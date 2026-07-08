@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 840">
+  <defs>
+    <style>
+      text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; fill: #111827; }
+      .title { font-size: 18px; font-weight: 600; }
+      .label { font-size: 13px; font-weight: 600; }
+      .sub { font-size: 11px; fill: #6b7280; }
+      .center { fill: #eff6ff; stroke: #2563eb; stroke-width: 2; }
+      .branch { fill: #ffffff; stroke: #d1d5db; stroke-width: 1.5; }
+      .b1 { fill: #f0fdf4; stroke: #86efac; }
+      .b2 { fill: #eff6ff; stroke: #bfdbfe; }
+      .b3 { fill: #faf5ff; stroke: #d8b4fe; }
+      .b4 { fill: #fff7ed; stroke: #fdba74; }
+      .b5 { fill: #f0fdfa; stroke: #5eead4; }
+      .b6 { fill: #fef2f2; stroke: #fca5a5; }
+    </style>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#9ca3af"/></marker>
+  </defs>
+  <rect width="960" height="840" fill="#ffffff"/>
+  <text x="40" y="36" class="title">Plugin Workload SDK — mind map (PR #518, desktop-first)</text>
+  <text x="40" y="56" class="sub">Radial concept map: declaración → runtime → auth → notifications → promptBridge → UI</text>
+  <rect x="370" y="378" width="220" height="84" rx="12" class="center"/>
+  <text x="480" y="412" text-anchor="middle" class="label">Plugin Workload SDK</text>
+  <text x="480" y="430" text-anchor="middle" class="sub">promptBridge + clientNotifications</text>
+  <text x="480" y="446" text-anchor="middle" class="sub">mcp-host sidecar :8099</text>
+  <path d="M 480.0,378.0 C 480.0,374.1 480.0,159.9 350.0,114.0" stroke="#9ca3af" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <rect x="330" y="70" width="300" height="88" rx="8" class="branch b2"/>
+  <text x="346" y="98" class="label">Declaración</text>
+  <text x="346" y="118" class="sub">WorkflowRecipe CRD</text>
+  <text x="346" y="134" class="sub">spec.pluginWorkloadSdk</text>
+  <text x="346" y="150" class="sub">allowedCallers (no wildcards in grants)</text>
+  <path d="M 562.3,399.0 C 578.0,382.2 690.0,205.8 640.0,168.0" stroke="#9ca3af" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <rect x="620" y="120" width="280" height="96" rx="8" class="branch b1"/>
+  <text x="636" y="148" class="label">Runtime K8s</text>
+  <text x="636" y="168" class="sub">WRC reconciler + NetworkPolicies</text>
+  <text x="636" y="184" class="sub">Recipe mcp-host eager pod</text>
+  <text x="636" y="200" class="sub">H1: deploying until /configure OK</text>
+  <path d="M 562.3,441.0 C 578.0,442.2 690.0,545.8 640.0,568.0" stroke="#9ca3af" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <rect x="620" y="520" width="280" height="96" rx="8" class="branch b3"/>
+  <text x="636" y="548" class="label">Auth and policy</text>
+  <text x="636" y="568" class="sub">Control UI explicit grants</text>
+  <text x="636" y="584" class="sub">Host JWT via InternalControl</text>
+  <text x="636" y="600" class="sub">quota + audit invocations</text>
+  <path d="M 480.0,462.0 C 480.0,457.8 480.0,634.2 350.0,672.0" stroke="#9ca3af" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <rect x="330" y="620" width="300" height="104" rx="8" class="branch b4"/>
+  <text x="346" y="648" class="label">clientNotifications</text>
+  <text x="346" y="668" class="sub">Workload → SDK :8099 → control-api</text>
+  <text x="346" y="684" class="sub">notification_deliveries outbox</text>
+  <text x="346" y="700" class="sub">Desktop SSE first · channel fallback after grace</text>
+  <path d="M 397.7,441.0 C 382.0,442.2 270.0,545.8 80.0,568.0" stroke="#9ca3af" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <rect x="60" y="520" width="280" height="96" rx="8" class="branch b5"/>
+  <text x="76" y="548" class="label">promptBridge</text>
+  <text x="76" y="568" class="sub">POST /sdk/v1/prompt-bridge</text>
+  <text x="76" y="584" class="sub">Provider key brokered via /configure</text>
+  <text x="76" y="600" class="sub">Skipped when recipe is notifications-only</text>
+  <path d="M 397.7,399.0 C 382.0,382.2 270.0,205.8 80.0,168.0" stroke="#9ca3af" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <rect x="60" y="120" width="280" height="96" rx="8" class="branch b6"/>
+  <text x="76" y="148" class="label">UI surfaces</text>
+  <text x="76" y="168" class="sub">Desktop: bell + ACK (Session JWT)</text>
+  <text x="76" y="184" class="sub">Settings: strict PUT prefs (H2)</text>
+  <text x="76" y="200" class="sub">Control UI: grants + invocations audit</text>
+  <rect x="40" y="760" width="880" height="56" rx="8" fill="#f9fafb" stroke="#e5e7eb"/>
+  <text x="56" y="784" class="label">Delivery priority (clientNotifications v1)</text>
+  <text x="56" y="802" class="sub">1) Desktop stream + POST ack (stops fallback) → 2) channel-reader after grace → Telegram/Slack via user_notification_preferences</text>
+</svg>

@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 620">
+  <defs>
+    <style>
+      text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; fill: #111827; }
+      .title { font-size: 18px; font-weight: 600; }
+      .label { font-size: 12px; font-weight: 600; }
+      .sub { font-size: 11px; fill: #6b7280; }
+      .msg { font-size: 11px; fill: #374151; }
+      .frame { fill: #f9fafb; stroke: #d1d5db; stroke-width: 1.2; stroke-dasharray: 4 3; }
+    </style>
+    <marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/></marker>
+    <marker id="arr-g" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#059669"/></marker>
+    <marker id="arr-o" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#ea580c"/></marker>
+    <marker id="arr-r" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#dc2626"/></marker>
+  </defs>
+  <rect width="1100" height="620" fill="#ffffff"/>
+  <text x="40" y="32" class="title">SDK clientNotifications — desktop ACK vs channel fallback</text>
+  <text x="40" y="50" class="sub">Sequence after authorize + enqueue (grace default 90s on next_attempt_at)</text>
+  <text x="70" y="78" text-anchor="middle" class="label">Workload</text>
+  <line x1="70" y1="88" x2="70" y2="580" stroke="#d1d5db" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <text x="190" y="78" text-anchor="middle" class="label">mcp-host SDK</text>
+  <line x1="190" y1="88" x2="190" y2="580" stroke="#d1d5db" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <text x="330" y="78" text-anchor="middle" class="label">control-api</text>
+  <line x1="330" y1="88" x2="330" y2="580" stroke="#d1d5db" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <text x="490" y="78" text-anchor="middle" class="label">external-rest-api</text>
+  <line x1="490" y1="88" x2="490" y2="580" stroke="#d1d5db" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <text x="650" y="78" text-anchor="middle" class="label">Desktop App</text>
+  <line x1="650" y1="88" x2="650" y2="580" stroke="#d1d5db" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <text x="810" y="78" text-anchor="middle" class="label">channel-reader</text>
+  <line x1="810" y1="88" x2="810" y2="580" stroke="#d1d5db" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <text x="970" y="78" text-anchor="middle" class="label">Telegram/Slack</text>
+  <line x1="970" y1="88" x2="970" y2="580" stroke="#d1d5db" stroke-width="1.2" stroke-dasharray="4 4"/>
+  <rect x="20" y="310" width="1060" height="250" rx="6" class="frame"/>
+  <text x="32" y="328" class="label">alt: no desktop ACK before grace expires</text>
+  <line x1="70" y1="100" x2="190" y2="100" stroke="#2563eb" stroke-width="1.6" marker-end="url(#arr)"/>
+  <rect x="35.0" y="86" width="190" height="20" fill="#ffffff" opacity="0.95"/>
+  <text x="130.0" y="100" text-anchor="middle" class="msg">POST /sdk/v1/client-notifications</text>
+  <line x1="190" y1="120" x2="330" y2="120" stroke="#2563eb" stroke-width="1.6" marker-end="url(#arr)"/>
+  <rect x="165.0" y="106" width="190" height="20" fill="#ffffff" opacity="0.95"/>
+  <text x="260.0" y="120" text-anchor="middle" class="msg">Host JWT → authorizer → INSERT outbox</text>
+  <rect x="240" y="133" width="180" height="22" fill="#ffffff" opacity="0.95"/>
+  <text x="330" y="149" text-anchor="middle" class="msg">next_attempt_at = NOW + grace (desktop-first)</text>
+  <line x1="330" y1="170" x2="490" y2="170" stroke="#059669" stroke-width="1.6" marker-end="url(#arr-g)"/>
+  <rect x="315.0" y="156" width="190" height="20" fill="#ffffff" opacity="0.95"/>
+  <text x="410.0" y="170" text-anchor="middle" class="msg">SSE filter: sdk.notification event</text>
+  <line x1="490" y1="195" x2="650" y2="195" stroke="#059669" stroke-width="1.6" marker-end="url(#arr-g)"/>
+  <rect x="475.0" y="181" width="190" height="20" fill="#ffffff" opacity="0.95"/>
+  <text x="570.0" y="195" text-anchor="middle" class="msg">NDJSON stream → bell + toast</text>
+  <line x1="650" y1="230" x2="490" y2="230" stroke="#2563eb" stroke-width="1.6" marker-end="url(#arr)"/>
+  <rect x="475.0" y="216" width="190" height="20" fill="#ffffff" opacity="0.95"/>
+  <text x="570.0" y="230" text-anchor="middle" class="msg">POST /external/notifications/:id/ack</text>
+  <line x1="490" y1="255" x2="330" y2="255" stroke="#2563eb" stroke-width="1.6" marker-end="url(#arr)"/>
+  <rect x="315.0" y="241" width="190" height="20" fill="#ffffff" opacity="0.95"/>
+  <text x="410.0" y="255" text-anchor="middle" class="msg">Session JWT → ACK service</text>
+  <rect x="240" y="268" width="180" height="22" fill="#ffffff" opacity="0.95"/>
+  <text x="330" y="284" text-anchor="middle" class="msg">UPDATE status=sent, delivered_medium=desktop</text>
+  <text x="32" y="548" class="sub">else: desktop ACK terminal row — channel-reader claim skipped for that delivery</text>
+  <line x1="330" y1="350" x2="810" y2="350" stroke="#ea580c" stroke-width="1.6" marker-end="url(#arr-o)"/>
+  <rect x="465.0" y="336" width="210" height="20" fill="#ffffff" opacity="0.95"/>
+  <text x="570.0" y="350" text-anchor="middle" class="msg">claim queued SDK row (next_attempt_at &lt;= NOW)</text>
+  <line x1="810" y1="385" x2="970" y2="385" stroke="#ea580c" stroke-width="1.6" marker-end="url(#arr-o)"/>
+  <rect x="785.0" y="371" width="210" height="20" fill="#ffffff" opacity="0.95"/>
+  <text x="890.0" y="385" text-anchor="middle" class="msg">deliver via preferred medium</text>
+  <line x1="970" y1="420" x2="810" y2="420" stroke="#ea580c" stroke-width="1.6" marker-end="url(#arr-o)" stroke-dasharray="4 2"/>
+  <rect x="785.0" y="406" width="210" height="20" fill="#ffffff" opacity="0.95"/>
+  <text x="890.0" y="420" text-anchor="middle" class="msg">ACK delivery success/fail</text>
+</svg>

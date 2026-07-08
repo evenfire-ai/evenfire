@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 
 /** Paths are relative to this file: control-api/test/ → repo root is ../.. */
 const BASE = '../../deploy/base'
@@ -29,6 +29,19 @@ const SPECIAL_USE_PUBLIC_EGRESS_EXCEPTS = [
 function read(relativeFromRepoRoot: string): string {
   return readFileSync(new URL(relativeFromRepoRoot, import.meta.url), 'utf-8')
 }
+
+function exists(relativeFromRepoRoot: string): boolean {
+  return existsSync(new URL(relativeFromRepoRoot, import.meta.url))
+}
+
+/**
+ * GKE overlays (deploy/overlays/gcp-*) and the gcp-* detect script are
+ * infra-repo concerns: the public single-tenant tree ships deploy/base/** but
+ * not the cloud overlays or gcp scripts. When those infra files are absent the
+ * GKE-overlay egress-CIDR contract is validated in the infra repo's CI instead,
+ * so the corresponding assertion here is skipped rather than failing on ENOENT.
+ */
+const GKE_INFRA_PRESENT = exists('../../deploy/scripts/gcp-detect-k8s-api-ip.sh')
 
 function readYamlBundle(relativeFromRepoRoot: string): string {
   const url = new URL(relativeFromRepoRoot, import.meta.url)
@@ -421,7 +434,7 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(rpcProxyHccEgress).not.toMatch(/podSelector:\s*\{\}/)
   })
 
-  it('patches the mcp-host Kubernetes API egress CIDR in GKE overlays', () => {
+  it.skipIf(!GKE_INFRA_PRESENT)('patches the mcp-host Kubernetes API egress CIDR in GKE overlays', () => {
     const detectScript = read('../../deploy/scripts/gcp-detect-k8s-api-ip.sh')
     expect(detectScript).toContain("-name 'k8s-api-ip*.yaml'")
 
