@@ -124,7 +124,7 @@ assert_no_gate_on_readonly gcp-prod-pf-desktop
 assert_no_gate_on_readonly gcp-prod-pf-all
 
 # ── Dev namespace ──
-DEV_CTX="gke_${GCP_PROJECT}_us-central1-a_clerum-dev"
+DEV_CTX="gke_${GCP_PROJECT}_us-central1-a_example-dev"
 
 assert_contains gcp-dev-deploy-all       "--context $DEV_CTX"
 assert_contains gcp-dev-deploy-all       "deploy/overlays/gcp-dev"

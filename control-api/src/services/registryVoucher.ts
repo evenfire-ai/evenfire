@@ -19,8 +19,8 @@ export class VoucherUnavailableError extends Error {
  *  (a) never a registry-reserved bareword (`admin`, `root`, `api`, `registry`, …),
  *      which the registry rejects with 409 reserved_username at user-creation; and
  *  (b) globally unique per deployment — two control-api instances' `admin` accounts
- *      map to distinct registry users (`clerum-dev-control-api-admin` vs
- *      `clerum-prod-control-api-admin`) instead of colliding on a single global
+ *      map to distinct registry users (`example-dev-control-api-admin` vs
+ *      `example-prod-control-api-admin`) instead of colliding on a single global
  *      `admin` on the shared registry.
  *
  * Output conforms to the registry username pattern `^[a-z0-9][a-z0-9_-]{0,62}$`.

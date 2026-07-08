@@ -39,7 +39,7 @@ describe('mintIdentityVoucher', () => {
   it('signs an RS256 voucher with a deployment-namespaced identity', () => {
     const { publicKey, privateKey } = keypair()
     cfg.registryVoucherPrivateKey = privateKey
-    cfg.registryClientId = 'clerum-dev-control-api'
+    cfg.registryClientId = 'example-dev-control-api'
     const token = mintIdentityVoucher(admin)
     const decoded = jwt.verify(token, publicKey, {
       algorithms: ['RS256'],
@@ -47,8 +47,8 @@ describe('mintIdentityVoucher', () => {
       audience: 'registry-api',
     }) as jwt.JwtPayload
     expect(decoded.sub).toBe('admin-1')
-    expect(decoded.username).toBe('clerum-dev-control-api-alice')
-    expect(decoded.email).toBe('clerum-dev-control-api-alice@control-api.local')
+    expect(decoded.username).toBe('example-dev-control-api-alice')
+    expect(decoded.email).toBe('example-dev-control-api-alice@control-api.local')
     expect(typeof decoded.jti).toBe('string')
     expect(decoded.exp! - decoded.iat!).toBe(60)
   })
@@ -57,7 +57,7 @@ describe('mintIdentityVoucher', () => {
     const { publicKey, privateKey } = keypair()
     cfg.registryVoucherPrivateKey = '' // documented default
     cfg.adminJwtPrivateKey = privateKey
-    cfg.registryClientId = 'clerum-dev-control-api'
+    cfg.registryClientId = 'example-dev-control-api'
     const token = mintIdentityVoucher(admin)
     expect(() => jwt.verify(token, publicKey, { algorithms: ['RS256'] })).not.toThrow()
   })
@@ -69,23 +69,23 @@ describe('mintIdentityVoucher', () => {
 
 describe('registrySyntheticUsername', () => {
   it('namespaces by the registry client id so reserved names are avoided', () => {
-    cfg.registryClientId = 'clerum-dev-control-api'
+    cfg.registryClientId = 'example-dev-control-api'
     const u = registrySyntheticUsername({ id: 'x', username: 'admin' } as never)
-    expect(u).toBe('clerum-dev-control-api-admin')
+    expect(u).toBe('example-dev-control-api-admin')
     expect(u).not.toBe('admin') // never a registry-reserved bareword (admin/root/api/...)
     expect(u).toMatch(REGISTRY_USERNAME)
   })
 
   it('maps the same admin username on different deployments to different registry users', () => {
-    cfg.registryClientId = 'clerum-dev-control-api'
+    cfg.registryClientId = 'example-dev-control-api'
     const dev = registrySyntheticUsername({ id: 'x', username: 'admin' } as never)
-    cfg.registryClientId = 'clerum-prod-control-api'
+    cfg.registryClientId = 'example-prod-control-api'
     const prod = registrySyntheticUsername({ id: 'x', username: 'admin' } as never)
     expect(dev).not.toBe(prod) // no cross-deployment collision on the shared registry
   })
 
   it('sanitizes non-conforming usernames to the registry pattern', () => {
-    cfg.registryClientId = 'clerum-prod-control-api'
+    cfg.registryClientId = 'example-prod-control-api'
     expect(registrySyntheticUsername({ id: 'x', username: 'Root.User' } as never)).toMatch(
       REGISTRY_USERNAME
     )

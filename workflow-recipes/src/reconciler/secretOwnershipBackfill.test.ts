@@ -250,12 +250,12 @@ describe('isProdContext', () => {
     expect(isProdContext('gke_${GCP_PROJECT}_us-central1-a_clerum')).toBe(true)
   })
   it('does NOT flag dev / test / minikube contexts', () => {
-    expect(isProdContext('gke_${GCP_PROJECT}_us-central1-a_clerum-dev')).toBe(false)
+    expect(isProdContext('gke_${GCP_PROJECT}_us-central1-a_example-dev')).toBe(false)
     expect(isProdContext('clerum-test')).toBe(false)
     expect(isProdContext('minikube')).toBe(false)
   })
   it('does NOT flag an unrelated context', () => {
-    expect(isProdContext('gke_palmera-prod_x')).toBe(false)
+    expect(isProdContext('gke_acme-prod_x')).toBe(false)
   })
 })
 

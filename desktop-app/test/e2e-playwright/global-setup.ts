@@ -2,12 +2,12 @@ import { execFileSync } from 'node:child_process'
 import { E2E_TEST_EMAIL } from '../../../tests/e2e/testUser'
 
 const ALLOWED_CONTEXTS = new Set(
-  (process.env.E2E_ALLOWED_CONTEXTS || 'clerum-test,gke_${GCP_PROJECT}_us-central1-a_clerum-dev')
+  (process.env.E2E_ALLOWED_CONTEXTS || 'clerum-test,gke_${GCP_PROJECT}_us-central1-a_example-dev')
     .split(',')
     .map(context => context.trim())
     .filter(Boolean)
 )
-const DEV_CONTEXT = 'gke_${GCP_PROJECT}_us-central1-a_clerum-dev'
+const DEV_CONTEXT = 'gke_${GCP_PROJECT}_us-central1-a_example-dev'
 const PROD_CONTEXT = 'gke_${GCP_PROJECT}_us-central1-a_clerum'
 
 function isLocalhost(url: string): boolean {
@@ -62,7 +62,7 @@ function assertNoSharedDefaultPorts(
     if (defaultPort && urlPort(url) === defaultPort) {
       throw new Error(
         `[E2E-GUARD] context=${expectedContext} must use random localhost port-forwards. ` +
-          `${name}="${url}" uses shared default port ${defaultPort}, which can point at a stale clerum-test or clerum-dev forward.`
+          `${name}="${url}" uses shared default port ${defaultPort}, which can point at a stale clerum-test or example-dev forward.`
       )
     }
   }
@@ -128,7 +128,7 @@ export function validateBaseUrls({
       throw new Error(
         `[E2E-GUARD] context=${expectedContext} requires non-localhost URLs. ` +
           `${name}="${url}" looks like a stale minikube/dev port-forward. ` +
-          `Set the real dev URL, or for clerum-dev local port-forwards set E2E_ALLOW_DEV_PORT_FORWARD=1.`
+          `Set the real dev URL, or for example-dev local port-forwards set E2E_ALLOW_DEV_PORT_FORWARD=1.`
       )
     }
   }
@@ -286,7 +286,7 @@ async function globalSetup(): Promise<void> {
   if (agentNames.length === 0) {
     const seedHint = isLocalPortForwardContext(expected)
       ? 'scripts/minikube/seed-test-data.sh'
-      : 'the equivalent seed script for clerum-dev'
+      : 'the equivalent seed script for example-dev'
     throw new Error(
       `[E2E-GUARD] User ${email} has zero agents on context=${expected}. Seed is missing. Run: ${seedHint}`
     )

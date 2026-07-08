@@ -64,8 +64,10 @@ TEST_SERVICES := \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk
 
-# ── Optional private infra (gcp-*, promotion, snapshot tooling) ─────────────
+# ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
+# ── Optional OSS-launch tooling (public snapshot / infra carve) — monorepo-only
+-include Makefile.oss
 
 # ── Install ──────────────────────────────────────────────────────────
 .PHONY: install-git-hooks
@@ -346,7 +348,7 @@ minikube-verify-network-policy: ## Prove NetworkPolicy enforcement in clerum-tes
 # E2E_CONTEXT drives which cluster desktop-app Playwright runs against.
 # Only these are permitted; "gke_${GCP_PROJECT}_us-central1-a_clerum" (prod) is hard-blocked.
 E2E_CONTEXT ?= clerum-test
-E2E_DESKTOP_ALLOWED_CONTEXTS := clerum-test gke_${GCP_PROJECT}_us-central1-a_clerum-dev
+E2E_DESKTOP_ALLOWED_CONTEXTS := clerum-test gke_${GCP_PROJECT}_us-central1-a_example-dev
 E2E_PROD_CONTEXT := gke_${GCP_PROJECT}_us-central1-a_clerum
 
 .PHONY: e2e-desktop-app

@@ -31,8 +31,8 @@ set -euo pipefail
 #
 # USAGE
 # =====
-#   # Against clerum-dev (GKE)
-#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_clerum-dev \
+#   # Against example-dev (GKE)
+#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_example-dev \
 #     bash deploy/scripts/bootstrap-rbac.sh
 #
 #   # Against clerum prod (GKE) — requires CONFIRM=yes
@@ -51,11 +51,11 @@ set -euo pipefail
 CONTEXT="${CONTEXT:-}"
 CONFIRM="${CONFIRM:-}"
 
-# Prod guardrail: any context containing "clerum" but not "clerum-dev"/"clerum-test".
+# Prod guardrail: any context containing "clerum" but not "example-dev"/"clerum-test".
 is_prod_context() {
   local c="$1"
   if [[ -z "$c" ]]; then return 1; fi
-  if [[ "$c" == *"clerum-dev"* ]] || [[ "$c" == *"clerum-test"* ]] || [[ "$c" == *"minikube"* ]] || [[ "$c" == *"kind"* ]]; then
+  if [[ "$c" == *"example-dev"* ]] || [[ "$c" == *"clerum-test"* ]] || [[ "$c" == *"minikube"* ]] || [[ "$c" == *"kind"* ]]; then
     return 1
   fi
   if [[ "$c" == *"clerum"* ]]; then

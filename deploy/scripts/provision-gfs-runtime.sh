@@ -70,7 +70,7 @@ done
 [ -d "$OVERLAY" ] || die "overlay directory not found: $OVERLAY"
 
 case "$CONTEXT" in
-  *clerum-dev*|minikube|clerum-test|clerum-codex-*|clerum-detached-*|clerum-feat-*|clerum-pr-*)
+  *example-dev*|minikube|clerum-test|clerum-codex-*|clerum-detached-*|clerum-feat-*|clerum-pr-*)
     ;;
   *)
     [ "$ALLOW_PROD" = "1" ] || die "refusing non-dev context without --allow-prod: $CONTEXT"

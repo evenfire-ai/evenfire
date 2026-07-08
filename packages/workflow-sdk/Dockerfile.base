@@ -24,7 +24,7 @@ FROM node:24-alpine AS base
 LABEL org.opencontainers.image.title="clerum-workflow-base" \
       org.opencontainers.image.description="Base image for Clerum workflow coordinators with @clerum/workflow-sdk pre-installed" \
       org.opencontainers.image.vendor="Clerum" \
-      org.opencontainers.image.source="https://github.com/PalmeraDAO/clerum"
+      org.opencontainers.image.source="https://github.com/your-org/evenfire"
 
 WORKDIR /app
 

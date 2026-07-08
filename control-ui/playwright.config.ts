@@ -67,7 +67,7 @@ const gfsAuthCrossBrowserProjects: NonNullable<PlaywrightTestConfig['projects']>
 // progress stream. A previous run of the registry suite in the background
 // produced a silent stall because `line` reporter rewrites the last line;
 // keeping `list` here makes the contract consistent across minikube and
-// the clerum-dev GKE wrappers. Override with `--reporter=<name>` on the CLI
+// the example-dev GKE wrappers. Override with `--reporter=<name>` on the CLI
 // when you need html/json for CI artifacts.
 export default defineConfig({
   testDir: './e2e',

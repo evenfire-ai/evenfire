@@ -2,7 +2,7 @@
 set -euo pipefail
 
 profile="${MINIKUBE_PROFILE:-clerum-test}"
-gcp_dev_context="${GCP_DEV_CONTEXT:-gke_${GCP_PROJECT}_us-central1-a_clerum-dev}"
+gcp_dev_context="${GCP_DEV_CONTEXT:-gke_${GCP_PROJECT}_us-central1-a_example-dev}"
 gcp_prod_context="${GCP_PROD_CONTEXT:-gke_${GCP_PROJECT}_us-central1-a_clerum}"
 
 context_exists() {
@@ -48,7 +48,7 @@ cat >&2 <<MSG
 ERROR: no usable Kubernetes context found for local UI port-forwards.
 
 Start minikube, or fetch a GKE context first:
-  gcloud container clusters get-credentials clerum-dev --zone=us-central1-a --project=${GCP_PROJECT}
+  gcloud container clusters get-credentials example-dev --zone=us-central1-a --project=${GCP_PROJECT}
   gcloud container clusters get-credentials clerum --zone=us-central1-a --project=${GCP_PROJECT}
 MSG
 exit 1

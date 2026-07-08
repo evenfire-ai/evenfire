@@ -17,7 +17,7 @@
 #
 # Usage:
 #   # dev cluster
-#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_clerum-dev \
+#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_example-dev \
 #     ./scripts/drop-orphan-instantiation-audit-log.sh
 #
 #   # prod cluster (requires CONFIRM=yes)

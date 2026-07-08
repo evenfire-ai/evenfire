@@ -2162,7 +2162,7 @@ export class HostReconciler {
    * (channel-reader-<host>). With both alive, the two pods compete on the
    * same Telegram bot token's getUpdates long-poll and Telegram returns
    * 409 Conflict to whichever loses — empirical evidence on minikube +
-   * clerum-dev is captured in #273.
+   * example-dev is captured in #273.
    *
    * Idempotent on every HCC startup: 404 means already gone (the steady
    * state we want), so we log nothing. A successful delete emits an

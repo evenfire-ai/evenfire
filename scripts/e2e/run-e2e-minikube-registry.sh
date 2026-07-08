@@ -13,7 +13,7 @@
 #   3. e2e/registry-mythos-workflow.spec.ts — WorkflowRecipe 3-step agentic pipeline + PDF
 #   4. e2e/registry-ssrf-attack.spec.ts    — Defense-in-depth SSRF rejection chain
 #
-# This wrapper is the MINIKUBE twin of `run-e2e-clerum-dev-*.sh` — same
+# This wrapper is the MINIKUBE twin of `run-e2e-example-dev-*.sh` — same
 # PF lifecycle, same readiness polling, same `--reporter=list` flushing
 # pattern, same outer `timeout` wall-clock guard. Kept identical on
 # purpose so the two environments don't diverge in tooling semantics.

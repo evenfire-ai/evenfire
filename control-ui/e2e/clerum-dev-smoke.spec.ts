@@ -1,7 +1,7 @@
 /**
- * E2E — clerum-dev smoke test
+ * E2E — example-dev smoke test
  *
- * Non-destructive health check for the clerum-dev GKE cluster. Validates that:
+ * Non-destructive health check for the example-dev GKE cluster. Validates that:
  *   - Control UI is reachable on :3000 (via port-forward)
  *   - Admin login issues a valid JWT
  *   - Control API is reachable on :8090 (via port-forward)
@@ -14,13 +14,13 @@
  *
  * Prerequisites:
  *   1. `make gcp-dev-pf-all` running in a separate terminal (or invoked by
- *      scripts/e2e/run-e2e-clerum-dev.sh) so that:
- *        - http://localhost:3000 → control-ui svc (clerum-dev)
- *        - http://localhost:8090 → control-api svc (clerum-dev)
+ *      scripts/e2e/run-e2e-example-dev.sh) so that:
+ *        - http://localhost:3000 → control-ui svc (example-dev)
+ *        - http://localhost:8090 → control-api svc (example-dev)
  *   2. Admin credentials in env: ADMIN_USER, ADMIN_PASS (defaults: admin / changeme123!)
  *
  * This suite is the minimum-viable validation required before trusting the
- * clerum-dev cluster for downstream test work (registry install lifecycle,
+ * example-dev cluster for downstream test work (registry install lifecycle,
  * Desktop App flows, recipes). If it fails, the cluster is not
  * ready; investigate the specific step before running heavier suites.
  */
@@ -32,7 +32,7 @@ const BASE_UI = process.env.CONTROL_UI_URL || 'http://localhost:3000'
 const ADMIN_USER = process.env.ADMIN_USER || 'admin'
 const ADMIN_PASS = process.env.ADMIN_PASS || 'changeme123!'
 const K8S_CONTEXT =
-  process.env.KUBECONTEXT || process.env.CONTEXT || 'gke_${GCP_PROJECT}_us-central1-a_clerum-dev'
+  process.env.KUBECONTEXT || process.env.CONTEXT || 'gke_${GCP_PROJECT}_us-central1-a_example-dev'
 const EXPECTED_GFS_STORAGE_CLASS = process.env.GFS_STORAGE_CLASS || 'standard-rwo'
 
 // Minimum entries we expect the registry to serve. The registry base seed is
@@ -85,7 +85,7 @@ async function login(page: Page) {
   await page.waitForSelector('text=Marketplace', { timeout: 20_000 })
 }
 
-test.describe('clerum-dev — cluster smoke', () => {
+test.describe('example-dev — cluster smoke', () => {
   test.describe.configure({ mode: 'serial' })
 
   let page: Page

@@ -7,7 +7,7 @@
 set -eo pipefail
 umask 077
 
-KCTX="${KUBECONTEXT:-gke_${GCP_PROJECT}_us-central1-a_clerum-dev}"
+KCTX="${KUBECONTEXT:-gke_${GCP_PROJECT}_us-central1-a_example-dev}"
 NS="sandbox-recipes"
 STS="mongodb"
 

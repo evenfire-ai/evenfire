@@ -51,7 +51,7 @@ kq() { kubectl --context "$CONTEXT" "$@"; }
 
 if [ -z "$OVERLAY" ]; then
   case "$CONTEXT" in
-    *clerum-dev) OVERLAY="gcp-dev" ;;
+    *example-dev) OVERLAY="gcp-dev" ;;
     *clerum) OVERLAY="gcp-prod" ;;
   esac
 fi

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Diagnose mongodb-0 CrashLoopBackOff on clerum-dev sandbox-recipes namespace.
+# Diagnose mongodb-0 CrashLoopBackOff on example-dev sandbox-recipes namespace.
 # If FIX_PVC=1, deletes the PVC + pod so K8s recreates both with fresh fsGroup
 # ownership (works around stale root-owned files from pre-security-patch attempts).
 set -eo pipefail
 umask 077
 
-KCTX="${KUBECONTEXT:-gke_${GCP_PROJECT}_us-central1-a_clerum-dev}"
+KCTX="${KUBECONTEXT:-gke_${GCP_PROJECT}_us-central1-a_example-dev}"
 NS="sandbox-recipes"
 POD="mongodb-0"
 PVC="mongodb-data-mongodb-0"

@@ -53,7 +53,7 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
 
     const userARecipe = makeScopedE2ERecipeName('alfredo-personal')
     const userBRecipe = makeScopedE2ERecipeName('belen-personal')
-    const teamOnlyRecipe = makeScopedE2ERecipeName('palmera-team')
+    const teamOnlyRecipe = makeScopedE2ERecipeName('acme-team')
     const membershipOnlyRecipe = makeScopedE2ERecipeName('membership-only')
     const ambiguousRecipe = makeScopedE2ERecipeName('shared-risk-review')
     const markerA = `telegram-authz-user-a-${Date.now()}`
@@ -61,7 +61,7 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
     const markerTeam = `telegram-authz-team-only-${Date.now()}`
     const markerMembership = `telegram-authz-membership-only-${Date.now()}`
     const markerAmbiguous = `telegram-authz-ambiguous-${Date.now()}`
-    const teamName = `e2e-palmera-risk-team-${Date.now().toString(36)}`
+    const teamName = `e2e-acme-risk-team-${Date.now().toString(36)}`
     const membershipOnlyTeamName = `e2e-membership-only-team-${Date.now().toString(36)}`
     const telegramIdentitySeed = Date.now() % 1_000_000
     const telegramUserA: TelegramClientIdentity = {

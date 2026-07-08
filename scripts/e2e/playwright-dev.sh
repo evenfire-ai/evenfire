@@ -109,7 +109,7 @@ require_random_local_port_for_branch_context() {
   fi
   if [[ "$url" =~ ^https?://(localhost|127\.0\.0\.1):${default_port}(/|$) ]]; then
     echo "[playwright-dev] ERROR: context=$KCTX must use random localhost port-forwards." >&2
-    echo "  $name=$url uses shared default port $default_port, which can point at stale clerum-test/clerum-dev forwards." >&2
+    echo "  $name=$url uses shared default port $default_port, which can point at stale clerum-test/example-dev forwards." >&2
     exit 1
   fi
 }
@@ -138,7 +138,7 @@ if [[ "${E2E_SKIP_DESKTOP_BUILD:-0}" != "1" ]]; then
   npm run build
 fi
 
-if [[ "$E2E_K8S_CONTEXT" == "gke_${GCP_PROJECT}_us-central1-a_clerum-dev" ]] && \
+if [[ "$E2E_K8S_CONTEXT" == "gke_${GCP_PROJECT}_us-central1-a_example-dev" ]] && \
    [[ "$CONTROL_API_BASE_URL" =~ ^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?(/|$) ]] && \
    [[ "$EXTERNAL_REST_API_BASE_URL" =~ ^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?(/|$) ]] && \
    [[ "$RPC_PROXY_BASE_URL" =~ ^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?(/|$) ]] && \

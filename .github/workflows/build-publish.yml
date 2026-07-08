@@ -94,6 +94,7 @@ jobs:
               - 'workflow-approval-request-reader/**'
             control-api:
               - 'control-api/**'
+              - 'packages/workflow-runtime-core/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
             control-ui:

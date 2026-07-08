@@ -423,8 +423,8 @@ export const config: Config = {
     return value
   })(),
   memberRegistrationServiceHmacKid:
-    process.env.CONTROL_API_MEMBER_REGISTRATION_HMAC_KID || 'clerum-dev',
-  memberRegistrationTenantId: process.env.CONTROL_API_MEMBER_REGISTRATION_TENANT_ID || 'clerum-dev',
+    process.env.CONTROL_API_MEMBER_REGISTRATION_HMAC_KID || 'example-dev',
+  memberRegistrationTenantId: process.env.CONTROL_API_MEMBER_REGISTRATION_TENANT_ID || 'example-dev',
   desktopExternalRestApiBaseUrl:
     process.env.CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091',
   desktopRpcProxyBaseUrl:

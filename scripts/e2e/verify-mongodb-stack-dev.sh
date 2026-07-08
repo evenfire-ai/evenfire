@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify MongoDB WorkflowRecipe stack is fully operational on clerum-dev:
+# Verify MongoDB WorkflowRecipe stack is fully operational on example-dev:
 #   1. StatefulSet pod Ready
 #   2. MCP Deployment Ready
 #   3. McpServer CRD present + listed in context1 allowlist
@@ -7,7 +7,7 @@
 set -eo pipefail
 umask 077
 
-KCTX="${KUBECONTEXT:-gke_${GCP_PROJECT}_us-central1-a_clerum-dev}"
+KCTX="${KUBECONTEXT:-gke_${GCP_PROJECT}_us-central1-a_example-dev}"
 MCP_NS="mcp-server"
 SANDBOX_NS="sandbox-recipes"
 WORKFLOW_RECIPE_NS="$SANDBOX_NS"

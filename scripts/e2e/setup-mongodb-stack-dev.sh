@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Upgrades clerum-dev from standalone mongodb-server McpServer to the full
+# Upgrades example-dev from standalone mongodb-server McpServer to the full
 # WorkflowRecipe stack: StatefulSet (PVC) + MCP Server + bindings.
 #
 # Idempotent: safe to re-run.
 set -eo pipefail
 umask 077
 
-KCTX="${KUBECONTEXT:-gke_${GCP_PROJECT}_us-central1-a_clerum-dev}"
+KCTX="${KUBECONTEXT:-gke_${GCP_PROJECT}_us-central1-a_example-dev}"
 REGISTRY="us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum"
 DB_SRC="mongodb/mongodb-community-server:7.0-ubi8"
 DB_TARGET="$REGISTRY/mongodb-community-server:7.0-ubi8"
@@ -58,7 +58,7 @@ else
 fi
 
 # ── 4. Apply WorkflowRecipe with AR image overrides + FQDN fix ─────────
-# WRC in clerum-dev does not resolve {{mongodb:host}} — use explicit FQDN.
+# WRC in example-dev does not resolve {{mongodb:host}} — use explicit FQDN.
 # (See CLAUDE.md > Known Issues: "use DNS FQDN instead of {{mongodb:clusterIP}}")
 # Delete+recreate because WRC marks failed recipes as non-deployable and
 # does not retry on spec change.

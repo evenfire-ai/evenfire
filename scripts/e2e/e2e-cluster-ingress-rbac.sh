@@ -11,7 +11,7 @@ if [ -z "${CONTEXT:-}" ]; then
   exit 2
 fi
 case "$CONTEXT" in
-  clerum-test|gke_${GCP_PROJECT}_us-central1-a_clerum-dev|gke_${GCP_PROJECT}_us-central1-a_clerum) ;;
+  clerum-test|gke_${GCP_PROJECT}_us-central1-a_example-dev|gke_${GCP_PROJECT}_us-central1-a_clerum) ;;
   *) echo "ERROR: CONTEXT '$CONTEXT' is not an allowed Clerum context." >&2; exit 2 ;;
 esac
 

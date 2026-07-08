@@ -176,11 +176,11 @@ RUBYOPT=--disable=gems ruby -ryaml -e '
             next
           end
 
-          abort("sandbox-ui static DNS egress peer #{rule_idx}/#{peer_idx} must stay scoped to kube-system kube-dns pods or the clerum-dev kube-dns ClusterIP")
+          abort("sandbox-ui static DNS egress peer #{rule_idx}/#{peer_idx} must stay scoped to kube-system kube-dns pods or the example-dev kube-dns ClusterIP")
         end
       end
       abort("sandbox-ui static DNS egress must include a kube-system kube-dns peer") unless saw_dns_peer
-      abort("sandbox-ui static DNS egress must include the clerum-dev kube-dns ClusterIP") unless saw_dns_ipblock
+      abort("sandbox-ui static DNS egress must include the example-dev kube-dns ClusterIP") unless saw_dns_ipblock
     end
   end
   abort("sandbox-ui static slice must not render HCC-owned policies: #{found.join(", ")}") unless found.empty?

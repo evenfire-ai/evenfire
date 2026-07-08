@@ -43,7 +43,7 @@ describe('workflow_trigger effective target resolution', () => {
 
   it('ignores workflow-name-derived target labels when the effective target is already unique', async () => {
     const teamId = '00000000-0000-4000-8000-0000000000aa'
-    const recipeName = 'e2e-risk-review-palmera-team-abcd1234'
+    const recipeName = 'e2e-risk-review-acme-team-abcd1234'
     mockedGateStep.mockResolvedValueOnce({
       approvalRequestId: '00000000-0000-4000-8000-000000000789',
       status: 'approved',
@@ -70,7 +70,7 @@ describe('workflow_trigger effective target resolution', () => {
       },
     }).execute({
       name: recipeName,
-      targetLabel: 'palmera-team',
+      targetLabel: 'acme-team',
       inputs: { marker: 'alpha' },
     })
 
@@ -176,7 +176,7 @@ describe('workflow_trigger effective target resolution', () => {
           'Trigger the workflow recipe named shared-risk-review for team Treasury',
       },
     }).execute({
-      name: 'palmera-team-review',
+      name: 'acme-team-review',
       targetLabel: 'Treasury',
     })
 

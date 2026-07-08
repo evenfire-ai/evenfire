@@ -157,7 +157,7 @@ function collectSnippetSecretRefs(
 export function isProdContext(context: string): boolean {
   if (!context) return false
   if (
-    context.includes('clerum-dev') ||
+    context.includes('example-dev') ||
     context.includes('clerum-test') ||
     context.includes('minikube') ||
     context.includes('kind')

@@ -377,7 +377,7 @@ describe('registryClient — resolvePublishScope', () => {
 
   it('curator → scope null (unscoped → @clerum bridge)', async () => {
     const fetchMock = whoamiMock({
-      clientId: 'clerum-prod-control-api',
+      clientId: 'example-prod-control-api',
       orgName: 'clerum',
       curator: true,
     })

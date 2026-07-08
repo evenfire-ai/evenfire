@@ -15,7 +15,7 @@
 #   - All prior bug fixes (DNS, body limit, keepAlive, fatal status)
 #
 # Prerequisites:
-#   - GKE cluster connected (`GKE_CONTEXT` set, or default clerum-dev context available)
+#   - GKE cluster connected (`GKE_CONTEXT` set, or default example-dev context available)
 #   - All Clerum services running v0.9.5+
 #   - clerum-model-secret-mapping ConfigMap in mcp-host (post-refactor)
 #   - LLM API keys configured (chatllm-api-keys Secret in mcp-host — single source of truth)
@@ -47,7 +47,7 @@ POLL_INTERVAL=10
 TIMEOUT_WORKFLOW=600  # 10 min max per workflow
 CONTROL_API_URL="${CONTROL_API_URL:-http://localhost:8090}"
 CONTROL_API_TOKEN="${CONTROL_API_TOKEN:-${ADMIN_TOKEN:-}}"
-GKE_CONTEXT="${GKE_CONTEXT:-gke_${GCP_PROJECT}_us-central1-a_clerum-dev}"
+GKE_CONTEXT="${GKE_CONTEXT:-gke_${GCP_PROJECT}_us-central1-a_example-dev}"
 NAMESPACE="sandbox-recipes"
 SANDBOX_NS="sandbox-recipes"
 CONTROL_API_AUTH_ARGS=()

@@ -11,7 +11,7 @@ fail() { echo "FAIL: $1"; FAIL=1; }
 assert_setup_defaults_prod() {
   local out
   out="$(DRY_RUN=1 bash deploy/scripts/gcp-setup.sh 2>&1 || true)"
-  if [[ "$out" == *"clerum"* ]] && [[ "$out" != *"clerum-dev"* ]] && [[ "$out" == *"e2-standard-8"* ]]; then
+  if [[ "$out" == *"clerum"* ]] && [[ "$out" != *"example-dev"* ]] && [[ "$out" == *"e2-standard-8"* ]]; then
     pass "setup defaults target prod cluster"
   else
     fail "setup defaults wrong"
@@ -21,9 +21,9 @@ assert_setup_defaults_prod() {
 
 assert_setup_dev_overrides() {
   local out
-  out="$(DRY_RUN=1 CLUSTER_NAME=clerum-dev MACHINE_TYPE=e2-standard-4 RELEASE_CHANNEL=regular \
+  out="$(DRY_RUN=1 CLUSTER_NAME=example-dev MACHINE_TYPE=e2-standard-4 RELEASE_CHANNEL=regular \
          bash deploy/scripts/gcp-setup.sh 2>&1 || true)"
-  if [[ "$out" == *"clerum-dev"* ]] && [[ "$out" == *"e2-standard-4"* ]] && [[ "$out" == *"regular"* ]]; then
+  if [[ "$out" == *"example-dev"* ]] && [[ "$out" == *"e2-standard-4"* ]] && [[ "$out" == *"regular"* ]]; then
     pass "setup honors env overrides"
   else
     fail "setup env overrides not wired"
@@ -33,10 +33,10 @@ assert_setup_dev_overrides() {
 
 assert_teardown_dev() {
   local out
-  out="$(DRY_RUN=1 CLUSTER_NAME=clerum-dev SKIP_CONFIRM=yes \
+  out="$(DRY_RUN=1 CLUSTER_NAME=example-dev SKIP_CONFIRM=yes \
          bash deploy/scripts/gcp-teardown.sh 2>&1 || true)"
-  if [[ "$out" == *"clerum-dev"* ]] && [[ "$out" != *"Aborted"* ]]; then
-    pass "teardown targets clerum-dev with SKIP_CONFIRM=yes"
+  if [[ "$out" == *"example-dev"* ]] && [[ "$out" != *"Aborted"* ]]; then
+    pass "teardown targets example-dev with SKIP_CONFIRM=yes"
   else
     fail "teardown env override not wired"
     echo "$out"
@@ -395,7 +395,7 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  out="$(TEST_LOG_FILE="$log_file" PATH="$tmp:$PATH" CONTEXT=gke_${GCP_PROJECT}_us-central1-a_clerum-dev \
+  out="$(TEST_LOG_FILE="$log_file" PATH="$tmp:$PATH" CONTEXT=gke_${GCP_PROJECT}_us-central1-a_example-dev \
     bash deploy/scripts/bootstrap-rbac.sh 2>&1 || true)"
 
   if [[ "$out" == *"deploy/base/cluster-wide/clusterroles.yaml"* ]] && \

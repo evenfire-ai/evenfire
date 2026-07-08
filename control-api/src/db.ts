@@ -1136,7 +1136,7 @@ async function alignWorkflowRunsAuditRecipeIndex(db: DbClient): Promise<void> {
  * simply no-op.
  *
  * Rediscovered end-to-end by the Desktop App competitive-intel happy-path
- * E2E running against clerum-dev on 2026-04-24.
+ * E2E running against example-dev on 2026-04-24.
  */
 async function dropTriggerGrantsAuditOperatorFk(db: DbClient): Promise<void> {
   await db.query(`
@@ -1922,7 +1922,7 @@ async function applyWorkflowApprovalMediumChannelRef(db: DbClient): Promise<void
 // degrades to the default instead of silently blocking delivery.
 async function applyUserNotificationPreferencesPreferredAccount(db: DbClient): Promise<void> {
   // Self-contained: user_notification_preferences was added to the BASELINE
-  // schema, so clusters that ran 0001 before that table existed (e.g. clerum-dev)
+  // schema, so clusters that ran 0001 before that table existed (e.g. example-dev)
   // never created it — and the baseline does not re-run. Create it idempotently
   // (exact baseline shape) before the ALTER so this migration succeeds on both
   // fresh clusters (no-op; table already exists) and pre-existing clusters.

@@ -73,7 +73,7 @@ roleRef:
 #
 # NOTE: subject is a GCP service account mapped to a k8s User. CONFIRM this is
 # the repo's GCP_SERVICE_ACCOUNT (identified from the GKE audit log as the
-# principal doing pods.portforward/deployments.patch on clerum-dev).
+# principal doing pods.portforward/deployments.patch on example-dev).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

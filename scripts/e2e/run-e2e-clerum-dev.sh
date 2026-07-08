@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════
-# E2E Runner — clerum-dev (GKE) smoke suite
+# E2E Runner — example-dev (GKE) smoke suite
 # ═══════════════════════════════════════════════════════════════════════
 #
-# Boots port-forwards against the clerum-dev GKE cluster, runs the
-# Playwright smoke spec (control-ui/e2e/clerum-dev-smoke.spec.ts), then
+# Boots port-forwards against the example-dev GKE cluster, runs the
+# Playwright smoke spec (control-ui/e2e/example-dev-smoke.spec.ts), then
 # tears the port-forwards down — regardless of success or failure.
 #
 # WHY A WRAPPER (AND NOT `make gcp-dev-pf-all`):
@@ -13,16 +13,16 @@
 #   Playwright, and reap them on exit via `trap`.
 #
 # Prerequisites:
-#   - gcloud auth + `gcloud container clusters get-credentials clerum-dev`
+#   - gcloud auth + `gcloud container clusters get-credentials example-dev`
 #     has already populated the GKE_DEV context in kubeconfig
 #   - `npm ci` inside control-ui/ (Playwright + browsers)
 #   - jq, curl on PATH
 #
 # Env overrides:
-#   CONTEXT      — kubectl context (default: gke_${GCP_PROJECT}_us-central1-a_clerum-dev)
+#   CONTEXT      — kubectl context (default: gke_${GCP_PROJECT}_us-central1-a_example-dev)
 #   ADMIN_USER   — admin username (default: admin)
 #   ADMIN_PASS   — admin password (default: changeme123!)
-#   SPEC         — Playwright spec path (default: e2e/clerum-dev-smoke.spec.ts)
+#   SPEC         — Playwright spec path (default: e2e/example-dev-smoke.spec.ts)
 #
 # Exit code: propagates Playwright's.
 
@@ -31,10 +31,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-CONTEXT="${CONTEXT:-gke_${GCP_PROJECT}_us-central1-a_clerum-dev}"
+CONTEXT="${CONTEXT:-gke_${GCP_PROJECT}_us-central1-a_example-dev}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-changeme123!}"
-SPEC="${SPEC:-e2e/clerum-dev-smoke.spec.ts}"
+SPEC="${SPEC:-e2e/example-dev-smoke.spec.ts}"
 
 UI_PORT=3000
 API_PORT=8090
@@ -43,8 +43,8 @@ API_NS=control-plane
 UI_SVC=control-ui
 API_SVC=control-api
 
-log()  { printf '[e2e-clerum-dev] %s\n' "$*" >&2; }
-die()  { printf '[e2e-clerum-dev] ERROR: %s\n' "$*" >&2; exit 1; }
+log()  { printf '[e2e-example-dev] %s\n' "$*" >&2; }
+die()  { printf '[e2e-example-dev] ERROR: %s\n' "$*" >&2; exit 1; }
 
 # ─── Prerequisite checks ──────────────────────────────────────────────
 command -v kubectl >/dev/null 2>&1 || die "kubectl not on PATH"
@@ -55,7 +55,7 @@ command -v npx     >/dev/null 2>&1 || die "npx not on PATH"
 # Context must exist; fail fast with a readable error rather than a
 # cryptic kubectl "context not found" later inside the PF loop.
 if ! kubectl config get-contexts -o name | grep -Fxq "$CONTEXT"; then
-  die "kubectl context '$CONTEXT' not found. Run 'gcloud container clusters get-credentials clerum-dev --zone us-central1-a --project ${GCP_PROJECT}' first."
+  die "kubectl context '$CONTEXT' not found. Run 'gcloud container clusters get-credentials example-dev --zone us-central1-a --project ${GCP_PROJECT}' first."
 fi
 
 # Reject if the literal dev services aren't reachable — typical on a

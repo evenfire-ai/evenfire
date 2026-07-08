@@ -20,7 +20,7 @@
 #   ADMIN_PASSWORD='...' scripts/e2e/seed-e2e-data.sh
 #
 #   # targeted cluster
-#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_clerum-dev \
+#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_example-dev \
 #     ADMIN_PASSWORD='...' scripts/e2e/seed-e2e-data.sh
 #
 #   # CI (GitHub Actions)
@@ -108,7 +108,7 @@ is_minikube_context() {
 
 is_password_seed_allowed_context() {
   case "$CONTEXT" in
-    clerum-test|gke_${GCP_PROJECT}_us-central1-a_clerum-dev)
+    clerum-test|gke_${GCP_PROJECT}_us-central1-a_example-dev)
       return 0
       ;;
     *)
@@ -238,7 +238,7 @@ seed_plugin_sdk_demo_grants_if_enabled() {
 # list). Never add a prod context to this allowlist.
 DEFAULT_ALLOWED_CONTEXTS=(
   "clerum-test"                                               # minikube
-  "gke_${GCP_PROJECT}_us-central1-a_clerum-dev"             # GKE dev
+  "gke_${GCP_PROJECT}_us-central1-a_example-dev"             # GKE dev
 )
 IFS=',' read -r -a EXTRA_ALLOWED <<<"${ALLOWED_CONTEXTS:-}"
 ALLOWED=("${DEFAULT_ALLOWED_CONTEXTS[@]}" "${EXTRA_ALLOWED[@]}")

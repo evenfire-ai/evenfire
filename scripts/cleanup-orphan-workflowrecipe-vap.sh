@@ -10,7 +10,7 @@
 # out-of-band. This script does exactly that and is idempotent.
 #
 # Usage:
-#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_clerum-dev \
+#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_example-dev \
 #     ./scripts/cleanup-orphan-workflowrecipe-vap.sh
 #
 #   # dry-run (no deletion, only shows what would happen):
@@ -26,7 +26,7 @@ DRY_RUN="${DRY_RUN:-false}"
 # and requires explicit CONFIRM=yes per the project convention
 # (`CLAUDE.md` §GCP Deployment — "Every prod mutation requires CONFIRM=yes").
 # Match `-dev` at the END of the context string so e.g.
-# `gke_${GCP_PROJECT}_us-central1-a_clerum-dev` is dev, but
+# `gke_${GCP_PROJECT}_us-central1-a_example-dev` is dev, but
 # `gke_${GCP_PROJECT}_us-central1-a_clerum` (prod) trips the gate.
 if [[ "${CONTEXT}" != *-dev ]] && [[ "${DRY_RUN}" != "true" ]]; then
   if [[ "${CONFIRM:-}" != "yes" ]]; then

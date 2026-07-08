@@ -501,7 +501,7 @@ describe('runToolUseLoop — loop control', () => {
           {
             id: 'tc_1',
             name: 'workflow_trigger',
-            arguments: { name: 'workflow-agent-chat-due-diligence', targetLabel: 'Palmera Risk' },
+            arguments: { name: 'workflow-agent-chat-due-diligence', targetLabel: 'Acme Risk' },
           },
         ],
       },
@@ -512,7 +512,7 @@ describe('runToolUseLoop — loop control', () => {
       sanitize: false,
       output: JSON.stringify({
         workflowName: 'workflow-agent-chat-due-diligence',
-        target: { label: 'Palmera Risk' },
+        target: { label: 'Acme Risk' },
         phase: 'Pending',
       }),
     })
@@ -528,7 +528,7 @@ describe('runToolUseLoop — loop control', () => {
     const result = await runToolUseLoop(config, [
       {
         role: 'user',
-        content: 'Run workflow-agent-chat-due-diligence for team Palmera Risk.',
+        content: 'Run workflow-agent-chat-due-diligence for team Acme Risk.',
       },
     ])
 

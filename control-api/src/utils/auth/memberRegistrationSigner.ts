@@ -2,7 +2,7 @@ import { createHmac, randomUUID } from 'node:crypto'
 import { config } from '../../config.js'
 
 // Signs the per-tenant HMAC JWT that control-api presents to the centralized
-// member-registration service (on evenfire-hub, example.com) for
+// member-registration service (on example-hub, example.com) for
 // its three machine-to-machine routes. Mirrors the InternalControl-JWT
 // convention used by WRC/HCC; the member-registration service verifies the
 // signature against this tenant's secret (resolved by `kid`) and binds the

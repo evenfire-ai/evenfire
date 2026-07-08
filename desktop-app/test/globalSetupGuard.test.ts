@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { validateBaseUrls } from './e2e-playwright/global-setup'
 
-const DEV_CONTEXT = 'gke_${GCP_PROJECT}_us-central1-a_clerum-dev'
+const DEV_CONTEXT = 'gke_${GCP_PROJECT}_us-central1-a_example-dev'
 
 describe('validateBaseUrls', () => {
   it('requires localhost for clerum-test', () => {
@@ -42,7 +42,7 @@ describe('validateBaseUrls', () => {
     )
   })
 
-  it('allows explicit dev port-forward mode for clerum-dev', () => {
+  it('allows explicit dev port-forward mode for example-dev', () => {
     expect(() =>
       validateBaseUrls({
         expectedContext: DEV_CONTEXT,
@@ -106,7 +106,7 @@ describe('validateBaseUrls', () => {
     ).toThrow(/WORKFLOW_APPROVAL_READER_BASE_URL/)
   })
 
-  it('rejects localhost on clerum-dev without explicit opt-in', () => {
+  it('rejects localhost on example-dev without explicit opt-in', () => {
     expect(() =>
       validateBaseUrls({
         expectedContext: DEV_CONTEXT,
