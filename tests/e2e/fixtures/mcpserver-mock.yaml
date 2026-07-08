@@ -1,0 +1,23 @@
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: mock-server
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: Mock MCP server for E2E testing — provides echo, add, record, and recall tools
+  image: clerum/mock-mcp-server:dev
+  transport:
+    type: streamableHttp
+    url: http://mock-server.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000
+  healthCheck:
+    port: 3001
+  resources:
+    requests:
+      memory: '64Mi'
+      cpu: '50m'
+    limits:
+      memory: '128Mi'
+      cpu: '200m'
+  enabled: true

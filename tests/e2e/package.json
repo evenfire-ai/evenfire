@@ -1,0 +1,22 @@
+{
+  "name": "clerum-e2e-tests",
+  "version": "0.1.40",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:verbose": "vitest run --reporter=verbose",
+    "test:rpc-proxy-e2e": "vitest run rpc-proxy/security.e2e.test.ts",
+    "test:rpc-proxy-e2e:watch": "vitest rpc-proxy/security.e2e.test.ts",
+    "test:external-rest-api-e2e": "vitest run external-rest-api/security.e2e.test.ts",
+    "test:external-rest-api-e2e:watch": "vitest external-rest-api/security.e2e.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/jsonwebtoken": "^9.0.10",
+    "jsonwebtoken": "^9.0.2",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}

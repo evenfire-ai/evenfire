@@ -1,0 +1,15 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: smoke-wf-test
+  namespace: sandbox-recipes
+spec:
+  workloads: []
+  agent:
+    model: glm-4.7
+    provider: zai
+  steps:
+    - id: step-greet
+      instruction: 'Say hello to the world'
+    - id: step-summarize
+      instruction: 'Summarize the greeting'

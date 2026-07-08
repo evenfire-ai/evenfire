@@ -1,0 +1,64 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: agentic-workload-template-resolution
+spec:
+  description: Agentic workflow sample that validates workload env/command/args template resolution.
+  agent:
+    provider: zai
+    model: glm-4.7
+  triggers:
+    onDemand:
+      allowedActors:
+        - user
+        - autonomous
+  inputContract:
+    properties:
+      db_name:
+        type: string
+        default: clerum
+      shell_bin:
+        type: string
+        default: sh
+  computed:
+    - name: db_mode
+      expression: "'readonly'"
+  workloads:
+    - id: postgres
+      type: statefulset
+      image: postgres:16-alpine
+      port: 5432
+      security:
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+      env:
+        - name: POSTGRES_DB
+          value: '{{inputs.db_name}}'
+        - name: POSTGRES_USER
+          value: clerum
+      envSecret:
+        name: agentic-template-postgres-auth
+        keys:
+          - secretKey: password
+            envVar: POSTGRES_PASSWORD
+    - id: qa-api
+      type: deployment
+      image: busybox:1.36
+      port: 8080
+      env:
+        - name: DATABASE_URL
+          value: 'postgres://clerum@{{postgres:host}}:{{postgres:port}}/{{inputs.db_name}}'
+        - name: DB_MODE
+          value: '{{computed.db_mode}}'
+      command:
+        - '{{inputs.shell_bin}}'
+        - -c
+      args:
+        - 'echo "db=$DATABASE_URL host={{postgres:host}} port={{postgres:port}} mode={{computed.db_mode}}"; sleep 3600'
+  steps:
+    - id: verify-template-resolution
+      instruction: >
+        Confirm that the qa-api workload received resolved PostgreSQL service
+        host and port values in env.value, command, and args. Workload secrets
+        stay on envSecret and are not rendered through env.value templates.

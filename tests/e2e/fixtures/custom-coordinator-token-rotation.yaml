@@ -1,0 +1,34 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-custom-token-rotation
+  namespace: sandbox-recipes
+spec:
+  triggers:
+    onDemand: {}
+  coordinatorImage: clerum/workflow-custom-sdk-e2e:test
+  inputContract:
+    type: object
+    properties:
+      tokenRotationProbe:
+        type: boolean
+        default: true
+      tokenRotationInitialDelayMs:
+        type: number
+        default: 70000
+      tokenRotationProjectionDelayMs:
+        type: number
+        default: 90000
+  inputs:
+    tokenRotationProbe: true
+    tokenRotationInitialDelayMs: 70000
+    tokenRotationProjectionDelayMs: 90000
+  output:
+    destination: pvc
+    format: json
+    storageSize: 128Mi
+  steps:
+    - id: wait-for-token-rotation
+    - id: emit
+      dependsOn:
+        - wait-for-token-rotation

@@ -1,0 +1,11 @@
+apiVersion: clerum.io/v1alpha1
+kind: CommunicationChannel
+metadata:
+  name: test-channel
+  namespace: channels
+spec:
+  hostRef: chatllm
+  email:
+    - channelId: "INBOX"
+      emails:
+        - "minikube@example.test"

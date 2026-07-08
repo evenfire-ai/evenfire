@@ -1,0 +1,39 @@
+# Template-only policy. The `except: []` placeholder below must be rendered by
+# `make deploy-mongodb`; do not apply this file directly with `kubectl apply -f`.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mongodb-server-custom-traffic
+  namespace: mcp-server
+spec:
+  podSelector:
+    matchLabels:
+      clerum.io/mcpserver: mongodb-server
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # NOTE: Kubernetes NetworkPolicy cannot match FQDN domains.
+    # This allows common MongoDB Atlas/API egress while ingress remains context-controlled.
+    # Scope is rule-level: DNS is separate above, and cluster-internal targets
+    # require an explicit selector/CIDR policy instead of this public rule.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: []
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 27017

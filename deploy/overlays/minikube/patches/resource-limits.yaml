@@ -1,0 +1,116 @@
+# Minikube resource limits — reduced for local development
+# Base limits are already moderate; we reduce rpc-proxy replicas to 1 and
+# lower its cpu/memory for a single-node minikube environment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rpc-proxy
+  namespace: rpc-proxy
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: rpc-proxy
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+---
+# control-api: base is 300m/256Mi — keep but explicitly confirm for minikube
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-api
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-api
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
+---
+# control-ui: base is 300m/256Mi — reduce for minikube
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-ui
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-ui
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
+---
+# control-postgres: base is 200m/256Mi — acceptable, reduce request slightly
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-postgres
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: postgres
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+---
+# host-context-controller: keep local HCC headroom aligned with GCP readiness/startup gates
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: host-context-controller
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: host-context-controller
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+            requests:
+              cpu: 200m
+              memory: 256Mi
+---
+# external-rest-api: base is 300m/256Mi — reduce for minikube
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-rest-api
+  namespace: profiles
+spec:
+  template:
+    spec:
+      containers:
+        - name: external-rest-api
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi

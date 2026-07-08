@@ -1,0 +1,38 @@
+{
+  "name": "clerum-external-rest-api",
+  "version": "0.1.56",
+  "description": "External REST API for profile, team management, and RPC token brokerage",
+  "main": "dist/main.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts",
+    "test": "vitest run --no-file-parallelism",
+    "test:run": "vitest run --no-file-parallelism",
+    "test:e2e": "npm --prefix ../tests/e2e run test:external-rest-api-e2e",
+    "test:e2e:watch": "npm --prefix ../tests/e2e run test:external-rest-api-e2e:watch"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "google-auth-library": "^9.15.1",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^24.3.0",
+    "@types/pg": "^8.11.10",
+    "@types/supertest": "^7.2.0",
+    "supertest": "^7.2.2",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.0.18"
+  }
+}

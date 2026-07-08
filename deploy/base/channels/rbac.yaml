@@ -1,0 +1,144 @@
+# --- Role: control-api-communication-channels ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: control-api-communication-channels
+  namespace: channels
+rules:
+  - apiGroups: ["clerum.io"]
+    resources: ["communicationchannels"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Per-Host channel-reader feature: control-api owns CRUD on per-host
+  # credentials Secrets via /admin/channel-secrets (POST/PUT/GET/DELETE).
+  # Secret name and labels are server-controlled; HCC's SecretInformer
+  # reacts to ADDED/MODIFIED/DELETED to roll the matching Deployment.
+  #
+  # Figure D multi-bot ALSO relies on the `get` verb here: the user-bound
+  # approval delivery worker (inside control-api) reads each CommunicationChannel
+  # credentials Secret to resolve its per-channel bot. No new grant is needed —
+  # `get` already covers it. FOLLOW-UP (security M1): this Role is broader than
+  # the worker needs (full CRUD, no resourceNames). K8s RBAC resourceNames takes
+  # exact names only (no `cc-*-credentials` wildcard), so tightening requires a
+  # split Role or admission policy; tracked as a separate hardening PR.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-api-communication-channels
+  namespace: channels
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: control-api-communication-channels
+subjects:
+- kind: ServiceAccount
+  name: control-api
+  namespace: control-plane
+---
+# --- Role: host-context-controller-channels-runtime ---
+# Per-Host channel-reader feature: HCC creates/replaces/patches/deletes
+# channel-reader-<host> Deployments in the channels namespace and runs a
+# SecretInformer over channel-reader-<host>-credentials Secrets to drive
+# rolling restarts on credential change. The orphan sweep also requires
+# delete on Secrets when a Host CRD has been removed while HCC was down.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller-channels-runtime
+  namespace: channels
+rules:
+  # Manage per-Host channel-reader Deployments: create/replace on reconcile,
+  # patch for revision annotation rolls, delete on Host removal + orphan sweep.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Manage per-Host channel-reader Services. workflow-approval-request-reader
+  # hands Slack webhook events to channel-reader-<host> through these Services.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # CommunicationChannel watch (#281): HCC counts CCs per host to drive
+  # per-Host channel-reader Deployment replicas. Read-only — CC CRUD is
+  # owned by control-api's /admin/communication-channels routes elsewhere.
+  - apiGroups: ["clerum.io"]
+    resources: ["communicationchannels"]
+    verbs: ["get", "list", "watch"]
+  # Watch and manage HCC-owned per-Host channel-reader Secrets, and delete
+  # those HCC-owned Secrets as part of the orphan sweep when their Host has
+  # been removed. This also preserves narrow cleanup for legacy
+  # channel-reader-<host>-mcp-host-runtime-auth Secrets without reissuing or
+  # mounting runtime JWT credentials.
+  #
+  # Why `delete` is granted at namespace scope:
+  # K8s RBAC `resourceNames` requires exact names — wildcards are not
+  # supported, so we cannot pin delete to `channel-reader-*-credentials`.
+  # Two safeguards mitigate the broad grant:
+  #   1. The actual list+delete loop in HostReconciler.sweepOrphanChannelReader
+  #      Resources() filters server-side by labelSelector
+  #      `clerum.io/managed-by=host-context-controller,
+  #       clerum.io/component=channel-reader` so HCC only ever sees Secrets
+  #      it created itself.
+  #   2. An in-loop guard re-checks the same labels before each delete, so a
+  #      future bug that drops the labelSelector still cannot wipe unrelated
+  #      Secrets in the channels namespace.
+  # Secret create/update remains scoped to HCC-managed channel-reader material.
+  # The direct channel-reader -> mcp-host runtime hop uses edge context plus
+  # NetworkPolicy, not a mounted runtime JWT. The reconciler refuses to replace
+  # existing managed Secrets unless the expected HCC ownership, host,
+  # component, and purpose labels are present.
+  # Each delete emits an `AUDIT:` log line for monitoring/alerting.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  # Per-Host NetworkPolicy: HCC creates `channel-reader-<host>-egress` to pin
+  # channel-reader-<host> traffic to mcp-host-<host> only. Required by ensureChannelReaderEgressNetworkPolicy.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller-channels-runtime
+  namespace: channels
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller-channels-runtime
+subjects:
+- kind: ServiceAccount
+  name: host-context-controller
+  namespace: control-plane
+---
+# --- Role: clerum-channel-reader-secrets ---
+# channel-reader resolves CC.spec.credentialsSecretRef.name at startup
+# via the K8s API, so the channel-reader SA needs `get` on Secrets in the
+# channels namespace. Explicitly NO list/watch — channel-reader only ever
+# reads by explicit name (the CC tells it which Secret to read). HCC
+# remains the actor that reacts to Secret changes (annotation-roll).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: clerum-channel-reader-secrets
+  namespace: channels
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: clerum-channel-reader-secrets
+  namespace: channels
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: clerum-channel-reader-secrets
+subjects:
+- kind: ServiceAccount
+  name: clerum-channel-reader
+  namespace: channels

@@ -1,0 +1,76 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-layer3a-hybrid-secret-pvc-5step-long-name
+  namespace: sandbox-recipes
+spec:
+  description: Layer 3A snippet runtime combined with an agentic mcp-host step.
+  contextRef: context1
+  triggers:
+    onDemand:
+      allowedActors:
+        - user
+        - autonomous
+  security:
+    allowContextRef: true
+  workloads:
+    - id: mock-tools
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3000
+      transport:
+        type: streamableHttp
+        path: /mcp
+      healthCheck:
+        type: tcp
+        port: 3001
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+  inputs:
+    requestId: layer3a-hybrid-agentic
+  output:
+    destination: pvc
+    format: multi
+    storageSize: 128Mi
+  steps:
+    - id: prepare
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          const artifact = await sdk.artifacts.writeJson("hybrid-prepare.json", {
+            requestId: sdk.inputs.requestId,
+            prepared: true
+          })
+          return { prepared: true, requestId: sdk.inputs.requestId, artifact }
+        capabilities: {}
+    - id: agentic-review
+      dependsOn: [prepare]
+      instruction: |
+        Use the mock-tools add tool exactly once with a=40 and b=2.
+        Return only a concise one-line summary containing the number 42.
+      agent:
+        provider: zai
+        model: glm-4.7
+      mcpServers: [mock-tools]
+      allowedTools:
+        include: [mock-tools__add]
+      maxIterations: 6
+    - id: finalize
+      dependsOn: [agentic-review]
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          const summary = String(sdk.previousOutputs["agentic-review"] ?? "")
+          const artifact = await sdk.artifacts.writeMarkdown(
+            "hybrid-agentic-summary.md",
+            `# Hybrid Agentic Summary\n\nPrepared: ${sdk.previousOutputs.prepare.prepared}\nReview: ${summary}\n`
+          )
+          return { prepared: sdk.previousOutputs.prepare.prepared, review: summary, artifact }
+        capabilities: {}

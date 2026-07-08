@@ -1,0 +1,65 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: stdio-mcp-with-postgres
+  namespace: sandbox-recipes
+spec:
+  description: 'stdio MCP server with PostgreSQL backend — validates stdio + cross-namespace bindings (production)'
+  contextRef: context1
+  workloads:
+    - id: postgres
+      type: statefulset
+      image: postgres:16-alpine
+      port: 5432
+      serviceName: postgres
+      env:
+        - name: POSTGRES_PASSWORD
+          value: '{{inputs.db_password}}'
+        - name: POSTGRES_DB
+          value: clerum_test
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+      volumeMounts:
+        - name: pgdata
+          mountPath: /var/lib/postgresql/data
+      volumeClaimTemplates:
+        - name: pgdata
+          storageClass: do-block-storage
+          accessMode: ReadWriteOnce
+          size: 256Mi
+      security:
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        addCapabilities:
+          - CHOWN
+          - FOWNER
+          - DAC_OVERRIDE
+
+    - id: pg-stdio-mcp
+      type: deployment
+      image: us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mock-stdio-mcp-server:prod
+      imagePullPolicy: Always
+      imagePullSecrets:
+        - clerum
+      transport:
+        type: stdio
+      port: 3000
+      env:
+        - name: PG_HOST
+          value: '{{postgres:host}}'
+        - name: PG_PORT
+          value: '{{postgres:port}}'
+      dependsOn:
+        - postgres
+
+  bindings:
+    - from: pg-stdio-mcp
+      to: postgres
+      port: 5432
+
+  inputs:
+    db_password: testpass123
+
+  security:
+    isolationLevel: minimal

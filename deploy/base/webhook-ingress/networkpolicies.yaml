@@ -1,0 +1,172 @@
+# Static NetworkPolicies for webhook-ingress. Per spec §9.1.
+#
+# Mirrors the rpc-proxy pattern: a deny-all baseline plus narrow
+# allowlists that just permit the legitimate paths webhook-proxy needs.
+# Infrastructure policies (deny-all, allow-dns, allow-hcc-api,
+# allow-k8s-api) are reconciled by host-context-controller for
+# webhook-ingress at runtime, the same way they are for rpc-proxy /
+# mcp-server / sandbox-recipes — provided webhook-ingress is added to
+# the runtime-managed namespace list. Until that's wired we fall back
+# to the static deny-all + DNS rules below so the namespace isn't
+# accidentally permissive on first apply.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-webhook-ingress
+  namespace: webhook-ingress
+  labels:
+    clerum.io/managed-by: webhook-ingress
+    clerum.io/policy-type: default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress-webhook-ingress
+  namespace: webhook-ingress
+  labels:
+    clerum.io/managed-by: webhook-ingress
+    clerum.io/policy-type: infrastructure
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+---
+# Public ingress: accept HTTP from the cloudflared tunnel on the public
+# port. TLS is terminated at Cloudflare's edge; the tunnel carries plain
+# HTTP to webhook-proxy:8095. Mirrors rpc-proxy's ingress shape (see
+# deploy/base/rpc-proxy/networkpolicies.yaml).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-public-ingress-webhook-proxy
+  namespace: webhook-ingress
+  labels:
+    clerum.io/managed-by: webhook-ingress
+    clerum.io/policy-type: public-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: webhook-proxy
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress
+          podSelector:
+            matchLabels:
+              app: cloudflared
+      ports:
+        - { port: 8095, protocol: TCP }
+---
+# Prometheus scrape on the metrics port (Q6 same scrape config as rpc-proxy).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-monitoring-scrape-webhook-proxy
+  namespace: webhook-ingress
+  labels:
+    clerum.io/managed-by: webhook-ingress
+    clerum.io/policy-type: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: webhook-proxy
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - { port: 9090, protocol: TCP }
+---
+# Egress to per-recipe webhook-gateway pods in sandbox-recipes.
+# Selector matches the label WRC stamps on every gateway Deployment
+# (clerum.io/webhook-gateway: "true"); that's the SAME boundary the
+# per-recipe NetworkPolicies use on the sandbox-recipes side.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-webhook-proxy-egress-gateway
+  namespace: webhook-ingress
+  labels:
+    clerum.io/managed-by: webhook-ingress
+    clerum.io/policy-type: gateway-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: webhook-proxy
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: sandbox-recipes
+          podSelector:
+            matchLabels:
+              clerum.io/webhook-gateway: "true"
+      ports:
+        - { port: 8090, protocol: TCP }
+---
+# Egress to workflow-approval-request-reader for provider approval/chat callbacks
+# (`/webhooks/telegram`, `/webhooks/slack/<targetId>`).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-webhook-proxy-egress-workflow-approval-reader
+  namespace: webhook-ingress
+  labels:
+    clerum.io/managed-by: webhook-ingress
+    clerum.io/policy-type: workflow-approval-reader-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: webhook-proxy
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: channels
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: workflow-approval-request-reader
+      ports:
+        - { port: 8098, protocol: TCP }
+---
+# Egress to control-api for registry lookups.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-webhook-proxy-egress-control-api
+  namespace: webhook-ingress
+  labels:
+    clerum.io/managed-by: webhook-ingress
+    clerum.io/policy-type: control-api-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: webhook-proxy
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: control-plane
+          podSelector:
+            matchLabels:
+              app: control-api
+      ports:
+        - { port: 8090, protocol: TCP }

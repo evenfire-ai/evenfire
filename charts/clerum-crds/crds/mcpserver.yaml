@@ -1,0 +1,458 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mcpservers.clerum.io
+  labels:
+    app.kubernetes.io/name: mcpserver
+    app.kubernetes.io/part-of: clerum
+spec:
+  group: clerum.io
+  names:
+    kind: McpServer
+    listKind: McpServerList
+    plural: mcpservers
+    singular: mcpserver
+    shortNames:
+      - mcp
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            McpServer defines an MCP (Model Context Protocol) server that provides
+            tools to the LLM. The context-mapper watches these CRDs and automatically
+            manages deployments, services, and secret validation.
+          properties:
+            spec:
+              type: object
+              required:
+                - contextRef
+                - transport
+                - image
+              properties:
+                contextRef:
+                  type: string
+                  description: Reference to the context this server belongs to.
+                description:
+                  type: string
+                  description: Human-readable description of what this MCP server does.
+                image:
+                  type: string
+                  description: Docker image for the MCP server container (e.g. mongodb/mongodb-mcp-server:latest).
+                imagePullPolicy:
+                  type: string
+                  enum:
+                    - Always
+                    - IfNotPresent
+                    - Never
+                  description: Image pull policy. If omitted, HCC uses CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY (default IfNotPresent).
+                command:
+                  type: array
+                  items:
+                    type: string
+                  description: >-
+                    Override the container entrypoint (Docker ENTRYPOINT).
+                    Use when the image default entrypoint does not start the
+                    server in the desired mode.
+                args:
+                  type: array
+                  items:
+                    type: string
+                  description: >-
+                    Arguments passed to the container entrypoint (Docker CMD).
+                transport:
+                  type: object
+                  description: Transport configuration for connecting to the MCP server.
+                  properties:
+                    type:
+                      type: string
+                      enum:
+                        - sse
+                        - streamableHttp
+                        - stdio
+                      description: >-
+                        Transport type. sse for Server-Sent Events, streamableHttp for HTTP streaming,
+                        stdio for stdin/stdout (requires stdio-bridge sidecar).
+                    url:
+                      type: string
+                      description: >-
+                        Client-facing URL endpoint of the MCP server.
+                        Required for sse and streamableHttp transports.
+                        Auto-generated for stdio transport (stdio-bridge sidecar provides the HTTP endpoint).
+                    port:
+                      type: integer
+                      default: 3000
+                      description: Port the MCP server listens on (used for container port and Service).
+                  required:
+                    - type
+                auth:
+                  type: object
+                  description: Authentication configuration for the mcp-host connecting to this server.
+                  properties:
+                    type:
+                      type: string
+                      enum:
+                        - none
+                        - bearer
+                        - basic
+                        - apiKey
+                      description: Authentication type.
+                    secretRef:
+                      type: string
+                      description: Name of the Kubernetes Secret containing auth credentials.
+                    secretKey:
+                      type: string
+                      description: Key within the secret to use (default depends on auth type).
+                serverConfig:
+                  type: object
+                  description: Operational configuration for the MCP server runtime.
+                  properties:
+                    readOnly:
+                      type: boolean
+                      default: true
+                      description: Whether the MCP server operates in read-only mode.
+                    loggers:
+                      type: string
+                      default: "stderr"
+                      description: Comma-separated list of logger outputs (e.g. stderr, disk, mcp).
+                    telemetry:
+                      type: string
+                      enum:
+                        - enabled
+                        - disabled
+                      default: "disabled"
+                      description: Whether telemetry collection is enabled.
+                envMapping:
+                  type: object
+                  description: >-
+                    Maps CRD fields to environment variable names specific to
+                    this MCP server image. The context-mapper reads the structured
+                    CRD fields and sets the named env vars automatically.
+                  properties:
+                    transport:
+                      type: string
+                      description: 'Env var for transport mode (value derived: sse/streamableHttp → "http").'
+                    httpHost:
+                      type: string
+                      description: 'Env var for HTTP bind host (value: always "0.0.0.0").'
+                    httpPort:
+                      type: string
+                      description: Env var for HTTP port (value from spec.transport.port).
+                    healthCheckHost:
+                      type: string
+                      description: 'Env var for health check bind host (value: always "0.0.0.0").'
+                    healthCheckPort:
+                      type: string
+                      description: Env var for health check port (value from spec.healthCheck.port).
+                    readOnly:
+                      type: string
+                      description: Env var for read-only mode (value from spec.serverConfig.readOnly).
+                    loggers:
+                      type: string
+                      description: Env var for loggers (value from spec.serverConfig.loggers).
+                    telemetry:
+                      type: string
+                      description: Env var for telemetry (value from spec.serverConfig.telemetry).
+                env:
+                  type: array
+                  description: >-
+                    Additional environment variables for the MCP server container.
+                    Use this for server-specific settings not covered by
+                    serverConfig + envMapping.
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - value
+                    properties:
+                      name:
+                        type: string
+                        description: Environment variable name.
+                      value:
+                        type: string
+                        description: Environment variable value.
+                envSecret:
+                  type: object
+                  description: >-
+                    Secret-backed environment variables. The context-mapper validates
+                    that the secret and all referenced keys exist before creating
+                    the deployment. The secret itself must be created separately.
+                  required:
+                    - name
+                    - keys
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the Kubernetes Secret in the same namespace.
+                    keys:
+                      type: array
+                      description: Mapping of secret keys to environment variable names.
+                      items:
+                        type: object
+                        required:
+                          - secretKey
+                          - envVar
+                        properties:
+                          secretKey:
+                            type: string
+                            description: Key within the Kubernetes Secret.
+                          envVar:
+                            type: string
+                            description: Environment variable name to expose the secret value as.
+                healthCheck:
+                  type: object
+                  description: Health check endpoint configuration for Kubernetes probes.
+                  properties:
+                    port:
+                      type: integer
+                      default: 3001
+                      description: Port for the health check endpoint (separate from the main transport port).
+                resources:
+                  type: object
+                  description: Resource requests and limits for the MCP server container.
+                  properties:
+                    requests:
+                      type: object
+                      properties:
+                        memory:
+                          type: string
+                        cpu:
+                          type: string
+                    limits:
+                      type: object
+                      properties:
+                        memory:
+                          type: string
+                        cpu:
+                          type: string
+                enabled:
+                  type: boolean
+                  default: true
+                  description: Whether this MCP server is enabled. Disabled servers will have their deployments removed.
+                managed:
+                  type: boolean
+                  default: true
+                  description: >-
+                    Runtime ownership for this MCP server. When true (default),
+                    host-context-controller owns the runtime and creates/manages
+                    Deployment, Service, NetworkPolicy, and remote proxy resources.
+                    When false, workflow-recipes owns the runtime; HCC only exposes
+                    discovery/status and must not create or delete the WRC-owned
+                    runtime.
+                remote:
+                  type: object
+                  description: >-
+                    Remote MCP server configuration. When present, the Context Mapper
+                    creates an nginx-based egress proxy Pod instead of deploying the
+                    vendor image directly. The proxy forwards requests to the external
+                    baseUrl, injecting auth headers from envSecret.
+                  properties:
+                    baseUrl:
+                      type: string
+                      pattern: "^https://[a-zA-Z0-9._-]+(:[0-9]+)?(/[^\\n\\r; ]*)?$"
+                      description: >-
+                        External MCP server endpoint URL (must be HTTPS, e.g. https://mcp.sentry.io/sse).
+                        The egress proxy will forward all requests to this URL.
+                    authHeaders:
+                      type: array
+                      maxItems: 20
+                      description: |
+                        Optional HTTP headers to inject when proxying to the remote MCP server.
+                        Rendered by host-context-controller into nginx proxy_set_header directives.
+                        Values are envsubst-expanded at pod start from Secret-mounted env vars.
+                      items:
+                        type: object
+                        required:
+                          - header
+                          - valueTemplate
+                        properties:
+                          header:
+                            type: string
+                            minLength: 1
+                            maxLength: 128
+                            pattern: '^[A-Za-z0-9-]+$'
+                            description: "HTTP header name. Alphanumeric and hyphens only."
+                          valueTemplate:
+                            type: string
+                            minLength: 1
+                            maxLength: 2048
+                            description: |
+                              Header value template. May contain ${VAR} placeholders that
+                              nginx envsubst resolves at startup from mounted env vars.
+                  required:
+                    - baseUrl
+                  x-kubernetes-validations:
+                    - rule: "self.baseUrl.startsWith('https://')"
+                      message: "remote.baseUrl must use HTTPS"
+                    - rule: "!self.baseUrl.contains('svc.cluster.local')"
+                      message: "remote.baseUrl must not reference internal cluster services"
+                imagePullSecrets:
+                  type: array
+                  description: Image pull secrets for the container.
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                security:
+                  type: object
+                  description: Security context overrides for the MCP server pod.
+                  properties:
+                    runAsUser:
+                      type: integer
+                      minimum: 1
+                    runAsGroup:
+                      type: integer
+                    fsGroup:
+                      type: integer
+                    addCapabilities:
+                      type: array
+                      items:
+                        type: string
+                        enum:
+                          - CHOWN
+                          - FOWNER
+                          - DAC_OVERRIDE
+                          - NET_BIND_SERVICE
+                egressBindings:
+                  type: array
+                  maxItems: 20
+                  description: >-
+                    External egress bindings allowing this MCP server to reach external
+                    APIs. exact-host bindings generate NetworkPolicies to resolved public
+                    IPs or explicit public CIDRs. public-web is an explicit opt-in that
+                    allows public TCP 80/443 while blocking private, metadata, link-local,
+                    service, documentation, multicast, and reserved IPv4 ranges.
+                  items:
+                    type: object
+                    properties:
+                      egressClass:
+                        type: string
+                        enum:
+                          - exact-host
+                          - public-web
+                        default: exact-host
+                        description: >-
+                          exact-host allows a single dns or cidr destination plus port.
+                          public-web allows public TCP 80/443 and must not declare dns,
+                          cidr, port, or protocol.
+                      dns:
+                        type: string
+                        minLength: 1
+                        maxLength: 128
+                        pattern: "^[a-z0-9][a-z0-9.-]*\\.[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+                        description: DNS hostname to resolve (e.g. api.openai.com). Mutually exclusive with cidr.
+                      cidr:
+                        type: string
+                        minLength: 3
+                        maxLength: 43
+                        description: Public IPv4 CIDR range (for example 203.0.114.10/32). Mutually exclusive with dns. Must not overlap private, metadata, link-local, documentation, multicast, or reserved IPv4 ranges.
+                      port:
+                        type: integer
+                        description: Destination port number.
+                      protocol:
+                        type: string
+                        enum:
+                          - TCP
+                          - UDP
+                        description: Network protocol.
+                    x-kubernetes-validations:
+                      - rule: "((has(self.egressClass) && self.egressClass == 'public-web') && !has(self.dns) && !has(self.cidr) && !has(self.port) && !has(self.protocol)) || ((!has(self.egressClass) || self.egressClass == 'exact-host') && has(self.port) && has(self.dns) != has(self.cidr))"
+                        message: "exact-host requires port and exactly one of dns or cidr; public-web must not declare dns, cidr, port, or protocol"
+                      - rule: "!has(self.dns) || !self.dns.contains('/')"
+                        message: "dns must not use CIDR notation"
+                      - rule: "!has(self.dns) || !self.dns.contains(':')"
+                        message: "dns must not include a port or URL scheme"
+                      - rule: "!has(self.dns) || (self.dns != '*' && !self.dns.startsWith('*.'))"
+                        message: "wildcard dns values are not allowed"
+                      - rule: "!has(self.dns) || (self.dns != 'localhost' && self.dns != 'metadata.goog' && self.dns != 'kubernetes.default' && !self.dns.endsWith('.localhost') && !self.dns.endsWith('.local') && !self.dns.endsWith('.internal') && !self.dns.endsWith('.svc') && !self.dns.endsWith('.cluster.local'))"
+                        message: "dns must not target localhost, metadata, Kubernetes, service, or internal hostnames"
+                      - rule: "!has(self.cidr) || isCIDR(self.cidr)"
+                        message: "cidr must be valid CIDR notation"
+                      - rule: "!has(self.cidr) || !isCIDR(self.cidr) || cidr(self.cidr) == cidr(self.cidr).masked()"
+                        message: "cidr must use canonical network CIDR notation"
+                      - rule: "!has(self.cidr) || !self.cidr.contains(':')"
+                        message: "IPv6 CIDR ranges are not supported for external egress"
+                      - rule: "!has(self.cidr) || !isCIDR(self.cidr) || !['0.0.0.0/8','10.0.0.0/8','100.64.0.0/10','127.0.0.0/8','169.254.0.0/16','172.16.0.0/12','192.0.0.0/24','192.0.2.0/24','192.31.196.0/24','192.52.193.0/24','192.88.99.0/24','192.168.0.0/16','192.175.48.0/24','198.18.0.0/15','198.51.100.0/24','203.0.113.0/24','224.0.0.0/4','240.0.0.0/4'].exists(blocked, cidr(self.cidr).containsCIDR(cidr(blocked)) || cidr(blocked).containsCIDR(cidr(self.cidr)))"
+                        message: "CIDR must not overlap private, metadata, link-local, documentation, multicast, or reserved IPv4 ranges"
+              x-kubernetes-validations:
+                - rule: "self.managed == oldSelf.managed"
+                  message: "spec.managed is immutable; delete and recreate the McpServer to change ownership"
+                - rule: "self.managed == true || (has(self.transport) && has(self.contextRef))"
+                  message: "WRC-owned servers (managed: false) still require transport and contextRef"
+                - rule: "(has(self.managed) ? self.managed : true) == (has(oldSelf.managed) ? oldSelf.managed : true)"
+                  message: "spec.managed is immutable; delete and recreate the McpServer to change runtime ownership"
+                - rule: "!has(self.remote) || (has(self.egressBindings) && size(self.egressBindings) > 0)"
+                  message: "Remote servers must declare at least one egressBinding for egress NetworkPolicy"
+            status:
+              type: object
+              properties:
+                resolvedEgressIPs:
+                  type: array
+                  description: Resolved IPs for DNS-based egress bindings (for auditability).
+                  items:
+                    type: object
+                    properties:
+                      dns:
+                        type: string
+                      ips:
+                        type: array
+                        items:
+                          type: string
+                      resolvedAt:
+                        type: string
+                        format: date-time
+                conditions:
+                  type: array
+                  description: Standard K8s conditions reflecting reconciliation state.
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type:
+                        type: string
+                        description: Condition type (e.g. SecretResolved, Ready).
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      reason:
+                        type: string
+                        description: Machine-readable reason (e.g. SecretNotFound, SecretFound).
+                      message:
+                        type: string
+                        description: Human-readable explanation.
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                        description: McpServer metadata.generation observed by the controller when writing this condition.
+      additionalPrinterColumns:
+        - name: Context
+          type: string
+          jsonPath: .spec.contextRef
+        - name: Image
+          type: string
+          jsonPath: .spec.image
+        - name: Transport
+          type: string
+          jsonPath: .spec.transport.type
+        - name: URL
+          type: string
+          jsonPath: .spec.transport.url
+        - name: Enabled
+          type: boolean
+          jsonPath: .spec.enabled
+        - name: Managed
+          type: boolean
+          jsonPath: .spec.managed
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+      subresources:
+        status: {}

@@ -1,0 +1,205 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-layer3a-snippet-api-mongo-pg-chain
+  namespace: sandbox-recipes
+spec:
+  triggers:
+    onDemand: {}
+  description: 'Layer 3A snippet runtime chain: public API -> MongoDB -> PostgreSQL -> Markdown artifact.'
+  runtimeEgress:
+    http:
+      allowedHosts:
+        - api.ipify.org
+  workloads:
+    - id: mongodb
+      type: statefulset
+      image: mongodb/mongodb-community-server:7.0-ubi8
+      port: 27017
+      healthCheck:
+        type: exec
+        command: ['mongosh', '--eval', 'db.runCommand({ping:1})', '--quiet']
+        initialDelaySeconds: 60
+        periodSeconds: 15
+        timeoutSeconds: 10
+        failureThreshold: 5
+      resources:
+        requests:
+          cpu: '100m'
+          memory: '256Mi'
+        limits:
+          cpu: '500m'
+          memory: '512Mi'
+    - id: postgres
+      type: statefulset
+      image: postgres:16-alpine
+      port: 5432
+      security:
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+      env:
+        - name: POSTGRES_DB
+          value: clerum
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+      envSecret:
+        name: e2e-layer3a-snippet-api-mongo-pg-chain-secret
+        keys:
+          - secretKey: pgPassword
+            envVar: POSTGRES_PASSWORD
+      healthCheck:
+        type: exec
+        command: ['pg_isready', '-U', 'postgres']
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '256Mi'
+  inputs:
+    requestId: e2e-api-mongo-pg-chain
+    scenario: layer3a-api-mongo-postgres-chain
+  output:
+    destination: pvc
+    format: multi
+    storageSize: 128Mi
+  steps:
+    - id: fetch-api
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          const apiKey = sdk.secrets.get("vendor_api_key")
+          const response = await sdk.http.fetchJson("https://api.ipify.org?format=json")
+          const artifact = await sdk.artifacts.writeJson("api-ip.json", {
+            requestId: sdk.inputs.requestId,
+            scenario: sdk.inputs.scenario,
+            host: "api.ipify.org",
+            api: "ipify",
+            observedIp: response.ip,
+            apiKeyResolved: apiKey.length > 0
+          })
+          return {
+            requestId: sdk.inputs.requestId,
+            scenario: sdk.inputs.scenario,
+            host: "api.ipify.org",
+            api: "ipify",
+            observedIp: response.ip,
+            apiKeyResolved: apiKey.length > 0,
+            artifact
+          }
+        capabilities:
+          http:
+            allowedHosts:
+              - api.ipify.org
+          secrets:
+            - alias: vendor_api_key
+              secretRef:
+                name: e2e-layer3a-snippet-api-mongo-pg-chain-secret
+                key: apiKey
+    - id: load-mongo
+      dependsOn: [fetch-api]
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          const api = sdk.previousOutputs["fetch-api"]
+          const ref = { workload: "mongodb", database: "clerum", collection: "api_ips" }
+          await sdk.mongo.updateOne(ref, {
+            filter: { requestId: api.requestId },
+            update: {
+              $set: {
+                requestId: api.requestId,
+                scenario: api.scenario,
+                observedIp: api.observedIp,
+                source: "ipify"
+              }
+            },
+            upsert: true
+          })
+          const rows = await sdk.mongo.find(ref, {
+            filter: { requestId: api.requestId },
+            limit: 1
+          })
+          const artifact = await sdk.artifacts.writeJson("api-to-mongo.json", {
+            requestId: api.requestId,
+            source: "mongo",
+            mongoRows: rows.length,
+            row: rows[0]
+          })
+          return { requestId: api.requestId, source: "mongo", mongoRows: rows.length, row: rows[0], artifact }
+        capabilities:
+          mongo:
+            access: readWrite
+            workloads: [mongodb]
+    - id: copy-postgres
+      dependsOn: [load-mongo]
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          const mongo = sdk.previousOutputs["load-mongo"]
+          const mongoRef = { workload: "mongodb", database: "clerum", collection: "api_ips" }
+          const mongoRows = await sdk.mongo.find(mongoRef, {
+            filter: { requestId: mongo.requestId },
+            limit: 1
+          })
+          const row = mongoRows[0]
+          if (!row) throw new Error(`Mongo row not found for request ${mongo.requestId}`)
+          const ref = { workload: "postgres", database: "clerum", user: "postgres", passwordSecretAlias: "pg_password" }
+          await sdk.postgres.execute(ref, {
+            sql: "create table if not exists api_ips(request_id text primary key, observed_ip text, source text)"
+          })
+          const inserted = await sdk.postgres.execute(ref, {
+            sql: "insert into api_ips(request_id, observed_ip, source) values ($1, $2, $3) on conflict (request_id) do update set observed_ip = excluded.observed_ip, source = excluded.source returning request_id, observed_ip, source",
+            values: [row.requestId, row.observedIp, "mongo"]
+          })
+          const copied = inserted.rows[0]
+          const artifact = await sdk.artifacts.writeJson("mongo-to-postgres.json", {
+            requestId: row.requestId,
+            source: "postgres",
+            mongoRows: mongoRows.length,
+            copied
+          })
+          return { requestId: row.requestId, source: "postgres", mongoRows: mongoRows.length, copied, artifact }
+        capabilities:
+          secrets:
+            - alias: pg_password
+              secretRef:
+                name: e2e-layer3a-snippet-api-mongo-pg-chain-secret
+                key: pgPassword
+          mongo:
+            access: read
+            workloads: [mongodb]
+          postgres:
+            access: readWrite
+            workloads: [postgres]
+    - id: emit-report
+      dependsOn: [copy-postgres]
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          const copied = sdk.previousOutputs["copy-postgres"].copied
+          const ref = { workload: "postgres", database: "clerum", user: "postgres", passwordSecretAlias: "pg_password" }
+          const rows = await sdk.postgres.query(ref, {
+            sql: "select request_id, observed_ip, source from api_ips where request_id = $1",
+            values: [copied.request_id],
+            limit: 1
+          })
+          const artifact = await sdk.artifacts.writeMarkdown(
+            "api-mongo-postgres-summary.md",
+            `# API Mongo PostgreSQL Chain\n\nRequest: ${copied.request_id}\nObserved IP: ${copied.observed_ip}\nSource: ${copied.source}\nRows: ${rows.length}\n`
+          )
+          return { requestId: copied.request_id, reportReady: true, postgresRows: rows.length, artifact }
+        capabilities:
+          secrets:
+            - alias: pg_password
+              secretRef:
+                name: e2e-layer3a-snippet-api-mongo-pg-chain-secret
+                key: pgPassword
+          postgres:
+            access: read
+            workloads: [postgres]

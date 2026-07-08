@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Evenfire</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="top-navbar">
+        <div class="top-left">
+          <div id="user-label" class="navbar-user">Not logged in</div>
+          <div class="team-controls">
+            <select id="team-select"></select>
+            <button id="switch-team-btn">Switch Team</button>
+          </div>
+        </div>
+
+        <div class="top-tabs">
+          <button class="tab-btn active" data-tab="main">Workspace</button>
+          <button class="tab-btn" data-tab="access">Access</button>
+          <button class="tab-btn" data-tab="token">Token</button>
+          <button class="tab-btn" data-tab="status">Status</button>
+          <button class="tab-btn" data-tab="auth">Auth</button>
+        </div>
+
+        <div class="top-right">
+          <button id="login-btn">Login</button>
+          <button id="logout-btn" class="hidden">Logout</button>
+        </div>
+      </header>
+
+      <div class="workspace-layout">
+        <aside class="left-navbar panel">
+          <div class="left-navbar-title">Explore</div>
+          <button class="left-nav-btn active" data-left-tab="agents">Agents</button>
+          <button class="left-nav-btn" data-left-tab="connectors">Connectors</button>
+          <button class="left-nav-btn" data-left-tab="contexts">Contexts</button>
+          <button class="left-nav-btn" data-left-tab="teams">Teams</button>
+        </aside>
+
+        <section class="content-area">
+          <section class="panel tab-panel" data-tab-panel="main">
+            <div id="team-label" class="muted"></div>
+            <div class="main-content-grid">
+              <section class="panel-sub">
+                <h2 id="left-view-title">Agents (MCP-hosts)</h2>
+                <pre id="left-view-content"></pre>
+              </section>
+
+              <section class="panel-sub">
+                <h2>Available MCP Servers</h2>
+                <div class="row inline">
+                  <input
+                    id="host-refs-input"
+                    placeholder="Optional host refs override (comma-separated)"
+                  />
+                  <button id="refresh-servers-btn">Refresh Servers</button>
+                </div>
+                <select id="server-select" size="6"></select>
+
+                <h2>JSON-RPC Invoke</h2>
+                <textarea id="rpc-request" rows="4"></textarea>
+                <button id="invoke-btn">Invoke</button>
+                <h3>Invocation Response</h3>
+                <pre id="rpc-response"></pre>
+              </section>
+            </div>
+          </section>
+
+          <section class="panel tab-panel hidden" data-tab-panel="access">
+            <h2>Authorized Access</h2>
+            <div class="muted">Hidden from main workspace, available on demand.</div>
+            <button id="refresh-access-btn">Refresh Access</button>
+            <div class="row">
+              <label for="contexts-list">Contexts</label>
+              <pre id="contexts-list"></pre>
+            </div>
+            <div class="row">
+              <label for="agents-list">Agents</label>
+              <pre id="agents-list"></pre>
+            </div>
+          </section>
+
+          <section class="panel tab-panel hidden" data-tab-panel="token">
+            <h2>Token Metadata</h2>
+            <button id="refresh-token-meta-btn">Refresh Token Metadata</button>
+            <pre id="token-meta"></pre>
+          </section>
+
+          <section class="panel tab-panel hidden" data-tab-panel="status">
+            <h2>Status</h2>
+            <pre id="status"></pre>
+          </section>
+
+          <section class="panel tab-panel hidden" data-tab-panel="auth">
+            <h2>Authentication</h2>
+            <p class="muted">Sign in to discover and invoke authorized MCP hosts via rpc-proxy.</p>
+
+            <div class="row">
+              <label for="google-id-token">Google ID token</label>
+              <textarea
+                id="google-id-token"
+                rows="3"
+                placeholder="Paste a valid Google idToken"
+              ></textarea>
+            </div>
+
+            <div id="google-login-section" class="hidden">
+              <button id="google-login-btn">Sign in (Google Token)</button>
+            </div>
+
+            <div id="password-login-section">
+              <div class="divider"></div>
+              <div class="row">
+                <label for="password-email">Email</label>
+                <input id="password-email" placeholder="you@example.com" />
+              </div>
+              <div class="row">
+                <label for="password-password">Password</label>
+                <input id="password-password" type="password" />
+              </div>
+              <button id="password-login-btn">Sign in</button>
+            </div>
+          </section>
+        </section>
+      </div>
+    </main>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

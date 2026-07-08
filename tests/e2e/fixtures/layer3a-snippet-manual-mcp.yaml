@@ -1,0 +1,65 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-layer3a-snippet-manual-mcp
+  namespace: sandbox-recipes
+spec:
+  triggers:
+    onDemand: {}
+  description: Layer 3A snippet runtime manual MCP SDK call without child mcp-host.
+  contextRef: context1
+  security:
+    allowContextRef: true
+  workloads:
+    - id: mock-tools
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3000
+      transport:
+        type: streamableHttp
+        path: /mcp
+      healthCheck:
+        type: tcp
+        port: 3001
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+  inputs:
+    requestId: layer3a-manual-mcp
+  output:
+    destination: pvc
+    format: json
+    storageSize: 128Mi
+  steps:
+    - id: call-mcp
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          const result = await sdk.mcp.callTool("mock-tools", "add", { a: 40, b: 2 })
+          const record = await sdk.mcp.callTool("mock-tools", "record", {
+            key: "layer3a-manual-mcp",
+            value: "context-write-ok"
+          })
+          const recall = await sdk.mcp.callTool("mock-tools", "recall", {
+            key: "layer3a-manual-mcp"
+          })
+          const artifact = await sdk.artifacts.writeJson("manual-mcp-result.json", {
+            requestId: sdk.inputs.requestId,
+            mcpDataUsed: true,
+            server: "mock-tools",
+            tools: ["add", "record", "recall"],
+            result,
+            record,
+            recall
+          })
+          return { mcpDataUsed: true, server: "mock-tools", tools: ["add", "record", "recall"], result, record, recall, artifact }
+        capabilities:
+          mcp:
+            servers: [mock-tools]
+            allowedTools:
+              include: [mock-tools__add, mock-tools__record, mock-tools__recall]

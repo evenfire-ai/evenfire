@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-ui
+  namespace: control-plane
+  labels:
+    app: control-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: control-ui
+  template:
+    metadata:
+      labels:
+        app: control-ui
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: control-ui
+        image: clerum/control-ui:0.9.5
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+          name: http
+          protocol: TCP
+        env:
+        - name: CONTROL_API_INTERNAL_URL
+          value: http://control-api.control-plane.svc.cluster.local:8090
+        - name: CONTROL_UI_PUBLIC_TOKEN_CSRF_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: control-ui-secrets
+              key: CONTROL_UI_PUBLIC_TOKEN_CSRF_SECRET
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 8
+          periodSeconds: 12
+          failureThreshold: 3
+          successThreshold: 1
+          timeoutSeconds: 1
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 4
+          periodSeconds: 8
+          failureThreshold: 3
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: 300m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          seccompProfile:
+            type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-ui
+  namespace: control-plane
+  labels:
+    app: control-ui
+spec:
+  type: ClusterIP
+  selector:
+    app: control-ui
+  ports:
+  - name: http
+    port: 3000
+    targetPort: http
+    protocol: TCP

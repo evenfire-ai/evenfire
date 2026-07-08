@@ -1,0 +1,45 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: mongodb-local
+  namespace: sandbox-recipes
+spec:
+  description: 'Local MongoDB instance for E2E testing — provides storage for MongoDB MCP server'
+  contextRef: context1
+  workloads:
+    - id: mongodb
+      type: statefulset
+      image: mongodb/mongodb-community-server:7.0-ubi8
+      port: 27017
+      env:
+        - name: MONGODB_DATABASE
+          value: 'clerum'
+      volumeMounts:
+        - name: mongodb-data
+          mountPath: /data/db
+      healthCheck:
+        type: exec
+        command: ['mongosh', '--eval', 'db.runCommand({ping:1})', '--quiet']
+        initialDelaySeconds: 60
+        periodSeconds: 15
+        timeoutSeconds: 10
+        failureThreshold: 5
+      resources:
+        requests:
+          cpu: '100m'
+          memory: '256Mi'
+        limits:
+          cpu: '500m'
+          memory: '512Mi'
+      security:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        prepareVolumeOwnership: true
+      volumeClaimTemplates:
+        - name: mongodb-data
+          storageClass: standard
+          accessMode: ReadWriteOnce
+          size: 1Gi
+  security:
+    isolationLevel: minimal

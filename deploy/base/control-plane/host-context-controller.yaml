@@ -1,0 +1,152 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: host-context-controller
+  namespace: control-plane
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: host-context-controller
+  namespace: control-plane
+  labels:
+    app: host-context-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: host-context-controller
+  template:
+    metadata:
+      labels:
+        app: host-context-controller
+    spec:
+      serviceAccountName: host-context-controller
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: host-context-controller
+        image: clerum/host-context-controller:0.9.5
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8081
+          name: http
+          protocol: TCP
+        env:
+        # HCC signs InternalControl JWTs with its issuer-specific HS256 secret.
+        - name: INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: internal-control-jwt-secrets
+              key: INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET
+        - name: CONTEXT_MAPPER_PORT
+          value: "8081"
+        - name: CONTEXT_MAPPER_NAMESPACE
+          value: mcp-server
+        - name: CONTEXT_MAPPER_HOST_NAMESPACE
+          value: mcp-host
+        - name: CONTEXT_MAPPER_HOST_IMAGE
+          value: clerum/mcp-host:0.9.5
+        - name: CONTEXT_MAPPER_EGRESS_PROXY_IMAGE
+          value: clerum/nginx-egress-proxy:0.1.0
+        - name: STDIO_BRIDGE_IMAGE
+          value: clerum/stdio-bridge:0.9.5
+        - name: CONTEXT_MAPPER_RUNTIME_NAMESPACES
+          value: mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui
+        # sandbox-ui pods are React HTTP servers — they don't talk to the K8s
+        # API or the HCC discovery API, so they get only deny-all + DNS.
+        - name: CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES
+          value: sandbox-ui
+        - name: HCC_EXTERNAL_EGRESS_RESYNC_SEC
+          value: "300"
+        - name: CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE
+          value: clerum/stdio-bridge:0.9.5
+        # workspace-files-controller (per-SharedFileSystem) — see config.ts wfc*
+        - name: CONTEXT_MAPPER_WFC_IMAGE
+          value: clerum/workspace-files-controller:0.9.5
+        - name: CONTEXT_MAPPER_WFC_IMAGE_PULL_POLICY
+          value: IfNotPresent
+        - name: CONTEXT_MAPPER_WFC_PORT
+          value: "8086"
+        - name: CONTEXT_MAPPER_WFC_INIT_IMAGE
+          value: busybox:1.36
+        - name: CONTEXT_MAPPER_WFC_JWT_PUBLIC_KEY_CM
+          value: mcp-host-config
+        - name: CONTEXT_MAPPER_WFC_JWT_PUBLIC_KEY_CM_KEY
+          value: CLERUM_AUTH_JWT_PUBLIC_KEY
+        - name: HCC_TARGET_NAMESPACE
+          value: mcp-host
+        - name: CONTROL_API_BASE_URL
+          value: http://control-api.control-plane.svc.cluster.local:8090
+        # URL of the nginx gateway that mediates mcp-host → control-api
+        # traffic. HCC injects this as MCP_HOST_GATEWAY_URL into every
+        # 1st-party mcp-host pod it provisions; HCC itself does NOT use it
+        # (HCC calls control-api directly via CONTROL_API_BASE_URL).
+        - name: MCP_HOST_GATEWAY_URL
+          value: http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092
+        # Plugin image-host allowlist (Phase 2.3) — audit mode by default.
+        - name: CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES
+          value: "us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/,example.com/,mongodb/,mcr.microsoft.com/,clerum/"
+        - name: CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST
+          value: "false"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          failureThreshold: 4
+          successThreshold: 1
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 6
+          successThreshold: 1
+          timeoutSeconds: 10
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          periodSeconds: 3
+          failureThreshold: 40
+          successThreshold: 1
+          timeoutSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: host-context-controller
+  namespace: control-plane
+  labels:
+    app: host-context-controller
+spec:
+  type: ClusterIP
+  selector:
+    app: host-context-controller
+  ports:
+  - name: http
+    port: 8081
+    targetPort: http
+    protocol: TCP

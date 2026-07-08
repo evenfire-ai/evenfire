@@ -1,0 +1,19 @@
+#!/bin/bash
+# Start mcp-host as a background daemon alongside the desktop session.
+# Runs as abc user (PUID/PGID set by LinuxServer s6-overlay).
+# DISPLAY=:1 gives agent access to the X11 display for desktop tools.
+
+echo "[s6-init] Starting mcp-host service..."
+
+# /config/workspace is the PVC mount point — created by K8s.
+# Ensure it's owned by abc (UID 1001) so both the agent and XFCE user can access it.
+chown -R abc:abc /config/workspace /app 2>/dev/null || true
+
+export DISPLAY=:1
+# CLERUM_WORKSPACE_PATH is set by the K8s Deployment env; no need to export here.
+
+# Start mcp-host in background as abc user
+s6-setuidgid abc nohup node /app/dist/main.js \
+  > /config/.mcp-host.log 2>&1 &
+
+echo "[s6-init] mcp-host started (PID: $!)"

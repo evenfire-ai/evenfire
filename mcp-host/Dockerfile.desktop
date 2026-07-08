@@ -1,0 +1,52 @@
+# ─── Builder stage (same as other Dockerfiles) ─────────────────────────────
+# Pinned to Node 24.16.0 by digest: 24.17.0's undici bump regresses node-fetch@2
+# (ERR_STREAM_PREMATURE_CLOSE). Keep the runtime frozen.
+FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY tsconfig.json tsconfig.build.json ./
+COPY src ./src
+RUN npm run build
+
+# ─── Desktop runtime stage ─────────────────────────────────────────────────
+# Pinned to a specific digest for reproducibility and supply-chain hygiene —
+# the floating `ubuntu-xfce` tag mutates over time. To bump: `docker pull
+# lscr.io/linuxserver/webtop:ubuntu-xfce && docker inspect --format
+# '{{index .RepoDigests 0}}' lscr.io/linuxserver/webtop:ubuntu-xfce`.
+FROM lscr.io/linuxserver/webtop:ubuntu-xfce@sha256:3c052ffab7a7b28ff7a592237c066a3985ff7d2c2345b2d5bbd36b82cface0ab
+
+# Node.js 24.16.0 (matches builder stage). Pin the exact NodeSource patch:
+# `setup_24.x` otherwise installs the latest 24.x (24.17.0+), whose undici bump
+# regresses node-fetch@2 (ERR_STREAM_PREMATURE_CLOSE).
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs=24.16.0-1nodesource1 && rm -rf /var/lib/apt/lists/*
+
+# Dev tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl wget vim jq unzip ca-certificates build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# X11 computer-use tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xdotool scrot xclip imagemagick \
+    && rm -rf /var/lib/apt/lists/*
+
+# Chromium is pre-installed in webtop (via chromium package, not snap).
+# The actual binary is at /usr/lib/chromium/chromium.
+# Playwright uses it via PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH.
+ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/lib/chromium/chromium
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+# mcp-host application
+WORKDIR /app
+COPY --from=builder /app/package*.json ./
+RUN npm ci --omit=dev
+COPY --from=builder /app/dist ./dist
+
+# s6 init script
+COPY 50-mcp-host-service /custom-cont-init.d/
+RUN chmod +x /custom-cont-init.d/50-mcp-host-service
+
+# Workspace directory
+RUN mkdir -p /config/workspace && chown -R 1000:1000 /config/workspace

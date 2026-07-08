@@ -1,0 +1,178 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sharedfilesystems.clerum.io
+  labels:
+    app.kubernetes.io/name: sharedfilesystem
+    app.kubernetes.io/part-of: clerum
+spec:
+  group: clerum.io
+  names:
+    kind: SharedFileSystem
+    listKind: SharedFileSystemList
+    plural: sharedfilesystems
+    singular: sharedfilesystem
+    shortNames:
+      - sfs
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            SharedFileSystem describes a per-team shared workspace (PVC + per-SFS
+            workspace-files-controller Deployment) that one or more Contexts can
+            mount read-only into their mcp-host pods. Always lives in the
+            mcp-host namespace because PVCs are namespaced and mcp-host pods
+            run there.
+          properties:
+            spec:
+              type: object
+              properties:
+                size:
+                  type: string
+                  description: PVC requested storage (e.g. "20Gi").
+                  default: "20Gi"
+                storageClassName:
+                  type: string
+                  description: Optional StorageClass name. Empty means cluster default.
+                accessModes:
+                  type: array
+                  description: >-
+                    PVC accessModes. Defaults to ["ReadWriteOnce"] (#592). The
+                    workspace-files-controller Deployment is single-replica and
+                    seeds the PVC via a root init container in the SAME pod, and
+                    consumer mcp-host pods co-locate with it via podAffinity, so
+                    ReadWriteOnce works on the RWO-only StorageClasses we run.
+                    Multi-node shared (ReadWriteMany) requires an RWX-capable
+                    StorageClass (NFS/Filestore/GCS-FUSE) and is deferred — set
+                    it explicitly here when such a class exists.
+                  items:
+                    type: string
+                    enum:
+                      - ReadWriteOnce
+                      - ReadOnlyMany
+                      - ReadWriteMany
+                      - ReadWriteOncePod
+                  default:
+                    - ReadWriteOnce
+                annotations:
+                  type: object
+                  description: Optional annotations applied to the PVC.
+                  additionalProperties:
+                    type: string
+                directories:
+                  type: array
+                  maxItems: 64
+                  description: >-
+                    Relative paths pre-created by the controller's root init
+                    container. Each segment must start with an alphanumeric or
+                    underscore character and may contain alphanumerics,
+                    underscores, dots, and hyphens.
+                  items:
+                    type: string
+                    maxLength: 255
+                    pattern: '^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$'
+                  default: []
+                security:
+                  type: object
+                  description: >-
+                    POSIX identity applied by the controller's root init
+                    container and the per-SFS workspace-files-controller pod.
+                    fsGroup is inherited so the wfc can write the mounted files.
+                  properties:
+                    runAsUser:
+                      type: integer
+                      minimum: 1
+                    runAsGroup:
+                      type: integer
+                      minimum: 1
+                    fsGroup:
+                      type: integer
+                      minimum: 1
+                retainOnDelete:
+                  type: boolean
+                  description: >-
+                    When the SharedFileSystem is deleted, retain the PVC if true
+                    (default). When false, HCC tears down Deployment, Service,
+                    NetworkPolicies, and PVC last.
+                  default: true
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Provisioning
+                    - Initializing
+                    - Ready
+                    - Degraded
+                    - Failed
+                pvcName:
+                  type: string
+                capacity:
+                  type: string
+                storageClassName:
+                  type: string
+                serviceName:
+                  type: string
+                  description: ClusterIP Service serving the per-SFS workspace-files-controller.
+                mountedByContexts:
+                  type: array
+                  description: Back-reference to Contexts that currently reference this SharedFileSystem.
+                  items:
+                    type: object
+                    required:
+                      - namespace
+                      - name
+                    properties:
+                      namespace:
+                        type: string
+                      name:
+                        type: string
+                lastInitJob:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    completedAt:
+                      type: string
+                    error:
+                      type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ['True', 'False', 'Unknown']
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: PVC
+          type: string
+          jsonPath: .status.pvcName
+        - name: Capacity
+          type: string
+          jsonPath: .status.capacity
+        - name: Storage Class
+          type: string
+          jsonPath: .status.storageClassName
+      subresources:
+        status: {}

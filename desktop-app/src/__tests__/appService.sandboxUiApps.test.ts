@@ -1,0 +1,185 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { AppService } from '../appService.js'
+import { ApiError } from '../httpClient.js'
+
+vi.mock('electron', () => ({
+  app: {
+    getPath: vi.fn(() => '/tmp/clerum-desktop-test'),
+  },
+  safeStorage: {
+    isEncryptionAvailable: vi.fn(() => false),
+    encryptString: vi.fn(),
+    decryptString: vi.fn(),
+  },
+  shell: {
+    openExternal: vi.fn(),
+  },
+}))
+
+vi.mock('../config.js', () => ({
+  config: {
+    rpcProxyBaseUrl: 'http://proxy',
+    externalRestApiBaseUrl: 'http://rest',
+    desktopProfileUiBaseUrl: 'https://profile.example.com',
+    enableDevLoginUi: false,
+    requestTimeoutMs: 60000,
+    appName: 'test',
+  },
+}))
+
+const mockGetOrIssue = vi.fn()
+const mockRpcTokenManagerClear = vi.fn()
+const mockRpcTokenManagerGetMetadata = vi.fn().mockReturnValue({
+  expiresAtMs: null,
+  scopes: [],
+  hostRefs: [],
+})
+
+vi.mock('../rpcTokenManager.js', () => ({
+  RpcTokenManager: class {
+    getOrIssue = mockGetOrIssue
+    clear = mockRpcTokenManagerClear
+    getMetadata = mockRpcTokenManagerGetMetadata
+  },
+}))
+
+const mockListSandboxUiApps = vi.fn()
+const mockHealth = vi.fn().mockResolvedValue({ status: 'ok' })
+
+vi.mock('../rpcProxyClient.js', () => ({
+  RpcProxyClient: class {
+    health = mockHealth
+    listSandboxUiApps = mockListSandboxUiApps
+  },
+}))
+
+vi.mock('../authClient.js', () => ({
+  AuthClient: class {
+    health = vi.fn().mockResolvedValue({ status: 'ok' })
+    getMe = vi.fn()
+  },
+}))
+
+vi.mock('../tokenStore.js', () => ({
+  TokenStore: class {
+    getSessionToken = vi.fn().mockResolvedValue(null)
+    setSessionToken = vi.fn()
+    clearSessionToken = vi.fn()
+  },
+}))
+
+function makeService(): AppService {
+  const svc = new AppService()
+  ;(svc as unknown as { sessionToken: string }).sessionToken = 'session-token'
+  return svc
+}
+
+describe('AppService.listSandboxUiApps', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetOrIssue.mockResolvedValue({ token: 'rpc-token' })
+    mockListSandboxUiApps.mockResolvedValue({ apps: [] })
+  })
+
+  it('issues a sandbox:ui:view RPC token using the Sandbox UI sentinel hostRef', async () => {
+    mockListSandboxUiApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+        {
+          appRef: 'sandbox-recipes/support-desk',
+          title: 'Support Desk',
+          defaultPath: '/tickets',
+          ready: false,
+          phase: 'deploying',
+          updatedAt: null,
+        },
+      ],
+    })
+
+    const result = await makeService().listSandboxUiApps()
+
+    expect(mockGetOrIssue).toHaveBeenCalledWith(
+      'session-token',
+      ['sandbox:ui:view'],
+      ['sandbox-ui']
+    )
+    expect(mockListSandboxUiApps).toHaveBeenCalledWith('rpc-token')
+    expect(result.apps.map(app => app.title)).toEqual(["Andy's Sales CRM", 'Support Desk'])
+  })
+
+  it('clears and reissues the RPC token when rpc-proxy reports a missing sandbox UI scope', async () => {
+    mockGetOrIssue
+      .mockResolvedValueOnce({ token: 'stale-rpc-token' })
+      .mockResolvedValueOnce({ token: 'fresh-rpc-token' })
+    mockListSandboxUiApps
+      .mockRejectedValueOnce(new ApiError('403 Forbidden: missing scope', 403, 'missing scope'))
+      .mockResolvedValueOnce({ apps: [] })
+
+    await makeService().listSandboxUiApps()
+
+    expect(mockRpcTokenManagerClear).toHaveBeenCalledOnce()
+    expect(mockGetOrIssue).toHaveBeenNthCalledWith(
+      1,
+      'session-token',
+      ['sandbox:ui:view'],
+      ['sandbox-ui']
+    )
+    expect(mockGetOrIssue).toHaveBeenNthCalledWith(
+      2,
+      'session-token',
+      ['sandbox:ui:view'],
+      ['sandbox-ui']
+    )
+    expect(mockListSandboxUiApps).toHaveBeenNthCalledWith(1, 'stale-rpc-token')
+    expect(mockListSandboxUiApps).toHaveBeenNthCalledWith(2, 'fresh-rpc-token')
+  })
+})
+
+describe('AppService.openForgotPassword', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('opens the Profile UI forgot-password page without requiring an email', async () => {
+    const service = new AppService() as unknown as {
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
+    }
+    const getInvitationProfile = vi.fn()
+    service.memberRegistrationServiceClient = { getInvitationProfile } as never
+
+    const result = await service.openForgotPassword('')
+    const { shell } = await import('electron')
+
+    expect(getInvitationProfile).not.toHaveBeenCalled()
+    expect(shell.openExternal).toHaveBeenCalledWith('https://profile.example.com/forgot-password')
+    expect(result).toEqual({ profileUiUrl: 'https://profile.example.com/forgot-password' })
+  })
+
+  it('opens the configured Profile UI forgot-password page with the login email prefilled', async () => {
+    const service = new AppService() as unknown as {
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      openForgotPassword: (email: string) => Promise<{ profileUiUrl: string }>
+    }
+    const getInvitationProfile = vi.fn()
+    service.memberRegistrationServiceClient = { getInvitationProfile } as never
+
+    const result = await service.openForgotPassword(' User@Example.COM ')
+    const { shell } = await import('electron')
+
+    expect(getInvitationProfile).not.toHaveBeenCalled()
+    expect(shell.openExternal).toHaveBeenCalledWith(
+      'https://profile.example.com/forgot-password?email=user%40example.com'
+    )
+    expect(result).toEqual({
+      profileUiUrl: 'https://profile.example.com/forgot-password?email=user%40example.com',
+    })
+  })
+})

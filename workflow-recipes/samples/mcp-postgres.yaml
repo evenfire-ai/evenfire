@@ -1,0 +1,71 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: mcp-postgres
+  namespace: sandbox-recipes
+spec:
+  description: 'PostgreSQL StatefulSet + MCP server for database queries'
+  contextRef: context1
+  workloads:
+    - id: postgres
+      type: statefulset
+      image: postgres:16-alpine
+      port: 5432
+      # GAP 15: Per-workload security overrides enable PostgreSQL to run
+      # as its native user (UID 70) without needing gosu/CAP_SETUID.
+      # The entrypoint detects non-root and skips user switching.
+      security:
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+      env:
+        - name: POSTGRES_PASSWORD
+          value: '{{inputs.db_password}}'
+        - name: POSTGRES_DB
+          value: '{{inputs.db_name}}'
+        - name: PGDATA
+          value: '/var/lib/postgresql/data/pgdata'
+      healthCheck:
+        type: exec
+        command: ['pg_isready', '-U', 'postgres']
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '256Mi'
+    - id: pg-mcp
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3000
+      dependsOn: ['postgres']
+      transport:
+        type: streamableHttp
+        path: /mcp
+      env:
+        - name: POSTGRES_HOST
+          value: '{{postgres:host}}'
+        - name: POSTGRES_PORT
+          value: '{{postgres:port}}'
+        - name: POSTGRES_PASSWORD
+          value: '{{inputs.db_password}}'
+      healthCheck:
+        type: tcp
+        port: 3001
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+  bindings:
+    - from: pg-mcp
+      to: postgres
+      port: 5432
+  inputs:
+    db_password: changeme
+    db_name: clerum
+  security:
+    isolationLevel: minimal

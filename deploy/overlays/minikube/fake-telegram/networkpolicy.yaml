@@ -1,0 +1,110 @@
+# MINIKUBE ONLY — NetworkPolicies for the Figure D two-bot fake-telegram harness.
+# Both `channels` and `control-plane` enforce deny-all (Ingress+Egress) under
+# Calico, so each hop needs an egress allow on the source AND an ingress allow on
+# the target. These are additive (OR'd) with the existing infra policies and are
+# scoped strictly to the fake-telegram-server <-> control-api / reader paths.
+# NEVER promote to deploy/base or any gcp overlay (no fake server runs there).
+---
+# A. control-api (control-plane) -> fake-telegram (channels):8080  [egress]
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-control-api-to-fake-telegram-egress
+  namespace: control-plane
+  labels:
+    app: control-api
+    clerum.io/minikube-only: "true"
+spec:
+  podSelector:
+    matchLabels:
+      app: control-api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: channels
+          podSelector:
+            matchLabels:
+              app: fake-telegram-server
+      ports:
+        - port: 8080
+          protocol: TCP
+---
+# B. fake-telegram (channels) <- control-api (control-plane):8080  [ingress]
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-fake-telegram-ingress-from-control-api
+  namespace: channels
+  labels:
+    app: fake-telegram-server
+    clerum.io/minikube-only: "true"
+spec:
+  podSelector:
+    matchLabels:
+      app: fake-telegram-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: control-plane
+          podSelector:
+            matchLabels:
+              app: control-api
+      ports:
+        - port: 8080
+          protocol: TCP
+---
+# C. fake-telegram (channels) -> reader (channels):8098  [egress]
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-fake-telegram-to-reader-egress
+  namespace: channels
+  labels:
+    app: fake-telegram-server
+    clerum.io/minikube-only: "true"
+spec:
+  podSelector:
+    matchLabels:
+      app: fake-telegram-server
+  policyTypes:
+    - Egress
+  egress:
+    # reader webhook (same ns). DNS egress is already granted by
+    # allow-dns-egress-channels (podSelector <none> = all pods).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: workflow-approval-request-reader
+      ports:
+        - port: 8098
+          protocol: TCP
+---
+# D. reader (channels) <- fake-telegram (channels):8098  [ingress]
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-reader-ingress-from-fake-telegram
+  namespace: channels
+  labels:
+    app.kubernetes.io/name: workflow-approval-request-reader
+    clerum.io/minikube-only: "true"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: workflow-approval-request-reader
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: fake-telegram-server
+      ports:
+        - port: 8098
+          protocol: TCP

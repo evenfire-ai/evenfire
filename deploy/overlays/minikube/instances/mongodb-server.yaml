@@ -1,0 +1,48 @@
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: mongodb-server
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: >-
+    MongoDB MCP Server - provides tools for interacting with MongoDB databases
+    including querying, aggregation, schema inspection, index management, and
+    Atlas cluster operations.
+  image: mongodb/mongodb-mcp-server:latest
+  imagePullPolicy: Never
+  transport:
+    type: streamableHttp
+    url: http://mongodb-server.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000
+  envMapping:
+    transport: MDB_MCP_TRANSPORT
+    httpHost: MDB_MCP_HTTP_HOST
+    httpPort: MDB_MCP_HTTP_PORT
+    healthCheckHost: MDB_MCP_HEALTH_CHECK_HOST
+    healthCheckPort: MDB_MCP_HEALTH_CHECK_PORT
+    readOnly: MDB_MCP_READ_ONLY
+    loggers: MDB_MCP_LOGGERS
+    telemetry: MDB_MCP_TELEMETRY
+  envSecret:
+    name: mcp-mongodb-credentials
+    keys:
+      - secretKey: connection-string
+        envVar: MDB_MCP_CONNECTION_STRING
+  healthCheck:
+    port: 3001
+  serverConfig:
+    readOnly: false
+    loggers: stderr
+    telemetry: disabled
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+  managed: true
+  auth:
+    type: none
+  enabled: true

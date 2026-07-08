@@ -1,0 +1,185 @@
+'use client'
+
+import React, { useMemo, useState } from 'react'
+import type { LlmModelPrice } from '@lib/api'
+import { getProviderDisplayLabel } from '@lib/llm'
+import type { LlmPriceTableProps } from './LlmPriceTable.types'
+import { SectionSearchInput } from './SectionSearchInput'
+import { IconPrice } from './Sidebar/icons'
+import { SkeletonTableRows } from './SkeletonTableRows'
+import { TableHeaderRow } from './TableHeaderRow'
+import type { TableHeaderColumn } from './TableHeaderRow/types'
+import { TablePanelHeader } from './TablePanelHeader'
+import { IconPencil, IconRefresh, IconX } from './icons'
+
+const PRICE_COLUMNS: TableHeaderColumn[] = [
+  { key: 'provider', label: 'Provider', width: '10%' },
+  { key: 'model', label: 'Model', minWidth: '10rem' },
+  { key: 'input', label: 'Input', align: 'right', title: 'Price per 1M input tokens' },
+  { key: 'output', label: 'Output', align: 'right', title: 'Price per 1M output tokens' },
+  {
+    key: 'cacheRead',
+    label: 'Cache read',
+    align: 'right',
+    title: 'Price per 1M cache-read tokens',
+  },
+  {
+    key: 'cacheWrite',
+    label: 'Cache write',
+    align: 'right',
+    title: 'Price per 1M cache-write tokens',
+  },
+  { key: 'currency', label: 'Currency', width: '6rem' },
+  { key: 'enabled', label: 'Enabled', width: '6rem' },
+  { key: 'actions', width: '5rem', align: 'right', ariaLabel: 'Actions' },
+]
+
+// Prices are stored per 1,000,000 tokens. Show up to 6 decimals but trim
+// trailing zeros so common round values stay readable.
+function formatPrice(value: number): string {
+  if (!Number.isFinite(value)) return '-'
+  return value.toLocaleString(undefined, { maximumFractionDigits: 6 })
+}
+
+export function LlmPriceTable({
+  items,
+  banner,
+  onCreate,
+  onEdit,
+  onDelete,
+  onRefresh,
+  deletingId,
+  refreshing,
+  loading,
+}: LlmPriceTableProps) {
+  const [searchQuery, setSearchQuery] = useState('')
+  const normalizedSearch = searchQuery.trim().toLowerCase()
+
+  const filteredItems = useMemo(() => {
+    if (!normalizedSearch) return items
+    return items.filter(price =>
+      [price.provider, getProviderDisplayLabel(price.provider), price.model, price.currency]
+        .join(' ')
+        .toLowerCase()
+        .includes(normalizedSearch)
+    )
+  }, [items, normalizedSearch])
+
+  const isInitialLoad = Boolean(loading) && items.length === 0
+
+  return (
+    <div className="cu-card cu-card--viewport-fill" style={{ marginBottom: '1.25rem' }}>
+      <TablePanelHeader
+        title={
+          <>
+            <IconPrice />
+            {isInitialLoad ? 'LLM Prices' : `LLM Prices (${filteredItems.length})`}
+          </>
+        }
+        subtitle="Per-model token prices that back cost-unit budgets. Prices are per 1M tokens."
+        actions={
+          <>
+            <SectionSearchInput
+              value={searchQuery}
+              onChange={setSearchQuery}
+              placeholder="Search prices"
+              ariaLabel="Search prices"
+              disabled={isInitialLoad}
+            />
+            <button
+              type="button"
+              className="cu-btn cu-btn--icon cu-btn--toolbar"
+              onClick={() => void onRefresh()}
+              disabled={refreshing || isInitialLoad}
+              aria-label={refreshing ? 'Refreshing…' : 'Reload prices'}
+            >
+              <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
+            </button>
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={onCreate}
+              disabled={isInitialLoad}
+            >
+              Add price
+            </button>
+          </>
+        }
+      />
+      {banner ? <div className="cu-px-unpriced-slot">{banner}</div> : null}
+      {isInitialLoad ? (
+        <div className="cu-table-wrap">
+          <table className="cu-table cu-table--header-band">
+            <thead>
+              <TableHeaderRow columns={PRICE_COLUMNS} />
+            </thead>
+            <tbody>
+              <SkeletonTableRows columns={PRICE_COLUMNS.length} rows={4} />
+            </tbody>
+          </table>
+        </div>
+      ) : filteredItems.length === 0 ? (
+        <div className="cu-empty">
+          {normalizedSearch
+            ? 'No prices match this search.'
+            : 'No model prices configured yet. Add one to start tracking cost.'}
+        </div>
+      ) : (
+        <div className="cu-table-wrap">
+          <table className="cu-table cu-table--header-band">
+            <thead>
+              <TableHeaderRow columns={PRICE_COLUMNS} />
+            </thead>
+            <tbody>
+              {filteredItems.map((price: LlmModelPrice) => (
+                <tr key={price.id} className="cu-table__row">
+                  <td>{getProviderDisplayLabel(price.provider)}</td>
+                  <td className="cu-px-model">{price.model}</td>
+                  <td className="cu-px-num">{formatPrice(price.input_token_price)}</td>
+                  <td className="cu-px-num">{formatPrice(price.output_token_price)}</td>
+                  <td className="cu-px-num">{formatPrice(price.cache_read_token_price)}</td>
+                  <td className="cu-px-num">{formatPrice(price.cache_write_token_price)}</td>
+                  <td>{price.currency}</td>
+                  <td>
+                    <span
+                      className={
+                        price.enabled
+                          ? 'cu-px-badge cu-px-badge--on'
+                          : 'cu-px-badge cu-px-badge--off'
+                      }
+                    >
+                      {price.enabled ? 'Enabled' : 'Disabled'}
+                    </span>
+                  </td>
+                  <td className="cu-px-actions">
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--icon cu-btn--toolbar"
+                      onClick={() => onEdit(price.id)}
+                      aria-label={`Edit price ${price.provider}/${price.model}`}
+                    >
+                      <IconPencil width={16} height={16} />
+                    </button>
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                      onClick={() => void onDelete(price)}
+                      disabled={deletingId === price.id}
+                      aria-label={
+                        deletingId === price.id
+                          ? 'Deleting price…'
+                          : `Delete price ${price.provider}/${price.model}`
+                      }
+                    >
+                      <IconX width={16} height={16} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}

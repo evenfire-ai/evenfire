@@ -1,0 +1,21 @@
+# Minimal WorkflowRecipe used to validate the WRC Secret Broker refactor.
+# A single `ping` step with `zai/glm-4.7` exercises:
+#   1. WRC /configure-model handler (reads ConfigMap + Secret from mcp-host ns)
+#   2. Coordinator spawn in sandbox-recipes
+#   3. Cross-NS RBAC on chatllm-api-keys
+# Expect: workflowExecution.phase=completed within ~60s.
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: diag-coord-mini
+  namespace: sandbox-recipes
+spec:
+  triggers:
+    onDemand: {}
+  workloads: []
+  agent:
+    model: glm-4.7
+    provider: zai
+  steps:
+    - id: ping
+      instruction: 'Reply with the single word: pong'

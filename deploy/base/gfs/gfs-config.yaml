@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gfs-config
+  namespace: gfs
+  labels:
+    app.kubernetes.io/name: gfs-controller
+    app.kubernetes.io/part-of: clerum
+data:
+  # RS256 public key gfsc verifies gfs access tokens with. The open core reuses
+  # the platform keypair (the same public key as rpc-proxy / mcp-host-config);
+  # `make <env>-gen-keys` populates/syncs this. Empty here so a fresh checkout
+  # never ships a real key — gfsc /readyz fails closed until it is populated.
+  jwt-public-key: ""

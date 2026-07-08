@@ -1,0 +1,33 @@
+apiVersion: clerum.io/v1alpha1
+kind: Host
+metadata:
+  name: chatllm
+  namespace: mcp-host
+spec:
+  host: chatLLM
+  contextRef: context1
+  secretRef: chatllm-api-keys
+  model:
+    provider: zai
+    name: glm-5.1
+  workflowControl:
+    scopes:
+      - workflow:list
+      - workflow:read
+      - workflow:trigger
+      - workflow:approval:resolve
+      - workflow:approval:decide
+  channels:
+    - all-channels
+  # NOTE: `spec.desktop` intentionally omitted for minikube to keep the
+  # chatllm pod lightweight (~200 MB Node runtime, ~3-5 s boot). The desktop
+  # variant (~2.5 GB with X11 + Chrome + KasmVNC) takes ~60-90 s to roll out
+  # and blocks `make minikube-start`'s sync-auth-key step on slow workstations.
+  # To test desktop-specific features locally, apply an overlay patch:
+  #   kubectl --context clerum-test patch host chatllm --type=merge \
+  #     -p '{"spec":{"desktop":{"browser":true,"x11":true}}}'
+  approval:
+    defaultPolicy: channel_users
+    channels:
+      telegram:
+        enabled: true

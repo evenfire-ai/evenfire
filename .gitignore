@@ -1,0 +1,130 @@
+.env
+.env.*
+!.env.example
+!.env.test
+!.env.e2e.example
+!.env.dev.example
+!.env.quickstart.example
+.env.local
+.env.dev
+.env.prod
+desktop-app/.env.prod
+
+secret.yaml
+**/secret.yaml
+
+# Generated JWT signing keys for minikube — created by scripts/minikube/generate-keys.sh
+deploy/minikube/secrets/jwt-signing-keys.yaml
+
+# Minikube image manifest — per-machine SHA256 digests from local builds
+# (written by scripts/minikube/build-images.sh, regenerated on every rebuild)
+deploy/minikube/.image-manifest.json
+
+# Local minikube member-registration SMTP/JWT values. Example files are tracked;
+# real values are generated into ConfigMap/Secret by the optional local kustomize overlay.
+deploy/overlays/minikube-local-member-registration/member-registration-config.env
+deploy/overlays/minikube-local-member-registration/member-registration-secrets.env
+
+# Standard installs plus linked-worktree symlinks into package node_modules.
+node_modules/
+**/node_modules
+dist/
+
+
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code / Local tooling
+.claude/
+.ralph/
+.codex-home/
+.npm-cache/
+
+# Logs
+*.log
+npm-debug.log*
+
+*/.next/
+.next/
+
+# Profile UI test build emits imported app helpers under .test-dist.
+profile-ui/.test-dist/
+
+# Chat GPT
+**/*chatGPT*.md
+
+# Internal scripts that are not ready for deployment
+internal-scripts/
+
+# Desktop app build artifacts
+desktop-app/dist/
+desktop-app/ui-dist/
+desktop-app/out/
+desktop-app/release/
+desktop-app/.vite/
+desktop-app/*.tsbuildinfo
+
+# understand-anything — generated knowledge graph (local only, not committed)
+.understand-anything/
+
+# playwright
+.playwright-mcp/
+control-ui/.playwright-browsers/
+desktop-app/.playwright-browsers/
+**/e2e-artifacts/
+desktop-app/test/e2e-playwright/test-results/
+**/test-results/
+desktop-app/test-results/
+**/playwright-report/
+*.tsbuildinfo
+
+# Screenshots from manual testing
+e2e-*.png
+
+# Production cluster backups (raw kubectl exports with timestamps)
+deploy/production-backup/
+docs/analysis/
+
+# Local developer notes (untracked)
+.local-notes/
+
+# Session-only recovery / diagnostic scripts (one-shot fixes, cleanup helpers,
+# context-switching wrappers). Not reusable infrastructure — recreate on demand.
+# Evidence of the work lives in git log, issues, and memory files.
+scripts/recovery/
+
+# docs/analysis
+docs/analysis/
+
+# docs/superpowers — per-developer working artifacts (brainstorm specs,
+# implementation plans, audit deliverables). Kept local; never committed.
+docs/plans/
+docs/diagrams/
+docs/security/
+docs/superpowers/
+docs/archive/superpowers/
+
+# Git worktrees — isolated feature workspaces, never tracked.
+.worktrees/
+
+# Per-UID runtime caches/locks (suffix is $(id -u) on macOS/Linux).
+# Created by minikube (locks), @playwright/test (transform cache), and
+# node's v8-compile-cache. Regenerated on demand; never commit.
+minikube-locks-*/
+playwright-transform-cache-*/
+v8-compile-cache-*/
+
+# Per-run Chromium user-data dirs created by Playwright persistent context.
+# Suffix is a random token; dirs are torn down on clean exit but remain
+# on crash/SIGKILL. Pure local noise.
+playwright_chromiumdev_profile-*/
+.codex
+dist-public/

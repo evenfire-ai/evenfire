@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: profile-ui
+  name: profile-ui
+  namespace: profiles
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: profile-ui
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: profile-ui
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: EXTERNAL_REST_API_INTERNAL_URL
+          value: http://external-rest-api.profiles.svc.cluster.local:8091
+        - name: NEXT_PUBLIC_GOOGLE_CLIENT_ID
+          value: replace-me.apps.googleusercontent.com
+        image: clerum/profile-ui:0.9.5
+        imagePullPolicy: Always
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 8
+          periodSeconds: 12
+          successThreshold: 1
+          timeoutSeconds: 1
+        name: profile-ui
+        ports:
+        - containerPort: 3001
+          name: http
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 4
+          periodSeconds: 8
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          seccompProfile:
+            type: RuntimeDefault
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: profile-ui
+  name: profile-ui
+  namespace: profiles
+spec:
+  ports:
+  - name: http
+    port: 3001
+    protocol: TCP
+    targetPort: http
+  selector:
+    app: profile-ui
+  type: ClusterIP

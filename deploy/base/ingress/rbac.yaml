@@ -1,0 +1,17 @@
+# Narrow Role: patch the cloudflared-config ConfigMap only. No RoleBinding is
+# shipped — operators bind this case-by-case for time-bounded changes. See
+# spec §6.1 HIGH-2: ConfigMap-edit on cloudflared-config = publishing any
+# cluster-internal service, so write access is deliberately not granted by
+# default.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cloudflared-config-editor
+  namespace: ingress
+  labels:
+    app.kubernetes.io/component: ingress
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["cloudflared-config"]
+  verbs: ["get", "patch", "update"]

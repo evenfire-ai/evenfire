@@ -1,0 +1,24 @@
+import * as initial from './001-initial-schema'
+import * as activeTaskId from './002-active-task-id'
+import * as sessionsStateIndex from './003-sessions-state-index'
+import * as awaitingApprovalIndex from './004-sessions-awaiting-approval-index'
+import * as messagesTokenUsage from './005-messages-token-usage'
+import * as sessionsCacheReported from './006-sessions-cache-reported'
+
+/**
+ * Ordered list of migrations. New migrations append; never reorder or rename.
+ * The runner (`src/db/migrate.ts`) executes `up()` in order and records each
+ * applied name in the `migrations_meta` table.
+ */
+export const migrations: Array<{
+  name: string
+  up: typeof initial.up
+  down: typeof initial.down
+}> = [
+  initial,
+  activeTaskId,
+  sessionsStateIndex,
+  awaitingApprovalIndex,
+  messagesTokenUsage,
+  sessionsCacheReported,
+]

@@ -1,0 +1,60 @@
+# HCC gfsReconciler RBAC. GlobalFileSystem CRDs live in the `gfs` namespace, so
+# (unlike SharedFileSystem, whose Role sits in mcp-host) HCC needs a Role +
+# RoleBinding HERE. Without it the GlobalFileSystem watch is 403 Forbidden and
+# gfsc is never created. Least-privilege: exactly the kinds the reconciler
+# manages in this namespace (gfsFactory builds Deployments writer+reader, a
+# Service, a PVC, a writer PodDisruptionBudget, ingress/egress NetworkPolicies)
+# plus the CRD + its /status.
+# HCC does NOT need configmaps/secrets here — the gfsc Deployment references
+# gfs-config / gfs-controller-db via valueFrom, which the kubelet resolves.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller-gfs-runtime
+  namespace: gfs
+  labels:
+    app.kubernetes.io/part-of: clerum
+rules:
+  # Watch the GlobalFileSystem singleton + write status/phase back.
+  - apiGroups: ['clerum.io']
+    resources: ['globalfilesystems']
+    verbs: ['get', 'list', 'watch']
+  - apiGroups: ['clerum.io']
+    resources: ['globalfilesystems/status']
+    verbs: ['get', 'patch', 'update']
+  # gfsc writer + reader Deployments (+ read availability for status).
+  - apiGroups: ['apps']
+    resources: ['deployments']
+    verbs: ['get', 'list', 'create', 'update', 'patch', 'delete']
+  # The brokered Service + the drive PVC.
+  - apiGroups: ['']
+    resources: ['services', 'persistentvolumeclaims']
+    verbs: ['get', 'list', 'create', 'update', 'patch', 'delete']
+  # Ingress (only the broker port) + egress (DNS, control-api, Postgres) policies.
+  - apiGroups: ['networking.k8s.io']
+    resources: ['networkpolicies']
+    verbs: ['get', 'list', 'create', 'update', 'patch', 'delete']
+  # Writer disruption protection. HCC creates/replaces/deletes the singleton PDB.
+  - apiGroups: ['policy']
+    resources: ['poddisruptionbudgets']
+    verbs: ['get', 'create', 'update', 'delete']
+  # Read-only pod state for truthful GlobalFileSystem status (no escalation).
+  - apiGroups: ['']
+    resources: ['pods']
+    verbs: ['get', 'list']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller-gfs-runtime
+  namespace: gfs
+  labels:
+    app.kubernetes.io/part-of: clerum
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller-gfs-runtime
+subjects:
+  - kind: ServiceAccount
+    name: host-context-controller
+    namespace: control-plane

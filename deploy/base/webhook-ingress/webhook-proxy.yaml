@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: webhook-proxy
+  namespace: webhook-ingress
+  labels:
+    app: webhook-proxy
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webhook-proxy-config
+  namespace: webhook-ingress
+  labels:
+    app: webhook-proxy
+data:
+  WEBHOOK_PROXY_HTTP_PORT: "8095"
+  WEBHOOK_PROXY_METRICS_PORT: "9090"
+  WEBHOOK_PROXY_CONTROL_API_BASE_URL: http://control-api.control-plane.svc.cluster.local:8090/api/v1
+  WEBHOOK_PROXY_WORKFLOW_APPROVAL_READER_BASE_URL: http://workflow-approval-request-reader.channels.svc.cluster.local:8098
+  WEBHOOK_PROXY_SANDBOX_NAMESPACE: sandbox-recipes
+  WEBHOOK_PROXY_REGISTRY_CACHE_TTL_MS: "5000"
+  WEBHOOK_PROXY_UPSTREAM_TIMEOUT_MS: "30000"
+  WEBHOOK_PROXY_MAX_BODY_BYTES_CEILING: "10485760"
+---
+# Service-token Secret. The actual value lives in
+# `internal-service-tokens` mapping inside control-api's config; we
+# reference it by service name when calling the registry endpoint.
+# In dev/minikube this can be the literal "dev-webhook-proxy-token"
+# (matches control-api's default in src/config.ts). In prod it is
+# rotated via apply-inter-service-tokens.sh, same flow as rpc-proxy.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: webhook-proxy-secrets
+  namespace: webhook-ingress
+  labels:
+    app: webhook-proxy
+type: Opaque
+stringData:
+  WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN: replace-with-real-webhook-proxy-token
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-proxy
+  namespace: webhook-ingress
+  labels:
+    app: webhook-proxy
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: webhook-proxy
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: webhook-proxy
+    spec:
+      serviceAccountName: webhook-proxy
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: webhook-proxy
+          image: clerum/webhook-proxy:0.1.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: webhook-proxy-config
+            - secretRef:
+                name: webhook-proxy-secrets
+          ports:
+            - name: http
+              containerPort: 8095
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 4
+            periodSeconds: 8
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 8
+            periodSeconds: 12
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-proxy
+  namespace: webhook-ingress
+  labels:
+    app: webhook-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app: webhook-proxy
+  ports:
+    - name: http
+      port: 8095
+      protocol: TCP
+      targetPort: http
+    - name: metrics
+      port: 9090
+      protocol: TCP
+      targetPort: metrics

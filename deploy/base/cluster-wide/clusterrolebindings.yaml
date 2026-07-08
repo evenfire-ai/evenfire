@@ -1,0 +1,103 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: clerum-channel-reader
+  labels:
+    app.kubernetes.io/name: channel-reader
+    app.kubernetes.io/part-of: clerum
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: clerum-channel-reader
+subjects:
+- kind: ServiceAccount
+  name: clerum-channel-reader
+  namespace: channels
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: control-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: control-api
+subjects:
+- kind: ServiceAccount
+  name: control-api
+  namespace: control-plane
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workflow-recipes-cluster-watch
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workflow-recipes-cluster-watch
+subjects:
+- kind: ServiceAccount
+  name: workflow-recipes
+  namespace: control-plane
+---
+# Mutating RoleBinding for rendered MCP delegation children in mcp-server.
+# WorkflowRecipe parent mutation is handled only by the sandbox-recipes Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workflow-recipes-mutator
+  namespace: mcp-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workflow-recipes-ns-mutator
+subjects:
+- kind: ServiceAccount
+  name: workflow-recipes
+  namespace: control-plane
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wrc-trigger-binding
+  labels:
+    clerum.io/managed-by: clerum-wrc
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: wrc-trigger-role
+subjects:
+- kind: ServiceAccount
+  name: wrc-trigger-sa
+  namespace: control-plane
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-api-pod-reader
+  namespace: sandbox-recipes
+  labels:
+    app.kubernetes.io/part-of: clerum
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: control-api-pod-reader
+subjects:
+- kind: ServiceAccount
+  name: control-api
+  namespace: control-plane
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: control-api-pod-lister
+  labels:
+    app.kubernetes.io/part-of: clerum
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: control-api-pod-lister
+subjects:
+- kind: ServiceAccount
+  name: control-api
+  namespace: control-plane

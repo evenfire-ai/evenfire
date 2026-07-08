@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clerum-channel-reader-config
+  namespace: channels
+  labels:
+    app: channel-reader
+data:
+  CLERUM_HOST_REF: "chatllm"
+  CLERUM_NAMESPACE: ""
+  CLERUM_EMAIL_IMAP_HOST: "mailpit.channels.svc.cluster.local"
+  CLERUM_EMAIL_IMAP_PORT: "1143"
+  CLERUM_POLL_INTERVAL_SECONDS: "2"
+  CLERUM_ENABLE_RESPONSE_ATTACHMENTS: "true"
+  CLERUM_ATTACHMENT_MAX_COUNT: "3"
+  CLERUM_ATTACHMENT_MAX_BYTES: "52428800"

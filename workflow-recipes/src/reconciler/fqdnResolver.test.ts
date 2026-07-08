@@ -1,0 +1,223 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  type FqdnLookup,
+  type FqdnLookupResult,
+  defaultFqdnLookup,
+  resolveExternalEgress,
+} from './fqdnResolver'
+
+const { resolve4Mock, resolve6Mock } = vi.hoisted(() => ({
+  resolve4Mock: vi.fn(),
+  resolve6Mock: vi.fn(),
+}))
+vi.mock('node:dns/promises', () => ({
+  resolve4: resolve4Mock,
+  resolve6: resolve6Mock,
+}))
+
+function dnsError(code: string): NodeJS.ErrnoException {
+  const err = new Error(`query ${code}`) as NodeJS.ErrnoException
+  err.code = code
+  return err
+}
+
+function fakeLookup(map: Record<string, FqdnLookupResult>): FqdnLookup {
+  return vi.fn(async host => map[host] ?? { kind: 'error', error: 'unknown host' })
+}
+
+describe('resolveExternalEgress', () => {
+  it('expands a fqdn entry into one /32 per A record', async () => {
+    const lookup = fakeLookup({
+      'api.stripe.com': {
+        kind: 'ok',
+        ipv4: ['93.184.216.10', '93.184.216.11'],
+        ipv6: [],
+      },
+    })
+    const result = await resolveExternalEgress(
+      [{ fqdn: 'api.stripe.com', port: 443, reason: 'Charge cards' }],
+      lookup
+    )
+    expect(result.resolved).toEqual([
+      {
+        cidr: '93.184.216.10/32',
+        port: 443,
+        reason: 'Charge cards',
+        source: { kind: 'fqdn', fqdn: 'api.stripe.com' },
+      },
+      {
+        cidr: '93.184.216.11/32',
+        port: 443,
+        reason: 'Charge cards',
+        source: { kind: 'fqdn', fqdn: 'api.stripe.com' },
+      },
+    ])
+  })
+
+  // AAAA records are intentionally dropped — all current deployment targets are
+  // IPv4-only clusters and a /128 ipBlock would be inert. The resolver gates
+  // emission so the policy builder never sees a /128 it can't enforce.
+  it('drops AAAA records and emits only A-record /32 entries', async () => {
+    const lookup = fakeLookup({
+      'api.anthropic.com': {
+        kind: 'ok',
+        ipv4: ['160.79.104.10'],
+        ipv6: ['2607:6bc0::10'],
+      },
+    })
+    const result = await resolveExternalEgress([{ fqdn: 'api.anthropic.com', port: 443 }], lookup)
+    expect(result.resolved).toEqual([
+      {
+        cidr: '160.79.104.10/32',
+        port: 443,
+        reason: undefined,
+        source: { kind: 'fqdn', fqdn: 'api.anthropic.com' },
+      },
+    ])
+    expect(result.failures).toEqual([])
+  })
+
+  it('preserves fqdn ordering across multiple entries', async () => {
+    const lookup = fakeLookup({
+      'api.stripe.com': { kind: 'ok', ipv4: ['93.184.216.10'], ipv6: [] },
+      'ingest.sentry.io': { kind: 'ok', ipv4: ['93.184.216.20'], ipv6: [] },
+    })
+    const result = await resolveExternalEgress(
+      [
+        { fqdn: 'api.stripe.com', port: 443 },
+        { fqdn: 'ingest.sentry.io', port: 443 },
+      ],
+      lookup
+    )
+    expect(result.resolved.map(r => r.cidr)).toEqual(['93.184.216.10/32', '93.184.216.20/32'])
+  })
+
+  it('records a failure when fqdn resolution errors and continues with the rest', async () => {
+    const lookup = fakeLookup({
+      'good.example.com': { kind: 'ok', ipv4: ['93.184.216.5'], ipv6: [] },
+      'bad.example.com': { kind: 'error', error: 'NXDOMAIN' },
+    })
+    const result = await resolveExternalEgress(
+      [
+        { fqdn: 'good.example.com', port: 443 },
+        { fqdn: 'bad.example.com', port: 443 },
+      ],
+      lookup
+    )
+    expect(result.resolved.map(r => r.cidr)).toEqual(['93.184.216.5/32'])
+    expect(result.failures).toEqual([
+      { fqdn: 'bad.example.com', error: 'NXDOMAIN', retryable: false },
+    ])
+  })
+
+  it('treats an empty A-record set as no expansion (no entries, no failure)', async () => {
+    const lookup = fakeLookup({
+      'empty.example.com': { kind: 'ok', ipv4: [], ipv6: [] },
+    })
+    const result = await resolveExternalEgress([{ fqdn: 'empty.example.com', port: 443 }], lookup)
+    expect(result.resolved).toEqual([])
+    expect(result.failures).toEqual([])
+  })
+
+  it('fails closed for a hostname with any blocked A record and emits no public siblings', async () => {
+    const lookup = fakeLookup({
+      'mixed.example.com': {
+        kind: 'ok',
+        ipv4: ['93.184.216.34', '169.254.169.254'],
+        ipv6: [],
+      },
+    })
+    const result = await resolveExternalEgress([{ fqdn: 'mixed.example.com', port: 443 }], lookup)
+    expect(result.resolved).toEqual([])
+    expect(result.failures).toEqual([
+      {
+        fqdn: 'mixed.example.com',
+        error: 'resolved to blocked IPv4 address(es): 169.254.169.254',
+        retryable: false,
+      },
+    ])
+  })
+
+  it('returns an empty result for an empty input', async () => {
+    const result = await resolveExternalEgress([], fakeLookup({}))
+    expect(result.resolved).toEqual([])
+    expect(result.failures).toEqual([])
+  })
+
+  it('propagates a retryable lookup error onto the failure entry', async () => {
+    const lookup = fakeLookup({
+      'flaky.example.com': { kind: 'error', error: 'DNS timeout (ETIMEOUT)', retryable: true },
+    })
+    const result = await resolveExternalEgress([{ fqdn: 'flaky.example.com', port: 443 }], lookup)
+    expect(result.resolved).toEqual([])
+    expect(result.failures).toEqual([
+      { fqdn: 'flaky.example.com', error: 'DNS timeout (ETIMEOUT)', retryable: true },
+    ])
+  })
+})
+
+describe('defaultFqdnLookup classification', () => {
+  afterEach(() => {
+    resolve4Mock.mockReset()
+    resolve6Mock.mockReset()
+  })
+
+  it('returns ok with A records even when AAAA has none', async () => {
+    resolve4Mock.mockResolvedValue(['160.79.104.10'])
+    resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
+    const result = await defaultFqdnLookup('api.anthropic.com')
+    expect(result).toEqual({ kind: 'ok', ipv4: ['160.79.104.10'], ipv6: [] })
+  })
+
+  it('classifies SERVFAIL as a retryable error and surfaces the code', async () => {
+    resolve4Mock.mockRejectedValue(dnsError('ESERVFAIL'))
+    resolve6Mock.mockRejectedValue(dnsError('ESERVFAIL'))
+    const result = await defaultFqdnLookup('huggingface.co')
+    expect(result.kind).toBe('error')
+    if (result.kind !== 'error') throw new Error('expected error')
+    expect(result.retryable).toBe(true)
+    expect(result.error).toContain('ESERVFAIL')
+    expect(result.error).toContain('huggingface.co')
+  })
+
+  it('classifies a timeout as retryable', async () => {
+    resolve4Mock.mockRejectedValue(dnsError('ETIMEOUT'))
+    resolve6Mock.mockRejectedValue(dnsError('ETIMEOUT'))
+    const result = await defaultFqdnLookup('api.anthropic.com')
+    expect(result).toMatchObject({ kind: 'error', retryable: true })
+  })
+
+  it.each(['EFORMERR', 'ENOTIMP', 'EOF', 'ENOMEM', 'EDESTRUCTION', 'ENOTINITIALIZED'])(
+    'classifies operational DNS failure %s as retryable instead of no-records',
+    async code => {
+      resolve4Mock.mockRejectedValue(dnsError(code))
+      resolve6Mock.mockRejectedValue(dnsError(code))
+      const result = await defaultFqdnLookup('resolver-broken.example.com')
+      expect(result).toMatchObject({ kind: 'error', retryable: true })
+      if (result.kind !== 'error') throw new Error('expected error')
+      expect(result.error).toContain(code)
+    }
+  )
+
+  it('treats a genuine no-records answer (ENODATA) as permanent', async () => {
+    resolve4Mock.mockRejectedValue(dnsError('ENODATA'))
+    resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
+    const result = await defaultFqdnLookup('no-records.example.com')
+    expect(result).toEqual({ kind: 'error', error: 'no A or AAAA records' })
+  })
+
+  it('treats NXDOMAIN (ENOTFOUND) as permanent', async () => {
+    resolve4Mock.mockRejectedValue(dnsError('ENOTFOUND'))
+    resolve6Mock.mockRejectedValue(dnsError('ENOTFOUND'))
+    const result = await defaultFqdnLookup('does-not-exist.example.com')
+    expect(result).toEqual({ kind: 'error', error: 'no A or AAAA records' })
+    expect((result as { retryable?: boolean }).retryable).toBeFalsy()
+  })
+
+  it('is retryable when any family hits a transient code even if the other is empty', async () => {
+    resolve4Mock.mockRejectedValue(dnsError('ECONNREFUSED'))
+    resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
+    const result = await defaultFqdnLookup('partial.example.com')
+    expect(result).toMatchObject({ kind: 'error', retryable: true })
+  })
+})

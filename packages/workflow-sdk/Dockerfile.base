@@ -1,0 +1,54 @@
+FROM node:24-alpine AS sdk-builder
+
+WORKDIR /app
+
+COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/
+COPY packages/workflow-runtime-core/tsconfig.json ./packages/workflow-runtime-core/
+COPY packages/workflow-runtime-core/src ./packages/workflow-runtime-core/src
+WORKDIR /app/packages/workflow-runtime-core
+RUN npm ci --ignore-scripts && npm run build
+
+WORKDIR /app
+COPY packages/workflow-sdk/package.json packages/workflow-sdk/package-lock.json ./packages/workflow-sdk/
+COPY packages/workflow-sdk/tsconfig.json ./packages/workflow-sdk/
+COPY packages/workflow-sdk/src ./packages/workflow-sdk/src
+# The SDK base image build only needs TypeScript compilation. Vitest pulls in
+# esbuild for tests, and esbuild's postinstall binary validation can be flaky
+# under Docker BuildKit on CI. Skipping dependency lifecycle scripts keeps this
+# image build deterministic without changing the produced SDK dist.
+WORKDIR /app/packages/workflow-sdk
+RUN npm ci --ignore-scripts && npm run build:docker
+
+FROM node:24-alpine AS base
+
+LABEL org.opencontainers.image.title="clerum-workflow-base" \
+      org.opencontainers.image.description="Base image for Clerum workflow coordinators with @clerum/workflow-sdk pre-installed" \
+      org.opencontainers.image.vendor="Clerum" \
+      org.opencontainers.image.source="https://github.com/PalmeraDAO/clerum"
+
+WORKDIR /app
+
+COPY --from=sdk-builder /app/packages/workflow-runtime-core/dist/ ./node_modules/@clerum/workflow-runtime-core/dist/
+COPY packages/workflow-runtime-core/package.json ./node_modules/@clerum/workflow-runtime-core/package.json
+COPY --from=sdk-builder /app/packages/workflow-sdk/dist/ ./node_modules/@clerum/workflow-sdk/dist/
+COPY packages/workflow-sdk/package.json ./node_modules/@clerum/workflow-sdk/package.json
+
+RUN addgroup -S clerum && adduser -S clerum -G clerum && \
+    mkdir -p /etc/workflow/souls && chown -R clerum:clerum /etc/workflow
+
+ENV NODE_ENV=production
+
+USER clerum
+
+# Developer extends this image:
+#
+#   FROM your-registry.example.com/evenfire/clerum-workflow-base:1.0.0
+#   COPY dist/ ./dist/
+#   CMD ["node", "dist/coordinator.js"]
+#
+# WRC injects runtime identity env vars and Secret-volume token file pointers:
+#   CLERUM_WORKFLOW_NAME, CLERUM_NAMESPACE, CLERUM_WRC_URL, WRC_TOKEN_FILE,
+#   CLERUM_MCPHOST_URL, MCP_HOST_TOKEN_FILE, CLERUM_CORRELATION_ID
+# Optional:
+#   CLERUM_REGISTRY_URL, CLERUM_STORAGE_ENDPOINT, CLERUM_SIGNAL_POLL_INTERVAL_MS,
+#   CLERUM_SDK_REST_PORT

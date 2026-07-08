@@ -1,0 +1,28 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-layer3a-snippet-negative-mcp-wildcard
+  namespace: sandbox-recipes
+spec:
+  triggers:
+    onDemand: {}
+  workloads:
+    - id: mock-tools
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3000
+      transport:
+        type: streamableHttp
+        path: /mcp
+  steps:
+    - id: snippet
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          return await sdk.mcp.callTool("mock-tools", "add", { a: 1, b: 2 })
+        capabilities:
+          mcp:
+            servers: [mock-tools]
+            allowedTools:
+              include: ['mock-tools__*']

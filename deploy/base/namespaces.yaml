@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: channels
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: control-plane
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+    kubernetes.io/metadata.name: control-plane
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-host
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-server
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+    kubernetes.io/metadata.name: mcp-server
+    # Pod Security Admission — second layer behind VAP + admin-API allowlist.
+    # baseline = blocks privileged pods / hostPath / hostNetwork / hostPID;
+    # restricted (warn+audit) surfaces future hardening gaps without breaking today.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: profiles
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rpc-proxy
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-recipes
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+    kubernetes.io/metadata.name: sandbox-recipes
+    # Pod Security Admission — second layer behind VAP + admin-API allowlist.
+    # Sandbox runs untrusted user workloads; baseline enforce is the floor.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-ui
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+    kubernetes.io/metadata.name: sandbox-ui
+    # Untrusted recipe-supplied UI workloads; same PSA floor as sandbox-recipes.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: webhook-ingress
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+    kubernetes.io/metadata.name: webhook-ingress
+    # Pod Security Admission — same floor as rpc-proxy. The proxy is a
+    # plain HTTP terminator; baseline enforcement keeps it from growing
+    # privileges over time.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gfs
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+    kubernetes.io/metadata.name: gfs
+    # gfsc is the platform file broker (non-root, drop-ALL caps, RO rootfs);
+    # baseline enforce is the floor, restricted warn/audit surfaces drift.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest

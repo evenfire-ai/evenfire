@@ -1,0 +1,101 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  # These configmaps are only in the minikube overlay (no base equivalent)
+  - configmaps/mcp-host-config.yaml
+  # rpc-proxy-config is referenced by base/rpc-proxy/rpc-proxy.yaml via envFrom
+  # but NOT defined in base — each overlay must provide its own. GCP has its
+  # own at deploy/overlays/gcp/configmaps/rpc-proxy-config.yaml. Without this
+  # file, rpc-proxy Pod fails with `configmap "rpc-proxy-config" not found`
+  # → CreateContainerConfigError on every fresh minikube install.
+  - configmaps/rpc-proxy-config.yaml
+  # fake-telegram-server (MINIKUBE ONLY) — mock Telegram Bot API for the
+  # Figure D two-bot E2E gate (B1/B2/B3). See tests/e2e/fixtures/fake-telegram-server.
+  - fake-telegram/configmap.yaml
+  - fake-telegram/deployment.yaml
+  - fake-telegram/service.yaml
+  - fake-telegram/networkpolicy.yaml
+  # Local evenfire-registry lives in a sibling repo, but Clerum owns the
+  # consumer egress policies that let control-api/workflow-recipes call it.
+  - registry/namespace.yaml
+  - registry/networkpolicies.yaml
+  # Bootstrap admin Secret canary. Operator populates via
+  # scripts/minikube/seed-test-data.sh; kubectl apply -k preserves canary.
+
+# Extend kustomize's built-in image transformer to also scan env-var values
+# in Deployment podspecs. This makes the 3 dynamic-spawn images
+# (clerum/mcp-host, clerum/stdio-bridge, clerum/workflow-coordinator) active
+# entries in the `images:` block instead of orphans. See the file for details.
+configurations:
+  - kustomizeconfig/imagetags.yaml
+
+# Single source of truth for every clerum/* image tag in the minikube overlay.
+# Rewrites both:
+#   1. `spec.containers[].image` (default kustomize behavior — 10 services)
+#   2. `spec.template.spec.containers[].env[].value` (extended via configurations
+#      above — the 3 dynamic-spawn images that HCC/WRC inject into child pods)
+# Build local images with `eval $(minikube docker-env) && docker build -t
+# clerum/<svc>:test ./<svc>`. To roll a new local tag, change `newTag: test`
+# below in ONE place and re-render with `kubectl kustomize`.
+images:
+  - name: clerum/channel-reader
+    newTag: test
+  - name: clerum/workflow-approval-request-reader
+    newTag: test
+  - name: clerum/control-api
+    newTag: test
+  - name: clerum/control-ui
+    newTag: test
+  - name: clerum/external-rest-api
+    newTag: test
+  - name: clerum/host-context-controller
+    newTag: test
+  - name: clerum/mcp-host
+    newTag: test
+  - name: clerum/mcp-proxy
+    newTag: test
+  - name: clerum/nginx-egress-proxy
+    newTag: test
+  - name: clerum/profile-ui
+    newTag: test
+  - name: clerum/rpc-proxy
+    newTag: test
+  - name: clerum/webhook-proxy
+    newTag: test
+  - name: clerum/webhook-gateway
+    newTag: test
+  - name: clerum/stdio-bridge
+    newTag: test
+  - name: clerum/workflow-coordinator
+    newTag: test
+  - name: clerum/workflow-snippet-runner
+    newTag: test
+  - name: clerum/workflow-recipes
+    newTag: test
+  - name: clerum/workspace-files-controller
+    newTag: test
+
+patchesStrategicMerge:
+  - patches/resource-limits.yaml
+  - patches/dynamic-images.yaml
+  - patches/image-pull-policy.yaml
+  - patches/service-tokens.yaml
+  - patches/nginx-workflow-approval-gateway.yaml
+  # Registry env vars for workflow-recipes (in-cluster URL, auth off).
+  # control-api gets registry env via configmaps/control-api-config.yaml.
+  - patches/registry-env.yaml
+  # Multi-document YAML must use patchesStrategicMerge — kubectl's embedded
+  # kustomize (e.g. v4.5.x) rejects the same files under `patches:` with:
+  # "unable to parse SM or JSON patch from [...]".
+  - patches/storage-class.yaml
+  # CIDR-based egress to kube-apiserver — required under Calico CNI.
+  # The `cidr:` values are auto-patched by
+  # `deploy/scripts/minikube-detect-k8s-api-ip.sh` on every
+  # `make minikube-deploy-all` / `make minikube-setup`.
+  - patches/k8s-api-ip.yaml
+
+patches:
+  # ConfigMap overrides: replace base values with minikube-specific config
+  - path: configmaps/control-api-config.yaml
+  - path: configmaps/channel-reader-config.yaml

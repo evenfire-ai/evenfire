@@ -1,0 +1,49 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: stdio-mcp-multi-tool
+  namespace: sandbox-recipes
+spec:
+  description: 'Two stdio MCP servers + Redis — validates multi-tool agent flow via mcp-proxy'
+  contextRef: context1
+  workloads:
+    - id: redis
+      type: deployment
+      image: redis:7-alpine
+      port: 6379
+      args: ['--save', '']
+      security:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+
+    - id: data-mcp
+      type: deployment
+      image: clerum/mock-stdio-mcp-server:test
+      imagePullPolicy: IfNotPresent
+      transport:
+        type: stdio
+      port: 3000
+      env:
+        - name: REDIS_HOST
+          value: '{{redis:host}}'
+        - name: REDIS_PORT
+          value: '{{redis:port}}'
+      dependsOn:
+        - redis
+
+    - id: compute-mcp
+      type: deployment
+      image: clerum/mock-stdio-mcp-server:test
+      imagePullPolicy: IfNotPresent
+      transport:
+        type: stdio
+      port: 3000
+
+  bindings:
+    - from: data-mcp
+      to: redis
+      port: 6379
+
+  security:
+    isolationLevel: minimal

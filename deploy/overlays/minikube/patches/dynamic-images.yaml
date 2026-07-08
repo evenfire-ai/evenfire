@@ -1,0 +1,136 @@
+# NOTE on env-var image refs (CONTEXT_MAPPER_HOST_IMAGE, STDIO_BRIDGE_IMAGE,
+# CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE, CLERUM_COORDINATOR_IMAGE, CLERUM_MCP_HOST_IMAGE):
+# we DELIBERATELY do NOT override their values here. The base values (:0.9.5)
+# are rewritten at render time by kustomize's image transformer, which has been
+# extended via `configurations: kustomizeconfig/imagetags.yaml` to scan
+# `spec/template/spec/containers/env/value` for image refs matching entries in
+# the `images:` block of kustomization.yaml. This makes that block the SINGLE
+# source of truth for every clerum/* tag in the minikube overlay — including
+# the dynamic-spawn images that HCC/WRC inject into child pods.
+#
+# The only override that remains here is the storage class for the workspace
+# PVC, which is minikube-specific (not an image ref).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: host-context-controller
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: host-context-controller
+          env:
+            - name: CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS
+              value: standard
+            # Minikube loads images locally — never pull from remote registry.
+            # Without this, HCC defaults to "Always" and dynamic-spawn Host
+            # pods (chatllm, etc.) fail with ErrImagePull.
+            - name: CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY
+              value: IfNotPresent
+            # Minikube uses local images loaded into the profile; do not inject
+            # a pull reference that this overlay does not create.
+            - name: CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET
+              value: ""
+            # McpServer Deployments created by HCC also need IfNotPresent
+            # to use images built locally inside minikube's Docker daemon.
+            - name: CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY
+              value: IfNotPresent
+            # Per-Host channel-reader Deployments created by HCC also need
+            # IfNotPresent to use images loaded locally into minikube.
+            - name: CONTEXT_MAPPER_CHANNEL_READER_IMAGE_PULL_POLICY
+              value: IfNotPresent
+            - name: CONTEXT_MAPPER_DESKTOP_IMAGE
+              value: clerum/mcp-host-desktop:test
+            # gfsc (Global File System controller) is reconciler-spawned by HCC's
+            # gfsReconciler — never a static Deployment. Minikube loads
+            # clerum/gfs-controller:test locally (build-images.sh), so pin :test
+            # + IfNotPresent exactly like the other dynamic-spawn images above.
+            - name: CONTEXT_MAPPER_GFSC_IMAGE
+              value: clerum/gfs-controller:test
+            - name: CONTEXT_MAPPER_GFSC_IMAGE_PULL_POLICY
+              value: IfNotPresent
+            - name: CONTEXT_MAPPER_DESKTOP_API_TOKEN
+              value: "minikube-desktop-api-token-shared-xxxxxxxx"
+            # Image rewritten by kustomize image transformer (see kustomizeconfig/imagetags.yaml).
+            # The base value here matches `clerum/channel-reader` from images: block → rewritten to :test.
+            - name: CONTEXT_MAPPER_CHANNEL_READER_IMAGE
+              value: clerum/channel-reader:0.9.5
+            # workspace-files-controller pods spawned per SharedFileSystem must
+            # use locally-loaded image; minikube has no remote registry.
+            - name: CONTEXT_MAPPER_WFC_IMAGE_PULL_POLICY
+              value: IfNotPresent
+            - name: CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET
+              value: ""
+---
+# Patch WRC: same IfNotPresent for workflow coordinator + mcp-host pods,
+# plus local-only workflow features that must not constrain minikube/E2E.
+# Without this, WRC defaults to "Always" and workflow pods fail with
+# ErrImagePull in minikube (images are loaded locally, not in a registry).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workflow-recipes
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: workflow-recipes
+          env:
+            - name: CLERUM_IMAGE_PULL_POLICY
+              value: IfNotPresent
+            - name: WRC_ENABLE_SNIPPET_RUNTIME
+              value: "true"
+            # Plugin Workload SDK E2E gate (plan §9.2 triple activation).
+            - name: PLUGIN_WORKLOAD_SDK_ENABLED
+              value: "true"
+            # Minikube is the local advanced-workflow sandbox: custom
+            # coordinator images are expected to use locally built :test tags.
+            - name: WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE
+              value: "true"
+            - name: WRC_ALLOWED_COORDINATOR_IMAGE_PREFIXES
+              value: "clerum/workflow-custom-sdk-e2e:"
+            # Local custom-coordinator E2E fixtures use the tag-only image
+            # clerum/workflow-custom-sdk-e2e:test loaded into minikube.
+            # Keep digest enforcement enabled in base/prod paths.
+            - name: WRC_REQUIRE_COORDINATOR_IMAGE_DIGEST
+              value: "false"
+            - name: CLERUM_NETWORK_POLICY_ENFORCEMENT_MODE
+              value: required
+            - name: CLERUM_NETWORK_POLICY_ENFORCEMENT_CONFIRMED
+              value: "true"
+---
+# Patch Control UI: expose local/advanced recipe templates by default only in
+# minikube. The same value is also passed at image build time by
+# scripts/minikube/build-images.sh because NEXT_PUBLIC_* flags are compiled
+# into the Next.js client bundle.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-ui
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-ui
+          env:
+            - name: NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_TEMPLATES
+              value: "true"
+---
+# Patch control-api: E2E checks this env directly on the Deployment (not
+# envFrom) before exercising Plugin Workload SDK routes and grants.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-api
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-api
+          env:
+            - name: PLUGIN_WORKLOAD_SDK_ENABLED
+              value: "true"

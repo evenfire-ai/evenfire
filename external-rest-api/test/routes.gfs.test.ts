@@ -1,0 +1,206 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import express from 'express'
+import request from 'supertest'
+import { createGfsRouter } from '../src/routes/gfs.js'
+
+const { ControlApiError, clientMock } = vi.hoisted(() => {
+  class ControlApiError extends Error {
+    constructor(
+      message: string,
+      public status: number,
+      public body: unknown
+    ) {
+      super(message)
+    }
+  }
+  return {
+    ControlApiError,
+    clientMock: { controlApiRequest: vi.fn(), controlApiStreamRequest: vi.fn() },
+  }
+})
+vi.mock('../src/controlApiClient.js', () => ({
+  controlApiRequest: clientMock.controlApiRequest,
+  controlApiStreamRequest: clientMock.controlApiStreamRequest,
+  ControlApiError,
+}))
+
+const authTokenMock = vi.hoisted(() => ({ verifyToken: vi.fn() }))
+vi.mock('../src/authToken.js', () => authTokenMock)
+
+function buildApp() {
+  const app = express()
+  app.use(express.json())
+  app.use(createGfsRouter())
+  return app
+}
+
+beforeEach(() => {
+  clientMock.controlApiRequest.mockReset()
+  clientMock.controlApiStreamRequest.mockReset()
+  authTokenMock.verifyToken.mockReset()
+  authTokenMock.verifyToken.mockReturnValue({
+    userId: 'u1',
+    email: 'u@example.com',
+    teamId: null,
+    role: 'member',
+    exp: 9_999_999_999,
+  })
+})
+
+describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', () => {
+  it('mints a user gfs token, forwarding the session token to control-api', async () => {
+    clientMock.controlApiRequest.mockResolvedValue({ token: 'gfs-tok', expiresInSeconds: 300 })
+    const res = await request(buildApp())
+      .post('/me/gfs/token')
+      .set('authorization', 'Bearer sess-xyz')
+      .send({ scopes: ['gfs.read'] })
+    expect(res.status).toBe(200)
+    expect(res.body.token).toBe('gfs-tok')
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith('POST', '/external/gfs/token', {
+      userSessionToken: 'sess-xyz',
+      body: { scopes: ['gfs.read'] },
+    })
+  })
+
+  it('forwards a user delegation grant to /external/gfs/grants', async () => {
+    clientMock.controlApiRequest.mockResolvedValue({ ok: true })
+    const body = {
+      resourceId: 'r',
+      subject: { type: 'user', id: '22222222-2222-4222-8222-222222222222' },
+      permissions: ['read'],
+      inherit: false,
+    }
+    const res = await request(buildApp())
+      .put('/me/gfs/grants')
+      .set('authorization', 'Bearer sess-xyz')
+      .send(body)
+    expect(res.status).toBe(200)
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith('PUT', '/external/gfs/grants', {
+      userSessionToken: 'sess-xyz',
+      body,
+    })
+  })
+
+  it('lists accessible resources through /external/gfs/resources', async () => {
+    clientMock.controlApiRequest.mockResolvedValue({
+      ok: true,
+      data: { items: [], nextCursor: 'next-page' },
+    })
+    const res = await request(buildApp())
+      .get('/me/gfs/resources?drive=main&limit=25&cursor=cursor-1')
+      .set('authorization', 'Bearer sess-xyz')
+    expect(res.status).toBe(200)
+    expect(res.body.data.nextCursor).toBe('next-page')
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith('GET', '/external/gfs/resources', {
+      userSessionToken: 'sess-xyz',
+      query: { drive: 'main', limit: '25', cursor: 'cursor-1' },
+    })
+  })
+
+  it('propagates a control-api no-escalation 403 verbatim', async () => {
+    clientMock.controlApiRequest.mockRejectedValue(
+      new ControlApiError('escalation', 403, { error: 'escalation_rejected' })
+    )
+    const res = await request(buildApp())
+      .put('/me/gfs/grants')
+      .set('authorization', 'Bearer sess-xyz')
+      .send({
+        resourceId: 'r',
+        subject: { type: 'user', id: '22222222-2222-4222-8222-222222222222' },
+        permissions: ['write'],
+      })
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'escalation_rejected' })
+  })
+
+  it('streams a content download (binary) from the proxy', async () => {
+    clientMock.controlApiStreamRequest.mockResolvedValue(
+      new Response('hello', {
+        status: 200,
+        headers: { 'content-type': 'application/octet-stream', 'content-length': '5' },
+      })
+    )
+    const res = await request(buildApp())
+      .get('/me/gfs/proxy/abc?drive=main')
+      .set('authorization', 'Bearer sess-xyz')
+    expect(res.status).toBe(200)
+    const bytes = Buffer.isBuffer(res.body) ? res.body : Buffer.from(res.text ?? '')
+    expect(bytes.toString('utf8')).toBe('hello')
+    expect(clientMock.controlApiStreamRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/gfs/proxy/abc',
+      { userSessionToken: 'sess-xyz', query: { drive: 'main' } }
+    )
+  })
+
+  it('forwards user resource mutations to control-api on the session plane', async () => {
+    clientMock.controlApiRequest.mockResolvedValue({ ok: true, data: { resourceId: 'abc' } })
+    await request(buildApp())
+      .patch('/me/gfs/resources/abc?drive=main')
+      .set('authorization', 'Bearer sess-xyz')
+      .send({ newName: 'renamed.md', ifMatch: 1 })
+      .expect(200)
+    await request(buildApp())
+      .post('/me/gfs/resources/abc/children?drive=main')
+      .set('authorization', 'Bearer sess-xyz')
+      .send({ name: 'docs', kind: 'directory' })
+      .expect(201)
+    await request(buildApp())
+      .put('/me/gfs/resources/abc/content?drive=main')
+      .set('authorization', 'Bearer sess-xyz')
+      .send({ content: 'hello', ifMatch: 2 })
+      .expect(200)
+    await request(buildApp())
+      .delete('/me/gfs/resources/abc?drive=main')
+      .set('authorization', 'Bearer sess-xyz')
+      .send({ ifMatch: 3 })
+      .expect(200)
+
+    expect(clientMock.controlApiRequest).toHaveBeenNthCalledWith(
+      1,
+      'PATCH',
+      '/external/gfs/resources/abc',
+      {
+        userSessionToken: 'sess-xyz',
+        query: { drive: 'main' },
+        body: { newName: 'renamed.md', ifMatch: 1 },
+      }
+    )
+    expect(clientMock.controlApiRequest).toHaveBeenNthCalledWith(
+      2,
+      'POST',
+      '/external/gfs/resources/abc/children',
+      {
+        userSessionToken: 'sess-xyz',
+        query: { drive: 'main' },
+        body: { name: 'docs', kind: 'directory' },
+      }
+    )
+    expect(clientMock.controlApiRequest).toHaveBeenNthCalledWith(
+      3,
+      'PUT',
+      '/external/gfs/resources/abc/content',
+      {
+        userSessionToken: 'sess-xyz',
+        query: { drive: 'main' },
+        body: { content: 'hello', ifMatch: 2 },
+      }
+    )
+    expect(clientMock.controlApiRequest).toHaveBeenNthCalledWith(
+      4,
+      'DELETE',
+      '/external/gfs/resources/abc',
+      {
+        userSessionToken: 'sess-xyz',
+        query: { drive: 'main' },
+        body: { ifMatch: 3 },
+      }
+    )
+  })
+
+  it('401 without a session token', async () => {
+    authTokenMock.verifyToken.mockReturnValue(null)
+    const res = await request(buildApp()).post('/me/gfs/token').send({})
+    expect(res.status).toBe(401)
+  })
+})

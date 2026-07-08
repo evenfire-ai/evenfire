@@ -1,0 +1,99 @@
+# control-api needs Secret CRUD in its own namespace only.
+# Cluster-wide Secret access was removed from the ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: control-api-secrets-role
+  namespace: control-plane
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-api-secrets-binding
+  namespace: control-plane
+subjects:
+- kind: ServiceAccount
+  name: control-api
+  namespace: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: control-api-secrets-role
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workflow-recipes-control-plane
+  namespace: control-plane
+rules:
+  # V7 fix: remove "list" — K8s ignores resourceNames for list verbs,
+  # so list+resourceNames would allow listing ALL secrets in the namespace.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["clerum-wrc-signing-key"]
+  # Workflow trigger token Secrets — dynamic names (wf-*-trigger-token, wf-*-coordinator-token)
+  # K8s does not support wildcard resourceNames, so this rule has no resourceNames restriction.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch", "delete"]
+  # V6 fix: scope configmaps access to only the resources WRC manages
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+    resourceNames: ["clerum-wrc-public-key"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workflow-recipes-control-plane
+  namespace: control-plane
+subjects:
+- kind: ServiceAccount
+  name: workflow-recipes
+  namespace: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workflow-recipes-control-plane
+---
+# Lets the CI/e2e service account READ NetworkPolicies in control-plane so the
+# registry-decoupling compat suite can verify the consumer egress NPs exist.
+# Without this, the suite's `kubectl get networkpolicy` returns a permission
+# error that the suite swallows as "missing" — false-failing every registry
+# deploy (the SA can port-forward but lacked networkpolicies:get). Read-only,
+# scoped to this one resource + namespace.
+#
+# NOTE: subject is a GCP service account mapped to a k8s User. CONFIRM this is
+# the repo's GCP_SERVICE_ACCOUNT (identified from the GKE audit log as the
+# principal doing pods.portforward/deployments.patch on clerum-dev).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: e2e-compat-networkpolicy-reader
+  namespace: control-plane
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: e2e-compat-networkpolicy-reader
+  namespace: control-plane
+subjects:
+- kind: User
+  name: github-actions-releaser@${GCP_PROJECT}.iam.gserviceaccount.com
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: e2e-compat-networkpolicy-reader

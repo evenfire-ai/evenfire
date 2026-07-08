@@ -1,0 +1,41 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: sandbox-ui-test-harness
+  namespace: sandbox-recipes
+spec:
+  description: >-
+    Interactive harness that exercises every spec §9 and §11 boundary in
+    one app — CSP rules, off-origin redirect rewriting, navigation hand-
+    offs to the OS browser, permission denials, path traversal rejection,
+    header injection / strip, cookie HttpOnly, etc. Each scenario carries
+    its own explanation of the rule and the expected behaviour.
+  contextRef: context1
+  workloads:
+    - id: harness
+      type: deployment
+      # Local image baked into the minikube docker daemon. To rebuild:
+      #   eval $(minikube -p clerum-test docker-env)
+      #   docker build -t clerum/sandbox-ui-test-harness:test \
+      #     workflow-recipes/samples/sandbox-ui-test-harness
+      image: clerum/sandbox-ui-test-harness:test
+      imagePullPolicy: IfNotPresent
+      port: 8080
+      healthCheck:
+        type: http
+        path: /api/ping
+        port: 8080
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '32Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+  ui:
+    workloadRef: harness
+    port: 8080
+    title: 'Sandbox UI Test Harness'
+    defaultPath: '/'
+  security:
+    isolationLevel: minimal

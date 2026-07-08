@@ -1,0 +1,232 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: communicationchannels.clerum.io
+  labels:
+    app.kubernetes.io/name: communicationchannel
+    app.kubernetes.io/part-of: clerum
+spec:
+  group: clerum.io
+  names:
+    kind: CommunicationChannel
+    listKind: CommunicationChannelList
+    plural: communicationchannels
+    singular: communicationchannel
+    shortNames:
+      - channel
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: CommunicationChannel defines one or more communication channel groups (Telegram, Email, Slack) with agent-scoped access grants.
+          properties:
+            spec:
+              type: object
+              description: A communication channel belongs to a Host and may enable one or more chat providers.
+              required:
+                - hostRef
+              properties:
+                hostRef:
+                  type: string
+                  description: Reference to the Host this channel configuration belongs to.
+                credentialsSecretRef:
+                  type: object
+                  description: |
+                    Secret in the `channels` namespace holding provider credentials for this CC.
+                    Channel-reader reads these keys at runtime by channel type:
+                      telegram-bot-token, slack-bot-token, email-username, email-password.
+                    Slack app setup also stores slack-signing-secret for signed
+                    Events and Interactivity callbacks.
+                    Auto-created and named `cc-<ccname>-credentials` when credentials are
+                    set via Control UI; raw YAML may set this to share a Secret across CCs.
+                  required: [name]
+                  properties:
+                    name:
+                      type: string
+                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                      maxLength: 253
+                access:
+                  type: object
+                  description: >
+                    Users and teams allowed to connect conversations to this channel. Control UI
+                    restricts these values to principals that already have access to hostRef.
+                  properties:
+                    users:
+                      type: array
+                      items:
+                        type: string
+                    teams:
+                      type: array
+                      items:
+                        type: string
+                telegramSettings:
+                  type: object
+                  description: Global Telegram bot behavior for conversations confirmed later.
+                  properties:
+                    botHandle:
+                      type: string
+                      pattern: '^@?[A-Za-z0-9_]{5,32}$'
+                      description: >
+                        Public Telegram bot handle used to direct users to the correct bot during
+                        conversation setup. This is not a secret; the bot token remains in the
+                        credentials Secret.
+                    replyOnlyWhenMentioned:
+                      type: boolean
+                      description: >
+                        If true, group and supergroup messages must mention or reply to the bot.
+                telegram:
+                  type: array
+                  description: List of confirmed Telegram conversations.
+                  items:
+                    type: object
+                    required:
+                      - channelId
+                      - chatType
+                    properties:
+                      channelId:
+                        type: string
+                        description: Identifier for this Telegram private chat, group, or supergroup.
+                      chatType:
+                        type: string
+                        enum:
+                          - private
+                          - group
+                          - supergroup
+                        description: >
+                          Explicit Telegram chat type for this operational channel. Private chats,
+                          groups, and supergroups are supported in v1. Channels cannot identify a
+                          personal approver and remain unsupported.
+                      userIds:
+                        type: array
+                        description: >
+                          Legacy transport pre-filter for Telegram user IDs. New access is driven by
+                          spec.access plus provider-event verification.
+                        items:
+                          type: string
+                      title:
+                        type: string
+                        description: Telegram chat title or private chat display name captured at setup.
+                      handle:
+                        type: string
+                        description: Telegram username/handle captured at setup, without secrets.
+                      confirmedByUserId:
+                        type: string
+                        description: Clerum user id that confirmed this conversation.
+                      confirmedAt:
+                        type: string
+                        format: date-time
+                        description: Time this conversation was confirmed.
+                      replyOnlyWhenMentioned:
+                        type: boolean
+                        description: >
+                          If true, in groups and supergroups the bot only processes messages that @mention
+                          the bot, use a text_mention entity for the bot, or reply to the bot. Private chats
+                          are unaffected. Group/supergroup messages are dropped until the bot's numeric id is
+                          known after startup. If the bot has no @username, @mention matching does not apply in
+                          groups (reply-to-bot and text_mention still work). /approve and /deny are always
+                          accepted from allowed senders.
+                email:
+                  type: array
+                  description: List of Email channel groups.
+                  items:
+                    type: object
+                    required:
+                      - channelId
+                      - emails
+                    properties:
+                      channelId:
+                        type: string
+                        description: Mailbox/folder to read from (e.g. INBOX).
+                      emails:
+                        type: array
+                        description: Allowed email addresses for this group.
+                        items:
+                          type: string
+                slack:
+                  type: array
+                  description: >
+                    List of Slack channel groups. Workflow approval decisions require stable
+                    Slack user IDs plus workspace/team ID; userNames is retained for legacy
+                    chat allowlists only.
+                  items:
+                    type: object
+                    required:
+                      - channelId
+                    anyOf:
+                      - required:
+                          - userIds
+                          - workspaceId
+                      - required:
+                          - userNames
+                    properties:
+                      channelId:
+                        type: string
+                        description: >
+                          Slack channel identifier. Workflow approval decisions require a stable
+                          Slack channel ID (C..., D..., or G...) together with userIds and workspaceId.
+                          Legacy userNames-only chat allowlists may retain their existing channel names.
+                      workspaceId:
+                        type: string
+                        pattern: '^T[A-Z0-9]+$'
+                        description: Slack workspace/team ID used for stable identity.
+                      userIds:
+                        type: array
+                        description: Allowed Slack user IDs for this group. Required for workflow approval decisions.
+                        minItems: 1
+                        items:
+                          type: string
+                      userNames:
+                        type: array
+                        description: Legacy allowed Slack usernames for non-workflow chat filtering. Do not use as workflow approval identity.
+                        minItems: 1
+                        items:
+                          type: string
+                      replyOnlyWhenMentioned:
+                        type: boolean
+                        description: >
+                          If true, only process messages that include an app mention of this bot (<@USER_ID>).
+                          Non-approval messages are dropped until Slack auth.test returns a bot user_id.
+                          /approve and /deny are always accepted from allowed senders.
+                slackSettings:
+                  type: object
+                  description: >
+                    Public Slack app metadata and global bot behavior for conversations confirmed
+                    later. Secrets for the Slack app stay in credentialsSecretRef.
+                  properties:
+                    workspaceId:
+                      type: string
+                      pattern: '^T[A-Z0-9]+$'
+                      description: Slack workspace/team ID used while conversations are confirmed.
+                    botHandle:
+                      type: string
+                      description: Slack App name shown during user setup.
+                    replyOnlyWhenMentioned:
+                      type: boolean
+                      description: If true, process Slack messages only when the app is mentioned.
+                    replyInThreads:
+                      type: boolean
+                      description: >
+                        If true, Slack app responses are posted in a thread for the triggering
+                        message and follow-up messages in that thread continue there.
+      additionalPrinterColumns:
+        - name: Host
+          type: string
+          jsonPath: .spec.hostRef
+        - name: Telegram Groups
+          type: integer
+          jsonPath: .spec.telegram
+          description: Number of Telegram groups
+        - name: Email Groups
+          type: integer
+          jsonPath: .spec.email
+          description: Number of Email groups
+        - name: Slack Groups
+          type: integer
+          jsonPath: .spec.slack
+          description: Number of Slack groups
+      subresources:
+        status: {}

@@ -1,0 +1,47 @@
+# Example SharedFileSystem + a Context that references it.
+#
+# Layout that demonstrates the SharedFileSystem feature:
+#   - One SharedFileSystem ("team-mission") in the mcp-host namespace
+#   - One Context ("context-with-team-mission") in mcp-server that references it
+#
+# A Host pointing at this Context will get a RO mount of team-mission's PVC at
+# /workspace/team-mission. The mcp-host built-in clerum__context_files_* tools
+# will register and the LLM will see "team-mission/" as a top-level directory
+# under the virtual unified root.
+---
+apiVersion: clerum.io/v1alpha1
+kind: SharedFileSystem
+metadata:
+  name: team-mission
+  namespace: mcp-host
+spec:
+  size: 5Gi
+  accessModes:
+    # Minikube's default `standard` StorageClass is RWO-only. The wfc
+    # reconciler detects RWO and forces replicas:1 automatically (what GKE
+    # callers will do is set ReadWriteMany backed by the GCS FUSE
+    # StorageClass — see deploy/scripts/gcp-enable-gcsfuse.sh).
+    - ReadWriteOnce
+  directories:
+    - docs
+    - customer-history
+    - runbooks
+  security:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  retainOnDelete: true
+---
+apiVersion: clerum.io/v1alpha1
+kind: Context
+metadata:
+  name: context-with-team-mission
+  namespace: mcp-server
+spec:
+  contextId: context-with-team-mission
+  description: Example Context that mounts the team-mission SharedFileSystem.
+  mcpServers:
+    - mongodb-server
+  sharedFileSystems:
+    - name: team-mission
+      mountPath: /workspace/team-mission

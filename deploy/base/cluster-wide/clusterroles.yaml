@@ -1,0 +1,144 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clerum-channel-reader
+  labels:
+    app.kubernetes.io/name: channel-reader
+    app.kubernetes.io/part-of: clerum
+rules:
+- apiGroups:
+  - clerum.io
+  resources:
+  - communicationchannels
+  verbs:
+  - list
+  - watch
+---
+# control-api: CRD access only (cluster-wide).
+# Secret access is scoped to namespace-specific Roles:
+#   - control-plane: control-api-secrets-role (rbac.yaml)
+#   - mcp-host:      control-api-hosts-and-secrets (rbac.yaml)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: control-api
+rules:
+- apiGroups:
+  - clerum.io
+  resources:
+  - hosts
+  - contexts
+  - communicationchannels
+  - mcpservers
+  verbs:
+  - get
+  - list
+  - create
+  - update
+  - delete
+# workflowrecipepolicies: READ-ONLY access so the /admin/recipes/validate
+# handler can check the agenticWorkflowContextRefBlocked invariant (spec
+# §270-271 / §1441). control-api never mutates policies — those are authored
+# by cluster operators via `kubectl apply` and watched by the reconciler (L4).
+- apiGroups:
+  - clerum.io
+  resources:
+  - workflowrecipepolicies
+  verbs:
+  - get
+  - list
+---
+# workflow-recipes-cluster-watch — READ-ONLY cluster scope.
+# WorkflowRecipe parent CRDs are watched through the sandbox-recipes Role.
+# Cluster scope is kept only for referenced child resources that may be resolved
+# outside the recipe namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workflow-recipes-cluster-watch
+rules:
+- apiGroups:
+  - clerum.io
+  resources:
+  - contexts
+  - mcpservers
+  verbs:
+  - get
+  - list
+  - watch
+---
+# workflow-recipes-ns-mutator — mutating verbs for rendered MCP delegation
+# children. WorkflowRecipe parent CRDs are intentionally not included here; WRC
+# may mutate them only through the sandbox-recipes Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workflow-recipes-ns-mutator
+rules:
+- apiGroups:
+  - clerum.io
+  resources:
+  - contexts
+  - mcpservers
+  verbs:
+  - get
+  - create
+  - update
+  - patch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wrc-trigger-role
+  labels:
+    clerum.io/managed-by: clerum-wrc
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - services/proxy
+  verbs:
+  - create
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+---
+# control-api-pod-reader: allows control-api to exec into artifact pods
+# through @kubernetes/client-node. The client opens pods/exec over WebSocket
+# GET, while kubectl-compatible exec paths may use create; grant both verbs
+# and keep namespace scope in the RoleBindings.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: control-api-pod-reader
+  labels:
+    app.kubernetes.io/part-of: clerum
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["get", "create"]
+---
+# control-api-pod-lister: cluster-wide pods get/list ONLY (no exec).
+# Bound at cluster scope so control-api's `/admin/recipes/:name/pods`
+# endpoint can list pods across the three namespaces WRC splits into
+# (sandbox-recipes, sandbox-ui, mcp-server) without needing a separate
+# RoleBinding per namespace. The exec-capable ClusterRole above stays
+# namespace-bound to sandbox-recipes so cluster-wide exec is NOT
+# inadvertently granted.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: control-api-pod-lister
+  labels:
+    app.kubernetes.io/part-of: clerum
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]

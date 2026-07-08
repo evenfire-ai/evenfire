@@ -1,0 +1,650 @@
+import { config } from './config.js'
+import { ApiError, requestJson, withTimeout } from './httpClient.js'
+import {
+  ApprovalDecisionResult,
+  ContextBreakdownResult,
+  HostActivitySnapshot,
+  HostMessageRequest,
+  HostMessageResponse,
+  HostRuntimeHealth,
+  HostRuntimeStatus,
+  PendingApprovalLite,
+  RpcAllowedServersResult,
+  SessionLifecycleState,
+  SessionMessagesResult,
+  SessionTokensLite,
+} from './types.js'
+
+/**
+ * mcp-host answers HTTP 200 with `{success:false, error}` when an approval was
+ * already decided by another channel (spec-v2 §4.7.4). Parse the body into a
+ * structured result; a genuine non-ok HTTP still throws upstream.
+ */
+async function parseApprovalDecisionResponse(response: Response): Promise<ApprovalDecisionResult> {
+  const text = await response.text()
+  if (!text) return { success: true }
+  try {
+    const parsed = JSON.parse(text) as { success?: unknown; error?: unknown }
+    if (parsed && parsed.success === false) {
+      return {
+        success: false,
+        error: typeof parsed.error === 'string' ? parsed.error : undefined,
+      }
+    }
+    return { success: true }
+  } catch {
+    // A 200 with a non-JSON body historically meant success.
+    return { success: true }
+  }
+}
+
+function url(path: string): string {
+  return `${config.rpcProxyBaseUrl.replace(/\/+$/, '')}${path}`
+}
+
+export type SandboxUiApp = {
+  appRef: string
+  title?: string
+  description?: string
+  icon?: string
+  defaultPath: string
+  ready: boolean
+  phase: string | null
+  updatedAt: string | null
+}
+
+/**
+ * Status mapping used by the renderer:
+ *   401 / 403 → re-auth or lost ACL
+ *   404       → app removed
+ *   409       → app is updating; try again
+ *   500 / 502 → generic open failure
+ */
+export class SandboxUiSessionError extends Error {
+  readonly status: number
+  readonly body: string
+  constructor(status: number, body: string) {
+    super(`sandbox-ui session mint failed (${status}): ${body || '<empty body>'}`)
+    this.status = status
+    this.body = body
+    this.name = 'SandboxUiSessionError'
+  }
+}
+
+async function readErrorBody(response: Response): Promise<string> {
+  try {
+    return await response.text()
+  } catch (error) {
+    return error instanceof Error
+      ? `Failed to read error body: ${error.message}`
+      : 'Failed to read error body'
+  }
+}
+
+export class RpcProxyClient {
+  async health(): Promise<{ status: string }> {
+    return requestJson<{ status: string }>('GET', url('/health'))
+  }
+
+  async listServers(rpcAccessToken: string): Promise<RpcAllowedServersResult> {
+    return requestJson<RpcAllowedServersResult>('GET', url('/api/v1/rpc/servers'), {
+      token: rpcAccessToken,
+    })
+  }
+
+  async invokeHostMessage(
+    rpcAccessToken: string,
+    hostRef: string,
+    payload: HostMessageRequest,
+    options?: { async?: boolean }
+  ): Promise<HostMessageResponse> {
+    const query = options?.async ? '?async=true' : ''
+    return requestJson<HostMessageResponse>(
+      'POST',
+      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/messages${query}`),
+      {
+        token: rpcAccessToken,
+        body: payload,
+      }
+    )
+  }
+
+  async getTaskResult(
+    rpcAccessToken: string,
+    hostRef: string,
+    taskId: string
+  ): Promise<HostMessageResponse> {
+    return requestJson<HostMessageResponse>(
+      'GET',
+      url(
+        `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/tasks/${encodeURIComponent(taskId)}/result`
+      ),
+      { token: rpcAccessToken }
+    )
+  }
+
+  async getHostStatus(rpcAccessToken: string, hostRef: string): Promise<HostRuntimeStatus> {
+    return requestJson<HostRuntimeStatus>(
+      'GET',
+      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/status`),
+      {
+        token: rpcAccessToken,
+      }
+    )
+  }
+
+  async getHostHealth(rpcAccessToken: string, hostRef: string): Promise<HostRuntimeHealth> {
+    return requestJson<HostRuntimeHealth>(
+      'GET',
+      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/health`),
+      {
+        token: rpcAccessToken,
+      }
+    )
+  }
+
+  async getHostActivity(
+    rpcAccessToken: string,
+    hostRef: string,
+    options?: { limit?: number; sinceEventId?: string }
+  ): Promise<HostActivitySnapshot> {
+    const params = new URLSearchParams()
+    if (options?.limit) params.set('limit', String(options.limit))
+    if (options?.sinceEventId) params.set('sinceEventId', options.sinceEventId)
+    const query = params.toString()
+    return requestJson<HostActivitySnapshot>(
+      'GET',
+      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/activity${query ? `?${query}` : ''}`),
+      { token: rpcAccessToken }
+    )
+  }
+
+  /**
+   * List every UI-bearing recipe the user is allowlisted on.
+   * The RPC JWT must carry the `sandbox:ui:view` scope (issued by control-api
+   * when the user appears in user_workflow_triggers for any recipe
+   * with a `ui:` block). The recipe ACL is re-checked per recipe on session
+   * mint — this list is purely the picker payload.
+   */
+  async listSandboxUiApps(rpcAccessToken: string): Promise<{ apps: SandboxUiApp[] }> {
+    return requestJson<{ apps: SandboxUiApp[] }>('GET', url('/api/v1/sandbox-ui/apps'), {
+      token: rpcAccessToken,
+    })
+  }
+
+  /**
+   * Mint the per-recipe UI session cookie.
+   *
+   * Returns the raw Set-Cookie header value so the main process can hand it
+   * off to the WebContentsView's session.cookies.set() — rpc-proxy issues a
+   * Path-scoped cookie that must be installed into the embed's per-recipe
+   * partition before any view/* request.
+   *
+   * 204 → cookie minted; the Set-Cookie response header is non-empty.
+   * Other → throws a typed error so the caller can decide whether to retry,
+   *         show a toast, or refuse to mount the view.
+   */
+  async mintSandboxUiSession(
+    rpcAccessToken: string,
+    recipeNs: string,
+    recipeName: string
+  ): Promise<{ setCookie: string }> {
+    const response = await fetch(
+      url(
+        `/api/v1/sandbox-ui/${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/session`
+      ),
+      {
+        method: 'POST',
+        headers: { authorization: `Bearer ${rpcAccessToken}` },
+      }
+    )
+    if (response.status !== 204) {
+      const body = await response.text()
+      throw new SandboxUiSessionError(response.status, body)
+    }
+    const setCookie = response.headers.get('set-cookie') ?? ''
+    if (!setCookie) {
+      throw new SandboxUiSessionError(500, 'session minted without Set-Cookie header')
+    }
+    return { setCookie }
+  }
+
+  /**
+   * Spec §9.9 — fetch the provider authorize URL for an embed-initiated
+   * OAuth flow. The desktop main process calls this when the embed
+   * navigates to `clerum://oauth?clientId=…`; the returned URL is opened
+   * in the OS browser via `shell.openExternal`. rpc-proxy constructs the
+   * redirect_uri (control-api's public callback) and forwards to
+   * control-api's internal endpoint with the user identity asserted from
+   * the JWT sub.
+   */
+  async requestSandboxUiOauthAuthorizeUrl(
+    rpcAccessToken: string,
+    recipeNs: string,
+    recipeName: string,
+    oauthClientId: string,
+    background = false
+  ): Promise<{ authorizeUrl: string }> {
+    const response = await fetch(
+      url(
+        `/api/v1/sandbox-ui/${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/oauth/authorize-url`
+      ),
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${rpcAccessToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ oauthClientId, background }),
+      }
+    )
+    if (!response.ok) {
+      const body = await response.text()
+      throw new Error(
+        `sandbox-ui authorize-url request failed (${response.status}): ${body || '<empty>'}`
+      )
+    }
+    const json = (await response.json()) as { authorizeUrl?: unknown }
+    if (typeof json?.authorizeUrl !== 'string' || !json.authorizeUrl) {
+      throw new Error('sandbox-ui authorize-url response missing authorizeUrl')
+    }
+    return { authorizeUrl: json.authorizeUrl }
+  }
+
+  private async openHostStream(
+    rpcAccessToken: string,
+    path: string,
+    onEvent: (event: { event: string; data: unknown }) => void,
+    signal: AbortSignal,
+    // Invoked for SSE comment lines (e.g. `: keepalive`). These carry no data
+    // and are normally dropped, but they prove the connection is alive — the
+    // progress stream wires this to a heartbeat so the client watchdog doesn't
+    // falsely time out during a long, semantically-silent tool run.
+    onKeepalive?: () => void
+  ): Promise<void> {
+    const response = await fetch(url(path), {
+      method: 'GET',
+      headers: {
+        accept: 'text/event-stream',
+        authorization: `Bearer ${rpcAccessToken}`,
+      },
+      signal,
+    })
+    if (!response.ok) {
+      const body = await response.text()
+      throw new Error(`Host stream failed (${response.status}): ${body || response.statusText}`)
+    }
+    if (!response.body) {
+      throw new Error('Host stream missing response body')
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    const processChunk = (chunk: string) => {
+      buffer += chunk
+      while (true) {
+        const separator = buffer.indexOf('\n\n')
+        if (separator === -1) break
+        const rawEvent = buffer.slice(0, separator)
+        buffer = buffer.slice(separator + 2)
+        const lines = rawEvent.split(/\r?\n/)
+        let eventName = 'message'
+        let sawComment = false
+        const dataLines: string[] = []
+        for (const line of lines) {
+          if (line.startsWith('event:')) {
+            eventName = line.slice(6).trim() || 'message'
+          } else if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).trim())
+          } else if (line.startsWith(':')) {
+            sawComment = true
+          }
+        }
+        if (!dataLines.length) {
+          // A bare comment block (`: keepalive`) — signal liveness, then skip.
+          if (sawComment) onKeepalive?.()
+          continue
+        }
+        const payloadText = dataLines.join('\n')
+        try {
+          const data = JSON.parse(payloadText) as unknown
+          onEvent({ event: eventName, data })
+        } catch {
+          onEvent({ event: 'error', data: { message: 'Invalid stream payload' } })
+        }
+      }
+    }
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      processChunk(decoder.decode(value, { stream: true }))
+    }
+    const trailing = decoder.decode()
+    if (trailing) processChunk(trailing)
+  }
+
+  async openHostStatusStream(
+    rpcAccessToken: string,
+    hostRef: string,
+    onEvent: (event: { event: string; data: unknown }) => void,
+    signal: AbortSignal
+  ): Promise<void> {
+    await this.openHostStream(
+      rpcAccessToken,
+      `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/status/stream`,
+      onEvent,
+      signal
+    )
+  }
+
+  async openHostActivityStream(
+    rpcAccessToken: string,
+    hostRef: string,
+    onEvent: (event: { event: string; data: unknown }) => void,
+    signal: AbortSignal
+  ): Promise<void> {
+    await this.openHostStream(
+      rpcAccessToken,
+      `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/activity/stream`,
+      onEvent,
+      signal
+    )
+  }
+
+  async openTaskProgressStream(
+    rpcAccessToken: string,
+    hostRef: string,
+    taskId: string,
+    onEvent: (event: { event: string; data: unknown }) => void,
+    signal: AbortSignal
+  ): Promise<void> {
+    await this.openHostStream(
+      rpcAccessToken,
+      `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/tasks/${encodeURIComponent(taskId)}/progress/stream`,
+      onEvent,
+      signal,
+      // Surface mcp-host's `: keepalive` comments as heartbeats so the renderer's
+      // task watchdog treats the connection as alive during long silent tools.
+      () => onEvent({ event: 'heartbeat', data: { taskId, iteration: 0, elapsedMs: 0 } })
+    )
+  }
+
+  async approveToolCall(
+    rpcToken: string,
+    hostRef: string,
+    taskId: string,
+    toolCallId: string
+  ): Promise<ApprovalDecisionResult> {
+    const response = await fetch(
+      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/approvals/approve`),
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${rpcToken}`,
+        },
+        body: JSON.stringify({ taskId, toolCallId }),
+        signal: withTimeout(),
+      }
+    )
+    if (!response.ok) {
+      const body = await response.text()
+      // ApiError (not a bare Error) so `AppService.shouldRefreshRpcToken` can see
+      // the 401/403 status and drive the retry-after-refresh (§4.5-7).
+      throw new ApiError(`Approve failed (${response.status}): ${body}`, response.status, body)
+    }
+    return parseApprovalDecisionResponse(response)
+  }
+
+  async denyToolCall(
+    rpcToken: string,
+    hostRef: string,
+    taskId: string,
+    toolCallId: string,
+    reason: string
+  ): Promise<ApprovalDecisionResult> {
+    const response = await fetch(
+      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/approvals/deny`),
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${rpcToken}`,
+        },
+        body: JSON.stringify({ taskId, toolCallId, reason }),
+        signal: withTimeout(),
+      }
+    )
+    if (!response.ok) {
+      const body = await response.text()
+      throw new ApiError(`Deny failed (${response.status}): ${body}`, response.status, body)
+    }
+    return parseApprovalDecisionResponse(response)
+  }
+
+  async cancelTask(rpcToken: string, hostRef: string, taskId: string): Promise<void> {
+    const response = await fetch(
+      url(
+        `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/tasks/${encodeURIComponent(taskId)}/cancel`
+      ),
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${rpcToken}`,
+        },
+        signal: withTimeout(),
+      }
+    )
+    if (!response.ok) {
+      const body = await response.text()
+      throw new ApiError(`cancelTask failed (${response.status}): ${body}`, response.status, body)
+    }
+  }
+
+  async listArtifacts(
+    rpcToken: string,
+    hostRef: string
+  ): Promise<{
+    artifacts: Array<{ name: string; format: string; sizeBytes: number; createdAt: string }>
+  }> {
+    const response = await fetch(
+      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/artifacts`),
+      {
+        headers: { authorization: `Bearer ${rpcToken}` },
+        signal: withTimeout(),
+      }
+    )
+    if (!response.ok) {
+      const body = await response.text()
+      throw new ApiError(
+        `List artifacts failed (${response.status}): ${body}`,
+        response.status,
+        body
+      )
+    }
+    return response.json() as Promise<{
+      artifacts: Array<{ name: string; format: string; sizeBytes: number; createdAt: string }>
+    }>
+  }
+
+  async downloadArtifact(rpcToken: string, hostRef: string, filename: string): Promise<Buffer> {
+    const response = await fetch(
+      url(
+        `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/artifacts/${encodeURIComponent(filename)}/download`
+      ),
+      {
+        headers: { authorization: `Bearer ${rpcToken}` },
+      }
+    )
+    if (!response.ok) {
+      const body = await response.text()
+      throw new Error(`Download artifact failed (${response.status}): ${body}`)
+    }
+    return Buffer.from(await response.arrayBuffer())
+  }
+
+  async listSessions(
+    rpcToken: string,
+    hostRef: string
+  ): Promise<{
+    items: Array<{
+      agent: string
+      chatId: string
+      turnCount: number
+      lastActivityAt: string
+      // V5: the wire already carries these per-session recovery fields
+      // (mcp-host `main.ts` `...sessionStateView(conversation)`); only the TS
+      // return type used to omit them, hiding the batch badge seeding source.
+      state?: SessionLifecycleState
+      activeTaskId?: string
+      pendingApproval?: PendingApprovalLite
+      tokens?: SessionTokensLite
+    }>
+  }> {
+    const response = await fetch(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions`), {
+      headers: { authorization: `Bearer ${rpcToken}` },
+      signal: withTimeout(),
+    })
+    if (!response.ok) {
+      const body = await response.text()
+      throw new ApiError(
+        `List sessions failed (${response.status}): ${body}`,
+        response.status,
+        body
+      )
+    }
+    return response.json() as Promise<{
+      items: Array<{
+        agent: string
+        chatId: string
+        turnCount: number
+        lastActivityAt: string
+        state?: SessionLifecycleState
+        activeTaskId?: string
+        pendingApproval?: PendingApprovalLite
+        tokens?: SessionTokensLite
+      }>
+    }>
+  }
+
+  async loadSessionMessages(
+    rpcToken: string,
+    hostRef: string,
+    agent: string,
+    chatId: string
+  ): Promise<SessionMessagesResult> {
+    const response = await fetch(
+      url(
+        `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
+      ),
+      { headers: { authorization: `Bearer ${rpcToken}` }, signal: withTimeout() }
+    )
+    if (response.status === 404) {
+      // Keep the '404' token in the message: the renderer's `isHttp404` matches on
+      // it to evict a stale local chat.
+      throw new ApiError(`Session not found (404)`, 404, '')
+    }
+    if (!response.ok) {
+      const body = await response.text()
+      throw new ApiError(
+        `Load session messages failed (${response.status}): ${body}`,
+        response.status,
+        body
+      )
+    }
+    // F5: cast to the full wire shape — the server returns `state`/`activeTaskId`/
+    // `pendingApproval` + per-turn `tool_steps`, and the renderer's recovery path
+    // reads them. The previous cast dropped them, silently weakening the contract.
+    return response.json() as Promise<SessionMessagesResult>
+  }
+
+  /**
+   * On-demand snapshot of the active conversation's context-window composition.
+   * Keyed by `(agent, chatId)` like {@link loadSessionMessages} — the server
+   * derives the owning `userSub` from the verified caller token, never from the
+   * path. Returns `{ breakdown: null }` when the session has no snapshot yet, and
+   * also when the session is unknown to this user (the server replies with the
+   * same anti-enumeration 404 in both cases) — the caller treats both as "no
+   * breakdown to show" rather than an error.
+   */
+  async getContextBreakdown(
+    rpcToken: string,
+    hostRef: string,
+    agent: string,
+    chatId: string
+  ): Promise<ContextBreakdownResult> {
+    const response = await fetch(
+      url(
+        `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`
+      ),
+      { headers: { authorization: `Bearer ${rpcToken}` }, signal: withTimeout() }
+    )
+    if (response.status === 404) {
+      // Anti-enumeration 404 (no snapshot or session not owned by caller) — the
+      // chip simply hides. NOT an error to surface to the user.
+      return { breakdown: null }
+    }
+    if (!response.ok) {
+      const body = await response.text()
+      throw new ApiError(
+        `Get context breakdown failed (${response.status}): ${body}`,
+        response.status,
+        body
+      )
+    }
+    return response.json() as Promise<ContextBreakdownResult>
+  }
+
+  async getDesktopStatus(
+    rpcAccessToken: string,
+    hostRef: string
+  ): Promise<{ hostRef: string; status: string; message?: string }> {
+    return requestJson<{ hostRef: string; status: string; message?: string }>(
+      'GET',
+      url(`/api/v1/desktop/${encodeURIComponent(hostRef)}`),
+      {
+        token: rpcAccessToken,
+      }
+    )
+  }
+
+  /**
+   * Exchanges JWT for a desktop session cookie.
+   * Returns the raw Set-Cookie header value so the caller (main process)
+   * can inject it into an Electron BrowserWindow's session.
+   */
+  async postDesktopSession(
+    rpcAccessToken: string,
+    hostRef: string
+  ): Promise<{ ok: true; hostRef: string; setCookie: string[] }> {
+    const res = await fetch(url(`/api/v1/desktop/${encodeURIComponent(hostRef)}/session`), {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${rpcAccessToken}`,
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    })
+    if (!res.ok) {
+      const text = await readErrorBody(res)
+      throw new ApiError(
+        `Desktop session exchange failed: ${res.status} ${text || res.statusText}`,
+        res.status,
+        text
+      )
+    }
+    const body = (await res.json()) as { ok: true; hostRef: string }
+    const cookies: string[] =
+      typeof (res.headers as any).getSetCookie === 'function'
+        ? (res.headers as any).getSetCookie()
+        : [res.headers.get('set-cookie') || ''].filter(Boolean)
+    if (!cookies.length) {
+      throw new Error('Desktop session response missing Set-Cookie header')
+    }
+    return { ...body, setCookie: cookies }
+  }
+}

@@ -1,0 +1,135 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-layer3a-snippet-direct-db
+  namespace: sandbox-recipes
+spec:
+  triggers:
+    onDemand: {}
+  description: Layer 3A snippet runtime direct MongoDB and PostgreSQL SDK flow.
+  resources:
+    - id: pg-auth
+      type: secret
+      data:
+        password: layer3a-test-password
+  workloads:
+    - id: mongodb
+      type: statefulset
+      image: mongodb/mongodb-community-server:7.0-ubi8
+      port: 27017
+      healthCheck:
+        type: exec
+        command: ['mongosh', '--eval', 'db.runCommand({ping:1})', '--quiet']
+        initialDelaySeconds: 60
+        periodSeconds: 15
+        timeoutSeconds: 10
+        failureThreshold: 5
+      resources:
+        requests:
+          cpu: '100m'
+          memory: '256Mi'
+        limits:
+          cpu: '500m'
+          memory: '512Mi'
+    - id: postgres
+      type: statefulset
+      image: postgres:16-alpine
+      port: 5432
+      security:
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+      env:
+        - name: POSTGRES_PASSWORD
+          value: '{{pg-auth:password}}'
+        - name: POSTGRES_DB
+          value: clerum
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+      healthCheck:
+        type: exec
+        command: ['pg_isready', '-U', 'postgres']
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '256Mi'
+  inputs:
+    minAmount: 1000
+    scenario: layer3a-direct-db
+  output:
+    destination: pvc
+    format: multi
+    storageSize: 128Mi
+  steps:
+    - id: query-mongo
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          const ref = { workload: "mongodb", database: "clerum", collection: "receivables" }
+          const inserted = await sdk.mongo.insertMany(ref, {
+            documents: [
+              { account: "dao-alpha", status: "open", amount: 1880 },
+              { account: "dao-beta", status: "closed", amount: 25 }
+            ]
+          })
+          await sdk.mongo.updateOne(ref, {
+            filter: { account: "dao-alpha" },
+            update: { $set: { reviewed: true } }
+          })
+          const rows = await sdk.mongo.find(ref, {
+            filter: { status: "open", reviewed: true },
+            sort: { amount: -1 },
+            limit: 10
+          })
+          const artifact = await sdk.artifacts.writeJson("direct-db-mongo.json", {
+            scenario: sdk.inputs.scenario,
+            source: "mongo",
+            insertedCount: inserted.insertedCount,
+            rows
+          })
+          return { source: "mongo", insertedCount: inserted.insertedCount, rows, artifact }
+        capabilities:
+          mongo:
+            access: readWrite
+            workloads: [mongodb]
+    - id: query-postgres
+      dependsOn: [query-mongo]
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          const minAmount = Number(sdk.inputs.minAmount)
+          const ref = { workload: "postgres", database: "clerum", user: "postgres", passwordSecretAlias: "pg_password" }
+          await sdk.postgres.execute(ref, {
+            sql: "create table if not exists receivables(account text primary key, amount numeric, source text)"
+          })
+          const inserted = await sdk.postgres.execute(ref, {
+            sql: "insert into receivables(account, amount, source) values ($1, $2, $3), ($4, $5, $6) on conflict (account) do update set amount = excluded.amount, source = excluded.source returning account, amount, source",
+            values: ["dao-alpha", 1880, "snippet", "dao-beta", 25, "snippet"]
+          })
+          const rows = await sdk.postgres.query(
+            ref,
+            {
+              sql: "select account, amount, source from receivables where amount >= $1 order by amount desc",
+              values: [minAmount],
+              limit: 10
+            }
+          )
+          const artifact = await sdk.artifacts.writeMarkdown(
+            "direct-db-summary.md",
+            `# Direct DB Summary\n\nRows: ${rows.length}\nInsertedRows: ${inserted.rowCount}\nMongoRows: ${sdk.previousOutputs["query-mongo"].rows.length}\n`
+          )
+          return { source: "postgres", insertedCount: inserted.rowCount, rows, artifact, mongoRows: sdk.previousOutputs["query-mongo"].rows.length }
+        capabilities:
+          secrets:
+            - alias: pg_password
+              secretRef:
+                name: pg-auth
+                key: password
+          postgres:
+            access: readWrite
+            workloads: [postgres]

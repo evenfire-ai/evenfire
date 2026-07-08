@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MCP Delegation — Phase-8 §4.8 Namespace Split (post-refactor)</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #020617;
+    --panel: #0f172a;
+    --border: #1e293b;
+    --muted: #94a3b8;
+    --text: #e2e8f0;
+    --cyan: #22d3ee;
+    --emerald: #34d399;
+    --violet: #a78bfa;
+    --amber: #fbbf24;
+    --rose: #fb7185;
+    --orange: #fb923c;
+    --slate: #94a3b8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--bg);
+    color: var(--text);
+    padding: 32px 24px;
+  }
+  header {
+    max-width: 1240px;
+    margin: 0 auto 24px;
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  header .dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--emerald);
+    box-shadow: 0 0 10px var(--emerald);
+    animation: pulse 2s infinite;
+    display: inline-block;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+  header .subtitle { color: var(--muted); font-size: 11px; }
+  .card {
+    max-width: 1240px;
+    margin: 0 auto;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    overflow-x: auto;
+  }
+  svg { display: block; margin: 0 auto; }
+  .grid-wrap {
+    max-width: 1240px;
+    margin: 24px auto 0;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+  .info-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .info-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .info-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .d-rose { background: var(--rose); box-shadow: 0 0 6px var(--rose); }
+  .d-cyan { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+  .d-emerald { background: var(--emerald); box-shadow: 0 0 6px var(--emerald); }
+  .info-card h3 { margin: 0; font-size: 12px; color: var(--text); font-weight: 600; }
+  .info-card ul { margin: 0; padding: 0; list-style: none; }
+  .info-card li { font-size: 10px; color: var(--muted); margin: 4px 0; line-height: 1.4; }
+  .info-card li code { color: var(--amber); font-size: 9.5px; }
+  footer {
+    max-width: 1240px;
+    margin: 24px auto 0;
+    color: var(--muted);
+    font-size: 9px;
+    text-align: center;
+    letter-spacing: 0.3px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="dot"></span>
+  <h1>MCP Delegation — Phase-8 §4.8 Namespace Split</h1>
+  <span class="subtitle">post-canonical-namespace refactor (commits 9b192be0 · 1fcfd16c · aa6b13fd)</span>
+</header>
+
+<div class="card">
+  <svg viewBox="0 0 1180 900" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+        <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+      </pattern>
+      <marker id="arr-slate" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/>
+      </marker>
+      <marker id="arr-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185"/>
+      </marker>
+      <marker id="arr-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/>
+      </marker>
+      <marker id="arr-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/>
+      </marker>
+      <marker id="arr-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa"/>
+      </marker>
+      <marker id="arr-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#fb923c"/>
+      </marker>
+    </defs>
+
+    <rect width="100%" height="100%" fill="url(#grid)"/>
+
+    <!-- ═══════════════  NAMESPACE: control-plane  ═══════════════ -->
+    <rect x="40" y="40" width="1100" height="130" rx="12" fill="none" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="8,4"/>
+    <text x="58" y="62" fill="#22d3ee" font-family="JetBrains Mono" font-size="11" font-weight="600">namespace: control-plane</text>
+
+    <!-- control-api -->
+    <rect x="70" y="80" width="260" height="70" rx="6" fill="#0f172a"/>
+    <rect x="70" y="80" width="260" height="70" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="200" y="102" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">control-api</text>
+    <text x="200" y="120" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">/admin/recipes · /validate</text>
+    <text x="200" y="134" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">422 if ns ≠ canonical</text>
+    <text x="200" y="146" fill="#fbbf24" font-family="JetBrains Mono" font-size="8" text-anchor="middle">signs delegation JWT</text>
+
+    <!-- workflow-recipes / WRC -->
+    <rect x="460" y="80" width="260" height="70" rx="6" fill="#0f172a"/>
+    <rect x="460" y="80" width="260" height="70" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="590" y="102" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">workflow-recipes (WRC)</text>
+    <text x="590" y="120" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">reconciler :8082</text>
+    <text x="590" y="134" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">watches workflowrecipes (cluster)</text>
+    <text x="590" y="146" fill="#fbbf24" font-family="JetBrains Mono" font-size="8" text-anchor="middle">mints coord/mcp-host JWTs</text>
+
+    <!-- HCC -->
+    <rect x="850" y="80" width="260" height="70" rx="6" fill="#0f172a"/>
+    <rect x="850" y="80" width="260" height="70" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="980" y="102" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">host-context-controller</text>
+    <text x="980" y="120" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">Context Mapper :8081</text>
+    <text x="980" y="134" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">watches mcpservers + contexts</text>
+    <text x="980" y="146" fill="#fbbf24" font-family="JetBrains Mono" font-size="8" text-anchor="middle">creates L0-L3 NetworkPolicies</text>
+
+    <!-- ═══════════════  NAMESPACE: sandbox-recipes  ═══════════════ -->
+    <rect x="40" y="210" width="540" height="620" rx="12" fill="none" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="8,4"/>
+    <text x="58" y="232" fill="#fb7185" font-family="JetBrains Mono" font-size="11" font-weight="600">namespace: sandbox-recipes  ·  CANONICAL CRD storage</text>
+    <text x="58" y="246" fill="#94a3b8" font-family="JetBrains Mono" font-size="9">Phase-8 §4.8: workloads without `transport` live here</text>
+
+    <!-- WorkflowRecipe CRD -->
+    <rect x="70" y="270" width="240" height="70" rx="6" fill="#0f172a"/>
+    <rect x="70" y="270" width="240" height="70" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="190" y="292" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">WorkflowRecipe CRD</text>
+    <text x="190" y="308" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">clerum.io/v1alpha1</text>
+    <text x="190" y="322" fill="#fbbf24" font-family="JetBrains Mono" font-size="8" text-anchor="middle">VAP: [sandbox-recipes, mcp-server]</text>
+
+    <!-- WorkflowRecipePolicy -->
+    <rect x="320" y="270" width="240" height="70" rx="6" fill="#0f172a"/>
+    <rect x="320" y="270" width="240" height="70" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="440" y="292" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">WorkflowRecipePolicy</text>
+    <text x="440" y="308" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">gate: allowContextRef, minIso…</text>
+    <text x="440" y="322" fill="#fbbf24" font-family="JetBrains Mono" font-size="8" text-anchor="middle">co-located with recipes (ns-local lookup)</text>
+
+    <!-- coordinator Pod -->
+    <rect x="70" y="370" width="240" height="90" rx="6" fill="#0f172a"/>
+    <rect x="70" y="370" width="240" height="90" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="190" y="392" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">coordinator Pod</text>
+    <text x="190" y="408" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">&lt;recipe&gt;-coordinator</text>
+    <text x="190" y="424" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">runs workflow steps</text>
+    <text x="190" y="440" fill="#fbbf24" font-family="JetBrains Mono" font-size="8" text-anchor="middle">JWT recipeNamespace: sandbox-recipes</text>
+    <text x="190" y="452" fill="#34d399" font-family="JetBrains Mono" font-size="8" text-anchor="middle">ownerRef: WorkflowRecipe (same-ns OK)</text>
+
+    <!-- mcp-host Pod -->
+    <rect x="320" y="370" width="240" height="90" rx="6" fill="#0f172a"/>
+    <rect x="320" y="370" width="240" height="90" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="440" y="392" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">mcp-host Pod</text>
+    <text x="440" y="408" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">&lt;recipe&gt;-mcp-host</text>
+    <text x="440" y="424" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">LLM orchestrator + MCP client</text>
+    <text x="440" y="440" fill="#fb7185" font-family="JetBrains Mono" font-size="8" text-anchor="middle">talks HTTP cross-ns → mcp-server:3000</text>
+    <text x="440" y="452" fill="#34d399" font-family="JetBrains Mono" font-size="8" text-anchor="middle">ownerRef: WorkflowRecipe (same-ns OK)</text>
+
+    <!-- non-MCP workloads -->
+    <rect x="70" y="490" width="490" height="90" rx="6" fill="#0f172a"/>
+    <rect x="70" y="490" width="490" height="90" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="315" y="512" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">non-MCP rendered workloads</text>
+    <text x="315" y="528" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">Deployment · StatefulSet · CronJob · Job · DaemonSet</text>
+    <text x="315" y="544" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">PVCs · ConfigMaps · Secrets · NetworkPolicies L0+L1</text>
+    <text x="315" y="562" fill="#fbbf24" font-family="JetBrains Mono" font-size="8" text-anchor="middle">resolved via resolveWorkloadNamespace(workload)</text>
+    <text x="315" y="574" fill="#34d399" font-family="JetBrains Mono" font-size="8" text-anchor="middle">ownerRef: WorkflowRecipe (same-ns OK)</text>
+
+    <!-- Secret coordinator-token -->
+    <rect x="70" y="610" width="490" height="70" rx="6" fill="#0f172a"/>
+    <rect x="70" y="610" width="490" height="70" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="315" y="632" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">Secret wf-&lt;recipe&gt;-coordinator-token</text>
+    <text x="315" y="650" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">{ mcp-host-token, wrc-token, cronjob-trigger-token }</text>
+    <text x="315" y="666" fill="#fbbf24" font-family="JetBrains Mono" font-size="8" text-anchor="middle">claim recipeNamespace = sandbox-recipes  ←  matches CRD's actual ns</text>
+
+    <!-- ═══════════════  NAMESPACE: mcp-server  ═══════════════ -->
+    <rect x="600" y="210" width="540" height="620" rx="12" fill="none" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="8,4"/>
+    <text x="618" y="232" fill="#22d3ee" font-family="JetBrains Mono" font-size="11" font-weight="600">namespace: mcp-server  ·  MCP workloads rendered by WRC batch ops</text>
+    <text x="618" y="246" fill="#94a3b8" font-family="JetBrains Mono" font-size="9">Phase-8 §4.8: workloads with `transport` land here</text>
+
+    <!-- McpServer CRD -->
+    <rect x="630" y="270" width="240" height="70" rx="6" fill="#0f172a"/>
+    <rect x="630" y="270" width="240" height="70" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="750" y="292" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">McpServer CRD</text>
+    <text x="750" y="308" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">&lt;recipe&gt;-&lt;workload&gt;-&lt;uuid&gt;</text>
+    <text x="750" y="322" fill="#fb7185" font-family="JetBrains Mono" font-size="8" text-anchor="middle">ownerRef STRIPPED (cross-ns)</text>
+
+    <!-- transport Service -->
+    <rect x="880" y="270" width="240" height="70" rx="6" fill="#0f172a"/>
+    <rect x="880" y="270" width="240" height="70" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="1000" y="292" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">transport Service</text>
+    <text x="1000" y="308" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">ClusterIP · port 3000</text>
+    <text x="1000" y="322" fill="#fb7185" font-family="JetBrains Mono" font-size="8" text-anchor="middle">ownerRef STRIPPED (cross-ns)</text>
+
+    <!-- per-recipe Context -->
+    <rect x="630" y="370" width="240" height="80" rx="6" fill="#0f172a"/>
+    <rect x="630" y="370" width="240" height="80" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="750" y="392" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">Context CRD</text>
+    <text x="750" y="408" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">wf-&lt;recipe&gt;  (H-04 isolation)</text>
+    <text x="750" y="422" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">allowlist: mcpServers[]</text>
+    <text x="750" y="440" fill="#fb7185" font-family="JetBrains Mono" font-size="8" text-anchor="middle">ownerRef STRIPPED (cross-ns)</text>
+
+    <!-- MCP workload Pod -->
+    <rect x="880" y="370" width="240" height="80" rx="6" fill="#0f172a"/>
+    <rect x="880" y="370" width="240" height="80" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="1000" y="392" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">MCP workload Pod</text>
+    <text x="1000" y="408" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">transport: HTTP | stdio</text>
+    <text x="1000" y="422" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">Deployment serves /mcp</text>
+    <text x="1000" y="440" fill="#fbbf24" font-family="JetBrains Mono" font-size="8" text-anchor="middle">stdio-bridge sidecar (HCC-managed)</text>
+
+    <!-- NetworkPolicies -->
+    <rect x="630" y="480" width="490" height="110" rx="6" fill="#0f172a"/>
+    <rect x="630" y="480" width="490" height="110" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="875" y="502" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">NetworkPolicies (HCC-managed)</text>
+    <text x="875" y="520" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">L0: deny-all-mcp-server (pod-level default deny)</text>
+    <text x="875" y="534" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">L1: allow-dns-egress · allow-hcc-api-egress · allow-k8s-api</text>
+    <text x="875" y="548" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">L2: ctx-{contextId}-egress  (allows sandbox-recipes mcp-host)</text>
+    <text x="875" y="562" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">L3: binding-allow · egressBindings (per-workload)</text>
+    <text x="875" y="580" fill="#fbbf24" font-family="JetBrains Mono" font-size="8" text-anchor="middle">reconciled from Context CRD + McpServer.egressBindings</text>
+
+    <!-- cleanup note -->
+    <rect x="630" y="610" width="490" height="70" rx="6" fill="#0f172a"/>
+    <rect x="630" y="610" width="490" height="70" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="875" y="632" fill="#e2e8f0" font-family="JetBrains Mono" font-size="12" font-weight="600" text-anchor="middle">Cleanup (no native GC cross-ns)</text>
+    <text x="875" y="650" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">cleanupDelegation → deleteNamespacedCustomObject per workload name</text>
+    <text x="875" y="666" fill="#94a3b8" font-family="JetBrains Mono" font-size="9" text-anchor="middle">finalizationHandler → label selector clerum.io/recipe=&lt;name&gt;</text>
+
+    <!-- ═══════════════  ARROWS  ═══════════════ -->
+
+    <!-- control-api → WorkflowRecipe CRD -->
+    <line x1="200" y1="150" x2="200" y2="265" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr-cyan)"/>
+    <text x="210" y="188" fill="#22d3ee" font-family="JetBrains Mono" font-size="9">POST /admin/recipes</text>
+    <text x="210" y="202" fill="#22d3ee" font-family="JetBrains Mono" font-size="8">ns = sandbox-recipes</text>
+    <text x="210" y="214" fill="#fb7185" font-family="JetBrains Mono" font-size="8">422 if mismatch</text>
+
+    <!-- WRC watches WorkflowRecipe (cluster-wide) -->
+    <line x1="460" y1="128" x2="315" y2="268" stroke="#34d399" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arr-emerald)"/>
+    <text x="340" y="186" fill="#34d399" font-family="JetBrains Mono" font-size="9">watch (cluster-wide)</text>
+
+    <!-- WRC → McpServer (cross-ns, strip ownerRef) -->
+    <line x1="700" y1="150" x2="750" y2="265" stroke="#34d399" stroke-width="2" marker-end="url(#arr-emerald)"/>
+    <text x="720" y="184" fill="#34d399" font-family="JetBrains Mono" font-size="9">preDeployMcpServers(</text>
+    <text x="720" y="196" fill="#34d399" font-family="JetBrains Mono" font-size="9">  recipe, this.config.namespace</text>
+    <text x="720" y="208" fill="#34d399" font-family="JetBrains Mono" font-size="9">)</text>
+    <text x="720" y="222" fill="#fb7185" font-family="JetBrains Mono" font-size="8">+ ownerRef STRIP cross-ns</text>
+
+    <!-- WRC → coordinator + mcp-host + non-MCP (sandbox-recipes) -->
+    <line x1="520" y1="150" x2="300" y2="368" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr-emerald)"/>
+    <text x="325" y="250" fill="#34d399" font-family="JetBrains Mono" font-size="8">creates coordinator,</text>
+    <text x="325" y="262" fill="#34d399" font-family="JetBrains Mono" font-size="8">mcp-host, non-MCP</text>
+    <text x="325" y="274" fill="#34d399" font-family="JetBrains Mono" font-size="8">(same-ns ownerRef ✓)</text>
+
+    <!-- HCC → McpServer + Context (watch) -->
+    <line x1="930" y1="150" x2="810" y2="265" stroke="#a78bfa" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arr-violet)"/>
+    <text x="830" y="186" fill="#a78bfa" font-family="JetBrains Mono" font-size="9">watch McpServer</text>
+    <text x="830" y="198" fill="#a78bfa" font-family="JetBrains Mono" font-size="9">watch Context</text>
+
+    <!-- HCC → NetworkPolicies -->
+    <line x1="980" y1="150" x2="960" y2="475" stroke="#a78bfa" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arr-violet)"/>
+
+    <!-- Service → MCP Pod (selector) -->
+    <line x1="1000" y1="340" x2="1000" y2="368" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr-cyan)"/>
+    <text x="1020" y="358" fill="#94a3b8" font-family="JetBrains Mono" font-size="8">selector</text>
+
+    <!-- mcp-host → Service (cross-ns HTTP via DNS) -->
+    <line x1="560" y1="412" x2="877" y2="300" stroke="#fb7185" stroke-width="2" marker-end="url(#arr-rose)"/>
+    <text x="580" y="345" fill="#fb7185" font-family="JetBrains Mono" font-size="9">HTTP :3000/mcp</text>
+    <text x="580" y="358" fill="#fb7185" font-family="JetBrains Mono" font-size="8">DNS: &lt;svc&gt;.mcp-server.svc.cluster.local</text>
+    <text x="580" y="370" fill="#fb7185" font-family="JetBrains Mono" font-size="8">allowed by L2/L3 NetworkPolicies</text>
+
+    <!-- coordinator → WRC REST (JWT bearer) -->
+    <line x1="230" y1="370" x2="540" y2="152" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arr-orange)"/>
+    <text x="260" y="300" fill="#fb923c" font-family="JetBrains Mono" font-size="8">GET /status · /configure</text>
+    <text x="260" y="312" fill="#fb923c" font-family="JetBrains Mono" font-size="8">Bearer JWT</text>
+    <text x="260" y="324" fill="#fb923c" font-family="JetBrains Mono" font-size="8">claim: recipeNamespace</text>
+
+    <!-- WRC → policy lookup (same ns) -->
+    <line x1="500" y1="150" x2="450" y2="265" stroke="#34d399" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arr-emerald)"/>
+    <text x="420" y="210" fill="#34d399" font-family="JetBrains Mono" font-size="8">listWorkflowRecipe-</text>
+    <text x="420" y="222" fill="#34d399" font-family="JetBrains Mono" font-size="8">Policies(ns = recipe's ns)</text>
+
+    <!-- coordinator → Secret (mount) -->
+    <line x1="190" y1="460" x2="200" y2="605" stroke="#fbbf24" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#arr-slate)"/>
+    <text x="208" y="520" fill="#fbbf24" font-family="JetBrains Mono" font-size="8">mount</text>
+
+    <!-- Legend -->
+    <text x="60" y="870" fill="#e2e8f0" font-family="JetBrains Mono" font-size="11" font-weight="600">Legend</text>
+    <line x1="130" y1="866" x2="155" y2="866" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr-cyan)"/>
+    <text x="160" y="870" fill="#94a3b8" font-family="JetBrains Mono" font-size="9">control-plane ops</text>
+    <line x1="270" y1="866" x2="295" y2="866" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr-emerald)"/>
+    <text x="300" y="870" fill="#94a3b8" font-family="JetBrains Mono" font-size="9">WRC reconcile (solid=create, dashed=watch)</text>
+    <line x1="560" y1="866" x2="585" y2="866" stroke="#a78bfa" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arr-violet)"/>
+    <text x="590" y="870" fill="#94a3b8" font-family="JetBrains Mono" font-size="9">HCC watch / NP reconcile</text>
+    <line x1="770" y1="866" x2="795" y2="866" stroke="#fb7185" stroke-width="2" marker-end="url(#arr-rose)"/>
+    <text x="800" y="870" fill="#94a3b8" font-family="JetBrains Mono" font-size="9">runtime data plane (HTTP)</text>
+    <line x1="980" y1="866" x2="1005" y2="866" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arr-orange)"/>
+    <text x="1010" y="870" fill="#94a3b8" font-family="JetBrains Mono" font-size="9">auth (Bearer JWT)</text>
+  </svg>
+</div>
+
+<div class="grid-wrap">
+  <div class="info-card">
+    <div class="info-header"><span class="info-dot d-rose"></span><h3>sandbox-recipes (canonical)</h3></div>
+    <ul>
+      <li>• WorkflowRecipe + Policy CRDs</li>
+      <li>• coordinator + mcp-host Pods (orchestrator)</li>
+      <li>• Non-MCP workloads (StatefulSet, Deployment, CronJob, Job, DaemonSet)</li>
+      <li>• PVCs + Secrets + non-MCP NetworkPolicies</li>
+      <li>• Secret <code>wf-&lt;recipe&gt;-coordinator-token</code> with <code>recipeNamespace=sandbox-recipes</code></li>
+    </ul>
+  </div>
+  <div class="info-card">
+    <div class="info-header"><span class="info-dot d-cyan"></span><h3>mcp-server (MCP children)</h3></div>
+    <ul>
+      <li>• McpServer CRD + transport Service (ClusterIP :3000)</li>
+      <li>• per-recipe Context <code>wf-&lt;recipe&gt;</code> (H-04 isolation, allowlist)</li>
+      <li>• MCP workload Pod (HTTP or stdio+bridge sidecar)</li>
+      <li>• <code>ownerReferences</code> STRIPPED (cross-ns invalid per K8s ≥1.24)</li>
+      <li>• Cleanup: <code>cleanupDelegation</code> + <code>finalizationHandler</code></li>
+    </ul>
+  </div>
+  <div class="info-card">
+    <div class="info-header"><span class="info-dot d-emerald"></span><h3>batch ops (workflowRecipeReconciler.ts)</h3></div>
+    <ul>
+      <li>• <code>preDeployMcpServers(recipe, this.config.namespace)</code></li>
+      <li>• <code>waitForNetworkReady(…, this.config.namespace)</code></li>
+      <li>• <code>delegateTransportWorkloads(…, this.config.namespace)</code></li>
+      <li>• <code>cleanupDelegation(…, this.config.namespace)</code></li>
+      <li>• Per-workload single path still uses <code>resolveWorkloadNamespace(workload)</code></li>
+    </ul>
+  </div>
+</div>
+
+<footer>
+  source: workflow-recipes/src/reconciler/workflowRecipeReconciler.ts · mcpDelegation.ts · non-mcp-services.md §4.8
+</footer>
+</body>
+</html>

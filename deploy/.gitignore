@@ -1,0 +1,2 @@
+# Secrets are environment-specific and must not be committed
+overlays/*/secrets/

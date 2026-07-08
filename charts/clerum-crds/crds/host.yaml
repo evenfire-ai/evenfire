@@ -1,0 +1,188 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: hosts.clerum.io
+  labels:
+    app.kubernetes.io/name: host
+    app.kubernetes.io/part-of: clerum
+spec:
+  group: clerum.io
+  names:
+    kind: Host
+    listKind: HostList
+    plural: hosts
+    singular: host
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: Host is the central entity that uses a context and connects to channels and MPC servers.
+          properties:
+            spec:
+              type: object
+              required:
+                - host
+                - contextRef
+                - secretRef
+              properties:
+                host:
+                  type: string
+                  description: Host identifier (e.g. chatLLM).
+                contextRef:
+                  type: string
+                  description: Reference to the context (e.g. context1) used for MPC servers and secrets.
+                secretRef:
+                  type: string
+                  description: Name of the Kubernetes Secret containing API keys (openai-api-key, claude-api-key, zai-api-key).
+                channels:
+                  type: array
+                  description: List of CommunicationChannel names this host interacts with.
+                  items:
+                    type: string
+                model:
+                  type: object
+                  description: LLM model configuration.
+                  properties:
+                    provider:
+                      type: string
+                      enum:
+                        - openai
+                        - claude
+                        - zai
+                        - bailian
+                      description: LLM provider to use.
+                    name:
+                      type: string
+                      description: Model name (e.g. gpt-5.4-mini, claude-opus-4-7, glm-5.1).
+                approval:
+                  type: object
+                  description: Tool approval configuration. Controls who can approve tool executions.
+                  properties:
+                    defaultPolicy:
+                      type: string
+                      enum:
+                        - cli_only
+                        - channel_users
+                        - designated_approvers
+                      description: >-
+                        Who can approve tool calls.
+                        cli_only: Only HTTP /approve /deny endpoints.
+                        channel_users: Any authorized channel user.
+                        designated_approvers: Only users in approvers list.
+                    channels:
+                      type: object
+                      description: Per-channel-type approval settings.
+                      properties:
+                        telegram:
+                          type: object
+                          properties:
+                            enabled:
+                              type: boolean
+                              description: Whether Telegram users can approve.
+                            approvers:
+                              type: array
+                              description: List of Telegram user IDs allowed to approve.
+                              items:
+                                type: string
+                        email:
+                          type: object
+                          properties:
+                            enabled:
+                              type: boolean
+                              description: Whether email users can approve.
+                            approvers:
+                              type: array
+                              description: List of email addresses allowed to approve.
+                              items:
+                                type: string
+                        slack:
+                          type: object
+                          properties:
+                            enabled:
+                              type: boolean
+                              description: Whether Slack users can approve.
+                            approvers:
+                              type: array
+                              description: List of Slack user IDs allowed to approve.
+                              items:
+                                type: string
+                    tools:
+                      type: object
+                      description: >-
+                        Per-tool approval overrides for native mcp-host tools.
+                        Map of native tool name (e.g. http_request, shell_exec)
+                        to boolean: true forces approval, false skips approval.
+                        Absent entries fall through to each tool's built-in default.
+                        Out of scope: MCP tools (gated separately).
+                      additionalProperties:
+                        type: boolean
+                desktop:
+                  type: object
+                  description: Desktop environment configuration. Enables a Linux desktop (XFCE + KasmVNC) with agent-accessible X11 and browser tools.
+                  properties:
+                    browser:
+                      type: boolean
+                      description: Enable Playwright browser tools (browser_open, browser_screenshot, etc.).
+                    x11:
+                      type: boolean
+                      description: Enable X11 desktop tools (desktop_screenshot, desktop_click, desktop_type, etc.).
+                workflowControl:
+                  type: object
+                  description: >-
+                    Workflow broker scopes this first-party Host is allowed to
+                    request in its mcp-host-control JWT. control-api remains the
+                    authority for every workflow request; these scopes only
+                    bound the broker tool surface available to the Host runtime.
+                  properties:
+                    scopes:
+                      type: array
+                      items:
+                        type: string
+                        enum:
+                          - workflow:list
+                          - workflow:read
+                          - workflow:trigger
+                          - workflow:approval:resolve
+                          - workflow:approval:decide
+                      description: >-
+                        Allowed workflow tool scopes. workflow_status and
+                        workflow_health are covered by workflow:read; there is
+                        no separate workflow_read native tool.
+                personalization:
+                  type: object
+                  description: Identity files (admin-managed, read-only to the agent).
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: Whether mcp-host should reconcile identity files from this block.
+                    identity:
+                      type: string
+                      description: Content of IDENTITY.md (system-prompt section "## Identity").
+                    soul:
+                      type: string
+                      description: Content of SOUL.md (system-prompt section "## Core Values").
+                    agents:
+                      type: string
+                      description: Content of AGENTS.md (system-prompt section "## Agent Instructions").
+                    user:
+                      type: string
+                      description: Content of USER.md (system-prompt section "## User Context").
+      additionalPrinterColumns:
+        - name: Host
+          type: string
+          jsonPath: .spec.host
+        - name: Context
+          type: string
+          jsonPath: .spec.contextRef
+        - name: Secret
+          type: string
+          jsonPath: .spec.secretRef
+        - name: Provider
+          type: string
+          jsonPath: .spec.model.provider
+      subresources:
+        status: {}

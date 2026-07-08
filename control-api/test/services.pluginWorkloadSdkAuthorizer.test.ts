@@ -1,0 +1,504 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  authorizeClientNotification,
+  authorizeListRecipients,
+  authorizePromptBridge,
+} from '../src/services/pluginWorkloadSdkAuthorizer.js'
+import * as sdkDb from '../src/services/pluginWorkloadSdkDb.js'
+import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
+
+vi.mock('../src/db.js', () => ({
+  pool: {
+    query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+    connect: vi.fn(),
+  },
+  withTransaction: vi.fn(),
+}))
+
+vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/pluginWorkloadSdkDb.js')>(
+    '../src/services/pluginWorkloadSdkDb.js'
+  )
+  return {
+    ...actual,
+    findGrant: vi.fn(),
+    insertInvocation: vi.fn(),
+    updateInvocationStatus: vi.fn(),
+    consumePeriodQuota: vi.fn(),
+    countRecentInvocations: vi.fn(),
+  }
+})
+
+const NS = 'sandbox-recipes'
+const RECIPE = 'sdk-recipe'
+
+function claims(scopes: string[] = ['plugin-workload-sdk']): McpHostAccessClaims {
+  return {
+    sub: `${NS}/${RECIPE}`,
+    recipeNamespace: NS,
+    recipeName: RECIPE,
+    hostRefs: [`${NS}/${RECIPE}`],
+    scope: 'workflow:approval:request',
+    workflowControlScopes: scopes as McpHostAccessClaims['workflowControlScopes'],
+    iss: 'control-api',
+    aud: 'workflow-approvals',
+    jti: 'test-jti',
+    exp: Math.floor(Date.now() / 1000) + 300,
+  }
+}
+
+function grant(
+  overrides: Partial<sdkDb.PluginWorkloadSdkGrant> = {}
+): sdkDb.PluginWorkloadSdkGrant {
+  return {
+    id: 'grant-1',
+    recipeNamespace: NS,
+    recipeName: RECIPE,
+    capabilityFamily: 'promptBridge',
+    allowedModels: ['glm-4.7'],
+    allowedEventTypes: [],
+    allowedTargetRefs: [],
+    allowedUserRefs: [],
+    allowedCallers: ['api'],
+    quotaLimits: {},
+    modelPolicies: {},
+    createdAt: '2026-06-09T00:00:00.000Z',
+    updatedAt: '2026-06-09T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function invocation(
+  overrides: Partial<sdkDb.PluginWorkloadSdkInvocationRecord> = {}
+): sdkDb.PluginWorkloadSdkInvocationRecord {
+  return {
+    id: 'inv-1',
+    recipeNamespace: NS,
+    recipeName: RECIPE,
+    callerRef: 'api',
+    correlationId: null,
+    method: 'promptBridge',
+    detail: 'glm-4.7',
+    purpose: 'summarization',
+    idempotencyKeyHash: 'hash',
+    payloadHash: 'payload-hash',
+    status: 'in_progress',
+    quotaConsumed: true,
+    authorizationDecision: 'authorized',
+    createdAt: '2026-06-09T00:00:00.000Z',
+    completedAt: null,
+    ...overrides,
+  }
+}
+
+const basePromptParams = {
+  callerRef: 'api',
+  model: 'glm-4.7',
+  purpose: 'summarization',
+  idempotencyKey: 'key-1',
+  payload: { messages: [{ role: 'user', content: 'hi' }] },
+}
+
+const baseNotificationParams = {
+  callerRef: 'api',
+  eventType: 'lead.followup.due',
+  targetRef: 'team.sales',
+  idempotencyKey: 'key-2',
+  payload: { eventType: 'lead.followup.due' },
+}
+
+beforeEach(() => {
+  vi.mocked(sdkDb.findGrant).mockReset()
+  vi.mocked(sdkDb.insertInvocation).mockReset()
+  vi.mocked(sdkDb.updateInvocationStatus).mockReset()
+  vi.mocked(sdkDb.consumePeriodQuota).mockReset()
+  vi.mocked(sdkDb.countRecentInvocations).mockReset()
+  vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(0)
+  vi.mocked(sdkDb.consumePeriodQuota).mockResolvedValue(true)
+  vi.mocked(sdkDb.insertInvocation).mockResolvedValue({
+    kind: 'inserted',
+    invocation: invocation(),
+  })
+})
+
+describe('authorizePromptBridge', () => {
+  it('returns scope_denied when the JWT lacks the plugin-workload-sdk scope', async () => {
+    const result = await authorizePromptBridge({ claims: claims([]), ...basePromptParams })
+    expect(result).toMatchObject({ ok: false, error: 'scope_denied' })
+    expect(sdkDb.findGrant).not.toHaveBeenCalled()
+  })
+
+  it('returns capability_not_declared when no grant exists', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(null)
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({ ok: false, error: 'capability_not_declared' })
+  })
+
+  it('returns caller_not_allowed when allowedCallers is empty', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ allowedCallers: [] }))
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({ ok: false, error: 'caller_not_allowed' })
+  })
+
+  it('returns caller_not_allowed when allowedCallers excludes the caller', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ allowedCallers: ['worker'] }))
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({ ok: false, error: 'caller_not_allowed' })
+  })
+
+  it('returns provider_policy_denied for a model outside allowedModels', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ allowedModels: ['glm-4.7'] }))
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      ...basePromptParams,
+      model: 'gpt-4o',
+    })
+    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+  })
+
+  it('fails closed when a promptBridge grant has no allowedModels', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ allowedModels: [] }))
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+    expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the request has no concrete model', async () => {
+    const paramsWithoutModel = {
+      callerRef: basePromptParams.callerRef,
+      purpose: basePromptParams.purpose,
+      idempotencyKey: basePromptParams.idempotencyKey,
+      payload: basePromptParams.payload,
+    }
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant())
+    const result = await authorizePromptBridge({ claims: claims(), ...paramsWithoutModel })
+    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+    expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
+  })
+
+  it('rejects wildcard allowedModels entries', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ allowedModels: ['*'] }))
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      ...basePromptParams,
+      model: 'gpt-4o',
+    })
+    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+  })
+
+  it('returns provider_policy_denied for an unresolvable modelPolicyRef', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant())
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      ...basePromptParams,
+      modelPolicyRef: 'missing-policy',
+    })
+    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+  })
+
+  it('denies a request model that does not match the referenced model policy', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({
+        allowedModels: ['glm-4.7', 'glm-5.1'],
+        modelPolicies: { 'support-summary-v1': { provider: 'zai', model: 'glm-4.7' } },
+      })
+    )
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      ...basePromptParams,
+      model: 'glm-5.1',
+      modelPolicyRef: 'support-summary-v1',
+    })
+    expect(result).toMatchObject({ ok: false, error: 'provider_policy_denied' })
+    expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
+  })
+
+  it('resolves a modelPolicyRef to its concrete record', async () => {
+    const paramsWithoutModel = {
+      callerRef: basePromptParams.callerRef,
+      purpose: basePromptParams.purpose,
+      idempotencyKey: basePromptParams.idempotencyKey,
+      payload: basePromptParams.payload,
+    }
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({
+        modelPolicies: { 'support-summary-v1': { provider: 'zai', model: 'glm-4.7' } },
+      })
+    )
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      ...paramsWithoutModel,
+      modelPolicyRef: 'support-summary-v1',
+    })
+    expect(result).toMatchObject({
+      ok: true,
+      value: { model: 'glm-4.7', modelPolicy: { provider: 'zai', model: 'glm-4.7' } },
+    })
+  })
+
+  it('returns quota_exceeded when the per-minute rate limit is exceeded', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({ quotaLimits: { maxInvocationsPerMinute: 5 } })
+    )
+    // recent count INCLUDES the just-recorded current invocation, so the window
+    // is over the limit only at 6 (5 prior succeeded + this one).
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(6)
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({ ok: false, error: 'quota_exceeded', retryable: false })
+    expect(sdkDb.insertInvocation).toHaveBeenCalledOnce()
+    expect(sdkDb.updateInvocationStatus).toHaveBeenCalledWith('inv-1', 'failed', {
+      completed: true,
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+    })
+  })
+
+  it('allows exactly maxInvocationsPerMinute calls (the limit-th call is not self-rejected)', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({ quotaLimits: { maxInvocationsPerMinute: 5 } })
+    )
+    // The limit-th call: 4 prior + this one = 5, which is within the limit of 5.
+    // Pre-fix (`recent >= limit`) this would have been rejected (effective N-1).
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(5)
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({ ok: true })
+  })
+
+  it('returns idempotent replay without re-checking the per-minute rate limit', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({ quotaLimits: { maxInvocationsPerMinute: 5 } })
+    )
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(5)
+    vi.mocked(sdkDb.insertInvocation).mockResolvedValue({
+      kind: 'replay',
+      invocation: invocation({ status: 'complete' }),
+    })
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({
+      ok: true,
+      value: { invocationId: 'inv-1', replay: true, status: 'complete' },
+    })
+    expect(sdkDb.countRecentInvocations).not.toHaveBeenCalled()
+    expect(sdkDb.consumePeriodQuota).not.toHaveBeenCalled()
+  })
+
+  it('marks the invocation failed when period quota is exceeded', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ quotaLimits: { maxRequestsPerRun: 3 } }))
+    vi.mocked(sdkDb.consumePeriodQuota).mockResolvedValue(false)
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({ ok: false, error: 'quota_exceeded' })
+    expect(sdkDb.updateInvocationStatus).toHaveBeenCalledWith('inv-1', 'failed', {
+      completed: true,
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+    })
+  })
+
+  it('authorizes a valid request and records the invocation', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({ quotaLimits: { maxOutputTokens: 2048, maxRequestsPerRun: 10 } })
+    )
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      ...basePromptParams,
+      model: 'glm-4.7',
+    })
+    expect(result).toMatchObject({
+      ok: true,
+      value: { invocationId: 'inv-1', replay: false, maxOutputTokens: 2048 },
+    })
+    expect(sdkDb.insertInvocation).toHaveBeenCalledOnce()
+    expect(sdkDb.consumePeriodQuota).toHaveBeenCalledOnce()
+  })
+
+  it('authorizes an explicitly approved non-default model', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      grant({ allowedModels: ['glm-5.1'], quotaLimits: { maxRequestsPerRun: 10 } })
+    )
+    const result = await authorizePromptBridge({
+      claims: claims(),
+      ...basePromptParams,
+      model: 'glm-5.1',
+    })
+    expect(result).toMatchObject({
+      ok: true,
+      value: { model: 'glm-5.1' },
+    })
+    expect(sdkDb.insertInvocation).toHaveBeenCalledOnce()
+  })
+
+  it('returns the existing invocation on idempotent replay without re-consuming quota', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ quotaLimits: { maxRequestsPerRun: 10 } }))
+    vi.mocked(sdkDb.insertInvocation).mockResolvedValue({
+      kind: 'replay',
+      invocation: invocation({ status: 'complete' }),
+    })
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({
+      ok: true,
+      value: { invocationId: 'inv-1', replay: true, status: 'complete' },
+    })
+    expect(sdkDb.consumePeriodQuota).not.toHaveBeenCalled()
+  })
+
+  it('re-consumes quota and revives status for a failed-replay retry', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant({ quotaLimits: { maxRequestsPerRun: 10 } }))
+    vi.mocked(sdkDb.insertInvocation).mockResolvedValue({
+      kind: 'replay',
+      invocation: invocation({ status: 'failed' }),
+    })
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    // quota must be re-consumed for a failed retry
+    expect(sdkDb.consumePeriodQuota).toHaveBeenCalledOnce()
+    // status revived to in_progress
+    expect(sdkDb.updateInvocationStatus).toHaveBeenCalledWith('inv-1', 'in_progress', {
+      completed: false,
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+    })
+    expect(result).toMatchObject({
+      ok: true,
+      value: { invocationId: 'inv-1', replay: true, status: 'in_progress' },
+    })
+  })
+
+  it('returns idempotency_conflict when the key was reused with another payload', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(grant())
+    vi.mocked(sdkDb.insertInvocation).mockResolvedValue({
+      kind: 'conflict',
+      invocation: invocation(),
+    })
+    const result = await authorizePromptBridge({ claims: claims(), ...basePromptParams })
+    expect(result).toMatchObject({ ok: false, error: 'idempotency_conflict' })
+  })
+})
+
+describe('authorizeClientNotification', () => {
+  const notificationGrant = (overrides: Partial<sdkDb.PluginWorkloadSdkGrant> = {}) =>
+    grant({
+      capabilityFamily: 'clientNotifications',
+      allowedEventTypes: ['lead.followup.due'],
+      allowedTargetRefs: ['team.sales'],
+      ...overrides,
+    })
+
+  beforeEach(() => {
+    vi.mocked(sdkDb.insertInvocation).mockResolvedValue({
+      kind: 'inserted',
+      invocation: invocation({ method: 'clientNotifications', status: 'accepted' }),
+    })
+  })
+
+  it('returns scope_denied when the JWT lacks the plugin-workload-sdk scope', async () => {
+    const result = await authorizeClientNotification({
+      claims: claims([]),
+      ...baseNotificationParams,
+    })
+    expect(result).toMatchObject({ ok: false, error: 'scope_denied' })
+  })
+
+  it('returns event_type_not_allowed for an undeclared event type', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(notificationGrant())
+    const result = await authorizeClientNotification({
+      claims: claims(),
+      ...baseNotificationParams,
+      eventType: 'unknown.event',
+    })
+    expect(result).toMatchObject({ ok: false, error: 'event_type_not_allowed' })
+  })
+
+  it('returns target_not_allowed for a target outside allowedTargetRefs', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(notificationGrant())
+    const result = await authorizeClientNotification({
+      claims: claims(),
+      ...baseNotificationParams,
+      targetRef: 'team.engineering',
+    })
+    expect(result).toMatchObject({ ok: false, error: 'target_not_allowed' })
+  })
+
+  it('returns target_not_allowed for a userRef when the grant does not allow them', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(notificationGrant())
+    const result = await authorizeClientNotification({
+      claims: claims(),
+      ...baseNotificationParams,
+      targetRef: undefined,
+      userRef: 'user-123',
+    })
+    expect(result).toMatchObject({ ok: false, error: 'target_not_allowed' })
+  })
+
+  it('accepts a valid notification intent', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(notificationGrant())
+    const result = await authorizeClientNotification({
+      claims: claims(),
+      ...baseNotificationParams,
+    })
+    expect(result).toMatchObject({
+      ok: true,
+      value: { notificationId: 'inv-1', replay: false, status: 'accepted' },
+    })
+  })
+
+  it('rate-limits per recipe + eventType', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(
+      notificationGrant({ quotaLimits: { maxNotificationsPerMinute: 2 } })
+    )
+    // The current in-progress invocation is already audited before the rate
+    // check, so countRecentInvocations returns limit+1 (3) when the window
+    // genuinely exceeds the 2/minute ceiling (recent > limit).
+    vi.mocked(sdkDb.countRecentInvocations).mockResolvedValue(3)
+    const result = await authorizeClientNotification({
+      claims: claims(),
+      ...baseNotificationParams,
+    })
+    expect(result).toMatchObject({ ok: false, error: 'quota_exceeded' })
+    expect(sdkDb.insertInvocation).toHaveBeenCalledOnce()
+    expect(sdkDb.updateInvocationStatus).toHaveBeenCalledWith('inv-1', 'failed', {
+      completed: true,
+      recipeNamespace: NS,
+      recipeName: RECIPE,
+    })
+    expect(sdkDb.countRecentInvocations).toHaveBeenCalledWith(NS, RECIPE, 'clientNotifications', {
+      detail: 'lead.followup.due',
+    })
+  })
+})
+
+describe('authorizeListRecipients', () => {
+  const notificationGrant = (overrides: Partial<sdkDb.PluginWorkloadSdkGrant> = {}) =>
+    grant({
+      capabilityFamily: 'clientNotifications',
+      allowedEventTypes: ['lead.followup.due'],
+      ...overrides,
+    })
+
+  it('returns scope_denied when the JWT lacks the plugin-workload-sdk scope', async () => {
+    const result = await authorizeListRecipients({ claims: claims([]), callerRef: 'api' })
+    expect(result).toMatchObject({ ok: false, error: 'scope_denied' })
+    expect(sdkDb.findGrant).not.toHaveBeenCalled()
+  })
+
+  it('returns capability_not_declared when no clientNotifications grant exists', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(null)
+    const result = await authorizeListRecipients({ claims: claims(), callerRef: 'api' })
+    expect(result).toMatchObject({ ok: false, error: 'capability_not_declared' })
+    expect(sdkDb.findGrant).toHaveBeenCalledWith(NS, RECIPE, 'clientNotifications')
+  })
+
+  it('returns caller_not_allowed when the caller is not in allowedCallers', async () => {
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(notificationGrant({ allowedCallers: ['worker'] }))
+    const result = await authorizeListRecipients({ claims: claims(), callerRef: 'api' })
+    expect(result).toMatchObject({ ok: false, error: 'caller_not_allowed' })
+  })
+
+  it('returns the grant allowedUserRefs for an authorized caller without auditing', async () => {
+    const refs = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222']
+    vi.mocked(sdkDb.findGrant).mockResolvedValue(notificationGrant({ allowedUserRefs: refs }))
+    const result = await authorizeListRecipients({ claims: claims(), callerRef: 'api' })
+    expect(result).toMatchObject({ ok: true, value: { allowedUserRefs: refs } })
+    // Read-only: no invocation row, no quota consumption.
+    expect(sdkDb.insertInvocation).not.toHaveBeenCalled()
+    expect(sdkDb.consumePeriodQuota).not.toHaveBeenCalled()
+  })
+})

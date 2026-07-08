@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fake-telegram-server
+  namespace: channels
+  labels:
+    app: fake-telegram-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fake-telegram-server
+  template:
+    metadata:
+      labels:
+        app: fake-telegram-server
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: node:24-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["node", "/app/server.cjs"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: PORT
+              value: "8080"
+            - name: TMPDIR
+              value: /tmp
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: script
+              mountPath: /app
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: script
+          configMap:
+            name: fake-telegram-server
+        - name: tmp
+          emptyDir: {}

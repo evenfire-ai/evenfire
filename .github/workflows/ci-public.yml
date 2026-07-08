@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    name: Build / test / typecheck (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - mcp-host
+          - channel-reader
+          - host-context-controller
+          - control-api
+          - mcp-proxy
+          - workflow-recipes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+
+      # workflow-recipes uses project references into packages/workflow-runtime-core.
+      # Build that package first so `tsc -b` in workflow-recipes can resolve it.
+      - name: Install workflow-runtime-core dependencies
+        if: matrix.service == 'workflow-recipes'
+        working-directory: packages/workflow-runtime-core
+        run: npm ci
+
+      - name: Build workflow-runtime-core
+        if: matrix.service == 'workflow-recipes'
+        working-directory: packages/workflow-runtime-core
+        run: npm run build
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.service }}
+        run: npm ci
+
+      - name: Build
+        working-directory: ${{ matrix.service }}
+        run: npm run build
+
+      - name: Test
+        working-directory: ${{ matrix.service }}
+        run: npm test
+
+      # Typecheck against the base tsconfig (covers src + test dirs).
+      # This catches errors in test files that tsconfig.build.json may exclude.
+      - name: Typecheck (tsc --noEmit)
+        working-directory: ${{ matrix.service }}
+        run: npx tsc --noEmit

@@ -1,0 +1,200 @@
+# ─── L0: Default deny all traffic ─────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-profiles
+  namespace: profiles
+  labels:
+    clerum.io/policy-type: default-deny
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# ─── L1: DNS egress (all pods) ────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress-profiles
+  namespace: profiles
+  labels:
+    clerum.io/policy-type: infrastructure
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+---
+# ─── L2: Ingress from the cloudflared tunnel to externally-exposed services
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-profiles
+  namespace: profiles
+  labels:
+    clerum.io/policy-type: service
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [external-rest-api, profile-ui]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress
+          podSelector:
+            matchLabels:
+              app: cloudflared
+---
+# ─── L2 (existing): external-rest-api egress ─────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: external-rest-api-egress
+  namespace: profiles
+spec:
+  egress:
+    - ports:
+        - port: 8080
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: profiles
+          podSelector:
+            matchLabels:
+              app: profile-control-funnel
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+  podSelector:
+    matchLabels:
+      app: external-rest-api
+  policyTypes:
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: profile-control-funnel
+  namespace: profiles
+spec:
+  egress:
+    - ports:
+        - port: 8090
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: control-plane
+          podSelector:
+            matchLabels:
+              app: control-api
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: profiles
+          podSelector:
+            matchLabels:
+              app: external-rest-api
+      ports:
+        - port: 8080
+          protocol: TCP
+  podSelector:
+    matchLabels:
+      app: profile-control-funnel
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# ─── L2: profile-ui → external-rest-api (SSR + Next.js rewrite proxy) ────────
+# profile-ui's Next.js server calls external-rest-api both directly (SSR via
+# serverApi.ts) and through the /external-rest-api/* rewrite (api.ts). Without
+# this NP, deny-all-profiles drops every TCP packet → UND_ERR_CONNECT_TIMEOUT
+# (issue #371). DNS already covered by allow-dns-egress-profiles.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: profile-ui-to-external-rest-api
+  namespace: profiles
+  labels:
+    clerum.io/policy-type: service
+spec:
+  podSelector:
+    matchLabels:
+      app: profile-ui
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 8091
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: profiles
+          podSelector:
+            matchLabels:
+              app: external-rest-api
+---
+# ─── L2: external-rest-api ← profile-ui (server-side fetches) ────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: external-rest-api-from-profile-ui
+  namespace: profiles
+  labels:
+    clerum.io/policy-type: service
+spec:
+  podSelector:
+    matchLabels:
+      app: external-rest-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: profiles
+          podSelector:
+            matchLabels:
+              app: profile-ui
+      ports:
+        - port: 8091
+          protocol: TCP

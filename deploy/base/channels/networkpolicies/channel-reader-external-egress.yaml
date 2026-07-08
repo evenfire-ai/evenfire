@@ -1,0 +1,29 @@
+# Telegram/Slack use HTTPS, email uses IMAPS. Provider endpoints have dynamic
+# IPs, so this policy allows public internet only. The ipBlock.except list below
+# is not a hardcoded provider allowlist; it excludes private, metadata,
+# link-local, loopback, documentation, benchmarking, multicast, and reserved ranges.
+# Scope is rule-level: Kubernetes API egress and per-Host mcp-host egress are
+# separate static/generated NetworkPolicies, not exceptions to this public rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: channel-reader-external-egress
+  namespace: channels
+  labels:
+    clerum.io/policy-type: service
+spec:
+  podSelector:
+    matchLabels:
+      app: channel-reader
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - port: 443
+      protocol: TCP
+    - port: 993
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: []

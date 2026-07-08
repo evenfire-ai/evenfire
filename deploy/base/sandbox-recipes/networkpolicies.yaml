@@ -1,0 +1,131 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    clerum.io/managed-by: host-context-controller
+    clerum.io/policy-type: default-deny
+  name: deny-all-sandbox-recipes
+  namespace: sandbox-recipes
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    clerum.io/managed-by: host-context-controller
+    clerum.io/policy-type: infrastructure
+  name: allow-dns-egress-sandbox-recipes
+  namespace: sandbox-recipes
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+  podSelector: {}
+  policyTypes:
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    clerum.io/managed-by: host-context-controller
+    clerum.io/policy-type: infrastructure
+  name: allow-hcc-api-egress-sandbox-recipes
+  namespace: sandbox-recipes
+spec:
+  egress:
+  - ports:
+    - port: 8081
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: control-plane
+      podSelector:
+        matchLabels:
+          app: host-context-controller-api-gateway
+  podSelector:
+    matchLabels:
+      clerum.io/component: workflow-mcp-host
+  policyTypes:
+  - Egress
+---
+# Allow workflow mcp-host pods to reach the workflow approval gateway
+# in control-plane for approval/auth requests.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    clerum.io/managed-by: host-context-controller
+    clerum.io/policy-type: service
+  name: allow-workflow-approval-gateway-egress-sandbox-recipes
+  namespace: sandbox-recipes
+spec:
+  egress:
+  - ports:
+    - port: 8092
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: control-plane
+      podSelector:
+        matchLabels:
+          app: nginx-workflow-approval-gateway
+  podSelector:
+    matchLabels:
+      clerum.io/component: workflow-mcp-host
+  policyTypes:
+  - Egress
+---
+# Allow channel readers and workflow-approval-request-reader to deliver provider
+# approval decisions to the WorkflowRecipe mcp-host runtime. The recipe mcp-host
+# remains the only component that calls control-api with workflow control
+# credentials.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    clerum.io/policy-type: service
+  name: allow-workflow-approval-reader-to-workflow-mcp-host
+  namespace: sandbox-recipes
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: channels
+      podSelector:
+        matchLabels:
+          app: channel-reader
+          clerum.io/managed-by: wrc
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: channels
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: workflow-approval-request-reader
+    ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      clerum.io/component: workflow-mcp-host
+      clerum.io/managed-by: wrc
+  policyTypes:
+  - Ingress
+# NOTE: allow-k8s-api-egress-sandbox-recipes is intentionally NOT in base.
+# host-context-controller creates an opt-in runtime policy with selector
+# clerum.io/k8s-api-egress=true using KUBERNETES_SERVICE_HOST, so workflow
+# workloads do not receive Kubernetes API access by default.

@@ -1,0 +1,95 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: mongodb-mcp-stack
+  namespace: sandbox-recipes
+spec:
+  description: >-
+    MongoDB database + MCP server — full stack composition.
+    Deploys a local MongoDB instance (sandbox-recipes) with persistent storage
+    and a MongoDB MCP server (mcp-server) that connects to it.
+    The WRC handles namespace splitting, MCP delegation, and NetworkPolicy bindings.
+  contextRef: context1
+  workloads:
+    # ─── Non-MCP workload: MongoDB database (→ sandbox-recipes) ──────
+    - id: mongodb
+      type: statefulset
+      image: mongodb/mongodb-community-server:7.0-ubi8
+      port: 27017
+      env:
+        - name: MONGODB_DATABASE
+          value: 'clerum'
+      volumeMounts:
+        - name: mongodb-data
+          mountPath: /data/db
+      volumeClaimTemplates:
+        - name: mongodb-data
+          storageClass: standard
+          accessMode: ReadWriteOnce
+          size: 1Gi
+      healthCheck:
+        type: exec
+        command: ['mongosh', '--eval', 'db.runCommand({ping:1})', '--quiet']
+        initialDelaySeconds: 60
+        periodSeconds: 15
+        timeoutSeconds: 10
+        failureThreshold: 5
+      security:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        prepareVolumeOwnership: true
+      resources:
+        requests:
+          cpu: '100m'
+          memory: '256Mi'
+        limits:
+          cpu: '500m'
+          memory: '512Mi'
+    # ─── MCP workload: MongoDB MCP Server (→ mcp-server) ─────────────
+    - id: mongodb-mcp-server
+      type: deployment
+      image: mongodb/mongodb-mcp-server:latest
+      imagePullSecrets: []
+      port: 3000
+      dependsOn: ['mongodb']
+      transport:
+        type: streamableHttp
+        path: /mcp
+      env:
+        - name: MDB_MCP_CONNECTION_STRING
+          value: 'mongodb://{{mongodb:host}}:{{mongodb:port}}/clerum?directConnection=true'
+        - name: MDB_MCP_TRANSPORT
+          value: 'http'
+        - name: MDB_MCP_HTTP_HOST
+          value: '0.0.0.0'
+        - name: MDB_MCP_HTTP_PORT
+          value: '3000'
+        - name: MDB_MCP_HEALTH_CHECK_HOST
+          value: '0.0.0.0'
+        - name: MDB_MCP_HEALTH_CHECK_PORT
+          value: '3001'
+        - name: MDB_MCP_READ_ONLY
+          value: 'false'
+        - name: MDB_MCP_LOGGERS
+          value: 'stderr'
+        - name: MDB_MCP_TELEMETRY
+          value: 'disabled'
+      healthCheck:
+        type: tcp
+        port: 3001
+      resources:
+        requests:
+          cpu: '100m'
+          memory: '128Mi'
+        limits:
+          cpu: '500m'
+          memory: '256Mi'
+  # ─── Cross-namespace binding: MCP server → MongoDB database ────────
+  # Generates L3 NetworkPolicy via HCC (clerum.io/recipe-bindings annotation)
+  bindings:
+    - from: mongodb-mcp-server
+      to: mongodb
+      port: 27017
+  security:
+    isolationLevel: minimal

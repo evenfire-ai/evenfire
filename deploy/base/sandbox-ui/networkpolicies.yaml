@@ -1,0 +1,71 @@
+# Static NetworkPolicies for the sandbox-ui namespace.
+#
+# HCC owns deny-all-sandbox-ui and allow-dns-egress-sandbox-ui at runtime. The
+# static baseline below uses distinct names so deploys do not migrate HCC-owned
+# immutable labels, while Calico activation still has a sandbox-ui baseline even
+# before HCC convergence.
+#
+# allow-rpc-proxy-ingress-sandbox-ui is sandbox-ui-specific (HCC doesn't know
+# about it) and is the load-bearing rule that prevents any pod outside rpc-proxy
+# from reaching a UI Service directly and spoofing the trusted X-Clerum-User
+# header rpc-proxy injects.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    clerum.io/managed-by: sandbox-ui
+    clerum.io/policy-type: baseline
+  name: sandbox-ui-static-deny-all
+  namespace: sandbox-ui
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    clerum.io/managed-by: sandbox-ui
+    clerum.io/policy-type: infrastructure
+  name: sandbox-ui-static-dns-egress
+  namespace: sandbox-ui
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    clerum.io/managed-by: sandbox-ui
+    clerum.io/policy-type: ingress
+  name: allow-rpc-proxy-ingress-sandbox-ui
+  namespace: sandbox-ui
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: rpc-proxy
+          podSelector:
+            matchLabels:
+              app: rpc-proxy

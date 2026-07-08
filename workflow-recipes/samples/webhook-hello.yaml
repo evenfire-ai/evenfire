@@ -1,0 +1,30 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: webhook-hello
+  namespace: sandbox-recipes
+spec:
+  description: >-
+    Smallest possible recipe with spec.webhooks[]. Used by
+    scripts/e2e/e2e-webhooks-basic.sh to gate the webhook stack on a
+    real cluster. The handler is nginxinc/nginx-unprivileged on its
+    default config — a 200 response from the default welcome page is
+    enough to prove the verify+forward pipeline. Headers sent by the
+    gateway show up in the nginx access log.
+  workloads:
+    - id: handler
+      type: deployment
+      image: nginxinc/nginx-unprivileged:1.27-alpine
+      port: 8080
+  webhooks:
+    - id: hello
+      workloadRef: handler
+      path: /
+      verification:
+        scheme: hmac-sha256-body
+        secretRef:
+          name: webhook-hello-creds
+          key: signing-secret
+        signatureHeader: X-Hub-Signature-256
+        signaturePrefix: 'sha256='
+        signatureEncoding: hex

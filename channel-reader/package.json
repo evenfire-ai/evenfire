@@ -1,0 +1,38 @@
+{
+  "name": "clerum-channel-reader",
+  "version": "0.1.63",
+  "description": "Watches CommunicationChannel CRDs and fetches messages from Telegram, Email, and Slack",
+  "main": "dist/main.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "ts-node src/main.ts",
+    "lint": "eslint src --ext .ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "kubernetes",
+    "crd",
+    "telegram",
+    "slack",
+    "email"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "dependencies": {
+    "@kubernetes/client-node": "^1.0.0",
+    "@slack/web-api": "^7.0.0",
+    "grammy": "^1.21.0",
+    "imapflow": "^1.0.164",
+    "nodemailer": "^6.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/nodemailer": "^6.4.0",
+    "typescript": "^5.3.0",
+    "vitest": "^4.1.0"
+  }
+}

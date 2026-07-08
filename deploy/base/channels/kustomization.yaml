@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - channel-reader.yaml
+  - workflow-approval-request-reader/serviceaccount.yaml
+  - workflow-approval-request-reader/configmap.yaml
+  - workflow-approval-request-reader/deployment.yaml
+  - workflow-approval-request-reader/service.yaml
+  - secrets-canary.yaml
+  - rbac.yaml
+  - networkpolicies/deny-all.yaml
+  - networkpolicies/dns-egress.yaml
+  - networkpolicies/k8s-api-egress.yaml
+  - networkpolicies/channel-reader-external-egress.yaml
+  - networkpolicies/channel-reader-handoff-ingress.yaml
+  - networkpolicies/channel-reader-to-workflow-mcp-host.yaml
+  - networkpolicies/workflow-approval-request-reader-to-channel-reader.yaml
+  - networkpolicies/workflow-approval-request-reader-to-mcp-host.yaml
+  - networkpolicies/workflow-approval-request-reader-ingress.yaml
+  - networkpolicies/workflow-approval-request-reader-external-egress.yaml
+  - networkpolicies/workflow-approval-request-reader-to-control-api.yaml

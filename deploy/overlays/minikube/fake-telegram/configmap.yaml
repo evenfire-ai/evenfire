@@ -1,0 +1,109 @@
+apiVersion: v1
+data:
+  server.cjs: |
+    #!/usr/bin/env node
+    // Fake Telegram Bot API server — Figure D two-bot E2E (MINIKUBE ONLY).
+    // Captures sendMessage (records which bot token was used + the inline-keyboard
+    // callback_data) and can replay a Telegram callback_query to the reader webhook.
+    // Dependency-free: uses Node built-in http + fetch (Node >= 18).
+    const http = require('http')
+    const PORT = process.env.PORT || 8080
+    const sends = [] // { token, chat_id, text, callback_data[], ts }
+
+    function sendJson(res, code, obj) {
+      const body = JSON.stringify(obj)
+      res.writeHead(code, {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      })
+      res.end(body)
+    }
+    function readBody(req) {
+      return new Promise(resolve => {
+        let d = ''
+        req.on('data', c => (d += c))
+        req.on('end', () => resolve(d))
+      })
+    }
+
+    const server = http.createServer(async (req, res) => {
+      try {
+        const url = req.url || '/'
+        if (req.method === 'GET' && url === '/health') return sendJson(res, 200, { ok: true })
+
+        // Telegram Bot API: POST /bot<token>/sendMessage
+        const m = url.match(/^\/bot([^/]+)\/sendMessage/)
+        if (req.method === 'POST' && m) {
+          const token = m[1]
+          const raw = await readBody(req)
+          let payload = {}
+          try {
+            payload = JSON.parse(raw)
+          } catch {}
+          const kbd = (payload && payload.reply_markup && payload.reply_markup.inline_keyboard) || []
+          const cbData = kbd
+            .flat()
+            .map(b => b && b.callback_data)
+            .filter(Boolean)
+          sends.push({
+            token,
+            chat_id: payload.chat_id,
+            text: payload.text,
+            callback_data: cbData,
+            ts: Date.now(),
+          })
+          return sendJson(res, 200, { ok: true, result: { message_id: Date.now() } })
+        }
+
+        // Inspect captured sends (harness assertions: which token delivered?)
+        if (req.method === 'GET' && url === '/sends') return sendJson(res, 200, { sends })
+        // Reset between scenarios
+        if (req.method === 'POST' && url === '/reset') {
+          sends.length = 0
+          return sendJson(res, 200, { ok: true })
+        }
+
+        // Fire a Telegram callback_query to the reader webhook ("user presses Approve").
+        // body: { reader_base_url, secret, chat_id, callback_data, from_id }
+        if (req.method === 'POST' && url === '/fire-callback') {
+          const raw = await readBody(req)
+          let cfg = {}
+          try {
+            cfg = JSON.parse(raw)
+          } catch {}
+          const update = {
+            update_id: Date.now(),
+            callback_query: {
+              id: String(Date.now()),
+              from: { id: cfg.from_id || 1, is_bot: false, first_name: 'E2E' },
+              message: {
+                message_id: 1,
+                date: Math.floor(Date.now() / 1000),
+                chat: { id: cfg.chat_id, type: 'private' },
+                text: 'approve',
+              },
+              data: cfg.callback_data,
+            },
+          }
+          const r = await fetch(cfg.reader_base_url.replace(/\/+$/, '') + '/webhooks/telegram', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-telegram-bot-api-secret-token': cfg.secret || '',
+            },
+            body: JSON.stringify(update),
+          })
+          const rbody = await r.text()
+          return sendJson(res, 200, { reader_status: r.status, reader_body: rbody })
+        }
+
+        sendJson(res, 404, { error: 'not_found', url })
+      } catch (e) {
+        sendJson(res, 500, { error: String((e && e.message) || e) })
+      }
+    })
+    server.listen(PORT, () => console.log('fake-telegram-server listening on :' + PORT))
+kind: ConfigMap
+metadata:
+  name: fake-telegram-server
+  namespace: channels

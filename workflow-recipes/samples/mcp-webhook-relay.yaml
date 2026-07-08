@@ -1,0 +1,39 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: mcp-webhook-relay
+  namespace: sandbox-recipes
+spec:
+  description: 'Webhook relay MCP server with CronJob health checker'
+  contextRef: context1
+  workloads:
+    - id: relay
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3000
+      transport:
+        type: streamableHttp
+        path: /mcp
+      healthCheck:
+        type: tcp
+        port: 3001
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '100m'
+          memory: '128Mi'
+    - id: health-checker
+      type: cronjob
+      image: curlimages/curl:8.7.1
+      schedule: '*/5 * * * *'
+      command: ['curl']
+      args: ['-sf', 'http://{{relay:host}}:{{relay:port}}/health']
+      dependsOn: ['relay']
+  bindings:
+    - from: health-checker
+      to: relay
+      port: 3000
+  security:
+    isolationLevel: minimal

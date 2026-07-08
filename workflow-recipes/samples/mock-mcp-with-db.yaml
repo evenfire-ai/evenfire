@@ -1,0 +1,58 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: mock-mcp-with-db
+  namespace: sandbox-recipes
+spec:
+  description: 'Mock MCP server + PostgreSQL with persistent storage for E2E'
+  contextRef: context1
+  workloads:
+    - id: db
+      type: statefulset
+      image: postgres:16-alpine
+      port: 5432
+      # GAP 15: Per-workload security overrides enable PostgreSQL to run
+      # as its native user (UID 70) without needing gosu/CAP_SETUID.
+      security:
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+      env:
+        - name: POSTGRES_PASSWORD
+          value: 'changeme'
+        - name: PGDATA
+          value: '/var/lib/postgresql/data/pgdata'
+      healthCheck:
+        type: exec
+        command: ['pg_isready', '-U', 'postgres']
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '256Mi'
+    - id: mcp-api
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3000
+      dependsOn: ['db']
+      transport:
+        type: streamableHttp
+        path: /mcp
+      healthCheck:
+        type: tcp
+        port: 3001
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+  bindings:
+    - from: mcp-api
+      to: db
+      port: 5432
+  security:
+    isolationLevel: minimal

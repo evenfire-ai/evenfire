@@ -1,0 +1,53 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: mcp-redis-cache
+  namespace: sandbox-recipes
+spec:
+  description: 'Redis cache + MCP server exposing cache operations'
+  contextRef: context1
+  workloads:
+    - id: redis
+      type: deployment
+      image: redis:7-alpine
+      port: 6379
+      security:
+        runAsUser: 999
+        runAsGroup: 999
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '256Mi'
+      healthCheck:
+        type: tcp
+        port: 6379
+    - id: redis-mcp
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3000
+      dependsOn: ['redis']
+      transport:
+        type: streamableHttp
+        path: /mcp
+      env:
+        - name: REDIS_URL
+          value: 'redis://{{redis:host}}:{{redis:port}}'
+      healthCheck:
+        type: tcp
+        port: 3001
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+  bindings:
+    - from: redis-mcp
+      to: redis
+      port: 6379
+  security:
+    isolationLevel: minimal

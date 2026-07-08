@@ -1,0 +1,22 @@
+# channel-reader lists/watches CommunicationChannel CRDs and needs apiserver
+# egress under the namespace default-deny policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-k8s-api-egress-channels
+  namespace: channels
+  labels:
+    clerum.io/policy-type: infrastructure
+spec:
+  podSelector:
+    matchLabels:
+      app: channel-reader
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 10.109.0.1/32

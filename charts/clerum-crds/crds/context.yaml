@@ -1,0 +1,152 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: contexts.clerum.io
+  labels:
+    app.kubernetes.io/name: context
+    app.kubernetes.io/part-of: clerum
+spec:
+  group: clerum.io
+  names:
+    kind: Context
+    listKind: ContextList
+    plural: contexts
+    singular: context
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            Context defines which MCP servers a host can access and which
+            SharedFileSystems a host should mount read-only.
+            A Host references a Context via contextRef. The host-context-controller
+            uses the Context to filter which MCP servers are returned and to
+            inject SharedFileSystem volume mounts into the mcp-host pod.
+          properties:
+            spec:
+              type: object
+              required:
+                - contextId
+                - mcpServers
+              properties:
+                contextId:
+                  type: string
+                  description: Unique identifier for this context (e.g. context1).
+                description:
+                  type: string
+                  description: Human-readable description of the context scope.
+                mcpServers:
+                  type: array
+                  description: >-
+                    List of McpServer names that are accessible within this context.
+                    When a host requests servers for this context, only these
+                    servers will be returned by the context-mapper.
+                  items:
+                    type: string
+                sharedFileSystems:
+                  type: array
+                  description: >-
+                    Optional list of SharedFileSystem references. Each entry
+                    causes HCC to inject a read-only volume mount into every
+                    mcp-host pod whose Host references this Context, at the
+                    requested mountPath. Within a single Context, mountPath
+                    values must be unique. SharedFileSystems must exist in
+                    the mcp-host namespace.
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - mountPath
+                    properties:
+                      name:
+                        type: string
+                        description: SharedFileSystem.metadata.name (in mcp-host namespace).
+                      mountPath:
+                        type: string
+                        description: Absolute path inside the mcp-host container where the workspace is mounted RO.
+                        pattern: '^/[a-zA-Z0-9_.][a-zA-Z0-9_./\-]*$'
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys:
+                    - mountPath
+                gfs:
+                  type: object
+                  description: >-
+                    Optional gfs (Global File System) mount INTENTS. INTENT ONLY:
+                    HCC wires a mount only if the Context identity already holds
+                    the requested scopes (confirmed against the permission store);
+                    insufficient scope is reported PendingMount and grants nothing.
+                    Editing this field never escalates access.
+                  properties:
+                    mounts:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - drive
+                          - target
+                          - scopes
+                        properties:
+                          drive:
+                            type: string
+                            description: gfs drive name (e.g. "main").
+                          target:
+                            type: string
+                            description: Target resource id (32-hex rid) or absolute path.
+                          scopes:
+                            type: array
+                            description: Requested gfs scopes. P3 read tools use gfs.read.
+                            items:
+                              type: string
+                              enum:
+                                - gfs.read
+                                - gfs.write
+                                - gfs.delete
+                                - gfs.manage_acl
+                                - gfs.share
+                      x-kubernetes-list-type: map
+                      x-kubernetes-list-map-keys:
+                        - target
+            status:
+              type: object
+              properties:
+                sharedFileSystems:
+                  type: array
+                  description: Per-Context resolution status of each spec.sharedFileSystems entry.
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - mountPath
+                      - phase
+                    properties:
+                      name:
+                        type: string
+                      mountPath:
+                        type: string
+                      phase:
+                        type: string
+                        enum:
+                          - Resolving
+                          - Mounted
+                          - MissingTarget
+                          - Failed
+                      pvcName:
+                        type: string
+                      message:
+                        type: string
+      additionalPrinterColumns:
+        - name: Context ID
+          type: string
+          jsonPath: .spec.contextId
+        - name: MCP Servers
+          type: string
+          jsonPath: .spec.mcpServers
+        - name: SharedFS
+          type: string
+          jsonPath: .spec.sharedFileSystems[*].name
+      subresources:
+        status: {}

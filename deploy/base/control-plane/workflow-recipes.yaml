@@ -1,0 +1,213 @@
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  name: workflow-recipes
+  namespace: control-plane
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wrc-trigger-sa
+  namespace: control-plane
+  labels:
+    clerum.io/component: scheduling-trigger
+    clerum.io/managed-by: clerum-wrc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workflow-recipes
+  namespace: control-plane
+  labels:
+    app: workflow-recipes
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/name: workflow-recipes
+    app.kubernetes.io/part-of: clerum
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: workflow-recipes
+  template:
+    metadata:
+      labels:
+        app: workflow-recipes
+        app.kubernetes.io/component: operator
+        app.kubernetes.io/name: workflow-recipes
+        app.kubernetes.io/part-of: clerum
+    spec:
+      automountServiceAccountToken: true
+      serviceAccountName: workflow-recipes
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: workflow-recipes
+        image: clerum/workflow-recipes:0.9.5
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8082
+          name: http
+          protocol: TCP
+        envFrom:
+        # WRC opens a sticky Postgres session for leader election,
+        # workflow_run_update notifications, schedule workers, archive
+        # maintenance, and run processing. Credentials live in the
+        # control-postgres Secret shared with control-api.
+        - secretRef:
+            name: control-postgres
+        env:
+        # WRC signs InternalControl JWTs with its issuer-specific HS256 secret.
+        - name: INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: internal-control-jwt-secrets
+              key: INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET
+        - name: CLERUM_OPERATOR_PORT
+          value: "8082"
+        # MCP transport child namespace. WorkflowRecipe CRDs themselves are
+        # always stored in CLERUM_SANDBOX_NAMESPACE.
+        - name: CLERUM_NAMESPACE
+          value: mcp-server
+        - name: CLERUM_HOST_NAMESPACE
+          value: mcp-host
+        - name: CLERUM_SANDBOX_NAMESPACE
+          value: sandbox-recipes
+        - name: WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE
+          value: "false"
+        - name: WRC_ENABLE_SNIPPET_RUNTIME
+          value: "false"
+        - name: WRC_MAX_WORKFLOW_STEPS
+          value: "100"
+        - name: CLERUM_WORKFLOW_MAX_WORKLOADS_PER_RECIPE
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-config
+              key: CLERUM_WORKFLOW_MAX_WORKLOADS_PER_RECIPE
+        - name: CLERUM_WORKFLOW_UI_EGRESS_INTERNAL_MAX_ITEMS
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-config
+              key: CLERUM_WORKFLOW_UI_EGRESS_INTERNAL_MAX_ITEMS
+        # Step output stored in WorkflowRecipe status is only a bounded preview.
+        # Keep max_steps * preview_chars under the Kubernetes object budget
+        # (etcd default ~1.5MiB; GKE API server request body commonly ~3MiB).
+        # Complete intermediate/final files belong in /output artifacts on the
+        # run PVC and follow the workflow retention policy.
+        - name: WRC_WORKFLOW_STEP_OUTPUT_PREVIEW_MAX_CHARS
+          value: "32768"
+        - name: WRC_ALLOWED_COORDINATOR_IMAGE_PREFIXES
+          value: ""
+        - name: WRC_REQUIRE_COORDINATOR_IMAGE_DIGEST
+          value: "true"
+        - name: WRC_ENABLE_DETERMINISTIC
+          value: "true"
+        - name: CLERUM_WORKFLOW_MAX_STEPS
+          value: "100"
+        - name: CLERUM_WORKFLOW_STEP_DEPENDS_ON_MAX_ITEMS
+          value: "100"
+        - name: CLERUM_WORKFLOW_STEP_ALLOWED_TOOLS_MAX_ITEMS
+          value: "50"
+        - name: CLERUM_WORKFLOW_STEP_MCP_SERVERS_MAX_ITEMS
+          value: "20"
+        - name: CLERUM_NETWORK_POLICY_ENFORCEMENT_MODE
+          value: required
+        - name: CLERUM_NETWORK_POLICY_ENFORCEMENT_CONFIRMED
+          value: "false"
+        - name: MCP_HOST_STEP_TIMEOUT_SECONDS
+          value: "300"
+        - name: CLERUM_MCP_TOOL_TIMEOUT_MS
+          value: "3600000"
+        - name: CLERUM_MCP_TOOL_MAX_TOTAL_TIMEOUT_MS
+          value: "3600000"
+        # Optional cap passed to recipe-local mcp-host provider calls. Leave
+        # empty to use provider defaults.
+        - name: MCP_HOST_WORKFLOW_MAX_OUTPUT_TOKENS
+          value: ""
+        - name: CLERUM_WORKFLOW_PREVIOUS_OUTPUT_PROMPT_MAX_CHARS
+          value: "8192"
+        - name: CLERUM_MODEL_CONFIG_NAMESPACE
+          value: mcp-host
+        - name: CLERUM_COORDINATOR_IMAGE
+          value: clerum/workflow-coordinator:0.9.5
+        - name: CLERUM_MCP_HOST_IMAGE
+          value: clerum/mcp-host:0.9.5
+        - name: CLERUM_ARTIFACT_READER_IMAGE
+          value: clerum/workflow-recipes:0.9.5
+        - name: CLERUM_SNIPPET_RUNNER_IMAGE
+          value: clerum/workflow-snippet-runner:0.9.5
+        - name: CLERUM_IMAGE_PULL_POLICY
+          value: Always
+        # Webhook gateway (per-recipe) — injected when spec.webhooks[] is set.
+        - name: WRC_WEBHOOK_GATEWAY_IMAGE
+          value: clerum/webhook-gateway:0.1.0
+        - name: WRC_WEBHOOK_INGRESS_NAMESPACE
+          value: webhook-ingress
+        - name: WRC_MONITORING_NAMESPACE
+          value: monitoring
+        # Public key of control-api's admin JWT signing key. Used by WRC to
+        # verify delegation JWTs (iss=control-api, aud=clerum-wrc) when
+        # control-api proxies artifact downloads through WRC. Populated by
+        # deploy/scripts/gen-jwt-keys.sh and kept in sync with the admin
+        # private key held in control-api-secrets.
+        - name: CONTROL_API_PUBLIC_KEY_PEM
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-public-key
+              key: CONTROL_API_PUBLIC_KEY_PEM
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 15
+          periodSeconds: 15
+          failureThreshold: 3
+          successThreshold: 1
+          timeoutSeconds: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+          timeoutSeconds: 3
+        resources:
+          limits:
+            cpu: 200m
+            memory: 128Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          seccompProfile:
+            type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: workflow-recipes
+  namespace: control-plane
+  labels:
+    app: workflow-recipes
+    app.kubernetes.io/part-of: clerum
+spec:
+  selector:
+    app: workflow-recipes
+  ports:
+    - port: 8082
+      targetPort: 8082
+      protocol: TCP
+      name: http

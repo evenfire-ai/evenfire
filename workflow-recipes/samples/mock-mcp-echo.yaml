@@ -1,0 +1,25 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: mock-mcp-echo
+  namespace: sandbox-recipes
+spec:
+  description: 'Mock MCP echo server for E2E operational testing'
+  contextRef: default
+  workloads:
+    - id: echo-server
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3000
+      transport:
+        type: streamableHttp
+        path: /mcp
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+  security:
+    isolationLevel: minimal

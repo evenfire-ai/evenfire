@@ -1,0 +1,133 @@
+# ─── Default deny all traffic in the ingress namespace ────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-ingress
+  namespace: ingress
+  labels:
+    app.kubernetes.io/component: ingress
+    clerum.io/policy-type: default-deny
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# ─── DNS egress — discrete policy, matching the allow-dns-egress-<ns> house
+# convention (mcp-host, rpc-proxy, control-plane, profiles each ship one).
+# Kept separate from allow-cloudflared-egress so np-enforce-preflight.sh and
+# any future per-namespace audit find a conventionally-named DNS policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress-ingress
+  namespace: ingress
+  labels:
+    app.kubernetes.io/component: ingress
+    clerum.io/policy-type: infrastructure
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+---
+# ─── cloudflared egress — explicit, enumerated allow-list ─────────────────────
+# No wildcards. Adding a new public hostname requires editing this list
+# (a manifest PR), not just the overlay ConfigMap. See spec §6.1 HIGH-2.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cloudflared-egress
+  namespace: ingress
+  labels:
+    app.kubernetes.io/component: ingress
+    clerum.io/policy-type: infrastructure
+spec:
+  podSelector:
+    matchLabels:
+      app: cloudflared
+  policyTypes:
+  - Egress
+  egress:
+  # Cloudflare edge — outbound tunnel.
+  # QUIC data plane = UDP 7844; HTTP/2 fallback = TCP 7844.
+  # TCP 443 = api.cloudflare.com / update.argotunnel.com (registration + updates).
+  # Scope is rule-level: cluster-internal upstreams remain the explicit selector
+  # rules below, so this public edge rule must not reach private/reserved ranges.
+  - ports:
+    - port: 7844
+      protocol: UDP
+    - port: 7844
+      protocol: TCP
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: []
+  # control-ui
+  - ports:
+    - port: 3000
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: control-plane
+      podSelector:
+        matchLabels:
+          app: control-ui
+  # profile-ui
+  - ports:
+    - port: 3001
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: profiles
+      podSelector:
+        matchLabels:
+          app: profile-ui
+  # external-rest-api
+  - ports:
+    - port: 8091
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: profiles
+      podSelector:
+        matchLabels:
+          app: external-rest-api
+  # rpc-proxy
+  - ports:
+    - port: 8094
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: rpc-proxy
+      podSelector:
+        matchLabels:
+          app: rpc-proxy
+  # webhook-proxy (cluster-ingress spec §6.1 — webhook ingress lane).
+  # Keeps the deny-all-by-default posture: this is an enumerated allow,
+  # not a wildcard. Add a sibling block per future upstream.
+  - ports:
+    - port: 8095
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: webhook-ingress
+      podSelector:
+        matchLabels:
+          app: webhook-proxy

@@ -1,0 +1,24 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: smoke-sched-test
+  namespace: sandbox-recipes
+spec:
+  workloads: []
+  agent:
+    model: glm-4.7
+    provider: zai
+  steps:
+    - id: step-fetch
+      instruction: 'Fetch market data'
+    - id: step-analyze
+      instruction: 'Analyze market data'
+      dependsOn:
+        - step-fetch
+  scheduling:
+    cron: '0 9 * * *'
+    timezone: 'UTC'
+    concurrencyPolicy: Forbid
+    successfulHistoryLimit: 3
+    failedHistoryLimit: 1
+    suspend: false

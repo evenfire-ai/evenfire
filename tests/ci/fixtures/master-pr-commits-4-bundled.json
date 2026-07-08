@@ -1,0 +1,9 @@
+{
+  "commits": [
+    { "messageHeadline": "Merge pull request #218 from your-org/feat/sse-401-handling" },
+    { "messageHeadline": "Merge pull request #220 from your-org/feat/desktop-mcp-list" },
+    { "messageHeadline": "fix: address review feedback" },
+    { "messageHeadline": "Merge pull request #222 from your-org/chore/ci-timeout" },
+    { "messageHeadline": "Merge pull request #225 from your-org/refactor/conversation" }
+  ]
+}

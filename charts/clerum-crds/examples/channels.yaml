@@ -1,0 +1,62 @@
+# Example: All three channel types with multiple groups
+apiVersion: clerum.io/v1alpha1
+kind: CommunicationChannel
+metadata:
+  name: all-channels
+spec:
+  hostRef: chatllm
+  telegram:
+    - channelId: telegram1
+      chatType: group
+      userIds:
+        - xyz1111
+        - abc22
+        - jkaall1
+    - channelId: support-bot
+      chatType: private
+      userIds:
+        - "123456789"
+  email:
+    - channelId: INBOX
+      emails:
+        - xyz1111@xyz
+        - abc22@abc
+        - jkaall1@jka
+  slack:
+    - channelId: C1111111111
+      workspaceId: T0123456789
+      userIds:
+        - U1111111111
+        - U2222222222
+        - U3333333333
+---
+# Example: Only Telegram with a single group
+apiVersion: clerum.io/v1alpha1
+kind: CommunicationChannel
+metadata:
+  name: telegram-only
+spec:
+  hostRef: chatllm
+  telegram:
+    - channelId: support-bot
+      chatType: private
+      userIds:
+        - "123456789"
+---
+# Example: Email and Slack only
+apiVersion: clerum.io/v1alpha1
+kind: CommunicationChannel
+metadata:
+  name: email-and-slack
+spec:
+  hostRef: chatllm
+  email:
+    - channelId: support-inbox
+      emails:
+        - support@example.com
+        - admin@example.com
+  slack:
+    - channelId: C0123456789
+      workspaceId: T0123456789
+      userIds:
+        - U0123456789

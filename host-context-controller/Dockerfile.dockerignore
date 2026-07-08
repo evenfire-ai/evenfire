@@ -1,0 +1,13 @@
+**
+!packages/
+!packages/workflow-recipe-capability-policy/
+!packages/workflow-recipe-capability-policy/**
+!packages/image-policy/
+!packages/image-policy/**
+!host-context-controller/
+!host-context-controller/package.json
+!host-context-controller/package-lock.json
+!host-context-controller/tsconfig.json
+!host-context-controller/tsconfig.build.json
+!host-context-controller/src/
+!host-context-controller/src/**

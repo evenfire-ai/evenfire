@@ -1,0 +1,460 @@
+import { type NextFunction, type Request, type Response, Router } from 'express'
+import { config } from '../../config.js'
+import { asyncHandler } from '../../http/asyncHandler.js'
+import { enforceNamespace } from '../../http/namespaceAudit.js'
+import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
+import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
+import { K8sGateway } from '../../k8s.js'
+import { ClerumResourceType } from '../../types.js'
+import {
+  registerCommunicationChannelCredentialsRoutes,
+  validateCommunicationChannelCredentials,
+} from './communicationChannelCredentials.js'
+import {
+  ccCredentialsSecretName,
+  extractK8sStatusCode,
+  preserveCommunicationChannelCredentialsSecretRef,
+} from './communicationChannelSpecHelpers.js'
+import { validateHostSpec } from './hostSpecValidation.js'
+
+/**
+ * Return true if the CC spec has at least one non-empty provider array
+ * (telegram, slack, or email). These are the providers that require a
+ * credentials Secret to function; a CC without any provider is valid
+ * (e.g. a bare hostRef-only CC for future configuration).
+ */
+function ccSpecHasProvider(spec: Record<string, unknown>): boolean {
+  const telegramSettings =
+    spec.telegramSettings &&
+    typeof spec.telegramSettings === 'object' &&
+    !Array.isArray(spec.telegramSettings)
+      ? (spec.telegramSettings as Record<string, unknown>)
+      : null
+  const slackSettings =
+    spec.slackSettings &&
+    typeof spec.slackSettings === 'object' &&
+    !Array.isArray(spec.slackSettings)
+      ? (spec.slackSettings as Record<string, unknown>)
+      : null
+  return (
+    (Array.isArray(spec.telegram) && spec.telegram.length > 0) ||
+    (Array.isArray(spec.slack) && spec.slack.length > 0) ||
+    (Array.isArray(spec.email) && spec.email.length > 0) ||
+    !!telegramSettings?.botHandle ||
+    telegramSettings?.replyOnlyWhenMentioned !== undefined ||
+    !!slackSettings?.workspaceId ||
+    !!slackSettings?.botHandle ||
+    slackSettings?.replyOnlyWhenMentioned !== undefined ||
+    slackSettings?.replyInThreads !== undefined
+  )
+}
+
+function ccSpecHasTelegramProvider(spec: Record<string, unknown>): boolean {
+  const telegramSettings =
+    spec.telegramSettings &&
+    typeof spec.telegramSettings === 'object' &&
+    !Array.isArray(spec.telegramSettings)
+      ? (spec.telegramSettings as Record<string, unknown>)
+      : null
+  return (
+    (Array.isArray(spec.telegram) && spec.telegram.length > 0) ||
+    !!telegramSettings?.botHandle ||
+    telegramSettings?.replyOnlyWhenMentioned !== undefined
+  )
+}
+
+function ccSpecHasSlackProvider(spec: Record<string, unknown>): boolean {
+  const slackSettings =
+    spec.slackSettings &&
+    typeof spec.slackSettings === 'object' &&
+    !Array.isArray(spec.slackSettings)
+      ? (spec.slackSettings as Record<string, unknown>)
+      : null
+  return (
+    (Array.isArray(spec.slack) && spec.slack.length > 0) ||
+    !!slackSettings?.workspaceId ||
+    !!slackSettings?.botHandle ||
+    slackSettings?.replyOnlyWhenMentioned !== undefined ||
+    slackSettings?.replyInThreads !== undefined
+  )
+}
+
+function missingCreateCredentialKey(
+  spec: Record<string, unknown>,
+  credentials: Record<string, string>
+): string | null {
+  if (ccSpecHasTelegramProvider(spec) && !credentials['telegram-bot-token']) {
+    return 'telegram-bot-token'
+  }
+  if (ccSpecHasSlackProvider(spec)) {
+    for (const key of ['slack-signing-secret', 'slack-bot-token']) {
+      if (!credentials[key]) return key
+    }
+  }
+  return null
+}
+
+// workflowrecipes is handled by recipes.ts (canonical sandbox-recipes route).
+// workflowrecipepolicies is read inline by the recipes policy-invariant
+// helper and does not need generic admin CRUD routing.
+// sharedfilesystems is handled by sharedFilesystems.ts (admin-only writes
+// + token mint + reverse proxy to the per-SFS wfc).
+type AdminResourceType = Exclude<
+  ClerumResourceType,
+  'workflowrecipes' | 'workflowrecipepolicies' | 'sharedfilesystems'
+>
+
+const RESOURCE_MAP: Record<string, AdminResourceType> = {
+  hosts: 'hosts',
+  contexts: 'contexts',
+  communicationchannels: 'communicationchannels',
+  'communication-channels': 'communicationchannels',
+  mcpservers: 'mcpservers',
+  'mcp-servers': 'mcpservers',
+}
+
+function resourceNamespace(plural: AdminResourceType): string {
+  switch (plural) {
+    case 'hosts':
+      return config.hostsNamespace
+    case 'contexts':
+      return config.contextsNamespace
+    case 'communicationchannels':
+      return config.communicationChannelsNamespace
+    case 'mcpservers':
+      return config.mcpServersNamespace
+  }
+}
+
+function communicationChannelMatchesConfirmedUser(item: unknown, userId: string): boolean {
+  const spec = (item as { spec?: Record<string, unknown> } | null)?.spec
+  if (!spec) return false
+  const groups = [
+    ...(Array.isArray(spec.telegram) ? spec.telegram : []),
+    ...(Array.isArray(spec.slack) ? spec.slack : []),
+    ...(Array.isArray(spec.email) ? spec.email : []),
+  ]
+  return groups.some(group => {
+    if (!group || typeof group !== 'object') return false
+    return String((group as { confirmedByUserId?: unknown }).confirmedByUserId || '') === userId
+  })
+}
+
+const RESOURCE_PATTERN =
+  '/admin/:resource(hosts|contexts|communication-channels|communicationchannels|mcp-servers|mcpservers)'
+
+/** Resolve the plural type and canonical namespace for a resource route param. */
+function resolveResource(param: string): { plural: AdminResourceType; ns: string } | null {
+  const plural = RESOURCE_MAP[param]
+  if (!plural) return null
+  return { plural, ns: resourceNamespace(plural) }
+}
+
+export function createAdminResourcesRouter(gateway: K8sGateway): Router {
+  const router = Router()
+
+  // Middleware: enforce namespace per resource type and audit any injection attempt.
+  // Uses enforceNamespace() consistently with all other admin routers.
+  router.use(RESOURCE_PATTERN, (req: Request, _res: Response, next: NextFunction) => {
+    const resolved = resolveResource(req.params.resource)
+    if (resolved) {
+      enforceNamespace(resolved.ns)(req, _res, next)
+    } else {
+      next()
+    }
+  })
+
+  router.get(
+    RESOURCE_PATTERN,
+    asyncHandler(async (req, res) => {
+      const { plural, ns } = resolveResource(req.params.resource)!
+      let items = await gateway.listResource(plural, ns)
+      const confirmedByUserId =
+        typeof req.query.confirmedByUserId === 'string' ? req.query.confirmedByUserId.trim() : ''
+      if (plural === 'communicationchannels' && confirmedByUserId) {
+        items = items.filter(item =>
+          communicationChannelMatchesConfirmedUser(item, confirmedByUserId)
+        )
+      }
+      res.status(200).json({ items })
+    })
+  )
+
+  router.post(
+    RESOURCE_PATTERN,
+    asyncHandler(async (req, res) => {
+      const { plural, ns } = resolveResource(req.params.resource)!
+      const body = req.body as {
+        metadata: { name: string }
+        spec: Record<string, unknown> & {
+          envSecret?: { name?: unknown }
+        }
+        credentials?: Record<string, string>
+      }
+
+      if (plural === 'communicationchannels' && body.spec) {
+        const errors = validateCommunicationChannelSpec(body.spec)
+        if (errors.length > 0) {
+          res.status(422).json({ errors })
+          return
+        }
+
+        // B4: a CC with a provider (telegram/slack/email) must not be created
+        // without credentials. Require EITHER a `credentials` envelope on the
+        // request OR a `credentialsSecretRef` already present in the spec.
+        if (ccSpecHasProvider(body.spec) && !body.credentials && !body.spec.credentialsSecretRef) {
+          res.status(400).json({
+            error:
+              'A CommunicationChannel with a provider (telegram, slack, or email) requires ' +
+              'credentials. Supply a "credentials" envelope on the request, or set ' +
+              '"spec.credentialsSecretRef" to an existing Secret.',
+          })
+          return
+        }
+      }
+
+      if (plural === 'communicationchannels' && body.credentials) {
+        const credentialValidation = validateCommunicationChannelCredentials(body.credentials)
+        if (!credentialValidation.ok) {
+          res.status(400).json({ error: credentialValidation.error })
+          return
+        }
+        const missingKey = missingCreateCredentialKey(body.spec, credentialValidation.values)
+        if (missingKey) {
+          res.status(400).json({
+            error: `credentials["${missingKey}"] is required for this CommunicationChannel provider`,
+          })
+          return
+        }
+        const ccName = body.metadata?.name
+        if (!ccName) {
+          res.status(400).json({ error: 'metadata.name is required' })
+          return
+        }
+        const secretName = ccCredentialsSecretName(ccName)
+        await gateway.createSecret({
+          name: secretName,
+          namespace: ns,
+          type: 'Opaque',
+          stringData: credentialValidation.values,
+        })
+        // Inject credentialsSecretRef into the CC spec; strip the
+        // non-CRD `credentials` envelope so it does not leak into the
+        // CustomObjects API call.
+        const { credentials: _credentials, ...rest } = body
+        const ccBody = {
+          ...rest,
+          spec: {
+            ...rest.spec,
+            credentialsSecretRef: { name: secretName },
+          },
+        }
+        try {
+          const created = await gateway.createResource(plural, ccBody, ns)
+          res.status(201).json(created)
+        } catch (err) {
+          // Best-effort rollback. 404 from a stale Secret read or a
+          // missing-secret race is tolerable — log and bubble the
+          // original CRD error up so the caller sees the failure cause.
+          try {
+            await gateway.deleteSecret(secretName, ns)
+          } catch (rollbackErr) {
+            console.warn(
+              `[Admin] cc credentials rollback failed for "${secretName}": ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`
+            )
+          }
+          throw err
+        }
+        return
+      }
+
+      // Early validation for Host specs — defensive Zod check for spec.approval.tools.
+      if (plural === 'hosts' && body.spec) {
+        const issue = validateHostSpec(body.spec)
+        if (issue) {
+          res.status(422).json(issue)
+          return
+        }
+      }
+
+      // Early validation for McpServer specs — UX safety net + defense-in-depth.
+      // HCC reconciler also sanitizes as a backstop.
+      if (plural === 'mcpservers' && body.spec) {
+        const errors = await validateMcpServerSpecPreflight(body.spec, {
+          allowedImagePrefixes: config.allowedPluginImagePrefixes,
+          enforceImageAllowlist: config.enforcePluginImageAllowlist,
+        })
+        if (errors.length > 0) {
+          res.status(422).json({ errors })
+          return
+        }
+
+        // Missing envSecret refs are allowed at creation time so Connector
+        // Secrets can be completed from the Secrets UI after the McpServer CRD
+        // exists. HCC/Kubernetes still fail closed until the Secret is added.
+      }
+
+      const created = await gateway.createResource(plural, body, ns)
+      res.status(201).json(created)
+    })
+  )
+
+  router.get(
+    `${RESOURCE_PATTERN}/:name`,
+    asyncHandler(async (req, res) => {
+      const { plural, ns } = resolveResource(req.params.resource)!
+      const resource = await gateway.getResource(plural, req.params.name, ns)
+      res.status(200).json(resource)
+    })
+  )
+
+  router.put(
+    `${RESOURCE_PATTERN}/:name`,
+    asyncHandler(async (req, res) => {
+      const { plural, ns } = resolveResource(req.params.resource)!
+      const body = req.body as { spec: Record<string, unknown> }
+
+      if (plural === 'communicationchannels' && body.spec) {
+        const errors = validateCommunicationChannelSpec(body.spec)
+        if (errors.length > 0) {
+          res.status(422).json({ errors })
+          return
+        }
+      }
+
+      // Same early validation for McpServer updates.
+      if (plural === 'mcpservers' && body.spec) {
+        const errors = await validateMcpServerSpecPreflight(body.spec, {
+          allowedImagePrefixes: config.allowedPluginImagePrefixes,
+          enforceImageAllowlist: config.enforcePluginImageAllowlist,
+        })
+        if (errors.length > 0) {
+          res.status(422).json({ errors })
+          return
+        }
+      }
+
+      if (plural === 'hosts' && body.spec) {
+        const issue = validateHostSpec(body.spec)
+        if (issue) {
+          res.status(422).json(issue)
+          return
+        }
+      }
+
+      const updateBody =
+        plural === 'communicationchannels' && body.spec
+          ? {
+              ...body,
+              spec: await preserveCommunicationChannelCredentialsSecretRef(
+                gateway,
+                req.params.name,
+                ns,
+                body.spec
+              ),
+            }
+          : body
+      const updated = await gateway.updateResource(plural, req.params.name, updateBody, ns)
+      res.status(200).json(updated)
+    })
+  )
+
+  router.delete(
+    `${RESOURCE_PATTERN}/:name`,
+    asyncHandler(async (req, res) => {
+      const { plural, ns } = resolveResource(req.params.resource)!
+      const name = req.params.name
+
+      // CommunicationChannel: read the credentialsSecretRef name FIRST (we
+      // can't read the CC after it's deleted), then delete the CC, then
+      // delete the Secret. The CC-first order means HCC's SecretInformer
+      // observes the Secret DELETED event when no CC references it anymore,
+      // so reconcileChannelReaderRevision short-circuits cleanly with zero
+      // CCs — no transient "patch with sha256 of empty data" annotation
+      // roll. Tradeoff: if Secret delete fails after CC delete, an orphan
+      // Secret survives. That's harmless (Secrets without referencing CCs
+      // do nothing) and easier to clean up than an orphan CC.
+      let ccSecretRefName: string | undefined
+      if (plural === 'communicationchannels') {
+        try {
+          const cc = (await gateway.getResource(plural, name, ns)) as {
+            spec?: { credentialsSecretRef?: { name?: string } }
+          }
+          ccSecretRefName = cc.spec?.credentialsSecretRef?.name
+        } catch (err) {
+          if (extractK8sStatusCode(err) !== 404) {
+            throw err
+          }
+        }
+      }
+
+      const deleted = await gateway.deleteResource(plural, name, ns)
+
+      if (plural === 'communicationchannels' && ccSecretRefName) {
+        try {
+          await gateway.deleteSecret(ccSecretRefName, ns)
+          console.log(`[Admin] Deleted CC credentials Secret "${ccSecretRefName}" in ${ns}`)
+        } catch (err) {
+          if (extractK8sStatusCode(err) === 404) {
+            console.log(`[Admin] CC credentials Secret "${ccSecretRefName}" already gone in ${ns}`)
+          } else {
+            // CC is already gone; log and swallow so the operator gets a 200
+            // and can clean the orphan Secret manually if needed.
+            console.error(
+              `[Admin] CC delete succeeded but credentials Secret "${ccSecretRefName}" cleanup failed:`,
+              err
+            )
+          }
+        }
+      }
+
+      if (plural === 'mcpservers') {
+        const contextsNs = resourceNamespace('contexts')
+        try {
+          await gateway.deleteSecret(`${name}-credentials`, ns)
+          console.log(`[Admin] Deleted credentials secret "${name}-credentials" in ${ns}`)
+        } catch (err) {
+          console.log(
+            `[Admin] No credentials secret to delete for "${name}": ${err instanceof Error ? err.message : String(err)}`
+          )
+        }
+
+        try {
+          const ctxList = (await gateway.listResource('contexts', contextsNs)) as Array<{
+            metadata?: { name?: string }
+            spec?: { contextId?: string; description?: string; mcpServers?: string[] }
+          }>
+          for (const ctx of ctxList) {
+            const ctxName = ctx.metadata?.name
+            const servers = ctx.spec?.mcpServers ?? []
+            if (ctxName && servers.includes(name)) {
+              await gateway.updateResource(
+                'contexts',
+                ctxName,
+                {
+                  spec: {
+                    contextId: ctx.spec?.contextId ?? ctxName,
+                    description: ctx.spec?.description,
+                    mcpServers: servers.filter(s => s !== name),
+                  } as Record<string, unknown>,
+                },
+                contextsNs
+              )
+              console.log(`[Admin] Removed "${name}" from Context "${ctxName}" allowlist`)
+            }
+          }
+        } catch (err) {
+          console.error(
+            `[Admin] Failed to clean up Context allowlists for "${name}": ${err instanceof Error ? err.message : String(err)}`
+          )
+        }
+      }
+
+      res.status(200).json(deleted)
+    })
+  )
+
+  registerCommunicationChannelCredentialsRoutes(router, gateway)
+
+  return router
+}

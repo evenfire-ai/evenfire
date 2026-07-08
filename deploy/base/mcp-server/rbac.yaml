@@ -1,0 +1,189 @@
+# --- Role: control-api (legacy name, referenced by existing RoleBinding) ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: control-api
+  namespace: mcp-server
+rules:
+  - apiGroups: ["clerum.io"]
+    resources: ["contexts", "mcpservers"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Workflow trigger preflight verifies transport MCP Services are actually
+  # routable before creating approval requests or workflow runs.
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list"]
+  # Secrets: required for registry install flow with credentials
+  # (api-key/bearer-token/oauth2 tokens stored as K8s Secrets in mcp-server ns)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-api
+  namespace: mcp-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: control-api
+subjects:
+- kind: ServiceAccount
+  name: control-api
+  namespace: control-plane
+---
+# --- Role: control-api-mcp-resources ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: control-api-mcp-resources
+  namespace: mcp-server
+rules:
+  - apiGroups: ["clerum.io"]
+    resources: ["contexts", "mcpservers"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-api-mcp-resources
+  namespace: mcp-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: control-api-mcp-resources
+subjects:
+- kind: ServiceAccount
+  name: control-api
+  namespace: control-plane
+---
+# --- Role: host-context-controller ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller
+  namespace: mcp-server
+rules:
+  # Watch McpServer CRDs
+  - apiGroups: ["clerum.io"]
+    resources: ["mcpservers"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Read + update McpServer status conditions so readiness/secret resolution
+  # is visible on the CRD instead of only in controller-local memory/logs.
+  - apiGroups: ["clerum.io"]
+    resources: ["mcpservers/status"]
+    verbs: ["get", "patch"]
+  # Watch Context CRDs (resolve server access + trigger NetworkPolicy reconciliation)
+  - apiGroups: ["clerum.io"]
+    resources: ["contexts"]
+    verbs: ["get", "list", "watch"]
+  # Manage NetworkPolicies (generated from Context CRDs)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Manage Deployments for MCP servers
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Manage Services for MCP servers
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Manage ConfigMaps for remote egress proxy nginx config
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Read + watch secrets (auth tokens, envSecret validation, SecretInformer re-enqueue)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller
+  namespace: mcp-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller
+subjects:
+- kind: ServiceAccount
+  name: host-context-controller
+  namespace: control-plane
+---
+# --- Role: workflow-recipes ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workflow-recipes
+  namespace: mcp-server
+rules:
+  # McpServer CRDs — full lifecycle for MCP delegation
+  - apiGroups: ["clerum.io"]
+    resources: ["mcpservers"]
+    verbs: ["get", "list", "create", "update", "delete", "deletecollection"]
+  # Context CRDs — full lifecycle for per-recipe Context isolation
+  - apiGroups: ["clerum.io"]
+    resources: ["contexts"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Deployments — workload creation
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # StatefulSets need patch for data-safe mutable-spec reconciliation (#690).
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # CronJobs + Jobs — workload creation
+  - apiGroups: ["batch"]
+    resources: ["cronjobs", "jobs"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # DaemonSets — workload creation
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Services — WRC also sweeps by label during finalizer cleanup.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "update", "delete", "deletecollection"]
+  # PVCs, ConfigMaps — resource creation
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "configmaps"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # NetworkPolicies — NP-02 fix
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete", "deletecollection"]
+  # Secrets — full lifecycle (reconciler uses create-or-replace pattern).
+  # `list`+`watch` let the multi-namespace SecretWatcher observe ownership-label
+  # changes for transport-workload envSecrets mounted from mcp-server, so a Secret
+  # created or re-labeled foreign here fans out a re-reconcile (Issue #637
+  # revocation / deferred-foreign-creation) instead of lingering in the McpServer
+  # CRD until the next unrelated event.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pods — `deletecollection` supports deleteStatefulSetManagedPods (Issue #637
+  # Fix #4) for a transport StatefulSet whose Secret ownership is revoked.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete", "deletecollection"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workflow-recipes
+  namespace: mcp-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workflow-recipes
+subjects:
+- kind: ServiceAccount
+  name: workflow-recipes
+  namespace: control-plane

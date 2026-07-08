@@ -1,0 +1,186 @@
+# The legacy shared `mcp-host` ServiceAccount + Role + RoleBinding have
+# been removed. HCC now provisions a per-Host ServiceAccount
+# (`host-<hostRef>-sa`) bound to a narrow Role
+# (`host-<hostRef>-config-reader`) on every reconcile. The narrow Role
+# grants `get/watch/list` on exactly the Host CRD by name, the per-Host
+# env CM/Secret, and the LLM Secret currently referenced by
+# `spec.secretRef` — Host A cannot read Host B's resources.
+#
+# --- Role: control-api-hosts-and-secrets ---
+# control-api manages Host CRDs, the LLM Secret referenced by spec.secretRef,
+# and the per-Host env ConfigMap (`host-<hostRef>-env`) + env Secret
+# (`host-<hostRef>-env-secret`) populated by the Host detail page's
+# Environment Variables tab.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: control-api-hosts-and-secrets
+  namespace: mcp-host
+rules:
+  - apiGroups: ['clerum.io']
+    resources: ['hosts']
+    verbs: ['get', 'list', 'create', 'update', 'delete']
+  # SharedFileSystem CRDs (always in mcp-host ns) — Control UI admin endpoints
+  # under /api/v1/admin/shared-filesystems list/get/create/delete CRDs and the
+  # proxy endpoint reads the CRD before forwarding to the per-SFS wfc.
+  - apiGroups: ['clerum.io']
+    resources: ['sharedfilesystems']
+    verbs: ['get', 'list', 'create', 'update', 'delete']
+  - apiGroups: ['']
+    resources: ['secrets']
+    verbs: ['get', 'list', 'create', 'update', 'delete']
+  - apiGroups: ['']
+    resources: ['configmaps']
+    verbs: ['get', 'list', 'create', 'update', 'delete']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-api-hosts-and-secrets
+  namespace: mcp-host
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: control-api-hosts-and-secrets
+subjects:
+  - kind: ServiceAccount
+    name: control-api
+    namespace: control-plane
+---
+# control-api's admin Host artifact endpoints execute a read-only command in
+# the target Host pod and stream files through the exec guard in K8sGateway.
+# Keep the exec grant namespace-scoped to mcp-host; workflow artifact exec is
+# bound separately in sandbox-recipes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-api-pod-reader
+  namespace: mcp-host
+  labels:
+    app.kubernetes.io/part-of: clerum
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: control-api-pod-reader
+subjects:
+  - kind: ServiceAccount
+    name: control-api
+    namespace: control-plane
+---
+# --- Role: host-context-controller-host-runtime ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller-host-runtime
+  namespace: mcp-host
+rules:
+  # Watch Host CRDs in host namespace
+  - apiGroups: ['clerum.io']
+    resources: ['hosts']
+    verbs: ['get', 'list', 'watch']
+  # Watch SharedFileSystem CRDs (always live in mcp-host namespace) and write
+  # status/phase back via /status subresource. The sharedFileSystemReconciler
+  # provisions a per-SFS PVC + init Job + workspace-files-controller Deployment
+  # + Service + NetworkPolicies and tracks them on the SFS status field.
+  - apiGroups: ['clerum.io']
+    resources: ['sharedfilesystems']
+    verbs: ['get', 'list', 'watch', 'patch', 'update']
+  - apiGroups: ['clerum.io']
+    resources: ['sharedfilesystems/status']
+    verbs: ['get', 'patch', 'update']
+  # Init Jobs for the SharedFileSystem PVC (chown/seed/mkdir directories[]).
+  - apiGroups: ['batch']
+    resources: ['jobs']
+    verbs: ['get', 'list', 'create', 'update', 'delete', 'watch']
+  # Manage per-host Deployments
+  - apiGroups: ['apps']
+    resources: ['deployments']
+    verbs: ['get', 'list', 'create', 'update', 'delete']
+  # Manage per-host Services and PVCs
+  - apiGroups: ['']
+    resources: ['services', 'persistentvolumeclaims']
+    verbs: ['get', 'list', 'create', 'update', 'delete']
+  # Validate host secret references AND satisfy K8s RBAC no-escalation rule:
+  # HCC creates per-Host Roles that grant `[get, watch, list]` on secrets, so
+  # HCC itself must hold those same verbs to delegate them.
+  # HCC also creates `host-<hostRef>-mcp-host-runtime-tokens` Secrets for shared
+  # mcp-host pods, so it needs `create/update/patch/delete` on those HCC-owned
+  # runtime-token Secrets.
+  # in this namespace (and per-Host Role grants the same verbs to that Secret).
+  - apiGroups: ['']
+    resources: ['secrets']
+    verbs: ['get', 'watch', 'list', 'create', 'update', 'patch', 'delete']
+  # Same no-escalation requirement: per-Host Role grants `[get, watch, list]`
+  # on configmaps (host-<hostRef>-env), so HCC must hold those too.
+  - apiGroups: ['']
+    resources: ['configmaps']
+    verbs: ['get', 'watch', 'list']
+  # Phase 8: Manage NetworkPolicies (L0 deny-all + L1 infrastructure)
+  - apiGroups: ['networking.k8s.io']
+    resources: ['networkpolicies']
+    verbs: ['get', 'list', 'create', 'update', 'delete']
+  # HCC provisions per-Host ServiceAccount + Role + RoleBinding so each
+  # mcp-host pod runs under a narrowly-scoped identity. Required verbs
+  # include `update` on Role because resourceNames is rewritten on
+  # `spec.secretRef` change.
+  - apiGroups: ['']
+    resources: ['serviceaccounts']
+    verbs: ['get', 'list', 'create', 'update', 'delete']
+  - apiGroups: ['rbac.authorization.k8s.io']
+    resources: ['roles', 'rolebindings']
+    verbs: ['get', 'list', 'create', 'update', 'delete']
+  # Truthful SharedFileSystem status (issue #592): the reconciler reads the
+  # per-SFS wfc Pod (status.conditions + container statuses) to distinguish a PVC
+  # that is Pending because of WaitForFirstConsumer (normal, transient) from one
+  # wedged behind an Unschedulable Pod or a crash/image-pull loop (Degraded).
+  # Read-only — no escalation. (No Events API access is used.)
+  - apiGroups: ['']
+    resources: ['pods']
+    verbs: ['get', 'list']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller-host-runtime
+  namespace: mcp-host
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller-host-runtime
+subjects:
+  - kind: ServiceAccount
+    name: host-context-controller
+    namespace: control-plane
+---
+# --- Role: workflow-recipes-model-config-reader ---
+# Tight, get-only cross-namespace access for WRC (control-plane/workflow-recipes SA)
+# to resolve per-step LLM API keys from mcp-host's single source of truth.
+# Scoped to 2 named resources: chatllm-api-keys Secret + clerum-model-secret-mapping ConfigMap.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workflow-recipes-model-config-reader
+  namespace: mcp-host
+rules:
+  - apiGroups: ['']
+    resources: ['secrets']
+    verbs: ['get']
+    resourceNames: ['chatllm-api-keys']
+  - apiGroups: ['']
+    resources: ['configmaps']
+    verbs: ['get']
+    resourceNames: ['clerum-model-secret-mapping']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workflow-recipes-model-config-reader
+  namespace: mcp-host
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workflow-recipes-model-config-reader
+subjects:
+  - kind: ServiceAccount
+    name: workflow-recipes
+    namespace: control-plane

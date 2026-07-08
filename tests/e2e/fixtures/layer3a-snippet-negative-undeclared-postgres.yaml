@@ -1,0 +1,22 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-layer3a-snippet-negative-undeclared-postgres
+  namespace: sandbox-recipes
+spec:
+  triggers:
+    onDemand: {}
+  steps:
+    - id: snippet
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          return await sdk.postgres.query(
+            { workload: "postgres", database: "clerum" },
+            { sql: "select 1" }
+          )
+        capabilities:
+          postgres:
+            access: read
+            workloads: [postgres]

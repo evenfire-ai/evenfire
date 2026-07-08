@@ -1,0 +1,42 @@
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: airtable-server
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: >-
+    Airtable MCP Server - provides tools for interacting with Airtable bases
+    including listing bases, querying and searching records, creating/updating/deleting
+    records, managing tables and fields, and working with comments.
+  image: clerum/airtable-mcp-server:test
+  imagePullPolicy: IfNotPresent
+  transport:
+    type: streamableHttp
+    url: http://airtable-server.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000
+  envMapping:
+    transport: MCP_TRANSPORT
+    httpPort: PORT
+  env:
+    - name: AIRTABLE_MCP_LOG_TRAFFIC
+      value: "true"
+  envSecret:
+    name: mcp-airtable-credentials
+    keys:
+      - secretKey: api-key
+        envVar: AIRTABLE_API_KEY
+  egressBindings:
+    - dns: api.airtable.com
+      port: 443
+      protocol: TCP
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "500m"
+  auth:
+    type: none
+  enabled: true

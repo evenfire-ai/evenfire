@@ -1,0 +1,39 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-layer3a-snippet-http-egress
+  namespace: sandbox-recipes
+spec:
+  triggers:
+    onDemand: {}
+  description: Layer 3A snippet runtime public HTTP egress through declared allowedHosts.
+  runtimeEgress:
+    http:
+      allowedHosts:
+        - api.ipify.org
+  output:
+    destination: pvc
+    format: json
+    storageSize: 128Mi
+  steps:
+    - id: call-public-api
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          const response = await sdk.http.fetchJson("https://api.ipify.org?format=json")
+          const artifact = await sdk.artifacts.writeJson("http-egress-result.json", {
+            host: "api.ipify.org",
+            api: "ipify",
+            observedIp: response.ip
+          })
+          return {
+            host: "api.ipify.org",
+            api: "ipify",
+            observedIp: response.ip,
+            artifact
+          }
+        capabilities:
+          http:
+            allowedHosts:
+              - api.ipify.org

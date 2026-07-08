@@ -1,0 +1,39 @@
+{
+  "name": "@clerum/workflow-sdk",
+  "version": "1.0.26-beta.0",
+  "description": "Clerum Workflow SDK — TypeScript library for workflow coordinator Pods",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "examples",
+    "Dockerfile.base",
+    "Makefile"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "build:docker": "tsc -p tsconfig.json",
+    "test": "tsc -b && vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src --ext .ts"
+  },
+  "keywords": [
+    "clerum",
+    "workflow",
+    "sdk",
+    "kubernetes",
+    "mcp"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "dependencies": {
+    "@clerum/workflow-runtime-core": "file:../workflow-runtime-core"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0",
+    "vitest": "^3.0.0"
+  }
+}

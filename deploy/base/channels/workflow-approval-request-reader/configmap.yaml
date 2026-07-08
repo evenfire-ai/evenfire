@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clerum-workflow-approval-request-reader-config
+  namespace: channels
+  labels:
+    app.kubernetes.io/name: workflow-approval-request-reader
+    app.kubernetes.io/part-of: clerum
+data:
+  WORKFLOW_APPROVAL_READER_ENABLED_MEDIA: "telegram,slack"
+  WORKFLOW_APPROVAL_READER_MCP_HOST_TIMEOUT_MS: "5000"
+  WORKFLOW_APPROVAL_READER_MCP_HOST_MESSAGE_TIMEOUT_MS: "120000"
+  WORKFLOW_APPROVAL_READER_RATE_LIMIT_WINDOW_MS: "60000"
+  WORKFLOW_APPROVAL_READER_RATE_LIMIT_MAX_REQUESTS: "120"
+  WORKFLOW_APPROVAL_READER_MCP_HOST_TARGETS: ""
+  WORKFLOW_APPROVAL_READER_MCP_HOST_TARGETS_FILE: "/etc/clerum/workflow-approval-request-reader/WORKFLOW_APPROVAL_READER_MCP_HOST_TARGETS"
+  WORKFLOW_APPROVAL_READER_CHANNEL_READER_URL_TEMPLATE: "http://channel-reader-{host}:8099"
+  WORKFLOW_APPROVAL_READER_CHANNEL_READER_HANDOFF_TIMEOUT_MS: "5000"

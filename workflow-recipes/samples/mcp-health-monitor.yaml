@@ -1,0 +1,25 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: mcp-health-monitor
+  namespace: sandbox-recipes
+spec:
+  description: 'Node health monitor running on every cluster node'
+  workloads:
+    - id: health-monitor
+      type: daemonset
+      image: us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/health-monitor:latest
+      port: 9090
+      resources:
+        requests:
+          cpu: '25m'
+          memory: '32Mi'
+        limits:
+          cpu: '100m'
+          memory: '64Mi'
+      healthCheck:
+        type: http
+        path: /health
+        port: 9090
+  security:
+    isolationLevel: strict

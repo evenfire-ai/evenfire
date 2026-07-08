@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: channel-reader-to-workflow-mcp-host
+  namespace: channels
+  labels:
+    clerum.io/policy-type: service
+spec:
+  podSelector:
+    matchLabels:
+      app: channel-reader
+      clerum.io/managed-by: wrc
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - port: 8080
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: sandbox-recipes
+      podSelector:
+        matchLabels:
+          clerum.io/component: workflow-mcp-host
+          clerum.io/managed-by: wrc

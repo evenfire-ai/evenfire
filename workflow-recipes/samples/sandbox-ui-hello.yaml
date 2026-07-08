@@ -1,0 +1,38 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: sandbox-ui-hello
+  namespace: sandbox-recipes
+spec:
+  description: >-
+    Hello-world demo for the sandbox-ui pipeline. Mounts an unprivileged
+    nginx that serves its default welcome page so the embed has something
+    to render. No backend, no egress — proves the proxy + cookie + view/*
+    path end-to-end with the smallest possible recipe.
+  contextRef: context1
+  workloads:
+    - id: hello
+      type: deployment
+      # nginx-unprivileged listens on 8080 and runs as UID 101, which
+      # satisfies the sandbox-ui namespace's runAsNonRoot floor without
+      # any per-workload security override.
+      image: nginxinc/nginx-unprivileged:1.27-alpine
+      port: 8080
+      healthCheck:
+        type: http
+        path: /
+        port: 8080
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '32Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+  ui:
+    workloadRef: hello
+    port: 8080
+    title: 'Hello Sandbox UI'
+    defaultPath: '/'
+  security:
+    isolationLevel: minimal

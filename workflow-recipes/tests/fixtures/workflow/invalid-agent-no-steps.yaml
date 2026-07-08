@@ -1,0 +1,12 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: smoke-invalid-cel
+  namespace: sandbox-recipes
+spec:
+  workloads: []
+  agent:
+    model: glm-4.7
+    provider: zai
+  # steps[] intentionally omitted — CEL rule R1 should reject this:
+  # !has(self.spec.agent) || has(self.spec.steps)

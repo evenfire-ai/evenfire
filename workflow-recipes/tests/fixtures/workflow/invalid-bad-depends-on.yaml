@@ -1,0 +1,17 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: smoke-invalid-dep
+  namespace: sandbox-recipes
+spec:
+  workloads: []
+  agent:
+    model: glm-4.7
+    provider: zai
+  steps:
+    - id: step-one
+      instruction: 'First step'
+    - id: step-two
+      instruction: 'References non-existent step'
+      dependsOn:
+        - step-does-not-exist

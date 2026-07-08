@@ -1,0 +1,74 @@
+# ============================================================================
+# e2e-cron-exec-test — mcp-host CRON TAB (cron_manage) execution probe
+# ----------------------------------------------------------------------------
+# WHAT IT PROVES
+#   That a task scheduled via `cron_manage` ACTUALLY executes (issue #529).
+#   The agent: (1) creates a cron job, (2) triggers it, (3) waits and verifies
+#   the side-effect, (4) reports the verdict in the step output.
+#
+# EXPECTED RESULT
+#   - WITHOUT the fix: the cron task is orphaned and NEVER runs ->
+#     step output: CRON_EXEC_FAILED
+#   - WITH the fix (cron routed into SessionProcessor): the task runs ->
+#     step output: CRON_EXEC_VERIFIED
+#
+# IMPORTANT PREREQUISITE
+#   Run with approval DISABLED so the scheduled cron task runs autonomously:
+#     CLERUM_ENABLE_APPROVAL=false   (in the recipe mcp-host ConfigMap)
+#   (With approval ON, the scheduled cron task would wait for approval — that is
+#    expected behavior, but not what this recipe measures.)
+#
+# HOW TO RUN
+#   kubectl apply -f cron-exec-test-recipe.yaml
+#   # wait for the step to finish:
+#   kubectl get workflowrecipe e2e-cron-exec-test -n sandbox-recipes \
+#     -o jsonpath='{.status.steps[0].phase} -> {.status.steps[0].output}{"\n"}'
+#
+# EXTERNAL VERIFICATION (source of truth, independent of the LLM):
+#   POD=$(kubectl get pod -n sandbox-recipes \
+#         -l clerum.io/workload=e2e-cron-exec-test-mcp-host -o name | head -1)
+#   kubectl exec -n sandbox-recipes "$POD" -- cat /tmp/cron-exec-proof.txt 2>/dev/null
+#   #   -> "CRON_EXEC_OK"  = cron executed (fix OK)
+#   #   -> (no file)       = orphaned (no fix)
+#
+# CLEANUP
+#   kubectl delete workflowrecipe e2e-cron-exec-test -n sandbox-recipes
+#
+# NOTE
+#   The equivalent assertion is automated as test case CR-11 in
+#   tests/e2e/mcp-host/cron-scheduler.test.ts (gated by E2E_RUN_CRON_SCHEDULER=1).
+# ============================================================================
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-cron-exec-test
+  namespace: sandbox-recipes
+spec:
+  triggers:
+    onDemand: {}
+  agent:
+    # Adjust to the provider/model used in e2e:
+    provider: claude
+    model: claude-opus-4-6
+  steps:
+    - id: cron-exec-check
+      instruction: |
+        You are validating whether SCHEDULED (cron) tasks actually execute on this
+        mcp-host. Use the available tools and do these steps IN ORDER.
+
+        1. CREATE — use the cron scheduling tool (cron_manage) to create a recurring job
+           named "e2e-cron-exec" with schedule "*/1 * * * *". The job's task content MUST be
+           EXACTLY this sentence (copy it verbatim):
+           Use the shell tool to run this command: echo CRON_EXEC_OK > /tmp/cron-exec-proof.txt
+
+        2. FIRE — use cron_manage to TRIGGER the "e2e-cron-exec" job immediately so it runs now.
+
+        3. WAIT + VERIFY — the triggered task runs asynchronously in the background, so you
+           must poll. Use the shell tool to run:
+             sleep 8 ; cat /tmp/cron-exec-proof.txt
+           If the file is missing or empty, repeat the same shell command (sleep 8 ; cat ...)
+           up to 4 attempts total.
+
+        4. REPORT — the FINAL line of your answer MUST be exactly one of:
+           - if the file contains CRON_EXEC_OK   ->   CRON_EXEC_VERIFIED
+           - if after all 4 attempts it is empty ->   CRON_EXEC_FAILED

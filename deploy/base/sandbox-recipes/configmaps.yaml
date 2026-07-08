@@ -1,0 +1,14 @@
+# WRC public key — mounted by workflow mcp-host pods for JWT verification.
+# Must match the public key derived from clerum-wrc-signing-key in control-plane.
+# The gen-jwt-keys.sh script creates the control-plane copy; this one must be
+# kept in sync (or replaced by a cross-namespace reference in a future version).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clerum-wrc-public-key
+  namespace: sandbox-recipes
+  labels:
+    app.kubernetes.io/part-of: clerum
+    clerum.io/component: workflow-subsystem
+data:
+  CLERUM_WRC_SIGNING_PUBLIC_KEY: "REPLACE_WITH_PUBLIC_KEY"

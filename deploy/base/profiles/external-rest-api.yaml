@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: external-rest-api
+  name: external-rest-api
+  namespace: profiles
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: external-rest-api
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: external-rest-api
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        # `external-rest-api-secrets` carries the JWT public key plus
+        # inter-service tokens populated out-of-band by
+        # `apply-inter-service-tokens.sh` (kubectl patch), so kustomize
+        # reapplies do not wipe them. Missing keys crash the pod fast,
+        # which is the intended canary behaviour.
+        - envFrom:
+            - secretRef:
+                name: external-rest-api-secrets
+          env:
+            - name: EXTERNAL_REST_API_PORT
+              value: '8091'
+            - name: EXTERNAL_REST_API_JSON_BODY_LIMIT
+              valueFrom:
+                configMapKeyRef:
+                  key: EXTERNAL_REST_API_JSON_BODY_LIMIT
+                  name: external-rest-api-config
+            - name: EXTERNAL_REST_API_CORS_ORIGIN
+              value: 'http://localhost:3001'
+            - name: EXTERNAL_REST_API_GOOGLE_CLIENT_ID
+              value: replace-me.apps.googleusercontent.com # PLACEHOLDER — replace before production deploy
+            - name: EXTERNAL_REST_API_CONTROL_API_BASE_URL
+              value: http://profile-control-funnel.profiles.svc.cluster.local:8080/api/v1
+            - name: EXTERNAL_REST_API_CONTROL_API_SERVICE_NAME
+              value: external-rest-api
+            - name: EXTERNAL_REST_API_JWT_ISSUER
+              value: control-api
+            - name: EXTERNAL_REST_API_JWT_AUDIENCE
+              value: dev-profile-ui
+            - name: EXTERNAL_REST_API_PUBLIC_BASE_URL
+              value: http://127.0.0.1:8091
+            - name: EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL
+              value: http://127.0.0.1:8094
+            - name: EXTERNAL_REST_API_DESKTOP_APP_NAME
+              value: Evenfire
+          image: clerum/external-rest-api:0.9.5
+          imagePullPolicy: Always
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 8
+            periodSeconds: 12
+            successThreshold: 1
+            timeoutSeconds: 1
+          name: external-rest-api
+          ports:
+            - containerPort: 8091
+              name: http
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 4
+            periodSeconds: 8
+            successThreshold: 1
+            timeoutSeconds: 1
+          resources:
+            limits:
+              cpu: 300m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: external-rest-api
+  name: external-rest-api
+  namespace: profiles
+spec:
+  ports:
+    - name: http
+      port: 8091
+      protocol: TCP
+      targetPort: http
+  selector:
+    app: external-rest-api
+  type: ClusterIP
