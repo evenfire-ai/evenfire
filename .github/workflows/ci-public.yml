@@ -29,15 +29,17 @@ jobs:
           cache: npm
           cache-dependency-path: ${{ matrix.service }}/package-lock.json
 
-      # workflow-recipes uses project references into packages/workflow-runtime-core.
-      # Build that package first so `tsc -b` in workflow-recipes can resolve it.
+      # workflow-recipes and control-api both consume @clerum/workflow-runtime-core
+      # via a `file:../packages/workflow-runtime-core` dependency. Build that package
+      # first so its dist/ exists before the service's `npm ci` links it in — otherwise
+      # the service build fails with TS2307 "Cannot find module '@clerum/workflow-runtime-core'".
       - name: Install workflow-runtime-core dependencies
-        if: matrix.service == 'workflow-recipes'
+        if: matrix.service == 'workflow-recipes' || matrix.service == 'control-api'
         working-directory: packages/workflow-runtime-core
         run: npm ci
 
       - name: Build workflow-runtime-core
-        if: matrix.service == 'workflow-recipes'
+        if: matrix.service == 'workflow-recipes' || matrix.service == 'control-api'
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
