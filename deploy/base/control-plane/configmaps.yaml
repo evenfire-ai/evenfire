@@ -70,8 +70,10 @@ data:
   CLERUM_WORKFLOW_STEP_ALLOWED_TOOLS_MAX_ITEMS: "50"
   CLERUM_WORKFLOW_STEP_MCP_SERVERS_MAX_ITEMS: "20"
   CLERUM_ATTACHMENT_MAX_BYTES: "52428800"
-  # Plugin image-host allowlist (Phase 2.3) — audit mode by default.
-  CONTROL_API_ALLOWED_IMAGE_PREFIXES: "us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/,example.com/,mongodb/,mcr.microsoft.com/,clerum/"
+  # Plugin image-host allowlist (Phase 2.3) — audit mode by default. Base ships a
+  # vendor-neutral default; environment overlays override this with the image
+  # prefixes for their own registry.
+  CONTROL_API_ALLOWED_IMAGE_PREFIXES: "ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/"
   CONTROL_API_ENFORCE_IMAGE_ALLOWLIST: "false"
 ---
 apiVersion: v1

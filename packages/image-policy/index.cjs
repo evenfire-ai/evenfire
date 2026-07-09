@@ -36,10 +36,16 @@ function matchesAllowedImagePrefix(image, rawPrefix) {
 }
 
 // Permissive audit-mode default: current fleet hosts + example.com.
-// This is the CODE FALLBACK used only when the env var is unset. Deployed
-// clusters set the same list via base manifests
-// (CONTROL_API_/CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES) — those manifest copies
-// are the effective values in prod and must be kept in sync with this constant.
+// This is the CODE FALLBACK used only when the env var is unset. It is NOT
+// kept in sync with deploy/base: deploy/base is environment-generic and
+// ships only the vendor-neutral subset of this list
+// (ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/) via
+// CONTROL_API_/CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES, since the base tree is
+// shared across clusters and must not hardcode any one fleet's identity. The
+// private gcp-dev/gcp-prod overlays each patch that env var to the real,
+// fleet-specific Artifact Registry + example.com prefixes below —
+// those overlay values are the effective ones in prod. This constant is only
+// the safety-net default for local/dev-mode runs where the env var is unset.
 // Prefixes match against the RAW image ref, so a Docker Hub image is listed in
 // its short form (e.g. 'mongodb/'), which matches 'mongodb/x' but NOT the
 // fully-qualified 'docker.io/mongodb/x' — add the docker.io/-qualified prefix

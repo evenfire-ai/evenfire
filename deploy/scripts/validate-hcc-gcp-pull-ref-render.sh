@@ -19,6 +19,18 @@ required_empty = [
   "CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET",
 ]
 
+# The gcp-dev/gcp-prod overlays patch CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES to
+# the real Artifact Registry + example.com prefixes (see
+# deploy/overlays/gcp-{dev,prod}/patches/hcc-allowed-image-prefixes.yaml).
+# deploy/base only ships a vendor-neutral default — this asserts the overlay
+# override actually lands in the rendered Deployment for BOTH clusters, so a
+# base-genericization change can never silently regress gcp-dev/gcp-prod back
+# to the neutral placeholder.
+required_values = {
+  "CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES" =>
+    "us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/,example.com/,mongodb/,mcr.microsoft.com/,clerum/",
+}
+
 def fail!(overlay, message)
   warn "#{overlay}: #{message}"
   exit 1
@@ -45,6 +57,13 @@ files.each do |overlay, path|
   required_empty.each do |name|
     fail!(overlay, "#{name} missing") unless env.key?(name)
     fail!(overlay, "#{name} must render as an explicit empty string") unless env[name] == ""
+  end
+
+  required_values.each do |name, expected|
+    fail!(overlay, "#{name} missing") unless env.key?(name)
+    unless env[name] == expected
+      fail!(overlay, "#{name} expected #{expected.inspect}, got #{env[name].inspect}")
+    end
   end
 end
 

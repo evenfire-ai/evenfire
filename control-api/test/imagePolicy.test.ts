@@ -98,3 +98,32 @@ describe('DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES', () => {
     ])
   })
 })
+
+describe('assembled allowlist behavior (deploy/base vs gcp overlay boundary)', () => {
+  // REAL mirrors the value the gcp-dev/gcp-prod overlays patch into
+  // CONTROL_API_ALLOWED_IMAGE_PREFIXES / CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES
+  // (deploy/overlays/gcp-{dev,prod}/configmaps/control-api-config.yaml and
+  // patches/hcc-allowed-image-prefixes.yaml).
+  const REAL =
+    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/,example.com/,mongodb/,mcr.microsoft.com/,clerum/'.split(
+      ','
+    )
+  // PLACEHOLDER mirrors a genericized base that leaked through unoverridden —
+  // the exact bug this boundary guards against.
+  const PLACEHOLDER =
+    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/,example.com/,mongodb/,mcr.microsoft.com/,clerum/'.split(
+      ','
+    )
+  const img = 'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mcp-host:sha-5792ba7'
+
+  it('accepts a real AR image against the real overlay list', () => {
+    expect(classifyPluginImage(img, { allowedPrefixes: REAL })).toEqual({ ok: true })
+  })
+
+  it('rejects the same image against the genericized placeholder list (the bug)', () => {
+    expect(classifyPluginImage(img, { allowedPrefixes: PLACEHOLDER })).toEqual({
+      ok: false,
+      reason: 'host_not_allowed',
+    })
+  })
+})

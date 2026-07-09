@@ -85,9 +85,11 @@ spec:
         # (HCC calls control-api directly via CONTROL_API_BASE_URL).
         - name: MCP_HOST_GATEWAY_URL
           value: http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092
-        # Plugin image-host allowlist (Phase 2.3) — audit mode by default.
+        # Plugin image-host allowlist (Phase 2.3) — audit mode by default. Base
+        # ships a vendor-neutral default; environment overlays override this env
+        # with the image prefixes for their own registry.
         - name: CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES
-          value: "us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/,example.com/,mongodb/,mcr.microsoft.com/,clerum/"
+          value: "ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/"
         - name: CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST
           value: "false"
         livenessProbe:

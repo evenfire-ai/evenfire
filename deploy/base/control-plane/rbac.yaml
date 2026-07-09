@@ -83,17 +83,3 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: e2e-compat-networkpolicy-reader
-  namespace: control-plane
-subjects:
-- kind: User
-  name: github-actions-releaser@${GCP_PROJECT}.iam.gserviceaccount.com
-  apiGroup: rbac.authorization.k8s.io
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: e2e-compat-networkpolicy-reader
