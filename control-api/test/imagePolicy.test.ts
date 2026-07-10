@@ -108,12 +108,11 @@ describe('assembled allowlist behavior (deploy/base vs gcp overlay boundary)', (
     'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/,example.com/,mongodb/,mcr.microsoft.com/,clerum/'.split(
       ','
     )
-  // PLACEHOLDER mirrors a genericized base that leaked through unoverridden —
-  // the exact bug this boundary guards against.
-  const PLACEHOLDER =
-    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/,example.com/,mongodb/,mcr.microsoft.com/,clerum/'.split(
-      ','
-    )
+  // PLACEHOLDER mirrors the vendor-neutral base default that deploy/base ships
+  // (ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/) — the exact list
+  // that leaks through when a gcp overlay fails to patch its AR prefix in. It
+  // has NO us-central1-docker.pkg.dev host, so a real AR image must be rejected.
+  const PLACEHOLDER = 'ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/'.split(',')
   const img = 'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mcp-host:sha-5792ba7'
 
   it('accepts a real AR image against the real overlay list', () => {
