@@ -52,7 +52,10 @@ docker compose --env-file .env.quickstart --profile telegram up
 >   (no JWT — these are trust headers sent by the channel-reader sidecar in production).
 > - `channel-reader` is in the `telegram` profile; requires a real Telegram bot token.
 > - No MCP servers are wired by default (agent replies using its LLM knowledge only).
->   To add MCP tools, set `CLERUM_MCP_SERVERS` as a JSON array (see `.env.quickstart.example`).
+>   To add MCP tools, set `CLERUM_MCP_SERVERS` in `.env.quickstart` as a JSON array —
+>   each entry needs `name`, `contextRef`, `transport`, `enabled`, and a
+>   `status: {"deployed": true, "ready": true}` object. See
+>   `.env.quickstart.example` for the exact shape.
 
 (The full Kubernetes deployment with NetworkPolicies, CRDs, and all services is under [docs/deploy](docs/deploy).)
 

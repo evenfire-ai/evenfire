@@ -11,6 +11,10 @@ services:
       CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
       ZAI_API_KEY: ${ZAI_API_KEY:-}
       BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
+      # Optional dev MCP servers as a JSON array. Passed through from the env
+      # file so the quickstart's "set CLERUM_MCP_SERVERS" actually reaches the
+      # container. See .env.quickstart.example for the required object shape.
+      CLERUM_MCP_SERVERS: ${CLERUM_MCP_SERVERS:-}
     ports:
       - "8080:8080"
     healthcheck:
