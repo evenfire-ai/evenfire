@@ -200,19 +200,22 @@ The `.env` file is gitignored and never committed.
 
 ### 2. Unit Tests
 
-~3,000 unit tests across services (run `make test-unit-all`).
-
-Each service also has its own suite:
+Each service is an independent npm package (there is no root workspace), so
+install its dependencies once before running its suite — otherwise `npm test`
+fails in a pretest hook with `MODULE_NOT_FOUND`:
 
 ```bash
-cd mcp-host && npm test
-cd workflow-recipes && npm test
-cd mcp-servers && npm test
-cd control-api && npm test
-cd workflow-sdk && npm test
-cd host-context-controller && npm test
-cd mcp-proxy && npm test
+cd mcp-host && npm install && npm test
+cd workflow-recipes && npm install && npm test
+cd mcp-servers && npm install && npm test
+cd control-api && npm install && npm test
+cd packages/workflow-sdk && npm install && npm test
+cd host-context-controller && npm install && npm test
+cd mcp-proxy && npm install && npm test
 ```
+
+Once every service has its dependencies installed, `make test-unit-all` runs
+all of the suites at once (~3,000 unit tests across services).
 
 ### 3. E2E Tests (Kubernetes)
 
