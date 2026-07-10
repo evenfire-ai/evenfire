@@ -9,8 +9,6 @@
 
 [Quickstart](#quickstart) · [Architecture](ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [License](#license)
 
-<!-- ![demo](docs/assets/demo.gif) — add the demo GIF before launch (see docs/assets/) -->
-
 ## Why evenfire
 - **CRD-driven, bidirectional MCP** — provision MCP servers declaratively; expose
   your agents over MCP. Not a per-vendor wrapper.
@@ -122,10 +120,10 @@ kubectl apply -f charts/clerum-crds/examples/
 
 ### Documentation — start here
 
-- **[docs/README.md](docs/README.md)** — docs index (architecture, deploy, security, CRD reference, testing, features, archive).
+- **[docs/README.md](docs/README.md)** — docs index (architecture, deploy, security, CRD reference, testing, features).
 - **[docs/architecture/overview.md](docs/architecture/overview.md)** — full architecture reference (services, CRDs, message lifecycle, NetworkPolicy model).
 - **[docs/crds/](docs/crds/README.md)** — per-CRD reference pages for Host, Context, McpServer, WorkflowRecipe, CommunicationChannel.
-- **[docs/deploy/gcp.md](docs/deploy/gcp.md)** and **[docs/deploy/minikube.md](docs/deploy/minikube.md)** — production and local deployment guides.
+- **[docs/deploy/minikube.md](docs/deploy/minikube.md)** — local Kubernetes (minikube) deployment guide.
 - **[docs/features/workflow-recipes.md](docs/features/workflow-recipes.md)** — WorkflowRecipes feature hub (single landing page for all WR content).
 - **[docs/testing/e2e-guide.md](docs/testing/e2e-guide.md)** — E2E testing guide (8 suites, 9 phases, approval flow).
 
