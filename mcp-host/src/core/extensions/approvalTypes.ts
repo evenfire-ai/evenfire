@@ -56,7 +56,7 @@ export interface ApprovalConfig {
 
 /**
  * An approval or denial decision from a user.
- * Sent via POST /approve or POST /deny.
+ * Sent via POST /v1/runtime/approvals/approve or POST /v1/runtime/approvals/deny.
  */
 export interface ApprovalDecision {
   userId: string

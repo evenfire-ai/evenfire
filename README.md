@@ -338,15 +338,24 @@ Each suite validates 9 phases:
 
 #### 3.6 Approval Flow in E2E
 
-Phase 8 tests the full approval pipeline without disabling any security:
+Phase 8 tests the full approval pipeline without disabling any security. The
+`mcp-host` runtime routes are:
 
 ```
-POST /message → response: { status: "awaiting_approval", approval: { requestId, taskId } }
+POST /v1/runtime/messages
+  → response: { status: "waiting_approval", approval: { requestId, taskId } }
      ↓
-POST /approve → { userId: "e2e-runner", requestId }
+POST /v1/runtime/approvals/approve
+  body: { userId, requestId, channelType, channelId }   (+ x-clerum-edge-* headers)
      ↓
-GET /task/:taskId/result → poll until { status: "completed" }
+GET /v1/runtime/tasks/:taskId/result → poll until { status: "completed" }
 ```
+
+The E2E suite drives these through the tenant gateway instead of hitting
+`mcp-host` directly: it approves at
+`POST /api/v1/rpc/hosts/{hostRef}/approvals/approve` with `{ toolCallId }` and
+polls `GET /api/v1/rpc/hosts/{hostRef}/tasks/{taskId}/result` (see
+`tests/e2e/e2e-approval-flow.sh`).
 
 #### E2E Test Results
 
