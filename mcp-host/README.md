@@ -1,12 +1,12 @@
 # MCP Host
 
-MCP Host is a Kubernetes-native service that reads Host CRD configuration and provides LLM access via OpenAI or Claude. It exposes an HTTP RPC endpoint for receiving messages from channel-reader and connects to MCP (Model Context Protocol) servers for tool capabilities.
+MCP Host is a Kubernetes-native service that reads Host CRD configuration and provides LLM access via OpenAI, Anthropic Claude, Z.AI, or Alibaba Bailian. It exposes an HTTP RPC endpoint for receiving messages from channel-reader and connects to MCP (Model Context Protocol) servers for tool capabilities.
 
 ## Features
 
 - Reads Host CRD from Kubernetes
 - Fetches API keys from referenced Kubernetes Secret
-- Supports both OpenAI and Anthropic Claude providers
+- Supports OpenAI, Anthropic Claude, Z.AI, and Bailian providers (see [Supported LLM Providers](#supported-llm-providers))
 - Watches for Host CRD changes and reloads configuration
 - HTTP RPC server for receiving messages from channel-reader
 - Connects to MCP servers via host-context-controller service for tool capabilities
@@ -80,6 +80,37 @@ spec:
     - telegram-channel
     - slack-channel
 ```
+
+### Supported LLM Providers
+
+Configured via the Host CRD `spec.model.provider` field (or
+`CLERUM_MODEL_PROVIDER` in dev mode):
+
+| Provider                             | `provider` value | Default Model       | API                     |
+| ------------------------------------ | ---------------- | ------------------- | ----------------------- |
+| OpenAI                               | `openai`         | `gpt-5.4-mini`      | OpenAI Chat Completions |
+| Anthropic Claude                     | `claude`         | `claude-sonnet-4-6` | Anthropic Messages      |
+| ZAI (z.ai)                           | `zai`            | `glm-5.1`           | OpenAI-compatible       |
+| Alibaba Cloud Model Studio (Bailian) | `bailian`        | `qwen3-coder-plus`  | OpenAI-compatible       |
+
+Providers are defined data-first in `src/llm/registryCore.ts` — OpenAI-compatible
+providers are pure data entries (adding one requires a descriptor, not new code).
+
+#### Bailian (Alibaba Cloud Model Studio)
+
+Bailian provides access to multiple models through Alibaba Cloud's Coding Plan,
+including Qwen, MiniMax, GLM, and Kimi models.
+
+Available models: `qwen3-coder-plus`, `qwen3.5-plus`, `qwen3-coder-next`,
+`qwen3-max-2026-01-23`, `MiniMax-M2.5`, `glm-5.1`, `glm-5`, `glm-4.7`, `kimi-k2.5`
+
+**Dev mode:**
+
+```bash
+CLERUM_DEV_MODE=true BAILIAN_API_KEY=sk-... CLERUM_MODEL_PROVIDER=bailian npm run dev
+```
+
+Get your Coding Plan API key at: https://modelstudio.console.alibabacloud.com/
 
 ### Per-Tool Approval Overrides
 
