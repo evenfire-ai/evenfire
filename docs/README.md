@@ -1,70 +1,85 @@
-# Clerum Documentation
-
-Clerum is a Kubernetes-native platform for LLM orchestration with multi-channel communication (Telegram, Email, Slack) and MCP (Model Context Protocol) integration. All configuration is driven by Kubernetes Custom Resources (CRDs) under the `clerum.io` API group.
-
-This directory holds the project's long-form documentation. Start at the root [`README.md`](../README.md) for the monorepo layout and service list, and at [`CLAUDE.md`](../CLAUDE.md) for developer commands (build, test, minikube, GCP).
-
+---
+slug: /
+title: What is evenfire?
+description: Self-hostable, Kubernetes-native platform for LLM agents — multi-channel, first-class MCP, and a declarative workflow engine.
 ---
 
-## Architecture & design
+# What is evenfire?
 
-- [`architecture/overview.md`](architecture/overview.md) — full architecture reference (services, CRDs, message lifecycle, NetworkPolicy model, deployment sequence).
-- [`architecture/platform-topology.md`](architecture/platform-topology.md) — 7-namespace topology, HCC/WRC controller split, deny-all security baseline.
-- [`architecture/non-mcp-services.md`](architecture/non-mcp-services.md) — namespace splitting rules and L0–L3 NetworkPolicy layers for non-MCP workloads.
-- [`architecture/diagrams/`](architecture/diagrams/) — Excalidraw source files for architecture diagrams (agent state machine, CRD relationships, high-level architecture, message lifecycle, NetworkPolicy, operator reconciliation).
+evenfire (internally "Clerum") is a **self-hostable, Kubernetes-native platform
+for LLM agents** — multi-channel communication (Telegram, Email, Slack),
+first-class MCP (Model Context Protocol) integration, and a declarative
+workflow engine. All configuration is driven by Kubernetes Custom Resources
+(CRDs) under the `clerum.io` API group.
 
-## Deployment & operations
+## Why evenfire
 
-- [`deploy/minikube.md`](deploy/minikube.md) — full local-cluster deployment guide (setup, JWT auth chain, WorkflowRecipes config).
-- [`deploy/gcp.md`](deploy/gcp.md) — production GCP (GKE) deployment guide.
-- [`deploy/workflow-internal-dependency-networkpolicy-runbook.md`](deploy/workflow-internal-dependency-networkpolicy-runbook.md) — post-rollout validation and hotfix cleanup for WRC-owned intra-recipe NetworkPolicies.
-- [`deploy/workflow-recipes-guide.md`](deploy/workflow-recipes-guide.md) — configuration, operations, and debugging for WorkflowRecipes (CRD, Control UI, RBAC, REST API).
-- [`deploy/workflow-bugs-2026-03-24.md`](deploy/workflow-bugs-2026-03-24.md) — WorkflowRecipes bug index (10 bugs with root causes and commits).
+- **CRD-driven, bidirectional MCP** — provision MCP servers declaratively;
+  expose your agents over MCP. Not a per-vendor wrapper.
+- **WorkflowRecipe engine** — declarative multi-step agentic workflows as
+  Kubernetes CRDs.
+- **Multi-provider** — OpenAI, Claude, ZAI, Bailian behind one interface.
+- **Security by default** — deny-all NetworkPolicy baseline, human approval
+  flow for tool calls, per-tenant isolation.
 
-## Security
-
-Security-sensitive runtime guidance is tracked in the root [`CLAUDE.md`](../CLAUDE.md), [`AGENTS.md`](../AGENTS.md), deploy guides, and Kubernetes manifests. Ignored local security notes are not part of the repo contract.
-
-## CRD Reference
-
-- [`crds/README.md`](crds/README.md) — CRD reference index (all 6 `clerum.io/v1alpha1` CRDs).
-- [`crds/host.md`](crds/host.md) — Host CRD (LLM provider config, context + secret refs).
-- [`crds/context.md`](crds/context.md) — Context CRD (MCP server allowlist).
-- [`crds/mcpserver.md`](crds/mcpserver.md) — McpServer CRD (deployment spec, transport, auth, env).
-- [`crds/workflowrecipe.md`](crds/workflowrecipe.md) — WorkflowRecipe CRD (multi-workload composition).
-- [`crds/communicationchannel.md`](crds/communicationchannel.md) — CommunicationChannel CRD (Telegram/Email/Slack config).
-
-## Feature Hubs
-
-- [`features/workflow-recipes.md`](features/workflow-recipes.md) — WorkflowRecipes feature hub — single landing page linking to CRD reference, deploy guide, architecture, security policy, service internals, and historical archive.
-
-## Testing
-
-- [`testing/e2e-guide.md`](testing/e2e-guide.md) — consolidated E2E testing guide (8 suites, 9 phases per suite, approval flow, unit test coverage, desktop-app E2E, troubleshooting).
-- Root [`CLAUDE.md`](../CLAUDE.md) §Testing — authoritative per-service test commands.
-
-## Archive & historical artifacts
-
-Point-in-time historical content, consolidated under [`archive/`](archive/). Not actively maintained and may be factually stale — do not rely on any of it for current behavior.
-
-- [`archive/clerum-workflow-recipes/`](archive/clerum-workflow-recipes/) — historical WorkflowRecipes material from the early build-out.
-- [`archive/workflow-recipes/`](archive/workflow-recipes/) — historical WorkflowRecipes lessons, troubleshooting, validation notes, and navigation material.
-- [`archive/testing/`](archive/testing/) — historical E2E test result snapshots and benchmark material.
-- [`archive/misc/`](archive/misc/) — miscellaneous retired content.
-- [`research/`](research/) — external framework research (not Clerum-specific; kept separately).
-
-> **Note:** Contributor-local working artifacts live under `docs/superpowers/` on each checkout. They are git-ignored and intentionally not part of the repo.
-
-## Finding things
+## Start here
 
 | I want to… | Start at |
 |---|---|
-| Run Clerum locally | Root [`CLAUDE.md`](../CLAUDE.md) Minikube section |
-| Deploy to GCP | [`deploy/gcp.md`](deploy/gcp.md) |
-| Understand the services and CRDs | [`architecture/overview.md`](architecture/overview.md) |
-| Configure a WorkflowRecipe CRD | [`crds/workflowrecipe.md`](crds/workflowrecipe.md) or [`features/workflow-recipes.md`](features/workflow-recipes.md) |
-| Configure a Host / Context / McpServer / CommunicationChannel CRD | [`crds/host.md`](crds/host.md), [`crds/context.md`](crds/context.md), [`crds/mcpserver.md`](crds/mcpserver.md), [`crds/communicationchannel.md`](crds/communicationchannel.md) |
-| Run or troubleshoot E2E tests | [`testing/e2e-guide.md`](testing/e2e-guide.md) |
-| Read archived / historical content | [`archive/`](archive/) |
-| See a diagram | [`architecture/diagrams/`](architecture/diagrams/) |
-| Check NetworkPolicy rules before a security change | Root [`CLAUDE.md`](../CLAUDE.md) NetworkPolicy section and `deploy/base/**/networkpolicies*.yaml` |
+| Try it in 5 minutes (no Kubernetes) | [Quickstart](getting-started/quickstart.md) |
+| Install on Kubernetes | [Installation](getting-started/installation.md) |
+| Understand the services and CRDs | [Architecture overview](architecture/overview.md) |
+| Configure a Host / Context / McpServer / CommunicationChannel | [CRD reference](crds/README.md) |
+| Build a multi-workload agentic workflow | [WorkflowRecipes feature hub](features/workflow-recipes.md) |
+| Deploy a full local cluster | [Minikube deployment guide](deploy/minikube.md) |
+| Run or troubleshoot E2E tests | [E2E testing guide](testing/e2e-guide.md) |
+
+## Documentation map
+
+### Architecture & design
+
+- [Architecture overview](architecture/overview.md) — full architecture reference (services, CRDs, message lifecycle, NetworkPolicy model, deployment sequence).
+- [Platform topology](architecture/platform-topology.md) — 7-namespace topology, HCC/WRC controller split, deny-all security baseline.
+- [Non-MCP services](architecture/non-mcp-services.md) — namespace splitting rules and L0–L3 NetworkPolicy layers for non-MCP workloads.
+- [WorkflowRecipe naming](architecture/workflow-recipe-naming.md) — naming conventions for recipe-managed resources.
+
+### Deployment & operations
+
+- [Minikube guide](deploy/minikube.md) — full local-cluster deployment (setup, JWT auth chain, WorkflowRecipes config).
+- [WorkflowRecipes guide](deploy/workflow-recipes-guide.md) — configuration, operations, and debugging (CRD, Control UI, RBAC, REST API).
+- [Workflow output PVC upgrade](deploy/workflow-output-pvc-upgrade.md) — upgrade runbook for workflow output volumes.
+
+### CRD reference
+
+- [CRD index](crds/README.md) — all 6 `clerum.io/v1alpha1` CRDs.
+- [Host](crds/host.md) · [Context](crds/context.md) · [McpServer](crds/mcpserver.md) · [WorkflowRecipe](crds/workflowrecipe.md) · [CommunicationChannel](crds/communicationchannel.md)
+
+### Features
+
+- [WorkflowRecipes hub](features/workflow-recipes.md) — single landing page for all WorkflowRecipe content.
+- [Context filesystem](features/context-filesystem.md) · [Custom coordinator images](features/custom-coordinator-images.md) · [Snippet runtime](features/custom-coordinator-snippet-runtime.md) · [Snippet workflow](features/custom-coordinator-snippet-workflow.md)
+- [Control UI: recipes & registry](features/control-ui-workflow-recipes-and-registry-guide.md) · [OAuth sandbox UI bridge](features/oauth-sandbox-ui-bridge.md) · [Admin desktop workspace provisioning](features/admin-desktop-workspace-provisioning.md) · [AI recipe builder architecture](features/ai-recipe-builder-app-architecture.md)
+
+### Testing
+
+- [E2E guide](testing/e2e-guide.md) — 8 suites, 9 phases per suite, approval flow, troubleshooting.
+- [Custom coordinator E2E gates](testing/custom-coordinator-e2e-gates.md) · [Desktop observation smoke test](testing/desktop-observation-smoke-test.md)
+
+### Reference
+
+- [Service catalog](reference/services.md) — every service in the monorepo and the message data flow.
+- [LLM providers](reference/llm-providers.md) — supported providers and Host CRD configuration.
+
+## Repository & contributing
+
+- Monorepo layout and per-service READMEs: [github.com/evenfire-ai/evenfire](https://github.com/evenfire-ai/evenfire)
+- Developer commands (build, test, minikube): [CLAUDE.md](../CLAUDE.md)
+- [Contributing](../CONTRIBUTING.md) · [Security policy](../SECURITY.md) · [Governance](../GOVERNANCE.md)
+
+## License
+
+evenfire is licensed under **Apache-2.0 with an additional use grant** (no
+operating a competing managed multi-tenant service). It is **source-available**,
+not OSI open source. Self-hosting for your own organization and internal
+commercial use are permitted. See [LICENSE](../LICENSE) and
+[TRADEMARK.md](../TRADEMARK.md).

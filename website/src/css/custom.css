@@ -1,0 +1,33 @@
+/**
+ * evenfire docs theme — ember/flame palette on top of Docusaurus Infima.
+ */
+
+:root {
+  --ifm-color-primary: #d1490f;
+  --ifm-color-primary-dark: #bc420e;
+  --ifm-color-primary-darker: #b23e0d;
+  --ifm-color-primary-darkest: #92330b;
+  --ifm-color-primary-light: #e65010;
+  --ifm-color-primary-lighter: #ef5513;
+  --ifm-color-primary-lightest: #f16a31;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #ff8a50;
+  --ifm-color-primary-dark: #ff7531;
+  --ifm-color-primary-darker: #ff6a21;
+  --ifm-color-primary-darkest: #f05400;
+  --ifm-color-primary-light: #ff9f6f;
+  --ifm-color-primary-lighter: #ffaa7f;
+  --ifm-color-primary-lightest: #ffc9ac;
+  --docusaurus-highlighted-code-line-bg: rgba(66, 66, 66, 0.35);
+}
+
+/* Wide reference tables (CRD specs, E2E matrices) scroll instead of
+   overflowing the content column. */
+.markdown table {
+  display: block;
+  overflow-x: auto;
+}
