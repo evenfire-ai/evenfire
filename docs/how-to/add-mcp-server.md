@@ -4,20 +4,19 @@ MCP servers give agents tools. evenfire never “auto-discovers the whole
 cluster”: a **Context** allowlists which servers a **Host** may reach, and the
 platform enforces that with NetworkPolicies on Kubernetes.
 
-## Option A — Compose quickstart (dev only)
+## Option A — mcp-host dev mode (contributors, no cluster)
 
-Wire servers into `mcp-host` with `CLERUM_MCP_SERVERS` (JSON array). Each entry
-needs `name`, `contextRef`, `transport`, `enabled`, and
-`status: { deployed: true, ready: true }` or it is skipped as not ready.
-
-See `.env.quickstart.example` for the exact shape. Example:
+When running `mcp-host` standalone (`CLERUM_DEV_MODE=true npm run dev`), wire
+servers with `CLERUM_MCP_SERVERS` (JSON array). Each entry needs `name`,
+`contextRef`, `transport`, `enabled`, and
+`status: { deployed: true, ready: true }` or it is skipped as not ready:
 
 ```bash
 CLERUM_MCP_SERVERS=[{"name":"my-mcp","contextRef":"dev-context","transport":{"type":"streamableHttp","url":"http://my-mcp:3000/mcp"},"enabled":true,"status":{"deployed":true,"ready":true}}]
 ```
 
-Restart Compose after changing the env file. There is **no** NetworkPolicy
-isolation in Compose — this is for local tool smoke tests only.
+Restart the dev process after changing env. There is **no** NetworkPolicy
+isolation in dev mode — this is for local tool smoke tests only.
 
 ## Option B — Kubernetes (platform path)
 

@@ -2,109 +2,215 @@
 
 > **Build multi-channel LLM agents you own** — agents that take **real actions**,
 > with human-in-the-loop approvals, least-privilege connectors, and default-deny
-> networking built in. Self-hostable; Kubernetes-native when you need the full
-> platform. Declared as CRDs.
+> networking built in. Self-hosted, Kubernetes-native, declared as CRDs.
 
 [![License: Apache 2.0 (+ use grant)](https://img.shields.io/badge/License-Apache_2.0%20%2B%20grant-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/evenfire-ai/evenfire/ci-public.yml?branch=main&label=CI)](https://github.com/evenfire-ai/evenfire/actions)
 [![GitHub release](https://img.shields.io/github/v/release/evenfire-ai/evenfire?sort=semver)](https://github.com/evenfire-ai/evenfire/releases)
 
-[Quickstart](#quickstart) · [What is evenfire](#what-is-evenfire) · [Security model](#security-model) · [Docs](docs/README.md) · [Contributing](CONTRIBUTING.md) · [License](#license)
+[What agents can do](#what-agents-can-do) · [Get started](#get-started-minikube) · [Architecture](#architecture) · [Security model](#security-model) · [Docs](docs/README.md) · [License](#license)
 
 ---
 
 ## What is evenfire
 
 evenfire runs LLM agents on **your** infrastructure. Agents converse over
-Telegram, Email, and Slack, call tools through the
+Telegram, Email, Slack, and a desktop app, call tools through the
 [Model Context Protocol](https://modelcontextprotocol.io) (MCP), and execute
-multi-step workflows — while risky actions wait for a human “yes.” Agents,
+multi-step workflows — while risky actions wait for a human "yes." Agents,
 connectors, channels, and workflows are declared as Kubernetes custom
 resources, so your fleet is version-controlled, reviewable configuration. You
 bring your own model keys; prompts and data stay in your environment.
 
-Try the agent runtime in two commands with Docker Compose (no Kubernetes
-required), then deploy the full platform to any cluster when you need
-NetworkPolicies, the control plane, and multi-host ops.
+One command (`make minikube-setup`) stands up the full platform — operators,
+NetworkPolicies, JWT chain, control plane, seeded agent — on a local cluster.
 
-> **Naming:** the code uses the project’s internal name **clerum** —
+> **Naming:** the code uses the project's internal name **clerum** —
 > `clerum.io` CRDs, `CLERUM_*` env vars, `clerum-*` packages. **evenfire** is
 > the public name of the same project. Details:
 > [docs/concepts/code-names.md](docs/concepts/code-names.md).
 
 ---
 
-## Features
+## What agents can do
 
-- **Multi-channel agents** — one agent over Telegram, Email (IMAP), and Slack,
-  with per-channel allowed-sender filters (`CommunicationChannel` CRD).
-- **Human-in-the-loop approvals** — MCP tool calls require explicit approve/deny
-  by default; desktop app or Slack/Telegram; pending approvals survive pod
-  restarts. Per-tool policy is configurable on the `Host` CRD.
-- **Governed connectors** — a `Context` lists which MCP servers an agent may
-  reach; everything unlisted is unreachable at the network layer.
-- **First-class MCP** — provision servers declaratively (`McpServer` CRD, HTTP
-  and stdio); expose agents over MCP. Not a per-vendor wrapper.
-- **Declarative workflow engine** — `WorkflowRecipe` CRDs compose Deployments,
-  StatefulSets, and CronJobs with auto-registered MCP servers and scoped tokens.
-- **Model-neutral, bring-your-own-keys** — four providers (OpenAI, Claude, Z.AI,
-  Bailian) behind one interface; switching is a config change. Bailian can
-  surface Qwen / GLM / Kimi / MiniMax models via that provider.
-- **Built-in context management** — deterministic pre-pruning and tiered
-  compaction (configurable per deployment; not always-on by default).
-- **Shared file systems** — per-team workspaces mounted **read-only** into
-  agent pods; brokered global drive with permission-store authorization and a
-  tamper-evident audit log.
-- **Usage & cost visibility** — per-request token accounting in the control
-  plane (control-api / control-ui), price tables, and token budgets. Budgets are
-  cost control (fail-open), not a security boundary.
-- **Governed registry** — publish and install connectors and workflow recipes
-  with trust labels and publisher keys.
-- **Desktop app** — Electron client for chat, live approvals, files, and
-  workflow monitoring.
+Everything below is shipped in this repo and registered in
+`mcp-host/src/core/tools/nativeToolRegistry.ts`. Tools marked 🔒 suspend the
+task for human approval before running.
+
+### Act on systems
+
+| Capability                 | Tools                                                                                                                  | Notes                                                                                                                                          |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Run shell commands         | `shell_exec` 🔒                                                                                                        | full shell syntax in the agent workspace; the approval gate is the security boundary                                                           |
+| Call HTTP APIs             | `http_request` 🔒                                                                                                      | GET/POST/PUT/DELETE against an allowlisted set of domains (`CLERUM_HTTP_ALLOWLIST`)                                                            |
+| Read/write workspace files | `file_read`, `file_write`                                                                                              | path-validated, per-user isolated workspace                                                                                                    |
+| Drive a real browser       | `browser_open` 🔒, `browser_navigate` 🔒, `browser_click`, `browser_type`, `browser_screenshot`, `browser_get_content` | Playwright Chromium; enable with `CLERUM_DESKTOP_BROWSER=true`                                                                                 |
+| Drive a desktop            | `desktop_screenshot`, `desktop_click`, `desktop_type`, `desktop_key`, `desktop_mouse_move`, `desktop_drag`             | X11 (`scrot`/`xdotool`); enable with `CLERUM_DESKTOP_X11=true`                                                                                 |
+| Schedule recurring work    | `cron_manage` 🔒                                                                                                       | agent creates/edits cron jobs (5-part expressions); each fire enqueues a real agent task and the result routes back to the originating channel |
+
+### Produce artifacts
+
+Pure-JS document generation — no headless browser involved; artifacts persist
+on the workspace PVC so download links survive pod restarts:
+
+| Tool                                                                        | Output                                                                                            |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `clerum__generate_pdf`                                                      | print-quality PDF (markdown subset, tables, cover band, embedded images)                          |
+| `clerum__generate_docx` / `clerum__generate_xlsx` / `clerum__generate_pptx` | styled Word / Excel (frozen headers, auto-filter, number formats) / PowerPoint (4 deck templates) |
+| `clerum__generate_chart`                                                    | PNG charts — line, bar, horizontalBar, pie, doughnut, area, scatter, radar, polarArea, bubble     |
+| `clerum__generate_dashboard`                                                | self-contained single-file HTML dashboard                                                         |
+| `clerum__generate_markdown`                                                 | plain `.md`                                                                                       |
+
+### Use governed connectors (MCP)
+
+- **Shipped connector specs:** MongoDB (9 tools: find, aggregate, count,
+  distinct, insert/update/delete-one, list collections/databases; writes
+  blockable via read-only mode) and Airtable (8 tools). Both run upstream
+  images packaged as `McpServer` CRDs.
+- **Any stdio MCP server** plugs in through the [stdio-bridge](stdio-bridge/README.md)
+  sidecar (PostgreSQL, Redis, GitHub, Brave Search, …) — set
+  `transport.type: stdio` and the operator injects the bridge. Example CRDs
+  ship for postgres, github, and filesystem servers
+  ([charts/clerum-crds/examples/](charts/clerum-crds/examples/)).
+- An agent only reaches connectors its `Context` allowlists — enforced by
+  NetworkPolicy, not convention.
+
+### Remember and stay within budget
+
+- **Persistent memory** — `memory_search` / `memory_write` / `memory_read` /
+  `memory_tree` over a per-user workspace (`CLERUM_MEMORY_ENABLED`).
+- **Cross-session recall** — full-text search (SQLite FTS5) over the user's
+  past conversations (`clerum__session_search`, flag-gated).
+- **Context management** — deterministic pre-pruning plus tiered compaction
+  under token pressure; oversized tool results spill to disk and the agent
+  reads them back on demand (`clerum__spillover_read`, on by default).
+- **Durable sessions** — conversation state survives pod restarts
+  (SQLite-backed); a boot-time reaper recovers sessions stuck mid-approval.
+  Sessions persist and resume per channel; identities are deliberately
+  channel-namespaced.
+
+### Trigger multi-step workflows
+
+`workflow_list` / `workflow_status` / `workflow_trigger` 🔒 /
+`workflow_result` — agents inspect and (with approval) launch
+`WorkflowRecipe` deployments. One recipe YAML can stand up e.g. a persistent
+MongoDB StatefulSet with PVC, health probes, stable DNS, and auto-registered
+MCP tools; recipes advance through a 13-state lifecycle with risk-based
+approval, shadow testing, and automatic rollback.
+
+### The approval flow, on the wire
+
+A tool call that needs approval suspends the task and tells the caller:
+
+```jsonc
+// POST /v1/runtime/messages            → agent decides it needs a tool
+{ "success": true, "status": "waiting_approval",
+  "approval": { "taskId": "…", "requestId": "…", "userId": "…",
+                "notification": "The agent wants to run shell_exec: …" } }
+
+// POST /v1/runtime/approvals/approve   { "userId", "requestId" }
+{ "success": true }
+
+// GET /v1/runtime/tasks/{taskId}/result   → poll until done
+{ "success": true, "status": "completed",
+  "response": "…final answer…", "attachments": [ /* generated files */ ] }
+```
+
+Approvals surface wherever you are: **inline Approve/Deny buttons on
+Telegram** (or `/approve <target>`), a Slack Approve button, or the desktop
+app's in-chat gate. Channel callbacks are signature-verified and re-authorized
+against the control plane before any decision is forwarded — and pending
+approvals survive pod restarts.
 
 ---
 
-## Quickstart
+## Get started (minikube)
 
-No Kubernetes required. Run the agent runtime (`mcp-host`) and send a message.
+The full platform on a local Kubernetes cluster: all services, deny-all
+NetworkPolicies, the JWT chain, and a seeded agent named `chatllm`.
 
-```bash
-cp .env.quickstart.example .env.quickstart   # add ONE LLM API key
-docker compose --env-file .env.quickstart up mcp-host
-```
-
-When healthy:
+**Prerequisites:** Docker Desktop running with **≥10 GB RAM / 6 CPUs**
+allocated · `minikube` v1.30+ · `kubectl` · `python3` · Node.js 20+.
 
 ```bash
-./scripts/dev/quickstart-chat.sh "Hello! What can you help with?"
+git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
+cp .env.example .env
 ```
 
-**Optional — Telegram:** set `CLERUM_TELEGRAM_BOT_TOKEN` and
-`TELEGRAM_ALLOWED_USER_ID` in `.env.quickstart`, then:
+Edit `.env` — set **one** LLM key **and its matching provider**:
 
 ```bash
-docker compose --env-file .env.quickstart --profile telegram up
+OPENAI_API_KEY=sk-...
+CLERUM_MODEL_PROVIDER=openai     # REQUIRED: openai | claude | zai | bailian
 ```
 
-> **Quickstart limitations**
->
-> - The runtime authenticates callers with platform edge trust headers (the
->   helper script sets them) — the same mechanism production uses, where
->   NetworkPolicy restricts who can reach `mcp-host` and short-lived JWTs
->   authenticate the hops into the edge services themselves.
-> - No MCP servers by default. Wire tools with `CLERUM_MCP_SERVERS` — see
->   `.env.quickstart.example`.
-> - Full approvals UX, Control UI, and default-deny networking need the
->   Kubernetes stack.
+> ⚠️ If `CLERUM_MODEL_PROVIDER` is unset, the seeded agent defaults to
+> `zai`/`glm-5.1` regardless of which key you provided — the most common
+> "my agent won't reply" cause.
 
-Walkthrough: [docs/get-started/quickstart.md](docs/get-started/quickstart.md).  
-Full platform: [docs/deploy/minikube.md](docs/deploy/minikube.md) ·
-[docs/deploy/production.md](docs/deploy/production.md).
+Then:
+
+```bash
+make minikube-setup    # 12 idempotent steps: cluster → CRDs → keys → images → deploy → seed
+make minikube-status   # every deployment READY
+```
+
+First run takes ~5–10 minutes (image builds dominate). Re-run safely any time;
+`ARGS="--skip-build"` redeploys in ~1 minute.
+
+### Say hello — desktop app
+
+```bash
+npm run ui             # Control UI + Profile UI + Desktop App against the cluster
+```
+
+Log into the desktop app as `test@clerum.io` / `changeme123!` and message the
+`chatllm` agent. Ask it to run a command or generate a PDF — and approve the
+tool call from the chat.
+
+### Say hello — the API (exercises the real JWT chain)
+
+With `make minikube-pf-all` holding port-forwards in another terminal:
+
+```bash
+EXT=http://localhost:8091  RPC=http://localhost:8094  HOST=chatllm
+
+# 1. password login → session token
+SESSION=$(curl -s -X POST "$EXT/api/v1/auth/password-login" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"test@clerum.io","password":"changeme123!"}' | jq -r .token)
+
+# 2. exchange for a short-lived RPC token scoped to this host
+RPC_TOKEN=$(curl -s -X POST "$EXT/api/v1/rpc/token" \
+  -H "Authorization: Bearer $SESSION" -H 'Content-Type: application/json' \
+  -d '{"hostRefs":["chatllm"],"scopes":["host:message:invoke","host:task:read","host:approval:write"]}' \
+  | jq -r .token)
+
+# 3. message the agent
+TASK=$(curl -s -X POST "$RPC/api/v1/rpc/hosts/$HOST/messages?async=true" \
+  -H "Authorization: Bearer $RPC_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"content":"Hello! Reply with a one-sentence greeting."}' | jq -r .taskId)
+
+# 4. poll the result
+curl -s "$RPC/api/v1/rpc/hosts/$HOST/tasks/$TASK/result" \
+  -H "Authorization: Bearer $RPC_TOKEN" | jq '{status, response}'
+```
+
+That hello just traversed the production auth path: session JWT → scoped RPC
+token (audience/scope-checked, wildcard host bindings rejected) → rpc-proxy →
+agent runtime.
+
+**If something fails:** postgres CrashLoopBackOff after a cold start →
+`make minikube-setup ARGS="--reset-db --skip-build"`; Calico pods take a while
+on first boot — `make minikube-status` until green. Full guide:
+[docs/get-started/quickstart.md](docs/get-started/quickstart.md) ·
+[docs/deploy/minikube.md](docs/deploy/minikube.md) ·
+production: [docs/deploy/production.md](docs/deploy/production.md).
 
 ---
 
-## How it works
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -119,13 +225,56 @@ flowchart LR
 ```
 
 Messages arrive through `channel-reader` or the desktop app (via `rpc-proxy`).
-`mcp-host` runs the agent state machine, calls your LLM, and executes MCP tools
-— pausing for human approval when policy requires it.
+`mcp-host` runs the agent state machine, calls your LLM, and executes MCP and
+native tools — pausing for human approval when policy requires it.
 `host-context-controller` turns CRDs into Deployments, Services, and
-NetworkPolicies.
+NetworkPolicies; the `workflow-recipes` operator does the same for multi-step
+workflow workloads.
+
+### Services and ports
+
+| Service                            | Port           | Role                                                                                 |
+| ---------------------------------- | -------------- | ------------------------------------------------------------------------------------ |
+| `mcp-host`                         | 8080           | agent runtime: LLM loop, state machine, approval gate, native tools                  |
+| `host-context-controller`          | 8081           | operator: Host/Context/McpServer → Deployments + NetworkPolicies; discovery REST API |
+| `workflow-recipes` (WRC)           | 8082           | operator: WorkflowRecipe → workloads with policy enforcement                         |
+| `mcp-proxy`                        | 8083           | optional centralized HTTP router for MCP servers                                     |
+| `gfs-controller`                   | 8087           | brokered GlobalFileSystem API (permission store, audit chain)                        |
+| `control-api`                      | 8090           | control plane: CRDs, secrets, token issuance, usage/cost, registry                   |
+| `external-rest-api`                | 8091           | profiles, teams, invitations, RPC-token brokerage                                    |
+| approval gateway                   | 8092           | workflow approval ingress lane                                                       |
+| `rpc-proxy`                        | 8094           | external JWT-gated gateway (desktop/tenant → hosts and MCP servers)                  |
+| `workflow-approval-request-reader` | 8098           | Slack/Telegram approval callbacks, signature-verified                                |
+| `stdio-bridge`                     | 3000 (sidecar) | stdio MCP transport → StreamableHTTP                                                 |
+| `control-ui` / `profile-ui`        | 3000 / 3001    | admin dashboard / end-user profile                                                   |
+
+### Token flows
+
+- **External:** desktop → `external-rest-api` (password/Google login →
+  session JWT) → `POST /api/v1/rpc/token` brokers a **short-lived, scope-narrowed
+  RPC token** (dropped scopes are surfaced) signed by `control-api` →
+  `rpc-proxy` verifies RS256 + issuer + audience + scopes + host bindings
+  (wildcards rejected).
+- **Internal:** services authenticate with audience-separated RS256 token
+  families — down to **60-second single-purpose artifact tokens** minted per
+  request and never stored. Shared-file access treats the JWT as a ceiling and
+  re-checks a permission store on every operation, fail-closed.
+- **Agent ingress:** `mcp-host` runtime routes authenticate the platform's own
+  edge services via edge trust headers, restricted by NetworkPolicy (the route
+  rejects bearer tokens by design; JWTs authenticate the hops _into_ the edge).
+
+### Network isolation (4 layers)
+
+Every runtime namespace starts from **deny-all in both directions**; the
+operators add back only what CRDs declare: **L0** deny-all → **L1**
+infrastructure (DNS; Kubernetes-API egress denied by default, opt-in by
+label) → **L2** per-(context, server) allow pairs → **L3** external egress
+with private/link-local/cloud-metadata CIDRs excluded and remote connectors
+pinned behind an SSRF-hardened egress proxy.
 
 Deep dives: [ARCHITECTURE.md](ARCHITECTURE.md) ·
-[docs/architecture/overview.md](docs/architecture/overview.md).
+[docs/architecture/overview.md](docs/architecture/overview.md) ·
+[docs/architecture/platform-topology.md](docs/architecture/platform-topology.md).
 
 ---
 
@@ -159,29 +308,26 @@ it by default. Four enforcement layers in this repo:
    NetworkPolicy); the host's own JWT middleware guards only specific control
    routes.
 
-Report vulnerabilities privately: **[SECURITY.md](SECURITY.md)**.  
+Report vulnerabilities privately: **[SECURITY.md](SECURITY.md)**.
 Public claim rules: [docs/meta/claims-guardrails.md](docs/meta/claims-guardrails.md).
 
 ---
 
 ## Beyond the agent
 
-- **Context management** — deterministic pre-prune (dedup, oversized-output
-  trimming) plus tiered compaction under pressure; configurable, not assumed
-  always-on.
 - **Shared file systems** — `SharedFileSystem` (read-only to agents) and
   `GlobalFileSystem` (brokered API, permission store, tamper-evident audit).
 - **Usage & cost** — authoritative token usage in control-api; dashboards and
   budgets in control-ui (not the Grafana/Loki stack under `monitoring/`).
-- **Governed registry** — connectors and recipes with trust labels.
+  Budgets are cost control (fail-open), not a security boundary.
+- **Governed registry** — publish and install connectors and workflow recipes
+  with trust labels and publisher keys.
 - **Observability** — Prometheus metrics across services; optional Grafana +
   Loki log aggregation in [monitoring/](monitoring/README.md).
 
 ---
 
-## Running on Kubernetes
-
-### Custom Resource Definitions (8)
+## Custom Resource Definitions (8)
 
 | Resource                 | Description                                      |
 | ------------------------ | ------------------------------------------------ |
@@ -199,8 +345,8 @@ helm install clerum-crds ./charts/clerum-crds
 kubectl apply -f charts/clerum-crds/examples/   # optional samples
 ```
 
-Reference: [docs/crds/README.md](docs/crds/README.md).  
-Local full stack: [docs/deploy/minikube.md](docs/deploy/minikube.md).
+Reference: [docs/crds/README.md](docs/crds/README.md) ·
+Production checklist: [docs/deploy/production.md](docs/deploy/production.md).
 
 ---
 
@@ -214,28 +360,28 @@ Local full stack: [docs/deploy/minikube.md](docs/deploy/minikube.md).
 | Alibaba Bailian  | `bailian`        | `qwen3-coder-plus`  |
 
 Four providers behind one interface; OpenAI-compatible endpoints can plug in as
-registry descriptors where the code supports it. Keys live in a Kubernetes
-Secret you create (dev mode: environment variables). Details:
-[mcp-host/README.md](mcp-host/README.md).
+registry descriptors where the code supports it. Bailian surfaces Qwen / GLM /
+Kimi / MiniMax models. Keys live in a Kubernetes Secret you create (dev mode:
+environment variables). Details: [mcp-host/README.md](mcp-host/README.md).
 
 ---
 
 ## Repository layout
 
-| Area                    | Component                                                                                                                                              | Role                                     |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
-| **Agent runtime**       | [mcp-host/](mcp-host/README.md)                                                                                                                        | LLM loop, approvals, MCP tools           |
-|                         | [channel-reader/](channel-reader/README.md)                                                                                                            | Telegram / Email / Slack ingress         |
-|                         | [mcp-proxy/](mcp-proxy/README.md), [stdio-bridge/](stdio-bridge/README.md)                                                                             | MCP routing / stdio bridge               |
-|                         | [mcp-servers/](mcp-servers/README.md)                                                                                                                  | Sample connector specs (upstream images) |
-| **Operators**           | [host-context-controller/](host-context-controller/README.md)                                                                                          | CRDs → Deployments + NetworkPolicies     |
-|                         | [workflow-recipes/](workflow-recipes/README.md)                                                                                                        | WorkflowRecipe operator                  |
-|                         | [gfs-controller/](gfs-controller/), [workspace-files-controller/](workspace-files-controller/)                                                         | File planes                              |
-| **Edge & security**     | [rpc-proxy/](rpc-proxy/README.md), [external-rest-api/](external-rest-api/README.md)                                                                   | JWT edge, profiles/tokens                |
-|                         | [webhook-gateway/](webhook-gateway/), [webhook-proxy/](webhook-proxy/), [nginx-egress-proxy/](nginx-egress-proxy/)                                     | Ingress / egress hardening               |
-|                         | [workflow-approval-request-reader/](workflow-approval-request-reader/)                                                                                 | Channel approval callbacks               |
-| **Control plane & UIs** | [control-api/](control-api/README.md), [control-ui/](control-ui/README.md), [profile-ui/](profile-ui/README.md), [desktop-app/](desktop-app/README.md) | Admin, profile, desktop                  |
-| **Platform**            | [charts/clerum-crds/](charts/clerum-crds/README.md), [deploy/](deploy/), [packages/](packages/), [monitoring/](monitoring/README.md)                   | CRDs, manifests, shared libs, log stack  |
+| Area                    | Component                                                                                                                                              | Role                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------- |
+| **Agent runtime**       | [mcp-host/](mcp-host/README.md)                                                                                                                        | LLM loop, approvals, MCP + native tools |
+|                         | [channel-reader/](channel-reader/README.md)                                                                                                            | Telegram / Email / Slack ingress        |
+|                         | [mcp-proxy/](mcp-proxy/README.md), [stdio-bridge/](stdio-bridge/README.md)                                                                             | MCP routing / stdio bridge              |
+|                         | [mcp-servers/](mcp-servers/README.md)                                                                                                                  | Connector specs (upstream images)       |
+| **Operators**           | [host-context-controller/](host-context-controller/README.md)                                                                                          | CRDs → Deployments + NetworkPolicies    |
+|                         | [workflow-recipes/](workflow-recipes/README.md)                                                                                                        | WorkflowRecipe operator                 |
+|                         | [gfs-controller/](gfs-controller/), [workspace-files-controller/](workspace-files-controller/)                                                         | File planes                             |
+| **Edge & security**     | [rpc-proxy/](rpc-proxy/README.md), [external-rest-api/](external-rest-api/README.md)                                                                   | JWT edge, profiles/tokens               |
+|                         | [webhook-gateway/](webhook-gateway/), [webhook-proxy/](webhook-proxy/), [nginx-egress-proxy/](nginx-egress-proxy/)                                     | Ingress / egress hardening              |
+|                         | [workflow-approval-request-reader/](workflow-approval-request-reader/)                                                                                 | Channel approval callbacks              |
+| **Control plane & UIs** | [control-api/](control-api/README.md), [control-ui/](control-ui/README.md), [profile-ui/](profile-ui/README.md), [desktop-app/](desktop-app/README.md) | Admin, profile, desktop                 |
+| **Platform**            | [charts/clerum-crds/](charts/clerum-crds/README.md), [deploy/](deploy/), [packages/](packages/), [monitoring/](monitoring/README.md)                   | CRDs, manifests, shared libs, log stack |
 
 ---
 
