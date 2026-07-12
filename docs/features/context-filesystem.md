@@ -99,7 +99,7 @@ The original design intuition is "just attach a PVC to mcp-host, let it own the 
 
 Six load-bearing reasons:
 
-1. **PVC mount mechanics demand a writer pod.** PVCs are accessed via pod mounts; mounts are declared at pod-spec time. The "upload file" request from Control UI has to land somewhere with a RW mount of the PVC. *Some* pod has to be the writer. The choice is whether that pod is mcp-host (combined writer + LLM) or a dedicated wfc.
+1. **PVC mount mechanics demand a writer pod.** PVCs are accessed via pod mounts; mounts are declared at pod-spec time. The "upload file" request from Control UI has to land somewhere with a RW mount of the PVC. _Some_ pod has to be the writer. The choice is whether that pod is mcp-host (combined writer + LLM) or a dedicated wfc.
 2. **mcp-host stays RO** → the kernel returns `EROFS` on any write attempt → defense in depth against prompt injection or buggy code that might accidentally register a write tool. With a combined design, "agents are read-only" is enforced only by code convention. With a separate wfc, the kernel enforces it regardless of what mcp-host code does.
 3. **Ingress NetworkPolicy lock.** wfc accepts traffic only from `app=control-api`. mcp-host already accepts traffic from rpc-proxy and other paths — putting upload endpoints in mcp-host would expand its attack surface.
 4. **Resource isolation.** A 100 MiB upload doesn't share Node event loop / memory budget with active LLM streaming. The LLM's tail latency is independent of file IO load.
@@ -110,7 +110,7 @@ Six load-bearing reasons:
 
 Six additional reasons that justify the per-SFS Deployment topology:
 
-7. **K8s pod-spec immutability for PVCs.** A pod can only mount PVCs declared at pod-spec time. To add a new SharedFileSystem to a shared wfc, you must update its pod spec and roll the pod. Every add/remove restarts the shared wfc → brief write downtime for *every* SharedFileSystem on the cluster. Per-SharedFileSystem wfc avoids this entirely.
+7. **K8s pod-spec immutability for PVCs.** A pod can only mount PVCs declared at pod-spec time. To add a new SharedFileSystem to a shared wfc, you must update its pod spec and roll the pod. Every add/remove restarts the shared wfc → brief write downtime for _every_ SharedFileSystem on the cluster. Per-SharedFileSystem wfc avoids this entirely.
 8. **Per-SharedFileSystem NetworkPolicy precision.** With per-wfc, each ingress policy is exactly "control-api → this one wfc serving this one SharedFileSystem." With one shared wfc, the network-level policy is "control-api → all SharedFileSystems"; per-SharedFileSystem enforcement happens in code only.
 9. **Per-workspace resource limits / quotas.** A high-traffic shared workspace gets its own cgroup; a quiet one doesn't pay for it. Independent CPU/memory budgets.
 10. **Per-workspace blast radius.** A bug in file IO that crashes one wfc affects only that SharedFileSystem. Other workspaces keep accepting writes.
@@ -143,23 +143,23 @@ Realistic for an idle Express + pino + multipart server:
 - Requests: `50m CPU` / `64 MiB memory`
 - Limits: `200m CPU` / `128 MiB memory`
 
-| GKE pricing model | Cost per wfc pod / month |
-| --- | --- |
-| GKE Standard, on-demand e2 nodes | ~$1.20 |
-| GKE Standard, spot e2 nodes | ~$0.40 |
-| GKE Autopilot, on-demand | ~$1.85 |
-| GKE Autopilot, spot | ~$1.20 |
+| GKE pricing model                | Cost per wfc pod / month |
+| -------------------------------- | ------------------------ |
+| GKE Standard, on-demand e2 nodes | ~$1.20                   |
+| GKE Standard, spot e2 nodes      | ~$0.40                   |
+| GKE Autopilot, on-demand         | ~$1.85                   |
+| GKE Autopilot, spot              | ~$1.20                   |
 
 ### At scale (per-SharedFileSystem wfc, on-demand GKE Standard)
 
-| Active SharedFileSystems | Marginal wfc cost / month | Notes |
-| --- | --- | --- |
-| 1 | ~$1.20 | Fits in node slack |
-| 10 | ~$12 | Fits in node slack |
-| 50 | ~$60 | Approaches one extra e2-standard-4 |
-| 100 | ~$120 | ~1.25 extra e2-standard-4 nodes |
-| 500 | ~$600 | ~6 extra nodes |
-| 1000 | ~$1200 | ~13 extra nodes |
+| Active SharedFileSystems | Marginal wfc cost / month | Notes                              |
+| ------------------------ | ------------------------- | ---------------------------------- |
+| 1                        | ~$1.20                    | Fits in node slack                 |
+| 10                       | ~$12                      | Fits in node slack                 |
+| 50                       | ~$60                      | Approaches one extra e2-standard-4 |
+| 100                      | ~$120                     | ~1.25 extra e2-standard-4 nodes    |
+| 500                      | ~$600                     | ~6 extra nodes                     |
+| 1000                     | ~$1200                    | ~13 extra nodes                    |
 
 On the current dev cluster (e2-standard-4 nodes), each wfc pod consumes ~1.25% of one node's CPU. There is headroom for ~80 wfc pods before forcing a node scale-up — so up to ~80 SharedFileSystems, marginal cost is **literally $0** (the pods slot into existing slack).
 
@@ -181,7 +181,7 @@ GCS FUSE CSI on GCP overlays (vs Filestore Basic HDD's $200/mo minimum):
 ### Comparison to other costs
 
 - One LLM conversation with Claude Opus on a 50k-token context: ~$0.75. One conversation pays for ~3 wfc pods for a month.
-- The original spec's Filestore Basic HDD storage was a $200/mo minimum *per Context* (because of the 1 TiB floor). Switching to GCS FUSE saves ~$200/mo per SharedFileSystem.
+- The original spec's Filestore Basic HDD storage was a $200/mo minimum _per Context_ (because of the 1 TiB floor). Switching to GCS FUSE saves ~$200/mo per SharedFileSystem.
 - Cluster baseline (4 nodes, idle): ~$390/mo. A 100-SharedFileSystem wfc fleet adds 30% to compute cost.
 
 ### Summary
@@ -265,7 +265,7 @@ A new optional `spec.sharedFileSystems` field references one or more SharedFileS
 ```yaml
 spec:
   sharedFileSystems:
-    - name: team-mission                           # SharedFileSystem.metadata.name (must exist in mcp-host)
+    - name: team-mission # SharedFileSystem.metadata.name (must exist in mcp-host)
       mountPath: /workspace/team-mission
     - name: customer-complaints
       mountPath: /workspace/customer-complaints
@@ -358,9 +358,9 @@ The RO mounts on `mcp-host` are dead bytes unless the LLM has a way to discover 
 
 All tools are read-only. They present every mounted SharedFileSystem under one **virtual unified root** with the SharedFileSystem `name` as the top-level directory. The mcp-host reader rejects `..`, NUL/control characters, backslashes, symlinks, non-regular files, and paths that resolve outside the SharedFileSystem mount root.
 
-| Tool | Purpose | Key params |
-| --- | --- | --- |
-| `clerum__context_files_list` | List entries. At root (`/` or empty) returns the list of available SharedFileSystems. | `path?` (default ".") |
+| Tool                         | Purpose                                                                                     | Key params                              |
+| ---------------------------- | ------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `clerum__context_files_list` | List entries. At root (`/` or empty) returns the list of available SharedFileSystems.       | `path?` (default ".")                   |
 | `clerum__context_files_read` | Return file contents as UTF-8 text. Files larger than the configured read cap are rejected. | `path` (e.g. `team-mission/mission.md`) |
 
 ### Discovery and surfacing
@@ -384,7 +384,7 @@ All tools are read-only. They present every mounted SharedFileSystem under one *
   ]
   ```
 
-- mcp-host appends a one-line system-prompt postfix when these tools are registered: *"You have shared filesystems available: `<comma-separated names>`. Use `clerum__context_files_list` to discover files (start at `/` to see workspaces) and `clerum__context_files_read` to read them."*
+- mcp-host appends a one-line system-prompt postfix when these tools are registered: _"You have shared filesystems available: `<comma-separated names>`. Use `clerum__context_files_list` to discover files (start at `/` to see workspaces) and `clerum__context_files_read` to read them."_
 - Files written via the workspace-files-controller are visible to readers within RWX cache-coherency bounds (Filestore: typically a few seconds; GCS FUSE: tunable via mount opts). v1 accepts this delay as good-enough for the "notes + docs" workload.
 
 ### Limits
@@ -458,34 +458,34 @@ The browsing JWT shape below is forward-compatible — v2 just changes which sub
 
 ### Repository layout
 
-| Path | Purpose | v1? |
-| --- | --- | --- |
-| `workspace-files-controller/` | New TS/Node service. Mirrors the `mcp-host` package layout (Express + pino + vitest). Single image; one Deployment per SharedFileSystem. | yes |
-| `host-context-controller/src/sharedFileSystemReconciler.ts` | New HCC reconciler watching `SharedFileSystem` CRDs. | yes |
-| `host-context-controller/src/k8s/sharedFileSystemFactory.ts` | Pure builders for PVC, Deployment (+ seeding init container), Service, NetworkPolicies. | yes |
-| `control-api/src/routes/admin/sharedFileSystems.ts` | Admin token-mint endpoint + thin proxy to per-SFS wfc. | yes |
-| `control-ui/app/shared-filesystems/` | Workspace picker, file tree, viewer, upload/replace/delete dialogs. | yes |
-| `mcp-host/src/workflow/contextFiles.ts` | Built-in `clerum__context_files_*` tools (list/read) with virtual unified root over multiple RO mounts. | yes |
-| `external-rest-api/src/routes/sharedFileSystems.ts` | Session-JWT-gated passthrough to `control-api`. | **v2 — deferred** |
-| `desktop-app/ui/src/features/workspace/` | End-user UI (file tree, viewer, upload/replace/delete). | **v2 — deferred** |
-| `tests/e2e/shared-filesystems/` | E2E suite (see Test strategy). | yes |
+| Path                                                         | Purpose                                                                                                                                  | v1?               |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `workspace-files-controller/`                                | New TS/Node service. Mirrors the `mcp-host` package layout (Express + pino + vitest). Single image; one Deployment per SharedFileSystem. | yes               |
+| `host-context-controller/src/sharedFileSystemReconciler.ts`  | New HCC reconciler watching `SharedFileSystem` CRDs.                                                                                     | yes               |
+| `host-context-controller/src/k8s/sharedFileSystemFactory.ts` | Pure builders for PVC, Deployment (+ seeding init container), Service, NetworkPolicies.                                                  | yes               |
+| `control-api/src/routes/admin/sharedFileSystems.ts`          | Admin token-mint endpoint + thin proxy to per-SFS wfc.                                                                                   | yes               |
+| `control-ui/app/shared-filesystems/`                         | Workspace picker, file tree, viewer, upload/replace/delete dialogs.                                                                      | yes               |
+| `mcp-host/src/workflow/contextFiles.ts`                      | Built-in `clerum__context_files_*` tools (list/read) with virtual unified root over multiple RO mounts.                                  | yes               |
+| `external-rest-api/src/routes/sharedFileSystems.ts`          | Session-JWT-gated passthrough to `control-api`.                                                                                          | **v2 — deferred** |
+| `desktop-app/ui/src/features/workspace/`                     | End-user UI (file tree, viewer, upload/replace/delete).                                                                                  | **v2 — deferred** |
+| `tests/e2e/shared-filesystems/`                              | E2E suite (see Test strategy).                                                                                                           | yes               |
 
 ### HTTP API: `workspace-files-controller`
 
 Listens on `:8086`. All routes except `/healthz` and `/readyz` require a valid browsing JWT in `Authorization: Bearer <token>` whose `sharedFileSystem` claim matches the wfc's identity. The SharedFileSystem identity comes from the JWT, NOT from URL path.
 
-| Method | Path | Body / Query | Purpose |
-| --- | --- | --- | --- |
-| `GET` | `/v1/files?path=<rel>` | — | List directory entries (name, kind, size, mtime). |
-| `GET` | `/v1/files/stat?path=<rel>` | — | File metadata. |
-| `GET` | `/v1/files/download?path=<rel>` | — | Stream file contents (`Content-Disposition: attachment`). |
-| `POST` | `/v1/files/upload` | multipart `file` + `path` | Create new file. `409` if exists. |
-| `PUT` | `/v1/files/replace` | multipart `file` + `path` | Whole-file replace (Google Drive–style). `404` if missing. |
-| `POST` | `/v1/files/mkdir` | `{path}` | Create directory (and parents). |
-| `POST` | `/v1/files/move` | `{from, to}` | Rename or move within the workspace. |
-| `DELETE` | `/v1/files?path=<rel>` | — | Delete file or empty directory. Recursive delete is `?recursive=true` and is logged. |
-| `GET` | `/healthz` | — | Liveness. |
-| `GET` | `/readyz` | — | Reports PVC mounted + writable. |
+| Method   | Path                            | Body / Query              | Purpose                                                                              |
+| -------- | ------------------------------- | ------------------------- | ------------------------------------------------------------------------------------ |
+| `GET`    | `/v1/files?path=<rel>`          | —                         | List directory entries (name, kind, size, mtime).                                    |
+| `GET`    | `/v1/files/stat?path=<rel>`     | —                         | File metadata.                                                                       |
+| `GET`    | `/v1/files/download?path=<rel>` | —                         | Stream file contents (`Content-Disposition: attachment`).                            |
+| `POST`   | `/v1/files/upload`              | multipart `file` + `path` | Create new file. `409` if exists.                                                    |
+| `PUT`    | `/v1/files/replace`             | multipart `file` + `path` | Whole-file replace (Google Drive–style). `404` if missing.                           |
+| `POST`   | `/v1/files/mkdir`               | `{path}`                  | Create directory (and parents).                                                      |
+| `POST`   | `/v1/files/move`                | `{from, to}`              | Rename or move within the workspace.                                                 |
+| `DELETE` | `/v1/files?path=<rel>`          | —                         | Delete file or empty directory. Recursive delete is `?recursive=true` and is logged. |
+| `GET`    | `/healthz`                      | —                         | Liveness.                                                                            |
+| `GET`    | `/readyz`                       | —                         | Reports PVC mounted + writable.                                                      |
 
 **Response envelope:** `{ok: true, data: ...}` on success, `{ok: false, error: {code, message}}` on failure. Error codes: `path_invalid`, `not_found`, `already_exists`, `not_a_directory`, `not_empty`, `payload_too_large`, `forbidden`, `unauthorized`.
 
@@ -499,12 +499,12 @@ Listens on `:8086`. All routes except `/healthz` and `/readyz` require a valid b
 
 All under `/api/v1/admin/shared-filesystems/:name/*`. Admin session-JWT auth handled by upstream middleware.
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/api/v1/admin/shared-filesystems` | List SharedFileSystems (proxies the K8s CRD list). |
-| `GET` | `/api/v1/admin/shared-filesystems/:name` | Get one SharedFileSystem (CRD + status). |
-| `POST` | `/api/v1/admin/shared-filesystems/:name/token` | Mint browsing JWT for this SharedFileSystem. Returns `{token, expiresIn, serviceUrl}`. v1: requires admin role. v2: also accepts non-admin via the transitive rule. |
-| `*` | `/api/v1/admin/shared-filesystems/:name/proxy/*` | Thin reverse proxy to `wfc-<sfsHash>.mcp-host.svc:8086`. Forwards `Authorization` and request body unchanged. |
+| Method | Path                                             | Purpose                                                                                                                                                             |
+| ------ | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/api/v1/admin/shared-filesystems`               | List SharedFileSystems (proxies the K8s CRD list).                                                                                                                  |
+| `GET`  | `/api/v1/admin/shared-filesystems/:name`         | Get one SharedFileSystem (CRD + status).                                                                                                                            |
+| `POST` | `/api/v1/admin/shared-filesystems/:name/token`   | Mint browsing JWT for this SharedFileSystem. Returns `{token, expiresIn, serviceUrl}`. v1: requires admin role. v2: also accepts non-admin via the transitive rule. |
+| `*`    | `/api/v1/admin/shared-filesystems/:name/proxy/*` | Thin reverse proxy to `wfc-<sfsHash>.mcp-host.svc:8086`. Forwards `Authorization` and request body unchanged.                                                       |
 
 The proxy approach keeps the per-SFS wfc reachable only from `control-plane`, simplifying NetworkPolicy. Control UI always traverses `Control UI → control-api → workspace-files-controller`.
 
@@ -525,21 +525,21 @@ Reconciliation is **per-object idempotent**, debounced 5s, retries on failure wi
 
 ### NetworkPolicies
 
-| Name | Namespace | Effect |
-| --- | --- | --- |
-| `wfc-<sfsHash>-ingress` | `mcp-host` | Allow `:8086` from `control-plane` / `app=control-api`. Deny everything else. |
-| `wfc-<sfsHash>-egress` | `mcp-host` | Allow DNS to `kube-system`. Nothing else. |
+| Name                         | Namespace       | Effect                                                                                |
+| ---------------------------- | --------------- | ------------------------------------------------------------------------------------- |
+| `wfc-<sfsHash>-ingress`      | `mcp-host`      | Allow `:8086` from `control-plane` / `app=control-api`. Deny everything else.         |
+| `wfc-<sfsHash>-egress`       | `mcp-host`      | Allow DNS to `kube-system`. Nothing else.                                             |
 | `control-api → wfc` (egress) | `control-plane` | Allow `:8086` to `mcp-host` namespace, pod selector `app=workspace-files-controller`. |
-| `mcp-host RO mounts` | `mcp-host` | No new policy needed — mounts are purely volume-level. |
+| `mcp-host RO mounts`         | `mcp-host`      | No new policy needed — mounts are purely volume-level.                                |
 
 All three per-SFS policies are runtime-managed by HCC. The `control-api → wfc` egress policy lives in `deploy/base/control-plane/networkpolicies.yaml` (control-api egress is namespace-scoped, not per-SFS).
 
 ### Storage classes per environment
 
-| Overlay | Class | Notes |
-| --- | --- | --- |
-| `minikube` | `standard` (RWO) | RWX is hard locally; v1 runs at `replicas: 1` with RWO — safe because the initContainer co-locates seeding in the controller pod (no Multi-Attach). |
-| `gcp-prod` / `gcp-dev` | GCS FUSE CSI driver | Per-SharedFileSystem GCS bucket, RWX semantics, ~$0.02/GiB/mo (vs Filestore Basic HDD's ~$200/mo minimum). |
+| Overlay                | Class               | Notes                                                                                                                                               |
+| ---------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `minikube`             | `standard` (RWO)    | RWX is hard locally; v1 runs at `replicas: 1` with RWO — safe because the initContainer co-locates seeding in the controller pod (no Multi-Attach). |
+| `gcp-prod` / `gcp-dev` | GCS FUSE CSI driver | Per-SharedFileSystem GCS bucket, RWX semantics, ~$0.02/GiB/mo (vs Filestore Basic HDD's ~$200/mo minimum).                                          |
 
 ### Path safety (server-side, mandatory)
 
@@ -559,13 +559,13 @@ All paths arriving from clients are normalised and validated before any FS call:
 
 ### Phased rollout
 
-| Phase | Scope |
-| --- | --- |
-| **P1** | New `SharedFileSystem` CRD + `Context.spec.sharedFileSystems`. HCC reconciler creating PVC + wfc Deployment (with a seeding init container) per SharedFileSystem; status reaches `Initializing`. No service yet. |
+| Phase  | Scope                                                                                                                                                                                                              |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **P1** | New `SharedFileSystem` CRD + `Context.spec.sharedFileSystems`. HCC reconciler creating PVC + wfc Deployment (with a seeding init container) per SharedFileSystem; status reaches `Initializing`. No service yet.   |
 | **P2** | `workspace-files-controller` service: list/stat/download/healthz only. HCC reconciler creates per-SFS Deployment + Service + NetworkPolicies. control-api token-mint + proxy. Read-only Control UI workspace view. |
-| **P3** | upload/replace/mkdir/move/delete. Control UI write actions. |
-| **P4** | mcp-host RO mount injection (multi-mount via `Context.spec.sharedFileSystems`) + built-in `clerum__context_files_*` tools with virtual unified root. End-to-end with agent reads. |
-| **P5** | E2E suite, NetworkPolicy enforcement verification, GCP-dev soak. |
+| **P3** | upload/replace/mkdir/move/delete. Control UI write actions.                                                                                                                                                        |
+| **P4** | mcp-host RO mount injection (multi-mount via `Context.spec.sharedFileSystems`) + built-in `clerum__context_files_*` tools with virtual unified root. End-to-end with agent reads.                                  |
+| **P5** | E2E suite, NetworkPolicy enforcement verification, GCP-dev soak.                                                                                                                                                   |
 
 ### Test strategy
 
@@ -594,5 +594,5 @@ All paths arriving from clients are normalised and validated before any FS call:
 
 - **[Context CRD reference](../crds/context.md)** (will be updated to include `spec.sharedFileSystems` once implemented)
 - **[SharedFileSystem CRD reference](../crds/sharedfilesystem.md)** (new — created with v1)
-- **[Token contract](../security/token-contract.md)**
-- **[AuthZ policy](../security/authz-policy.md)**
+- Root [Security model](../../README.md#security-model)
+- [SharedFileSystem CRD](../crds/sharedfilesystem.md)

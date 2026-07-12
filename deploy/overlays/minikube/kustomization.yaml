@@ -5,8 +5,7 @@ resources:
   # These configmaps are only in the minikube overlay (no base equivalent)
   - configmaps/mcp-host-config.yaml
   # rpc-proxy-config is referenced by base/rpc-proxy/rpc-proxy.yaml via envFrom
-  # but NOT defined in base — each overlay must provide its own. GCP has its
-  # own at deploy/overlays/gcp/configmaps/rpc-proxy-config.yaml. Without this
+  # but NOT defined in base — each overlay must provide its own. Without this
   # file, rpc-proxy Pod fails with `configmap "rpc-proxy-config" not found`
   # → CreateContainerConfigError on every fresh minikube install.
   - configmaps/rpc-proxy-config.yaml
@@ -16,8 +15,8 @@ resources:
   - fake-telegram/deployment.yaml
   - fake-telegram/service.yaml
   - fake-telegram/networkpolicy.yaml
-  # Local evenfire-registry lives in a sibling repo, but Clerum owns the
-  # consumer egress policies that let control-api/workflow-recipes call it.
+  # The registry service runs outside this repo; these policies grant the
+  # consumer egress that lets control-api/workflow-recipes reach it.
   - registry/namespace.yaml
   - registry/networkpolicies.yaml
   # Bootstrap admin Secret canary. Operator populates via

@@ -37,7 +37,7 @@
 
 ### 1.1 Platform Overview
 
-Clerum is a Kubernetes-native platform for LLM orchestration with multi-channel communication (Telegram, Email, Slack, Desktop App) and MCP (Model Context Protocol) integration. All configuration is driven by CRDs under the `clerum.io/v1alpha1` API group.
+evenfire is a Kubernetes-native platform for LLM orchestration with multi-channel communication (Telegram, Email, Slack, Desktop App) and MCP (Model Context Protocol) integration. All configuration is driven by CRDs under the historical `clerum.io/v1alpha1` API group ([code names](../concepts/code-names.md)).
 
 The platform is deployed across **7 namespaces** with a **deny-all by default** security posture. All runtime namespaces (mcp-host, mcp-server, sandbox-recipes, rpc-proxy) deny all ingress/egress by default. Communication is only enabled through explicit NetworkPolicies owned by the component responsible for that selector family: HCC for Context/MCP relationships, WRC for WorkflowRecipe runtime pods, and static deploy overlays for platform infrastructure policies.
 
@@ -137,29 +137,29 @@ flowchart TB
 
 ### 1.2 Namespace Map
 
-| Namespace | Purpose | Deny-All Default | Key Components |
-|-----------|---------|:----------------:|----------------|
-| **profile-plane** | User identity, profiles, team management, access mapping | No (management) | profile-ui, external-rest-api |
-| **control-plane** | Platform management, CRD lifecycle, controllers | No (management) | control-ui, control-api, email intf, HCC Image (3 synchronizers + WRC reconciler module) |
-| **gateway** | External communication ingress (channels) | No (ingress) | Communication Channel Image (TG/Email/Slack) |
-| **mcp-host** | LLM orchestration and agent state machine | **Yes** | mcp-host (Agent + MCP Client) |
-| **mcp-server** | MCP server runtime and CRD storage | **Yes** | MCP server pods, McpServer CRDs, Context CRDs |
-| **sandbox-recipes** | Non-MCP workloads from WorkflowRecipes | **Yes** | StatefulSets, CronJobs, Jobs, Deployments, PVCs |
-| **rpc-proxy** | Secure external access for Desktop App users | **Yes** | mcpProxy Image (MCP Server Proxy, MCP Host Proxy) |
+| Namespace           | Purpose                                                  | Deny-All Default | Key Components                                                                           |
+| ------------------- | -------------------------------------------------------- | :--------------: | ---------------------------------------------------------------------------------------- |
+| **profile-plane**   | User identity, profiles, team management, access mapping | No (management)  | profile-ui, external-rest-api                                                            |
+| **control-plane**   | Platform management, CRD lifecycle, controllers          | No (management)  | control-ui, control-api, email intf, HCC Image (3 synchronizers + WRC reconciler module) |
+| **gateway**         | External communication ingress (channels)                |   No (ingress)   | Communication Channel Image (TG/Email/Slack)                                             |
+| **mcp-host**        | LLM orchestration and agent state machine                |     **Yes**      | mcp-host (Agent + MCP Client)                                                            |
+| **mcp-server**      | MCP server runtime and CRD storage                       |     **Yes**      | MCP server pods, McpServer CRDs, Context CRDs                                            |
+| **sandbox-recipes** | Non-MCP workloads from WorkflowRecipes                   |     **Yes**      | StatefulSets, CronJobs, Jobs, Deployments, PVCs                                          |
+| **rpc-proxy**       | Secure external access for Desktop App users             |     **Yes**      | mcpProxy Image (MCP Server Proxy, MCP Host Proxy)                                        |
 
 ### 1.3 Service Map
 
-| Service | Directory | Namespace | Port | Role |
-|---------|-----------|-----------|------|------|
-| **profile-ui** | `/profile-ui` | profile-plane | 3000 | User-facing profile management UI |
-| **external-rest-api** | `/external-rest-api` | profile-plane | 8091 | User-facing profile, auth, team, invitation, and RPC-token API |
-| **control-ui** | `/control-ui` | control-plane | 3001 | Platform management UI |
-| **control-api** | `/control-api` | control-plane | 8090 | CRD lifecycle, resource CRUD, profile mapping |
-| **Host Context Controller** | `/host-context-controller` | control-plane | 8081 | 3 synchronizers (MCP Host, AccessCtrl, MCP Server) + Discovery REST API |
-| **Workflow Recipe Controller** | `/workflow-recipes` | control-plane | — | A reconciler module within the Host Context Controller (HCC) process — WRC runs in the same Pod as the other HCC synchronizers, not as a separate service |
-| **Comm Channel Image** | `/channel-reader` | gateway | — | Polls TG/Email/Slack, forwards to mcp-host |
-| **mcp-host** | `/mcp-host` | mcp-host | 8080 | LLM orchestration, agent state machine, MCP tool calling |
-| **mcpProxy Image** | `/rpc-proxy` | rpc-proxy | 8094 | Secure RPC proxy: Desktop App → MCP servers / Agent |
+| Service                        | Directory                  | Namespace     | Port | Role                                                                                                                                                      |
+| ------------------------------ | -------------------------- | ------------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **profile-ui**                 | `/profile-ui`              | profile-plane | 3000 | User-facing profile management UI                                                                                                                         |
+| **external-rest-api**          | `/external-rest-api`       | profile-plane | 8091 | User-facing profile, auth, team, invitation, and RPC-token API                                                                                            |
+| **control-ui**                 | `/control-ui`              | control-plane | 3001 | Platform management UI                                                                                                                                    |
+| **control-api**                | `/control-api`             | control-plane | 8090 | CRD lifecycle, resource CRUD, profile mapping                                                                                                             |
+| **Host Context Controller**    | `/host-context-controller` | control-plane | 8081 | 3 synchronizers (MCP Host, AccessCtrl, MCP Server) + Discovery REST API                                                                                   |
+| **Workflow Recipe Controller** | `/workflow-recipes`        | control-plane | —    | A reconciler module within the Host Context Controller (HCC) process — WRC runs in the same Pod as the other HCC synchronizers, not as a separate service |
+| **Comm Channel Image**         | `/channel-reader`          | gateway       | —    | Polls TG/Email/Slack, forwards to mcp-host                                                                                                                |
+| **mcp-host**                   | `/mcp-host`                | mcp-host      | 8080 | LLM orchestration, agent state machine, MCP tool calling                                                                                                  |
+| **mcpProxy Image**             | `/rpc-proxy`               | rpc-proxy     | 8094 | Secure RPC proxy: Desktop App → MCP servers / Agent                                                                                                       |
 
 ---
 
@@ -196,16 +196,16 @@ Nothing moves until HCC creates explicit allow policies.
 
 ### 2.2 Trust Boundaries
 
-| Boundary | Trust Level | Enforcement |
-|----------|-------------|-------------|
-| External → rpc-proxy | Zero trust | JWT + 2FA/YubiKey + VPN, profile ACL |
-| External → gateway | Channel trust | Bot tokens, allowed sender lists |
-| gateway → mcp-host | Internal trust | NetworkPolicy |
-| mcp-host → mcp-server | Context-scoped | NetworkPolicy per (context, server) + identity headers |
-| sandbox → mcp-server | Recipe-scoped | NetworkPolicy per recipe binding |
-| rpc-proxy → mcp-server | Context/server-scoped data plane + profile-scoped app auth | HCC `rpc-egress-<context>-<server>` plus matching `ctx-<context>-<server>` ingress, with control-api profile ACL |
-| rpc-proxy → mcp-host | Host-scoped data plane + profile-scoped app auth | HCC `rpc-proxy-<host>-egress-mcp-host` and `mcp-host-<host>-ingress-rpc-proxy` NetworkPolicies plus control-api profile ACL |
-| control-plane → mcp-server | RBAC watch-only | HCC watches CRDs, creates Deploys. No data plane access |
+| Boundary                   | Trust Level                                                | Enforcement                                                                                                                 |
+| -------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| External → rpc-proxy       | Zero trust                                                 | JWT + 2FA/YubiKey + VPN, profile ACL                                                                                        |
+| External → gateway         | Channel trust                                              | Bot tokens, allowed sender lists                                                                                            |
+| gateway → mcp-host         | Internal trust                                             | NetworkPolicy                                                                                                               |
+| mcp-host → mcp-server      | Context-scoped                                             | NetworkPolicy per (context, server) + identity headers                                                                      |
+| sandbox → mcp-server       | Recipe-scoped                                              | NetworkPolicy per recipe binding                                                                                            |
+| rpc-proxy → mcp-server     | Context/server-scoped data plane + profile-scoped app auth | HCC `rpc-egress-<context>-<server>` plus matching `ctx-<context>-<server>` ingress, with control-api profile ACL            |
+| rpc-proxy → mcp-host       | Host-scoped data plane + profile-scoped app auth           | HCC `rpc-proxy-<host>-egress-mcp-host` and `mcp-host-<host>-ingress-rpc-proxy` NetworkPolicies plus control-api profile ACL |
+| control-plane → mcp-server | RBAC watch-only                                            | HCC watches CRDs, creates Deploys. No data plane access                                                                     |
 
 ### 2.3 Security Invariants
 
@@ -224,13 +224,13 @@ Nothing moves until HCC creates explicit allow policies.
 
 The platform uses a **controller architecture** where all control logic runs in `control-plane`:
 
-| Component | Namespace | Role |
-|-----------|-----------|------|
-| Host Context Controller (HCC) | `control-plane` | 3 synchronizers + WRC module + Discovery API |
-| Workflow Recipe Controller (WRC) | `control-plane` (within HCC) | Pure CRD reconciler for WorkflowRecipe lifecycle |
-| Control-plane triggers deploys | `control-plane` | Agents cannot trigger deploys directly |
-| Non-MCP workloads | `sandbox-recipes` | Isolated runtime for non-MCP recipe workloads |
-| 7 namespaces | — | profile-plane, control-plane, gateway, mcp-host, mcp-server, sandbox-recipes, rpc-proxy |
+| Component                        | Namespace                    | Role                                                                                    |
+| -------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------- |
+| Host Context Controller (HCC)    | `control-plane`              | 3 synchronizers + WRC module + Discovery API                                            |
+| Workflow Recipe Controller (WRC) | `control-plane` (within HCC) | Pure CRD reconciler for WorkflowRecipe lifecycle                                        |
+| Control-plane triggers deploys   | `control-plane`              | Agents cannot trigger deploys directly                                                  |
+| Non-MCP workloads                | `sandbox-recipes`            | Isolated runtime for non-MCP recipe workloads                                           |
+| 7 namespaces                     | —                            | profile-plane, control-plane, gateway, mcp-host, mcp-server, sandbox-recipes, rpc-proxy |
 
 ### 3.2 Where the WRC Fits
 
@@ -310,41 +310,41 @@ sequenceDiagram
 
 ### 4.1 CRD Summary
 
-| CRD | Created By | Watched By | Purpose |
-|-----|------------|-----------|---------|
-| `WorkflowRecipe` | control-api | WR Controller | Package of workloads + resources + bindings |
-| `WorkflowRecipePolicy` | control-api | WR Controller | Governance rules per recipe context |
-| `McpServer` | control-api, WR Controller | HCC (MCP Server Sync) | MCP server deployment spec |
-| `Context` | control-api, WR Controller (patches) | HCC (AccessCtrl Sync) | Access control: server allowlist |
-| `Host` | control-api | HCC (MCP Host Sync) | LLM provider config |
-| `CommunicationChannel` | control-api | Comm Channel Image | TG/Email/Slack channels |
+| CRD                    | Created By                           | Watched By            | Purpose                                     |
+| ---------------------- | ------------------------------------ | --------------------- | ------------------------------------------- |
+| `WorkflowRecipe`       | control-api                          | WR Controller         | Package of workloads + resources + bindings |
+| `WorkflowRecipePolicy` | control-api                          | WR Controller         | Governance rules per recipe context         |
+| `McpServer`            | control-api, WR Controller           | HCC (MCP Server Sync) | MCP server deployment spec                  |
+| `Context`              | control-api, WR Controller (patches) | HCC (AccessCtrl Sync) | Access control: server allowlist            |
+| `Host`                 | control-api                          | HCC (MCP Host Sync)   | LLM provider config                         |
+| `CommunicationChannel` | control-api                          | Comm Channel Image    | TG/Email/Slack channels                     |
 
 ### 4.2 McpServer CRD Status (v2 additions)
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `status.phase` | enum | `Pending`, **`Sanitizing`**, `Running`, **`Rejected`**, `Failed`, `Terminating` |
-| `status.sanitization` | object | `passed: bool`, `reason: string`, `checkedAt: timestamp` |
+| Field                 | Type   | Description                                                                     |
+| --------------------- | ------ | ------------------------------------------------------------------------------- |
+| `status.phase`        | enum   | `Pending`, **`Sanitizing`**, `Running`, **`Rejected`**, `Failed`, `Terminating` |
+| `status.sanitization` | object | `passed: bool`, `reason: string`, `checkedAt: timestamp`                        |
 
 ---
 
 ## 5. Host Context Controller Image (3 Synchronizers)
 
-| Synchronizer | Watches | Produces | Target Namespaces |
-|--------------|---------|----------|-------------------|
-| **MCP Server Sync** | McpServer CRDs | Deployments + Services (after sanitization) | mcp-server |
-| **MCPAccessController Sync** | Context CRDs, McpServer annotations, Host CRDs | Context/MCP NetworkPolicies | mcp-server, mcp-host, sandbox-recipes, rpc-proxy |
-| **MCP Host Sync** | Host CRDs | mcp-host configuration, Secret validation | mcp-host |
+| Synchronizer                 | Watches                                        | Produces                                    | Target Namespaces                                |
+| ---------------------------- | ---------------------------------------------- | ------------------------------------------- | ------------------------------------------------ |
+| **MCP Server Sync**          | McpServer CRDs                                 | Deployments + Services (after sanitization) | mcp-server                                       |
+| **MCPAccessController Sync** | Context CRDs, McpServer annotations, Host CRDs | Context/MCP NetworkPolicies                 | mcp-server, mcp-host, sandbox-recipes, rpc-proxy |
+| **MCP Host Sync**            | Host CRDs                                      | mcp-host configuration, Secret validation   | mcp-host                                         |
 
 ### 5.1 Sanitization Gate (MCP Server Sync)
 
-| Rule | Default |
-|------|---------|
+| Rule                     | Default                               |
+| ------------------------ | ------------------------------------- |
 | Allowed image registries | `your-registry.example.com/evenfire/` |
-| Max CPU/memory | 500m / 512Mi |
-| Privileged containers | **Denied** |
-| Host path / host network | **Denied** |
-| Root user | **Denied** |
+| Max CPU/memory           | 500m / 512Mi                          |
+| Privileged containers    | **Denied**                            |
+| Host path / host network | **Denied**                            |
+| Root user                | **Denied**                            |
 
 **If sanitization fails** → `status.phase: Rejected` → operator notified → option to fork recipe or override (admin-only annotation).
 
@@ -377,7 +377,7 @@ sequenceDiagram
     end
 ```
 
-**Trust is layered, not binary.** The registry verifies recipe *authorship and integrity* (who published it, has it been tampered with). The sanitization gate verifies *runtime safety* (does this specific configuration meet our cluster's security requirements). A verified recipe might use an image that was safe at publish time but has since been found vulnerable, or might request resources beyond what our cluster allows. The gate ensures that **what runs in our cluster is safe for our cluster**, regardless of external trust signals.
+**Trust is layered, not binary.** The registry verifies recipe _authorship and integrity_ (who published it, has it been tampered with). The sanitization gate verifies _runtime safety_ (does this specific configuration meet our cluster's security requirements). A verified recipe might use an image that was safe at publish time but has since been found vulnerable, or might request resources beyond what our cluster allows. The gate ensures that **what runs in our cluster is safe for our cluster**, regardless of external trust signals.
 
 > **Cross-reference**: The `status.sanitization` fields (`passed`, `reason`, `checkedAt`) are defined in [§4.2 McpServer CRD Status](#42-mcpserver-crd-status-v2-additions).
 
@@ -385,37 +385,37 @@ sequenceDiagram
 
 ## 6. Workflow Recipe Controller (WRC)
 
-The **Workflow Recipe Controller (WRC)** is a pure CRD reconciler in `control-plane` that generates *intent* (CRDs and workloads) but never touches the data plane directly. The WRC is implemented as a **reconciler module within the Host Context Controller (HCC)** — it runs in the same process as the other HCC synchronizers (MCP Host, AccessCtrl, MCP Server), not as a separate service or pod. This design follows the same pattern as the existing HCC reconcilers and minimizes operational complexity.
+The **Workflow Recipe Controller (WRC)** is a pure CRD reconciler in `control-plane` that generates _intent_ (CRDs and workloads) but never touches the data plane directly. The WRC is implemented as a **reconciler module within the Host Context Controller (HCC)** — it runs in the same process as the other HCC synchronizers (MCP Host, AccessCtrl, MCP Server), not as a separate service or pod. This design follows the same pattern as the existing HCC reconcilers and minimizes operational complexity.
 
 ### 6.1 What It Does vs. What It Does NOT
 
-| Does | Does NOT |
-|------|----------|
-| Watches WorkflowRecipe CRDs | Manage MCP servers (HCC does this) |
-| Creates McpServer CRDs (for HCC) | Create Context/MCP NetworkPolicies owned by HCC |
-| Creates non-MCP workloads in sandbox | Expose MCP tools (no MCP interface) |
-| Creates runtime NetworkPolicies for WRC-owned workflow pods | Create static platform infrastructure policies |
-| Annotates binding requirements | Accept agent-triggered deployments |
+| Does                                                        | Does NOT                                        |
+| ----------------------------------------------------------- | ----------------------------------------------- |
+| Watches WorkflowRecipe CRDs                                 | Manage MCP servers (HCC does this)              |
+| Creates McpServer CRDs (for HCC)                            | Create Context/MCP NetworkPolicies owned by HCC |
+| Creates non-MCP workloads in sandbox                        | Expose MCP tools (no MCP interface)             |
+| Creates runtime NetworkPolicies for WRC-owned workflow pods | Create static platform infrastructure policies  |
+| Annotates binding requirements                              | Accept agent-triggered deployments              |
 
 ### 6.2 Namespace Placement: Control Plane
 
-| Factor | Control Plane (chosen) | MCP Server (rejected) |
-|--------|:---:|:---:|
-| Triggered by CRDs from control-api | Same namespace | Cross-namespace |
-| MCP interface needed | No | Unnecessary surface |
-| Attack surface in mcp-server | Unchanged | Increased |
-| Diagram alignment | Matches | Contradicts |
+| Factor                             | Control Plane (chosen) | MCP Server (rejected) |
+| ---------------------------------- | :--------------------: | :-------------------: |
+| Triggered by CRDs from control-api |     Same namespace     |    Cross-namespace    |
+| MCP interface needed               |           No           |  Unnecessary surface  |
+| Attack surface in mcp-server       |       Unchanged        |       Increased       |
+| Diagram alignment                  |        Matches         |      Contradicts      |
 
 ### 6.3 Intent Decomposition
 
-The WRC decomposes every WorkflowRecipe into architectural intent classes before any runtime state is created. This decomposition is the central architectural function of the WRC — a recipe expresses *intent*, not direct MCP runtime ownership and not implicit trust. WRC does render NetworkPolicies only for the runtime pods that it creates and labels itself.
+The WRC decomposes every WorkflowRecipe into architectural intent classes before any runtime state is created. This decomposition is the central architectural function of the WRC — a recipe expresses _intent_, not direct MCP runtime ownership and not implicit trust. WRC does render NetworkPolicies only for the runtime pods that it creates and labels itself.
 
-| Intent Class | What It Represents | Produced As |
-|---|---|---|
-| **MCP Intent** | Which MCP servers the recipe wants to expose through the platform | McpServer CRDs in mcp-server namespace |
-| **Sandbox Intent** | Which non-MCP services must run in an isolated execution zone | Workloads (StatefulSet, Job, CronJob) in sandbox-recipes namespace |
-| **Access-Policy Intent** | Which communication relationships are requested — both internal (MCP server ↔ non-MCP service) and external (MCP server → external API via `dns`/`cidr`) | Binding annotations on CRDs + Context CRD patches + McpServer `spec.egressBindings[]` |
-| **Runtime-Egress Intent** | Which external public HTTP hosts WRC-owned workflow code runtimes may reach | WRC-owned runtime NetworkPolicies in sandbox-recipes, with hostnames resolved to public `/32` CIDRs |
+| Intent Class              | What It Represents                                                                                                                                       | Produced As                                                                                         |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| **MCP Intent**            | Which MCP servers the recipe wants to expose through the platform                                                                                        | McpServer CRDs in mcp-server namespace                                                              |
+| **Sandbox Intent**        | Which non-MCP services must run in an isolated execution zone                                                                                            | Workloads (StatefulSet, Job, CronJob) in sandbox-recipes namespace                                  |
+| **Access-Policy Intent**  | Which communication relationships are requested — both internal (MCP server ↔ non-MCP service) and external (MCP server → external API via `dns`/`cidr`) | Binding annotations on CRDs + Context CRD patches + McpServer `spec.egressBindings[]`               |
+| **Runtime-Egress Intent** | Which external public HTTP hosts WRC-owned workflow code runtimes may reach                                                                              | WRC-owned runtime NetworkPolicies in sandbox-recipes, with hostnames resolved to public `/32` CIDRs |
 
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': {'fontSize':'12px'}}}%%
@@ -463,10 +463,10 @@ If recipe authors could define final policy directly, the platform would no long
 
 ### 7.1 Trigger: Control-Plane Only
 
-| Trigger | Behavior |
-|---------|----------|
-| Agent request | **Not supported** — agents cannot deploy workloads directly. Agents can REQUEST deployment by notifying operators through channels |
-| Operator via control-api UI | **Primary path** |
+| Trigger                     | Behavior                                                                                                                           |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Agent request               | **Not supported** — agents cannot deploy workloads directly. Agents can REQUEST deployment by notifying operators through channels |
+| Operator via control-api UI | **Primary path**                                                                                                                   |
 
 **Why**: An LLM agent should not deploy workloads to production. Human-in-the-loop for high-impact operations. Agent can REQUEST deployment by notifying operators through channels.
 
@@ -507,27 +507,27 @@ flowchart TD
 
 ### 7.3 Step-by-Step Explanation
 
-| Step | Who | What | Where |
-|------|-----|------|-------|
-| **1. Recipe Submission** | Human operator via control-api | Creates `WorkflowRecipe` CRD — the **only entry point** for recipe deployment. Agents cannot trigger this step | control-plane |
-| **2. Intent Decomposition** | WRC (watches WorkflowRecipe CRDs) | Validates recipe, decomposes into 3 intent classes: MCP Intent → McpServer CRDs, Sandbox Intent → non-MCP workloads, Access-Policy Intent → Context patches + binding annotations | control-plane → mcp-server, sandbox-recipes |
-| **3. Sanitization Gate** | HCC: MCP Server Sync | Evaluates each McpServer CRD: image registry, resource limits, security context. PASS → Deployment + Service. REJECT → `status.phase: Rejected` | control-plane → mcp-server |
+| Step                            | Who                                | What                                                                                                                                                                                                                          | Where                                                 |
+| ------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| **1. Recipe Submission**        | Human operator via control-api     | Creates `WorkflowRecipe` CRD — the **only entry point** for recipe deployment. Agents cannot trigger this step                                                                                                                | control-plane                                         |
+| **2. Intent Decomposition**     | WRC (watches WorkflowRecipe CRDs)  | Validates recipe, decomposes into 3 intent classes: MCP Intent → McpServer CRDs, Sandbox Intent → non-MCP workloads, Access-Policy Intent → Context patches + binding annotations                                             | control-plane → mcp-server, sandbox-recipes           |
+| **3. Sanitization Gate**        | HCC: MCP Server Sync               | Evaluates each McpServer CRD: image registry, resource limits, security context. PASS → Deployment + Service. REJECT → `status.phase: Rejected`                                                                               | control-plane → mcp-server                            |
 | **4. NetworkPolicy Generation** | HCC + WRC + static deploy overlays | HCC watches Context/McpServer intent and generates Context/MCP policies; WRC generates policies only for WRC-owned workflow runtime pods; static deploy owns platform infrastructure policies such as GKE mcp-host API egress | control-plane → mcp-host, mcp-server, sandbox-recipes |
-| **5. Discovery** | HCC REST API | Internal cache updates when MCP server Deployment is running. mcp-host polls Discovery API (`GET /api/v1/mcpservers/context/{contextRef}`) | control-plane (8081) → mcp-host |
-| **6. Tool Availability** | mcp-host | Agent discovers new MCP server tools. L2 NetworkPolicy allows traffic. Auth token from Discovery API authenticates the agent to the MCP server | mcp-host → mcp-server |
+| **5. Discovery**                | HCC REST API                       | Internal cache updates when MCP server Deployment is running. mcp-host polls Discovery API (`GET /api/v1/mcpservers/context/{contextRef}`)                                                                                    | control-plane (8081) → mcp-host                       |
+| **6. Tool Availability**        | mcp-host                           | Agent discovers new MCP server tools. L2 NetworkPolicy allows traffic. Auth token from Discovery API authenticates the agent to the MCP server                                                                                | mcp-host → mcp-server                                 |
 
 ### 7.4 Trust Behavior Properties
 
 The important property of this flow is not its sequence alone, but its **trust behavior**:
 
-| Property | Guarantee |
-|----------|-----------|
-| **Recipes do not self-authorize** | A recipe can request behavior, but it cannot directly create trusted runtime state |
-| **Runtime is created only after review** | HCC sanitization gate evaluates every intent before materialization |
-| **Network openings are controlled, not implied** | Each pod-selector family has exactly one NetworkPolicy owner, and every exception has a declared source |
-| **MCP and non-MCP remain coordinated but isolated** | Different namespaces, different trust zones, connected only by approved bindings |
+| Property                                                                   | Guarantee                                                                                                              |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **Recipes do not self-authorize**                                          | A recipe can request behavior, but it cannot directly create trusted runtime state                                     |
+| **Runtime is created only after review**                                   | HCC sanitization gate evaluates every intent before materialization                                                    |
+| **Network openings are controlled, not implied**                           | Each pod-selector family has exactly one NetworkPolicy owner, and every exception has a declared source                |
+| **MCP and non-MCP remain coordinated but isolated**                        | Different namespaces, different trust zones, connected only by approved bindings                                       |
 | **No component bypasses the security arbiter for another owner's surface** | WRC cannot skip HCC review for MCP server materialization; WRC only finalizes its own runtime pod and policy selectors |
-| **Discovery is context-scoped** | mcp-host only sees servers allowed by its Context CRD — not all servers in the cluster |
+| **Discovery is context-scoped**                                            | mcp-host only sees servers allowed by its Context CRD — not all servers in the cluster                                 |
 
 ---
 
@@ -553,8 +553,8 @@ Recipe bindings[] → WRC annotates McpServer CRD → HCC generates NetworkPolic
 > **✅ Implementation Status (Phase 8)**: Namespace splitting is **implemented**.
 > Non-MCP workloads are deployed to `sandbox-recipes` namespace, MCP workloads remain
 > in `mcp-server`. Cross-namespace L3 NetworkPolicies enable communication between
-> namespaces. See [PHASE-8-HARDENING-POST-MVP.md §4.8 (archived)](../archive/clerum-workflow-recipes/implementation/phases/PHASE-8-HARDENING-POST-MVP.md)
-> for implementation details.
+> namespaces. See [non-MCP services](non-mcp-services.md) for the published
+> namespace-splitting rules and implementation details.
 
 ---
 
@@ -562,10 +562,10 @@ Recipe bindings[] → WRC annotates McpServer CRD → HCC generates NetworkPolic
 
 ### 9.1 Dual Proxy Architecture
 
-| Proxy | Path | Target | Purpose |
-|-------|------|--------|---------|
-| **MCP Server Proxy** | `/rpc/mcp/{server}` | mcp-server pods | Desktop App → MCP tools directly |
-| **MCP Host Proxy** | `/rpc/agent` | mcp-host | Desktop App → Agent (secure channel, like TG/Slack but with strong auth) |
+| Proxy                | Path                | Target          | Purpose                                                                  |
+| -------------------- | ------------------- | --------------- | ------------------------------------------------------------------------ |
+| **MCP Server Proxy** | `/rpc/mcp/{server}` | mcp-server pods | Desktop App → MCP tools directly                                         |
+| **MCP Host Proxy**   | `/rpc/agent`        | mcp-host        | Desktop App → Agent (secure channel, like TG/Slack but with strong auth) |
 
 > **Important — Gateway does NOT use rpc-proxy**: Channel communication (Telegram, Email, Slack) flows
 > directly from the gateway namespace to mcp-host via NetworkPolicy. The rpc-proxy is exclusively for
@@ -612,13 +612,13 @@ The proxy routes traffic to the right internal target only after: the user is au
 
 #### Channel vs Desktop Comparison
 
-| Concern | Channel Path | Desktop App Path |
-|---------|-------------|-----------------|
-| **Auth model** | Bot tokens + allowed sender lists (per channel) | Enterprise: JWT + 2FA/YubiKey + VPN |
-| **Traffic pattern** | Polling → HTTP POST (simple) | Bidirectional RPC (complex) |
-| **Infrastructure** | Already built and proven | Requires rpc-proxy namespace |
-| **Latency** | Direct = minimal hops | Proxy adds one hop (acceptable for strong auth) |
-| **Blast radius** | Gateway compromise ≠ Desktop compromise | Separate security boundary |
+| Concern             | Channel Path                                    | Desktop App Path                                |
+| ------------------- | ----------------------------------------------- | ----------------------------------------------- |
+| **Auth model**      | Bot tokens + allowed sender lists (per channel) | Enterprise: JWT + 2FA/YubiKey + VPN             |
+| **Traffic pattern** | Polling → HTTP POST (simple)                    | Bidirectional RPC (complex)                     |
+| **Infrastructure**  | Already built and proven                        | Requires rpc-proxy namespace                    |
+| **Latency**         | Direct = minimal hops                           | Proxy adds one hop (acceptable for strong auth) |
+| **Blast radius**    | Gateway compromise ≠ Desktop compromise         | Separate security boundary                      |
 
 ---
 
@@ -639,14 +639,14 @@ The proxy routes traffic to the right internal target only after: the user is au
 
 ### 11.1 Four-Layer Model
 
-| Layer | Type | Purpose |
-|-------|------|---------|
-| **L0** | deny-all | Base isolation for all runtime namespaces (ingress + egress) |
-| **L1** | infrastructure | DNS egress, HCC API access, K8s API token refresh |
-| **L2** | context-scoped | Agent ↔ MCP server per context; rpc-proxy ↔ selected mcp-host per Host |
-| **L3** | binding-scoped | Sandbox ↔ MCP server per recipe binding |
-| **L3-egress** | external-scoped | MCP server → external endpoint per recipe `to: external` binding |
-| **runtime-egress** | public-runtime-scoped | WRC-owned workflow code runtime pod → declared public HTTP host |
+| Layer              | Type                  | Purpose                                                                |
+| ------------------ | --------------------- | ---------------------------------------------------------------------- |
+| **L0**             | deny-all              | Base isolation for all runtime namespaces (ingress + egress)           |
+| **L1**             | infrastructure        | DNS egress, HCC API access, K8s API token refresh                      |
+| **L2**             | context-scoped        | Agent ↔ MCP server per context; rpc-proxy ↔ selected mcp-host per Host |
+| **L3**             | binding-scoped        | Sandbox ↔ MCP server per recipe binding                                |
+| **L3-egress**      | external-scoped       | MCP server → external endpoint per recipe `to: external` binding       |
+| **runtime-egress** | public-runtime-scoped | WRC-owned workflow code runtime pod → declared public HTTP host        |
 
 Each selector family has one owner. HCC owns Context/MCP policies, WRC owns WorkflowRecipe runtime policies for pods it creates, and static deploy overlays own platform infrastructure policies. This prevents additive NetworkPolicies from widening another owner's boundary.
 
@@ -711,6 +711,7 @@ flowchart TD
 **Why it matters**: This is the core of Clerum's multi-tenancy model. Agent A in Context "analytics" can only reach MCP servers listed in the "analytics" Context CRD. It cannot reach servers in Context "finance", even though both agents might run in the same `mcp-host` namespace. L2 is what makes **cross-context access impossible**.
 
 **Example**: Context CRD `analytics` lists `mcpServers: [mongodb-analytics, airtable-reports]`. L2 generates:
+
 - `mcp-host` egress: allow traffic from agent pod (label `clerum.io/context=analytics`) to `mongodb-analytics` pod on port 3000
 - `mcp-server` ingress: allow traffic from `mcp-host` namespace pods with label `clerum.io/context=analytics` to `mongodb-analytics` pod
 - `rpc-proxy` egress to MCP server: `rpc-egress-analytics-mongodb-analytics`, only to the selected server pod after app-level profile authorization
@@ -728,6 +729,7 @@ flowchart TD
 **Why it matters**: WorkflowRecipes often describe composite topologies where a non-MCP support service (e.g., a database migration Job or an API adapter) needs to communicate with an MCP server. L3 ensures this cross-namespace communication only happens for **explicitly declared and HCC-approved bindings**, on specific ports, and only for pods belonging to the same recipe.
 
 **Example**: A recipe deploys a MongoDB StatefulSet in `sandbox-recipes` and a `mongodb-mcp` server in `mcp-server`. The recipe declares a binding: `sandbox:mongodb-statefulset → mcp:mongodb-mcp on port 27017`. After HCC approves:
+
 - `sandbox-recipes` egress: allow pods with label `clerum.io/recipe=my-recipe` to reach `mongodb-mcp` pod on port 27017
 - `mcp-server` ingress: allow pods from `sandbox-recipes` with label `clerum.io/recipe=my-recipe` on port 27017
 
@@ -751,16 +753,16 @@ flowchart TD
 
 ### 11.3 NetworkPolicy Owner Boundaries
 
-In Kubernetes, NetworkPolicies are **additive** — if two controllers independently create policies targeting the same pods, the effective policy is the *union* of both, which can be more permissive than either controller intended. This is a known source of security drift in multi-controller environments.
+In Kubernetes, NetworkPolicies are **additive** — if two controllers independently create policies targeting the same pods, the effective policy is the _union_ of both, which can be more permissive than either controller intended. This is a known source of security drift in multi-controller environments.
 
 Clerum avoids that drift with a **single owner per pod-selector family**, not a blanket single controller for every policy:
 
-| Guarantee | How |
-|-----------|-----|
-| **Predictable** | HCC targets Context/MCP selectors, WRC targets WorkflowRecipe runtime selectors, and static deploy manifests target infrastructure selectors |
-| **Auditable** | To audit access, identify the selector family first, then inspect that family's single owner |
-| **Consistent lifecycle** | The controller or manifest layer that creates a selector family also cleans up or updates the matching policies |
-| **No privilege escalation** | Controllers must not create policies for another owner's selectors, because additive policies would widen access |
+| Guarantee                   | How                                                                                                                                          |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Predictable**             | HCC targets Context/MCP selectors, WRC targets WorkflowRecipe runtime selectors, and static deploy manifests target infrastructure selectors |
+| **Auditable**               | To audit access, identify the selector family first, then inspect that family's single owner                                                 |
+| **Consistent lifecycle**    | The controller or manifest layer that creates a selector family also cleans up or updates the matching policies                              |
+| **No privilege escalation** | Controllers must not create policies for another owner's selectors, because additive policies would widen access                             |
 
 ### 11.4 Network Isolation Before Deployment (Option C — Pre-Deploy Annotation Handshake)
 
@@ -770,11 +772,11 @@ When a workload is deployed, there is a **time gap** between the pod starting (k
 
 Three approaches were evaluated:
 
-| Option | Mechanism | Pros | Cons |
-|--------|-----------|------|------|
-| **A — ReadinessGate** | HCC patches `pod.status.conditions` with `clerum.io/network-isolated: True` after applying NPs | Standard K8s pattern, Service won't route until ready | HCC must watch pods in all namespaces, direct pod patching violates Invariant #1 (CRD-only communication), adds Pod RBAC to HCC, complex lifecycle (pod restart = re-patch) |
-| **B — Init container** | Sidecar init container blocks until NetworkPolicy exists | No HCC changes needed | Requires shared ServiceAccount, polling from within pod is fragile, no guarantee NP is *applied* vs just *created* |
-| **C — Pre-deploy annotation handshake** | WRC creates McpServer CRD with `clerum.io/pre-deploy: true` → HCC applies NPs → HCC sets `clerum.io/network-ready: true` → WRC creates Deployment | 100% CRD-based (Invariant #1 preserved), no pod patching, no RBAC expansion, reuses existing watch loops | Adds ~1-5s latency to first deployment, requires timeout handling for HCC unavailability |
+| Option                                  | Mechanism                                                                                                                                         | Pros                                                                                                     | Cons                                                                                                                                                                        |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A — ReadinessGate**                   | HCC patches `pod.status.conditions` with `clerum.io/network-isolated: True` after applying NPs                                                    | Standard K8s pattern, Service won't route until ready                                                    | HCC must watch pods in all namespaces, direct pod patching violates Invariant #1 (CRD-only communication), adds Pod RBAC to HCC, complex lifecycle (pod restart = re-patch) |
+| **B — Init container**                  | Sidecar init container blocks until NetworkPolicy exists                                                                                          | No HCC changes needed                                                                                    | Requires shared ServiceAccount, polling from within pod is fragile, no guarantee NP is _applied_ vs just _created_                                                          |
+| **C — Pre-deploy annotation handshake** | WRC creates McpServer CRD with `clerum.io/pre-deploy: true` → HCC applies NPs → HCC sets `clerum.io/network-ready: true` → WRC creates Deployment | 100% CRD-based (Invariant #1 preserved), no pod patching, no RBAC expansion, reuses existing watch loops | Adds ~1-5s latency to first deployment, requires timeout handling for HCC unavailability                                                                                    |
 
 **Decision**: **Option C** — the annotation handshake preserves the CRD-only communication invariant while closing the vulnerability window. ReadinessGate (Option A) is deferred indefinitely as Option C provides equivalent security guarantees with simpler implementation.
 
@@ -806,10 +808,10 @@ WRC                                    McpServer CRD                          HC
 
 #### 11.4.3 Annotations
 
-| Annotation | Set by | Value | Meaning |
-|------------|--------|-------|---------|
-| `clerum.io/pre-deploy` | WRC | `"true"` | McpServer CRD created before workload pods exist; HCC should apply NPs proactively |
-| `clerum.io/network-ready` | HCC | `"true"` | L2/L3 NetworkPolicies applied; safe to start workload pods |
+| Annotation                | Set by | Value    | Meaning                                                                            |
+| ------------------------- | ------ | -------- | ---------------------------------------------------------------------------------- |
+| `clerum.io/pre-deploy`    | WRC    | `"true"` | McpServer CRD created before workload pods exist; HCC should apply NPs proactively |
+| `clerum.io/network-ready` | HCC    | `"true"` | L2/L3 NetworkPolicies applied; safe to start workload pods                         |
 
 #### 11.4.4 Timeout and Graceful Degradation
 
@@ -837,14 +839,14 @@ The timeout is configurable via `NETWORK_READY_TIMEOUT_MS` (default: 30,000ms).
 
 Each security invariant from [§2.3](#23-security-invariants) is enforced by specific NetworkPolicy layers:
 
-| Invariant | Enforcement Layer(s) |
-|-----------|---------------------|
-| No runtime pod initiates unauthorized outbound connections | **L0** (egress deny-all) + **L1** (opens only DNS and HCC API) |
+| Invariant                                                              | Enforcement Layer(s)                                                  |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| No runtime pod initiates unauthorized outbound connections             | **L0** (egress deny-all) + **L1** (opens only DNS and HCC API)        |
 | No sandbox pod reaches any MCP server unless recipe bindings sanitized | **L0** (base deny) + **L3** (binding-scoped allow after HCC approval) |
-| The agent cannot deploy workloads | Not NetworkPolicy — control-plane RBAC |
-| Cross-context access is impossible | **L2** (per-Context CRD scoping with label selectors) |
-| All NetworkPolicies have one owner per pod-selector family | Owner-boundary guarantee (§11.3) |
-| Recipe McpServer CRDs sanitized before Deployment | Sanitization gate (§5.1) — prerequisite for L2/L3 generation |
+| The agent cannot deploy workloads                                      | Not NetworkPolicy — control-plane RBAC                                |
+| Cross-context access is impossible                                     | **L2** (per-Context CRD scoping with label selectors)                 |
+| All NetworkPolicies have one owner per pod-selector family             | Owner-boundary guarantee (§11.3)                                      |
+| Recipe McpServer CRDs sanitized before Deployment                      | Sanitization gate (§5.1) — prerequisite for L2/L3 generation          |
 
 ---
 
@@ -891,105 +893,105 @@ See [§7.2 Full Deployment Flow](#72-full-deployment-flow) for the complete merm
 
 ## 13. Deployment Responsibility Matrix
 
-| Resource | Created By | Target Namespace | Current Namespace | Sanitized By | Infrastructure By |
-|----------|-----------|-----------------|-------------------|--------------|-------------------|
-| Standalone MCP server | control-api | mcp-server | mcp-server | HCC | HCC (Deploy+Svc) |
-| Recipe MCP workload | WRC | mcp-server | mcp-server | HCC (**full gate**) | WRC (Deploy+Svc) |
-| Platform MCP server | Platform install | mcp-server (`managed:false`) | mcp-server | Pre-validated | WRC-owned runtime |
-| Non-MCP workload | WRC | sandbox-recipes | **mcp-server** ¹ | HCC validates bindings | WRC |
-| Context/MCP NetworkPolicies | HCC (AccessCtrl Sync) | runtime namespaces | runtime namespaces | Self | Self |
-| Workflow runtime NetworkPolicies | WRC | sandbox-recipes | sandbox-recipes | Self | Self |
-| Static infrastructure NetworkPolicies | deploy overlays | runtime namespaces | runtime namespaces | Pre-reviewed | Platform deploy |
+| Resource                              | Created By            | Target Namespace             | Current Namespace  | Sanitized By           | Infrastructure By |
+| ------------------------------------- | --------------------- | ---------------------------- | ------------------ | ---------------------- | ----------------- |
+| Standalone MCP server                 | control-api           | mcp-server                   | mcp-server         | HCC                    | HCC (Deploy+Svc)  |
+| Recipe MCP workload                   | WRC                   | mcp-server                   | mcp-server         | HCC (**full gate**)    | WRC (Deploy+Svc)  |
+| Platform MCP server                   | Platform install      | mcp-server (`managed:false`) | mcp-server         | Pre-validated          | WRC-owned runtime |
+| Non-MCP workload                      | WRC                   | sandbox-recipes              | **mcp-server** ¹   | HCC validates bindings | WRC               |
+| Context/MCP NetworkPolicies           | HCC (AccessCtrl Sync) | runtime namespaces           | runtime namespaces | Self                   | Self              |
+| Workflow runtime NetworkPolicies      | WRC                   | sandbox-recipes              | sandbox-recipes    | Self                   | Self              |
+| Static infrastructure NetworkPolicies | deploy overlays       | runtime namespaces           | runtime namespaces | Pre-reviewed           | Platform deploy   |
 
 > ¹ **Gap**: Non-MCP workloads currently deploy to `mcp-server` (same as recipe namespace).
 > Target: `sandbox-recipes` with L3 cross-namespace binding policies. Requires namespace
-> splitting implementation (Phase 9). See [PHASE-8-HARDENING-POST-MVP.md §4.8 (archived)](../archive/clerum-workflow-recipes/implementation/phases/PHASE-8-HARDENING-POST-MVP.md).
+> splitting implementation (later phases). See [non-MCP services](non-mcp-services.md).
 
 ---
 
 ## 14. Design Decisions
 
-| # | Decision | Rationale |
-|---|----------|-----------|
-| D1 | WRC is a module within HCC in control-plane | Single process, separate control/data planes. mcp-server = pure runtime |
-| D2 | Agent cannot deploy recipes | Security-first. LLM agent + deploy = risk. Human-in-the-loop |
-| D3 | WRC has no MCP interface | No agent trigger → no MCP needed. Reduces attack surface |
-| D4 | Single sandbox namespace (shared) | Standard K8s multi-tenancy. Label + NetworkPolicy isolation |
-| D5 | Each NetworkPolicy selector family has one owner | Prevents additive-policy drift while allowing HCC, WRC, and static deploy to own different runtime surfaces |
-| D6 | HCC sanitization gate | Defense-in-depth. Even registry-verified recipes validated locally |
-| D7 | Context = sufficient access control | Context controls discovery + network. Agent ACL is redundant |
-| D8 | RPC Proxy = secure agent channel | Desktop App users interact with agent via strong auth, not cluster access |
-| D9 | Deny-all by default | Linux firewall model. Every exception requires explicit justification |
-| D10 | CRD-as-Package stays | Non-negotiable. K8s-native lifecycle. No Helm migration |
+| #   | Decision                                         | Rationale                                                                                                   |
+| --- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| D1  | WRC is a module within HCC in control-plane      | Single process, separate control/data planes. mcp-server = pure runtime                                     |
+| D2  | Agent cannot deploy recipes                      | Security-first. LLM agent + deploy = risk. Human-in-the-loop                                                |
+| D3  | WRC has no MCP interface                         | No agent trigger → no MCP needed. Reduces attack surface                                                    |
+| D4  | Single sandbox namespace (shared)                | Standard K8s multi-tenancy. Label + NetworkPolicy isolation                                                 |
+| D5  | Each NetworkPolicy selector family has one owner | Prevents additive-policy drift while allowing HCC, WRC, and static deploy to own different runtime surfaces |
+| D6  | HCC sanitization gate                            | Defense-in-depth. Even registry-verified recipes validated locally                                          |
+| D7  | Context = sufficient access control              | Context controls discovery + network. Agent ACL is redundant                                                |
+| D8  | RPC Proxy = secure agent channel                 | Desktop App users interact with agent via strong auth, not cluster access                                   |
+| D9  | Deny-all by default                              | Linux firewall model. Every exception requires explicit justification                                       |
+| D10 | CRD-as-Package stays                             | Non-negotiable. K8s-native lifecycle. No Helm migration                                                     |
 
 ---
 
 ## 15. Glossary
 
-| Term | Full Name | Description |
-|------|-----------|-------------|
-| **WRC** | Workflow Recipe Controller | Pure CRD reconciler module within HCC. No platform name conflict, pure-controller role |
-| **HCC** | Host Context Controller | 3 synchronizers + WRC module + Discovery API. Manages all namespaces |
-| **MCPAccessCtrl Sync** | MCPAccessController Synchronizer | Context/MCP NetworkPolicy scope across runtime namespaces |
-| **MCP Server Sync** | MCP Server Synchronizer | McpServer CRD → Deployment + Service. Includes sanitization gate |
-| **MCP Host Sync** | MCP Host Synchronizer | Host CRD lifecycle management |
-| `control-plane` | Control-Plane Namespace | All controllers run here. Separation of control/data planes |
-| `sandbox-recipes` | Sandbox Recipes Namespace | Isolated non-MCP runtime for recipe workloads |
-| `rpc-proxy` | RPC Proxy Namespace | Core architecture for blockchain RPC proxying |
+| Term                   | Full Name                        | Description                                                                            |
+| ---------------------- | -------------------------------- | -------------------------------------------------------------------------------------- |
+| **WRC**                | Workflow Recipe Controller       | Pure CRD reconciler module within HCC. No platform name conflict, pure-controller role |
+| **HCC**                | Host Context Controller          | 3 synchronizers + WRC module + Discovery API. Manages all namespaces                   |
+| **MCPAccessCtrl Sync** | MCPAccessController Synchronizer | Context/MCP NetworkPolicy scope across runtime namespaces                              |
+| **MCP Server Sync**    | MCP Server Synchronizer          | McpServer CRD → Deployment + Service. Includes sanitization gate                       |
+| **MCP Host Sync**      | MCP Host Synchronizer            | Host CRD lifecycle management                                                          |
+| `control-plane`        | Control-Plane Namespace          | All controllers run here. Separation of control/data planes                            |
+| `sandbox-recipes`      | Sandbox Recipes Namespace        | Isolated non-MCP runtime for recipe workloads                                          |
+| `rpc-proxy`            | RPC Proxy Namespace              | Core architecture for blockchain RPC proxying                                          |
 
 ---
 
 ## 16. Known Limitations
 
-| Limitation | Mitigation |
-|-----------|------------|
-| Single-replica mcp-host | Future: sharding by context |
-| Shared sandbox namespace | Label-scoped NetworkPolicies + ResourceQuotas |
-| HCC single point of failure | Multiple replicas + leader election |
-| Sanitization is binary (pass/reject) | Future: per-workload with degraded mode |
-| No egress control for MCP servers | **Resolved**: `bindings[].to: external` with `dns` or specific `cidr` propagated to McpServer CRD `spec.egressBindings[]` → HCC generates L3-egress NetworkPolicies. Open CIDRs (`0.0.0.0/0`) rejected by CEL. See WORKLOADRECIPE-SPEC §3.6 and §23.11. |
-| Registry seed changes do not update existing DB rows | Run the registry egress DB audit/migration helper after deploy; install smoke must verify the live row translates to exact-host or explicit public-web CRD bindings. |
+| Limitation                                           | Mitigation                                                                                                                                                                                                                                              |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Single-replica mcp-host                              | Future: sharding by context                                                                                                                                                                                                                             |
+| Shared sandbox namespace                             | Label-scoped NetworkPolicies + ResourceQuotas                                                                                                                                                                                                           |
+| HCC single point of failure                          | Multiple replicas + leader election                                                                                                                                                                                                                     |
+| Sanitization is binary (pass/reject)                 | Future: per-workload with degraded mode                                                                                                                                                                                                                 |
+| No egress control for MCP servers                    | **Resolved**: `bindings[].to: external` with `dns` or specific `cidr` propagated to McpServer CRD `spec.egressBindings[]` → HCC generates L3-egress NetworkPolicies. Open CIDRs (`0.0.0.0/0`) rejected by CEL. See WORKLOADRECIPE-SPEC §3.6 and §23.11. |
+| Registry seed changes do not update existing DB rows | Run the registry egress DB audit/migration helper after deploy; install smoke must verify the live row translates to exact-host or explicit public-web CRD bindings.                                                                                    |
 
 ---
 
 ## 17. Future Scope
 
-| Feature | Description |
-|---------|-------------|
-| ~~Egress policies per MCP server~~ | **Specified** in Phase 8 — `bindings[].to: external` with `dns`/`cidr` → McpServer CRD `spec.egressBindings[]` → HCC L3-egress NetworkPolicies |
-| Per-recipe ResourceQuotas | CPU/memory quotas in sandbox-recipes |
-| WRO detection pipeline | Workflow Recipe Optimization per WRO-SPECIFICATION.md |
-| Namespace-per-context sandbox | Stronger isolation if scale requires it |
-| OPA policy engine | Replace HCC sanitization with OPA Rego policies |
-| Gateway routing via rpc-proxy | Study routing channel traffic (TG/Email/Slack) through rpc-proxy for unified ingress and centralized auth. Currently, gateway communicates directly with mcp-host for simplicity |
+| Feature                            | Description                                                                                                                                                                      |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ~~Egress policies per MCP server~~ | **Specified** in Phase 8 — `bindings[].to: external` with `dns`/`cidr` → McpServer CRD `spec.egressBindings[]` → HCC L3-egress NetworkPolicies                                   |
+| Per-recipe ResourceQuotas          | CPU/memory quotas in sandbox-recipes                                                                                                                                             |
+| WRO detection pipeline             | Workflow Recipe Optimization per WRO-SPECIFICATION.md                                                                                                                            |
+| Namespace-per-context sandbox      | Stronger isolation if scale requires it                                                                                                                                          |
+| OPA policy engine                  | Replace HCC sanitization with OPA Rego policies                                                                                                                                  |
+| Gateway routing via rpc-proxy      | Study routing channel traffic (TG/Email/Slack) through rpc-proxy for unified ingress and centralized auth. Currently, gateway communicates directly with mcp-host for simplicity |
 
 ---
 
 ## 18. Implementation Status
 
-| Component | Status | Location |
-|-----------|--------|----------|
-| Discovery API (HCC REST) | **Implemented** | `host-context-controller/src/server.ts` |
-| MCP Server Reconciler | **Implemented** | `host-context-controller/src/reconciler.ts` |
-| NetworkPolicy Reconciler (L0-L3 + L3-egress) | **Implemented** (Phase 8) | `host-context-controller/src/networkPolicyReconciler.ts` |
-| L0 deny-all (Ingress + Egress, 4 NS) | **Implemented** (Phase 8) | `ensureDefaultDeny()` — dynamic, all runtime namespaces |
-| L1 infrastructure (DNS, HCC API, K8s API) | **Implemented** (Phase 8) | `ensureInfrastructurePolicies()` — 12 policies (3 x 4 NS) |
-| L1 allow-api ingress | **Implemented** (Phase 8) | `ensureAllowContextMapperApi()` — `from` bug fixed |
-| L2 context-allow (bidirectional) | **Implemented** (Phase 8) | `reconcileContext()` — ingress in mcp-server + egress in mcp-host |
-| L3 binding-scoped NetworkPolicies | **Implemented** (Phase 8) | `bindingPolicyReconciler.ts` — wired to HCC McpServer watch loop |
-| L3-egress external-scoped | **Implemented** (Phase 8) | `reconcileExternalEgress()` — CIDR + DNS resolution |
-| Prometheus metrics (HCC + WRC) | **Implemented** (Phase 8) | `host-context-controller/src/metrics.ts`, `workflow-recipes/src/metrics.ts` |
-| RPC Proxy service + NetworkPolicy | **Implemented** | `rpc-proxy/src/` + `rpc-proxy/deploy/networkpolicy.yaml` |
-| WRC reconciler pipeline | **Implemented** (pending integration into HCC) | `workflow-recipes/src/reconciler/` — to be moved to `host-context-controller/src/wrc/` |
-| Host Reconciler | **Implemented** | `host-context-controller/src/hostReconciler.ts` |
-| WorkflowRecipePolicy CRD | **Implemented** (Phase 7) | Blocking enforcement in reconciler step 2.5 |
-| Namespace splitting (non-MCP → sandbox-recipes) | **Implemented** (Phase 8) | `resolveWorkloadNamespace()` + finalizer pattern + cross-namespace L3 |
-| ValidatingAdmissionWebhook | **Deferred** (Phase 9) | Requires TLS certificates (cert-manager) |
-| Per-context auth (TokenReview) | **Deferred** (Phase 9) | Requires ServiceAccount projected token infrastructure |
-| ~~ReadinessGate `clerum.io/network-isolated`~~ | **Replaced** by Option C (§11.4) | Pre-deploy annotation handshake closes vulnerability window without pod patching |
-| Pre-deploy annotation handshake (Option C) | **Implemented** | `mcpDelegation.ts:preDeployMcpServers()` + `waitForNetworkReady()` — Steps 7b/7c in reconciler pipeline |
-| Sanitization Gate | Architecture defined | Extension of HCC reconciler |
-| Registry integration | Stubbed | `search_registry` tool exists |
+| Component                                       | Status                                         | Location                                                                                                |
+| ----------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Discovery API (HCC REST)                        | **Implemented**                                | `host-context-controller/src/server.ts`                                                                 |
+| MCP Server Reconciler                           | **Implemented**                                | `host-context-controller/src/reconciler.ts`                                                             |
+| NetworkPolicy Reconciler (L0-L3 + L3-egress)    | **Implemented** (Phase 8)                      | `host-context-controller/src/networkPolicyReconciler.ts`                                                |
+| L0 deny-all (Ingress + Egress, 4 NS)            | **Implemented** (Phase 8)                      | `ensureDefaultDeny()` — dynamic, all runtime namespaces                                                 |
+| L1 infrastructure (DNS, HCC API, K8s API)       | **Implemented** (Phase 8)                      | `ensureInfrastructurePolicies()` — 12 policies (3 x 4 NS)                                               |
+| L1 allow-api ingress                            | **Implemented** (Phase 8)                      | `ensureAllowContextMapperApi()` — `from` bug fixed                                                      |
+| L2 context-allow (bidirectional)                | **Implemented** (Phase 8)                      | `reconcileContext()` — ingress in mcp-server + egress in mcp-host                                       |
+| L3 binding-scoped NetworkPolicies               | **Implemented** (Phase 8)                      | `bindingPolicyReconciler.ts` — wired to HCC McpServer watch loop                                        |
+| L3-egress external-scoped                       | **Implemented** (Phase 8)                      | `reconcileExternalEgress()` — CIDR + DNS resolution                                                     |
+| Prometheus metrics (HCC + WRC)                  | **Implemented** (Phase 8)                      | `host-context-controller/src/metrics.ts`, `workflow-recipes/src/metrics.ts`                             |
+| RPC Proxy service + NetworkPolicy               | **Implemented**                                | `rpc-proxy/src/` + `rpc-proxy/deploy/networkpolicy.yaml`                                                |
+| WRC reconciler pipeline                         | **Implemented** (pending integration into HCC) | `workflow-recipes/src/reconciler/` — to be moved to `host-context-controller/src/wrc/`                  |
+| Host Reconciler                                 | **Implemented**                                | `host-context-controller/src/hostReconciler.ts`                                                         |
+| WorkflowRecipePolicy CRD                        | **Implemented** (Phase 7)                      | Blocking enforcement in reconciler step 2.5                                                             |
+| Namespace splitting (non-MCP → sandbox-recipes) | **Implemented** (Phase 8)                      | `resolveWorkloadNamespace()` + finalizer pattern + cross-namespace L3                                   |
+| ValidatingAdmissionWebhook                      | **Deferred** (Phase 9)                         | Requires TLS certificates (cert-manager)                                                                |
+| Per-context auth (TokenReview)                  | **Deferred** (Phase 9)                         | Requires ServiceAccount projected token infrastructure                                                  |
+| ~~ReadinessGate `clerum.io/network-isolated`~~  | **Replaced** by Option C (§11.4)               | Pre-deploy annotation handshake closes vulnerability window without pod patching                        |
+| Pre-deploy annotation handshake (Option C)      | **Implemented**                                | `mcpDelegation.ts:preDeployMcpServers()` + `waitForNetworkReady()` — Steps 7b/7c in reconciler pipeline |
+| Sanitization Gate                               | Architecture defined                           | Extension of HCC reconciler                                                                             |
+| Registry integration                            | Stubbed                                        | `search_registry` tool exists                                                                           |
 
 ---
 
@@ -997,14 +999,14 @@ See [§7.2 Full Deployment Flow](#72-full-deployment-flow) for the complete merm
 
 ### 19.1 Deployed Services
 
-| Service | Image Tag | Namespace | Status |
-|---------|-----------|-----------|--------|
-| host-context-controller | v1.0.0-wrc | control-plane | Running |
-| mcp-host (chatllm + agent2) | v1.0.0-wrc | mcp-host | Running |
-| channel-reader | v1.0.0-wrc | gateway | Running |
-| mcp-proxy | v1.0.0-wrc | mcp-server | Running |
-| stdio-bridge | v1.0.0-wrc | mcp-server (sidecar) | Running |
-| workflow-recipes (WRC) | v1.0.0-wrc | control-plane | Running |
+| Service                     | Image Tag  | Namespace            | Status  |
+| --------------------------- | ---------- | -------------------- | ------- |
+| host-context-controller     | v1.0.0-wrc | control-plane        | Running |
+| mcp-host (chatllm + agent2) | v1.0.0-wrc | mcp-host             | Running |
+| channel-reader              | v1.0.0-wrc | gateway              | Running |
+| mcp-proxy                   | v1.0.0-wrc | mcp-server           | Running |
+| stdio-bridge                | v1.0.0-wrc | mcp-server (sidecar) | Running |
+| workflow-recipes (WRC)      | v1.0.0-wrc | control-plane        | Running |
 
 ### 19.2 Cluster
 
@@ -1014,15 +1016,15 @@ See [§7.2 Full Deployment Flow](#72-full-deployment-flow) for the complete merm
 
 ### 19.3 Namespace Validation
 
-| Namespace | Spec Status | Production Status |
-|-----------|-------------|-------------------|
-| profile-plane | Defined | Not yet deployed (future) |
-| control-plane | Defined | Deployed (HCC + WRC) |
-| gateway | Defined | Deployed (channel-reader) |
-| mcp-host | Defined (deny-all) | Deployed (chatllm, agent2) |
-| mcp-server | Defined (deny-all) | Deployed (MCP servers, mcp-proxy) |
+| Namespace       | Spec Status        | Production Status                                 |
+| --------------- | ------------------ | ------------------------------------------------- |
+| profile-plane   | Defined            | Not yet deployed (future)                         |
+| control-plane   | Defined            | Deployed (HCC + WRC)                              |
+| gateway         | Defined            | Deployed (channel-reader)                         |
+| mcp-host        | Defined (deny-all) | Deployed (chatllm, agent2)                        |
+| mcp-server      | Defined (deny-all) | Deployed (MCP servers, mcp-proxy)                 |
 | sandbox-recipes | Defined (deny-all) | Created (empty — no non-MCP recipes deployed yet) |
-| rpc-proxy | Defined (deny-all) | Not yet deployed (future — Desktop App) |
+| rpc-proxy       | Defined (deny-all) | Not yet deployed (future — Desktop App)           |
 
 ### 19.4 Key Implementation Differences from Spec
 
@@ -1035,8 +1037,7 @@ See [§7.2 Full Deployment Flow](#72-full-deployment-flow) for the complete merm
 
 ## See Also
 
-- [WorkflowRecipe CRD schema](../crds/workflowrecipe.md) — current living spec for the WorkflowRecipe CRD
-- [WRO-SPECIFICATION.md (archived)](../archive/clerum-workflow-recipes/specs/WRO-SPECIFICATION.md) — WRO detection pipeline
-- Public Recipe Registry — TBD (registry spec not yet drafted)
-- [WRC Architecture Key Points (archived)](../archive/clerum-workflow-recipes/specs/wrc-architecture-key-points.md) — Companion document with detailed architectural rationale
-- [WORKLOADRECIPE-IMPLEMENTATION-PLAN.md (archived)](../archive/clerum-workflow-recipes/specs/WORKLOADRECIPE-IMPLEMENTATION-PLAN.md) — Implementation roadmap and next steps
+- [WorkflowRecipe CRD schema](../crds/workflowrecipe.md) — living CRD reference
+- [WorkflowRecipes feature hub](../features/workflow-recipes.md) — ops, architecture, authoring entry points
+- [Non-MCP services](non-mcp-services.md) — namespace splitting and L0–L3 NetworkPolicy layers
+- Public Recipe Registry — external component; client integration lives in this repo
