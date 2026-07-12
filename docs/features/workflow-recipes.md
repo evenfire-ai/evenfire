@@ -1,57 +1,74 @@
 # WorkflowRecipes — Feature Hub
 
-WorkflowRecipes is Clerum's most complex CRD, enabling declarative multi-workload applications (Deployments, StatefulSets, CronJobs, Jobs, DaemonSets) with MCP server registration, network bindings, security overrides, and envSecret support. Because the feature spans CRD schema, operator internals, deployment operations, and security policy, its documentation is distributed across several locations in this repo.
+WorkflowRecipes are evenfire’s multi-workload CRD: compose Deployments,
+StatefulSets, CronJobs, Jobs, and DaemonSets with MCP registration, network
+bindings, security overrides, and scoped runtime tokens.
 
-This page is your single starting point for everything WorkflowRecipe-related.
+Because the feature spans schema, operator internals, deployment ops, and
+security policy, docs live in several places. **This page is the single
+starting point.**
 
-> **Naming note:** The CRD kind is `WorkflowRecipe` (and `WorkflowRecipePolicy`). The operator directory is `workflow-recipes/` and the module is "Workload Recipe Controller (WRC)" — these names are historical and intentionally unchanged.
+> **Naming:** CRD kinds are `WorkflowRecipe` and `WorkflowRecipePolicy`. The
+> operator directory is `workflow-recipes/`; the module is often called Workload
+> Recipe Controller (WRC). Public product name is **evenfire**; APIs remain
+> `clerum.io` — [code names](../concepts/code-names.md).
 
 ---
 
-## CRD Reference
+## CRD reference
 
-- **[WorkflowRecipe CRD Reference](../crds/workflowrecipe.md)** — full CRD schema (fields, CEL validation, approval semantics, resource lifecycle, security overrides, envSecret, namespace splitting). This is the authoritative spec for CRD users.
-- **[Custom Coordinator Snippet Workflow](./custom-coordinator-snippet-workflow.md)** — developer guide for writing snippet business logic with the curated SDK, declared HTTP/DB/MCP capabilities, and run-scoped artifacts.
-- **[Custom Coordinator Images](custom-coordinator-images.md)** — developer guide for building a custom `coordinatorImage`, writing business logic, producing `/output` artifacts, and optionally using WRC-managed `mcp-host`/MCP tools.
-- **[CRD YAML Examples](../../charts/clerum-crds/examples/)** — working example manifests, including the [MongoDB StatefulSet recipe](../../charts/clerum-crds/examples/MONGODB-STATEFULSET-README.md).
+- **[WorkflowRecipe CRD](../crds/workflowrecipe.md)** — schema, validation,
+  approval semantics, lifecycle, security overrides
+- **[WorkflowRecipePolicy CRD](../crds/workflowrecipepolicy.md)** — governance
+  policy for recipes
+- **[Custom coordinator snippet workflow](./custom-coordinator-snippet-workflow.md)** —
+  snippet business logic with the curated SDK
+- **[Custom coordinator images](custom-coordinator-images.md)** — custom
+  `coordinatorImage`, `/output` artifacts, optional MCP tools
+- **[CRD YAML examples](../../charts/clerum-crds/examples/)** — including the
+  [MongoDB StatefulSet recipe](../../charts/clerum-crds/examples/MONGODB-STATEFULSET-README.md)
 
 ## Architecture
 
-- **[Platform Topology](../architecture/platform-topology.md)** — 7-namespace architecture, HCC/WRC controller split, deny-all security baseline. Explains how WRC fits into the Host Context Controller process.
-- **[Non-MCP Services Architecture](../architecture/non-mcp-services.md)** — namespace splitting rules (workloads with `transport` → `mcp-server`, without → `sandbox-recipes`), L0–L3 NetworkPolicy layers.
+- **[Platform topology](../architecture/platform-topology.md)** — namespaces,
+  HCC/WRC split, deny-all baseline
+- **[Non-MCP services](../architecture/non-mcp-services.md)** — namespace
+  splitting (`transport` → `mcp-server`, else `sandbox-recipes`), L0–L3 policies
 
-## Deployment & Operations
+## Deployment & operations
 
-- **[WorkflowRecipes Operations Guide](../deploy/workflow-recipes-guide.md)** — configuration, Control UI/API integration, RBAC requirements, REST API routes, debugging guide.
-- **[WorkflowRecipes Bug Index](../deploy/workflow-bugs-2026-03-24.md)** — 10 bugs from the validation phase with root causes, severity, and fix commits.
-- **[GCP Deployment Guide](../deploy/gcp.md)** — production deployment including WorkflowRecipe CRD installation and instance application.
-- **[Minikube Deployment Guide](../deploy/minikube.md)** — local development stack including WorkflowRecipe testing.
+- **[WorkflowRecipes operations guide](../deploy/workflow-recipes-guide.md)** —
+  Control UI/API, RBAC, REST routes, debugging
+- **[Minikube deploy guide](../deploy/minikube.md)** — local full stack
+- **[Production notes](../deploy/production.md)** — production checklist and
+  in-repo deploy assets
 
 ## Security
 
-- WorkflowRecipe CRDs are always owned by the platform in `sandbox-recipes`.
-- `mcp-server` is reserved for transport children generated from recipes that declare transport workloads.
-- NetworkPolicy behavior is split between static manifests under `deploy/base/**/networkpolicies*.yaml` and HCC runtime-managed policies described in `docs/architecture/overview.md`.
+- Recipe CRDs and sandbox workloads follow platform namespace rules
+  (`sandbox-recipes` vs `mcp-server` for transport children)
+- NetworkPolicy behavior: static manifests under
+  `deploy/base/**/networkpolicies*.yaml` plus HCC-managed policies described in
+  [architecture overview](../architecture/overview.md)
+- Root [security model](../../README.md#security-model)
 
-## Operator Internals
+## Operator internals
 
-- **[`workflow-recipes/README.md`](../../workflow-recipes/README.md)** — WRC reconciler entry point, test instructions, module architecture.
-- **[Host Context Controller README](../../host-context-controller/README.md)** — parent operator that hosts both Context Mapper and WRC modules.
-
-## Historical Archive
-
-- **[`docs/archive/clerum-workflow-recipes/`](../archive/clerum-workflow-recipes/)** — phase plans (PHASE-1 through PHASE-9), workflow stages (STAGE-1 through STAGE-6), E2E test runbooks (FASE-1 through FASE-7), early specs (WRO-SPECIFICATION, USER-APPROVAL-WORKFLOW-SPEC, WORKFLOW-ADJUSTMENT-PLAN), and review artifacts. These are point-in-time planning docs from the 2026-02 through 2026-03 build-out and are not maintained.
+- **[`workflow-recipes/README.md`](../../workflow-recipes/README.md)** — reconciler
+  entry, tests, module layout
+- **[host-context-controller README](../../host-context-controller/README.md)** —
+  parent operator hosting Context Mapper and related modules
 
 ## Quick reference
 
-| I want to… | Go to |
-|---|---|
-| Define a new WorkflowRecipe CRD | [CRD Reference](../crds/workflowrecipe.md) |
-| Write TypeScript snippet workflow logic | [Custom Coordinator Snippet Workflow](./custom-coordinator-snippet-workflow.md) |
-| Build a custom coordinator image | [Custom Coordinator Images](custom-coordinator-images.md) |
-| See a working YAML example | [MongoDB StatefulSet](../../charts/clerum-crds/examples/MONGODB-STATEFULSET-README.md) |
-| Deploy to my cluster | [GCP Guide](../deploy/gcp.md) or [Minikube Guide](../deploy/minikube.md) |
-| Understand namespace splitting | [Non-MCP Services](../architecture/non-mcp-services.md) |
-| Debug a stuck recipe | [Operations Guide](../deploy/workflow-recipes-guide.md) |
-| Understand HCC/WRC architecture | [Platform Topology](../architecture/platform-topology.md) |
-| Read historical design decisions | [Archive](../archive/clerum-workflow-recipes/) |
+| I want to…                       | Go to                                                                                  |
+| -------------------------------- | -------------------------------------------------------------------------------------- |
+| Define a WorkflowRecipe          | [CRD reference](../crds/workflowrecipe.md)                                             |
+| Write TypeScript snippet logic   | [Snippet workflow](./custom-coordinator-snippet-workflow.md)                           |
+| Build a custom coordinator image | [Custom images](custom-coordinator-images.md)                                          |
+| See a working YAML example       | [MongoDB StatefulSet](../../charts/clerum-crds/examples/MONGODB-STATEFULSET-README.md) |
+| Deploy locally                   | [Minikube](../deploy/minikube.md)                                                      |
+| Plan production                  | [Production notes](../deploy/production.md)                                            |
+| Understand namespace splitting   | [Non-MCP services](../architecture/non-mcp-services.md)                                |
+| Debug a stuck recipe             | [Operations guide](../deploy/workflow-recipes-guide.md)                                |
+| Understand HCC/WRC architecture  | [Platform topology](../architecture/platform-topology.md)                              |

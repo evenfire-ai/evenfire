@@ -1,6 +1,8 @@
-# Clerum Architecture Document
+# evenfire Architecture Document
 
-Clerum is a Kubernetes-native platform for LLM orchestration with multi-channel communication and MCP (Model Context Protocol) integration. All configuration is driven by Kubernetes Custom Resources (CRDs) under the `clerum.io` API group.
+evenfire is a Kubernetes-native platform for LLM orchestration with multi-channel communication and MCP (Model Context Protocol) integration. All configuration is driven by Kubernetes Custom Resources (CRDs) under the historical `clerum.io` API group ([code names](../concepts/code-names.md)).
+
+> Public product name: **evenfire**. Code, CRDs, and many package paths still say **clerum**.
 
 ---
 
@@ -26,15 +28,14 @@ Clerum is a Kubernetes-native platform for LLM orchestration with multi-channel 
 
 > **[Open in Excalidraw](https://link.excalidraw.com/l/7VPzoB0Tohx/3YpKQJgCG6o)** - Interactive high-level architecture diagram showing all services, namespaces, and data flows.
 
-
 ### Service Summary
 
-| Service | Directory | Namespace | Port | Role |
-|---------|-----------|-----------|------|------|
-| **channel-reader** | `/channel-reader` | `channels` | - | Watches CommunicationChannel CRDs, polls Telegram/Email/Slack, forwards to mcp-host |
-| **mcp-host** | `/mcp-host` | `mcp-host` | 8080 | Central LLM service with agent state machine, message queue, and MCP tool calling |
+| Service                     | Directory                  | Namespace       | Port | Role                                                                                                 |
+| --------------------------- | -------------------------- | --------------- | ---- | ---------------------------------------------------------------------------------------------------- |
+| **channel-reader**          | `/channel-reader`          | `channels`      | -    | Watches CommunicationChannel CRDs, polls Telegram/Email/Slack, forwards to mcp-host                  |
+| **mcp-host**                | `/mcp-host`                | `mcp-host`      | 8080 | Central LLM service with agent state machine, message queue, and MCP tool calling                    |
 | **host-context-controller** | `/host-context-controller` | `control-plane` | 8081 | K8s operator managing MCP server Deployments/Services/NetworkPolicies; REST API for server discovery |
-| **MCP Servers** | `/mcp-servers` | `mcp-server` | 3000 | Individual MCP server implementations (airtable, mongodb) |
+| **MCP Servers**             | `/mcp-servers`             | `mcp-server`    | 3000 | Individual MCP server implementations (airtable, mongodb)                                            |
 
 ### Key Design Principles
 
@@ -62,21 +63,22 @@ metadata:
   name: all-channels
   namespace: default
 spec:
-  hostRef: "chatllm"                      # Links this channel config to a Host
+  hostRef: 'chatllm' # Links this channel config to a Host
   telegram:
-    - channelId: "telegram-general"       # Logical channel ID
-      userIds: ["123456789", "987654321"] # Authorized Telegram user IDs
+    - channelId: 'telegram-general' # Logical channel ID
+      userIds: ['123456789', '987654321'] # Authorized Telegram user IDs
   email:
-    - channelId: "INBOX"
-      emails: ["alice@example.com"]       # Authorized email addresses
+    - channelId: 'INBOX'
+      emails: ['alice@example.com'] # Authorized email addresses
   slack:
-    - channelId: "C01234567"              # Slack channel ID or name
-      userNames: ["@john", "@jane"]       # Authorized Slack usernames
+    - channelId: 'C01234567' # Slack channel ID or name
+      userNames: ['@john', '@jane'] # Authorized Slack usernames
 ```
 
 **Watched by**: channel-reader (filters by `hostRef`)
 
 **Key fields**:
+
 - `hostRef` (required) - Associates this channel with a specific Host CRD
 - `telegram[].userIds` - Telegram numeric user IDs allowed to interact
 - `email[].emails` - Email addresses allowed to send messages
@@ -95,28 +97,29 @@ metadata:
   name: chatllm
   namespace: mcp-host
 spec:
-  host: "chatLLM"                  # Host identifier
-  contextRef: "context1"           # Links to a Context CRD
-  secretRef: "chatllm-api-keys"    # K8s Secret with LLM API keys
-  channels:                        # Optional: explicit channel references
-    - "all-channels"
+  host: 'chatLLM' # Host identifier
+  contextRef: 'context1' # Links to a Context CRD
+  secretRef: 'chatllm-api-keys' # K8s Secret with LLM API keys
+  channels: # Optional: explicit channel references
+    - 'all-channels'
   model:
-    provider: "openai"             # "openai", "claude", "zai", or "bailian"
-    name: "gpt-5.4-mini"           # Specific model name
+    provider: 'openai' # "openai", "claude", "zai", or "bailian"
+    name: 'gpt-5.4-mini' # Specific model name
 ```
 
 **Watched by**: mcp-host (reads configuration and API keys)
 
 **Referenced Secret format**:
+
 ```yaml
 apiVersion: v1
 kind: Secret
 metadata:
   name: chatllm-api-keys
 stringData:
-  openai-api-key: "sk-..."
-  claude-api-key: "sk-ant-..."
-  zai-api-key: "zai-..."
+  openai-api-key: 'sk-...'
+  claude-api-key: 'sk-ant-...'
+  zai-api-key: 'zai-...'
 ```
 
 ---
@@ -132,11 +135,11 @@ metadata:
   name: context1
   namespace: mcp-server
 spec:
-  contextId: "context1"
-  description: "Context for the chatLLM host"
-  mcpServers:                       # Allowlist of MCP server names
-    - "mongodb-server"
-    - "airtable-server"
+  contextId: 'context1'
+  description: 'Context for the chatLLM host'
+  mcpServers: # Allowlist of MCP server names
+    - 'mongodb-server'
+    - 'airtable-server'
 ```
 
 **Watched by**: host-context-controller (generates NetworkPolicies per context-server pair)
@@ -154,52 +157,52 @@ metadata:
   name: mongodb-server
   namespace: mcp-server
 spec:
-  contextRef: "context1"
-  description: "MongoDB MCP server for database access"
-  image: "mongodb/mongodb-mcp-server:latest"
-  imagePullPolicy: "Always"
+  contextRef: 'context1'
+  description: 'MongoDB MCP server for database access'
+  image: 'mongodb/mongodb-mcp-server:latest'
+  imagePullPolicy: 'Always'
 
   transport:
-    type: "streamableHttp"                    # "sse", "streamableHttp", or "stdio"
-    url: "http://mongodb-server.mcp-server.svc.cluster.local:3000/mcp"
+    type: 'streamableHttp' # "sse", "streamableHttp", or "stdio"
+    url: 'http://mongodb-server.mcp-server.svc.cluster.local:3000/mcp'
     port: 3000
 
   auth:
-    type: "bearer"
-    secretRef: "mcp-mongodb-credentials"
-    secretKey: "connection-string"
+    type: 'bearer'
+    secretRef: 'mcp-mongodb-credentials'
+    secretKey: 'connection-string'
 
   serverConfig:
     readOnly: true
-    loggers: "stderr"
-    telemetry: "disabled"
+    loggers: 'stderr'
+    telemetry: 'disabled'
 
-  envMapping:                                  # Maps structured fields to env vars
-    transport: "MDB_MCP_TRANSPORT"
-    httpHost: "MDB_MCP_HTTP_HOST"
-    httpPort: "MDB_MCP_HTTP_PORT"
-    healthCheckHost: "MDB_MCP_HEALTH_CHECK_HOST"
-    healthCheckPort: "MDB_MCP_HEALTH_CHECK_PORT"
-    readOnly: "MDB_MCP_READ_ONLY"
-    loggers: "MDB_MCP_LOGGERS"
-    telemetry: "MDB_MCP_TELEMETRY"
+  envMapping: # Maps structured fields to env vars
+    transport: 'MDB_MCP_TRANSPORT'
+    httpHost: 'MDB_MCP_HTTP_HOST'
+    httpPort: 'MDB_MCP_HTTP_PORT'
+    healthCheckHost: 'MDB_MCP_HEALTH_CHECK_HOST'
+    healthCheckPort: 'MDB_MCP_HEALTH_CHECK_PORT'
+    readOnly: 'MDB_MCP_READ_ONLY'
+    loggers: 'MDB_MCP_LOGGERS'
+    telemetry: 'MDB_MCP_TELEMETRY'
 
-  env:                                         # Additional plain env vars
-    - name: "EXTRA_VAR"
-      value: "value"
+  env: # Additional plain env vars
+    - name: 'EXTRA_VAR'
+      value: 'value'
 
-  envSecret:                                   # Secret-backed env vars
-    name: "mcp-mongodb-credentials"
+  envSecret: # Secret-backed env vars
+    name: 'mcp-mongodb-credentials'
     keys:
-      - secretKey: "connection-string"
-        envVar: "MDB_MCP_CONNECTION_STRING"
+      - secretKey: 'connection-string'
+        envVar: 'MDB_MCP_CONNECTION_STRING'
 
   healthCheck:
     port: 3001
 
   resources:
-    requests: { memory: "128Mi", cpu: "100m" }
-    limits: { memory: "256Mi", cpu: "500m" }
+    requests: { memory: '128Mi', cpu: '100m' }
+    limits: { memory: '256Mi', cpu: '500m' }
 
   enabled: true
 ```
@@ -207,20 +210,24 @@ spec:
 **Watched by**: host-context-controller (creates Deployment + Service, manages lifecycle)
 
 **Transport Types**:
+
 - `streamableHttp` / `sse`: HTTP-based MCP transport. WRC sets `managed: false` (WRC owns the Deployment).
 - `stdio`: stdin/stdout-based MCP transport. WRC sets `managed: true` (HCC creates Deployment with stdio-bridge sidecar). The sidecar translates stdio to HTTP so MCP Proxy can route to it.
 
 **`managed` Field Contract**:
+
 - `managed: false` — WRC owns the Deployment (HTTP transport workloads)
 - `managed: true` — HCC owns the Deployment with stdio-bridge sidecar (stdio transport workloads)
 - For `managed: false`, WRC also owns runtime NetworkPolicy lifecycle; HCC only publishes discovery/status for the registered server.
 - The `managed` field is **immutable** after initial creation (G7 safety check in HCC reconciler)
 
 **Per-Workload Security Overrides** (propagated via McpServer CRD):
+
 - `security.runAsUser`, `security.runAsGroup`, `security.fsGroup` — UID/GID overrides
 - `security.addCapabilities` — Linux capabilities to add back after `DROP ALL` (e.g., `CHOWN`, `FOWNER`, `DAC_OVERRIDE` for PostgreSQL)
 
 **Environment Variable Strategy**:
+
 - `envMapping` bridges structured CRD fields to server-specific env var names (e.g., `transport.port` -> `MDB_MCP_HTTP_PORT`)
 - `env` provides additional plain key-value pairs
 - `envSecret` maps Kubernetes Secret keys to container env vars
@@ -266,32 +273,32 @@ channel-reader/
 ```typescript
 // Unified message from any channel
 interface Message {
-  channelType: "telegram" | "email" | "slack";
-  channelId: string;
-  sender: string;
-  content: string;
-  timestamp: Date;
-  messageId: string;
-  rawData?: Record<string, unknown>;
+  channelType: 'telegram' | 'email' | 'slack'
+  channelId: string
+  sender: string
+  content: string
+  timestamp: Date
+  messageId: string
+  rawData?: Record<string, unknown>
 }
 
 // Common interface all channel adapters implement
 interface ChannelAdapter {
-  readonly channelType: "telegram" | "email" | "slack";
-  connect(): Promise<void>;
-  disconnect(): Promise<void>;
-  fetchMessages(channelId: string, allowedSenders: Set<string>): Promise<Message[]>;
-  sendMessage(channelId: string, content: string, replyToMessageId?: string): Promise<void>;
+  readonly channelType: 'telegram' | 'email' | 'slack'
+  connect(): Promise<void>
+  disconnect(): Promise<void>
+  fetchMessages(channelId: string, allowedSenders: Set<string>): Promise<Message[]>
+  sendMessage(channelId: string, content: string, replyToMessageId?: string): Promise<void>
 }
 ```
 
 ### Channel Adapters
 
-| Adapter | Library | Connect | Fetch Strategy | Send Strategy |
-|---------|---------|---------|----------------|---------------|
-| **Telegram** | grammY | Bot polling via `bot.start()` | Buffer incoming messages in `pendingMessages[]`, drain on fetch | `bot.api.sendMessage()` with optional `reply_to_message_id` |
-| **Email** | ImapFlow + Nodemailer | IMAP connection (port 993) + SMTP transporter | Lock mailbox, search `unseen`, fetch envelope+source, parse text body | `transporter.sendMail()` with threading references |
-| **Slack** | @slack/web-api | `auth.test()` to verify token | `conversations.history()` since last timestamp, filter bot messages, resolve usernames | `chat.postMessage()` with optional `thread_ts` |
+| Adapter      | Library               | Connect                                       | Fetch Strategy                                                                         | Send Strategy                                               |
+| ------------ | --------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| **Telegram** | grammY                | Bot polling via `bot.start()`                 | Buffer incoming messages in `pendingMessages[]`, drain on fetch                        | `bot.api.sendMessage()` with optional `reply_to_message_id` |
+| **Email**    | ImapFlow + Nodemailer | IMAP connection (port 993) + SMTP transporter | Lock mailbox, search `unseen`, fetch envelope+source, parse text body                  | `transporter.sendMail()` with threading references          |
+| **Slack**    | @slack/web-api        | `auth.test()` to verify token                 | `conversations.history()` since last timestamp, filter bot messages, resolve usernames | `chat.postMessage()` with optional `thread_ts`              |
 
 ### Sender Authorization
 
@@ -300,16 +307,15 @@ All adapters use a whitelist model. Each channel group defines allowed senders; 
 ```typescript
 // Normalization: case-insensitive, strips @ prefix
 function isAllowedSender(sender: string, allowedSenders: Set<string>): boolean {
-  const normalized = sender.toLowerCase().replace(/^@/, "");
-  return [...allowedSenders].some(
-    s => s.toLowerCase().replace(/^@/, "") === normalized
-  );
+  const normalized = sender.toLowerCase().replace(/^@/, '')
+  return [...allowedSenders].some(s => s.toLowerCase().replace(/^@/, '') === normalized)
 }
 ```
 
 ### Polling Loop
 
 **Startup sequence** (`ChannelReader.start()`):
+
 1. Initialize K8s watcher (production) or parse env var (dev)
 2. Load channel configurations
 3. Validate all channel configs (no empty strings/arrays)
@@ -317,17 +323,19 @@ function isAllowedSender(sender: string, allowedSenders: Set<string>): boolean {
 5. Enter polling loop
 
 **Main loop** (runs every `CLERUM_POLL_INTERVAL_SECONDS`, default 30):
+
 ```typescript
 while (running) {
-  if (needsRestart)              // CRD changed (production only)
-    restart()                    // Shutdown adapters, reload CRDs, reinitialize
-  if (channels.length > 0)
-    pollCycle()                  // Fetch and process messages
+  if (needsRestart)
+    // CRD changed (production only)
+    restart() // Shutdown adapters, reload CRDs, reinitialize
+  if (channels.length > 0) pollCycle() // Fetch and process messages
   sleep(pollIntervalSeconds)
 }
 ```
 
 **Poll cycle** (each iteration):
+
 ```
 for each CommunicationChannel CRD:
   for each channel group (telegram/email/slack):
@@ -358,22 +366,22 @@ for each CommunicationChannel CRD:
 
 ### Configuration
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `CLERUM_DEV_MODE` | No | `false` | Read config from env vars instead of K8s |
-| `CLERUM_CHANNEL` | Dev only | - | Channel config JSON string |
-| `CLERUM_HOST_REF` | Prod only | - | Filter CommunicationChannels by hostRef |
-| `CLERUM_NAMESPACE` | No | `""` (all) | K8s namespace to watch |
-| `CLERUM_MCP_HOST_URL` | No | auto | mcp-host endpoint |
-| `CLERUM_TELEGRAM_BOT_TOKEN` | No | - | Telegram Bot API token |
-| `CLERUM_SLACK_BOT_TOKEN` | No | - | Slack Bot token (xoxb-...) |
-| `CLERUM_EMAIL_IMAP_HOST` | No | - | IMAP server hostname |
-| `CLERUM_EMAIL_IMAP_PORT` | No | `993` | IMAP port (SSL) |
-| `CLERUM_EMAIL_USERNAME` | No | - | IMAP username |
-| `CLERUM_EMAIL_PASSWORD` | No | - | IMAP password |
-| `CLERUM_EMAIL_SMTP_HOST` | No | `{IMAP_HOST}` | SMTP server |
-| `CLERUM_EMAIL_SMTP_PORT` | No | `587` | SMTP port (TLS) |
-| `CLERUM_POLL_INTERVAL_SECONDS` | No | `30` | Seconds between polling cycles |
+| Variable                       | Required  | Default       | Description                              |
+| ------------------------------ | --------- | ------------- | ---------------------------------------- |
+| `CLERUM_DEV_MODE`              | No        | `false`       | Read config from env vars instead of K8s |
+| `CLERUM_CHANNEL`               | Dev only  | -             | Channel config JSON string               |
+| `CLERUM_HOST_REF`              | Prod only | -             | Filter CommunicationChannels by hostRef  |
+| `CLERUM_NAMESPACE`             | No        | `""` (all)    | K8s namespace to watch                   |
+| `CLERUM_MCP_HOST_URL`          | No        | auto          | mcp-host endpoint                        |
+| `CLERUM_TELEGRAM_BOT_TOKEN`    | No        | -             | Telegram Bot API token                   |
+| `CLERUM_SLACK_BOT_TOKEN`       | No        | -             | Slack Bot token (xoxb-...)               |
+| `CLERUM_EMAIL_IMAP_HOST`       | No        | -             | IMAP server hostname                     |
+| `CLERUM_EMAIL_IMAP_PORT`       | No        | `993`         | IMAP port (SSL)                          |
+| `CLERUM_EMAIL_USERNAME`        | No        | -             | IMAP username                            |
+| `CLERUM_EMAIL_PASSWORD`        | No        | -             | IMAP password                            |
+| `CLERUM_EMAIL_SMTP_HOST`       | No        | `{IMAP_HOST}` | SMTP server                              |
+| `CLERUM_EMAIL_SMTP_PORT`       | No        | `587`         | SMTP port (TLS)                          |
+| `CLERUM_POLL_INTERVAL_SECONDS` | No        | `30`          | Seconds between polling cycles           |
 
 ### Dependencies
 
@@ -466,16 +474,17 @@ mcp-host/
 
 ### HTTP RPC API
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/` | API information page |
-| `GET` | `/health` | Health check (`{ status: "ok" }`) |
-| `POST` | `/message` | Submit a message for LLM processing |
-| `GET` | `/status` | Agent state, queue stats, cron job count, pending approvals |
-| `POST` | `/approve` | Approve a pending tool execution |
-| `POST` | `/deny` | Deny a pending tool execution |
+| Method | Path       | Description                                                 |
+| ------ | ---------- | ----------------------------------------------------------- |
+| `GET`  | `/`        | API information page                                        |
+| `GET`  | `/health`  | Health check (`{ status: "ok" }`)                           |
+| `POST` | `/message` | Submit a message for LLM processing                         |
+| `GET`  | `/status`  | Agent state, queue stats, cron job count, pending approvals |
+| `POST` | `/approve` | Approve a pending tool execution                            |
+| `POST` | `/deny`    | Deny a pending tool execution                               |
 
 **POST /message** request:
+
 ```json
 {
   "content": "What records are in the users table?",
@@ -490,6 +499,7 @@ mcp-host/
 ```
 
 **POST /message** response:
+
 ```json
 {
   "success": true,
@@ -507,13 +517,14 @@ mcp-host/
 
 In-memory FIFO queue with priority support. Processes one task at a time.
 
-| Stage | Description |
-|-------|-------------|
+| Stage             | Description                                                                   |
+| ----------------- | ----------------------------------------------------------------------------- |
 | **Pending Queue** | Tasks sorted by priority weight (urgent=4, high=3, normal=2, low=1) then FIFO |
-| **Processing** | Max 1 active task at a time, dequeued by the agent |
-| **History** | Completed + failed tasks stored for inspection (trimmed to max size) |
+| **Processing**    | Max 1 active task at a time, dequeued by the agent                            |
+| **History**       | Completed + failed tasks stored for inspection (trimmed to max size)          |
 
 **Task sources**:
+
 - `channel` - From channel-reader HTTP messages (includes response callback)
 - `cron` - From cron scheduler (scheduled LLM tasks)
 - `internal` - System-generated tasks
@@ -546,6 +557,7 @@ Processes tasks one at a time from the queue. Supports multi-turn LLM tool calli
 7. Mark task as completed
 
 **Configurable limits**:
+
 - `maxToolCallsPerTask` (default: 50) - Prevents infinite tool calling loops
 - `maxTaskDuration` (default: 300000ms / 5 min) - Task timeout
 - `taskDelay` (default: 100ms) - Delay between processing tasks
@@ -556,15 +568,15 @@ All three providers implement the same `LLMProvider` interface:
 
 ```typescript
 interface LLMProvider {
-  chat(messages: ChatMessage[], model?: string): Promise<ChatResponse>;
+  chat(messages: ChatMessage[], model?: string): Promise<ChatResponse>
   chatWithTools(
     messages: ChatMessage[],
     tools: any[],
     toolCallHandler: (name: string, args: any) => Promise<ToolCallResult>,
     model?: string
-  ): Promise<ChatResponse>;
-  chatStream(messages: ChatMessage[], model?: string): AsyncGenerator<string>;
-  getProviderType(): "openai" | "claude" | "zai";
+  ): Promise<ChatResponse>
+  chatStream(messages: ChatMessage[], model?: string): AsyncGenerator<string>
+  getProviderType(): 'openai' | 'claude' | 'zai'
 }
 ```
 
@@ -611,6 +623,7 @@ Manages multiple MCP client connections. Provides a unified interface for tool d
 #### McpClient
 
 Individual MCP server connection. Supports two transports:
+
 - **SSE** (Server-Sent Events) - Legacy transport
 - **StreamableHTTP** - Modern bidirectional transport
 
@@ -628,6 +641,7 @@ mcp-host ──GET /api/v1/mcpservers/context/{contextRef}──▶ host-context
 Polling interval: 30 seconds (configurable via `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL`)
 
 On each poll, mcp-host compares new server list with previous state and:
+
 - **Adds** new servers (creates MCP client, discovers tools)
 - **Updates** modified servers (reconnects if needed)
 - **Removes** deleted servers (disconnects MCP client)
@@ -635,6 +649,7 @@ On each poll, mcp-host compares new server list with previous state and:
 ### Host CRD Watching (Production)
 
 mcp-host watches its own Host CRD for changes:
+
 - ADDED/MODIFIED: Reloads provider if secretRef changed
 - DELETED: Graceful shutdown
 
@@ -668,25 +683,25 @@ The HTTP response is held open until the agent finishes processing. The response
 
 ### Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CLERUM_DEV_MODE` | `false` | Enable dev mode |
-| `CLERUM_HOST_NAME` | - | Host CRD name (production, required) |
-| `CLERUM_NAMESPACE` | `"default"` | Kubernetes namespace |
-| `CLERUM_SERVER_PORT` | `8080` | HTTP server port |
-| `CLERUM_CONTEXT_MAPPER_URL` | auto | Context-mapper service URL |
-| `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000` | Poll interval (ms) |
-| `CLERUM_MODEL_PROVIDER` | auto-detected | `"openai"`, `"claude"`, or `"zai"` |
-| `CLERUM_MODEL_NAME` | provider default | Specific model name |
-| `OPENAI_API_KEY` | - | OpenAI key (dev mode) |
-| `CLAUDE_API_KEY` | - | Claude key (dev mode) |
-| `ZAI_API_KEY` | - | ZAI/z.ai key (dev mode) |
-| `CLERUM_HOST_CONFIG` | - | JSON host config (dev mode) |
-| `CLERUM_MCP_SERVERS` | - | JSON MCP server array (dev mode) |
-| `CLERUM_AGENT_TASK_DELAY` | `100` | Delay between tasks (ms) |
-| `CLERUM_AGENT_MAX_TASK_DURATION` | `300000` | Max task duration (ms) |
-| `CLERUM_AGENT_MAX_TOOL_CALLS` | `50` | Max tool calls per task |
-| `CLERUM_AGENT_MAX_QUEUE_SIZE` | `100` | Max pending queue size |
+| Variable                              | Default          | Description                          |
+| ------------------------------------- | ---------------- | ------------------------------------ |
+| `CLERUM_DEV_MODE`                     | `false`          | Enable dev mode                      |
+| `CLERUM_HOST_NAME`                    | -                | Host CRD name (production, required) |
+| `CLERUM_NAMESPACE`                    | `"default"`      | Kubernetes namespace                 |
+| `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                     |
+| `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL           |
+| `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                   |
+| `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, or `"zai"`   |
+| `CLERUM_MODEL_NAME`                   | provider default | Specific model name                  |
+| `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                |
+| `CLAUDE_API_KEY`                      | -                | Claude key (dev mode)                |
+| `ZAI_API_KEY`                         | -                | ZAI/z.ai key (dev mode)              |
+| `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)          |
+| `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)     |
+| `CLERUM_AGENT_TASK_DELAY`             | `100`            | Delay between tasks (ms)             |
+| `CLERUM_AGENT_MAX_TASK_DURATION`      | `300000`         | Max task duration (ms)               |
+| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `50`             | Max tool calls per task              |
+| `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size               |
 
 ### Dependencies
 
@@ -766,6 +781,7 @@ patch.
 HCC reconciles NetworkPolicies in two modes:
 
 **A. Infrastructure policies** (created per namespace at startup by `ensureDefaultPolicies`) — HCC loops over the namespaces in `CONTEXT_MAPPER_RUNTIME_NAMESPACES` and creates deny/DNS/HCC gateway policies for the selected platform pod family in each namespace:
+
 - `deny-all-<ns>` (default deny ingress + egress)
 - `allow-dns-egress-<ns>` (CoreDNS)
 - `allow-hcc-api-egress-<ns>` (only the namespace's platform helper pods → HCC REST API; for example `mcp-proxy`, `rpc-proxy`, or workflow mcp-host pods)
@@ -776,6 +792,7 @@ HCC reconciles NetworkPolicies in two modes:
 HCC does NOT reconcile its own namespace (`control-plane`) either; control-plane policies are statically declared in `deploy/base/control-plane/networkpolicies.yaml` and patched per overlay for the cluster-specific K8s API IP.
 
 **B. Context-specific policies** (created per Context CRD by `reconcileContext`) — for each `(context, server)` pair, HCC creates:
+
 - `ctx-<context>-<server>` in `mcp-server` (ingress allow: mcp-host → MCP server)
 - `ctx-<context>-<server>-egress` in `mcp-host` (egress allow: mcp-host pods → MCP server)
 - `rpc-egress-<context>-<server>` in `rpc-proxy` (egress allow: rpc-proxy → MCP server)
@@ -797,8 +814,8 @@ name: deny-all-mcp-servers
 podSelector:
   matchLabels:
     clerum.io/managed-by: skill-mapper
-policyTypes: ["Ingress"]
-ingress: []                                  # No rules = deny all
+policyTypes: ['Ingress']
+ingress: [] # No rules = deny all
 ```
 
 Blocks all ingress to any pod managed by host-context-controller.
@@ -810,12 +827,12 @@ name: allow-host-context-controller-api
 podSelector:
   matchLabels:
     app: host-context-controller
-policyTypes: ["Ingress"]
+policyTypes: ['Ingress']
 ingress:
   - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: mcp-host
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: mcp-host
     ports:
       - port: 8081
 ```
@@ -829,34 +846,35 @@ name: ctx-{contextId}-{serverName}
 labels:
   clerum.io/managed-by: host-context-controller
   clerum.io/policy-type: context-allow
-  clerum.io/context: {contextId}
-  clerum.io/mcpserver: {serverName}
+  clerum.io/context: { contextId }
+  clerum.io/mcpserver: { serverName }
 podSelector:
   matchLabels:
-    clerum.io/mcpserver: {serverName}
-policyTypes: ["Ingress"]
+    clerum.io/mcpserver: { serverName }
+policyTypes: ['Ingress']
 ingress:
   - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: mcp-host
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: mcp-host
     ports:
-      - port: {transport.port}
+      - port: { transport.port }
 ```
 
 One policy per (context, server) pair. Only allows traffic from the mcp-host namespace to specific MCP server pods on their transport port.
 
 ### REST API
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/` | API information |
-| `GET` | `/health` | Health check |
-| `GET` | `/api/v1/mcpservers` | List ALL MCP servers |
-| `GET` | `/api/v1/mcpservers/context/{contextRef}` | List servers filtered by Context CRD |
-| `GET` | `/api/v1/mcpservers/{name}/auth` | Get auth token for a server |
+| Method | Path                                      | Description                          |
+| ------ | ----------------------------------------- | ------------------------------------ |
+| `GET`  | `/`                                       | API information                      |
+| `GET`  | `/health`                                 | Health check                         |
+| `GET`  | `/api/v1/mcpservers`                      | List ALL MCP servers                 |
+| `GET`  | `/api/v1/mcpservers/context/{contextRef}` | List servers filtered by Context CRD |
+| `GET`  | `/api/v1/mcpservers/{name}/auth`          | Get auth token for a server          |
 
 **Server info response**:
+
 ```json
 {
   "servers": [
@@ -885,15 +903,15 @@ One policy per (context, server) pair. Only allows traffic from the mcp-host nam
 
 ### Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CLERUM_DEV_MODE` | `false` | Enable dev mode |
-| `CONTEXT_MAPPER_PORT` | `8081` | HTTP server port |
-| `CONTEXT_MAPPER_NAMESPACE` | `"default"` | K8s namespace for MCP servers |
+| Variable                        | Default      | Description                                       |
+| ------------------------------- | ------------ | ------------------------------------------------- |
+| `CLERUM_DEV_MODE`               | `false`      | Enable dev mode                                   |
+| `CONTEXT_MAPPER_PORT`           | `8081`       | HTTP server port                                  |
+| `CONTEXT_MAPPER_NAMESPACE`      | `"default"`  | K8s namespace for MCP servers                     |
 | `CONTEXT_MAPPER_HOST_NAMESPACE` | `"mcp-host"` | Namespace where mcp-host runs (for NetworkPolicy) |
-| `CLERUM_MCP_SERVERS` | - | JSON MCP server array (dev mode) |
-| `CLERUM_CONTEXTS` | - | JSON Context array (dev mode) |
-| `CLERUM_MCP_AUTH` | - | JSON auth token map (dev mode) |
+| `CLERUM_MCP_SERVERS`            | -            | JSON MCP server array (dev mode)                  |
+| `CLERUM_CONTEXTS`               | -            | JSON Context array (dev mode)                     |
+| `CLERUM_MCP_AUTH`               | -            | JSON auth token map (dev mode)                    |
 
 ### Dependencies
 
@@ -964,24 +982,26 @@ The MCP servers maintain comprehensive test coverage validating CRD configuratio
 
 #### Test Coverage
 
-| Metric | Value |
-|--------|-------|
-| **Total Test Files** | 8 files |
-| **Total Unit Tests** | ~110 tests |
-| **Test Framework** | Vitest 4.0.18 |
-| **Environment** | Node.js 20.x+ |
+| Metric               | Value         |
+| -------------------- | ------------- |
+| **Total Test Files** | 8 files       |
+| **Total Unit Tests** | ~110 tests    |
+| **Test Framework**   | Vitest 4.0.18 |
+| **Environment**      | Node.js 20.x+ |
 
 #### Test Organization
 
 Tests are organized by server type and coverage area:
 
 **Airtable MCP Server (4 test files, ~40 tests)**
+
 - `airtable.config.test.ts` - CRD specification validation
 - `airtable.api.test.ts` - Airtable API mocking and interactions
 - `airtable.mcp.test.ts` - MCP protocol operations (tools/list, tools/call)
 - `airtable.k8s.test.ts` - Kubernetes resource generation
 
 **MongoDB MCP Server (4 test files, ~70 tests)**
+
 - `mongodb.config.test.ts` - CRD specification validation
 - `mongodb.connection.test.ts` - MongoDB connection handling
 - `mongodb.mcp.test.ts` - MCP protocol operations
@@ -1023,6 +1043,7 @@ For comprehensive testing documentation, see [mcp-servers/README.md §Testing](.
 > **[Open in Excalidraw](https://link.excalidraw.com/l/7VPzoB0Tohx/3YpKQJgCG6o)** - Interactive diagram showing the three-layer NetworkPolicy model: default deny, API allow, and per-context allow rules.
 
 **Three namespaces** with strict isolation:
+
 - `channels` - channel-reader (no inbound traffic needed)
 - `mcp-host` - mcp-host service (receives HTTP from channel-reader)
 - `control-plane` - host-context-controller
@@ -1030,13 +1051,14 @@ For comprehensive testing documentation, see [mcp-servers/README.md §Testing](.
 
 **Three policy layers**:
 
-| Layer | Policy Name | Effect |
-|-------|-------------|--------|
-| 1. Default Deny | `deny-all-mcp-servers` | Block ALL ingress to pods with `clerum.io/managed-by=skill-mapper` |
-| 2. Allow API | `allow-host-context-controller-api` | Allow `ns:mcp-host` -> `host-context-controller:8081` |
-| 3. Context Allow | `ctx-{contextId}-{serverName}` | Allow `ns:mcp-host` -> specific MCP server pod on transport port |
+| Layer            | Policy Name                         | Effect                                                             |
+| ---------------- | ----------------------------------- | ------------------------------------------------------------------ |
+| 1. Default Deny  | `deny-all-mcp-servers`              | Block ALL ingress to pods with `clerum.io/managed-by=skill-mapper` |
+| 2. Allow API     | `allow-host-context-controller-api` | Allow `ns:mcp-host` -> `host-context-controller:8081`              |
+| 3. Context Allow | `ctx-{contextId}-{serverName}`      | Allow `ns:mcp-host` -> specific MCP server pod on transport port   |
 
 This ensures that:
+
 - MCP servers are completely isolated by default
 - Only mcp-host can reach host-context-controller's API
 - Only mcp-host can reach specific MCP servers, and only those listed in the relevant Context CRD
@@ -1044,10 +1066,10 @@ This ensures that:
 
 ### RBAC Summary
 
-| Service | Namespace | CRD Permissions | Resource Permissions |
-|---------|-----------|-----------------|---------------------|
-| **channel-reader** | `channels` | `list`, `watch` CommunicationChannels | - |
-| **mcp-host** | `mcp-host` | `get`, `list`, `watch` Hosts | `get` Secrets |
+| Service                     | Namespace       | CRD Permissions                                                        | Resource Permissions                                                                              |
+| --------------------------- | --------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| **channel-reader**          | `channels`      | `list`, `watch` CommunicationChannels                                  | -                                                                                                 |
+| **mcp-host**                | `mcp-host`      | `get`, `list`, `watch` Hosts                                           | `get` Secrets                                                                                     |
 | **host-context-controller** | `control-plane` | `get`, `list`, `watch` McpServers, Contexts (via RBAC in `mcp-server`) | `get`, `list`, `create`, `update`, `delete` Deployments, Services, NetworkPolicies; `get` Secrets |
 
 ### Secret Management
@@ -1064,16 +1086,16 @@ Complete flow of a user message from Telegram through to an LLM-generated respon
 
 > **[Open in Excalidraw](https://link.excalidraw.com/l/7VPzoB0Tohx/3YpKQJgCG6o)** - Interactive sequence diagram showing the complete message lifecycle across all 5 actors.
 
-| Step | Actor | Action |
-|------|-------|--------|
-| 1 | **User** | Sends "What users are in the database?" on Telegram |
-| 2 | **channel-reader** | grammY bot buffers message, poll cycle drains it, sender checked against CommunicationChannel CRD allowlist, message normalized to unified `Message` interface |
-| 3 | **channel-reader** | HTTP POST to `mcp-host:8080/message` with content, channelType, sender, hostRef |
-| 4 | **mcp-host** | Creates Task with conversation history, stores response callback, enqueues to MessageQueue (priority: normal) |
-| 5 | **mcp-host** | Agent dequeues task (idle -> processing), builds system prompt with MCP server capabilities, calls LLM with messages + tool definitions |
-| 6 | **LLM + MCP** | LLM requests `mongodb-server__find_documents({ collection: "users" })`. Agent parses tool name, MCP Client calls MongoDB server via StreamableHTTP. Tool result added to history. LLM called again with results. Generates final text response. |
-| 7 | **mcp-host** | Agent invokes `responseCallback`, resolves HTTP response promise, returns `{ success: true, response: "..." }` to channel-reader |
-| 8 | **channel-reader** | Telegram adapter calls `bot.api.sendMessage()` with LLM response, replies to original message |
+| Step | Actor              | Action                                                                                                                                                                                                                                          |
+| ---- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | **User**           | Sends "What users are in the database?" on Telegram                                                                                                                                                                                             |
+| 2    | **channel-reader** | grammY bot buffers message, poll cycle drains it, sender checked against CommunicationChannel CRD allowlist, message normalized to unified `Message` interface                                                                                  |
+| 3    | **channel-reader** | HTTP POST to `mcp-host:8080/message` with content, channelType, sender, hostRef                                                                                                                                                                 |
+| 4    | **mcp-host**       | Creates Task with conversation history, stores response callback, enqueues to MessageQueue (priority: normal)                                                                                                                                   |
+| 5    | **mcp-host**       | Agent dequeues task (idle -> processing), builds system prompt with MCP server capabilities, calls LLM with messages + tool definitions                                                                                                         |
+| 6    | **LLM + MCP**      | LLM requests `mongodb-server__find_documents({ collection: "users" })`. Agent parses tool name, MCP Client calls MongoDB server via StreamableHTTP. Tool result added to history. LLM called again with results. Generates final text response. |
+| 7    | **mcp-host**       | Agent invokes `responseCallback`, resolves HTTP response promise, returns `{ success: true, response: "..." }` to channel-reader                                                                                                                |
+| 8    | **channel-reader** | Telegram adapter calls `bot.api.sendMessage()` with LLM response, replies to original message                                                                                                                                                   |
 
 ---
 
@@ -1083,16 +1105,16 @@ Every service supports `CLERUM_DEV_MODE=true` for local development without a Ku
 
 ### Comparison
 
-| Aspect | Dev Mode | Production Mode |
-|--------|----------|-----------------|
-| **Configuration source** | Environment variables / JSON strings | Kubernetes CRDs |
-| **K8s access** | Not required | In-cluster or kubeconfig |
-| **CRD watching** | Disabled (static config) | Active watchers with auto-restart |
-| **Secret management** | Env vars (`OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY`) | K8s Secrets referenced by CRDs |
-| **MCP server discovery** | `CLERUM_MCP_SERVERS` JSON env var | Polls host-context-controller REST API |
-| **MCP server deployment** | Manual (run locally or docker) | Automatic via host-context-controller operator |
-| **NetworkPolicies** | Not created | Automatically managed |
-| **Typical use** | Local development, debugging | Kubernetes cluster deployment |
+| Aspect                    | Dev Mode                                                     | Production Mode                                |
+| ------------------------- | ------------------------------------------------------------ | ---------------------------------------------- |
+| **Configuration source**  | Environment variables / JSON strings                         | Kubernetes CRDs                                |
+| **K8s access**            | Not required                                                 | In-cluster or kubeconfig                       |
+| **CRD watching**          | Disabled (static config)                                     | Active watchers with auto-restart              |
+| **Secret management**     | Env vars (`OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY`) | K8s Secrets referenced by CRDs                 |
+| **MCP server discovery**  | `CLERUM_MCP_SERVERS` JSON env var                            | Polls host-context-controller REST API         |
+| **MCP server deployment** | Manual (run locally or docker)                               | Automatic via host-context-controller operator |
+| **NetworkPolicies**       | Not created                                                  | Automatically managed                          |
+| **Typical use**           | Local development, debugging                                 | Kubernetes cluster deployment                  |
 
 ### Dev Mode Example
 
@@ -1130,6 +1152,7 @@ helm install clerum-crds ./charts/clerum-crds
 ```
 
 The chart contains:
+
 - `crds/communicationchannel.yaml`
 - `crds/context.yaml`
 - `crds/host.yaml`
@@ -1167,12 +1190,12 @@ Default: `your-registry.example.com/evenfire/`
 
 ### Resource Allocations
 
-| Service | Requests | Limits |
-|---------|----------|--------|
-| **channel-reader** | 50m CPU, 128Mi RAM | 200m CPU, 256Mi RAM |
-| **mcp-host** | 100m CPU, 128Mi RAM | 500m CPU, 512Mi RAM |
-| **host-context-controller** | 50m CPU, 64Mi RAM | 200m CPU, 128Mi RAM |
-| **MCP servers** | 100m CPU, 128Mi RAM | 500m CPU, 256Mi RAM |
+| Service                     | Requests            | Limits              |
+| --------------------------- | ------------------- | ------------------- |
+| **channel-reader**          | 50m CPU, 128Mi RAM  | 200m CPU, 256Mi RAM |
+| **mcp-host**                | 100m CPU, 128Mi RAM | 500m CPU, 512Mi RAM |
+| **host-context-controller** | 50m CPU, 64Mi RAM   | 200m CPU, 128Mi RAM |
+| **MCP servers**             | 100m CPU, 128Mi RAM | 500m CPU, 256Mi RAM |
 
 ### Full Production Deployment Sequence
 
@@ -1214,6 +1237,7 @@ kubectl apply -f charts/clerum-crds/examples/channels.yaml
 ### Graceful Shutdown
 
 All services handle `SIGINT` and `SIGTERM`:
+
 1. Stop CRD watchers
 2. Stop polling loops
 3. Wait for current task to complete (mcp-host)
@@ -1271,14 +1295,15 @@ Host CRD (spec.approval)
 
 ### HTTP Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/approve` | Approve a pending tool execution |
-| `POST` | `/deny` | Deny a pending tool execution |
-| `GET` | `/task/:id/result` | Poll for final result after channel-based approval (two-phase response) |
-| `GET` | `/status` | Includes `pendingApprovals` array |
+| Method | Path               | Description                                                             |
+| ------ | ------------------ | ----------------------------------------------------------------------- |
+| `POST` | `/approve`         | Approve a pending tool execution                                        |
+| `POST` | `/deny`            | Deny a pending tool execution                                           |
+| `GET`  | `/task/:id/result` | Poll for final result after channel-based approval (two-phase response) |
+| `GET`  | `/status`          | Includes `pendingApprovals` array                                       |
 
 **POST /approve request**:
+
 ```json
 {
   "userId": "123456789",
@@ -1290,6 +1315,7 @@ Host CRD (spec.approval)
 ```
 
 **POST /deny request**:
+
 ```json
 {
   "userId": "123456789",
@@ -1300,6 +1326,7 @@ Host CRD (spec.approval)
 ```
 
 **GET /status response** (when approval pending):
+
 ```json
 {
   "agent": { "state": "awaiting_approval", "..." },
@@ -1319,14 +1346,15 @@ Host CRD (spec.approval)
 
 ### Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CLERUM_ENABLE_APPROVAL` | `true` | Master switch for approval system |
-| `CLERUM_APPROVAL_CONFIG` | - | JSON approval config (dev mode) |
-| `CLERUM_ENABLE_NUDGE` | `false` | Enable nudge controller |
-| `CLERUM_NUDGE_MAX_ITERATIONS` | `3` | Max nudge attempts before accepting text |
+| Variable                      | Default | Description                              |
+| ----------------------------- | ------- | ---------------------------------------- |
+| `CLERUM_ENABLE_APPROVAL`      | `true`  | Master switch for approval system        |
+| `CLERUM_APPROVAL_CONFIG`      | -       | JSON approval config (dev mode)          |
+| `CLERUM_ENABLE_NUDGE`         | `false` | Enable nudge controller                  |
+| `CLERUM_NUDGE_MAX_ITERATIONS` | `3`     | Max nudge attempts before accepting text |
 
 **Host CRD spec.approval** (production mode):
+
 ```yaml
 spec:
   approval:
@@ -1334,7 +1362,7 @@ spec:
     channels:
       telegram:
         enabled: true
-        approvers: ["123456789"]
+        approvers: ['123456789']
 ```
 
 ### Approval Flow Sequence (Channel-Based)
@@ -1376,29 +1404,29 @@ User (Telegram)          channel-reader              mcp-host
 
 Approving any MCP tool automatically approves **all tools from the same MCP server** for the rest of the conversation. The MCP server prefix (e.g., `airtable-server` from `airtable-server__list_bases`) is stored in the conversation's `auto_approved_tools` set.
 
-| Scenario | Approvals Required |
-|----------|-------------------|
-| LLM calls 3 tools from `airtable-server` | 1 (first tool prompts, rest auto-approved) |
-| LLM calls tools from `airtable-server` + `mongodb-server` | 2 (one per server) |
-| Native tools (no `__` in name) | Per-tool (unchanged) |
+| Scenario                                                  | Approvals Required                         |
+| --------------------------------------------------------- | ------------------------------------------ |
+| LLM calls 3 tools from `airtable-server`                  | 1 (first tool prompts, rest auto-approved) |
+| LLM calls tools from `airtable-server` + `mongodb-server` | 2 (one per server)                         |
+| Native tools (no `__` in name)                            | Per-tool (unchanged)                       |
 
 **Channel commands:**
 
-| Command | Behavior |
-|---------|----------|
-| `/approve` | Approve tool + auto-approve all tools from the same MCP server |
-| `/approve always` | Same as `/approve` + stores the individual tool name |
-| `/deny` | Deny the specific tool call |
+| Command           | Behavior                                                       |
+| ----------------- | -------------------------------------------------------------- |
+| `/approve`        | Approve tool + auto-approve all tools from the same MCP server |
+| `/approve always` | Same as `/approve` + stores the individual tool name           |
+| `/deny`           | Deny the specific tool call                                    |
 
 ### Architecture Components
 
-| Component | File | Purpose |
-|-----------|------|---------|
-| `ApprovalController` | `core/extensions/approvalController.ts` | LoopController decorator, checks auto_approved_tools |
-| `ApprovalResolver` | `core/extensions/approvalResolver.ts` | Permission resolution (policy + channel + user) |
-| `NudgeController` | `core/extensions/nudgeController.ts` | Encourages tool use when LLM responds with text only |
-| `PressureContextManager` | `core/extensions/contextManager.ts` | Tiered context compaction based on token pressure |
-| Approval types | `core/extensions/approvalTypes.ts` | Type definitions for config, decisions, requests |
+| Component                | File                                    | Purpose                                              |
+| ------------------------ | --------------------------------------- | ---------------------------------------------------- |
+| `ApprovalController`     | `core/extensions/approvalController.ts` | LoopController decorator, checks auto_approved_tools |
+| `ApprovalResolver`       | `core/extensions/approvalResolver.ts`   | Permission resolution (policy + channel + user)      |
+| `NudgeController`        | `core/extensions/nudgeController.ts`    | Encourages tool use when LLM responds with text only |
+| `PressureContextManager` | `core/extensions/contextManager.ts`     | Tiered context compaction based on token pressure    |
+| Approval types           | `core/extensions/approvalTypes.ts`      | Type definitions for config, decisions, requests     |
 
 ### Dev Mode Testing
 
@@ -1419,6 +1447,7 @@ CLERUM_TELEGRAM_BOT_TOKEN=your_token npm run dev
 ```
 
 Then in Telegram:
+
 1. Send a message that triggers a tool requiring approval
 2. Bot sends notification: "Tool X requires approval. Reply /approve or /deny"
 3. Reply `/approve` — bot responds with the tool execution result

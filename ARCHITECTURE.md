@@ -1,20 +1,31 @@
 # Architecture
 
-evenfire is a Kubernetes-native platform for LLM orchestration. Everything is
-driven by Custom Resources under `clerum.io`.
+evenfire is a Kubernetes-native platform for LLM orchestration. Configuration is
+driven by Custom Resources under the historical API group `clerum.io`
+([code names](docs/concepts/code-names.md)).
 
-## Layers
+For the full reference (services, CRDs, message lifecycle, NetworkPolicy model),
+start here:
 
-- **Core orchestration** — `mcp-host` (the agent runtime: LLM loop, MCP tool
-  calling, state machine, queue).
-- **Control plane** — `host-context-controller` (operator for Context/McpServer/
-  WorkflowRecipe + NetworkPolicy) and `control-api` + the five CRDs
-  (Host, Context, McpServer, CommunicationChannel, WorkflowRecipe).
-- **Channels & surfaces** — `channel-reader` (Telegram/Email/Slack), `control-ui`,
-  `profile-ui`, `desktop-app`, `external-rest-api`, `rpc-proxy`, `mcp-proxy`.
-- **Extensions** — MCP servers and WorkflowRecipes are provisioned declaratively via CRDs. The platform integrates with an external MCP/recipe **registry**; this repo ships the client integration (the registry server is a separate component).
-- **Commercial (not in this repo)** — the managed-multitenancy control plane and
-  hosted registry-as-a-service are separate, commercial components.
+- **[docs/architecture/overview.md](docs/architecture/overview.md)**
+- **[docs/architecture/platform-topology.md](docs/architecture/platform-topology.md)**
+- **[docs/README.md](docs/README.md)** (index)
+
+## Layers (summary)
+
+- **Core orchestration** — `mcp-host` (agent runtime: LLM loop, MCP tools, state
+  machine, approval gate, queue).
+- **Control plane** — `host-context-controller` (Context / McpServer /
+  NetworkPolicy reconciliation), `control-api`, and the platform CRDs (Host,
+  Context, McpServer, CommunicationChannel, WorkflowRecipe,
+  WorkflowRecipePolicy, SharedFileSystem, GlobalFileSystem).
+- **Channels & surfaces** — `channel-reader` (Telegram / Email / Slack),
+  `control-ui`, `profile-ui`, `desktop-app`, `external-rest-api`, `rpc-proxy`,
+  `mcp-proxy`.
+- **Extensions** — MCP servers and WorkflowRecipes provisioned via CRDs; registry
+  client in-repo (registry server may be separate).
+- **Commercial (not in this repo)** — managed multi-tenancy and hosted
+  registry-as-a-service.
 
 ```mermaid
 flowchart LR
@@ -25,5 +36,12 @@ flowchart LR
 ```
 
 ## Swapping LLM providers
+
 Set `CLERUM_MODEL_PROVIDER` to `openai | claude | zai | bailian` and supply the
-matching API key. One interface, no code change.
+matching API key. One interface, no code change. See
+[mcp-host/README.md](mcp-host/README.md).
+
+## Security
+
+Product-level model: [README security section](README.md#security-model).  
+Reporting: [SECURITY.md](SECURITY.md).

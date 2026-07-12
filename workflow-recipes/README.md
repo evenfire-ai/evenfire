@@ -82,7 +82,7 @@ The Dockerfile exposes port 8082 and runs as non-root (`USER node`).
 
 ```bash
 cd workflow-recipes
-npm test          # vitest — 790 tests across 15 test files
+npm test          # vitest — 130+ test files under src/ and tests/
 npm run test:watch
 npm run test:e2e  # E2E tests (requires minikube)
 ```

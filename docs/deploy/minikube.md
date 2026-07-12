@@ -1,6 +1,13 @@
-# Minikube Deploy Guide — Clerum Full Stack
+# Minikube Deploy Guide — evenfire full stack
 
-Reference guide for deploying the full Clerum stack on local minikube.
+Reference guide for deploying the **full** evenfire platform on local minikube
+(all services, JWT auth chain, NetworkPolicies). Historical scripts and profiles
+may still say **clerum** ([code names](../concepts/code-names.md)).
+
+> **New here?** For a 10-minute agent-only try without Kubernetes, use the
+> [Quickstart](../get-started/quickstart.md) first. This guide is the full local
+> platform path (Path C in the [learning path](../get-started/learning-path.md)).
+
 Includes the correct order of operations, the JWT authentication chain, and known issues.
 
 ---
@@ -8,6 +15,7 @@ Includes the correct order of operations, the JWT authentication chain, and know
 ## Minikube Profile
 
 Normal local development uses the single-node `clerum-test` profile:
+
 ```bash
 minikube start --profile clerum-test --cpus 6 --memory 10240 --driver docker --cni calico
 # or simply:
@@ -187,16 +195,17 @@ Desktop App
 
 ### Critical Invariants
 
-| Invariant | Description |
-|-----------|-------------|
-| **Same RSA key** | `rpc-proxy-secrets.JWT_PUBLIC_KEY` == `mcp-host-config.CLERUM_AUTH_JWT_PUBLIC_KEY` == public pair of `jwt-signing-keys.CONTROL_API_RPC_JWT_PRIVATE_KEY` |
-| **Audience passthrough** | mcp-host validates `aud: "rpc-proxy"` (NOT `"mcp-host"`). The rpc-proxy passes through the user's token; mcp-host is downstream of the proxy. |
-| **Issuer** | All RPC tokens have `iss: "control-api"`. mcp-host must have `CLERUM_AUTH_JWT_ISSUER=control-api` |
-| **Auth header** | `rpc-proxy/src/services/controlApiRestService.ts` MUST return `headers: { authorization: \`Bearer \${rpcAccessToken}\` }` in `fetchHostConnectionFromControlApi`. Without this, mcp-host receives requests without a token. |
+| Invariant                | Description                                                                                                                                                                                                               |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Same RSA key**         | `rpc-proxy-secrets.JWT_PUBLIC_KEY` == `mcp-host-config.CLERUM_AUTH_JWT_PUBLIC_KEY` == public pair of `jwt-signing-keys.CONTROL_API_RPC_JWT_PRIVATE_KEY`                                                                   |
+| **Audience passthrough** | mcp-host validates `aud: "rpc-proxy"` (NOT `"mcp-host"`). The rpc-proxy passes through the user's token; mcp-host is downstream of the proxy.                                                                             |
+| **Issuer**               | All RPC tokens have `iss: "control-api"`. mcp-host must have `CLERUM_AUTH_JWT_ISSUER=control-api`                                                                                                                         |
+| **Auth header**          | `rpc-proxy/src/services/controlApiRestService.ts` MUST return `headers: { authorization: \`Bearer \${rpcAccessToken}\` }`in`fetchHostConnectionFromControlApi`. Without this, mcp-host receives requests without a token. |
 
 ### Required Configuration Per Service
 
 #### rpc-proxy-secrets (Secret, namespace: rpc-proxy)
+
 ```
 RPC_PROXY_JWT_PUBLIC_KEY      = <RSA-4096 public key, pair of CONTROL_API_RPC_JWT_PRIVATE_KEY>
 RPC_PROXY_JWT_ISSUER          = control-api
@@ -204,6 +213,7 @@ RPC_PROXY_JWT_AUDIENCE        = rpc-proxy
 ```
 
 #### mcp-host-config (ConfigMap, namespace: mcp-host)
+
 ```
 CLERUM_ENABLE_AUTH            = true
 CLERUM_AUTH_JWT_ISSUER        = control-api
@@ -289,12 +299,12 @@ kubectl port-forward -n profiles svc/external-rest-api 8091:8091 --context cleru
 kubectl port-forward -n rpc-proxy svc/rpc-proxy 8094:8094 --context clerum-test &
 ```
 
-| Port | Service | Usage |
-|------|---------|-------|
-| :8091 | external-rest-api | Login OAuth / issueRpcToken |
-| :8094 | rpc-proxy | SSE stream + invoke/approve/deny |
-| :8090 | control-api | Admin UI, CRUD (optional for Desktop) |
-| :3000 | control-ui | Control UI web (optional) |
+| Port  | Service           | Usage                                 |
+| ----- | ----------------- | ------------------------------------- |
+| :8091 | external-rest-api | Login OAuth / issueRpcToken           |
+| :8094 | rpc-proxy         | SSE stream + invoke/approve/deny      |
+| :8090 | control-api       | Admin UI, CRUD (optional for Desktop) |
+| :3000 | control-ui        | Control UI web (optional)             |
 
 > **After any pod restart**: port-forwards are disconnected.
 > Always re-run `make minikube-pf-desktop` after a `kubectl rollout restart`.
@@ -354,11 +364,11 @@ kubectl get configmap clerum-wrc-public-key -n sandbox-recipes --context clerum-
 
 ### Workflow Env Vars (deploy/minikube/services/wrc/deployment.yaml)
 
-| Variable | Default | Usage |
-|----------|---------|-------|
-| `CLERUM_COORDINATOR_IMAGE` | `clerum/workflow-coordinator:test` | Coordinator pod image |
-| `CLERUM_MCP_HOST_IMAGE` | `clerum/mcp-host:test` | mcp_host image injected into workflows |
-| `CLERUM_WRC_SERVICE_NAME` | `workflow-recipes` | Service name for coordinator DNS callbacks |
+| Variable                   | Default                            | Usage                                      |
+| -------------------------- | ---------------------------------- | ------------------------------------------ |
+| `CLERUM_COORDINATOR_IMAGE` | `clerum/workflow-coordinator:test` | Coordinator pod image                      |
+| `CLERUM_MCP_HOST_IMAGE`    | `clerum/mcp-host:test`             | mcp_host image injected into workflows     |
+| `CLERUM_WRC_SERVICE_NAME`  | `workflow-recipes`                 | Service name for coordinator DNS callbacks |
 
 > **Bug fixed**: previously `clerum-operator` was used as the service name. The coordinator could
 > not reach the WRC REST endpoint and all status updates returned `ECONNREFUSED`.
@@ -422,14 +432,14 @@ authoritative.
 
 When the WRC creates a workflow, it generates **6 NetworkPolicies** (previously 4, with 2 missing):
 
-| NP | Namespace | Direction | Purpose |
-|----|-----------|-----------|---------|
-| `{name}-coord-to-mcp-host` | `sandbox-recipes` | Egress | Coordinator → mcp_host pod |
-| `{name}-coord-to-wrc` | `sandbox-recipes` | Egress | Coordinator → WRC REST API |
-| `{name}-wrc-to-mcp-host` | `sandbox-recipes` | Ingress | WRC → mcp_host (`/configure` after `/configure-model` or SDK `/injections/model`) |
-| `{name}-mcp-host-to-servers` | `sandbox-recipes` | Egress | mcp_host → MCP servers in `mcp-server` |
-| `{name}-wf-mcp-host-ingress` | **`mcp-server`** | Ingress | MCP servers accept connections from mcp_host |
-| `{name}-mcp-host-to-llm-api` | `sandbox-recipes` | Egress | mcp_host → external LLM (ports 443/80) |
+| NP                           | Namespace         | Direction | Purpose                                                                           |
+| ---------------------------- | ----------------- | --------- | --------------------------------------------------------------------------------- |
+| `{name}-coord-to-mcp-host`   | `sandbox-recipes` | Egress    | Coordinator → mcp_host pod                                                        |
+| `{name}-coord-to-wrc`        | `sandbox-recipes` | Egress    | Coordinator → WRC REST API                                                        |
+| `{name}-wrc-to-mcp-host`     | `sandbox-recipes` | Ingress   | WRC → mcp_host (`/configure` after `/configure-model` or SDK `/injections/model`) |
+| `{name}-mcp-host-to-servers` | `sandbox-recipes` | Egress    | mcp_host → MCP servers in `mcp-server`                                            |
+| `{name}-wf-mcp-host-ingress` | **`mcp-server`**  | Ingress   | MCP servers accept connections from mcp_host                                      |
+| `{name}-mcp-host-to-llm-api` | `sandbox-recipes` | Egress    | mcp_host → external LLM (ports 443/80)                                            |
 
 ```bash
 # Verify that all 6 NPs exist:
@@ -438,6 +448,7 @@ kubectl get networkpolicies -n mcp-server -l clerum.io/recipe=<recipeName> --con
 ```
 
 **Bugs fixed:**
+
 - **NP-01**: the `mcp-host-to-servers` egress used label `{workloadId}` — now uses `{recipeName}-{workloadId}` which is the actual pod format.
 - **NP-02**: the ingress NP in `mcp-server` (`wf-mcp-host-ingress`) was missing — the namespace deny-all blocked all cross-namespace traffic.
 - **NP-03**: egress to ports 443/80 for the external LLM (`mcp-host-to-llm-api`) was missing — the `sandbox-recipes` deny-all blocked calls to ZAI/OpenAI and each step timed out at 300s.
@@ -457,15 +468,18 @@ The coordinator used `FETCH_TIMEOUT_MS = 30_000` (fixed 30s) for **all** HTTP ca
 including calls to `/execute` that run LLM steps with timeouts up to 300s.
 
 **Symptom**: the coordinator aborted the step call at 30s with:
+
 ```
 AbortError: The operation was aborted due to timeout
 ```
+
 even though mcp_host was still processing the LLM response.
 
 **Fix applied** (`coordinator.ts`):
+
 ```typescript
 // Dynamic timeout: step timeout + 30s buffer
-const stepTimeoutMs = (body.timeoutSeconds ?? 300) * 1000 + 30_000;
+const stepTimeoutMs = (body.timeoutSeconds ?? 300) * 1000 + 30_000
 ```
 
 ---
@@ -480,6 +494,7 @@ This token is persisted in the Secret `wf-{recipeName}-coordinator-token` in `sa
 be expired or signed with a different key.
 
 **Symptom**:
+
 ```
 [Coordinator] Unhandled error: Error: WRC rejected status update with 401
 ```
@@ -505,10 +520,12 @@ After completing execution, the CRD showed `status.phase: deploying` indefinitel
 `workflowExecution.phase` reported by the coordinator.
 
 **Fix applied** (`workflowReconciler.ts`):
+
 - `workflowExecution.phase === "completed"` → CRD phase `"active"`
 - `workflowExecution.phase === "failed"` → CRD phase `"failed"`
 
 **Verify**:
+
 ```bash
 kubectl get workflowrecipe <recipeName> -n mcp-server -o jsonpath='{.status.phase}' --context clerum-test
 # Expected: "active" after successful execution, "failed" if there was an error
@@ -526,6 +543,7 @@ did a `return` before executing `resolveInputs()`.
 is passed to `ensureWorkflowConfigMap()` for build-time substitution.
 
 **Verify that inputs are resolved in the ConfigMap**:
+
 ```bash
 kubectl get configmap <recipeName>-workflow-config -n sandbox-recipes \
   -o jsonpath='{.data.config\.json}' --context clerum-test | python3 -m json.tool | grep instruction
@@ -543,10 +561,11 @@ For a step to receive the output of the previous step, the CRD author must inclu
 **Symptom without the placeholder**: the subsequent step says "I don't have access to previous results".
 
 **Correct pattern**:
+
 ```yaml
 steps:
   - id: research
-    instruction: "Research {{inputs.topic}}."
+    instruction: 'Research {{inputs.topic}}.'
   - id: summarize
     instruction: |
       Using the following research:
@@ -561,7 +580,7 @@ steps:
 If the referenced step does not exist or did not complete, the placeholder is preserved as literal text
 and the LLM will see `{{research:output}}` in its instruction.
 
-See also: [Full step design rules in CLAUDE.md](../../CLAUDE.md#workflowrecipe--agentic-step-design-rules)
+See also: [Workflow recipe authoring guide](../agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md)
 
 ---
 
@@ -598,6 +617,7 @@ kubectl patch workflowrecipe $RECIPE -n mcp-server --subresource=status --type=m
 ### PVC Immutability — ensure-pvcs.sh
 
 When re-applying manifests with changes to `storageRequest`, Kubernetes returns:
+
 ```
 The PersistentVolumeClaim "..." is invalid: spec.resources.requests.storage: Forbidden: field is immutable
 ```
@@ -617,8 +637,8 @@ bash scripts/minikube/ensure-pvcs.sh
 
 The key in the Secret `rpc-proxy-secrets` was renamed (2026-03-23):
 
-| Before | After |
-|--------|-------|
+| Before           | After                      |
+| ---------------- | -------------------------- |
 | `JWT_PUBLIC_KEY` | `RPC_PROXY_JWT_PUBLIC_KEY` |
 
 The Makefile (`minikube-sync-auth-key`) and `generate-keys.sh` already use the new name.
@@ -635,6 +655,7 @@ make minikube-sync-auth-key
 ## Quick Diagnostics
 
 ### View Status of All Services
+
 ```bash
 make minikube-status
 # or:
@@ -642,6 +663,7 @@ kubectl get pods -A --no-headers | awk '{print $1, $2, $3}' | column -t
 ```
 
 ### View Logs for a Service
+
 ```bash
 make minikube-logs SVC=rpc-proxy NS=rpc-proxy
 make minikube-logs SVC=chatllm NS=mcp-host
@@ -649,6 +671,7 @@ make minikube-logs SVC=control-api NS=control-plane
 ```
 
 ### End-to-End Auth Test From Inside the Cluster
+
 ```bash
 # Generate a token in control-api and verify it in chatllm:
 PRIV=$(kubectl get secret rpc-proxy-secrets -n rpc-proxy \
@@ -667,13 +690,17 @@ kubectl exec -n mcp-host deployment/chatllm -- \
 ## Troubleshooting
 
 ### Login fails with 401 Unauthorized
+
 Service tokens may not be properly applied. Run:
+
 ```bash
 make minikube-setup ARGS="--skip-build"   # Re-applies kustomize overlay with correct tokens
 ```
 
 ### ImagePullBackOff on pods
+
 Images are tagged `:test` locally but the cluster can't find them. Run:
+
 ```bash
 make minikube-pre-gate-sync GATE=image-refresh ARGS="--force-cluster-sync"
 # or:
@@ -682,13 +709,17 @@ make minikube-restart-all     # Restart deployments to pick up images
 ```
 
 ### Postgres CrashLoopBackOff (WAL corruption)
+
 Common after cold starts. The setup script detects and auto-fixes this, but you can also run manually:
+
 ```bash
 make minikube-setup ARGS="--reset-db --skip-build"
 ```
 
 ### JWT 401 errors after key regeneration
+
 Run:
+
 ```bash
 make minikube-gen-keys        # Regenerates + auto-syncs
 make minikube-restart-all     # Restart all pods to pick up new keys
@@ -698,26 +729,26 @@ make minikube-restart-all     # Restart all pods to pick up new keys
 
 ## Known Issues and Solutions
 
-| Symptom | Cause | Solution |
-|---------|-------|----------|
-| `401: "Invalid token"` from chatllm | Token expired in SSE stream, or incorrect audience | Verify `CLERUM_AUTH_JWT_AUDIENCE=rpc-proxy` in mcp-host-config. Restart chatllm. |
-| `401: "Missing token"` from chatllm | `controlApiRestService.ts` returns `headers: {}` without Bearer | Verify the code has `headers: { authorization: \`Bearer \${rpcAccessToken}\` }` |
-| `401: "Invalid token"` in rpc-proxy when opening stream | Session token expired in Desktop App | Close and reopen the app, do logout/login |
-| `403: "Forbidden: user cannot access this host"` | hostRef does not match what is authorized in control-api, or the Host CRD does not exist | Verify `kubectl get host chatllm -n mcp-host`, verify host assignment to team |
-| Pod in `ImagePullBackOff` | Image not loaded in minikube | `make minikube-build-images` |
-| Port forward dropped after pod restart | Kubernetes closes the tunnel when the pod restarts | `make minikube-pf-desktop` |
-| `409 Conflict` on first setup | Previous data in postgres | `make minikube-db-reset` |
-| SSE stream closes with `"auth-expired"` | Token expired (300s TTL) while the stream was open | Normal. The Desktop App reconnects automatically with a fresh token. |
-| **Workflow** — `WRC returned 404 on GET status` | Stale rollout, old WRC, or a legacy recipe CRD outside `sandbox-recipes` | Run the clean pre-gate sync, verify `kubectl get workflowrecipes -n sandbox-recipes`, and delete any legacy `workflowrecipes` in `mcp-server`. |
-| **Workflow** — `Failed to connect to MCP servers` | NP-01: incorrect egress label (`{workloadId}` instead of `{recipeName}-{workloadId}`) or NP-02: missing ingress in `mcp-server` | Verify 6 NPs with `kubectl get netpol -n sandbox-recipes` and `-n mcp-server`. Reset workflow. |
-| **Workflow** — step timeout at 30s (`AbortError`) | Coordinator used fixed 30s timeout on `/execute`. Fix in `coordinator.ts` | Ensure updated `clerum/workflow-coordinator:test` image is used. |
-| **Workflow** — step timeout at 300s (no explicit error) | NP-03: missing egress NP for external LLM (ports 443/80) | Reset workflow + verify NP `{name}-mcp-host-to-llm-api` exists in `sandbox-recipes`. |
-| **Workflow** — `401` in coordinator when reporting status | Coordinator JWT token expired (WRC restarted or token TTL expired) | Delete Secret `wf-{name}-coordinator-token` + pods + reset status. See "Full Workflow Reset" section. |
-| **Workflow** — CRD phase stuck on `deploying` | Bug fixed in `workflowReconciler.ts`. Ensure updated WRC image. | `kubectl rollout restart deployment/workflow-recipes -n control-plane` |
-| **Workflow** — `{{inputs.topic}}` in instruction (literal) | The reconciler did not execute `resolveInputs()` before the early return | Updated WRC image fixes this. Delete workflow ConfigMap + reset. |
-| **Workflow** — step does not receive data from previous step | Missing `{{stepId:output}}` in the instruction (common in old templates) | Edit the step instruction in the CRD. `dependsOn` does not inject data. |
-| `field is immutable` on PVC when applying manifests | `storageRequest` changed in manifest for existing PVC | `bash scripts/minikube/ensure-pvcs.sh` before `kubectl apply` |
-| `clerum-wrc-public-key not found` in coordinator logs | Public key ConfigMap does not exist in `sandbox-recipes` | `make minikube-gen-keys && make minikube-apply-secrets` (script updated 2026-03-23) |
+| Symptom                                                      | Cause                                                                                                                           | Solution                                                                                                                                       |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `401: "Invalid token"` from chatllm                          | Token expired in SSE stream, or incorrect audience                                                                              | Verify `CLERUM_AUTH_JWT_AUDIENCE=rpc-proxy` in mcp-host-config. Restart chatllm.                                                               |
+| `401: "Missing token"` from chatllm                          | `controlApiRestService.ts` returns `headers: {}` without Bearer                                                                 | Verify the code has `headers: { authorization: \`Bearer \${rpcAccessToken}\` }`                                                                |
+| `401: "Invalid token"` in rpc-proxy when opening stream      | Session token expired in Desktop App                                                                                            | Close and reopen the app, do logout/login                                                                                                      |
+| `403: "Forbidden: user cannot access this host"`             | hostRef does not match what is authorized in control-api, or the Host CRD does not exist                                        | Verify `kubectl get host chatllm -n mcp-host`, verify host assignment to team                                                                  |
+| Pod in `ImagePullBackOff`                                    | Image not loaded in minikube                                                                                                    | `make minikube-build-images`                                                                                                                   |
+| Port forward dropped after pod restart                       | Kubernetes closes the tunnel when the pod restarts                                                                              | `make minikube-pf-desktop`                                                                                                                     |
+| `409 Conflict` on first setup                                | Previous data in postgres                                                                                                       | `make minikube-db-reset`                                                                                                                       |
+| SSE stream closes with `"auth-expired"`                      | Token expired (300s TTL) while the stream was open                                                                              | Normal. The Desktop App reconnects automatically with a fresh token.                                                                           |
+| **Workflow** — `WRC returned 404 on GET status`              | Stale rollout, old WRC, or a legacy recipe CRD outside `sandbox-recipes`                                                        | Run the clean pre-gate sync, verify `kubectl get workflowrecipes -n sandbox-recipes`, and delete any legacy `workflowrecipes` in `mcp-server`. |
+| **Workflow** — `Failed to connect to MCP servers`            | NP-01: incorrect egress label (`{workloadId}` instead of `{recipeName}-{workloadId}`) or NP-02: missing ingress in `mcp-server` | Verify 6 NPs with `kubectl get netpol -n sandbox-recipes` and `-n mcp-server`. Reset workflow.                                                 |
+| **Workflow** — step timeout at 30s (`AbortError`)            | Coordinator used fixed 30s timeout on `/execute`. Fix in `coordinator.ts`                                                       | Ensure updated `clerum/workflow-coordinator:test` image is used.                                                                               |
+| **Workflow** — step timeout at 300s (no explicit error)      | NP-03: missing egress NP for external LLM (ports 443/80)                                                                        | Reset workflow + verify NP `{name}-mcp-host-to-llm-api` exists in `sandbox-recipes`.                                                           |
+| **Workflow** — `401` in coordinator when reporting status    | Coordinator JWT token expired (WRC restarted or token TTL expired)                                                              | Delete Secret `wf-{name}-coordinator-token` + pods + reset status. See "Full Workflow Reset" section.                                          |
+| **Workflow** — CRD phase stuck on `deploying`                | Bug fixed in `workflowReconciler.ts`. Ensure updated WRC image.                                                                 | `kubectl rollout restart deployment/workflow-recipes -n control-plane`                                                                         |
+| **Workflow** — `{{inputs.topic}}` in instruction (literal)   | The reconciler did not execute `resolveInputs()` before the early return                                                        | Updated WRC image fixes this. Delete workflow ConfigMap + reset.                                                                               |
+| **Workflow** — step does not receive data from previous step | Missing `{{stepId:output}}` in the instruction (common in old templates)                                                        | Edit the step instruction in the CRD. `dependsOn` does not inject data.                                                                        |
+| `field is immutable` on PVC when applying manifests          | `storageRequest` changed in manifest for existing PVC                                                                           | `bash scripts/minikube/ensure-pvcs.sh` before `kubectl apply`                                                                                  |
+| `clerum-wrc-public-key not found` in coordinator logs        | Public key ConfigMap does not exist in `sandbox-recipes`                                                                        | `make minikube-gen-keys && make minikube-apply-secrets` (script updated 2026-03-23)                                                            |
 
 ---
 
