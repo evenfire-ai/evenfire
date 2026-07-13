@@ -43,7 +43,7 @@ connector path exercised.
 
 1. [Production deploy notes](../deploy/production.md)
 2. Security model + [SECURITY.md](../../SECURITY.md)
-3. License / source-available terms in root [README](../../README.md#license) and [LICENSE](../../LICENSE)
+3. License (MPL-2.0) in root [README](../../README.md#license) and [LICENSE](../../LICENSE)
 
 ## Stuck?
 

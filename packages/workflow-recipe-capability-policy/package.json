@@ -13,5 +13,5 @@
     },
     "./policy.json": "./policy.json"
   },
-  "license": "SEE LICENSE IN LICENSE"
+  "license": "MPL-2.0"
 }

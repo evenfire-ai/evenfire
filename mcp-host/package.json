@@ -23,7 +23,7 @@
     "claude",
     "llm"
   ],
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MPL-2.0",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.0",
     "@kubernetes/client-node": "^1.0.0",

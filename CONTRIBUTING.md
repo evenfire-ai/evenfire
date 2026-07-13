@@ -1,7 +1,7 @@
 # Contributing to evenfire
 
-Thanks for your interest. evenfire is **source-available** (Apache-2.0 + a
-no-compete addendum) and requires a signed CLA.
+Thanks for your interest. evenfire is **open source** (MPL-2.0) and requires a
+signed CLA.
 
 ## Before you start
 

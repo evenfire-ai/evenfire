@@ -1,6 +1,7 @@
 {
   "name": "clerum-playwright-tests",
   "version": "0.1.13",
+  "license": "MPL-2.0",
   "private": true,
   "description": "Playwright E2E tests for Control UI and Desktop App",
   "scripts": {

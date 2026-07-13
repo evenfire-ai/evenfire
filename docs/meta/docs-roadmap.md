@@ -29,16 +29,16 @@ slim dev runtime. That is a deliberate trade: higher trust / higher time-to-firs
 
 ### Root README — grade **A-** (launch-ready front door)
 
-| Criterion              | Score | Notes                                                                 |
-| ---------------------- | ----- | --------------------------------------------------------------------- |
-| 30s value prop         | A     | “Build multi-channel LLM agents you own” + real actions               |
-| Differentiator clarity | A     | Capability tour + approvals + NetworkPolicy story                     |
-| Time-to-first-success  | B     | Real success (desktop + JWT API), but **≥10 GB / 6 CPU / 5–10 min**   |
-| Trust / honesty        | A-    | Security caveats improved; CLA still draft; LICENSE provisional       |
-| Code-backed claims     | A-    | Tools tied to `nativeToolRegistry.ts`; seed default zai called out    |
-| Competitor silence     | A     | No product names                                                      |
-| Length / skim          | B     | 434 lines — rich but long for GitHub fold; capability tour is the win |
-| Visual proof           | C     | Still no screenshots / GIF of desktop approval                        |
+| Criterion              | Score | Notes                                                                                 |
+| ---------------------- | ----- | ------------------------------------------------------------------------------------- |
+| 30s value prop         | A     | “Build multi-channel LLM agents you own” + real actions                               |
+| Differentiator clarity | A     | Capability tour + approvals + NetworkPolicy story                                     |
+| Time-to-first-success  | B     | Real success (desktop + JWT API), but **≥10 GB / 6 CPU / 5–10 min**                   |
+| Trust / honesty        | A-    | Security caveats improved; CLA still draft; LICENSE provisional (since resolved — §9) |
+| Code-backed claims     | A-    | Tools tied to `nativeToolRegistry.ts`; seed default zai called out                    |
+| Competitor silence     | A     | No product names                                                                      |
+| Length / skim          | B     | 434 lines — rich but long for GitHub fold; capability tour is the win                 |
+| Visual proof           | C     | Still no screenshots / GIF of desktop approval                                        |
 
 **Strengths**
 
@@ -59,8 +59,9 @@ slim dev runtime. That is a deliberate trade: higher trust / higher time-to-firs
 3. **CLA.md still DRAFT** while `signatures/cla.json` has a signature — the
    document itself says counsel review must precede any signing. Legal
    inconsistency; highest-priority human item.
-4. **LICENSE use grant still PROVISIONAL** — superseded by the 2026-07-13
-   decision to migrate to the latest MPL (see §6 P0 and §9).
+4. **LICENSE use grant still PROVISIONAL** — resolved: the 2026-07-13 MPL
+   migration was **executed** the same day (see §9 status; LICENSE is now
+   canonical MPL-2.0, no additional restriction).
 5. **Default host model `zai`** is correct to document; still a footgun if users
    only set `OPENAI_API_KEY` (mitigated by README warning).
 6. Capability table implies broad enablement; some tools need flags
@@ -99,10 +100,10 @@ warns — it does).
    equal peer without product decision.
 2. **Optional “dev slice” later** only if product wants sub-5-min try-without-K8s;
    if added, label clearly as **incomplete security**.
-3. Finish **trust surfaces**: CLA counsel pass; **license migration to the
-   latest MPL (MPL-2.0)** — decided 2026-07-13, replaces finalizing the
-   Apache-2.0 use grant (see §9); `security@evenfire.ai` mailbox confirmed
-   2026-07-12, GH private reporting to verify.
+3. Finish **trust surfaces**: CLA counsel pass (still open); **license
+   migration to MPL-2.0 executed 2026-07-13** (see §9 status);
+   `security@evenfire.ai` mailbox confirmed 2026-07-12, GH private reporting
+   to verify.
 4. **Service README backlog** (§2 table, §6 P1 rows) — six missing edge/file
    READMEs + control-ui / HCC accuracy pass.
 5. **Visual assets** — 3–5 screenshots (desktop chat + approval, Control UI,
@@ -124,7 +125,8 @@ warns — it does).
 ## 4. Explicit non-goals (for now)
 
 - Competitor comparison pages naming products (keep categories only).
-- Claiming OSI open source.
+- Retaining “source-available” / “not open source” language anywhere — the repo
+  is MPL-2.0 open source since 2026-07-13.
 - Restoring Compose as the default first-run without a product owner decision.
 - Publishing internal phase plans / `docs/superpowers` audits.
 
@@ -150,25 +152,25 @@ If length becomes a problem, **trim 5 and 9** first, not 3 or 4.
 
 ## 6. Prioritized backlog
 
-| P   | Item                                                                                                                                                                                                  | Owner type       | Depends on                |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ------------------------- |
-| P0  | Legal: **migrate license to latest MPL (MPL-2.0)** + CLA counsel pass; align with cla.json (see §9)                                                                                                   | Human / counsel  | decision taken 2026-07-13 |
-| P0  | Verify GH private vulnerability reporting enabled (security@ mailbox confirmed)                                                                                                                       | Human            | —                         |
-| P1  | Six missing service READMEs (1 screen each: purpose, ports, env, security)                                                                                                                            | Docs eng         | —                         |
-| P1  | control-ui README: real route groups + auth story (AuthGate exists)                                                                                                                                   | Docs eng         | —                         |
-| P1  | HCC README: document 4-layer NetworkPolicy model                                                                                                                                                      | Docs eng         | code already exists       |
-| P1  | Screenshots / short demo GIF                                                                                                                                                                          | Design / product | running minikube          |
-| P1  | Cut **v0.1.1** — v0.1.0 tarball predates PR #3 and still contains the deleted Compose quickstart                                                                                                      | Eng              | PR #4 merge               |
-| P2  | Automate test counts (make target printing file/case counts; README cites it)                                                                                                                         | Eng              | —                         |
-| P2  | e2e-guide internal debt: CLAUDE.md-era test tables (“Total 1,944”) and prose refs                                                                                                                     | Docs eng         | —                         |
-| P2  | Document-or-mark-experimental the four undocumented `mcp-servers/` dirs (web-search, playwright, doc-generator = real servers referenced from docs; alphavantage = stub) + add to “Available Servers” | Docs eng         | —                         |
-| P2  | Optional README length pass (move ports table to docs)                                                                                                                                                | Docs eng         | —                         |
-| P2  | Docs website                                                                                                                                                                                          | Eng              | —                         |
-| P3  | Fix the zai-default footgun in code: infer provider from whichever single API key is set (`full-setup.sh:571-573`) instead of only warning in docs                                                    | Eng              | —                         |
-| P3  | Resolve or strip TBD placeholders in `docs/crds/workflowrecipe.md` (registry spec “TBD”, unmigrated comparison doc — lines ~177, ~3075, ~4121)                                                        | Docs eng         | —                         |
-| P3  | platform-topology.md “7 namespaces” vs 12 declared in deploy/ (pre-existing)                                                                                                                          | Docs eng         | —                         |
-| P3  | Lightweight non-K8s path (product decision required)                                                                                                                                                  | Product          | decision                  |
-| P3  | Cloud production tutorial                                                                                                                                                                             | Eng              | production env            |
+| P   | Item                                                                                                                                                                                                  | Owner type       | Depends on          |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ------------------- |
+| P0  | Legal: license migration to MPL-2.0 **executed 2026-07-13** (§9); remaining: CLA counsel pass + align with cla.json                                                                                   | Human / counsel  | —                   |
+| P0  | Verify GH private vulnerability reporting enabled (security@ mailbox confirmed)                                                                                                                       | Human            | —                   |
+| P1  | Six missing service READMEs (1 screen each: purpose, ports, env, security)                                                                                                                            | Docs eng         | —                   |
+| P1  | control-ui README: real route groups + auth story (AuthGate exists)                                                                                                                                   | Docs eng         | —                   |
+| P1  | HCC README: document 4-layer NetworkPolicy model                                                                                                                                                      | Docs eng         | code already exists |
+| P1  | Screenshots / short demo GIF                                                                                                                                                                          | Design / product | running minikube    |
+| P1  | Cut **v0.1.1** — v0.1.0 tarball predates PR #3 and still contains the deleted Compose quickstart                                                                                                      | Eng              | PR #4 merge         |
+| P2  | Automate test counts (make target printing file/case counts; README cites it)                                                                                                                         | Eng              | —                   |
+| P2  | e2e-guide internal debt: CLAUDE.md-era test tables (“Total 1,944”) and prose refs                                                                                                                     | Docs eng         | —                   |
+| P2  | Document-or-mark-experimental the four undocumented `mcp-servers/` dirs (web-search, playwright, doc-generator = real servers referenced from docs; alphavantage = stub) + add to “Available Servers” | Docs eng         | —                   |
+| P2  | Optional README length pass (move ports table to docs)                                                                                                                                                | Docs eng         | —                   |
+| P2  | Docs website                                                                                                                                                                                          | Eng              | —                   |
+| P3  | Fix the zai-default footgun in code: infer provider from whichever single API key is set (`full-setup.sh:571-573`) instead of only warning in docs                                                    | Eng              | —                   |
+| P3  | Resolve or strip TBD placeholders in `docs/crds/workflowrecipe.md` (registry spec “TBD”, unmigrated comparison doc — lines ~177, ~3075, ~4121)                                                        | Docs eng         | —                   |
+| P3  | platform-topology.md “7 namespaces” vs 12 declared in deploy/ (pre-existing)                                                                                                                          | Docs eng         | —                   |
+| P3  | Lightweight non-K8s path (product decision required)                                                                                                                                                  | Product          | decision            |
+| P3  | Cloud production tutorial                                                                                                                                                                             | Eng              | production env      |
 
 > In flight: PR #4 (`fix/minikube-docs-followups`) fixes the pf-mcp-host
 > service name, the e2e-approval-flow default email, canonical bootstrap in the
@@ -183,7 +185,7 @@ If length becomes a problem, **trim 5 and 9** first, not 3 or 4.
 - [x] Capability tour code-anchored in README
 - [x] Claims guardrails committed
 - [x] 8 CRDs documented at index level
-- [ ] Legal surfaces not marked provisional/draft (MPL migration, §9)
+- [ ] Legal surfaces not marked draft — LICENSE ✅ MPL-2.0 (2026-07-13); CLA.md still DRAFT (counsel)
 - [ ] All platform services have a minimal README
 - [ ] At least one visual proof in README
 - [ ] No known broken public links (currently OK on root README)
@@ -208,7 +210,14 @@ If length becomes a problem, **trim 5 and 9** first, not 3 or 4.
 
 ---
 
-## 9. License migration — Apache-2.0 + use grant → latest MPL (MPL-2.0)
+## 9. License migration — Apache-2.0 + use grant → MPL-2.0
+
+> **Status: EXECUTED 2026-07-13** (same-day decision by Jose). LICENSE swapped
+> to the canonical mozilla.org MPL-2.0 text (16,726 bytes, verified); all 33
+> `package.json` license fields set to `MPL-2.0` (killing the 2× MIT
+> mislabels); 30 lockfiles synced; every doc surface below flipped from
+> “source-available” to open source. **Pure MPL-2.0 — no additional
+> restriction.** Remaining from this motion: CLA counsel pass only.
 
 **Decision (Jose, 2026-07-13):** replace the current provisional
 “Apache-2.0 + additional use grant” with the **latest Mozilla Public License
@@ -241,4 +250,5 @@ which; docs follow.**
   workflow-approval-request-reader). Lockfile `license` fields follow
 - `TRADEMARK.md` — unchanged (trademarks are independent of MPL)
 
-**Until then:** keep the §4 non-goal (“no OSI claims”) exactly as is.
+**Done:** the former §4 non-goal (“no OSI claims”) is inverted — §4 now
+forbids retaining any “source-available” / “not open source” language.

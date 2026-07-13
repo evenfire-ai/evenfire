@@ -1,6 +1,7 @@
 {
   "name": "@clerum/mock-secrets-server",
   "version": "1.0.2",
+  "license": "MPL-2.0",
   "description": "Mock HTTP server for providing test secrets in E2E tests",
   "type": "module",
   "main": "index.ts",

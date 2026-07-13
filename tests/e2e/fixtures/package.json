@@ -1,6 +1,7 @@
 {
   "name": "@clerum/e2e-test-fixtures",
   "version": "1.0.39",
+  "license": "MPL-2.0",
   "description": "E2E test fixtures and utilities for Clerum testing",
   "type": "module",
   "main": "index.ts",

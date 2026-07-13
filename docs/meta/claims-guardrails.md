@@ -24,12 +24,12 @@ caveats over absolute language.
 | SFS multi-writer everywhere                             | Read-only into agents; RWO single-node default unless stated                                                   |
 | First-party Airtable/Mongo MCP images                   | Upstream images + platform packaging                                                                           |
 | Audit-logging for external-rest-api if still future     | Only what the code ships today                                                                                 |
-| OSI open source                                         | Source-available; Apache-2.0 + additional use grant                                                            |
+| “Source-available” / “not open source” / Apache-2.0     | MPL-2.0 since 2026-07-13 — OSI-approved, file-level copyleft                                                   |
 | Stale test counts from service READMEs                  | Recount or use conservative aggregates                                                                         |
 
 ## Always state (when relevant)
 
-- License is **source-available**, not OSI
+- License is **MPL-2.0** (OSI open source; file-level copyleft)
 - Public name **evenfire** / code name **clerum** (`clerum.io`, `CLERUM_*`)
 - Single-service dev mode (`CLERUM_DEV_MODE`) is **not** full platform security
 - Budgets are cost control, not security

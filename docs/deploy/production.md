@@ -60,11 +60,12 @@ the target is not minikube: the dependency graph is the same.
 - Treat approval policy as a control, not a UX preference.
 - Report vulnerabilities per [SECURITY.md](../../SECURITY.md).
 
-## License boundary
+## License
 
-Self-hosting for your organization is permitted under the project license.
-Operating a **competing multi-tenant managed service** requires a commercial
-license — see [LICENSE](../../LICENSE) and the root README license section.
+evenfire is open source under **MPL-2.0**: self-hosting, modification, and
+commercial use are permitted; file-level copyleft applies when you distribute
+modified MPL-licensed files. Trademarks are separate
+([TRADEMARK.md](../../TRADEMARK.md)) — see [LICENSE](../../LICENSE).
 
 ## Related
 

@@ -27,7 +27,7 @@
     "kubernetes",
     "mcp"
   ],
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MPL-2.0",
   "dependencies": {
     "@clerum/workflow-runtime-core": "file:../workflow-runtime-core"
   },

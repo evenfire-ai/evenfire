@@ -2,6 +2,7 @@
   "name": "evenfire",
   "productName": "Evenfire",
   "version": "0.1.253",
+  "license": "MPL-2.0",
   "private": true,
   "description": "Electron desktop client for Clerum RPC access",
   "main": "dist/main.js",

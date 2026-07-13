@@ -21,7 +21,7 @@
     "slack",
     "email"
   ],
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MPL-2.0",
   "dependencies": {
     "@kubernetes/client-node": "^1.0.0",
     "@slack/web-api": "^7.0.0",

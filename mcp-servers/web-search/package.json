@@ -1,6 +1,7 @@
 {
   "name": "@clerum/web-search-mcp",
   "version": "1.0.3",
+  "license": "MPL-2.0",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

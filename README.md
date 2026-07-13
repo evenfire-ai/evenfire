@@ -4,7 +4,7 @@
 > with human-in-the-loop approvals, least-privilege connectors, and default-deny
 > networking built in. Self-hosted, Kubernetes-native, declared as CRDs.
 
-[![License: Apache 2.0 (+ use grant)](https://img.shields.io/badge/License-Apache_2.0%20%2B%20grant-blue.svg)](LICENSE)
+[![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-brightgreen.svg)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/evenfire-ai/evenfire/ci-public.yml?branch=main&label=CI)](https://github.com/evenfire-ai/evenfire/actions)
 [![GitHub release](https://img.shields.io/github/v/release/evenfire-ai/evenfire?sort=semver)](https://github.com/evenfire-ai/evenfire/releases)
 
@@ -428,7 +428,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-evenfire is licensed under **Apache-2.0 with an additional use grant** (no
-operating a competing managed multi-tenant service). It is **source-available**,
-not OSI open source. Self-hosting for your own organization and internal
-commercial use are permitted. See [LICENSE](LICENSE) and [TRADEMARK.md](TRADEMARK.md).
+evenfire is **open source** under the [Mozilla Public License 2.0](LICENSE)
+(MPL-2.0) — an OSI-approved, file-level copyleft license. Use it, modify it,
+self-host it, and build commercial products on it; changes to MPL-licensed
+files must remain under MPL when distributed. Trademarks are separate — see
+[TRADEMARK.md](TRADEMARK.md).

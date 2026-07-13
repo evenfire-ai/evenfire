@@ -10,10 +10,11 @@ declared as Kubernetes CRDs. See [Why evenfire](concepts/why-evenfire.md).
 
 ### Is it “open source”?
 
-It is **source-available** under Apache-2.0 **with an additional use grant**
-(no competing multi-tenant managed service without a commercial license). That
-is **not** an OSI-approved open-source license. Self-hosting for your own
-organization is allowed. See [LICENSE](../LICENSE).
+Yes — **MPL-2.0** (Mozilla Public License 2.0), an OSI-approved, file-level
+copyleft license. You can use, modify, self-host, and build commercial products
+on it; changes to MPL-licensed files must stay under MPL when distributed,
+while larger works that combine with this code may carry their own licenses.
+See [LICENSE](../LICENSE).
 
 ### Why do I keep seeing “clerum”?
 
