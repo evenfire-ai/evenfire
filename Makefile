@@ -315,8 +315,12 @@ minikube-pf-rpc-proxy: ## Port-forward RPC Proxy → localhost:8094
 	scripts/dev/resilient-kubectl-port-forward.sh "$(MINIKUBE_PROFILE)" rpc-proxy rpc-proxy 8094 8094
 
 .PHONY: minikube-pf-mcp-host
-minikube-pf-mcp-host: ## Port-forward MCP Host → localhost:8080
-	$(KC) port-forward svc/mcp-host -n mcp-host 8080:8080
+minikube-pf-mcp-host: ## Port-forward MCP Host → localhost:8080 (service is named after the Host CRD, e.g. chatllm)
+	@if $(KC) get svc chatllm -n mcp-host >/dev/null 2>&1; then \
+		$(KC) port-forward svc/chatllm -n mcp-host 8080:8080; \
+	else \
+		$(KC) port-forward svc/mcp-host -n mcp-host 8080:8080; \
+	fi
 
 .PHONY: minikube-pf-desktop
 minikube-pf-desktop: ## Port-forward all services needed by Desktop App (background)
