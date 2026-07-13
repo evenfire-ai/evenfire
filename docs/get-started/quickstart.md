@@ -25,18 +25,19 @@ git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
 cp .env.example .env
 ```
 
-Edit `.env` and set **one** key **plus its matching provider**:
+Edit `.env` and set **one** key (setup infers the matching provider):
 
 ```bash
 OPENAI_API_KEY=sk-...
-CLERUM_MODEL_PROVIDER=openai     # REQUIRED: openai | claude | zai | bailian
-# CLERUM_MODEL_NAME=gpt-5.4-mini # optional model override
+CLERUM_MODEL_PROVIDER=openai     # optional with one key: openai | claude | zai | bailian
+# CLERUM_MODEL_NAME=gpt-5.4-mini # optional model override (default follows the provider)
 ```
 
-> ⚠️ **The most common failure:** if `CLERUM_MODEL_PROVIDER` is unset, the
-> seeded Host CRD defaults to `zai` / `glm-5.1` — regardless of which API key
-> you provided — and the agent will not reply. Always set the provider to
-> match your key.
+> ⚠️ **Provider selection:** with exactly **one** API key set, setup auto-infers
+> `CLERUM_MODEL_PROVIDER` and logs the choice. With multiple keys, set it
+> explicitly — setup fails with a clear error naming the keys instead of
+> guessing. With no key at all, the seeded agent gets placeholder credentials
+> and will not reply.
 
 ## 2. Set up the cluster (one command)
 
@@ -130,13 +131,13 @@ Details: [Connect Telegram](../how-to/connect-telegram.md).
 
 ## Troubleshooting
 
-| Symptom                                    | Fix                                                                    |
-| ------------------------------------------ | ---------------------------------------------------------------------- |
-| Agent never replies                        | `CLERUM_MODEL_PROVIDER` unset or mismatched with your key (see step 1) |
-| `minikube start` fails                     | Docker Desktop has less than 10 GB RAM / 6 CPUs allocated              |
-| Pods `Pending` early on                    | Calico is still coming up — wait, then `make minikube-status`          |
-| postgres CrashLoopBackOff after cold start | `make minikube-setup ARGS="--reset-db --skip-build"`                   |
-| Port-forwards die                          | re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops)       |
+| Symptom                                    | Fix                                                                                               |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| Agent never replies                        | No real LLM key in `.env`; with several keys, set `CLERUM_MODEL_PROVIDER` explicitly (see step 1) |
+| `minikube start` fails                     | Docker Desktop has less than 10 GB RAM / 6 CPUs allocated                                         |
+| Pods `Pending` early on                    | Calico is still coming up — wait, then `make minikube-status`                                     |
+| postgres CrashLoopBackOff after cold start | `make minikube-setup ARGS="--reset-db --skip-build"`                                              |
+| Port-forwards die                          | re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops)                                  |
 
 ## Next steps
 

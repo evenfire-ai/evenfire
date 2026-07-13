@@ -8,10 +8,16 @@ This directory contains MCP server implementations, test suites, and Kubernetes 
 
 ## Available Servers
 
-| Server | Description | Transport | Port |
-|--------|-------------|-----------|------|
-| **Airtable** | Airtable API integration for bases, tables, and records | StreamableHTTP | 3000 |
-| **MongoDB** | MongoDB integration for querying, aggregation, and schema inspection | StreamableHTTP | 3000 |
+| Server                                         | Description                                                                             | Transport      | Port | Status                             |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------- | -------------- | ---- | ---------------------------------- |
+| **[Airtable](./airtable/README.md)**           | Airtable API integration for bases, tables, and records                                 | StreamableHTTP | 3000 | Tested — dedicated unit-test suite |
+| **[MongoDB](./mongodb/README.md)**             | MongoDB integration for querying, aggregation, and schema inspection                    | StreamableHTTP | 3000 | Tested — dedicated unit-test suite |
+| **[Web Search](./web-search/README.md)**       | Brave Search API web/news search and page fetching (first-party source)                 | StreamableHTTP | 3000 | Available — no test suite yet      |
+| **[Playwright](./playwright/README.md)**       | Browser automation via the upstream Microsoft Playwright MCP image                      | StreamableHTTP | 8931 | Available — no test suite yet      |
+| **[Doc Generator](./doc-generator/README.md)** | Markdown → print-ready HTML documents and Excel (.xlsx) generation (first-party source) | StreamableHTTP | 3000 | Available — no test suite yet      |
+| **[Alpha Vantage](./alphavantage/README.md)**  | Secret template only — no Dockerfile, source, or CRD yet                                | —              | —    | Experimental stub                  |
+
+"Tested" refers to the unit-test suites under `__tests__/` in this package (see [Testing](#testing)); the servers marked "available" build and deploy but do not have test suites here yet. Web Search and Doc Generator ship no in-tree `mcpserver.yaml` — see their READMEs for how to deploy them.
 
 ## Project Structure
 
@@ -33,6 +39,11 @@ mcp-servers/
 │       ├── mongodb.connection.test.ts
 │       ├── mongodb.mcp.test.ts
 │       └── mongodb.statefulset.test.ts
+├── web-search/                  # Web Search MCP server (first-party src/ + Dockerfile)
+├── playwright/                  # Playwright MCP server (upstream image + CRD spec)
+├── doc-generator/               # Doc Generator MCP server (first-party src/ + Dockerfile)
+├── alphavantage/                # Experimental stub (secret template only)
+├── makefile                     # deploy-* / undeploy-* targets (mongodb, airtable, playwright)
 ├── utils/                       # Shared utilities
 │   └── yaml-loader.ts          # YAML parser for tests
 ├── vitest.config.ts            # Test configuration
@@ -85,7 +96,7 @@ metadata:
   namespace: mcp-server
 spec:
   contextRef: context1
-  description: "Airtable MCP server for data operations"
+  description: 'Airtable MCP server for data operations'
   image: your-registry.example.com/evenfire/airtable-mcp-server:latest
   imagePullPolicy: Always
   transport:
@@ -102,11 +113,11 @@ spec:
         envVar: AIRTABLE_API_KEY
   resources:
     requests:
-      memory: "128Mi"
-      cpu: "100m"
+      memory: '128Mi'
+      cpu: '100m'
     limits:
-      memory: "256Mi"
-      cpu: "500m"
+      memory: '256Mi'
+      cpu: '500m'
   auth:
     type: none
   enabled: true
@@ -170,10 +181,13 @@ All servers use **StreamableHTTP** transport:
 
 ## Resource Requirements
 
-| Server | Memory Request | Memory Limit | CPU Request | CPU Limit |
-|--------|----------------|--------------|-------------|-----------|
-| Airtable | 128Mi | 256Mi | 100m | 500m |
-| MongoDB | 128Mi | 256Mi | 100m | 500m |
+| Server     | Memory Request | Memory Limit | CPU Request | CPU Limit |
+| ---------- | -------------- | ------------ | ----------- | --------- |
+| Airtable   | 128Mi          | 256Mi        | 100m        | 500m      |
+| MongoDB    | 128Mi          | 256Mi        | 100m        | 500m      |
+| Playwright | 512Mi          | 1Gi          | 250m        | 1000m     |
+
+Web Search and Doc Generator have no in-tree `McpServer` CRD, so no resource requirements are defined here.
 
 ## Architecture
 
@@ -197,6 +211,7 @@ MCP servers are deployed as Kubernetes Deployments (or StatefulSets for stateful
 ### Test Structure
 
 Follow the established test pattern:
+
 - `*.config.test.ts` - CRD configuration validation
 - `*.api.test.ts` - API interaction mocks
 - `*.mcp.test.ts` - MCP protocol operations
@@ -230,6 +245,7 @@ kubectl logs -n mcp-server -l app=airtable-server
 ### Connection Failures
 
 Verify:
+
 1. Secret exists and has correct keys
 2. Service is reachable: `kubectl get svc -n mcp-server`
 3. NetworkPolicies allow traffic
@@ -244,22 +260,24 @@ Complete guide for testing the MCP servers (Airtable, MongoDB) in the Clerum pro
 
 ### Test Statistics
 
-| Metric | Value |
-|--------|-------|
-| **Total Test Cases** | 343 unit tests |
-| **Test Framework** | Vitest 4.0.18 |
-| **Test Environment** | Node.js |
-| **Coverage** | Configuration, API, MCP, K8s resources |
+| Metric               | Value                                  |
+| -------------------- | -------------------------------------- |
+| **Total Test Cases** | 343 unit tests                         |
+| **Test Framework**   | Vitest 4.0.18                          |
+| **Test Environment** | Node.js                                |
+| **Coverage**         | Configuration, API, MCP, K8s resources |
 
 ### Test Files by Server
 
 **Airtable**
+
 - `airtable.config.test.ts` — CRD and configuration validation
 - `airtable.api.test.ts` — Airtable API mocking and interactions
 - `airtable.mcp.test.ts` — MCP protocol operations
 - `airtable.k8s.test.ts` — Kubernetes resource generation
 
 **MongoDB**
+
 - `mongodb.config.test.ts` — CRD and configuration validation
 - `mongodb.connection.test.ts` — MongoDB connection handling
 - `mongodb.mcp.test.ts` — MCP protocol operations
@@ -307,6 +325,7 @@ Tests are organized into four categories. A given server may have several or all
 Validate CRD specifications, environment variable mappings, resource requirements, and secret configurations.
 
 **What they test:**
+
 - CRD metadata (API version, kind, names)
 - Context references
 - Transport configuration (StreamableHTTP)
@@ -316,9 +335,9 @@ Validate CRD specifications, environment variable mappings, resource requirement
 - Authentication configuration
 
 ```typescript
-expect(crd.apiVersion).toBe('clerum.io/v1alpha1');
-expect(crd.kind).toBe('McpServer');
-expect(crd.spec.transport.type).toBe('streamableHttp');
+expect(crd.apiVersion).toBe('clerum.io/v1alpha1')
+expect(crd.kind).toBe('McpServer')
+expect(crd.spec.transport.type).toBe('streamableHttp')
 ```
 
 #### 2. API Tests (`*.api.test.ts`)
@@ -326,6 +345,7 @@ expect(crd.spec.transport.type).toBe('streamableHttp');
 Test external API interactions using mocks. Validate API client behavior, error handling, and rate limiting.
 
 **What they test:**
+
 - API mock setup
 - Response parsing
 - Error handling (rate limits, auth failures)
@@ -333,6 +353,7 @@ Test external API interactions using mocks. Validate API client behavior, error 
 - Retry logic
 
 **Key fixtures:**
+
 - `MockAirtableClient` — Simulates Airtable API
 - `MockMongoClient` — Simulates MongoDB connections
 
@@ -341,6 +362,7 @@ Test external API interactions using mocks. Validate API client behavior, error 
 Validate MCP protocol operations including `tools/list`, `tools/call`, and session management.
 
 **What they test:**
+
 - MCP `tools/list` endpoint
 - Tool parameter validation
 - Tool execution (`tools/call`)
@@ -348,6 +370,7 @@ Validate MCP protocol operations including `tools/list`, `tools/call`, and sessi
 - Error responses
 
 **Example MCP tools validated:**
+
 - `airtable_list_bases`, `airtable_list_tables`, `airtable_list_records`
 - `mongodb_find`, `mongodb_aggregate`, `mongodb_count_documents`
 
@@ -356,6 +379,7 @@ Validate MCP protocol operations including `tools/list`, `tools/call`, and sessi
 Validate Kubernetes resource generation (Deployments, Services, StatefulSets).
 
 **What they test:**
+
 - Deployment resource generation
 - Service resource generation
 - StatefulSet generation (MongoDB)
@@ -370,15 +394,16 @@ Validate Kubernetes resource generation (Deployments, Services, StatefulSets).
 Simple YAML parser for loading test fixtures from CRD files.
 
 ```typescript
-import { loadYaml } from '../../utils/yaml-loader';
+import { loadYaml } from '../../utils/yaml-loader'
 
-const crd = loadYaml(yamlContent);
-expect(crd.kind).toBe('McpServer');
+const crd = loadYaml(yamlContent)
+expect(crd.kind).toBe('McpServer')
 ```
 
 #### Mock Clients
 
 Test files include mock implementations for:
+
 - `MockAirtableClient` — Airtable API mock
 - `MockMongoClient` — MongoDB connection mock
 - `MockAirtableMcpServer` — MCP server mock
@@ -386,6 +411,7 @@ Test files include mock implementations for:
 ### Test Fixtures
 
 Test fixtures are located alongside test files:
+
 - `mcpserver.yaml` — CRD specification
 - `example.secret.yaml` — Secret template
 
@@ -409,20 +435,20 @@ Test fixtures are located alongside test files:
 ### Writing New Tests
 
 ```typescript
-import { describe, it, expect, beforeEach } from 'vitest';
-import { loadYaml } from '../../utils/yaml-loader';
+import { beforeEach, describe, expect, it } from 'vitest'
+import { loadYaml } from '../../utils/yaml-loader'
 
 describe('Feature Name', () => {
-  let fixture: any;
+  let fixture: any
 
   beforeEach(() => {
-    fixture = loadFixture();
-  });
+    fixture = loadFixture()
+  })
 
   it('should validate behavior', () => {
-    expect(fixture.property).toBe('expected');
-  });
-});
+    expect(fixture.property).toBe('expected')
+  })
+})
 ```
 
 **Best practices:**
@@ -448,9 +474,9 @@ describe('Feature Name', () => {
 export default defineConfig({
   test: {
     testTimeout: 10000, // 10 seconds
-    hookTimeout: 10000
-  }
-});
+    hookTimeout: 10000,
+  },
+})
 ```
 
 ### CI/CD Integration

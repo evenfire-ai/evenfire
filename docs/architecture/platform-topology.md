@@ -4,7 +4,7 @@
 > All other specification documents reference this document for architectural decisions.
 > When the architecture changes, update THIS document first, then propagate to specs.
 >
-> **Security-First Architecture**: This document defines the 7-namespace architecture,
+> **Security-First Architecture**: This document defines the 12-namespace architecture,
 > the controller architecture (HCC + WRC), the Sandbox Recipes Namespace, the RPC Proxy Namespace,
 > and the **deny-all by default** security posture across all runtime namespaces.
 
@@ -12,7 +12,7 @@
 
 ## Table of Contents
 
-1. [Platform Architecture (7 Namespaces)](#1-platform-architecture-7-namespaces)
+1. [Platform Architecture (12 Namespaces)](#1-platform-architecture-12-namespaces)
 2. [Security Architecture: Deny-All by Default](#2-security-architecture-deny-all-by-default)
 3. [Controller Architecture](#3-controller-architecture)
 4. [CRD Ecosystem](#4-crd-ecosystem)
@@ -33,13 +33,13 @@
 
 ---
 
-## 1. Platform Architecture (7 Namespaces)
+## 1. Platform Architecture (12 Namespaces)
 
 ### 1.1 Platform Overview
 
 evenfire is a Kubernetes-native platform for LLM orchestration with multi-channel communication (Telegram, Email, Slack, Desktop App) and MCP (Model Context Protocol) integration. All configuration is driven by CRDs under the historical `clerum.io/v1alpha1` API group ([code names](../concepts/code-names.md)).
 
-The platform is deployed across **7 namespaces** with a **deny-all by default** security posture. All runtime namespaces (mcp-host, mcp-server, sandbox-recipes, rpc-proxy) deny all ingress/egress by default. Communication is only enabled through explicit NetworkPolicies owned by the component responsible for that selector family: HCC for Context/MCP relationships, WRC for WorkflowRecipe runtime pods, and static deploy overlays for platform infrastructure policies.
+The platform is deployed across **12 namespaces** (declared in `deploy/`) with a **deny-all by default** security posture. All runtime namespaces (mcp-host, mcp-server, sandbox-recipes, rpc-proxy) deny all ingress/egress by default. Communication is only enabled through explicit NetworkPolicies owned by the component responsible for that selector family: HCC for Context/MCP relationships, WRC for WorkflowRecipe runtime pods, and static deploy overlays for platform infrastructure policies.
 
 **Core architectural principle**: Think Linux — **deny everything by default, open only what is needed, with explicit justification for every exception**.
 
@@ -137,15 +137,22 @@ flowchart TB
 
 ### 1.2 Namespace Map
 
-| Namespace           | Purpose                                                  | Deny-All Default | Key Components                                                                           |
-| ------------------- | -------------------------------------------------------- | :--------------: | ---------------------------------------------------------------------------------------- |
-| **profile-plane**   | User identity, profiles, team management, access mapping | No (management)  | profile-ui, external-rest-api                                                            |
-| **control-plane**   | Platform management, CRD lifecycle, controllers          | No (management)  | control-ui, control-api, email intf, HCC Image (3 synchronizers + WRC reconciler module) |
-| **gateway**         | External communication ingress (channels)                |   No (ingress)   | Communication Channel Image (TG/Email/Slack)                                             |
-| **mcp-host**        | LLM orchestration and agent state machine                |     **Yes**      | mcp-host (Agent + MCP Client)                                                            |
-| **mcp-server**      | MCP server runtime and CRD storage                       |     **Yes**      | MCP server pods, McpServer CRDs, Context CRDs                                            |
-| **sandbox-recipes** | Non-MCP workloads from WorkflowRecipes                   |     **Yes**      | StatefulSets, CronJobs, Jobs, Deployments, PVCs                                          |
-| **rpc-proxy**       | Secure external access for Desktop App users             |     **Yes**      | mcpProxy Image (MCP Server Proxy, MCP Host Proxy)                                        |
+| Namespace           | Purpose                                                   | Deny-All Default | Key Components                                                                           |
+| ------------------- | --------------------------------------------------------- | :--------------: | ---------------------------------------------------------------------------------------- |
+| **profiles**        | User identity, profiles, team management, access mapping  | No (management)  | profile-ui, external-rest-api                                                            |
+| **control-plane**   | Platform management, CRD lifecycle, controllers           | No (management)  | control-ui, control-api, email intf, HCC Image (3 synchronizers + WRC reconciler module) |
+| **channels**        | External communication ingress (channels)                 |   No (ingress)   | Communication Channel Image (TG/Email/Slack)                                             |
+| **mcp-host**        | LLM orchestration and agent state machine                 |     **Yes**      | mcp-host (Agent + MCP Client)                                                            |
+| **mcp-server**      | MCP server runtime and CRD storage                        |     **Yes**      | MCP server pods, McpServer CRDs, Context CRDs                                            |
+| **sandbox-recipes** | Non-MCP workloads from WorkflowRecipes                    |     **Yes**      | StatefulSets, CronJobs, Jobs, Deployments, PVCs                                          |
+| **rpc-proxy**       | Secure external access for Desktop App users              |     **Yes**      | mcpProxy Image (MCP Server Proxy, MCP Host Proxy)                                        |
+| **sandbox-ui**      | Untrusted recipe-supplied UI workloads                    |     **Yes**      | Recipe-defined UI workloads (ingress only via rpc-proxy)                                 |
+| **webhook-ingress** | Public webhook termination                                |     **Yes**      | webhook-proxy (HTTP terminator)                                                          |
+| **gfs**             | GFS (Global File System) data plane                       |     **Yes**      | gfsc file-broker pods reconciled from GlobalFileSystem CRDs                              |
+| **ingress**         | Public tunnel ingress                                     |     **Yes**      | cloudflared                                                                              |
+| **registry**        | Recipe registry (declared in the minikube overlay only)   |        No        | registry-api (side-by-side registry server, port 8085)                                   |
+
+> Namespace names above are the ones declared in `deploy/` (`deploy/base/namespaces.yaml`, plus `deploy/base/ingress/` and `deploy/overlays/minikube/registry/`). Diagrams in this document use the historical conceptual names **profile-plane** and **gateway** for the declared namespaces `profiles` and `channels`.
 
 ### 1.3 Service Map
 
@@ -230,7 +237,7 @@ The platform uses a **controller architecture** where all control logic runs in 
 | Workflow Recipe Controller (WRC) | `control-plane` (within HCC) | Pure CRD reconciler for WorkflowRecipe lifecycle                                        |
 | Control-plane triggers deploys   | `control-plane`              | Agents cannot trigger deploys directly                                                  |
 | Non-MCP workloads                | `sandbox-recipes`            | Isolated runtime for non-MCP recipe workloads                                           |
-| 7 namespaces                     | —                            | profile-plane, control-plane, gateway, mcp-host, mcp-server, sandbox-recipes, rpc-proxy |
+| 12 namespaces                    | —                            | channels, control-plane, gfs, ingress, mcp-host, mcp-server, profiles, registry (minikube overlay), rpc-proxy, sandbox-recipes, sandbox-ui, webhook-ingress |
 
 ### 3.2 Where the WRC Fits
 

@@ -115,8 +115,11 @@ warns — it does).
 ### Secondary (post-launch polish)
 
 7. Docs site (Mintlify/Docusaurus) from existing `docs/` tree + `llms.txt`.
-8. Shorten root README: keep capability tour + get-started + security; move
-   services/ports and layout tables fully into docs (target ~280–320 lines).
+8. README length: superseded in part on 2026-07-13 — the repo-layout table
+   was deliberately upgraded to a detailed **Components map** (per-component
+   distillation of every folder README) so first-time readers get real depth
+   on the front page. Any future length pass trims architecture/ports
+   duplication, never the capability tour, get-started, or the Components map.
 9. Community channel + badge when ready.
 10. Production deploy guide beyond checklist (real cloud walkthrough).
 
@@ -144,37 +147,44 @@ Do **not** regress these sections without a new decision:
 6. Security model (4 pillars, claims-aligned)
 7. Beyond the agent
 8. CRDs (8) + providers
-9. Repo layout + testing + docs + community + license
+9. Components map (per-component distillation of all folder READMEs, added
+   2026-07-13) + testing + docs + community + license
 
-If length becomes a problem, **trim 5 and 9** first, not 3 or 4.
+If length becomes a problem, **trim 5** first — not 3, not 4, and not the
+Components map in 9 (explicit decision, 2026-07-13).
 
 ---
 
 ## 6. Prioritized backlog
 
-| P   | Item                                                                                                                                                                                                  | Owner type       | Depends on          |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ------------------- |
-| P0  | Legal: license migration to MPL-2.0 **executed 2026-07-13** (§9); remaining: CLA counsel pass + align with cla.json                                                                                   | Human / counsel  | —                   |
-| P0  | Verify GH private vulnerability reporting enabled (security@ mailbox confirmed)                                                                                                                       | Human            | —                   |
-| P1  | Six missing service READMEs (1 screen each: purpose, ports, env, security)                                                                                                                            | Docs eng         | —                   |
-| P1  | control-ui README: real route groups + auth story (AuthGate exists)                                                                                                                                   | Docs eng         | —                   |
-| P1  | HCC README: document 4-layer NetworkPolicy model                                                                                                                                                      | Docs eng         | code already exists |
-| P1  | Screenshots / short demo GIF                                                                                                                                                                          | Design / product | running minikube    |
-| P1  | Cut **v0.1.1** — v0.1.0 tarball predates PR #3 and still contains the deleted Compose quickstart                                                                                                      | Eng              | PR #4 merge         |
-| P2  | Automate test counts (make target printing file/case counts; README cites it)                                                                                                                         | Eng              | —                   |
-| P2  | e2e-guide internal debt: CLAUDE.md-era test tables (“Total 1,944”) and prose refs                                                                                                                     | Docs eng         | —                   |
-| P2  | Document-or-mark-experimental the four undocumented `mcp-servers/` dirs (web-search, playwright, doc-generator = real servers referenced from docs; alphavantage = stub) + add to “Available Servers” | Docs eng         | —                   |
-| P2  | Optional README length pass (move ports table to docs)                                                                                                                                                | Docs eng         | —                   |
-| P2  | Docs website                                                                                                                                                                                          | Eng              | —                   |
-| P3  | Fix the zai-default footgun in code: infer provider from whichever single API key is set (`full-setup.sh:571-573`) instead of only warning in docs                                                    | Eng              | —                   |
-| P3  | Resolve or strip TBD placeholders in `docs/crds/workflowrecipe.md` (registry spec “TBD”, unmigrated comparison doc — lines ~177, ~3075, ~4121)                                                        | Docs eng         | —                   |
-| P3  | platform-topology.md “7 namespaces” vs 12 declared in deploy/ (pre-existing)                                                                                                                          | Docs eng         | —                   |
-| P3  | Lightweight non-K8s path (product decision required)                                                                                                                                                  | Product          | decision            |
-| P3  | Cloud production tutorial                                                                                                                                                                             | Eng              | production env      |
+| P   | Item                                                                                                                                           | Owner type       | Depends on          |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ------------------- |
+| P0  | Legal: license migration to MPL-2.0 **executed 2026-07-13** (§9); remaining: CLA counsel pass + align with cla.json                            | Human / counsel  | —                   |
+| P0  | Verify GH private vulnerability reporting enabled (security@ mailbox confirmed)                                                                | Human            | —                   |
+| P1  | Six missing service READMEs (purpose, ports, env, security) — **done** (PR #7, merged 2026-07-13)                                              | Docs eng         | —                   |
+| P1  | control-ui README: real route groups + auth story — **done** (PR #7)                                                                           | Docs eng         | —                   |
+| P1  | HCC README: document 4-layer NetworkPolicy model — **done** (PR #7)                                                                            | Docs eng         | code already exists |
+| P1  | Screenshots / short demo GIF                                                                                                                   | Design / product | running minikube    |
+| P1  | Cut post-Compose release — **done**: v0.2.0 (2026-07-13) supersedes v0.1.0                                                                     | Eng              | —                   |
+| P2  | Automate test counts — **done**: `make test-counts` (PR #7); README cites it                                                                   | Eng              | —                   |
+| P2  | e2e-guide internal debt (CLAUDE.md-era test tables) — **done** 2026-07-13                                                                      | Docs eng         | —                   |
+| P2  | Four undocumented `mcp-servers/` dirs — **done** 2026-07-13: READMEs + Status column in “Available Servers”                                    | Docs eng         | —                   |
+| P2  | Optional README length pass (move ports table to docs; the Components map is exempt — deliberate 2026-07-13 decision)                          | Docs eng         | —                   |
+| P2  | Docs website                                                                                                                                   | Eng              | —                   |
+| P3  | Fix the zai-default footgun in code — **done**: full-setup.sh infers the provider from the single set API key                                  | Eng              | —                   |
+| P3  | Resolve or strip TBD placeholders in `docs/crds/workflowrecipe.md` (registry spec “TBD”, unmigrated comparison doc — lines ~177, ~3075, ~4121) | Docs eng         | —                   |
+| P3  | platform-topology.md namespace count — **done**: now documents 12 namespaces                                                                   | Docs eng         | —                   |
+| P3  | Lightweight non-K8s path (product decision required)                                                                                           | Product          | decision            |
+| P3  | Cloud production tutorial                                                                                                                      | Eng              | production env      |
 
 > In flight: PR #4 (`fix/minikube-docs-followups`) fixes the pf-mcp-host
 > service name, the e2e-approval-flow default email, canonical bootstrap in the
 > e2e-guide, two stale code comments — and commits this roadmap.
+>
+> Also in flight: `docs/service-readmes` (this branch) — the three P1
+> service-README rows above, plus `make test-counts` (P2 test-count
+> automation), the e2e-guide CLAUDE.md-era unit-test tables (P2), and the
+> platform-topology namespace count (P3).
 
 ---
 
@@ -190,7 +200,7 @@ If length becomes a problem, **trim 5 and 9** first, not 3 or 4.
 - [ ] At least one visual proof in README
 - [ ] No known broken public links (currently OK on root README)
 - [x] Test claims verified by reproducible count (10,260 cases / 882 files, 2026-07-13) — CI automation still open (P2)
-- [ ] Release matches main (v0.1.1 after PR #4)
+- [x] Release matches main (v0.2.0 on e805f47, 2026-07-13)
 
 ---
 
