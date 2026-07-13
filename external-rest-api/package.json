@@ -1,6 +1,7 @@
 {
   "name": "clerum-external-rest-api",
   "version": "0.1.56",
+  "license": "MPL-2.0",
   "description": "External REST API for profile, team management, and RPC token brokerage",
   "main": "dist/main.js",
   "engines": {

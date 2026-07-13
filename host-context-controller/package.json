@@ -20,7 +20,7 @@
     "mcp",
     "host-context-controller"
   ],
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MPL-2.0",
   "dependencies": {
     "@clerum/image-policy": "file:../packages/image-policy",
     "@clerum/workflow-recipe-capability-policy": "file:../packages/workflow-recipe-capability-policy",

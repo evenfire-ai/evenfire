@@ -1,6 +1,7 @@
 {
   "name": "clerum-rpc-proxy",
   "version": "0.1.36",
+  "license": "MPL-2.0",
   "description": "External-facing RPC proxy for tenant-scoped MCP access",
   "main": "dist/main.js",
   "engines": {

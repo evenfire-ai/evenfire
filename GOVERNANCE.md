@@ -11,8 +11,8 @@ suitable. See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Decision making
 
 Maintainers decide by lazy consensus; the core team has final say on scope and
-roadmap. This is a single-vendor source-available / open-core style project, not
-a foundation.
+roadmap. This is a single-vendor open-source (MPL-2.0) project, not a
+foundation.
 
 ## Security
 

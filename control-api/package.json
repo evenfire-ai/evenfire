@@ -1,6 +1,7 @@
 {
   "name": "clerum-control-api",
   "version": "0.1.298",
+  "license": "MPL-2.0",
   "description": "Internal Clerum control plane REST API + UI for managing CRDs and secrets",
   "main": "dist/main.js",
   "engines": {

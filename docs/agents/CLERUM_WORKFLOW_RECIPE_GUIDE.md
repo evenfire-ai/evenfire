@@ -1725,7 +1725,7 @@ docker buildx build \
   --platform linux/amd64,linux/arm64 \
   --tag ghcr.io/<org>/<image>:1.0.0 \
   --label org.opencontainers.image.source=https://github.com/<org>/<repo> \
-  --label org.opencontainers.image.licenses=Apache-2.0 \
+  --label org.opencontainers.image.licenses=MPL-2.0 \
   --push \
   .
 ```

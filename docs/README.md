@@ -76,7 +76,7 @@ Use this index for long-form docs.
 | [Claims guardrails](meta/claims-guardrails.md) | Never-overclaim rules for public docs |
 | [Governance](../GOVERNANCE.md)                 | How the project is run                |
 | [Code of conduct](../CODE_OF_CONDUCT.md)       | Community standards                   |
-| [License](../LICENSE)                          | Apache-2.0 + additional use grant     |
+| [License](../LICENSE)                          | MPL-2.0 (open source)                 |
 
 ## Finding things
 

@@ -1,6 +1,7 @@
 {
   "name": "workflow-recipes-e2e",
   "version": "0.1.16",
+  "license": "MPL-2.0",
   "private": true,
   "description": "E2E tests for Workload Recipes Controller (minikube)",
   "scripts": {
