@@ -30,32 +30,33 @@ Details (category-level, no product rankings):
 
 ## Quickstart
 
-### Compose is up but curl fails
+### Setup finished but the agent never replies
 
-- Confirm health: `curl -sS http://localhost:8080/v1/runtime/health`
-- Prefer `./scripts/dev/quickstart-chat.sh "Hello"`
-- Ensure you send the `x-clerum-edge-*` headers in dev mode
-- Confirm `.env.quickstart` has a valid key and provider
+- The #1 cause: `CLERUM_MODEL_PROVIDER` unset or mismatched with your API key —
+  the seeded Host defaults to `zai`/`glm-5.1`. Fix `.env`, then
+  `make minikube-setup ARGS="--skip-build"`.
+- `make minikube-status` — every deployment should show READY.
+- With `make minikube-pf-all` running:
+  `curl -sS http://localhost:8080/v1/runtime/health`.
 
-### The agent answers but has no tools
+### The agent answers but has no MCP connectors
 
-Expected in default quickstart. Wire `CLERUM_MCP_SERVERS` or use the Kubernetes
-path: [Add an MCP server](how-to/add-mcp-server.md).
+Expected for the seeded agent (native tools only). Declare an `McpServer` and
+allowlist it in the Context: [Add an MCP server](how-to/add-mcp-server.md).
 
 ### Telegram bot ignores me
 
 Your numeric user id must be allowlisted
-(`TELEGRAM_ALLOWED_USER_ID` or CRD `userIds`). Usernames alone are not enough.
-See [Connect Telegram](how-to/connect-telegram.md).
+(`CLERUM_TELEGRAM_USER_ID` in `.env`, or CRD `userIds`). Usernames alone are
+not enough. See [Connect Telegram](how-to/connect-telegram.md).
 
 ## Platform
 
 ### Do I need Kubernetes?
 
-| Goal                                          | Need K8s?           |
-| --------------------------------------------- | ------------------- |
-| Try the LLM agent runtime                     | No — Docker Compose |
-| Approvals + NetworkPolicies + full CRDs + UIs | Yes                 |
+Yes — evenfire is Kubernetes-native; `make minikube-setup` gives you the full
+platform on a local cluster in minutes. (Contributors hacking on a single
+service can run it standalone in dev mode — see that service's README.)
 
 ### How many CRDs are there?
 

@@ -6,7 +6,7 @@
 ## Start here
 
 - README: ../README.md — product pitch, security model, CRDs, license
-- Quickstart: get-started/quickstart.md — Docker Compose agent runtime
+- Quickstart: get-started/quickstart.md — full platform on minikube, one command
 - Learning path: get-started/learning-path.md
 - FAQ: faq.md
 

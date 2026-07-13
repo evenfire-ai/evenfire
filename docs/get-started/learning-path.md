@@ -2,13 +2,15 @@
 
 Pick the path that matches what you want to do.
 
-## Path A — Try the agent runtime (≈ 10 minutes)
+## Path A — Run the platform and message an agent (≈ 20 minutes)
 
-1. [Quickstart](quickstart.md) — Docker Compose `mcp-host`, send a message
+1. [Quickstart](quickstart.md) — `make minikube-setup`, then message the seeded
+   `chatllm` agent from the desktop app or the API
 2. Optional: connect [Telegram](../how-to/connect-telegram.md)
 3. Read [Why evenfire](../concepts/why-evenfire.md)
 
-**Success looks like:** an LLM reply on the local HTTP surface (or Telegram).
+**Success looks like:** an LLM reply (desktop, API, or Telegram) — and an
+approval gate firing when you ask the agent to run a real tool.
 
 ## Path B — Understand the platform (≈ 30–60 minutes)
 

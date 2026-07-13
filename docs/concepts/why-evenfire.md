@@ -41,8 +41,8 @@ runtime and multi-channel surfaces.
 
 - **AI / app developers** building multi-channel agents they operate themselves
 - Teams that need Telegram / Slack / email / desktop under shared policy
-- Operators who can start with Docker Compose and grow into Kubernetes for the
-  full security model
+- Operators who want the full security model from day one — one command
+  (`make minikube-setup`) runs the whole platform on a local cluster
 
 ## Who it is not for (yet)
 
@@ -55,13 +55,13 @@ See [When to use evenfire](when-to-use-evenfire.md) for category-level fit.
 
 ## Vocabulary bridge
 
-| You might say | In this repo |
-| --- | --- |
-| agent | `Host` CRD + `mcp-host` runtime |
-| governed connector | `McpServer` scoped by `Context` |
-| plugin / workflow | `WorkflowRecipe` (+ registry client) |
-| model-neutral, BYOK | four providers; keys in your Secret |
-| shared files | `SharedFileSystem` + `GlobalFileSystem` |
+| You might say       | In this repo                            |
+| ------------------- | --------------------------------------- |
+| agent               | `Host` CRD + `mcp-host` runtime         |
+| governed connector  | `McpServer` scoped by `Context`         |
+| plugin / workflow   | `WorkflowRecipe` (+ registry client)    |
+| model-neutral, BYOK | four providers; keys in your Secret     |
+| shared files        | `SharedFileSystem` + `GlobalFileSystem` |
 
 ## Next
 

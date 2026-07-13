@@ -14,11 +14,11 @@ Use this index for long-form docs.
 
 ## Get started
 
-| Doc                                           | Description                             |
-| --------------------------------------------- | --------------------------------------- |
-| [Quickstart](get-started/quickstart.md)       | Docker Compose agent runtime in minutes |
-| [Learning path](get-started/learning-path.md) | Choose a path by role and goal          |
-| [FAQ](faq.md)                                 | Common questions and troubleshooting    |
+| Doc                                           | Description                          |
+| --------------------------------------------- | ------------------------------------ |
+| [Quickstart](get-started/quickstart.md)       | Full platform on minikube in minutes |
+| [Learning path](get-started/learning-path.md) | Choose a path by role and goal       |
+| [FAQ](faq.md)                                 | Common questions and troubleshooting |
 
 ## Concepts
 
@@ -36,9 +36,9 @@ Use this index for long-form docs.
 
 | Doc                                                            | Description                         |
 | -------------------------------------------------------------- | ----------------------------------- |
-| [Connect Telegram](how-to/connect-telegram.md)                 | Compose or cluster Telegram path    |
+| [Connect Telegram](how-to/connect-telegram.md)                 | Minikube env or CRD channel path    |
 | [Configure approvals](how-to/configure-approvals.md)           | Human-in-the-loop tool gates        |
-| [Add an MCP server](how-to/add-mcp-server.md)                  | Dev JSON or CRD allowlist path      |
+| [Add an MCP server](how-to/add-mcp-server.md)                  | Dev-mode JSON or CRD allowlist path |
 | [Minikube full stack](deploy/minikube.md)                      | Local Kubernetes platform           |
 | [Production notes](deploy/production.md)                       | Checklist and in-repo deploy assets |
 | [WorkflowRecipes operations](deploy/workflow-recipes-guide.md) | Recipe ops, RBAC, debugging         |

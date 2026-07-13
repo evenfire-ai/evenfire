@@ -7,7 +7,7 @@ assets.
 
 ## What “production” means here
 
-- All platform services deployed to a real cluster (not only Compose `mcp-host`)
+- All platform services deployed to a real cluster (not a single dev-mode `mcp-host`)
 - JWT auth chain on the external edges (desktop → rpc-proxy, service → control-api);
   `mcp-host` runtime routes still use edge trust headers, restricted by NetworkPolicy
 - Default-deny NetworkPolicies enforced (Calico or equivalent CNI with policy)

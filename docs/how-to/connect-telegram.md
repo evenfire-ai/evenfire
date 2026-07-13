@@ -2,37 +2,33 @@
 
 Reach an evenfire agent from Telegram.
 
-## Option A — Docker Compose quickstart
+## On minikube (quickstart stack)
 
-Best for a single-host smoke test without Kubernetes.
-
-1. Complete the [Quickstart](../get-started/quickstart.md) so `mcp-host` runs.
+1. Complete the [Quickstart](../get-started/quickstart.md) so the platform runs.
 2. Create a bot via [@BotFather](https://t.me/BotFather); copy the bot token.
-3. Find your numeric Telegram **user id** (not username).
-4. Set in `.env.quickstart`:
+3. Find your numeric Telegram **user id** (not username), e.g. via `@userinfobot`.
+4. Set in `.env`:
 
 ```bash
 CLERUM_TELEGRAM_BOT_TOKEN=<bot-token>
-TELEGRAM_ALLOWED_USER_ID=<your-numeric-user-id>
+CLERUM_TELEGRAM_USER_ID=<your-numeric-user-id>
 ```
 
-5. Start with the telegram profile:
+5. Re-apply secrets and redeploy:
 
 ```bash
-docker compose --env-file .env.quickstart --profile telegram up
+make minikube-setup ARGS="--skip-build"
 ```
 
 6. Message the bot from the allowed user account.
 
 `channel-reader` polls Telegram and forwards allowed senders to `mcp-host`.
-Users not in `userIds` are dropped.
+Users not in the allowlist are dropped.
 
-Compose wiring lives in root `docker-compose.yml` (`channel-reader` service).
+## Any cluster (CRD path)
 
-## Option B — Full platform (Kubernetes)
-
-On the cluster stack, Telegram is declared as a `CommunicationChannel` CRD
-bound to a `Host`, with secrets for the bot token managed by the platform.
+Telegram is declared as a `CommunicationChannel` CRD bound to a `Host`, with
+the bot token in a platform-managed Secret.
 
 1. Deploy the stack ([Minikube guide](../deploy/minikube.md) for local).
 2. Create or edit a `CommunicationChannel` (see
@@ -50,24 +46,25 @@ kind: CommunicationChannel
 metadata:
   name: all-channels
 spec:
-  hostRef: "chatllm"
+  hostRef: 'chatllm'
   telegram:
-    - channelId: "telegram-general"
-      userIds: ["123456789"]   # allowed senders
+    - channelId: 'telegram-general'
+      userIds: ['123456789'] # allowed senders
 ```
 
 ## Approvals over Telegram
 
-When approval policy enables Telegram approvers, approve/deny callbacks are
+When approval policy enables Telegram approvers, approval requests arrive with
+inline **Approve / Deny** buttons (or reply `/approve <target>`); callbacks are
 signature-checked and authorized before a decision is applied. See
 [Configure approvals](configure-approvals.md).
 
 ## Troubleshooting
 
-| Symptom | Check |
-| --- | --- |
-| Bot never replies | Token set? Profile `telegram` up? `mcp-host` healthy? |
-| Your messages ignored | `TELEGRAM_ALLOWED_USER_ID` / CRD `userIds` match your numeric id |
-| Works in Compose, not in K8s | Channel CRD `hostRef`, secrets, channel-reader logs, NetworkPolicies |
+| Symptom                        | Check                                                                       |
+| ------------------------------ | --------------------------------------------------------------------------- |
+| Bot never replies              | Token set in `.env`? channel-reader deployed and READY? `mcp-host` healthy? |
+| Your messages ignored          | `CLERUM_TELEGRAM_USER_ID` / CRD `userIds` match your numeric id             |
+| Channel looks wired but silent | Channel CRD `hostRef`, secrets, channel-reader logs, NetworkPolicies        |
 
 More FAQ: [FAQ](../faq.md).

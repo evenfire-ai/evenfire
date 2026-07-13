@@ -2,20 +2,20 @@
 
 evenfire is a self-hostable platform for **multi-channel LLM agents that take
 real actions** — with approvals, permissions, and audit-oriented controls built
-in. This page describes *categories* of tools so you can choose the right fit.
+in. This page describes _categories_ of tools so you can choose the right fit.
 It does not rank or name competing products.
 
 ## At a glance
 
-| | **evenfire** | **Personal assistants** | **In-process agent frameworks** |
-| --- | --- | --- | --- |
-| **Primary job** | Governed agent *platform* | Assistant you message day-to-day | Library to build agent features |
-| **Install metaphor** | Runtime locally; full stack on Kubernetes | Single process / gateway | `pip` / `npm` into your app |
-| **Config model** | Kubernetes CRDs + control plane | Config files / CLI / skills | Code-first graphs and crews |
-| **Multi-channel** | Telegram, email, Slack + desktop | Many chat surfaces (often the focus) | Usually your application’s UI |
-| **Tool governance** | Context allowlists + NetworkPolicies + approvals | Approvals / allowlists / sandbox (varies) | Application-defined |
-| **Fleet / org policy** | Hosts, contexts, recipes as reviewable config | Usually single-user or small team | Your responsibility |
-| **Best first hour** | Own an agent runtime; then grow into policy | Chat tonight with minimal infra | Embed an agent loop in code |
+|                        | **evenfire**                                      | **Personal assistants**                   | **In-process agent frameworks** |
+| ---------------------- | ------------------------------------------------- | ----------------------------------------- | ------------------------------- |
+| **Primary job**        | Governed agent _platform_                         | Assistant you message day-to-day          | Library to build agent features |
+| **Install metaphor**   | Kubernetes-native (`make minikube-setup` locally) | Single process / gateway                  | `pip` / `npm` into your app     |
+| **Config model**       | Kubernetes CRDs + control plane                   | Config files / CLI / skills               | Code-first graphs and crews     |
+| **Multi-channel**      | Telegram, email, Slack + desktop                  | Many chat surfaces (often the focus)      | Usually your application’s UI   |
+| **Tool governance**    | Context allowlists + NetworkPolicies + approvals  | Approvals / allowlists / sandbox (varies) | Application-defined             |
+| **Fleet / org policy** | Hosts, contexts, recipes as reviewable config     | Usually single-user or small team         | Your responsibility             |
+| **Best first hour**    | Own an agent runtime; then grow into policy       | Chat tonight with minimal infra           | Embed an agent loop in code     |
 
 ## Choose a personal assistant when…
 
@@ -25,7 +25,7 @@ It does not rank or name competing products.
 
 ## Choose an in-process framework when…
 
-- Agents are a feature *inside* your product
+- Agents are a feature _inside_ your product
 - You need custom multi-step graphs or research experiments in code
 - You will own deployment, identity, and tool isolation yourself
 
@@ -36,8 +36,8 @@ It does not rank or name competing products.
   primitives, not bolt-ons
 - Multiple hosts, channels, connectors, and workflows should be **declarative
   and reviewable**
-- You will self-host on infrastructure you control (Docker Compose for the
-  runtime; Kubernetes for the full model)
+- You will self-host on infrastructure you control (Kubernetes — minikube
+  locally, any cluster in production)
 
 ## Overlap (honest)
 

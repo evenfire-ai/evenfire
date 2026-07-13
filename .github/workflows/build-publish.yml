@@ -10,9 +10,9 @@ name: Build & Publish
 # build_all=true rebuilds the whole matrix (use this for the first publish, or
 # to repopulate ghcr).
 #
-# Quickstart images (mcp-host, channel-reader — the docker-compose services) are
-# built multi-arch (amd64 + arm64) so Apple-Silicon users can pull-and-run. The
-# rest are amd64-only (they deploy to amd64 GKE).
+# mcp-host and channel-reader are built multi-arch (amd64 + arm64) so
+# Apple-Silicon users can pull-and-run. The rest are amd64-only (they deploy
+# to amd64 GKE).
 
 on:
   push:
