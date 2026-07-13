@@ -2,7 +2,9 @@
  * JWT scope-based authorization middleware for mcp-host runtime API.
  *
  * Validates RS256 tokens per token-contract.md and enforces scopes per authz-policy.md.
- * Disabled when config.enableAuth is false (default).
+ * Enabled by default (CLERUM_ENABLE_AUTH=true); set config.enableAuth false to disable.
+ * Only wired onto specific control routes (e.g. session-search, compaction-invoke) —
+ * the primary runtime ingress uses edge trust headers (see edgeRuntimeAuth.ts).
  */
 import type { NextFunction, Request, Response } from 'express'
 import jwt from 'jsonwebtoken'

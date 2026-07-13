@@ -77,7 +77,9 @@ warn()   { echo -e "  ${YELLOW}WARN${NC} $*"; }
 detail() { [[ "$VERBOSE" == "true" ]] && echo -e "       $*" || true; }
 
 # ─── Configuration ───────────────────────────────────────────────────
-TEST_EMAIL="${E2E_TEST_EMAIL:-playwright@clerum.io}"
+# Default to the user seeded by `make minikube-setup` (playwright@clerum.io is
+# only present on clusters that ran the Playwright seed separately).
+TEST_EMAIL="${E2E_TEST_EMAIL:-test@clerum.io}"
 HOST_REF="${E2E_HOST_REF:-chatllm}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-changeme123!}"
 EXT_URL="${E2E_EXTERNAL_REST_API_URL:-http://localhost:8091}"

@@ -47,21 +47,19 @@ minikube start -p clerum-test \
 
 ### 2. Bootstrap infrastructure
 
-```bash
-./scripts/bootstrap-cluster.sh
-```
-
-This performs 10 steps: cluster verify → namespaces (`control-plane`, `mcp-host`, `mcp-server`, `sandbox-recipes`, `rpc-proxy`) → CRDs install → image build+load → deploy HCC + WRC + mcp-host + mcp-proxy → apply Context/Host CRD instances → wait for readiness. API keys are read from `.env` automatically.
-
-Alternatively, the Makefile path is the canonical local setup — it starts the
-`clerum-test` profile, installs CRDs, creates secrets/config, builds images in
-minikube's Docker daemon, deploys manifests, waits for rollouts, and seeds
-local test data:
+The canonical setup is the Makefile path — it starts the `clerum-test`
+profile, installs CRDs, creates secrets/config, builds images in minikube's
+Docker daemon, deploys manifests, waits for rollouts, and seeds local test
+data (12 idempotent steps):
 
 ```bash
-PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH make minikube-setup
-PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH make minikube-status
+make minikube-setup
+make minikube-status
 ```
+
+> `scripts/bootstrap-cluster.sh` is an older, partial bootstrap (no full JWT
+> chain, UIs, or user seed). E2E suites need the full setup above — do not use
+> the script for E2E runs.
 
 ### 3. Sync a running cluster before a gate
 
@@ -69,25 +67,24 @@ Before any cluster-backed E2E gate, sync the running cluster to the current
 worktree:
 
 ```bash
-PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH make minikube-pre-gate-sync GATE=<gate-name>
+make minikube-pre-gate-sync GATE=<gate-name>
 ```
 
 Use `--force-cluster-sync --skip-port-forwards` when deployable code changed
 and your test runner will hold its own port-forwards:
 
 ```bash
-PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH \
-  make minikube-pre-gate-sync GATE=<gate-name> ARGS="--force-cluster-sync --skip-port-forwards"
+make minikube-pre-gate-sync GATE=<gate-name> ARGS="--force-cluster-sync --skip-port-forwards"
 ```
 
 After the deploy sync, verify a clean state before reading E2E results:
 
 ```bash
-PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH make minikube-status
+make minikube-status
 kubectl --context=clerum-test get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded
 kubectl --context=clerum-test -n sandbox-recipes get workflowrecipes
-PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH make minikube-verify-network-policy
-PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH CONTEXT=clerum-test scripts/minikube/seed-test-data.sh
+make minikube-verify-network-policy
+CONTEXT=clerum-test scripts/minikube/seed-test-data.sh
 ```
 
 ### 4. Port-forwards and Vitest
@@ -97,7 +94,7 @@ dependencies when missing and keep minikube port-forwards alive for the Vitest
 phase. Direct `npx vitest` runs still require a held port-forward terminal:
 
 ```bash
-PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH make minikube-pf-all
+make minikube-pf-all
 ```
 
 With port-forwards held, verify the localhost ports used by the tests:
@@ -123,13 +120,13 @@ curl -sS http://127.0.0.1:8080/v1/runtime/health
 ./scripts/e2e/e2e-workflow-runtime-gate.sh --cleanup
 
 # Full bash + Vitest E2E
-PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH make test-e2e-all
+make test-e2e-all
 ```
 
 The long-running software-creation suites are opt-in:
 
 ```bash
-E2E_RUN_SOFTWARE_CREATION=1 PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH make test-e2e-vitest
+E2E_RUN_SOFTWARE_CREATION=1 make test-e2e-vitest
 ```
 
 ## Individual suites
