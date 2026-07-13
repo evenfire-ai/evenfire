@@ -138,16 +138,16 @@ git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
 cp .env.example .env
 ```
 
-Edit `.env` — set **one** LLM key **and its matching provider**:
+Edit `.env` — set **one** LLM key (setup infers the matching provider):
 
 ```bash
 OPENAI_API_KEY=sk-...
-CLERUM_MODEL_PROVIDER=openai     # REQUIRED: openai | claude | zai | bailian
+CLERUM_MODEL_PROVIDER=openai     # optional with one key: openai | claude | zai | bailian
 ```
 
-> ⚠️ If `CLERUM_MODEL_PROVIDER` is unset, the seeded agent defaults to
-> `zai`/`glm-5.1` regardless of which key you provided — the most common
-> "my agent won't reply" cause.
+> ⚠️ With exactly **one** API key set, setup auto-infers `CLERUM_MODEL_PROVIDER`
+> (and logs the choice). With multiple keys, set it explicitly — setup fails
+> with a clear error naming the keys instead of guessing.
 
 Then:
 
