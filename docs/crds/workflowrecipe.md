@@ -174,7 +174,7 @@ Clerum Recipes combines several capabilities that are individually available in 
 | Mandatory operator approval with risk classification | ArgoCD sync windows, Terraform plan + Sentinel (opt-in)                  | Enforced by default, not opt-in                                                                   |
 | Single-file CRD-as-Package                           | kro ResourceGraphDefinition                                              | Pure YAML, no DSL                                                                                 |
 
-A 15-dimension comparison against 8 tools (Helm, Kustomize, ArgoCD, Crossplane, KubeVela, etc.) was previously drafted but has not yet been migrated into the new docs tree (TBD). Note that Clerum Recipes is a draft specification with no production validation, while the compared tools have years of operational history.
+A broader comparative analysis against ecosystem tools (Helm, Kustomize, ArgoCD, Crossplane, KubeVela, etc.) is not published in this OSS tree. Note that Clerum Recipes is a draft specification with no production validation, while the compared tools have years of operational history.
 
 ---
 
@@ -3070,11 +3070,7 @@ Operator approval is still required before deployment to a cluster
 
 ### 14.2 Registry and Distribution
 
-The Recipe Repository, OCI distribution format, supply chain security, and agent publishing model are defined in a separate specification:
-
-> **Public Recipe Registry specification** -- TBD (registry spec not yet drafted)
->
-> Covers: registry architecture, REST API, publishing model, recipe lifecycle, OCI bundle format, supply chain security (cosign), recipe quality scoring, deprecation lifecycle, and cold-start seeding plan.
+The Recipe Registry is an external component. This repository ships the client-side integration — the multi-registry search/pull client in the `workflow-recipes` service and the `RegistryClient` interface contract in `packages/workflow-sdk` — while the registry service itself (its architecture, REST API, publishing model, recipe lifecycle, OCI bundle format, supply chain security, quality scoring, and deprecation lifecycle) is specified separately. A public registry specification is not published in this OSS tree.
 
 The WRO-driven marketplace matching and fitScore algorithm are defined in:
 
@@ -4118,7 +4114,5 @@ This section tracks what has been implemented, validated, and deployed from this
 
 ## Further Reading
 
-- Public Recipe Registry specification -- TBD (registry spec not yet drafted)
-- 15-dimension comparison against 8 tools -- TBD (comparative-analysis doc not yet migrated)
 - [Feature hub](../features/workflow-recipes.md) — operator docs, ops, and architecture links
 - [agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md](../agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md) — deep authoring guide

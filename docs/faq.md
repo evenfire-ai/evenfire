@@ -33,8 +33,9 @@ Details (category-level, no product rankings):
 
 ### Setup finished but the agent never replies
 
-- The #1 cause: `CLERUM_MODEL_PROVIDER` unset or mismatched with your API key —
-  the seeded Host defaults to `zai`/`glm-5.1`. Fix `.env`, then
+- The #1 cause: no real LLM API key in `.env`. Setup infers
+  `CLERUM_MODEL_PROVIDER` when exactly one key is set and fails loudly when
+  several keys are set without an explicit provider. Fix `.env`, then
   `make minikube-setup ARGS="--skip-build"`.
 - `make minikube-status` — every deployment should show READY.
 - With `make minikube-pf-all` running:
