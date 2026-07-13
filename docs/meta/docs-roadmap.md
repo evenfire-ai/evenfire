@@ -103,8 +103,8 @@ warns — it does).
    latest MPL (MPL-2.0)** — decided 2026-07-13, replaces finalizing the
    Apache-2.0 use grant (see §9); `security@evenfire.ai` mailbox confirmed
    2026-07-12, GH private reporting to verify.
-4. **§8 service README backlog** — six missing edge/file READMEs + control-ui /
-   HCC accuracy pass.
+4. **Service README backlog** (§2 table, §6 P1 rows) — six missing edge/file
+   READMEs + control-ui / HCC accuracy pass.
 5. **Visual assets** — 3–5 screenshots (desktop chat + approval, Control UI,
    Telegram approve) in README or `docs/assets/`.
 6. **Test number hygiene** — script or Makefile target that prints unit
@@ -150,26 +150,29 @@ If length becomes a problem, **trim 5 and 9** first, not 3 or 4.
 
 ## 6. Prioritized backlog
 
-| P   | Item                                                                                                | Owner type       | Depends on                |
-| --- | --------------------------------------------------------------------------------------------------- | ---------------- | ------------------------- |
-| P0  | Legal: **migrate license to latest MPL (MPL-2.0)** + CLA counsel pass; align with cla.json (see §9) | Human / counsel  | decision taken 2026-07-13 |
-| P0  | Verify GH private vulnerability reporting enabled (security@ mailbox confirmed)                     | Human            | —                         |
-| P1  | Six missing service READMEs (1 screen each: purpose, ports, env, security)                          | Docs eng         | —                         |
-| P1  | control-ui README: real route groups + auth story (AuthGate exists)                                 | Docs eng         | —                         |
-| P1  | HCC README: document 4-layer NetworkPolicy model                                                    | Docs eng         | code already exists       |
-| P1  | Screenshots / short demo GIF                                                                        | Design / product | running minikube          |
-| P1  | Cut **v0.1.1** — v0.1.0 tarball predates PR #3 and still contains the deleted Compose quickstart    | Eng              | PR #4 merge               |
-| P2  | Automate test counts (make target printing file/case counts; README cites it)                       | Eng              | —                         |
-| P2  | e2e-guide internal debt: CLAUDE.md-era test tables (“Total 1,944”) and prose refs                   | Docs eng         | —                         |
-| P2  | Optional README length pass (move ports table to docs)                                              | Docs eng         | —                         |
-| P2  | Docs website                                                                                        | Eng              | —                         |
-| P3  | platform-topology.md “7 namespaces” vs 12 declared in deploy/ (pre-existing)                        | Docs eng         | —                         |
-| P3  | Lightweight non-K8s path (product decision required)                                                | Product          | decision                  |
-| P3  | Cloud production tutorial                                                                           | Eng              | production env            |
+| P   | Item                                                                                                                                                                                                  | Owner type       | Depends on                |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ------------------------- |
+| P0  | Legal: **migrate license to latest MPL (MPL-2.0)** + CLA counsel pass; align with cla.json (see §9)                                                                                                   | Human / counsel  | decision taken 2026-07-13 |
+| P0  | Verify GH private vulnerability reporting enabled (security@ mailbox confirmed)                                                                                                                       | Human            | —                         |
+| P1  | Six missing service READMEs (1 screen each: purpose, ports, env, security)                                                                                                                            | Docs eng         | —                         |
+| P1  | control-ui README: real route groups + auth story (AuthGate exists)                                                                                                                                   | Docs eng         | —                         |
+| P1  | HCC README: document 4-layer NetworkPolicy model                                                                                                                                                      | Docs eng         | code already exists       |
+| P1  | Screenshots / short demo GIF                                                                                                                                                                          | Design / product | running minikube          |
+| P1  | Cut **v0.1.1** — v0.1.0 tarball predates PR #3 and still contains the deleted Compose quickstart                                                                                                      | Eng              | PR #4 merge               |
+| P2  | Automate test counts (make target printing file/case counts; README cites it)                                                                                                                         | Eng              | —                         |
+| P2  | e2e-guide internal debt: CLAUDE.md-era test tables (“Total 1,944”) and prose refs                                                                                                                     | Docs eng         | —                         |
+| P2  | Document-or-mark-experimental the four undocumented `mcp-servers/` dirs (web-search, playwright, doc-generator = real servers referenced from docs; alphavantage = stub) + add to “Available Servers” | Docs eng         | —                         |
+| P2  | Optional README length pass (move ports table to docs)                                                                                                                                                | Docs eng         | —                         |
+| P2  | Docs website                                                                                                                                                                                          | Eng              | —                         |
+| P3  | Fix the zai-default footgun in code: infer provider from whichever single API key is set (`full-setup.sh:571-573`) instead of only warning in docs                                                    | Eng              | —                         |
+| P3  | Resolve or strip TBD placeholders in `docs/crds/workflowrecipe.md` (registry spec “TBD”, unmigrated comparison doc — lines ~177, ~3075, ~4121)                                                        | Docs eng         | —                         |
+| P3  | platform-topology.md “7 namespaces” vs 12 declared in deploy/ (pre-existing)                                                                                                                          | Docs eng         | —                         |
+| P3  | Lightweight non-K8s path (product decision required)                                                                                                                                                  | Product          | decision                  |
+| P3  | Cloud production tutorial                                                                                                                                                                             | Eng              | production env            |
 
 > In flight: PR #4 (`fix/minikube-docs-followups`) fixes the pf-mcp-host
 > service name, the e2e-approval-flow default email, canonical bootstrap in the
-> e2e-guide, and two stale code comments.
+> e2e-guide, two stale code comments — and commits this roadmap.
 
 ---
 
@@ -184,7 +187,7 @@ If length becomes a problem, **trim 5 and 9** first, not 3 or 4.
 - [ ] All platform services have a minimal README
 - [ ] At least one visual proof in README
 - [ ] No known broken public links (currently OK on root README)
-- [x] Test claims machine-verified (10,260 cases / 882 files, 2026-07-13; automate via P2)
+- [x] Test claims verified by reproducible count (10,260 cases / 882 files, 2026-07-13) — CI automation still open (P2)
 - [ ] Release matches main (v0.1.1 after PR #4)
 
 ---
@@ -227,10 +230,15 @@ which; docs follow.**
 - `docs/meta/claims-guardrails.md` — “OSI open source” row and license lines
 - `CONTRIBUTING.md` (source-available phrasing), `GOVERNANCE.md`
   (“source-available / open-core style”), `docs/deploy/production.md`
-  (license-boundary section), `docs/README.md` community table
+  (license-boundary section), `docs/README.md` community table,
+  `docs/get-started/learning-path.md` (Path E “source-available terms”)
 - `CLA.md` — counsel pass in the same motion (CLA scope depends on final license)
-- Per-service `package.json` `"license": "SEE LICENSE IN LICENSE"` fields —
-  verify they remain accurate; lockfile `license` fields follow
+- Per-service `package.json` `license` fields — **audit; currently mixed**
+  (2026-07-13 census): 10× `"SEE LICENSE IN LICENSE"`, 2× **`"MIT"`
+  (gfs-controller, packages/image-policy — wrong under the CURRENT license
+  too, reconcile regardless of MPL timing)**, 7× field absent (control-api,
+  control-ui, desktop-app, external-rest-api, rpc-proxy, profile-ui,
+  workflow-approval-request-reader). Lockfile `license` fields follow
 - `TRADEMARK.md` — unchanged (trademarks are independent of MPL)
 
 **Until then:** keep the §4 non-goal (“no OSI claims”) exactly as is.
