@@ -156,9 +156,9 @@ If length becomes a problem, **trim 5 and 9** first, not 3 or 4.
 | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ------------------- |
 | P0  | Legal: license migration to MPL-2.0 **executed 2026-07-13** (§9); remaining: CLA counsel pass + align with cla.json                                                                                   | Human / counsel  | —                   |
 | P0  | Verify GH private vulnerability reporting enabled (security@ mailbox confirmed)                                                                                                                       | Human            | —                   |
-| P1  | Six missing service READMEs (1 screen each: purpose, ports, env, security)                                                                                                                            | Docs eng         | —                   |
-| P1  | control-ui README: real route groups + auth story (AuthGate exists)                                                                                                                                   | Docs eng         | —                   |
-| P1  | HCC README: document 4-layer NetworkPolicy model                                                                                                                                                      | Docs eng         | code already exists |
+| P1  | Six missing service READMEs (1 screen each: purpose, ports, env, security) *(in PR — this branch)*                                                                                                    | Docs eng         | —                   |
+| P1  | control-ui README: real route groups + auth story (AuthGate exists) *(in PR — this branch)*                                                                                                           | Docs eng         | —                   |
+| P1  | HCC README: document 4-layer NetworkPolicy model *(in PR — this branch)*                                                                                                                              | Docs eng         | code already exists |
 | P1  | Screenshots / short demo GIF                                                                                                                                                                          | Design / product | running minikube    |
 | P1  | Cut **v0.1.1** — v0.1.0 tarball predates PR #3 and still contains the deleted Compose quickstart                                                                                                      | Eng              | PR #4 merge         |
 | P2  | Automate test counts (make target printing file/case counts; README cites it)                                                                                                                         | Eng              | —                   |
@@ -175,6 +175,11 @@ If length becomes a problem, **trim 5 and 9** first, not 3 or 4.
 > In flight: PR #4 (`fix/minikube-docs-followups`) fixes the pf-mcp-host
 > service name, the e2e-approval-flow default email, canonical bootstrap in the
 > e2e-guide, two stale code comments — and commits this roadmap.
+>
+> Also in flight: `docs/service-readmes` (this branch) — the three P1
+> service-README rows above, plus `make test-counts` (P2 test-count
+> automation), the e2e-guide CLAUDE.md-era unit-test tables (P2), and the
+> platform-topology namespace count (P3).
 
 ---
 
@@ -190,7 +195,7 @@ If length becomes a problem, **trim 5 and 9** first, not 3 or 4.
 - [ ] At least one visual proof in README
 - [ ] No known broken public links (currently OK on root README)
 - [x] Test claims verified by reproducible count (10,260 cases / 882 files, 2026-07-13) — CI automation still open (P2)
-- [ ] Release matches main (v0.1.1 after PR #4)
+- [x] Release matches main (v0.2.0 on e805f47, 2026-07-13)
 
 ---
 

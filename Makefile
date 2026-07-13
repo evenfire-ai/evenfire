@@ -102,6 +102,13 @@ test-unit-all: ## Run unit tests across all services
 	fi
 	@echo "All unit tests passed."
 
+.PHONY: test-counts
+test-counts: ## Print unit-test file/case counts (*.test.ts excl. node_modules, tests/e2e, dist)
+	@files=$$(find . -name '*.test.ts' -not -path '*/node_modules/*' -not -path './tests/e2e/*' -not -path '*/dist/*' | wc -l | tr -d ' '); \
+	cases=$$(find . -name '*.test.ts' -not -path '*/node_modules/*' -not -path './tests/e2e/*' -not -path '*/dist/*' -print0 | xargs -0 grep -hE '^[[:space:]]*(it|test)\(' | wc -l | tr -d ' '); \
+	echo "Unit test files: $$files"; \
+	echo "Unit test cases: $$cases"
+
 # ── Build Preflight ──────────────────────────────────────────────────
 .PHONY: build-preflight
 build-preflight: ## Run local build preflight across deployable packages
