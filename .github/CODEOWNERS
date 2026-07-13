@@ -1,0 +1,54 @@
+# Code owners for evenfire.
+#
+# Every rule below assigns @jozer-rami, the current maintainer. When the
+# evenfire-ai org has review teams, swap these for a team handle (e.g.
+# @evenfire-ai/maintainers) — but note that GitHub SILENTLY IGNORES a
+# CODEOWNERS rule naming a team that does not exist or lacks write access to
+# this repo, so verify the team resolves before relying on it for reviews.
+#
+# Last match wins, so the catch-all comes first.
+
+*                                   @jozer-rami
+
+# ── Platform services ────────────────────────────────────────────────────
+/mcp-host/                          @jozer-rami
+/host-context-controller/           @jozer-rami
+/control-api/                       @jozer-rami
+/external-rest-api/                 @jozer-rami
+/channel-reader/                    @jozer-rami
+/workflow-recipes/                  @jozer-rami
+/workflow-approval-request-reader/  @jozer-rami
+/webhook-gateway/                   @jozer-rami
+/webhook-proxy/                     @jozer-rami
+/gfs-controller/                    @jozer-rami
+/workspace-files-controller/        @jozer-rami
+/rpc-proxy/                         @jozer-rami
+/mcp-proxy/                         @jozer-rami
+/stdio-bridge/                      @jozer-rami
+/mcp-servers/                       @jozer-rami
+/nginx-egress-proxy/                @jozer-rami
+
+# ── User interfaces ──────────────────────────────────────────────────────
+/control-ui/                        @jozer-rami
+/profile-ui/                        @jozer-rami
+/desktop-app/                       @jozer-rami
+
+# ── Shared packages (workflow-sdk is the public third-party surface) ─────
+/packages/                          @jozer-rami
+/packages/workflow-sdk/             @jozer-rami
+
+# ── Deployment, charts, and CI ───────────────────────────────────────────
+/deploy/                            @jozer-rami
+/charts/                            @jozer-rami
+/scripts/                           @jozer-rami
+/monitoring/                        @jozer-rami
+/Makefile                           @jozer-rami
+/.github/                           @jozer-rami
+
+# ── Legal and governance surfaces (review these carefully) ───────────────
+/LICENSE                            @jozer-rami
+/CLA.md                             @jozer-rami
+/TRADEMARK.md                       @jozer-rami
+/GOVERNANCE.md                      @jozer-rami
+/SECURITY.md                        @jozer-rami
+/signatures/                        @jozer-rami

@@ -81,15 +81,6 @@ Security guarantees:
 - `external-rest-api` forwards the same session token to `control-api` in `x-user-session-token`.
 - `control-api` re-validates token and claim-binding at route level (`:userId`/`:teamId` match), preventing cross-user or cross-team data access.
 
-## Security Improvements (Next Steps)
-
-- **Harden Google claim validation**: explicitly require `email_verified=true` and document accepted identity claims.
-- **Keep centralized policy for sensitive operations**: use a hybrid model where critical actions still perform live authorization checks in `control-api`.
-- **Strengthen transport and network boundaries**: enforce TLS everywhere, tighten NetworkPolicies, and limit egress from `external-rest-api` to only required services.
-- **Improve credential hygiene**: move all service credentials to Kubernetes Secrets, rotate regularly, and avoid inline placeholders in deployment examples.
-- **Add security-focused tests**: extend tests for tampered tokens, disabled users, role downgrades, and authorization regression cases across route handlers.
-- **Add audit logging**: emit structured auth and privileged-action audit events with request correlation IDs across `external-rest-api` and `control-api`.
-
 ## Local Run
 
 ```bash

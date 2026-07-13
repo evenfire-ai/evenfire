@@ -219,36 +219,34 @@ If length becomes a problem, **trim 5 and 9** first, not 3 or 4.
 > “source-available” to open source. **Pure MPL-2.0 — no additional
 > restriction.** Remaining from this motion: CLA counsel pass only.
 
-**Decision (Jose, 2026-07-13):** replace the current provisional
-“Apache-2.0 + additional use grant” with the **latest Mozilla Public License
-(MPL-2.0)**. Executed as a **later step** with counsel — not part of the
-current docs waves.
+**Decision (Jose, 2026-07-13):** the provisional “Apache-2.0 + additional use
+grant” was replaced with the **Mozilla Public License 2.0**, adopted **pure —
+no additional restriction**.
 
-**Why it matters for docs:** MPL-2.0 is an **OSI-approved** license
-(file-level copyleft). If adopted without any additional restriction, every
-“source-available, **not** OSI open source” statement flips to genuinely open
-source — a materially better trust story. If any use-grant-style restriction
-is retained on top, the source-available language must stay. **Counsel decides
-which; docs follow.**
+**Why it mattered for docs:** MPL-2.0 is an **OSI-approved** license
+(file-level copyleft). Adopted without a use-grant-style restriction on top,
+every “source-available, **not** OSI open source” statement flips to genuinely
+open source — a materially better trust story. That is the path taken, so the
+source-available language is gone rather than retained.
 
-**Touch list when it lands** (single PR, run the claims-guardrails gate):
+**Surfaces changed when it landed** (single PR, claims-guardrails gate run):
 
-- `LICENSE` (full text swap; remove provisional addendum)
+- `LICENSE` — full text swap to canonical mozilla.org MPL-2.0; provisional
+  addendum removed
 - Root `README.md` — License section + license badge
 - `docs/faq.md` — “Is it open source?” answer
 - `docs/meta/claims-guardrails.md` — “OSI open source” row and license lines
-- `CONTRIBUTING.md` (source-available phrasing), `GOVERNANCE.md`
-  (“source-available / open-core style”), `docs/deploy/production.md`
+- `CONTRIBUTING.md`, `GOVERNANCE.md`, `docs/deploy/production.md`
   (license-boundary section), `docs/README.md` community table,
-  `docs/get-started/learning-path.md` (Path E “source-available terms”)
-- `CLA.md` — counsel pass in the same motion (CLA scope depends on final license)
-- Per-service `package.json` `license` fields — **audit; currently mixed**
-  (2026-07-13 census): 10× `"SEE LICENSE IN LICENSE"`, 2× **`"MIT"`
-  (gfs-controller, packages/image-policy — wrong under the CURRENT license
-  too, reconcile regardless of MPL timing)**, 7× field absent (control-api,
-  control-ui, desktop-app, external-rest-api, rpc-proxy, profile-ui,
-  workflow-approval-request-reader). Lockfile `license` fields follow
+  `docs/get-started/learning-path.md` (Path E)
+- Per-service `package.json` `license` fields — all **33** set to `MPL-2.0`,
+  reconciling the pre-migration mix (10× `"SEE LICENSE IN LICENSE"`, 2× `"MIT"`
+  in gfs-controller and packages/image-policy — wrong under the Apache grant
+  too, 7× field absent). Lockfile `license` fields synced
 - `TRADEMARK.md` — unchanged (trademarks are independent of MPL)
+
+**Still open:** `CLA.md` counsel pass (CLA scope depends on the final license)
+and alignment with `cla.json`.
 
 **Done:** the former §4 non-goal (“no OSI claims”) is inverted — §4 now
 forbids retaining any “source-available” / “not open source” language.

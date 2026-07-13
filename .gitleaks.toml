@@ -1,0 +1,31 @@
+# gitleaks configuration for evenfire.
+#
+# Extends the upstream default ruleset, then allowlists the handful of files
+# that are *supposed* to contain credential-shaped strings: committed example
+# env files and test fixtures. Those values are deliberately invalid
+# placeholders (see .env.test), but scanners still pattern-match on prefixes,
+# so a fresh clone would otherwise report false positives.
+#
+# This narrows noise only. Real secrets in real source files are still caught.
+
+title = "evenfire"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Committed placeholder credentials and test fixtures"
+
+paths = [
+  # Example/placeholder env files — force-committed on purpose (see .gitignore).
+  '''^\.env\.test$''',
+  '''^\.env\..*\.example$''',
+  '''^\.env\.example$''',
+]
+
+regexes = [
+  # Our placeholder convention: any value carrying REPLACE-ME is never a secret.
+  '''REPLACE-ME''',
+  # Angle-bracket doc placeholders, e.g. <TELEGRAM_BOT_TOKEN>.
+  '''<[A-Z0-9_]+>''',
+]
