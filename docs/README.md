@@ -45,11 +45,11 @@ Use this index for long-form docs.
 
 ## Reference
 
-| Doc                         | Description                                                                 |
-| --------------------------- | --------------------------------------------------------------------------- |
-| [CRD index](crds/README.md) | All 8 `clerum.io` CRDs                                                      |
-| [llms.txt](llms.txt)        | Machine-readable doc map for coding agents                                  |
-| Service READMEs             | Linked from root [README repository layout](../README.md#repository-layout) |
+| Doc                         | Description                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------------ |
+| [CRD index](crds/README.md) | All 8 `clerum.io` CRDs                                                               |
+| [llms.txt](llms.txt)        | Machine-readable doc map for coding agents                                           |
+| Service READMEs             | Distilled per component in the root [README components map](../README.md#components) |
 
 ## Feature hubs
 

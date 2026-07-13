@@ -8,7 +8,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/evenfire-ai/evenfire/ci-public.yml?branch=main&label=CI)](https://github.com/evenfire-ai/evenfire/actions)
 [![GitHub release](https://img.shields.io/github/v/release/evenfire-ai/evenfire?sort=semver)](https://github.com/evenfire-ai/evenfire/releases)
 
-[What agents can do](#what-agents-can-do) · [Get started](#get-started-minikube) · [Architecture](#architecture) · [Security model](#security-model) · [Docs](docs/README.md) · [License](#license)
+[What agents can do](#what-agents-can-do) · [Get started](#get-started-minikube) · [Architecture](#architecture) · [Security model](#security-model) · [Components](#components) · [Docs](docs/README.md) · [License](#license)
 
 ---
 
@@ -302,7 +302,7 @@ it by default. Four enforcement layers in this repo:
 4. **Authenticated internals.** Service-to-service RS256 tokens with strict
    audience/scope (including short-lived artifact tokens). Shared-file access
    treats the JWT as a ceiling, re-checks a permission store fail-closed, and
-   appends to a tamper-evident audit chain. Inbound webhooks use timing-safe
+   appends to a tamper-evident audit log. Inbound webhooks use timing-safe
    signature checks. Direct `mcp-host` ingress is **layered**: edge trust
    headers from named platform services (in production restricted by
    NetworkPolicy); the host's own JWT middleware guards only specific control
@@ -366,22 +366,183 @@ environment variables). Details: [mcp-host/README.md](mcp-host/README.md).
 
 ---
 
-## Repository layout
+## Components
 
-| Area                    | Component                                                                                                                                              | Role                                    |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------- |
-| **Agent runtime**       | [mcp-host/](mcp-host/README.md)                                                                                                                        | LLM loop, approvals, MCP + native tools |
-|                         | [channel-reader/](channel-reader/README.md)                                                                                                            | Telegram / Email / Slack ingress        |
-|                         | [mcp-proxy/](mcp-proxy/README.md), [stdio-bridge/](stdio-bridge/README.md)                                                                             | MCP routing / stdio bridge              |
-|                         | [mcp-servers/](mcp-servers/README.md)                                                                                                                  | Connector specs (upstream images)       |
-| **Operators**           | [host-context-controller/](host-context-controller/README.md)                                                                                          | CRDs → Deployments + NetworkPolicies    |
-|                         | [workflow-recipes/](workflow-recipes/README.md)                                                                                                        | WorkflowRecipe operator                 |
-|                         | [gfs-controller/](gfs-controller/), [workspace-files-controller/](workspace-files-controller/)                                                         | File planes                             |
-| **Edge & security**     | [rpc-proxy/](rpc-proxy/README.md), [external-rest-api/](external-rest-api/README.md)                                                                   | JWT edge, profiles/tokens               |
-|                         | [webhook-gateway/](webhook-gateway/), [webhook-proxy/](webhook-proxy/), [nginx-egress-proxy/](nginx-egress-proxy/)                                     | Ingress / egress hardening              |
-|                         | [workflow-approval-request-reader/](workflow-approval-request-reader/)                                                                                 | Channel approval callbacks              |
-| **Control plane & UIs** | [control-api/](control-api/README.md), [control-ui/](control-ui/README.md), [profile-ui/](profile-ui/README.md), [desktop-app/](desktop-app/README.md) | Admin, profile, desktop                 |
-| **Platform**            | [charts/clerum-crds/](charts/clerum-crds/README.md), [deploy/](deploy/), [packages/](packages/), [monitoring/](monitoring/README.md)                   | CRDs, manifests, shared libs, log stack |
+Every deployable component in this monorepo has its own README. The map below
+distills the load-bearing facts from each — the folder READMEs are the deep
+dives.
+
+### Agent runtime
+
+- **[mcp-host/](mcp-host/README.md)** — the agent runtime. Runs the task
+  state machine and LLM loop under hard guardrails (per-task tool-call cap,
+  max task duration, bounded queue), executes native and MCP tools behind the
+  approval gate, and serves the versioned `/v1/runtime/*` REST API — messages,
+  approve/deny, task results, cron deliveries. Identity comes from a `Host`
+  CRD plus its referenced Secret, hot-reloaded on change; connector discovery
+  goes through host-context-controller's API, so mcp-host needs no McpServer
+  RBAC. LLM providers are data-first descriptors — an OpenAI-compatible
+  provider is a registry entry, not new code. `Host.spec.approval.tools`
+  overrides per-tool approval defaults (e.g. skip `http_request` approval
+  when `CLERUM_HTTP_ALLOWLIST` is the gate).
+- **[channel-reader/](channel-reader/README.md)** — Telegram (grammY), Email
+  (ImapFlow), and Slack (`@slack/web-api`) ingress. Watches
+  `CommunicationChannel` CRDs filtered by `hostRef` and restarts itself when
+  they change; applies per-sender pre-filters (Telegram user IDs, email
+  addresses, Slack usernames) before a message ever reaches the agent;
+  delivers generated attachments back to the channel under count/size caps.
+- **[mcp-proxy/](mcp-proxy/README.md)** — optional centralized MCP router
+  (`MCP_PROXY_ENABLED`). Polls host-context-controller for the live server
+  list into a diff-logged routing table, forwards with response-size and
+  timeout guards, and fails readiness when its discovery cache expires.
+- **[stdio-bridge/](stdio-bridge/README.md)** — sidecar that turns any
+  stdio-only MCP server (PostgreSQL, Redis, GitHub, …) into a StreamableHTTP
+  endpoint. Injected automatically when a CRD declares
+  `transport.type: stdio`; supervises the child process with
+  exponential-backoff restarts and graceful shutdown.
+- **[mcp-servers/](mcp-servers/README.md)** — the connector catalog. MongoDB
+  and Airtable ship with a 343-case test suite covering CRD config, API
+  behavior, MCP protocol, and generated Kubernetes resources; web-search
+  (Brave), Playwright, and doc-generator are available; Alpha Vantage is a
+  stub. Credentials live in Kubernetes Secrets, never in CRDs.
+
+### Operators
+
+- **[host-context-controller/](host-context-controller/README.md)** — the
+  central operator. Reconciles `McpServer` CRDs into Deployments and Services
+  — refusing to deploy any server whose referenced Secret (or any declared
+  key) is missing — and `Host` CRDs into a per-agent Deployment, Service, and
+  workspace PVC. Owns the four-layer NetworkPolicy model: for external
+  egress, public hostnames are DNS-resolved to `/32` ipBlocks, rejected if
+  they overlap private/link-local/cloud-metadata ranges, and re-resolved
+  periodically (default 5 min) — a failed egress binding blocks the workload
+  from starting at all. Also serves the discovery REST API mcp-host uses to
+  find connectors and their auth tokens, and sweeps orphaned resources on
+  startup.
+- **[workflow-recipes/](workflow-recipes/README.md)** — the operator that
+  owns the `WorkflowRecipe` lifecycle: policy validation against
+  cluster-wide `WorkflowRecipePolicy` CRDs, input and `{{…}}` template
+  resolution, topological dependency ordering, then Deployments,
+  StatefulSets, CronJobs, and Jobs. Recipes advance through a 13-state
+  machine (candidate → … → active, with degraded / rolling-back / failed
+  paths). Transport-enabled workloads become `McpServer` CRDs that
+  host-context-controller picks up. Per-workload security overrides let
+  images like PostgreSQL (uid 70) run under their expected uid while keeping
+  `runAsNonRoot` and all capabilities dropped. Recipes with `steps[]` get a
+  coordinator pod that executes multi-step LLM workflows with crash
+  recovery, per-step model overrides, and LLM-call rate limiting.
+- **[gfs-controller/](gfs-controller/README.md)** — brokered file API over
+  the `GlobalFileSystem` drive, and the only workload that mounts its PVC
+  (one writer replica, read-only readers). Every request runs a fail-closed
+  chain: RS256 JWT → subject expansion → token ceiling (the token is an
+  upper bound on authority, never a grant) → Postgres permission store
+  re-checked on every operation. Unauthorized and non-existent resources are
+  indistinguishable (both 403); every decision — allow, deny, or error — is
+  an INSERT-only audit row, and an audit-write failure means the operation
+  is not served. Agent replace/delete calls carry an integer `ifMatch`
+  version for optimistic concurrency.
+- **[workspace-files-controller/](workspace-files-controller/README.md)** —
+  the write path for `SharedFileSystem` team workspaces, one instance per
+  filesystem. Agents mount the same PVC read-only, and the instance's
+  NetworkPolicy admits only control-api — so a compromised agent pod cannot
+  reach the writable side of its own workspace. Short-lived JWTs are pinned
+  to one filesystem with a closed scope set; paths are validated lexically
+  and physically (symlinks rejected, re-validation after writes against
+  TOCTOU swaps, atomic temp-then-rename uploads).
+
+### Edge & security
+
+- **[rpc-proxy/](rpc-proxy/README.md)** — the external gateway for desktop
+  and tenant traffic. Verifies RS256 RPC tokens — issuer, audience, expiry,
+  scopes, per-host bindings, wildcard `*` rejected — holding a public key
+  only, so it can never mint what it verifies; each user's reachable servers
+  and hosts are resolved through control-api. Status/activity SSE streams
+  are read-only and never include chain-of-thought. Ships hardened
+  manifests: non-root, seccomp `RuntimeDefault`, read-only root filesystem,
+  NetworkPolicy, PodDisruptionBudget.
+- **[external-rest-api/](external-rest-api/README.md)** — public auth and
+  profile facade: password/Google login (session tokens are minted by
+  control-api), team membership and roles (admin / inviter / member),
+  invitations, directory lookup, and RPC-token brokerage. `userId` and
+  `teamId` always derive from verified JWT claims — never from request input
+  — and control-api re-validates the claim binding on every forwarded call.
+- **[webhook-gateway/](webhook-gateway/README.md)** — per-recipe webhook
+  verifier, one per recipe that declares `spec.webhooks[]`. Verifies the
+  exact raw bytes the provider signed: HMAC-SHA256 (plain or timestamped
+  with a replay window), constant-time static bearer, or JWKS-verified JWTs
+  — asymmetric algorithms only, `HS*`/`none` rejected. Slowloris budgets,
+  in-flight caps, per-webhook body caps; strips every inbound `x-clerum-*`
+  header and injects its own verified identity. Zero runtime npm
+  dependencies.
+- **[webhook-proxy/](webhook-proxy/README.md)** — stateless public webhook
+  router in front of the gateways. Path segments are matched raw (encoded
+  `%2e%2e` never decodes into `..`), the recipe namespace is pinned,
+  webhooks are looked up in control-api's registry (hits and misses both
+  cached), and bodies stream through unbuffered with method and size
+  enforcement. Holds no secrets beyond one service token and does no HMAC
+  itself — that is the gateway's job. Zero runtime npm dependencies.
+- **[workflow-approval-request-reader/](workflow-approval-request-reader/README.md)**
+  — the inbound half of channel approvals: normalizes Telegram/Slack
+  callbacks (approve/deny buttons, enrollment, chat handoff) and submits
+  decisions to the right workflow runtime. Telegram auth is a timing-safe
+  secret comparison; Slack signatures are verified via control-api and
+  cross-checked against the workspace ID; a fail-safe `can-approve`
+  pre-check refuses to forward a decision when control-api errors. Zero
+  runtime npm dependencies.
+- **[nginx-egress-proxy/](nginx-egress-proxy/README.md)** — hardened nginx
+  image serving as the pinned egress path for remote (SaaS) connectors.
+  host-context-controller generates its config per server: `proxy_pass`
+  locked to exactly one sanitized HTTPS URL (DNS hostnames only — IP
+  literals, internal and metadata hosts rejected, the URL reconstructed to
+  strip injected characters), upstream TLS verified, auth headers sanitized
+  against CRLF injection, credentials resolved from Secrets at pod start via
+  `${VAR}` placeholders so they never land in the ConfigMap. A remote CRD's
+  `spec.image` is never what runs — the operator always stamps the platform
+  image.
+
+### Control plane & UIs
+
+- **[control-api/](control-api/README.md)** — control-plane backend and the
+  platform's token mint. CRUD for the CRDs, namespace-constrained secret
+  management (listing returns metadata, never payloads), usage/cost
+  accounting, and three separately-keyed RS256 token families: user session
+  JWTs, short-lived scope-narrowed RPC tokens, and admin JWTs
+  (bcrypt-seeded bootstrap admin, lockout after repeated failures).
+  Separate keypairs keep blast radius contained and rotation independent;
+  internal service calls use timing-safe token comparison; token consumers
+  hold public keys only.
+- **[control-ui/](control-ui/README.md)** — the admin dashboard (Next.js).
+  Admin-JWT login in front of 14 sections: agents with a per-tool approval
+  editor that shows risk hints whenever a setting loosens a
+  required-by-default gate, connector egress editing that rejects
+  private/metadata/reserved ranges, a registry marketplace with trust levels
+  and publisher keys, a Global File System browser with grant delegation,
+  token usage with 8 group-by dimensions, budgets, and write-only secrets.
+  The browser talks same-origin only; a server-side handler proxies to
+  control-api.
+- **[profile-ui/](profile-ui/README.md)** — end-user profile and invitation
+  confirmation (Next.js). Invited users accept and set a password through a
+  token route; only the invitation token, email, and password ever leave the
+  browser — the temporary invitation session stays server-side.
+- **[desktop-app/](desktop-app/README.md)** — Electron + React client with a
+  hardened renderer: `contextIsolation` and `sandbox` on, `nodeIntegration`
+  off, all access through validated IPC (`window.clerum.*`). Authenticates
+  via external-rest-api, holds only short-lived scoped RPC tokens (internal
+  service tokens never touch the app), restores sessions from the OS
+  keychain, and consumes the read-only SSE streams. E2E-tested in two
+  phases: real IPC handlers against a live cluster, then Playwright driving
+  the built Electron app.
+
+### Platform directories
+
+| Directory                                           | What's in it                                                                                                             |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| [charts/clerum-crds/](charts/clerum-crds/README.md) | Helm chart with all 8 CRDs plus example resources                                                                        |
+| [deploy/](deploy/)                                  | Kubernetes manifests (`deploy/base/…`) for every namespace                                                               |
+| [packages/](packages/)                              | Shared TypeScript libraries                                                                                              |
+| [monitoring/](monitoring/README.md)                 | Optional Grafana + Loki log stack — Helm values and dashboards only, no code; authoritative usage/cost is in control-api |
+| [tests/e2e/](docs/testing/e2e-guide.md)             | 268 end-to-end tests across 8 suites on minikube                                                                         |
+| [docs/](docs/README.md)                             | The documentation tree                                                                                                   |
 
 ---
 
