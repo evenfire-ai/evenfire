@@ -1,6 +1,6 @@
 # Clerum E2E Testing Guide
 
-> Consolidated 2026-04-13 from CLAUDE.md, scripts/e2e/, and scattered service test docs.
+> Consolidated 2026-04-13 from internal testing notes, scripts/e2e/, and scattered service test docs.
 
 ## Overview
 
@@ -13,7 +13,7 @@ E2E tests validate the full pipeline (CRD reconcile → NetworkPolicy → MCP di
 
 ## Prerequisites
 
-From root `README.md` §Testing prerequisites and CLAUDE.md §Before E2E Testing:
+From root `README.md` §Testing prerequisites:
 
 - **Docker Desktop** running
 - **minikube** installed (`brew install minikube`)
@@ -201,21 +201,15 @@ This ensures E2E tests validate the real production flow, not a weakened test-mo
 
 ## Unit test suites
 
-CLAUDE.md §Testing (test coverage table). Per-service numbers here track the authoritative CLAUDE.md values; actuals can drift — run `npm test` in each directory to confirm.
+Every service in the root Makefile's `TEST_SERVICES` list ships its own vitest suite (mcp-host, workflow-recipes, mcp-servers, control-api, host-context-controller, rpc-proxy, desktop-app, and the rest). Exact per-service counts drift as code changes, so this guide does not pin them — count them yourself, or run the suite:
 
-| Service                 | Tests (CLAUDE.md) | Description                                                                     |
-| ----------------------- | ----------------- | ------------------------------------------------------------------------------- |
-| mcp-host                | 570               | Agent state machine, LLM providers, approval system, MCP client, internal tools |
-| workflow-recipes        | 790               | StatefulSet, Deployment, envSecret, PVC, workflows                              |
-| mcp-servers             | 343 ⚠️            | MongoDB + Airtable config + E2E                                                 |
-| workflow-sdk            | 147               | Workflow SDK primitives                                                         |
-| control-api             | 56                | Admin CRUD, auth, recipes, artifacts                                            |
-| host-context-controller | 38                | McpServer reconciler, NetworkPolicy reconciler, API gateway                     |
-| **Total (CLAUDE.md)**   | **1,944**         |                                                                                 |
+```bash
+make test-counts          # prints unit-test file and case counts
+                          # (it()/test() cases in *.test.ts, excluding
+                          #  node_modules, tests/e2e, and dist)
+```
 
-> ⚠️ **Known discrepancy (mcp-servers)**: CLAUDE.md reports 343 tests; Phase 2 Agent 1 audit (2026-04-11) verified 294 actual tests passing. Likely a counting-methodology difference (e.g. E2E subdirectory vs. unit only). Running `cd mcp-servers && npm test` is the source of truth.
-
-Root `README.md` §2 quotes slightly different (older) per-service counts — 370 workflow-recipes, 404 mcp-host, 37 mcp-proxy, 32 HCC = 843 total. CLAUDE.md is considered more current.
+`npm test` inside each service directory is the source of truth for what actually passes.
 
 Run all unit tests:
 
@@ -238,7 +232,7 @@ cd host-context-controller && npm test
 
 ## Desktop app E2E
 
-From CLAUDE.md §Testing desktop-app. Two-phase test strategy — requires port-forwards to a running cluster.
+Two-phase test strategy — requires port-forwards to a running cluster.
 
 ```bash
 cd desktop-app
@@ -257,15 +251,15 @@ cd tests/e2e && npx vitest run
 
 ## Troubleshooting
 
-Relevant test-related issues from CLAUDE.md §Common issues:
+Common test-related issues:
 
 - **409 on first-time setup** → `make minikube-setup ARGS="--reset-db --skip-build"`
 - **Postgres WAL corruption after cold start** → `make minikube-setup ARGS="--reset-db --skip-build"` (auto-detected)
 - **Pod `ImagePullBackOff`** → `make minikube-setup` (rebuilds images with `:test` tag and `imagePullPolicy: IfNotPresent`)
-- **`401: "Invalid token"` from chatllm** → `make minikube-gen-keys` followed by `make minikube-sync-auth-key` (auto-syncs + restarts). See CLAUDE.md §JWT Auth Chain.
+- **`401: "Invalid token"` from chatllm** → `make minikube-gen-keys` followed by `make minikube-sync-auth-key` (auto-syncs + restarts). See the JWT auth chain notes at the top of the root `Makefile`.
 - **Port-forward drops after pod restart** → re-run `make minikube-pf-desktop`
 - **Desktop app shows no agents after login** → `scripts/minikube/seed-test-data.sh`
-- **NetworkPolicy Phase 6 passes when it shouldn't** → ensure minikube was started with `--cni=calico`; the default `kindnet` CNI silently ignores NetworkPolicy. Cross-check the NetworkPolicy section in root `CLAUDE.md` and the rendered policies from the active overlay.
+- **NetworkPolicy Phase 6 passes when it shouldn't** → ensure minikube was started with `--cni=calico`; the default `kindnet` CNI silently ignores NetworkPolicy. Cross-check the rendered policies from the active overlay (`kubectl kustomize deploy/overlays/minikube`).
 - **Phase 8 times out on approval** → check mcp-host logs for `awaiting_approval` entry; E2E runner uses `userId: "e2e-runner"` and must match the approver identity configured on the Host CRD.
 
 ## Related
