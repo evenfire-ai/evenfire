@@ -65,7 +65,7 @@ jobs:
       webhook-gateway: ${{ steps.filter.outputs.webhook-gateway }}
       webhook-proxy: ${{ steps.filter.outputs.webhook-proxy }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -259,7 +259,7 @@ jobs:
             path: webhook-proxy
             changed: ${{ needs.detect.outputs.webhook-proxy }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
 
       - name: Set up QEMU
@@ -272,7 +272,7 @@ jobs:
 
       - name: Log in to ghcr.io
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
