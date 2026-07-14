@@ -58,10 +58,10 @@ these in any real deployment:
 - `EXTERNAL_REST_API_DESKTOP_APP_NAME`: Desktop app name in that payload (default `Evenfire`).
 - `EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL`: Base URL for the release link from `GET /api/v1/desktop/release` (default `https://github.com/evenfire-ai/evenfire/releases`).
 
-> `EXTERNAL_REST_API_PG_CONNECTION_STRING` exists in `src/db.ts` but is **not
-> live**: nothing imports `db.ts` or `src/repositories/`, and `initDb()` is never
-> called. All data access goes through `control-api` (see the delegated security
-> model below). Setting it has no effect.
+> **This service has no database of its own.** It holds no Postgres connection
+> and no `pg` dependency — every read and write goes through `control-api`, which
+> owns the `users` / `teams` / `team_members` / `profiles` / `invitations` tables
+> (see the delegated security model below).
 
 Session JWT issuance is centralized in `control-api`. `external-rest-api` verifies session JWTs locally with a public key and still uses `control-api` for internal profile/team operations.
 
