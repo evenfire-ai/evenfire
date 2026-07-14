@@ -10,7 +10,7 @@
     "test": "rm -rf .test-dist && tsc -p tsconfig.test.json && node --test .test-dist/test/invitations.test.js"
   },
   "dependencies": {
-    "next": "16.2.6",
+    "next": "16.2.10",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

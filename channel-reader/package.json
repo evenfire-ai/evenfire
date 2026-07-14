@@ -24,15 +24,15 @@
   "license": "MPL-2.0",
   "dependencies": {
     "@kubernetes/client-node": "^1.0.0",
-    "@slack/web-api": "^7.0.0",
-    "grammy": "^1.21.0",
-    "imapflow": "^1.0.164",
+    "@slack/web-api": "^7.19.0",
+    "grammy": "^1.44.0",
+    "imapflow": "^1.4.7",
     "nodemailer": "^6.9.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/nodemailer": "^6.4.0",
     "typescript": "^5.3.0",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.10"
   }
 }

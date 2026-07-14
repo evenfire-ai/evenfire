@@ -27,11 +27,11 @@
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^24.3.0",
-    "@types/supertest": "^7.2.0",
+    "@types/supertest": "^7.2.1",
     "supertest": "^7.2.2",
     "ts-node": "^10.9.2",
-    "tsx": "^4.21.0",
+    "tsx": "^4.23.1",
     "typescript": "^5.9.2",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.10"
   }
 }
