@@ -1,0 +1,15 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: smoke-invalid-dup
+  namespace: sandbox-recipes
+spec:
+  workloads: []
+  agent:
+    model: glm-4.7
+    provider: zai
+  steps:
+    - id: step-one
+      instruction: 'First step'
+    - id: step-one
+      instruction: 'Duplicate ID — CRD should reject this'

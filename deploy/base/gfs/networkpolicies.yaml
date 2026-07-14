@@ -1,0 +1,17 @@
+# Namespace floor for the GFS data plane. HCC creates the gfsc-specific ingress
+# and egress allowlists from the GlobalFileSystem CRD; this static policy makes
+# every pod in the namespace deny-by-default while those explicit policies are
+# absent, delayed, or scoped to a different workload.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-gfs
+  namespace: gfs
+  labels:
+    app.kubernetes.io/part-of: clerum
+    clerum.io/policy-type: default-deny
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

@@ -1,0 +1,138 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: control-api
+  namespace: control-plane
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-api
+  namespace: control-plane
+  labels:
+    app: control-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: control-api
+  template:
+    metadata:
+      labels:
+        app: control-api
+    spec:
+      serviceAccountName: control-api
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: control-api
+        image: clerum/control-api:0.9.5
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8090
+          name: http
+          protocol: TCP
+        env:
+        - name: CONTROL_API_SESSION_JWT_PRIVATE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: control-api-secrets
+              key: CONTROL_API_SESSION_JWT_PRIVATE_KEY
+        - name: CONTROL_API_RPC_JWT_PRIVATE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: control-api-secrets
+              key: CONTROL_API_RPC_JWT_PRIVATE_KEY
+        - name: CONTROL_API_ADMIN_JWT_PRIVATE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: control-api-secrets
+              key: CONTROL_API_ADMIN_JWT_PRIVATE_KEY
+        - name: CONTROL_API_ADMIN_BOOTSTRAP_PASSWORD_HASH
+          valueFrom:
+            secretKeyRef:
+              name: control-api-secrets
+              key: CONTROL_API_ADMIN_BOOTSTRAP_PASSWORD_HASH
+        - name: CONTROL_API_OAUTH_STATE_HMAC_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: control-api-secrets
+              key: CONTROL_API_OAUTH_STATE_HMAC_SECRET
+        - name: CONTROL_API_OAUTH_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: control-api-secrets
+              key: CONTROL_API_OAUTH_ENCRYPTION_KEY
+        - name: CONTROL_API_ALLOWED_ISSUANCE_NAMESPACES
+          value: "mcp-host,sandbox-recipes"
+        - name: CONTROL_API_REMOTE_MCP_EGRESS_PROXY_IMAGE
+          value: clerum/nginx-egress-proxy:0.1.0
+        envFrom:
+        - configMapRef:
+            name: control-api-config
+        # Inter-service tokens live in a Secret populated out-of-band by
+        # `deploy/scripts/apply-inter-service-tokens.sh` (via kubectl patch,
+        # which writes outside the last-applied-configuration envelope so
+        # `kubectl apply -k` does NOT wipe them on every CI redeploy).
+        # Keys projected: CONTROL_API_INTERNAL_SERVICE_TOKENS, CONTROL_API_INTERNAL_TOKENS.
+        - secretRef:
+            name: control-api-internal-tokens
+        # HS256 secrets for WRC/HCC InternalControl JWT verification.
+        - secretRef:
+            name: internal-control-jwt-secrets
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 8
+          periodSeconds: 12
+          failureThreshold: 3
+          successThreshold: 1
+          timeoutSeconds: 1
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 4
+          periodSeconds: 8
+          failureThreshold: 3
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: 300m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          seccompProfile:
+            type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-api
+  namespace: control-plane
+  labels:
+    app: control-api
+spec:
+  type: ClusterIP
+  selector:
+    app: control-api
+  ports:
+  - name: http
+    port: 8090
+    targetPort: http
+    protocol: TCP

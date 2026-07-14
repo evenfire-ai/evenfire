@@ -1,0 +1,27 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - control-api.yaml
+  - control-postgres.yaml
+  - control-ui.yaml
+  - control-api-rpc-gateway.yaml
+  - nginx-workflow-approval-gateway.yaml
+  - host-context-controller.yaml
+  - host-context-controller-api-gateway.yaml
+  - workflow-recipes.yaml
+  - configmaps.yaml
+  # Empty-by-design Secrets. Populated out-of-band by
+  # `deploy/scripts/apply-inter-service-tokens.sh` (kubectl patch) BEFORE
+  # `kubectl apply -k` runs. Declared in base so every overlay gets the
+  # canary automatically and no overlay ships a reusable placeholder.
+  - secrets-canary.yaml
+  # control-api-public-key-configmap.yaml is NOT included — it contains a
+  # placeholder value that would overwrite the real PEM key on every kubectl apply.
+  # The ConfigMap is created by deploy/scripts/gen-jwt-keys.sh (and
+  # scripts/minikube/generate-keys.sh) with the actual key derived from the
+  # admin JWT signing secret.
+  # model-config.yaml and model-secrets.yaml were removed when the WRC Secret
+  # Broker was refactored to read from mcp-host's chatllm-api-keys Secret
+  # directly. The ConfigMap now lives at deploy/base/mcp-host/model-secret-mapping.yaml.
+  - rbac.yaml
+  - networkpolicies.yaml

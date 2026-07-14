@@ -1,0 +1,91 @@
+# MongoDB MCP Server - StatefulSet WorkflowRecipe
+#
+# This recipe deploys MongoDB MCP server as a StatefulSet with persistent storage.
+# Using WorkflowRecipe instead of McpServer CRD because McpServer does not
+# currently support volumeClaimTemplates for StatefulSet deployment.
+#
+# Persistence: 10Gi PVC per replica (ReadWriteOnce)
+# DNS: mongodb-mcp-0.mongodb-mcp.mcp-server.svc.cluster.local:3000
+#
+# Prerequisites:
+#   - Context CRD "context1" must exist
+#   - Secret "mcp-mongodb-credentials" must exist with connection-string key
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: mongodb-mcp-server
+  namespace: sandbox-recipes
+  labels:
+    app: mongodb-mcp-server
+    clerum.io/workload-type: mcp-server
+spec:
+  # Context reference for MCP tool registration
+  contextRef: context1
+
+  # Security level (minimal for E2E testing with standard images)
+  security:
+    isolationLevel: minimal
+
+  # MCP server workload with persistent storage
+  workloads:
+    - id: mongodb-mcp
+      type: statefulset
+      image: mongodb/mongodb-mcp-server:latest
+      replicas: 1
+
+      # NO transport field - creates workload in sandbox-recipes for infrastructure testing
+      # For production MCP deployment, use McpServer CRD instead
+
+      # Persistent storage for data persistence test
+      volumeClaimTemplates:
+        - name: data
+          storageClass: standard  # minikube storage class
+          accessMode: ReadWriteOnce
+          size: 1Gi  # Smaller size for E2E testing
+
+      # MCP server ports
+      port: 3000  # MCP protocol port
+
+      # Health check endpoint (separate port)
+      healthCheck:
+        type: http
+        port: 3001
+        path: /health
+
+      # Environment variables for MongoDB MCP server
+      env:
+        - name: MDB_MCP_TRANSPORT
+          value: http
+        - name: MDB_MCP_HTTP_HOST
+          value: 0.0.0.0
+        - name: MDB_MCP_HTTP_PORT
+          value: "3000"
+        - name: MDB_MCP_HEALTH_CHECK_HOST
+          value: 0.0.0.0
+        - name: MDB_MCP_HEALTH_CHECK_PORT
+          value: "3001"
+        - name: MDB_MCP_READ_ONLY
+          value: "true"
+        - name: MDB_MCP_LOGGERS
+          value: stderr
+        - name: MDB_MCP_TELEMETRY
+          value: disabled
+
+      # MongoDB connection string from secret
+      envSecret:
+        name: mcp-mongodb-credentials
+        keys:
+          - secretKey: connection-string
+            envVar: MDB_MCP_CONNECTION_STRING
+
+      # Resource limits
+      resources:
+        requests:
+          memory: 128Mi
+          cpu: 100m
+        limits:
+          memory: 256Mi
+          cpu: 500m
+
+  # No additional resources needed (credentials created separately)
+  resources: []

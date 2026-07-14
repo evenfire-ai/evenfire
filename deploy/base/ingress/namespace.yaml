@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingress
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+    app.kubernetes.io/component: ingress
+    kubernetes.io/metadata.name: ingress
+    # cloudflared terminates an internet tunnel — strictest PSS tier.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

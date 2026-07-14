@@ -1,0 +1,31 @@
+{
+  "name": "@clerum/mcp-servers",
+  "version": "1.0.5",
+  "license": "MPL-2.0",
+  "description": "MCP servers for Clerum testing",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "build": "echo 'mcp-servers has no build step (uses upstream Docker images: domdomegg/airtable-mcp-server, mongodb/mongodb-mcp-server)'",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:airtable": "vitest run airtable/__tests__",
+    "test:mongodb": "vitest run mongodb/__tests__",
+    "lint": "eslint . --ext .ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "clerum",
+    "mcp",
+    "testing"
+  ],
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0",
+    "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.1"
+  }
+}

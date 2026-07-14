@@ -1,0 +1,202 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1660 900" width="1660" height="900">
+  <style>text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', 'Microsoft JhengHei', 'SimHei', sans-serif; }</style>
+  <defs>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/></marker>
+    <marker id="arrow-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#dc2626"/></marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#16a34a"/></marker>
+    <marker id="arrow-purple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#9333ea"/></marker>
+  </defs>
+  <rect width="1660" height="900" fill="#ffffff"/>
+  <text x="50" y="46" font-size="24" font-weight="700" fill="#111827">PR #535 Figure D Telegram group approval architecture</text>
+  <text x="50" y="72" font-size="13" fill="#6b7280">Branch codex/figure-d-sync-origin-dev-7c44 · head 1b90d04d9861 · T2 clerum-codex-figure-d-sync-origin-dev-7c44-a16d1edd</text>
+  <rect x="40" y="112" width="1580" height="260" rx="14" fill="#f9fafb" stroke="#e5e7eb"/><text x="58" y="140" font-size="13" font-weight="700" fill="#374151">User journey</text>
+<rect x="40" y="405" width="1580" height="255" rx="14" fill="#f9fafb" stroke="#e5e7eb"/><text x="58" y="433" font-size="13" font-weight="700" fill="#374151">Trust boundaries and runtime</text>
+<rect x="40" y="690" width="1580" height="118" rx="14" fill="#f9fafb" stroke="#e5e7eb"/><text x="58" y="718" font-size="13" font-weight="700" fill="#374151">Validation and E2E hardening</text>
+
+    <path d="M 300 211 L 340 211" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <rect x="284" y="190" width="72" height="18" rx="9" fill="#ffffff" opacity="0.96" stroke="#e5e7eb"/>
+    <text x="320" y="203" text-anchor="middle" font-size="11" fill="#374151">update</text>
+
+    <path d="M 600 211 L 640 211" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <rect x="584" y="190" width="72" height="18" rx="9" fill="#ffffff" opacity="0.96" stroke="#e5e7eb"/>
+    <text x="620" y="203" text-anchor="middle" font-size="11" fill="#374151">intent</text>
+
+    <path d="M 890 211 L 930 211" fill="none" stroke="#9333ea" stroke-width="2" marker-end="url(#arrow-purple)"/>
+    <rect x="872" y="190" width="76" height="18" rx="9" fill="#ffffff" opacity="0.96" stroke="#e5e7eb"/>
+    <text x="910" y="203" text-anchor="middle" font-size="11" fill="#374151">private DM</text>
+
+    <path d="M 1180 211 L 1220 211" fill="none" stroke="#9333ea" stroke-width="2" marker-end="url(#arrow-purple)"/>
+    <rect x="1164" y="190" width="72" height="18" rx="9" fill="#ffffff" opacity="0.96" stroke="#e5e7eb"/>
+    <text x="1200" y="203" text-anchor="middle" font-size="11" fill="#374151">callback</text>
+
+    <path d="M 1355 250 L 1445 428" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <rect x="1364" y="318" width="72" height="18" rx="9" fill="#ffffff" opacity="0.96" stroke="#e5e7eb"/>
+    <text x="1400" y="331" text-anchor="middle" font-size="11" fill="#374151">decision</text>
+
+    <path d="M 355 501 L 395 501" fill="none" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow-rose)"/>
+    <rect x="339" y="480" width="72" height="18" rx="9" fill="#ffffff" opacity="0.96" stroke="#e5e7eb"/>
+    <text x="375" y="493" text-anchor="middle" font-size="11" fill="#374151">login</text>
+
+    <path d="M 680 501 L 720 574" fill="none" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow-rose)"/>
+    <rect x="664" y="517" width="72" height="18" rx="9" fill="#ffffff" opacity="0.96" stroke="#e5e7eb"/>
+    <text x="700" y="530" text-anchor="middle" font-size="11" fill="#374151">Bearer</text>
+
+    <path d="M 1020 574 L 1060 574" fill="none" stroke="#16a34a" stroke-width="2" marker-end="url(#arrow-green)"/>
+    <rect x="1004" y="553" width="72" height="18" rx="9" fill="#ffffff" opacity="0.96" stroke="#e5e7eb"/>
+    <text x="1040" y="566" text-anchor="middle" font-size="11" fill="#374151">verified</text>
+
+    <path d="M 1320 574 L 1320 649" fill="none" stroke="#16a34a" stroke-width="2" marker-end="url(#arrow-green)"/>
+    <rect x="1282" y="591" width="76" height="18" rx="9" fill="#ffffff" opacity="0.96" stroke="#e5e7eb"/>
+    <text x="1320" y="604" text-anchor="middle" font-size="11" fill="#374151">run result</text>
+
+    <path d="M 1445 506 L 1470 610" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <rect x="1422" y="537" width="72" height="18" rx="9" fill="#ffffff" opacity="0.96" stroke="#e5e7eb"/>
+    <text x="1458" y="550" text-anchor="middle" font-size="11" fill="#374151">decision</text>
+
+    <path d="M 420 751 L 470 751" fill="none" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow-rose)"/>
+    <rect x="409" y="730" width="72" height="18" rx="9" fill="#ffffff" opacity="0.96" stroke="#e5e7eb"/>
+    <text x="445" y="743" text-anchor="middle" font-size="11" fill="#374151">hardens</text>
+
+    <path d="M 860 751 L 910 751" fill="none" stroke="#16a34a" stroke-width="2" marker-end="url(#arrow-green)"/>
+    <rect x="849" y="730" width="72" height="18" rx="9" fill="#ffffff" opacity="0.96" stroke="#e5e7eb"/>
+    <text x="885" y="743" text-anchor="middle" font-size="11" fill="#374151">validated</text>
+
+    <g id="node-group">
+      <rect x="70" y="172" width="230" height="78" rx="10" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.6"/>
+      <circle cx="98" cy="200" r="16" fill="#ffffff" stroke="#0284c7" stroke-width="1.3"/>
+      <text x="98" y="205" text-anchor="middle" font-size="13" font-weight="700" fill="#0284c7">tg</text>
+      <text x="124" y="200" font-size="15" font-weight="700" fill="#111827">Telegram group trigger</text>
+      <text x="124" y="221" font-size="12" fill="#4b5563">requester sends workflow command</text>
+      <circle cx="274" cy="196" r="15" fill="#0284c7" stroke="#0284c7" stroke-width="1.3"/>
+      <text x="274" y="201" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">1</text>
+    </g>
+
+    <g id="node-gateway">
+      <rect x="340" y="172" width="260" height="78" rx="10" fill="#f0fdfa" stroke="#0f766e" stroke-width="1.6"/>
+      <circle cx="368" cy="200" r="16" fill="#ffffff" stroke="#0f766e" stroke-width="1.3"/>
+      <text x="368" y="205" text-anchor="middle" font-size="13" font-weight="700" fill="#0f766e">gw</text>
+      <text x="394" y="200" font-size="15" font-weight="700" fill="#111827">Channel gateway</text>
+      <text x="394" y="221" font-size="12" fill="#4b5563">CommunicationChannel + channel-reader</text>
+      <circle cx="574" cy="196" r="15" fill="#0f766e" stroke="#0f766e" stroke-width="1.3"/>
+      <text x="574" y="201" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">2</text>
+    </g>
+
+    <g id="node-control">
+      <rect x="640" y="172" width="250" height="78" rx="10" fill="#fff7ed" stroke="#ea580c" stroke-width="1.6"/>
+      <circle cx="668" cy="200" r="16" fill="#ffffff" stroke="#ea580c" stroke-width="1.3"/>
+      <text x="668" y="205" text-anchor="middle" font-size="13" font-weight="700" fill="#ea580c">api</text>
+      <text x="694" y="200" font-size="15" font-weight="700" fill="#111827">control-api gate</text>
+      <text x="694" y="221" font-size="12" fill="#4b5563">approval intent + notification queue</text>
+      <circle cx="864" cy="196" r="15" fill="#ea580c" stroke="#ea580c" stroke-width="1.3"/>
+      <text x="864" y="201" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">3</text>
+    </g>
+
+    <g id="node-dm">
+      <rect x="930" y="172" width="250" height="78" rx="10" fill="#e0f2fe" stroke="#0284c7" stroke-width="1.6"/>
+      <circle cx="958" cy="200" r="16" fill="#ffffff" stroke="#0284c7" stroke-width="1.3"/>
+      <text x="958" y="205" text-anchor="middle" font-size="13" font-weight="700" fill="#0284c7">dm</text>
+      <text x="984" y="200" font-size="15" font-weight="700" fill="#111827">Private approver DM</text>
+      <text x="984" y="221" font-size="12" fill="#4b5563">compact approve/deny callback</text>
+      <circle cx="1154" cy="196" r="15" fill="#0284c7" stroke="#0284c7" stroke-width="1.3"/>
+      <text x="1154" y="201" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">4</text>
+    </g>
+
+    <g id="node-reader">
+      <rect x="1220" y="172" width="270" height="78" rx="10" fill="#f0fdfa" stroke="#0f766e" stroke-width="1.6"/>
+      <circle cx="1248" cy="200" r="16" fill="#ffffff" stroke="#0f766e" stroke-width="1.3"/>
+      <text x="1248" y="205" text-anchor="middle" font-size="13" font-weight="700" fill="#0f766e">ar</text>
+      <text x="1274" y="200" font-size="15" font-weight="700" fill="#111827">approval-request-reader</text>
+      <text x="1274" y="221" font-size="12" fill="#4b5563">resolves a/d:id:~hash</text>
+      <circle cx="1464" cy="196" r="15" fill="#0f766e" stroke="#0f766e" stroke-width="1.3"/>
+      <text x="1464" y="201" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">5</text>
+    </g>
+
+    <g id="node-runtime">
+      <rect x="1320" y="428" width="250" height="78" rx="10" fill="#fff7ed" stroke="#ea580c" stroke-width="1.6"/>
+      <circle cx="1348" cy="456" r="16" fill="#ffffff" stroke="#ea580c" stroke-width="1.3"/>
+      <text x="1348" y="461" text-anchor="middle" font-size="13" font-weight="700" fill="#ea580c">mh</text>
+      <text x="1374" y="456" font-size="15" font-weight="700" fill="#111827">Runtime mcp-host</text>
+      <text x="1374" y="477" font-size="12" fill="#4b5563">posts decision to control-api</text>
+      <circle cx="1544" cy="452" r="15" fill="#ea580c" stroke="#ea580c" stroke-width="1.3"/>
+      <text x="1544" y="457" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">6</text>
+    </g>
+
+    <g id="node-profile">
+      <rect x="70" y="462" width="285" height="78" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="1.6"/>
+      <circle cx="98" cy="490" r="16" fill="#ffffff" stroke="#2563eb" stroke-width="1.3"/>
+      <text x="98" y="495" text-anchor="middle" font-size="13" font-weight="700" fill="#2563eb">ui</text>
+      <text x="124" y="490" font-size="15" font-weight="700" fill="#111827">Profile UI access</text>
+      <text x="124" y="511" font-size="12" fill="#4b5563">Email + Password + Bearer token</text>
+
+    </g>
+
+    <g id="node-auth">
+      <rect x="395" y="462" width="285" height="78" rx="10" fill="#fef2f2" stroke="#dc2626" stroke-width="1.6"/>
+      <circle cx="423" cy="490" r="16" fill="#ffffff" stroke="#dc2626" stroke-width="1.3"/>
+      <text x="423" y="495" text-anchor="middle" font-size="13" font-weight="700" fill="#dc2626">jwt</text>
+      <text x="449" y="490" font-size="15" font-weight="700" fill="#111827">Session JWT boundary</text>
+      <text x="449" y="511" font-size="12" fill="#4b5563">401 clears session; fail-closed</text>
+
+    </g>
+
+    <g id="node-mediums">
+      <rect x="720" y="535" width="300" height="78" rx="10" fill="#faf5ff" stroke="#7c3aed" stroke-width="1.6"/>
+      <circle cx="748" cy="563" r="16" fill="#ffffff" stroke="#7c3aed" stroke-width="1.3"/>
+      <text x="748" y="568" text-anchor="middle" font-size="13" font-weight="700" fill="#7c3aed">db</text>
+      <text x="774" y="563" font-size="15" font-weight="700" fill="#111827">Workflow approval mediums</text>
+      <text x="774" y="584" font-size="12" fill="#4b5563">verify, bind, prefer, disconnect row</text>
+
+    </g>
+
+    <g id="node-recipe">
+      <rect x="1060" y="535" width="260" height="78" rx="10" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.6"/>
+      <circle cx="1088" cy="563" r="16" fill="#ffffff" stroke="#16a34a" stroke-width="1.3"/>
+      <text x="1088" y="568" text-anchor="middle" font-size="13" font-weight="700" fill="#16a34a">wr</text>
+      <text x="1114" y="563" font-size="15" font-weight="700" fill="#111827">WorkflowRecipe</text>
+      <text x="1114" y="584" font-size="12" fill="#4b5563">sandbox-recipes namespace invariant</text>
+
+    </g>
+
+    <g id="node-outcome">
+      <rect x="1320" y="610" width="300" height="78" rx="10" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.6"/>
+      <circle cx="1348" cy="638" r="16" fill="#ffffff" stroke="#16a34a" stroke-width="1.3"/>
+      <text x="1348" y="643" text-anchor="middle" font-size="13" font-weight="700" fill="#16a34a">end</text>
+      <text x="1374" y="638" font-size="15" font-weight="700" fill="#111827">Approve / deny outcomes</text>
+      <text x="1374" y="659" font-size="12" fill="#4b5563">approve succeeds; deny blocks final step</text>
+
+    </g>
+
+    <g id="node-rules">
+      <rect x="70" y="722" width="350" height="58" rx="10" fill="#fef2f2" stroke="#dc2626" stroke-width="1.6"/>
+      <circle cx="98" cy="750" r="16" fill="#ffffff" stroke="#dc2626" stroke-width="1.3"/>
+      <text x="98" y="755" text-anchor="middle" font-size="13" font-weight="700" fill="#dc2626">qa</text>
+      <text x="124" y="750" font-size="15" font-weight="700" fill="#111827">E2E fixture rules</text>
+      <text x="124" y="771" font-size="12" fill="#4b5563">same seed/env, real login, bounded waits</text>
+
+    </g>
+
+    <g id="node-specs">
+      <rect x="470" y="722" width="390" height="58" rx="10" fill="#fef2f2" stroke="#dc2626" stroke-width="1.6"/>
+      <circle cx="498" cy="750" r="16" fill="#ffffff" stroke="#dc2626" stroke-width="1.3"/>
+      <text x="498" y="755" text-anchor="middle" font-size="13" font-weight="700" fill="#dc2626">test</text>
+      <text x="524" y="750" font-size="15" font-weight="700" fill="#111827">PR #535 specs</text>
+      <text x="524" y="771" font-size="12" fill="#4b5563">group Figure D + Profile UI Telegram verification</text>
+
+    </g>
+
+    <g id="node-proof">
+      <rect x="910" y="722" width="390" height="58" rx="10" fill="#f8fafc" stroke="#475569" stroke-width="1.6"/>
+      <circle cx="938" cy="750" r="16" fill="#ffffff" stroke="#475569" stroke-width="1.3"/>
+      <text x="938" y="755" text-anchor="middle" font-size="13" font-weight="700" fill="#475569">ok</text>
+      <text x="964" y="750" font-size="15" font-weight="700" fill="#111827">Local proof</text>
+      <text x="964" y="771" font-size="12" fill="#4b5563">desktop build, auth tests, T2 E2E passed</text>
+
+    </g>
+  <g transform="translate(50 850)">
+    <text x="0" y="-18" font-size="12" font-weight="700" fill="#374151">Legend</text>
+    <line x1="0" y1="0" x2="34" y2="0" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/><text x="44" y="4" font-size="12" fill="#6b7280">User/workflow flow</text>
+    <line x1="190" y1="0" x2="224" y2="0" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow-rose)"/><text x="234" y="4" font-size="12" fill="#6b7280">Auth/fail-closed gate</text>
+    <line x1="420" y1="0" x2="454" y2="0" stroke="#16a34a" stroke-width="2" marker-end="url(#arrow-green)"/><text x="464" y="4" font-size="12" fill="#6b7280">Verified business signal</text>
+    <line x1="690" y1="0" x2="724" y2="0" stroke="#9333ea" stroke-width="2" marker-end="url(#arrow-purple)"/><text x="734" y="4" font-size="12" fill="#6b7280">Async notification/callback</text>
+  </g>
+</svg>

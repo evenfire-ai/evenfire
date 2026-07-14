@@ -1,0 +1,15 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: invalid-sched-bad-cron
+  namespace: sandbox-recipes
+spec:
+  workloads: []
+  agent:
+    model: glm-4.7
+    provider: zai
+  steps:
+    - id: step-one
+      instruction: 'Do something'
+  scheduling:
+    cron: 'not-a-cron'

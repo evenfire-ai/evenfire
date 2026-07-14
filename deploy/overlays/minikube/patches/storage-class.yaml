@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: control-postgres-data
+  namespace: control-plane
+spec:
+  storageClassName: standard
+---
+# Shared workflow-output PVC — minikube's hostpath-provisioner backs the
+# "standard" StorageClass. Recent minikube releases support ReadWriteMany
+# on hostpath via the csi-hostpath driver; fall back to installing
+# nfs-subdir-external-provisioner if the default does not honor RWX.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: clerum-workflow-output
+  namespace: sandbox-recipes
+spec:
+  storageClassName: standard

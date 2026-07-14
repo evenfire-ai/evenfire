@@ -1,0 +1,2 @@
+export const DEFAULT_TOAST_DURATION_MS = 3000
+export const ERROR_TOAST_DURATION_MS = 6000

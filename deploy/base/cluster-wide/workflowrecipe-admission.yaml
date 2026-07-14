@@ -1,0 +1,223 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: workflowrecipe-namespace-allowlist
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:
+          - clerum.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - workflowrecipes
+        scope: Namespaced
+  validations:
+    # Canonical storage namespace for WorkflowRecipe CRDs is `sandbox-recipes`
+    # (co-located with the coordinator + mcp-host pods each recipe
+    # orchestrates — see control-api/src/routes/admin/recipes.ts for the
+    # rationale). `mcp-server` is reserved for rendered McpServer transport
+    # children and their network policies; it is not a WorkflowRecipe CRD
+    # storage namespace.
+    - expression: "object.metadata.namespace == 'sandbox-recipes'"
+      message: "WorkflowRecipe resources must live in 'sandbox-recipes'. The platform, not recipe YAML, decides recipe placement; mcp-server is only for rendered MCP transport children."
+      reason: Invalid
+    - expression: "!has(object.metadata.ownerReferences) || object.metadata.ownerReferences.all(ref, !(ref.apiVersion == 'clerum.io/v1alpha1' && ref.kind == 'WorkflowRecipe') || request.userInfo.username == 'system:serviceaccount:control-plane:workflow-recipes')"
+      message: "Only the workflow-recipes controller may set WorkflowRecipe ownerReferences. Clients must create parent WorkflowRecipes without ownerReferences."
+      reason: Forbidden
+    - expression: "!has(object.spec.steps) || size(object.spec.steps) == 0 || request.userInfo.username == 'system:serviceaccount:control-plane:workflow-recipes' || (has(object.spec.triggers) && (has(object.spec.triggers.onDemand) || has(object.spec.triggers.schedule)))"
+      message: "WorkflowRecipes with spec.steps must declare spec.triggers.onDemand or spec.triggers.schedule. Workload-only recipes may omit triggers; child execution recipes are created by the workflow-recipes controller."
+      reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: workflowrecipe-namespace-allowlist
+spec:
+  policyName: workflowrecipe-namespace-allowlist
+  validationActions:
+    - Deny
+---
+# WorkflowRecipePolicy CRDs gate what recipes can declare (allowContextRef,
+# minIsolationLevel, …). Policies must co-locate with the recipes they
+# govern, otherwise the reconciler's namespace-scoped lookup in
+# workflow-recipes/src/reconciler/workflowRecipeReconciler.ts (line 297)
+# would miss them. Canonical storage is `sandbox-recipes`; `mcp-server` is
+# reserved for rendered McpServer transport children.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: workflowrecipepolicy-namespace-allowlist
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:
+          - clerum.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - workflowrecipepolicies
+        scope: Namespaced
+  validations:
+    - expression: "object.metadata.namespace == 'sandbox-recipes'"
+      message: "WorkflowRecipePolicy must live in 'sandbox-recipes' so it co-locates with the WorkflowRecipe CRDs it governs. mcp-server is only for rendered MCP transport children."
+      reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: workflowrecipepolicy-namespace-allowlist
+spec:
+  policyName: workflowrecipepolicy-namespace-allowlist
+  validationActions:
+    - Deny
+---
+# Managed NetworkPolicies encode controller ownership and selector identity in
+# labels. Those labels define the security boundary for deny/allow rules, so
+# legitimate migrations must delete/recreate the policy or temporarily remove
+# this admission binding through an explicit operator change. Runtime paths do
+# not get a silent breakglass bypass.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: managed-networkpolicy-label-immutability
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:
+          - networking.k8s.io
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - networkpolicies
+        scope: Namespaced
+  validations:
+    - expression: "request.operation != 'CREATE' || !(has(object.metadata.labels) && 'clerum.io/managed-by' in object.metadata.labels && ['host-context-controller','wrc','workflow-recipes'].exists(v, v == object.metadata.labels['clerum.io/managed-by'])) || ['system:serviceaccount:control-plane:host-context-controller','system:serviceaccount:control-plane:workflow-recipes'].exists(u, u == request.userInfo.username) || request.userInfo.groups.exists(g, g == 'system:masters')"
+      message: "Only the owning controllers or cluster-admin bootstrap may create NetworkPolicies with managed controller labels."
+      reason: Forbidden
+    - expression: "request.operation != 'UPDATE' || !(has(oldObject.metadata.labels) && 'clerum.io/managed-by' in oldObject.metadata.labels && ['host-context-controller','wrc','workflow-recipes'].exists(v, v == oldObject.metadata.labels['clerum.io/managed-by'])) || (has(object.metadata.labels) && 'clerum.io/managed-by' in object.metadata.labels && object.metadata.labels['clerum.io/managed-by'] == oldObject.metadata.labels['clerum.io/managed-by'])"
+      message: "Managed NetworkPolicy label clerum.io/managed-by is immutable; delete and recreate for intentional ownership migration."
+      reason: Forbidden
+    - expression: "request.operation != 'UPDATE' || !(has(object.metadata.labels) && 'clerum.io/managed-by' in object.metadata.labels && ['host-context-controller','wrc','workflow-recipes'].exists(v, v == object.metadata.labels['clerum.io/managed-by'])) || (has(oldObject.metadata.labels) && 'clerum.io/managed-by' in oldObject.metadata.labels && oldObject.metadata.labels['clerum.io/managed-by'] == object.metadata.labels['clerum.io/managed-by'])"
+      message: "NetworkPolicy ownership cannot be changed into a managed controller label by update; create it through the owning controller."
+      reason: Forbidden
+    - expression: "request.operation != 'UPDATE' || !(has(oldObject.metadata.labels) && 'clerum.io/managed-by' in oldObject.metadata.labels && ['host-context-controller','wrc','workflow-recipes'].exists(v, v == oldObject.metadata.labels['clerum.io/managed-by'])) || !('clerum.io/policy-type' in oldObject.metadata.labels) || (has(object.metadata.labels) && 'clerum.io/policy-type' in object.metadata.labels && object.metadata.labels['clerum.io/policy-type'] == oldObject.metadata.labels['clerum.io/policy-type'])"
+      message: "Managed NetworkPolicy label clerum.io/policy-type is immutable; delete and recreate for intentional policy migration."
+      reason: Forbidden
+    - expression: "request.operation != 'UPDATE' || !(has(oldObject.metadata.labels) && 'clerum.io/managed-by' in oldObject.metadata.labels && ['host-context-controller','wrc','workflow-recipes'].exists(v, v == oldObject.metadata.labels['clerum.io/managed-by'])) || !('clerum.io/context' in oldObject.metadata.labels) || (has(object.metadata.labels) && 'clerum.io/context' in object.metadata.labels && object.metadata.labels['clerum.io/context'] == oldObject.metadata.labels['clerum.io/context'])"
+      message: "Managed NetworkPolicy identity label clerum.io/context is immutable."
+      reason: Forbidden
+    - expression: "request.operation != 'UPDATE' || !(has(oldObject.metadata.labels) && 'clerum.io/managed-by' in oldObject.metadata.labels && ['host-context-controller','wrc','workflow-recipes'].exists(v, v == oldObject.metadata.labels['clerum.io/managed-by'])) || !('clerum.io/mcpserver' in oldObject.metadata.labels) || (has(object.metadata.labels) && 'clerum.io/mcpserver' in object.metadata.labels && object.metadata.labels['clerum.io/mcpserver'] == oldObject.metadata.labels['clerum.io/mcpserver'])"
+      message: "Managed NetworkPolicy identity label clerum.io/mcpserver is immutable."
+      reason: Forbidden
+    - expression: "request.operation != 'UPDATE' || !(has(oldObject.metadata.labels) && 'clerum.io/managed-by' in oldObject.metadata.labels && ['host-context-controller','wrc','workflow-recipes'].exists(v, v == oldObject.metadata.labels['clerum.io/managed-by'])) || !('clerum.io/recipe' in oldObject.metadata.labels) || (has(object.metadata.labels) && 'clerum.io/recipe' in object.metadata.labels && object.metadata.labels['clerum.io/recipe'] == oldObject.metadata.labels['clerum.io/recipe'])"
+      message: "Managed NetworkPolicy identity label clerum.io/recipe is immutable."
+      reason: Forbidden
+    - expression: "request.operation != 'UPDATE' || !(has(oldObject.metadata.labels) && 'clerum.io/managed-by' in oldObject.metadata.labels && ['host-context-controller','wrc','workflow-recipes'].exists(v, v == oldObject.metadata.labels['clerum.io/managed-by'])) || !('clerum.io/workload' in oldObject.metadata.labels) || (has(object.metadata.labels) && 'clerum.io/workload' in object.metadata.labels && object.metadata.labels['clerum.io/workload'] == oldObject.metadata.labels['clerum.io/workload'])"
+      message: "Managed NetworkPolicy identity label clerum.io/workload is immutable."
+      reason: Forbidden
+    - expression: "request.operation != 'UPDATE' || !(has(oldObject.metadata.labels) && 'clerum.io/managed-by' in oldObject.metadata.labels && ['host-context-controller','wrc','workflow-recipes'].exists(v, v == oldObject.metadata.labels['clerum.io/managed-by'])) || !('clerum.io/host' in oldObject.metadata.labels) || (has(object.metadata.labels) && 'clerum.io/host' in object.metadata.labels && object.metadata.labels['clerum.io/host'] == oldObject.metadata.labels['clerum.io/host'])"
+      message: "Managed NetworkPolicy identity label clerum.io/host is immutable."
+      reason: Forbidden
+    - expression: "request.operation != 'UPDATE' || !(has(oldObject.metadata.labels) && 'clerum.io/managed-by' in oldObject.metadata.labels && ['host-context-controller','wrc','workflow-recipes'].exists(v, v == oldObject.metadata.labels['clerum.io/managed-by'])) || !('clerum.io/sharedfilesystem' in oldObject.metadata.labels) || (has(object.metadata.labels) && 'clerum.io/sharedfilesystem' in object.metadata.labels && object.metadata.labels['clerum.io/sharedfilesystem'] == oldObject.metadata.labels['clerum.io/sharedfilesystem'])"
+      message: "Managed NetworkPolicy identity label clerum.io/sharedfilesystem is immutable."
+      reason: Forbidden
+    - expression: "request.operation != 'UPDATE' || !(has(oldObject.metadata.labels) && 'clerum.io/managed-by' in oldObject.metadata.labels && ['host-context-controller','wrc','workflow-recipes'].exists(v, v == oldObject.metadata.labels['clerum.io/managed-by'])) || !('clerum.io/component' in oldObject.metadata.labels) || (has(object.metadata.labels) && 'clerum.io/component' in object.metadata.labels && object.metadata.labels['clerum.io/component'] == oldObject.metadata.labels['clerum.io/component'])"
+      message: "Managed NetworkPolicy identity label clerum.io/component is immutable."
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: managed-networkpolicy-label-immutability
+spec:
+  policyName: managed-networkpolicy-label-immutability
+  validationActions:
+    - Deny
+---
+# WRC runtime name-budget guards (issue #613). Some controllers append a FIXED,
+# non-truncated suffix to the parent name when creating a child whose name must be
+# a <=63 DNS label; the reconciler clamps generated names and this admission layer
+# blocks direct manifests in WRC namespaces from bypassing that invariant:
+#   - CronJob     -> child Job `<name>-<timestamp>`  => parent <= 52 (hardcoded K8s limit)
+#   - StatefulSet -> Pod label `controller-revision-hash=<name>-<hash>` (label
+#                    value <=63), reserving 1 dash + 10 hash chars => parent <= 52
+# DaemonSet and Deployment are intentionally NOT guarded: K8s truncates their children
+# (Deployment ReplicaSet names fit a 253 subdomain via controller truncation;
+# DaemonSet ControllerRevision prefixes truncate to 223; both create Pods via
+# generateName, which the apiserver truncates) so their names cannot overflow.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: wrc-statefulset-name-budget
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:
+          - apps
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - statefulsets
+        scope: Namespaced
+  validations:
+    - expression: "!['sandbox-recipes','mcp-server'].exists(ns, ns == request.namespace) || size(object.metadata.name) <= 52"
+      message: "StatefulSet names in WRC runtime namespaces must be 52 characters or fewer so each Pod controller-revision-hash label value (<name>-<hash>) stays within the Kubernetes 63-character label-value limit."
+      reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: wrc-statefulset-name-budget
+spec:
+  policyName: wrc-statefulset-name-budget
+  validationActions:
+    - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: wrc-cronjob-name-budget
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:
+          - batch
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - cronjobs
+        scope: Namespaced
+  validations:
+    - expression: "!['sandbox-recipes','mcp-server'].exists(ns, ns == request.namespace) || size(object.metadata.name) <= 52"
+      message: "CronJob names in WRC runtime namespaces must be 52 characters or fewer so child Jobs stay within the Kubernetes 63-character DNS label limit."
+      reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: wrc-cronjob-name-budget
+spec:
+  policyName: wrc-cronjob-name-budget
+  validationActions:
+    - Deny

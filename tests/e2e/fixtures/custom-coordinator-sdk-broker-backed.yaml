@@ -1,0 +1,87 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-custom-coordinator-sdk-broker
+  namespace: sandbox-recipes
+spec:
+  coordinatorImage: clerum/workflow-custom-sdk-e2e:test
+  contextRef: context1
+  triggers:
+    onDemand:
+      allowedActors:
+        - user
+        - autonomous
+  security:
+    allowContextRef: true
+  workloads:
+    - id: business-api
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3001
+      healthCheck:
+        type: tcp
+        port: 3001
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+    - id: mock-tools
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3000
+      transport:
+        type: streamableHttp
+        path: /mcp
+      healthCheck:
+        type: tcp
+        port: 3001
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+  inputContract:
+    type: object
+    properties:
+      requestId:
+        type: string
+        default: e2e-custom-broker
+      approvalThreshold:
+        type: number
+        default: 1000
+      scenario:
+        type: string
+        default: broker-backed-receivables-risk
+  output:
+    destination: pvc
+    format: json
+    storageSize: 128Mi
+  steps:
+    - id: prepare
+    - id: broker-review
+      dependsOn:
+        - prepare
+      instruction: |
+        Use the mock-tools record tool exactly once with key="broker-proof"
+        and value="e2e-custom-coordinator-sdk-broker-e2e".
+        Return a concise JSON summary that includes the requestId and the stored record result.
+        Do not answer from memory; this step is valid only if the MCP tool is called.
+        Prepared data:
+        {{prepare:output}}
+      agent:
+        provider: zai
+        model: glm-4.7
+      mcpServers:
+        - mock-tools
+      allowedTools:
+        include:
+          - mock-tools__record
+      maxIterations: 6
+    - id: emit
+      dependsOn:
+        - broker-review

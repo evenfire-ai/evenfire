@@ -1,0 +1,37 @@
+{
+  "name": "clerum-rpc-proxy",
+  "version": "0.1.36",
+  "license": "MPL-2.0",
+  "description": "External-facing RPC proxy for tenant-scoped MCP access",
+  "main": "dist/main.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "npm --prefix ../tests/e2e run test:rpc-proxy-e2e",
+    "test:e2e:watch": "npm --prefix ../tests/e2e run test:rpc-proxy-e2e:watch",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "http-proxy": "^1.18.1",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/http-proxy": "^1.17.17",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^24.3.0",
+    "@types/supertest": "^6.0.3",
+    "supertest": "^7.1.4",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

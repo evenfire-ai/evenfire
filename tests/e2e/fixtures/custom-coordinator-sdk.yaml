@@ -1,0 +1,52 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-custom-coordinator-sdk
+  namespace: sandbox-recipes
+spec:
+  triggers:
+    onDemand: {}
+  coordinatorImage: clerum/workflow-custom-sdk-e2e:test
+  runtimeEgress:
+    http:
+      allowedHosts:
+        - api.github.com
+  workloads:
+    - id: business-api
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3001
+      healthCheck:
+        type: tcp
+        port: 3001
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+  inputContract:
+    type: object
+    properties:
+      requestId:
+        type: string
+        default: e2e-custom
+      approvalThreshold:
+        type: number
+        default: 1000
+      scenario:
+        type: string
+        default: receivables-risk-reconciliation
+  output:
+    destination: pvc
+    format: json
+    storageSize: 128Mi
+  steps:
+    - id: prepare
+    - id: transform
+      dependsOn:
+        - prepare
+    - id: emit
+      dependsOn:
+        - transform

@@ -1,0 +1,197 @@
+// control-api/test/routes.adminRegistryKeys.test.ts
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import express from 'express'
+import request from 'supertest'
+import { createAdminRegistryRouter } from '../src/routes/admin/registry.js'
+import { findAdminById } from '../src/services/adminAuthService.js'
+import { createKey, listKeys, revokeKey } from '../src/services/orgApiKeyClient.js'
+import { checkAndIncrement } from '../src/services/rateLimiterService.js'
+import { resolvePublishScope } from '../src/services/registryClient.js'
+
+vi.mock('../src/services/orgApiKeyClient.js', () => ({
+  listKeys: vi.fn(),
+  createKey: vi.fn(),
+  revokeKey: vi.fn(),
+  // Re-export a matching error class so the route's instanceof/status mapping works.
+  RegistryStatusError: class RegistryStatusError extends Error {
+    status: number
+    constructor(code: string, status: number) {
+      super(code)
+      this.status = status
+    }
+  },
+}))
+// The router imports many registryClient fns at module load; provide the surface.
+vi.mock('../src/services/registryClient.js', () => ({
+  searchEntries: vi.fn(),
+  getEntry: vi.fn(),
+  getEntryVersion: vi.fn(),
+  getCredentialSchema: vi.fn(),
+  getCategories: vi.fn(),
+  reportInstall: vi.fn(),
+  downloadBundle: vi.fn(),
+  getDigest: vi.fn(),
+  uploadArtifacts: vi.fn(),
+  updateVersionMetadata: vi.fn(),
+  deleteVersion: vi.fn(),
+  publishEntry: vi.fn(),
+  applyPublishScope: vi.fn((n: string | undefined) => n),
+  resolvePublishScope: vi.fn(),
+}))
+vi.mock('../src/services/adminAuthService.js', () => ({ findAdminById: vi.fn() }))
+const { cfg } = vi.hoisted(() => ({ cfg: { registryAuthEnabled: true } }))
+vi.mock('../src/config.js', () => ({ config: cfg }))
+vi.mock('../src/services/rateLimiterService.js', () => ({
+  checkAndIncrement: vi.fn(async () => ({
+    allowed: true,
+    remaining: 29,
+    resetMs: Date.now() + 60000,
+  })),
+}))
+
+function makeApp(adminId: string | null = 'admin-1') {
+  const app = express()
+  app.use(express.json())
+  app.use((req, _res, next) => {
+    ;(req as unknown as { adminAuth?: { sub: string } }).adminAuth = adminId
+      ? { sub: adminId }
+      : undefined
+    next()
+  })
+  app.use(createAdminRegistryRouter())
+  return app
+}
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  cfg.registryAuthEnabled = true
+  vi.mocked(checkAndIncrement).mockResolvedValue({
+    allowed: true,
+    remaining: 29,
+    resetMs: Date.now() + 60000,
+  } as never)
+  vi.mocked(findAdminById).mockResolvedValue({
+    id: 'admin-1',
+    username: 'alice',
+    status: 'active',
+  } as never)
+  vi.mocked(resolvePublishScope).mockResolvedValue({
+    curator: false,
+    orgName: 'acme',
+    scope: '@acme',
+  } as never)
+})
+
+describe('GET /admin/registry/keys', () => {
+  it('returns { org, keys } on success', async () => {
+    vi.mocked(listKeys).mockResolvedValue({ keys: [{ id: 'k1' }] } as never)
+    const res = await request(makeApp()).get('/admin/registry/keys')
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ org: 'acme', keys: [{ id: 'k1' }] })
+  })
+
+  it('409 registry_auth_disabled when auth disabled (before any registry call)', async () => {
+    cfg.registryAuthEnabled = false
+    const res = await request(makeApp()).get('/admin/registry/keys')
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'registry_auth_disabled' })
+    expect(resolvePublishScope).not.toHaveBeenCalled()
+  })
+
+  it('401 when admin missing/inactive', async () => {
+    vi.mocked(findAdminById).mockResolvedValue(null as never)
+    const res = await request(makeApp()).get('/admin/registry/keys')
+    expect(res.status).toBe(401)
+  })
+
+  it('409 no_org when the client is not org-bound (after a force refresh)', async () => {
+    vi.mocked(resolvePublishScope).mockResolvedValue({
+      curator: true,
+      orgName: null,
+      scope: null,
+    } as never)
+    const res = await request(makeApp()).get('/admin/registry/keys')
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'no_org' })
+    expect(resolvePublishScope).toHaveBeenCalledWith({ force: true })
+  })
+
+  it('forwards a 403 with org included', async () => {
+    const { RegistryStatusError } = await import('../src/services/orgApiKeyClient.js')
+    vi.mocked(listKeys).mockRejectedValue(new RegistryStatusError('forbidden', 403))
+    const res = await request(makeApp()).get('/admin/registry/keys')
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'forbidden', org: 'acme' })
+  })
+
+  it('429 when the per-admin rate limit is exceeded', async () => {
+    vi.mocked(checkAndIncrement).mockResolvedValue({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60000,
+    } as never)
+    const res = await request(makeApp()).get('/admin/registry/keys')
+    expect(res.status).toBe(429)
+  })
+})
+
+describe('POST /admin/registry/keys', () => {
+  it('201 returns the one-time key payload', async () => {
+    vi.mocked(createKey).mockResolvedValue({
+      id: 'k1',
+      key: 'efrk_x',
+      key_prefix: 'efrk_x',
+      scopes: [],
+      expires_at: null,
+    } as never)
+    const res = await request(makeApp()).post('/admin/registry/keys').send({ description: 'ci' })
+    expect(res.status).toBe(201)
+    expect(res.body.key).toBe('efrk_x')
+  })
+
+  it('passes through dockerconfigjson/registry/username when the registry returns them', async () => {
+    vi.mocked(createKey).mockResolvedValue({
+      id: 'k2',
+      key: 'efrk_pub',
+      key_prefix: 'efrk_pub',
+      scopes: ['registry:read', 'registry:publish'],
+      expires_at: null,
+      dockerconfigjson: 'eyJhdXRocyI6e30=',
+      registry: 'example.com',
+      username: '_',
+    } as never)
+    const res = await request(makeApp())
+      .post('/admin/registry/keys')
+      .send({ description: 'ci-push' })
+    expect(res.status).toBe(201)
+    expect(res.body.dockerconfigjson).toBe('eyJhdXRocyI6e30=')
+    expect(res.body.registry).toBe('example.com')
+    expect(res.body.username).toBe('_')
+  })
+
+  it('forwards a 409 too_many_keys code', async () => {
+    const { RegistryStatusError } = await import('../src/services/orgApiKeyClient.js')
+    vi.mocked(createKey).mockRejectedValue(new RegistryStatusError('too_many_keys', 409))
+    const res = await request(makeApp()).post('/admin/registry/keys').send({})
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'too_many_keys' })
+  })
+
+  it('maps a 502 integration error (not 500)', async () => {
+    const { RegistryStatusError } = await import('../src/services/orgApiKeyClient.js')
+    vi.mocked(createKey).mockRejectedValue(
+      new RegistryStatusError('registry_integration_error', 502)
+    )
+    const res = await request(makeApp()).post('/admin/registry/keys').send({})
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({ error: 'registry_integration_error' })
+  })
+})
+
+describe('DELETE /admin/registry/keys/:id', () => {
+  it('204 on revoke', async () => {
+    vi.mocked(revokeKey).mockResolvedValue(undefined as never)
+    const res = await request(makeApp()).delete('/admin/registry/keys/k1')
+    expect(res.status).toBe(204)
+  })
+})

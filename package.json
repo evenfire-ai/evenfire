@@ -1,0 +1,27 @@
+{
+  "name": "clerum",
+  "license": "MPL-2.0",
+  "private": true,
+  "scripts": {
+    "app": "make local-app",
+    "commitlint": "commitlint",
+    "format": "node scripts/prettier/run-all.mjs --write",
+    "format:check": "node scripts/prettier/run-all.mjs --check",
+    "format:staged": "node scripts/prettier/run-on-staged.mjs",
+    "profile": "make -C profile-ui dev",
+    "postinstall": "npm run install-git-hooks",
+    "style-rules": "node scripts/style-rules/run-all.mjs",
+    "style-rules:staged": "node scripts/style-rules/run-on-staged.mjs",
+    "ui": "make local-ui",
+    "validate:nginx-images": "bash scripts/validate-nginx-images.sh",
+    "version:staged": "node scripts/precommit/bump-staged-package-versions.mjs",
+    "install-git-hooks": "git config core.hooksPath .githooks && chmod +x .githooks/pre-commit .githooks/commit-msg",
+    "web": "make local-web"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.8.0",
+    "@commitlint/config-conventional": "^19.8.0",
+    "@trivago/prettier-plugin-sort-imports": "^5.0.0",
+    "prettier": "^3.0.0"
+  }
+}

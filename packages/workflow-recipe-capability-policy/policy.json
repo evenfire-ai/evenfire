@@ -1,0 +1,29 @@
+{
+  "workflowRecipeDefaultAllowedCapabilities": [
+    "CHOWN",
+    "FOWNER",
+    "DAC_OVERRIDE",
+    "NET_BIND_SERVICE"
+  ],
+  "workflowRecipeDeniedCapabilities": [
+    "SETUID",
+    "SETGID",
+    "SYS_CHROOT",
+    "KILL",
+    "AUDIT_WRITE",
+    "SYS_ADMIN",
+    "SYS_PTRACE",
+    "NET_ADMIN",
+    "NET_RAW",
+    "SYS_MODULE",
+    "SYS_RAWIO",
+    "SYS_BOOT",
+    "SYS_TIME",
+    "MKNOD",
+    "AUDIT_CONTROL",
+    "MAC_ADMIN",
+    "MAC_OVERRIDE",
+    "SYSLOG",
+    "DAC_READ_SEARCH"
+  ]
+}

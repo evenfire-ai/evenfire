@@ -1,0 +1,45 @@
+# Provider webhook/approval endpoints use HTTPS and can resolve to dynamic public
+# IPs. This policy allows public internet only. The ipBlock.except list below is
+# not a hardcoded provider allowlist; it excludes private, metadata, link-local,
+# loopback, documentation, benchmarking, multicast, and reserved ranges.
+# Scope is rule-level: internal decision posting uses
+# workflow-approval-request-reader-to-mcp-host, not this public egress rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workflow-approval-request-reader-external-egress
+  namespace: channels
+  labels:
+    clerum.io/policy-type: service
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: workflow-approval-request-reader
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 0.0.0.0/8
+        - 10.0.0.0/8
+        - 100.64.0.0/10
+        - 127.0.0.0/8
+        - 169.254.0.0/16
+        - 172.16.0.0/12
+        - 192.0.0.0/24
+        - 192.0.2.0/24
+        - 192.31.196.0/24
+        - 192.52.193.0/24
+        - 192.88.99.0/24
+        - 192.168.0.0/16
+        - 192.175.48.0/24
+        - 198.18.0.0/15
+        - 198.51.100.0/24
+        - 203.0.113.0/24
+        - 224.0.0.0/4
+        - 240.0.0.0/4

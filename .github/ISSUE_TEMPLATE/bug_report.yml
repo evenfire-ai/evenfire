@@ -1,0 +1,19 @@
+name: Bug report
+description: Report a problem with evenfire
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Steps, expected vs actual
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: deploy mode (compose/minikube/GKE), provider

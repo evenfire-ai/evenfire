@@ -1,0 +1,176 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: globalfilesystems.clerum.io
+  labels:
+    app.kubernetes.io/name: globalfilesystem
+    app.kubernetes.io/part-of: clerum
+spec:
+  group: clerum.io
+  names:
+    kind: GlobalFileSystem
+    listKind: GlobalFileSystemList
+    plural: globalfilesystems
+    singular: globalfilesystem
+    shortNames:
+      - gfs
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            GlobalFileSystem describes the single governed drive (one per
+            cluster — a singleton) of the Global File System. HCC's
+            gfsReconciler provisions a PVC plus a gfs-controller (gfsc) writer
+            Deployment (1 replica, RW), reader Deployments (RO), and a
+            ClusterIP Service plus per-GFS NetworkPolicies. When the writer is
+            Ready, the reconciler asks control-api to idempotently materialize
+            layout.rootDirectories as governed resources in the permission
+            store. The volume is only ever mounted by gfsc;
+            every other actor reaches the drive over gfsc's HTTP API. Bytes are
+            stored flat by resourceId; the human path is metadata in the
+            permission store, never mirrored on disk. The CRD declares intent
+            only — the reconciler owns securityContext, imagePullPolicy, and
+            replica wiring.
+          properties:
+            spec:
+              type: object
+              properties:
+                storage:
+                  type: object
+                  description: Persistent storage for the drive's flat blob layout.
+                  properties:
+                    size:
+                      type: string
+                      description: PVC requested storage (e.g. "500Gi"). Required — no default.
+                    storageClassName:
+                      type: string
+                      description: >-
+                        StorageClass for the drive PVC. v1 uses standard-rwo
+                        (RWO, single-node gfsc). RWX (clerum-gcsfuse) is a
+                        deferred escalation, set explicitly only when such a
+                        class exists.
+                      default: standard-rwo
+                    accessModes:
+                      type: array
+                      description: >-
+                        PVC accessModes. Defaults to ["ReadWriteOnce"] (v1). The
+                        gfsc writer is single-replica and the readers co-locate
+                        with it, so ReadWriteOnce works on the RWO-only
+                        StorageClasses we run. RWX (["ReadWriteMany"]) requires
+                        an RWX-capable StorageClass and is deferred — set it
+                        explicitly here when such a class exists.
+                      items:
+                        type: string
+                        enum:
+                          - ReadWriteOnce
+                          - ReadOnlyMany
+                          - ReadWriteMany
+                          - ReadWriteOncePod
+                      default:
+                        - ReadWriteOnce
+                  required:
+                    - size
+                layout:
+                  type: object
+                  description: Initial directory layout seeded into the drive.
+                  properties:
+                    rootDirectories:
+                      type: array
+                      maxItems: 64
+                      description: >-
+                        Absolute seed paths materialized by control-api after
+                        the gfsc writer is Ready (e.g. "/org",
+                        "/system/published-workflow-artifacts").
+                        Each path must be absolute (leading "/") with segments
+                        that start with an alphanumeric or underscore and may
+                        contain alphanumerics, underscores, dots, and hyphens.
+                        Traversal ("..") and empty segments are rejected.
+                      items:
+                        type: string
+                        maxLength: 512
+                        pattern: '^/[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$'
+                      default: []
+                security:
+                  type: object
+                  description: >-
+                    POSIX identity applied by the reconciler to the gfsc pods
+                    and the init Job so they can read/write the mounted drive.
+                  properties:
+                    runAsUser:
+                      type: integer
+                      minimum: 1
+                    fsGroup:
+                      type: integer
+                      minimum: 1
+                readerReplicas:
+                  type: integer
+                  description: >-
+                    Number of read-only gfsc reader replicas. The writer is
+                    always exactly 1 (single-writer drive); only the readers
+                    scale.
+                  minimum: 0
+                  default: 2
+                retainOnDelete:
+                  type: boolean
+                  description: >-
+                    When the GlobalFileSystem is deleted, retain the PVC if true
+                    (default). When false, HCC tears down the Deployments,
+                    Service, NetworkPolicies, and PVC last.
+                  default: true
+              required:
+                - storage
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Provisioning
+                    - Initializing
+                    - Ready
+                    - Degraded
+                    - Failed
+                pvcName:
+                  type: string
+                serviceName:
+                  type: string
+                  description: ClusterIP Service serving gfsc reads through the writer + readers. Mutations use the writer-only gfsc-writer Service.
+                serviceUrl:
+                  type: string
+                  description: In-cluster base URL of the gfsc read Service (e.g. http://gfsc.gfs.svc.cluster.local:8087).
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ['True', 'False', 'Unknown']
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: PVC
+          type: string
+          jsonPath: .status.pvcName
+        - name: Service URL
+          type: string
+          jsonPath: .status.serviceUrl
+      subresources:
+        status: {}

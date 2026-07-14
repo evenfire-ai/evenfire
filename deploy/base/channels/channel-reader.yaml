@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clerum-channel-reader
+  namespace: channels
+  labels:
+    app.kubernetes.io/name: channel-reader
+    app.kubernetes.io/part-of: clerum
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clerum-channel-reader-config
+  namespace: channels
+  labels:
+    app.kubernetes.io/name: channel-reader
+    app.kubernetes.io/part-of: clerum
+data:
+  CLERUM_ATTACHMENT_MAX_BYTES: "52428800"
+  CLERUM_ATTACHMENT_MAX_COUNT: "3"
+  CLERUM_EMAIL_IMAP_HOST: imap.gmail.com
+  CLERUM_EMAIL_IMAP_PORT: "993"
+  CLERUM_ENABLE_RESPONSE_ATTACHMENTS: "true"
+  CLERUM_CHANNEL_READER_HANDOFF_PORT: "8099"
+  CLERUM_NAMESPACE: ""
+  CLERUM_POLL_INTERVAL_SECONDS: "2"
+# The legacy static `clerum-channel-reader` Deployment that lived here has
+# been retired in favor of per-Host channel-reader Deployments managed by
+# HCC (`channel-reader-<host>`). HCC sweeps any lingering copy on startup
+# (HostReconciler.sweepLegacyStaticChannelReader). See #273 for the
+# rationale (Telegram getUpdates 409 polling collision) and the
+# retirement plan. The ServiceAccount + ConfigMap above are retained
+# because per-Host pods reference them.

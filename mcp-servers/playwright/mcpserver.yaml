@@ -1,0 +1,40 @@
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: playwright-server
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: >-
+    Playwright MCP Server - browser automation tools for navigation, DOM interaction,
+    code execution, and screenshot capture.
+  image: mcr.microsoft.com/playwright/mcp@sha256:a9d607e571d70954acc36de7a45e7f424a94cebdfba973b1f404435108c60f3f
+  imagePullPolicy: Always
+  command:
+    - node
+  args:
+    - cli.js
+    - --headless
+    - --browser
+    - chromium
+    - --no-sandbox
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8931"
+    - --allowed-hosts
+    - "*"
+  transport:
+    type: streamableHttp
+    url: http://playwright-server.mcp-server.svc.cluster.local:8931/mcp
+    port: 8931
+  auth:
+    type: none
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+  enabled: true

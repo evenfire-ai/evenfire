@@ -1,0 +1,9 @@
+loki:
+  enabled: true
+  persistence:
+    enabled: true
+    storageClassName: do-block-storage
+    accessModes: ["ReadWriteOnce"]
+    size: 100Gi
+promtail:
+  enabled: true

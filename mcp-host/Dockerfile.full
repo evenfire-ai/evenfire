@@ -1,0 +1,48 @@
+# MCP Host Dockerfile — Full variant
+# Base: node:24 (full Debian, glibc + apt + python3/gcc/make/curl/perl, ~400-500MB)
+# Use case: full dev workstation for agent shell execution
+# Pinned to Node 24.16.0 by digest: 24.17.0's undici bump regresses node-fetch@2
+# (ERR_STREAM_PREMATURE_CLOSE). Keep the runtime frozen.
+FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy source code
+COPY tsconfig.json tsconfig.build.json ./
+COPY src ./src
+
+# Build TypeScript
+RUN npm run build
+
+# Production image — full Debian (git, python3, gcc, make, curl, perl included)
+FROM node:24.16.0@sha256:40ad9f3064e67d6860b4bc3fe1880b2953934fd6320ada990e45fe0efa6badd7
+
+WORKDIR /app
+
+# Fill gaps in full Debian base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    jq wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy package files and install production dependencies only
+COPY package*.json ./
+RUN npm ci --only=production
+
+# Copy built code
+COPY --from=builder /app/dist ./dist
+
+# Run as non-root user
+RUN groupadd -g 1001 nodejs && useradd -u 1001 -g nodejs -m nodejs
+
+# Create writable workspace for native tools (file_read, file_write, shell_exec)
+RUN mkdir -p /workspace && chown nodejs:nodejs /workspace
+
+USER nodejs
+
+CMD ["node", "dist/main.js"]

@@ -1,0 +1,18 @@
+---
+# Minikube: workflow-recipes points at the local evenfire-registry deploy.
+# Auth is disabled in minikube — no registry-client-credentials Secret needed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workflow-recipes
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: workflow-recipes
+          env:
+            - name: CLERUM_REGISTRY_URL
+              value: "http://registry-api.registry.svc.cluster.local:8085"
+            - name: CLERUM_REGISTRY_AUTH_ENABLED
+              value: "false"

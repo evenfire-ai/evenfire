@@ -1,0 +1,51 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: control-api-to-registry
+  namespace: control-plane
+  labels:
+    clerum.io/policy-type: service
+    clerum.io/minikube-only: "true"
+spec:
+  podSelector:
+    matchLabels:
+      app: control-api
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 8085
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: registry
+          podSelector:
+            matchLabels:
+              app: registry-api
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workflow-recipes-to-registry
+  namespace: control-plane
+  labels:
+    clerum.io/policy-type: service
+    clerum.io/minikube-only: "true"
+spec:
+  podSelector:
+    matchLabels:
+      app: workflow-recipes
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 8085
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: registry
+          podSelector:
+            matchLabels:
+              app: registry-api

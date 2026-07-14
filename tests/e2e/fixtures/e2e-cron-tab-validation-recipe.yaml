@@ -1,0 +1,40 @@
+# E2E fixture — validates recipe-scoped cron tab enqueue + agent execution.
+#
+# Step reports CRON_TAB_SCHEDULED when cron_manage is available, or
+# CRON_TAB_UNAVAILABLE when the fix is not yet wired. When scheduled,
+# the fired cron task must write /tmp/clerum-output/cron-tab-proof.md
+# containing CRON_TAB_OK via clerum__generate_markdown.
+#
+# Prerequisite: CLERUM_ENABLE_APPROVAL=false so cron tasks run without approval.
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-cron-tab-validation
+  namespace: sandbox-recipes
+  labels:
+    clerum.io/workflow-run-id: 00000000-0000-4000-8000-0000000000c1
+    clerum.io/workflow-actor-type: admin
+    clerum.io/workflow-actor-id: e2e-cron-tab-validation
+spec:
+  triggers:
+    onDemand: {}
+  agent:
+    provider: PLACEHOLDER_PROVIDER
+    model: PLACEHOLDER_MODEL
+  steps:
+    - id: cron-tab-validate
+      instruction: |
+        You are validating that the mcp-host cron tab can enqueue a task and the agent
+        executes it. Use the available tools, IN ORDER:
+
+        1. CHECK + CREATE — If a cron scheduling tool (cron_manage) is available to you,
+           create a recurring job named "cron-tab-proof" with schedule "*/1 * * * *".
+           The job's task content MUST be EXACTLY this sentence (copy verbatim):
+           Use the clerum__generate_markdown tool to write a file named cron-tab-proof whose content is exactly CRON_TAB_OK
+           If NO cron scheduling tool is available, skip to step 3 and report UNAVAILABLE.
+
+        2. FIRE — Use cron_manage to TRIGGER the "cron-tab-proof" job immediately.
+
+        3. REPORT — Your FINAL line MUST be exactly one of:
+           - CRON_TAB_SCHEDULED     (you created and triggered the cron job)
+           - CRON_TAB_UNAVAILABLE   (no cron scheduling tool was available)

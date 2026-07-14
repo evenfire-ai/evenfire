@@ -1,0 +1,89 @@
+# Patch K8s API server IP for minikube cluster (clerum-test profile).
+#
+# AUTO-MANAGED: The `cidr:` values below are overwritten on every
+# `make minikube-deploy-all` (and `make minikube-setup`) by
+# `deploy/scripts/minikube-detect-k8s-api-ip.sh`, which reads the current
+# `kubernetes` endpoint IP. Do not rely on the committed value — it reflects
+# whatever node IP minikube had the last time someone ran the detector.
+#
+# Why not `namespaceSelector`/`podSelector` instead of `ipBlock`?
+# Stock K8s NetworkPolicy cannot reference Services or their endpoints; the
+# apiserver runs on the minikube node's host network, not in a pod. CIDR is
+# the only peer type that can target it. Calico enforces these CIDR rules
+# natively (unlike Cilium which prefers identity-based `toEntities`).
+#
+# PR #102 (2026-04-13) removed allow-k8s-api-egress-* from mcp-server, rpc-proxy,
+# and sandbox-recipes base manifests. HCC now creates opt-in runtime API egress
+# policies for those namespaces using KUBERNETES_SERVICE_HOST and selector
+# clerum.io/k8s-api-egress=true, so ordinary runtime workloads do not receive
+# API-server access by default. Only these namespaces need static K8s API egress:
+#
+#   1. control-plane — HCC does NOT reconcile its own namespace
+#   2. mcp-host — intentionally excluded from HCC runtimeNamespaces because its
+#      first-party policy is static: explicit HCC/API lanes plus public-only
+#      HTTP(S) for LLM/tool traffic. K8s API access still needs this environment
+#      patch because minikube exposes the apiserver through the node IP.
+#   3. channels — channel-reader watches CommunicationChannel CRDs and therefore
+#      needs apiserver egress for Q3 channel-native approvals.
+#
+# See docs/architecture/overview.md for the tracked NetworkPolicy taxonomy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-k8s-api-egress-control-plane
+  namespace: control-plane
+spec:
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 172.17.0.4/32
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 8443
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-k8s-api-egress-mcp-host
+  namespace: mcp-host
+spec:
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 172.17.0.4/32
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 8443
+          protocol: TCP
+---
+# channels — per-Host channel-reader pods (and the legacy static one) need
+# explicit K8s API egress to list/watch CommunicationChannel CRDs. HCC does
+# NOT reconcile this namespace, and the channel-reader-external-egress base
+# policy (443 to anywhere) does not match the apiserver on minikube because
+# Calico evaluates egress against the apiserver pod IP (host network), not
+# the cluster service IP. Without this rule, all channel-reader pods crash
+# with ETIMEDOUT 10.96.0.1:443 on startup.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-k8s-api-egress-channels
+  namespace: channels
+spec:
+  podSelector:
+    matchLabels:
+      app: channel-reader
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 172.17.0.4/32
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 8443
+          protocol: TCP
+---

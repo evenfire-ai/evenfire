@@ -1,0 +1,340 @@
+name: Build & Publish
+
+# Builds each service image and pushes it to GitHub Container Registry
+# (ghcr.io/evenfire-ai/*) using the built-in GITHUB_TOKEN only — zero cloud
+# secrets live in this public repo. The private infra repo mirrors these images
+# ghcr -> GCP Artifact Registry (digest-identical) and deploys by digest.
+#
+# Change-detected like the legacy deploy build: only images whose source paths
+# changed since the previous commit are (re)built. A manual run with
+# build_all=true rebuilds the whole matrix (use this for the first publish, or
+# to repopulate ghcr).
+#
+# mcp-host and channel-reader are built multi-arch (amd64 + arm64) so
+# Apple-Silicon users can pull-and-run. The rest are amd64-only (they deploy
+# to amd64 GKE).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      build_all:
+        description: 'Build and push every image regardless of changed paths'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  NAMESPACE: evenfire-ai
+
+jobs:
+  detect:
+    name: Detect changed images
+    runs-on: ubuntu-latest
+    # Publishing targets ghcr.io/evenfire-ai/*, which forks cannot write to.
+    # Guarding the entry job cascades: build-push needs detect, notify-infra
+    # needs build-push, so a fork skips the whole workflow cleanly.
+    if: github.repository == 'evenfire-ai/evenfire'
+    outputs:
+      force_all: ${{ steps.base.outputs.force_all }}
+      channel-reader: ${{ steps.filter.outputs.channel-reader }}
+      workflow-approval-request-reader: ${{ steps.filter.outputs.workflow-approval-request-reader }}
+      control-api: ${{ steps.filter.outputs.control-api }}
+      control-ui: ${{ steps.filter.outputs.control-ui }}
+      external-rest-api: ${{ steps.filter.outputs.external-rest-api }}
+      host-context-controller: ${{ steps.filter.outputs.host-context-controller }}
+      mcp-host: ${{ steps.filter.outputs.mcp-host }}
+      mcp-proxy: ${{ steps.filter.outputs.mcp-proxy }}
+      gfs-controller: ${{ steps.filter.outputs.gfs-controller }}
+      nginx-egress-proxy: ${{ steps.filter.outputs.nginx-egress-proxy }}
+      profile-ui: ${{ steps.filter.outputs.profile-ui }}
+      rpc-proxy: ${{ steps.filter.outputs.rpc-proxy }}
+      workflow-recipes: ${{ steps.filter.outputs.workflow-recipes }}
+      stdio-bridge: ${{ steps.filter.outputs.stdio-bridge }}
+      workspace-files-controller: ${{ steps.filter.outputs.workspace-files-controller }}
+      airtable-mcp-server: ${{ steps.filter.outputs.airtable-mcp-server }}
+      playwright-server: ${{ steps.filter.outputs.playwright-server }}
+      web-search-mcp: ${{ steps.filter.outputs.web-search-mcp }}
+      mock-mcp-server: ${{ steps.filter.outputs.mock-mcp-server }}
+      mock-stdio-mcp-server: ${{ steps.filter.outputs.mock-stdio-mcp-server }}
+      webhook-gateway: ${{ steps.filter.outputs.webhook-gateway }}
+      webhook-proxy: ${{ steps.filter.outputs.webhook-proxy }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve build mode
+        id: base
+        env:
+          EVENT: ${{ github.event_name }}
+          BUILD_ALL: ${{ inputs.build_all }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$BUILD_ALL" = "true" ]; then
+            echo "force_all=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            # first push / new branch / unknown base — build everything
+            echo "force_all=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "force_all=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect changed paths
+        id: filter
+        if: steps.base.outputs.force_all != 'true'
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event.before }}
+          filters: |
+            channel-reader:
+              - 'channel-reader/**'
+            workflow-approval-request-reader:
+              - 'workflow-approval-request-reader/**'
+            control-api:
+              - 'control-api/**'
+              - 'packages/workflow-runtime-core/**'
+              - 'packages/workflow-recipe-capability-policy/**'
+              - 'packages/image-policy/**'
+            control-ui:
+              - 'control-ui/**'
+              - 'packages/workflow-recipe-capability-policy/**'
+            external-rest-api:
+              - 'external-rest-api/**'
+            host-context-controller:
+              - 'host-context-controller/**'
+              - 'packages/workflow-recipe-capability-policy/**'
+              - 'packages/image-policy/**'
+            mcp-host:
+              - 'mcp-host/**'
+            mcp-proxy:
+              - 'mcp-proxy/**'
+            gfs-controller:
+              - 'gfs-controller/**'
+            nginx-egress-proxy:
+              - 'nginx-egress-proxy/**'
+            profile-ui:
+              - 'profile-ui/**'
+            rpc-proxy:
+              - 'rpc-proxy/**'
+            workflow-recipes:
+              - 'workflow-recipes/**'
+              - 'packages/workflow-runtime-core/**'
+              - 'packages/workflow-sdk/**'
+              - 'packages/workflow-recipe-capability-policy/**'
+              - 'packages/image-policy/**'
+              - 'scripts/e2e/**'
+              - 'tests/e2e/fixtures/**'
+            stdio-bridge:
+              - 'stdio-bridge/**'
+            workspace-files-controller:
+              - 'workspace-files-controller/**'
+            airtable-mcp-server:
+              - 'mcp-servers/airtable/**'
+            playwright-server:
+              - 'mcp-servers/playwright/**'
+            web-search-mcp:
+              - 'mcp-servers/web-search/**'
+            mock-mcp-server:
+              - 'tests/e2e/fixtures/mock-mcp-server/**'
+            mock-stdio-mcp-server:
+              - 'tests/e2e/fixtures/mock-stdio-mcp-server/**'
+            webhook-gateway:
+              - 'webhook-gateway/**'
+            webhook-proxy:
+              - 'webhook-proxy/**'
+
+  build-push:
+    name: Build & push (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    needs: detect
+    # Gate at step level: the `matrix` context is not available in a job-level
+    # `if`, so each step checks whether this image changed (or a full build was
+    # requested). Unchanged images spin an empty job and exit fast.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: channel-reader
+            path: channel-reader
+            platforms: linux/amd64,linux/arm64
+            changed: ${{ needs.detect.outputs.channel-reader }}
+          - image: workflow-approval-request-reader
+            path: workflow-approval-request-reader
+            changed: ${{ needs.detect.outputs.workflow-approval-request-reader }}
+          - image: control-api
+            path: control-api
+            rooted: true
+            changed: ${{ needs.detect.outputs.control-api }}
+          - image: control-ui
+            path: control-ui
+            rooted: true
+            changed: ${{ needs.detect.outputs.control-ui }}
+          - image: external-rest-api
+            path: external-rest-api
+            changed: ${{ needs.detect.outputs.external-rest-api }}
+          - image: host-context-controller
+            path: host-context-controller
+            rooted: true
+            changed: ${{ needs.detect.outputs.host-context-controller }}
+          - image: mcp-host
+            path: mcp-host
+            platforms: linux/amd64,linux/arm64
+            changed: ${{ needs.detect.outputs.mcp-host }}
+          - image: mcp-host-slim
+            path: mcp-host
+            dockerfile: Dockerfile.slim
+            changed: ${{ needs.detect.outputs.mcp-host }}
+          - image: mcp-host-full
+            path: mcp-host
+            dockerfile: Dockerfile.full
+            changed: ${{ needs.detect.outputs.mcp-host }}
+          - image: mcp-host-desktop
+            path: mcp-host
+            dockerfile: Dockerfile.desktop
+            changed: ${{ needs.detect.outputs.mcp-host }}
+          - image: mcp-proxy
+            path: mcp-proxy
+            changed: ${{ needs.detect.outputs.mcp-proxy }}
+          - image: gfs-controller
+            path: gfs-controller
+            changed: ${{ needs.detect.outputs.gfs-controller }}
+          - image: nginx-egress-proxy
+            path: nginx-egress-proxy
+            changed: ${{ needs.detect.outputs.nginx-egress-proxy }}
+          - image: profile-ui
+            path: profile-ui
+            changed: ${{ needs.detect.outputs.profile-ui }}
+          - image: rpc-proxy
+            path: rpc-proxy
+            changed: ${{ needs.detect.outputs.rpc-proxy }}
+          - image: workflow-recipes
+            path: workflow-recipes
+            rooted: true
+            changed: ${{ needs.detect.outputs.workflow-recipes }}
+          - image: workflow-coordinator
+            path: workflow-recipes
+            dockerfile: Dockerfile.coordinator
+            rooted: true
+            changed: ${{ needs.detect.outputs.workflow-recipes }}
+          - image: workflow-snippet-runner
+            path: workflow-recipes
+            rooted: true
+            changed: ${{ needs.detect.outputs.workflow-recipes }}
+          - image: clerum-workflow-base
+            path: packages/workflow-sdk
+            dockerfile: Dockerfile.base
+            rooted: true
+            changed: ${{ needs.detect.outputs.workflow-recipes }}
+          - image: stdio-bridge
+            path: stdio-bridge
+            changed: ${{ needs.detect.outputs.stdio-bridge }}
+          - image: workspace-files-controller
+            path: workspace-files-controller
+            changed: ${{ needs.detect.outputs.workspace-files-controller }}
+          - image: airtable-mcp-server
+            path: mcp-servers/airtable
+            changed: ${{ needs.detect.outputs.airtable-mcp-server }}
+          - image: playwright-server
+            path: mcp-servers/playwright
+            changed: ${{ needs.detect.outputs.playwright-server }}
+          - image: web-search-mcp
+            path: mcp-servers/web-search
+            changed: ${{ needs.detect.outputs.web-search-mcp }}
+          - image: mock-mcp-server
+            path: tests/e2e/fixtures/mock-mcp-server
+            changed: ${{ needs.detect.outputs.mock-mcp-server }}
+          - image: mock-stdio-mcp-server
+            path: tests/e2e/fixtures/mock-stdio-mcp-server
+            changed: ${{ needs.detect.outputs.mock-stdio-mcp-server }}
+          - image: webhook-gateway
+            path: webhook-gateway
+            changed: ${{ needs.detect.outputs.webhook-gateway }}
+          - image: webhook-proxy
+            path: webhook-proxy
+            changed: ${{ needs.detect.outputs.webhook-proxy }}
+    steps:
+      - uses: actions/checkout@v4
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+
+      - name: Set up QEMU
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute short SHA
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        id: shortsha
+        run: echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve build context and Dockerfile
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        id: buildargs
+        env:
+          MATRIX_PATH: ${{ matrix.path }}
+          MATRIX_DOCKERFILE: ${{ matrix.dockerfile }}
+          MATRIX_ROOTED: ${{ matrix.rooted }}
+        run: |
+          # Rooted services COPY from sibling directories (packages/*) so their
+          # Docker build context must be the repo root and the Dockerfile path
+          # is fully qualified.
+          if [ "$MATRIX_ROOTED" = "true" ]; then
+            echo "context=." >> "$GITHUB_OUTPUT"
+            echo "file=$MATRIX_PATH/${MATRIX_DOCKERFILE:-Dockerfile}" >> "$GITHUB_OUTPUT"
+          else
+            echo "context=$MATRIX_PATH" >> "$GITHUB_OUTPUT"
+            echo "file=$MATRIX_PATH/${MATRIX_DOCKERFILE:-Dockerfile}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ steps.buildargs.outputs.context }}
+          file: ${{ steps.buildargs.outputs.file }}
+          platforms: ${{ matrix.platforms || 'linux/amd64' }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}:sha-${{ steps.shortsha.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}:latest
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+  # Notify the private infra repo that a fresh image set is available so it can
+  # mirror ghcr -> GCP Artifact Registry and bump the dev pins. Dormant until the
+  # operator sets the INFRA_DISPATCH_REPO variable and INFRA_DISPATCH_TOKEN secret;
+  # the nightly reconcile poll in the infra repo is the missed-event safety net.
+  notify-infra:
+    name: Dispatch images-published
+    runs-on: ubuntu-latest
+    needs: build-push
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_all }}
+    steps:
+      - name: Fire repository_dispatch to the infra repo
+        env:
+          DISPATCH_REPO: ${{ vars.INFRA_DISPATCH_REPO }}
+          DISPATCH_TOKEN: ${{ secrets.INFRA_DISPATCH_TOKEN }}
+          SHA: ${{ github.sha }}
+        if: ${{ env.DISPATCH_REPO != '' && env.DISPATCH_TOKEN != '' }}
+        run: |
+          curl --fail-with-body -sS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $DISPATCH_TOKEN" \
+            "https://api.github.com/repos/$DISPATCH_REPO/dispatches" \
+            -d "$(printf '{"event_type":"images-published","client_payload":{"sha":"%s","short_sha":"%s"}}' "$SHA" "${SHA:0:7}")"

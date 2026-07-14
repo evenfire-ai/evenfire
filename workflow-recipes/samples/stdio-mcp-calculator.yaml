@@ -1,0 +1,18 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: stdio-mcp-calculator
+  namespace: sandbox-recipes
+spec:
+  description: 'stdio MCP calculator — validates stdio-bridge sidecar injection via HCC'
+  contextRef: context1
+  workloads:
+    - id: calculator
+      type: deployment
+      image: clerum/mock-stdio-mcp-server:test
+      imagePullPolicy: IfNotPresent
+      transport:
+        type: stdio
+      port: 3000
+  security:
+    isolationLevel: minimal

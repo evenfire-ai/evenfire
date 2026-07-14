@@ -1,0 +1,106 @@
+# RBAC for the sandbox-ui namespace.
+#
+# Two controllers operate here:
+#   - host-context-controller (HCC): manages the namespace's infrastructure
+#     NetworkPolicies (deny-all + DNS / HCC-API / k8s-API egress) and any
+#     runtime-derived policies. Same role shape as sandbox-recipes.
+#   - workflow-recipes (WRC): owns the UI workload lifecycle (Deployment +
+#     Service) and generates the per-recipe ui-egress NetworkPolicy.
+
+# --- HCC: NetworkPolicy management ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller-sandbox-ui-runtime
+  namespace: sandbox-ui
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller-sandbox-ui-runtime
+  namespace: sandbox-ui
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller-sandbox-ui-runtime
+subjects:
+  - kind: ServiceAccount
+    name: host-context-controller
+    namespace: control-plane
+---
+# --- WRC: UI workload + per-recipe egress policy management ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workflow-recipes-sandbox-ui
+  namespace: sandbox-ui
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Secrets — `list`+`watch` let the multi-namespace SecretWatcher observe
+  # ownership-label changes for UI-workload envSecrets mounted from sandbox-ui
+  # (Issue #637 revocation fan-out).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # `deletecollection` supports deleteStatefulSetManagedPods (Issue #637 Fix #4)
+  # for a UI StatefulSet whose Secret ownership is revoked.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete", "deletecollection"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workflow-recipes-sandbox-ui
+  namespace: sandbox-ui
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workflow-recipes-sandbox-ui
+subjects:
+  - kind: ServiceAccount
+    name: workflow-recipes
+    namespace: control-plane
+---
+# --- control-api: read access for the registry endpoint + recipe secret creation ---
+# control-api resolves appRef -> Service for rpc-proxy. It needs to read the
+# Service and Endpoints to determine readiness. It also lists and creates
+# labelled recipe Secrets for UI workloads that mount envSecret from sandbox-ui.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: control-api-sandbox-ui-reader
+  namespace: sandbox-ui
+rules:
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-api-sandbox-ui-reader
+  namespace: sandbox-ui
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: control-api-sandbox-ui-reader
+subjects:
+  - kind: ServiceAccount
+    name: control-api
+    namespace: control-plane

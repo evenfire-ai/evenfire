@@ -1,0 +1,19 @@
+apiVersion: clerum.io/v1alpha1
+kind: Context
+metadata:
+  name: context1
+  namespace: mcp-server
+spec:
+  contextId: context1
+  description: Context for chatLLM host — defines which MCP servers it can access.
+  mcpServers:
+    - mongodb-server
+    - airtable-server
+    - playwright-server
+  # Optional: reference SharedFileSystems (must exist in mcp-host namespace)
+  # to inject read-only mounts into every mcp-host pod that uses this Context.
+  # sharedFileSystems:
+  #   - name: team-mission
+  #     mountPath: /workspace/team-mission
+  #   - name: customer-complaints
+  #     mountPath: /workspace/customer-complaints

@@ -1,0 +1,12 @@
+**
+!packages/
+!packages/workflow-recipe-capability-policy/
+!packages/workflow-recipe-capability-policy/**
+!packages/image-policy/
+!packages/image-policy/**
+!control-api/
+!control-api/package.json
+!control-api/package-lock.json
+!control-api/tsconfig.json
+!control-api/src/
+!control-api/src/**

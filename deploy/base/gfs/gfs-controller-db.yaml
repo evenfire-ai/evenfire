@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gfs-controller-db
+  namespace: gfs
+  labels:
+    app.kubernetes.io/name: gfs-controller
+    app.kubernetes.io/part-of: clerum
+type: Opaque
+stringData:
+  # Postgres connection string for the LEAST-PRIVILEGE gfs_controller role
+  # (migration 0043 creates it NOLOGIN; deploy provisioning grants LOGIN +
+  # password and writes the real DSN here). The role has SELECT on
+  # resource/grant/share and INSERT-only on gfs_audit — never write on grants.
+  # Placeholder so a fresh checkout ships no credential; gfsc /readyz fails
+  # closed (cannot SELECT 1) until deploy populates it.
+  connection-string: ""

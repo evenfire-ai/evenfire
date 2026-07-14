@@ -1,0 +1,107 @@
+'use client'
+
+import Link from 'next/link'
+import { IconTrash } from '@components/icons'
+import { formatCommunicationChannelConfirmedAt } from '@lib/communicationChannels'
+import type {
+  CommunicationChannelConversation,
+  CommunicationChannelConversationsTableProps,
+} from './types'
+
+function typeLabel(conversation: CommunicationChannelConversation): string {
+  if (conversation.chatType === 'supergroup') return 'Supergroup'
+  if (conversation.chatType === 'group') return 'Group'
+  if (conversation.chatType === 'private') return 'Private chat'
+  return conversation.provider === 'telegram' ? 'Telegram chat' : 'Slack conversation'
+}
+
+function displayName(conversation: CommunicationChannelConversation): string {
+  const handle = conversation.handle ? `@${conversation.handle.replace(/^@/, '')}` : ''
+  return conversation.title || handle || typeLabel(conversation)
+}
+
+function conversationKey(conversation: CommunicationChannelConversation, index: number): string {
+  return [
+    conversation.provider,
+    conversation.workspaceId || '',
+    conversation.channelId || '',
+    conversation.chatType || '',
+    conversation.confirmedByUserId || '',
+    conversation.confirmedAt || '',
+    conversation.handle || '',
+    conversation.title || '',
+    String(index),
+  ].join(':')
+}
+
+export function CommunicationChannelConversationsTable({
+  conversations,
+  emptyLabel = 'No conversations have been confirmed yet.',
+  onDelete,
+  showUserColumn = false,
+  userLabelsById = {},
+}: CommunicationChannelConversationsTableProps) {
+  if (conversations.length === 0) {
+    return <div className="cu-empty cu-empty--compact">{emptyLabel}</div>
+  }
+  return (
+    <div className="cu-table-wrap">
+      <table className="cu-table cu-channel-conversations-table">
+        <thead>
+          <tr>
+            <th>Provider</th>
+            <th>Type</th>
+            <th>Name</th>
+            {showUserColumn ? <th>User</th> : null}
+            <th>Confirmed</th>
+            {onDelete ? <th className="cu-table__actions">Actions</th> : null}
+          </tr>
+        </thead>
+        <tbody>
+          {conversations.map((conversation, index) => {
+            const key = conversationKey(conversation, index)
+            return (
+              <tr key={key}>
+                <td>{conversation.provider === 'telegram' ? 'Telegram' : 'Slack'}</td>
+                <td>{typeLabel(conversation)}</td>
+                <td>
+                  <span className="cu-channel-conversations-table__name">
+                    {displayName(conversation)}
+                  </span>
+                  {conversation.handle && conversation.title ? (
+                    <span className="cu-muted"> @{conversation.handle.replace(/^@/, '')}</span>
+                  ) : null}
+                </td>
+                {showUserColumn ? (
+                  <td>
+                    {conversation.confirmedByUserId ? (
+                      <Link href={`/profile-admin/users/${conversation.confirmedByUserId}`}>
+                        {userLabelsById[conversation.confirmedByUserId] || 'Unknown user'}
+                      </Link>
+                    ) : (
+                      <span className="cu-muted">Unknown</span>
+                    )}
+                  </td>
+                ) : null}
+                <td>{formatCommunicationChannelConfirmedAt(conversation.confirmedAt)}</td>
+                {onDelete ? (
+                  <td className="cu-table__actions">
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                      onClick={() => onDelete(conversation)}
+                      aria-label={`Delete ${displayName(conversation)}`}
+                      title={`Delete ${displayName(conversation)}`}
+                    >
+                      <IconTrash width={16} height={16} />
+                    </button>
+                  </td>
+                ) : null}
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}

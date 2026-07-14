@@ -1,0 +1,27 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-layer3a-snippet-negative-http-egress
+  namespace: sandbox-recipes
+spec:
+  triggers:
+    onDemand: {}
+  runtimeEgress:
+    http:
+      allowedHosts:
+        - api.ipify.org
+  output:
+    destination: pvc
+    format: json
+    storageSize: 128Mi
+  steps:
+    - id: call-public-api
+      run:
+        type: snippet
+        language: typescript
+        code: |
+          return await sdk.http.fetchJson("https://jsonplaceholder.typicode.com/todos/1")
+        capabilities:
+          http:
+            allowedHosts:
+              - api.ipify.org

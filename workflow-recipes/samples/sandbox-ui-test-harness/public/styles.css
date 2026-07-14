@@ -1,0 +1,186 @@
+:root {
+  --bg: #0e0f10;
+  --panel: #161719;
+  --edge: #2a2c30;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --pass: #166534;
+  --pass-edge: #14532d;
+  --fail: #7f1d1d;
+  --fail-edge: #6b1a1a;
+  --external: #78350f;
+  --external-edge: #5e2c0a;
+  --accent: #6ee7b7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header,
+footer {
+  padding: 24px 32px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+header h1 {
+  margin: 0 0 4px 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 32px 64px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.card p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.card p.ctx {
+  color: var(--text);
+}
+
+.card p.rule {
+  color: var(--muted);
+}
+
+.card p.want {
+  color: var(--muted);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  color: var(--accent);
+  background: rgba(110, 231, 183, 0.08);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+button {
+  appearance: none;
+  border: 1px solid var(--edge);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 13px;
+  border-radius: 4px;
+  cursor: pointer;
+  align-self: flex-start;
+  margin-right: 6px;
+}
+
+button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+pre {
+  margin: 4px 0 0 0;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+  color: var(--text);
+}
+
+.card.pass {
+  border-left: 3px solid var(--pass);
+}
+.card.fail {
+  border-left: 3px solid var(--fail);
+}
+.card.external {
+  border-left: 3px solid var(--external);
+}
+
+/* Verdict — set by main.js after a test runs. Overrides the default panel
+   colour so a wall of cards can be scanned for red at a glance. The static
+   .pass/.fail/.external left border stays as the EXPECTED hint. */
+.card[data-status='ok'] {
+  border-color: var(--pass);
+  background: color-mix(in srgb, var(--panel) 80%, var(--pass) 20%);
+}
+.card[data-status='bad'] {
+  border-color: var(--fail);
+  background: color-mix(in srgb, var(--panel) 70%, var(--fail) 30%);
+  box-shadow: 0 0 0 1px var(--fail);
+}
+.card-verdict {
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--edge);
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+}
+.card[data-status='ok'] .card-verdict {
+  color: var(--text);
+  border-color: var(--pass-edge);
+  background: var(--pass);
+}
+.card[data-status='bad'] .card-verdict {
+  color: var(--text);
+  border-color: var(--fail-edge);
+  background: var(--fail);
+}
+
+.card a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.card a:hover {
+  text-decoration: underline;
+}

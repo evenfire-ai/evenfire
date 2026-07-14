@@ -1,0 +1,36 @@
+# Legacy shared PVC for pre-RWO-affinity WorkflowRecipe output artifacts.
+#
+# Greenfield WorkflowRecipes that omit `spec.output.claimName` no longer mount
+# this claim. WRC creates one scoped output PVC per parent recipe and labels it
+# with workflow-output ownership/scope metadata. Keep this PVC only as an
+# operator-managed historical source while old artifact bytes are copied or a
+# single recipe is explicitly pinned to it with matching external-claim labels.
+# Do not label this shared claim as WRC-managed, and do not use it as a
+# multi-recipe external claim; see docs/deploy/workflow-output-pvc-upgrade.md.
+#
+# Size: 1Gi MVP — holds ~20 concurrent recipes × 50 MB quota per recipe
+# (see CLERUM_WORKFLOW_OUTPUT_QUOTA_MB in mcp-host/internalTools.ts).
+#
+# Expandable: the chosen StorageClass MUST have allowVolumeExpansion: true
+# (default for GCE-PD, Filestore, most RWX provisioners). Expand with:
+#   kubectl patch pvc clerum-workflow-output -n sandbox-recipes \
+#     -p '{"spec":{"resources":{"requests":{"storage":"5Gi"}}}}'
+#
+# storageClassName intentionally unset in base — each overlay patches it:
+#   - minikube: standard (hostpath-provisioner supports RWX in recent versions)
+#   - gcp: DEFERRED — see deploy/overlays/gcp/kustomization.yaml TODO (requires
+#     Filestore CSI or NFS CSI; decision pending).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: clerum-workflow-output
+  namespace: sandbox-recipes
+  labels:
+    app.kubernetes.io/part-of: clerum
+    clerum.io/component: workflow-subsystem
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi

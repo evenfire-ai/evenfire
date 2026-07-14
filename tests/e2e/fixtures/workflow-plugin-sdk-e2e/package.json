@@ -1,0 +1,11 @@
+{
+  "name": "workflow-plugin-sdk-e2e",
+  "version": "0.1.0",
+  "license": "MPL-2.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic E2E plugin workload that exercises the Plugin Workload SDK (promptBridge + clientNotifications) from inside a recipe sandbox.",
+  "scripts": {
+    "start": "node src/index.js"
+  }
+}

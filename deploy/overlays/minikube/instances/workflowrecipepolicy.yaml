@@ -1,0 +1,27 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipePolicy
+metadata:
+  # Dev-only policy for minikube. Allows agentic workflows that declare
+  # `spec.contextRef` to pass the `agenticWorkflowContextRefBlocked` gate
+  # (see workflow-recipes/src/reconciler/policyEnforcer.ts and
+  # control-api/src/routes/admin/recipes.ts :: checkPolicyInvariant).
+  #
+  # Lives in `sandbox-recipes` because the reconciler looks up policies in
+  # the recipe's own namespace — canonical CRD storage is sandbox-recipes.
+  # See deploy/base/cluster-wide/workflowrecipe-admission.yaml for the
+  # namespace allowlist enforced by ValidatingAdmissionPolicy.
+  #
+  # Production / gcp-prod overlays deliberately do NOT ship this — operators
+  # must opt in per-environment so context sharing is not on-by-default.
+  name: minikube-allow-context-ref
+  namespace: sandbox-recipes
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/part-of: clerum
+    clerum.io/environment: minikube
+spec:
+  description: >-
+    Minikube dev default. Permits agentic workflows to share context between
+    steps via `spec.contextRef`. Pair with a recipe that sets
+    `spec.security.allowContextRef: true`.
+  allowContextRef: true

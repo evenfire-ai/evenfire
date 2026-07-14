@@ -1,0 +1,294 @@
+import { describe, expect, it, vi } from 'vitest'
+import type { Request, Response } from 'express'
+import {
+  handleContextBreakdownRoute,
+  handleSessionMessagesRoute,
+  handleSessionsListRoute,
+} from '../routes'
+import type { ContextBreakdownHandler, SessionMessagesHandler, SessionsListHandler } from '../types'
+import { makeHandlers } from './testHelpers'
+
+interface CapturedRes {
+  statusCode?: number
+  jsonBody?: unknown
+  res: Response
+}
+
+function makeRes(): CapturedRes {
+  const captured: { statusCode?: number; jsonBody?: unknown } = {}
+  const res = {
+    writeHead: vi.fn().mockImplementation((status: number) => {
+      captured.statusCode = status
+      return res
+    }),
+    end: vi.fn().mockImplementation((body?: string) => {
+      if (typeof body === 'string') {
+        try {
+          captured.jsonBody = JSON.parse(body)
+        } catch {
+          captured.jsonBody = body
+        }
+      }
+      return res
+    }),
+  } as unknown as Response
+  return {
+    get statusCode() {
+      return captured.statusCode
+    },
+    get jsonBody() {
+      return captured.jsonBody
+    },
+    res,
+  }
+}
+
+function makeReqWithAuth(sub: string): Request {
+  return {
+    runtimeCaller: { caller: 'rpc-proxy', hostRef: 'chatllm', userId: sub },
+  } as unknown as Request
+}
+
+describe('handleSessionsListRoute', () => {
+  it('returns 200 with items array for the authenticated user', async () => {
+    const sessionsListHandler: SessionsListHandler = vi.fn().mockReturnValue({
+      items: [
+        { agent: 'chatllm', chatId: 'c1', turnCount: 3, lastActivityAt: '2026-04-22T00:00:00Z' },
+      ],
+    })
+    const req = makeReqWithAuth('user-1')
+    const captured = makeRes()
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler }))
+    expect(captured.statusCode).toBe(200)
+    expect(captured.jsonBody).toEqual({
+      items: [
+        { agent: 'chatllm', chatId: 'c1', turnCount: 3, lastActivityAt: '2026-04-22T00:00:00Z' },
+      ],
+    })
+    expect(sessionsListHandler).toHaveBeenCalledWith('user-1')
+  })
+
+  it('returns 501 when sessionsListHandler is not configured', async () => {
+    const req = makeReqWithAuth('user-1')
+    const captured = makeRes()
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler: null }))
+    expect(captured.statusCode).toBe(501)
+  })
+
+  it('returns 401 if req.auth is missing', async () => {
+    const req = {} as Request
+    const captured = makeRes()
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler: vi.fn() }))
+    expect(captured.statusCode).toBe(401)
+  })
+
+  it('returns 500 when sessionsListHandler throws', async () => {
+    const sessionsListHandler: SessionsListHandler = vi
+      .fn()
+      .mockRejectedValue(new Error('db unavailable'))
+    const req = makeReqWithAuth('user-1')
+    const captured = makeRes()
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler }))
+    expect(captured.statusCode).toBe(500)
+    expect((captured.jsonBody as { error: string }).error).toBe('db unavailable')
+  })
+})
+
+function makeReqWithParams(sub: string, agent: string, chatId: string): Request {
+  return {
+    runtimeCaller: { caller: 'rpc-proxy', hostRef: 'chatllm', userId: sub },
+    params: { agent, chatId },
+  } as unknown as Request
+}
+
+describe('handleSessionMessagesRoute', () => {
+  it('returns 200 with the transcript when the session exists for this user', async () => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn().mockReturnValue({
+      agent: 'chatllm',
+      chatId: 'c1',
+      turns: [
+        { number: 1, user_input: 'hello', response: 'hi', started_at: '2026-04-22T00:00:00Z' },
+      ],
+    })
+    const req = makeReqWithParams('user-1', 'chatllm', 'c1')
+    const captured = makeRes()
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+    expect(captured.statusCode).toBe(200)
+    expect(captured.jsonBody).toEqual({
+      agent: 'chatllm',
+      chatId: 'c1',
+      turns: [
+        { number: 1, user_input: 'hello', response: 'hi', started_at: '2026-04-22T00:00:00Z' },
+      ],
+    })
+    expect(sessionMessagesHandler).toHaveBeenCalledWith('user-1', 'chatllm', 'c1')
+  })
+
+  it('returns 404 with the canonical body when the session does not exist', async () => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn().mockReturnValue(null)
+    const req = makeReqWithParams('user-1', 'chatllm', 'c-missing')
+    const captured = makeRes()
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+    expect(captured.statusCode).toBe(404)
+    expect(captured.jsonBody).toEqual({ error: 'session not found' })
+  })
+
+  it('returns 404 with the SAME body when the session exists for another user (enumeration-defense)', async () => {
+    // Simulate the handler impl: it returns null both when missing and when owned by someone else.
+    // The route must not distinguish.
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn().mockReturnValue(null)
+    const req = makeReqWithParams('user-1', 'chatllm', 'c-belongs-to-user-2')
+    const captured = makeRes()
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+    expect(captured.statusCode).toBe(404)
+    expect(captured.jsonBody).toEqual({ error: 'session not found' })
+  })
+
+  it('returns 400 if agent or chatId is missing from params', async () => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn()
+    const req = {
+      runtimeCaller: { caller: 'rpc-proxy', hostRef: 'chatllm', userId: 'user-1' },
+      params: { agent: '', chatId: '' },
+    } as unknown as Request
+    const captured = makeRes()
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+    expect(captured.statusCode).toBe(400)
+  })
+
+  it('returns 401 if req.auth is missing', async () => {
+    const req = { params: { agent: 'chatllm', chatId: 'c1' } } as unknown as Request
+    const captured = makeRes()
+    await handleSessionMessagesRoute(
+      req,
+      captured.res,
+      makeHandlers({ sessionMessagesHandler: vi.fn() })
+    )
+    expect(captured.statusCode).toBe(401)
+  })
+
+  it('returns 501 when sessionMessagesHandler is not configured', async () => {
+    const req = makeReqWithParams('user-1', 'chatllm', 'c1')
+    const captured = makeRes()
+    await handleSessionMessagesRoute(
+      req,
+      captured.res,
+      makeHandlers({ sessionMessagesHandler: null })
+    )
+    expect(captured.statusCode).toBe(501)
+  })
+
+  it('returns 500 when sessionMessagesHandler throws', async () => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi
+      .fn()
+      .mockRejectedValue(new Error('db unavailable'))
+    const req = makeReqWithParams('user-1', 'chatllm', 'c1')
+    const captured = makeRes()
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+    expect(captured.statusCode).toBe(500)
+    expect((captured.jsonBody as { error: string }).error).toBe('db unavailable')
+  })
+})
+
+describe('handleContextBreakdownRoute (F1.5)', () => {
+  const wire = {
+    buckets: { messages: 100, systemTools: 30, metaContext: 10, systemPrompt: 5 },
+    totalInputTokens: 32900,
+    maxTokens: 100000,
+    fillRatio: 0.329,
+    cacheHitRate: 0.3,
+    capturedAtTurn: 3,
+  }
+
+  it('returns 200 with the breakdown when the session has a snapshot', async () => {
+    const contextBreakdownHandler: ContextBreakdownHandler = vi
+      .fn()
+      .mockReturnValue({ breakdown: wire })
+    const req = makeReqWithParams('user-1', 'chatllm', 'c1')
+    const captured = makeRes()
+    await handleContextBreakdownRoute(req, captured.res, makeHandlers({ contextBreakdownHandler }))
+    expect(captured.statusCode).toBe(200)
+    expect(captured.jsonBody).toEqual({ breakdown: wire })
+    expect(contextBreakdownHandler).toHaveBeenCalledWith('user-1', 'chatllm', 'c1')
+  })
+
+  it('returns 200 with breakdown:null when the session exists but has no snapshot yet', async () => {
+    const contextBreakdownHandler: ContextBreakdownHandler = vi
+      .fn()
+      .mockReturnValue({ breakdown: null })
+    const req = makeReqWithParams('user-1', 'chatllm', 'c1')
+    const captured = makeRes()
+    await handleContextBreakdownRoute(req, captured.res, makeHandlers({ contextBreakdownHandler }))
+    expect(captured.statusCode).toBe(200)
+    expect(captured.jsonBody).toEqual({ breakdown: null })
+  })
+
+  it('returns 404 with the canonical body when the session does not exist (enumeration-defense)', async () => {
+    const contextBreakdownHandler: ContextBreakdownHandler = vi.fn().mockReturnValue(null)
+    const req = makeReqWithParams('user-1', 'chatllm', 'c-missing')
+    const captured = makeRes()
+    await handleContextBreakdownRoute(req, captured.res, makeHandlers({ contextBreakdownHandler }))
+    expect(captured.statusCode).toBe(404)
+    expect(captured.jsonBody).toEqual({ error: 'session not found' })
+  })
+
+  it('returns 401 when the rpc edge caller context is missing (userSub never from client)', async () => {
+    const req = { params: { agent: 'chatllm', chatId: 'c1' } } as unknown as Request
+    const captured = makeRes()
+    await handleContextBreakdownRoute(
+      req,
+      captured.res,
+      makeHandlers({ contextBreakdownHandler: vi.fn() })
+    )
+    expect(captured.statusCode).toBe(401)
+  })
+
+  it('returns 401 when the caller is not rpc-proxy', async () => {
+    const req = {
+      runtimeCaller: { caller: 'channel-reader', hostRef: 'chatllm', userId: 'user-1' },
+      params: { agent: 'chatllm', chatId: 'c1' },
+    } as unknown as Request
+    const captured = makeRes()
+    await handleContextBreakdownRoute(
+      req,
+      captured.res,
+      makeHandlers({ contextBreakdownHandler: vi.fn() })
+    )
+    expect(captured.statusCode).toBe(401)
+  })
+
+  it('returns 400 if agent or chatId is missing', async () => {
+    const req = {
+      runtimeCaller: { caller: 'rpc-proxy', hostRef: 'chatllm', userId: 'user-1' },
+      params: { agent: '', chatId: '' },
+    } as unknown as Request
+    const captured = makeRes()
+    await handleContextBreakdownRoute(
+      req,
+      captured.res,
+      makeHandlers({ contextBreakdownHandler: vi.fn() })
+    )
+    expect(captured.statusCode).toBe(400)
+  })
+
+  it('returns 501 when contextBreakdownHandler is not configured', async () => {
+    const req = makeReqWithParams('user-1', 'chatllm', 'c1')
+    const captured = makeRes()
+    await handleContextBreakdownRoute(
+      req,
+      captured.res,
+      makeHandlers({ contextBreakdownHandler: null })
+    )
+    expect(captured.statusCode).toBe(501)
+  })
+
+  it('returns 500 when the handler throws', async () => {
+    const contextBreakdownHandler: ContextBreakdownHandler = vi
+      .fn()
+      .mockRejectedValue(new Error('db unavailable'))
+    const req = makeReqWithParams('user-1', 'chatllm', 'c1')
+    const captured = makeRes()
+    await handleContextBreakdownRoute(req, captured.res, makeHandlers({ contextBreakdownHandler }))
+    expect(captured.statusCode).toBe(500)
+    expect((captured.jsonBody as { error: string }).error).toBe('db unavailable')
+  })
+})

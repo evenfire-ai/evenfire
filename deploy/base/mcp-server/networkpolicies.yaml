@@ -1,0 +1,176 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-mcp-server
+  namespace: mcp-server
+  labels:
+    clerum.io/managed-by: host-context-controller
+    clerum.io/policy-type: default-deny
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-mcp-servers
+  namespace: mcp-server
+  labels:
+    clerum.io/managed-by: host-context-controller
+    clerum.io/policy-type: default-deny
+spec:
+  podSelector:
+    matchLabels:
+      clerum.io/managed-by: host-context-controller
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: host-context-controller-managed-default-deny
+  namespace: mcp-server
+spec:
+  podSelector:
+    matchLabels:
+      clerum.io/managed-by: host-context-controller
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress-mcp-server
+  namespace: mcp-server
+  labels:
+    clerum.io/managed-by: host-context-controller
+    clerum.io/policy-type: infrastructure
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-hcc-api-egress-mcp-server
+  namespace: mcp-server
+  labels:
+    clerum.io/managed-by: host-context-controller
+    clerum.io/policy-type: infrastructure
+spec:
+  podSelector:
+    matchLabels:
+      app: mcp-proxy
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - port: 8081
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: control-plane
+      podSelector:
+        matchLabels:
+          app: host-context-controller-api-gateway
+---
+# NOTE: allow-k8s-api-egress-mcp-server is intentionally NOT in base.
+# host-context-controller creates an opt-in runtime policy with selector
+# clerum.io/k8s-api-egress=true using KUBERNETES_SERVICE_HOST, so ordinary MCP
+# server pods do not receive Kubernetes API access by default.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-host-context-controller-api
+  namespace: mcp-server
+  labels:
+    clerum.io/managed-by: host-context-controller
+    clerum.io/policy-type: allow-api
+spec:
+  podSelector:
+    matchLabels:
+      app: host-context-controller
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: mcp-host
+    ports:
+    - port: 8081
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-proxy-ingress
+  namespace: mcp-server
+spec:
+  podSelector:
+    matchLabels:
+      app: mcp-proxy
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: mcp-host
+    ports:
+    - port: 8083
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-proxy-egress
+  namespace: mcp-server
+spec:
+  podSelector:
+    matchLabels:
+      app: mcp-proxy
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - port: 8081
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: control-plane
+      podSelector:
+        matchLabels:
+          app: host-context-controller-api-gateway
+  - ports:
+    - port: 3000
+      protocol: TCP
+    to:
+    - podSelector:
+        matchExpressions:
+        - key: clerum.io/mcpserver
+          operator: Exists
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system

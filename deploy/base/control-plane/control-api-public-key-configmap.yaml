@@ -1,0 +1,20 @@
+# control-api public key — mounted into the workflow-recipes (WRC) Deployment as an
+# env var so WRC can verify delegation JWTs issued by control-api for artifact
+# downloads. This is the public half of CONTROL_API_ADMIN_JWT_PRIVATE_KEY, which
+# control-api uses to sign both admin session tokens AND the new delegation tokens
+# (iss=control-api, aud=clerum-wrc). Public keys need no secret protection, hence
+# a ConfigMap rather than a Secret.
+#
+# Populated by deploy/scripts/gen-jwt-keys.sh (mirrors the clerum-wrc-public-key
+# pattern) after the admin key pair is generated. Kept in the control-plane
+# namespace so it can be mounted by the workflow-recipes Deployment there.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: control-api-public-key
+  namespace: control-plane
+  labels:
+    app.kubernetes.io/part-of: clerum
+    clerum.io/component: workflow-subsystem
+data:
+  CONTROL_API_PUBLIC_KEY_PEM: "REPLACE_WITH_PUBLIC_KEY"

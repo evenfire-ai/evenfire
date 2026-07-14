@@ -1,0 +1,93 @@
+/**
+ * Control UI — Authentication flow tests
+ *
+ * Tests the login/logout lifecycle of the Clerum Control UI.
+ * Prerequisites: make minikube-pf-all
+ */
+import { expect, test } from '@playwright/test'
+import { CUI_AUTH, CUI_DASHBOARD } from '../helpers/selectors'
+
+const ADMIN_USERNAME = process.env.TEST_ADMIN_USERNAME ?? 'admin'
+const ADMIN_PASSWORD = process.env.TEST_ADMIN_PASSWORD ?? 'changeme123!'
+
+test.describe('Control UI — Auth', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/')
+  })
+
+  test('shows login form on initial load', async ({ page }) => {
+    await expect(page.locator(CUI_AUTH.PAGE_HEADING)).toBeVisible()
+    await expect(page.locator(CUI_AUTH.USERNAME_INPUT)).toBeVisible()
+    await expect(page.locator(CUI_AUTH.PASSWORD_INPUT)).toBeVisible()
+    await expect(page.locator(CUI_AUTH.SIGN_IN_BUTTON)).toBeVisible()
+  })
+
+  test("shows 'Account creation' toggle tab", async ({ page }) => {
+    await expect(page.locator(CUI_AUTH.ACCOUNT_CREATION_TAB)).toBeVisible()
+    await page.click(CUI_AUTH.ACCOUNT_CREATION_TAB)
+    // Account creation form shows different fields
+    await expect(page.locator(CUI_AUTH.SETUP_USERNAME_INPUT)).toBeVisible()
+    await expect(page.locator(CUI_AUTH.SETUP_PASSWORD_INPUT)).toBeVisible()
+    // Back to sign in
+    await page.click(CUI_AUTH.SIGN_IN_TAB)
+    await expect(page.locator(CUI_AUTH.USERNAME_INPUT)).toBeVisible()
+  })
+
+  test('sign in button is disabled when fields are empty', async ({ page }) => {
+    await expect(page.locator(CUI_AUTH.SIGN_IN_BUTTON)).toBeDisabled()
+  })
+
+  test('shows error on invalid credentials', async ({ page }) => {
+    await page.fill(CUI_AUTH.USERNAME_INPUT, 'admin')
+    await page.fill(CUI_AUTH.PASSWORD_INPUT, 'wrong-password-12345')
+    await page.click(CUI_AUTH.SIGN_IN_BUTTON)
+    await expect(page.locator(CUI_AUTH.ERROR_MESSAGE)).toBeVisible({
+      timeout: 10_000,
+    })
+  })
+
+  test('logs in with valid credentials and shows dashboard', async ({ page }) => {
+    await page.fill(CUI_AUTH.USERNAME_INPUT, ADMIN_USERNAME)
+    await page.fill(CUI_AUTH.PASSWORD_INPUT, ADMIN_PASSWORD)
+    await page.click(CUI_AUTH.SIGN_IN_BUTTON)
+
+    // Dashboard heading appears
+    await expect(page.locator(CUI_DASHBOARD.HEADING)).toBeVisible({
+      timeout: 15_000,
+    })
+
+    // All main tabs visible
+    await expect(page.locator(CUI_DASHBOARD.TAB_AGENTS)).toBeVisible()
+    await expect(page.locator(CUI_DASHBOARD.TAB_CONTEXTS)).toBeVisible()
+    await expect(page.locator(CUI_DASHBOARD.TAB_MCP_SERVERS)).toBeVisible()
+    await expect(page.locator(CUI_DASHBOARD.TAB_CHANNELS)).toBeVisible()
+    await expect(page.locator(CUI_DASHBOARD.TAB_MEMBERS_TEAMS)).toBeVisible()
+  })
+
+  test('login hint shows sign-in guidance without exposing a password', async ({ page }) => {
+    // Wait for the auth page to fully render (React hydration)
+    await page.locator(CUI_AUTH.USERNAME_INPUT).waitFor({ state: 'visible' })
+    const pageText = await page.locator('main').textContent()
+    expect(pageText).toContain('configured operator account credentials')
+    // Should NOT expose a hardcoded password like 'changeme123!' in the UI
+    expect(pageText).not.toContain('changeme123!')
+    expect(pageText).not.toContain('clerum-admin-2026')
+  })
+
+  test('logs out and returns to login form', async ({ page }) => {
+    // Login first
+    await page.fill(CUI_AUTH.USERNAME_INPUT, ADMIN_USERNAME)
+    await page.fill(CUI_AUTH.PASSWORD_INPUT, ADMIN_PASSWORD)
+    await page.click(CUI_AUTH.SIGN_IN_BUTTON)
+    await expect(page.locator(CUI_DASHBOARD.HEADING)).toBeVisible({
+      timeout: 15_000,
+    })
+
+    // Logout
+    await page.click(CUI_DASHBOARD.LOGOUT_BUTTON)
+    await expect(page.locator(CUI_AUTH.PAGE_HEADING)).toBeVisible({
+      timeout: 10_000,
+    })
+    await expect(page.locator(CUI_AUTH.USERNAME_INPUT)).toBeVisible()
+  })
+})

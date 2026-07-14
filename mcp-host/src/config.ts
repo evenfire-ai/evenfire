@@ -1,0 +1,691 @@
+/**
+ * Configuration settings loaded from environment variables.
+ */
+import type { ApprovalConfig } from './core/extensions/approvalTypes'
+import { NativeToolConfig } from './core/interfaces'
+import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
+import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConfig } from './types'
+
+export interface Config {
+  // Dev mode - if true, reads config from env vars instead of K8s
+  devMode: boolean
+
+  // Dev mode config (parsed from CLERUM_HOST_CONFIG or built from env vars)
+  devHostConfig?: HostSpec
+
+  // Host name - used to find the Host CRD in production mode
+  hostName: string
+
+  // Kubernetes namespace
+  namespace: string
+
+  // Dev mode: Model configuration from env vars
+  devModelProvider?: LlmProvider
+  devModelName?: string
+
+  // Dev mode: MCP servers (parsed from CLERUM_MCP_SERVERS JSON)
+  devMcpServers?: McpServerInfo[]
+
+  // MCP Proxy mode (default: false — direct connection to MCP servers)
+  mcpProxyEnabled: boolean
+
+  // MCP Proxy URL (only used when mcpProxyEnabled is true)
+  mcpProxyUrl: string
+
+  // RPC Server port
+  serverPort: number
+
+  // Context Mapper URL (for fetching McpServers)
+  contextMapperUrl: string
+
+  // Context Mapper poll interval in ms (for production mode)
+  contextMapperPollInterval: number
+
+  // MCP server health heartbeat interval in ms. mcp-host periodically
+  // tools/list's each connected server to keep observedAt fresh and detect
+  // silent failures. Must stay well under the desktop's 120s stale threshold.
+  mcpStatusHeartbeatInterval: number
+
+  // Agent configuration
+  agentTaskDelay: number
+  agentMaxTaskDuration: number
+  agentMaxToolCallsPerTask: number
+  agentMaxQueueSize: number
+  agentApprovalTimeout: number
+  // T2.1 — TTL for persisted pending approval rows (rows live in SQLite until
+  // a human resolves them; this caps how long an unresolved row survives a
+  // pod restart). Default 7d. Independent from `agentApprovalTimeout`
+  // (in-flight wait) and `spilloverTtlMs` (blob retention).
+  pendingApprovalTtlMs: number
+
+  // Approval system (default ON; tools advertise requiresApproval()).
+  enableApproval: boolean
+  // Dev-mode approval config parsed from CLERUM_APPROVAL_CONFIG; in prod the
+  // values come from the Host CRD.
+  approvalConfig?: ApprovalConfig
+
+  // Nudge controller (default OFF).
+  enableNudge: boolean
+  nudgeMaxIterations: number
+
+  // Context compaction: max token budget for the context window (default 100k)
+  contextMaxTokens: number
+
+  // P.2 — Tokenizer dry-run + offline knobs.
+  tokenizerDryrun: boolean
+  tokenizerOffline: boolean
+
+  // T1.4 — Anti-thrash for `PressureContextManager`.
+  compactionIneffectiveRatio: number
+  compactionIneffectiveMaxRun: number
+
+  // T1.2 — Pre-pruning before the LLM call. `compactionPrePruneEnabled` is
+  // the master flag (default false during rollout); the four per-pass toggles
+  // exist for granular rollback.
+  compactionPrePruneEnabled: boolean
+  compactionPrePruneDedup: boolean
+  compactionPrePruneOneLine: boolean
+  compactionPrePruneJsonTruncate: boolean
+  compactionPrePruneStripMedia: boolean
+  compactionPrePruneMaxArgsBytes: number
+  compactionPrePruneSummaryTokens: number
+  compactionPrePruneProtectedTailTurns: number
+
+  // T1.1 — Structured summary template. Default OFF; flipped per-Host once
+  // the goldens prove parity / quality improvement in staging.
+  compactionStructuredSummary: boolean
+
+  // T2.2 — System-prompt cache flag (Anthropic prompt caching, tiered system
+  // prompt with <turn-context> moved to the user message).
+  promptCacheEnabled: boolean
+
+  // F1 (dynamic-tool-loading) — Gates the dynamic-tool-loading bridge; default
+  // OFF; set true per-host to enable; see
+  // `.specs/dynamic-tool-loading/plan-hermes-bridge.es.md`.
+  dynamicToolsEnabled: boolean
+  // F1 (dynamic-tool-loading) — Minimum deferrable (MCP) tool count above which
+  // the bridge activates when enabled; small hosts stay on passthrough.
+  dynamicToolsThreshold: number
+
+  // T1.5 — Tool-result spillover. Master flag + threshold + TTL + GC period.
+  // When `toolSpilloverEnabled` is true the host wires a `SpilloverStorage`
+  // and TaskExecutor passes it to every loop; otherwise the loop ships
+  // inline content the way it did pre-T1.5.
+  toolSpilloverEnabled: boolean
+  toolSpilloverThresholdBytes: number
+  spilloverTtlMs: number
+  spilloverGcIntervalMs: number
+
+  // T2.1 — Conversation store backend selector and tuning knobs.
+  sessionStoreMode: 'memory' | 'sqlite' | 'dual'
+  sessionDbPath: string
+  conversationCacheSize: number
+  sessionTtlDays: number
+  dbWorkerHeartbeatMs: number
+  dbPersistSyncTimeoutMs: number
+  dbPersistAsyncTimeoutMs: number
+  dbCheckpointEveryWrites: number
+  dbWalSizeAlarmBytes: number
+
+  // T3.1 — Session search (clerum__session_search tool + REST endpoint).
+  // Master flag defaults OFF until staging soak confirms cross-user isolation.
+  // Retention controls the boot-time sweep of closed sessions; in-flight
+  // sessions are NEVER pruned (see T3.1-session-search.md §8).
+  sessionSearchEnabled: boolean
+  searchRetentionDays: number
+
+  // Native tool configuration
+  nativeTool: NativeToolConfig
+
+  // Attachment delivery configuration
+  enableResponseAttachments: boolean
+  attachmentMaxCount: number
+  attachmentMaxBytes: number
+  activityBufferSize: number
+  activityMaxEventBytes: number
+
+  // Memory (workspace) configuration.
+  memory: MemoryConfig
+
+  // Personalization configuration.
+  personalization: PersonalizationConfig
+
+  // Token budgets (P1) — pre-task budget check against control-api. Default OFF;
+  // the whole check path (BudgetClient construction + SessionProcessor wiring)
+  // is gated on this flag, and the check is fail-open (§0.2).
+  budgetsEnabled: boolean
+
+  // Workflow mode — set by WRC via CLERUM_WORKFLOW_ENABLED=true on the Pod
+  workflowEnabled: boolean
+  workflowRecipeName: string
+  userApprovalRequestRecipeName: string
+  userApprovalRequestRecipeNamespace: string
+  workflowMaxIterations: number
+
+  // Auth configuration
+  enableAuth: boolean
+  authJwtPublicKey: string
+  authJwtIssuer: string
+  authJwtAudience: string
+  wrcPublicKey: string
+
+  // mcpHost runtime JWTs for workflow approval gating (optional; non-workflow mcp-hosts skip this)
+  // Also reused for LLM usage reporting → control-api via the same nginx gateway and JWT.
+  mcpHostRuntimeAccessToken?: string
+  mcpHostRuntimeRefreshToken?: string
+  mcpHostGatewayUrl?: string
+  mcpHostWorkflowControlToken?: string
+  mcpHostWorkflowControlTokenFile?: string
+
+  // ─── Plugin Workload SDK (promptBridge + clientNotifications) ──────
+  // The server starts only when the namespace-bound activation gate passes
+  // (flag + runtime JWT recipeNamespace + downward-API pod namespace, all
+  // fail-closed — see pluginWorkloadSdk/server/sdkServer.ts).
+  pluginWorkloadSdkEnabled: boolean
+  pluginWorkloadSdkPort: number
+  /** Pod namespace via Kubernetes downward API (defense-in-depth). */
+  podNamespace: string
+  /** Overrides mcpHostGatewayUrl for SDK → control-api calls when set. */
+  pluginWorkloadSdkGatewayUrl?: string
+  /** Recipe-scoped shared token workloads present to the SDK server. @deprecated use tokensDir */
+  pluginWorkloadSdkWorkloadToken?: string
+  /** Dev-only caller binding when using a single legacy workload token env var. */
+  pluginWorkloadSdkBoundCallerRef?: string
+  /** Directory of per-caller token files mounted from the recipe Secret. */
+  pluginWorkloadSdkWorkloadTokensDir?: string
+  pluginWorkloadSdkPromptTimeoutSeconds: number
+  pluginWorkloadSdkMaxConnections: number
+  pluginWorkloadSdkMaxConnectionsPerWorkload: number
+  pluginWorkloadSdkMaxRpmPerWorkload: number
+  pluginWorkloadSdkMaxLlmResponseBytes: number
+}
+
+function getEnv(key: string, defaultValue?: string): string | undefined {
+  return process.env[key] ?? defaultValue
+}
+
+function getEnvBool(key: string, defaultValue: boolean): boolean {
+  const value = process.env[key]
+  if (!value) return defaultValue
+  return value.toLowerCase() === 'true' || value === '1'
+}
+
+function getEnvNumber(key: string, defaultValue: number): number {
+  const value = process.env[key]
+  if (!value) return defaultValue
+  const parsed = parseInt(value, 10)
+  // Guard against NaN and non-positive values — fall back to the default.
+  // Warn only when the value was actually set but invalid, so a typo'd env var
+  // is visible in logs rather than silently ignored.
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(
+      `[config] ${key}=${value} is not a valid positive integer; using default ${defaultValue}`
+    )
+    return defaultValue
+  }
+  return parsed
+}
+
+/**
+ * Parse CLERUM_HOST_CONFIG JSON for dev mode.
+ */
+function parseDevHostConfig(): HostSpec | undefined {
+  const configJson = process.env.CLERUM_HOST_CONFIG
+  if (!configJson) {
+    return undefined
+  }
+
+  try {
+    const parsed = JSON.parse(configJson) as HostSpec
+    console.log('[Config] Parsed dev host config from CLERUM_HOST_CONFIG:')
+    console.log('[Config]   host:', parsed.host)
+    console.log('[Config]   contextRef:', parsed.contextRef)
+    console.log('[Config]   secretRef:', parsed.secretRef)
+    console.log(
+      '[Config]   model:',
+      parsed.model ? `${parsed.model.provider}/${parsed.model.name}` : 'not set'
+    )
+    return parsed
+  } catch (error) {
+    console.error('[Config] Failed to parse CLERUM_HOST_CONFIG:', error)
+    return undefined
+  }
+}
+
+/**
+ * Build dev host config from individual environment variables. The default
+ * model per provider comes straight from the registry descriptor.
+ */
+function getDefaultModel(provider: LlmProvider): string {
+  return descriptorFor(provider).defaultModel
+}
+
+function buildDevHostConfig(provider?: LlmProvider, modelName?: string): HostSpec {
+  const model: ModelConfig | undefined = provider
+    ? {
+        provider,
+        name: modelName || getDefaultModel(provider),
+      }
+    : undefined
+
+  console.log('[Config] Built dev host config from env vars:')
+  console.log(
+    '[Config]   model:',
+    model ? `${model.provider}/${model.name}` : 'will auto-detect from API keys'
+  )
+
+  return {
+    host: 'dev-host',
+    contextRef: 'dev-context',
+    secretRef: 'dev-secret',
+    model,
+  }
+}
+
+const devMode = getEnvBool('CLERUM_DEV_MODE', false)
+
+// Raw CLERUM_MODEL_PROVIDER env var. NOT validated here: this runs at module top
+// level (imported very early, in prod too), so a stray/invalid value must never
+// throw on import. Validation is deferred to the dev-only path via
+// resolveDevModelProvider().
+const rawDevModelProvider = getEnv('CLERUM_MODEL_PROVIDER')
+const devModelName = getEnv('CLERUM_MODEL_NAME')
+
+/**
+ * Narrow a raw CLERUM_MODEL_PROVIDER value to an `LlmProvider`.
+ *
+ * Fail-closed: an explicitly-set but unknown provider THROWS rather than
+ * dropping to undefined. Dropping it would silently fall through to API-key
+ * auto-detection — routing to a different provider and ignoring
+ * CLERUM_MODEL_NAME, a provider-boundary regression. An ABSENT value returns
+ * undefined (auto-detection is the intended fallback there).
+ *
+ * MUST only be called from the dev-only path (after the devMode guard) so it
+ * never throws at module top level in prod.
+ */
+export function resolveDevModelProvider(raw: string | undefined): LlmProvider | undefined {
+  if (!raw) return undefined
+  if (!isLlmProvider(raw)) {
+    throw new Error(
+      `Invalid CLERUM_MODEL_PROVIDER '${raw}'. Valid providers: ${ALL_PROVIDERS.join(', ')}`
+    )
+  }
+  return raw
+}
+
+// In dev mode, try CLERUM_HOST_CONFIG first, then fall back to building from env vars
+function getDevHostConfig(): HostSpec | undefined {
+  if (!devMode) return undefined
+
+  const fromJson = parseDevHostConfig()
+  if (fromJson) return fromJson
+
+  return buildDevHostConfig(resolveDevModelProvider(rawDevModelProvider), devModelName)
+}
+
+/**
+ * Parse CLERUM_MCP_SERVERS JSON for dev mode.
+ * Format (top-level fields, see McpServerInfo): [{"name": "...", "contextRef": "...",
+ * "transport": {...}, "enabled": true, "status": {"deployed": true, "ready": true}}]
+ */
+function parseDevMcpServers(): McpServerInfo[] | undefined {
+  const serversJson = process.env.CLERUM_MCP_SERVERS
+  if (!serversJson) {
+    return undefined
+  }
+
+  try {
+    const parsed = JSON.parse(serversJson) as McpServerInfo[]
+    console.log(`[Config] Parsed ${parsed.length} dev MCP server(s) from CLERUM_MCP_SERVERS`)
+    for (const server of parsed) {
+      console.log(`[Config]   - ${server.name}: ${server.transport.url}`)
+    }
+    return parsed
+  } catch (error) {
+    console.error('[Config] Failed to parse CLERUM_MCP_SERVERS:', error)
+    return undefined
+  }
+}
+
+/**
+ * Parse CLERUM_APPROVAL_CONFIG JSON for dev mode.
+ * Format: {"defaultPolicy":"designated_approvers","channels":{"telegram":{"enabled":true,"approvers":["123"]}}}
+ */
+function parseApprovalConfig(): ApprovalConfig | undefined {
+  const configJson = process.env.CLERUM_APPROVAL_CONFIG
+  if (!configJson) {
+    return undefined
+  }
+
+  try {
+    const parsed = JSON.parse(configJson) as ApprovalConfig
+    console.log('[Config] Parsed approval config from CLERUM_APPROVAL_CONFIG:')
+    console.log('[Config]   defaultPolicy:', parsed.defaultPolicy)
+    console.log('[Config]   channels:', Object.keys(parsed.channels || {}))
+    return parsed
+  } catch (error) {
+    console.error('[Config] Failed to parse CLERUM_APPROVAL_CONFIG:', error)
+    return undefined
+  }
+}
+
+export const config: Config = {
+  devMode,
+  devHostConfig: getDevHostConfig(),
+
+  // Host name (required in production mode)
+  hostName:
+    process.env.CLERUM_HOST_NAME ||
+    (devMode || process.env.NODE_ENV !== 'production'
+      ? 'dev-host'
+      : (() => {
+          throw new Error('Missing required environment variable: CLERUM_HOST_NAME')
+        })()),
+
+  // Kubernetes namespace
+  namespace: getEnv('CLERUM_NAMESPACE', 'default')!,
+
+  // Dev mode model config. Provider is validated (and only resolved) in dev mode;
+  // resolveDevModelProvider fail-closes on a set-but-invalid value.
+  devModelProvider: devMode ? resolveDevModelProvider(rawDevModelProvider) : undefined,
+  devModelName,
+
+  // Dev mode MCP servers
+  devMcpServers: devMode ? parseDevMcpServers() : undefined,
+
+  // MCP Proxy: feature flag + URL (default: off, direct connection to each MCP server)
+  mcpProxyEnabled: getEnvBool('MCP_PROXY_ENABLED', false),
+  mcpProxyUrl: getEnv(
+    'MCP_PROXY_URL',
+    devMode ? 'http://localhost:8083' : 'http://mcp-proxy.mcp-server.svc.cluster.local:8083'
+  )!,
+
+  // RPC Server port
+  serverPort: parseInt(getEnv('CLERUM_SERVER_PORT', '8080')!, 10),
+
+  // Host Context Controller URL (defaults based on mode)
+  contextMapperUrl: getEnv(
+    'CLERUM_CONTEXT_MAPPER_URL',
+    devMode
+      ? 'http://localhost:8081'
+      : 'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
+  )!,
+
+  // Context Mapper poll interval (default 30 seconds)
+  contextMapperPollInterval: parseInt(getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!, 10),
+
+  // MCP status heartbeat. Defaults to 30 seconds so a single missed tick does
+  // not trip desktop staleness.
+  mcpStatusHeartbeatInterval: parseInt(
+    getEnv('CLERUM_MCP_STATUS_HEARTBEAT_INTERVAL', '30000')!,
+    10
+  ),
+
+  // Agent configuration
+  agentTaskDelay: parseInt(getEnv('CLERUM_AGENT_TASK_DELAY', '100')!, 10),
+  agentMaxTaskDuration: parseInt(getEnv('CLERUM_AGENT_MAX_TASK_DURATION', '1800000')!, 10),
+  agentMaxToolCallsPerTask: parseInt(getEnv('CLERUM_AGENT_MAX_TOOL_CALLS', '50')!, 10),
+  agentMaxQueueSize: parseInt(getEnv('CLERUM_AGENT_MAX_QUEUE_SIZE', '100')!, 10),
+  // 0 = disabled (default): an unresolved approval never auto-denies in memory,
+  // so the request stays available no matter how long the human takes. A
+  // suspended session only blocks its OWN session's next tasks (it frees the
+  // global concurrency slot in SessionProcessor), and the durable pending row is
+  // still bounded by `pendingApprovalTtlMs` (7d) + the boot-time reaper.
+  agentApprovalTimeout: parseInt(getEnv('CLERUM_APPROVAL_TIMEOUT', '0')!, 10),
+  pendingApprovalTtlMs:
+    parseInt(getEnv('CLERUM_PENDING_APPROVAL_TTL_HOURS', '168')!, 10) * 3600 * 1000, // 7d default
+
+  // Workflow step iteration limit — max LLM↔tool rounds per step before forced wrap-up.
+  // Override per step via CRD spec.steps[].maxIterations. Default 50.
+  workflowMaxIterations: parseInt(getEnv('CLERUM_WORKFLOW_MAX_ITERATIONS', '50')!, 10),
+
+  // Approval system (default ON; tools advertise requiresApproval()).
+  enableApproval: getEnvBool('CLERUM_ENABLE_APPROVAL', true),
+  // Dev-mode override; in prod the values come from the Host CRD.
+  approvalConfig: parseApprovalConfig(),
+
+  // Nudge controller (default OFF).
+  enableNudge: getEnvBool('CLERUM_ENABLE_NUDGE', false),
+  nudgeMaxIterations: parseInt(getEnv('CLERUM_NUDGE_MAX_ITERATIONS', '3')!, 10),
+
+  // Context compaction: max token budget (default 100k, configurable via CLERUM_CONTEXT_MAX_TOKENS)
+  //
+  // IronClaw invariant #1 (P.3 §4.1): compaction is skipped while a session
+  // has `pending_approval`. The token-budget threshold is not relaxed — the
+  // loop simply emits `compaction:skipped` and lets the snapshot survive
+  // verbatim. The session unblocks once the user approves/denies.
+  //
+  // Approval timeouts and the new `approval_expired` route are INDEPENDENT
+  // failure modes (P.3 §4.4):
+  //   - `AgentConfig.approvalTimeout` ticks from registerApproval; on expiry
+  //     the executor is auto-denied with `reason='approval_timeout'`.
+  //   - `approval_expired` fires only on resume, when a spillover ref in the
+  //     snapshot is gone. The user clicked Approve in time — the underlying
+  //     data simply no longer exists. T1.5 will add CLERUM_SPILLOVER_TTL_HOURS
+  //     to govern that lifetime.
+  contextMaxTokens: parseInt(getEnv('CLERUM_CONTEXT_MAX_TOKENS', '100000')!, 10),
+
+  // P.2 — Tokenizer dry-run. When true (default during the bake-week), the
+  // PressureContextManager computes both the heuristic and the real counter
+  // values for every decision, but USES the heuristic to choose the tier.
+  // Provides observability via `clerum_tokenizer_dryrun_delta` /
+  // `clerum_tokenizer_dryrun_tier_mismatch_total` without changing behavior.
+  // Flip to false (default after recalibration) once the new thresholds land.
+  tokenizerDryrun: getEnvBool('CLERUM_TOKENIZER_DRYRUN', true),
+  // When true the AnthropicTokenCounter skips its network call and returns the
+  // heuristic upper bound instead.
+  //
+  // Defaults to TRUE so the default config makes ZERO network calls on the hot
+  // path (legacy/safe). With offline=false + dryRun=true, `computePressure`
+  // would fire a real `beta.messages.countTokens` round-trip on EVERY manage()
+  // (~2×/loop iteration) for Claude hosts — added latency + rate-limit pressure
+  // purely to compute a dry-run delta that does not change the tier decision.
+  // Operators flip this to false deliberately for the recalibration bake-week,
+  // accepting the network cost while watching the rate-limit metric.
+  tokenizerOffline: getEnvBool('CLERUM_TOKENIZER_OFFLINE', true),
+
+  // T1.4 — Anti-thrash. If a compaction reduces tokens by less than this
+  // fraction (`ratio = post/pre > 0.9` ≈ ≤10% saved), it counts as ineffective.
+  // After `compactionIneffectiveMaxRun` consecutive ineffective compactions
+  // the PressureContextManager stops compacting until the task ends, leaving
+  // the existing task-level budgets to wrap things up cleanly. Defaults match
+  // Hermes (`.specs/mcp-hermes/1-diagnostic-hermes.md` §8 / §13).
+  compactionIneffectiveRatio: parseFloat(getEnv('CLERUM_COMPACTION_INEFFECTIVE_RATIO', '0.9')!),
+  compactionIneffectiveMaxRun: parseInt(getEnv('CLERUM_COMPACTION_INEFFECTIVE_MAX_RUN', '2')!, 10),
+
+  // T1.2 — Pre-pruning. Master flag defaults OFF; flipped per-Host once
+  // staging metrics confirm the savings ratio. Per-pass toggles default ON so
+  // operators can flip them all at once with the master. See
+  // `.specs/mcp-hermes/implementation-plans/T1.2-pre-pruning.md` §9.
+  compactionPrePruneEnabled: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE', false),
+  compactionPrePruneDedup: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_DEDUP', true),
+  compactionPrePruneOneLine: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_ONE_LINE', true),
+  compactionPrePruneJsonTruncate: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_JSON_TRUNC', true),
+  compactionPrePruneStripMedia: getEnvBool('CLERUM_COMPACTION_PRE_PRUNE_STRIP_MEDIA', true),
+  compactionPrePruneMaxArgsBytes: parseInt(
+    getEnv('CLERUM_COMPACTION_PRE_PRUNE_TRUNCATE_BYTES', '4096')!,
+    10
+  ),
+  compactionPrePruneSummaryTokens: parseInt(
+    getEnv('CLERUM_COMPACTION_PRE_PRUNE_SUMMARY_TOKENS', '200')!,
+    10
+  ),
+  compactionPrePruneProtectedTailTurns: parseInt(
+    getEnv('CLERUM_COMPACTION_PROTECTED_TAIL_TURNS', '3')!,
+    10
+  ),
+
+  // T1.1 — Structured summary template. Default OFF until staging confirms
+  // parse-ok rate ≥ 80% on the LLM in use.
+  compactionStructuredSummary: getEnvBool('CLERUM_COMPACTION_STRUCTURED_SUMMARY', false),
+
+  // T2.2 — System-prompt cache. ENABLED by default since 2026-06-23 (was OFF
+  // pending an Anthropic canary that never ran; shipped on + monitored instead).
+  // ROLLBACK: set CLERUM_PROMPT_CACHE_ENABLED=false (per-process env, no code
+  // change) on any host if a regression is observed.
+  // When ON, `TaskExecutor.buildLoopConfig` builds tiered `SystemPromptParts`
+  // via `PromptCache.getOrBuild`, plumbs them through `ReasoningPort` and
+  // `LlmPortAdapter`, and the Anthropic provider emits `cache_control`. For
+  // providers without explicit cache markers (OpenAI / ZAI / Bailian) the
+  // parts are concatenated back into a single `system` string (no native
+  // caching, but the tiered build path is used uniformly).
+  promptCacheEnabled: getEnvBool('CLERUM_PROMPT_CACHE_ENABLED', true),
+
+  // F1 (dynamic-tool-loading) — Gates the dynamic-tool-loading bridge; default
+  // OFF; set true per-host to enable; see
+  // `.specs/dynamic-tool-loading/plan-hermes-bridge.es.md`.
+  dynamicToolsEnabled: getEnvBool('CLERUM_DYNAMIC_TOOLS_ENABLED', false),
+  // F1 (dynamic-tool-loading) — Minimum deferrable (MCP) tool count above which
+  // the bridge activates when enabled; small hosts stay on passthrough.
+  dynamicToolsThreshold: getEnvNumber('CLERUM_DYNAMIC_TOOLS_THRESHOLD', 60),
+
+  // T2.1 — Conversation store backend selector.
+  //
+  //   - `memory`: legacy InMemoryConversationStore (no durability). Default
+  //     so the canary rollout can opt in per Host.
+  //   - `sqlite`: SqliteConversationStore (RAM + worker thread + state.db).
+  //   - `dual`: both stores live, reads from RAM, writes apply to both —
+  //     for one-week parity validation (`clerum_conversation_store_parity_total`).
+  //
+  // See `.specs/mcp-hermes/implementation-plans/T2.1-sqlite-store.md` §10.
+  sessionStoreMode: (() => {
+    const raw = (getEnv('CLERUM_SESSION_STORE', 'memory') || 'memory').toLowerCase()
+    if (raw === 'memory' || raw === 'sqlite' || raw === 'dual') {
+      return raw as 'memory' | 'sqlite' | 'dual'
+    }
+    console.warn(
+      `[Config] CLERUM_SESSION_STORE='${raw}' is not recognized — falling back to 'memory'`
+    )
+    return 'memory' as const
+  })(),
+  sessionDbPath: getEnv('CLERUM_SESSION_DB_PATH', '') || '',
+  conversationCacheSize: parseInt(getEnv('CLERUM_CONVERSATION_CACHE_SIZE', '200')!, 10),
+  sessionTtlDays: parseInt(getEnv('CLERUM_SESSION_TTL_DAYS', '90')!, 10),
+  dbWorkerHeartbeatMs: parseInt(getEnv('CLERUM_DB_WORKER_HEARTBEAT_MS', '5000')!, 10),
+  dbPersistSyncTimeoutMs: parseInt(getEnv('CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS', '2000')!, 10),
+  dbPersistAsyncTimeoutMs: parseInt(getEnv('CLERUM_DB_PERSIST_ASYNC_TIMEOUT_MS', '5000')!, 10),
+  dbCheckpointEveryWrites: parseInt(getEnv('CLERUM_DB_CHECKPOINT_EVERY_WRITES', '100')!, 10),
+  dbWalSizeAlarmBytes: parseInt(getEnv('CLERUM_DB_WAL_SIZE_ALARM_BYTES', '52428800')!, 10),
+
+  // T3.1 — `clerum__session_search` tool + REST. Default OFF: must be flipped
+  // on per-Host once staging soak validates cross-user isolation (test #18).
+  // Retention controls the boot-only sweep; defaults to 90 days per spec §8.
+  sessionSearchEnabled: getEnvBool('CLERUM_SESSION_SEARCH_ENABLED', false),
+  searchRetentionDays: parseInt(getEnv('CLERUM_SEARCH_RETENTION_DAYS', '90')!, 10),
+
+  // T1.5 — Tool-result spillover. Master flag defaults ON (the feature is
+  // backward-safe: outputs under the threshold are unchanged). Set to false
+  // to disable persistence entirely; the loop falls back to the pre-T1.5
+  // path (full content inline).
+  toolSpilloverEnabled: getEnvBool('CLERUM_TOOL_SPILLOVER_ENABLED', true),
+  toolSpilloverThresholdBytes: parseInt(getEnv('CLERUM_TOOL_SPILLOVER_THRESHOLD', '8192')!, 10),
+  // TTL window for persisted blobs. Default 168h = 1 week. The resolver
+  // double-checks the TTL on load even when GC hasn't pruned yet.
+  spilloverTtlMs: parseInt(getEnv('CLERUM_SPILLOVER_TTL_HOURS', '168')!, 10) * 3600 * 1000,
+  // Periodic sweep. `0` disables the timer; the lazy boot sweep still runs.
+  spilloverGcIntervalMs:
+    parseInt(getEnv('CLERUM_SPILLOVER_GC_INTERVAL_MINUTES', '60')!, 10) * 60 * 1000,
+
+  // Native tool configuration
+  nativeTool: {
+    workspacePath: process.env.CLERUM_WORKSPACE_PATH || process.cwd(),
+    shellTimeout: parseInt(getEnv('CLERUM_SHELL_TIMEOUT', '600000')!, 10),
+    toolTimeout: parseInt(getEnv('CLERUM_TOOL_TIMEOUT', '660000')!, 10),
+    toolProgressInterval: parseInt(getEnv('CLERUM_TOOL_PROGRESS_INTERVAL_MS', '30000')!, 10),
+    httpAllowlist: (process.env.CLERUM_HTTP_ALLOWLIST || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean),
+    envAllowlist: (process.env.CLERUM_ENV_ALLOWLIST || 'PATH,HOME,USER,SHELL,LANG,TERM')
+      .split(',')
+      .map(s => s.trim()),
+    memoryMaxSize: parseInt(getEnv('CLERUM_MEMORY_MAX_SIZE', '1048576')!, 10),
+  },
+
+  // Attachment delivery
+  enableResponseAttachments: getEnvBool('CLERUM_ENABLE_RESPONSE_ATTACHMENTS', true),
+  attachmentMaxCount: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_COUNT', '3')!, 10),
+  attachmentMaxBytes: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_BYTES', '52428800')!, 10),
+  activityBufferSize: parseInt(getEnv('MCP_HOST_ACTIVITY_BUFFER_SIZE', '1000')!, 10),
+  activityMaxEventBytes: parseInt(getEnv('MCP_HOST_ACTIVITY_MAX_EVENT_BYTES', '2048')!, 10),
+
+  // Memory (workspace) — CLERUM_MEMORY_ENABLED, CLERUM_MEMORY_WORKSPACE_PATH.
+  memory: {
+    enabled: getEnvBool('CLERUM_MEMORY_ENABLED', false),
+    workspacePath: getEnv('CLERUM_MEMORY_WORKSPACE_PATH', devMode ? './workspace' : '/workspace'),
+  },
+
+  // Token budgets (P1)
+  budgetsEnabled: getEnvBool('CLERUM_BUDGETS_ENABLED', false),
+
+  // Workflow mode
+  workflowEnabled: getEnvBool('CLERUM_WORKFLOW_ENABLED', false),
+  workflowRecipeName: getEnv('CLERUM_WORKFLOW_RECIPE', '')!,
+  userApprovalRequestRecipeName: getEnv('CLERUM_WORKFLOW_APPROVAL_RECIPE', '')!,
+  userApprovalRequestRecipeNamespace: getEnv(
+    'CLERUM_WORKFLOW_APPROVAL_RECIPE_NAMESPACE',
+    'mcp-host'
+  )!,
+
+  // Auth configuration
+  enableAuth: getEnvBool('CLERUM_ENABLE_AUTH', true),
+  authJwtPublicKey: (getEnv('CLERUM_AUTH_JWT_PUBLIC_KEY', '') || '').replace(/\\n/g, '\n'),
+  authJwtIssuer: getEnv('CLERUM_AUTH_JWT_ISSUER', 'control-api')!,
+  // Audience must be "rpc-proxy"; control-api stamps that value onto every
+  // issued RPC token.
+  authJwtAudience: getEnv('CLERUM_AUTH_JWT_AUDIENCE', 'rpc-proxy')!,
+
+  // Verifies workflow-mode tokens (iss: clerum-wrc); separate signer from authJwtPublicKey.
+  wrcPublicKey: (getEnv('WRC_PUBLIC_KEY_PEM', '') || '').replace(/\\n/g, '\n'),
+
+  // mcpHost runtime JWTs for workflow approval gating
+  mcpHostRuntimeAccessToken: getEnv('MCP_HOST_RUNTIME_ACCESS_TOKEN', ''),
+  mcpHostRuntimeRefreshToken: getEnv('MCP_HOST_RUNTIME_REFRESH_TOKEN', ''),
+  mcpHostGatewayUrl: getEnv('MCP_HOST_GATEWAY_URL', ''),
+  mcpHostWorkflowControlToken: getEnv('MCP_HOST_WORKFLOW_CONTROL_TOKEN', ''),
+  mcpHostWorkflowControlTokenFile: getEnv('MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE', ''),
+
+  // Plugin Workload SDK (plan §3.5 config table)
+  pluginWorkloadSdkEnabled: getEnvBool('PLUGIN_WORKLOAD_SDK_ENABLED', false),
+  pluginWorkloadSdkPort: parseInt(getEnv('MCP_HOST_PLUGIN_SDK_PORT', '8099')!, 10),
+  podNamespace: getEnv('MCP_HOST_POD_NAMESPACE', '')!,
+  pluginWorkloadSdkGatewayUrl: getEnv('CONTROL_API_GATEWAY_URL', ''),
+  pluginWorkloadSdkWorkloadToken: getEnv('PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKEN', ''),
+  pluginWorkloadSdkBoundCallerRef: getEnv('PLUGIN_WORKLOAD_SDK_BOUND_CALLER_REF', ''),
+  pluginWorkloadSdkWorkloadTokensDir: getEnv('PLUGIN_WORKLOAD_SDK_WORKLOAD_TOKENS_DIR', ''),
+  pluginWorkloadSdkPromptTimeoutSeconds: parseInt(
+    getEnv('PLUGIN_WORKLOAD_SDK_PROMPT_TIMEOUT_SECONDS', '120')!,
+    10
+  ),
+  pluginWorkloadSdkMaxConnections: parseInt(
+    getEnv('PLUGIN_WORKLOAD_SDK_MAX_CONNECTIONS', '100')!,
+    10
+  ),
+  pluginWorkloadSdkMaxConnectionsPerWorkload: parseInt(
+    getEnv('PLUGIN_WORKLOAD_SDK_MAX_CONNECTIONS_PER_WORKLOAD', '10')!,
+    10
+  ),
+  pluginWorkloadSdkMaxRpmPerWorkload: parseInt(
+    getEnv('PLUGIN_WORKLOAD_SDK_MAX_RPM_PER_WORKLOAD', '100')!,
+    10
+  ),
+  pluginWorkloadSdkMaxLlmResponseBytes: parseInt(
+    getEnv('PLUGIN_WORKLOAD_SDK_MAX_LLM_RESPONSE_BYTES', String(1024 * 1024))!,
+    10
+  ),
+
+  // Personalization — CLERUM_PERSONALIZATION_ENABLED, CLERUM_IDENTITY_SEED (JSON).
+  personalization: (() => {
+    const enabled = getEnvBool('CLERUM_PERSONALIZATION_ENABLED', false)
+    const seedJson = getEnv('CLERUM_IDENTITY_SEED')
+    let seed: Omit<PersonalizationConfig, 'enabled'> = {}
+    if (seedJson) {
+      try {
+        seed = JSON.parse(seedJson) as Omit<PersonalizationConfig, 'enabled'>
+      } catch {
+        console.error('[Config] Failed to parse CLERUM_IDENTITY_SEED')
+      }
+    }
+    return { enabled, ...seed }
+  })(),
+}

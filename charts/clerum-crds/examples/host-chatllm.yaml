@@ -1,0 +1,46 @@
+apiVersion: clerum.io/v1alpha1
+kind: Host
+metadata:
+  name: chatllm
+spec:
+  host: chatLLM
+  contextRef: context1
+  secretRef: chatllm-api-keys
+  model:
+    provider: claude
+    name: claude-opus-4-7
+  workflowControl:
+    scopes:
+      - workflow:list
+      - workflow:read
+      - workflow:trigger
+      - workflow:approval:resolve
+      - workflow:approval:decide
+  channels:
+    - all-channels
+  # Phase 6: Tool approval configuration
+  approval:
+    defaultPolicy: designated_approvers
+    channels:
+      telegram:
+        enabled: true
+        approvers:
+          - "123456789"
+---
+# Secret containing API keys for the host
+# In production, create this with:
+#   kubectl create secret generic chatllm-api-keys \
+#     --from-literal=openai-api-key=sk-xxx \
+#     --from-literal=claude-api-key=sk-ant-xxx \
+#     --from-literal=zai-api-key=zai-xxx \
+#     --from-literal=bailian-api-key=sk-xxx
+apiVersion: v1
+kind: Secret
+metadata:
+  name: chatllm-api-keys
+type: Opaque
+stringData:
+  openai-api-key: "your-openai-api-key-here"
+  claude-api-key: "your-claude-api-key-here"
+  zai-api-key: "your-zai-api-key-here"
+  bailian-api-key: "your-bailian-api-key-here"

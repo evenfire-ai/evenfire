@@ -1,0 +1,61 @@
+# evenfire — documentation index for LLMs
+
+> Curated map of public docs. Prefer these paths over random monorepo files.
+> Code/API still use the historical name "clerum" (clerum.io, CLERUM_*).
+
+## Start here
+
+- README: ../README.md — product pitch, security model, CRDs, license
+- Quickstart: get-started/quickstart.md — full platform on minikube, one command
+- Learning path: get-started/learning-path.md
+- FAQ: faq.md
+
+## Concepts
+
+- Why evenfire: concepts/why-evenfire.md
+- When to use evenfire (categories): concepts/when-to-use-evenfire.md
+- Claims guardrails: meta/claims-guardrails.md
+- Code names (evenfire vs clerum): concepts/code-names.md
+- Architecture overview: architecture/overview.md
+- Platform topology / NetworkPolicies: architecture/platform-topology.md
+
+## How-to
+
+- Connect Telegram: how-to/connect-telegram.md
+- Configure approvals: how-to/configure-approvals.md
+- Add MCP server: how-to/add-mcp-server.md
+- Minikube full stack: deploy/minikube.md
+- Production checklist: deploy/production.md
+- WorkflowRecipes ops: deploy/workflow-recipes-guide.md
+
+## Reference
+
+- CRD index: crds/README.md
+- Host: crds/host.md
+- Context: crds/context.md
+- McpServer: crds/mcpserver.md
+- CommunicationChannel: crds/communicationchannel.md
+- WorkflowRecipe: crds/workflowrecipe.md
+- WorkflowRecipePolicy: crds/workflowrecipepolicy.md
+- SharedFileSystem: crds/sharedfilesystem.md
+- GlobalFileSystem: crds/globalfilesystem.md
+
+## Features
+
+- WorkflowRecipes hub: features/workflow-recipes.md
+
+## Testing & contributing
+
+- E2E guide: testing/e2e-guide.md
+- Contributing: ../CONTRIBUTING.md
+- Security: ../SECURITY.md
+- License: ../LICENSE
+
+## Service READMEs (implementation detail)
+
+- ../mcp-host/README.md — agent runtime env vars and providers
+- ../channel-reader/README.md
+- ../host-context-controller/README.md
+- ../workflow-recipes/README.md
+- ../control-api/README.md
+- ../charts/clerum-crds/README.md

@@ -1,0 +1,62 @@
+# rpc-proxy ConfigMap for minikube clerum-test profile.
+#
+# Mirror of deploy/overlays/gcp/configmaps/rpc-proxy-config.yaml, with these
+# minikube-specific differences:
+#   - CORS origin accepts localhost (Desktop App dev ports 3000 + 8091)
+#     instead of https://clerum.io (production)
+#
+# All the other values (ports, JWT iss/aud, control-api base URL via
+# cluster-local DNS, stream limits) are identical to GCP because they're
+# environment-agnostic at the K8s service level.
+#
+# Why this file exists as a minikube-only addition: the base manifest
+# deploy/base/rpc-proxy/rpc-proxy.yaml references a `rpc-proxy-config`
+# ConfigMap via envFrom, but the ConfigMap itself is not in base — each
+# overlay must provide its own. GCP did. Minikube was missing it, which
+# caused rpc-proxy Pod to fail with
+#   `Error: configmap "rpc-proxy-config" not found`
+# and CreateContainerConfigError on every fresh install. This file closes
+# that gap without touching base or the GCP overlay.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rpc-proxy-config
+  namespace: rpc-proxy
+  labels:
+    app: rpc-proxy
+data:
+  RPC_PROXY_PORT: "8094"
+  # Comma-separated CORS origins: Control UI (3000) + external-rest-api (8091).
+  RPC_PROXY_CORS_ORIGIN: "http://localhost:3000,http://localhost:8091"
+  RPC_PROXY_JWT_ISSUER: "control-api"
+  RPC_PROXY_JWT_AUDIENCE: "rpc-proxy"
+  RPC_PROXY_CONTROL_API_BASE_URL: "http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1"
+  RPC_PROXY_CONTROL_API_CACHE_TTL_MS: "30000"
+  RPC_PROXY_UPSTREAM_TIMEOUT_MS: "60000"
+  RPC_PROXY_MAX_TOKEN_LENGTH: "4096"
+  RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB: "250"
+  RPC_PROXY_ALLOWED_METHOD_PATTERN: "^[a-zA-Z0-9_./:-]{1,120}$"
+  RPC_PROXY_STREAM_MAX_LIFETIME_MS: "600000"
+  RPC_PROXY_STREAM_INTERVAL_MS: "3000"
+  RPC_PROXY_STREAM_KEEPALIVE_MS: "15000"
+  RPC_PROXY_STREAM_MAX_CONCURRENT: "1000"
+  RPC_PROXY_STREAM_MAX_PER_USER: "3"
+  RPC_PROXY_STREAM_MAX_PER_USER_HOST: "1"
+  RPC_PROXY_STREAM_IDLE_TIMEOUT_MS: "60000"
+  RPC_PROXY_ACTIVITY_STREAM_MAX_LIFETIME_MS: "600000"
+  RPC_PROXY_ACTIVITY_STREAM_KEEPALIVE_MS: "15000"
+  RPC_PROXY_ACTIVITY_STREAM_IDLE_TIMEOUT_MS: "60000"
+  RPC_PROXY_ACTIVITY_STREAM_MAX_CONCURRENT: "1000"
+  RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER: "3"
+  RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST: "3"
+  RPC_PROXY_HCC_BASE_URL: "http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081"
+  RPC_PROXY_HOST_NAMESPACE: "mcp-host"
+  RPC_PROXY_DESKTOP_COOKIE_SECRET: "minikube-desktop-cookie-secret-32bytes"
+  RPC_PROXY_DESKTOP_API_TOKEN: "minikube-desktop-api-token-shared-xxxxxxxx"
+  # Spec §11.5 sandbox-ui session cookie HMAC key. ≥32 bytes per
+  # rpc-proxy/src/config.ts validation.
+  RPC_PROXY_SANDBOX_UI_COOKIE_SECRET: "minikube-sandbox-ui-cookie-secret-32by"
+  # Spec §9.9 OAuth callback URL base — control-api's public host as the
+  # user's browser sees it. In minikube this is the port-forward at
+  # localhost:8090; in production the cluster's public ingress.
+  RPC_PROXY_OAUTH_CALLBACK_BASE_URL: "http://localhost:8090"

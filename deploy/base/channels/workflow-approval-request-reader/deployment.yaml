@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clerum-workflow-approval-request-reader
+  namespace: channels
+  labels:
+    app: workflow-approval-request-reader
+    app.kubernetes.io/name: workflow-approval-request-reader
+    app.kubernetes.io/part-of: clerum
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: workflow-approval-request-reader
+  template:
+    metadata:
+      labels:
+        app: workflow-approval-request-reader
+        app.kubernetes.io/name: workflow-approval-request-reader
+        app.kubernetes.io/part-of: clerum
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: clerum-workflow-approval-request-reader
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: workflow-approval-request-reader
+        image: clerum/workflow-approval-request-reader:0.1.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8098
+          name: http
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: clerum-workflow-approval-request-reader-config
+        volumeMounts:
+        - name: reader-config
+          mountPath: /etc/clerum/workflow-approval-request-reader
+          readOnly: true
+        env:
+        - name: WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: workflow-approval-request-reader-credentials
+              key: telegram-webhook-secret
+              optional: true
+        - name: WORKFLOW_APPROVAL_READER_SLACK_SIGNING_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: workflow-approval-request-reader-credentials
+              key: slack-signing-secret
+              optional: true
+        # Reader internal control-api access. The reader uses this for Figure D
+        # can-approve checks and to resolve the CommunicationChannel ref for
+        # channel-scoped enrollment confirmations. BASE_URL is the in-cluster
+        # control-api Service; TOKEN is the static bearer (internalServiceAuth,
+        # same pattern as rpc-proxy). optional: true keeps local/test rendering
+        # tolerant, but production enrollment fails closed without a resolvable
+        # CommunicationChannel ref.
+        - name: WORKFLOW_APPROVAL_READER_CONTROL_API_BASE_URL
+          value: http://control-api.control-plane.svc.cluster.local:8090
+        - name: WORKFLOW_APPROVAL_READER_CONTROL_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: workflow-approval-request-reader-credentials
+              key: control-api-token
+              optional: true
+        - name: WORKFLOW_APPROVAL_READER_CHANNEL_READER_HANDOFF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: workflow-approval-request-reader-credentials
+              key: channel-reader-handoff-token
+              optional: true
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 8
+          periodSeconds: 12
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 4
+          periodSeconds: 8
+        resources:
+          limits:
+            cpu: 200m
+            memory: 192Mi
+          requests:
+            cpu: 25m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          seccompProfile:
+            type: RuntimeDefault
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: reader-config
+        configMap:
+          name: clerum-workflow-approval-request-reader-config

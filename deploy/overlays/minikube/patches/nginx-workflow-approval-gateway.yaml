@@ -1,0 +1,19 @@
+# Minikube: nginx-workflow-approval-gateway with reduced resources for single-node
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-workflow-approval-gateway
+  namespace: control-plane
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: nginx
+          resources:
+            limits:
+              cpu: 50m
+              memory: 32Mi
+            requests:
+              cpu: 5m
+              memory: 8Mi

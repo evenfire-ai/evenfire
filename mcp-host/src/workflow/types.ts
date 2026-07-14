@@ -1,0 +1,121 @@
+/**
+ * Workflow request/response types for mcp-host workflow mode.
+ *
+ * Source of truth: STAGE-2-STEP-EXECUTION-ENGINE.md §4.3–§4.7
+ */
+import type { LlmProvider } from '../llm/registryCore'
+
+// ─── MCP Server Reference (per-step) ───────────────────────────────────
+
+export interface StepMcpServerRef {
+  name: string
+  url: string
+  authToken?: string
+}
+
+// ─── Tool Scoping ───────────────────────────────────────────────────────
+
+export interface AllowedToolsConfig {
+  include?: string[] // if present and non-empty: ONLY these tools exposed
+}
+
+// ─── Execute Step ───────────────────────────────────────────────────────
+
+export interface ApprovalTarget {
+  userId?: string
+  teamId?: string
+}
+
+export interface ApprovalRequest {
+  target: ApprovalTarget
+  message: string
+  timeoutSeconds?: number
+}
+
+export interface ExecuteStepRequest {
+  stepId: string
+  instruction: string
+  mcpServers?: StepMcpServerRef[]
+  allowedTools?: AllowedToolsConfig
+  toolChoice?: 'auto' | 'none' | 'required'
+  maxIterations?: number
+  timeoutSeconds?: number
+  contextVars?: Record<string, string>
+  requiresApproval?: ApprovalRequest
+}
+
+export interface ExecuteStepResponse {
+  stepId: string
+  status: 'completed' | 'failed'
+  output?: string
+  error?: string
+  toolsCalled?: ToolCallRecord[]
+  tokensUsed?: TokenUsage
+  completedAt?: string
+  durationMs: number
+}
+
+export interface ToolCallRecord {
+  serverName: string
+  toolName: string
+  args: Record<string, unknown>
+  result: unknown
+  durationMs: number
+}
+
+export interface TokenUsage {
+  input: number
+  output: number
+  total: number
+}
+
+// ─── Configure ──────────────────────────────────────────────────────────
+
+export interface ConfigureRequest {
+  // Wire input — still validated at runtime with `isLlmProvider` before use
+  // (the payload is decoded as `unknown`, so this type is descriptive, not a
+  // trust boundary).
+  provider?: LlmProvider
+  model?: string
+  apiKey?: string
+  /** Kubernetes Secret name only, never the secret key or value. */
+  llmSecretName?: string
+  soulContent?: string
+}
+
+export interface ConfigureResponse {
+  configured: boolean
+  provider?: string
+  model?: string
+  message?: string
+}
+
+// ─── Internal Tools (clerum__*) ──────────────────────────────────────
+
+export interface ArtifactMetadata {
+  name: string
+  format: 'md' | 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'png' | 'svg' | 'html'
+  path: string
+  sizeBytes: number
+  createdAt: string
+}
+
+export interface InternalToolResult {
+  success: boolean
+  artifact?: ArtifactMetadata
+  /**
+   * Optional text payload for tools that return data instead of (or in
+   * addition to) a file artifact. The native-tool adapter prefers this
+   * over the auto-generated "File generated: …" message when present.
+   * Used by query-style internal tools such as clerum__get_capabilities.
+   */
+  content?: string
+  error?: string
+}
+
+export interface InternalToolDefinition {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+  execute: (args: Record<string, unknown>, outputDir: string) => Promise<InternalToolResult>
+}

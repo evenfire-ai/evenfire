@@ -1,0 +1,51 @@
+# --- Role: host-context-controller-rpc-proxy-runtime ---
+# Phase 8: rpc-proxy namespace — L0/L1 NetworkPolicies
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller-rpc-proxy-runtime
+  namespace: rpc-proxy
+rules:
+  # Manage NetworkPolicies (L0 deny-all + L1 infrastructure)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller-rpc-proxy-runtime
+  namespace: rpc-proxy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller-rpc-proxy-runtime
+subjects:
+- kind: ServiceAccount
+  name: host-context-controller
+  namespace: control-plane
+---
+# --- Role: host-context-controller (generic, referenced by existing RoleBinding) ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller
+  namespace: rpc-proxy
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller
+  namespace: rpc-proxy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller
+subjects:
+- kind: ServiceAccount
+  name: host-context-controller
+  namespace: control-plane

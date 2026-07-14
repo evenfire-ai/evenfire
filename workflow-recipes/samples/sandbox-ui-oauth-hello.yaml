@@ -1,0 +1,203 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: sandbox-ui-oauth-hello
+  namespace: sandbox-recipes
+spec:
+  description: >-
+    Full-lifecycle demo for the sandbox-ui OAuth flow (spec §9.9). The
+    embed renders Connect / Connected / Disconnect states by probing
+    `/oauth/token` on load and reacting to `clerum.onOauthCompleted`
+    pushes from the desktop app. Click Connect, complete OAuth in the
+    browser, watch the embed flip to Connected with a token preview;
+    click Disconnect to drop the grant and flip back.
+
+    Prerequisites: a K8s Secret `slack-oauth-creds` in the same namespace
+    as this recipe, with keys `client-id` and `client-secret` populated
+    from a real Slack OAuth app's Basic Information page. Without a real
+    app the platform plumbing applies, but the provider redirect fails
+    at the token-exchange step.
+
+    The recipe pod itself never calls Slack APIs in this demo; the
+    embed only retrieves and displays the access token. Real recipes
+    add `spec.ui.egress.external[]` with provider FQDNs and a backend
+    workload that uses the token server-side.
+  contextRef: context1
+  oauthClients:
+    - id: slack-bot
+      provider: slack
+      clientIdRef:
+        name: slack-oauth-creds
+        key: client-id
+      clientSecretRef:
+        name: slack-oauth-creds
+        key: client-secret
+      scopes:
+        - users:read
+        - channels:read
+  workloads:
+    - id: hello
+      type: deployment
+      # nginx-unprivileged listens as UID 101 by default — satisfies the
+      # sandbox-ui namespace's runAsNonRoot floor without per-workload
+      # security overrides. The default config serves /usr/share/nginx/html
+      # which is read-only for UID 101, so the bootstrap script writes a
+      # custom index.html + app.js + minimal nginx.conf into /tmp.
+      #
+      # The recipe uses an external app.js because rpc-proxy's CSP for
+      # view/* is `script-src 'self'` (no `'unsafe-inline'`); inline
+      # <script> blocks would be refused by the WebContentsView.
+      image: nginxinc/nginx-unprivileged:1.27-alpine
+      port: 8080
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          mkdir -p /tmp/html
+          cat > /tmp/html/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>OAuth Hello</title>
+            <style>
+              body { font-family: system-ui, sans-serif; max-width: 480px; margin: 4rem auto; padding: 0 1rem; color: #222; }
+              h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
+              p { color: #555; line-height: 1.5; margin: 0.5rem 0; }
+              a, button { color: #2563eb; background: none; border: 1px solid #2563eb; padding: 0.4rem 0.8rem; border-radius: 4px; text-decoration: none; cursor: pointer; font: inherit; }
+              button:hover, a:hover { background: #eff6ff; }
+              #status.connected { color: #16a34a; font-weight: 500; }
+              #status.error { color: #b91c1c; }
+              .muted { color: #6b7280; font-size: 0.85rem; white-space: pre-wrap; word-break: break-all; margin-top: 0.5rem; }
+            </style>
+          </head>
+          <body>
+            <h1>OAuth Hello</h1>
+            <p id="status">Loading…</p>
+            <p id="actions"></p>
+            <p id="detail" class="muted"></p>
+            <script src="app.js"></script>
+          </body>
+          </html>
+          EOF
+          cat > /tmp/html/app.js <<'EOF'
+          // Recipe-supplied OAuth lifecycle script. Runs in the sandbox-ui
+          // embed under rpc-proxy's strict CSP (`script-src 'self'`); the
+          // only globals it touches are window.clerum (exposed by the
+          // embed preload) and window.location (to derive the recipe's
+          // own URL prefix without hard-coding ns/name).
+          var CLIENT_ID = 'slack-bot';
+          var match = window.location.pathname.match(/^(\/api\/v1\/sandbox-ui\/[^/]+\/[^/]+)\/view/);
+          var BASE = match ? match[1] : '';
+          function $(id) { return document.getElementById(id); }
+          function jsonFetch(path, opts) {
+            return fetch(BASE + path, Object.assign({
+              credentials: 'include',
+              headers: { 'content-type': 'application/json' },
+            }, opts || {}));
+          }
+          function renderConnected(accessToken, expiresAt) {
+            $('status').textContent = 'Connected to slack';
+            $('status').className = 'connected';
+            $('actions').innerHTML = '<button id="disconnect">Disconnect</button>';
+            $('detail').textContent =
+              'access_token: ' + accessToken.slice(0, 12) + '… ' +
+              '(expires ' + (expiresAt || 'never') + ')';
+            var btn = $('disconnect');
+            if (btn) btn.addEventListener('click', doDisconnect);
+          }
+          function renderDisconnected() {
+            $('status').textContent = 'Not connected';
+            $('status').className = '';
+            $('actions').innerHTML =
+              '<a href="clerum://oauth?clientId=' + CLIENT_ID + '">Connect Slack</a>';
+            $('detail').textContent = '';
+          }
+          function renderError(status, body) {
+            $('status').textContent = 'Error (' + status + ')';
+            $('status').className = 'error';
+            $('actions').innerHTML =
+              '<a href="clerum://oauth?clientId=' + CLIENT_ID + '">Reconnect</a>';
+            $('detail').textContent = body || '';
+          }
+          function probe() {
+            jsonFetch('/oauth/token', {
+              method: 'POST',
+              body: JSON.stringify({ oauthClientId: CLIENT_ID }),
+            }).then(function (r) {
+              if (r.status === 200) {
+                return r.json().then(function (j) {
+                  renderConnected(j.accessToken, j.expiresAt);
+                });
+              }
+              if (r.status === 404) {
+                renderDisconnected();
+                return;
+              }
+              return r.text().then(function (b) { renderError(r.status, b); });
+            }).catch(function (err) {
+              renderError(0, String(err));
+            });
+          }
+          function doDisconnect() {
+            jsonFetch('/oauth/grant', {
+              method: 'DELETE',
+              body: JSON.stringify({ oauthClientId: CLIENT_ID }),
+            }).then(function (r) {
+              if (r.status === 204) probe();
+              else r.text().then(function (b) { renderError(r.status, b); });
+            }).catch(function (err) {
+              renderError(0, String(err));
+            });
+          }
+          if (window.clerum && window.clerum.onOauthCompleted) {
+            window.clerum.onOauthCompleted(function (p) {
+              if (!p || p.oauthClientId === CLIENT_ID || !p.oauthClientId) probe();
+            });
+          }
+          probe();
+          EOF
+          cat > /tmp/nginx.conf <<'EOF'
+          worker_processes 1;
+          pid /tmp/nginx.pid;
+          error_log /dev/stderr;
+          events {}
+          http {
+            access_log /dev/stdout;
+            # Without an explicit types map, nginx falls back to
+            # default_type for every file extension. The embed loads
+            # app.js as a <script src> — Chromium refuses it under
+            # CSP if served as application/octet-stream.
+            types {
+              text/html html;
+              application/javascript js;
+              text/css css;
+            }
+            default_type application/octet-stream;
+            server {
+              listen 8080;
+              root /tmp/html;
+              index index.html;
+            }
+          }
+          EOF
+          exec nginx -c /tmp/nginx.conf -g 'daemon off;'
+      healthCheck:
+        type: http
+        path: /
+        port: 8080
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '32Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+  ui:
+    workloadRef: hello
+    port: 8080
+    title: 'OAuth Hello'
+    defaultPath: '/'
+  security:
+    isolationLevel: minimal

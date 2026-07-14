@@ -1,0 +1,84 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: e2e-custom-coordinator-sdk-broker-timeout
+  namespace: sandbox-recipes
+spec:
+  coordinatorImage: clerum/workflow-custom-sdk-e2e:test
+  contextRef: context1
+  triggers:
+    onDemand:
+      allowedActors:
+        - user
+        - autonomous
+  security:
+    allowContextRef: true
+  workloads:
+    - id: business-api
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3001
+      healthCheck:
+        type: tcp
+        port: 3001
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+    - id: mock-tools
+      type: deployment
+      image: clerum/mock-mcp-server:test
+      port: 3000
+      transport:
+        type: streamableHttp
+        path: /mcp
+      healthCheck:
+        type: tcp
+        port: 3001
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '128Mi'
+  inputContract:
+    type: object
+    properties:
+      requestId:
+        type: string
+        default: e2e-custom-broker-timeout
+      approvalThreshold:
+        type: number
+        default: 1000
+      scenario:
+        type: string
+        default: broker-backed-mcp-timeout
+  output:
+    destination: pvc
+    format: json
+    storageSize: 128Mi
+  steps:
+    - id: prepare
+    - id: broker-review-timeout
+      dependsOn:
+        - prepare
+      timeoutSeconds: 2
+      instruction: |
+        Use the mock-tools hang tool exactly once with durationMs=120000.
+        Do not call any other MCP tool.
+      agent:
+        provider: zai
+        model: glm-4.7
+      mcpServers:
+        - mock-tools
+      allowedTools:
+        include:
+          - mock-tools__hang
+      maxIterations: 2
+    - id: emit
+      dependsOn:
+        - broker-review-timeout

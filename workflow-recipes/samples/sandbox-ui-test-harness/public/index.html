@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Sandbox UI Test Harness</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Sandbox UI · Test Harness</h1>
+      <p class="muted">
+        Each card exercises one boundary the spec sets. Click <em>Run</em> and compare the result
+        with the expected behavior. Verdicts and outputs persist across in-embed navigations (e.g.
+        #4 / #5) until you close the embed or hit <em>Reset</em>.
+      </p>
+      <p>
+        <button data-action="reset-tests" type="button">Reset all tests</button>
+      </p>
+    </header>
+
+    <main>
+      <!-- ─── ALLOWED ─────────────────────────────────────────── -->
+      <section class="card pass">
+        <h2>1. Reach the upstream (sanity)</h2>
+        <p class="ctx">A simple same-origin <code>fetch('api/ping')</code>.</p>
+        <p class="rule">
+          <strong>Spec:</strong> <code>connect-src 'self'</code>
+          (§9.8 CSP) — fetches to the same origin are allowed.
+        </p>
+        <p class="want"><strong>Expected:</strong> <code>200 OK</code> with JSON body.</p>
+        <button data-test="ping">Run</button>
+        <pre data-out="ping"></pre>
+      </section>
+
+      <section class="card pass">
+        <h2>2. Recipe identity headers</h2>
+        <p class="ctx">
+          <code>fetch('api/whoami')</code> echoes the request headers the upstream sees.
+        </p>
+        <p class="rule">
+          <strong>Spec:</strong> §9.7 — rpc-proxy injects <code>X-Clerum-User</code> (cookie sub)
+          and <code>X-Clerum-Recipe</code> (<code>ns/name</code>), and strips any client-supplied
+          <code>X-Clerum-*</code> from the inbound request.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> Both headers present and correct; no client-injected
+          <code>X-Clerum-Spoof</code> survives even if we add it.
+        </p>
+        <button data-test="whoami">Run</button>
+        <pre data-out="whoami"></pre>
+      </section>
+
+      <section class="card pass">
+        <h2>3. Cookie is httpOnly</h2>
+        <p class="ctx"><code>document.cookie</code> read from JS.</p>
+        <p class="rule">
+          <strong>Spec:</strong> §9.5 — <code>clerum_sandbox_ui_session</code> is set
+          <code>HttpOnly; Secure (in prod); SameSite=Strict</code>; unreadable from untrusted JS.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> Empty string (or only non-clerum cookies). The session JWT must
+          NOT appear here.
+        </p>
+        <button data-test="cookie">Run</button>
+        <pre data-out="cookie"></pre>
+      </section>
+
+      <section class="card pass">
+        <h2>4. Same-origin in-embed navigation</h2>
+        <p class="ctx">
+          <code>location.assign('landing.html')</code> — relative path that resolves into the
+          recipe's own <code>view/*</code> prefix.
+        </p>
+        <p class="rule">
+          <strong>Spec:</strong> §11.3 — top-level navigation is allowed when the resolved URL stays
+          under <code>&lt;rpcProxyOrigin&gt;/api/v1/sandbox-ui/&lt;ns&gt;/&lt;name&gt;/view/</code>.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> Page changes inside the embed to the landing page. Use the back
+          button on the page to return.
+        </p>
+        <button data-test="navInternal">Run</button>
+      </section>
+
+      <section class="card pass">
+        <h2>5. Same-origin 302 redirect</h2>
+        <p class="ctx">
+          <code>location.assign('redirect-internal')</code> — server returns
+          <code>302 Location: /landing.html</code>.
+        </p>
+        <p class="rule">
+          <strong>Spec:</strong> §9.4 (Decision 5) — relative / same-origin Locations are rewritten
+          by rpc-proxy to live inside the <code>view/*</code> prefix; the embed follows them
+          in-place.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> Browser follows the redirect; final URL is
+          <code>.../view/landing.html</code>.
+        </p>
+        <button data-test="redirectInternal">Run</button>
+      </section>
+
+      <!-- ─── EXTERNAL (window.open / will-navigate hand-off) ─── -->
+      <section class="card external">
+        <h2>6. Off-prefix link click → OS browser</h2>
+        <p class="ctx">
+          A real <code>&lt;a href="https://example.com"&gt;</code> click — top- level navigation.
+        </p>
+        <p class="rule">
+          <strong>Spec:</strong> §11.3 — <code>will-navigate</code> calls
+          <code>preventDefault()</code> and hands off to <code>shell.openExternal</code>.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> OS browser opens example.com; the embed stays on this page.
+        </p>
+        <p>
+          <a href="https://example.com" rel="noopener">https://example.com</a>
+        </p>
+      </section>
+
+      <section class="card external">
+        <h2>7. <code>window.open()</code> always pops to OS browser</h2>
+        <p class="ctx">
+          Even if the URL is on the SAME prefix:
+          <code>window.open('landing.html')</code>.
+        </p>
+        <p class="rule">
+          <strong>Spec:</strong> §11.3 — <code>setWindowOpenHandler</code> ALWAYS returns
+          <code>{ action: 'deny' }</code>; http(s) URLs go to OS browser.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> OS browser opens, even though <code>landing.html</code> would
+          be allowed for in-embed navigation.
+        </p>
+        <button data-test="windowOpenSelf">Open same-prefix URL</button>
+        <button data-test="windowOpenExternal">Open https://example.com</button>
+      </section>
+
+      <section class="card external">
+        <h2>8. Cross-origin 302 redirect</h2>
+        <p class="ctx">
+          Server returns <code>302 Location: https://example.com/</code> on
+          <code>/redirect-external</code>.
+        </p>
+        <p class="rule">
+          <strong>Spec:</strong> §9.4 (Decision 5) — proxy strips off-origin Location and coerces
+          status to 200. The embed never silently jumps to an external host.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> <code>fetch</code> sees a 200 with no Location; nothing happens
+          visually.
+        </p>
+        <button data-test="redirectExternal">Run</button>
+        <pre data-out="redirectExternal"></pre>
+      </section>
+
+      <!-- ─── BLOCKED ─────────────────────────────────────────── -->
+      <section class="card fail">
+        <h2>9. CSP — fetch off-origin</h2>
+        <p class="ctx"><code>fetch('https://example.com/api')</code> from JS.</p>
+        <p class="rule">
+          <strong>Spec:</strong> §9.8 — <code>connect-src 'self'</code>
+          blocks any cross-origin XHR / fetch / WebSocket / EventSource.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> The fetch rejects with a CSP / NetworkError before the request
+          leaves Chromium.
+        </p>
+        <button data-test="fetchExternal">Run</button>
+        <pre data-out="fetchExternal"></pre>
+      </section>
+
+      <section class="card fail">
+        <h2>10. CSP — remote image</h2>
+        <p class="ctx"><code>&lt;img src="https://example.com/x.png"&gt;</code>.</p>
+        <p class="rule"><strong>Spec:</strong> §9.8 — <code>img-src 'self' data:</code> only.</p>
+        <p class="want">
+          <strong>Expected:</strong> <code>onerror</code> fires; the image slot stays empty; CSP
+          violation visible in DevTools.
+        </p>
+        <button data-test="remoteImage">Run</button>
+        <div data-out="remoteImage"></div>
+      </section>
+
+      <section class="card fail">
+        <h2>11. CSP — inline script / eval</h2>
+        <p class="ctx"><code>eval('alert(1)')</code> from a button click.</p>
+        <p class="rule">
+          <strong>Spec:</strong> §9.8 — <code>script-src 'self'</code> with no
+          <code>unsafe-eval</code> or <code>unsafe-inline</code>.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> <code>EvalError: Refused to evaluate</code>
+          (or similar) caught and shown.
+        </p>
+        <button data-test="cspEval">Run</button>
+        <pre data-out="cspEval"></pre>
+      </section>
+
+      <section class="card fail">
+        <h2>12. CSP — cross-origin iframe</h2>
+        <p class="ctx"><code>&lt;iframe src="https://example.com"&gt;</code> injected.</p>
+        <p class="rule">
+          <strong>Spec:</strong> §9.8 — <code>default-src 'self'</code> (no
+          <code>frame-src</code> override) blocks cross-origin frames.
+          <code>frame-ancestors 'none'</code> also prevents reverse-framing.
+        </p>
+        <p class="want"><strong>Expected:</strong> iframe load fails / blank.</p>
+        <button data-test="iframeExternal">Run</button>
+        <div data-out="iframeExternal"></div>
+      </section>
+
+      <section class="card fail">
+        <h2>13. Permission — camera / mic</h2>
+        <p class="ctx"><code>navigator.mediaDevices.getUserMedia({video:true})</code>.</p>
+        <p class="rule">
+          <strong>Spec:</strong> §11.2 — Electron <code>setPermissionRequestHandler</code> denies
+          <code>media</code> for every sandbox-ui partition.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> <code>NotAllowedError</code> caught immediately — no system
+          camera prompt.
+        </p>
+        <button data-test="permCamera">Run</button>
+        <pre data-out="permCamera"></pre>
+      </section>
+
+      <section class="card fail">
+        <h2>14. Permission — geolocation</h2>
+        <p class="ctx"><code>navigator.geolocation.getCurrentPosition()</code>.</p>
+        <p class="rule">
+          <strong>Spec:</strong> §11.2 — <code>geolocation</code> denied via
+          <code>setPermissionRequestHandler</code>.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> Errback fires with <code>PERMISSION_DENIED</code> code 1.
+        </p>
+        <button data-test="permGeo">Run</button>
+        <pre data-out="permGeo"></pre>
+      </section>
+
+      <section class="card fail">
+        <h2>15. Permission — notifications</h2>
+        <p class="ctx"><code>Notification.requestPermission()</code>.</p>
+        <p class="rule"><strong>Spec:</strong> §11.2 — <code>notifications</code> denied.</p>
+        <p class="want"><strong>Expected:</strong> Resolves with <code>'denied'</code>.</p>
+        <button data-test="permNotify">Run</button>
+        <pre data-out="permNotify"></pre>
+      </section>
+
+      <section class="card fail">
+        <h2>16. Path — literal `..` traversal (browser layer)</h2>
+        <p class="ctx">
+          <code>fetch('../../../etc/passwd')</code> — relative path that tries to escape the
+          recipe's <code>view/*</code> prefix.
+        </p>
+        <p class="rule">
+          <strong>Spec:</strong> §9.4 — defense in depth. The WHATWG URL parser canonicalizes
+          <code>..</code> segments before the fetch leaves Chromium, so the rpc-proxy traversal
+          filter (<code>normalizeViewPath</code>) is a backstop for forms that survive that pass —
+          see #17 for the proxy-layer test.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> Any non-2xx response — the upstream's
+          <code>/etc/passwd</code> handler must be unreachable. After browser canonicalization the
+          URL becomes <code>/api/v1/sandbox-ui/etc/passwd</code>, which doesn't match any rpc-proxy
+          route, so rpc-proxy returns 404.
+        </p>
+        <button data-test="pathTraversal">Run</button>
+        <pre data-out="pathTraversal"></pre>
+      </section>
+
+      <section class="card fail">
+        <h2>17. Path — double-encoded traversal</h2>
+        <p class="ctx">
+          <code>fetch('%252e%252e/secret')</code> — double-percent-encoded <code>..</code>.
+          Single-encoding (<code>%2e%2e</code>) gets pre-normalized to <code>..</code> by the WHATWG
+          URL parser before the request leaves the renderer, so it can't reach the proxy;
+          double-encoding ships the literal <code>%252e%252e</code> on the wire.
+        </p>
+        <p class="rule">
+          <strong>Spec:</strong> §9.4 — proxy decodes once and re-checks against the WHATWG
+          double-dot path-segment forms (<code>..</code>, <code>.%2e</code>, <code>%2e.</code>,
+          <code>%2e%2e</code>) so post-decode literals are also caught.
+        </p>
+        <p class="want"><strong>Expected:</strong> Status 400.</p>
+        <button data-test="pathEncoded">Run</button>
+        <pre data-out="pathEncoded"></pre>
+      </section>
+
+      <section class="card fail">
+        <h2>18. WebSocket upgrade</h2>
+        <p class="ctx">
+          <code>new WebSocket('wss://example.com')</code> would be CSP-blocked anyway, but try via
+          same-origin <code>new WebSocket(self+'/ws')</code>.
+        </p>
+        <p class="rule">
+          <strong>Spec:</strong> §9.8 — proxy returns <code>426 Upgrade Required</code> on any
+          <code>Upgrade</code>
+          header. WS isn't supported in v1.
+        </p>
+        <p class="want"><strong>Expected:</strong> Connection error from the WS handshake.</p>
+        <button data-test="websocket">Run</button>
+        <pre data-out="websocket"></pre>
+      </section>
+
+      <section class="card fail">
+        <h2>19. Download attempt</h2>
+        <p class="ctx">
+          <code>&lt;a href="..." download&gt;</code> click + programmatic fetch +
+          <code>URL.createObjectURL</code> save.
+        </p>
+        <p class="rule">
+          <strong>Spec:</strong> §11.2 — Electron's
+          <code>session.on('will-download', e =&gt; e.preventDefault())</code>
+          blocks every download in the partition.
+        </p>
+        <p class="want"><strong>Expected:</strong> No save dialog; no file ends up on disk.</p>
+        <button data-test="download">Run</button>
+        <pre data-out="download"></pre>
+      </section>
+
+      <section class="card fail">
+        <h2>20. Header spoof</h2>
+        <p class="ctx">
+          <code>fetch('api/whoami', { headers: { 'X-Clerum-User': 'admin' }})</code>.
+        </p>
+        <p class="rule">
+          <strong>Spec:</strong> §9.7 — rpc-proxy strips every <code>X-Clerum-*</code> header from
+          the inbound request before injecting its own.
+        </p>
+        <p class="want">
+          <strong>Expected:</strong> Server-echoed <code>x-clerum-user</code>
+          equals the legitimate value (cookie sub), NOT
+          <code>"admin"</code>. <code>X-Clerum-Spoof</code> entirely absent.
+        </p>
+        <button data-test="headerSpoof">Run</button>
+        <pre data-out="headerSpoof"></pre>
+      </section>
+    </main>
+
+    <footer>
+      <p class="muted">
+        See
+        <code>docs/plans/spec-sandbox-ui.md</code> for the full spec.
+      </p>
+    </footer>
+
+    <script src="main.js"></script>
+  </body>
+</html>

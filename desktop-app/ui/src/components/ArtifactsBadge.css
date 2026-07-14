@@ -1,0 +1,119 @@
+.artifacts-badge-container {
+  margin-top: 8px;
+  border: 1px solid rgba(var(--edge-rgb), 0.28);
+  border-radius: 8px;
+  background: rgba(var(--panel-rgb), 0.7);
+  overflow: hidden;
+  animation: stepper-fade-in 0.25s ease-out;
+}
+
+.artifacts-badge-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 12px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.artifacts-badge-toggle:hover {
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+.artifacts-badge-icon {
+  font-size: var(--font-size-md);
+}
+
+.artifacts-badge-list {
+  padding: 4px 8px 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.artifacts-badge-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: rgba(var(--edge-rgb), 0.1);
+}
+
+.artifacts-format-badge {
+  font-size: var(--font-size-2xs);
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.fmt-pdf {
+  background: rgba(var(--danger-rgb), 0.2);
+  color: var(--danger);
+}
+.fmt-md {
+  background: rgba(var(--info-rgb, 0, 114, 192), 0.2);
+  color: var(--info);
+}
+.fmt-docx {
+  background: rgba(var(--accent-rgb), 0.2);
+  color: var(--accent);
+}
+.fmt-xlsx {
+  background: rgba(var(--success-rgb), 0.2);
+  color: var(--success);
+}
+
+.artifacts-filename {
+  color: var(--text);
+  font-size: var(--font-size-xs);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifacts-size {
+  color: var(--text-dim);
+  font-size: var(--font-size-2xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.artifacts-download-btn {
+  background: rgba(var(--accent-rgb), 0.12);
+  border: 1px solid rgba(var(--accent-rgb), 0.24);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--font-size-2xs);
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.artifacts-download-btn:hover:not(:disabled) {
+  background: rgba(var(--accent-rgb), 0.22);
+}
+
+.artifacts-download-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.artifacts-badge-error {
+  padding: 8px 12px;
+  color: var(--danger);
+  font-size: var(--font-size-xs);
+  line-height: 1.3;
+}

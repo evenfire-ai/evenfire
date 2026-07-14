@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-host-config
+  namespace: mcp-host
+  labels:
+    app: mcp-host
+data:
+  CLERUM_HOST_NAME: "chatllm"
+  CLERUM_SERVER_PORT: "8080"
+  CLERUM_CONTEXT_MAPPER_URL: "http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081"
+  CLERUM_CONTEXT_MAPPER_POLL_INTERVAL: "30000"
+  MCP_PROXY_ENABLED: "false"
+  MCP_PROXY_URL: "http://mcp-proxy.mcp-server.svc.cluster.local:8083"
+  CLERUM_AGENT_TASK_DELAY: "3"
+  CLERUM_AGENT_MAX_TASK_DURATION: "1800000"
+  CLERUM_SHELL_TIMEOUT: "600000"
+  CLERUM_TOOL_TIMEOUT: "660000"
+  CLERUM_MCP_TOOL_TIMEOUT_MS: "3600000"
+  CLERUM_MCP_TOOL_MAX_TOTAL_TIMEOUT_MS: "3600000"
+  CLERUM_TOOL_PROGRESS_INTERVAL_MS: "5000"
+  CLERUM_AGENT_MAX_TOOL_CALLS: "100"
+  CLERUM_AGENT_MAX_QUEUE_SIZE: "100"
+  CLERUM_BUDGETS_ENABLED: "true"
+  CLERUM_APPROVAL_CONFIG: '{"defaultPolicy":"channel_users","channels":{"telegram":{"enabled":true}}}'
+  CLERUM_APPROVAL_TIMEOUT: "0"
+  CLERUM_MEMORY_ENABLED: "true"
+  CLERUM_SESSION_STORE: "sqlite"
+  CLERUM_SESSION_SEARCH_ENABLED: "true"
+  CLERUM_SESSION_TTL_DAYS: "90"
+  CLERUM_SEARCH_RETENTION_DAYS: "90"
+  CLERUM_CONTEXT_MAX_TOKENS: "100000"
+  CLERUM_ENABLE_RESPONSE_ATTACHMENTS: "true"
+  CLERUM_ATTACHMENT_MAX_COUNT: "3"
+  CLERUM_ATTACHMENT_MAX_BYTES: "52428800"
+  CLERUM_PERSONALIZATION_ENABLED: "false"
+  # --- Auth configuration ---
+  # Enabled for defense in depth: runtimeEdgeGuard validates trusted edge caller
+  # headers, and HCC-managed NetworkPolicies restrict pod reachability.
+  CLERUM_ENABLE_AUTH: "true"
+  CLERUM_AUTH_JWT_ISSUER: "control-api"
+  CLERUM_AUTH_JWT_AUDIENCE: "rpc-proxy"
+  # Public key must match CONTROL_API_RPC_JWT_PRIVATE_KEY pair (from jwt-signing-keys.yaml)
+  # and RPC_PROXY_JWT_PUBLIC_KEY (from rpc-proxy-secrets). All three must be the same key pair.
+  CLERUM_AUTH_JWT_PUBLIC_KEY: |
+    -----BEGIN PUBLIC KEY-----
+    MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAqfbzhXp0HTebIoAEy22k
+    KSjCgkh2+YS5CAclF+rUtOby98opKEZwpb4xpl9YcNbRjBnhOiN4WFlbjmEzZfE5
+    zeuleMHfuFfXM518LNMvuoILhq4ZcYGiFHfXGidC3KAMeCFA5zEKjLVhEnpEZOzP
+    BBvLqD0g1LBnMSSic4f5IRtmzzlxLs/apL/WyExV6b2eTWxkGa0YZ5u9XKvlvAbo
+    BRYsEf6O4rpu1Jc4MXwQpvJKi5MorUscdPkr6uS1lvhEbltNiBnzWofdIoBl9N1+
+    /EVLbGQK1DY1oSvWUXZaQsJhH/vYor6es55x98rqonVlXV1KkzxXcTni+m8byu7P
+    KhOcepldQ93D9W2NdTMi8jBPI3J09+GnuXkID/7iV71xczywWCx1JefLj5e0I+WZ
+    +gbjvyj0jARrGh3/68bi5hZ1P9nfEDV8tXIxsw1L4qvc9wmqyoV+yGA9Y9kT5yjx
+    Qssuw+cSWVbrsXUm4jREmyrObVXUAmcuZ8MMEMUleubdY7DmvRjuugSIUurU5RYe
+    ssfFolmvWzbC6UhIk1uw52IhG+4CzG+AwxGefH4GnWmHL+b0fm2W45RPmtAkEZp9
+    1anU57iCqgzbejSIWaNfkk+DrR/ZzapWSCA8A0Ju/MlIkN0pvI2+8gbpoclND8b5
+    iIuM7hM8lo+Q6OOf/gbtLgECAwEAAQ==
+    -----END PUBLIC KEY-----

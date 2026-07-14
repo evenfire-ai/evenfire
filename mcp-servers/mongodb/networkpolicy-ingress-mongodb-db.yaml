@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mcp-server-to-mongodb
+  namespace: sandbox-recipes
+  labels:
+    clerum.io/policy-type: backend-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app: mongodb
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mcp-server
+          podSelector:
+            matchLabels:
+              clerum.io/mcpserver: mongodb-server
+      ports:
+        - protocol: TCP
+          port: 27017

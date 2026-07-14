@@ -1,0 +1,55 @@
+# Plugin Workload SDK E2E fixture.
+#
+# Declares BOTH SDK capability families and a plugin workload (sdk-caller)
+# that exercises them. The recipe also declares an agent + a minimal step so
+# WRC spawns the recipe mcp-host (which hosts the SDK server on :8099).
+#
+# WRC auto-injects into the sdk-caller pod:
+#   PLUGIN_WORKLOAD_SDK_ENDPOINT, PLUGIN_WORKLOAD_SDK_TOKEN
+# (because sdk-caller is in allowedCallers and is a non-transport workload).
+#
+# Image: clerum/workflow-plugin-sdk-e2e:test
+#   built from tests/e2e/fixtures/workflow-plugin-sdk-e2e/
+#
+# Authorization still requires a grant in control-api — the E2E gate creates
+# it via the admin API before asserting the calls succeed.
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: PLACEHOLDER_RECIPE_NAME
+  namespace: sandbox-recipes
+spec:
+  triggers:
+    onDemand: {}
+  agent:
+    provider: PLACEHOLDER_PROVIDER
+    model: PLACEHOLDER_MODEL
+  steps:
+    - id: keepalive
+      instruction: 'Return a one-word acknowledgement for the SDK runtime smoke check.'
+      toolChoice: none
+  workloads:
+    - id: sdk-caller
+      type: deployment
+      image: clerum/workflow-plugin-sdk-e2e:test
+      env:
+        - name: E2E_SDK_CALLER_REF
+          value: sdk-caller
+        - name: E2E_SDK_EVENT_TYPE
+          value: e2e.test.notification
+        - name: E2E_SDK_USER_REF
+          value: PLACEHOLDER_USER_REF
+        - name: E2E_SDK_QUOTA_LIMIT
+          value: '3'
+  pluginWorkloadSdk:
+    promptBridge:
+      allowedModels: []
+      maxRequestsPerRun: 10
+      maxInvocationsPerMinute: 60
+    clientNotifications:
+      allowedEventTypes:
+        - e2e.test.notification
+      allowedUserRefs: true
+      maxNotificationsPerRun: 10
+    allowedCallers:
+      - sdk-caller

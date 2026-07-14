@@ -1,0 +1,147 @@
+# --- Role: control-api-workflow-recipes-sandbox ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: control-api-workflow-recipes-sandbox
+  namespace: sandbox-recipes
+rules:
+  - apiGroups: ["clerum.io"]
+    resources: ["workflowrecipes"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-api-workflow-recipes-sandbox
+  namespace: sandbox-recipes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: control-api-workflow-recipes-sandbox
+subjects:
+- kind: ServiceAccount
+  name: control-api
+  namespace: control-plane
+---
+# --- Role: host-context-controller-sandbox-runtime ---
+# Phase 8: sandbox-recipes namespace — L0/L1 NetworkPolicies + L3 binding policies
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller-sandbox-runtime
+  namespace: sandbox-recipes
+rules:
+  # Manage NetworkPolicies (L0 deny-all, L1 infrastructure, L3 binding-allow)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller-sandbox-runtime
+  namespace: sandbox-recipes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller-sandbox-runtime
+subjects:
+- kind: ServiceAccount
+  name: host-context-controller
+  namespace: control-plane
+---
+# --- Role: host-context-controller (generic, referenced by existing RoleBinding) ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller
+  namespace: sandbox-recipes
+rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller
+  namespace: sandbox-recipes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller
+subjects:
+- kind: ServiceAccount
+  name: host-context-controller
+  namespace: control-plane
+---
+# --- Role: workflow-recipes-sandbox ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workflow-recipes-sandbox
+  namespace: sandbox-recipes
+rules:
+  # WorkflowRecipe parent CRDs always live in sandbox-recipes. WRC may watch,
+  # create child run recipes, update status, and remove finalizers only here.
+  - apiGroups: ["clerum.io"]
+    resources: ["workflowrecipes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["clerum.io"]
+    resources: ["workflowrecipes/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["clerum.io"]
+    resources: ["workflowrecipepolicies"]
+    verbs: ["get", "list"]
+  # Deployments + DaemonSets in sandbox namespace
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # StatefulSets need patch for data-safe mutable-spec reconciliation (#690).
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # CronJobs + Jobs in sandbox namespace
+  - apiGroups: ["batch"]
+    resources: ["cronjobs", "jobs"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Services, PVCs, ConfigMaps — resource creation
+  - apiGroups: [""]
+    resources: ["services", "persistentvolumeclaims", "configmaps"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Secrets — full lifecycle, plus list+watch for the envSecret optional-key
+  # watcher (§4.1.1 in the recipe guide). The watcher diffs key-sets on
+  # ADDED/MODIFIED/DELETED and fans reconciles out to recipes that reference
+  # the changed Secret via spec.workloads[].envSecret.name.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pods — workflow coordinator + mcp_host direct Pod creation (Stage 1).
+  # `deletecollection` is required by deleteStatefulSetManagedPods (Issue #637 Fix
+  # #4): on Secret-ownership revocation a StatefulSet is re-rendered credential-free
+  # and ONLY its managed Pods are deleted (by label selector) to restart from the
+  # clean template — the StatefulSet object and PVCs are preserved.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "create", "update", "delete", "deletecollection", "watch"]
+  # NetworkPolicies — workflow inter-pod isolation (Stage 1)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workflow-recipes-sandbox
+  namespace: sandbox-recipes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workflow-recipes-sandbox
+subjects:
+- kind: ServiceAccount
+  name: workflow-recipes
+  namespace: control-plane

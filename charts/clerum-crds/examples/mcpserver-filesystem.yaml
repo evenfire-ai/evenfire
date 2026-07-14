@@ -1,0 +1,33 @@
+# Example: Filesystem MCP Server
+# Provides file system tools to read/write files within a mounted volume
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: filesystem-server
+spec:
+  contextRef: context1
+  description: Provides file system operations (read, write, list files)
+  image: mcp/filesystem:latest
+  transport:
+    type: sse
+    url: http://filesystem-server.mcp-server.svc.cluster.local:3000/sse
+    port: 3000
+  env:
+    - name: MCP_TRANSPORT
+      value: "sse"
+    - name: MCP_HOST
+      value: "0.0.0.0"
+    - name: MCP_PORT
+      value: "3000"
+  healthCheck:
+    port: 3001
+  auth:
+    type: none
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"
+  enabled: true

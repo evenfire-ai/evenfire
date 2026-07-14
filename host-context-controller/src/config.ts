@@ -1,0 +1,495 @@
+/**
+ * Configuration settings loaded from environment variables.
+ */
+import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
+import { parseK8sApiCidrs, parseNodeLocalDnsCidr } from './k8sApiCidrs'
+import { ContextCRD, McpServerCRD } from './types'
+
+export const DEFAULT_EGRESS_PROXY_IMAGE = 'clerum/nginx-egress-proxy:0.1.0'
+
+export interface Config {
+  // Dev mode - if true, reads servers from env var instead of K8s
+  devMode: boolean
+
+  // Server port
+  port: number
+
+  // Kubernetes namespace where MCP servers and Context CRDs live
+  namespace: string
+
+  // Kubernetes namespace where control-plane gateway services live
+  controlPlaneNamespace: string
+
+  // Kubernetes namespace where mcp-host pods run (used for NetworkPolicy generation)
+  hostNamespace: string
+
+  // Kubernetes namespace and service port where gfsc runs.
+  gfsNamespace: string
+  gfscPort: number
+
+  // Kubernetes namespace where rpc-proxy runs (for L2 egress NetworkPolicy generation)
+  rpcProxyNamespace: string
+
+  // Kubernetes namespace where per-Host channel-reader Deployments live
+  channelsNamespace: string
+
+  // Container image used for per-Host channel-reader Deployments
+  channelReaderImage: string
+
+  // imagePullPolicy applied to per-Host channel-reader Deployments
+  channelReaderImagePullPolicy: string
+
+  // Internal handoff port exposed by per-Host channel-reader Services.
+  channelReaderHandoffPort: number
+
+  // Dev mode: MCP servers from CLERUM_MCP_SERVERS JSON
+  devMcpServers: McpServerCRD[]
+
+  // Dev mode: Contexts from CLERUM_CONTEXTS JSON
+  devContexts: ContextCRD[]
+
+  // Dev mode: Auth tokens from CLERUM_MCP_AUTH JSON (serverName -> token)
+  devAuthTokens: Map<string, string>
+
+  // Egress proxy image for remote MCP servers
+  egressProxyImage: string
+
+  // stdio-bridge sidecar image for managed stdio MCP servers
+  stdioBridgeImage: string
+
+  // Default resource limits for the stdio-bridge sidecar
+  stdioBridgeResources: {
+    requests: { memory: string; cpu: string }
+    limits: { memory: string; cpu: string }
+  }
+
+  // Runtime namespaces where L0 deny-all + L1 infrastructure policies apply
+  runtimeNamespaces: string[]
+
+  // Subset of `runtimeNamespaces` that get only deny-all + DNS egress —
+  // explicitly NOT allow-hcc-api or allow-k8s-api. Lets us opt out namespaces
+  // whose pods aren't K8s clients and don't consume the HCC discovery API.
+  minimalInfraNamespaces: string[]
+
+  // K8s API server CIDRs for allow-k8s-api-egress-* policies. Empty = fall
+  // back to KUBERNETES_SERVICE_HOST. Validated fail-closed at module load.
+  k8sApiCidrs: string[]
+
+  // DNS infrastructure CIDR for GKE NodeLocal DNSCache / kube-dns. When set,
+  // allow-dns-egress-* policies append an ipBlock egress rule on port 53 so
+  // pod DNS can reach the target cluster's kube-dns Service IP under Calico.
+  // Empty (default) -> no extra rule, behavior unchanged.
+  nodeLocalDnsCidr: string
+
+  // Host runtime reconciliation defaults
+  hostImage: string
+  hostImagePullPolicy: 'Always' | 'IfNotPresent' | 'Never'
+  mcpServerImagePullPolicy: 'Always' | 'IfNotPresent' | 'Never'
+  hostImagePullSecretName: string
+  hostPort: number
+  hostConfigMapName: string
+  hostServiceAccountName: string
+  hostWorkspaceStorageClassName: string
+  hostWorkspaceStorageSize: string
+  hostWorkspacePath: string
+  hostResources: {
+    requests: { memory: string; cpu: string }
+    limits: { memory: string; cpu: string }
+  }
+
+  // Desktop image and resource defaults (used when Host CRD has spec.desktop)
+  desktopImage: string
+  desktopPort: number
+  desktopResources: {
+    requests: { memory: string; cpu: string }
+    limits: { memory: string; cpu: string }
+  }
+
+  // Service token for desktop API endpoints (empty = skip auth, e.g. dev mode)
+  desktopApiToken: string
+
+  // workspace-files-controller (per-SharedFileSystem) reconciliation defaults
+  wfcImage: string
+  wfcImagePullPolicy: 'Always' | 'IfNotPresent' | 'Never'
+  wfcImagePullSecretName: string
+  wfcPort: number
+  wfcInitImage: string
+  wfcResources: {
+    requests: { memory: string; cpu: string }
+    limits: { memory: string; cpu: string }
+  }
+  /** ConfigMap that exposes the JWT public key the wfc uses to verify browsing JWTs. */
+  wfcJwtPublicKeyConfigMapName: string
+  wfcJwtPublicKeyConfigMapKey: string
+  /** WSF_MAX_* limits forwarded to the wfc container as env. */
+  wfcMaxUploadBytes: number
+  wfcMaxListEntries: number
+  wfcMaxPathDepth: number
+
+  // Cluster-internal control-api base URL — HCC calls this directly (NOT via
+  // the public workflow-approval-gateway) to issue mcpHost runtime tokens for the
+  // mcp-host pods it provisions. Provisioner issuance is direct;
+  // runtime traffic from mcp-host pods still flows through the gateway.
+  controlApiBaseUrl: string
+
+  // HS256 secret used by HCC to sign per-request InternalControl JWTs
+  // for control-api token issuance.
+  internalControlJwtHccHmacSecret: string
+
+  // Namespace HCC targets when asking control-api to issue the shared
+  // 1st-party mcp-host credentials.
+  hccTargetNamespace: string
+
+  // URL of the nginx gateway that mediates mcp-host → control-api traffic.
+  // Injected into mcp-host pods as MCP_HOST_GATEWAY_URL. Per the architecture
+  // diagram this is the "nginx (only /mcp-host)" allowlist-proxy.
+  mcpHostGatewayUrl: string
+
+  // Periodic Host fullReconcile interval (seconds). Guards against silent
+  // event drops on long K8s watch disconnects. 0 disables.
+  hostResyncIntervalSec: number
+
+  // Periodic SharedFileSystem fullReconcile interval (seconds). The SFS watch
+  // fires only on SFS CRD changes, not on PVC binding / wfc pod readiness, so
+  // this drives truthful-status auto-recovery (#592): a SharedFileSystem stuck
+  // in Initializing/Degraded converges to Ready once the volume binds. 0 disables.
+  sfsResyncIntervalSec: number
+
+  // Periodic GlobalFileSystem fullReconcile interval (seconds). Same rationale as
+  // SFS: the gfs watch fires only on the CRD changing, not on the gfsc writer
+  // Deployment becoming Available — so a GlobalFileSystem reported Initializing
+  // converges to Ready (and its root-directory seed runs) once the writer is up.
+  // 0 disables.
+  gfsResyncIntervalSec: number
+
+  // How long before refresh expiry HCC should refresh the bootstrap
+  // credential Secret for future pod starts. This does not by itself roll
+  // healthy running pods.
+  mcpHostBootstrapRefreshBeforeSec: number
+
+  // Periodic external-egress DNS resync interval (seconds). Re-resolves
+  // McpServer.spec.egressBindings so DNS changes and failures converge without
+  // requiring a watch event. 0 disables.
+  externalEgressResyncIntervalSec: number
+
+  // Plugin image-host allowlist (Phase 2.3). Trusted raw-image prefixes for
+  // local-mode McpServer images. Audit mode (default) logs would-be denials
+  // without blocking; enforce mode blocks the workload build.
+  allowedPluginImagePrefixes: string[]
+  enforcePluginImageAllowlist: boolean
+}
+
+function getEnv(key: string, defaultValue?: string): string | undefined {
+  return process.env[key] ?? defaultValue
+}
+
+function getEnvInt(key: string, defaultValue: number): number {
+  const value = process.env[key]
+  if (!value) return defaultValue
+  const parsed = parseInt(value, 10)
+  return isNaN(parsed) ? defaultValue : parsed
+}
+
+function getEnvBool(key: string, defaultValue: boolean): boolean {
+  const value = process.env[key]
+  if (!value) return defaultValue
+  return value.toLowerCase() === 'true' || value === '1'
+}
+
+/**
+ * Parse CLERUM_MCP_SERVERS JSON for dev mode.
+ * Format: [{"name": "...", "spec": {"contextRef": "...", "transport": {...}}}]
+ */
+function parseDevMcpServers(): McpServerCRD[] {
+  const serversJson = process.env.CLERUM_MCP_SERVERS
+  if (!serversJson) {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(serversJson) as McpServerCRD[]
+    console.log(`[Config] Parsed ${parsed.length} dev MCP server(s) from CLERUM_MCP_SERVERS`)
+    for (const server of parsed) {
+      console.log(`[Config]   - ${server.name}: ${server.spec.transport?.url || 'no url'}`)
+    }
+    return parsed
+  } catch (error) {
+    console.error('[Config] Failed to parse CLERUM_MCP_SERVERS:', error)
+    return []
+  }
+}
+
+/**
+ * Parse CLERUM_CONTEXTS JSON for dev mode.
+ * Format: [{"name": "ctx1", "spec": {"contextId": "ctx1", "mcpServers": ["server-a"]}}]
+ */
+function parseDevContexts(): ContextCRD[] {
+  const contextsJson = process.env.CLERUM_CONTEXTS
+  if (!contextsJson) {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(contextsJson) as ContextCRD[]
+    console.log(`[Config] Parsed ${parsed.length} dev Context(s) from CLERUM_CONTEXTS`)
+    for (const ctx of parsed) {
+      console.log(`[Config]   - ${ctx.name}: mcpServers=[${ctx.spec.mcpServers.join(', ')}]`)
+    }
+    return parsed
+  } catch (error) {
+    console.error('[Config] Failed to parse CLERUM_CONTEXTS:', error)
+    return []
+  }
+}
+
+/**
+ * Parse CLERUM_MCP_AUTH JSON for dev mode.
+ * Format: {"serverName": "token", ...}
+ */
+function parseDevAuthTokens(): Map<string, string> {
+  const authJson = process.env.CLERUM_MCP_AUTH
+  if (!authJson) {
+    return new Map()
+  }
+
+  try {
+    const parsed = JSON.parse(authJson) as Record<string, string>
+    const tokens = new Map<string, string>()
+    for (const [name, token] of Object.entries(parsed)) {
+      tokens.set(name, token)
+      console.log(`[Config]   - Auth token configured for: ${name}`)
+    }
+    return tokens
+  } catch (error) {
+    console.error('[Config] Failed to parse CLERUM_MCP_AUTH:', error)
+    return new Map()
+  }
+}
+
+const devMode = getEnvBool('CLERUM_DEV_MODE', false)
+
+export const config: Config = {
+  devMode,
+
+  // Server port
+  port: getEnvInt('CONTEXT_MAPPER_PORT', 8081),
+
+  // Kubernetes namespace (where MCP servers run)
+  namespace: getEnv('CONTEXT_MAPPER_NAMESPACE', 'mcp-server')!,
+
+  // Kubernetes namespace where host-context-controller API gateway runs
+  controlPlaneNamespace: getEnv('CONTEXT_MAPPER_CONTROL_PLANE_NAMESPACE', 'control-plane')!,
+
+  // Host namespace (where mcp-host pods run — for NetworkPolicy generation)
+  hostNamespace: getEnv('CONTEXT_MAPPER_HOST_NAMESPACE', 'mcp-host')!,
+
+  // Global File System controller namespace and service port.
+  gfsNamespace: getEnv('CONTEXT_MAPPER_GFS_NAMESPACE', 'gfs')!,
+  gfscPort: getEnvInt('CONTEXT_MAPPER_GFSC_PORT', 8087),
+
+  // rpc-proxy namespace
+  rpcProxyNamespace: getEnv('CONTEXT_MAPPER_RPC_PROXY_NAMESPACE', 'rpc-proxy')!,
+
+  // Per-Host channel-reader Deployments namespace
+  channelsNamespace: getEnv('CONTEXT_MAPPER_CHANNELS_NAMESPACE', 'channels')!,
+
+  // Per-Host channel-reader Deployment image (matches deploy/base/channels/channel-reader.yaml)
+  channelReaderImage: getEnv('CONTEXT_MAPPER_CHANNEL_READER_IMAGE', 'clerum/channel-reader:0.9.5')!,
+
+  // imagePullPolicy for per-Host channel-reader Deployments. Default 'Always'
+  // matches production (pull from registry). Minikube overlay sets
+  // 'IfNotPresent' to use locally-loaded images.
+  channelReaderImagePullPolicy: getEnv(
+    'CONTEXT_MAPPER_CHANNEL_READER_IMAGE_PULL_POLICY',
+    'Always'
+  )!,
+  channelReaderHandoffPort: getEnvInt('CONTEXT_MAPPER_CHANNEL_READER_HANDOFF_PORT', 8099),
+
+  // Egress proxy image for remote MCP servers (nginx-based, per-server proxy)
+  egressProxyImage: getEnv('CONTEXT_MAPPER_EGRESS_PROXY_IMAGE', DEFAULT_EGRESS_PROXY_IMAGE)!,
+
+  // stdio-bridge sidecar image
+  stdioBridgeImage: getEnv(
+    'CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE',
+    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/stdio-bridge:0.1.0'
+  )!,
+
+  // stdio-bridge sidecar resource defaults
+  stdioBridgeResources: {
+    requests: {
+      memory: getEnv('CONTEXT_MAPPER_STDIO_BRIDGE_REQUEST_MEMORY', '32Mi')!,
+      cpu: getEnv('CONTEXT_MAPPER_STDIO_BRIDGE_REQUEST_CPU', '50m')!,
+    },
+    limits: {
+      memory: getEnv('CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_MEMORY', '128Mi')!,
+      cpu: getEnv('CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_CPU', '200m')!,
+    },
+  },
+
+  // Runtime namespaces where L0 deny-all + L1 infrastructure policies apply
+  runtimeNamespaces: getEnv(
+    'CONTEXT_MAPPER_RUNTIME_NAMESPACES',
+    'mcp-server,mcp-host,sandbox-recipes,rpc-proxy'
+  )!.split(','),
+
+  // DNS infrastructure CIDR for GKE NodeLocal DNSCache / kube-dns. Empty
+  // (default) keeps only the kube-system selector. Validated fail-closed as a
+  // single IPv4 /32 because GKE requires KUBE_DNS_SVC_CLUSTER_IP/32.
+  nodeLocalDnsCidr: parseNodeLocalDnsCidr(getEnv('CONTEXT_MAPPER_NODELOCAL_DNS_CIDR')),
+
+  // Subset of runtime namespaces that get only the minimal infrastructure
+  // egress (deny-all + DNS) — and explicitly NOT allow-hcc-api or
+  // allow-k8s-api. Use this for namespaces whose pods are not K8s clients
+  // and don't consume the HCC discovery API (e.g. third-party UI workloads
+  // that only need to serve HTTP back to a single ingress source).
+  // Empty by default → all runtime namespaces get the full infra set.
+  minimalInfraNamespaces: getEnv('CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES', '')!
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0),
+
+  // Validated at module load — a malformed/over-broad value crashes startup
+  // rather than programming a permissive allow-k8s-api-egress NetworkPolicy.
+  k8sApiCidrs: parseK8sApiCidrs(getEnv('CONTEXT_MAPPER_K8S_API_CIDRS')),
+
+  // Dev mode MCP servers
+  devMcpServers: devMode ? parseDevMcpServers() : [],
+
+  // Dev mode contexts
+  devContexts: devMode ? parseDevContexts() : [],
+
+  // Dev mode auth tokens
+  devAuthTokens: devMode ? parseDevAuthTokens() : new Map(),
+
+  // Host runtime defaults
+  hostImage: getEnv(
+    'CONTEXT_MAPPER_HOST_IMAGE',
+    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mcp-host:0.6.0'
+  )!,
+  hostImagePullPolicy: getEnv('CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY', 'Always') as
+    | 'Always'
+    | 'IfNotPresent'
+    | 'Never',
+  mcpServerImagePullPolicy: getEnv('CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY', 'IfNotPresent') as
+    | 'Always'
+    | 'IfNotPresent'
+    | 'Never',
+  hostImagePullSecretName: getEnv('CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET', 'clerum')!,
+  hostPort: getEnvInt('CONTEXT_MAPPER_HOST_PORT', 8080),
+  hostConfigMapName: getEnv('CONTEXT_MAPPER_HOST_CONFIGMAP_NAME', 'mcp-host-config')!,
+  hostServiceAccountName: getEnv('CONTEXT_MAPPER_HOST_SERVICE_ACCOUNT', 'mcp-host')!,
+  hostWorkspaceStorageClassName: getEnv(
+    'CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS',
+    'do-block-storage-retain'
+  )!,
+  hostWorkspaceStorageSize: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_SIZE', '10Gi')!,
+  hostWorkspacePath: getEnv('CONTEXT_MAPPER_HOST_WORKSPACE_PATH', '/workspace')!,
+  hostResources: {
+    requests: {
+      memory: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_MEMORY', '128Mi')!,
+      cpu: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_CPU', '100m')!,
+    },
+    limits: {
+      memory: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY', '512Mi')!,
+      cpu: getEnv('CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_CPU', '500m')!,
+    },
+  },
+
+  // Desktop image and resource defaults
+  desktopImage: getEnv('CONTEXT_MAPPER_DESKTOP_IMAGE', 'clerum/mcp-host-desktop:latest')!,
+  desktopPort: getEnvInt('CONTEXT_MAPPER_DESKTOP_PORT', 3000),
+  desktopResources: {
+    requests: {
+      memory: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_MEMORY', '256Mi')!,
+      cpu: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_CPU', '250m')!,
+    },
+    limits: {
+      memory: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_MEMORY', '4Gi')!,
+      cpu: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU', '1000m')!,
+    },
+  },
+
+  // Service token for desktop API endpoints (empty = skip auth for dev mode)
+  desktopApiToken: getEnv('CONTEXT_MAPPER_DESKTOP_API_TOKEN', '')!,
+
+  // workspace-files-controller (per-SharedFileSystem) reconciliation defaults
+  wfcImage: getEnv(
+    'CONTEXT_MAPPER_WFC_IMAGE',
+    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/workspace-files-controller:0.1.0'
+  )!,
+  wfcImagePullPolicy: getEnv('CONTEXT_MAPPER_WFC_IMAGE_PULL_POLICY', 'IfNotPresent') as
+    | 'Always'
+    | 'IfNotPresent'
+    | 'Never',
+  wfcImagePullSecretName: getEnv('CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET', 'clerum')!,
+  wfcPort: getEnvInt('CONTEXT_MAPPER_WFC_PORT', 8086),
+  wfcInitImage: getEnv('CONTEXT_MAPPER_WFC_INIT_IMAGE', 'busybox:1.36')!,
+  wfcResources: {
+    requests: {
+      memory: getEnv('CONTEXT_MAPPER_WFC_RESOURCES_REQUEST_MEMORY', '64Mi')!,
+      cpu: getEnv('CONTEXT_MAPPER_WFC_RESOURCES_REQUEST_CPU', '50m')!,
+    },
+    limits: {
+      memory: getEnv('CONTEXT_MAPPER_WFC_RESOURCES_LIMIT_MEMORY', '128Mi')!,
+      cpu: getEnv('CONTEXT_MAPPER_WFC_RESOURCES_LIMIT_CPU', '200m')!,
+    },
+  },
+  wfcJwtPublicKeyConfigMapName: getEnv('CONTEXT_MAPPER_WFC_JWT_PUBLIC_KEY_CM', 'mcp-host-config')!,
+  wfcJwtPublicKeyConfigMapKey: getEnv(
+    'CONTEXT_MAPPER_WFC_JWT_PUBLIC_KEY_CM_KEY',
+    'CLERUM_AUTH_JWT_PUBLIC_KEY'
+  )!,
+  wfcMaxUploadBytes: getEnvInt('CONTEXT_MAPPER_WFC_MAX_UPLOAD_BYTES', 100 * 1024 * 1024),
+  wfcMaxListEntries: getEnvInt('CONTEXT_MAPPER_WFC_MAX_LIST_ENTRIES', 5000),
+  wfcMaxPathDepth: getEnvInt('CONTEXT_MAPPER_WFC_MAX_PATH_DEPTH', 32),
+
+  // Cluster-internal control-api endpoint (issuance is direct, NOT via gateway)
+  controlApiBaseUrl: getEnv(
+    'CONTROL_API_BASE_URL',
+    'http://control-api.control-plane.svc.cluster.local:8090'
+  )!,
+
+  // HCC signs InternalControl JWTs for direct control-api issuance calls.
+  internalControlJwtHccHmacSecret: getEnv('INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET', '')!,
+
+  // HCC provisions the shared 1st-party mcp-host credentials by default.
+  hccTargetNamespace: getEnv('HCC_TARGET_NAMESPACE')?.trim() || 'mcp-host',
+
+  // URL of the nginx gateway that mediates mcp-host → control-api traffic.
+  // Injected into mcp-host pods as MCP_HOST_GATEWAY_URL. Per the architecture
+  // diagram this is the "nginx (only /mcp-host)" allowlist-proxy.
+  mcpHostGatewayUrl: getEnv(
+    'MCP_HOST_GATEWAY_URL',
+    'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092'
+  )!,
+
+  // Periodic Host resync (default 5 min). 0 disables watches-only self-heal
+  // for runtime-auth degraded mcp-host pods; use only for diagnostic runs.
+  hostResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_HOST_RESYNC_SEC', 300),
+
+  // Periodic SharedFileSystem resync (default 60s). Re-evaluates PVC bind + wfc
+  // readiness so a transient Initializing/Degraded converges to Ready (#592).
+  sfsResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_SFS_RESYNC_SEC', 60),
+  gfsResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_GFS_RESYNC_SEC', 60),
+
+  // Bootstrap runtime credential refresh margin. The reconciler bounds this
+  // against hostResyncIntervalSec and the issuer-provided refresh TTL.
+  mcpHostBootstrapRefreshBeforeSec: getEnvInt(
+    'HCC_MCP_HOST_RUNTIME_BOOTSTRAP_REFRESH_BEFORE_SEC',
+    900
+  ),
+
+  // Periodic external-egress DNS resync (default 5 min). 0 disables.
+  externalEgressResyncIntervalSec: getEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 300),
+
+  // Plugin image-host allowlist (Phase 2.3). Permissive default = current
+  // fleet hosts + example.com; enforce defaults to false (audit mode).
+  allowedPluginImagePrefixes: getEnv(
+    'CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES',
+    [...DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES].join(',')
+  )!
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0),
+  enforcePluginImageAllowlist: getEnvBool('CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST', false),
+}

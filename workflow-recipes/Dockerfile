@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+FROM node:24-alpine AS builder
+
+WORKDIR /app
+
+COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/
+COPY packages/workflow-runtime-core/tsconfig.json ./packages/workflow-runtime-core/
+COPY packages/workflow-runtime-core/src ./packages/workflow-runtime-core/src
+WORKDIR /app/packages/workflow-runtime-core
+RUN npm ci && npm run build
+
+WORKDIR /app
+COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
+COPY packages/image-policy ./packages/image-policy
+COPY workflow-recipes/package.json workflow-recipes/package-lock.json ./workflow-recipes/
+WORKDIR /app/workflow-recipes
+RUN npm ci
+
+COPY workflow-recipes/tsconfig.json ./
+COPY workflow-recipes/src ./src
+RUN npm run build:docker
+
+FROM node:24-alpine
+
+WORKDIR /app
+
+COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/
+COPY --from=builder /app/packages/workflow-runtime-core/dist ./packages/workflow-runtime-core/dist
+COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
+COPY packages/image-policy ./packages/image-policy
+
+COPY workflow-recipes/package.json workflow-recipes/package-lock.json ./workflow-recipes/
+WORKDIR /app/workflow-recipes
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/workflow-recipes/dist ./dist
+
+USER node
+
+EXPOSE 8082
+
+CMD ["node", "dist/main.js"]

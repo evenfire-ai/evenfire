@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clerum — User Approval Requests v0.1 Architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'JetBrains Mono', monospace; background: #020617; min-height: 100vh; padding: 2rem; color: white; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header { margin-bottom: 2rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+    .pulse-dot { width: 12px; height: 12px; background: #22d3ee; border-radius: 50%; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-left: 1.75rem; }
+    .diagram-container { background: rgba(15, 23, 42, 0.5); border-radius: 1rem; border: 1px solid #1e293b; padding: 1.5rem; overflow-x: auto; }
+    svg { width: 100%; min-width: 900px; display: block; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 2rem; }
+    .card { background: rgba(15, 23, 42, 0.5); border-radius: 0.75rem; border: 1px solid #1e293b; padding: 1.25rem; }
+    .card-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .card-dot.cyan { background: #22d3ee; } .card-dot.emerald { background: #34d399; } .card-dot.violet { background: #a78bfa; } .card-dot.amber { background: #fbbf24; } .card-dot.rose { background: #fb7185; }
+    .card h3 { font-size: 0.875rem; font-weight: 600; }
+    .card ul { list-style: none; color: #94a3b8; font-size: 0.75rem; }
+    .card li { margin-bottom: 0.375rem; }
+    .footer { text-align: center; margin-top: 1.5rem; color: #475569; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-row">
+        <div class="pulse-dot"></div>
+        <h1>User Approval Requests v0.1 — Architecture</h1>
+      </div>
+      <p class="subtitle">Step-level gating in coordinator Pod, LLM-isolated tokens, dedicated gateway :8092</p>
+    </div>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1200 820">
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+          </marker>
+          <marker id="arrow-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185" />
+          </marker>
+          <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee" />
+          </marker>
+          <marker id="arrow-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#34d399" />
+          </marker>
+          <marker id="arrow-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- ===== ARROWS (drawn first, behind boxes) ===== -->
+
+        <!-- coordinator → mcp-host (existing: POST /execute) -->
+        <line x1="210" y1="240" x2="210" y2="340" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
+        <text x="225" y="295" fill="#34d399" font-size="8">POST /execute</text>
+        <text x="225" y="306" fill="#34d399" font-size="7">Bearer mcp-host-token</text>
+
+        <!-- coordinator → nginx gateway (NEW: approval request) -->
+        <line x1="330" y1="200" x2="568" y2="200" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#arrow-rose)"/>
+        <text x="440" y="193" fill="#fb7185" font-size="8">POST /workflow-approvals/request</text>
+        <text x="440" y="204" fill="#fb7185" font-size="7">Bearer mcpHostJwt access token</text>
+
+        <!-- nginx gateway → control-api -->
+        <line x1="680" y1="230" x2="680" y2="320" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
+        <text x="690" y="278" fill="#94a3b8" font-size="8">proxy_pass</text>
+        <text x="690" y="289" fill="#94a3b8" font-size="7">:8092 → :8090</text>
+
+        <!-- control-api → Postgres -->
+        <line x1="680" y1="430" x2="680" y2="510" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="690" y="475" fill="#94a3b8" font-size="8">SQL</text>
+
+        <!-- WRC → control-api (runtime token issuance) -->
+        <line x1="490" y1="590" x2="590" y2="430" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#arrow-amber)"/>
+        <text x="490" y="530" fill="#fbbf24" font-size="7">POST /auth/mcp-host/:ns/:name/tokens</text>
+        <text x="490" y="541" fill="#fbbf24" font-size="7">InternalControl iss=wrc</text>
+
+        <!-- WRC → coordinator (spawn Secret) -->
+        <line x1="370" y1="580" x2="210" y2="260" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#arrow-amber)"/>
+        <text x="245" y="420" fill="#fbbf24" font-size="7" transform="rotate(-55, 245, 420)">spawn + inject tokens</text>
+
+        <!-- external-rest-api → control-api (decision path) -->
+        <line x1="930" y1="380" x2="790" y2="380" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+        <text x="840" y="373" fill="#22d3ee" font-size="8">POST /external/decisions/:id</text>
+
+        <!-- User → external-rest-api -->
+        <line x1="1040" y1="500" x2="1040" y2="420" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="1052" y="465" fill="#94a3b8" font-size="8">1st-party OAuth</text>
+
+        <!-- control-api → notification_deliveries (pg_notify) -->
+        <line x1="790" y1="350" x2="910" y2="310" stroke="#fb923c" stroke-width="1.2" stroke-dasharray="3,3" marker-end="url(#arrowhead)"/>
+        <text x="830" y="318" fill="#fb923c" font-size="7">pg_notify</text>
+
+        <!-- ===== NAMESPACE: sandbox-recipes ===== -->
+        <rect x="50" y="70" width="360" height="510" rx="12" fill="rgba(6, 78, 59, 0.05)" stroke="#34d399" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="62" y="88" fill="#34d399" font-size="10" font-weight="600">namespace: sandbox-recipes</text>
+
+        <!-- coordinator Pod -->
+        <rect x="80" y="130" width="250" height="130" rx="6" fill="#0f172a" stroke-width="0"/>
+        <rect x="80" y="130" width="250" height="130" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="205" y="155" fill="white" font-size="11" font-weight="600" text-anchor="middle">${recipe}-coordinator</text>
+        <text x="205" y="173" fill="#94a3b8" font-size="9" text-anchor="middle">Pod [EXISTING, EXTEND]</text>
+        <text x="205" y="191" fill="#34d399" font-size="8" text-anchor="middle">Secret env (NEW): MCP_HOST_RUNTIME_ACCESS_TOKEN</text>
+        <text x="205" y="203" fill="#34d399" font-size="8" text-anchor="middle">MCP_HOST_RUNTIME_REFRESH_TOKEN, MCP_HOST_GATEWAY_URL</text>
+        <text x="205" y="220" fill="#94a3b8" font-size="8" text-anchor="middle">coordinator.ts: step.requiresApproval → gate()</text>
+        <text x="205" y="232" fill="#94a3b8" font-size="8" text-anchor="middle">approvalRequester.ts [NEW]</text>
+        <text x="205" y="249" fill="#22d3ee" font-size="7" text-anchor="middle">Health :8090 | phase: awaiting-approval</text>
+
+        <!-- mcp-host Pod -->
+        <rect x="80" y="340" width="250" height="100" rx="6" fill="#0f172a" stroke-width="0"/>
+        <rect x="80" y="340" width="250" height="100" rx="6" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="205" y="365" fill="white" font-size="11" font-weight="600" text-anchor="middle">${recipe}-mcp-host</text>
+        <text x="205" y="383" fill="#94a3b8" font-size="9" text-anchor="middle">Pod [EXISTING, UNCHANGED]</text>
+        <text x="205" y="401" fill="#fb7185" font-size="8" text-anchor="middle">NO approval tokens. NO calls to control-api.</text>
+        <text x="205" y="413" fill="#fb7185" font-size="8" text-anchor="middle">LLM is agnostic to approvals.</text>
+        <text x="205" y="430" fill="#22d3ee" font-size="7" text-anchor="middle">Service wf-${recipe}-mcp-host:8080</text>
+
+        <!-- NP #8 -->
+        <rect x="80" y="460" width="250" height="30" rx="4" fill="rgba(136, 19, 55, 0.2)" stroke="#fb7185" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="205" y="479" fill="#fb7185" font-size="8" text-anchor="middle">NP #8: coord → approval-gateway:8092 [NEW]</text>
+
+        <!-- ===== NAMESPACE: control-plane ===== -->
+        <rect x="440" y="70" width="470" height="510" rx="12" fill="rgba(120, 53, 15, 0.03)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="452" y="88" fill="#fbbf24" font-size="10" font-weight="600">namespace: control-plane</text>
+
+        <!-- nginx-workflow-approval-gateway -->
+        <rect x="570" y="130" width="220" height="70" rx="6" fill="#0f172a" stroke-width="0"/>
+        <rect x="570" y="130" width="220" height="70" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="680" y="155" fill="white" font-size="11" font-weight="600" text-anchor="middle">nginx-workflow-approval-gateway</text>
+        <text x="680" y="173" fill="#94a3b8" font-size="9" text-anchor="middle">[NEW] Service ClusterIP :8092</text>
+        <text x="680" y="188" fill="#22d3ee" font-size="7" text-anchor="middle">2 replicas + PDB | proxy_pass → control-api:8090</text>
+
+        <!-- control-api -->
+        <rect x="570" y="320" width="220" height="110" rx="6" fill="#0f172a" stroke-width="0"/>
+        <rect x="570" y="320" width="220" height="110" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="680" y="345" fill="white" font-size="11" font-weight="600" text-anchor="middle">control-api :8090</text>
+        <text x="680" y="363" fill="#94a3b8" font-size="9" text-anchor="middle">[EXISTING, EXTEND]</text>
+        <text x="680" y="380" fill="#34d399" font-size="8" text-anchor="middle">routes/mcp-host/* [NEW]</text>
+        <text x="680" y="392" fill="#34d399" font-size="8" text-anchor="middle">routes/auth/mcp-host/* [NEW]</text>
+        <text x="680" y="404" fill="#34d399" font-size="8" text-anchor="middle">middleware/internalControlJwt [NEW]</text>
+        <text x="680" y="416" fill="#34d399" font-size="8" text-anchor="middle">services/userApprovalRequestService [NEW]</text>
+
+        <!-- Postgres -->
+        <rect x="590" y="510" width="180" height="55" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="680" y="533" fill="white" font-size="11" font-weight="600" text-anchor="middle">Postgres</text>
+        <text x="680" y="551" fill="#94a3b8" font-size="9" text-anchor="middle">+4 tables [NEW] in db.ts:initDb()</text>
+
+        <!-- WRC -->
+        <rect x="460" y="570" width="180" height="60" rx="6" fill="#0f172a" stroke-width="0"/>
+        <rect x="460" y="570" width="180" height="60" rx="6" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="550" y="593" fill="white" font-size="11" font-weight="600" text-anchor="middle">WRC (workflow-recipes)</text>
+        <text x="550" y="611" fill="#94a3b8" font-size="9" text-anchor="middle">[EXISTING, EXTEND]</text>
+        <text x="550" y="623" fill="#34d399" font-size="7" text-anchor="middle">+mcpHostRuntimeTokenIssuerClient [NEW]</text>
+
+        <!-- notification_deliveries (event bus) -->
+        <rect x="820" y="280" width="160" height="55" rx="4" fill="rgba(251, 146, 60, 0.2)" stroke="#fb923c" stroke-width="1"/>
+        <text x="900" y="302" fill="#fb923c" font-size="9" font-weight="600" text-anchor="middle">notification_deliveries</text>
+        <text x="900" y="318" fill="#94a3b8" font-size="7" text-anchor="middle">[NEW] Event table + pg_notify</text>
+        <text x="900" y="329" fill="#94a3b8" font-size="7" text-anchor="middle">Consumer: notification-service (futuro)</text>
+
+        <!-- ===== EXTERNAL ZONE ===== -->
+        <rect x="930" y="300" width="240" height="260" rx="12" fill="rgba(8, 51, 68, 0.05)" stroke="#22d3ee" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="942" y="318" fill="#22d3ee" font-size="10" font-weight="600">External UX Plane</text>
+
+        <!-- external-rest-api -->
+        <rect x="950" y="340" width="200" height="60" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="1050" y="363" fill="white" font-size="11" font-weight="600" text-anchor="middle">external-rest-api</text>
+        <text x="1050" y="381" fill="#94a3b8" font-size="9" text-anchor="middle">[EXISTING, UNCHANGED]</text>
+        <text x="1050" y="393" fill="#94a3b8" font-size="7" text-anchor="middle">service gate + session JWT</text>
+
+        <!-- User -->
+        <rect x="950" y="500" width="200" height="50" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="1050" y="522" fill="white" font-size="11" font-weight="600" text-anchor="middle">User</text>
+        <text x="1050" y="539" fill="#94a3b8" font-size="9" text-anchor="middle">Browser / Desktop App</text>
+
+        <!-- ===== LEGEND ===== -->
+        <text x="60" y="610" fill="white" font-size="10" font-weight="600">Legend</text>
+
+        <line x1="60" y1="625" x2="80" y2="625" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
+        <text x="85" y="628" fill="#94a3b8" font-size="8">Existing flow</text>
+
+        <line x1="60" y1="645" x2="80" y2="645" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#arrow-rose)"/>
+        <text x="85" y="648" fill="#94a3b8" font-size="8">NEW approval flow</text>
+
+        <line x1="60" y1="665" x2="80" y2="665" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#arrow-amber)"/>
+        <text x="85" y="668" fill="#94a3b8" font-size="8">Spawn / token injection</text>
+
+        <line x1="60" y1="685" x2="80" y2="685" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+        <text x="85" y="688" fill="#94a3b8" font-size="8">User decision path</text>
+
+        <rect x="250" y="615" width="16" height="10" rx="2" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="272" y="623" fill="#94a3b8" font-size="8">Backend (EXISTING)</text>
+
+        <rect x="250" y="635" width="16" height="10" rx="2" fill="rgba(6, 78, 59, 0.3)" stroke="#34d399" stroke-width="1"/>
+        <text x="272" y="643" fill="#94a3b8" font-size="8">Backend (UNCHANGED)</text>
+
+        <rect x="250" y="655" width="16" height="10" rx="2" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="272" y="663" fill="#94a3b8" font-size="8">Database</text>
+
+        <rect x="250" y="675" width="16" height="10" rx="2" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="272" y="683" fill="#94a3b8" font-size="8">Frontend / External</text>
+
+        <rect x="250" y="695" width="16" height="10" rx="2" fill="rgba(251, 146, 60, 0.2)" stroke="#fb923c" stroke-width="1"/>
+        <text x="272" y="703" fill="#94a3b8" font-size="8">Event Bus / Notification</text>
+
+        <rect x="250" y="715" width="16" height="10" rx="2" fill="rgba(136, 19, 55, 0.2)" stroke="#fb7185" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="272" y="723" fill="#94a3b8" font-size="8">NetworkPolicy</text>
+
+        <!-- Invariants box -->
+        <rect x="500" y="610" width="380" height="120" rx="6" fill="rgba(136, 19, 55, 0.1)" stroke="#fb7185" stroke-width="1"/>
+        <text x="510" y="630" fill="#fb7185" font-size="9" font-weight="600">Security Invariants S1-S7</text>
+        <text x="510" y="646" fill="#94a3b8" font-size="7">S1: admin private key stays in control-api only</text>
+        <text x="510" y="658" fill="#94a3b8" font-size="7">S2: Recipe-bound mcpHostJwt with hostRefs</text>
+        <text x="510" y="670" fill="#94a3b8" font-size="7">S3: Runtime capabilities: request, refresh, trigger</text>
+        <text x="510" y="682" fill="#94a3b8" font-size="7">S4: User identity via session/OAuth only</text>
+        <text x="510" y="694" fill="#94a3b8" font-size="7">S5: Operator allowlist enforced at request time</text>
+        <text x="510" y="706" fill="#94a3b8" font-size="7">S6: Access TTL 10min, refresh rotated one-time</text>
+        <text x="510" y="718" fill="#94a3b8" font-size="7">S7: No direct internet → sandbox-recipes</text>
+      </svg>
+    </div>
+
+    <!-- Info Cards -->
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot rose"></div>
+          <h3>Approval Request Flow (A)</h3>
+        </div>
+        <ul>
+          <li>1. Coordinator detects step.requiresApproval</li>
+          <li>2. POST /workflow-approvals/request via gateway :8092</li>
+          <li>3. control-api validates JWT + allowlist + persists</li>
+          <li>4. Emits event to notification_deliveries</li>
+          <li>5. Coordinator polls GET /:id/status every 5s</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot cyan"></div>
+          <h3>User Decision Flow (B)</h3>
+        </div>
+        <ul>
+          <li>1. User → external-rest-api (session/OAuth)</li>
+          <li>2. external-rest-api → control-api decision route</li>
+          <li>3. control-api validates user eligibility</li>
+          <li>4. Updates status: pending → approved/denied</li>
+          <li>5. Coordinator observes polling result → resumes step</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot amber"></div>
+          <h3>Token Auth Chain</h3>
+        </div>
+        <ul>
+          <li>WRC/HCC → control-api: InternalControl JWT with issuer-specific HS256 secret</li>
+          <li>control-api → mcp-host runtime: mcpHostJwt access, refresh, and control tokens</li>
+          <li>hostRefs bind each token to namespace/name</li>
+          <li>Refresh token rotated one-time on every use</li>
+          <li>mcp-host pods never mount InternalControl JWT</li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="footer">
+      Clerum — User Approval Requests v0.1 &bull; Runtime Architecture
+    </p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,48 @@
+# MCP Host Dockerfile — Slim variant
+# Base: node:24-slim (Debian slim, glibc + apt, ~200-250MB)
+# Use case: agent shell execution with common Unix tools
+# Pinned to Node 24.16.0 by digest: 24.17.0's undici bump regresses node-fetch@2
+# (ERR_STREAM_PREMATURE_CLOSE). Keep the runtime frozen.
+FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy source code
+COPY tsconfig.json tsconfig.build.json ./
+COPY src ./src
+
+# Build TypeScript
+RUN npm run build
+
+# Production image — Debian slim (glibc + apt available)
+FROM node:24.16.0-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
+
+WORKDIR /app
+
+# System tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash git curl wget jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy package files and install production dependencies only
+COPY package*.json ./
+RUN npm ci --only=production
+
+# Copy built code
+COPY --from=builder /app/dist ./dist
+
+# Run as non-root user
+RUN groupadd -g 1001 nodejs && useradd -u 1001 -g nodejs -m nodejs
+
+# Create writable workspace for native tools (file_read, file_write, shell_exec)
+RUN mkdir -p /workspace && chown nodejs:nodejs /workspace
+
+USER nodejs
+
+CMD ["node", "dist/main.js"]

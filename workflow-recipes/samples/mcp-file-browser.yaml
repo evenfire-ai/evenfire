@@ -1,0 +1,37 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: mcp-file-browser
+  namespace: sandbox-recipes
+spec:
+  description: 'File browser MCP server with persistent storage'
+  contextRef: default
+  workloads:
+    - id: file-browser
+      type: deployment
+      image: us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/file-browser-mcp:latest
+      port: 3000
+      transport:
+        type: streamableHttp
+        path: /mcp
+      volumeMounts:
+        - name: data-storage
+          mountPath: /data
+      resources:
+        requests:
+          cpu: '50m'
+          memory: '64Mi'
+        limits:
+          cpu: '200m'
+          memory: '256Mi'
+      healthCheck:
+        type: http
+        path: /health
+        port: 3000
+  resources:
+    - id: data-storage
+      type: pvc
+      size: '5Gi'
+      accessMode: ReadWriteOnce
+  security:
+    isolationLevel: standard

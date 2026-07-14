@@ -1,0 +1,274 @@
+/**
+ * Prepared statements for the SQLite ConversationStore.
+ *
+ * Prepared once at worker boot; every dispatcher op reuses the cached
+ * statement objects (`better-sqlite3.Statement`). Reparsing the SQL on every
+ * call would be ~30% overhead in the hot path.
+ *
+ * Statements live in a single object so the dispatcher can carry it through
+ * the call graph without threading individual handles.
+ */
+import type { Database, Statement } from 'better-sqlite3'
+
+export interface PreparedStatements {
+  insertSession: Statement
+  updateSessionState: Statement
+  clearSessionActiveTask: Statement
+  selectProcessingSessions: Statement
+  selectSessionMaxOrdinalTurn: Statement
+  selectExpiredAwaitingApprovalSessions: Statement
+  selectAwaitingApprovalSessions: Statement
+  deletePendingApprovalsBySession: Statement
+  updateSessionCounters: Statement
+  updateSessionPromptStableHash: Statement
+  selectSessionBySessionKey: Statement
+  selectSessionsByPrefix: Statement
+
+  insertMessage: Statement
+  selectMessagesBySession: Statement
+  deleteMessagesBySession: Statement
+
+  insertPendingApproval: Statement
+  deletePendingApproval: Statement
+  selectPendingApprovalsAll: Statement
+  selectPendingApprovalBySession: Statement
+
+  sweepExpiredApprovals: Statement
+  sweepEndedSessions: Statement
+
+  ftsSearch: Statement
+  ftsSearchByUser: Statement
+  /** T3.1 — scoped to (userId [, channelType] [, since]) with hard JOIN on `s.id = m.session_id`. */
+  ftsSearchMessages: Statement
+  /** T3.1 — deletes sessions with `end_reason IS NOT NULL` closed before the cutoff. */
+  sweepClosedSessions: Statement
+
+  integrityCheck: Statement
+}
+
+export function prepareStatements(db: Database): PreparedStatements {
+  return {
+    insertSession: db.prepare(`
+      INSERT INTO sessions (
+        id, session_key, source, user_id, team_id,
+        channel_type, channel_id, thread_id,
+        model, system_prompt_stable_hash, parent_session_id,
+        started_at, ended_at, end_reason,
+        message_count, tool_call_count,
+        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+        cache_tokens_reported,
+        title, state, active_task_id
+      ) VALUES (
+        @id, @session_key, @source, @user_id, @team_id,
+        @channel_type, @channel_id, @thread_id,
+        @model, @system_prompt_stable_hash, @parent_session_id,
+        @started_at, @ended_at, @end_reason,
+        @message_count, @tool_call_count,
+        @input_tokens, @output_tokens, @cache_read_tokens, @cache_write_tokens,
+        @cache_tokens_reported,
+        @title, @state, @active_task_id
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        state = excluded.state,
+        ended_at = excluded.ended_at,
+        end_reason = excluded.end_reason
+    `),
+    updateSessionState: db.prepare(`
+      UPDATE sessions
+         SET state = @state,
+             ended_at = COALESCE(@ended_at, ended_at),
+             end_reason = COALESCE(@end_reason, end_reason),
+             active_task_id = COALESCE(@active_task_id, active_task_id)
+       WHERE id = @id
+    `),
+    // D.1 — COALESCE above can SET or KEEP active_task_id but never CLEAR it
+    // (a NULL param means "keep"). The dispatcher runs this dedicated clear
+    // statement, inside the same transaction, when a caller explicitly passes
+    // activeTaskId: null (turn complete/fail/cancel).
+    clearSessionActiveTask: db.prepare(`
+      UPDATE sessions SET active_task_id = NULL WHERE id = @id
+    `),
+    // D.2 — processing reaper. Chunked so a DoS spam of processing sessions
+    // can't block boot in one giant transaction (security P0-3).
+    selectProcessingSessions: db.prepare(`
+      SELECT id, session_key, active_task_id, user_id, channel_type, channel_id, thread_id
+        FROM sessions
+       WHERE state = 'processing'
+       LIMIT @limit
+    `),
+    selectSessionMaxOrdinalTurn: db.prepare(`
+      SELECT COALESCE(MAX(ordinal), -1)    AS max_ordinal,
+             COALESCE(MAX(turn_number), 0) AS max_turn
+        FROM messages
+       WHERE session_id = @session_id
+    `),
+    // D.8 (F7) — sessions stuck in 'awaiting_approval' whose approval can no
+    // longer resolve: either every pending_approval row for the session has
+    // expired (expires_at <= now), or the row is gone entirely (orphan, e.g. a
+    // periodic sweep deleted it but left the session awaiting). The NOT EXISTS
+    // "no LIVE approval" form is correct even with multiple approvals per
+    // session (only reap when none is still live).
+    selectExpiredAwaitingApprovalSessions: db.prepare(`
+      SELECT id, session_key, active_task_id, user_id, channel_type, channel_id, thread_id
+        FROM sessions s
+       WHERE s.state = 'awaiting_approval'
+         AND NOT EXISTS (
+           SELECT 1 FROM pending_approvals pa
+            WHERE pa.session_id = s.id AND pa.expires_at > @now_epoch_seconds
+         )
+       LIMIT @limit
+    `),
+    // S1 — sessions stuck in 'awaiting_approval' regardless of whether their
+    // approval is still LIVE. After a pod restart NO awaiting_approval session is
+    // resumable (no executor rehydration exists — the T2.1 it.todo), so a live
+    // approval is just as un-resolvable as an expired one. The boot reaper uses
+    // this form (no NOT EXISTS predicate) so every restart-interrupted approval
+    // is reaped to idle, not only the expired ones (spec decision #4 — "pod
+    // restart = reap, not auto-resume").
+    selectAwaitingApprovalSessions: db.prepare(`
+      SELECT id, session_key, active_task_id, user_id, channel_type, channel_id, thread_id
+        FROM sessions s
+       WHERE s.state = 'awaiting_approval'
+       LIMIT @limit
+    `),
+    deletePendingApprovalsBySession: db.prepare(`
+      DELETE FROM pending_approvals WHERE session_id = @session_id
+    `),
+    updateSessionPromptStableHash: db.prepare(`
+      UPDATE sessions
+         SET system_prompt_stable_hash = @system_prompt_stable_hash
+       WHERE id = @id
+    `),
+    updateSessionCounters: db.prepare(`
+      UPDATE sessions
+         SET message_count        = message_count      + @message_count_delta,
+             tool_call_count      = tool_call_count    + @tool_call_count_delta,
+             input_tokens         = input_tokens       + @input_tokens_delta,
+             output_tokens        = output_tokens      + @output_tokens_delta,
+             cache_read_tokens    = cache_read_tokens  + @cache_read_tokens_delta,
+             cache_write_tokens   = cache_write_tokens + @cache_write_tokens_delta,
+             cache_tokens_reported = cache_tokens_reported | @cache_reported
+       WHERE id = @id
+    `),
+    selectSessionBySessionKey: db.prepare(`
+      SELECT * FROM sessions WHERE session_key = ?
+    `),
+    selectSessionsByPrefix: db.prepare(`
+      SELECT * FROM sessions WHERE session_key LIKE ? ORDER BY started_at DESC
+    `),
+
+    insertMessage: db.prepare(`
+      INSERT INTO messages (
+        session_id, ordinal, role, content, content_parts,
+        tool_call_id, tool_calls, tool_name, timestamp,
+        token_count, finish_reason, spillover_ref, is_error, turn_number,
+        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+      ) VALUES (
+        @session_id, @ordinal, @role, @content, @content_parts,
+        @tool_call_id, @tool_calls, @tool_name, @timestamp,
+        @token_count, @finish_reason, @spillover_ref, @is_error, @turn_number,
+        @input_tokens, @output_tokens, @cache_read_tokens, @cache_write_tokens
+      )
+    `),
+    selectMessagesBySession: db.prepare(`
+      SELECT * FROM messages WHERE session_id = ? ORDER BY ordinal ASC
+    `),
+    deleteMessagesBySession: db.prepare(`
+      DELETE FROM messages WHERE session_id = ?
+    `),
+
+    insertPendingApproval: db.prepare(`
+      INSERT INTO pending_approvals (
+        request_id, session_id, task_id, tool_name, tool_call_id,
+        parameters, description, context_snapshot, completed_results,
+        intent_summary, source_message, registered_at, expires_at
+      ) VALUES (
+        @request_id, @session_id, @task_id, @tool_name, @tool_call_id,
+        @parameters, @description, @context_snapshot, @completed_results,
+        @intent_summary, @source_message, @registered_at, @expires_at
+      )
+      ON CONFLICT(request_id) DO UPDATE SET
+        context_snapshot = excluded.context_snapshot,
+        completed_results = excluded.completed_results,
+        expires_at = excluded.expires_at
+    `),
+    deletePendingApproval: db.prepare(`
+      DELETE FROM pending_approvals WHERE request_id = ?
+    `),
+    selectPendingApprovalsAll: db.prepare(`
+      SELECT pa.*, s.session_key AS session_key
+        FROM pending_approvals pa
+        JOIN sessions s ON s.id = pa.session_id
+       ORDER BY pa.registered_at ASC
+    `),
+    selectPendingApprovalBySession: db.prepare(`
+      SELECT * FROM pending_approvals WHERE session_id = ? LIMIT 1
+    `),
+
+    sweepExpiredApprovals: db.prepare(`
+      DELETE FROM pending_approvals WHERE expires_at < ?
+    `),
+    sweepEndedSessions: db.prepare(`
+      DELETE FROM sessions
+       WHERE ended_at IS NOT NULL
+         AND ended_at < ?
+    `),
+
+    ftsSearch: db.prepare(`
+      SELECT m.session_id AS session_id,
+             m.id AS message_id,
+             m.timestamp AS timestamp,
+             snippet(messages_fts, 0, '«', '»', '…', 8) AS snippet
+        FROM messages_fts
+        JOIN messages m ON m.id = messages_fts.rowid
+       WHERE messages_fts MATCH @query
+       ORDER BY rank
+       LIMIT @limit
+    `),
+    ftsSearchByUser: db.prepare(`
+      SELECT m.session_id AS session_id,
+             m.id AS message_id,
+             m.timestamp AS timestamp,
+             snippet(messages_fts, 0, '«', '»', '…', 8) AS snippet
+        FROM messages_fts
+        JOIN messages m ON m.id = messages_fts.rowid
+        JOIN sessions s ON s.id = m.session_id
+       WHERE messages_fts MATCH @query
+         AND s.user_id = @user_id
+       ORDER BY rank
+       LIMIT @limit
+    `),
+    // T3.1 — session search. `s.id = m.session_id` per P0-003 (T2.1 keyed
+    // sessions on `id`, not `session_id`). Optional channel + since filters
+    // use the binding-IS-NULL trick so a single statement covers all four
+    // combinations without dynamic SQL.
+    ftsSearchMessages: db.prepare(`
+      SELECT
+        snippet(messages_fts, 0, '<mark>', '</mark>', '…', 32) AS snippet,
+        m.session_id                                            AS session_id,
+        m.timestamp                                             AS timestamp,
+        s.channel_type                                          AS channel,
+        m.role                                                  AS role
+      FROM messages_fts
+      JOIN messages m ON m.id = messages_fts.rowid
+      JOIN sessions s ON s.id = m.session_id
+      WHERE messages_fts MATCH @query
+        AND s.user_id = @user_id
+        AND (@channel_type IS NULL OR s.channel_type = @channel_type)
+        AND (@since IS NULL OR m.timestamp >= @since)
+      ORDER BY rank
+      LIMIT @limit
+    `),
+    // T3.1 — retention sweep. Only deletes sessions that are properly closed
+    // (`end_reason IS NOT NULL`) AND aged past the cutoff. In-flight sessions
+    // never get pruned, regardless of `started_at`. ON DELETE CASCADE on
+    // `messages` cleans up the messages + FTS triggers handle the index.
+    sweepClosedSessions: db.prepare(`
+      DELETE FROM sessions
+       WHERE end_reason IS NOT NULL
+         AND ended_at IS NOT NULL
+         AND ended_at < @cutoff
+    `),
+    integrityCheck: db.prepare(`PRAGMA integrity_check`),
+  }
+}

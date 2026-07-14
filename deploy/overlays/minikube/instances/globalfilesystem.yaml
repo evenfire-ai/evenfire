@@ -1,0 +1,23 @@
+apiVersion: clerum.io/v1alpha1
+kind: GlobalFileSystem
+metadata:
+  name: gfs
+  namespace: gfs
+spec:
+  storage:
+    # minikube uses the in-tree 'standard' StorageClass (RWO). GKE overlays use
+    # standard-rwo. Single-node RWO is the v1 default (only gfsc mounts it).
+    size: 1Gi
+    storageClassName: standard
+    accessModes:
+      - ReadWriteOnce
+  layout:
+    rootDirectories:
+      - /org
+      - /system/published-workflow-artifacts
+  security:
+    runAsUser: 1000
+    fsGroup: 1000
+  # minikube is resource-constrained — 1 reader replica (writer is always 1).
+  readerReplicas: 1
+  retainOnDelete: true

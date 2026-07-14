@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+
+cd "$repo_root"
+npm run version:staged --silent
+npm run format:staged --silent
+npm run style-rules:staged --silent

@@ -1,0 +1,40 @@
+import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+describe('pluginWorkloadSdkSchema', () => {
+  it('scopes quota counters by recipe namespace in the primary key', () => {
+    const schemaPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../src/services/pluginWorkloadSdkSchema.ts'
+    )
+    const source = readFileSync(schemaPath, 'utf8')
+    expect(source).toMatch(/PRIMARY KEY \(recipe_namespace, recipe_name, period_start\)/)
+  })
+
+  it('scopes idempotency uniqueness by recipe namespace', () => {
+    const schemaPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../src/services/pluginWorkloadSdkSchema.ts'
+    )
+    const source = readFileSync(schemaPath, 'utf8')
+    expect(source).toMatch(
+      /plugin_workload_sdk_invocations \(recipe_namespace, recipe_name, method, idempotency_key_hash\)/
+    )
+  })
+
+  it('omits super_admin_approved from fresh grant schema and drops it on upgrade', () => {
+    const schemaPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../src/services/pluginWorkloadSdkSchema.ts'
+    )
+    const source = readFileSync(schemaPath, 'utf8')
+    const grantsCreate = source.slice(
+      source.indexOf('CREATE TABLE IF NOT EXISTS plugin_workload_sdk_grants'),
+      source.indexOf('CREATE TABLE IF NOT EXISTS plugin_workload_sdk_invocations')
+    )
+    expect(grantsCreate).not.toMatch(/super_admin_approved/)
+    expect(source).toMatch(/DROP COLUMN IF EXISTS super_admin_approved/)
+  })
+})

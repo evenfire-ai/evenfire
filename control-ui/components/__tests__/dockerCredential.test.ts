@@ -1,0 +1,56 @@
+import { describe, expect, it } from 'vitest'
+import {
+  buildDockerLoginCommand,
+  buildPushCoordinate,
+  deriveDockerconfigjson,
+  resolveDockerCredential,
+} from '../PublisherView/dockerCredential'
+
+describe('dockerCredential helpers', () => {
+  it('builds a docker login command with -u _ and the key as -p', () => {
+    expect(buildDockerLoginCommand('example.com', 'efrk_secret')).toBe(
+      'docker login example.com -u _ -p efrk_secret'
+    )
+  })
+
+  it('builds the push coordinate template', () => {
+    expect(buildPushCoordinate('example.com', 'acme')).toBe(
+      'example.com/acme/<name>:<tag>'
+    )
+  })
+
+  it('derives dockerconfigjson with username _, password key, and base64 auth', () => {
+    const json = deriveDockerconfigjson('example.com', 'efrk_secret')
+    const parsed = JSON.parse(json)
+    const entry = parsed.auths['example.com']
+    expect(entry.username).toBe('_')
+    expect(entry.password).toBe('efrk_secret')
+    expect(entry.auth).toBe(btoa('_:efrk_secret'))
+  })
+
+  it('resolveDockerCredential prefers the server dockerconfigjson + registry when present', () => {
+    const out = resolveDockerCredential({
+      id: 'k',
+      key: 'efrk_x',
+      key_prefix: 'efrk_',
+      scopes: [],
+      expires_at: null,
+      dockerconfigjson: '{"auths":{}}',
+      registry: 'reg.example.com',
+    })
+    expect(out.registry).toBe('reg.example.com')
+    expect(out.dockerconfigjson).toBe('{"auths":{}}')
+  })
+
+  it('resolveDockerCredential derives when the server omits the fields (pre-wiring)', () => {
+    const out = resolveDockerCredential({
+      id: 'k',
+      key: 'efrk_x',
+      key_prefix: 'efrk_',
+      scopes: [],
+      expires_at: null,
+    })
+    expect(out.registry).toBe('example.com')
+    expect(JSON.parse(out.dockerconfigjson).auths['example.com'].password).toBe('efrk_x')
+  })
+})

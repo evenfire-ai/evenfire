@@ -1,0 +1,25 @@
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: mcp-batch-processor
+  namespace: sandbox-recipes
+spec:
+  description: 'One-shot batch processing job with retry'
+  workloads:
+    - id: batch-processor
+      type: job
+      image: us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/batch-processor:latest
+      backoffLimit: 2
+      command: ['node', 'process.js']
+      env:
+        - name: BATCH_SIZE
+          value: '1000'
+      resources:
+        requests:
+          cpu: '100m'
+          memory: '128Mi'
+        limits:
+          cpu: '500m'
+          memory: '512Mi'
+  security:
+    isolationLevel: standard

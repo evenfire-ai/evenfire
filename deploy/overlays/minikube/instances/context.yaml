@@ -1,0 +1,12 @@
+apiVersion: clerum.io/v1alpha1
+kind: Context
+metadata:
+  name: context1
+  namespace: mcp-server
+spec:
+  contextId: context1
+  description: Default minikube context — defines which MCP servers the host can access.
+  mcpServers:
+    - airtable-server
+    - mongodb-server
+    - mongodb-mcp-stack-mongodb-mcp-server

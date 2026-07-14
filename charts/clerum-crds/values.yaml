@@ -1,0 +1,5 @@
+# Default values for clerum-crds.
+# This chart only installs CRDs; no additional configuration is required.
+
+# Optional: set to false to skip installing CRDs (e.g. if already installed)
+installCRDs: true

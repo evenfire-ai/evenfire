@@ -1,0 +1,2179 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: workflowrecipes.clerum.io
+  labels:
+    app.kubernetes.io/name: workflowrecipe
+    app.kubernetes.io/part-of: clerum
+spec:
+  group: clerum.io
+  names:
+    kind: WorkflowRecipe
+    listKind: WorkflowRecipeList
+    plural: workflowrecipes
+    singular: workflowrecipe
+    shortNames:
+      - wr
+      - recipe
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            WorkflowRecipe defines a composable, multi-workload application
+            that the Clerum Operator deploys and manages. Each recipe can
+            contain deployments, statefulsets, cronjobs, jobs, and daemonsets
+            along with their supporting resources (PVCs, Secrets, ConfigMaps)
+            and network bindings for automatic NetworkPolicy generation.
+
+            OAuth scope: this CRD supports BOTH foreground OAuth (delivered into
+            the sandbox UI embed via spec.ui) AND background OAuth for non-MCP
+            workloads (Path B — workloads[].oauthClientRefs referencing
+            spec.oauthClients[] entries with backgroundAccess: true). spec.ui is
+            not required; CEL O1 admits a no-UI recipe as long as every declared
+            oauthClient has a workload consumer. MCP transport workloads are
+            excluded from background OAuth via CEL O4 because they reach
+            providers through the MCP proxy. See the field-level docs on
+            spec.oauthClients and workloads[].oauthClientRefs for details.
+          properties:
+            spec:
+              type: object
+              # workloads is not required when steps is present (workflow-only recipes)
+              x-kubernetes-validations:
+                # R1: agent{} requires steps[] — no agent without workflow
+                - rule: "!has(self.agent) || has(self.steps)"
+                  message: "agent requires steps: cannot define agent without workflow steps"
+                # R2: recipe must have workloads or steps (not empty)
+                - rule: "(has(self.workloads) && size(self.workloads) > 0) || has(self.steps)"
+                  message: "recipe must define at least workloads or steps"
+                # R3: step IDs must be unique — no toSet() in K8s CEL, use all/exists_one.
+                # Cross-step dependsOn validation is enforced by control-api/WRC; with
+                # 100 steps, the equivalent CEL rule exceeds Kubernetes' cost budget.
+                - rule: "!has(self.steps) || self.steps.all(s, self.steps.exists_one(t, t.id == s.id))"
+                  message: "duplicate step IDs are not allowed"
+                # R4: scheduling requires steps[] (no scheduling without workflow)
+                - rule: "!has(self.scheduling) || (has(self.steps) && size(self.steps) > 0)"
+                  message: "spec.scheduling requires spec.steps to be non-empty"
+                # R5: scheduling.cron must be a valid five-field cron expression
+                - rule: "!has(self.scheduling) || self.scheduling.cron.matches('^(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)$')"
+                  message: "spec.scheduling.cron must be a valid five-field cron expression"
+                # R6: triggers must declare at least one of onDemand or schedule
+                - rule: "!has(self.triggers) || (has(self.triggers.onDemand) || has(self.triggers.schedule))"
+                  message: "spec.triggers must declare at least one of onDemand or schedule"
+                # R7: triggers.schedule.cron must be a valid five-field cron expression
+                - rule: "!has(self.triggers) || !has(self.triggers.schedule) || self.triggers.schedule.cron.matches('^(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)\\\\s+(\\\\*|[0-9,\\\\-\\\\*/]+)$')"
+                  message: "spec.triggers.schedule.cron must be a valid five-field cron expression"
+                # W1: webhooks[].id must be unique within webhooks[].
+                # W2 (workloadRef references an existing deployment workload
+                # with no transport) is enforced in the WRC reconciler and
+                # surfaced via a status condition — the nested webhooks x
+                # workloads lookup remains too costly at the workload ceiling.
+                - rule: "!has(self.webhooks) || self.webhooks.all(w, self.webhooks.exists_one(t, t.id == w.id))"
+                  message: "spec.webhooks[].id must be unique within webhooks[]"
+                # R8: run and instruction are mutually exclusive on every step
+                - rule: "!has(self.steps) || self.steps.all(s, !(has(s.run) && has(s.instruction)))"
+                  message: "step cannot define both run and instruction"
+                # R9: built-in workflows require exactly one executable step shape
+                - rule: "!has(self.steps) || has(self.coordinatorImage) || self.steps.all(s, has(s.run) != has(s.instruction))"
+                  message: "step must have exactly one of: run, instruction unless spec.coordinatorImage is set"
+                # R10: run steps cannot also declare a step agent
+                - rule: "!has(self.steps) || self.steps.all(s, !(has(s.run) && has(s.agent)))"
+                  message: "step cannot define both run and agent"
+                # R11: snippet MCP tool allowlists must be explicit; no wildcard in v1
+                - rule: "!has(self.steps) || self.steps.all(s, !has(s.run) || !has(s.run.capabilities) || !has(s.run.capabilities.mcp) || !has(s.run.capabilities.mcp.allowedTools) || !has(s.run.capabilities.mcp.allowedTools.include) || s.run.capabilities.mcp.allowedTools.include.all(t, !t.contains('*')))"
+                  message: "snippet mcp allowedTools.include must not contain wildcards"
+                # R12: public runtime egress intent only accepts public DNS hostnames unless explicit public-web is selected
+                - rule: "!has(self.runtimeEgress) || !has(self.runtimeEgress.http) || ((has(self.runtimeEgress.http.egressClass) && self.runtimeEgress.http.egressClass == 'public-web') ? (!has(self.runtimeEgress.http.allowedHosts) || size(self.runtimeEgress.http.allowedHosts) == 0) : (!has(self.runtimeEgress.http.allowedHosts) || self.runtimeEgress.http.allowedHosts.all(h, h.contains('.') && !h.matches('^([0-9]{1,3}[.]){3}[0-9]{1,3}$') && h != 'localhost' && !h.endsWith('.localhost') && !h.endsWith('.local') && !h.endsWith('.internal') && !h.endsWith('.svc') && !h.endsWith('.cluster.local') && h != 'kubernetes.default' && h != 'metadata.goog')))"
+                  message: "runtimeEgress.http.allowedHosts must contain public DNS hostnames for exact-host and must be omitted for public-web"
+                # R13: snippet HTTP capabilities must be backed by shared runtime egress intent
+                - rule: "!has(self.steps) || self.steps.all(s, !has(s.run) || !has(s.run.capabilities) || !has(s.run.capabilities.http) || ((has(s.run.capabilities.http.egressClass) && s.run.capabilities.http.egressClass == 'public-web') ? (has(self.runtimeEgress) && has(self.runtimeEgress.http) && has(self.runtimeEgress.http.egressClass) && self.runtimeEgress.http.egressClass == 'public-web' && (!has(s.run.capabilities.http.allowedHosts) || size(s.run.capabilities.http.allowedHosts) == 0)) : (!has(s.run.capabilities.http.allowedHosts) || (has(self.runtimeEgress) && has(self.runtimeEgress.http) && has(self.runtimeEgress.http.allowedHosts) && s.run.capabilities.http.allowedHosts.all(h, h in self.runtimeEgress.http.allowedHosts)))))"
+                  message: "snippet HTTP exact-host allowedHosts must be declared in spec.runtimeEgress.http.allowedHosts; public-web requires spec.runtimeEgress.http.egressClass public-web and no allowedHosts"
+                # R14: snippet MCP is never wildcard/implicit; tools must be stated with intent
+                - rule: "!has(self.steps) || self.steps.all(s, !has(s.run) || !has(s.run.capabilities) || !has(s.run.capabilities.mcp) || !has(s.run.capabilities.mcp.servers) || size(s.run.capabilities.mcp.servers) == 0 || (has(s.run.capabilities.mcp.allowedTools) && has(s.run.capabilities.mcp.allowedTools.include) && size(s.run.capabilities.mcp.allowedTools.include) > 0))"
+                  message: "snippet mcp servers require explicit allowedTools.include"
+                # R15: ui.workloadRef must reference an existing workloads[].id
+                - rule: "!has(self.ui) || (has(self.workloads) && self.workloads.exists(w, w.id == self.ui.workloadRef))"
+                  message: "spec.ui.workloadRef must reference an existing workloads[].id"
+                # R16: the UI workload must be type=deployment, replicas=1, no transport
+                - rule: "!has(self.ui) || self.workloads.exists(w, w.id == self.ui.workloadRef && w.type == 'deployment' && !has(w.transport) && (!has(w.replicas) || w.replicas == 1))"
+                  message: "the workload referenced by spec.ui.workloadRef must be type=deployment with replicas=1 and no transport"
+                # R17: ui.egress.internal[].workloadRef must reference an existing
+                # workloads[].id that is itself NOT an MCP server (no transport).
+                - rule: "!has(self.ui) || !has(self.ui.egress) || !has(self.ui.egress.internal) || self.ui.egress.internal.all(e, self.workloads.exists(w, w.id == e.workloadRef && !has(w.transport)))"
+                  message: "spec.ui.egress.internal[].workloadRef must reference a non-MCP-server workload"
+                # R18: ui.defaultPath must not begin with a scheme prefix that
+                # the field-level regex doesn't catch when the URL also starts
+                # with '/'. The regex enforces the leading '/'; this rule blocks
+                # values whose first segment matches /<scheme>: forms.
+                - rule: "!has(self.ui) || !has(self.ui.defaultPath) || !self.ui.defaultPath.matches('^/[a-zA-Z][a-zA-Z0-9+.\\\\-]*:.*')"
+                  message: "spec.ui.defaultPath must not include a scheme prefix"
+                # O1: oauthClients have TWO consumers — the sandbox UI embed
+                # (foreground end-user OAuth via the callback IPC) AND
+                # background workloads (Path B: backgroundAccess: true clients
+                # referenced from workloads[].oauthClientRefs). Either consumer
+                # is enough to justify declaring an oauthClient, so this rule
+                # admits a recipe with no spec.ui as long as every declared
+                # client is consumed by at least one workload's oauthClientRefs
+                # — preventing the dead-config case where an author declares
+                # oauthClients but wires up nothing.
+                - rule: |-
+                    !has(self.oauthClients) || size(self.oauthClients) == 0 ||
+                    has(self.ui) ||
+                    self.oauthClients.all(c,
+                      has(self.workloads) &&
+                      self.workloads.exists(w,
+                        has(w.oauthClientRefs) &&
+                        w.oauthClientRefs.exists(r, r == c.id)
+                      )
+                    )
+                  message: "spec.oauthClients requires either spec.ui or a workloads[].oauthClientRefs consumer for every client"
+                # O3: oauthClients[].id must be unique within oauthClients[].
+                - rule: "!has(self.oauthClients) || self.oauthClients.all(c, self.oauthClients.exists_one(t, t.id == c.id))"
+                  message: "spec.oauthClients[].id must be unique within oauthClients[]"
+                # O4: workloads[].oauthClientRefs is for background OAuth
+                # (Path B) — MCP transport workloads reach providers via the
+                # MCP proxy and must not also receive a broker-token mount.
+                # Reconciler enforces the same rule plus backgroundAccess and
+                # ref-resolution; this admission gate fails fast at apply.
+                - rule: |-
+                    !has(self.workloads) ||
+                    self.workloads.all(w,
+                      !has(w.transport) ||
+                      !has(w.oauthClientRefs) ||
+                      size(w.oauthClientRefs) == 0
+                    )
+                  message: "workloads[].oauthClientRefs is not allowed on MCP transport workloads"
+                # PS1: pluginWorkloadSdk must declare at least one capability family.
+                - rule: "!has(self.pluginWorkloadSdk) || (has(self.pluginWorkloadSdk.promptBridge) || has(self.pluginWorkloadSdk.clientNotifications))"
+                  message: "spec.pluginWorkloadSdk must declare at least one capability family (promptBridge or clientNotifications)"
+                # PS2: no wildcard event types at the CRD level — only explicit
+                # admin grants (control-api) may use wildcards.
+                - rule: "!has(self.pluginWorkloadSdk) || !has(self.pluginWorkloadSdk.clientNotifications) || self.pluginWorkloadSdk.clientNotifications.allowedEventTypes.all(t, !t.contains('*'))"
+                  message: "spec.pluginWorkloadSdk.clientNotifications.allowedEventTypes must not contain wildcards"
+                # PS3: no wildcard models at the CRD level.
+                - rule: "!has(self.pluginWorkloadSdk) || !has(self.pluginWorkloadSdk.promptBridge) || !has(self.pluginWorkloadSdk.promptBridge.allowedModels) || self.pluginWorkloadSdk.promptBridge.allowedModels.all(m, !m.contains('*'))"
+                  message: "spec.pluginWorkloadSdk.promptBridge.allowedModels must not contain wildcards"
+                # PS4 (allowedCallers reference existing workloads[].id) is
+                # enforced in the WRC reconciler — like W2, the nested lookup
+                # is too costly at the workload ceiling.
+              properties:
+                description:
+                  type: string
+                  description: Human-readable description of what this recipe provides.
+                gfs:
+                  type: object
+                  description: >-
+                    Optional gfs (Global File System) intents. publishTargets:
+                    folders where the recipe may publish artifact references
+                    (requires write on the target, brokered via the recipe's
+                    3rd-party host). mounts: gfs resources surfaced to the recipe's
+                    mcp-host — INTENT ONLY, wired only if the host identity already
+                    holds the scopes; insufficient scope => PendingMount, never an
+                    escalation. Editing this field never grants access.
+                  properties:
+                    publishTargets:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - drive
+                          - target
+                        properties:
+                          drive:
+                            type: string
+                          target:
+                            type: string
+                            description: Destination folder resourceId (32-hex) or path.
+                    mounts:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - drive
+                          - target
+                          - scopes
+                        properties:
+                          drive:
+                            type: string
+                          target:
+                            type: string
+                          scopes:
+                            type: array
+                            items:
+                              type: string
+                              enum:
+                                - gfs.read
+                                - gfs.write
+                                - gfs.delete
+                                - gfs.manage_acl
+                                - gfs.share
+                contextRef:
+                  type: string
+                  description: >-
+                    Reference to the Context CRD. Required when any workload
+                    exposes an MCP transport (enables Discovery API registration).
+                coordinatorImage:
+                  type: string
+                  minLength: 1
+                  maxLength: 512
+                  pattern: "^[A-Za-z0-9][A-Za-z0-9._/:@-]*$"
+                  description: >-
+                    Operator-approved custom coordinator image. When set, WRC may
+                    start the workflow coordinator Pod with this image after
+                    image policy validation. Custom coordinator workflows may
+                    declare id-only steps because developer code interprets the
+                    mounted workflow spec.
+                runtimeEgress:
+                  type: object
+                  description: >-
+                    Shared WorkflowRecipe runtime egress intent. In the current
+                    implementation this may open public TCP 80/443 NetworkPolicy
+                    egress for platform-owned snippet runners or custom
+                    coordinator pods. Host-level enforcement for custom images is
+                    tracked as follow-up hardening. For exact-host egress, DNS
+                    refresh retains previous public CIDRs for the configured
+                    overlap window; operators should treat that overlap as a
+                    bounded trust window, not only as an availability setting.
+                  properties:
+                    http:
+                      type: object
+                      properties:
+                        egressClass:
+                          type: string
+                          enum:
+                            - exact-host
+                            - public-web
+                          default: exact-host
+                          description: >-
+                            exact-host resolves allowedHosts into temporary public
+                            CIDR NetworkPolicies. public-web is an explicit
+                            operator opt-in for public TCP 80/443 with private,
+                            metadata, service, documentation, multicast, and
+                            reserved IPv4 ranges blocked.
+                        allowedHosts:
+                          type: array
+                          maxItems: 20
+                          items:
+                            type: string
+                            maxLength: 253
+                            pattern: "^[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+                agent:
+                  type: object
+                  description: >-
+                    Default agent configuration for workflow execution.
+                  properties:
+                    model:
+                      type: string
+                      description: LLM model name (e.g., glm-4.7, gpt-4o, claude-3-opus).
+                    provider:
+                      type: string
+                      enum: [openai, claude, zai, bailian]
+                      description: LLM provider.
+                    secretRef:
+                      type: object
+                      description: Reference to Secret containing API key.
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                    soulRef:
+                      type: object
+                      description: Reference to SOUL.md in object storage.
+                      properties:
+                        storageRef:
+                          type: object
+                          properties:
+                            bucket:
+                              type: string
+                            key:
+                              type: string
+                            provider:
+                              type: string
+                              enum: [s3, gcs, spaces, minio]
+                            region:
+                              type: string
+                            endpoint:
+                              type: string
+                steps:
+                  type: array
+                  maxItems: 100
+                  description: >-
+                    Ordered list of workflow steps. Presence of this field
+                    triggers workflow reconciliation instead of workload deployment.
+                  items:
+                    type: object
+                    x-kubernetes-validations:
+                      - rule: "!(has(self.run) && has(self.instruction))"
+                        message: "step cannot define both run and instruction"
+                      - rule: "!(has(self.run) && has(self.agent))"
+                        message: "step cannot define both run and agent"
+                    required:
+                      - id
+                    properties:
+                      id:
+                        type: string
+                        maxLength: 63
+                        pattern: "^[a-z][a-z0-9-]*$"
+                        description: Unique step identifier.
+                      instruction:
+                        type: string
+                        maxLength: 10000
+                        description: Natural language instruction for the agent.
+                      run:
+                        type: object
+                        description: TypeScript snippet invocation for steps that do not require an agent.
+                        x-kubernetes-validations:
+                          - rule: "has(self.type) && self.type == 'snippet' && has(self.language) && has(self.code)"
+                            message: "run must define type=snippet with language and code"
+                        properties:
+                          type:
+                            type: string
+                            enum: [snippet]
+                            description: Run execution type. Only TypeScript snippets are supported.
+                          language:
+                            type: string
+                            enum: [typescript]
+                            description: Snippet language. Only TypeScript is supported in v1.
+                          code:
+                            type: string
+                            maxLength: 20000
+                            description: Inline TypeScript snippet source.
+                          capabilities:
+                            type: object
+                            description: Explicit allowlist for snippet SDK capabilities.
+                            properties:
+                              http:
+                                type: object
+                                properties:
+                                  egressClass:
+                                    type: string
+                                    enum:
+                                      - exact-host
+                                      - public-web
+                                    default: exact-host
+                                    description: >-
+                                      exact-host restricts snippet HTTP calls to
+                                      allowedHosts. public-web is explicit opt-in
+                                      and must not declare allowedHosts.
+                                  allowedHosts:
+                                    type: array
+                                    maxItems: 20
+                                    items:
+                                      type: string
+                                      maxLength: 253
+                                      pattern: "^[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+                              secrets:
+                                type: array
+                                maxItems: 20
+                                x-kubernetes-list-type: map
+                                x-kubernetes-list-map-keys: [alias]
+                                items:
+                                  type: object
+                                  required: [alias, secretRef]
+                                  properties:
+                                    alias:
+                                      type: string
+                                      maxLength: 63
+                                      pattern: "^[A-Za-z][A-Za-z0-9_]*$"
+                                    secretRef:
+                                      type: object
+                                      required: [name, key]
+                                      properties:
+                                        name:
+                                          type: string
+                                          maxLength: 253
+                                        key:
+                                          type: string
+                                          maxLength: 253
+                              mongo:
+                                type: object
+                                required: [workloads, access]
+                                properties:
+                                  workloads:
+                                    type: array
+                                    maxItems: 20
+                                    items:
+                                      type: string
+                                      maxLength: 63
+                                  access:
+                                    type: string
+                                    enum: [read, readWrite]
+                              postgres:
+                                type: object
+                                required: [workloads, access]
+                                properties:
+                                  workloads:
+                                    type: array
+                                    maxItems: 20
+                                    items:
+                                      type: string
+                                      maxLength: 63
+                                  access:
+                                    type: string
+                                    enum: [read, readWrite]
+                              mcp:
+                                type: object
+                                properties:
+                                  servers:
+                                    type: array
+                                    maxItems: 20
+                                    items:
+                                      type: string
+                                      maxLength: 253
+                                  allowedTools:
+                                    type: object
+                                    properties:
+                                      include:
+                                        type: array
+                                        maxItems: 50
+                                        items:
+                                          type: string
+                                          maxLength: 253
+                              artifacts:
+                                type: object
+                                properties:
+                                  maxCount:
+                                    type: integer
+                                    minimum: 1
+                                    maximum: 20
+                              pluginWorkloadSdk:
+                                type: object
+                                description: >-
+                                  Snippet-scoped subset of the Plugin Workload
+                                  SDK capability. Effective limits are the
+                                  intersection with spec.pluginWorkloadSdk.
+                                properties:
+                                  promptBridge:
+                                    type: object
+                                    properties:
+                                      allowedModels:
+                                        type: array
+                                        maxItems: 32
+                                        items:
+                                          type: string
+                                          maxLength: 128
+                                      maxOutputTokens:
+                                        type: integer
+                                        minimum: 1
+                                  clientNotifications:
+                                    type: object
+                                    required: [allowedEventTypes]
+                                    properties:
+                                      allowedEventTypes:
+                                        type: array
+                                        minItems: 1
+                                        maxItems: 64
+                                        items:
+                                          type: string
+                                          maxLength: 128
+                                      allowedTargetRefs:
+                                        type: array
+                                        maxItems: 64
+                                        items:
+                                          type: string
+                                          maxLength: 256
+                                      allowedUserRefs:
+                                        type: boolean
+                      dependsOn:
+                        type: array
+                        maxItems: 100
+                        items:
+                          type: string
+                          maxLength: 63
+                        description: IDs of steps that must complete before this step.
+                      mcpServers:
+                        type: array
+                        maxItems: 20
+                        items:
+                          type: string
+                          maxLength: 253
+                        description: MCP server IDs available during this step.
+                      timeoutSeconds:
+                        type: integer
+                        minimum: 1
+                        default: 300
+                        description: Step execution timeout in seconds.
+                      backoffSeconds:
+                        type: integer
+                        minimum: 1
+                        maximum: 3600
+                        default: 30
+                        description: Backoff delay in seconds before retrying a failed step.
+                      maxRetries:
+                        type: integer
+                        minimum: 1
+                        maximum: 5
+                        default: 2
+                        description: Maximum retry attempts for transient failures (ECONNRESET, timeout).
+                      allowedTools:
+                        type: object
+                        description: Tool allowlist for this step. Only listed tools are presented to the LLM.
+                        properties:
+                          include:
+                            type: array
+                            maxItems: 100
+                            items:
+                              type: string
+                              maxLength: 253
+                            description: Tool names in serverName__toolName format.
+                      toolChoice:
+                        type: string
+                        enum: [auto, none, required]
+                        description: Optional LLM tool choice policy for this step.
+                      maxIterations:
+                        type: integer
+                        minimum: 1
+                        maximum: 100
+                        default: 50
+                        description: Maximum LLM tool-calling iterations for this step.
+                      agent:
+                        type: object
+                        description: Per-step agent override.
+                        properties:
+                          model:
+                            type: string
+                          provider:
+                            type: string
+                            enum: [openai, claude, zai, bailian]
+                          soul:
+                            type: string
+                            description: Per-step SOUL content override.
+                      requiresApproval:
+                        type: object
+                        description: >-
+                          When present, the step pauses before execution and waits
+                          for a human decision. The approval request is routed to
+                          target.userId (or all members of target.teamId), and the
+                          agent resumes only after an explicit approve.
+                        required:
+                          - target
+                          - message
+                        properties:
+                          target:
+                            type: object
+                            description: >-
+                              Who must approve this step. Exactly one of userId or
+                              teamId MUST be set.
+                            properties:
+                              userId:
+                                type: string
+                                maxLength: 253
+                                description: Target user identifier (UUID or login).
+                              teamId:
+                                type: string
+                                maxLength: 253
+                                description: Target team identifier.
+                            oneOf:
+                              - required: [userId]
+                              - required: [teamId]
+                          message:
+                            type: string
+                            minLength: 1
+                            maxLength: 2000
+                            description: Human-readable prompt shown to the approver.
+                          timeoutSeconds:
+                            type: integer
+                            minimum: 30
+                            maximum: 604800
+                            default: 3600
+                            description: >-
+                              Approval TTL. If no decision is received within this
+                              window, the step is auto-rejected as expired.
+                mcpServers:
+                  type: array
+                  description: MCP servers available to workflow steps.
+                  items:
+                    type: object
+                    required:
+                      - id
+                    properties:
+                      id:
+                        type: string
+                        description: Unique MCP server identifier.
+                      endpoint:
+                        type: string
+                        description: >-
+                          MCP server HTTP endpoint. Optional for workloads with transport —
+                          the reconciler auto-computes the endpoint from the workload's
+                          Service DNS name and port.
+                output:
+                  type: object
+                  description: Output destination for workflow results.
+                  properties:
+                    destination:
+                      type: string
+                      enum: [configmap, secret, stdout, pvc]
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                    claimName:
+                      type: string
+                      description: Existing output PVC in sandbox-recipes. When set, WRC mounts it but does not create, resize, or delete it.
+                      maxLength: 253
+                      pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+                    format:
+                      type: string
+                      description: Output file format (used with destination=pvc).
+                      enum: [pdf, xlsx, json, text, html, multi]
+                    storageSize:
+                      type: string
+                      description: PVC storage size (e.g. "256Mi", "1Gi"). Default 256Mi.
+                      pattern: "^[0-9]+(Mi|Gi)$"
+                  x-kubernetes-validations:
+                    - rule: "!has(self.claimName) || (has(self.destination) && self.destination == 'pvc')"
+                      message: "output.claimName requires output.destination=pvc"
+                scheduling:
+                  type: object
+                  description: >-
+                    Enables recurring execution of this recipe via a K8s CronJob.
+                    Only valid when spec.steps[] is non-empty.
+                  properties:
+                    cron:
+                      type: string
+                      maxLength: 100
+                      description: >-
+                        Standard cron expression (five fields), numeric only. E.g. "0 9 * * 1"
+                        for 09:00 every Monday. Named day/month values such as "MON" are
+                        REJECTED at admission: each field must be "*" or match [0-9,-*/].
+                    timezone:
+                      type: string
+                      maxLength: 63
+                      description: IANA timezone name. Defaults to UTC if omitted.
+                      default: "UTC"
+                    concurrencyPolicy:
+                      type: string
+                      enum: [Forbid, Replace, Allow]
+                      default: Forbid
+                      description: >-
+                        Forbid: skip trigger if a child is still running.
+                        Replace: cancel running child, start new one.
+                        Allow: permit concurrent executions up to policy limit.
+                    successfulHistoryLimit:
+                      type: integer
+                      minimum: 0
+                      default: 3
+                      description: Number of successful child CRDs to retain.
+                    failedHistoryLimit:
+                      type: integer
+                      minimum: 0
+                      default: 1
+                      description: Number of failed child CRDs to retain.
+                    suspend:
+                      type: boolean
+                      default: false
+                      description: >-
+                        When true, no new triggers are fired.
+                        Existing children run to completion.
+                  required:
+                    - cron
+                triggers:
+                  type: object
+                  description: >-
+                    Declares when and how this recipe can run. Presence of a
+                    sub-field enables that trigger mode; absence disables it.
+                    Recipes without this field use legacy behavior (implicit
+                    onDemand with requiresApproval=true).
+                  properties:
+                    onDemand:
+                      type: object
+                      description: >-
+                        PRESENCE enables manual triggering via Desktop App or
+                        agent tool call. Without this field, no user or agent
+                        can trigger the recipe by hand.
+                      properties:
+                        requiresApproval:
+                          type: boolean
+                          default: true
+                          description: >-
+                            When true, each manual trigger goes through the
+                            approval gateway before execution begins.
+                        allowedActors:
+                          type: array
+                          maxItems: 3
+                          items:
+                            type: string
+                            enum: [user, autonomous, scheduled]
+                          default: [user]
+                          description: >-
+                            Who may trigger on demand. "user" = end-user via
+                            Desktop App; "autonomous" = first-party mcp-host
+                            agents holding a service JWT with matching hostRefs[].
+                    schedule:
+                      type: object
+                      description: >-
+                        PRESENCE enables cron-based scheduled triggering. WRC
+                        emits a CronJob that calls POST /trigger with a
+                        system-attributed JWT.
+                      required: [cron]
+                      properties:
+                        cron:
+                          type: string
+                          pattern: "^(\\S+\\s+){4}\\S+$"
+                          description: Five-field cron expression (min hour dom mon dow).
+                        timezone:
+                          type: string
+                          default: "UTC"
+                          description: IANA timezone name.
+                        concurrencyPolicy:
+                          type: string
+                          enum: [Forbid, Replace, Allow]
+                          default: Forbid
+                          description: >-
+                            Forbid: skip trigger if a run is still active.
+                            Replace: cancel active run, start new one.
+                            Allow: permit concurrent executions.
+                        suspend:
+                          type: boolean
+                          default: false
+                          description: When true, no new triggers are fired.
+                        registeredUserId:
+                          type: string
+                          format: uuid
+                          description: >-
+                            User on whose behalf scheduled runs are attributed
+                            in audit logs. Captured at registration time.
+                runRetention:
+                  type: object
+                  description: >-
+                    Controls how many completed runs are retained in the
+                    live workflow_runs table before the archive cron moves
+                    them to workflow_runs_audit and deletes the child
+                    WorkflowRecipe (persist-then-delete ordering invariant).
+                  properties:
+                    successfulHistoryLimit:
+                      type: integer
+                      minimum: 0
+                      maximum: 50
+                      default: 5
+                      description: Keep last N successful runs.
+                    failedHistoryLimit:
+                      type: integer
+                      minimum: 0
+                      maximum: 100
+                      default: 20
+                      description: Keep last N failed runs.
+                    ttlSecondsAfterFinished:
+                      type: integer
+                      minimum: 0
+                      maximum: 2592000
+                      default: 2592000
+                      description: >-
+                        Retain the finished run row, child WorkflowRecipe,
+                        and run-scoped artifacts for this many seconds after
+                        completion. If omitted, the platform uses the maximum:
+                        2592000 seconds (30 days). Reaper checks every
+                        5 minutes.
+                    maxRunDurationSeconds:
+                      type: integer
+                      minimum: 1
+                      default: 604800
+                      description: >-
+                        Force-fail active runs that exceed this duration
+                        (seconds). Must be at least 1. Default 604800 (7 days).
+                ui:
+                  type: object
+                  description: >-
+                    Optional sandbox UI exposed by this recipe. When set,
+                    the referenced workload is deployed into the sandbox-ui
+                    namespace and reachable from the Desktop App via the
+                    rpc-proxy sandbox-ui path. Exactly zero or one UI per
+                    recipe.
+                  required:
+                    - workloadRef
+                    - port
+                  properties:
+                    workloadRef:
+                      type: string
+                      pattern: "^[a-z][a-z0-9-]*$"
+                      maxLength: 63
+                      description: >-
+                        ID of the workloads[] entry that serves the UI HTTP
+                        traffic. Must reference an existing workload of
+                        type=deployment with replicas=1 and no transport.
+                    port:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+                      description: >-
+                        TCP port on the UI workload that serves HTTP. The
+                        cluster's rpc-proxy enforces an admin-controlled
+                        allow-list on top of this range
+                        (RPC_PROXY_SANDBOX_UI_ALLOWED_PORTS, default `8080`).
+                        A port outside the allow-list is accepted by the CRD
+                        but rejected by rpc-proxy with `502 port_not_allowed`
+                        on the first view request. See spec §10.1.
+                    title:
+                      type: string
+                      maxLength: 100
+                      description: Human-readable title shown in the Desktop App picker.
+                    icon:
+                      type: string
+                      maxLength: 32768
+                      pattern: "^data:[a-zA-Z]+/[a-zA-Z0-9+.\\-]+;base64,[A-Za-z0-9+/=]+$"
+                      description: >-
+                        Inline icon as a data: URI (base64-encoded). Remote
+                        URLs are intentionally not supported. Max 32 KB.
+                    defaultPath:
+                      type: string
+                      maxLength: 1024
+                      # RE2-compatible (no lookaheads): either bare "/" or
+                      # "/" followed by a non-"/" non-whitespace char and
+                      # then any non-whitespace tail. The
+                      # x-kubernetes-validations rule below is the
+                      # defence-in-depth check for the protocol-relative
+                      # case using CEL.
+                      pattern: "^/([^/\\s][^\\s]*)?$"
+                      default: "/"
+                      description: >-
+                        Path the embed loads on first open. Must start with
+                        a single '/' (no protocol-relative URLs). Whitespace
+                        rejected.
+                    egress:
+                      type: object
+                      description: >-
+                        Egress allowances for the UI workload. Default is
+                        deny-all except DNS (inherited from the namespace's
+                        infra policies); declare additional egress here.
+                      properties:
+                        internal:
+                          type: array
+                          # Cost-budget bound for CEL rule R17 (nested
+                          # iteration with workloads). Runtime validation can
+                          # lower this via CLERUM_WORKFLOW_UI_EGRESS_INTERNAL_MAX_ITEMS,
+                          # but Kubernetes admission needs a static ceiling.
+                          maxItems: 25
+                          description: >-
+                            Sibling workloads in this recipe that the UI
+                            may reach. Targets MUST resolve to the
+                            sandbox-recipes namespace; MCP servers are not
+                            valid internal targets.
+                          items:
+                            type: object
+                            required:
+                              - workloadRef
+                              - port
+                            properties:
+                              workloadRef:
+                                type: string
+                                pattern: "^[a-z][a-z0-9-]*$"
+                                maxLength: 63
+                              port:
+                                type: integer
+                                minimum: 1
+                                maximum: 65535
+                        external:
+                          type: array
+                          # Reasonable upper bound; external egress lists
+                          # in the wild are short (a handful of vendor APIs).
+                          maxItems: 20
+                          description: >-
+                            External egress allowances. Each entry is a DNS
+                            hostname (fqdn:); WRC resolves it to ipBlock
+                            rules at reconcile time and re-resolves on a
+                            periodic tick. Static CIDR is not accepted —
+                            raw IPs are unreviewable, freeze across vendor
+                            IP rotations, and can authorize cloud-metadata
+                            or sibling-tenant ranges that the RFC1918 carve-
+                            out doesn't trim (e.g. 169.254/16).
+                          items:
+                            type: object
+                            required:
+                              - fqdn
+                              - port
+                            properties:
+                              fqdn:
+                                type: string
+                                # Multi-label DNS host (no IP literals, no
+                                # localhost) — same regex used by webhook
+                                # jwksUrl validation (W12).
+                                maxLength: 253
+                                pattern: "^[a-zA-Z][a-zA-Z0-9-]*(\\.[a-zA-Z][a-zA-Z0-9-]*)+$"
+                              port:
+                                type: integer
+                                minimum: 1
+                                maximum: 65535
+                              reason:
+                                type: string
+                                maxLength: 500
+                                description: Free-text rationale for security review.
+                  x-kubernetes-validations:
+                    # CEL `!= null` is rejected by the schema validator; use
+                    # `has()` instead, which is the idiomatic null-check.
+                    - rule: "!has(self.defaultPath) || !self.defaultPath.startsWith('//')"
+                      message: "ui.defaultPath must not be a protocol-relative URL"
+                workloads:
+                  type: array
+                  minItems: 0
+                  # maxItems is required to keep the cost of CEL rules that
+                  # iterate workloads (R3, R9-R11) under the per-CRD budget.
+                  # CLERUM_WORKFLOW_MAX_WORKLOADS_PER_RECIPE can lower this
+                  # runtime limit, but Kubernetes admission needs a static CRD
+                  # ceiling for CEL cost accounting.
+                  maxItems: 25
+                  description: >-
+                    List of workload definitions. Each workload becomes a
+                    Kubernetes resource (Deployment, StatefulSet, CronJob, Job, or DaemonSet).
+                    May be empty for workflow-only recipes.
+                  items:
+                    type: object
+                    required:
+                      - id
+                      - type
+                      - image
+                    x-kubernetes-validations:
+                      - rule: "self.type != 'cronjob' || has(self.schedule)"
+                        message: "CronJob workloads must specify a schedule"
+                    properties:
+                      id:
+                        type: string
+                        description: Unique identifier within this recipe.
+                        pattern: "^[a-z][a-z0-9-]*$"
+                        # DNS-1123 label limit; bounds CEL string-compare cost.
+                        maxLength: 63
+                      type:
+                        type: string
+                        enum:
+                          - deployment
+                          - statefulset
+                          - cronjob
+                          - job
+                          - daemonset
+                        description: Kubernetes workload type.
+                      image:
+                        type: string
+                        description: Container image reference.
+                      imagePullPolicy:
+                        type: string
+                        enum:
+                          - Always
+                          - IfNotPresent
+                          - Never
+                        description: Image pull policy for the container.
+                      port:
+                        type: integer
+                        description: Primary container port.
+                      replicas:
+                        type: integer
+                        minimum: 0
+                        # CLERUM_WORKFLOW_STATEFULSET_MAX_REPLICAS can lower
+                        # this runtime limit, but Kubernetes admission needs a
+                        # static CRD ceiling for schema validation.
+                        maximum: 20
+                        description: Number of replicas (not applicable to DaemonSet/Job).
+                      command:
+                        type: array
+                        items:
+                          type: string
+                        description: Override container entrypoint.
+                      args:
+                        type: array
+                        items:
+                          type: string
+                        description: Arguments to the container entrypoint.
+                      env:
+                        type: array
+                        description: Environment variables for the container. env[].value is optional and follows Kubernetes EnvVar.value semantics; omitted value defaults to an empty string. Clerum templates are resolved only in string values before Pods are created.
+                        items:
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
+                            value:
+                              type: string
+                      volumeMounts:
+                        type: array
+                        description: Volume mounts referencing recipe resources.
+                        items:
+                          type: object
+                          required:
+                            - name
+                            - mountPath
+                          properties:
+                            name:
+                              type: string
+                              description: Name of the resource (PVC/Secret/ConfigMap) to mount.
+                            mountPath:
+                              type: string
+                              description: Path inside the container.
+                            subPath:
+                              type: string
+                            readOnly:
+                              type: boolean
+                      envSecret:
+                        type: object
+                        description: Secret-backed environment variables configuration for batch mapping.
+                        required:
+                          - name
+                          - keys
+                        properties:
+                          name:
+                            type: string
+                            description: Name of the Secret to reference.
+                          keys:
+                            type: array
+                            description: Mapping from Secret keys to environment variable names.
+                            items:
+                              type: object
+                              required:
+                                - secretKey
+                                - envVar
+                              properties:
+                                secretKey:
+                                  type: string
+                                  description: Key within the Secret to reference.
+                                envVar:
+                                  type: string
+                                  description: Name of the environment variable to create.
+                                optional:
+                                  type: boolean
+                                  description: |
+                                    When true, this env var is omitted from the pod spec if the
+                                    Secret or key is missing at reconcile time (no pod failure).
+                                    When false (default), the env var is projected unconditionally
+                                    and the kubelet fails the pod with CreateContainerConfigError
+                                    if the key is absent.
+                      resources:
+                        type: object
+                        description: CPU/memory requests and limits.
+                        properties:
+                          requests:
+                            type: object
+                            properties:
+                              cpu:
+                                type: string
+                              memory:
+                                type: string
+                          limits:
+                            type: object
+                            properties:
+                              cpu:
+                                type: string
+                              memory:
+                                type: string
+                      healthCheck:
+                        type: object
+                        description: Health check configuration for liveness/readiness probes.
+                        properties:
+                          type:
+                            type: string
+                            enum:
+                              - http
+                              - tcp
+                              - exec
+                          path:
+                            type: string
+                            description: HTTP path (for http type).
+                          port:
+                            type: integer
+                            description: Port for http/tcp probes.
+                          command:
+                            type: array
+                            items:
+                              type: string
+                            description: Command for exec probe.
+                          initialDelaySeconds:
+                            type: integer
+                          periodSeconds:
+                            type: integer
+                          timeoutSeconds:
+                            type: integer
+                          failureThreshold:
+                            type: integer
+                      dependsOn:
+                        type: array
+                        items:
+                          type: string
+                        description: IDs of workloads that must be ready before this one starts.
+                      imagePullSecrets:
+                        type: array
+                        description: Docker registry secrets for pulling images from private registries.
+                        items:
+                          type: string
+                      oauthClientRefs:
+                        type: array
+                        maxItems: 8
+                        description: >-
+                          oauthClient ids (from spec.oauthClients[], each must
+                          have backgroundAccess: true) this workload uses.
+                          Opting in mounts the recipe OAuth broker token as a
+                          read-only volume and grants egress to the control-api
+                          broker route. Only valid on non-MCP, non-UI
+                          workloads. Path B, spec §9.2.
+                        items:
+                          type: string
+                          maxLength: 63
+                          pattern: "^[a-z0-9-]{1,63}$"
+                      egressBindings:
+                        type: array
+                        maxItems: 20
+                        description: >-
+                          Network egress bindings to external services. exact-host
+                          requires a public DNS hostname and port. public-web is
+                          explicit opt-in for public TCP 80/443 and must not
+                          declare dns, port, or protocol.
+                        items:
+                          type: object
+                          maxProperties: 4
+                          properties:
+                            egressClass:
+                              type: string
+                              maxLength: 10
+                              enum:
+                                - exact-host
+                                - public-web
+                              default: exact-host
+                              description: >-
+                                exact-host targets one DNS hostname plus port.
+                                public-web opens public TCP 80/443 with private
+                                and special ranges blocked by NetworkPolicy.
+                            dns:
+                              type: string
+                              minLength: 1
+                              maxLength: 128
+                              pattern: "^[a-z0-9][a-z0-9.-]*\\.[a-z0-9][a-z0-9.-]*[a-z0-9]$"
+                              description: DNS hostname of the external service.
+                            port:
+                              type: integer
+                              minimum: 1
+                              maximum: 65535
+                              description: Port number for the external service.
+                            protocol:
+                              type: string
+                              maxLength: 3
+                              enum:
+                                - TCP
+                                - UDP
+                              description: Network protocol.
+                      includeWhen:
+                        type: string
+                        description: >-
+                          CEL expression evaluated against inputs.
+                          Workload is only deployed when this evaluates to true.
+                      transport:
+                        type: object
+                        description: MCP transport config (makes this workload an MCP server).
+                        properties:
+                          type:
+                            type: string
+                            enum:
+                              - sse
+                              - streamableHttp
+                              - stdio
+                          path:
+                            type: string
+                            description: HTTP path for the MCP endpoint.
+                      # Per-workload security overrides
+                      security:
+                        type: object
+                        description: >-
+                          Per-workload security overrides. Allows specific workloads
+                          to run as a non-root UID (e.g., PostgreSQL UID 70) while
+                          maintaining the recipe-level isolation model.
+                        properties:
+                          runAsUser:
+                            type: integer
+                            minimum: 1
+                            description: >-
+                              UID to run the container as. Minimum 1 prevents root.
+                              Example: 70 for PostgreSQL, 999 for MongoDB.
+                          runAsGroup:
+                            type: integer
+                            minimum: 1
+                            description: GID to run the container as.
+                          fsGroup:
+                            type: integer
+                            minimum: 1
+                            description: >-
+                              Filesystem group for volume ownership. Ensures PVC
+                              directories are accessible by the specified group.
+                          addCapabilities:
+                            type: array
+                            items:
+                              type: string
+                              enum:
+                                - CHOWN
+                                - FOWNER
+                                - DAC_OVERRIDE
+                                - NET_BIND_SERVICE
+                            description: >-
+                              Linux capabilities to add back (after DROP ALL).
+                              Use sparingly for images that require specific caps,
+                              e.g., CHOWN, FOWNER, DAC_OVERRIDE for PostgreSQL.
+                          prepareVolumeOwnership:
+                            type: boolean
+                            description: >-
+                              When true, WRC inserts a root init container that
+                              chowns writable volume mounts to runAsUser/runAsGroup
+                              before the non-root workload starts. Requires
+                              runAsUser and a writable volumeMount. Use only
+                              for storage backends that do not honor fsGroup.
+                              The workload image must provide POSIX sh, chown,
+                              and chmod; distroless images are incompatible.
+                      # CronJob-specific fields
+                      schedule:
+                        type: string
+                        description: Cron schedule expression (required for cronjob type).
+                      timeZone:
+                        type: string
+                        description: IANA timezone for the cron schedule.
+                      # StatefulSet-specific fields
+                      serviceName:
+                        type: string
+                        description: Headless service name (for statefulset type).
+                      volumeClaimTemplates:
+                        type: array
+                        # CLERUM_WORKFLOW_STATEFULSET_MAX_VOLUME_CLAIM_TEMPLATES
+                        # can lower this runtime limit, but Kubernetes
+                        # admission needs a static CRD ceiling.
+                        maxItems: 4
+                        description: PVC templates for StatefulSet persistent storage.
+                        items:
+                          type: object
+                          required:
+                            - name
+                            - storageClass
+                            - accessMode
+                            - size
+                          properties:
+                            name:
+                              type: string
+                              description: PVC name (metadata.name).
+                            storageClass:
+                              type: string
+                              description: Storage class name (e.g., do-block-storage).
+                            accessMode:
+                              type: string
+                              enum:
+                                - ReadWriteOnce
+                                - ReadOnlyMany
+                                - ReadWriteMany
+                              description: PVC access mode.
+                            size:
+                              type: string
+                              description: Storage size (e.g., 10Gi, 100Gi).
+                      # Job-specific fields
+                      backoffLimit:
+                        type: integer
+                        description: Number of retries before marking as failed (for job type).
+                webhooks:
+                  type: array
+                  maxItems: 16
+                  description: >-
+                    External-provider HTTP webhooks. Each entry mounts a
+                    verified route on a per-recipe webhook gateway pod and
+                    forwards the verified payload to a non-MCP workload in
+                    this recipe. The public URL shape is
+                    "<host>/api/v1/webhook/<recipeNs>/<recipeName>/<id>".
+                  items:
+                    type: object
+                    required:
+                      - id
+                      - workloadRef
+                      - path
+                      - verification
+                    x-kubernetes-validations:
+                      # W4: methods must include POST when specified
+                      - rule: "!has(self.methods) || ('POST' in self.methods)"
+                        message: "spec.webhooks[].methods must include POST when specified"
+                      # W7: secretRef required for all schemes EXCEPT jwt-bearer-jwks
+                      - rule: "self.verification.scheme == 'jwt-bearer-jwks' || has(self.verification.secretRef)"
+                        message: "spec.webhooks[].verification.secretRef is required for all schemes except jwt-bearer-jwks"
+                      # W8: replay required iff scheme == hmac-sha256-timestamp-body
+                      - rule: "self.verification.scheme != 'hmac-sha256-timestamp-body' || has(self.replay)"
+                        message: "spec.webhooks[].replay is required when verification.scheme is hmac-sha256-timestamp-body"
+                      # W9: jwksUrl/issuer/audience required iff scheme == jwt-bearer-jwks
+                      - rule: "self.verification.scheme != 'jwt-bearer-jwks' || (has(self.verification.jwksUrl) && has(self.verification.issuer) && has(self.verification.audience))"
+                        message: "spec.webhooks[].verification must set jwksUrl, issuer, and audience when scheme is jwt-bearer-jwks"
+                      # W12: jwksUrl https:// only with a DNS host that has at
+                      # least one dot (rejects IP literals via the [a-zA-Z] start
+                      # and rejects localhost via the required dot). Reconciler
+                      # does deeper rejection (RFC1918 host resolution etc.).
+                      - rule: "self.verification.scheme != 'jwt-bearer-jwks' || self.verification.jwksUrl.matches('^https://[a-zA-Z][a-zA-Z0-9-]*(\\\\.[a-zA-Z][a-zA-Z0-9-]*)+(:[0-9]+)?(/.*)?$')"
+                        message: "spec.webhooks[].verification.jwksUrl must be https:// with a multi-label DNS host (no IP literals, no localhost)"
+                      # W13: methods may include GET only when verification.setupHandshake
+                      # is set. The handshake is the only mechanism that admits unsigned
+                      # GETs — without it, the gateway has no rule for them.
+                      - rule: "!('GET' in self.methods) || has(self.verification.setupHandshake)"
+                        message: "spec.webhooks[].methods may include GET only when verification.setupHandshake is set"
+                      # W14: meta-hub-challenge requires setupHandshake.secretRef (carries
+                      # the provider-side verify token) AND methods to include GET (the
+                      # strategy's request shape is a GET).
+                      - rule: "!has(self.verification.setupHandshake) || self.verification.setupHandshake.strategy != 'meta-hub-challenge' || (has(self.verification.setupHandshake.secretRef) && 'GET' in self.methods)"
+                        message: "spec.webhooks[].verification.setupHandshake.strategy=meta-hub-challenge requires setupHandshake.secretRef and methods to include GET"
+                    properties:
+                      id:
+                        type: string
+                        # W1 uniqueness enforced at spec level
+                        maxLength: 63
+                        pattern: "^[a-z0-9-]{1,63}$"
+                        description: >-
+                          Stable identifier within this recipe's webhooks[].
+                          Appears in the public URL.
+                      workloadRef:
+                        type: string
+                        # W2 cross-reference enforced in WRC reconciler.
+                        maxLength: 63
+                        pattern: "^[a-z][a-z0-9-]*$"
+                        description: >-
+                          References workloads[].id. Must point to a workload
+                          of type=deployment with no transport (MCP-server
+                          workloads cannot be webhook handlers).
+                      path:
+                        type: string
+                        # W3: must start with '/'; rejects '..' segments,
+                        # '.' segments, '//', and whitespace anywhere.
+                        # A valid segment is either:
+                        #   [^./\s][^/\s]*   — starts with a non-dot, non-slash, non-whitespace char
+                        # or
+                        #   \.+[^./\s][^/\s]* — one or more leading dots followed by a non-dot char
+                        # The "non-dot follow" requirement rejects segments that are
+                        # all dots ('.', '..', '...'); segments like '.well-known' are accepted.
+                        maxLength: 256
+                        pattern: "^/$|^(/[^./\\s][^/\\s]*|/\\.+[^./\\s][^/\\s]*)+$"
+                        description: >-
+                          Path the handler workload sees on the forwarded
+                          request. Must start with '/'. Rejects '..',
+                          '.' segments, whitespace, and '//'.
+                      methods:
+                        type: array
+                        # W4: subset of {POST, GET}; POST presence enforced via CEL
+                        maxItems: 2
+                        items:
+                          type: string
+                          enum: [POST, GET]
+                        default: [POST]
+                        description: >-
+                          HTTP methods the gateway accepts on this webhook.
+                          POST must be present. GET is permitted only for
+                          verification-handshake flows (e.g. WhatsApp's
+                          hub.verify_token GET).
+                      maxBodyBytes:
+                        type: integer
+                        # W5
+                        minimum: 1024
+                        maximum: 10485760
+                        default: 1048576
+                        description: >-
+                          Maximum size of the inbound request body in bytes.
+                          1 KiB to 10 MiB. Default 1 MiB.
+                      optional:
+                        type: boolean
+                        default: false
+                        description: >-
+                          When true, a missing or empty Secret/key referenced
+                          by verification.secretRef (or setupHandshake.secretRef)
+                          does NOT mark the recipe degraded. The gateway keeps
+                          the webhook dormant — every inbound request returns
+                          410 Gone with an X-Clerum-Webhook-State: dormant
+                          header — until the Secret is created. The Secret
+                          watcher then triggers a reconcile that transitions
+                          the entry to active. W7 still requires secretRef to
+                          be present in the spec so the operator declares
+                          intent.
+                      cors:
+                        type: object
+                        description: >-
+                          Browser-CORS policy enforced by the front-door
+                          webhook-proxy. When omitted (or allowedOrigins is
+                          empty), this webhook is server-to-server only:
+                          browser preflights return 403 and real responses
+                          carry no Access-Control-* headers. The per-recipe
+                          gateway never sees this — CORS is applied at the
+                          proxy before the verified payload is forwarded.
+                        properties:
+                          allowedOrigins:
+                            type: array
+                            maxItems: 32
+                            description: >-
+                              Exact-match origin strings the proxy will
+                              echo on preflight and real responses. Each
+                              entry is scheme + host + optional port with
+                              no trailing slash (e.g. https://example.com,
+                              http://localhost:9000). Wildcards are not
+                              accepted — recipe authors must list the
+                              concrete origins their widget runs on.
+                            items:
+                              type: string
+                              maxLength: 253
+                              # http(s)://host[:port], no path, no trailing slash, no wildcards
+                              pattern: "^https?://[a-zA-Z0-9][a-zA-Z0-9.-]*(:[0-9]+)?$"
+                      verification:
+                        type: object
+                        required: [scheme]
+                        description: Per-webhook signature-verification configuration.
+                        properties:
+                          scheme:
+                            type: string
+                            # W6
+                            enum:
+                              - hmac-sha256-body
+                              - hmac-sha256-timestamp-body
+                              - jwt-bearer-jwks
+                              - static-bearer
+                            description: >-
+                              Signature scheme the gateway applies to inbound
+                              requests. See docs/plans/spec-webhooks.md §7.
+                          secretRef:
+                            type: object
+                            required: [name, key]
+                            description: >-
+                              Reference to a Secret in the recipe's
+                              sandbox-recipes namespace. Required for all
+                              schemes except jwt-bearer-jwks.
+                            properties:
+                              name:
+                                type: string
+                                maxLength: 253
+                              key:
+                                type: string
+                                maxLength: 253
+                          signatureHeader:
+                            type: string
+                            # W10
+                            maxLength: 64
+                            pattern: "^[a-zA-Z][a-zA-Z0-9-]{0,63}$"
+                            description: >-
+                              HTTP header that carries the signature.
+                              Required for hmac-* schemes (validated at
+                              reconcile time).
+                          signaturePrefix:
+                            type: string
+                            maxLength: 32
+                            description: >-
+                              Optional prefix stripped from the signature
+                              header before decoding (e.g. "sha256=", "v1=").
+                          signatureEncoding:
+                            type: string
+                            enum: [hex, base64]
+                            default: hex
+                            description: >-
+                              Encoding of the signature value after the
+                              prefix is stripped. Default hex.
+                          tokenHeader:
+                            type: string
+                            # Reuses W10 header-name shape.
+                            maxLength: 64
+                            pattern: "^[a-zA-Z][a-zA-Z0-9-]{0,63}$"
+                            description: >-
+                              static-bearer only. Optional HTTP header to
+                              read the token from. Defaults to
+                              "Authorization" when omitted. Set to a custom
+                              header (e.g. "X-Telegram-Bot-Api-Secret-Token")
+                              for providers that authenticate webhooks via a
+                              non-Authorization header.
+                          tokenPrefix:
+                            type: string
+                            maxLength: 32
+                            description: >-
+                              static-bearer only. Optional prefix stripped
+                              from the header value before constant-time
+                              comparison. Defaults to "Bearer " (with
+                              trailing space). An explicit empty string is
+                              honored as "no prefix" — the entire header
+                              value IS the token (Telegram style).
+                          jwksUrl:
+                            type: string
+                            maxLength: 2048
+                            description: >-
+                              JWKS endpoint URL. Required iff scheme is
+                              jwt-bearer-jwks. Must be https:// with a DNS
+                              host (no IP literals, no localhost).
+                          issuer:
+                            type: string
+                            maxLength: 2048
+                            description: >-
+                              Expected `iss` claim value. Required iff
+                              scheme is jwt-bearer-jwks.
+                          audience:
+                            type: string
+                            maxLength: 2048
+                            description: >-
+                              Expected `aud` claim value. Required iff
+                              scheme is jwt-bearer-jwks.
+                          setupHandshake:
+                            type: object
+                            required: [strategy]
+                            description: >-
+                              Opt-in handshake handler for unsigned setup
+                              pings (Meta hub.verify_token GET, Slack
+                              URL-verification POST, etc.). Only the
+                              strategy's exact request shape bypasses
+                              body-signature verification; everything else
+                              still hits the normal verifier. See spec
+                              §7.5.
+                            properties:
+                              strategy:
+                                type: string
+                                # W14
+                                enum:
+                                  - meta-hub-challenge
+                                  - slack-url-verification
+                                  - stripe-verify
+                                description: >-
+                                  Known-shape handshake strategy implemented
+                                  in the gateway.
+                              secretRef:
+                                type: object
+                                required: [name, key]
+                                description: >-
+                                  Reference to a Secret in the recipe's
+                                  sandbox-recipes namespace. Required for
+                                  meta-hub-challenge (carries the
+                                  provider-side verify token).
+                                properties:
+                                  name:
+                                    type: string
+                                    maxLength: 253
+                                  key:
+                                    type: string
+                                    maxLength: 253
+                      replay:
+                        type: object
+                        required: [timestampHeader, toleranceSec]
+                        description: >-
+                          Replay-window configuration. Required iff scheme
+                          is hmac-sha256-timestamp-body.
+                        properties:
+                          timestampHeader:
+                            type: string
+                            # W10 also applies here
+                            maxLength: 64
+                            pattern: "^[a-zA-Z][a-zA-Z0-9-]{0,63}$"
+                          toleranceSec:
+                            type: integer
+                            # W11
+                            minimum: 10
+                            maximum: 3600
+                            default: 300
+                            description: >-
+                              Maximum |now - ts| in seconds for the request
+                              to be accepted.
+                oauthClients:
+                  type: array
+                  maxItems: 8
+                  description: >-
+                    OAuth providers the recipe acts-on-behalf-of. Each entry
+                    declares a known-shape provider adapter (Salesforce, Slack,
+                    Notion, Microsoft Graph, Google) and pointers to Secrets in
+                    this recipe's sandbox-recipes namespace holding the
+                    provider-side client credentials. Two consumer shapes:
+                    foreground end-user OAuth into the sandbox UI embed (via
+                    spec.ui), and background Path B (backgroundAccess: true,
+                    referenced from workloads[].oauthClientRefs on non-MCP
+                    workloads — typically API/worker/webhook-handler workloads).
+                    Either consumer is sufficient; spec.ui is no longer
+                    required. CEL O1 enforces that every declared client has at
+                    least one consumer. Spec §9.9.
+                  items:
+                    type: object
+                    required:
+                      - id
+                      - provider
+                      - clientIdRef
+                      - clientSecretRef
+                    properties:
+                      id:
+                        type: string
+                        # O3 uniqueness enforced at spec level
+                        maxLength: 63
+                        pattern: "^[a-z0-9-]{1,63}$"
+                        description: >-
+                          Stable identifier within this recipe's
+                          oauthClients[]. Embed surfaces it as the
+                          `clientId` query parameter on `clerum:oauth?` URLs
+                          and as the path segment on the callback URL.
+                      provider:
+                        type: string
+                        # O2: known-shape adapters baked into control-api.
+                        # Adding a provider is a control-api change — recipes
+                        # cannot speak OAuth to arbitrary endpoints.
+                        enum:
+                          - salesforce
+                          - slack
+                          - notion
+                          - microsoft-graph
+                          - google
+                        description: >-
+                          Known-shape adapter. The control-api OAuth
+                          subsystem owns the authorize / token URLs and
+                          response-shape parsing per provider.
+                      clientIdRef:
+                        type: object
+                        required: [name, key]
+                        description: >-
+                          Reference to a Secret in this recipe's
+                          sandbox-recipes namespace holding the OAuth
+                          client_id.
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 253
+                          key:
+                            type: string
+                            maxLength: 253
+                      clientSecretRef:
+                        type: object
+                        required: [name, key]
+                        description: >-
+                          Reference to a Secret in this recipe's
+                          sandbox-recipes namespace holding the OAuth
+                          client_secret.
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 253
+                          key:
+                            type: string
+                            maxLength: 253
+                      scopes:
+                        type: array
+                        maxItems: 32
+                        items:
+                          type: string
+                          maxLength: 128
+                        description: >-
+                          OAuth scopes to request. Provider-specific syntax
+                          (Salesforce uses space-separated single tokens;
+                          Microsoft Graph uses `Resource.Scope` form). The
+                          recipe author is responsible for picking the right
+                          shape per provider.
+                      backgroundAccess:
+                        type: boolean
+                        description: >-
+                          When true, this OAuth client may be connected by an
+                          operator as a recipe-owned `service` grant, letting
+                          background workloads (CronJobs, Deployments) obtain
+                          provider tokens via the control-api broker without an
+                          end-user present. Requires `scopes` to include the
+                          provider's offline/refresh scope. Path B, spec §7.
+                pluginWorkloadSdk:
+                  type: object
+                  description: >-
+                    Plugin Workload SDK capability declaration. Opts plugin
+                    workloads into two controlled side-effect channels:
+                    promptBridge (one-shot LLM call routed through the recipe's
+                    mcp-host) and clientNotifications (notification intent
+                    authorized by control-api, delivered by the Notification
+                    Service). The WRC reconciler validates this block and
+                    persists the validated capability to
+                    status.pluginWorkloadSdk; runtime enforcement is gated by
+                    the PLUGIN_WORKLOAD_SDK_ENABLED feature flag. Wildcards are
+                    rejected at the CRD level (CEL PS2/PS3) — only explicit
+                    admin grants may use them.
+                  properties:
+                    promptBridge:
+                      type: object
+                      description: >-
+                        One-shot LLM bridge capability. Requests can select a
+                        model within allowedModels but never the provider —
+                        the provider bound to the recipe's mcp-host wins.
+                      properties:
+                        allowedModels:
+                          type: array
+                          maxItems: 32
+                          items:
+                            type: string
+                            maxLength: 128
+                        maxOutputTokens:
+                          type: integer
+                          minimum: 1
+                        maxRequestsPerRun:
+                          type: integer
+                          minimum: 1
+                        maxRequestContentBytes:
+                          type: integer
+                          minimum: 1
+                          description: Max total bytes across messages[].content.
+                        maxConcurrentInvocations:
+                          type: integer
+                          minimum: 1
+                          description: Max parallel promptBridge calls per workload; default 5.
+                        maxInvocationsPerMinute:
+                          type: integer
+                          minimum: 1
+                          description: Rate limit per workload; default 60.
+                        resultRetentionHours:
+                          type: integer
+                          minimum: 1
+                          description: How long invocation results are queryable; default 24.
+                        maxAttachments:
+                          type: integer
+                          minimum: 0
+                          description: Max attachments per request; default 0 (v1 = no attachments).
+                        maxAttachmentBytes:
+                          type: integer
+                          minimum: 0
+                          description: Max total bytes across attachments; default 0.
+                    clientNotifications:
+                      type: object
+                      required: [allowedEventTypes]
+                      description: >-
+                        Notification intent capability. Targets are opaque
+                        refs (targetRef/userRef) — never raw channel
+                        addresses; control-api resolves delivery policy.
+                      properties:
+                        allowedEventTypes:
+                          type: array
+                          minItems: 1
+                          maxItems: 64
+                          items:
+                            type: string
+                            maxLength: 128
+                        allowedTargetRefs:
+                          type: array
+                          maxItems: 64
+                          items:
+                            type: string
+                            maxLength: 256
+                        allowedUserRefs:
+                          type: boolean
+                        maxNotificationsPerRun:
+                          type: integer
+                          minimum: 1
+                        maxNotificationsPerMinute:
+                          type: integer
+                          minimum: 1
+                          description: Rate limit per workload; default 120.
+                        maxTitleBytes:
+                          type: integer
+                          minimum: 1
+                          description: Default 256.
+                        maxBodyBytes:
+                          type: integer
+                          minimum: 1
+                          description: Default 4096.
+                        resultRetentionHours:
+                          type: integer
+                          minimum: 1
+                          description: How long notification records are queryable; default 72.
+                    allowedCallers:
+                      type: array
+                      maxItems: 64
+                      description: >-
+                        Workload ids permitted to call the SDK; empty = all
+                        declared workloads. Each entry must reference an
+                        existing workloads[].id (enforced by the reconciler —
+                        CEL PS4 note).
+                      items:
+                        type: string
+                        maxLength: 63
+                    idempotencyKeyPattern:
+                      type: string
+                      maxLength: 256
+                      description: >-
+                        Regex for idempotency key format validation; default
+                        '^[a-zA-Z0-9_-]{1,128}$'. Must compile as a valid
+                        regular expression (enforced by the reconciler).
+                resources:
+                  type: array
+                  description: >-
+                    Supporting resources (PVCs, Secrets, ConfigMaps) created
+                    alongside the workloads.
+                  items:
+                    type: object
+                    required:
+                      - id
+                      - type
+                    properties:
+                      id:
+                        type: string
+                        pattern: "^[a-z][a-z0-9-]*$"
+                      type:
+                        type: string
+                        enum:
+                          - pvc
+                          - secret
+                          - configmap
+                      # PVC fields
+                      storageClass:
+                        type: string
+                      size:
+                        type: string
+                        description: Storage size (e.g. "10Gi"). Required for PVC.
+                      accessMode:
+                        type: string
+                        enum:
+                          - ReadWriteOnce
+                          - ReadOnlyMany
+                          - ReadWriteMany
+                      # Secret fields
+                      data:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                        description: Key-value data (for secret/configmap).
+                      generateKeys:
+                        type: array
+                        items:
+                          type: string
+                        description: Secret keys to auto-generate random values for.
+                bindings:
+                  type: array
+                  description: >-
+                    Network bindings between workloads. Each binding generates
+                    a Kubernetes NetworkPolicy allowing traffic from source to target.
+                  items:
+                    type: object
+                    required:
+                      - from
+                      - to
+                      - port
+                    properties:
+                      from:
+                        type: string
+                        description: Source workload ID.
+                      to:
+                        type: string
+                        description: Target workload ID.
+                      port:
+                        type: integer
+                        description: Target port.
+                      protocol:
+                        type: string
+                        enum:
+                          - TCP
+                          - UDP
+                        default: TCP
+                inputs:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: >-
+                    User-provided input values. Keys and types are validated
+                    against inputContract if present.
+                inputContract:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: >-
+                    JSON Schema defining expected inputs. Default values
+                    are derived from the schema when inputs are not provided.
+                activeProfile:
+                  type: string
+                  description: >-
+                    Name of the active profile. Must be a key in the profiles map.
+                profiles:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: >-
+                    Named environment profiles. Each key maps to an object of
+                    overrides applied on top of the base spec when activeProfile
+                    matches. Supports nested overrides for workloads, resources, etc.
+                computed:
+                  type: array
+                  description: >-
+                    Computed values derived from inputs and resource outputs.
+                    Expressions use template syntax (e.g. "postgres://{{db:host}}:5432").
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - expression
+                    properties:
+                      name:
+                        type: string
+                      expression:
+                        type: string
+                security:
+                  type: object
+                  description: Security configuration for the recipe.
+                  properties:
+                    isolationLevel:
+                      type: string
+                      enum:
+                        - minimal
+                        - standard
+                        - strict
+                      description: >-
+                        Network isolation level. "minimal" allows all egress,
+                        "standard" restricts to declared bindings,
+                        "strict" adds pod-level security context constraints.
+
+                        No CRD-level default: when omitted, the reconciler
+                        uses `?? 'minimal'` as the runtime fallback. A CRD
+                        default of "standard" used to live here but was
+                        removed on 2026-04-23 because it created a footgun
+                        — any recipe that added `spec.security` for an
+                        UNRELATED reason (e.g. opting in to
+                        `allowContextRef: true`) inherited
+                        `isolationLevel: standard` silently via K8s schema
+                        default injection, forcing `runAsNonRoot: true` on
+                        pods and breaking community images that declare
+                        `USER <name>` instead of `USER <numeric-uid>`. With
+                        no CRD default, `spec.security: { allowContextRef:
+                        true }` stores as-is and the reconciler keeps pod
+                        isolation at "minimal" — consistent with how the
+                        reconciler has always behaved when the field is
+                        absent.
+                    allowContextRef:
+                      type: boolean
+                      description: >-
+                        Recipe-side opt-in for the spec §270-271 / §1441
+                        default-deny on `spec.contextRef`. When true AND a
+                        matching WorkflowRecipePolicy in the same namespace
+                        also sets `allowContextRef: true`, the agentic recipe
+                        may reference a shared Context (aggregating first-party
+                        MCP servers). Default-deny (field absent or false)
+                        blocks agentic workflows from silently reusing shared
+                        MCP servers the operator didn't intend. Without this
+                        field in the schema, K8s strict decoding would prune
+                        it silently — L3 would accept the body but the stored
+                        CRD would lose the flag, causing the reconciler (L4)
+                        to reject as if the author never declared it.
+                dependencies:
+                  type: array
+                  description: Inter-recipe dependencies.
+                  items:
+                    type: object
+                    required:
+                      - name
+                    properties:
+                      name:
+                        type: string
+                        description: Name of the dependent WorkflowRecipe.
+                      namespace:
+                        type: string
+                        description: Namespace of the dependent recipe (defaults to same namespace).
+                      cascadeRollback:
+                        type: boolean
+                        default: false
+                        description: Whether to rollback this recipe if the dependency fails.
+                      maxWaitMinutes:
+                        type: integer
+                        default: 10
+                        description: Maximum wait time for the dependency to become active.
+            status:
+              type: object
+              description: Current status of the WorkflowRecipe, managed by the Clerum Operator.
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - candidate
+                    - pending-approval
+                    - approved
+                    - pending
+                    - pending-operator-input
+                    - deploying
+                    - testing
+                    - active
+                    - degraded
+                    - rolling-back
+                    - failed
+                    - deprecated
+                    - rollback-failed
+                  description: Current lifecycle phase (13-state machine).
+                message:
+                  type: string
+                  description: Human-readable status message.
+                lastTransitionTime:
+                  type: string
+                  format: date-time
+                  description: Timestamp of the last phase transition.
+                workloads:
+                  type: array
+                  description: Per-workload deployment status.
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      type:
+                        type: string
+                      phase:
+                        type: string
+                      message:
+                        type: string
+                      ready:
+                        type: boolean
+                workflowExecution:
+                  type: object
+                  description: Workflow-specific execution status.
+                  properties:
+                    phase:
+                      type: string
+                      enum: [pending, initializing, running, recovering, completed, failed, cancelled]
+                      description: Current workflow execution phase.
+                    message:
+                      type: string
+                    attempt:
+                      type: integer
+                      description: Current crash recovery attempt count.
+                    startedAt:
+                      type: string
+                      format: date-time
+                    completedAt:
+                      type: string
+                      format: date-time
+                steps:
+                  type: array
+                  description: Per-step execution status for workflow recipes.
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      phase:
+                        type: string
+                        enum: [pending, running, completed, failed, skipped]
+                      output:
+                        type: string
+                        description: Bounded status preview only; complete files belong in status.artifacts[] and /output.
+                      outputTruncated:
+                        type: boolean
+                        description: True when output is a truncated preview.
+                      outputLength:
+                        type: integer
+                        description: Original serialized output length in characters before preview truncation.
+                      outputPreviewMaxChars:
+                        type: integer
+                        description: Preview limit used when WRC stored output.
+                      error:
+                        type: string
+                      executor:
+                        type: string
+                        enum: [agentic, snippet, custom]
+                      modelUsed:
+                        type: string
+                      toolsCalled:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            serverName:
+                              type: string
+                            toolName:
+                              type: string
+                            args:
+                              type: object
+                              x-kubernetes-preserve-unknown-fields: true
+                            result:
+                              x-kubernetes-preserve-unknown-fields: true
+                            durationMs:
+                              type: integer
+                          required:
+                            - serverName
+                            - toolName
+                      toolsCalledTruncated:
+                        type: boolean
+                      startedAt:
+                        type: string
+                        format: date-time
+                      completedAt:
+                        type: string
+                        format: date-time
+                artifacts:
+                  type: array
+                  description: Output file artifacts produced by the workflow (when destination=pvc).
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                        description: Artifact filename (e.g. "report.pdf").
+                      format:
+                        type: string
+                        description: File format (pdf, xlsx, html, json, text).
+                      sizeBytes:
+                        type: integer
+                        description: File size in bytes.
+                      path:
+                        type: string
+                        description: Path within the output PVC.
+                      createdAt:
+                        type: string
+                        format: date-time
+                        description: When the artifact was generated.
+                workloadInstances:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: >-
+                    Mapping of workload ID to K8s resource name (UUID-based).
+                    Assigned on first deploy, persisted for lifecycle consistency.
+                    Example: { "web-search": "my-recipe-a1b2c3d4" }
+                resourceInstances:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: >-
+                    Mapping of spec.resources[] ID (PVC/Secret/ConfigMap) to the
+                    recipe-scoped K8s resource name. Assigned on first deploy and
+                    persisted for lifecycle consistency, mirroring workloadInstances.
+                    Prevents cross-recipe collisions on generic resource ids such as
+                    "data" or "credentials". Example: { "data": "my-recipe-data-a1b2c3d4" }
+                pluginWorkloadSdk:
+                  type: object
+                  description: >-
+                    Validated Plugin Workload SDK capability projection,
+                    managed by the WRC reconciler. control-api reads this at
+                    runtime to know which SDK families a recipe actually has
+                    active (vs merely declared in spec).
+                  properties:
+                    state:
+                      type: string
+                      enum: [validated, disabled]
+                    promptBridge:
+                      type: boolean
+                    clientNotifications:
+                      type: boolean
+                    message:
+                      type: string
+                    validatedAt:
+                      type: string
+                      format: date-time
+                conditions:
+                  type: array
+                  description: Standard Kubernetes conditions.
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                      - lastTransitionTime
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - "Unknown"
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Profile
+          type: string
+          jsonPath: .spec.activeProfile
+        - name: Workloads
+          type: integer
+          jsonPath: .spec.workloads
+          description: Number of workloads in the recipe.
+        - name: Triggers
+          type: string
+          jsonPath: .spec.triggers
+          description: Trigger configuration (onDemand, schedule, or both).
+          priority: 1
+        - name: Workflow
+          type: string
+          jsonPath: .status.workflowExecution.phase
+          description: Workflow execution phase (if applicable).
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}

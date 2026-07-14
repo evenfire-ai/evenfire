@@ -1,0 +1,70 @@
+# Airtable MCP Server - WorkflowRecipe
+#
+# This recipe deploys Airtable MCP server as a Deployment (no persistent storage needed).
+# Using WorkflowRecipe for consistent deployment model across all MCP servers.
+#
+# Prerequisites:
+#   - Context CRD "context1" must exist
+#   - Secret "mcp-airtable-credentials" must exist with api-key
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: airtable-mcp-server
+  namespace: sandbox-recipes
+  labels:
+    app: airtable-mcp-server
+    clerum.io/workload-type: mcp-server
+spec:
+  # Context reference for MCP tool registration
+  contextRef: context1
+
+  # Security level (minimal for E2E testing)
+  security:
+    isolationLevel: minimal
+
+  # Airtable MCP server workload
+  workloads:
+    - id: airtable-mcp
+      type: deployment
+      image: us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/airtable-mcp-server:latest
+      imagePullSecrets:
+        - clerum  # GCP Artifact Registry secret
+      replicas: 1
+
+      # NO transport field - creates workload in sandbox-recipes for infrastructure testing
+      # For production MCP deployment, use McpServer CRD instead
+
+      # MCP server port
+      port: 3000
+
+      # Environment configuration
+      env:
+        - name: MCP_TRANSPORT
+          value: http
+        - name: PORT
+          value: "3000"
+
+      # Airtable API key from secret
+      envSecret:
+        name: mcp-airtable-credentials
+        keys:
+          - secretKey: api-key
+            envVar: AIRTABLE_API_KEY
+
+      # Resource limits
+      resources:
+        requests:
+          memory: 128Mi
+          cpu: 100m
+        limits:
+          memory: 256Mi
+          cpu: 500m
+
+      # Egress bindings for Airtable API access
+      egressBindings:
+        - dns: api.airtable.com
+          port: 443
+          protocol: TCP
+
+  # No additional resources needed (credentials created separately)
+  resources: []

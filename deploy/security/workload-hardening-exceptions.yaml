@@ -1,0 +1,35 @@
+exceptions:
+  - workload: control-plane/control-api
+    allowServiceAccountToken: true
+    reason: "Controller path needs Kubernetes API access through explicit RBAC."
+
+  - workload: control-plane/host-context-controller
+    allowServiceAccountToken: true
+    allowWritableRootFilesystem:
+      - host-context-controller
+    allowMissingRunAsNonRoot:
+      - host-context-controller
+    reason: "Runtime reconciler needs Kubernetes API access; image-level rootfs and user tightening needs runtime proof."
+
+  - workload: control-plane/workflow-recipes
+    allowServiceAccountToken: true
+    reason: "Workflow runtime reconciler intentionally opts in to Kubernetes API access."
+
+  - workload: control-plane/control-postgres
+    allowWritableRootFilesystem:
+      - postgres
+    allowMissingPrivilegeHardening:
+      - postgres
+    allowMissingRunAsNonRoot:
+      - postgres
+    reason: "Database container writes to its PVC and needs image-level tightening proof."
+
+  - workload: control-plane/control-ui
+    allowWritableRootFilesystem:
+      - control-ui
+    reason: "Next.js runtime image needs writable-root validation before enforcement; Calico activation checklist must remove or explicitly waive this exception."
+
+  - workload: profiles/profile-ui
+    allowWritableRootFilesystem:
+      - profile-ui
+    reason: "Next.js runtime image needs writable-root validation before enforcement; Calico activation checklist must remove or explicitly waive this exception."

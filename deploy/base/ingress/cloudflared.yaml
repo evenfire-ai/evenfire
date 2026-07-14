@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloudflared
+  namespace: ingress
+  labels:
+    app.kubernetes.io/component: ingress
+---
+# Sentinel Secret. Real credentials are written out-of-band by
+# deploy/scripts/apply-cloudflared-credentials.sh (kubectl patch outside the
+# last-applied envelope), so `kubectl apply -k` sees stringData: {} as desired
+# state and never clobbers the applied value.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflared-credentials
+  namespace: ingress
+  labels:
+    app.kubernetes.io/component: ingress
+type: Opaque
+stringData: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: ingress
+  labels:
+    app: cloudflared
+    app.kubernetes.io/component: ingress
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+        app.kubernetes.io/component: ingress
+    spec:
+      serviceAccountName: cloudflared
+      # cloudflared makes no Kubernetes API calls — no token needed.
+      automountServiceAccountToken: false
+      # Give in-flight tunnel connections time to drain on SIGTERM.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: cloudflared
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: cloudflared
+        image: cloudflare/cloudflared@sha256:f9d5c5b94cd7337c0c939a6dbf5537db34030828c243fca6b589fd85ab25d43b
+        args:
+        - --no-autoupdate
+        - tunnel
+        - --config
+        - /etc/cloudflared/config.yaml
+        - run
+        ports:
+        - containerPort: 2000
+          name: metrics
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: metrics
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: metrics
+          initialDelaySeconds: 5
+          periodSeconds: 8
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 300m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: config
+          mountPath: /etc/cloudflared
+          readOnly: true
+        # The creds Secret is mounted at a DEDICATED directory outside
+        # /etc/cloudflared so cloudflared's read-only ConfigMap mount is not
+        # in the way of the credentials bind. Mounting credentials.json via
+        # `subPath` INSIDE /etc/cloudflared fails at the OCI level ("not a
+        # directory") because the target path doesn't exist in the ConfigMap
+        # volume — the bind has nothing to attach to. Keep the file referenced
+        # by `credentials-file:` in deploy/overlays/gcp-{dev,prod}/configmaps/
+        # cloudflared-config.yaml in sync with this mountPath.
+        - name: creds
+          mountPath: /etc/cloudflared-creds
+          readOnly: true
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: config
+        configMap:
+          name: cloudflared-config
+      - name: creds
+        secret:
+          secretName: cloudflared-credentials

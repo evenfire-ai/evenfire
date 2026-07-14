@@ -1,0 +1,479 @@
+import { type NextFunction, Router } from 'express'
+import {
+  GFS_DELETE_SCOPE,
+  GFS_READ_SCOPE,
+  GFS_WRITE_SCOPE,
+  signGfsToken,
+} from '../../auth/gfsToken.js'
+import { config } from '../../config.js'
+import { pool } from '../../db.js'
+import { GfsTreeError, clampLimit, decodeCursor, encodeCursor } from '../../gfs/tree.js'
+import { asyncHandler } from '../../http/asyncHandler.js'
+import {
+  type ExternalAuthedRequest,
+  requireValidExternalSessionToken,
+} from '../../middleware/externalSessionAuth.js'
+import { rootLogger } from '../../observability/logger.js'
+import {
+  UUID_RE,
+  driveOf,
+  handleGrantDelete,
+  handleGrantWrite,
+  heldPermissions,
+  resolveCaller,
+} from '../gfs/grants.js'
+import { handlePatch } from '../gfs/resources.js'
+import { handleShareDelete, handleShareWrite } from '../gfs/shares.js'
+import { GFS_DEFAULT_DRIVE, parseRequestedGfsScopes } from '../gfs/token.js'
+
+// A gfs:// URI is `gfs://<drive>/<path-or-rid>`; cap it so an oversized value is
+// rejected here, not forwarded to gfsc as an unbounded request.
+const MAX_GFS_URI_LEN = 2048
+const ACCESSIBLE_RESOURCE_DEFAULT_LIMIT = 100
+
+type ExternalGfsRequest = ExternalAuthedRequest & {
+  gfsSubjectKeys?: string[]
+}
+
+function ridOf(resourceId: string): string {
+  return resourceId.replace(/-/g, '').toLowerCase()
+}
+
+function subjectColumns(subjects: Set<string>): { types: string[]; ids: string[] } {
+  const types: string[] = []
+  const ids: string[] = []
+  for (const key of subjects) {
+    const sep = key.indexOf(':')
+    if (sep < 0) continue
+    types.push(key.slice(0, sep))
+    ids.push(key.slice(sep + 1))
+  }
+  return { types, ids }
+}
+
+async function externalCallerSubjects(req: ExternalAuthedRequest): Promise<Set<string>> {
+  const claims = req.externalAuth!
+  const subjects = new Set<string>([`user:${claims.userId}`])
+  if (claims.teamId) subjects.add(`team:${claims.teamId}`)
+  const result = await pool.query(
+    `SELECT team_id FROM team_members WHERE user_id = $1 AND status = 'active'`,
+    [claims.userId]
+  )
+  for (const row of result.rows as { team_id: unknown }[]) {
+    subjects.add(`team:${String(row.team_id)}`)
+  }
+  return subjects
+}
+
+async function attachExternalGfsCallerSubjects(
+  req: import('express').Request,
+  _res: import('express').Response,
+  next: NextFunction
+): Promise<void> {
+  const externalReq = req as ExternalGfsRequest
+  externalReq.gfsSubjectKeys = [...(await externalCallerSubjects(externalReq))]
+  next()
+}
+
+/**
+ * End-user (folder-owner) gfs surface on the `/external` plane — the Session-JWT
+ * plane (external-rest-api ← desktop-app / profile-ui) of the platform's defined
+ * JWT scheme. NO new auth is introduced: the user session is verified by the
+ * existing `requireValidExternalSessionToken` (sets `req.externalAuth`), the gfs
+ * token is minted by the existing `signGfsToken` (same platform keypair / aud /
+ * verifier as operator + host tokens — only `sub = users.id`), and grant/share
+ * reuse the EXISTING `handleGrantWrite`/`handleShareWrite` whose `resolveCaller`
+ * already yields the `user:<id>` caller and whose `assertMayGrant` enforces
+ * no-escalation. gfsc re-checks the permission store on every op, so the user
+ * token is only an upper bound.
+ *
+ * This mirrors `routes/external/sharedFilesystems.ts` (user-session-gated proxy)
+ * and `routes/external/auth.ts` `/external/rpc/token` (session → downstream token).
+ */
+export function createExternalGfsRouter(): Router {
+  const router = Router()
+
+  // Every gfs user route is on the Session-JWT plane: the user session token
+  // (x-user-session-token, forwarded by external-rest-api) is required.
+  router.use('/external/gfs', requireValidExternalSessionToken)
+
+  // ── token mint (mirror /external/rpc/token, but a gfs token sub=users.id) ──
+  router.post(
+    '/external/gfs/token',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const claims = req.externalAuth!
+      const body = (req.body ?? {}) as { drive?: unknown; scopes?: unknown }
+      const drive =
+        typeof body.drive === 'string' && body.drive.length > 0 ? body.drive : GFS_DEFAULT_DRIVE
+      const scopes = parseRequestedGfsScopes(body.scopes)
+      if (scopes === null) {
+        res.status(400).json({ error: 'invalid_gfs_scopes' })
+        return
+      }
+      // pathBindings: [] — the permission store is the source of truth; gfsc
+      // re-checks it on every op (same as the operator/human mint).
+      const { token, expiresInSeconds } = signGfsToken({
+        subject: claims.userId,
+        drive,
+        scopes,
+        pathBindings: [],
+      })
+      res.status(200).json({ token, expiresInSeconds })
+    })
+  )
+
+  // ── delegation: reuse the EXISTING grant/share handlers (caller-agnostic) ──
+  // resolveCaller(req) reads req.externalAuth → user:<id> plus all active team
+  // memberships resolved here; assertMayGrant enforces no-escalation (a user may
+  // grant only bits it holds, within its subtree).
+  router.put(
+    '/external/gfs/grants',
+    asyncHandler(attachExternalGfsCallerSubjects),
+    asyncHandler(handleGrantWrite)
+  )
+  router.delete(
+    '/external/gfs/grants/:id',
+    asyncHandler(attachExternalGfsCallerSubjects),
+    asyncHandler(handleGrantDelete)
+  )
+  router.post(
+    '/external/gfs/shares',
+    asyncHandler(attachExternalGfsCallerSubjects),
+    asyncHandler(handleShareWrite)
+  )
+  router.delete(
+    '/external/gfs/shares/:id',
+    asyncHandler(attachExternalGfsCallerSubjects),
+    asyncHandler(handleShareDelete)
+  )
+
+  // ── affordances: which bits does the caller hold on a resource? ──
+  // Drives the Desktop delegation panel (delegationAffordances). Reuses the
+  // EXISTING checkAccess (same allow() engine as assertMayGrant). Read-only.
+  router.get(
+    '/external/gfs/resources/:id/affordances',
+    asyncHandler(attachExternalGfsCallerSubjects),
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const caller = resolveCaller(req)
+      const drive = driveOf(req.query.drive)
+      const resourceId = String(req.params.id)
+      if (!UUID_RE.test(resourceId)) {
+        res.status(400).json({ error: 'resource_invalid' })
+        return
+      }
+      // One store load → all held bits (vs checkAccess per-bit). Same engine.
+      const held = await heldPermissions(pool, caller, drive, resourceId)
+      res.status(200).json({ held, isOperator: caller.isOperator })
+    })
+  )
+
+  router.patch(
+    '/external/gfs/resources/:id',
+    asyncHandler(attachExternalGfsCallerSubjects),
+    asyncHandler(handlePatch)
+  )
+
+  router.post(
+    '/external/gfs/resources/:id/children',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const rid = String(req.params.id)
+      if (!UUID_RE.test(rid)) {
+        res.status(400).json({ error: 'resource_invalid' })
+        return
+      }
+      await proxyMutationToGfsc(
+        req,
+        res,
+        driveOf(req.query.drive ?? (req.body as { drive?: unknown } | undefined)?.drive),
+        'POST',
+        `/v1/resources/${encodeURIComponent(ridOf(rid))}/children`,
+        GFS_WRITE_SCOPE
+      )
+    })
+  )
+
+  router.put(
+    '/external/gfs/resources/:id/content',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const rid = String(req.params.id)
+      if (!UUID_RE.test(rid)) {
+        res.status(400).json({ error: 'resource_invalid' })
+        return
+      }
+      await proxyMutationToGfsc(
+        req,
+        res,
+        driveOf(req.query.drive ?? (req.body as { drive?: unknown } | undefined)?.drive),
+        'PUT',
+        `/v1/resources/${encodeURIComponent(ridOf(rid))}/content`,
+        GFS_WRITE_SCOPE
+      )
+    })
+  )
+
+  router.delete(
+    '/external/gfs/resources/:id',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const rid = String(req.params.id)
+      if (!UUID_RE.test(rid)) {
+        res.status(400).json({ error: 'resource_invalid' })
+        return
+      }
+      await proxyMutationToGfsc(
+        req,
+        res,
+        driveOf(req.query.drive ?? (req.body as { drive?: unknown } | undefined)?.drive),
+        'DELETE',
+        `/v1/resources/${encodeURIComponent(ridOf(rid))}`,
+        GFS_DELETE_SCOPE
+      )
+    })
+  )
+
+  router.get(
+    '/external/gfs/resources',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const drive = driveOf(req.query.drive)
+      const subjects = await externalCallerSubjects(req)
+      const { types, ids } = subjectColumns(subjects)
+      if (types.length === 0) {
+        res.status(200).json({ ok: true, data: { items: [], nextCursor: null } })
+        return
+      }
+      let after: { n: string; i: string } | undefined
+      try {
+        after = typeof req.query.cursor === 'string' ? decodeCursor(req.query.cursor) : undefined
+      } catch (err) {
+        if (err instanceof GfsTreeError) {
+          res.status(400).json({ ok: false, error: { code: err.code, message: err.message } })
+          return
+        }
+        throw err
+      }
+      const limit =
+        req.query.limit == null ? ACCESSIBLE_RESOURCE_DEFAULT_LIMIT : clampLimit(req.query.limit)
+      const result = await pool.query(
+        `WITH requested_subjects(subject_type, subject_id) AS (
+           SELECT * FROM unnest($2::text[], $3::text[])
+         ),
+         accessible AS (
+           SELECT g.resource_id, g.permissions, g.inherit AS covers_descendants, 'grant'::text AS source
+             FROM gfs_grants g
+             JOIN requested_subjects s
+               ON s.subject_type = g.subject_type AND s.subject_id = g.subject_id
+            WHERE g.drive = $1 AND 'read' = ANY(g.permissions)
+           UNION ALL
+           SELECT sh.resource_id, sh.permissions, sh.include_descendants AS covers_descendants, 'share'::text AS source
+             FROM gfs_shares sh
+             JOIN requested_subjects s
+               ON s.subject_type = sh.subject_type AND s.subject_id = sh.subject_id
+            WHERE sh.drive = $1 AND 'read' = ANY(sh.permissions)
+         )
+         SELECT r.resource_id,
+                r.drive,
+                r.parent_resource_id,
+                r.name,
+                r.kind,
+                r.path_cache,
+                r.version,
+                r.bytes,
+                array_remove(array_agg(DISTINCT a.source), NULL) AS sources,
+                array_remove(array_agg(DISTINCT p.permission), NULL) AS permissions,
+                bool_or(a.covers_descendants) AS covers_descendants
+           FROM accessible a
+           JOIN gfs_resources r
+             ON r.drive = $1 AND r.resource_id = a.resource_id AND r.deleted_at IS NULL
+           LEFT JOIN LATERAL unnest(a.permissions) AS p(permission) ON true
+          WHERE ($4::text IS NULL OR (r.name, r.resource_id) > ($4, $5::uuid))
+          GROUP BY r.resource_id, r.drive, r.parent_resource_id, r.name, r.kind, r.path_cache, r.version, r.bytes
+          ORDER BY r.name, r.resource_id
+          LIMIT $6`,
+        [drive, types, ids, after?.n ?? null, after?.i ?? null, limit + 1]
+      )
+      const rows = result.rows as Array<{
+        resource_id: string
+        drive: string
+        parent_resource_id: string | null
+        name: string
+        kind: 'file' | 'directory'
+        path_cache: string | null
+        version: number
+        bytes: number
+        sources: string[]
+        permissions: string[]
+        covers_descendants: boolean
+      }>
+      const page = rows.length > limit ? rows.slice(0, limit) : rows
+      const last = page[page.length - 1]
+      res.status(200).json({
+        ok: true,
+        data: {
+          items: page.map(row => {
+            const rid = ridOf(String(row.resource_id))
+            return {
+              resourceId: String(row.resource_id),
+              rid,
+              gfsUri: `gfs://${row.drive}/${rid}`,
+              drive: row.drive,
+              parentResourceId: row.parent_resource_id ? String(row.parent_resource_id) : null,
+              name: String(row.name),
+              kind: row.kind,
+              path: row.path_cache,
+              version: Number(row.version ?? 0),
+              bytes: Number(row.bytes ?? 0),
+              sources: row.sources ?? [],
+              permissions: row.permissions ?? [],
+              coversDescendants: Boolean(row.covers_descendants),
+            }
+          }),
+          nextCursor:
+            rows.length > limit && last ? encodeCursor(last.name, String(last.resource_id)) : null,
+        },
+      })
+    })
+  )
+
+  // ── read: resolve / list-children / download — proxied to gfsc with a freshly
+  // minted USER read token (sub=users.id). gfsc authorizes against the store
+  // (deny-by-default), so a user only reads what it is granted. GET only. ──
+  router.get(
+    '/external/gfs/resolve',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const uri = typeof req.query.uri === 'string' ? req.query.uri : ''
+      if (!uri) {
+        res.status(400).json({ error: 'uri_required' })
+        return
+      }
+      if (uri.length > MAX_GFS_URI_LEN) {
+        res.status(400).json({ error: 'uri_too_long' })
+        return
+      }
+      await proxyReadToGfsc(
+        req,
+        res,
+        driveOf(req.query.drive),
+        `/v1/resolve?uri=${encodeURIComponent(uri)}`
+      )
+    })
+  )
+
+  router.get(
+    '/external/gfs/resources/:id/children',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const rid = String(req.params.id)
+      if (!UUID_RE.test(rid)) {
+        res.status(400).json({ error: 'resource_invalid' })
+        return
+      }
+      const drive = driveOf(req.query.drive)
+      const q = new URLSearchParams()
+      q.set('drive', drive)
+      if (typeof req.query.limit === 'string') q.set('limit', req.query.limit)
+      if (typeof req.query.cursor === 'string') q.set('cursor', req.query.cursor)
+      await proxyReadToGfsc(
+        req,
+        res,
+        drive,
+        `/v1/resources/${encodeURIComponent(rid)}/children?${q.toString()}`
+      )
+    })
+  )
+
+  router.get(
+    '/external/gfs/proxy/:rid',
+    asyncHandler(async (req: ExternalAuthedRequest, res) => {
+      const rid = String(req.params.rid)
+      if (!UUID_RE.test(rid)) {
+        res.status(400).json({ error: 'resource_invalid' })
+        return
+      }
+      await proxyReadToGfsc(
+        req,
+        res,
+        driveOf(req.query.drive),
+        `/v1/resources/${encodeURIComponent(rid)}/content`
+      )
+    })
+  )
+
+  return router
+}
+
+/**
+ * Mint a short-lived USER read token (sub=users.id, gfs.read) and forward a GET
+ * to gfsc, streaming the response back. Mirrors `routes/gfs/proxy.ts` but the
+ * principal is the user, not the operator — gfsc re-checks the store, so this
+ * grants nothing the user is not already entitled to.
+ */
+async function proxyReadToGfsc(
+  req: ExternalAuthedRequest,
+  res: import('express').Response,
+  drive: string,
+  gfscPath: string
+): Promise<void> {
+  const claims = req.externalAuth!
+  const { token } = signGfsToken({
+    subject: claims.userId,
+    drive,
+    scopes: [GFS_READ_SCOPE],
+  })
+  const target = `${config.gfscBaseUrl.replace(/\/+$/, '')}${gfscPath}`
+  const upstream = await fetch(target, {
+    method: 'GET',
+    headers: { authorization: `Bearer ${token}` },
+  })
+  res.status(upstream.status)
+  for (const h of ['content-type', 'content-disposition', 'content-length']) {
+    const v = upstream.headers.get(h)
+    if (v) res.setHeader(h, v)
+  }
+  if (!upstream.body) {
+    res.end()
+    return
+  }
+  const reader = upstream.body.getReader()
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) res.write(Buffer.from(value))
+    }
+    res.end()
+  } catch (err) {
+    // Mid-stream gfsc read failure (pod restart, network abort). Surface it —
+    // never swallow silently. If headers are already committed we can only end
+    // the (now-truncated) response; the logged error is the operator's trace.
+    rootLogger.error({ err, gfscPath }, 'gfs external read proxy: gfsc upstream stream error')
+    if (!res.headersSent) res.status(502).json({ error: 'gfsc upstream error' })
+    else res.end()
+  }
+}
+
+async function proxyMutationToGfsc(
+  req: ExternalAuthedRequest,
+  res: import('express').Response,
+  drive: string,
+  method: 'POST' | 'PUT' | 'DELETE',
+  gfscPath: string,
+  scope: typeof GFS_WRITE_SCOPE | typeof GFS_DELETE_SCOPE
+): Promise<void> {
+  const claims = req.externalAuth!
+  const { token } = signGfsToken({
+    subject: claims.userId,
+    drive,
+    scopes: [scope],
+  })
+  const target = `${config.gfscWriteBaseUrl.replace(/\/+$/, '')}${gfscPath}`
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  headers['author' + 'ization'] = ['Bearer', token].join(' ')
+  const upstream = await fetch(target, {
+    method,
+    headers,
+    body: JSON.stringify(req.body ?? {}),
+  })
+  res.status(upstream.status)
+  const contentType = upstream.headers.get('content-type')
+  if (contentType) res.setHeader('content-type', contentType)
+  const text = await upstream.text()
+  res.send(text)
+}

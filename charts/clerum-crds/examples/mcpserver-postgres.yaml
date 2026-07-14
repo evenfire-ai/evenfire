@@ -1,0 +1,40 @@
+# Example: PostgreSQL MCP Server
+# Provides database query tools
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: postgres-server
+spec:
+  contextRef: context1
+  description: Provides PostgreSQL database query capabilities
+  image: mcp/postgres:latest
+  transport:
+    type: sse
+    url: http://postgres-server.mcp-server.svc.cluster.local:3000/sse
+    port: 3000
+  env:
+    - name: MCP_TRANSPORT
+      value: "sse"
+    - name: MCP_HOST
+      value: "0.0.0.0"
+    - name: MCP_PORT
+      value: "3000"
+  envSecret:
+    name: postgres-mcp-credentials
+    keys:
+      - secretKey: database-url
+        envVar: DATABASE_URL
+  healthCheck:
+    port: 3001
+  auth:
+    type: bearer
+    secretRef: postgres-mcp-credentials
+    secretKey: token
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"
+  enabled: true

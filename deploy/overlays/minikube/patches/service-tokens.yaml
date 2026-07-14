@@ -1,0 +1,37 @@
+# Inter-service tokens (EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN,
+# legacy provisioner static tokens) were moved out of this overlay on purpose. They now
+# come from native K8s Secrets populated by
+# `deploy/scripts/apply-inter-service-tokens.sh` (kubectl patch pattern).
+# See `deploy/base/control-plane/secrets-canary.yaml`.
+#
+# This patch now carries GOOGLE_CLIENT_ID overrides for the minikube profile
+# runtime.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-rest-api
+  namespace: profiles
+spec:
+  template:
+    spec:
+      containers:
+        - name: external-rest-api
+          env:
+            - name: EXTERNAL_REST_API_GOOGLE_CLIENT_ID
+              value: minikube-test.apps.googleusercontent.com
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: profile-ui
+  namespace: profiles
+spec:
+  template:
+    spec:
+      containers:
+        - name: profile-ui
+          env:
+            - name: GOOGLE_CLIENT_ID
+              value: minikube-test.apps.googleusercontent.com
+            - name: NEXT_PUBLIC_GOOGLE_CLIENT_ID
+              value: minikube-test.apps.googleusercontent.com

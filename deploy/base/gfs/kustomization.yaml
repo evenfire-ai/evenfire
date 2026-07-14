@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# gfs (Global File System) base. The gfsc writer/reader Deployments, Service,
+# PVC, and workload-specific allowlist NetworkPolicies are NOT static here —
+# HCC's gfsReconciler creates them from the GlobalFileSystem CRD instance
+# (applied via overlays/*/instances). This base ships the namespace default-deny
+# floor plus the namespace-scoped config the reconciler-created pods consume:
+# the JWT public key ConfigMap and the gfs_controller DB Secret (both
+# placeholders, populated by gen-keys / apply-secrets).
+resources:
+  - gfs-config.yaml
+  - gfs-controller-db.yaml
+  - networkpolicies.yaml
+  - rbac.yaml

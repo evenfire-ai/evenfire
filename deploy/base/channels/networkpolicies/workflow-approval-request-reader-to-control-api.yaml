@@ -1,0 +1,36 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workflow-approval-request-reader-to-control-api
+  namespace: channels
+  labels:
+    clerum.io/policy-type: service
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: workflow-approval-request-reader
+  policyTypes:
+  - Egress
+  egress:
+  # The reader calls control-api's internal endpoints for Figure D can-approve
+  # checks and CommunicationChannel ref resolution before enrollment
+  # confirmations. This uses a static bearer service token — the same
+  # internalServiceAuth pattern as rpc-proxy / webhook-proxy. Direct to
+  # control-api:8090, NOT through the nginx mcp-host gateway (which carries
+  # runtime traffic only).
+  - ports:
+    - port: 8090
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: control-plane
+      podSelector:
+        matchLabels:
+          # control-api pods are labelled `app: control-api` (see
+          # deploy/base/control-plane/control-api.yaml). The
+          # `app.kubernetes.io/name` label does not exist on control-api, so
+          # selecting by it left this egress allow unmatched → Calico denied
+          # reader→control-api:8090 and the consulta failed closed
+          # (consulta_error) in every enforced cluster. Match the real label.
+          app: control-api

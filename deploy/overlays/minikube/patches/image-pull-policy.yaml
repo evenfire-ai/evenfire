@@ -1,0 +1,117 @@
+# Force imagePullPolicy: IfNotPresent on every clerum/* container so minikube
+# uses images loaded into its docker daemon (eval $(minikube docker-env) +
+# docker build) instead of trying to pull from a remote registry.
+#
+# Per-Host channel-reader pull policy is set by HCC via the
+# CONTEXT_MAPPER_CHANNEL_READER_IMAGE_PULL_POLICY env var in the
+# minikube overlay's dynamic-images.yaml. The static `clerum-channel-reader`
+# Deployment that this section used to patch has been retired in favor of
+# per-Host pods. See #273.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clerum-workflow-approval-request-reader
+  namespace: channels
+spec:
+  template:
+    spec:
+      containers:
+        - name: workflow-approval-request-reader
+          imagePullPolicy: IfNotPresent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-api
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-api
+          imagePullPolicy: IfNotPresent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-ui
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-ui
+          imagePullPolicy: IfNotPresent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: host-context-controller
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: host-context-controller
+          imagePullPolicy: IfNotPresent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workflow-recipes
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: workflow-recipes
+          imagePullPolicy: IfNotPresent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-proxy
+  namespace: mcp-server
+spec:
+  template:
+    spec:
+      containers:
+        - name: mcp-proxy
+          imagePullPolicy: IfNotPresent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-rest-api
+  namespace: profiles
+spec:
+  template:
+    spec:
+      containers:
+        - name: external-rest-api
+          imagePullPolicy: IfNotPresent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: profile-ui
+  namespace: profiles
+spec:
+  template:
+    spec:
+      containers:
+        - name: profile-ui
+          imagePullPolicy: IfNotPresent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rpc-proxy
+  namespace: rpc-proxy
+spec:
+  template:
+    spec:
+      containers:
+        - name: rpc-proxy
+          imagePullPolicy: IfNotPresent
