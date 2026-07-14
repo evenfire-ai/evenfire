@@ -65,7 +65,7 @@ Use this index for long-form docs.
 | Doc                                                             | Description                   |
 | --------------------------------------------------------------- | ----------------------------- |
 | [WorkflowRecipe guide](agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md)  | Authoring recipes, for agents |
-| [control-ui & desktop-app](agents/control-ui-desktop-app.md)    | UI surfaces, for agents       |
+| [control-ui & desktop-app](agents/frontend-style-rules.md)    | UI surfaces, for agents       |
 | [WorkflowRecipe naming](architecture/workflow-recipe-naming.md) | Generated resource-name rules |
 
 ## Community & trust

@@ -1,6 +1,6 @@
 # CLAUDE.md — profile-ui
 
-This is one of three frontend projects in the monorepo (Next.js). It follows the **shared frontend UI rules** in [`../docs/agents/control-ui-desktop-app.md`](../docs/agents/control-ui-desktop-app.md).
+This is one of three frontend projects in the monorepo (Next.js). It follows the **shared frontend UI rules** in [`../docs/agents/frontend-style-rules.md`](../docs/agents/frontend-style-rules.md).
 
 Read those rules before generating, refactoring, or styling any code in this directory.
 

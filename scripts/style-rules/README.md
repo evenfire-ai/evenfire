@@ -1,7 +1,7 @@
 # style-rules
 
 Lightweight, repo-local enforcement for the frontend style conventions
-documented in [`docs/agents/control-ui-desktop-app.md`](../../docs/agents/control-ui-desktop-app.md)
+documented in [`docs/agents/frontend-style-rules.md`](../../docs/agents/frontend-style-rules.md)
 and the per-app pattern docs (e.g. `desktop-app/ui/docs/STYLE_STANDARDIZATION.md`).
 
 This is **not** Stylelint or ESLint. It is a small Node script — same shape
