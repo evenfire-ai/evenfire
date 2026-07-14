@@ -123,9 +123,7 @@ what is waiting:
 
 The prompt surfaces wherever the user already is — inline Approve/Deny buttons on
 Telegram (or `/approve <target>`), a Slack Approve button, or the desktop app's
-in-chat gate. Channel callbacks are signature-verified and re-authorized against
-the control plane before any decision is forwarded, and pending approvals
-survive pod restarts.
+in-chat gate; pending approvals survive pod restarts.
 
 ---
 
