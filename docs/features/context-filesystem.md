@@ -2,7 +2,7 @@
 
 This spec defines a v1 feature that adds a **`SharedFileSystem` CRD** referenced by one or more `Context` CRDs. Each SharedFileSystem is:
 
-- **Readable by all `mcp-host` pods** running under any Context that references it (multi-node).
+- **Readable by all `mcp-host` pods** running under any Context that references it (co-located on the wfc's node; see access modes below).
 - **Read-only inside `mcp-host`** (agents cannot mutate files via the mount).
 - **Writable by Control-UI admins** through a dedicated per-SharedFileSystem `workspace-files-controller` service. End-user writes through the Desktop App are deferred until intra-team RBAC lands (v2).
 
@@ -16,7 +16,7 @@ A Context can reference **multiple** SharedFileSystems at different mount paths.
 
 - Provide a shared, persistent set of files (notes + many docs) to improve agent context.
 - Allow the same workspace to be reused across multiple Contexts (e.g., team mission docs accessible to both customer-support and engineering agents) without duplicating data.
-- Support multiple `mcp-host` replicas across different nodes (RWX storage).
+- Support multiple `mcp-host` replicas across different nodes (RWX storage) — **deferred**: the shipped default is `ReadWriteOnce` and consumer `mcp-host` pods are co-located with the wfc pod via a required podAffinity (#592).
 - Keep the control plane stable by isolating heavy filesystem IO behind a dedicated service.
 - Keep agents read-only at the filesystem level (kernel-enforced — defense in depth against bugs or prompt injection that might cause an agent to write).
 - Keep the admin experience declarative: operators configure via CRD; Control UI edits CRDs and uploads files.
@@ -29,7 +29,7 @@ A Context can reference **multiple** SharedFileSystems at different mount paths.
 - Cross-cluster replication.
 - Expose workspace to workflow recipes (run in another namespace so it's problematic).
 - RBAC within a team (all users on a team have the same permissions for now).
-- **Desktop App write client.** v1 ships writes through Control UI only (admin-authenticated). Per-end-user browsing JWTs and the `external-rest-api → control-api → wfc` passthrough are explicitly deferred until intra-team RBAC lands. The auth model below is designed so the v2 path slots in without breaking changes.
+- **Desktop App write client.** Writes go through Control UI only (admin-authenticated). End-user **writes** are deferred until intra-team RBAC lands. (End-user **reads** have since shipped: `external-rest-api` exposes a session-JWT-gated `external-rest-api → control-api → wfc` read passthrough that hard-rejects anything but `GET`/`HEAD` with `405`.)
 - **Per-SharedFileSystem auth grants distinct from Context grants.** When end-user writes do land in v2, the auth rule will be transitive (a user can browse a SharedFileSystem if they have access to any Context that references it). Per-SharedFileSystem grants would not actually prevent leakage (an agent in any referencing Context can read & return the same files via chat) — they would only add admin burden.
 
 ---
@@ -50,14 +50,14 @@ For each `SharedFileSystem`, the Host Context Controller (HCC) reconciles a bund
 │                                                                    │
 │   ┌──────────────────────┐      ┌──────────────────────────────┐   │
 │   │ SharedFileSystem A   │      │ wfc-A (per-SFS Deployment)   │   │
-│   │   PVC (RWX)          │◄─RW─►│   mounts only SFS A's PVC    │   │
+│   │   PVC (RWO)          │◄─RW─►│   mounts only SFS A's PVC    │   │
 │   └──────────────────────┘      │   Service :8086              │   │
 │           ▲                     │   NetPol: from control-api   │   │
 │           │ RO                  └──────────────────────────────┘   │
 │           │                                                        │
 │   ┌──────────────────────┐      ┌──────────────────────────────┐   │
 │   │ SharedFileSystem B   │      │ wfc-B (per-SFS Deployment)   │   │
-│   │   PVC (RWX)          │◄─RW─►│   mounts only SFS B's PVC    │   │
+│   │   PVC (RWO)          │◄─RW─►│   mounts only SFS B's PVC    │   │
 │   └──────────────────────┘      └──────────────────────────────┘   │
 │           ▲                                                        │
 │           │ RO                                                     │
@@ -75,7 +75,7 @@ v1 write path (admin only, via Control UI):
 Control UI (admin JWT) → control-api → workspace-files-controller (per SFS) → SharedFileSystem PVC
 ```
 
-v2 write path (placeholder; not built in v1):
+End-user read path (shipped; the same chain in write mode is still deferred):
 
 ```
 Desktop App → external-rest-api → control-api → workspace-files-controller (per SFS) → SharedFileSystem PVC
@@ -193,7 +193,7 @@ Below ~80 SharedFileSystems on the current dev cluster, the per-SharedFileSystem
 ## Kubernetes constraints & invariants
 
 - **PVCs are namespaced.** Pods can only mount PVCs in the same namespace. SharedFileSystem PVCs always live in **`mcp-host`** so wfc + every mcp-host pod can mount them; the SharedFileSystem CRD itself also lives in `mcp-host`.
-- **Multi-node readers require RWX semantics.** The underlying StorageClass must support concurrent mounts across nodes (e.g. NFS/Filestore/GCS FUSE/EFS/CephFS). Default access mode is `ReadWriteMany`. The wfc Deployment is single-replica (v1) and seeds the PVC via a root **initContainer in the same pod**, so `ReadWriteOnce` volumes co-locate by construction — no cross-node Multi-Attach — and RWO works on minikube and any single-node-per-mount setup.
+- **Default access mode is `ReadWriteOnce`** (#592). The wfc Deployment is single-replica (v1) and seeds the PVC via a root **initContainer in the same pod**, and consumer `mcp-host` pods are co-located onto the wfc's node via a required podAffinity — so RWO volumes never need a cross-node Multi-Attach and work on the RWO-only StorageClasses in use (including minikube). **Multi-node readers require RWX semantics and are deferred**: they need an RWX-capable StorageClass (NFS/Filestore/GCS FUSE/EFS/CephFS) and an explicit `spec.accessModes: [ReadWriteMany]`.
 - `mcp-host` mounts are **read-only** (`volumeMount.readOnly: true`).
 - Each `workspace-files-controller` mount is **read-write** (the only writer for its SharedFileSystem).
 - Workflow recipe pods (`sandbox-recipes` namespace) cannot mount SharedFileSystem PVCs by design (cross-namespace mounts are not supported by Kubernetes, and exposing the workspace to recipes is an explicit v1 non-goal).
@@ -202,14 +202,14 @@ Below ~80 SharedFileSystems on the current dev cluster, the per-SharedFileSystem
 
 ## CRD: `SharedFileSystem` (new)
 
-`apiVersion: clerum.io/v1alpha1`, `kind: SharedFileSystem`, **namespaced**, lives in **`mcp-host`** (CRD validation rejects creation in other namespaces).
+`apiVersion: clerum.io/v1alpha1`, `kind: SharedFileSystem`, **namespaced**, lives in **`mcp-host`**. The CRD itself carries no namespace validation — an instance created elsewhere is accepted by the API server but is simply ignored, because control-api and HCC only ever operate on the configured `mcp-host` namespace.
 
 ### `spec`
 
 - **storage**
   - `size: string` — e.g. `"20Gi"` (defaulted)
   - `storageClassName?: string` — empty means cluster default
-  - `accessModes?: string[]` — default `["ReadWriteMany"]`
+  - `accessModes?: string[]` — default `["ReadWriteOnce"]`. Set `["ReadWriteMany"]` explicitly (with an RWX-capable StorageClass) to opt into multi-node mounts.
   - `annotations?: Record<string,string>` — optional PVC annotations
 
 - **layout**
@@ -245,7 +245,7 @@ metadata:
   namespace: mcp-host
 spec:
   size: 5Gi
-  accessModes: [ReadWriteMany]
+  accessModes: [ReadWriteOnce]
   directories: [docs, customer-history, runbooks]
   security:
     runAsUser: 1000
@@ -309,7 +309,7 @@ delete event while down, clean up the generated resources with:
 
 ```bash
 kubectl delete deploy,svc,job,netpol \
-  -l clerum.io/managed-by=hcc,clerum.io/sharedfilesystem=<name> \
+  -l clerum.io/managed-by=host-context-controller,clerum.io/sharedfilesystem=<name> \
   -n mcp-host
 ```
 
@@ -385,7 +385,7 @@ All tools are read-only. They present every mounted SharedFileSystem under one *
   ```
 
 - mcp-host appends a one-line system-prompt postfix when these tools are registered: _"You have shared filesystems available: `<comma-separated names>`. Use `clerum__context_files_list` to discover files (start at `/` to see workspaces) and `clerum__context_files_read` to read them."_
-- Files written via the workspace-files-controller are visible to readers within RWX cache-coherency bounds (Filestore: typically a few seconds; GCS FUSE: tunable via mount opts). v1 accepts this delay as good-enough for the "notes + docs" workload.
+- With the shipped RWO default, writers and readers share one node and one mount, so writes are visible to readers immediately. If RWX is ever opted into, visibility is bounded by that StorageClass's cache coherency (Filestore: typically a few seconds; GCS FUSE: tunable via mount opts) — a delay that is good-enough for the "notes + docs" workload.
 
 ### Limits
 
@@ -414,12 +414,11 @@ In v1 the only client of the workspace-files-controller is the **Control UI**, a
 - When the operator opens the workspace browser for SharedFileSystem `S`, the Control UI calls `POST /api/v1/admin/shared-filesystems/:name/token` on `control-api`. control-api verifies the caller has admin role, then mints a browsing JWT scoped to `S`.
 - Control UI then calls the proxy endpoints under `/api/v1/admin/shared-filesystems/:name/proxy/*`, which forward to `wfc-<sfsHash>.mcp-host.svc:8086`.
 
-### v2 placeholder (NOT IMPLEMENTED IN V1)
+### End-user access
 
-Once intra-team RBAC lands, end-user writes through the Desktop App will be added:
+The end-user **read** path has shipped: `external-rest-api` exposes `GET /api/v1/me/contexts/:contextId/shared-filesystems` and `GET /api/v1/me/contexts/:contextId/shared-filesystems/:sfsName/proxy/*` — session-JWT-gated, forwarding to `control-api`'s `/external/contexts/:id/shared-filesystems` router. The router rejects any method other than `GET`/`HEAD` with `405`, so end-user **writes** remain deferred until intra-team RBAC lands.
 
-- `external-rest-api` exposes `/rpc/shared-filesystems/:name/*` — verifies session JWT, forwards to `control-api`.
-- `control-api`'s token-mint endpoint adds a non-admin AuthZ branch using a transitive rule: a user can mint a browsing JWT for SharedFileSystem `S` if **any** of these are true (OR logic) for **any Context `C` that has `S` in `spec.sharedFileSystems`**, evaluated under the currently selected team:
+When end-user writes do land, `control-api`'s token-mint endpoint adds a non-admin AuthZ branch using a transitive rule: a user can mint a browsing JWT for SharedFileSystem `S` if **any** of these are true (OR logic) for **any Context `C` that has `S` in `spec.sharedFileSystems`**, evaluated under the currently selected team:
   1. Team has direct access to `C`, OR
   2. User has direct access to `C`, OR
   3. User has access to an agent/Host that has access to `C`, OR
@@ -440,16 +439,17 @@ The browsing JWT shape below is forward-compatible — v2 just changes which sub
   "sub": "<userId>",
   "sharedFileSystem": "<name>",
   "sharedFileSystemNamespace": "mcp-host",
-  "scopes": ["workspace.read", "workspace.write", "workspace.delete"],
+  "scopes": ["files:read", "files:write"],
   "iat": 1730000000,
   "exp": 1730000300
 }
 ```
 
 - **TTL:** 300 s (5 min). Caller renews on demand by calling the mint endpoint again — no refresh-token flow.
-- **Signing:** RS256, same keypair as the session JWT (`JWT_PRIVATE_KEY` on `control-api`, `JWT_PUBLIC_KEY` on `workspace-files-controller`).
-- **wfc verification:** check `iss`, `aud`, signature, expiry, and that the token's `sharedFileSystem` claim matches this wfc's `WSF_SHARED_FILESYSTEM_NAME`. Reject session JWTs.
-- **Forward-compat:** v1 always issues the full scope set; per-operation gating happens server-side once intra-team RBAC lands.
+- **Scopes:** exactly two exist — `files:read` and `files:write`. Delete is gated by `files:write`; there is no separate delete scope.
+- **Signing:** RS256, using the RPC keypair (`CONTROL_API_RPC_JWT_PRIVATE_KEY` on `control-api`, `WSF_JWT_PUBLIC_KEY` on `workspace-files-controller`). This is a different keypair from the session JWT (`CONTROL_API_SESSION_JWT_PRIVATE_KEY`); audience separation keeps RPC tokens out of the wfc and vice versa.
+- **wfc verification:** check `iss`, `aud`, signature, expiry, and that the token's `sharedFileSystem` / `sharedFileSystemNamespace` claims match this wfc's `WSF_SHARED_FILESYSTEM_NAME` / `WSF_SHARED_FILESYSTEM_NAMESPACE`. Reject session JWTs (different `aud`).
+- **Forward-compat:** the mint endpoint issues the full scope set by default; a caller may pass an optional narrower `scopes` array (anything outside the two known scopes → `400 invalid_wfc_browsing_scopes`). Per-operation gating happens server-side once intra-team RBAC lands.
 - **Audit:** `control-api` logs the admin user id at mint time; the JWT itself doesn't carry additional context.
 
 ---
@@ -463,12 +463,11 @@ The browsing JWT shape below is forward-compatible — v2 just changes which sub
 | `workspace-files-controller/`                                | New TS/Node service. Mirrors the `mcp-host` package layout (Express + pino + vitest). Single image; one Deployment per SharedFileSystem. | yes               |
 | `host-context-controller/src/sharedFileSystemReconciler.ts`  | New HCC reconciler watching `SharedFileSystem` CRDs.                                                                                     | yes               |
 | `host-context-controller/src/k8s/sharedFileSystemFactory.ts` | Pure builders for PVC, Deployment (+ seeding init container), Service, NetworkPolicies.                                                  | yes               |
-| `control-api/src/routes/admin/sharedFileSystems.ts`          | Admin token-mint endpoint + thin proxy to per-SFS wfc.                                                                                   | yes               |
+| `control-api/src/routes/admin/sharedFilesystems.ts`          | Admin token-mint endpoint + thin proxy to per-SFS wfc.                                                                                   | yes               |
 | `control-ui/app/shared-filesystems/`                         | Workspace picker, file tree, viewer, upload/replace/delete dialogs.                                                                      | yes               |
 | `mcp-host/src/workflow/contextFiles.ts`                      | Built-in `clerum__context_files_*` tools (list/read) with virtual unified root over multiple RO mounts.                                  | yes               |
-| `external-rest-api/src/routes/sharedFileSystems.ts`          | Session-JWT-gated passthrough to `control-api`.                                                                                          | **v2 — deferred** |
+| `external-rest-api/src/routes/contextSharedFilesystems.ts`   | Session-JWT-gated read passthrough to `control-api` (GET/HEAD only; writes still deferred).                                              | shipped           |
 | `desktop-app/ui/src/features/workspace/`                     | End-user UI (file tree, viewer, upload/replace/delete).                                                                                  | **v2 — deferred** |
-| `tests/e2e/shared-filesystems/`                              | E2E suite (see Test strategy).                                                                                                           | yes               |
 
 ### HTTP API: `workspace-files-controller`
 
@@ -503,8 +502,8 @@ All under `/api/v1/admin/shared-filesystems/:name/*`. Admin session-JWT auth han
 | ------ | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET`  | `/api/v1/admin/shared-filesystems`               | List SharedFileSystems (proxies the K8s CRD list).                                                                                                                  |
 | `GET`  | `/api/v1/admin/shared-filesystems/:name`         | Get one SharedFileSystem (CRD + status).                                                                                                                            |
-| `POST` | `/api/v1/admin/shared-filesystems/:name/token`   | Mint browsing JWT for this SharedFileSystem. Returns `{token, expiresIn, serviceUrl}`. v1: requires admin role. v2: also accepts non-admin via the transitive rule. |
-| `*`    | `/api/v1/admin/shared-filesystems/:name/proxy/*` | Thin reverse proxy to `wfc-<sfsHash>.mcp-host.svc:8086`. Forwards `Authorization` and request body unchanged.                                                       |
+| `POST` | `/api/v1/admin/shared-filesystems/:name/token`   | Mint browsing JWT for this SharedFileSystem. Returns `{token, expiresInSeconds, serviceUrl, audience}`. v1: requires admin role. v2: also accepts non-admin via the transitive rule. |
+| `*`    | `/api/v1/admin/shared-filesystems/:name/proxy/*` | Thin reverse proxy to `wfc-<sfsHash>.mcp-host.svc:8086`. Does **not** forward the caller's `Authorization`: it mints a fresh browsing JWT bound to this SharedFileSystem and sends that upstream, so the browser never sees a wfc token and the wfc never sees an admin token. Request body is forwarded unchanged. |
 
 The proxy approach keeps the per-SFS wfc reachable only from `control-plane`, simplifying NetworkPolicy. Control UI always traverses `Control UI → control-api → workspace-files-controller`.
 
@@ -539,7 +538,7 @@ All three per-SFS policies are runtime-managed by HCC. The `control-api → wfc`
 | Overlay                | Class               | Notes                                                                                                                                               |
 | ---------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `minikube`             | `standard` (RWO)    | RWX is hard locally; v1 runs at `replicas: 1` with RWO — safe because the initContainer co-locates seeding in the controller pod (no Multi-Attach). |
-| `gcp-prod` / `gcp-dev` | GCS FUSE CSI driver | Per-SharedFileSystem GCS bucket, RWX semantics, ~$0.02/GiB/mo (vs Filestore Basic HDD's ~$200/mo minimum).                                          |
+| `gcp-prod` / `gcp-dev` | RWO block storage   | RWO is the shipped default (#592); no RWX StorageClass is enabled on any cluster today. A GCS FUSE CSI class (RWX semantics, ~$0.02/GiB/mo vs Filestore Basic HDD's ~$200/mo minimum) is the deferred escalation path. |
 
 ### Path safety (server-side, mandatory)
 
@@ -573,7 +572,7 @@ All paths arriving from clients are normalised and validated before any FS call:
 - **Unit (HCC reconciler):** factory functions for PVC/Job/Deployment/Service/NetworkPolicies; per-Context mount-injection logic; phase transitions; missing-target handling.
 - **Unit (mcp-host built-in tools):** path-safety reuse, virtual-root `list("/")` returns SharedFileSystem names, `read("sfs-name/file")` resolves correctly, oversized reads are rejected, and list/read operations refuse unsafe paths and symlinks.
 - **Integration (control-api):** admin token-mint (admin role required in v1), proxy passthrough to per-SFS wfc.
-- **E2E (`tests/e2e/shared-filesystems/`):** create SharedFileSystem; create Context referencing it; wait for `phase=Ready`; upload/replace/list/delete via Control-UI-equivalent HTTP path; verify mcp-host pod sees the file at `mountPath`; verify mcp-host cannot write (EROFS); verify the LLM can list and read via `clerum__context_files_*`. Run on minikube (RWO/single-replica) and GCP-dev (GCS FUSE) profiles.
+- **E2E (`tests/e2e/shared-filesystems/` — planned, not yet written):** create SharedFileSystem; create Context referencing it; wait for `phase=Ready`; upload/replace/list/delete via Control-UI-equivalent HTTP path; verify mcp-host pod sees the file at `mountPath`; verify mcp-host cannot write (EROFS); verify the LLM can list and read via `clerum__context_files_*`. Run on minikube (RWO/single-replica) and GCP-dev (GCS FUSE) profiles.
 - **Multi-ref E2E:** create two SharedFileSystems; create one Context referencing both; verify virtual unified root behaviour.
 - **Sharing E2E:** create one SharedFileSystem; create two Contexts both referencing it; verify both Contexts' mcp-host pods see the same files.
 - **Observability assertions:** Prometheus counters for ops/bytes/errors; pino structured logs include `sharedFileSystem`, `subject`, `op`, `path`, `bytes`, `durationMs`.
@@ -582,7 +581,7 @@ All paths arriving from clients are normalised and validated before any FS call:
 
 ## Operations & failure modes
 
-- **RWX storage misconfigured / unavailable** → `SharedFileSystem.status.phase = Failed` with actionable condition/reason.
+- **Storage misconfigured / unavailable** (no usable StorageClass, PVC never binds) → `SharedFileSystem.status.phase = Failed` with actionable condition/reason.
 - **Seeding init container fails** -> the wfc pod CrashLoops in init; the SFS does not reach `Ready`.
 - **wfc unhealthy** → `phase = Degraded` for that SharedFileSystem only. Other SharedFileSystems unaffected. RO mounts on mcp-host remain readable (kernel-level, independent of wfc).
 - **Cross-Context exposure (operator-driven)** → if `Context: intern-agent` references `SharedFileSystem: secret-financials`, anyone with intern-agent chat access can ask the agent to read those files. **No auth check prevents this.** Operator discipline on `sharedFileSystems` references is the only mitigation. See "Operational guidance" in Authorization.

@@ -15,7 +15,7 @@ A single Kubernetes CRD that declares everything Clerum needs to:
 - Render a web UI inside the Clerum desktop app (sandbox-ui).
 - Broker OAuth flows for that UI.
 - Accept and verify external HTTP webhooks (Stripe, GitHub, Slack, Meta, …).
-- Run agentic / deterministic workflow steps (LLM- or handler-driven).
+- Run agentic / deterministic workflow steps (LLM-driven `instruction:` or TypeScript-snippet `run:`).
 
 You write ONE recipe; the Workflow Recipe Controller (WRC) fans it out across the cluster.
 
@@ -37,7 +37,9 @@ WRC then splits the spec across three namespaces:
 | Workload referenced by `spec.ui.workloadRef` | `sandbox-ui` | rpc-proxy is the only ingress; sibling pods cannot spoof identity. |
 | Everything else | `sandbox-recipes` | Default home for DBs, workers, webhook handlers, cron, etc. |
 
-`spec.contextRef` is required and references a pre-existing `Context` CR. Use `context1` unless told otherwise.
+`spec.contextRef` references a pre-existing `Context` CR. It is **required only when a workload exposes an MCP `transport`** (it enables Discovery API registration) — use `context1` unless told otherwise.
+
+**Do NOT set `contextRef` on an agentic (`spec.steps`) recipe.** control-api rejects a steps-based recipe that sets `spec.contextRef` unless the recipe ALSO sets `spec.security.allowContextRef: true` AND a `WorkflowRecipePolicy` with `allowContextRef: true` exists in `sandbox-recipes` (operator-owned, absent by default). Omit it: WRC auto-creates a private Context `wf-<recipeName>` with no sharing and no policy required.
 
 ---
 
@@ -45,23 +47,23 @@ WRC then splits the spec across three namespaces:
 
 | Field | Required | Notes |
 |---|---|---|
-| `description` | yes | One-paragraph human description. Shown in admin UI. |
-| `contextRef` | yes | Pre-existing `Context` CR (use `context1`). |
-| `agent` | only with `steps` | LLM provider config (model, provider, apiKeyRef). |
+| `description` | optional (strongly recommended) | One-paragraph human description. Shown in admin UI. `spec` has **no** OpenAPI `required` list, so admission accepts a recipe without it — but publish workflows and §14.4 expect it. |
+| `contextRef` | only with MCP `transport` | Pre-existing `Context` CR (use `context1`). Omit on agentic (`steps`) recipes — see §1.1. |
+| `agent` | optional; **allowed only with `steps`** (R1) | LLM provider config (`model`, `provider` ∈ openai/claude/zai/bailian, `secretRef`, `soulRef`). `steps` do **not** require it — R1 only forbids `agent` without `steps`. |
 | `workloads` | optional, ≤ 25 | Each becomes a Deployment / StatefulSet / Job / DaemonSet / CronJob. Operators can lower this runtime limit with `CLERUM_WORKFLOW_MAX_WORKLOADS_PER_RECIPE`. |
 | `bindings` | optional | Sibling-to-sibling network bindings (NetworkPolicy generation). |
 | `resources` | optional | PVCs, Secrets, ConfigMaps shared across workloads. |
 | `ui` | optional | Sandbox-UI surface. Requires a referenced workload of `type: deployment`, `replicas: 1`, no `transport`. |
-| `oauthClients` | optional, ≤ 8 | Requires `spec.ui`. Embed-initiated OAuth grants. |
+| `oauthClients` | optional, ≤ 8 | Requires `spec.ui` OR a `workloads[].oauthClientRefs` consumer per client (O1). Embed-initiated OAuth grants, or background access (§7.5). |
 | `webhooks` | optional, ≤ 16 | External HTTP webhook handlers. |
 | `steps` | optional | Agentic / deterministic workflow steps. |
 | `inputContract` | optional | JSON Schema for `inputs.*` template substitution in steps. |
-| `triggers` | optional | Manual or schedule (cron) triggers for the workflow. |
+| `triggers` | required with `steps` | `onDemand` and/or `schedule` (cron). At least one is required (R6), and a recipe with non-empty `steps` MUST declare one (cluster admission policy). |
 | `output` | optional | Where step output goes (stdout / configmap / pvc / secret). |
 | `scheduling` | optional | When the workflow runs (cron). |
 | `security` | optional | Recipe-level isolation floor (e.g. `isolationLevel: minimal`). |
 
-A recipe MUST have at least one of `workloads` or `steps` populated (rule R1).
+A recipe MUST have at least one of `workloads` or `steps` populated (rule R2).
 
 ---
 
@@ -150,26 +152,28 @@ spec:
       image: my-org/webhook-handler:1.0.0
       port: 8080
   webhooks:
-    - id: stripe-events
+    - id: slack-events
       workloadRef: handler
       path: /events
       verification:
         scheme: hmac-sha256-timestamp-body
-        secretRef: { name: stripe-creds, key: webhook-signing-secret }
-        signatureHeader: Stripe-Signature
-        timestampHeader: Stripe-Signature
-        timestampPrefix: 't='
-        signaturePrefix: 'v1='
+        secretRef: { name: slack-creds, key: webhook-signing-secret }
+        signatureHeader: X-Slack-Signature
+        signaturePrefix: 'v0='
         signatureEncoding: hex
-        timestampToleranceSec: 300
-      replay:
-        windowSec: 600
+      replay:                                    # REQUIRED iff scheme == hmac-sha256-timestamp-body (W8)
+        timestampHeader: X-Slack-Request-Timestamp
+        toleranceSec: 300                        # int, 10–3600, default 300
 ```
+
+The timestamp header and its tolerance live on `webhooks[].replay` (`required: [timestampHeader, toleranceSec]`) — **not** on `verification`. There is no `timestampHeader` / `timestampPrefix` / `timestampToleranceSec` under `verification`, and no `replay.windowSec`.
 
 ### 3.5 Agentic / deterministic workflow
 
 ```yaml
 spec:
+  triggers:
+    onDemand: {}                # REQUIRED for any recipe with steps — onDemand and/or schedule
   inputContract:
     properties:
       topic:
@@ -201,7 +205,7 @@ Workflow steps don't need workloads unless they require a specific MCP server.
   type: deployment               # deployment | statefulset | cronjob | job | daemonset
   image: registry/path:tag
   port: 8080                     # Primary container port
-  replicas: 1                    # Default 1. UI workloads MUST be 1 (R10).
+  replicas: 1                    # Default 1. UI workloads MUST be 1 (R16).
   command: ['/bin/sh', '-c']     # Optional
   args: ['exec my-binary']       # Optional
   env:
@@ -211,7 +215,6 @@ Workflow steps don't need workloads unless they require a specific MCP server.
     keys:
       - { secretKey: api-key, envVar: API_KEY }
       - { secretKey: slack-token, envVar: SLACK_TOKEN, optional: true }   # see §4.1.1
-  envFromConfigMap: [my-configmap]
   healthCheck:                   # Becomes BOTH livenessProbe + readinessProbe
     type: http                   # http | tcp | exec — pick ONE shape below
     path: /health                #  http: path + port
@@ -230,8 +233,10 @@ Workflow steps don't need workloads unless they require a specific MCP server.
   dependsOn: [db]                # Workload ordering — see §4.5
   schedule: '0 */6 * * *'        # REQUIRED for type: cronjob
   timeZone: 'UTC'                # Optional for cronjob — IANA TZ name (K8s ≥1.27)
-  when: '{{inputs.enable_db}} == true'   # Optional conditional deployment
+  includeWhen: 'inputs.enable_db == true'   # Optional conditional deployment — a CEL expression over inputs
 ```
+
+There is **no `envFromConfigMap`** field: `env` (name/value pairs) and `envSecret` (Secret-key → env-var mappings) are the only env-projection surfaces, and there is no ConfigMap env-projection path at all. The conditional-deployment field is **`includeWhen`** (a CEL expression, not `{{...}}` template syntax); `when:` does not exist and is rejected as an unknown field.
 
 **HealthCheck field-shape pitfalls** (the CRD validates these — wrong field name = silent omission or rejection):
 
@@ -357,7 +362,7 @@ spec:
 | Type | Reconciled artefact | Auto-wired into pods? |
 |---|---|---|
 | `pvc` | A `PersistentVolumeClaim` in `sandbox-recipes`. | YES — WRC synthesises pod `volumes:` from `spec.resources[]` (PVC type) when a workload's `volumeMounts[].name` matches the resource `id`. |
-| `configmap` | A `ConfigMap` in `sandbox-recipes`. | NO — declared-but-not-mountable today. Use `envFromConfigMap:` for env-var projection, or bootstrap files at startup via `command:`. |
+| `configmap` | A `ConfigMap` in `sandbox-recipes`. | NO — declared-but-not-mountable today, and there is **no** ConfigMap env-projection field. Read values via `{{resourceId:KEY}}` in `env[].value` / `command` / `args` (§10.2.2), or bootstrap files at startup via `command:`. |
 | `secret` | A reference for NetworkPolicy / discovery purposes (content not managed by WRC). | NO — declared-but-not-mountable today. Use `envSecret:` for env-var projection. |
 
 **`spec.resources[]` vs `volumeClaimTemplates`:** use `volumeClaimTemplates` on a StatefulSet (one PVC per replica, K8s-managed). Use `spec.resources[]` for a single PVC shared across one or more non-StatefulSet workloads.
@@ -383,7 +388,7 @@ If you need actual runtime ordering (dependent pod should not serve traffic unti
 
 Connection-refused storms during a first install are almost always missing-`healthCheck` issues, not missing-`dependsOn` issues. Add the probe.
 
-### 4.6 Slow-startup workloads — use `startupProbe`, not a long `initialDelaySeconds`
+### 4.6 Slow-startup workloads — bind the port first, don't stall before `listen()`
 
 WRC defaults `livenessProbe.initialDelaySeconds: 10` with `failureThreshold: 3` and `periodSeconds: 15`. That gives a workload roughly **55 seconds** between container start and the first SIGKILL. Any workload that does substantive work *before* binding its HTTP port — running migrations, warming a cache, registering with a service mesh, restoring snapshot state — will be killed mid-startup on a cold install. The signature is identical to §9.5's trap:
 
@@ -392,9 +397,9 @@ WRC defaults `livenessProbe.initialDelaySeconds: 10` with `failureThreshold: 3` 
 - Empty `kubectl logs` (Node line-buffers stdout; SIGKILL skips flush).
 - `kubectl logs --previous` shows at most a single "shutting down" line if Fastify/Express SIGTERM handlers ran before kubelet escalated to SIGKILL.
 
-Two equivalent fixes; pick by where the work belongs:
+**There is no `startupProbe` field.** `workloads[]` exposes exactly one probe surface — `healthCheck`, which WRC renders as BOTH `livenessProbe` and `readinessProbe`. A recipe declaring `startupProbe:` is rejected as an unknown field. The two levers you actually have are `healthCheck`'s own timing knobs (`initialDelaySeconds`, `periodSeconds`, `failureThreshold`) and, better, the shape of your process:
 
-**A. Declare a `startupProbe`.** Same probe shape as liveness, but kubelet only runs liveness *after* startup has succeeded once. Generous grace for cold start, tight policy in steady state.
+**A. Widen the `healthCheck` budget.** Raise `initialDelaySeconds` / `failureThreshold` so the liveness budget covers your worst cold start. Blunt — it also loosens steady-state liveness, since the same probe is both liveness and readiness.
 
 ```yaml
 workloads:
@@ -406,13 +411,12 @@ workloads:
       type: http
       path: /healthz
       port: 8080
-    startupProbe:
-      httpGet: { path: /healthz, port: 8080 }
-      periodSeconds: 5
-      failureThreshold: 60     # up to 5 minutes for migrations to finish
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 30     # ~5 minutes of budget for migrations to finish
 ```
 
-**B. Move pre-`listen` work to a background task.** Call `app.listen()` first; let `/healthz` return `503 starting` until migrations complete. Healthchecks pass immediately; the proxy holds new requests behind readiness. This matches K8s' bias (Ready ≠ Live) and avoids growing the probe budget.
+**B. Move pre-`listen` work to a background task (preferred).** Call `app.listen()` first; let `/healthz` return `503 starting` until migrations complete. The probe answers immediately, so liveness never fires; readiness holds traffic until you flip `ready`. This matches K8s' bias (Ready ≠ Live) and keeps steady-state liveness tight.
 
 ```ts
 app.get('/healthz', () => ready ? { ok: true } : reply.code(503).send('starting'));
@@ -452,7 +456,8 @@ steps:
   - id: search-the-web
     instruction: 'Search for {{inputs.query}}'
     mcpServers: [search]         # references workloads[].id
-    allowedTools: [search__web_search]   # server__tool with double underscore
+    allowedTools:                # OBJECT with an `include` array — not a bare array
+      include: [search__web_search]      # server__tool with double underscore
 ```
 
 ---
@@ -466,17 +471,16 @@ The UI workload runs inside the desktop app's Electron `WebContentsView` partiti
 ```yaml
 spec:
   ui:
-    workloadRef: web             # MUST match workloads[].id where type=deployment, replicas=1, no transport (R9/R10)
+    workloadRef: web             # MUST match workloads[].id where type=deployment, replicas=1, no transport (R15/R16)
     port: 8080                   # MUST be in platform allow-list (default 8080 only)
     title: 'My App'              # ≤ 100 chars
-    defaultPath: '/'             # MUST start with /, no scheme prefix, no // (R12)
+    defaultPath: '/'             # MUST start with /, no scheme prefix, no // (R18)
     icon: 'data:image/svg+xml;base64,...'   # Optional. data: URI only. ≤ 32 KB.
     egress:
       internal:
-        - { workloadRef: api, port: 8000 }
+        - { workloadRef: api, port: 8000 }        # workloadRef + port both required
       external:
-        - { fqdn: 'api.openai.com' }
-        - { cidr: '10.0.0.0/8' }
+        - { fqdn: 'api.openai.com', port: 443 }   # fqdn + port both required; `reason` optional
   security:
     isolationLevel: minimal
 ```
@@ -625,7 +629,7 @@ oauthClients:
     backgroundAccess: false      # optional — see §7.5 (default false)
 ```
 
-CEL rules: **O1** requires `spec.ui` set. **O2** `provider` enum (5 known). **O3** `id` unique.
+CEL rules: **O1** requires either `spec.ui` OR a `workloads[].oauthClientRefs` consumer for every declared client (so a UI-less background-OAuth recipe is legal — §7.5). **O2** `provider` enum (5 known). **O3** `id` unique. **O4** `oauthClientRefs` is not allowed on MCP transport workloads.
 
 ### 7.2 Embed endpoints (same-origin, no CORS)
 
@@ -800,10 +804,12 @@ Declaring `spec.webhooks[]` provisions a dedicated **per-recipe webhook gateway 
 
 ```yaml
 webhooks:
-  - id: stripe-events            # DNS-1123, ≤ 63 chars, unique within recipe (W1)
-    workloadRef: handler         # Must be a non-MCP workload (W2/W11)
+  - id: provider-events          # DNS-1123, ≤ 63 chars, unique within recipe (W1)
+    workloadRef: handler         # Must be a `type: deployment` workload with no transport (W2/W11)
     path: /events                # Forwarded path on the workload
-    methods: [POST]              # Default [POST]. POST is mandatory (W4).
+    methods: [GET, POST]         # Default [POST]. POST is mandatory (W4). GET is
+                                 # allowed ONLY with verification.setupHandshake (W13),
+                                 # and REQUIRED by meta-hub-challenge (W14) — see below.
     maxBodyBytes: 1048576        # Default 1 MiB, max 10 MiB (W5)
     optional: true               # OPTIONAL — see §8.6 (dormant webhooks).
     cors:                        # OPTIONAL — see §8.7 (browser widgets).
@@ -813,27 +819,29 @@ webhooks:
     verification:
       scheme: hmac-sha256-timestamp-body   # See §8.2
       secretRef:
-        name: stripe-creds
+        name: slack-creds
         key: webhook-signing-secret
-      signatureHeader: Stripe-Signature
-      timestampHeader: Stripe-Signature
-      timestampPrefix: 't='
-      signaturePrefix: 'v1='
+      signatureHeader: X-Slack-Signature
+      signaturePrefix: 'v0='
       signatureEncoding: hex     # hex | base64
-      timestampToleranceSec: 300
       setupHandshake:            # OPTIONAL — nests INSIDE verification (NOT a webhook-level sibling). See §8.3
         strategy: meta-hub-challenge
         secretRef: { name: meta-creds, key: hub-verify-token }
     replay:                      # REQUIRED iff scheme == hmac-sha256-timestamp-body (W8)
-      windowSec: 600
+      timestampHeader: X-Slack-Request-Timestamp   # required
+      toleranceSec: 300                            # required; int 10–3600, default 300
 ```
+
+This is a **field-shape reference, not a copy-paste provider recipe** — it deliberately shows every key at once (Slack-style HMAC headers alongside a Meta handshake). A real webhook picks one provider's headers and one handshake strategy (or none). See §8.2/§8.3 for per-provider shapes.
+
+`verification` accepts exactly: `scheme`, `secretRef`, `signatureHeader`, `signaturePrefix`, `signatureEncoding`, `tokenHeader`, `tokenPrefix`, `jwksUrl`, `issuer`, `audience`, `setupHandshake`. The timestamp knobs are on `replay`, not here — a `verification.timestampHeader` / `timestampToleranceSec` is rejected as an unknown field.
 
 ### 8.2 Verification schemes
 
 | Scheme | When to use | Required fields |
 |---|---|---|
 | `hmac-sha256-body` | Signature is HMAC over raw body, no timestamp. (GitHub, Fireflies, Granola, WhatsApp Cloud API, Shopify, Linear.) | `secretRef`, `signatureHeader`, `signaturePrefix`, `signatureEncoding`. |
-| `hmac-sha256-timestamp-body` | Signature is HMAC over `<timestamp>.<body>` with replay protection. (Stripe, Slack, Twilio.) | All of the above PLUS `timestampHeader`, `timestampPrefix`, `timestampToleranceSec`, AND `replay.windowSec`. |
+| `hmac-sha256-timestamp-body` | Signature is HMAC over `<timestamp>.<body>` with replay protection. (Slack, Twilio.) | All of the above PLUS a sibling `replay` block with `timestampHeader` + `toleranceSec` (both required; the timestamp is read from its own header). |
 | `jwt-bearer-jwks` | Provider sends a JWT in `Authorization`; verify against JWKS. (Google PubSub push, Auth0/Okta, Meta enterprise.) | `jwksUrl` (https only, multi-label DNS host), `issuer`, `audience`. NO `secretRef`. |
 | `static-bearer` | Shared static bearer token. Default is `Authorization: Bearer <token>`; set `tokenHeader` / `tokenPrefix` for providers that ship the token in a custom header (Telegram). TLS + low-stakes only — no replay protection, no body binding. | `secretRef`. Optional: `tokenHeader` (defaults to `Authorization`), `tokenPrefix` (defaults to `Bearer `; explicit empty string `""` means no prefix). |
 
@@ -1024,7 +1032,7 @@ There are four egress mechanisms and each only accepts a specific edge type. Pic
 ui:
   egress:
     internal:
-      - { workloadRef: api, port: 8000 }     # Non-MCP sibling only (R11)
+      - { workloadRef: api, port: 8000 }     # Non-MCP sibling only (R17)
 ```
 
 WRC generates a NetworkPolicy in `sandbox-ui` selecting the UI pod by 3 labels (`clerum.io/sandbox-ui=true`, `clerum.io/recipe-namespace=<ns>`, `clerum.io/recipe-name=<name>`) allowing egress to the target in `sandbox-recipes`. **MCP servers are not valid UI siblings** — route MCP from a non-UI backend.
@@ -1091,9 +1099,12 @@ workloads:
 
 | Field | Type | Notes |
 |---|---|---|
-| `dns` | string, 1–128 chars, REQUIRED | Concrete FQDN. No CIDR (`/`), no `*`, no `*.<domain>`. Cluster-local form is `<workload-id>.<namespace>.svc.cluster.local`; anything else is treated as external. |
-| `port` | integer, REQUIRED | Destination port. |
-| `protocol` | `TCP` \| `UDP`, optional | Defaults to TCP. |
+| `egressClass` | `exact-host` \| `public-web`, optional | Defaults to `exact-host`. `public-web` opens public TCP 80/443 (private/special ranges blocked by NetworkPolicy) and **must not** declare `dns`, `port`, or `protocol`. |
+| `dns` | string, 1–128 chars | Concrete FQDN. Required for `exact-host`. No CIDR (`/`), no `*`, no `*.<domain>`. Cluster-local form is `<workload-id>.<namespace>.svc.cluster.local`; anything else is treated as external. |
+| `port` | integer, 1–65535 | Destination port. Required for `exact-host`. |
+| `protocol` | `TCP` \| `UDP`, optional | Defaults to TCP. Only for `exact-host`. |
+
+The CRD item has **no `required` list** — `dns`/`port` are mandatory only for the default `exact-host` class, and are forbidden on `public-web`.
 
 **Cluster-local vs external dispatch.** WRC inspects the DNS string:
 
@@ -1177,21 +1188,23 @@ Steps run inside the platform's workflow coordinator (a separate platform pod), 
 
 ```yaml
 - id: my-step
-  run:                                   # Deterministic, server-side handler
-    handler: json.merge
-    params:
-      inputs:
-        - source: workflow
-        - kind: deterministic
+  run:                                   # Deterministic, inline TypeScript snippet
+    type: snippet                        # only value accepted
+    language: typescript                 # only value accepted
+    code: |                              # inline source, ≤ 20,000 chars
+      export default async function (ctx) {
+        return { merged: { ...ctx.inputs } }
+      }
+    capabilities: {}                     # explicit allowlist — http / secrets / mongo / postgres / mcp / artifacts
 ```
 
-You cannot ship custom handler code; only registered server-side handlers (e.g. `json.merge`) are callable.
+`run` is snippet-only: the CRD requires `type: snippet` with `language` and `code` (message: `run must define type=snippet with language and code`). There is no registered-handler surface — no `handler:`, no `params:`. Anything a snippet reaches (HTTP hosts, Secrets, MCP tools, DBs, artifacts) must be declared under `run.capabilities`.
 
 ### 10.2 Template variables — the complete substitution vocabulary
 
 Clerum has **two surfaces** that perform `{{...}}` substitution, and they support **different placeholders**. Authoring mistakes here are the #1 source of "looks right but nothing connects" bugs.
 
-#### 10.2.1 Step instructions / `run.params` — agentic + deterministic step text
+#### 10.2.1 Step instructions — agentic step text
 
 Resolved at **run time**, immediately before each step is dispatched. Source: `mcp-host/src/workflow/*` + the coordinator's `resolveTemplateVars`.
 
@@ -1240,17 +1253,22 @@ workloads:
   instruction: '...'                    # OR `run: {...}`
   dependsOn: [other-step]               # Ordering only
   mcpServers: [search]                  # workload IDs of MCP servers callable
-  allowedTools: [search__web_search]    # server__tool allowlist
+  allowedTools:                         # OBJECT — `include` array of server__tool names
+    include: [search__web_search]
   maxIterations: 10
   timeoutSeconds: 300
   backoffSeconds: 5
   maxRetries: 2
-  agent:                                # Optional per-step LLM override
-    provider: claude
+  agent:                                # Optional per-step LLM override — model / provider / soul ONLY
+    provider: claude                    # openai | claude | zai | bailian
     model: claude-3-opus
-    apiKeyRef: { name: claude-key, key: api-key }
-  requiresApproval: true                # Pause for human approval before executing
+  requiresApproval:                     # OBJECT — required: [target, message]
+    target: { userId: '<uuid-or-login>' }   # exactly one of userId | teamId
+    message: 'Approve the publish step?'    # 1–2000 chars
+    timeoutSeconds: 3600                    # optional; 30–604800, default 3600 (auto-reject on expiry)
 ```
+
+`steps[].agent` has no `apiKeyRef` — provider credentials come from `spec.agent.secretRef`, not from the per-step override. `requiresApproval: true` is a type error; it must be the object shape above.
 
 ### 10.4 `inputContract` and `triggers`
 
@@ -1261,10 +1279,12 @@ inputContract:
     topic: { type: string, default: 'latest advances in multi-agent AI' }
     depth: { type: integer, default: 3 }
 triggers:
-  manual: true
+  onDemand: {}                          # PRESENCE enables manual triggering (requiresApproval defaults true)
   schedule:
-    cron: '0 9 * * 1'                   # Strict 5-field cron (R8)
+    cron: '0 9 * * 1'                   # Strict 5-field cron (R7)
 ```
+
+`spec.triggers` has exactly two sub-fields — `onDemand` and `schedule` — and R6 requires at least one of them. There is no `manual:` field. Any recipe with non-empty `spec.steps` MUST declare one of the two (cluster ValidatingAdmissionPolicy `workflowrecipe-namespace-allowlist`).
 
 ### 10.5 Execution model — what actually runs
 
@@ -1291,12 +1311,14 @@ Plus the supporting reconciled objects (all in `sandbox-recipes`):
 
 ```yaml
 triggers:
-  manual: true                          # ad-hoc runs from admin UI / API
+  onDemand:                             # PRESENCE enables ad-hoc runs from admin UI / API
+    requiresApproval: true              # default true
+    allowedActors: [user]               # user | autonomous | scheduled (default [user])
   schedule:
-    cron: '0 9 * * 1'                   # cron-driven runs (R8: strict 5-field)
+    cron: '0 9 * * 1'                   # cron-driven runs (R7: strict 5-field)
 ```
 
-The cron path is reconciled into a WRC-managed CronJob (one per recipe with a `schedule`). The manual path is initiated through control-api's admin recipe endpoints — see §16 (`control-api/src/routes/admin/recipes.ts`) for the exact route, as the surface is not stabilised in this guide.
+The cron path is reconciled into a WRC-managed CronJob (one per recipe with a `schedule`). The on-demand path is initiated through control-api's admin recipe endpoints — see §16 (`control-api/src/routes/admin/recipes.ts`) for the exact route, as the surface is not stabilised in this guide.
 
 **Reading run state** — each run patches `.status.workflowExecution.phase` on the recipe through `running → completed | failed`:
 
@@ -1319,7 +1341,7 @@ A run reaches a terminal phase whenever the coordinator pod itself reaches a ter
 
 The top-level `spec.output` field listed in §2 (`stdout | configmap | pvc | secret`) is declared on the CRD as forward-looking surface for externalising results. Verify what WRC honours today against §16 (`workflow-recipes/src/workflow/*`, `mcp-host/src/workflow/*`) before relying on it in a recipe.
 
-**Approvals** — `requiresApproval: true` on a step pauses the coordinator before that step executes. The approval-delivery channel (admin UI prompt vs RPC vs message channel) is not part of the recipe surface; it lives in the coordinator's RPC client. See §16 (search `rpcClient` and `approval` in `workflow-recipes/src/coordinator.ts`).
+**Approvals** — a `requiresApproval: { target, message }` block on a step pauses the coordinator before that step executes; the request routes to `target.userId` (or every member of `target.teamId`) and auto-rejects as expired after `timeoutSeconds` (default 3600). The approval-delivery channel (admin UI prompt vs RPC vs message channel) is not part of the recipe surface; it lives in the coordinator's RPC client. See §16 (search `rpcClient` and `approval` in `workflow-recipes/src/coordinator.ts`).
 
 **Retry semantics** — `maxRetries` / `backoffSeconds` / `timeoutSeconds` on a step bound **that step's** retry loop within a single run. There is no recipe-level "retry the whole workflow" knob; re-running the workflow is a fresh trigger and a new pair of coordinator/mcp_host pods.
 
@@ -1333,21 +1355,27 @@ Rejection messages cite the rule code. CEL is strict — fix locally before appl
 
 | Code | Rule | Why |
 |---|---|---|
-| R1 | At least one of `workloads` / `steps` non-empty | Empty recipe reconciles to nothing. |
-| R3 | Each `workloads[].id` unique | NetworkPolicy + Service naming key. |
-| R8 | `triggers.schedule.cron` valid 5-field cron | Coordinator parses strict 5-field grammar. |
-| R9 | `ui.workloadRef` references existing `workloads[].id` | Cross-spec consistency. |
-| R10 | UI workload MUST be `type: deployment`, `replicas: 1`, no `transport` | Sandbox-UI proxy assumptions. |
-| R11 | `ui.egress.internal[].workloadRef` is non-MCP | UI must call its own backend, not MCP. |
-| R12 | `ui.defaultPath` matches `^/([^/\s][^\s]*)?$`; no scheme prefix, no `//` | Prevents `javascript:`/`data:`/`file:` smuggling. |
-| R13 | The workload referenced by `ui.workloadRef` MUST NOT declare `envSecret` or `imagePullSecrets` | UI workloads run in `sandbox-ui` (the credential boundary, §6.3). Secrets only exist in `sandbox-recipes`; a UI pod with envSecret will stick in `CreateContainerConfigError` forever. Put credentialed code on a sibling workload and reach it via `spec.bindings[]`. |
+| R1 | `spec.agent` requires non-empty `spec.steps` | No agent config without a workflow. |
+| R2 | At least one of `workloads` / `steps` non-empty | Empty recipe reconciles to nothing. |
+| R3 | Each `steps[].id` unique | Step graph key. (Duplicate **workload** ids are caught by the reconciler, not CEL.) |
+| R4/R5 | `spec.scheduling` requires `steps`; `scheduling.cron` is a valid 5-field cron | Coordinator parses strict 5-field grammar. |
+| R6 | `spec.triggers` declares at least one of `onDemand` / `schedule` | A trigger block that triggers nothing is dead config. |
+| R7 | `triggers.schedule.cron` valid 5-field cron | Same grammar as R5. |
+| R8/R9/R10 | Step shape: `run` and `instruction` mutually exclusive; exactly one of them unless `spec.coordinatorImage` is set; `run` and `agent` mutually exclusive | One executor per step. |
+| R11–R14 | Snippet rules: no wildcards in `run.capabilities.mcp.allowedTools.include`; snippet MCP servers require an explicit `allowedTools.include`; snippet HTTP hosts must be declared in `spec.runtimeEgress.http.allowedHosts` (`exact-host`) or use `public-web` with no `allowedHosts` | Explicit-allowlist egress + tool policy. |
+| R15 | `ui.workloadRef` references existing `workloads[].id` | Cross-spec consistency. |
+| R16 | UI workload MUST be `type: deployment`, `replicas: 1`, no `transport` | Sandbox-UI proxy assumptions. |
+| R17 | `ui.egress.internal[].workloadRef` is non-MCP | UI must call its own backend, not MCP. |
+| R18 | `ui.defaultPath` has no scheme prefix (field regex also enforces the leading `/` and blocks `//`) | Prevents `javascript:`/`data:`/`file:` smuggling. |
+
+There is **no CEL rule forbidding `envSecret` / `imagePullSecrets` on the UI workload** — it is admitted and then fails at runtime with `CreateContainerConfigError`, because `sandbox-ui` has no Secrets (§6.3). Don't do it; just don't expect admission to stop you.
 
 ### 11.2 Webhook (W*)
 
 | Code | Rule |
 |---|---|
 | W1 | `webhooks[].id` DNS-1123 ≤ 63, unique. |
-| W2 | `workloadRef` is non-MCP deployment/statefulset (WRC-level, surfaces as `WebhookHandlerInvalid` condition). |
+| W2 | `workloadRef` is a non-MCP `type: deployment` workload — no other workload type is accepted (WRC-level, surfaces as `WebhookHandlerInvalid` condition). |
 | W3 | `path` matches strict regex (no `..`, no `//`, no whitespace, allows `/.well-known`). |
 | W4 | `methods` ⊆ {POST, GET}; POST mandatory. |
 | W5 | `maxBodyBytes` ∈ [1024, 10485760]. |
@@ -1356,7 +1384,7 @@ Rejection messages cite the rule code. CEL is strict — fix locally before appl
 | W8 | `replay` required iff scheme is `hmac-sha256-timestamp-body`. |
 | W9 | `jwksUrl`/`issuer`/`audience` required iff scheme is `jwt-bearer-jwks`. |
 | W10 | Header names match `^[a-zA-Z][a-zA-Z0-9-]{0,63}$`. |
-| W11 | `replay.toleranceSec` (or `timestampToleranceSec`) ∈ [10, 3600]. |
+| W11 | `replay.toleranceSec` ∈ [10, 3600] (default 300). |
 | W12 | `jwksUrl` https only, multi-label DNS host (no IPs, no localhost). |
 | W13/W14 | `setupHandshake.strategy: meta-hub-challenge` requires `secretRef` AND `GET` in `methods`. |
 | W15 | `cors.allowedOrigins[]` entries are exact `http(s)://host[:port]` origins, max 32 entries; no wildcards, paths, query strings, fragments, or trailing slashes. Omitted/empty CORS means server-to-server only. |
@@ -1365,12 +1393,12 @@ Rejection messages cite the rule code. CEL is strict — fix locally before appl
 
 | Code | Rule |
 |---|---|
-| O1 | `oauthClients` requires `spec.ui`. |
-| O2 | `provider` enum (5 known). |
+| O1 | `oauthClients` requires **either** `spec.ui` **or** a `workloads[].oauthClientRefs` consumer for every declared client. (A UI-less background-OAuth recipe — §7.5 — is legal.) |
+| O2 | `provider` enum (5 known). Field-level enum, not a CEL rule. |
 | O3 | `oauthClients[].id` unique. |
-| O4 | `backgroundAccess: true` requires `scopes` to include the provider's offline/refresh scope (`refresh_token` Salesforce, `offline_access` Microsoft Graph); see §7.5. |
-| O5 | `workloads[].oauthClientRefs[]` must reference declared `backgroundAccess` clients. |
-| O6 | `oauthClientRefs` is only valid on non-MCP, non-UI workloads. |
+| O4 | `workloads[].oauthClientRefs` is not allowed on MCP transport workloads. |
+
+Enforced by the WRC reconciler (not CEL, so the rejection arrives as a status condition rather than at `kubectl apply`): `backgroundAccess: true` requires `scopes` to include the provider's offline/refresh scope (`refresh_token` Salesforce, `offline_access` Microsoft Graph — §7.5), and `oauthClientRefs[]` must resolve to declared `backgroundAccess` clients.
 
 ### 11.4 Egress (E*)
 
@@ -1389,7 +1417,7 @@ Plus field-level patterns: `metadata.name` DNS-1123 ≤ 63, `workloadRef` DNS-11
 | Mistake | Symptom | Fix |
 |---|---|---|
 | `metadata.namespace: sandbox-ui` (or `mcp-server`) | Admission rejects. | Always `sandbox-recipes`. |
-| `spec.oauthClients` without `spec.ui` | Admission rejects (O1). | Add `ui` or remove OAuth. |
+| `spec.oauthClients` with neither `spec.ui` nor any `workloads[].oauthClientRefs` consumer | Admission rejects (O1). | Add `ui`, wire the client into a workload's `oauthClientRefs`, or remove the client. |
 | Inline `<script>` in embed HTML | CSP error in DevTools. | External same-origin `.js`. |
 | nginx serves `.js` as `application/octet-stream` | Browser refuses script under CSP. | Add `types { application/javascript js; ... }` to nginx config. |
 | HTML uses absolute paths like `<script src="/static/app.js">` or `fetch('/api/...')` | Shell loads (200), JS bundle 404s, React renders an empty `<div id="root">`. rpc-proxy returns 404 because absolute paths resolve outside the `/api/v1/sandbox-ui/<ns>/<name>/view/` mount and rpc-proxy doesn't rewrite response bodies (§6.6). | Add `<base href="./">` to `<head>` AND use relative paths (`./static/app.js`, `fetch('./api/...')`) consistently across HTML, fetch calls, and CSS `url()`. `<base>` covers HTML attributes; absolute paths constructed inside JS need to be made relative in the source. |
@@ -1397,10 +1425,10 @@ Plus field-level patterns: `metadata.name` DNS-1123 ≤ 63, `workloadRef` DNS-11
 | ConfigMap-mounted file via `volumeMounts` | Empty `emptyDir`; file missing. | Write file at startup via `command:` bootstrap. |
 | `ui.port: 80` / `443` / `22` | Admission OK but runtime `502 port_not_allowed`. | Use 8080. |
 | `ui.egress.external` uses `*.slack.com` | FQDN resolution empty; NetworkPolicy empty. | Wildcards unsupported — declare each subdomain. |
-| `hmac-sha256-timestamp-body` without `replay:` | Admission rejects (W8). | Add `replay: { windowSec: 600 }`. |
+| `hmac-sha256-timestamp-body` without `replay:` | Admission rejects (W8). | Add `replay: { timestampHeader: <Header>, toleranceSec: 300 }`. |
 | `meta-hub-challenge` without `GET` in methods | Admission rejects (W14). | `methods: [GET, POST]`. |
 | OAuth secret missing | `/oauth/authorize-url` returns 503 `integration_not_configured`. NOTE: `/oauth/token` does **not** — with no grant it returns `404 no_grant` and never reads the Secret (§7.2.1). | Create K8s Secret in `sandbox-recipes`. |
-| UI workload declares `envSecret` | Pod stuck in `CreateContainerConfigError`: `secret "X" not found`, but the Secret exists in `sandbox-recipes`. UI workloads run in `sandbox-ui`, which has no Secrets (§6.3, R13). | Split the recipe: thin UI workload (no creds) + sibling backend workload in `sandbox-recipes` that owns the `envSecret`. Wire them with `spec.bindings[]`. |
+| UI workload declares `envSecret` | Admission ACCEPTS it (no CEL rule blocks this), then the pod sticks in `CreateContainerConfigError`: `secret "X" not found`, even though the Secret exists in `sandbox-recipes`. UI workloads run in `sandbox-ui`, which has no Secrets (§6.3). | Split the recipe: thin UI workload (no creds) + sibling backend workload in `sandbox-recipes` that owns the `envSecret`. Wire them with `spec.bindings[]`. |
 | OAuth callback `400 invalid_recipe_namespace` | Recipe in wrong namespace. | Use `sandbox-recipes`. |
 | Workload runs as root | Image entrypoint requires root (`nginx:alpine` etc). | Switch to non-root variant or set `security.runAsUser`. |
 | StatefulSet PVC mount fails to chown | `fsGroup` missing. | Set `fsGroup` = `runAsGroup`. |
@@ -1410,7 +1438,7 @@ Plus field-level patterns: `metadata.name` DNS-1123 ≤ 63, `workloadRef` DNS-11
 | Download click does nothing | `will-download` prevented. | Render content inline. |
 | Cross-user data leak | Trusted client-supplied identity. | Always read `X-Clerum-User` server-side. |
 | `503 recipe_not_ready` | Pod rolling. | Wait — embed auto-refreshes every 5 s. |
-| Pod `CrashLoopBackOff`, `exitCode 137`, **empty logs**, `Liveness probe failed: ... connection refused`. | Process is doing pre-`listen` work (migrations, warm cache) and gets SIGKILL'd before binding. Node line-buffers stdout, so the buffer never flushes. | Add a `startupProbe` (§4.6) or move pre-listen work to a background task. Check §9.5 first — most often the pre-listen call is a DB connect that's being dropped by `deny-all-<ns>`. |
+| Pod `CrashLoopBackOff`, `exitCode 137`, **empty logs**, `Liveness probe failed: ... connection refused`. | Process is doing pre-`listen` work (migrations, warm cache) and gets SIGKILL'd before binding. Node line-buffers stdout, so the buffer never flushes. | Move pre-listen work to a background task, or widen the `healthCheck` budget (§4.6 — there is no `startupProbe` field). Check §9.5 first — most often the pre-listen call is a DB connect that's being dropped by `deny-all-<ns>`. |
 | Workload `ETIMEDOUT` to a sibling Service in the same namespace. | No first-class field opens non-UI → non-UI sibling traffic; `deny-all-<ns>` drops it. | Add `egressBindings[]: { dns: <sibling>.<ns>.svc.cluster.local, port: <p> }` on the **calling** workload. See §9.5. |
 | Single-image recipe split into UI + backend; suddenly third-party APIs fail with `ETIMEDOUT`. | `spec.ui.egress.external[]` only opened egress for the UI pod; after split the credentialed pod is no longer the UI pod. | Move every external FQDN to the backend's `egressBindings[]`. See §12.7. |
 
@@ -1477,11 +1505,11 @@ The canonical sandbox-UI shape is "thin static-asset UI pod + sibling credential
          port: 8080
    ```
 
-5. **Re-verify the constraints the platform applies only to UI workloads.** The new `ui` workload now hits R10 (`replicas: 1`, no `transport`) and R13 (no `envSecret`, no `imagePullSecrets`). The old "I'll just put Secrets on the UI workload" shortcut stops working — that's intentional, it's the credential boundary at §6.3.
+5. **Re-verify the constraints the platform applies only to UI workloads.** The new `ui` workload now hits R16 (`type: deployment`, `replicas: 1`, no `transport`) at admission. The old "I'll just put Secrets on the UI workload" shortcut stops working — not because admission blocks it (no CEL rule does, §11.1), but because `sandbox-ui` has no Secrets, so the pod sticks in `CreateContainerConfigError`. That's the credential boundary at §6.3.
 
 **Migration checklist.**
 
-- [ ] No `envSecret` or `imagePullSecrets` on the new UI workload (R13).
+- [ ] No `envSecret` or `imagePullSecrets` on the new UI workload (not admission-enforced — it fails at the pod layer, §11.1).
 - [ ] Every external FQDN that the old UI workload reached now lives in **some workload's** `egressBindings[]` — not in `spec.ui.egress.external[]`.
 - [ ] Every sibling in `sandbox-recipes` the backend talks to is in the backend's `egressBindings[]` as `<id>.<ns>.svc.cluster.local` (§9.5).
 - [ ] `spec.ui.workloadRef` points at the new UI workload.
@@ -1522,10 +1550,10 @@ The canonical sandbox-UI shape is "thin static-asset UI pod + sibling credential
 
 `control-api` ServiceAccount needs:
 
-- `mcp-server` ns: Role `control-api-mcp-resources` covering `contexts`, `mcpservers`, `workflowrecipes`.
-- `sandbox-recipes` ns: Role `control-api-workflow-recipes-sandbox` for `workflowrecipes`.
+- `mcp-server` ns: Role `control-api-mcp-resources` covering `contexts`, `mcpservers`, `workflowrecipes` — `deploy/base/mcp-server/rbac.yaml`.
+- `sandbox-recipes` ns: Role `control-api-workflow-recipes-sandbox` for `workflowrecipes` — `deploy/base/sandbox-recipes/rbac.yaml`.
 
-Source: `control-api/deploy/rbac.yaml`. Applied by `setup.sh` step 7. Without it, all `/api/v1/admin/recipes` calls return 500.
+Both are part of the `deploy/base` kustomize bases (each namespace's `kustomization.yaml` lists `rbac.yaml`) and are applied with the rest of the deployment manifests. Without them, all `/api/v1/admin/recipes` calls return 500.
 
 ### 13.2 Install via Control UI (recommended)
 
@@ -1591,7 +1619,10 @@ The recipe's `.status` subresource carries three coordinates: top-level fields f
 
 ```yaml
 status:
-  phase: degraded                       # candidate | reconciling | ready | degraded | failed
+  phase: degraded                       # 13-state enum: candidate | pending-approval | approved | pending |
+                                        # pending-operator-input | deploying | testing | active | degraded |
+                                        # rolling-back | failed | deprecated | rollback-failed.
+                                        # The healthy terminal phase is `active` — there is no `ready`.
   message: "Webhook gateway disabled: webhooks[fireflies].secretRef 'sales-crm-fireflies-webhook' not found ..."
   conditions:
     - type: WebhookSecretMissing
@@ -1609,14 +1640,14 @@ status:
     - { id: db,        type: statefulset,  phase: deployed, ready: true }
     - { id: followup,  type: cronjob,      phase: deployed, ready: true }
   workflowExecution:                    # only when spec.steps is set
-    phase: completed                    # running | completed | failed
+    phase: completed                    # pending | initializing | running | recovering | completed | failed | cancelled
 ```
 
 **Condition schema** — standard K8s shape: `{type, status, reason, message, lastTransitionTime}`. `status` is `True | False | Unknown`; for problem-condition types like `WebhookSecretMissing` and `WebhookHandlerInvalid`, **`status: False` is the healthy form** — it means "this problem is not present." Always read condition meaning by `(type, status, reason)`, not by `type` alone. Per-feature detail (e.g. *which* webhook is broken) goes into `message`.
 
 #### 13.5.1 `.status.workloads[].ready` is NOT pod readiness
 
-`workloads[].ready: true` means **WRC successfully applied the workload's K8s manifest** (Deployment / StatefulSet / CronJob / Job / DaemonSet was accepted by the API server). It does NOT mean any pod is actually running. Pods can be in `ImagePullBackOff`, `CreateContainerConfigError`, `CrashLoopBackOff`, or stuck pre-sandbox while `workloads[].ready` still reports `true` and `phase` is `degraded` or even `ready`.
+`workloads[].ready: true` means **WRC successfully applied the workload's K8s manifest** (Deployment / StatefulSet / CronJob / Job / DaemonSet was accepted by the API server). It does NOT mean any pod is actually running. Pods can be in `ImagePullBackOff`, `CreateContainerConfigError`, `CrashLoopBackOff`, or stuck pre-sandbox while `workloads[].ready` still reports `true` and `.status.phase` is `degraded` or even `active`.
 
 The WRC also does NOT propagate kubelet-level failures into `.status.conditions[]`. Pod-level problems must be diagnosed at the pod layer:
 
@@ -1643,7 +1674,7 @@ Required-webhook Secret problems are the **only** Secret-presence check WRC perf
 |---|---|---|
 | `WebhookSecretMissing` | A **required** webhook `secretRef` resolves to a missing Secret/key. Gateway is NOT scheduled (fail-closed). | Create the K8s Secret in `sandbox-recipes` with the named key. |
 | `WebhookDormant` | At least one webhook with `optional: true` (§8.6) has a missing `secretRef`. Gateway IS scheduled; dormant webhooks short-circuit to `410 integration_not_configured`. | Optional: create the K8s Secret to activate the dormant webhook. A debounced reconcile picks it up. |
-| `WebhookHandlerInvalid` | A webhook's `workloadRef` is not a non-MCP deployment/statefulset (the W2 check that's too costly for CEL). | Fix `workloadRef` to point at a valid non-MCP workload. |
+| `WebhookHandlerInvalid` | A webhook's `workloadRef` does not name a workload, names one whose `type` is not `deployment`, or names one with `transport` set (the W2 check that's too costly for CEL). | Fix `workloadRef` to point at a `type: deployment` workload with no `transport`. |
 | `WebhookGatewayNotReady` | Per-recipe webhook-gateway Deployment is not `Available`. | `kubectl describe pod` on the gateway pod; usually image pull / resource pressure. |
 | `WebhookJwksFetchFailed` | Reconcile-time fetch of `verification.jwksUrl` failed. Gateway still deploys; lazy-refetch covers requests but `kid`-miss requests return `500 jwks_fetch_failed`. | Verify the JWKS URL is reachable from the gateway's egress and `jwksUrl` is HTTPS multi-label DNS. |
 
@@ -1672,12 +1703,12 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 | Symptom | Likely status signal | Fix path |
 |---|---|---|
-| Embed sticks on "recipe updating" | `phase != Ready`; events on the UI pod | Check `kubectl describe pod` — readiness probe failing or image pull pending. |
+| Embed sticks on "recipe updating" | `phase != active`; events on the UI pod | Check `kubectl describe pod` — readiness probe failing or image pull pending. |
 | Webhook returns `401 invalid_signature` | None (verification just rejected the request) | Verify HMAC scheme, secret content, encoding. |
 | Webhook returns `500 verifier_misconfigured` | `WebhookSecretMissing` | Create the missing Secret/key in `sandbox-recipes`. |
 | Webhook returns `500 jwks_fetch_failed` | `WebhookJwksFetchFailed` | Confirm `jwksUrl` is reachable; check periodic re-resolution succeeded. |
 | Workflow stuck in `running` indefinitely | `workflowExecution.phase: running` | Coordinator → WRC blocked by NetworkPolicy / token expired / mcp_host unreachable. See §10.5 troubleshooting + coordinator logs. |
-| Recipe simply not reconciling | `phase: Pending` long after `kubectl apply` | Check WRC pod logs: `kubectl logs -n control-plane deploy/workflow-recipes`. |
+| Recipe simply not reconciling | `phase: pending` long after `kubectl apply` | Check WRC pod logs: `kubectl logs -n control-plane deploy/workflow-recipes`. |
 
 `status` is updated by WRC and (for workflow runs) by the coordinator via WRC's REST handler — both paths PATCH the same subresource on the canonical CRD in `sandbox-recipes`.
 
@@ -1997,9 +2028,13 @@ spec:
     ## Install order
 
     1. Create the four Secrets (above).
-    2. Apply this recipe.
-    3. Wait for `phase=active`:
-       kubectl get workflowrecipe sales-crm -n sandbox-recipes -w
+    2. Install this recipe from the Control UI registry.
+    3. Wait for `phase=active` — the recipe detail header shows it.
+       From the CLI, first resolve the installed CR name (it is NOT
+       "sales-crm"; see the naming note in the guide's §14.5):
+       RECIPE=$(kubectl get workflowrecipes -n sandbox-recipes \
+         -o name | grep sales-crm)
+       kubectl get -n sandbox-recipes "$RECIPE" -w
     4. Register the two webhook URLs at Fireflies and Meta.
     5. Open the embed in the desktop app, click "Connect Microsoft",
        complete OAuth in your browser, return to the embed.
@@ -2009,10 +2044,10 @@ spec:
     All four Secrets present:
       kubectl get secret -n sandbox-recipes | grep sales-crm
 
-    Recipe Ready and no missing-Secret conditions:
-      kubectl get workflowrecipe sales-crm -n sandbox-recipes \
+    Recipe phase is `active` and no missing-Secret conditions:
+      kubectl get -n sandbox-recipes "$RECIPE" \
         -o jsonpath='{.status.phase}'
-      kubectl describe workflowrecipe sales-crm -n sandbox-recipes \
+      kubectl describe -n sandbox-recipes "$RECIPE" \
         | grep -A 3 Conditions
 ```
 
@@ -2053,16 +2088,19 @@ yq -o=json '.' recipe.yaml > recipe.json
 python3 -c 'import sys,yaml,json; json.dump(yaml.safe_load(open("recipe.yaml")),sys.stdout,indent=2)' > recipe.json
 ```
 
-**Recipe naming inside the cluster.** The Control UI registers your recipe as `recipe-<metadata.name>-v<version>-<hash>` (e.g. `recipe-sales-crm-v1-0-0-87c8cacc`). The `<metadata.name>` you wrote is preserved as a label but is **not** the CR name. Looking up a recipe with `kubectl get workflowrecipe <metadata.name>` will return `NotFound`. Use either of:
+**Recipe naming inside the cluster.** When a recipe is installed from the registry (the Control-UI path), the installed CR is **not** named after your `metadata.name`. (A direct `kubectl apply -f recipe.yaml`, §13, does keep it.) Control-API derives the name from the **registry entry** name and version: `recipe-<entry-name>-v<version-with-dashes>-<hash8>` (e.g. `recipe-sales-crm-v1-0-0-87c8cacc`; `control-api/src/routes/admin/registry.ts`). Your `metadata.name` is not carried over as a label — the only label applied at install is `clerum.io/managed-by: control-api`; the catalog entry name and version are stored as the **annotations** `clerum.io/catalog-id` and `clerum.io/catalog-version` (org-scoped names are illegal label values). So `kubectl get workflowrecipe <metadata.name>` returns `NotFound`. Look it up by substring or by annotation:
 
 ```bash
-kubectl get workflowrecipes -A | grep <your-name>
-kubectl get workflowrecipes -A -l clerum.io/recipe-base-name=<your-name>
+kubectl get workflowrecipes -A | grep <your-entry-name>
+# or, exactly, by the catalog annotation:
+kubectl get workflowrecipes -A -o json \
+  | jq -r '.items[] | select(.metadata.annotations["clerum.io/catalog-id"]=="<your-entry-name>")
+           | "\(.metadata.namespace)/\(.metadata.name)"'
 ```
 
 ### 14.6 Versioning your recipe + image
 
-Authors carry version discipline in two places: the **image tag** and (optionally) a `metadata.labels` or `metadata.annotations` field on the recipe. The cluster itself does not enforce a recipe version — `metadata.name` is the primary key — but you should still bump tags + announce changes to consumers.
+Authors carry version discipline in two places: the **image tag** and (optionally) a `metadata.labels` or `metadata.annotations` field on the recipe. The cluster itself does not enforce a recipe version — the installed CR's name (derived from the registry entry name + version, §14.5) is the primary key — but you should still bump tags + announce changes to consumers.
 
 | Change | Action |
 |---|---|
@@ -2081,7 +2119,7 @@ The whole flow is Control-UI-driven. No terminal required.
 2. **Reviews `spec.description`** in the detail page's full-page description reader — Secret prerequisites, callback URLs, container image links.
 3. **Clicks Install** on the detail page (or the catalog row's inline button).
 4. **Provisions the prerequisite Secrets** through the recipe's **Secrets** tab — Missing rows surface an **Add** button that pre-fills the key list from the spec. (Optional: a debounced reconcile picks up new keys without manual re-trigger; see §4.1.1.)
-5. **`.status.phase`** transitions `Pending → Reconciling → Ready`, visible in the recipe detail header. The **Workloads** and **Conditions** tabs surface any failure modes (see §13.4 / §13.5).
+5. **`.status.phase`** advances through the 13-state machine (`pending → deploying → testing → active`; `active` is the healthy terminal phase — there is no `ready`), visible in the recipe detail header. The **Workloads** and **Conditions** tabs surface any failure modes (see §13.4 / §13.5).
 6. **Grants the recipe to specific users** via the **Members** tab on the recipe detail page (recipe is invisible to end users until granted).
 7. **End user sees the recipe** in the desktop app (sandbox-UI recipes) or trigger list (workflows).
 
@@ -2115,9 +2153,12 @@ Steps 4 and 6 are the only operator-action steps; the rest is platform automatio
 **Step 5 — verify on a test install:**
 
 ```bash
-kubectl get workflowrecipe sandbox-ui-oauth-hello -n sandbox-recipes \
-  -o jsonpath='{.status.phase}'
-# Expect: Ready
+# The installed CR is named recipe-<entry>-v<version>-<hash>, NOT
+# "sandbox-ui-oauth-hello" (§14.5) — resolve it first.
+RECIPE=$(kubectl get workflowrecipes -n sandbox-recipes -o name \
+  | grep sandbox-ui-oauth-hello)
+kubectl get -n sandbox-recipes "$RECIPE" -o jsonpath='{.status.phase}'
+# Expect: active
 ```
 
 Then read §13.5 to confirm `.status.conditions[]` is empty, and you're done.
@@ -2128,11 +2169,11 @@ Then read §13.5 to confirm `.status.conditions[]` is empty, and you're done.
 
 - **Cannot live outside `sandbox-recipes`.** The CRD object always lives there.
 - **Cannot choose which namespace a workload lands in** — it's a function of `transport` and `spec.ui.workloadRef`.
-- **Cannot ship custom workflow handler code** — only registered server-side handlers (`json.merge`, …) are callable for `run:` steps. Custom logic must go in agentic `instruction:` steps or in a workload.
+- **Cannot ship arbitrary `run:` executors** — `run:` is snippet-only (`type: snippet`, `language: typescript`, inline `code`), and everything the snippet touches must be declared in `run.capabilities`. Logic that doesn't fit that envelope goes in agentic `instruction:` steps or in a workload.
 - **Cannot use cross-namespace `ownerReferences`** (K8s 1.24+ GC deletes them with `OwnerRefInvalidNamespace`). WRC finalizers own cleanup.
 - **Cannot mount ConfigMap/Secret as `volumeMounts`** today — only PVCs auto-wire. Bootstrap via `command:` if needed.
-- **Cannot use `replicas > 1` for UI workloads** (R10).
-- **Cannot point `ui.egress.internal` at MCP servers** (R11). Route via your own backend.
+- **Cannot use `replicas > 1` for UI workloads** (R16).
+- **Cannot point `ui.egress.internal` at MCP servers** (R17). Route via your own backend.
 - **Cannot use ports other than 8080 for the UI** (platform allow-list).
 - **Cannot use wildcard FQDNs** in `egress.external`.
 - **Cannot use WebSocket** in sandbox UI (`426 Upgrade Required`). Use SSE / polling.
@@ -2181,7 +2222,8 @@ When this doc and the code disagree, the code wins.
 
 - [ ] `metadata.namespace: sandbox-recipes` (always).
 - [ ] `metadata.name` is DNS-1123, ≤ 63 chars, unique.
-- [ ] `spec.contextRef` set (use `context1`).
+- [ ] `spec.contextRef` set ONLY if a workload exposes an MCP `transport` (use `context1`); omitted on agentic (`steps`) recipes — §1.1.
+- [ ] If `spec.steps` is non-empty: `spec.triggers` declares `onDemand` and/or `schedule` (cluster admission policy rejects otherwise).
 - [ ] All `workloads[].id` unique, lowercase, DNS-1123.
 - [ ] At least one of `workloads` / `steps` non-empty.
 - [ ] If `spec.ui`: referenced workload is `type: deployment`, `replicas: 1` (or omitted), no `transport`, port matches, container runs non-root on `0.0.0.0:8080`, `healthCheck` returns 2xx.
@@ -2189,7 +2231,7 @@ When this doc and the code disagree, the code wins.
 - [ ] All cross-origin embed fetches removed (or relayed server-side).
 - [ ] `ui.defaultPath` matches `^/([^/\s][^\s]*)?$`.
 - [ ] `ui.icon` (if set) is `data:` URI, ≤ 32 KB.
-- [ ] If `spec.oauthClients`: `spec.ui` also set; Secrets referenced in `clientIdRef`/`clientSecretRef` exist in `sandbox-recipes`.
+- [ ] If `spec.oauthClients`: `spec.ui` is set OR every client is consumed by a `workloads[].oauthClientRefs` (O1); Secrets referenced in `clientIdRef`/`clientSecretRef` exist in `sandbox-recipes`.
 - [ ] If any `oauthClients[].backgroundAccess: true`: `scopes` includes the provider's offline/refresh scope (§7.5); each consuming workload opts in via `oauthClientRefs` and is non-MCP, non-UI.
 - [ ] If `spec.webhooks`: each `workloadRef` is non-MCP; verification matches provider; `replay:` present iff `hmac-sha256-timestamp-body`; `meta-hub-challenge` has `GET` in methods.
 - [ ] If steps use `{{stepId:output}}`: every referenced `stepId` exists and runs first.
@@ -2214,7 +2256,7 @@ If a referenced Secret is missing, the recipe still applies. The failure mode de
 - [ ] **Health-check path returns 2xx with the right Content-Type** — `curl -i localhost:8080<healthCheck.path>` and `curl -i localhost:8080<defaultPath>` from a fresh shell; verify `.js` is served as `application/javascript` (CSP refuses scripts with the wrong type). This is the cheapest debugging step there is — three minutes here saves an hour of cluster-side detective work.
 - [ ] **No baked-in secrets** — `docker history <image>` reveals nothing sensitive.
 - [ ] **OCI source + license annotations** present.
-- [ ] **Recipe applies cleanly on a fresh cluster** — `.status.phase: Ready`, `.status.conditions[]` empty, **AND** pods in `sandbox-recipes` AND `sandbox-ui` are all `Running 1/1`. Split recipes can have a Ready WorkflowRecipe with a CrashLoop'ing backend pod — always check both namespaces.
+- [ ] **Recipe applies cleanly on a fresh cluster** — `.status.phase: active`, `.status.conditions[]` empty, **AND** pods in `sandbox-recipes` AND `sandbox-ui` are all `Running 1/1`. Split recipes can have a Ready WorkflowRecipe with a CrashLoop'ing backend pod — always check both namespaces.
 - [ ] **No `ETIMEDOUT` in any workload's startup logs** — if a backend talks to a sibling in the same namespace, confirm an `egressBindings[]` entry with the sibling's `<id>.<ns>.svc.cluster.local` FQDN exists (§9.5).
 - [ ] **Every referenced Secret documented in `spec.description`** with the exact `kubectl create secret` invocation.
 - [ ] **OAuth recipes**: exact callback URL spelled out (`/api/v1/oauth-callback/<oauthClientId>`).

@@ -63,7 +63,7 @@ duplicating runtime logic:
 | Checkpoint      | Fails                                                      | Examples                                                                                                                                                                                                                                                                        |
 | --------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Kubernetes CEL  | Invalid CRD shape or explicit intent mismatch              | duplicate step ids, `run + instruction`, `run + agent`, DB capability missing `access`, wildcard MCP tools, non-public `runtimeEgress.http.allowedHosts`, snippet HTTP hosts not declared in `spec.runtimeEgress.http.allowedHosts`, MCP servers without `allowedTools.include` |
-| WRC before pods | Semantic recipe references that require controller context | unknown `dependsOn`, snippet `secretRef` Secret/key missing from `sandbox-recipes`, Mongo/Postgres workload not declared in `spec.workloads`, MCP server/tool not declared or scoped                                                                                            |
+| WRC before pods | Semantic recipe references that require controller context | unknown `dependsOn`, snippet `secretRef` Secret not owned by or shared with the recipe, snippet `secretRef` Secret/key missing from `sandbox-recipes`, Mongo/Postgres workload not declared in `spec.workloads`, MCP server/tool not declared or scoped                       |
 | SDK runtime     | Values only known while code runs                          | actual URL host, HTTPS requirement, HTTP method, redirect target, response size, DB write attempted with `access: read`, unsafe artifact filename                                                                                                                               |
 
 This keeps admission useful for developer feedback without making the CRD
@@ -157,8 +157,12 @@ Snippet secrets reference Kubernetes Secrets by `secretRef.name/key`. Control UI
 can capture these values in password fields and creates or updates the Secret in
 `sandbox-recipes` before deploying the WorkflowRecipe; the CRD stores only the
 reference, never the value. If you apply YAML directly, create the Kubernetes
-Secret yourself first. Platform-managed runtime Secrets such as coordinator
-tokens are rejected.
+Secret yourself first, and label it so the recipe is allowed to read it: either
+`clerum.io/shared: "true"` (any recipe may reference it) or
+`clerum.io/owner-recipe: <recipeName>` (only that recipe may). An unlabeled
+Secret — or one carrying both labels — is denied, and the recipe fails with
+`snippet secret "<name>" is not accessible to recipe "<recipe>"`.
+Platform-managed runtime Secrets such as coordinator tokens are rejected.
 
 MongoDB/PostgreSQL:
 

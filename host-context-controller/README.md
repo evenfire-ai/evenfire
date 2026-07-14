@@ -1,11 +1,13 @@
 # Host Context Controller
 
-The Host Context Controller is a Kubernetes operator and REST API service that sits at the heart of the Clerum platform. It performs three key roles:
+The Host Context Controller is a Kubernetes operator and REST API service that sits at the heart of the Clerum platform. It performs these key roles:
 
 1. **McpServer Operator** — Watches `McpServer` CRDs and automatically manages Deployments and Services for each MCP server, including secret validation.
 2. **Host Operator** — Watches `Host` CRDs and automatically manages one Deployment, one Service, and one PVC per host, including secret validation.
 3. **NetworkPolicy Operator** — Watches `Context` and `McpServer` CRDs and generates a four-layer NetworkPolicy model (deny-all, infrastructure, context-allow, external-egress) plus recipe binding policies.
 4. **REST API** — Exposes a curated API that `mcp-host` uses to discover available MCP servers, their status, and auth tokens.
+
+It also reconciles `GlobalFileSystem` (`src/gfsReconciler.ts`) and `SharedFileSystem` (`src/sharedFileSystemReconciler.ts`) CRDs.
 
 ## Architecture
 
@@ -15,18 +17,18 @@ The Host Context Controller is a Kubernetes operator and REST API service that s
                                          └──────────┬──────────┘
                                                     │ watch
                                                     ▼
-┌─────────────────┐     REST API      ┌──────────────────────────┐     manages      ┌─────────────────────┐
-│    mcp-host     │ ───────────────▶  │  host-context-controller   │ ──────────────▶  │  Deployments        │
-│ (mcp-host)│                   │      (control-plane ns)   │                  │  Services           │
-└─────────────────┘                   └──────────────────────────┘                  │  NetworkPolicies    │
-                                                    │                               └─────────────────────┘
-                                         watch      │      reads
+┌─────────────────┐     REST API      ┌───────────────────────────┐     manages      ┌─────────────────────┐
+│    mcp-host     │ ───────────────▶  │  host-context-controller  │ ──────────────▶  │  Deployments        │
+│  (mcp-host ns)  │                   │    (control-plane ns)     │                  │  Services           │
+└─────────────────┘                   └───────────────────────────┘                  │  NetworkPolicies    │
+                                                    │                                └─────────────────────┘
+                                           watch    │      reads
                                     ┌───────────────┼───────────────┐
                                     ▼               ▼               ▼
-                             ┌─────────────┐ ┌───────────┐  ┌─────────────┐
-                             │ Context CRDs│ │  Secrets   │  │ MCP Server  │
-                             └─────────────┘ └───────────┘  │    Pods     │
-                                                            └─────────────┘
+                             ┌─────────────┐  ┌───────────┐  ┌─────────────┐
+                             │ Context CRDs│  │  Secrets  │  │ MCP Server  │
+                             └─────────────┘  └───────────┘  │    Pods     │
+                                                             └─────────────┘
 ```
 
 ## McpServer Operator
@@ -52,7 +54,7 @@ Before deploying an MCP server, the reconciler checks that:
 1. The secret referenced by `spec.envSecret.name` exists in the namespace.
 2. All keys listed in `spec.envSecret.keys[].secretKey` are present in the secret data.
 
-If the secret is missing or incomplete, the MCP server will **not** be deployed. Creating secrets is not the host-context-controller's responsibility — it only validates their existence.
+If the secret is missing or incomplete, the MCP server will **not** be deployed. Creating the secrets an `McpServer` references is not the host-context-controller's responsibility — for those it only validates their existence. (It does create its own Secrets elsewhere, e.g. the per-Host runtime-token Secret in `mcp-host`.)
 
 ## NetworkPolicy Operator
 
@@ -60,20 +62,23 @@ The host-context-controller enforces **deny-by-default** network isolation acros
 
 ### L0 — Default deny
 
-One `deny-all-<namespace>` policy per runtime namespace (default `mcp-server,mcp-host,sandbox-recipes,rpc-proxy`, configurable via `CONTEXT_MAPPER_RUNTIME_NAMESPACES`). Empty pod selector with `policyTypes: [Ingress, Egress]` — all traffic in both directions is blocked unless a higher layer allows it.
+One `deny-all-<namespace>` policy per runtime namespace, configurable via `CONTEXT_MAPPER_RUNTIME_NAMESPACES` (the shipped deployment sets `mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui`; the code default is `mcp-server,mcp-host,sandbox-recipes,rpc-proxy`). Empty pod selector with `policyTypes: [Ingress, Egress]` — all traffic in both directions is blocked unless a higher layer allows it.
+
+Note: as deployed, `mcp-host` is **not** in that list — its deny-all, DNS and K8s-API policies are static manifests (`deploy/base/mcp-host/networkpolicies.yaml`), not controller-managed.
 
 ### L1 — Infrastructure
 
-Baseline plumbing per runtime namespace:
+Baseline plumbing, created once per runtime namespace:
 
-| Policy                              | Allows                                                                                                                                                                                                                                                                                                                                            |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `allow-dns-egress-<ns>`             | DNS (UDP+TCP 53) to `kube-system`; optional extra ipBlock rule for GKE NodeLocal DNSCache via `CONTEXT_MAPPER_NODELOCAL_DNS_CIDR`                                                                                                                                                                                                                 |
-| `allow-hcc-api-egress-<ns>`         | Egress to the `host-context-controller-api-gateway` pod in the control-plane namespace, scoped per namespace to the pod classes that need discovery (managed mcp-host pods, `mcp-proxy`, `rpc-proxy`, workflow MCP hosts)                                                                                                                         |
-| `allow-k8s-api-egress-<ns>`         | Egress to the Kubernetes API server (TCP 443; CIDRs from `CONTEXT_MAPPER_K8S_API_CIDRS`, falling back to `KUBERNETES_SERVICE_HOST`, then to a hardcoded `10.96.0.1/32` when that is unset). **Deny by default** outside `mcp-host`: pods in other runtime namespaces must opt in with the platform-owned label `clerum.io/k8s-api-egress: "true"` |
-| `allow-host-context-controller-api` | Ingress to the controller's own REST API (`app: host-context-controller`) from the `mcp-host` namespace on the configured port                                                                                                                                                                                                                    |
+| Policy                      | Allows                                                                                                                                                                                                                                                                                                                                            |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allow-dns-egress-<ns>`     | DNS (UDP+TCP 53) to `kube-system`; optional extra ipBlock rule for GKE NodeLocal DNSCache via `CONTEXT_MAPPER_NODELOCAL_DNS_CIDR`                                                                                                                                                                                                                 |
+| `allow-hcc-api-egress-<ns>` | Egress to the `host-context-controller-api-gateway` pod in the control-plane namespace, scoped per namespace to the pod classes that need discovery (managed mcp-host pods, `mcp-proxy`, `rpc-proxy`, workflow MCP hosts)                                                                                                                         |
+| `allow-k8s-api-egress-<ns>` | Egress to the Kubernetes API server (TCP 443; CIDRs from `CONTEXT_MAPPER_K8S_API_CIDRS`, falling back to `KUBERNETES_SERVICE_HOST`, then to a hardcoded `10.96.0.1/32` when that is unset). **Deny by default** outside `mcp-host`: pods in other runtime namespaces must opt in with the platform-owned label `clerum.io/k8s-api-egress: "true"` |
 
 Namespaces listed in `CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES` get only deny-all + DNS egress (no HCC-API or K8s-API egress).
+
+`ensureDefaultPolicies` additionally creates one non-suffixed `allow-host-context-controller-api` policy — not per namespace, but a single policy in `CONTEXT_MAPPER_NAMESPACE` (`mcp-server`). It permits ingress from the `mcp-host` namespace on `CONTEXT_MAPPER_PORT` to pods matching `app: host-context-controller`. As shipped, the controller Deployment runs in `control-plane`, so this policy matches no pod in `mcp-server` and has no effect; the mcp-host → controller route is actually opened by the `allow-hcc-api-egress-<ns>` egress policies above.
 
 ### L2 — Context allow
 
@@ -127,12 +132,18 @@ ingress:
 
 When a `Host` CRD is created, modified, or deleted in the host namespace, the host-context-controller host reconciler:
 
-- **ADDED** — Validates that `spec.secretRef` exists, then creates/updates:
+- **ADDED** — Validates that `spec.secretRef` exists, then creates/updates, in the host namespace (`mcp-host`):
   - `Deployment/<host-name>`
   - `Service/<host-name>`
   - `PersistentVolumeClaim/<host-name>-workspace`
+  - `Secret/host-<host-name>-mcp-host-runtime-tokens` (runtime credentials, rotated by the reconciler)
+  - `ServiceAccount/`, `Role/` and `RoleBinding/` scoping the pod to its own Host CRD and Secrets
+  - `NetworkPolicy/allow-rpc-proxy-desktop-<host-name>` for desktop hosts
+
+  It also reconciles, in the channels namespace (`CONTEXT_MAPPER_CHANNELS_NAMESPACE`, default `channels`), a per-Host `Service/channel-reader-<host-name>`, `Deployment/channel-reader-<host-name>` and `NetworkPolicy/channel-reader-<host-name>-egress`.
+
 - **MODIFIED** — Reconciles the same resources to match current runtime defaults and host identity.
-- **DELETED** — Deletes the host Deployment, Service, and per-host PVC.
+- **DELETED** — Deletes the resources listed above, in both namespaces.
 
 Generated resources are labeled for orphan cleanup:
 
@@ -141,7 +152,7 @@ Generated resources are labeled for orphan cleanup:
 | `clerum.io/managed-by` | `host-context-controller` | Identifies operator-managed host runtime resources |
 | `clerum.io/host`       | `<host-name>`             | Tracks ownership to a specific Host CRD            |
 
-On startup, a full host reconciliation pass runs and deletes orphaned host runtime resources whose Host CRD no longer exists.
+On startup, a full host reconciliation pass runs and deletes orphaned host runtime resources whose Host CRD no longer exists — including orphaned channel-reader resources in `channels` and orphaned per-Host NetworkPolicies (`sweepOrphanChannelReaderResources`, `sweepOrphanHostNetworkPolicies`).
 
 ## REST API
 
@@ -154,8 +165,10 @@ GET /health
 ```
 
 ```json
-{ "status": "ok" }
+{ "status": "ok", "ready": true }
 ```
+
+The server also exposes `GET /` (API information), `GET /ready` (readiness; 503 until the controller has started), `GET /metrics` (Prometheus), and `GET /api/v1/desktop/:hostRef` (desktop status; requires the `CONTEXT_MAPPER_DESKTOP_API_TOKEN` bearer token — the check is skipped when that variable is empty).
 
 ### List All McpServers
 
@@ -222,7 +235,7 @@ Response (no auth configured):
 | `CONTEXT_MAPPER_PORT`                          | `8081`                                              | HTTP server port                                                 |
 | `CONTEXT_MAPPER_NAMESPACE`                     | `mcp-server`                                        | Kubernetes namespace where MCP servers and Context CRDs live     |
 | `CONTEXT_MAPPER_HOST_NAMESPACE`                | `mcp-host`                                          | Namespace where mcp-host pods run (for NetworkPolicy generation) |
-| `CONTEXT_MAPPER_HOST_IMAGE`                    | `your-registry.example.com/evenfire/mcp-host:0.3.0` | Container image for reconciled host Deployments                  |
+| `CONTEXT_MAPPER_HOST_IMAGE`                    | `us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mcp-host:0.6.0` | Container image for reconciled host Deployments     |
 | `CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY`        | `Always`                                            | Pull policy for reconciled host Deployments                      |
 | `CONTEXT_MAPPER_HOST_PORT`                     | `8080`                                              | Container/service port for host runtime                          |
 | `CONTEXT_MAPPER_HOST_CONFIGMAP_NAME`           | `mcp-host-config`                                   | ConfigMap loaded into host containers via `envFrom`              |
@@ -234,24 +247,31 @@ Response (no auth configured):
 | `CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_CPU`    | `100m`                                              | Host container CPU request                                       |
 | `CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY`   | `512Mi`                                             | Host container memory limit                                      |
 | `CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_CPU`      | `500m`                                              | Host container CPU limit                                         |
+| `INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET`         | -                                                   | HMAC secret used to sign InternalControl JWTs. **Required when `CLERUM_DEV_MODE` is not `true`** — the process logs `[HCC] FATAL` and exits 1 if it is empty or still holds a `replace-with-…` placeholder |
+| `CONTEXT_MAPPER_CHANNELS_NAMESPACE`            | `channels`                                          | Namespace for the per-Host channel-reader resources              |
+| `CONTEXT_MAPPER_DESKTOP_API_TOKEN`             | `` (empty)                                          | Bearer token required by `GET /api/v1/desktop/:hostRef`. When empty, the token check is **skipped** and the endpoint is unauthenticated |
 | `CLERUM_MCP_SERVERS`                           | -                                                   | (Dev mode) JSON array of McpServer objects                       |
+| `CLERUM_CONTEXTS`                              | -                                                   | (Dev mode) JSON array of Context objects; when set, `GET /api/v1/mcpservers/context/:contextRef` filters by the Context's `mcpServers` allow-list. When unset, that endpoint falls back to matching servers on `spec.contextRef` |
 | `CLERUM_MCP_AUTH`                              | -                                                   | (Dev mode) JSON object mapping server name to auth token         |
 
 ## Kubernetes RBAC
 
-The host-context-controller requires permissions in both `mcp-server` and `mcp-host` namespaces:
+The shipped Roles and RoleBindings are the source of truth — see `deploy/base/<namespace>/rbac.yaml`. The controller's ServiceAccount lives in `control-plane` and is bound into `mcp-server`, `mcp-host`, `channels`, `rpc-proxy`, `sandbox-recipes`, `sandbox-ui` and `gfs`. The table below is an overview of the two main namespaces, not a complete Role definition — do not build a Role from it.
 
-| API Group           | Resource                 | Verbs                             | Purpose                                                                |
-| ------------------- | ------------------------ | --------------------------------- | ---------------------------------------------------------------------- |
-| `clerum.io`         | `mcpservers`             | get, list, watch                  | Watch McpServer CRDs                                                   |
-| `clerum.io`         | `contexts`               | get, list, watch                  | Watch Context CRDs for NetworkPolicy reconciliation                    |
-| `clerum.io`         | `hosts`                  | get, list, watch                  | Watch Host CRDs in host namespace                                      |
-| `networking.k8s.io` | `networkpolicies`        | get, list, create, update, delete | Manage generated NetworkPolicies                                       |
-| `apps`              | `deployments`            | get, list, create, update, delete | Manage MCP server Deployments                                          |
-| `apps`              | `deployments`            | get, list, create, update, delete | Manage per-host runtime Deployments                                    |
-| _(core)_            | `services`               | get, list, create, update, delete | Manage MCP server and host runtime Services                            |
-| _(core)_            | `persistentvolumeclaims` | get, list, create, update, delete | Manage per-host workspace PVCs                                         |
-| _(core)_            | `secrets`                | get                               | Read auth tokens and validate secret references (`McpServer` + `Host`) |
+In `mcp-server` (`deploy/base/mcp-server/rbac.yaml`):
+
+| API Group           | Resource             | Verbs                             | Purpose                                                       |
+| ------------------- | -------------------- | --------------------------------- | ------------------------------------------------------------- |
+| `clerum.io`         | `mcpservers`         | get, list, watch, patch           | Watch McpServer CRDs                                          |
+| `clerum.io`         | `mcpservers/status`  | get, patch                        | Publish readiness / secret-resolution conditions              |
+| `clerum.io`         | `contexts`           | get, list, watch                  | Watch Context CRDs for NetworkPolicy reconciliation           |
+| `networking.k8s.io` | `networkpolicies`    | get, list, create, update, delete | Manage generated NetworkPolicies                              |
+| `apps`              | `deployments`        | get, list, create, update, delete | Manage MCP server Deployments                                 |
+| _(core)_            | `services`           | get, list, create, update, delete | Manage MCP server Services                                    |
+| _(core)_            | `configmaps`         | get, list, create, update, delete | Manage the remote egress proxy nginx config                   |
+| _(core)_            | `secrets`            | get, list, watch                  | Read auth tokens, validate `envSecret`, re-enqueue on change  |
+
+In `mcp-host` (`deploy/base/mcp-host/rbac.yaml`), the controller additionally manages per-Host identity and SharedFileSystem resources: `hosts` (get, list, watch), `sharedfilesystems` + `sharedfilesystems/status`, `batch/jobs`, `deployments`, `services`, `persistentvolumeclaims`, `networkpolicies`, `serviceaccounts`, `roles`/`rolebindings`, `configmaps` (get, watch, list), `pods` (get, list), and `secrets` with **get, watch, list, create, update, patch, delete** — it creates the per-Host `host-<hostRef>-mcp-host-runtime-tokens` Secret and the per-Host ServiceAccount + Role + RoleBinding on every reconcile.
 
 ## Namespaces
 
@@ -279,44 +299,50 @@ make dev
 
 # Option 2: Run with inline example servers (quick test)
 make dev-example
-
-# Or provide your own servers:
-CLERUM_DEV_MODE=true \
-CLERUM_MCP_SERVERS='[
-  {
-    "name": "filesystem",
-    "spec": {
-      "contextRef": "dev-context",
-      "description": "Filesystem operations",
-      "image": "mcp/filesystem:latest",
-      "transport": {"type": "sse", "url": "http://localhost:3001/sse", "port": 3001},
-      "enabled": true
-    }
-  }
-]' \
-CLERUM_MCP_AUTH='{"github":"ghp_your_token_here"}' \
-make dev
 ```
+
+`make dev` requires a `.env` file — it sources `./.env` and exits with an error if the file is absent. Because the recipe re-sources `.env` after make has exported the environment, any key defined in `.env` overrides a value passed inline on the command line; a variable *not* present in `.env` is passed through untouched. To provide your own servers, put them in `.env`:
+
+```bash
+CLERUM_DEV_MODE=true
+CLERUM_MCP_SERVERS='[{"name":"filesystem","spec":{"contextRef":"dev-context","description":"Filesystem operations","image":"mcp/filesystem:latest","transport":{"type":"sse","url":"http://localhost:3001/sse","port":3001},"enabled":true}}]'
+CLERUM_CONTEXTS='[{"name":"dev-context","namespace":"dev","spec":{"contextId":"dev-context","description":"Dev context","mcpServers":["filesystem"]}}]'
+CLERUM_MCP_AUTH='{"github":"ghp_your_token_here"}'
+```
+
+In dev mode, `GET /api/v1/mcpservers/context/:contextRef` uses `CLERUM_CONTEXTS` when it is set: it returns the enabled servers named in the matching Context's `mcpServers` list, and returns an empty list if no Context with that name was loaded. When `CLERUM_CONTEXTS` is unset, it falls back to returning the enabled servers whose own `spec.contextRef` matches.
 
 ### Production Mode (with Kubernetes)
 
+Run against the cluster in your current kubeconfig (watches K8s for McpServer and Context CRDs) with `CLERUM_DEV_MODE` unset. Outside dev mode the process also requires `INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET` — without it, startup aborts with `[HCC] FATAL: INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET env var is required` and exit code 1:
+
 ```bash
-# Run with kubectl access (watches K8s for McpServer and Context CRDs)
-make dev
+make build
+INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET=<hmac-secret> npm start
 ```
+
+`make dev` also works, but only if a `.env` file exists (see above) — it is the same target, so it aborts when `.env` is absent. Leave `CLERUM_DEV_MODE` out of that `.env` and set `INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET` in it to run against a real cluster.
 
 ## Deployment
 
+`host-context-controller/Dockerfile` copies `packages/workflow-recipe-capability-policy`, `packages/image-policy` and `host-context-controller/`, so **the build context must be the repo root**, not this directory. Build from the repo root and point `-f` at the Dockerfile:
+
 ```bash
-# Build Docker image
-make docker-build
+# From the repo root
+export IMAGE=ghcr.io/<org>/host-context-controller:$(git describe --tags --always)
 
-# Build and push to registry
-make docker-push
+# Build
+docker build -f host-context-controller/Dockerfile -t "$IMAGE" .
 
-# Deploy to Kubernetes (namespace, RBAC, deployment, service)
-make deploy
+# Push
+docker push "$IMAGE"
 
-# Undeploy
-make undeploy
+# Multi-platform build + push (ARM host targeting an amd64 cluster)
+docker buildx build --platform linux/amd64 -f host-context-controller/Dockerfile -t "$IMAGE" --push .
 ```
+
+For a local minikube cluster, `scripts/minikube/build-images.sh` builds this image (and the other services) with the correct root context.
+
+> The component Makefile's `docker-build` / `docker-push` / `docker-push-cross` targets pass this directory as the build context, so the `COPY packages/...` layer cannot resolve and the build fails. Use the root-context commands above.
+
+The component Makefile does not deploy. The controller's ServiceAccount, Deployment and Service live in `deploy/base/control-plane/host-context-controller.yaml`; namespaces are in `deploy/base/namespaces.yaml` and RBAC in `deploy/base/<namespace>/rbac.yaml`. All are applied with kustomize from the repo root, e.g. `kubectl apply -k deploy/overlays/minikube`.

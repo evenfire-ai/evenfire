@@ -28,24 +28,29 @@ tenant's `control-api` needs **all five** of:
 2. a desktop password (`users.password_hash`) — in prod only settable via the
    invitation / password-setup flow; direct DB seeding is deliberately
    prod-blocked (`scripts/e2e/seed-e2e-data.sh`)
-3. a **team** with the user as `owner` — without it, `POST /external/rpc/token`
-   returns `403 team_membership_required` (`control-api/src/routes/external/auth.ts:135`),
-   so the desktop app cannot obtain an RPC token and is unusable
+3. a **team** the user administers — without it the desktop app has no team
+   directory to load, and `POST /external/rpc/token` refuses the team-only
+   `desktop:view` scope: a team-less caller is denied with
+   `403 desktop_requires_team` (`TEAM_ONLY_RPC_SCOPES` /
+   `classifyRpcTokenDenial` in `control-api/src/utils/auth/rpcAuthToken.ts`; the
+   desktop app requests exactly that scope —
+   `desktop-app/src/appService.ts` `DESKTOP_VIEW_SCOPES`). The login routes do
+   issue a session token with `teamId: null`, so a team-less session exists —
+   it just cannot open the desktop surface.
 4. ≥1 **agent grant** (e.g. `chatllm`) at user- or team-level, else the desktop
    shows "No agents available" (`docs/agents-display-issue-analysis.md`)
 5. ≥1 **context grant** (e.g. `context1`) at user- or team-level
 
 ### Why it breaks today
 
-- **Google login self-heals** — `googleLoginData()` auto-creates a personal team
-  (`"<name> team"`, role `owner`) when the user has no membership
-  (`control-api/src/services/directory/login.ts`).
-- **Password login does NOT** — `passwordLoginData()` returns
-  `membership: { team_id: null, ... }` when there is no membership; the Control
-  UI tolerates a null team, the desktop app cannot.
+- **Neither login path creates a team** — `googleLoginData()` and
+  `passwordLoginData()` both heal accepted-invitation memberships and then fall
+  back to `membership: { team_id: null, role: 'member', team_name: null }`
+  (`control-api/src/services/directory/login.ts`). The Control UI tolerates a
+  null team; the desktop app lands in an empty workspace.
 - Invitations can be **teamless** (PR #412), and brand-new teams have **zero**
   `team_contexts` / `team_agents` — `createTeamForUser` only inserts the team +
-  owner row.
+  the `admin` `team_members` row.
 
 Net: the onboarded admin is a Control-UI operator with no desktop identity,
 team, or grants.
@@ -73,7 +78,7 @@ team, or grants.
 
 ---
 
-## Approach (chosen: "first-run setup provisions the workspace" + login backstop)
+## Approach (chosen: "first-run setup provisions the workspace")
 
 ### Decisions locked during brainstorming
 
@@ -81,10 +86,11 @@ team, or grants.
    `users.password_hash`, so the same email+password works in both apps
    immediately. (`bcryptjs` is used by both `adminAuthService` and `login.ts`,
    so the hash is directly compatible.)
-2. **Login self-heal backstop included** — also make `passwordLoginData`
-   create a default team + grants on first login if the user has none. Closes
-   the gap if setup-time provisioning was skipped/failed and repairs any
-   pre-existing team-less users.
+2. ~~**Login self-heal backstop**~~ — **not shipped.** The plan was to also make
+   `passwordLoginData` create a default team + grants on first login. What
+   shipped instead is invitation-membership healing plus a team-less fallback
+   (see §3). Setup-time provisioning is therefore the only path that creates a
+   team.
 3. **Config-driven defaults** for the granted agent/context names.
 
 ---
@@ -110,6 +116,7 @@ try {
     passwordHash, // SAME hash → one credential for both apps
     agentNames: config.adminDefaultAgentNames,
     contextIds: config.adminDefaultContextIds,
+    seedPassword: seedDesktopPassword, // = req.body?.seedDesktopPassword !== false
   })
 } catch (err) {
   logger.error(
@@ -120,8 +127,8 @@ try {
 ```
 
 The control-admin row is already committed before this runs, so a failure here
-leaves the Control UI fully usable; the login backstop (§3) will repair the
-desktop side on first desktop login.
+leaves the Control UI fully usable — but note the desktop side is then **not**
+repaired at login (see §3): re-provisioning is needed.
 
 ### 2. New service — `provisionAdminDesktopWorkspace`
 
@@ -135,16 +142,21 @@ export async function provisionAdminDesktopWorkspace(input: {
   passwordHash: string
   agentNames: string[]
   contextIds: string[]
+  /** When false, skip the users.password_hash write — the desktop password then
+   *  comes only from the invitation flow (MCC-driven installs). Defaults true. */
+  seedPassword?: boolean
 }): Promise<void> {
   const email = input.email.trim().toLowerCase()
+  const name = input.displayName.trim() || null
+  const teamLabel = input.displayName.trim() || email
   return withTransaction(async db => {
     // (a) ensure users row (reuse if it already exists for this email)
-    const existing = await db.query(`SELECT id FROM users WHERE email = $1`, [email])
+    const existing = await db.query(`SELECT id FROM users WHERE email = $1 LIMIT 1`, [email])
     let userId = existing.rows[0]?.id as string | undefined
     if (!userId) {
       const ins = await db.query(`INSERT INTO users(email, name) VALUES($1, $2) RETURNING id`, [
         email,
-        input.displayName || null,
+        name,
       ])
       userId = ins.rows[0].id as string
     }
@@ -153,24 +165,21 @@ export async function provisionAdminDesktopWorkspace(input: {
     await db.query(
       `INSERT INTO profiles(user_id, display_name) VALUES($1, $2)
        ON CONFLICT (user_id) DO NOTHING`,
-      [userId, input.displayName || null]
+      [userId, name]
     )
 
-    // (b) set desktop password from the setup hash (one credential)
-    await db.query(
-      `UPDATE users SET password_hash = $2, password_set_at = NOW(), updated_at = NOW()
-        WHERE id = $1`,
-      [userId, input.passwordHash]
-    )
+    // (b) set desktop password from the setup hash (one credential), unless
+    //     the caller opted out with seedPassword: false
+    if (input.seedPassword !== false) {
+      await db.query(
+        `UPDATE users SET password_hash = $2, password_set_at = NOW(), updated_at = NOW()
+          WHERE id = $1`,
+        [userId, input.passwordHash]
+      )
+    }
 
     // (c) + (d) + (e): default team + grants (shared helper, see §4)
-    await ensureDefaultTeamAndGrants(
-      db,
-      userId,
-      input.displayName,
-      input.agentNames,
-      input.contextIds
-    )
+    await ensureDefaultTeamAndGrants(db, userId, teamLabel, input.agentNames, input.contextIds)
   })
 }
 ```
@@ -180,36 +189,36 @@ Idempotency: re-running finds the existing user (no duplicate; `users.email` is
 skips team creation when the user already owns a team and PUT-replaces grants
 with the same values.
 
-### 3. Login self-heal backstop — `passwordLoginData`
+### 3. Login self-heal backstop — `passwordLoginData` (NOT SHIPPED)
 
 File: `control-api/src/services/directory/login.ts`.
 
-In `passwordLoginData`, replace the "no membership → return `team_id: null`"
-branch with the same self-heal `googleLoginData` already performs: create a
-personal team (owner) + default grants, then return that membership.
+The plan was to replace the "no membership → return `team_id: null`" branch with
+a self-heal that calls `ensureDefaultTeamAndGrants` on first login. **This was
+not built.** No login path calls `ensureDefaultTeamAndGrants`; it is only used by
+`provisionAdminDesktopWorkspace` (§2).
+
+What `passwordLoginData` actually does when it finds no active membership:
 
 ```ts
-const membership = await findFirstActiveMembership(db, user.id)
+let membership = await findFirstActiveMembership(db, user.id)
 if ((membership.rowCount ?? 0) === 0) {
-  const teamId = await ensureDefaultTeamAndGrants(
-    db,
-    user.id,
-    user.name || user.email,
-    config.adminDefaultAgentNames,
-    config.adminDefaultContextIds
-  )
-  // re-read membership for the freshly created team and return it
+  await healAcceptedInvitationMemberships(db, user.id, user.email)
+  await linkAcceptedInvitationsToUser(db, user.id, user.email)
+  membership = await findFirstActiveMembership(db, user.id)
 }
+// still none → teamlessMemberMembership() = { team_id: null, role: 'member', team_name: null }
 ```
 
-This runs inside the existing `withTransaction` in `passwordLoginData`. It only
-fires for an already-authenticated user with no team, so it cannot create
-workspaces for arbitrary emails.
+`googleLoginData` heals unconditionally before its first membership lookup, then
+falls back to a pending-invitation membership, then to the same team-less row.
+Consequence: a team-less password user is **not** repaired at login — the
+workspace only comes from setup-time provisioning.
 
 ### 4. Shared helper — `ensureDefaultTeamAndGrants`
 
-Also in `adminProvisioning.ts`, exported and used by both §2 and §3 so defaults
-stay consistent.
+Also in `adminProvisioning.ts`, exported for reuse; in the shipped code only §2
+calls it.
 
 ```ts
 export async function ensureDefaultTeamAndGrants(
@@ -219,10 +228,10 @@ export async function ensureDefaultTeamAndGrants(
   agentNames: string[],
   contextIds: string[]
 ): Promise<string> {
-  // find an existing active team this user owns
+  // find an existing active team this user administers
   const owned = await db.query(
     `SELECT t.id FROM team_members tm JOIN teams t ON t.id = tm.team_id
-      WHERE tm.user_id = $1 AND tm.status = 'active' AND tm.role = 'owner'
+      WHERE tm.user_id = $1 AND tm.status = 'active' AND tm.role = 'admin'
       ORDER BY t.created_at ASC LIMIT 1`,
     [userId]
   )
@@ -234,8 +243,8 @@ export async function ensureDefaultTeamAndGrants(
     teamId = t.rows[0].id as string
     await db.query(
       `INSERT INTO team_members(team_id, user_id, role, status)
-       VALUES($1, $2, 'owner', 'active')
-       ON CONFLICT (team_id, user_id) DO UPDATE SET role='owner', status='active', updated_at=NOW()`,
+       VALUES($1, $2, 'admin', 'active')
+       ON CONFLICT (team_id, user_id) DO UPDATE SET role='admin', status='active', updated_at=NOW()`,
       [teamId, userId]
     )
   }
@@ -302,8 +311,8 @@ No schema migration. Writes to existing tables only: `users`
   duplicate (`users.email UNIQUE`).
 - **User already owns a team**: reuse it; only top up missing grants.
 - **Re-run of setup**: `setupInitialAdminCredentials` is a no-op after the first
-  admin exists (returns `null`), so provisioning won't re-run from setup; the
-  login backstop remains idempotent.
+  admin exists (returns `null`), so provisioning won't re-run from setup.
+  `provisionAdminDesktopWorkspace` is itself safe to call again.
 - **Password drift**: if the admin later changes the Control-UI password via
   Settings, the desktop `users.password_hash` is **not** updated. Documented
   limitation; see Future work for optional sync.
@@ -317,14 +326,13 @@ No schema migration. Writes to existing tables only: `users`
 
 **Unit / integration (control-api, vitest + testcontainers Postgres):**
 
-- `provisionAdminDesktopWorkspace` creates user + password + owner team + grants;
-  re-run is idempotent (no dup user/team, grants stable).
-- Reuse path: pre-existing user / pre-existing owned team.
-- `passwordLoginData` backstop: team-less user → first login creates team +
-  grants and returns non-null `team_id`; second login is stable.
+- `provisionAdminDesktopWorkspace` creates user + password + admin team + grants;
+  re-run is idempotent (no dup user/team, grants stable). With
+  `seedPassword: false`, `users.password_hash` is left untouched.
+- Reuse path: pre-existing user / pre-existing administered team.
 - Setup route: after `POST /admin/auth/setup`, the email can `password-login`
-  (desktop path) AND `POST /external/rpc/token` returns a token (no
-  `team_membership_required`).
+  (desktop path) AND `POST /external/rpc/token` returns a token carrying the
+  provisioned `teamId`.
 - Failure isolation: stub provisioning to throw → setup still returns `200`
   with an admin token.
 
@@ -338,8 +346,9 @@ RPC-backed surface.
 
 - Server-side only; no migration; no front-end change. Ships with the
   `feat/multiple-admins` line.
-- Existing tenants: the login backstop repairs any current team-less password
-  users on their next desktop login. New tenants get it at first-run setup.
+- Existing tenants: new tenants get the workspace at first-run setup. Because the
+  login backstop was not shipped (§3), already-existing team-less password users
+  are **not** repaired at login — they need an invitation or a re-provision.
 - Config defaults are safe for current prod (agent `chatllm`, context
   `context1`); override per tenant only if their deployed names differ.
 

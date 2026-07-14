@@ -70,6 +70,12 @@ spec:
     format: json
     storageSize: 128Mi
 
+  resources:
+    - id: pg-auth
+      type: secret
+      data:
+        password: dev-only-password
+
   workloads:
     - id: postgres
       type: deployment
@@ -78,10 +84,8 @@ spec:
       env:
         - name: POSTGRES_DB
           value: clerum
-        - name: POSTGRES_USER
-          value: clerum
         - name: POSTGRES_PASSWORD
-          value: dev-only-password
+          value: '{{pg-auth:password}}'
 
   steps:
     - id: build-summary
@@ -91,7 +95,12 @@ spec:
         code: |
           const minAmount = sdk.inputs.minAmount ?? 1000
           const rows = await sdk.postgres.query(
-            { workload: "postgres", database: "clerum" },
+            {
+              workload: "postgres",
+              database: "clerum",
+              user: "postgres",
+              passwordSecretAlias: "pg_password",
+            },
             {
               sql: "select account, amount from receivables where amount >= $1 order by amount desc limit $2",
               values: [minAmount, 100],
@@ -105,6 +114,11 @@ spec:
 
           return { rows, artifact }
         capabilities:
+          secrets:
+            - alias: pg_password
+              secretRef:
+                name: pg-auth
+                key: password
           postgres:
             access: read
             workloads: [postgres]
@@ -117,6 +131,10 @@ How to read this:
   the parent recipe output PVC, sized by `output.storageSize` unless an existing
   `output.claimName` is provided.
 - The snippet can query only the declared `postgres` workload.
+- The PostgreSQL ref carries the connection identity: `user` defaults to
+  `postgres` when omitted, and no password is sent unless the ref declares
+  `passwordSecretAlias`. Declare the alias in `run.capabilities.secrets` so it
+  resolves.
 - `capabilities.postgres.access: read` declares read-only intent for this step.
 - The returned artifact metadata is surfaced through run-scoped downloads.
 
@@ -154,6 +172,12 @@ spec:
     http:
       allowedHosts: [api.vendor.example]
 
+  resources:
+    - id: pg-auth
+      type: secret
+      data:
+        password: dev-only-password
+
   workloads:
     - id: mongo
       type: deployment
@@ -166,10 +190,8 @@ spec:
       env:
         - name: POSTGRES_DB
           value: clerum
-        - name: POSTGRES_USER
-          value: clerum
         - name: POSTGRES_PASSWORD
-          value: dev-only-password
+          value: '{{pg-auth:password}}'
 
   steps:
     - id: fetch-api-to-mongo
@@ -216,7 +238,8 @@ For manual testing:
   values in password fields, and creates or updates the Kubernetes Secret in
   `sandbox-recipes` before deploying;
 - if you apply YAML directly, create the Kubernetes Secret in `sandbox-recipes`
-  first;
+  first and label it `clerum.io/owner-recipe=<recipeName>` (or
+  `clerum.io/shared=true`) — unlabeled Secrets are denied, see [Secrets](#secrets);
 - never commit real API keys or database passwords to Git.
 
 ## SDK Surface
@@ -357,12 +380,34 @@ steps:
 Control UI captures the missing `vendor-api/token` value outside the JSON
 editor and writes the Kubernetes Secret to `sandbox-recipes` before the final
 server-side validation. Direct `kubectl apply` users must create the Secret
-first, for example:
+first, and the Secret must carry an ownership label or WRC refuses to project
+it:
 
 ```bash
 kubectl --context=clerum-test -n sandbox-recipes create secret generic vendor-api \
   --from-literal=token="$VENDOR_TOKEN"
+
+# Grant this recipe access. Use the owner label for a single-recipe Secret:
+kubectl --context=clerum-test -n sandbox-recipes label secret vendor-api \
+  clerum.io/owner-recipe=api-db-report
+
+# ...or the shared label when several recipes must read the same Secret:
+#   kubectl ... label secret vendor-api clerum.io/shared=true
 ```
+
+Secret ownership is fail closed. An unlabeled Secret — or one carrying both
+labels — is denied, the recipe never reaches `active`, and WRC reports:
+
+```text
+snippet secret "vendor-api" is not accessible to recipe "api-db-report" —
+it requires clerum.io/shared=true or clerum.io/owner-recipe=api-db-report
+```
+
+Set exactly one of `clerum.io/owner-recipe=<recipeName>` or
+`clerum.io/shared=true`. This is why Control UI always attaches an ownership
+descriptor when it creates the Secret for you, and why Secrets declared as
+`spec.resources[].type: secret` need no manual labeling — WRC stamps the owner
+label on the Secrets it creates.
 
 Platform runtime tokens and provider API keys are not exposed as snippet
 secrets.
@@ -397,7 +442,12 @@ run:
   type: snippet
   language: typescript
   code: |
-    const ref = { workload: "postgres", database: "clerum" }
+    const ref = {
+      workload: "postgres",
+      database: "clerum",
+      user: "postgres",
+      passwordSecretAlias: "pg_password",
+    }
     await sdk.postgres.execute(ref, {
       sql: "insert into receivables(account, amount) values ($1, $2)",
       values: ["dao-alpha", 1880],
@@ -407,10 +457,21 @@ run:
       values: ["dao-alpha"],
     })
   capabilities:
+    secrets:
+      - alias: pg_password
+        secretRef:
+          name: pg-auth
+          key: password
     postgres:
       access: readWrite
       workloads: [postgres]
 ```
+
+The PostgreSQL ref takes `user` and `passwordSecretAlias` alongside `workload`
+and `database`. `user` defaults to `postgres` when omitted, and the connection
+sends no password unless `passwordSecretAlias` names an alias declared in
+`run.capabilities.secrets`. Match them to the credentials the declared workload
+actually accepts.
 
 Use `access: read` when the step should only read. Use `access: readWrite` when
 the step needs inserts, updates, deletes, DDL, or MongoDB write pipelines such
@@ -493,7 +554,7 @@ Snippet workflows fail early where possible:
 | Checkpoint     | Example failures                                                                                           |
 | -------------- | ---------------------------------------------------------------------------------------------------------- |
 | Kubernetes CEL | invalid snippet shape, duplicate steps, wildcard MCP tools, HTTP host not declared in `runtimeEgress`      |
-| WRC preflight  | undeclared DB workload, missing `secretRef` Secret/key, undeclared MCP server/tool                         |
+| WRC preflight  | undeclared DB workload, missing `secretRef` Secret/key, Secret not owned by or shared with the recipe, undeclared MCP server/tool |
 | SDK runtime    | unsupported HTTP method, unsafe redirect, DB write attempted with `access: read`, unsafe artifact filename |
 
 Bad recipes should fail before useful runtime resources are created. Runtime
