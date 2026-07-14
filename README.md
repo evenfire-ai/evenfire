@@ -49,7 +49,7 @@ each pillar links to its depth.
   admins govern the fleet: token usage by team, model, agent, and desktop user;
   budgets and model prices; per-tool approval overrides; connector egress
   policy; a trust-rated connector registry. And an Electron **Desktop App**
-  where people actually use the agents: chat, a live tool-call timeline, in-chat
+  where people actually use the agents: chat, a live tool-call view, in-chat
   approvals, and artifacts — no Telegram bot and no curl required. →
   [docs/surfaces/README.md](docs/surfaces/README.md)
 - **Connectors (MCP)** — governed MCP servers with per-`Context` allowlists

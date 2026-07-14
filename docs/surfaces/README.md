@@ -15,6 +15,11 @@ agents, and the Profile UI is the invited member's front door.
 | Invited member                      | [Profile UI](profile-ui.md)             | `external-rest-api`                                                  | `control-api`, `rpc-proxy`  |
 | Channel user (Telegram/Slack/Email) | no UI — the chat app they already have | `channel-reader`                                                     | everything else             |
 
+Invitation signup depends on `member-registration-service`, which is not in
+this repo — see the
+[`member-registration-service` gap](desktop-app.md#the-member-registration-service-gap)
+for what still works without it.
+
 ## How the surfaces are wired
 
 ```mermaid

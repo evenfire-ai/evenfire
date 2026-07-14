@@ -71,10 +71,13 @@ matrix: [Which surface is for me?](surfaces/README.md#which-surface-is-for-me).
 
 ### Do I need kubectl to run day-to-day?
 
-No, for day-2 operations: agents, connectors, channels, approvals, budgets,
-and the registry all have Control UI screens, and each one writes the same
-CRD you would otherwise apply by hand. Yes, for install and for GitOps —
-bootstrapping the platform is still `make` and `kubectl`. See
+No, for day-2 operations: agents, connectors, channels, and approvals all have
+Control UI screens, and each one writes the same CRD you would otherwise
+apply by hand. Budgets and the registry are Control UI screens too, but
+they are **not** CRD-backed — both live in control-api's own store (Postgres
+and the registry catalog), reachable through the Control UI or its API, not
+`kubectl apply`. Yes, for install and for GitOps — bootstrapping the
+platform is still `make` and `kubectl`. See
 [Quickstart](get-started/quickstart.md) and [Production notes](deploy/production.md).
 
 ### Can I ship the desktop app to my users?
