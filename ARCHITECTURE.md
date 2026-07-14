@@ -97,6 +97,9 @@ every read and write is an authorized, audited API call rather than a raw mount.
 | [desktop-app](desktop-app/) | Electron + React client; authenticates via `external-rest-api`, calls `rpc-proxy`                              |
 | [packages/](packages/)      | Shared libraries: `image-policy`, `workflow-recipe-capability-policy`, `workflow-runtime-core`, `workflow-sdk` |
 
+Product-level treatment of `control-ui`, `desktop-app`, and `profile-ui` as the
+platform's three human surfaces: [docs/surfaces/README.md](docs/surfaces/README.md).
+
 ## CRDs
 
 `Host`, `Context`, `McpServer`, `CommunicationChannel`, `WorkflowRecipe`,
@@ -108,6 +111,8 @@ page each under [docs/crds/](docs/crds/), shipped in
 flowchart TB
   user[Telegram / Email / Slack] --> cr[channel-reader]
   desktop[Desktop App] --> rpc[rpc-proxy]
+  cui[control-ui] --> capi
+  pui[profile-ui] --> era[external-rest-api]
   hook[Provider webhooks] --> wp[webhook-proxy] --> wg[webhook-gateway]
 
   cr --> mh[mcp-host]
@@ -119,6 +124,7 @@ flowchart TB
 
   capi[control-api] -->|workspace writes| wfc[workspace-files-controller]
   capi --> crd[(CRDs)]
+  era -.mints scoped RPC tokens via.-> capi
 
   hcc[host-context-controller] -.creates.-> mh
   hcc -.creates.-> mcp
