@@ -88,7 +88,7 @@ jobs:
       - name: Detect changed paths
         id: filter
         if: steps.base.outputs.force_all != 'true'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           base: ${{ github.event.before }}
           filters: |
