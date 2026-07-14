@@ -11,8 +11,6 @@ import { IncomingMessage } from '../server'
  * Flows unchanged through all four user-delivery channels:
  * task.responseCallback, sync POST /messages response, async pendingTaskResults
  * polling, and the SSE progress stream's "error" event.
- *
- * See docs/superpowers/specs/2026-04-10-llm-error-handling-design.md.
  */
 export interface TaskError {
   code: string // LlmErrorCode string, e.g. "LLM_INSUFFICIENT_QUOTA"

@@ -1159,7 +1159,6 @@ export class AgentStateMachine extends EventEmitter {
 
   /**
    * Handle task failure — the single delivery point for user-visible errors.
-   * See docs/superpowers/specs/2026-04-10-llm-error-handling-design.md, Layer E.
    */
   private handleTaskFailure(task: Task, error: TaskError): void {
     console.error(

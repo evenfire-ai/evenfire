@@ -29,7 +29,7 @@ import type { LlmProvider } from './registryCore'
  * to construct the downstream LlmError.
  *
  * `message` is the raw provider message, passed through verbatim (no
- * reformatting). See docs/superpowers/specs/2026-04-10-llm-error-handling-design.md.
+ * reformatting).
  */
 export interface ClassifiedError {
   code: LlmErrorCode

@@ -1,5 +1,5 @@
 /**
- * TaskLifecycle types. See docs/superpowers/specs/2026-04-20-task-cancel-v2-design.md §3.
+ * TaskLifecycle types.
  */
 /**
  * MIGRATION NOTE: `TaskStatus` and `QueueStats` are also exported from

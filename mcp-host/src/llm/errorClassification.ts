@@ -4,8 +4,6 @@
  * These helpers work on any error whose shape matches HttpErrorLike — no
  * instanceof checks, so OpenAI/Anthropic/ZAI/Bailian/future providers all
  * share the same status-code branch.
- *
- * See docs/superpowers/specs/2026-04-10-llm-error-handling-design.md — Layer B.
  */
 import { LlmErrorCode } from '../core/errors'
 import type { ClassifiedError } from './index'

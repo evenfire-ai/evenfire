@@ -15,8 +15,6 @@
  *   peek, isEmpty, isProcessing, getCurrentTask, getPendingTasks,
  *   getCompletedTasks, getFailedTasks, clearHistory, sortQueue,
  *   trimCompletedHistory, trimFailedHistory.
- *
- * See docs/superpowers/specs/2026-04-20-task-cancel-v2-design.md §4.2, §9.3.
  */
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'

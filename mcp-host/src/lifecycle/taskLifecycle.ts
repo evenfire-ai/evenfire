@@ -1,6 +1,5 @@
 /**
  * TaskLifecycle — single-writer service for task state transitions.
- * See docs/superpowers/specs/2026-04-20-task-cancel-v2-design.md §4.1.
  */
 import { EventEmitter } from 'events'
 import type { Task } from '../queue/types'

@@ -26,7 +26,6 @@ export enum LlmErrorCode {
   ContextLengthExceeded = 'LLM_CONTEXT_LENGTH_EXCEEDED',
   ContentFiltered = 'LLM_CONTENT_FILTERED',
   ModelNotAvailable = 'LLM_MODEL_NOT_AVAILABLE',
-  // New — see docs/superpowers/specs/2026-04-10-llm-error-handling-design.md
   InsufficientQuota = 'LLM_INSUFFICIENT_QUOTA',
   RateLimited = 'LLM_RATE_LIMITED',
   AuthenticationFailed = 'LLM_AUTHENTICATION_FAILED',

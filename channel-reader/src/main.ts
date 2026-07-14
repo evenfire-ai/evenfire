@@ -998,7 +998,7 @@ export class ChannelReader {
    * open for the entire task lifecycle, and edits a status message in-place as
    * progress events arrive.
    *
-   * Architecture (per docs/superpowers/specs/2026-05-12-channel-reader-sse-driven-design.md):
+   * Architecture:
    * - The wrapping Promise resolves on the FIRST state-signal event
    *   (suspended OR terminal OR error). This unblocks handleMessages's for
    *   loop quickly so the poll cycle can move on.
