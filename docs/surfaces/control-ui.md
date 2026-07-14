@@ -57,8 +57,8 @@ five steps live together.
 
 4. **Constrain it** — `EgressEditor` (`components/EgressEditor.tsx`, model in
    `lib/egressModel.ts`): closed-by-default, exact-host, exact-CIDR/IP (where
-   enabled — connector creation and registry install expose it; recipe and
-   publish flows do not), and public-web modes. Private, metadata,
+   enabled — connector creation, connector edit, and registry install expose
+   it; recipe and publish flows do not), and public-web modes. Private, metadata,
    link-local, documentation, multicast, and reserved IPv4 ranges are
    rejected outright. This is port/CIDR egress with documented FQDN
    limits — do not read it as per-domain allowlisting for arbitrary SaaS
@@ -74,11 +74,15 @@ five steps live together.
    guided install flow, plus org-scoped publish API keys (create / reveal /
    revoke) at `/registry/keys`. Connector images are checked against an
    allowlist, audit-mode by default, on both the direct `/mcp-servers`
-   Create form and registry installs — a violation is logged, not blocked,
-   unless an operator explicitly turns on enforcement. sha256 digest pinning
-   is a different mechanism: it applies to custom coordinator images in
-   workflow recipes, not to connector images, and it is required by default
-   there.
+   Create form and registry installs — but that check is a no-op unless an
+   operator turns on enforcement, since the shipped default is off. The
+   audit signal instead comes later, at reconcile: for a non-allowlisted
+   image, `host-context-controller` logs a would-be denial ("audit mode,
+   allowing") and still builds the workload when its own enforcement is
+   off (the shipped default), or blocks it and logs a denial when
+   enforcement is on. sha256 digest pinning is a different mechanism: it
+   applies to custom coordinator images in workflow recipes, not to
+   connector images, and it is required by default there.
 
    ![Control UI registry catalog at /registry showing trust levels and the install flow](../assets/control-ui-registry-install.png)
    *Dev cluster, demo tenant.*
