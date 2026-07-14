@@ -4,7 +4,7 @@
 **Version:** `v1alpha1`  
 **Scope:** Namespaced  
 **Short name:** `gfs`  
-**Reconciled by:** host-context-controller GFS reconciler + `gfs-controller`
+**Reconciled by:** host-context-controller `gfsReconciler`
 
 ## Purpose
 

@@ -7,7 +7,6 @@
 - Node.js + TypeScript
 - Express.js
 - Internal REST integration with `control-api` (through the profile control funnel)
-- Internal REST integration with `member-registration-service` for outbound email delivery
 - Google ID token verification (`google-auth-library`)
 
 ## Key Endpoints
@@ -44,9 +43,6 @@ Environment variables:
 - `EXTERNAL_REST_API_CONTROL_API_BASE_URL`: Base URL for internal calls to `control-api` (typically through the profile control funnel).
 - `EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN`: Shared bearer token used when `external-rest-api` authenticates to `control-api`.
 - `EXTERNAL_REST_API_CONTROL_API_SERVICE_NAME`: Service identity sent in `x-service-token` for `control-api` internal auth checks (default `external-rest-api`).
-- `EXTERNAL_REST_API_MEMBER_REGISTRATION_SERVICE_BASE_URL`: Base URL for internal calls to `member-registration-service`.
-- `EXTERNAL_REST_API_MEMBER_REGISTRATION_SERVICE_SERVICE_TOKEN`: Shared bearer token used when `external-rest-api` authenticates to `member-registration-service`.
-- `EXTERNAL_REST_API_MEMBER_REGISTRATION_SERVICE_SERVICE_NAME`: Service identity sent in `x-service-token` for `member-registration-service` internal auth checks.
 - `EXTERNAL_REST_API_JWT_PUBLIC_KEY`: RSA public key used to verify session JWTs locally in `external-rest-api` (RS256).
 - `EXTERNAL_REST_API_JWT_ISSUER`: Expected `iss` claim for session JWT verification.
 - `EXTERNAL_REST_API_JWT_AUDIENCE`: Expected `aud` claim for session JWT verification.
@@ -61,7 +57,6 @@ Session JWT issuance is centralized in `control-api`. `external-rest-api` verifi
 - **Session issuance authority**: after Google token verification, `external-rest-api` calls `control-api` internal auth endpoints, and `control-api` mints Clerum session tokens.
 - **Local session verification**: protected routes in `external-rest-api` validate bearer tokens locally using `EXTERNAL_REST_API_JWT_PUBLIC_KEY` (RS256) with issuer and audience checks.
 - **Internal service authentication**: calls from `external-rest-api` to `control-api` include `Authorization: Bearer <service-token>` plus `x-service-token: <service-name>`, and are checked by `control-api` internal middleware.
-- **Delegated email delivery**: invitation email dispatch is forwarded to `member-registration-service`, which owns the actual SMTP integration.
 - **Authorization boundary**: team membership and role decisions are enforced by `control-api` profile services; `external-rest-api` acts as the external facade and transport boundary.
 - **Reduced machine-to-machine surface**: service-token access to `/directory/search` was removed; directory lookups now require an authenticated user token.
 
@@ -88,13 +83,3 @@ cd external-rest-api
 npm install
 npm run dev
 ```
-
-## Kubernetes Deploy
-
-```bash
-cd external-rest-api
-kubectl apply -f deploy/example.secret.yaml
-make deploy
-```
-
-`deploy/deployment.yaml` expects `EXTERNAL_REST_API_JWT_PUBLIC_KEY` in the `external-rest-api-secrets` Secret.

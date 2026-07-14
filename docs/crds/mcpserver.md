@@ -21,7 +21,7 @@ HCC-owned servers, and exposes discovery/status for WRC-owned servers.
 | `spec.contextRef` | string | yes | -- | Reference to the Context this server belongs to. |
 | `spec.description` | string | no | -- | Human-readable description of what this MCP server does. |
 | `spec.image` | string | yes | -- | Docker image for the MCP server container (e.g. `mongodb/mongodb-mcp-server:latest`). |
-| `spec.imagePullPolicy` | string | no | `Always` | Image pull policy. One of: `Always`, `IfNotPresent`, `Never`. |
+| `spec.imagePullPolicy` | string | no | _(none)_ | Image pull policy. One of: `Always`, `IfNotPresent`, `Never`. The schema sets no default; if omitted, HCC applies `CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY` (default `IfNotPresent`). |
 | `spec.command` | string[] | no | -- | Override the container entrypoint (Docker ENTRYPOINT). |
 | `spec.args` | string[] | no | -- | Arguments passed to the container entrypoint (Docker CMD). |
 | `spec.enabled` | boolean | no | `true` | Whether this MCP server is enabled. Disabled servers have their deployments removed. |
@@ -100,6 +100,35 @@ reads structured CRD fields and sets the named env vars automatically.
 | `spec.resources.limits.memory` | string | no | Memory limit. |
 | `spec.resources.limits.cpu` | string | no | CPU limit. |
 
+### Remote Proxy
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `spec.remote` | object | no | Remote MCP server configuration. When present, the Context Mapper creates an nginx-based egress proxy Pod instead of deploying the vendor image directly. The proxy forwards requests to the external `baseUrl`, injecting auth headers from `envSecret`. |
+| `spec.remote.baseUrl` | string | yes* | External MCP server endpoint URL (e.g. `https://mcp.sentry.io/sse`). Must be HTTPS and must not reference an internal cluster service (`svc.cluster.local`). (*Required when `remote` is set.) |
+| `spec.remote.authHeaders` | object[] | no | HTTP headers to inject when proxying to the remote server (max 20). Rendered into nginx `proxy_set_header` directives. |
+| `spec.remote.authHeaders[].header` | string | yes | HTTP header name. Alphanumeric and hyphens only (1--128 chars). |
+| `spec.remote.authHeaders[].valueTemplate` | string | yes | Header value template. May contain `${VAR}` placeholders that nginx envsubst resolves at startup from mounted env vars. |
+
+An McpServer with `spec.remote` must declare at least one `egressBinding`.
+
+### Image Pull Secrets
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `spec.imagePullSecrets` | object[] | no | Image pull secrets for the container. |
+| `spec.imagePullSecrets[].name` | string | no | Name of the image pull Secret. |
+
+### Security Context
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `spec.security` | object | no | Security context overrides for the MCP server pod. |
+| `spec.security.runAsUser` | integer | no | UID to run the container as. Minimum `1`. |
+| `spec.security.runAsGroup` | integer | no | GID to run the container as. |
+| `spec.security.fsGroup` | integer | no | Supplemental group applied to mounted volumes. |
+| `spec.security.addCapabilities` | string[] | no | Linux capabilities to add. Each one of: `CHOWN`, `FOWNER`, `DAC_OVERRIDE`, `NET_BIND_SERVICE`. |
+
 ### Egress Bindings
 
 | Field | Type | Required | Description |
@@ -107,12 +136,14 @@ reads structured CRD fields and sets the named env vars automatically.
 | `spec.egressBindings` | object[] | no | External egress bindings allowing this MCP server to reach external APIs. Each binding generates a NetworkPolicy allowing egress to the specified destination. |
 | `spec.egressBindings[].egressClass` | string | no | Egress class. `exact-host` is the default for `dns`/`cidr` bindings. `public-web` is explicit public TCP 80/443 egress with private, metadata, cluster-internal, link-local, multicast, and reserved ranges blocked. |
 | `spec.egressBindings[].dns` | string | no | DNS hostname to resolve (e.g. `api.openai.com`). Mutually exclusive with `cidr`. |
-| `spec.egressBindings[].cidr` | string | no | IP CIDR range (e.g. `10.0.0.1/32`). Mutually exclusive with `dns`. Must not be `0.0.0.0/0`. |
+| `spec.egressBindings[].cidr` | string | no | Public IPv4 CIDR range (e.g. `203.0.114.10/32`). Mutually exclusive with `dns`. Must use canonical network notation and must not overlap private, metadata, link-local, documentation, multicast, or reserved IPv4 ranges (this rejects `0.0.0.0/0` and any RFC1918 range such as `10.0.0.0/8`). |
 | `spec.egressBindings[].port` | integer | yes | Destination port number. |
 | `spec.egressBindings[].protocol` | string | no | Network protocol for exact-host bindings. One of: `TCP`, `UDP`. If omitted, the controller treats exact-host as `TCP`; public-web must omit this field. |
 
 Validation rules enforce that exactly one of `dns` or `cidr` must be set per binding, and
-open CIDR `0.0.0.0/0` is rejected.
+that a `cidr` is a canonical public IPv4 range that does not overlap private, metadata,
+link-local, documentation, multicast, or reserved ranges (so `0.0.0.0/0` and RFC1918 ranges
+are rejected).
 
 `public-web` bindings must not declare `dns`, `cidr`, `port`, or `protocol`.
 They are intended for operator-approved MCP servers that need dynamic public web
@@ -139,7 +170,8 @@ API translates to this explicit `egressClass: public-web` CRD shape.
 - For `managed: false`, WRC owns runtime isolation, including runtime NetworkPolicies; HCC exposes discovery/status and does not create or delete WRC-owned runtime policies.
 - `spec.managed` is immutable after creation; omit is treated as the default `true`.
 - Each egress binding must have exactly one of `dns` or `cidr` (not both, not neither).
-- Open CIDR range `0.0.0.0/0` is not allowed in egress bindings.
+- A `cidr` must be a canonical public IPv4 range; ranges overlapping private, metadata, link-local, documentation, multicast, or reserved IPv4 ranges (including `0.0.0.0/0` and RFC1918 ranges such as `10.0.0.0/8`) are rejected.
+- An McpServer with `spec.remote` must declare at least one `egressBinding`.
 
 ## Example
 
