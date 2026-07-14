@@ -31,7 +31,7 @@ EXTERNAL_REST_API_INTERNAL_URL=http://localhost:8091 npm run dev -- --port 3001
 Invitation flow:
 
 - an invite is created either by `control-ui` in `control-api`, or by an authenticated `profile-ui` user through `/members/invite`
-- `control-ui` asks `external-rest-api` to trigger invite delivery, and `external-rest-api` delegates the actual email send to `member-registration-service`
+- `control-ui` (or an authenticated `profile-ui` user via `/members/invite`) asks `external-rest-api` to create the invitation, which it does through `control-api`
 - `profile-ui` loads `/invitations/[token]` without requiring profile login
 - the invited user accepts the invitation through the unauthenticated invitation route
 - after confirmation, `profile-ui` lets the invited user set their password before downloading Evenfire

@@ -106,7 +106,7 @@ flowchart TB
     %% === CONNECTIONS ===
     USER -->|messages| CHAN
     CHAN -->|HTTP POST| MH
-    DESKTOP -->|JWT+2FA| NS_RPC
+    DESKTOP -->|RS256 JWT| NS_RPC
     PP_API -->|REST| CP_API
     CP_API -->|creates CRDs| MCS_CRD
     CP_API -->|creates CRDs| CTX_CRD
@@ -206,7 +206,7 @@ Nothing moves until HCC creates explicit allow policies.
 
 | Boundary                   | Trust Level                                                | Enforcement                                                                                                                 |
 | -------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| External → rpc-proxy       | Zero trust                                                 | JWT + 2FA/YubiKey + VPN, profile ACL                                                                                        |
+| External → rpc-proxy       | Zero trust                                                 | Scoped RS256 bearer JWT (iss/aud/typ/exp/scope/hostRefs), control-api profile ACL                                          |
 | External → gateway         | Channel trust                                              | Bot tokens, allowed sender lists                                                                                            |
 | gateway → mcp-host         | Internal trust                                             | NetworkPolicy                                                                                                               |
 | mcp-host → mcp-server      | Context-scoped                                             | NetworkPolicy per (context, server) + identity headers                                                                      |
@@ -611,14 +611,14 @@ All rpc-proxy routers are mounted under `/api/v1`; unmatched paths return 404.
 
 > **Important — Gateway does NOT use rpc-proxy**: Channel communication (Telegram, Email, Slack) flows
 > directly from the gateway namespace to mcp-host via NetworkPolicy. The rpc-proxy is exclusively for
-> Desktop App users who need enterprise-grade authentication (JWT + 2FA/YubiKey). This separation keeps
+> Desktop App users, who authenticate with a scoped RS256 bearer JWT. This separation keeps
 > existing channel infrastructure simple and avoids unnecessary indirection. Routing channels through
 > rpc-proxy is tracked as a [future study option](#17-future-scope).
 
 ### 9.2 Auth Chain
 
 ```
-Desktop App → VPN (optional) → JWT + 2FA/YubiKey →
+Desktop App → RS256 JWT (scoped: scope + hostRefs) →
 rpc-proxy validates → resolves user profile via control-api →
 forwards to allowed MCP servers or agent
 ```
@@ -636,7 +636,7 @@ flowchart LR
     MS["MCP Server<br/>(mcp-server NS)"]
     MH["MCP Host RPC<br/>(mcp-host NS)"]
 
-    U -->|"1. JWT + 2FA"| RP
+    U -->|"1. RS256 JWT"| RP
     RP -->|"2. Resolve user profile"| PP
     PP -->|"3. Allowed targets"| RP
     RP -->|"4a. /api/v1/rpc/{serverName}"| MS
@@ -656,7 +656,7 @@ The proxy routes traffic to the right internal target only after: the user is au
 
 | Concern             | Channel Path                                    | Desktop App Path                                |
 | ------------------- | ----------------------------------------------- | ----------------------------------------------- |
-| **Auth model**      | Bot tokens + allowed sender lists (per channel) | Enterprise: JWT + 2FA/YubiKey + VPN             |
+| **Auth model**      | Bot tokens + allowed sender lists (per channel) | Scoped RS256 JWT + control-api profile ACL      |
 | **Traffic pattern** | Polling → HTTP POST (simple)                    | Bidirectional RPC (complex)                     |
 | **Infrastructure**  | Already built and proven                        | Requires rpc-proxy namespace                    |
 | **Latency**         | Direct = minimal hops                           | Proxy adds one hop (acceptable for strong auth) |
@@ -920,7 +920,7 @@ flowchart LR
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': {'fontSize':'12px'}}}%%
 flowchart LR
-    DESK["Desktop App"] -->|"JWT + 2FA/YubiKey"| RPC["rpc-proxy"]
+    DESK["Desktop App"] -->|"RS256 JWT"| RPC["rpc-proxy"]
     RPC -->|"MCP Server Proxy<br/>/api/v1/rpc/{serverName}"| MCP["MCP Servers"]
     RPC -->|"MCP Host Proxy<br/>/api/v1/rpc/hosts/{hostRef}/messages"| MH["mcp-host<br/>(Agent channel)"]
 

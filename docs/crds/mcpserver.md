@@ -162,7 +162,7 @@ API translates to this explicit `egressClass: public-web` CRD shape.
 
 ## Additional Printer Columns
 
-`kubectl get mcpservers` displays: Context, Image, Transport, URL, Enabled, Managed.
+`kubectl get mcpservers` displays: Context, Image, Transport, URL, Enabled, Managed, Ready.
 
 ## CRD Validation Rules
 
