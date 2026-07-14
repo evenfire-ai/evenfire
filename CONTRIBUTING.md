@@ -1,8 +1,7 @@
 # Contributing to evenfire
 
-Thanks for your interest. evenfire is **open source** (MPL-2.0). A CLA is
-planned but currently [paused pending legal review](#cla) — you do not need to
-sign anything to contribute today.
+Thanks for your interest. evenfire is **open source** (MPL-2.0). You do not
+need to sign anything to contribute today.
 
 ## Before you start
 
@@ -57,17 +56,6 @@ User-facing docs live under [`docs/`](docs/README.md). Prefer:
 - CRD and env reference for facts
 
 Avoid landing internal phase plans or PR-numbered notes on the main docs index.
-
-## CLA
-
-> **Paused.** The CLA is undergoing legal review, so the signing gate is
-> currently **disabled** — you do **not** need to sign anything to contribute
-> today, and the bot will not prompt you.
-
-This project intends to require a Contributor License Agreement once
-[CLA.md](CLA.md) is final; contributions may then be used in commercial /
-managed editions. Until counsel clears the text, no signature is requested and
-no PR is blocked on one.
 
 ## Code of conduct
 

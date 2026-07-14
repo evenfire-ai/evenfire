@@ -17,7 +17,3 @@ foundation.
 ## Security
 
 Vulnerability reports: [SECURITY.md](SECURITY.md).
-
-## Trademark
-
-[TRADEMARK.md](TRADEMARK.md).

@@ -339,10 +339,9 @@ namespace).
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — dev loop, what we accept
 - **[SECURITY.md](SECURITY.md)** — private vulnerability disclosure
-- **[GOVERNANCE.md](GOVERNANCE.md)** · **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** · **[CLA.md](CLA.md)**
+- **[GOVERNANCE.md](GOVERNANCE.md)** · **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)**
 
 evenfire is **open source** under the [Mozilla Public License 2.0](LICENSE)
 (MPL-2.0) — an OSI-approved, file-level copyleft license. Use it, modify it,
 self-host it, and build commercial products on it; changes to MPL-licensed files
-must remain under MPL when distributed. Trademarks are separate — see
-[TRADEMARK.md](TRADEMARK.md).
+must remain under MPL when distributed.
