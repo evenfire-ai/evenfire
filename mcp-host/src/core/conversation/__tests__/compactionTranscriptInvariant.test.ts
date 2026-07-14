@@ -6,8 +6,8 @@ import { ConversationManager } from '../conversation'
 /**
  * FU2 — characterization test for the compaction ↔ durable-transcript invariant.
  *
- * Closes the spec §8 open question ("Compaction mid-task: ... los turns previos
- * cambian → trigger re-fetch de /messages"). That premise is false:
+ * Closes the spec §8 open question ("Compaction mid-task: ... previous turns
+ * change → trigger re-fetch of /messages"). That premise is false:
  *
  *   - `compactConversation` operates on the ephemeral `ChatMessage[]` context
  *     window the agent loop builds fresh each run via
@@ -21,7 +21,7 @@ import { ConversationManager } from '../conversation'
  * invariant so a future refactor that mutates `turns` from the compaction path
  * fails loudly here.
  */
-describe('compaction ↔ durable transcript invariant (FU2, spec §8 "no aplica")', () => {
+describe('compaction ↔ durable transcript invariant (FU2, spec §8 "does not apply")', () => {
   // Build a conversation with `count` completed turns through the real manager.
   const buildConversationWithTurns = async (count: number) => {
     const manager = new ConversationManager()

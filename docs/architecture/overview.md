@@ -28,7 +28,7 @@ evenfire is a Kubernetes-native platform for LLM orchestration with multi-channe
 8. [Message Lifecycle (End-to-End)](#8-message-lifecycle-end-to-end)
 9. [Dev Mode vs Production Mode](#9-dev-mode-vs-production-mode)
 10. [Deployment & Infrastructure](#10-deployment--infrastructure)
-11. [Tool Approval System (Phase 6)](#11-tool-approval-system-phase-6)
+11. [Tool Approval System](#11-tool-approval-system)
 
 ---
 
@@ -1452,7 +1452,7 @@ All services handle `SIGINT` and `SIGTERM`:
 
 ---
 
-## 11. Tool Approval System (Phase 6)
+## 11. Tool Approval System
 
 ### Overview
 
