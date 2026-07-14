@@ -27,6 +27,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # Code scanning is FREE on public repositories but requires paid GitHub
+    # Advanced Security on private ones. This repo is still private pending the
+    # public launch, so uploading results fails with:
+    #   "Code Security must be enabled for this repository to use code scanning."
+    #
+    # Rather than leave a permanently-red check (which trains everyone to ignore
+    # CI) or pay for GHAS on a repo that is about to be public anyway, the job is
+    # gated on visibility. It costs nothing today and starts enforcing itself the
+    # moment the repo flips to public — no follow-up commit required.
+    #
+    # Nothing else is needed at that point: just verify the run appears under the
+    # Security tab.
+    if: github.event.repository.visibility == 'public'
+
     permissions:
       security-events: write # upload results to the Security tab
       actions: read
