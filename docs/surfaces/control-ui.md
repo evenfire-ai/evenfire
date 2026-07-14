@@ -163,3 +163,9 @@ In-cluster, Control UI is a single-replica Deployment on port 3000
   tests and Playwright end-to-end specs), see
   [`control-ui/README.md`](../../control-ui/README.md) — this page does not
   duplicate those tables so the two cannot drift apart.
+
+## Next
+
+- [UI Surfaces](README.md) — the persona matrix across all three consoles
+- [Desktop App](desktop-app.md) — the end-user client
+- [Profile UI](profile-ui.md) — the invited member's front door

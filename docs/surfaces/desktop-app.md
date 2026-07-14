@@ -33,6 +33,7 @@ Surfaces](README.md) for how the three consoles divide the platform, and the
    input and output token counts for the thread.
 
    ![Evenfire Desktop App chat with the chatllm agent: the agent's answer sits above a collapsed "More details · 1 tool" summary, with thread token counts in the header](../assets/desktop-app-chat.png)
+   *Dev cluster, demo tenant.*
 
 5. **Watch it work.** `ProgressStepper` renders the tool calls as they run —
    each step's tool name, how long it took, and the payload it returned.
@@ -44,6 +45,7 @@ Surfaces](README.md) for how the three consoles divide the platform, and the
    never used to submit messages, only to observe what is already running.
 
    ![Expanded ProgressStepper in the Desktop App: a completed sqlite-mcp list_tables step showing a 99ms duration and the JSON payload it returned](../assets/desktop-app-progress-stepper.png)
+   *Dev cluster, demo tenant.*
 
 6. **Approve the gated call.** When a tool call needs a human decision, the
    `ProgressStepper` suspends the step in place and shows an in-chat
@@ -53,6 +55,7 @@ Surfaces](README.md) for how the three consoles divide the platform, and the
    Required / Skip / Default policy behind that prompt is set.
 
    ![In-chat approval gate in the Desktop App: an MCP tool call is held with the message "requires approval" and Approve / Deny buttons](../assets/desktop-app-approval.png)
+   *Dev cluster, demo tenant.*
 
 7. **Collect the artifact.** Completed work surfaces through the
    `ArtifactsBadge`, alongside two related file surfaces: shared files
@@ -84,6 +87,7 @@ Two screens worth calling out specifically:
   a real interface; it does not get a second client to install.
 
   ![The LeadForge plugin's dashboard rendered inside the Evenfire Desktop App: the app's own icon rail and "Back to apps" bar surround a recipe-supplied prospecting UI showing contact, company, and outreach-funnel counters](../assets/desktop-app-sandbox-ui.png)
+  *Dev cluster, demo tenant.*
 
 ## How it is wired
 
