@@ -114,6 +114,10 @@ approval-gated tool, the result poll returns `status: "awaiting_approval"`
 with `approval.requestId` — approve it and re-poll:
 
 ```bash
+# pull the pending approval id out of the result poll
+REQUEST_ID=$(curl -s "$RPC/api/v1/rpc/hosts/$HOST/tasks/$TASK/result" \
+  -H "Authorization: Bearer $RPC_TOKEN" | jq -r '.approval.requestId')
+
 curl -s -X POST "$RPC/api/v1/rpc/hosts/$HOST/approvals/approve" \
   -H "Authorization: Bearer $RPC_TOKEN" -H 'Content-Type: application/json' \
   -d "{\"toolCallId\":\"$REQUEST_ID\"}"

@@ -41,6 +41,8 @@ SERVICES := \
 	webhook-proxy \
 	webhook-gateway \
 	stdio-bridge \
+	gfs-controller \
+	workspace-files-controller \
 	desktop-app \
 	mcp-servers \
 	packages/workflow-runtime-core \
@@ -48,6 +50,7 @@ SERVICES := \
 
 # Services that have unit tests (vitest)
 TEST_SERVICES := \
+	channel-reader \
 	workflow-approval-request-reader \
 	mcp-host \
 	host-context-controller \
@@ -59,6 +62,8 @@ TEST_SERVICES := \
 	webhook-proxy \
 	webhook-gateway \
 	stdio-bridge \
+	gfs-controller \
+	workspace-files-controller \
 	desktop-app \
 	mcp-servers \
 	packages/workflow-runtime-core \

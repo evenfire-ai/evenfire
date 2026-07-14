@@ -20,15 +20,13 @@
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "google-auth-library": "^9.15.1",
-    "jsonwebtoken": "^9.0.3",
-    "pg": "^8.13.1"
+    "jsonwebtoken": "^9.0.3"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^24.3.0",
-    "@types/pg": "^8.11.10",
     "@types/supertest": "^7.2.0",
     "supertest": "^7.2.2",
     "ts-node": "^10.9.2",

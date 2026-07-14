@@ -12,6 +12,17 @@ Electron desktop client with a React renderer. The app authenticates through `ex
   - `member-registration-service` for the invitation/activation flow (invitation profile lookup and desktop setup completion).
 - `control-api` internal service tokens are never stored in the desktop app.
 
+> **`member-registration-service` is not in this repository.** It is an extracted
+> sibling service, expected in-cluster at
+> `member-registration-service.registration.svc.cluster.local:8092`
+> (`deploy/base/control-plane/configmaps.yaml`). Everything else the desktop app
+> needs is here; only the **invitation / activation flow** depends on it, so
+> without that service you can still log in and drive agents, but you cannot
+> complete an invitation-based signup. Point
+> `MEMBER_REGISTRATION_SERVICE_BASE_URL` at your own deployment of it — the
+> variable has no working default (see
+> [Environment Variables](#environment-variables)).
+
 ## Implemented Flows
 
 - Google login with direct `idToken` submit (`POST /api/v1/auth/google`)
@@ -192,16 +203,16 @@ npm run test:e2e:all          # Phase 1 + Phase 2
 
 ### Environment Configuration (`.env.e2e`)
 
-| Variable                               | Default                 | Description                                    |
-| -------------------------------------- | ----------------------- | ---------------------------------------------- |
-| `EXTERNAL_REST_API_BASE_URL`           | `http://localhost:8091` | external-rest-api URL                          |
-| `RPC_PROXY_BASE_URL`                   | `http://localhost:8094` | rpc-proxy URL                                  |
-| `MEMBER_REGISTRATION_SERVICE_BASE_URL` | `http://localhost:8092` | member-registration-service activation URL     |
-| `E2E_DEV_LOGIN_EMAIL`                  | `test@clerum.io`        | Test-only login email (must have agent access) |
-| `E2E_DEV_LOGIN_EMAIL_2`                | `test2@clerum.io`       | Second user, required by the cross-device session tests |
-| `E2E_DEV_LOGIN_NAME`                   | `Test User`             | Test-only login display name                   |
-| `E2E_HOST_REF`                         | `chatllm`               | Agent hostRef to test against                  |
-| `E2E_ALLOW_DEV_PORT_FORWARD`           | unset (off)             | Set to `1`/`true` to let the Playwright global-setup guard accept localhost port-forward URLs |
+| Variable                               | Default                                      | Description                                                                                                          |
+| -------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `EXTERNAL_REST_API_BASE_URL`           | `http://localhost:8091`                      | external-rest-api URL                                                                                                |
+| `RPC_PROXY_BASE_URL`                   | `http://localhost:8094`                      | rpc-proxy URL                                                                                                        |
+| `MEMBER_REGISTRATION_SERVICE_BASE_URL` | `https://example.com` (placeholder — set it) | member-registration-service activation URL. There is no working default: unset, it silently points at `example.com`. |
+| `E2E_DEV_LOGIN_EMAIL`                  | `test@clerum.io`                             | Test-only login email (must have agent access)                                                                       |
+| `E2E_DEV_LOGIN_EMAIL_2`                | `test2@clerum.io`                            | Second user, required by the cross-device session tests                                                              |
+| `E2E_DEV_LOGIN_NAME`                   | `Test User`                                  | Test-only login display name                                                                                         |
+| `E2E_HOST_REF`                         | `chatllm`                                    | Agent hostRef to test against                                                                                        |
+| `E2E_ALLOW_DEV_PORT_FORWARD`           | unset (off)                                  | Set to `1`/`true` to let the Playwright global-setup guard accept localhost port-forward URLs                        |
 
 ## Notes
 

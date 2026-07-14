@@ -19,6 +19,8 @@ jobs:
           - control-api
           - mcp-proxy
           - workflow-recipes
+          - gfs-controller
+          - workspace-files-controller
 
     steps:
       - uses: actions/checkout@v4

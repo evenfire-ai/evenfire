@@ -9,7 +9,7 @@ This suite validates internet-facing `rpc-proxy` behavior with emphasis on authe
 
 ## Prerequisites
 
-- Node.js 22+ available locally.
+- Node.js 24+ available locally.
 - Repo dependencies installed for:
   - `rpc-proxy`
   - `tests/e2e`

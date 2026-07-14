@@ -37,7 +37,7 @@ spec:
                   description: Reference to the context (e.g. context1) used for MPC servers and secrets.
                 secretRef:
                   type: string
-                  description: Name of the Kubernetes Secret containing API keys (openai-api-key, claude-api-key, zai-api-key).
+                  description: Name of the Kubernetes Secret containing API keys (openai-api-key, claude-api-key, zai-api-key, bailian-api-key).
                 channels:
                   type: array
                   description: List of CommunicationChannel names this host interacts with.

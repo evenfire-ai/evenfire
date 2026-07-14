@@ -221,6 +221,6 @@ npm start
 
 ## Related Documentation
 
-- `docs/archive/mcp-servers/DIAGNOSTICO-ARQUITECTURA.md` - Architecture diagnosis (archived snapshot)
-- `docs/archive/testing/E2E-REAL-SYSTEMS-TESTING.md` - E2E testing guide (historical)
+- [`docs/testing/e2e-guide.md`](../../../docs/testing/e2e-guide.md) - E2E testing guide
+- [`docs/architecture/overview.md`](../../../docs/architecture/overview.md) - Architecture reference
 - `scripts/create-k8s-secrets.sh` - Production secrets script

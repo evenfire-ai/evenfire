@@ -38,7 +38,7 @@ tenant's `control-api` needs **all five** of:
    issue a session token with `teamId: null`, so a team-less session exists —
    it just cannot open the desktop surface.
 4. ≥1 **agent grant** (e.g. `chatllm`) at user- or team-level, else the desktop
-   shows "No agents available" (`docs/agents-display-issue-analysis.md`)
+   shows "No agents available"
 5. ≥1 **context grant** (e.g. `context1`) at user- or team-level
 
 ### Why it breaks today

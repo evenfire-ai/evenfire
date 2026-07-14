@@ -229,30 +229,175 @@ Response (no auth configured):
 
 ## Environment Variables
 
-| Variable                                       | Default                                             | Description                                                      |
-| ---------------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------- |
-| `CLERUM_DEV_MODE`                              | `false`                                             | Enable dev mode (reads from env vars instead of K8s)             |
-| `CONTEXT_MAPPER_PORT`                          | `8081`                                              | HTTP server port                                                 |
-| `CONTEXT_MAPPER_NAMESPACE`                     | `mcp-server`                                        | Kubernetes namespace where MCP servers and Context CRDs live     |
-| `CONTEXT_MAPPER_HOST_NAMESPACE`                | `mcp-host`                                          | Namespace where mcp-host pods run (for NetworkPolicy generation) |
-| `CONTEXT_MAPPER_HOST_IMAGE`                    | `us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mcp-host:0.6.0` | Container image for reconciled host Deployments     |
-| `CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY`        | `Always`                                            | Pull policy for reconciled host Deployments                      |
-| `CONTEXT_MAPPER_HOST_PORT`                     | `8080`                                              | Container/service port for host runtime                          |
-| `CONTEXT_MAPPER_HOST_CONFIGMAP_NAME`           | `mcp-host-config`                                   | ConfigMap loaded into host containers via `envFrom`              |
-| `CONTEXT_MAPPER_HOST_SERVICE_ACCOUNT`          | `mcp-host`                                          | Service account used by host Deployments                         |
-| `CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS`  | `do-block-storage-retain`                           | Storage class for per-host workspace PVCs                        |
-| `CONTEXT_MAPPER_HOST_WORKSPACE_SIZE`           | `10Gi`                                              | Requested per-host workspace PVC size                            |
-| `CONTEXT_MAPPER_HOST_WORKSPACE_PATH`           | `/workspace`                                        | Workspace mount path inside host containers                      |
-| `CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_MEMORY` | `128Mi`                                             | Host container memory request                                    |
-| `CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_CPU`    | `100m`                                              | Host container CPU request                                       |
-| `CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY`   | `512Mi`                                             | Host container memory limit                                      |
-| `CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_CPU`      | `500m`                                              | Host container CPU limit                                         |
-| `INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET`         | -                                                   | HMAC secret used to sign InternalControl JWTs. **Required when `CLERUM_DEV_MODE` is not `true`** — the process logs `[HCC] FATAL` and exits 1 if it is empty or still holds a `replace-with-…` placeholder |
-| `CONTEXT_MAPPER_CHANNELS_NAMESPACE`            | `channels`                                          | Namespace for the per-Host channel-reader resources              |
-| `CONTEXT_MAPPER_DESKTOP_API_TOKEN`             | `` (empty)                                          | Bearer token required by `GET /api/v1/desktop/:hostRef`. When empty, the token check is **skipped** and the endpoint is unauthenticated |
-| `CLERUM_MCP_SERVERS`                           | -                                                   | (Dev mode) JSON array of McpServer objects                       |
-| `CLERUM_CONTEXTS`                              | -                                                   | (Dev mode) JSON array of Context objects; when set, `GET /api/v1/mcpservers/context/:contextRef` filters by the Context's `mcpServers` allow-list. When unset, that endpoint falls back to matching servers on `spec.contextRef` |
-| `CLERUM_MCP_AUTH`                              | -                                                   | (Dev mode) JSON object mapping server name to auth token         |
+HCC reads **60** environment variables (`src/config.ts`, `src/gfsConfig.ts`,
+`src/logger.ts`, `src/k8sApiCidrs.ts`). Defaults below are the literal fallbacks
+in code; where the deploy manifest overrides one, that is noted.
+
+**Parsing semantics.** `getEnv(key, default)` uses `process.env[key] ?? default`,
+so an **empty string wins over the default** — that is how the minikube overlay
+disables the image-pull secret with `value: ""`. `getEnvInt` / `getEnvBool` treat
+an empty string as unset and fall back to the default; `getEnvBool` accepts
+`true` (any case) or `1`.
+
+**Three variables fail the process closed on bad input** rather than programming
+a permissive policy — see the NetworkPolicy and GFS tables:
+`CONTEXT_MAPPER_K8S_API_CIDRS`, `CONTEXT_MAPPER_NODELOCAL_DNS_CIDR`, and
+`CONTEXT_MAPPER_GFSC_IMAGE_PULL_POLICY`.
+
+### Core / server
+
+| Variable              | Default | Description                                                                                                                                          |
+| --------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_PORT` | `8081`  | HTTP server port.                                                                                                                                    |
+| `CLERUM_DEV_MODE`     | `false` | Read McpServers/Contexts/auth tokens from env instead of the K8s API. Also skips the `INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET` startup assertion below. |
+| `LOG_LEVEL`           | `info`  | `debug` \| `info` \| `warn` \| `error`. Unrecognized values fall back to `info`.                                                                     |
+
+### Namespaces
+
+| Variable                                 | Default           | Description                                                                                                                                                         |
+| ---------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_NAMESPACE`               | `mcp-server`      | Where `McpServer` / `Context` CRDs live and managed server workloads are created.                                                                                   |
+| `CONTEXT_MAPPER_CONTROL_PLANE_NAMESPACE` | `control-plane`   | Where control-plane gateway services live.                                                                                                                          |
+| `CONTEXT_MAPPER_HOST_NAMESPACE`          | `mcp-host`        | Where mcp-host pods run (drives NetworkPolicy generation).                                                                                                          |
+| `CONTEXT_MAPPER_GFS_NAMESPACE`           | `gfs`             | Where the GlobalFileSystem controller (gfsc) runs.                                                                                                                  |
+| `CONTEXT_MAPPER_RPC_PROXY_NAMESPACE`     | `rpc-proxy`       | Where rpc-proxy runs (L2 egress policy generation).                                                                                                                 |
+| `CONTEXT_MAPPER_CHANNELS_NAMESPACE`      | `channels`        | Per-Host channel-reader Deployments/Services.                                                                                                                       |
+| `CONTEXT_MAPPER_SANDBOX_NAMESPACE`       | `sandbox-recipes` | Workflow-recipe namespace. Read only by the GFS factory.                                                                                                            |
+| `HCC_TARGET_NAMESPACE`                   | `mcp-host`        | Namespace HCC names when asking control-api for shared 1st-party mcp-host credentials. **Exits 1** if it resolves empty; warns if outside mcp-host/sandbox-recipes. |
+
+### MCP server provisioning
+
+| Variable                                     | Default                             | Description                                                                                                 |
+| -------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY` | `IfNotPresent`                      | Pull policy for reconciled McpServer workloads.                                                             |
+| `CONTEXT_MAPPER_EGRESS_PROXY_IMAGE`          | `clerum/nginx-egress-proxy:0.1.0`   | Per-server nginx egress proxy for **remote** MCP servers (`spec.remote`).                                   |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE`          | (registry-qualified `stdio-bridge`) | stdio-bridge sidecar image for managed stdio MCP servers. Manifest pins `clerum/stdio-bridge:0.9.5`.        |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_REQUEST_MEMORY` | `32Mi`                              | stdio-bridge sidecar memory request.                                                                        |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_REQUEST_CPU`    | `50m`                               | stdio-bridge sidecar CPU request.                                                                           |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_MEMORY`   | `128Mi`                             | stdio-bridge sidecar memory limit.                                                                          |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_CPU`      | `200m`                              | stdio-bridge sidecar CPU limit.                                                                             |
+| `HCC_EXTERNAL_EGRESS_RESYNC_SEC`             | `300`                               | Periodic external-egress DNS resync (seconds), so DNS changes converge without a watch event. `0` disables. |
+
+### mcp-host provisioning
+
+| Variable                                            | Default                         | Description                                                                                                                    |
+| --------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `CONTEXT_MAPPER_HOST_IMAGE`                         | (registry-qualified `mcp-host`) | Image for reconciled Host Deployments. Manifest pins `clerum/mcp-host:0.9.5`.                                                  |
+| `CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY`             | `Always`                        | Pull policy. Minikube overlay sets `IfNotPresent`.                                                                             |
+| `CONTEXT_MAPPER_HOST_IMAGE_PULL_SECRET`             | `clerum`                        | `imagePullSecrets` name. Minikube overlay sets `""` to disable (empty string overrides the default).                           |
+| `CONTEXT_MAPPER_HOST_PORT`                          | `8080`                          | Container/service port for the host runtime.                                                                                   |
+| `CONTEXT_MAPPER_HOST_CONFIGMAP_NAME`                | `mcp-host-config`               | ConfigMap loaded into host containers via `envFrom`.                                                                           |
+| `CONTEXT_MAPPER_HOST_SERVICE_ACCOUNT`               | `mcp-host`                      | ServiceAccount used by Host Deployments.                                                                                       |
+| `CONTEXT_MAPPER_HOST_WORKSPACE_STORAGE_CLASS`       | `do-block-storage-retain`       | StorageClass for per-host workspace PVCs. Minikube overlay sets `standard`.                                                    |
+| `CONTEXT_MAPPER_HOST_WORKSPACE_SIZE`                | `10Gi`                          | Requested per-host workspace PVC size.                                                                                         |
+| `CONTEXT_MAPPER_HOST_WORKSPACE_PATH`                | `/workspace`                    | Workspace mount path inside host containers.                                                                                   |
+| `CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_MEMORY`      | `128Mi`                         | Host container memory request.                                                                                                 |
+| `CONTEXT_MAPPER_HOST_RESOURCES_REQUEST_CPU`         | `100m`                          | Host container CPU request.                                                                                                    |
+| `CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_MEMORY`        | `512Mi`                         | Host container memory limit.                                                                                                   |
+| `CONTEXT_MAPPER_HOST_RESOURCES_LIMIT_CPU`           | `500m`                          | Host container CPU limit.                                                                                                      |
+| `CONTEXT_MAPPER_HOST_RESYNC_SEC`                    | `300`                           | Periodic Host `fullReconcile` (seconds); guards against dropped watch events and drives auth-degraded self-heal. `0` disables. |
+| `HCC_MCP_HOST_RUNTIME_BOOTSTRAP_REFRESH_BEFORE_SEC` | `900`                           | How long before expiry HCC refreshes the mcp-host bootstrap credential Secret.                                                 |
+
+### Desktop (Host CRD `spec.desktop`)
+
+| Variable                                          | Default                          | Description                                                                                                                                                                              |
+| ------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_DESKTOP_IMAGE`                    | `clerum/mcp-host-desktop:latest` | Desktop sidecar image.                                                                                                                                                                   |
+| `CONTEXT_MAPPER_DESKTOP_PORT`                     | `3000`                           | Desktop container port.                                                                                                                                                                  |
+| `CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_MEMORY` | `256Mi`                          | Desktop memory request.                                                                                                                                                                  |
+| `CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_CPU`    | `250m`                           | Desktop CPU request.                                                                                                                                                                     |
+| `CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_MEMORY`   | `4Gi`                            | Desktop memory limit.                                                                                                                                                                    |
+| `CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU`      | `1000m`                          | Desktop CPU limit.                                                                                                                                                                       |
+| `CONTEXT_MAPPER_DESKTOP_API_TOKEN`                | `` (empty)                       | Bearer token required by `GET /api/v1/desktop/:hostRef`. **When empty the check is skipped and the endpoint is unauthenticated** — a dev-mode convenience. Set it in any shared cluster. |
+
+### channel-reader provisioning
+
+| Variable                                          | Default                       | Description                                                                     |
+| ------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_CHANNEL_READER_IMAGE`             | `clerum/channel-reader:0.9.5` | Image for per-Host channel-reader Deployments.                                  |
+| `CONTEXT_MAPPER_CHANNEL_READER_IMAGE_PULL_POLICY` | `Always`                      | Pull policy. Minikube overlay sets `IfNotPresent` to use locally-loaded images. |
+| `CONTEXT_MAPPER_CHANNEL_READER_HANDOFF_PORT`      | `8099`                        | Internal handoff port on per-Host channel-reader Services.                      |
+
+### workspace-files-controller (WFC) provisioning
+
+| Variable                                      | Default                      | Description                                                                                                                                                                                                    |
+| --------------------------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_WFC_IMAGE`                    | (registry-qualified `wfc`)   | Per-SharedFileSystem WFC image. Manifest pins `clerum/workspace-files-controller:0.9.5`.                                                                                                                       |
+| `CONTEXT_MAPPER_WFC_IMAGE_PULL_POLICY`        | `IfNotPresent`               | Pull policy for WFC Deployments.                                                                                                                                                                               |
+| `CONTEXT_MAPPER_WFC_IMAGE_PULL_SECRET`        | `clerum`                     | `imagePullSecrets` name. Minikube overlay sets `""` to disable.                                                                                                                                                |
+| `CONTEXT_MAPPER_WFC_PORT`                     | `8086`                       | WFC container/service port.                                                                                                                                                                                    |
+| `CONTEXT_MAPPER_WFC_INIT_IMAGE`               | `busybox:1.36`               | Init container that seeds directories and chowns the fresh PVC.                                                                                                                                                |
+| `CONTEXT_MAPPER_WFC_RESOURCES_REQUEST_MEMORY` | `64Mi`                       | WFC memory request.                                                                                                                                                                                            |
+| `CONTEXT_MAPPER_WFC_RESOURCES_REQUEST_CPU`    | `50m`                        | WFC CPU request.                                                                                                                                                                                               |
+| `CONTEXT_MAPPER_WFC_RESOURCES_LIMIT_MEMORY`   | `128Mi`                      | WFC memory limit.                                                                                                                                                                                              |
+| `CONTEXT_MAPPER_WFC_RESOURCES_LIMIT_CPU`      | `200m`                       | WFC CPU limit.                                                                                                                                                                                                 |
+| `CONTEXT_MAPPER_WFC_JWT_PUBLIC_KEY_CM`        | `mcp-host-config`            | ConfigMap holding the JWT public key the WFC verifies against.                                                                                                                                                 |
+| `CONTEXT_MAPPER_WFC_JWT_PUBLIC_KEY_CM_KEY`    | `CLERUM_AUTH_JWT_PUBLIC_KEY` | Key within that ConfigMap.                                                                                                                                                                                     |
+| `CONTEXT_MAPPER_WFC_MAX_UPLOAD_BYTES`         | `104857600` (100 MiB)        | Upload size cap forwarded to the WFC container.                                                                                                                                                                |
+| `CONTEXT_MAPPER_WFC_MAX_LIST_ENTRIES`         | `5000`                       | Max directory entries the WFC will list.                                                                                                                                                                       |
+| `CONTEXT_MAPPER_WFC_MAX_PATH_DEPTH`           | `32`                         | Max path depth the WFC will traverse.                                                                                                                                                                          |
+| `CONTEXT_MAPPER_SFS_RESYNC_SEC`               | `60`                         | Periodic SharedFileSystem `fullReconcile` (seconds). The SFS watch fires only on CRD changes — not on PVC binding or WFC readiness — so this is what drives `Initializing`/`Degraded` → `Ready`. `0` disables. |
+
+### GlobalFileSystem (GFS) provisioning
+
+Read by `src/gfsConfig.ts`. Invalid values **throw at startup** rather than silently defaulting.
+
+| Variable                                | Default                      | Description                                                                                                                   |
+| --------------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_GFSC_PORT`              | `8087`                       | gfsc service port.                                                                                                            |
+| `CONTEXT_MAPPER_GFSC_IMAGE`             | `clerum/gfs-controller:test` | gfsc writer Deployment image. **The default is a `:test` tag** — override it.                                                 |
+| `CONTEXT_MAPPER_GFSC_IMAGE_PULL_POLICY` | `IfNotPresent`               | Must be exactly `Always` \| `IfNotPresent` \| `Never`; any other non-empty value **throws** at startup.                       |
+| `CONTEXT_MAPPER_GFSC_IMAGE_PULL_SECRET` | _(unset)_                    | Optional `imagePullSecrets` name for gfsc.                                                                                    |
+| `CONTEXT_MAPPER_GFSC_PRIORITY_CLASS`    | _(unset)_                    | Optional `priorityClassName` for the gfsc Deployment.                                                                         |
+| `CONTEXT_MAPPER_GFSC_INIT_IMAGE`        | `busybox:1.36`               | gfsc init-container image.                                                                                                    |
+| `CONTEXT_MAPPER_GFSC_REQUEST_MEMORY`    | `128Mi`                      | gfsc memory request.                                                                                                          |
+| `CONTEXT_MAPPER_GFSC_REQUEST_CPU`       | `100m`                       | gfsc CPU request.                                                                                                             |
+| `CONTEXT_MAPPER_GFSC_LIMIT_MEMORY`      | `256Mi`                      | gfsc memory limit.                                                                                                            |
+| `CONTEXT_MAPPER_GFSC_LIMIT_CPU`         | `500m`                       | gfsc CPU limit.                                                                                                               |
+| `CONTEXT_MAPPER_GFS_POSTGRES_APP_LABEL` | `control-postgres`           | `app` pod label selecting the Postgres pods gfsc may reach (NetworkPolicy).                                                   |
+| `CONTEXT_MAPPER_GFS_POSTGRES_PORT`      | `5432`                       | Postgres port for the gfsc egress policy.                                                                                     |
+| `CONTEXT_MAPPER_GFS_JWT_CONFIGMAP`      | `gfs-config`                 | ConfigMap holding the JWT public key gfsc verifies against.                                                                   |
+| `CONTEXT_MAPPER_GFS_JWT_CONFIGMAP_KEY`  | `jwt-public-key`             | Key within that ConfigMap.                                                                                                    |
+| `CONTEXT_MAPPER_GFS_PG_SECRET`          | `gfs-controller-db`          | Secret holding the gfsc Postgres connection string.                                                                           |
+| `CONTEXT_MAPPER_GFS_PG_SECRET_KEY`      | `connection-string`          | Key within that Secret.                                                                                                       |
+| `CONTEXT_MAPPER_GFS_DRIVE_NAME`         | `main`                       | Default GFS drive name.                                                                                                       |
+| `CONTEXT_MAPPER_GFS_TOKEN_AUDIENCE`     | `gfs-controller`             | Expected `aud` claim on GFS access tokens.                                                                                    |
+| `CONTEXT_MAPPER_GFS_RESYNC_SEC`         | `60`                         | Periodic GlobalFileSystem `fullReconcile` (seconds); drives convergence to `Ready` and the root-directory seed. `0` disables. |
+
+### NetworkPolicy
+
+| Variable                                  | Default                                         | Description                                                                                                                                                                                                                                                                                                         |
+| ----------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_RUNTIME_NAMESPACES`       | `mcp-server,mcp-host,sandbox-recipes,rpc-proxy` | Namespaces that get L0 deny-all + L1 infrastructure policies. Manifest overrides to `mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui` — note it **drops `mcp-host`**, whose policies are static (`deploy/base/mcp-host/networkpolicies.yaml`), because an HCC deny-all would block mcp-host from reaching LLM APIs. |
+| `CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES` | `` (empty)                                      | Subset of runtime namespaces that get **only** deny-all + DNS egress — no HCC-API or K8s-API egress. Manifest sets `sandbox-ui`.                                                                                                                                                                                    |
+| `CONTEXT_MAPPER_K8S_API_CIDRS`            | _(unset → `[]`)_                                | K8s API-server CIDRs for `allow-k8s-api-egress-*`. Empty falls back to `KUBERNETES_SERVICE_HOST`. **Validated fail-closed at module load**: a malformed entry, or one broader than `/24` (IPv4) or `/120` (IPv6), **crashes startup** rather than programming a permissive policy.                                  |
+| `CONTEXT_MAPPER_NODELOCAL_DNS_CIDR`       | `` (empty)                                      | DNS infrastructure CIDR for NodeLocal DNSCache / kube-dns. Must be exactly one IPv4 `/32`; anything else throws at startup.                                                                                                                                                                                         |
+| `KUBERNETES_SERVICE_HOST`                 | _(injected by Kubernetes)_                      | Not set by the operator — the `/32` fallback source when `CONTEXT_MAPPER_K8S_API_CIDRS` is empty.                                                                                                                                                                                                                   |
+
+### Plugin image allowlist
+
+| Variable                                 | Default                     | Description                                                                                                                                         |
+| ---------------------------------------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES`  | see `packages/image-policy` | Comma-separated trusted image prefixes for local-mode `McpServer` images. Manifest sets `ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/`. |
+| `CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST` | `false`                     | `false` = audit mode (log would-be denials without blocking). `true` = enforce. Manifest sets `"false"`.                                            |
+
+### Control-API integration
+
+| Variable                               | Default                                                         | Description                                                                                                                                                                                         |
+| -------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CONTROL_API_BASE_URL`                 | `http://control-api.control-plane.svc.cluster.local:8090`       | Cluster-internal control-api URL. HCC calls it directly to issue mcp-host runtime tokens for the pods it provisions.                                                                                |
+| `INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET` | `` (empty)                                                      | HS256 secret for signing InternalControl JWTs. **Required whenever `CLERUM_DEV_MODE` is not `true`** — the process logs `[HCC] FATAL` and exits 1 if empty or still a `replace-with-…` placeholder. |
+| `MCP_HOST_GATEWAY_URL`                 | `http://nginx-workflow-approval-gateway.control-plane.svc:8092` | The nginx allowlist proxy mediating mcp-host → control-api. HCC **injects this into the mcp-host pods it provisions**; it does not call it itself.                                                  |
+
+### Dev mode
+
+Parsed only when `CLERUM_DEV_MODE` is truthy. A JSON parse failure logs an error and yields an empty result rather than crashing.
+
+| Variable             | Default | Description                                                                                                                                                                                     |
+| -------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLERUM_MCP_SERVERS` | `[]`    | JSON array of McpServer objects.                                                                                                                                                                |
+| `CLERUM_CONTEXTS`    | `[]`    | JSON array of Context objects. When set, `GET /api/v1/mcpservers/context/:contextRef` filters by the Context's `mcpServers` allow-list; when unset it falls back to matching `spec.contextRef`. |
+| `CLERUM_MCP_AUTH`    | `{}`    | JSON object mapping MCP server name → auth token.                                                                                                                                               |
 
 ## Kubernetes RBAC
 
@@ -260,16 +405,16 @@ The shipped Roles and RoleBindings are the source of truth — see `deploy/base/
 
 In `mcp-server` (`deploy/base/mcp-server/rbac.yaml`):
 
-| API Group           | Resource             | Verbs                             | Purpose                                                       |
-| ------------------- | -------------------- | --------------------------------- | ------------------------------------------------------------- |
-| `clerum.io`         | `mcpservers`         | get, list, watch, patch           | Watch McpServer CRDs                                          |
-| `clerum.io`         | `mcpservers/status`  | get, patch                        | Publish readiness / secret-resolution conditions              |
-| `clerum.io`         | `contexts`           | get, list, watch                  | Watch Context CRDs for NetworkPolicy reconciliation           |
-| `networking.k8s.io` | `networkpolicies`    | get, list, create, update, delete | Manage generated NetworkPolicies                              |
-| `apps`              | `deployments`        | get, list, create, update, delete | Manage MCP server Deployments                                 |
-| _(core)_            | `services`           | get, list, create, update, delete | Manage MCP server Services                                    |
-| _(core)_            | `configmaps`         | get, list, create, update, delete | Manage the remote egress proxy nginx config                   |
-| _(core)_            | `secrets`            | get, list, watch                  | Read auth tokens, validate `envSecret`, re-enqueue on change  |
+| API Group           | Resource            | Verbs                             | Purpose                                                      |
+| ------------------- | ------------------- | --------------------------------- | ------------------------------------------------------------ |
+| `clerum.io`         | `mcpservers`        | get, list, watch, patch           | Watch McpServer CRDs                                         |
+| `clerum.io`         | `mcpservers/status` | get, patch                        | Publish readiness / secret-resolution conditions             |
+| `clerum.io`         | `contexts`          | get, list, watch                  | Watch Context CRDs for NetworkPolicy reconciliation          |
+| `networking.k8s.io` | `networkpolicies`   | get, list, create, update, delete | Manage generated NetworkPolicies                             |
+| `apps`              | `deployments`       | get, list, create, update, delete | Manage MCP server Deployments                                |
+| _(core)_            | `services`          | get, list, create, update, delete | Manage MCP server Services                                   |
+| _(core)_            | `configmaps`        | get, list, create, update, delete | Manage the remote egress proxy nginx config                  |
+| _(core)_            | `secrets`           | get, list, watch                  | Read auth tokens, validate `envSecret`, re-enqueue on change |
 
 In `mcp-host` (`deploy/base/mcp-host/rbac.yaml`), the controller additionally manages per-Host identity and SharedFileSystem resources: `hosts` (get, list, watch), `sharedfilesystems` + `sharedfilesystems/status`, `batch/jobs`, `deployments`, `services`, `persistentvolumeclaims`, `networkpolicies`, `serviceaccounts`, `roles`/`rolebindings`, `configmaps` (get, watch, list), `pods` (get, list), and `secrets` with **get, watch, list, create, update, patch, delete** — it creates the per-Host `host-<hostRef>-mcp-host-runtime-tokens` Secret and the per-Host ServiceAccount + Role + RoleBinding on every reconcile.
 
@@ -301,7 +446,7 @@ make dev
 make dev-example
 ```
 
-`make dev` requires a `.env` file — it sources `./.env` and exits with an error if the file is absent. Because the recipe re-sources `.env` after make has exported the environment, any key defined in `.env` overrides a value passed inline on the command line; a variable *not* present in `.env` is passed through untouched. To provide your own servers, put them in `.env`:
+`make dev` requires a `.env` file — it sources `./.env` and exits with an error if the file is absent. Because the recipe re-sources `.env` after make has exported the environment, any key defined in `.env` overrides a value passed inline on the command line; a variable _not_ present in `.env` is passed through untouched. To provide your own servers, put them in `.env`:
 
 ```bash
 CLERUM_DEV_MODE=true

@@ -190,6 +190,16 @@ Auth settings:
 - `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL`: profile-ui URL used for invitation links and desktop setup.
 - `CONTROL_API_DESKTOP_APP_NAME`: desktop app name associated with invitation flow configs.
 
+Issuance and image controls:
+
+- `CONTROL_API_ALLOWED_ISSUANCE_NAMESPACES`: comma-separated allowlist of namespaces a caller may mint host/provisioner tokens for (default: `mcp-host,sandbox-recipes`). Values are lowercased and de-duplicated. A startup guard **rejects boot** unless the list contains both the hosts and sandbox namespaces.
+- `CONTROL_API_REMOTE_MCP_EGRESS_PROXY_IMAGE`: image stamped into `spec.image` for remote-MCP entries installed from the registry (default `clerum/nginx-egress-proxy:0.1.0`).
+
+OAuth secrets — **both are required in production**; control-api refuses to start without them (see [Generating Secrets and Keys](#generating-secrets-and-keys)):
+
+- `CONTROL_API_OAUTH_STATE_HMAC_SECRET`: HMAC secret for OAuth state parameters.
+- `CONTROL_API_OAUTH_ENCRYPTION_KEY`: encryption key for stored OAuth tokens.
+
 Route-policy controls:
 
 - `CONTROL_API_POLICY_AUTH_AUDIENCE`: expected audience used by protected route-policy checks.
@@ -230,7 +240,25 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out rpc-jwt-privat
 openssl pkey -in rpc-jwt-private.pem -pubout -out rpc-jwt-public.pem
 ```
 
+Generate the OAuth secrets. **Both are required in production** — control-api
+refuses to start without them (`src/config.ts`, `requiredOrDevDefault`), so a
+Secret built by hand without these will crash-loop:
+
+```bash
+# CONTROL_API_OAUTH_STATE_HMAC_SECRET
+openssl rand -hex 32
+
+# CONTROL_API_OAUTH_ENCRYPTION_KEY
+openssl rand -hex 32
+```
+
 When storing PEM values in env vars/secrets, preserve line breaks (or encode as `\n` and normalize at runtime).
+
+> The scripted paths already do all of the above —
+> [`deploy/scripts/gen-jwt-keys.sh`](../deploy/scripts/gen-jwt-keys.sh) and
+> [`scripts/minikube/generate-keys.sh`](../scripts/minikube/generate-keys.sh)
+> generate every key in this section, including the two OAuth secrets. Prefer
+> them over assembling the Secret by hand.
 
 ## Deployment
 
