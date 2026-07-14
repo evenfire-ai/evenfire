@@ -68,7 +68,7 @@ pre-filter). See [Control UI](../surfaces/control-ui.md).
 ## Approvals over Telegram
 
 When approval policy enables Telegram approvers, approval requests arrive with
-inline **Approve / Deny** buttons (or reply `/approve <target>`); callbacks are
+inline **Approve / Deny** buttons (or reply `/approve` / `/deny`); callbacks are
 signature-checked and authorized before a decision is applied. See
 [Configure approvals](configure-approvals.md).
 

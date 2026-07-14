@@ -58,7 +58,7 @@ manifest is retargeted out of the recipe's own namespace, WRC strips its
 (`adjustManifestNamespace`, same file). Same-namespace owner refs are kept. A
 finalizer drives cleanup of the cross-namespace resources.
 
-## NetworkPolicy layers (L0–L3)
+## NetworkPolicy layers (L0–L3-egress)
 
 Every runtime namespace is deny-all by default; each layer opens exactly what is
 needed.
@@ -68,9 +68,9 @@ needed.
 | **L0** | Security baseline         | `deny-all` NetworkPolicy — both Ingress and Egress — per runtime namespace                                                                                                                                                                                                                                                       |
 | **L1** | Functional infrastructure | DNS egress (port 53) for **every** pod in the namespace. HCC-API and K8s-API egress are pod-selector-scoped, not namespace-wide: in `sandbox-recipes`, HCC-API egress selects `clerum.io/component=workflow-mcp-host` and K8s-API egress selects `clerum.io/k8s-api-egress=true` — so a plain non-MCP workload gets **DNS only** |
 | **L2** | Context isolation         | Per `(Context, McpServer)` pair: an ingress policy on the McpServer pod in `mcp-server`, plus egress counterparts in `mcp-host` and `rpc-proxy` (without them, L0's egress deny-all would block agents from reaching the server)                                                                                                 |
-| **L3** | Egress control            | External egress per McpServer `egressBindings` (CIDR or DNS)                                                                                                                                                                                                                                                                     |
+| **L3-egress** | Egress control     | External egress per McpServer `egressBindings` (CIDR or DNS)                                                                                                                                                                                                                                                                     |
 
-> **Policy ownership.** L2 and L3 above are HCC's policies for **McpServer**
+> **Policy ownership.** L2 and L3-egress above are HCC's policies for **McpServer**
 > pods. The policies for a _recipe workload's_ `egressBindings` are built by WRC
 > itself, in that workload's own namespace
 > (`buildWorkloadEgressNetworkPolicy` / `buildWorkloadIngressNetworkPolicy`).

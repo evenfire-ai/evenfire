@@ -18,9 +18,11 @@ Telegram personal approval accounts are verified separately from Profile UI.
 
 ### Core
 
-| Field          | Type   | Required | Description                                                                                                                      |
-| -------------- | ------ | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.hostRef` | string | yes      | Reference to the Host this channel configuration belongs to. The channel-reader uses this to filter which channels it processes. |
+| Field                          | Type     | Required | Description                                                                                                                                                                                                                                                            |
+| ------------------------------ | -------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.hostRef`                 | string   | yes      | Reference to the Host this channel configuration belongs to. The channel-reader uses this to filter which channels it processes.                                                                                                                                       |
+| `spec.credentialsSecretRef`    | object   | no       | Reference (`{ name }`) to a Secret in the `channels` namespace holding provider credentials for this channel — keyed by type: `telegram-bot-token`, `slack-bot-token`, `slack-signing-secret`, `email-username`, `email-password`. Auto-created as `cc-<ccname>-credentials` when set via the Control UI; raw YAML may point at a shared Secret. |
+| `spec.access`                  | object   | no       | Users and teams allowed to connect conversations to this channel: `access.users[]` and `access.teams[]` (string lists). The Control UI restricts these to principals that already have access to `hostRef`.                                                            |
 
 ### Telegram
 
@@ -30,7 +32,19 @@ Telegram personal approval accounts are verified separately from Profile UI.
 | `spec.telegram[].channelId`              | string                              | yes      | Identifier for this Telegram private chat, group, or supergroup.                                                                                                                                                                                                                             |
 | `spec.telegram[].chatType`               | `private`, `group`, or `supergroup` | yes      | Explicit Telegram chat type for this operational channel. `channel` cannot identify a personal approver and remains unsupported.                                                                                                                                                             |
 | `spec.telegram[].userIds`                | string[]                            | no       | Optional transport pre-filter for Telegram user IDs. This does not verify personal accounts or authorize workflow actions.                                                                                                                                                                   |
+| `spec.telegram[].title`                  | string                              | no       | Telegram chat title or private-chat display name captured at setup.                                                                                                                                                                                                                          |
+| `spec.telegram[].handle`                 | string                              | no       | Telegram username/handle captured at setup (no secrets).                                                                                                                                                                                                                                     |
+| `spec.telegram[].confirmedByUserId`      | string                              | no       | Clerum user ID that confirmed this conversation. Required for workflow approval authorization (see the upgrade note below).                                                                                                                                                                  |
+| `spec.telegram[].confirmedAt`            | string (date-time)                  | no       | Time this conversation was confirmed.                                                                                                                                                                                                                                                        |
 | `spec.telegram[].replyOnlyWhenMentioned` | boolean                             | no       | If `true`, in groups and supergroups the bot only processes messages that @mention the bot, use a `text_mention` entity for the bot, or reply to the bot. Private chats are unaffected. `/approve` and `/deny` commands are always accepted from verified users after backend authorization. |
+
+#### Telegram global settings
+
+| Field                                          | Type    | Required | Description                                                                                                                        |
+| ---------------------------------------------- | ------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.telegramSettings`                        | object  | no       | Global Telegram bot behavior for conversations confirmed later.                                                                    |
+| `spec.telegramSettings.botHandle`              | string  | no       | Public Telegram bot handle (pattern `^@?[A-Za-z0-9_]{5,32}$`) shown to users during setup. Not a secret — the token stays in the credentials Secret. |
+| `spec.telegramSettings.replyOnlyWhenMentioned` | boolean | no       | If `true`, group and supergroup messages must mention or reply to the bot.                                                         |
 
 ### Email
 
@@ -56,6 +70,16 @@ Telegram personal approval accounts are verified separately from Profile UI.
 > `workspaceId` (the modern form — required for workflow approvals), **or**
 > `userNames` (the legacy chat-allowlist form). An entry with only `channelId` is
 > rejected at admission.
+
+#### Slack global settings
+
+| Field                                       | Type    | Required | Description                                                                                                        |
+| ------------------------------------------- | ------- | -------- | ---------------------------------------------------------------------------------------------------------------- |
+| `spec.slackSettings`                        | object  | no       | Public Slack app metadata and global bot behavior for conversations confirmed later. App secrets stay in `credentialsSecretRef`. |
+| `spec.slackSettings.workspaceId`            | string  | no       | Slack workspace/team ID (pattern `^T[A-Z0-9]+$`) used while conversations are confirmed.                          |
+| `spec.slackSettings.botHandle`              | string  | no       | Slack App name shown to users during setup.                                                                       |
+| `spec.slackSettings.replyOnlyWhenMentioned` | boolean | no       | If `true`, process Slack messages only when the app is mentioned.                                                 |
+| `spec.slackSettings.replyInThreads`         | boolean | no       | If `true`, app responses are posted in a thread for the triggering message and follow-ups in that thread continue there. |
 
 At least one channel group (`telegram`, `email`, or `slack`) should be defined for the
 CRD to be useful, though the schema does not enforce this.
