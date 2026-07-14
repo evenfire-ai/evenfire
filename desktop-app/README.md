@@ -12,6 +12,17 @@ Electron desktop client with a React renderer. The app authenticates through `ex
   - `member-registration-service` for the invitation/activation flow (invitation profile lookup and desktop setup completion).
 - `control-api` internal service tokens are never stored in the desktop app.
 
+> **`member-registration-service` is not in this repository.** It is an extracted
+> sibling service, expected in-cluster at
+> `member-registration-service.registration.svc.cluster.local:8092`
+> (`deploy/base/control-plane/configmaps.yaml`). Everything else the desktop app
+> needs is here; only the **invitation / activation flow** depends on it, so
+> without that service you can still log in and drive agents, but you cannot
+> complete an invitation-based signup. Point
+> `MEMBER_REGISTRATION_SERVICE_BASE_URL` at your own deployment of it — the
+> variable has no working default (see
+> [Environment Variables](#environment-variables)).
+
 ## Implemented Flows
 
 - Google login with direct `idToken` submit (`POST /api/v1/auth/google`)
