@@ -1,6 +1,7 @@
 import * as dns from 'dns/promises'
 import * as http from 'http'
 import * as https from 'https'
+import * as net from 'net'
 import { URL } from 'url'
 import { Tool } from '../interfaces'
 import { ToolOutput } from '../types'
@@ -79,46 +80,64 @@ export class HttpRequestTool implements Tool {
       }
     }
 
-    // Resolve BOTH A and AAAA in parallel so attackers cannot hide a private
-    // target behind the record type we skip. The first validated address is
-    // pinned into makeRequest to close the DNS-rebinding window between
-    // validation and connect; the Host header (and SNI) keeps the original
-    // hostname intact.
+    // The address we ultimately connect to. For an IP literal it is the literal
+    // itself; for a hostname it is the first DNS-validated address (pinned into
+    // makeRequest to close the DNS-rebinding window between validation and
+    // connect). The Host header (and SNI) always keep the original hostname.
     let resolvedIp: string | undefined
-    try {
-      const [v4, v6] = await Promise.allSettled([
-        dns.resolve4(url.hostname),
-        dns.resolve6(url.hostname),
-      ])
-      const addresses: string[] = []
-      if (v4.status === 'fulfilled') addresses.push(...v4.value)
-      if (v6.status === 'fulfilled') addresses.push(...v6.value)
 
-      if (addresses.length === 0) {
-        throw new Error('no addresses resolved')
-      }
-
-      for (const addr of addresses) {
-        if (isPrivateIp(addr)) {
-          return {
-            content: `Error: Domain resolves to private IP (${addr})`,
-            duration_ms: Date.now() - startTime,
-            is_error: true,
-          }
+    // IP-literal targets never resolve via DNS — dns.resolve4/resolve6 reject a
+    // literal, so the DNS-based guard below would never inspect them. Check the
+    // literal directly (stripping [] brackets and %zone) and skip DNS entirely.
+    // Without this, `http://169.254.169.254/…`, `http://127.0.0.1/…`, etc. slip
+    // straight through to the connect step (SSRF).
+    const bareHost = stripIpv6Decorations(url.hostname)
+    if (net.isIP(bareHost) !== 0) {
+      if (isPrivateIp(url.hostname)) {
+        return {
+          content: `Error: Target is a private IP (${bareHost})`,
+          duration_ms: Date.now() - startTime,
+          is_error: true,
         }
       }
-      resolvedIp = addresses[0]
-    } catch {
-      // DNS resolution failed. If an allowlist is configured, we must block
-      // the request since we can't verify the IP is safe (SSRF protection).
-      if (this.allowlist.length > 0) {
+      resolvedIp = bareHost
+    } else {
+      // Hostname target. Resolve BOTH A and AAAA in parallel so attackers cannot
+      // hide a private target behind the record type we skip.
+      try {
+        const [v4, v6] = await Promise.allSettled([
+          dns.resolve4(url.hostname),
+          dns.resolve6(url.hostname),
+        ])
+        const addresses: string[] = []
+        if (v4.status === 'fulfilled') addresses.push(...v4.value)
+        if (v6.status === 'fulfilled') addresses.push(...v6.value)
+
+        if (addresses.length === 0) {
+          throw new Error('no addresses resolved')
+        }
+
+        for (const addr of addresses) {
+          if (isPrivateIp(addr)) {
+            return {
+              content: `Error: Domain resolves to private IP (${addr})`,
+              duration_ms: Date.now() - startTime,
+              is_error: true,
+            }
+          }
+        }
+        resolvedIp = addresses[0]
+      } catch {
+        // DNS resolution failed — we cannot verify the target is not a
+        // private/internal address, so fail closed. This holds whether or not
+        // an allowlist is configured: an unresolvable name could not have been
+        // reached anyway, and proceeding would be the SSRF hole this guards.
         return {
           content: `Error: DNS resolution failed for "${url.hostname}". Cannot verify IP safety.`,
           duration_ms: Date.now() - startTime,
           is_error: true,
         }
       }
-      // No allowlist — all domains allowed, let HTTP request proceed/fail naturally
     }
 
     try {
