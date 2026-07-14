@@ -1,7 +1,5 @@
 # Clerum E2E Testing Guide
 
-> Consolidated 2026-04-13 from internal testing notes, scripts/e2e/, and scattered service test docs.
-
 ## Overview
 
 Clerum has two categories of tests:
