@@ -2,7 +2,7 @@
 
 **API version:** `clerum.io/v1alpha1`
 **Kind:** `WorkflowRecipe`
-**References:** [Platform Architecture](../architecture/platform-topology.md) | [Feature Hub](../features/workflow-recipes.md) | [Operations Guide](../deploy/workflow-recipes-guide.md) | [Architecture Overview](../architecture/overview.md)
+**References:** [Platform Architecture](../architecture/platform-topology.md) | [Operations Guide](../deploy/workflow-recipes-guide.md) | [Architecture Overview](../architecture/overview.md)
 
 ---
 
@@ -4303,5 +4303,4 @@ This section tracks what has been implemented, validated, and deployed from this
 
 ## Further Reading
 
-- [Feature hub](../features/workflow-recipes.md) — operator docs, ops, and architecture links
 - [agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md](../agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md) — deep authoring guide

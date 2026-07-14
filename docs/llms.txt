@@ -40,10 +40,6 @@
 - SharedFileSystem: crds/sharedfilesystem.md
 - GlobalFileSystem: crds/globalfilesystem.md
 
-## Features
-
-- WorkflowRecipes hub: features/workflow-recipes.md
-
 ## Testing & contributing
 
 - E2E guide: testing/e2e-guide.md

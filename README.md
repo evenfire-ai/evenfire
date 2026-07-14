@@ -53,15 +53,12 @@ each pillar links to its depth.
 - **Workflows** — declarative, multi-workload `WorkflowRecipe`s with a
   lifecycle state machine: risk-based approval, shadow testing, automatic
   rollback, and multi-step coordinator pods. →
-  [docs/crds/workflowrecipe.md](docs/crds/workflowrecipe.md),
-  [docs/features/workflow-recipes.md](docs/features/workflow-recipes.md)
+  [docs/crds/workflowrecipe.md](docs/crds/workflowrecipe.md)
 - **Plugins & registry** — author and publish connectors and recipes to a
   governed registry (entries carry trust levels and an `author`); build custom
   coordinator images with `@clerum/workflow-sdk`; install through a governed
   flow. →
-  [packages/workflow-sdk/README.md](packages/workflow-sdk/README.md),
-  [docs/features/custom-coordinator-images.md](docs/features/custom-coordinator-images.md),
-  [registry guide](docs/features/control-ui-workflow-recipes-and-registry-guide.md)
+  [packages/workflow-sdk/README.md](packages/workflow-sdk/README.md)
 - **Teams & access** — profiles, teams, roles (admin / inviter / member),
   invitations, and session → scoped-RPC token brokerage. →
   [external-rest-api/README.md](external-rest-api/README.md),
@@ -69,11 +66,11 @@ each pillar links to its depth.
 - **Files** — `SharedFileSystem` team workspaces (read-only to agents) and a
   brokered, audited `GlobalFileSystem` drive. →
   [gfs-controller/README.md](gfs-controller/README.md),
-  [docs/features/context-filesystem.md](docs/features/context-filesystem.md)
+  [docs/crds/sharedfilesystem.md](docs/crds/sharedfilesystem.md)
 - **Cost & governance** — token budgets per scope with block/warn decisions
   (opt-in via `CLERUM_BUDGETS_ENABLED`), usage and LLM-price accounting,
   `WorkflowRecipePolicy`, and a connector-image allowlist. →
-  [docs/features/token-budgets.md](docs/features/token-budgets.md)
+  [docs/crds/workflowrecipepolicy.md](docs/crds/workflowrecipepolicy.md)
 - **Config as code** — the entire fleet is eight `clerum.io` CRDs:
   version-controlled, reviewable, and `kubectl`/GitOps-friendly. →
   [docs/crds/README.md](docs/crds/README.md)

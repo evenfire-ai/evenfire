@@ -22,8 +22,7 @@ charts/clerum-crds/crds/workflowrecipepolicy.yaml
 ```
 
 Use that schema plus operator logs when authoring policies. Narrative and ops
-context: [WorkflowRecipes hub](../features/workflow-recipes.md) and
-[workflow-recipes-guide](../deploy/workflow-recipes-guide.md).
+context: [workflow-recipes-guide](../deploy/workflow-recipes-guide.md).
 
 ## Related
 

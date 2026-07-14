@@ -101,4 +101,3 @@ See [stdio-bridge README](../../stdio-bridge/README.md) and
 
 - [CRD index](../crds/README.md)
 - [Architecture overview](../architecture/overview.md)
-- [WorkflowRecipes](../features/workflow-recipes.md) — multi-workload recipes that may register MCP servers

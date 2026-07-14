@@ -1,9 +1,8 @@
 # Custom Coordinator E2E Gates
 
 This runbook documents the local minikube gates for custom coordinator snippets
-and custom coordinator images. It is intentionally separate from the developer
-guides under `docs/features/` because these commands validate the local
-branch-scoped minikube cluster, not the public developer contract.
+and custom coordinator images. It validates the local branch-scoped minikube
+cluster, not the public developer contract.
 
 Run these gates only after the normal minikube pre-gate sync has rebuilt and
 loaded the current worktree images, CRDs, manifests, secrets, and config.

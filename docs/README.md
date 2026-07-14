@@ -52,18 +52,6 @@ Use this index for long-form docs.
 | [llms.txt](llms.txt)                               | Machine-readable doc map for coding agents                                                        |
 | Service READMEs                                    | One-line map per component in the root [README components list](../README.md#docs-and-components) |
 
-## Feature hubs
-
-| Doc                                                  | Description                                            |
-| ---------------------------------------------------- | ------------------------------------------------------ |
-| [WorkflowRecipes](features/workflow-recipes.md)      | Landing page for the recipe CRD + ops + architecture   |
-| [Token budgets & cost](features/token-budgets.md)    | Cap LLM tokens/cost per scope; prices; Cost & Usage UI |
-| [Context filesystem](features/context-filesystem.md) | Per-context shared file storage (SharedFileSystem)     |
-
-> Other files under `features/` include design-depth writeups (custom
-> coordinators, OAuth bridge, registry UI, admin workspace provisioning). Prefer
-> the hubs and how-tos above unless you are implementing that subsystem.
-
 ## Testing
 
 | Doc                                                                         | Description                            |

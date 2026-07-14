@@ -27,7 +27,7 @@ NetworkPolicies matter.
 1. [Minikube deploy guide](../deploy/minikube.md)
 2. [Configure approvals](../how-to/configure-approvals.md)
 3. [Add an MCP server](../how-to/add-mcp-server.md)
-4. [WorkflowRecipes hub](../features/workflow-recipes.md) if you need multi-workload recipes
+4. [WorkflowRecipe CRD reference](../crds/workflowrecipe.md) if you need multi-workload recipes
 
 **Success looks like:** Control UI up, a Host responding, an approval or
 connector path exercised.

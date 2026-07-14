@@ -1078,6 +1078,5 @@ you to expect:
 ## See Also
 
 - [WorkflowRecipe CRD schema](../crds/workflowrecipe.md) — living CRD reference
-- [WorkflowRecipes feature hub](../features/workflow-recipes.md) — ops, architecture, authoring entry points
 - [Non-MCP services](non-mcp-services.md) — namespace splitting and L0–L3 NetworkPolicy layers
 - Public Recipe Registry — external component; client integration lives in this repo

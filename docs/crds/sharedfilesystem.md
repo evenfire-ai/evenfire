@@ -12,9 +12,6 @@ A **per-team shared workspace**: PVC + file API, mounted **read-only** into
 `mcp-host` pods for Contexts that reference it. Humans/admins write via the
 workspace-files controller; agents do not mutate the mount.
 
-Long-form design notes (may include implementation status):  
-[features/context-filesystem.md](../features/context-filesystem.md).
-
 ## Spec fields (summary)
 
 | Field                   | Description                                                      |
