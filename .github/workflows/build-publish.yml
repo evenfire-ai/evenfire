@@ -268,7 +268,7 @@ jobs:
 
       - name: Set up Docker Buildx
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to ghcr.io
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
