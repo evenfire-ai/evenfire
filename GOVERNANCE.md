@@ -1,6 +1,6 @@
 # Governance
 
-evenfire is maintained by Keyper Labs. Direction is set by the core maintainers.
+evenfire is maintained by the evenfire project. Direction is set by the core maintainers.
 
 ## Proposing changes
 
@@ -17,7 +17,3 @@ foundation.
 ## Security
 
 Vulnerability reports: [SECURITY.md](SECURITY.md).
-
-## Trademark
-
-[TRADEMARK.md](TRADEMARK.md).

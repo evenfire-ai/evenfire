@@ -84,7 +84,7 @@ Use this index for long-form docs.
 
 | Doc                                            | Description                           |
 | ---------------------------------------------- | ------------------------------------- |
-| [Contributing](../CONTRIBUTING.md)             | Dev loop, PR rules, CLA               |
+| [Contributing](../CONTRIBUTING.md)             | Dev loop, PR rules                    |
 | [Security](../SECURITY.md)                     | Private vulnerability reporting       |
 | [Claims guardrails](meta/claims-guardrails.md) | Never-overclaim rules for public docs |
 | [Governance](../GOVERNANCE.md)                 | How the project is run                |

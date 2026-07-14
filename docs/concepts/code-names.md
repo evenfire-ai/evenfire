@@ -13,6 +13,3 @@ code name that still appears in APIs and repositories.
 
 These are the same project. When a guide says “create a Host CRD” or “set
 `CLERUM_MODEL_PROVIDER`”, that is the evenfire platform.
-
-Forks and derivatives must not use the evenfire or Clerum trademarks — see
-[TRADEMARK.md](../../TRADEMARK.md).

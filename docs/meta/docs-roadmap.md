@@ -100,8 +100,9 @@ warns — it does).
    equal peer without product decision.
 2. **Optional “dev slice” later** only if product wants sub-5-min try-without-K8s;
    if added, label clearly as **incomplete security**.
-3. Finish **trust surfaces**: CLA counsel pass (still open); **license
-   migration to MPL-2.0 executed 2026-07-13** (see §9 status);
+3. Finish **trust surfaces**: CLA/TRADEMARK resolved by removal 2026-07-14
+   (see §9 status); **license migration to MPL-2.0 executed 2026-07-13**
+   (see §9 status);
    `security@evenfire.ai` mailbox confirmed 2026-07-12, GH private reporting
    to verify.
 4. **Service README backlog** (§2 table, §6 P1 rows) — six missing edge/file
@@ -159,7 +160,7 @@ Components map in 9 (explicit decision, 2026-07-13).
 
 | P   | Item                                                                                                                                           | Owner type       | Depends on          |
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ------------------- |
-| P0  | Legal: license migration to MPL-2.0 **executed 2026-07-13** (§9); remaining: CLA counsel pass + align with cla.json                            | Human / counsel  | —                   |
+| P0  | Legal: license migration to MPL-2.0 **executed 2026-07-13** (§9); CLA.md/TRADEMARK.md removed 2026-07-14 (§9) — no open legal item remains        | Human / counsel  | —                   |
 | P0  | Verify GH private vulnerability reporting enabled (security@ mailbox confirmed)                                                                | Human            | —                   |
 | P1  | Six missing service READMEs (purpose, ports, env, security) — **done** (PR #7, merged 2026-07-13)                                              | Docs eng         | —                   |
 | P1  | control-ui README: real route groups + auth story — **done** (PR #7)                                                                           | Docs eng         | —                   |
@@ -195,7 +196,7 @@ Components map in 9 (explicit decision, 2026-07-13).
 - [x] Capability tour code-anchored in README
 - [x] Claims guardrails committed
 - [x] 8 CRDs documented at index level
-- [ ] Legal surfaces not marked draft — LICENSE ✅ MPL-2.0 (2026-07-13); CLA.md still DRAFT (counsel)
+- [x] Legal surfaces not marked draft — LICENSE ✅ MPL-2.0 (2026-07-13); CLA.md/TRADEMARK.md removed 2026-07-14 (no entity to hold either yet)
 - [ ] All platform services have a minimal README
 - [ ] At least one visual proof in README
 - [ ] No known broken public links (currently OK on root README)
@@ -227,7 +228,8 @@ Components map in 9 (explicit decision, 2026-07-13).
 > `package.json` license fields set to `MPL-2.0` (killing the 2× MIT
 > mislabels); 30 lockfiles synced; every doc surface below flipped from
 > “source-available” to open source. **Pure MPL-2.0 — no additional
-> restriction.** Remaining from this motion: CLA counsel pass only.
+> restriction.** Remaining from this motion (CLA counsel pass) was resolved
+> 2026-07-14 by removing CLA.md and TRADEMARK.md outright — see below.
 
 **Decision (Jose, 2026-07-13):** the provisional “Apache-2.0 + additional use
 grant” was replaced with the **Mozilla Public License 2.0**, adopted **pure —
@@ -253,10 +255,17 @@ source-available language is gone rather than retained.
   reconciling the pre-migration mix (10× `"SEE LICENSE IN LICENSE"`, 2× `"MIT"`
   in gfs-controller and packages/image-policy — wrong under the Apache grant
   too, 7× field absent). Lockfile `license` fields synced
-- `TRADEMARK.md` — unchanged (trademarks are independent of MPL)
+- `TRADEMARK.md` — unchanged at the time (trademarks are independent of MPL);
+  removed entirely 2026-07-14, see below
 
-**Still open:** `CLA.md` counsel pass (CLA scope depends on the final license)
-and alignment with `cla.json`.
+**Resolved 2026-07-14 (Jose):** `CLA.md` and `TRADEMARK.md` removed outright
+rather than taken through counsel review — evenfire has no incorporated legal
+entity yet, so a contributor agreement and a trademark claim both need a real
+entity behind them first. Removed alongside: `.github/workflows/cla.yml` (the
+paused CLA-assistant gate) and `signatures/cla.json`. All references to either
+doc across README.md, CONTRIBUTING.md, GOVERNANCE.md, docs/deploy/production.md,
+docs/concepts/code-names.md, docs/README.md, the PR template, and CODEOWNERS
+were removed in the same PR. No legal item remains open from this motion.
 
 **Done:** the former §4 non-goal (“no OSI claims”) is inverted — §4 now
 forbids retaining any “source-available” / “not open source” language.
