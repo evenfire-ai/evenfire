@@ -49,8 +49,12 @@ spec:
   hostRef: 'chatllm'
   telegram:
     - channelId: 'telegram-general'
+      chatType: 'group' # required — private | group | supergroup
       userIds: ['123456789'] # allowed senders
 ```
+
+Both `channelId` and `chatType` are required on every `telegram[]` entry; the
+API server rejects the resource without them.
 
 ## Approvals over Telegram
 

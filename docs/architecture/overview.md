@@ -4,6 +4,16 @@ evenfire is a Kubernetes-native platform for LLM orchestration with multi-channe
 
 > Public product name: **evenfire**. Code, CRDs, and many package paths still say **clerum**.
 
+> **Scope of this document.** This is the deep-dive on the **message path** —
+> `channel-reader` → `mcp-host` → MCP servers, plus the `host-context-controller`
+> that provisions them — and on the end-to-end message lifecycle, dev mode, and
+> the tool approval system. It is **not** a complete service reference: the
+> platform has ~18 services, and this document details four of them.
+>
+> - For every service and which controller creates it → [/ARCHITECTURE.md](../../ARCHITECTURE.md)
+> - For namespaces, trust boundaries, NetworkPolicy layers and the WRC → [platform-topology.md](platform-topology.md)
+> - For all eight CRDs → [docs/crds/](../crds/)
+
 ---
 
 ## Table of Contents
@@ -28,14 +38,18 @@ evenfire is a Kubernetes-native platform for LLM orchestration with multi-channe
 
 > **[Open in Excalidraw](https://link.excalidraw.com/l/7VPzoB0Tohx/3YpKQJgCG6o)** - Interactive high-level architecture diagram showing all services, namespaces, and data flows.
 
-### Service Summary
+### Services covered in this document
+
+These four are the message path. For the other services — the UIs, control-api,
+external-rest-api, rpc-proxy, the WRC, the webhook and file planes — see
+[/ARCHITECTURE.md](../../ARCHITECTURE.md).
 
 | Service                     | Directory                  | Namespace       | Port | Role                                                                                                 |
 | --------------------------- | -------------------------- | --------------- | ---- | ---------------------------------------------------------------------------------------------------- |
 | **channel-reader**          | `/channel-reader`          | `channels`      | -    | Watches CommunicationChannel CRDs, polls Telegram/Email/Slack, forwards to mcp-host                  |
 | **mcp-host**                | `/mcp-host`                | `mcp-host`      | 8080 | Central LLM service with agent state machine, message queue, and MCP tool calling                    |
 | **host-context-controller** | `/host-context-controller` | `control-plane` | 8081 | K8s operator managing MCP server Deployments/Services/NetworkPolicies; REST API for server discovery |
-| **MCP Servers**             | `/mcp-servers`             | `mcp-server`    | 3000 | Individual MCP server implementations (airtable, mongodb)                                            |
+| **MCP Servers**             | `/mcp-servers`             | `mcp-server`    | 3000 | First-party MCP servers (airtable, alphavantage, doc-generator, mongodb, playwright, web-search)     |
 
 ### Key Design Principles
 
@@ -51,6 +65,11 @@ evenfire is a Kubernetes-native platform for LLM orchestration with multi-channe
 ## 2. Custom Resource Definitions (CRDs)
 
 All CRDs belong to the `clerum.io` API group, version `v1alpha1`. They are installed via the Helm chart at `charts/clerum-crds`.
+
+The platform ships **eight** CRDs. This section covers the four on the message
+path in depth. The other four — `WorkflowRecipe`, `WorkflowRecipePolicy`,
+`SharedFileSystem`, `GlobalFileSystem` — have reference pages under
+[docs/crds/](../crds/), which is the complete set.
 
 ### 2.1 CommunicationChannel
 
@@ -262,7 +281,6 @@ channel-reader/
 │       ├── email.ts         # Email adapter (ImapFlow + Nodemailer)
 │       ├── slack.ts         # Slack adapter (@slack/web-api)
 │       └── index.ts         # Channel exports
-├── deploy/                  # Kubernetes manifests
 ├── Dockerfile
 ├── Makefile
 └── package.json
@@ -468,7 +486,6 @@ mcp-host/
 │       ├── manager.ts            # MCP server manager (multi-client)
 │       ├── client.ts             # Single MCP server client
 │       └── index.ts
-├── deploy/                       # Kubernetes manifests
 ├── Dockerfile
 ├── Makefile
 └── package.json
@@ -478,15 +495,15 @@ mcp-host/
 
 All runtime routes are namespaced under `/v1/runtime/*`. Unmatched paths fall through to a catch-all 404.
 
-| Method | Path                             | Description                                                 |
-| ------ | -------------------------------- | ----------------------------------------------------------- |
-| `GET`  | `/v1/runtime`                    | API information page                                        |
-| `GET`  | `/v1/runtime/live`               | Liveness check (`{ status: "live" }`)                       |
-| `GET`  | `/v1/runtime/health`             | Readiness check (`{ status: "ok" }`, 503 when degraded)     |
-| `POST` | `/v1/runtime/messages`           | Submit a message for LLM processing                         |
-| `GET`  | `/v1/runtime/status`             | Agent state, queue stats, cron job count, pending approvals |
-| `POST` | `/v1/runtime/approvals/approve`  | Approve a pending tool execution                            |
-| `POST` | `/v1/runtime/approvals/deny`     | Deny a pending tool execution                               |
+| Method | Path                            | Description                                                 |
+| ------ | ------------------------------- | ----------------------------------------------------------- |
+| `GET`  | `/v1/runtime`                   | API information page                                        |
+| `GET`  | `/v1/runtime/live`              | Liveness check (`{ status: "live" }`)                       |
+| `GET`  | `/v1/runtime/health`            | Readiness check (`{ status: "ok" }`, 503 when degraded)     |
+| `POST` | `/v1/runtime/messages`          | Submit a message for LLM processing                         |
+| `GET`  | `/v1/runtime/status`            | Agent state, queue stats, cron job count, pending approvals |
+| `POST` | `/v1/runtime/approvals/approve` | Approve a pending tool execution                            |
+| `POST` | `/v1/runtime/approvals/deny`    | Deny a pending tool execution                               |
 
 Except for the three unauthenticated routes (`/v1/runtime`, `/v1/runtime/live`, `/v1/runtime/health`), these routes are wrapped in a runtime edge guard: callers must send `x-clerum-edge-caller` and `x-clerum-edge-host-ref` (plus `x-clerum-edge-user-id` when the caller is `rpc-proxy`), and the host-ref must match the pod's own `CLERUM_HOST_NAME` (403 otherwise). The accepted caller value is per route: `/v1/runtime/status` accepts only `rpc-proxy`; the approval routes accept `rpc-proxy` or `channel-reader`; `/v1/runtime/messages` also accepts `workflow-approval-request-reader`. An `Authorization` header is rejected with 401 on these routes.
 
@@ -697,26 +714,26 @@ The HTTP response is held open until the agent finishes processing. The response
 
 ### Configuration
 
-| Variable                              | Default          | Description                          |
-| ------------------------------------- | ---------------- | ------------------------------------ |
-| `CLERUM_DEV_MODE`                     | `false`          | Enable dev mode                      |
-| `CLERUM_HOST_NAME`                    | -                | Host CRD name (production, required) |
-| `CLERUM_NAMESPACE`                    | `"default"`      | Kubernetes namespace                 |
-| `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                     |
-| `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL           |
-| `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                   |
+| Variable                              | Default          | Description                                     |
+| ------------------------------------- | ---------------- | ----------------------------------------------- |
+| `CLERUM_DEV_MODE`                     | `false`          | Enable dev mode                                 |
+| `CLERUM_HOST_NAME`                    | -                | Host CRD name (production, required)            |
+| `CLERUM_NAMESPACE`                    | `"default"`      | Kubernetes namespace                            |
+| `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                                |
+| `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL                      |
+| `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                              |
 | `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, `"zai"`, or `"bailian"` |
-| `CLERUM_MODEL_NAME`                   | provider default | Specific model name                  |
-| `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                |
-| `CLAUDE_API_KEY`                      | -                | Claude key (dev mode)                |
-| `ZAI_API_KEY`                         | -                | ZAI/z.ai key (dev mode)              |
-| `BAILIAN_API_KEY`                     | -                | Bailian/DashScope key (dev mode)     |
-| `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)          |
-| `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)     |
-| `CLERUM_AGENT_TASK_DELAY`             | `100`            | Delay between tasks (ms)             |
-| `CLERUM_AGENT_MAX_TASK_DURATION`      | `300000`         | Max task duration (ms)               |
-| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `50`             | Max tool calls per task              |
-| `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size               |
+| `CLERUM_MODEL_NAME`                   | provider default | Specific model name                             |
+| `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                           |
+| `CLAUDE_API_KEY`                      | -                | Claude key (dev mode)                           |
+| `ZAI_API_KEY`                         | -                | ZAI/z.ai key (dev mode)                         |
+| `BAILIAN_API_KEY`                     | -                | Bailian/DashScope key (dev mode)                |
+| `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)                     |
+| `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)                |
+| `CLERUM_AGENT_TASK_DELAY`             | `100`            | Delay between tasks (ms)                        |
+| `CLERUM_AGENT_MAX_TASK_DURATION`      | `300000`         | Max task duration (ms)                          |
+| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `50`             | Max tool calls per task                         |
+| `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size                          |
 
 ### Dependencies
 
@@ -743,14 +760,26 @@ host-context-controller/
 │   ├── config.ts                    # Environment-based configuration
 │   ├── types.ts                     # Shared types (McpServerCRD, ContextCRD, etc.)
 │   ├── k8sClient.ts                 # K8s watcher (McpServerWatcher or DevMcpServerProvider)
-│   ├── reconciler.ts                # Deployment + Service reconciler
+│   ├── reconciler.ts                # Deployment + Service reconciler (incl. remote-server egress proxy)
 │   ├── networkPolicyReconciler.ts   # NetworkPolicy reconciler
-│   └── server.ts                    # REST API server
-├── deploy/                          # Kubernetes manifests
+│   ├── hostReconciler.ts            # Host CRD → mcp-host Deployment
+│   ├── sharedFileSystemReconciler.ts # SharedFileSystem → PVC + workspace-files-controller
+│   ├── gfsReconciler.ts             # GlobalFileSystem → gfs-controller writer/reader roles
+│   ├── bindingPolicyReconciler.ts   # Binding policy reconciliation
+│   ├── secretFactory.ts             # Secret projection for reconciled workloads
+│   ├── metrics.ts                   # Prometheus metrics
+│   └── server.ts                    # REST API server (discovery + desktop routes)
 ├── Dockerfile
 ├── Makefile
 └── package.json
 ```
+
+> Kubernetes manifests are **not** per-service. They live centrally in
+> [`deploy/base/`](../../deploy/base/), grouped by namespace — HCC's are in
+> `deploy/base/control-plane/host-context-controller.yaml`.
+
+The controller reconciles five CRDs: `McpServer`, `Context`, `Host`,
+`SharedFileSystem`, and `GlobalFileSystem`.
 
 ### Operator Reconciliation
 
@@ -789,9 +818,9 @@ When an McpServer CRD is created or modified:
 ### NetworkPolicy Reconciliation (NetworkPolicyReconciler)
 
 This section is the tracked policy taxonomy for HCC runtime-managed policies
-versus static base manifests. Before changing NetworkPolicies, also check the
-root `CLAUDE.md` NetworkPolicy section and the target overlay's K8s API CIDR
-patch.
+versus static base manifests. Before changing NetworkPolicies, also check
+[the NetworkPolicy model](platform-topology.md#11-networkpolicy-architecture)
+and the target overlay's K8s API CIDR patch.
 
 HCC reconciles NetworkPolicies in two modes:
 
@@ -802,7 +831,7 @@ HCC reconciles NetworkPolicies in two modes:
 - `allow-hcc-api-egress-<ns>` (only the namespace's platform helper pods → HCC REST API; for example `mcp-proxy`, `rpc-proxy`, or workflow mcp-host pods)
 - `allow-k8s-api-egress-<ns>` (K8s API server on 443; created with an explicit opt-in pod selector `clerum.io/k8s-api-egress=true`, so ordinary runtime workloads do not receive API-server egress by default. The CIDR comes from `process.env.KUBERNETES_SERVICE_HOST` injected into HCC's own pod.)
 
-**In production, `CONTEXT_MAPPER_RUNTIME_NAMESPACES` is explicitly set to `mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui` (NOT the `config.ts` default, which is `mcp-server,mcp-host,sandbox-recipes,rpc-proxy` — it includes `mcp-host` and omits `sandbox-ui`). `sandbox-ui` is additionally listed in `CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES`, so it receives only deny-all + DNS egress.** The `mcp-host` namespace is intentionally excluded: HCC's deny-all would block mcp-host pods from reaching LLM APIs. See the NetworkPolicy section in `docs/deploy/gcp.md`. mcp-host's NetworkPolicies are statically declared in `deploy/base/mcp-host/networkpolicies.yaml` instead.
+**In production, `CONTEXT_MAPPER_RUNTIME_NAMESPACES` is explicitly set to `mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui` (NOT the `config.ts` default, which is `mcp-server,mcp-host,sandbox-recipes,rpc-proxy` — it includes `mcp-host` and omits `sandbox-ui`). `sandbox-ui` is additionally listed in `CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES`, so it receives only deny-all + DNS egress.** The `mcp-host` namespace is intentionally excluded: HCC's deny-all would block mcp-host pods from reaching LLM APIs. mcp-host's NetworkPolicies are statically declared in `deploy/base/mcp-host/networkpolicies.yaml` instead.
 
 HCC does NOT reconcile its own namespace (`control-plane`) either; control-plane policies are statically declared in `deploy/base/control-plane/networkpolicies.yaml` and patched per overlay for the cluster-specific K8s API IP.
 
@@ -916,15 +945,16 @@ One policy per (context, server) pair. Only allows traffic from the mcp-host nam
 
 ### Configuration
 
-| Variable                        | Default      | Description                                       |
-| ------------------------------- | ------------ | ------------------------------------------------- |
-| `CLERUM_DEV_MODE`               | `false`      | Enable dev mode                                   |
-| `CONTEXT_MAPPER_PORT`           | `8081`       | HTTP server port                                  |
-| `CONTEXT_MAPPER_NAMESPACE`      | `"default"`  | K8s namespace for MCP servers                     |
-| `CONTEXT_MAPPER_HOST_NAMESPACE` | `"mcp-host"` | Namespace where mcp-host runs (for NetworkPolicy) |
-| `CLERUM_MCP_SERVERS`            | -            | JSON MCP server array (dev mode)                  |
-| `CLERUM_CONTEXTS`               | -            | JSON Context array (dev mode)                     |
-| `CLERUM_MCP_AUTH`               | -            | JSON auth token map (dev mode)                    |
+| Variable                                 | Default           | Description                                       |
+| ---------------------------------------- | ----------------- | ------------------------------------------------- |
+| `CLERUM_DEV_MODE`                        | `false`           | Enable dev mode                                   |
+| `CONTEXT_MAPPER_PORT`                    | `8081`            | HTTP server port                                  |
+| `CONTEXT_MAPPER_NAMESPACE`               | `"mcp-server"`    | K8s namespace for MCP servers                     |
+| `CONTEXT_MAPPER_HOST_NAMESPACE`          | `"mcp-host"`      | Namespace where mcp-host runs (for NetworkPolicy) |
+| `CONTEXT_MAPPER_CONTROL_PLANE_NAMESPACE` | `"control-plane"` | Namespace where the HCC API gateway runs          |
+| `CLERUM_MCP_SERVERS`                     | -                 | JSON MCP server array (dev mode)                  |
+| `CLERUM_CONTEXTS`                        | -                 | JSON Context array (dev mode)                     |
+| `CLERUM_MCP_AUTH`                        | -                 | JSON auth token map (dev mode)                    |
 
 ### Dependencies
 
@@ -937,6 +967,12 @@ One policy per (context, server) pair. Only allows traffic from the mcp-host nam
 MCP servers are individual services that expose tools via the Model Context Protocol. They are declared as McpServer CRDs and automatically deployed by host-context-controller.
 
 ### Current Implementations
+
+`mcp-servers/` ships six first-party servers: **airtable**, **alphavantage**,
+**doc-generator**, **mongodb**, **playwright**, and **web-search** — see
+[mcp-servers/README.md](../../mcp-servers/README.md) for all of them. Two are
+detailed below as representative examples of the two sourcing patterns (built
+from an upstream repo, and an official upstream image).
 
 #### Airtable MCP Server
 
@@ -1064,12 +1100,12 @@ For comprehensive testing documentation, see [mcp-servers/README.md §Testing](.
 
 **Four policy layers** (L0-L3, as reconciled by HCC):
 
-| Layer                  | Policy Name                                       | Effect                                                                          |
-| ---------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------- |
-| L0. Default Deny       | `deny-all-<ns>`                                   | Block ALL ingress + egress for every pod in each runtime namespace              |
-| L1. Infrastructure     | `allow-dns-egress-<ns>`, `allow-hcc-api-egress-<ns>`, `allow-k8s-api-egress-<ns>`, `allow-host-context-controller-api` | DNS, HCC REST API and K8s API egress; ingress `ns:mcp-host` -> `host-context-controller:8081` |
-| L2. Context Allow      | `ctx-{contextId}-{serverName}`                    | Allow `ns:mcp-host` -> specific MCP server pod on transport port                |
-| L3. External Egress    | per McpServer with `egressBindings`               | Allow a specific MCP server pod to reach declared external destinations         |
+| Layer               | Policy Name                                                                                                            | Effect                                                                                        |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| L0. Default Deny    | `deny-all-<ns>`                                                                                                        | Block ALL ingress + egress for every pod in each runtime namespace                            |
+| L1. Infrastructure  | `allow-dns-egress-<ns>`, `allow-hcc-api-egress-<ns>`, `allow-k8s-api-egress-<ns>`, `allow-host-context-controller-api` | DNS, HCC REST API and K8s API egress; ingress `ns:mcp-host` -> `host-context-controller:8081` |
+| L2. Context Allow   | `ctx-{contextId}-{serverName}`                                                                                         | Allow `ns:mcp-host` -> specific MCP server pod on transport port                              |
+| L3. External Egress | per McpServer with `egressBindings`                                                                                    | Allow a specific MCP server pod to reach declared external destinations                       |
 
 This ensures that:
 
@@ -1115,7 +1151,7 @@ The platform runs three distinct token flows, all RS256-signed:
 - **Agent ingress (edge trust headers).** Direct ingress to the `mcp-host`
   runtime is authenticated by edge trust headers from named platform edge
   services and restricted by NetworkPolicy; the runtime message route rejects
-  bearer tokens by design — JWTs authenticate the hops *into* the edge, not the
+  bearer tokens by design — JWTs authenticate the hops _into_ the edge, not the
   final agent ingress.
 
 ---
@@ -1130,7 +1166,7 @@ Complete flow of a user message from Telegram through to an LLM-generated respon
 | ---- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1    | **User**           | Sends "What users are in the database?" on Telegram                                                                                                                                                                                             |
 | 2    | **channel-reader** | grammY bot buffers message, poll cycle drains it, sender checked against CommunicationChannel CRD allowlist, message normalized to unified `Message` interface                                                                                  |
-| 3    | **channel-reader** | HTTP POST to `mcp-host:8080/v1/runtime/messages` (with `x-clerum-edge-*` headers) with content, channelType, sender, hostRef                                                                                                                                                                 |
+| 3    | **channel-reader** | HTTP POST to `mcp-host:8080/v1/runtime/messages` (with `x-clerum-edge-*` headers) with content, channelType, sender, hostRef                                                                                                                    |
 | 4    | **mcp-host**       | Creates Task with conversation history, stores response callback, enqueues to MessageQueue (priority: normal)                                                                                                                                   |
 | 5    | **mcp-host**       | Agent dequeues task (idle -> processing), builds system prompt with MCP server capabilities, calls LLM with messages + tool definitions                                                                                                         |
 | 6    | **LLM + MCP**      | LLM requests `mongodb-server__find_documents({ collection: "users" })`. Agent parses tool name, MCP Client calls MongoDB server via StreamableHTTP. Tool result added to history. LLM called again with results. Generates final text response. |
@@ -1145,16 +1181,16 @@ Every service supports `CLERUM_DEV_MODE=true` for local development without a Ku
 
 ### Comparison
 
-| Aspect                    | Dev Mode                                                     | Production Mode                                |
-| ------------------------- | ------------------------------------------------------------ | ---------------------------------------------- |
-| **Configuration source**  | Environment variables / JSON strings                         | Kubernetes CRDs                                |
-| **K8s access**            | Not required                                                 | In-cluster or kubeconfig                       |
-| **CRD watching**          | Disabled (static config)                                     | Active watchers with auto-restart              |
-| **Secret management**     | Env vars (`OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY`, `BAILIAN_API_KEY`) | K8s Secrets referenced by CRDs               |
-| **MCP server discovery**  | `CLERUM_MCP_SERVERS` JSON env var                            | Polls host-context-controller REST API         |
-| **MCP server deployment** | Manual (run locally or docker)                               | Automatic via host-context-controller operator |
-| **NetworkPolicies**       | Not created                                                  | Automatically managed                          |
-| **Typical use**           | Local development, debugging                                 | Kubernetes cluster deployment                  |
+| Aspect                    | Dev Mode                                                                        | Production Mode                                |
+| ------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------- |
+| **Configuration source**  | Environment variables / JSON strings                                            | Kubernetes CRDs                                |
+| **K8s access**            | Not required                                                                    | In-cluster or kubeconfig                       |
+| **CRD watching**          | Disabled (static config)                                                        | Active watchers with auto-restart              |
+| **Secret management**     | Env vars (`OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY`, `BAILIAN_API_KEY`) | K8s Secrets referenced by CRDs                 |
+| **MCP server discovery**  | `CLERUM_MCP_SERVERS` JSON env var                                               | Polls host-context-controller REST API         |
+| **MCP server deployment** | Manual (run locally or docker)                                                  | Automatic via host-context-controller operator |
+| **NetworkPolicies**       | Not created                                                                     | Automatically managed                          |
+| **Typical use**           | Local development, debugging                                                    | Kubernetes cluster deployment                  |
 
 ### Dev Mode Example
 
@@ -1338,12 +1374,12 @@ Host CRD (spec.approval)
 
 ### HTTP Endpoints
 
-| Method | Path                             | Description                                                             |
-| ------ | -------------------------------- | ----------------------------------------------------------------------- |
-| `POST` | `/v1/runtime/approvals/approve`  | Approve a pending tool execution                                        |
-| `POST` | `/v1/runtime/approvals/deny`     | Deny a pending tool execution                                           |
+| Method | Path                               | Description                                                             |
+| ------ | ---------------------------------- | ----------------------------------------------------------------------- |
+| `POST` | `/v1/runtime/approvals/approve`    | Approve a pending tool execution                                        |
+| `POST` | `/v1/runtime/approvals/deny`       | Deny a pending tool execution                                           |
 | `GET`  | `/v1/runtime/tasks/:taskId/result` | Poll for final result after channel-based approval (two-phase response) |
-| `GET`  | `/v1/runtime/status`             | Includes `pendingApprovals` array                                       |
+| `GET`  | `/v1/runtime/status`               | Includes `pendingApprovals` array                                       |
 
 All four require the `x-clerum-edge-*` caller headers (see [HTTP RPC API](#http-rpc-api)).
 

@@ -21,12 +21,12 @@ From root `README.md` §Testing prerequisites:
 - **Node.js 24+** for unit tests
 - `.env` file at repo root with LLM API keys:
 
-  | Variable                | Required For               | How to Get                              |
-  | ----------------------- | -------------------------- | --------------------------------------- |
-  | `ZAI_API_KEY`           | LLM tool-calling           | https://z.ai                            |
-  | `OPENAI_API_KEY`        | Alternative LLM provider   | https://platform.openai.com/api-keys    |
-  | `CLAUDE_API_KEY`        | Alternative LLM provider   | https://console.anthropic.com/          |
-  | `CLERUM_MODEL_PROVIDER` | Provider selection         | `zai`, `openai`, `claude`, or `bailian` |
+  | Variable                | Required For             | How to Get                              |
+  | ----------------------- | ------------------------ | --------------------------------------- |
+  | `ZAI_API_KEY`           | LLM tool-calling         | https://z.ai                            |
+  | `OPENAI_API_KEY`        | Alternative LLM provider | https://platform.openai.com/api-keys    |
+  | `CLAUDE_API_KEY`        | Alternative LLM provider | https://console.anthropic.com/          |
+  | `CLERUM_MODEL_PROVIDER` | Provider selection       | `zai`, `openai`, `claude`, or `bailian` |
 
 Copy `.env.example` to `.env` and fill in your keys. `.env` is gitignored.
 
@@ -132,16 +132,16 @@ E2E_RUN_SOFTWARE_CREATION=1 make test-e2e-vitest
 
 Runtime gate suites live in `scripts/e2e/`. Backend compatibility suites live in `scripts/e2e/workflow-backend-compat/`.
 
-| #   | Script                             | Transport  | Tests      | Description                                                                          |
-| --- | ---------------------------------- | ---------- | ---------- | ------------------------------------------------------------------------------------ |
-| 1   | `e2e-637-secret-ownership-bypass.sh` | mixed    | gate       | Recipe Secret ownership bypass probes                                                |
-| 2   | `e2e-agentic-workflow-baseline.sh` | HTTP       | gate       | Agentic workflow baseline                                                            |
-| 3   | `e2e-snippet-runtime-smoke.sh`     | snippet    | gate       | Fast snippet runtime smoke                                                           |
-| 4   | `e2e-snippet-runtime.sh`           | mixed      | gate       | Snippet, DB, MCP, HTTP, and negative runtime paths                                   |
-| 5   | `e2e-custom-coordinator-sdk.sh`    | mixed      | gate       | Custom coordinator image runtime                                                     |
-| 6   | `e2e-workflow-token-rotation.sh`   | mixed      | gate       | Runtime token rotation                                                               |
-| 7   | `e2e-agentic-stdio-baseline.sh`    | stdio      | standalone | Pure compute stdio baseline                                                          |
-| 8   | `workflow-backend-compat/*.sh`     | HTTP/stdio | compat     | Backend and transport compatibility, including stdio PostgreSQL and multi-tool flows |
+| #   | Script                               | Transport  | Tests      | Description                                                                          |
+| --- | ------------------------------------ | ---------- | ---------- | ------------------------------------------------------------------------------------ |
+| 1   | `e2e-637-secret-ownership-bypass.sh` | mixed      | gate       | Recipe Secret ownership bypass probes                                                |
+| 2   | `e2e-agentic-workflow-baseline.sh`   | HTTP       | gate       | Agentic workflow baseline                                                            |
+| 3   | `e2e-snippet-runtime-smoke.sh`       | snippet    | gate       | Fast snippet runtime smoke                                                           |
+| 4   | `e2e-snippet-runtime.sh`             | mixed      | gate       | Snippet, DB, MCP, HTTP, and negative runtime paths                                   |
+| 5   | `e2e-custom-coordinator-sdk.sh`      | mixed      | gate       | Custom coordinator image runtime                                                     |
+| 6   | `e2e-workflow-token-rotation.sh`     | mixed      | gate       | Runtime token rotation                                                               |
+| 7   | `e2e-agentic-stdio-baseline.sh`      | stdio      | standalone | Pure compute stdio baseline                                                          |
+| 8   | `workflow-backend-compat/*.sh`       | HTTP/stdio | compat     | Backend and transport compatibility, including stdio PostgreSQL and multi-tool flows |
 
 Rows 1–6 are exactly the six suites the runtime gate runs, in order.
 
@@ -171,16 +171,16 @@ suites. The pure-compute stdio suite is the standalone
 
 Each backend compatibility suite validates 8 phases in order (Phase 0 through Phase 7). Any failed phase aborts the suite.
 
-| Phase                     | What it tests                                                                               |
-| ------------------------- | ------------------------------------------------------------------------------------------- |
-| 0 — Prerequisites         | Cluster reachable, namespaces, CRDs installed, core deployments healthy                     |
-| 1 — Clean Slate           | Delete previous recipe resources to guarantee a clean test                                  |
-| 2 — Apply Recipe          | `kubectl apply` the WorkflowRecipe YAML                                                     |
-| 3 — Backend               | StatefulSet/Deployment readiness; data connectivity (`pg_isready`, `mongosh`, redis `PING`) |
-| 4 — MCP Delegation        | McpServer CRD auto-created, `managed=false`, transport Service, Context allowlist           |
-| 5 — MCP Server            | Pod ready, transport protocol started                                                       |
-| 6 — NetworkPolicy         | Deny-all enforcement, binding NP cross-namespace, internet egress blocked                   |
-| 7 — mcp-proxy tool contract | `tools/list` / `tools/call` against mcp-proxy for the delegated server                    |
+| Phase                       | What it tests                                                                               |
+| --------------------------- | ------------------------------------------------------------------------------------------- |
+| 0 — Prerequisites           | Cluster reachable, namespaces, CRDs installed, core deployments healthy                     |
+| 1 — Clean Slate             | Delete previous recipe resources to guarantee a clean test                                  |
+| 2 — Apply Recipe            | `kubectl apply` the WorkflowRecipe YAML                                                     |
+| 3 — Backend                 | StatefulSet/Deployment readiness; data connectivity (`pg_isready`, `mongosh`, redis `PING`) |
+| 4 — MCP Delegation          | McpServer CRD auto-created, `managed=false`, transport Service, Context allowlist           |
+| 5 — MCP Server              | Pod ready, transport protocol started                                                       |
+| 6 — NetworkPolicy           | Deny-all enforcement, binding NP cross-namespace, internet egress blocked                   |
+| 7 — mcp-proxy tool contract | `tools/list` / `tools/call` against mcp-proxy for the delegated server                      |
 
 The backend compatibility suites stop at the mcp-proxy tool contract — they do not
 drive an LLM or an approval gate. The approval pipeline is covered separately by
@@ -249,8 +249,8 @@ Two-phase test strategy — requires port-forwards to a running cluster.
 cd desktop-app
 cp .env.e2e.example .env.e2e    # set E2E_DEV_LOGIN_EMAIL and E2E_HOST_REF
 
-npm run test:e2e                # Phase 1: IPC harness   (19 tests, ~45s)
-npm run test:e2e:playwright     # Phase 2: Playwright/Electron (9 tests, ~2-3 min)
+npm run test:e2e                # Phase 1: IPC harness   (~45s)
+npm run test:e2e:playwright     # Phase 2: Playwright/Electron (~2-3 min)
 npm run test:e2e:all            # Both phases
 ```
 

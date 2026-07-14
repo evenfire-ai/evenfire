@@ -45,20 +45,20 @@ Use this index for long-form docs.
 
 ## Reference
 
-| Doc                         | Description                                                                          |
-| --------------------------- | ------------------------------------------------------------------------------------ |
-| [CRD index](crds/README.md)                              | All 8 `clerum.io` CRDs                                                               |
-| [Workflow SDK](../packages/workflow-sdk/README.md)       | `@clerum/workflow-sdk` — build custom workflow coordinator images                    |
-| [llms.txt](llms.txt)                                     | Machine-readable doc map for coding agents                                           |
-| Service READMEs                                          | One-line map per component in the root [README components list](../README.md#docs-and-components) |
+| Doc                                                | Description                                                                                       |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| [CRD index](crds/README.md)                        | All 8 `clerum.io` CRDs                                                                            |
+| [Workflow SDK](../packages/workflow-sdk/README.md) | `@clerum/workflow-sdk` — build custom workflow coordinator images                                 |
+| [llms.txt](llms.txt)                               | Machine-readable doc map for coding agents                                                        |
+| Service READMEs                                    | One-line map per component in the root [README components list](../README.md#docs-and-components) |
 
 ## Feature hubs
 
-| Doc                                                        | Description                                          |
-| ---------------------------------------------------------- | ---------------------------------------------------- |
-| [WorkflowRecipes](features/workflow-recipes.md)            | Landing page for the recipe CRD + ops + architecture |
-| [Token budgets & cost](features/token-budgets.md)          | Cap LLM tokens/cost per scope; prices; Cost & Usage UI |
-| [Context filesystem](features/context-filesystem.md)       | Per-context shared file storage (SharedFileSystem)   |
+| Doc                                                  | Description                                            |
+| ---------------------------------------------------- | ------------------------------------------------------ |
+| [WorkflowRecipes](features/workflow-recipes.md)      | Landing page for the recipe CRD + ops + architecture   |
+| [Token budgets & cost](features/token-budgets.md)    | Cap LLM tokens/cost per scope; prices; Cost & Usage UI |
+| [Context filesystem](features/context-filesystem.md) | Per-context shared file storage (SharedFileSystem)     |
 
 > Other files under `features/` include design-depth writeups (custom
 > coordinators, OAuth bridge, registry UI, admin workspace provisioning). Prefer
@@ -66,9 +66,19 @@ Use this index for long-form docs.
 
 ## Testing
 
-| Doc                               | Description                            |
-| --------------------------------- | -------------------------------------- |
-| [E2E guide](testing/e2e-guide.md) | Cluster E2E suites, approvals, desktop |
+| Doc                                                                         | Description                            |
+| --------------------------------------------------------------------------- | -------------------------------------- |
+| [E2E guide](testing/e2e-guide.md)                                           | Cluster E2E suites, approvals, desktop |
+| [Custom coordinator E2E gates](testing/custom-coordinator-e2e-gates.md)     | Gates for custom coordinator images    |
+| [Desktop observation smoke test](testing/desktop-observation-smoke-test.md) | Desktop surface smoke check            |
+
+## For coding agents
+
+| Doc                                                             | Description                   |
+| --------------------------------------------------------------- | ----------------------------- |
+| [WorkflowRecipe guide](agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md)  | Authoring recipes, for agents |
+| [control-ui & desktop-app](agents/control-ui-desktop-app.md)    | UI surfaces, for agents       |
+| [WorkflowRecipe naming](architecture/workflow-recipe-naming.md) | Generated resource-name rules |
 
 ## Community & trust
 

@@ -230,7 +230,25 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out rpc-jwt-privat
 openssl pkey -in rpc-jwt-private.pem -pubout -out rpc-jwt-public.pem
 ```
 
+Generate the OAuth secrets. **Both are required in production** — control-api
+refuses to start without them (`src/config.ts`, `requiredOrDevDefault`), so a
+Secret built by hand without these will crash-loop:
+
+```bash
+# CONTROL_API_OAUTH_STATE_HMAC_SECRET
+openssl rand -hex 32
+
+# CONTROL_API_OAUTH_ENCRYPTION_KEY
+openssl rand -hex 32
+```
+
 When storing PEM values in env vars/secrets, preserve line breaks (or encode as `\n` and normalize at runtime).
+
+> The scripted paths already do all of the above —
+> [`deploy/scripts/gen-jwt-keys.sh`](../deploy/scripts/gen-jwt-keys.sh) and
+> [`scripts/minikube/generate-keys.sh`](../scripts/minikube/generate-keys.sh)
+> generate every key in this section, including the two OAuth secrets. Prefer
+> them over assembling the Secret by hand.
 
 ## Deployment
 

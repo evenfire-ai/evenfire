@@ -17,13 +17,14 @@ as `scripts/prettier/run-on-staged.mjs` — chosen because:
 
 Scope: `desktop-app/ui/**` only.
 
-| Rule ID                         | Severity | What it catches                                                                       |
-| ------------------------------- | -------- | ------------------------------------------------------------------------------------- |
-| `da-no-hex-in-css`              | error    | `color: #abc` / `border: 1px solid #fff` outside `tokens.css` and the 3 legacy files. |
-| `da-no-raw-font-size`           | error\*  | `font-size: 14px` / `font-size: 1rem` outside `tokens.css`. Use `var(--font-size-*)`. |
-| `da-no-new-component-css`       | error    | New `.css` files under `desktop-app/ui/src/` other than the 5 allowlisted ones.       |
-| `da-no-hex-in-tsx`              | warn     | Hex literals in TS/TSX strings. Reviewer judgment for genuinely dynamic cases.        |
-| `da-no-static-inline-style`     | warn     | JSX `style={{...}}` not containing `--da-grid-cols` or whitelisted runtime values.    |
+| Rule ID                     | Severity | What it catches                                                                                     |
+| --------------------------- | -------- | --------------------------------------------------------------------------------------------------- |
+| `da-no-hex-in-css`          | error    | `color: #abc` / `border: 1px solid #fff` outside `tokens.css` and the 3 legacy files.               |
+| `da-no-raw-font-size`       | error\*  | `font-size: 14px` / `font-size: 1rem` outside `tokens.css`. Use `var(--font-size-*)`.               |
+| `da-no-new-component-css`   | error    | New `.css` files under `desktop-app/ui/src/` other than the 5 allowlisted ones.                     |
+| `da-no-hover-motion`        | error    | Hover states that move, scale, or filter controls. Use background/border/text/shadow token changes. |
+| `da-no-hex-in-tsx`          | warn     | Hex literals in TS/TSX strings. Reviewer judgment for genuinely dynamic cases.                      |
+| `da-no-static-inline-style` | warn     | JSX `style={{...}}` not containing `--da-grid-cols` or whitelisted runtime values.                  |
 
 \*`da-no-raw-font-size` is downgraded to `warn` for the 3 legacy CSS files
 to allow boy-scout migration without forcing one big-bang cleanup.
@@ -80,6 +81,6 @@ Considered and skipped intentionally. Notes:
   need a second tool — easier to keep it in one place.
 - The repo's existing convention is custom Node scripts in `scripts/`.
   Adding a Stylelint dependency + plugin config + ignore file would diverge
-  from that convention without enough payoff for ~5 rules.
+  from that convention without enough payoff for a handful of rules.
 - If the rule count grows past ~15 or auto-fix becomes a hard requirement,
   reconsider.

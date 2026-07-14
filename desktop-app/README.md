@@ -192,16 +192,16 @@ npm run test:e2e:all          # Phase 1 + Phase 2
 
 ### Environment Configuration (`.env.e2e`)
 
-| Variable                               | Default                 | Description                                    |
-| -------------------------------------- | ----------------------- | ---------------------------------------------- |
-| `EXTERNAL_REST_API_BASE_URL`           | `http://localhost:8091` | external-rest-api URL                          |
-| `RPC_PROXY_BASE_URL`                   | `http://localhost:8094` | rpc-proxy URL                                  |
-| `MEMBER_REGISTRATION_SERVICE_BASE_URL` | `http://localhost:8092` | member-registration-service activation URL     |
-| `E2E_DEV_LOGIN_EMAIL`                  | `test@clerum.io`        | Test-only login email (must have agent access) |
-| `E2E_DEV_LOGIN_EMAIL_2`                | `test2@clerum.io`       | Second user, required by the cross-device session tests |
-| `E2E_DEV_LOGIN_NAME`                   | `Test User`             | Test-only login display name                   |
-| `E2E_HOST_REF`                         | `chatllm`               | Agent hostRef to test against                  |
-| `E2E_ALLOW_DEV_PORT_FORWARD`           | unset (off)             | Set to `1`/`true` to let the Playwright global-setup guard accept localhost port-forward URLs |
+| Variable                               | Default                                      | Description                                                                                                          |
+| -------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `EXTERNAL_REST_API_BASE_URL`           | `http://localhost:8091`                      | external-rest-api URL                                                                                                |
+| `RPC_PROXY_BASE_URL`                   | `http://localhost:8094`                      | rpc-proxy URL                                                                                                        |
+| `MEMBER_REGISTRATION_SERVICE_BASE_URL` | `https://example.com` (placeholder — set it) | member-registration-service activation URL. There is no working default: unset, it silently points at `example.com`. |
+| `E2E_DEV_LOGIN_EMAIL`                  | `test@clerum.io`                             | Test-only login email (must have agent access)                                                                       |
+| `E2E_DEV_LOGIN_EMAIL_2`                | `test2@clerum.io`                            | Second user, required by the cross-device session tests                                                              |
+| `E2E_DEV_LOGIN_NAME`                   | `Test User`                                  | Test-only login display name                                                                                         |
+| `E2E_HOST_REF`                         | `chatllm`                                    | Agent hostRef to test against                                                                                        |
+| `E2E_ALLOW_DEV_PORT_FORWARD`           | unset (off)                                  | Set to `1`/`true` to let the Playwright global-setup guard accept localhost port-forward URLs                        |
 
 ## Notes
 

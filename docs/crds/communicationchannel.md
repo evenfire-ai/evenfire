@@ -18,38 +18,44 @@ Telegram personal approval accounts are verified separately from Profile UI.
 
 ### Core
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `spec.hostRef` | string | yes | Reference to the Host this channel configuration belongs to. The channel-reader uses this to filter which channels it processes. |
+| Field          | Type   | Required | Description                                                                                                                      |
+| -------------- | ------ | -------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.hostRef` | string | yes      | Reference to the Host this channel configuration belongs to. The channel-reader uses this to filter which channels it processes. |
 
 ### Telegram
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `spec.telegram` | object[] | no | List of Telegram channel groups. |
-| `spec.telegram[].channelId` | string | yes | Identifier for this Telegram private chat, group, or supergroup. |
-| `spec.telegram[].chatType` | `private`, `group`, or `supergroup` | yes | Explicit Telegram chat type for this operational channel. `channel` cannot identify a personal approver and remains unsupported. |
-| `spec.telegram[].userIds` | string[] | no | Optional transport pre-filter for Telegram user IDs. This does not verify personal accounts or authorize workflow actions. |
-| `spec.telegram[].replyOnlyWhenMentioned` | boolean | no | If `true`, in groups and supergroups the bot only processes messages that @mention the bot, use a `text_mention` entity for the bot, or reply to the bot. Private chats are unaffected. `/approve` and `/deny` commands are always accepted from verified users after backend authorization. |
+| Field                                    | Type                                | Required | Description                                                                                                                                                                                                                                                                                  |
+| ---------------------------------------- | ----------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.telegram`                          | object[]                            | no       | List of Telegram channel groups.                                                                                                                                                                                                                                                             |
+| `spec.telegram[].channelId`              | string                              | yes      | Identifier for this Telegram private chat, group, or supergroup.                                                                                                                                                                                                                             |
+| `spec.telegram[].chatType`               | `private`, `group`, or `supergroup` | yes      | Explicit Telegram chat type for this operational channel. `channel` cannot identify a personal approver and remains unsupported.                                                                                                                                                             |
+| `spec.telegram[].userIds`                | string[]                            | no       | Optional transport pre-filter for Telegram user IDs. This does not verify personal accounts or authorize workflow actions.                                                                                                                                                                   |
+| `spec.telegram[].replyOnlyWhenMentioned` | boolean                             | no       | If `true`, in groups and supergroups the bot only processes messages that @mention the bot, use a `text_mention` entity for the bot, or reply to the bot. Private chats are unaffected. `/approve` and `/deny` commands are always accepted from verified users after backend authorization. |
 
 ### Email
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `spec.email` | object[] | no | List of Email channel groups. |
-| `spec.email[].channelId` | string | yes | Mailbox/folder to read from (e.g. `INBOX`). |
-| `spec.email[].emails` | string[] | yes | Allowed email addresses for this group. Only messages from these addresses are processed. |
+| Field                    | Type     | Required | Description                                                                               |
+| ------------------------ | -------- | -------- | ----------------------------------------------------------------------------------------- |
+| `spec.email`             | object[] | no       | List of Email channel groups.                                                             |
+| `spec.email[].channelId` | string   | yes      | Mailbox/folder to read from (e.g. `INBOX`).                                               |
+| `spec.email[].emails`    | string[] | yes      | Allowed email addresses for this group. Only messages from these addresses are processed. |
 
 ### Slack
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `spec.slack` | object[] | no | List of Slack channel groups. |
-| `spec.slack[].channelId` | string | yes | Slack channel identifier. When `userIds` are configured, must be a stable Slack channel ID, not a display name (e.g. `C0123456789`, `D0123456789`, or `G0123456789`). Legacy `userNames`-only groups may retain an existing channel display name. |
-| `spec.slack[].workspaceId` | string | with userIds | Slack workspace/team ID (e.g. `T0123456789`). Required when `userIds` are configured so provider-originated workflow approval decisions bind to stable workspace identity; not required for legacy `userNames`-only groups. |
-| `spec.slack[].userIds` | string[] | yes for workflow approvals | Allowed Slack user IDs for this group (e.g. `U0123456789`). Workflow approval decisions use this stable identity. |
-| `spec.slack[].userNames` | string[] | legacy | Legacy allowed Slack usernames for non-workflow chat filtering. Usernames are not accepted as workflow approval identity. |
-| `spec.slack[].replyOnlyWhenMentioned` | boolean | no | If `true`, only process messages that include an app mention of this bot (`<@USER_ID>`). Non-approval messages are dropped until Slack `auth.test` returns a bot `user_id`. `/approve` and `/deny` commands are always accepted from allowed senders. |
+| Field                                 | Type     | Required                   | Description                                                                                                                                                                                                                                           |
+| ------------------------------------- | -------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.slack`                          | object[] | no                         | List of Slack channel groups.                                                                                                                                                                                                                         |
+| `spec.slack[].channelId`              | string   | yes                        | Slack channel identifier. When `userIds` are configured, must be a stable Slack channel ID, not a display name (e.g. `C0123456789`, `D0123456789`, or `G0123456789`). Legacy `userNames`-only groups may retain an existing channel display name.     |
+| `spec.slack[].workspaceId`            | string   | with userIds               | Slack workspace/team ID (e.g. `T0123456789`). Required when `userIds` are configured so provider-originated workflow approval decisions bind to stable workspace identity; not required for legacy `userNames`-only groups.                           |
+| `spec.slack[].userIds`                | string[] | yes for workflow approvals | Allowed Slack user IDs for this group (e.g. `U0123456789`). Workflow approval decisions use this stable identity.                                                                                                                                     |
+| `spec.slack[].userNames`              | string[] | legacy                     | Legacy allowed Slack usernames for non-workflow chat filtering. Usernames are not accepted as workflow approval identity.                                                                                                                             |
+| `spec.slack[].replyOnlyWhenMentioned` | boolean  | no                         | If `true`, only process messages that include an app mention of this bot (`<@USER_ID>`). Non-approval messages are dropped until Slack `auth.test` returns a bot `user_id`. `/approve` and `/deny` commands are always accepted from allowed senders. |
+
+> **Schema constraint (`anyOf`).** `channelId` alone is not a valid Slack group.
+> Every `slack[]` entry must additionally supply **either** `userIds` **and**
+> `workspaceId` (the modern form — required for workflow approvals), **or**
+> `userNames` (the legacy chat-allowlist form). An entry with only `channelId` is
+> rejected at admission.
 
 At least one channel group (`telegram`, `email`, or `slack`) should be defined for the
 CRD to be useful, though the schema does not enforce this.
@@ -86,12 +92,12 @@ spec:
     - channelId: telegram1
       chatType: private
       userIds:
-        - "111222333"
-        - "444555666"
+        - '111222333'
+        - '444555666'
     - channelId: support-bot
       chatType: group
       userIds:
-        - "123456789"
+        - '123456789'
       replyOnlyWhenMentioned: true
     - channelId: supergroup-chat
       chatType: supergroup
