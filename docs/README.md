@@ -50,7 +50,7 @@ Use this index for long-form docs.
 | [CRD index](crds/README.md)                              | All 8 `clerum.io` CRDs                                                               |
 | [Workflow SDK](../packages/workflow-sdk/README.md)       | `@clerum/workflow-sdk` — build custom workflow coordinator images                    |
 | [llms.txt](llms.txt)                                     | Machine-readable doc map for coding agents                                           |
-| Service READMEs                                          | Distilled per component in the root [README components map](../README.md#components) |
+| Service READMEs                                          | One-line map per component in the root [README components list](../README.md#docs-and-components) |
 
 ## Feature hubs
 
