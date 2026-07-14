@@ -1092,6 +1092,32 @@ This ensures that:
 - **MCP server credentials**: Stored in mcp-server namespace, referenced by McpServer CRD's `envSecret`, injected as env vars by host-context-controller, validated before deployment
 - **Channel credentials**: Stored in channels namespace, injected as env vars into channel-reader pod
 
+### Token Flows
+
+The platform runs three distinct token flows, all RS256-signed:
+
+- **External (session → RPC-token brokerage).** The desktop app and tenant
+  callers authenticate to `external-rest-api` (password or Google login → a
+  session JWT), then call `POST /api/v1/rpc/token`, which brokers a
+  **short-lived, scope-narrowed RPC token** signed by `control-api` (dropped
+  scopes are surfaced to the caller, never silently widened). `rpc-proxy`
+  verifies RS256 signature, issuer, audience, scopes, and per-host bindings —
+  wildcard host bindings are rejected — holding a public key only, so it can
+  never mint what it verifies.
+- **Internal (audience-separated token families).** Services authenticate to one
+  another with RS256 token families keyed by audience, down to **60-second
+  single-purpose artifact tokens** minted per request and **never stored**.
+  Shared-file access treats the JWT as a **ceiling** (an upper bound on
+  authority, never a grant) and re-checks a Postgres permission store on every
+  operation, **fail-closed** — an unauthorized or non-existent resource is
+  indistinguishable (both 403), and an audit-write failure means the operation
+  is not served.
+- **Agent ingress (edge trust headers).** Direct ingress to the `mcp-host`
+  runtime is authenticated by edge trust headers from named platform edge
+  services and restricted by NetworkPolicy; the runtime message route rejects
+  bearer tokens by design — JWTs authenticate the hops *into* the edge, not the
+  final agent ingress.
+
 ---
 
 ## 8. Message Lifecycle (End-to-End)
