@@ -392,20 +392,19 @@ kubectl get secret clerum-wrc-signing-key -n control-plane --context clerum-test
 If the WRC starts without the Secret, the workflow subsystem is disabled (degraded mode:
 WorkflowRecipes of type `workflow` return errors, other workloads continue to function).
 
-### Public Key ConfigMap — CRITICAL (fix 2026-03-23)
+### Public Key ConfigMap — CRITICAL
 
 The coordinator pod reads the WRC public key from the ConfigMap `clerum-wrc-public-key`.
 This ConfigMap must exist in **TWO** namespaces:
 
 ```bash
-# Automatically created by make minikube-gen-keys (updated 2026-03-23)
+# Automatically created by make minikube-gen-keys
 kubectl get configmap clerum-wrc-public-key -n control-plane --context clerum-test
 kubectl get configmap clerum-wrc-public-key -n sandbox-recipes --context clerum-test
 ```
 
-> **Bug fixed**: before 2026-03-23 `generate-keys.sh` only created the ConfigMap in
-> `control-plane`. The coordinator pod (which runs in `sandbox-recipes`) could not read the
-> public key and all workflow JWTs failed with `401 Invalid token`.
+If the ConfigMap is missing from `sandbox-recipes`, the coordinator pod (which runs
+there) cannot read the public key and all workflow JWTs fail with `401 Invalid token`.
 
 ### Workflow Env Vars
 
@@ -459,7 +458,7 @@ Tests should verify `kubectl get context wf-{recipeName}` instead of the shared 
 
 ---
 
-## WorkflowRecipe — Namespace, NetworkPolicies and Execution (bugs and fixes 2026-03-23)
+## WorkflowRecipe — Namespace, NetworkPolicies and Execution
 
 This section documents the bugs found during e2e testing of the agentic workflow execution
 pipeline and the fixes applied.
@@ -708,7 +707,7 @@ bash scripts/minikube/ensure-pvcs.sh
 
 ### rpc-proxy-secrets — Key Rename
 
-The key in the Secret `rpc-proxy-secrets` was renamed (2026-03-23):
+The key in the Secret `rpc-proxy-secrets` was renamed:
 
 | Before           | After                      |
 | ---------------- | -------------------------- |

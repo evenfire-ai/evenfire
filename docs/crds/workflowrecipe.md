@@ -2588,7 +2588,7 @@ A `--skip-verification` flag is available for development/testing environments w
 
 ### 8.5 Image Compatibility & Security Edge Cases
 
-> **Context**: E2E testing of composite WorkflowRecipes (Phase 8+) revealed that many popular Docker images are incompatible with the current security model (`drop: ALL` + `runAsNonRoot: true`). This section documents known incompatibilities and proposed CRD extensions to resolve them.
+> **Context**: E2E testing of composite WorkflowRecipes revealed that many popular Docker images are incompatible with the current security model (`drop: ALL` + `runAsNonRoot: true`). This section documents known incompatibilities and proposed CRD extensions to resolve them.
 
 #### 8.5.1 Known Incompatibilities
 
@@ -4234,7 +4234,7 @@ All WorkflowRecipe CRDs are stored in the `sandbox-recipes` namespace, sharing R
 
 ---
 
-## 24. Implementation Status (v1.0.0-wrc, 2026-03-11)
+## 24. Implementation Status
 
 This section tracks what has been implemented, validated, and deployed from this specification.
 
