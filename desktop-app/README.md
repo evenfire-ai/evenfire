@@ -5,10 +5,11 @@ Electron desktop client with a React renderer. The app authenticates through `ex
 ## Security Model
 
 - User session token is obtained from `external-rest-api`.
-- RPC access token is issued by `external-rest-api` via `control-api` and is scoped (`mcp:servers:list`, `mcp:server:invoke`, `host:health:read`, `host:status:read`, `host:activity:read`, `host:message:invoke`) and short-lived.
+- RPC access token is issued by `external-rest-api` via `control-api` and is scoped (`mcp:servers:list`, `mcp:server:invoke`, `host:health:read`, `host:status:read`, `host:activity:read`, `host:message:invoke`, `host:task:read`, `host:session:read`, `host:approval:write`, `desktop:view`, `sandbox:ui:view`) and short-lived.
 - Desktop app calls only:
   - `external-rest-api` for user/session and token issuance.
   - `rpc-proxy` for agent discovery and invocation.
+  - `member-registration-service` for the invitation/activation flow (invitation profile lookup and desktop setup completion).
 - `control-api` internal service tokens are never stored in the desktop app.
 
 ## Implemented Flows
@@ -56,7 +57,7 @@ The app now auto-populates default RPC `hostRefs` from authorized agent names re
 
 - `EXTERNAL_REST_API_BASE_URL` (default: `http://127.0.0.1:8091`)
 - `RPC_PROXY_BASE_URL` (default: `http://127.0.0.1:8094`)
-- `MEMBER_REGISTRATION_SERVICE_BASE_URL` (default: `http://127.0.0.1:8092`)
+- `MEMBER_REGISTRATION_SERVICE_BASE_URL` (no working default — falls back to the placeholder `https://example.com`, so set it explicitly; locally this is usually `http://127.0.0.1:8092`)
 - `REQUEST_TIMEOUT_MS` (default: `60000`)
 
 ## Architecture
@@ -111,11 +112,26 @@ npm run start
 
 ## Port-forward Remote Cluster Services
 
-The root launcher already starts the required port-forwards for normal local development. Optional manual debugging commands:
+The root launcher already starts the required port-forwards for normal local development.
+
+To start them manually (control-api `:8090`, external-rest-api `:8091`, rpc-proxy `:8094` — the set the desktop app and both E2E phases need), run from the repository root:
+
+```bash
+make minikube-pf-desktop
+```
+
+Individual targets, if you only need one:
+
+```bash
+make minikube-pf-control-api    # control-api    → localhost:8090
+make minikube-pf-external-api   # external-rest-api → localhost:8091
+make minikube-pf-rpc-proxy      # rpc-proxy      → localhost:8094
+```
+
+Optional, only for the invitation/activation flow against `profile-ui`:
 
 ```bash
 kubectl -n profiles port-forward svc/profile-ui 3001:3001
-kubectl -n control-plane port-forward svc/control-api 8090:8090
 ```
 
 ## Testing
@@ -133,11 +149,11 @@ Runs real IPC handlers against a live cluster via port-forwards. No Electron win
 
 **Prerequisites:**
 
-1. Port-forwards active (see [Port-forward Remote Cluster Services](#port-forward-remote-cluster-services))
+1. Port-forwards for external-rest-api (`:8091`) and rpc-proxy (`:8094`) active — `make minikube-pf-desktop` from the repo root covers them (see [Port-forward Remote Cluster Services](#port-forward-remote-cluster-services))
 2. Copy env template: `cp .env.e2e.example .env.e2e` and set `E2E_DEV_LOGIN_EMAIL` to an authorized user and `E2E_HOST_REF` to an accessible agent.
 
 ```bash
-npm run test:e2e      # 19 tests — auth, teams, catalog, messages, streams, tokens (~45s)
+npm run test:e2e      # 33 tests — auth, teams, catalog, messages, sessions, streams, tokens
 ```
 
 **What it tests:** Login round-trip, dependencies health, team listing, access catalog, RPC token lifecycle, direct MCP server invocation (JSON-RPC), host message delivery (LLM), host status/activity polling, SSE activity/status/progress streams, stream cleanup, token metadata/refresh, unauthenticated error path, logout.
@@ -150,19 +166,28 @@ Launches the real Electron app, interacts with the UI, and sends real prompts to
 
 **Prerequisites:**
 
-1. Same as Phase 1 (port-forwards + `.env.e2e`)
+1. Same as Phase 1 (`.env.e2e`), plus a control-api port-forward (`:8090`) — the Playwright global-setup health-checks control-api, external-rest-api and rpc-proxy before any test runs.
 2. App must be built first (`npm run build`)
+3. A kubectl context the global-setup allows. It defaults to `E2E_K8S_CONTEXT=clerum-test`, rejects anything outside the allow-list (`E2E_ALLOWED_CONTEXTS`, default `clerum-test` plus the GKE dev context), hard-blocks the production context, and **switches your current kubectl context** to the expected one if it differs.
+
+The supported entry point wires all of this together (context guard → port-forwards → seed → Playwright):
 
 ```bash
-npm run test:e2e:playwright   # 9 tests — builds, then launches Electron (~2-3min)
+make e2e-desktop-app          # from the repository root; override with E2E_CONTEXT=<ctx>
 ```
 
-**What it tests:** Login flow (handles persisted sessions), sidebar navigation (all 4 pages), agent list rendering, sending messages with real LLM responses, MongoDB tool calls (`list-databases`), Airtable tool calls (`list_bases`), multi-tool orchestration, progress stepper expand/collapse, error resilience.
+To run Playwright directly once port-forwards and context are already set up:
+
+```bash
+npm run test:e2e:playwright   # ~81 tests across 40 spec files — builds, then launches Electron
+```
+
+**What it tests:** Login flow (handles persisted sessions), sidebar navigation, agent list rendering, sending messages with real LLM responses, tool calls and multi-tool orchestration, progress stepper expand/collapse, approval flows, workflow recipes and runs, artifacts, GFS, sandbox-ui, Telegram, cross-device sessions, error resilience.
 
 ### Full Suite
 
 ```bash
-npm run test:e2e:all          # Phase 1 + Phase 2 (~3-4min total)
+npm run test:e2e:all          # Phase 1 + Phase 2
 ```
 
 ### Environment Configuration (`.env.e2e`)
@@ -173,8 +198,10 @@ npm run test:e2e:all          # Phase 1 + Phase 2 (~3-4min total)
 | `RPC_PROXY_BASE_URL`                   | `http://localhost:8094` | rpc-proxy URL                                  |
 | `MEMBER_REGISTRATION_SERVICE_BASE_URL` | `http://localhost:8092` | member-registration-service activation URL     |
 | `E2E_DEV_LOGIN_EMAIL`                  | `test@clerum.io`        | Test-only login email (must have agent access) |
+| `E2E_DEV_LOGIN_EMAIL_2`                | `test2@clerum.io`       | Second user, required by the cross-device session tests |
 | `E2E_DEV_LOGIN_NAME`                   | `Test User`             | Test-only login display name                   |
 | `E2E_HOST_REF`                         | `chatllm`               | Agent hostRef to test against                  |
+| `E2E_ALLOW_DEV_PORT_FORWARD`           | unset (off)             | Set to `1`/`true` to let the Playwright global-setup guard accept localhost port-forward URLs |
 
 ## Notes
 

@@ -16,7 +16,8 @@ manages as a single unit.
 apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
-  name: my-recipe        # RFC1123: lowercase, hyphens, digits only
+  name: my-recipe             # RFC1123: lowercase, hyphens, digits only
+  namespace: sandbox-recipes  # required: admission rejects any other namespace
 spec:
   workloads:
     - id: web
@@ -60,8 +61,11 @@ Operator (admin)
 | `POST` | `/api/v1/admin/recipes/validate` | Validate without deploying |
 | `GET` | `/api/v1/admin/recipes/:name/status` | Deployment status |
 
-All routes require authentication: `Authorization: Bearer <admin_jwt>`.
-The admin JWT is obtained from `/api/v1/admin/auth/login` with username/password.
+All routes require authentication. `POST /api/v1/admin/auth/login` (username/password)
+does **not** return a token in the response body — it sets an HttpOnly session cookie
+(`control_ui_admin_session`) and responds with `{ "me": { ... } }`. The admin gate
+(`requireAuthForControlUI`) reads the session **only** from that cookie and ignores the
+`Authorization` header, so `curl` must carry the cookie jar (`-c` on login, `-b` after).
 
 ### Proxy Next.js
 
@@ -80,53 +84,62 @@ is needed for control-api when using the UI**.
 ### Why it is needed
 
 The `control-api` ServiceAccount needs permissions to create/read/update/delete
-`workflowrecipes` across two different namespaces. Without this RBAC, all API
-calls to the recipes endpoint return **HTTP 500** (K8s rejects with 403).
+`workflowrecipes` in `sandbox-recipes` — control-api reads and writes WorkflowRecipe
+CRDs only there (`RECIPE_CRD_NAMESPACE = config.sandboxNamespace`). Without this RBAC,
+all API calls to the recipes endpoint return **HTTP 500** (K8s rejects with 403).
 
 ### Required Roles
 
-#### Namespace `mcp-server` — Role `control-api-mcp-resources`
-
-```yaml
-rules:
-  - apiGroups: ["clerum.io"]
-    resources: ["contexts", "mcpservers", "workflowrecipes"]  # workflowrecipes is new
-    verbs: ["get", "list", "create", "update", "delete"]
-```
-
-#### Namespace `sandbox-recipes` — Role `control-api-workflow-recipes-sandbox` (NEW)
+#### Namespace `sandbox-recipes` — Role `control-api-workflow-recipes-sandbox`
 
 ```yaml
 rules:
   - apiGroups: ["clerum.io"]
     resources: ["workflowrecipes"]
     verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+```
+
+#### Namespace `mcp-server` — Role `control-api-mcp-resources`
+
+Grants the rendered MCP surface only — no `workflowrecipes` here:
+
+```yaml
+rules:
+  - apiGroups: ["clerum.io"]
+    resources: ["contexts", "mcpservers"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list"]
 ```
 
 ### Where the RBAC lives
 
-The source file is `control-api/deploy/rbac.yaml`. The `setup.sh` script applies it
-automatically in step 7 (lines 128-136):
+The source files are `deploy/base/sandbox-recipes/rbac.yaml` (recipes) and
+`deploy/base/mcp-server/rbac.yaml` (MCP resources). They are applied by the
+kustomize overlay:
 
 ```bash
-for svc_dir in host-context-controller workflow-recipes mcp-host mcp-proxy control-api ...; do
-  kubectl apply -f "${svc_dir}/deploy/rbac.yaml"
-done
+make minikube-deploy-all
 ```
 
 > **Important**: RBAC fixes applied with `kubectl patch` at runtime
 > are **volatile** — they do NOT survive a `make minikube-teardown`. They only persist
-> in `control-api/deploy/rbac.yaml` (already updated).
+> in `deploy/base/`.
 
 ### Verify RBAC in the cluster
 
 ```bash
-# Verify role in mcp-server
-kubectl get role control-api-mcp-resources -n mcp-server -o jsonpath='{.rules[0].resources}'
-# Expected: ["contexts","mcpservers","workflowrecipes"]
-
 # Verify role in sandbox-recipes
-kubectl get role control-api-workflow-recipes-sandbox -n sandbox-recipes
+kubectl get role control-api-workflow-recipes-sandbox -n sandbox-recipes \
+  -o jsonpath='{.rules[0].resources}'
+# Expected: ["workflowrecipes"]
+
+# Verify role in mcp-server
+kubectl get role control-api-mcp-resources -n mcp-server
 
 # Verify RoleBindings
 kubectl get rolebinding -n mcp-server | grep control-api
@@ -136,7 +149,7 @@ kubectl get rolebinding -n sandbox-recipes | grep control-api
 ### Apply RBAC without restarting the cluster
 
 ```bash
-kubectl apply -f control-api/deploy/rbac.yaml --context clerum-test
+kubectl apply -f deploy/base/sandbox-recipes/rbac.yaml --context clerum-test
 ```
 
 ---
@@ -149,12 +162,12 @@ The tab is activated from the main dashboard. Implemented in:
 
 | File | Responsibility |
 |------|---------------|
-| `control-ui/lib/api.ts` | CRUD functions: `getRecipes`, `createRecipe`, `updateRecipe`, `deleteRecipe`, `validateRecipe`, `getRecipeStatus` |
+| `control-ui/lib/api.ts` | CRUD functions: `getRecipes`, `createRecipe`, `updateRecipe`, `deleteRecipe`, `validateRecipeServer`, `getRecipeStatus` |
 | `control-ui/lib/recipeValidator.ts` | Client-side validation in 3 phases (before calling the API) |
 | `control-ui/components/RecipesTab.tsx` | Recipes table with per-row actions |
 | `control-ui/components/RecipeEditor.tsx` | JSON/YAML editor with 4-step flow |
-| `control-ui/components/RecipeDefaultsPanel.tsx` | Operator Defaults panel (security, storage, resources) |
-| `control-ui/components/RecipeStatusModal.tsx` | Deployment status modal |
+| `control-ui/components/RecipeDefaultsPanel/` | Operator Defaults panel (security, storage, resources) |
+| `control-ui/components/RecipeStatusContent/` | Deployment status modal content |
 
 ### Installation flow in the editor (4 steps)
 
@@ -165,9 +178,17 @@ The tab is activated from the main dashboard. Implemented in:
                - Phase 2: Schema (apiVersion, kind, metadata.name RFC1123, workloads[])
                - Phase 3: Security compliance (runAsUser >= 1, capabilities in allowlist)
 3. DEFAULTS  → "Apply Operator Defaults" button (optional)
-               - Injects resource requests/limits per workload
-               - Assigns namespace based on presence of the transport field
-               - Applies imagePullSecrets from the registry
+               `applyDefaults()` (control-ui/lib/recipeDefaults.ts) applies
+               exactly three rules and nothing else:
+               - Workloads with no `resources` get default CPU/memory
+                 requests+limits
+               - A bare image name (no `/`) gets the registry prefix
+                 prepended — e.g. `nginx:1.30.1-alpine` becomes
+                 `us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/nginx:1.30.1-alpine`
+               - `volumeClaimTemplates` with no `storageClass` get the
+                 default storage class
+               It does NOT set a namespace and does NOT add imagePullSecrets.
+               Security is validated, never auto-injected.
 4. CONFIRM   → "Deploy Recipe" button → POST /api/v1/admin/recipes
                Editor closes and table refreshes
 ```
@@ -176,7 +197,7 @@ The tab is activated from the main dashboard. Implemented in:
 
 | Button | Action |
 |--------|--------|
-| **Status** | Opens modal showing the current recipe phase (`Running`, `Pending`, `Failed`, etc.) |
+| **Status** | Opens modal showing the current recipe phase (`pending`, `deploying`, `active`, `degraded`, `failed`, … — the 13-state lowercase `status.phase` enum) |
 | **Edit** | Opens the editor pre-loaded with the recipe's current JSON |
 | **Uninstall** | `window.confirm` → DELETE recipe from the cluster |
 
@@ -213,21 +234,26 @@ make minikube-pf-all          # all port-forwards
 ```
 
 5. Click **"Validate"** → wait for "Validation passed"
-6. (Optional) Click **"Apply Operator Defaults"** to enrich with defaults
-7. Click **"Deploy Recipe"**
-8. The editor closes and the recipe appears in the table
+6. Click **"Deploy Recipe"**
+7. The editor closes and the recipe appears in the table
+
+> **Do not click "Apply Operator Defaults" on this example in minikube.**
+> `nginx:1.30.1-alpine` has no `/`, so the registry rule rewrites it to
+> `us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/nginx:1.30.1-alpine`, which
+> minikube cannot pull (`ImagePullBackOff`). The button is safe for images that
+> already carry a registry/repo path.
 
 ---
 
 ## Install a WorkflowRecipe from the API (direct)
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:8090/api/v1/admin/auth/login \
+# Login stores the HttpOnly session cookie in a cookie jar.
+curl -s -c /tmp/clerum-admin.jar -X POST http://localhost:8090/api/v1/admin/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"<password>"}' | jq -r '.token')
+  -d '{"username":"admin","password":"<password>"}' | jq .
 
-curl -s -X POST http://localhost:8090/api/v1/admin/recipes \
-  -H "Authorization: Bearer $TOKEN" \
+curl -s -b /tmp/clerum-admin.jar -X POST http://localhost:8090/api/v1/admin/recipes \
   -H "Content-Type: application/json" \
   -d '{
     "metadata": {"name": "my-nginx"},
@@ -255,8 +281,7 @@ In the table, click **"Uninstall"** → confirm the dialog.
 ### From the API
 
 ```bash
-curl -s -X DELETE http://localhost:8090/api/v1/admin/recipes/my-nginx \
-  -H "Authorization: Bearer $TOKEN" | jq .
+curl -s -b /tmp/clerum-admin.jar -X DELETE http://localhost:8090/api/v1/admin/recipes/my-nginx | jq .
 ```
 
 ### From kubectl
@@ -302,31 +327,53 @@ the write entirely when the existing object's stamped hash matches**. This keeps
 
 ```bash
 cd control-ui
-npm test
-# → 66 tests pass (recipeValidator + RecipesTab + RecipeEditor + RecipeDefaultsPanel)
+npm test                       # whole control-ui suite
+
+# Recipe-only slice:
+npm test -- recipeValidator RecipesTab RecipeEditor RecipeDefaultsPanel RecipeStatusContent
 ```
 
-### Playwright E2E (requires cluster + port-forward :3000)
+Recipe unit tests live in `control-ui/lib/__tests__/recipeValidator.test.ts` and
+`control-ui/components/__tests__/Recipe*.test.tsx`.
+
+### Playwright E2E (currently BLOCKED — does not run)
+
+> **The recipes Playwright suite cannot execute today.** `globalSetup`
+> (`tests/e2e/playwright/global-setup.ts`) posts to `/api/v1/admin/auth/login`
+> and then throws `Admin login response missing token field` unless the response
+> body carries a `token`. The login route
+> (`control-api/src/routes/admin/auth.ts`) returns only `{ "me": { ... } }` and
+> sets the session as an HttpOnly cookie — it has never returned a `token` key.
+> Global setup therefore fails before any test starts, and the `authedPage`
+> fixture additionally depends on the `.auth/admin-token.json` that setup never
+> writes. **This needs a code fix in the test harness (cookie-based session
+> instead of a bearer token), not a doc change.** The command below is recorded
+> for when that lands:
 
 ```bash
 cd tests/e2e/playwright
 CONTROL_API_URL=http://localhost:8090 \
-PLAYWRIGHT_ADMIN_TOKEN=<admin_jwt> \
 npx playwright test control-ui/recipes.spec.ts --reporter=line
-# → 18/18 tests pass
 ```
 
-**Test groups:**
+Once fixed, `global-setup.ts` is meant to perform the admin login itself
+(`TEST_ADMIN_USERNAME` / `TEST_ADMIN_PASSWORD`, defaulting to the minikube
+bootstrap admin) — no admin token is passed on the command line.
 
-| Group | Tests | Requires cluster |
-|-------|-------|-----------------|
-| Navigation | 4 | No (UI only) |
-| Editor UI | 8 | No (local validation only) |
-| Install/Uninstall lifecycle | 4 (+ 2 update + 1 cancel) | Yes (real deploy) |
+**Test groups as written in the spec file** (none of them currently execute) (`tests/e2e/playwright/control-ui/recipes.spec.ts`, 24 tests in 4
+`describe` blocks):
 
-**Lifecycle test idempotency**: Tests use `beforeAll`/`afterAll` to
-clean up the `e2e-pw-recipe` recipe before and after each run. This prevents
-`409 Conflict` errors when a test crashes mid-cycle.
+| Group | Tests | Deploys real recipes |
+|-------|-------|----------------------|
+| Navigation | 4 | No |
+| Editor UI | 11 | No (client-side validation only) |
+| Install and uninstall | 5 | Yes |
+| Status modal structure | 4 | Yes |
+
+**Lifecycle test idempotency**: The cluster-touching groups use `beforeAll`/`afterAll`
+to delete their recipes (`e2e-pw-recipe`, `e2e-pw-snippet-secret-ref`,
+`e2e-pw-status-modal`) before and after each run. This prevents `409 Conflict`
+errors when a test crashes mid-cycle.
 
 ---
 
@@ -334,7 +381,7 @@ clean up the `e2e-pw-recipe` recipe before and after each run. This prevents
 
 | Symptom | Cause | Solution |
 |---------|-------|----------|
-| `POST /api/v1/admin/recipes → 500` | Missing RBAC in K8s | `kubectl apply -f control-api/deploy/rbac.yaml` |
+| `POST /api/v1/admin/recipes → 500` | Missing RBAC in K8s | `kubectl apply -f deploy/base/sandbox-recipes/rbac.yaml` |
 | `409 Conflict` when creating recipe | A recipe with that name already exists (possible orphan from a previous test) | `kubectl delete workflowrecipe <name> -n sandbox-recipes` |
 | Recipe appears in API but not in table | The tab did not refresh | Click the "Refresh" button |
 | Lifecycle tests always skip | `locator.isVisible({timeout})` in Playwright is instant, does not wait | Use `locator.waitFor({state:"visible", timeout})` with try/catch |
@@ -356,9 +403,9 @@ kubectl describe workflowrecipe <name> -n sandbox-recipes
 # View operator (WRC) logs to understand reconciliation errors
 make minikube-logs SVC=workflow-recipes NS=control-plane
 
-# Direct API test (with active port-forward)
-curl -s http://localhost:8090/api/v1/admin/recipes \
-  -H "Authorization: Bearer $TOKEN" | jq '.items[].metadata.name'
+# Direct API test (with active port-forward + the cookie jar from admin login)
+curl -s -b /tmp/clerum-admin.jar http://localhost:8090/api/v1/admin/recipes \
+  | jq '.items[].metadata.name'
 
 # Verify that the sandbox-recipes namespace exists
 kubectl get namespace sandbox-recipes
@@ -372,9 +419,9 @@ kubectl get namespace sandbox-recipes
 |-----------|--------|
 | control-api routes CRUD + validate + status | ✅ Complete |
 | control-ui tab "Workflow Recipes" | ✅ Complete |
-| RBAC persisted in `control-api/deploy/rbac.yaml` | ✅ Complete |
-| Unit tests (66 tests) | ✅ 66/66 pass |
-| Playwright E2E (18 tests) | ✅ 18/18 pass |
+| RBAC persisted in `deploy/base/sandbox-recipes/rbac.yaml` | ✅ Complete |
+| Unit tests (vitest, `control-ui`) | ✅ Complete |
+| Playwright E2E (`control-ui/recipes.spec.ts`, 24 tests) | ⛔ Blocked — `globalSetup` throws on the missing `token` field; 0 tests run (see above) |
 | Install recipe from UI → appears in K8s | ✅ Verified |
 | View recipe status from UI | ✅ Verified |
 | Edit and update recipe from UI | ✅ Verified |
@@ -493,8 +540,9 @@ MCP transport resources live in `mcp-server`.
 | mcp_host DNS endpoint | `sandbox-recipes` | configured sandbox namespace |
 
 The coordinator tried `GET /api/v1/workflow/{name}/status` → WRC → K8s API
-looked for the CRD in the WRC pod namespace (`mcp-server`) → 404 → coordinator
-failed with `WRC returned 404 on GET status`.
+looked for the CRD in the wrong namespace (the configured MCP transport child
+namespace `mcp-server`, not `sandbox-recipes`) → 404 → coordinator failed with
+`WRC returned 404 on GET status`.
 
 #### Adjustment applied
 
@@ -510,7 +558,8 @@ createWorkflowEndpointHandlers(customApi, recipeNamespace, sandboxNamespace)
 createWorkflowEndpointHandlers(customApi, sandboxNamespace)
 // sandboxNamespace = "sandbox-recipes"
 // claims.recipeNamespace = "sandbox-recipes"
-// WRC pod namespace = "mcp-server" is not part of the REST handler contract
+// WRC's MCP transport child namespace ("mcp-server") is not part of the REST
+// handler contract — and neither is WRC's own pod namespace ("control-plane")
 ```
 
 And in `server.ts`:
@@ -696,7 +745,7 @@ is that the workflow **ran and reached a terminal phase**, not that it completed
 successfully. Running with a real API key will produce `completed`.
 
 To get `completed` in local development:
-1. Provide a real ZAI API key in `deploy/minikube/secrets/llm-api-keys.yaml`
+1. Provide a real ZAI API key in `deploy/overlays/minikube/secrets/llm-api-keys.yaml`
 2. Run `make minikube-apply-secrets && kubectl -n control-plane rollout restart deployment/workflow-recipes`
 3. Re-run the integration test
 
@@ -777,7 +826,7 @@ kubectl -n sandbox-recipes get networkpolicies
 make minikube-gen-keys          # Generate RSA-4096 keys (WRC signing + JWT)
 make minikube-apply-secrets     # Apply secrets + configmaps
 make minikube-build-images      # Build + load coordinator + mcp-host images
-make minikube-deploy-core       # Deploy WRC + HCC
+make minikube-deploy-all        # Deploy all services via the Kustomize minikube overlay
 make minikube-deploy-instances  # Apply CRD instances (context, host)
 ```
 

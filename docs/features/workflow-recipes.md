@@ -9,8 +9,9 @@ security policy, docs live in several places. **This page is the single
 starting point.**
 
 > **Naming:** CRD kinds are `WorkflowRecipe` and `WorkflowRecipePolicy`. The
-> operator directory is `workflow-recipes/`; the module is often called Workload
-> Recipe Controller (WRC). Public product name is **evenfire**; APIs remain
+> operator directory is `workflow-recipes/`; the operator is often called Workload
+> Recipes Controller (WRC), and it runs as its own process, separate from the
+> host-context-controller (HCC). Public product name is **evenfire**; APIs remain
 > `clerum.io` — [code names](../concepts/code-names.md).
 
 ---
@@ -55,9 +56,10 @@ starting point.**
 ## Operator internals
 
 - **[`workflow-recipes/README.md`](../../workflow-recipes/README.md)** — reconciler
-  entry, tests, module layout
+  entry, tests, module layout for the standalone WRC operator
 - **[host-context-controller README](../../host-context-controller/README.md)** —
-  parent operator hosting Context Mapper and related modules
+  the separate HCC operator (McpServer, Host, and NetworkPolicy reconcilers);
+  WRC and HCC coordinate through the K8s API
 
 ## Quick reference
 

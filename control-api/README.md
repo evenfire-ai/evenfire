@@ -234,14 +234,16 @@ When storing PEM values in env vars/secrets, preserve line breaks (or encode as 
 
 ## Deployment
 
+Build and push the image:
+
 ```bash
 cd control-api
-kubectl apply -f deploy/example.secret.yaml
 make docker-push
-make deploy
 ```
 
-`deploy/deployment.yaml` expects RSA key material in the `control-api-secrets` Secret:
+Manifests live under `deploy/base/control-plane/` and are applied via the Kustomize overlays from the repo root (`make minikube-deploy-all`).
+
+`deploy/base/control-plane/control-api.yaml` expects RSA key material in the `control-api-secrets` Secret, including:
 
 - `CONTROL_API_SESSION_JWT_PRIVATE_KEY`
 - `CONTROL_API_RPC_JWT_PRIVATE_KEY`

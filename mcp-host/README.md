@@ -36,7 +36,7 @@ MCP Host is a Kubernetes-native service that reads Host CRD configuration and pr
 | `ZAI_API_KEY`                          | ZAI API key used by dev mode when provider selection resolves to ZAI.                                                                                                                                                                                       | `ZAI_API_KEY=zai-xxxx`                                                                                                                                                                             |
 | `BAILIAN_API_KEY`                      | Bailian API key used by dev mode when provider selection resolves to Bailian/Qwen.                                                                                                                                                                          | `BAILIAN_API_KEY=ba-xxxx`                                                                                                                                                                          |
 | `CLERUM_AGENT_TASK_DELAY`              | Delay in milliseconds between queued task processing attempts in the state machine loop.                                                                                                                                                                    | `CLERUM_AGENT_TASK_DELAY=100`                                                                                                                                                                      |
-| `CLERUM_AGENT_MAX_TASK_DURATION`       | Maximum task runtime in milliseconds before task execution is treated as timed out.                                                                                                                                                                         | `CLERUM_AGENT_MAX_TASK_DURATION=300000`                                                                                                                                                            |
+| `CLERUM_AGENT_MAX_TASK_DURATION`       | Maximum task runtime in milliseconds before task execution is treated as timed out.                                                                                                                                                                         | `CLERUM_AGENT_MAX_TASK_DURATION=1800000`                                                                                                                                                           |
 | `CLERUM_AGENT_MAX_TOOL_CALLS`          | Hard cap on tool calls per task to prevent unbounded tool loops.                                                                                                                                                                                            | `CLERUM_AGENT_MAX_TOOL_CALLS=50`                                                                                                                                                                   |
 | `CLERUM_AGENT_MAX_QUEUE_SIZE`          | Maximum pending queue size before new tasks are rejected/back-pressured.                                                                                                                                                                                    | `CLERUM_AGENT_MAX_QUEUE_SIZE=100`                                                                                                                                                                  |
 | `CLERUM_ENABLE_APPROVAL`               | Enables the approval gate workflow for tool execution decisions.                                                                                                                                                                                            | `CLERUM_ENABLE_APPROVAL=true`                                                                                                                                                                      |
@@ -45,7 +45,7 @@ MCP Host is a Kubernetes-native service that reads Host CRD configuration and pr
 | `CLERUM_NUDGE_MAX_ITERATIONS`          | Maximum number of nudge cycles allowed for a task.                                                                                                                                                                                                          | `CLERUM_NUDGE_MAX_ITERATIONS=3`                                                                                                                                                                    |
 | `CLERUM_CONTEXT_MAX_TOKENS`            | Token budget used by context compaction logic before pruning/summarization.                                                                                                                                                                                 | `CLERUM_CONTEXT_MAX_TOKENS=100000`                                                                                                                                                                 |
 | `CLERUM_WORKSPACE_PATH`                | Base workspace path used by native tools and workspace-aware operations.                                                                                                                                                                                    | `CLERUM_WORKSPACE_PATH=/workspace`                                                                                                                                                                 |
-| `CLERUM_SHELL_TIMEOUT`                 | Maximum execution time in milliseconds for shell native-tool commands.                                                                                                                                                                                      | `CLERUM_SHELL_TIMEOUT=30000`                                                                                                                                                                       |
+| `CLERUM_SHELL_TIMEOUT`                 | Maximum execution time in milliseconds for shell native-tool commands.                                                                                                                                                                                      | `CLERUM_SHELL_TIMEOUT=600000`                                                                                                                                                                      |
 | `CLERUM_TOOL_TIMEOUT`                  | Maximum execution time in milliseconds for native tool wrapper calls. This is separate from the MCP SDK request timeout controlled by `CLERUM_MCP_TOOL_TIMEOUT_MS`.                                                                                         | `CLERUM_TOOL_TIMEOUT=660000`                                                                                                                                                                       |
 | `CLERUM_HTTP_ALLOWLIST`                | Comma-separated allowlist of outbound hosts/URLs allowed for HTTP native tools. With an allowlist set, you can also skip per-call approval by adding `tools: { http_request: false }` under `Host.spec.approval` (see Host CRD).                            | `CLERUM_HTTP_ALLOWLIST=api.github.com,example.com`                                                                                                                                                 |
 | `CLERUM_ENV_ALLOWLIST`                 | Comma-separated list of environment variables forwarded into native tool execution contexts.                                                                                                                                                                | `CLERUM_ENV_ALLOWLIST=PATH,HOME,USER,SHELL,LANG,TERM`                                                                                                                                              |
@@ -147,11 +147,7 @@ kubectl create secret generic mcp-host-keys \
   --from-literal=claude-api-key=sk-ant-xxx
 ```
 
-Or apply the example secret (edit with your keys first):
-
-```bash
-kubectl apply -f deploy/secret.yaml
-```
+The Secret name is what you reference from `Host.spec.secretRef`.
 
 ## Development
 
@@ -235,15 +231,18 @@ make build
    make docker-push
    ```
 
-4. Deploy:
-   ```bash
-   make deploy
-   ```
+4. That's it — there is no `make deploy`. mcp-host Deployments are never applied
+   by hand: host-context-controller reconciles the Host CRD and creates the
+   per-Host Deployment, ServiceAccount and Role (`host-<hostRef>-sa`,
+   `host-<hostRef>-config-reader`) for you.
 
 ### Undeploy
 
+Delete the Host CRD; host-context-controller tears down the per-Host workload it
+created.
+
 ```bash
-make undeploy
+kubectl delete host chatllm
 ```
 
 ## Architecture
@@ -293,6 +292,16 @@ Each runtime route is backed by an internal RPCServer callback (`onMessage`, `on
 | Read pending cron deliveries   | `GET /v1/runtime/cron/results`            | `onCronResults(handler)`         | Yes         |
 | Acknowledge cron delivery      | `DELETE /v1/runtime/cron/results/:taskId` | `onCronResultAck(handler)`       | Yes         |
 
+These routes are not directly callable by end users. Every route above except
+`GET /v1/runtime` and `GET /v1/runtime/health` is wrapped in `runtimeEdgeGuard`,
+which requires the `x-clerum-edge-caller` header (one of `rpc-proxy`,
+`channel-reader`, `workflow-approval-request-reader`), `x-clerum-edge-host-ref`
+matching this pod's own host (403 otherwise), and `x-clerum-edge-user-id` when
+the caller is `rpc-proxy`. A request carrying an `Authorization` header is
+rejected with 401 on these routes. In practice you reach mcp-host through
+rpc-proxy or channel-reader, which set those headers; the body below is what
+they forward.
+
 ### Canonical message request example
 
 ```json
@@ -319,4 +328,8 @@ The MCP Host requires the following permissions:
 
 Note: McpServer CRD access is handled by the `host-context-controller` service, so mcp-host does not need direct permissions for McpServer resources.
 
-These are configured in `deploy/rbac.yaml`.
+These are not granted by a static manifest. host-context-controller provisions a
+per-Host ServiceAccount (`host-<hostRef>-sa`) bound to a narrow Role
+(`host-<hostRef>-config-reader`) on every reconcile, scoped to exactly the Host
+CRD by name, its env ConfigMap/Secret, and the LLM Secret named by
+`spec.secretRef` — so one Host cannot read another Host's resources.

@@ -30,7 +30,8 @@
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                    Host Context Controller (HCC)                      │
-│  Port 8081 - Namespace: mcp-server                                   │
+│  Deployment: host-context-controller                                  │
+│  Port 8081 - Namespace: control-plane                                 │
 ├──────────────────────────────────────────────────────────────────────┤
 │  ┌────────────────────────────────────────────────────────────────┐  │
 │  │   Context Mapper (McpServerReconciler)                         │  │
@@ -39,21 +40,34 @@
 │  │   - NetworkPolicyReconciler (L0, L1, L2, L3)                   │  │
 │  │   - Discovery REST API                                         │  │
 │  └────────────────────────────────────────────────────────────────┘  │
-│                                                                       │
-│  ┌────────────────────────────────────────────────────────────────┐  │
-│  │   Workflow Recipe Controller (WRC)                             │  │
-│  │   - WorkflowRecipe CRDs                                        │  │
-│  │   - WorkflowRecipePolicy CRDs                                 │  │
-│  │   - Generates Deployments/StatefulSets/Services/etc           │  │
-│  │   - Does NOT expose MCP interface (pure CRD reconciler)       │  │
-│  └────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│              Workflow Recipe Controller (WRC)                         │
+│  Deployment: workflow-recipes                                         │
+│  Port 8082 - Namespace: control-plane                                 │
+├──────────────────────────────────────────────────────────────────────┤
+│  - WorkflowRecipe CRDs                                                │
+│  - WorkflowRecipePolicy CRDs                                          │
+│  - Generates Deployments/StatefulSets/Services/etc                    │
+│  - Also exposes MCP: StreamableHTTP on :8082/mcp/v1 (8 tools)         │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
+WRC is not a pure CRD reconciler: alongside the reconcile loop it starts a
+StreamableHTTP MCP server on the same port (`POST :8082/mcp/v1`) exposing
+`deploy_recipe`, `list_recipes`, `get_recipe_status`, `rollback_recipe`,
+`delete_recipe`, `validate_recipe`, `search_registry` and `list_policies`
+(`workflow-recipes/src/mcp/server.ts`, `workflow-recipes/src/mcp/tools.ts`).
+That MCP interface is *about* recipes; it does not make WRC the deployer of
+McpServer CRDs.
+
 **Separation of Concerns**:
 - **HCC/Context Mapper**: MCP services (McpServer CRDs)
-- **HCC/WRC**: Workloads from recipes (WorkflowRecipe CRDs)
-- **Both**: Run in the same process inside HCC
+- **WRC**: Workloads from recipes (WorkflowRecipe CRDs), plus an MCP interface
+  for managing those recipes
+- **Both**: Separate Deployments in the `control-plane` namespace, each with its
+  own image, ServiceAccount and Service (HCC on 8081, WRC on 8082)
 
 ---
 
@@ -80,9 +94,11 @@ Non-MCP services are workloads that:
 │                                                                    │
 │     ┌──────────────────────────────────────────────────────────┐   │
 │     │  IF workload.transport EXISTS →                          │   │
-│     │    - Create McpServer CRD                                 │   │
-│     │    - Context Mapper deploys it as MCP server              │   │
-│     │    - Register in MCP registry                             │   │
+│     │    - Create McpServer CRD                                │   │
+│     │    - stdio → managed: true; HCC owns the Deployment      │   │
+│     │    - sse/streamableHttp → managed: false; WRC owns the   │   │
+│     │      runtime, HCC only maps/registers it                 │   │
+│     │    - Register in MCP registry                            │   │
 │     └──────────────────────────────────────────────────────────┘   │
 │                                                                    │
 │     ┌──────────────────────────────────────────────────────────┐   │
@@ -92,15 +108,24 @@ Non-MCP services are workloads that:
 │     │    - Does NOT register in MCP registry                    │   │
 │     └──────────────────────────────────────────────────────────┘   │
 ├─────────────────────────────────────────────────────────────────────┤
-│  4. For ALL created resources (MCP and non-MCP):                   │
+│  4. NetworkPolicies:                                               │
 │                                                                    │
 │     ┌──────────────────────────────────────────────────────────┐   │
-│     │  HCC/NetworkPolicyReconciler applies policies:           │   │
-│     │  - L0: egress deny-all (baseline)                        │   │
-│     │  - L1: infrastructure allow (DNS, K8s API, HCC API)      │   │
-│     │  - L2: context-scoped allow (bidirectional)              │   │
-│     │  - L3: binding-scoped allow (ingress)                    │   │
-│     │  - L3-egress: egressBindings (external API access)       │   │
+│     │  HCC/NetworkPolicyReconciler applies the L0-L3 model:    │   │
+│     │  - L0: deny-all ingress + egress (per runtime namespace) │   │
+│     │  - L1: infrastructure egress — DNS for every pod in the  │   │
+│     │        namespace; HCC API and K8s API egress only for    │   │
+│     │        pods matching platform-owned selectors            │   │
+│     │  - L2: context-allow ingress per (context, McpServer)    │   │
+│     │        + egress counterparts in mcp-host / rpc-proxy     │   │
+│     │  - L3: external-egress per McpServer egressBindings      │   │
+│     └──────────────────────────────────────────────────────────┘   │
+│                                                                    │
+│     ┌──────────────────────────────────────────────────────────┐   │
+│     │  WRC builds its own per-workload policies for recipe     │   │
+│     │  workloads (buildWorkloadEgressNetworkPolicy /           │   │
+│     │  buildWorkloadIngressNetworkPolicy) from                 │   │
+│     │  workloads[].egressBindings.                             │   │
 │     └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -109,11 +134,14 @@ Non-MCP services are workloads that:
 
 | Layer | Validation | Mechanism |
 |-------|------------|-----------|
-| **L0** | Security baseline | NetworkPolicy deny-all egress |
-| **L1** | Functional infrastructure | Allow DNS (port 53), K8s API, HCC API |
-| **L2** | Context isolation | Only pods from same context can communicate |
-| **L3** | Controlled binding access | Only pods with binding can access the service |
-| **L3-egress** | Egress control | External API access via egressBindings |
+| **L0** | Security baseline | NetworkPolicy deny-all, both Ingress and Egress |
+| **L1** | Functional infrastructure | DNS egress (port 53) for every pod in the namespace. HCC-API and K8s-API egress are pod-selector-scoped, not namespace-wide: in `sandbox-recipes` HCC-API egress selects `clerum.io/component=workflow-mcp-host` and K8s-API egress selects `clerum.io/k8s-api-egress=true`, so a plain non-MCP workload gets DNS only (`networkPolicyReconciler.ts:132-156`) |
+| **L2** | Context isolation | Per (Context, McpServer) pair: ingress policy on the McpServer pod in `mcp-server`, **plus** egress counterparts in the `mcp-host` and `rpc-proxy` namespaces (without them L0 egress deny-all would block agents/rpc-proxy from reaching the server) |
+| **L3** | Egress control | External egress per McpServer `egressBindings` (CIDR or DNS) |
+
+Note: L2/L3 above are HCC's policies for **McpServer** pods. The NetworkPolicies
+for a recipe workload's `egressBindings` are built by **WRC** itself, in the
+workload's own namespace.
 
 **HCC does NOT validate**:
 - Correctness of Deployment/StatefulSet created by WRC
@@ -131,7 +159,7 @@ Non-MCP services are workloads that:
 
 ### 3.1 Specification (Phase 8 §4.8)
 
-**Status**: ✅ IMPLEMENTED (commit a6814f2)
+**Status**: ✅ IMPLEMENTED
 
 **Original Specification**:
 ```
@@ -141,26 +169,38 @@ Workloads without transport → sandbox-recipes namespace
 
 ### 3.2 Current Implementation (Phase 8)
 
-**Implementation commit**: `a6814f2` — "feat(phase-8): namespace splitting — non-MCP workloads to sandbox-recipes"
+Namespace splitting (non-MCP workloads to `sandbox-recipes`) is implemented in
+`workflow-recipes/src/reconciler/workflowRecipeReconciler.ts`:
 
 ```typescript
-// workloadRecipeReconciler.ts (line 72)
-private resolveWorkloadNamespace(workload: WorkloadDef): string {
-  return workload.transport ? this.config.namespace : this.config.sandboxNamespace;
+// workflow-recipes/src/reconciler/workflowRecipeReconciler.ts
+private resolveWorkloadNamespace(workload: WorkloadDef, uiWorkloadId?: string): string {
+  if (workload.transport) return this.config.namespace
+  if (uiWorkloadId && workload.id === uiWorkloadId) return this.config.sandboxUiNamespace
+  return this.config.sandboxNamespace
 }
 ```
 
-**Namespace Resolution Logic**:
+**Namespace Resolution Logic** (three-way split):
 - Workloads **WITH** `transport` → `this.config.namespace` (mcp-server) → MCP servers
-- Workloads **WITHOUT** `transport` → `this.config.sandboxNamespace` (sandbox-recipes) → non-MCP workloads
+- The workload referenced by `spec.ui.workloadRef` → `this.config.sandboxUiNamespace` (sandbox-ui) → UI workload
+- All other workloads → `this.config.sandboxNamespace` (sandbox-recipes) → non-MCP workloads
+
+The WorkflowRecipe CRDs themselves always live in `sandbox-recipes`.
 
 **Cross-namespace Resources**:
 ```typescript
-// workloadRecipeReconciler.ts (lines 84-92)
-private adjustManifestNamespace(manifest, targetNs) {
-  manifest.metadata.namespace = targetNs;
-  if (targetNs !== this.config.namespace && manifest.metadata.ownerReferences) {
-    delete manifest.metadata.ownerReferences; // ← Avoids cross-namespace GC issues
+// workflow-recipes/src/reconciler/workflowRecipeReconciler.ts
+private adjustManifestNamespace(manifest, targetNs: string, recipeNamespace: string): void {
+  if (manifest.metadata) {
+    manifest.metadata.namespace = targetNs
+    // Reference namespace is the CRD's own namespace (sandbox-recipes).
+    // Same-namespace ownerRefs are safe to keep; cross-namespace ones are
+    // stripped (K8s does not support cross-namespace GC) and cleanup falls
+    // back to label-based deletion in reconcileDelete.
+    if (targetNs !== recipeNamespace && manifest.metadata.ownerReferences) {
+      delete manifest.metadata.ownerReferences
+    }
   }
 }
 ```
@@ -189,21 +229,27 @@ private adjustManifestNamespace(manifest, targetNs) {
 ### 4.2 Long Answer
 
 **HCC deploys directly**:
-- ✅ MCP services (via Context Mapper + McpServer CRDs)
 - ✅ NetworkPolicies (via NetworkPolicyReconciler)
-- ✅ Services for MCP servers
-- ✅ StatefulSets/Deployments for MCP servers
+- ✅ Runtime (Deployment + Service) **only** for `managed: true` McpServers — i.e.
+  `stdio` transports, where HCC injects the stdio-bridge sidecar
+- ❌ NOT the runtime of `managed: false` McpServers (`sse`/`streamableHttp`): HCC
+  skips runtime creation/deletion for those and only maps/registers them
+  (`host-context-controller/src/reconciler.ts` → `reconcileWrcOwnedServer`)
 
 **WRC deploys directly**:
-- ✅ MCP services (via McpServer CRDs it creates)
+- ✅ McpServer CRDs for workloads with `transport` (`managed: isStdio` —
+  `workflow-recipes/src/reconciler/mcpDelegation.ts`)
+- ✅ The runtime for `sse`/`streamableHttp` MCP workloads (`managed: false`)
 - ✅ Non-MCP services (via direct Deployment/StatefulSet/Service)
 - ✅ ConfigMaps, Secrets associated with workloads
 
 **HCC validates** (post-deployment):
-- ✅ NetworkPolicies applied to all pods
-- ✅ Context isolation (L2)
-- ✅ Binding-controlled access (L3)
-- ✅ Egress controls (L3-egress)
+- ✅ Baseline NetworkPolicies (L0 deny-all + L1 infrastructure) in every runtime namespace
+- ✅ Context isolation for McpServer pods (L2)
+- ✅ External egress for McpServer `egressBindings` (L3)
+
+Egress controls for recipe workloads' `egressBindings` are WRC's own policies,
+not HCC's.
 
 ### 4.3 Complete Validation Flow
 
@@ -217,10 +263,12 @@ private adjustManifestNamespace(manifest, targetNs) {
 │     apiVersion: clerum.io/v1alpha1                                 │
 │     kind: WorkflowRecipe                                           │
 │     metadata:                                                      │
-│       namespace: mcp-server                                        │
+│       name: my-recipe                                              │
+│       namespace: sandbox-recipes  # ← recipes always live here     │
 │     spec:                                                          │
 │       workloads:                                                   │
-│         - name: web-frontend                                       │
+│         - id: web-frontend        # ← id + type + image required   │
+│           type: deployment                                         │
 │           image: nginx:1.30.1-alpine                               │
 │           # NO transport field → non-MCP workload                  │
 │     ```                                                            │
@@ -233,42 +281,48 @@ private adjustManifestNamespace(manifest, targetNs) {
 │       name: web-frontend                                           │
 │       namespace: sandbox-recipes  # ← non-MCP workloads go here    │
 │       labels:                                                      │
-│         clerum.io/workload: web-frontend                           │
+│         app: web-frontend                                          │
+│         clerum.io/managed-by: workflow-recipes                     │
 │         clerum.io/recipe: my-recipe                                │
-│         clerum.io/context: context1                                │
-│       # NOTE: no ownerReferences (cross-namespace GC)              │
+│         clerum.io/workload: web-frontend                           │
+│         # clerum.io/context is only stamped when the recipe        │
+│         # sets spec.contextRef                                     │
+│      # NOTE: the ownerReference to the WorkflowRecipe IS kept here │
+│      # (target ns == recipe ns). It is only stripped for children  │
+│      # placed in a different namespace, e.g. mcp-server.           │
 │     spec:                                                          │
 │       # ... deployment spec                                         │
 │     ```                                                            │
 │                                                                     │
-│  3. HCC/NetworkPolicyReconciler creates NetworkPolicies:           │
+│  3. HCC/NetworkPolicyReconciler creates the baseline policies:     │
 │     ```yaml                                                         │
-│     # L0: Egress deny-all (applied to all pods)                    │
+│     # L0: deny-all, ingress AND egress (one per runtime namespace) │
 │     apiVersion: networking.k8s.io/v1                               │
 │     kind: NetworkPolicy                                            │
 │     metadata:                                                      │
-│       name: l0-egress-deny                                         │
+│       name: deny-all-sandbox-recipes                               │
 │       namespace: sandbox-recipes                                   │
 │     spec:                                                          │
 │       podSelector: {}                                              │
 │       policyTypes:                                                  │
+│         - Ingress                                                  │
 │         - Egress                                                   │
 │                                                                     │
-│     # L2: Context-allow (bidirectional)                            │
-│     apiVersion: networking.k8s.io/v1                               │
-│     kind: NetworkPolicy                                            │
-│     metadata:                                                      │
-│       name: l2-context-context1-allow                              │
-│       namespace: sandbox-recipes                                   │
-│     spec:                                                          │
-│       podSelector:                                                  │
-│         matchLabels:                                                │
-│           clerum.io/context: context1                              │
-│       policyTypes: [Ingress, Egress]                               │
-│                                                                     │
-│     # L3: Binding-allow (if bindings[] specified)                  │
-│     # L3-egress: EgressBindings (if egressBindings[] specified)    │
+│     # L1: DNS egress for every pod in sandbox-recipes.             │
+│     # HCC-API egress is scoped to pods labelled                    │
+│     #   clerum.io/component=workflow-mcp-host, and K8s-API egress  │
+│     #   to pods labelled clerum.io/k8s-api-egress=true — so this   │
+│     #   plain web-frontend pod gets DNS egress only.               │
 │     ```                                                            │
+│                                                                     │
+│     HCC's L2 (context-allow) and L3 (external-egress) policies are │
+│     built for McpServer pods (L2 ingress in mcp-server, plus its   │
+│     egress counterparts in mcp-host and rpc-proxy), not for recipe │
+│     workloads in sandbox-recipes.                                  │
+│                                                                     │
+│  3b. WRC creates the per-workload policies for this workload from  │
+│     its `egressBindings[]` (buildWorkloadEgressNetworkPolicy /     │
+│     buildWorkloadIngressNetworkPolicy), in sandbox-recipes.        │
 │                                                                     │
 │  4. Final validation:                                              │
 │     ✅ Pod web-frontend Running                                     │
@@ -285,17 +339,18 @@ private adjustManifestNamespace(manifest, targetNs) {
 ### 5.1 Validated Understanding
 
 ✅ **Correct**:
-- WRC is a module INSIDE HCC (not separate operator)
+- WRC is a standalone Deployment (`workflow-recipes`, port 8082) in `control-plane`,
+  separate from HCC (`host-context-controller`, port 8081, same namespace)
 - WRC handles WorkflowRecipe CRDs
 - WRC generates Deployments/StatefulSets for non-MCP workloads
-- HCC validates via NetworkPolicyReconciler (L0-L3)
-- ✅ **Namespace splitting is IMPLEMENTED** (commit a6814f2)
+- HCC applies the L0-L3 NetworkPolicy model via NetworkPolicyReconciler
+- ✅ **Namespace splitting is IMPLEMENTED**
 
 ### 5.2 Gaps Identified
 
 | Gap | Severity | Status |
 |-----|-----------|--------|
-| **Namespace splitting** | 🟢 ZERO | ✅ IMPLEMENTED (commit a6814f2) |
+| **Namespace splitting** | 🟢 ZERO | ✅ IMPLEMENTED |
 | **Ready state validation** | 🟢 ZERO | K8s handles this correctly |
 | **Documentation** | 🟢 ZERO | ✅ Updated (Step 2 completed) |
 
@@ -303,14 +358,13 @@ private adjustManifestNamespace(manifest, targetNs) {
 
 1. ✅ **Documentation**: COMPLETED
    - Phase 8 §4.8 updated to "IMPLEMENTED"
-   - CLERUM-PLATFORM-ARCHITECTURE.md §8.2 updated
    - Implementation Status updated
-   - NetworkPolicy Layer Model updated
+   - NetworkPolicy Layer Model updated (see `docs/architecture/platform-topology.md`)
 
 2. ✅ **Code**: IMPLEMENTED
-   - Namespace splitting functional in workloadRecipeReconciler.ts
+   - Namespace splitting functional in workflow-recipes/src/reconciler/workflowRecipeReconciler.ts
    - Finalizer pattern implemented
-   - Cross-namespace L3 NetworkPolicies functional
+   - Per-workload egress/ingress NetworkPolicies (built by WRC) functional
 
 3. ✅ **Testing**: VALIDATED
    - E2E tests in operational-complex.test.ts
@@ -324,7 +378,11 @@ private adjustManifestNamespace(manifest, targetNs) {
 1. ✅ Validate understanding (this document)
 2. ✅ Adjust documentation per identified gaps
 3. ⏭️ Code changes if needed (currently no gaps identified)
-4. ⏭️ Continue with Phase 9 items (ValidatingAdmissionWebhook, per-context auth)
+4. ⏭️ Continue with Phase 9 items (per-context auth)
+   - Note: admission validation for WorkflowRecipe / WorkflowRecipePolicy is
+     already shipped as CEL `ValidatingAdmissionPolicy` objects
+     (`deploy/base/cluster-wide/workflowrecipe-admission.yaml`), not as a
+     webhook — no ValidatingAdmissionWebhook is pending for these CRDs.
 
 ---
 

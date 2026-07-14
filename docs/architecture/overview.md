@@ -44,7 +44,7 @@ evenfire is a Kubernetes-native platform for LLM orchestration with multi-channe
 - **Deny-by-default networking**: NetworkPolicies block all ingress to MCP servers; explicit allow rules are generated per Context
 - **Dual-mode operation**: Every service supports `CLERUM_DEV_MODE=true` for local development without a cluster
 - **Adapter pattern**: Channel communication is abstracted behind a common interface, making new channels easy to add
-- **Polling-based**: channel-reader polls channels on a configurable interval (default 30s); mcp-host polls host-context-controller for server changes (default 30s)
+- **Polling-based**: channel-reader polls channels on a configurable interval (default 2s); mcp-host polls host-context-controller for server changes (default 30s)
 
 ---
 
@@ -322,7 +322,7 @@ function isAllowedSender(sender: string, allowedSenders: Set<string>): boolean {
 4. Initialize channel adapters (connect to Telegram/IMAP/Slack)
 5. Enter polling loop
 
-**Main loop** (runs every `CLERUM_POLL_INTERVAL_SECONDS`, default 30):
+**Main loop** (runs every `CLERUM_POLL_INTERVAL_SECONDS`, default 2):
 
 ```typescript
 while (running) {
@@ -358,10 +358,10 @@ for each CommunicationChannel CRD:
 
 ### RPC Client (Communication with mcp-host)
 
-- HTTP POST to `{mcpHostUrl}/message`
+- HTTP POST to `{mcpHostUrl}/v1/runtime/messages` (with the `x-clerum-edge-*` caller headers required by mcp-host's runtime edge guard)
 - Payload: `OutgoingMessage` with hostRef, channelType, channelId, sender, content, timestamp, messageId, metadata
 - Response: `MessageResponse` with success, response text, model name, token usage
-- Health check on startup via `GET /health`
+- Health check on startup via `GET /v1/runtime/health`
 - Default URLs: `http://localhost:8080` (dev) / `http://mcp-host:8080` (production)
 
 ### Configuration
@@ -381,7 +381,7 @@ for each CommunicationChannel CRD:
 | `CLERUM_EMAIL_PASSWORD`        | No        | -             | IMAP password                            |
 | `CLERUM_EMAIL_SMTP_HOST`       | No        | `{IMAP_HOST}` | SMTP server                              |
 | `CLERUM_EMAIL_SMTP_PORT`       | No        | `587`         | SMTP port (TLS)                          |
-| `CLERUM_POLL_INTERVAL_SECONDS` | No        | `30`          | Seconds between polling cycles           |
+| `CLERUM_POLL_INTERVAL_SECONDS` | No        | `2`           | Seconds between polling cycles           |
 
 ### Dependencies
 
@@ -445,7 +445,7 @@ mcp-host/
 │   ├── main.ts                    # Entry point, startup/shutdown orchestration
 │   ├── config.ts                  # Configuration management
 │   ├── types.ts                   # Shared type definitions
-│   ├── server.ts                  # HTTP RPC server (4 endpoints)
+│   ├── server.ts                  # HTTP RPC server (`/v1/runtime/*` endpoints)
 │   ├── k8sClient.ts              # Host CRD watcher, Secret reader
 │   ├── contextMapperClient.ts    # HTTP client for host-context-controller
 │   ├── agent/
@@ -459,9 +459,11 @@ mcp-host/
 │   │   └── index.ts
 │   ├── llm/
 │   │   ├── index.ts              # LLM factory and provider interface
+│   │   ├── registryCore.ts       # PROVIDERS descriptor (openai, claude, zai, bailian)
+│   │   ├── registry.ts           # Provider factory dispatch
 │   │   ├── openai.ts             # OpenAI provider (gpt-5.4-mini default)
 │   │   ├── claude.ts             # Claude provider (claude-sonnet-4-6 default)
-│   │   └── zai.ts                # ZAI/z.ai provider (extends OpenAI, glm-5.1 default)
+│   │   └── openaiCompatible.ts   # OpenAI-compatible providers (zai, bailian) via baseURL
 │   └── mcp/
 │       ├── manager.ts            # MCP server manager (multi-client)
 │       ├── client.ts             # Single MCP server client
@@ -474,16 +476,21 @@ mcp-host/
 
 ### HTTP RPC API
 
-| Method | Path       | Description                                                 |
-| ------ | ---------- | ----------------------------------------------------------- |
-| `GET`  | `/`        | API information page                                        |
-| `GET`  | `/health`  | Health check (`{ status: "ok" }`)                           |
-| `POST` | `/message` | Submit a message for LLM processing                         |
-| `GET`  | `/status`  | Agent state, queue stats, cron job count, pending approvals |
-| `POST` | `/approve` | Approve a pending tool execution                            |
-| `POST` | `/deny`    | Deny a pending tool execution                               |
+All runtime routes are namespaced under `/v1/runtime/*`. Unmatched paths fall through to a catch-all 404.
 
-**POST /message** request:
+| Method | Path                             | Description                                                 |
+| ------ | -------------------------------- | ----------------------------------------------------------- |
+| `GET`  | `/v1/runtime`                    | API information page                                        |
+| `GET`  | `/v1/runtime/live`               | Liveness check (`{ status: "live" }`)                       |
+| `GET`  | `/v1/runtime/health`             | Readiness check (`{ status: "ok" }`, 503 when degraded)     |
+| `POST` | `/v1/runtime/messages`           | Submit a message for LLM processing                         |
+| `GET`  | `/v1/runtime/status`             | Agent state, queue stats, cron job count, pending approvals |
+| `POST` | `/v1/runtime/approvals/approve`  | Approve a pending tool execution                            |
+| `POST` | `/v1/runtime/approvals/deny`     | Deny a pending tool execution                               |
+
+Except for the three unauthenticated routes (`/v1/runtime`, `/v1/runtime/live`, `/v1/runtime/health`), these routes are wrapped in a runtime edge guard: callers must send `x-clerum-edge-caller` and `x-clerum-edge-host-ref` (plus `x-clerum-edge-user-id` when the caller is `rpc-proxy`), and the host-ref must match the pod's own `CLERUM_HOST_NAME` (403 otherwise). The accepted caller value is per route: `/v1/runtime/status` accepts only `rpc-proxy`; the approval routes accept `rpc-proxy` or `channel-reader`; `/v1/runtime/messages` also accepts `workflow-approval-request-reader`. An `Authorization` header is rejected with 401 on these routes.
+
+**POST /v1/runtime/messages** request:
 
 ```json
 {
@@ -498,7 +505,7 @@ mcp-host/
 }
 ```
 
-**POST /message** response:
+**POST /v1/runtime/messages** response:
 
 ```json
 {
@@ -564,7 +571,7 @@ Processes tasks one at a time from the queue. Supports multi-turn LLM tool calli
 
 ### LLM Providers
 
-All three providers implement the same `LLMProvider` interface:
+All four providers implement the same `LLMProvider` interface:
 
 ```typescript
 interface LLMProvider {
@@ -576,7 +583,7 @@ interface LLMProvider {
     model?: string
   ): Promise<ChatResponse>
   chatStream(messages: ChatMessage[], model?: string): AsyncGenerator<string>
-  getProviderType(): 'openai' | 'claude' | 'zai'
+  getProviderType(): 'openai' | 'claude' | 'zai' | 'bailian'
 }
 ```
 
@@ -604,9 +611,16 @@ interface LLMProvider {
 - Tool format: OpenAI function calling schema (identical to OpenAI provider)
 - Tool responses: `role: "tool"` messages (identical to OpenAI provider)
 - System message: included in messages array (identical to OpenAI provider)
-- Implementation: extends `OpenAIProvider`, only overrides client configuration
+- Implementation: data-driven `openaiCompatible.ts` provider, configured from the `PROVIDERS` descriptor in `registryCore.ts` (only the client `baseURL` differs)
 
-**Provider selection**: Auto-detected from available API key, or set explicitly via `CLERUM_MODEL_PROVIDER`.
+#### Bailian Provider (Alibaba DashScope)
+
+- SDK: `openai` v4.70.0 (OpenAI-compatible, `baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"`)
+- Default model: `qwen3-coder-plus`
+- API key: `BAILIAN_API_KEY` / Secret key `bailian-api-key`
+- Implementation: same data-driven `openaiCompatible.ts` provider as ZAI
+
+**Provider selection**: Auto-detected from available API key (priority order: openai, claude, zai, bailian), or set explicitly via `CLERUM_MODEL_PROVIDER`.
 
 ### MCP Integration
 
@@ -691,11 +705,12 @@ The HTTP response is held open until the agent finishes processing. The response
 | `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                     |
 | `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL           |
 | `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                   |
-| `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, or `"zai"`   |
+| `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, `"zai"`, or `"bailian"` |
 | `CLERUM_MODEL_NAME`                   | provider default | Specific model name                  |
 | `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                |
 | `CLAUDE_API_KEY`                      | -                | Claude key (dev mode)                |
 | `ZAI_API_KEY`                         | -                | ZAI/z.ai key (dev mode)              |
+| `BAILIAN_API_KEY`                     | -                | Bailian/DashScope key (dev mode)     |
 | `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)          |
 | `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)     |
 | `CLERUM_AGENT_TASK_DELAY`             | `100`            | Delay between tasks (ms)             |
@@ -750,7 +765,7 @@ When an McpServer CRD is created or modified:
 1. **Secret validation**: If `envSecret` is configured, verify the referenced K8s Secret exists and contains all required keys. If validation fails, deployment is skipped.
 
 2. **Deployment creation**: Builds a Deployment manifest with:
-   - Labels: `app=<name>`, `clerum.io/managed-by=skill-mapper`, `clerum.io/mcpserver=<name>`
+   - Labels: `app=<name>`, `clerum.io/managed-by=host-context-controller`, `clerum.io/mcpserver=<name>`
    - 1 replica
    - Environment variables from `envMapping` + `env` + `envSecret`
    - TCP liveness probe (initial delay 10s, period 15s) and readiness probe (initial delay 5s, period 10s)
@@ -769,7 +784,7 @@ When an McpServer CRD is created or modified:
 
 6. **Status conditions** (G11): After reconciliation, HCC patches McpServer CRD status with `NetworkReady` and `DeploymentReady` conditions for reactive watches.
 
-7. **Orphan cleanup**: On startup, full reconciliation deletes any Deployments with `clerum.io/managed-by=skill-mapper` that no longer have a corresponding McpServer CRD.
+7. **Orphan cleanup**: On startup, full reconciliation deletes any Deployments with `clerum.io/managed-by=host-context-controller` that no longer have a corresponding McpServer CRD.
 
 ### NetworkPolicy Reconciliation (NetworkPolicyReconciler)
 
@@ -787,7 +802,7 @@ HCC reconciles NetworkPolicies in two modes:
 - `allow-hcc-api-egress-<ns>` (only the namespace's platform helper pods → HCC REST API; for example `mcp-proxy`, `rpc-proxy`, or workflow mcp-host pods)
 - `allow-k8s-api-egress-<ns>` (K8s API server on 443; created with an explicit opt-in pod selector `clerum.io/k8s-api-egress=true`, so ordinary runtime workloads do not receive API-server egress by default. The CIDR comes from `process.env.KUBERNETES_SERVICE_HOST` injected into HCC's own pod.)
 
-**In production, `CONTEXT_MAPPER_RUNTIME_NAMESPACES` is explicitly set to `mcp-server,sandbox-recipes,rpc-proxy` (3 namespaces, NOT the 4-namespace `config.ts` default).** The `mcp-host` namespace is intentionally excluded: HCC's deny-all would block mcp-host pods from reaching LLM APIs. See the NetworkPolicy section in `docs/deploy/gcp.md`. mcp-host's NetworkPolicies are statically declared in `deploy/base/mcp-host/networkpolicies.yaml` instead.
+**In production, `CONTEXT_MAPPER_RUNTIME_NAMESPACES` is explicitly set to `mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui` (NOT the `config.ts` default, which is `mcp-server,mcp-host,sandbox-recipes,rpc-proxy` — it includes `mcp-host` and omits `sandbox-ui`). `sandbox-ui` is additionally listed in `CONTEXT_MAPPER_MINIMAL_INFRA_NAMESPACES`, so it receives only deny-all + DNS egress.** The `mcp-host` namespace is intentionally excluded: HCC's deny-all would block mcp-host pods from reaching LLM APIs. See the NetworkPolicy section in `docs/deploy/gcp.md`. mcp-host's NetworkPolicies are statically declared in `deploy/base/mcp-host/networkpolicies.yaml` instead.
 
 HCC does NOT reconcile its own namespace (`control-plane`) either; control-plane policies are statically declared in `deploy/base/control-plane/networkpolicies.yaml` and patched per overlay for the cluster-specific K8s API IP.
 
@@ -807,18 +822,16 @@ Plus two singleton policies created once at startup: `allow-host-context-control
 
 None of these HCC-managed policies should be declared in `deploy/base/` — doing so creates drift between git and runtime state.
 
-#### 1. Default-Deny (created once at startup)
+#### 1. Default-Deny (one per runtime namespace, created at startup)
 
 ```yaml
-name: deny-all-mcp-servers
-podSelector:
-  matchLabels:
-    clerum.io/managed-by: skill-mapper
-policyTypes: ['Ingress']
-ingress: [] # No rules = deny all
+name: deny-all-<ns> # e.g. deny-all-mcp-server
+podSelector: {} # All pods in the namespace
+policyTypes: ['Ingress', 'Egress']
+# No ingress/egress rules = deny all traffic in both directions
 ```
 
-Blocks all ingress to any pod managed by host-context-controller.
+Blocks all ingress and egress for every pod in each runtime namespace.
 
 #### 2. Allow host-context-controller API (created once at startup)
 
@@ -1040,22 +1053,23 @@ For comprehensive testing documentation, see [mcp-servers/README.md §Testing](.
 
 ### Namespace Layout & NetworkPolicy Strategy
 
-> **[Open in Excalidraw](https://link.excalidraw.com/l/7VPzoB0Tohx/3YpKQJgCG6o)** - Interactive diagram showing the three-layer NetworkPolicy model: default deny, API allow, and per-context allow rules.
+> **[Open in Excalidraw](https://link.excalidraw.com/l/7VPzoB0Tohx/3YpKQJgCG6o)** - Interactive diagram showing the layered NetworkPolicy model: default deny, API allow, and per-context allow rules.
 
-**Three namespaces** with strict isolation:
+`deploy/base/namespaces.yaml` declares ten namespaces: `channels`, `control-plane`, `mcp-host`, `mcp-server`, `profiles`, `rpc-proxy`, `sandbox-recipes`, `sandbox-ui`, `webhook-ingress`, `gfs`. The core four for the message path are:
 
 - `channels` - channel-reader (no inbound traffic needed)
 - `mcp-host` - mcp-host service (receives HTTP from channel-reader)
 - `control-plane` - host-context-controller
 - `mcp-server` - all MCP server pods + McpServer/Context CRDs (deny-by-default networking)
 
-**Three policy layers**:
+**Four policy layers** (L0-L3, as reconciled by HCC):
 
-| Layer            | Policy Name                         | Effect                                                             |
-| ---------------- | ----------------------------------- | ------------------------------------------------------------------ |
-| 1. Default Deny  | `deny-all-mcp-servers`              | Block ALL ingress to pods with `clerum.io/managed-by=skill-mapper` |
-| 2. Allow API     | `allow-host-context-controller-api` | Allow `ns:mcp-host` -> `host-context-controller:8081`              |
-| 3. Context Allow | `ctx-{contextId}-{serverName}`      | Allow `ns:mcp-host` -> specific MCP server pod on transport port   |
+| Layer                  | Policy Name                                       | Effect                                                                          |
+| ---------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------- |
+| L0. Default Deny       | `deny-all-<ns>`                                   | Block ALL ingress + egress for every pod in each runtime namespace              |
+| L1. Infrastructure     | `allow-dns-egress-<ns>`, `allow-hcc-api-egress-<ns>`, `allow-k8s-api-egress-<ns>`, `allow-host-context-controller-api` | DNS, HCC REST API and K8s API egress; ingress `ns:mcp-host` -> `host-context-controller:8081` |
+| L2. Context Allow      | `ctx-{contextId}-{serverName}`                    | Allow `ns:mcp-host` -> specific MCP server pod on transport port                |
+| L3. External Egress    | per McpServer with `egressBindings`               | Allow a specific MCP server pod to reach declared external destinations         |
 
 This ensures that:
 
@@ -1090,7 +1104,7 @@ Complete flow of a user message from Telegram through to an LLM-generated respon
 | ---- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1    | **User**           | Sends "What users are in the database?" on Telegram                                                                                                                                                                                             |
 | 2    | **channel-reader** | grammY bot buffers message, poll cycle drains it, sender checked against CommunicationChannel CRD allowlist, message normalized to unified `Message` interface                                                                                  |
-| 3    | **channel-reader** | HTTP POST to `mcp-host:8080/message` with content, channelType, sender, hostRef                                                                                                                                                                 |
+| 3    | **channel-reader** | HTTP POST to `mcp-host:8080/v1/runtime/messages` (with `x-clerum-edge-*` headers) with content, channelType, sender, hostRef                                                                                                                                                                 |
 | 4    | **mcp-host**       | Creates Task with conversation history, stores response callback, enqueues to MessageQueue (priority: normal)                                                                                                                                   |
 | 5    | **mcp-host**       | Agent dequeues task (idle -> processing), builds system prompt with MCP server capabilities, calls LLM with messages + tool definitions                                                                                                         |
 | 6    | **LLM + MCP**      | LLM requests `mongodb-server__find_documents({ collection: "users" })`. Agent parses tool name, MCP Client calls MongoDB server via StreamableHTTP. Tool result added to history. LLM called again with results. Generates final text response. |
@@ -1110,7 +1124,7 @@ Every service supports `CLERUM_DEV_MODE=true` for local development without a Ku
 | **Configuration source**  | Environment variables / JSON strings                         | Kubernetes CRDs                                |
 | **K8s access**            | Not required                                                 | In-cluster or kubeconfig                       |
 | **CRD watching**          | Disabled (static config)                                     | Active watchers with auto-restart              |
-| **Secret management**     | Env vars (`OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY`) | K8s Secrets referenced by CRDs                 |
+| **Secret management**     | Env vars (`OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY`, `BAILIAN_API_KEY`) | K8s Secrets referenced by CRDs               |
 | **MCP server discovery**  | `CLERUM_MCP_SERVERS` JSON env var                            | Polls host-context-controller REST API         |
 | **MCP server deployment** | Manual (run locally or docker)                               | Automatic via host-context-controller operator |
 | **NetworkPolicies**       | Not created                                                  | Automatically managed                          |
@@ -1145,7 +1159,7 @@ npm run dev
 
 ### Helm Chart: clerum-crds
 
-Installs the six CRDs. Must be installed before deploying any services.
+Installs the eight CRDs. Must be installed before deploying any services.
 
 ```bash
 helm install clerum-crds ./charts/clerum-crds
@@ -1155,10 +1169,13 @@ The chart contains:
 
 - `crds/communicationchannel.yaml`
 - `crds/context.yaml`
+- `crds/globalfilesystem.yaml`
 - `crds/host.yaml`
 - `crds/mcpserver.yaml`
+- `crds/sharedfilesystem.yaml`
 - `crds/workflowrecipe.yaml`
 - `crds/workflowrecipepolicy.yaml`
+- `crds/wrc-trigger-rbac.yaml` (not a CRD — ServiceAccount + Role + RoleBinding for WRC triggers)
 - Example resources in `examples/`
 
 ### Docker Images
@@ -1269,7 +1286,7 @@ Host CRD (spec.approval)
 **Resolution order**:
 
 1. No config provided -> cli_only (safest default)
-2. Policy is `cli_only` -> only HTTP `/approve` and `/deny` endpoints work
+2. Policy is `cli_only` -> only the HTTP `/v1/runtime/approvals/approve` and `/v1/runtime/approvals/deny` endpoints work
 3. Channel type disabled -> block all users in that channel
 4. Policy is `channel_users` -> any authorized channel user can approve
 5. Policy is `designated_approvers` -> only users in `approvers[]` can approve
@@ -1295,14 +1312,16 @@ Host CRD (spec.approval)
 
 ### HTTP Endpoints
 
-| Method | Path               | Description                                                             |
-| ------ | ------------------ | ----------------------------------------------------------------------- |
-| `POST` | `/approve`         | Approve a pending tool execution                                        |
-| `POST` | `/deny`            | Deny a pending tool execution                                           |
-| `GET`  | `/task/:id/result` | Poll for final result after channel-based approval (two-phase response) |
-| `GET`  | `/status`          | Includes `pendingApprovals` array                                       |
+| Method | Path                             | Description                                                             |
+| ------ | -------------------------------- | ----------------------------------------------------------------------- |
+| `POST` | `/v1/runtime/approvals/approve`  | Approve a pending tool execution                                        |
+| `POST` | `/v1/runtime/approvals/deny`     | Deny a pending tool execution                                           |
+| `GET`  | `/v1/runtime/tasks/:taskId/result` | Poll for final result after channel-based approval (two-phase response) |
+| `GET`  | `/v1/runtime/status`             | Includes `pendingApprovals` array                                       |
 
-**POST /approve request**:
+All four require the `x-clerum-edge-*` caller headers (see [HTTP RPC API](#http-rpc-api)).
+
+**POST /v1/runtime/approvals/approve request**:
 
 ```json
 {
@@ -1314,7 +1333,7 @@ Host CRD (spec.approval)
 }
 ```
 
-**POST /deny request**:
+**POST /v1/runtime/approvals/deny request**:
 
 ```json
 {
@@ -1325,7 +1344,7 @@ Host CRD (spec.approval)
 }
 ```
 
-**GET /status response** (when approval pending):
+**GET /v1/runtime/status response** (when approval pending):
 
 ```json
 {
@@ -1373,7 +1392,7 @@ The approval flow happens entirely within the user's communication channel (Tele
 User (Telegram)          channel-reader              mcp-host
      |                        |                         |
      |-- "query data" ------->|                         |
-     |                        |-- POST /message ------->|
+     |                        |-- POST /v1/runtime/messages -->|
      |                        |                         |-- LLM decides tool call
      |                        |                         |-- tool needs approval
      |                        |                         |-- emits tool:approval_needed
@@ -1387,18 +1406,20 @@ User (Telegram)          channel-reader              mcp-host
      |    /approve or /deny"  |                         |
      |                        |                         |
      |-- "/approve" --------->|                         |
-     |                        |-- POST /approve ------->|
+     |                        |-- POST /v1/runtime/approvals/approve -->|
      |                        |<-- { success: true } ---|
      |<-- "Approved." --------|                         |-- resumes agent loop
      |                        |                         |-- tool executes
      |                        |                         |-- stores result in pendingTaskResults
-     |                        |-- GET /task/:id/result->|
+     |                        |-- GET /v1/runtime/tasks/:taskId/result -->|
      |                        |<-- { status: completed, |
      |                        |     response: "..." } --|
      |<-- final response -----|                         |
 ```
 
-**CLI fallback**: Direct `POST /approve` and `POST /deny` to mcp-host still works for scripts and admin UIs.
+All three calls carry the `x-clerum-edge-*` caller headers (`x-clerum-edge-caller: channel-reader`, `x-clerum-edge-host-ref: <host>`).
+
+**CLI fallback**: Direct `POST /v1/runtime/approvals/approve` and `POST /v1/runtime/approvals/deny` to mcp-host still works for scripts and admin UIs, provided the caller supplies the same `x-clerum-edge-*` headers.
 
 ### Per-Server Auto-Approval
 
@@ -1455,9 +1476,18 @@ Then in Telegram:
 
 **Option 2: CLI-based approval (for scripts/debugging)**
 
+Every `/v1/runtime/*` route below is behind the runtime edge guard, so each call must
+carry the edge headers: `x-clerum-edge-caller` (one of `rpc-proxy`, `channel-reader`,
+`workflow-approval-request-reader`), `x-clerum-edge-host-ref` (must match the running
+host's `CLERUM_HOST_NAME`), and — when the caller is `rpc-proxy` — `x-clerum-edge-user-id`.
+There is no dev-mode bypass; without them the guard returns `401`. An `Authorization`
+header on these routes is also rejected with `401`.
+
 ```bash
+EDGE=(-H "x-clerum-edge-caller: rpc-proxy" -H "x-clerum-edge-host-ref: chatllm" -H "x-clerum-edge-user-id: 123")
+
 # Send a message that triggers a tool
-curl -X POST http://localhost:8080/v1/runtime/messages -H "Content-Type: application/json" -d '{
+curl -X POST http://localhost:8080/v1/runtime/messages "${EDGE[@]}" -H "Content-Type: application/json" -d '{
   "content": "List files in /tmp",
   "channelType": "telegram",
   "channelId": "test",
@@ -1468,10 +1498,10 @@ curl -X POST http://localhost:8080/v1/runtime/messages -H "Content-Type: applica
 }'
 
 # Check pending approvals
-curl http://localhost:8080/v1/runtime/status | jq '.pendingApprovals'
+curl http://localhost:8080/v1/runtime/status "${EDGE[@]}" | jq '.pendingApprovals'
 
 # Approve
-curl -X POST http://localhost:8080/v1/runtime/approvals/approve -H "Content-Type: application/json" -d '{
+curl -X POST http://localhost:8080/v1/runtime/approvals/approve "${EDGE[@]}" -H "Content-Type: application/json" -d '{
   "userId": "123",
   "requestId": "<from status response>",
   "alwaysApprove": false

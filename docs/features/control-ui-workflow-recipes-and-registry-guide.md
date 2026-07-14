@@ -91,15 +91,18 @@ Key fields:
 | `trust_level`, `quality_tier`, `origin` | Catalog trust and curation metadata. |
 | `downloads`, `installs` | Registry usage counters. |
 
-Registry entries do not run by themselves. Install creates cluster resources and stamps them with catalog labels:
+Registry entries do not run by themselves. Install creates cluster resources and stamps them with catalog metadata:
 
 ```yaml
-clerum.io/catalog-id: <entry-name>
-clerum.io/catalog-version: <entry-version>
-clerum.io/managed-by: control-api
+metadata:
+  labels:
+    clerum.io/managed-by: control-api
+  annotations:
+    clerum.io/catalog-id: <entry-name>
+    clerum.io/catalog-version: <entry-version>
 ```
 
-Control UI uses those labels to decide whether a catalog entry is already installed.
+Only `clerum.io/managed-by` is a label. `clerum.io/catalog-id` and `clerum.io/catalog-version` are **annotations**, because org-scoped entry names contain `@` and `/`, which are illegal label values. Installed detection reads the annotations first and falls back to the legacy labels for resources installed before that change. A `kubectl get workflowrecipes -l clerum.io/catalog-id=<entry>` selector will therefore return nothing.
 
 ## 3. Current Control UI Surfaces
 
@@ -133,7 +136,9 @@ Each row opens:
 /workflow-recipes/:namespace/:name
 ```
 
-The list currently has an **Install Recipe** button, but that button opens `RecipeEditor`, not the registry. This is one reason the UX feels split: "install" means "paste JSON and create a CRD" here, while "install" in Registry means "install a catalog version."
+Note on naming: Control UI already presents this section as **Plugins** in the sidebar, and the Registry section as **Marketplace**. This document uses the code-level names (Workflow Recipes, Registry) for the underlying concepts; the UI labels are called out where you have to click them.
+
+The list currently has an **Install Plugin** button, but that button opens `RecipeEditor`, not the registry. This is one reason the UX feels split: "install" means "paste JSON and create a CRD" here, while "install" in Marketplace means "install a catalog version."
 
 ### 3.2 Workflow Recipe Detail
 
@@ -162,7 +167,9 @@ Tabs include:
 | Conditions | CRD conditions from the reconciler. |
 | Secrets | Recipe-scoped secret management. |
 | Integrations | Background OAuth clients from `spec.oauthClients`. |
-| Users | Workflow trigger grants. |
+| Members | Workflow trigger grants for individual users. |
+| Teams | Workflow trigger grants for teams. |
+| Approval targets | Teams that can be targeted by `step.requiresApproval`. |
 
 This is the page Desktop App behavior depends on indirectly. If a recipe does not declare a user on-demand trigger or has no authorized users, it may be live in Control UI but not practically usable by end users.
 
@@ -185,16 +192,16 @@ The editor is a JSON-first create/update flow. It supports:
 - Per-step human approval gating editor for `step.requiresApproval`.
 - Workflow trigger grants through `GrantsPanel`.
 
-The effective create flow is:
+The editor is a four-step wizard: **Manifest**, **Review**, **Defaults**, **Access & deploy**. The effective create flow is:
 
-1. Operator pastes JSON or loads a template.
-2. Operator clicks **Validate**.
-3. Client validation checks parse, shape, limits, secret hygiene, template refs, and some security rules.
-4. Editor detects referenced secrets from snippet capabilities and workload `envSecret`.
-5. Operator may enter secret values. Values are written as Kubernetes Secrets, not copied into the recipe JSON.
-6. Operator may apply defaults.
+1. Operator pastes JSON or loads a template (Manifest step).
+2. Operator clicks **Review manifest**.
+3. Client validation checks parse, shape, limits, secret hygiene, template refs, and some security rules; the Review step also shows egress findings.
+4. Operator clicks **Apply defaults** and may adjust the operator defaults panel.
+5. Operator clicks **Continue to access**.
+6. On the Access & deploy step, the editor shows secrets detected from snippet capabilities and workload `envSecret`. Operator may enter values. Values are written as Kubernetes Secrets, not copied into the recipe JSON.
 7. Operator selects authorized users.
-8. Operator clicks **Deploy Recipe**.
+8. Operator clicks **Deploy plugin** (**Update plugin** when editing an existing recipe).
 9. Editor runs server validation.
 10. Editor creates or updates the WorkflowRecipe.
 11. On create, editor saves workflow grants after the CRD exists.
@@ -218,7 +225,7 @@ control-ui/components/RegistryCatalog.tsx
 The registry catalog is embedded in the dashboard tab and supports:
 
 - Search.
-- Type filtering: all, MCP servers, Workflow Recipes.
+- Type filtering: all, **Connectors** (`mcp-server`), **Plugins** (`recipe`).
 - Category filtering.
 - Mode filtering: local, remote, workflow, only-workloads.
 - Installed detection.
@@ -228,19 +235,18 @@ The registry catalog is embedded in the dashboard tab and supports:
 - Remove catalog version.
 - Publish new entry.
 
-The catalog reads:
+The catalog makes a single aggregate call:
 
 ```ts
-GET /api/v1/admin/registry/entries
-GET /api/v1/admin/registry/categories
-GET /api/v1/admin/mcp-servers
-GET /api/v1/admin/recipes
+GET /api/v1/admin/registry/catalog
 ```
+
+Control API fans that out server-side to `searchEntries`, `getCategories`, and `getInstalledRegistryState`, and returns `data`, `categories`, and `installed.{catalogKeys,serverNames,recipeKeys}` in one response.
 
 Installed detection differs by entry type:
 
-- MCP servers match either catalog labels or `metadata.name`.
-- Recipes match catalog labels on live WorkflowRecipe CRDs.
+- MCP servers match either catalog annotations (label fallback) or `metadata.name`.
+- Recipes match catalog annotations (label fallback) on live WorkflowRecipe CRDs.
 
 ### 3.5 Registry Detail
 
@@ -259,19 +265,17 @@ The detail page shows:
 - Source repo URL extracted from `clerum.io/source-repo` annotation.
 - Expandable recipe YAML.
 
-For recipe entries, the install button currently routes through a legacy deep link:
+For recipe entries, the Install button does **not** route anywhere. `handleInstall()` branches on `entry.entry_type`: for `recipe` it calls `installRecipeFromRegistry(...)` immediately and then pushes straight to `/workflow-recipes/sandbox-recipes/<created-recipe-name>`. Only the `mcp-server` branch pushes to `/registry/install?entry=<entry>&version=<version>`.
+
+The Marketplace catalog card behaves the same way: its recipe Install button calls `handleInstallRecipe` -> `installRecipeFromRegistry` directly, while its MCP-server Install button navigates to `/registry/install`.
+
+So there is no validation/egress preview step for recipe installs from either surface. The `/registry/install` recipe preview described in §3.6 is reachable only through the legacy deep link:
 
 ```text
 /workflow-recipes?registry=<entry>&version=<version>
 ```
 
-`/workflow-recipes` immediately redirects that link to:
-
-```text
-/registry/install?entry=<entry>&version=<version>
-```
-
-A unified UI should remove or hide this historical detour.
+which `/workflow-recipes` redirects to `/registry/install?entry=<entry>&version=<version>`. A unified UI should decide whether that preview becomes the default path for recipe installs, or is removed.
 
 ### 3.6 Registry Install
 
@@ -397,6 +401,7 @@ Important endpoints:
 
 | Method | Route | Purpose |
 |---|---|---|
+| `GET` | `/api/v1/admin/registry/catalog` | Catalog plus installed state in one response. Used by `RegistryCatalog.tsx`. |
 | `GET` | `/api/v1/admin/registry/entries` | Search catalog. |
 | `POST` | `/api/v1/admin/registry/entries` | Publish entry. |
 | `GET` | `/api/v1/admin/registry/entries/:name/versions/:version` | Read version. |
@@ -419,7 +424,7 @@ Important endpoints:
 8. Uses `parsed.spec` when present, or the parsed object as spec for legacy payloads.
 9. Validates recipe limits.
 10. Optionally merges `inputValues` into `inputContract.properties[*].default`.
-11. Creates the WorkflowRecipe CRD with catalog labels.
+11. Creates the WorkflowRecipe CRD with the `clerum.io/managed-by: control-api` label and the `clerum.io/catalog-id` / `clerum.io/catalog-version` annotations.
 12. Reports install back to registry asynchronously.
 
 One difference from direct Recipe Editor creation: `install-recipe` does not currently run the full `validateRecipeBody` path from `admin/recipes.ts`. The browser preview and CRD/admission/reconciler still protect the install, but a unified system should consider whether registry recipe install should reuse the same validation path as direct create.
@@ -458,7 +463,7 @@ spec:
 
 If `allowedActors` is absent, Desktop App treats it as triggerable once `onDemand` exists. If `allowedActors` exists and does not contain `user`, the UI disables trigger.
 
-Separate from `spec.triggers`, Control API grants decide which users can see or trigger a workflow. Control UI stores those through the Users/Grants panel.
+Separate from `spec.triggers`, Control API grants decide which users can see or trigger a workflow. Control UI stores those through the Members/Teams grants panel.
 
 ### 5.2 Apps / Sandbox UI Page
 
@@ -522,7 +527,7 @@ spec:
     isolationLevel: minimal
 ```
 
-Control UI's editor expects JSON today, so convert the YAML to JSON before using **Workflow Recipes -> Install Recipe**, or install from Registry if the entry is published as YAML.
+Control UI's editor expects JSON today, so convert the YAML to JSON before using **Plugins -> Install Plugin**, or install from Marketplace if the entry is published as YAML.
 
 ### 6.2 Add Inputs
 
@@ -638,15 +643,28 @@ Use `dependsOn` when startup ordering matters:
   dependsOn: [postgres]
 ```
 
-Use template references for sibling service discovery:
+Use template references for sibling service discovery. Template refs resolve against workload `host`/`port` fields, `spec.resources[]` data, `inputs.*`, and `computed.*` — a Secret key is **not** addressable this way. Keep the credential in `envSecret` and let the workload assemble the connection string:
 
 ```yaml
 env:
-  - name: DATABASE_URL
-    value: "postgres://app:{{app-db:password}}@{{postgres:host}}:{{postgres:port}}/app"
+  - name: PGHOST
+    value: "{{postgres:host}}"
+  - name: PGPORT
+    value: "{{postgres:port}}"
+  - name: PGDATABASE
+    value: app
+  - name: PGUSER
+    value: app
+envSecret:
+  name: app-db
+  keys:
+    - secretKey: password
+      envVar: PGPASSWORD
 ```
 
-Be careful with credentials in templates. Inline sensitive values are rejected or flagged. Prefer `envSecret` or snippet secret capabilities.
+Do not inline a credential into an env value. An env value such as `postgres://app:<password>@host:5432/app` is **rejected** by Control API on both create and validate (rule `workflowInlineSecretEnv`, field `spec.workloads[i].env[j].value`), producing a 422 — it is an error, not a warning. Use `envSecret` or snippet secret capabilities instead.
+
+If the workload really needs a single pre-assembled URL, compose the non-secret part in `spec.computed` and inject the password separately through `envSecret`.
 
 ### 6.5 Expose an MCP Server
 
@@ -860,29 +878,28 @@ Desktop App and Control UI can list and download run artifacts from the workflow
 Direct recipe authoring path:
 
 1. Open Control UI.
-2. Go to **Workflow Recipes**.
-3. Click **Install Recipe**.
+2. Go to **Plugins**.
+3. Click **Install Plugin**.
 4. Paste JSON.
-5. Click **Validate**.
-6. Resolve errors and review warnings.
-7. Fill detected secret values, or leave empty to use existing secrets.
-8. Optionally click **Apply Operator Defaults**.
-9. Add authorized users in the grants panel.
-10. Click **Deploy Recipe**.
-11. Open the recipe detail page.
-12. Check Conditions, Workloads, Secrets, Integrations, Users, and Runs.
+5. Click **Review manifest**.
+6. Resolve errors and review warnings and egress findings.
+7. Click **Apply defaults**, adjusting the operator defaults panel if needed.
+8. Click **Continue to access**.
+9. Fill detected secret values, or leave empty to use existing secrets.
+10. Add authorized users in the grants panel.
+11. Click **Deploy plugin**.
+12. Open the recipe detail page.
+13. Check Conditions, Workloads, Secrets, Integrations, Members, Teams, Approval targets, and Runs.
 
 Registry path:
 
-1. Go to **Registry**.
-2. Filter type to **Workflow Recipes**.
-3. Open a recipe entry.
+1. Go to **Marketplace**.
+2. Filter type to **Plugins**.
+3. Open a plugin entry.
 4. Review description, images, source repo, trust, and YAML.
-5. Click **Install**.
-6. Review validation and external egress.
-7. Click **Install recipe**.
-8. Control UI navigates to the live recipe detail page.
-9. Configure secrets, integrations, and authorized users there.
+5. Click **Install**. The install happens immediately — there is no validation or egress preview step on this path.
+6. Control UI navigates to the live recipe detail page.
+7. Configure secrets, integrations, and authorized users there.
 
 ### 6.14 Verify With kubectl
 
@@ -940,9 +957,9 @@ Registry detail extracts `image:` values from recipe YAML and links known regist
 ### 7.3 Publish From Control UI
 
 1. Open Control UI.
-2. Go to **Registry**.
-3. Click **Publish to Registry**.
-4. Select **Recipe**.
+2. Go to **Marketplace**.
+3. Click **+ Publish to Marketplace**.
+4. Select **Plugin** as the entry type.
 5. Fill common metadata:
    - Name: RFC1123-compatible.
    - Version: semantic or project version.
@@ -953,9 +970,9 @@ Registry detail extracts `image:` values from recipe YAML and links known regist
    - Tags.
 6. Paste the recipe YAML.
 7. Submit.
-8. Return to Registry and verify the entry appears.
+8. Return to Marketplace and verify the entry appears.
 9. Open the entry detail and inspect images and YAML.
-10. Install it into a test cluster from Registry before sharing it.
+10. Install it into a test cluster from Marketplace before sharing it.
 
 ### 7.4 Registry Install Naming
 
@@ -986,22 +1003,15 @@ The current UI supports metadata edit and removal, but not a rich "upgrade insta
 
 ## 8. CRM Sample Deep Dive
 
-Sample root:
+> The CRM sample (`sales-crm`) is maintained **outside this repository** and is not part of the `evenfire-ai/evenfire` tree. The paths and files below are not checkable in this repo; treat this section as a described reference architecture, not as files you can open here.
 
-```text
-crm-plugin-sample-master/sales-crm
-```
+The sample is a plugin-style recipe with:
 
-Key files:
-
-| File | Purpose |
+| Part | Purpose |
 |---|---|
-| `recipe.yaml` | Authoritative WorkflowRecipe. |
-| `recipe.json` | JSON form of the recipe. |
-| `api/` | Fastify API image, database migrations, webhook handlers, cron jobs. |
-| `ui/` | Preact/nginx sandbox UI image. |
-| `sales-crm/README.md` | App-specific build, deploy, provider, and test guide. |
-| `CLERUM_WORKFLOW_RECIPE_GUIDE.md` | Long authoring guide with CRM examples. |
+| Recipe manifest | Authoritative WorkflowRecipe (YAML, with a JSON form for the editor). |
+| API image | Fastify API, database migrations, webhook handlers, cron jobs. |
+| UI image | Preact/nginx sandbox UI. |
 
 ### 8.1 What the CRM Recipe Demonstrates
 
@@ -1158,18 +1168,19 @@ The editor warns on create when no users are selected. A unified install flow sh
 
 ### 10.1 Rename Actions by Intent
 
-Current ambiguity:
+A first rename already shipped: the sections are now **Plugins** and **Marketplace** in the sidebar, and the entry types are **Plugin** and **Connector**.
 
-- Workflow Recipes -> **Install Recipe** means "create from JSON template/editor."
-- Registry -> **Install** means "install catalog entry."
+Remaining ambiguity is on the verb, not the noun:
+
+- Plugins -> **Install Plugin** means "create from JSON template/editor."
+- Marketplace -> **Install** means "install catalog entry."
 
 Better labels:
 
 | Current | Suggested |
 |---|---|
-| Install Recipe in Workflow Recipes | Create recipe |
-| Registry Install | Install from catalog |
-| Publish to Registry | Publish catalog entry |
+| Install Plugin in Plugins | Create plugin |
+| Marketplace Install | Install from catalog |
 
 ### 10.2 Unified Recipe Home
 
@@ -1286,8 +1297,8 @@ Remember the UI agent rules for `control-ui`: reusable types belong in sibling `
 | CRD reference | `docs/crds/workflowrecipe.md` |
 | Operations guide | `docs/deploy/workflow-recipes-guide.md` |
 | Custom coordinator snippet guide | `docs/features/custom-coordinator-snippet-workflow.md` |
-| Registry seed recipes | `registry-api/seed/recipes.json` |
-| CRM sample | `crm-plugin-sample-master/sales-crm/recipe.yaml` |
+
+The registry service and the CRM sample are maintained outside this repository and have no paths in this tree.
 
 ## 12. Practical Checklist for a New Recipe
 
@@ -1311,7 +1322,7 @@ Use this as the authoring checklist.
 16. Verify CRD phase, conditions, pods, secrets, integrations, UI, trigger, runs, and artifacts.
 17. Publish to Registry with versioned metadata.
 18. Install from Registry into a test cluster.
-19. Confirm catalog labels are present on the live recipe.
+19. Confirm the `clerum.io/catalog-id` / `clerum.io/catalog-version` annotations and the `clerum.io/managed-by` label are present on the live recipe.
 20. Confirm Desktop App visibility for the intended users.
 
 ## 13. Known Sharp Edges
@@ -1320,7 +1331,7 @@ Use this as the authoring checklist.
 - Registry recipe install preview can fail to parse YAML client-side but still allow server-side YAML install only when there are no parsed blocking findings; the messaging currently calls this a fallback.
 - Registry recipe install currently does not ask for authorized users before install.
 - Registry publish form does not validate recipe YAML as richly as the Recipe Editor validates JSON.
-- Installed detection depends on catalog labels, so direct-created recipes will not show as installed catalog entries.
+- Installed detection depends on the catalog annotations (with a legacy label fallback), so direct-created recipes will not show as installed catalog entries.
 - `metadata.labels` in author YAML may not survive direct recipe create because Control API owns labels and namespace placement.
 - A recipe can be active but not visible in Desktop App Workflows if grants/triggers are missing.
 - A recipe can be active but not visible in Desktop App Apps if `spec.ui` is absent.

@@ -7,6 +7,9 @@ on:
 jobs:
   cla:
     runs-on: ubuntu-latest
+    # The CLA assistant needs secrets.CLA_PAT and writes to this repo's
+    # signatures/cla.json; forks have neither, so let them skip.
+    if: github.repository == 'evenfire-ai/evenfire'
     steps:
       - uses: contributor-assistant/github-action@v2.6.1
         env:

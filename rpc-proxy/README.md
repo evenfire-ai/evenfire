@@ -36,6 +36,11 @@ External-facing user-scoped JSON-RPC proxy for MCP servers and MCP hosts.
 - `GET /api/v1/rpc/hosts/:hostRef/status/stream` (requires `host:status:read`)
 - `GET /api/v1/rpc/hosts/:hostRef/health` (requires `host:health:read`)
 
+The list above covers the core `/api/v1/rpc/*` surface. `rpc-proxy` also serves
+two further route families — the **desktop proxy** (`rpc-proxy/src/routes/desktopProxy.ts`)
+and the **sandbox-ui proxy** (`rpc-proxy/src/routes/sandboxUi.ts`, `/api/v1/sandbox-ui/*`).
+See `rpc-proxy/src/routes/` for the complete set.
+
 ## Host Runtime Contract
 
 Host runtime routes in `rpc-proxy` are REST-oriented and scope-specific. The status stream is a read-only telemetry channel.
@@ -70,11 +75,13 @@ Notes:
 
 ```json
 {
-  "content": "hello from desktop",
-  "channelType": "rpc",
-  "sender": "desktop-app"
+  "content": "hello from desktop"
 }
 ```
+
+Only `content` is honored. The proxy **ignores** any client-supplied
+`channelType`, `sender`, and host fields, stamping its own (`channelType: "rpc"`,
+`sender` = the token's `sub`) before forwarding.
 
 ## Host Message Authorization Flow
 
@@ -101,16 +108,16 @@ Required JWT claims for host message path:
 
 - `typ=user`
 - `sub=<userId>`
-- `teamId=<teamId>`
+- `teamId` — optional; may be `null` (user-scoped tokens without a team are accepted). Treated as informational
 - `scopes` includes `host:message:invoke`
-- `hostRefs` includes target `:hostRef` (wildcard `*` is rejected)
+- `hostRefs` present and non-empty (wildcard `*` is rejected); on this path the proxy does not check that `:hostRef` is a member of `hostRefs` — host authorization is delegated to `control-api`
 - `iss`, `aud`, `iat`, `exp`, `jti` valid
 
 ## Troubleshooting
 
 - `401 Unauthorized`: token malformed/expired/wrong issuer-audience/signature.
 - `403 Forbidden: missing scope`: token does not include the required route scope.
-- `403 Forbidden: user cannot access this host`: host not in token `hostRefs` and/or denied by `control-api` RPC-access policy.
+- `403 Forbidden: user cannot access this host`: host denied by `control-api` RPC-access policy.
 - `504 Gateway Timeout`: upstream MCP target unreachable (check network policy and service reachability).
 
 ## Environment
@@ -137,31 +144,3 @@ cd rpc-proxy
 npm install
 npm run dev
 ```
-
-## Kubernetes Deploy (Hardened Defaults)
-
-The `deploy/` manifests include:
-
-- non-root container + `RuntimeDefault` seccomp
-- dropped Linux capabilities
-- read-only root filesystem with writable `/tmp`
-- resource requests/limits and health probes
-- ingress TLS and basic rate limiting annotations
-- restrictive `NetworkPolicy` and `PodDisruptionBudget`
-
-Before deploying, create a real secret from `deploy/example.secret.yaml` values:
-
-```bash
-kubectl create secret generic rpc-proxy-secrets -n rpc-proxy \
-  --from-literal=RPC_PROXY_JWT_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----\nreplace-with-rs256-public-key\n-----END PUBLIC KEY-----' \
-  --from-literal=RPC_PROXY_CONTROL_API_SERVICE_TOKEN='replace-with-rpc-proxy-token'
-```
-
-Then deploy:
-
-```bash
-cd rpc-proxy
-make deploy
-```
-
-Update `deploy/ingress.yaml` host/TLS secret and `deploy/networkpolicy.yaml` selectors/ports for your cluster.

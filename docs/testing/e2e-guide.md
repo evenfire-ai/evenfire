@@ -23,7 +23,7 @@ From root `README.md` §Testing prerequisites:
 
   | Variable                | Required For               | How to Get                              |
   | ----------------------- | -------------------------- | --------------------------------------- |
-  | `ZAI_API_KEY`           | LLM tool-calling (Phase 8) | https://z.ai                            |
+  | `ZAI_API_KEY`           | LLM tool-calling           | https://z.ai                            |
   | `OPENAI_API_KEY`        | Alternative LLM provider   | https://platform.openai.com/api-keys    |
   | `CLAUDE_API_KEY`        | Alternative LLM provider   | https://console.anthropic.com/          |
   | `CLERUM_MODEL_PROVIDER` | Provider selection         | `zai`, `openai`, `claude`, or `bailian` |
@@ -37,13 +37,12 @@ Copy `.env.example` to `.env` and fill in your keys. `.env` is gitignored.
 ```bash
 minikube start -p clerum-test \
   --driver=docker \
-  --kubernetes-version=v1.26.1 \
   --cpus=6 \
   --memory=10240 \
   --cni=calico
 ```
 
-> **Important:** ~10GB RAM allocated to minikube is recommended. The E2E suite runs 5 composite recipes concurrently deploying MongoDB, PostgreSQL, Redis, and multiple MCP servers. Calico CNI is required so NetworkPolicy Phase 6 actually enforces.
+> **Important:** ~10GB RAM allocated to minikube is recommended. The E2E suite runs 5 composite recipes concurrently deploying MongoDB, PostgreSQL, Redis, and multiple MCP servers. Calico CNI is required so NetworkPolicy Phase 6 actually enforces. Do not pin an older `--kubernetes-version`: `deploy/base` ships `ValidatingAdmissionPolicy` on `admissionregistration.k8s.io/v1`, which requires Kubernetes 1.30+. The minikube default is what `scripts/minikube/start.sh` uses.
 
 ### 2. Bootstrap infrastructure
 
@@ -135,49 +134,61 @@ Runtime gate suites live in `scripts/e2e/`. Backend compatibility suites live in
 
 | #   | Script                             | Transport  | Tests      | Description                                                                          |
 | --- | ---------------------------------- | ---------- | ---------- | ------------------------------------------------------------------------------------ |
-| 1   | `e2e-agentic-workflow-baseline.sh` | HTTP       | gate       | Agentic workflow baseline                                                            |
-| 2   | `e2e-snippet-runtime-smoke.sh`     | snippet    | gate       | Fast snippet runtime smoke                                                           |
-| 3   | `e2e-snippet-runtime.sh`           | mixed      | gate       | Snippet, DB, MCP, HTTP, and negative runtime paths                                   |
-| 4   | `e2e-custom-coordinator-sdk.sh`    | mixed      | gate       | Custom coordinator image runtime                                                     |
-| 5   | `e2e-workflow-token-rotation.sh`   | mixed      | gate       | Runtime token rotation                                                               |
-| 6   | `e2e-agentic-stdio-baseline.sh`    | stdio      | standalone | Pure compute stdio baseline                                                          |
-| 7   | `workflow-backend-compat/*.sh`     | HTTP/stdio | compat     | Backend and transport compatibility, including stdio PostgreSQL and multi-tool flows |
+| 1   | `e2e-637-secret-ownership-bypass.sh` | mixed    | gate       | Recipe Secret ownership bypass probes                                                |
+| 2   | `e2e-agentic-workflow-baseline.sh` | HTTP       | gate       | Agentic workflow baseline                                                            |
+| 3   | `e2e-snippet-runtime-smoke.sh`     | snippet    | gate       | Fast snippet runtime smoke                                                           |
+| 4   | `e2e-snippet-runtime.sh`           | mixed      | gate       | Snippet, DB, MCP, HTTP, and negative runtime paths                                   |
+| 5   | `e2e-custom-coordinator-sdk.sh`    | mixed      | gate       | Custom coordinator image runtime                                                     |
+| 6   | `e2e-workflow-token-rotation.sh`   | mixed      | gate       | Runtime token rotation                                                               |
+| 7   | `e2e-agentic-stdio-baseline.sh`    | stdio      | standalone | Pure compute stdio baseline                                                          |
+| 8   | `workflow-backend-compat/*.sh`     | HTTP/stdio | compat     | Backend and transport compatibility, including stdio PostgreSQL and multi-tool flows |
 
-Extra scripts in `scripts/e2e/` not part of the main composite suite: `e2e-gke-*.sh` (production GKE smoke tests) and `e2e-prod-*.sh` (production recipe regressions).
+Rows 1–6 are exactly the six suites the runtime gate runs, in order.
+
+`scripts/e2e/` also holds many further suites that are not part of the runtime gate or
+the backend compatibility driver — webhooks, registry, shared filesystem, GFS, workflow
+approvals, sandbox-UI, ingress, and more — plus `e2e-gke-*.sh` (production GKE smoke
+tests) and `e2e-prod-*.sh` (production recipe regressions). Run those individually.
 
 ### Backend compatibility suite results
 
 | Suite                   | Transport | Tests   | Description                                                |
 | ----------------------- | --------- | ------- | ---------------------------------------------------------- |
 | mongodb-mcp-stack       | HTTP      | 36      | MongoDB StatefulSet + PVC + 24 MongoDB tools               |
-| mock-mcp-with-db        | HTTP      | 32      | PostgreSQL (runAsUser:70) + Mock MCP + approval flow       |
+| mock-mcp-with-db        | HTTP      | 32      | PostgreSQL (runAsUser:70) + Mock MCP + cross-namespace NP  |
 | mcp-postgres            | HTTP      | 37      | PostgreSQL + template interpolation (`{{workload:field}}`) |
 | mcp-redis-cache         | HTTP      | 33      | Redis Deployment + binding NP cross-namespace              |
 | mcp-webhook-relay       | HTTP      | 32      | MCP + CronJob + template resolution in args[]              |
-| stdio-mcp-calculator    | stdio     | 28      | Pure compute, no backend                                   |
 | stdio-mcp-with-postgres | stdio     | 31      | stdio + PostgreSQL StatefulSet + VCT + bindings            |
 | stdio-mcp-multi-tool    | stdio     | 39      | 2 stdio servers + Redis                                    |
-| **Total**               |           | **268** | **All phases including LLM tool-calling**                  |
+| **Total**               |           | **240** | **Phases 0–7; no LLM tool-calling or approval**            |
 
-## E2E phases (9 phases per suite)
+The driver (`scripts/e2e/e2e-workflow-backend-compat.sh`) runs exactly these seven
+suites. The pure-compute stdio suite is the standalone
+`e2e-agentic-stdio-baseline.sh`, not a backend compatibility suite.
 
-Each suite validates 9 phases in order. Any failed phase aborts the suite.
+## E2E phases (8 phases per suite)
 
-| Phase              | What it tests                                                                               |
-| ------------------ | ------------------------------------------------------------------------------------------- |
-| 0 — Prerequisites  | Cluster reachable, namespaces, CRDs installed, core deployments healthy                     |
-| 1 — Clean Slate    | Delete previous recipe resources to guarantee a clean test                                  |
-| 2 — Apply Recipe   | `kubectl apply` the WorkflowRecipe YAML                                                     |
-| 3 — Backend        | StatefulSet/Deployment readiness; data connectivity (`pg_isready`, `mongosh`, redis `PING`) |
-| 4 — MCP Delegation | McpServer CRD auto-created, `managed=false`, transport Service, Context allowlist           |
-| 5 — MCP Server     | Pod ready, transport protocol started                                                       |
-| 6 — NetworkPolicy  | Deny-all enforcement, binding NP cross-namespace, internet egress blocked                   |
-| 7 — Discovery      | mcp-host discovers server via HCC API, tool registration                                    |
-| 8 — Tool-Calling   | Send message → LLM selects tool → **approval flow** → tool execution → result               |
+Each backend compatibility suite validates 8 phases in order (Phase 0 through Phase 7). Any failed phase aborts the suite.
+
+| Phase                     | What it tests                                                                               |
+| ------------------------- | ------------------------------------------------------------------------------------------- |
+| 0 — Prerequisites         | Cluster reachable, namespaces, CRDs installed, core deployments healthy                     |
+| 1 — Clean Slate           | Delete previous recipe resources to guarantee a clean test                                  |
+| 2 — Apply Recipe          | `kubectl apply` the WorkflowRecipe YAML                                                     |
+| 3 — Backend               | StatefulSet/Deployment readiness; data connectivity (`pg_isready`, `mongosh`, redis `PING`) |
+| 4 — MCP Delegation        | McpServer CRD auto-created, `managed=false`, transport Service, Context allowlist           |
+| 5 — MCP Server            | Pod ready, transport protocol started                                                       |
+| 6 — NetworkPolicy         | Deny-all enforcement, binding NP cross-namespace, internet egress blocked                   |
+| 7 — mcp-proxy tool contract | `tools/list` / `tools/call` against mcp-proxy for the delegated server                    |
+
+The backend compatibility suites stop at the mcp-proxy tool contract — they do not
+drive an LLM or an approval gate. The approval pipeline is covered separately by
+`tests/e2e/e2e-approval-flow.sh` (below).
 
 ## Approval flow in E2E
 
-Phase 8 exercises the full production approval pipeline without disabling any security. No short-circuiting — the E2E runner plays the role of the approving user.
+`tests/e2e/e2e-approval-flow.sh` exercises the full production approval pipeline without disabling any security — approval is its **Phase 5** ("Approve tool call"). No short-circuiting — the E2E runner plays the role of the approving user.
 
 The `mcp-host` runtime routes are:
 
@@ -260,7 +271,7 @@ Common test-related issues:
 - **Port-forward drops after pod restart** → re-run `make minikube-pf-desktop`
 - **Desktop app shows no agents after login** → `scripts/minikube/seed-test-data.sh`
 - **NetworkPolicy Phase 6 passes when it shouldn't** → ensure minikube was started with `--cni=calico`; the default `kindnet` CNI silently ignores NetworkPolicy. Cross-check the rendered policies from the active overlay (`kubectl kustomize deploy/overlays/minikube`).
-- **Phase 8 times out on approval** → check mcp-host logs for `awaiting_approval` entry; E2E runner uses `userId: "e2e-runner"` and must match the approver identity configured on the Host CRD.
+- **Approval times out (`e2e-approval-flow.sh` Phase 4/5)** → check mcp-host logs for the `awaiting_approval` entry. The runner approves with `{ toolCallId }` only; for rpc-proxy callers mcp-host derives the approving user from the `x-clerum-edge-user-id` header, not from the request body — so check the identity the RPC token was minted for.
 
 ## Related
 

@@ -64,7 +64,11 @@ download API. Clerum provides those.
 
 The published `clerum-workflow-base` image is a convenience base for custom
 coordinator images. It contains Node.js plus the compiled `@clerum/workflow-sdk`
-package under `node_modules/@clerum/workflow-sdk`.
+package under `node_modules/@clerum/workflow-sdk`, and its required runtime
+dependency `@clerum/workflow-runtime-core` under
+`node_modules/@clerum/workflow-runtime-core`. The SDK re-exports from
+runtime-core, so both packages must be present; an image with only
+`@clerum/workflow-sdk` fails at `require()` time.
 
 Use it when your coordinator is a Node/TypeScript runtime:
 
@@ -272,10 +276,17 @@ WRC accepts a custom image only when all policy checks pass:
 | Feature flag  | `WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE=true` must be set by the operator. |
 | Allowlist     | The image must match `WRC_ALLOWED_COORDINATOR_IMAGE_PREFIXES`.          |
 | No `:latest`  | Mutable `latest` tags are rejected.                                     |
-| Digest policy | If enabled, the image must include a valid `sha256` digest.             |
+| Digest policy | `WRC_REQUIRE_COORDINATOR_IMAGE_DIGEST` defaults to `true` (and `deploy/base` ships `"true"`), so the image must include a valid `sha256` digest. |
 
 This is a platform control. Your image does not enforce it, but release images
 should be built as if the policy will be strict.
+
+Because digest enforcement is on by default, a tag-only `spec.coordinatorImage`
+is rejected in the default and base configurations. The tag-only references in
+this guide's examples are shown for readability; use a digest-pinned reference such
+as `ghcr.io/acme/receivables-coordinator@sha256:<64-hex>` unless an operator has
+explicitly set `WRC_REQUIRE_COORDINATOR_IMAGE_DIGEST=false` (the minikube overlay
+does this for local E2E fixtures).
 
 ## Runtime Environment
 
@@ -598,18 +609,31 @@ sending runtime tokens to tools or external systems.
 
 ## Image Build Checklist
 
-Recommended Dockerfile shape:
+Recommended Dockerfile shape. `@clerum/workflow-sdk` depends on
+`@clerum/workflow-runtime-core` through a `file:` link, so the build context must
+be the repository root and runtime-core must be built first and copied into the
+final image alongside the SDK:
 
 ```Dockerfile
 FROM node:24-alpine AS sdk-builder
+WORKDIR /app
+COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/
+COPY packages/workflow-runtime-core/tsconfig.json ./packages/workflow-runtime-core/
+COPY packages/workflow-runtime-core/src ./packages/workflow-runtime-core/src
+WORKDIR /app/packages/workflow-runtime-core
+RUN npm ci --ignore-scripts && npm run build
+
+WORKDIR /app
+COPY packages/workflow-sdk/package.json packages/workflow-sdk/package-lock.json ./packages/workflow-sdk/
+COPY packages/workflow-sdk/tsconfig.json ./packages/workflow-sdk/
+COPY packages/workflow-sdk/src ./packages/workflow-sdk/src
 WORKDIR /app/packages/workflow-sdk
-COPY packages/workflow-sdk/package.json packages/workflow-sdk/package-lock.json ./
-COPY packages/workflow-sdk/tsconfig.json ./
-COPY packages/workflow-sdk/src ./src
-RUN npm ci && npm run build
+RUN npm ci --ignore-scripts && npm run build:docker
 
 FROM node:24-alpine
 WORKDIR /app
+COPY packages/workflow-runtime-core/package.json ./node_modules/@clerum/workflow-runtime-core/package.json
+COPY --from=sdk-builder /app/packages/workflow-runtime-core/dist ./node_modules/@clerum/workflow-runtime-core/dist
 COPY packages/workflow-sdk/package.json ./node_modules/@clerum/workflow-sdk/package.json
 COPY --from=sdk-builder /app/packages/workflow-sdk/dist ./node_modules/@clerum/workflow-sdk/dist
 COPY coordinator.js ./coordinator.js
@@ -619,13 +643,19 @@ EXPOSE 8090
 CMD ["node", "coordinator.js"]
 ```
 
+This mirrors `packages/workflow-sdk/Dockerfile.base` and the E2E fixture at
+`tests/e2e/fixtures/custom-workflow-coordinator/Dockerfile`. If you extend the
+published `clerum-workflow-base` image instead, both packages are already present
+and you only need to copy your own build output.
+
 Before release:
 
 - Run as user `1000`, not root.
 - Write only to `/tmp` and `/output`.
 - Do not bundle provider API keys or static Clerum credentials.
 - Pin third-party dependencies.
-- Prefer digest-pinned image references in production-like environments.
+- Use digest-pinned image references: digest enforcement is on by default, so a
+  tag-only reference is rejected unless an operator turns it off.
 - Keep business logic testable outside Kubernetes.
 
 ## Validation Checklist

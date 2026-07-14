@@ -34,16 +34,17 @@ NetworkPolicies, JWT chain, control plane, seeded agent — on a local cluster.
 
 ## What agents can do
 
-Everything below is shipped in this repo and registered in
-`mcp-host/src/core/tools/nativeToolRegistry.ts`. Tools marked 🔒 suspend the
-task for human approval before running.
+Everything below is shipped in this repo — native tools are registered in
+`mcp-host/src/core/tools/nativeToolRegistry.ts`, and the `browser_*` /
+`desktop_*` tools in `mcp-host/src/core/tools/desktopTools.ts`. Tools marked 🔒
+suspend the task for human approval before running.
 
 ### Act on systems
 
 | Capability                 | Tools                                                                                                                  | Notes                                                                                                                                          |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | Run shell commands         | `shell_exec` 🔒                                                                                                        | full shell syntax in the agent workspace; the approval gate is the security boundary                                                           |
-| Call HTTP APIs             | `http_request` 🔒                                                                                                      | GET/POST/PUT/DELETE against an allowlisted set of domains (`CLERUM_HTTP_ALLOWLIST`)                                                            |
+| Call HTTP APIs             | `http_request` 🔒                                                                                                      | GET/POST/PUT/DELETE. `CLERUM_HTTP_ALLOWLIST` restricts which domains are reachable and is **empty by default** — set it, or every public domain is reachable. The approval gate is the security boundary |
 | Read/write workspace files | `file_read`, `file_write`                                                                                              | path-validated, per-user isolated workspace                                                                                                    |
 | Drive a real browser       | `browser_open` 🔒, `browser_navigate` 🔒, `browser_click`, `browser_type`, `browser_screenshot`, `browser_get_content` | Playwright Chromium; enable with `CLERUM_DESKTOP_BROWSER=true`                                                                                 |
 | Drive a desktop            | `desktop_screenshot`, `desktop_click`, `desktop_type`, `desktop_key`, `desktop_mouse_move`, `desktop_drag`             | X11 (`scrot`/`xdotool`); enable with `CLERUM_DESKTOP_X11=true`                                                                                 |
@@ -66,13 +67,14 @@ on the workspace PVC so download links survive pod restarts:
 
 - **Shipped connector specs:** MongoDB (9 tools: find, aggregate, count,
   distinct, insert/update/delete-one, list collections/databases; writes
-  blockable via read-only mode) and Airtable (8 tools). Both run upstream
-  images packaged as `McpServer` CRDs.
+  blockable via read-only mode) and Airtable (8 tools), both packaged as
+  `McpServer` CRDs. MongoDB runs the upstream image; Airtable runs an image
+  built here from upstream source (`mcp-servers/airtable/Dockerfile`).
 - **Any stdio MCP server** plugs in through the [stdio-bridge](stdio-bridge/README.md)
   sidecar (PostgreSQL, Redis, GitHub, Brave Search, …) — set
-  `transport.type: stdio` and the operator injects the bridge. Example CRDs
-  ship for postgres, github, and filesystem servers
-  ([charts/clerum-crds/examples/](charts/clerum-crds/examples/)).
+  `transport.type: stdio` and the operator injects the bridge. The `McpServer`
+  examples in [charts/clerum-crds/examples/](charts/clerum-crds/examples/)
+  (postgres, github, filesystem) use `transport.type: sse`, not stdio.
 - An agent only reaches connectors its `Context` allowlists — enforced by
   NetworkPolicy, not convention.
 
@@ -131,7 +133,7 @@ The full platform on a local Kubernetes cluster: all services, deny-all
 NetworkPolicies, the JWT chain, and a seeded agent named `chatllm`.
 
 **Prerequisites:** Docker Desktop running with **≥10 GB RAM / 6 CPUs**
-allocated · `minikube` v1.30+ · `kubectl` · `python3` · Node.js 20+.
+allocated · `minikube` v1.30+ · `kubectl` · `python3` · Node.js 24+.
 
 ```bash
 git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
@@ -161,6 +163,17 @@ First run takes ~5–10 minutes (image builds dominate). Re-run safely any time;
 
 ### Say hello — desktop app
 
+The UIs run from your workstation (not in-cluster), so install their
+dependencies once — `make minikube-setup` builds images in Docker and never
+populates local `node_modules`:
+
+```bash
+make install-all               # all services, including desktop-app
+npm --prefix control-ui install   # control-ui is not in install-all
+```
+
+Then:
+
 ```bash
 npm run ui             # Control UI + Profile UI + Desktop App against the cluster
 ```
@@ -168,6 +181,11 @@ npm run ui             # Control UI + Profile UI + Desktop App against the clust
 Log into the desktop app as `test@clerum.io` / `changeme123!` and message the
 `chatllm` agent. Ask it to run a command or generate a PDF — and approve the
 tool call from the chat.
+
+`npm run ui` (`make local-ui`) starts its own port-forwards on 8090 / 8091 /
+8094 and aborts if any of them is already bound, so it cannot run alongside
+`make minikube-pf-all` (below), which binds the same ports. Stop one before
+starting the other.
 
 ### Say hello — the API (exercises the real JWT chain)
 
@@ -283,9 +301,15 @@ Deep dives: [ARCHITECTURE.md](ARCHITECTURE.md) ·
 A model can be steered, misled, or simply wrong — so the platform never trusts
 it by default. Four enforcement layers in this repo:
 
-1. **Human-in-the-loop approvals.** MCP tool calls suspend until explicit
-   approve/deny (default-on for MCP tools; per-tool overrides on the `Host`
-   CRD). Channel callbacks are signature-verified and authorized. Pending
+1. **Human-in-the-loop approvals.** With the gate on (`CLERUM_ENABLE_APPROVAL`,
+   default true), MCP tool calls suspend until a human approves or denies, and
+   the `Host` CRD's per-tool overrides cannot relax them — those apply to native
+   mcp-host tools, which otherwise default to each tool's own setting. Two
+   deliberate carve-outs: approving once is "approve once, run all" — it
+   auto-approves the remaining tool calls in that turn, and for an MCP tool the
+   whole MCP server for later turns in the same conversation; and cron-fired
+   tasks run without the gate, because the human decision happened when the job
+   was created. Channel callbacks are signature-verified and authorized. Pending
    approvals survive restarts.
 
 2. **Least privilege.** A `Context` defines reachable connectors; RPC tokens are
@@ -342,7 +366,17 @@ Public claim rules: [docs/meta/claims-guardrails.md](docs/meta/claims-guardrails
 
 ```bash
 helm install clerum-crds ./charts/clerum-crds
-kubectl apply -f charts/clerum-crds/examples/   # optional samples
+
+# optional samples — the CRD chart creates no namespaces, so apply those first
+kubectl apply -f deploy/base/namespaces.yaml
+kubectl apply -f charts/clerum-crds/examples/
+
+# only some samples pin metadata.namespace (mcp-host / mcp-server / sandbox-recipes).
+# host-chatllm.yaml, channels.yaml and the three mcpserver-*.yaml files do not, so the
+# apply above lands them in your current namespace, where the controller does not read
+# them. Re-apply those with an explicit -n — Host in mcp-host, McpServer in mcp-server,
+# CommunicationChannel in channels:
+kubectl apply -n mcp-server -f charts/clerum-crds/examples/mcpserver-postgres.yaml
 ```
 
 Reference: [docs/crds/README.md](docs/crds/README.md) ·
@@ -384,7 +418,8 @@ dives.
   RBAC. LLM providers are data-first descriptors — an OpenAI-compatible
   provider is a registry entry, not new code. `Host.spec.approval.tools`
   overrides per-tool approval defaults (e.g. skip `http_request` approval
-  when `CLERUM_HTTP_ALLOWLIST` is the gate).
+  when `CLERUM_HTTP_ALLOWLIST` is the gate — mcp-host warns at startup if that
+  override is set while the allowlist is empty, which leaves no gate at all).
 - **[channel-reader/](channel-reader/README.md)** — Telegram (grammY), Email
   (ImapFlow), and Slack (`@slack/web-api`) ingress. Watches
   `CommunicationChannel` CRDs filtered by `hostRef` and restarts itself when
@@ -401,7 +436,7 @@ dives.
   `transport.type: stdio`; supervises the child process with
   exponential-backoff restarts and graceful shutdown.
 - **[mcp-servers/](mcp-servers/README.md)** — the connector catalog. MongoDB
-  and Airtable ship with a 343-case test suite covering CRD config, API
+  and Airtable ship with dedicated unit-test suites covering CRD config, API
   behavior, MCP protocol, and generated Kubernetes resources; web-search
   (Brave), Playwright, and doc-generator are available; Alpha Vantage is a
   stub. Credentials live in Kubernetes Secrets, never in CRDs.
@@ -421,7 +456,7 @@ dives.
   startup.
 - **[workflow-recipes/](workflow-recipes/README.md)** — the operator that
   owns the `WorkflowRecipe` lifecycle: policy validation against
-  cluster-wide `WorkflowRecipePolicy` CRDs, input and `{{…}}` template
+  namespaced `WorkflowRecipePolicy` CRDs, input and `{{…}}` template
   resolution, topological dependency ordering, then Deployments,
   StatefulSets, CronJobs, and Jobs. Recipes advance through a 13-state
   machine (candidate → … → active, with degraded / rolling-back / failed
@@ -541,7 +576,7 @@ dives.
 | [deploy/](deploy/)                                  | Kubernetes manifests (`deploy/base/…`) for every namespace                                                               |
 | [packages/](packages/)                              | Shared TypeScript libraries                                                                                              |
 | [monitoring/](monitoring/README.md)                 | Optional Grafana + Loki log stack — Helm values and dashboards only, no code; authoritative usage/cost is in control-api |
-| [tests/e2e/](docs/testing/e2e-guide.md)             | 268 end-to-end tests across 8 suites on minikube                                                                         |
+| [tests/e2e/](docs/testing/e2e-guide.md)             | Full-stack E2E suites (Vitest + bash) run against minikube                                                               |
 | [docs/](docs/README.md)                             | The documentation tree                                                                                                   |
 
 ---
@@ -554,10 +589,11 @@ Each service is an independent npm package:
 cd mcp-host && npm install && npm test
 ```
 
-- **Unit tests** — 10,000+ Vitest cases across ~880 test files; run `npm test`
-  in each package, or `make test-unit-all` after installing deps.
-- **E2E** — 268 tests across 8 suites on minikube with Calico NetworkPolicies
-  and the approval flow:
+- **Unit tests** — 20,000+ Vitest cases across ~1,800 test files (`make
+  test-counts` prints the live numbers); run `npm test` in each package, or
+  `make test-unit-all` after installing deps.
+- **E2E** — Vitest and bash suites on minikube with Calico NetworkPolicies and
+  the approval flow; run with `make test-e2e-all`:
   [docs/testing/e2e-guide.md](docs/testing/e2e-guide.md)
 - **Hooks** — [`.githooks/`](.githooks); `npm run install-git-hooks`
 

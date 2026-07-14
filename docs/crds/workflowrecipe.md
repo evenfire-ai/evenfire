@@ -17,10 +17,10 @@
 7. [Resource Generation](#7-resource-generation)
 8. [Security Model](#8-security-model)
 9. [Network Security and Bindings](#9-network-security-and-bindings)
-10. [External Ingress](#10-external-ingress)
+10. [External Ingress — Not Implemented](#10-external-ingress--not-implemented)
 11. [CRD Validation Rules (CEL)](#11-crd-validation-rules-cel)
 12. [Status Subresource and Observability](#12-status-subresource-and-observability)
-13. [Dry-Run and Preview Mode](#13-dry-run-and-preview-mode)
+13. [Dry-Run and Preview Mode — Not Implemented](#13-dry-run-and-preview-mode--not-implemented)
 14. [Agent-Driven Recipe Creation](#14-agent-driven-recipe-creation)
 15. [Operator Approval and Governance](#15-operator-approval-and-governance)
 16. [Template Injection Prevention](#16-template-injection-prevention)
@@ -69,7 +69,7 @@ profiles{}    -- How it varies across environments (staging, production)
 
 ### 1.3 Design Principles
 
-1. **Security-by-default, enforced at every level** -- Every workload gets non-root, read-only root filesystem, resource limits, and deny-all networking. These are not optional. No isolation level permits privileged execution.
+1. **Security-by-default, enforced at every level** -- Every workload gets `allowPrivilegeEscalation: false`, `capabilities: drop: [ALL]`, a `RuntimeDefault` seccomp profile, and deny-all networking. No isolation level permits privileged execution. Non-root and read-only root filesystem are enforced from `isolationLevel: standard` upwards; the default level (`minimal`, used when `spec.security.isolationLevel` is omitted) still allows the container to run as root so that stock images work (see Section 8).
 2. **Additive complexity** -- A single-workload recipe is minimal YAML. Multi-workload, multi-environment, and conditional inclusion are all opt-in.
 3. **Minimal required fields** -- Each workload needs only `id`, `type`, and `image`. Everything else has sensible defaults.
 4. **Kubernetes-native** -- No new abstractions over Kubernetes concepts. If you know Kubernetes, you know this format.
@@ -83,7 +83,7 @@ profiles{}    -- How it varies across environments (staging, production)
 
 ### 1.4 Platform Architecture Reference
 
-WorkflowRecipes operate within the Clerum platform architecture. The Workload Recipe Controller (WRC) is a pure CRD reconciler module within the Host Context Controller (HCC) in the `control-plane` namespace. It runs in the same process as the HCC's 3 synchronizers (MCP Host, AccessCtrl, MCP Server) and does not expose an MCP interface:
+WorkflowRecipes operate within the Clerum platform architecture. The Workload Recipe Controller (WRC) is a pure CRD reconciler that runs as its own Deployment (`workflow-recipes`, image `clerum/workflow-recipes`, port 8082) in the `control-plane` namespace, alongside — but separate from — the Host Context Controller (HCC) Deployment (`host-context-controller`, port 8081). Each has its own ServiceAccount. Besides reconciling WorkflowRecipe CRDs, the WRC exposes an MCP interface (StreamableHTTP at `:8082/mcp/v1`) whose tools include `deploy_recipe`, `rollback_recipe`, and `delete_recipe`; deployments requested through it are authorized by a caller-`contextRef` check (a cross-context request is rejected with 403):
 
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': {
@@ -114,8 +114,8 @@ flowchart TB
         CP["Control API + UI"]
         subgraph HCC_BOX["Host Context Controller"]
             HCC_SYNC["3 Synchronizers"]
-            WRC["WRC (reconciler module)"]
         end
+        WRC["Workflow Recipes (WRC)<br/>separate Deployment"]
     end
 
     subgraph NS_MCP["mcp-server"]
@@ -149,15 +149,15 @@ flowchart TB
     class PP,CP user
 ```
 
-| Node                        | Detail                                                                                  |
-| --------------------------- | --------------------------------------------------------------------------------------- |
-| **External REST API + UI**  | external-rest-api, profile-ui, WorkflowRecipePolicy CRDs                                |
-| **Control API + UI**        | control-api, control-ui (platform management)                                           |
-| **Channel Reader**          | Telegram, Email, Slack adapters                                                         |
-| **MCP Host**                | Agent + MCP Client + WRO                                                                |
-| **Host Context Controller** | 3 Synchronizers (MCP Host, AccessCtrl, MCP Server) + WRC module + Discovery API (:8081) |
-| **WRC**                     | WorkflowRecipe reconciler module within HCC (pure CRD reconciler, no MCP interface)     |
-| **MCP Servers**             | MongoDB, Airtable, etc.                                                                 |
+| Node                        | Detail                                                                              |
+| --------------------------- | ----------------------------------------------------------------------------------- |
+| **External REST API + UI**  | external-rest-api, profile-ui, WorkflowRecipePolicy CRDs                            |
+| **Control API + UI**        | control-api, control-ui (platform management)                                       |
+| **Channel Reader**          | Telegram, Email, Slack adapters                                                     |
+| **MCP Host**                | Agent + MCP Client + WRO                                                            |
+| **Host Context Controller** | 3 Synchronizers (MCP Host, AccessCtrl, MCP Server) + Discovery API (:8081)          |
+| **WRC**                     | `workflow-recipes` Deployment (:8082) — WorkflowRecipe reconciler + MCP interface (`/mcp/v1`) |
+| **MCP Servers**             | MongoDB, Airtable, etc.                                                             |
 
 > **Full architecture details**: See [Platform Architecture](../architecture/platform-topology.md) for the complete 7-namespace architecture, service map, data flow, and controller architecture. This is a reference diagram only — the architecture document is the source of truth.
 
@@ -182,7 +182,7 @@ A broader comparative analysis against ecosystem tools (Helm, Kustomize, ArgoCD,
 
 ### 2.1 Recipe
 
-A `WorkflowRecipe` CRD that defines a complete, self-contained application composed of one or more workloads. Recipes can declare dependencies on other recipes via `spec.dependsOn` for deployment ordering (Section 6.3).
+A `WorkflowRecipe` CRD that defines a complete, self-contained application composed of one or more workloads. Recipes can declare dependencies on other recipes via `spec.dependencies` for deployment ordering (Section 6.3).
 
 ### 2.2 Workload
 
@@ -216,19 +216,19 @@ A named set of input overrides for environment-specific parameterization (stagin
 
 ### 2.6 MCP Registration
 
-Workloads with a `transport` field are automatically registered as MCP servers. The HCC controller architecture splits responsibilities through CRD-mediated coordination between its internal modules:
+Workloads with a `transport` field are automatically registered as MCP servers. Responsibilities are split between the WRC and the HCC through CRD-mediated coordination:
 
-1. **WRC module** (within HCC) watches WorkflowRecipe CRDs and reconciles them:
+1. **WRC** (the `workflow-recipes` Deployment) watches WorkflowRecipe CRDs and reconciles them:
    - Non-MCP workloads (StatefulSets, CronJobs, Jobs, PVCs, Secrets, ConfigMaps) → created directly with `ownerRef → WorkflowRecipe`
-   - MCP workloads (those with `transport` field) → creates McpServer CRDs (`managed: true`) with `ownerRef → WorkflowRecipe`
-2. **MCP Server Sync** (within HCC) watches McpServer CRDs and creates Deployment + Service for each `managed: true` McpServer
+   - MCP workloads (those with `transport` field) → creates McpServer CRDs with `ownerRef → WorkflowRecipe`. The `managed` flag is **transport-dependent**: `managed: true` only for `transport.type: stdio`; `streamableHttp` and `sse` workloads get `managed: false` and the WRC creates their Deployment + Service itself.
+2. **MCP Server Sync** (within HCC) watches McpServer CRDs and creates Deployment + Service for each `managed: true` McpServer — i.e. for stdio recipe workloads (where it also injects the stdio-bridge sidecar) and for standalone managed servers. `managed: false` McpServer CRDs are registration/discovery records only; their runtime is owned by whoever created it (the WRC, for HTTP transport workloads).
 3. **Discovery**: mcp-host discovers ALL MCP servers (standalone, recipe-based, and infrastructure) through HCC's Discovery API
 
 See [Architecture Reference §13](../architecture/platform-topology.md#13-deployment-responsibility-matrix) for the complete deployment responsibility matrix.
 
 ### 2.7 Architecture: Controller Model with CRD-Mediated Coordination
 
-A WorkflowRecipe functions as a **CRD-as-Package** orchestrated by the **WRC module** within the Host Context Controller (HCC) in the `control-plane` namespace. The WRC delegates MCP server lifecycle to the HCC's MCP Server Sync via McpServer CRDs:
+A WorkflowRecipe functions as a **CRD-as-Package** orchestrated by the **WRC** (`workflow-recipes` Deployment) in the `control-plane` namespace. The WRC delegates MCP server lifecycle to the HCC's MCP Server Sync via McpServer CRDs:
 
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': {
@@ -252,8 +252,8 @@ flowchart TB
             MAP_OP["MCPAccessCtrl Sync"]
             MH_OP["MCP Host Sync"]
             DISC_API["Discovery API"]
-            WRR["WRC (reconciler module)"]
         end
+        WRR["WRC (workflow-recipes Deployment)"]
     end
 
     subgraph NS_MCP["Namespace: mcp-server"]
@@ -275,13 +275,12 @@ flowchart TB
         direction TB
         STS["StatefulSets"] ~~~ CJ["CronJobs"]
         JOB["Jobs"] ~~~ DS["DaemonSets"]
-        ING["Ingress"]
         PVC["PVCs"] ~~~ SEC["Secrets"]
         CM_RES["ConfigMaps"]
     end
 
     WRR -->|"creates directly"| CREATED
-    WRR -->|"creates McpServer CRD<br/>(managed: true)"| MCS_CRD
+    WRR -->|"creates McpServer CRD<br/>(managed: true only for stdio;<br/>false for HTTP transports)"| MCS_CRD
     WRR -->|"patches"| CTX_CRD
 
     MCS_CRD -->|"watch"| MCS_OP
@@ -310,61 +309,61 @@ flowchart TB
     class WRR,MCS_OP,MAP_OP,MH_OP,DISC_API operator
     class MCP_A,MCP_B workload
     class STS,CJ,JOB,DS workload
-    class NP,ING,NP_GEN security
+    class NP,NP_GEN security
     class PVC,SEC,CM_RES storage
     class WR,MCS_CRD,CTX_CRD crd
 ```
 
 **Diagram Legend:**
 
-| Color             | Meaning                                       | Examples                                                                      |
-| ----------------- | --------------------------------------------- | ----------------------------------------------------------------------------- |
-| Blue (service)    | Core platform services                        | mcp-host, MCP Client                                                          |
-| Purple (operator) | Controller components                         | WRC module, MCP Server Sync, MCPAccessCtrl Sync, MCP Host Sync, Discovery API |
-| Green (workload)  | Deployed workloads and non-MCP workload kinds | MCP Server A/B, StatefulSets, CronJobs                                        |
-| Pink (crd)        | CRDs                                          | WorkflowRecipe CRD, McpServer CRDs, Context CRDs                              |
-| Red (security)    | Security resources                            | NetworkPolicies, Ingress                                                      |
-| Gray (storage)    | Supporting resources                          | PVCs, Secrets, ConfigMaps                                                     |
+| Color             | Meaning                                       | Examples                                                               |
+| ----------------- | --------------------------------------------- | ---------------------------------------------------------------------- |
+| Blue (service)    | Core platform services                        | mcp-host, MCP Client                                                   |
+| Purple (operator) | Controller components                         | WRC, MCP Server Sync, MCPAccessCtrl Sync, MCP Host Sync, Discovery API |
+| Green (workload)  | Deployed workloads and non-MCP workload kinds | MCP Server A/B, StatefulSets, CronJobs                                 |
+| Pink (crd)        | CRDs                                          | WorkflowRecipe CRD, McpServer CRDs, Context CRDs                       |
+| Red (security)    | Security resources                            | NetworkPolicies                                                        |
+| Gray (storage)    | Supporting resources                          | PVCs, Secrets, ConfigMaps                                              |
 
-| Node                        | Detail                                                                                               |
-| --------------------------- | ---------------------------------------------------------------------------------------------------- |
-| **WRC (reconciler module)** | WorkflowRecipe Reconciler module within HCC                                                          |
-| **MCP Server Sync**         | McpServer Reconciler — watches McpServer CRDs, creates Deployments + Services                        |
-| **MCPAccessCtrl Sync**      | Context Reconciler — manages access NetworkPolicies                                                  |
-| **MCP Host Sync**           | Host CRD lifecycle management                                                                        |
-| **Discovery API**           | REST endpoint: `GET /api/v1/mcpservers/context/{ref}`                                                |
-| **MCP Server Pool**         | All MCP servers: recipe-created and standalone (`managed: true`) + infrastructure (`managed: false`) |
-| **McpServer CRDs**          | Created by WRC module for MCP workloads (`managed: true`, `ownerRef → WorkflowRecipe`)               |
-| **MCP Server A/B**          | Standalone or recipe-created MCP servers (MongoDB, Airtable, etc.)                                   |
+| Node                   | Detail                                                                                             |
+| ---------------------- | -------------------------------------------------------------------------------------------------- |
+| **WRC**                | WorkflowRecipe Reconciler — its own `workflow-recipes` Deployment in `control-plane`               |
+| **MCP Server Sync**    | McpServer Reconciler — watches McpServer CRDs, creates Deployments + Services                      |
+| **MCPAccessCtrl Sync** | Context Reconciler — manages access NetworkPolicies                                                |
+| **MCP Host Sync**      | Host CRD lifecycle management                                                                      |
+| **Discovery API**      | REST endpoint: `GET /api/v1/mcpservers/context/{ref}`                                              |
+| **MCP Server Pool**    | All MCP servers: recipe-created, standalone, and infrastructure                                    |
+| **McpServer CRDs**     | Created by the WRC for MCP workloads (`ownerRef → WorkflowRecipe`; `managed: true` only for stdio) |
+| **MCP Server A/B**     | Standalone or recipe-created MCP servers (MongoDB, Airtable, etc.)                                 |
 
-> **WRC as pure CRD reconciler**: The WRC does not expose an MCP interface. Recipes are deployed by creating WorkflowRecipe CRDs via control-api or `kubectl apply`. The WRC watches these CRDs and reconciles them — it produces declarative intent (McpServer CRDs, workloads, Context patches), and the HCC's other synchronizers materialize them into runtime state.
+> **WRC reconciliation model**: Recipes are deployed either by creating WorkflowRecipe CRDs (via control-api or `kubectl apply`) or through the WRC's MCP `deploy_recipe` tool. Either way, the WRC watches the resulting CRDs and reconciles them — it produces declarative intent (McpServer CRDs, workloads, Context patches), and the HCC's other synchronizers materialize them into runtime state.
 
 **Controller resource ownership:**
 
-| Resource Type                                            | Created By               | Managed By               |
-| -------------------------------------------------------- | ------------------------ | ------------------------ |
-| StatefulSets, CronJobs, Jobs, DaemonSets                 | HCC (WRC module)         | HCC (WRC module)         |
-| Non-MCP Deployments + Services                           | HCC (WRC module)         | HCC (WRC module)         |
-| PVCs, Secrets, ConfigMaps                                | HCC (WRC module)         | HCC (WRC module)         |
-| Ingress resources                                        | HCC (WRC module)         | HCC (WRC module)         |
-| McpServer CRD (`managed: true`, MCP-enabled workloads)   | HCC (WRC module)         | HCC (MCP Server Sync)    |
-| MCP server Deployment + Service                          | HCC (MCP Server Sync)    | HCC (MCP Server Sync)    |
-| ALL NetworkPolicies (deny-all, bindings, context access) | HCC (MCPAccessCtrl Sync) | HCC (MCPAccessCtrl Sync) |
+| Resource Type                                                   | Created By               | Managed By                                                                             |
+| --------------------------------------------------------------- | ------------------------ | -------------------------------------------------------------------------------------- |
+| StatefulSets, CronJobs, Jobs, DaemonSets                        | WRC                      | WRC                                                                                    |
+| Non-MCP Deployments + Services                                  | WRC                      | WRC                                                                                    |
+| PVCs, Secrets, ConfigMaps                                       | WRC                      | WRC                                                                                    |
+| McpServer CRD (MCP-enabled workloads)                           | WRC                      | WRC (`managed: false`, HTTP transports) / HCC MCP Server Sync (`managed: true`, stdio) |
+| Deployment + Service for `streamableHttp` / `sse` MCP workloads | WRC                      | WRC                                                                                    |
+| Deployment (+ stdio-bridge sidecar) for `stdio` MCP workloads   | HCC (MCP Server Sync)    | HCC (MCP Server Sync)                                                                  |
+| ALL NetworkPolicies (deny-all, bindings, context access)        | HCC (MCPAccessCtrl Sync) | HCC (MCPAccessCtrl Sync)                                                               |
 
-> **NetworkPolicy ownership**: The HCC's MCPAccessCtrl Sync is the SOLE owner of all NetworkPolicies across all runtime namespaces. The WRC module creates ZERO NetworkPolicies. When the WRC reconciles a WorkflowRecipe, it patches the Context CRD with binding information; the MCPAccessCtrl Sync then generates and manages all NetworkPolicies (deny-all defaults, inter-workload binding rules, and cross-namespace access rules). This single-owner model eliminates NetworkPolicy conflicts and TOCTOU race conditions.
+> **NetworkPolicy ownership**: The HCC's MCPAccessCtrl Sync is the SOLE owner of all NetworkPolicies across all runtime namespaces. The WRC creates ZERO NetworkPolicies. When the WRC reconciles a WorkflowRecipe, it patches the Context CRD with binding information; the MCPAccessCtrl Sync then generates and manages all NetworkPolicies (deny-all defaults, inter-workload binding rules, and cross-namespace access rules). This single-owner model eliminates NetworkPolicy conflicts and TOCTOU race conditions.
 >
-> **TOCTOU requirement**: NetworkPolicies MUST exist before workload pods are scheduled. The MCPAccessCtrl Sync creates NetworkPolicies synchronously during Context CRD reconciliation, before the WRC module creates workload resources.
+> **TOCTOU requirement**: NetworkPolicies MUST exist before workload pods are scheduled. The MCPAccessCtrl Sync creates NetworkPolicies synchronously during Context CRD reconciliation, before the WRC creates workload resources.
 
 **Key architectural decisions:**
 
-1. **Controller architecture**: The WRC is a reconciler module within the HCC in the `control-plane` namespace. The HCC runs 3 synchronizers (MCP Host, AccessCtrl, MCP Server) plus the WRC module in a single process. All modules interact through CRDs via the Kubernetes API.
-2. **WRC has no MCP interface**: The WRC is a pure CRD reconciler. Recipes are deployed by creating WorkflowRecipe CRDs — no agent-triggered deployments. This reduces attack surface and enforces human-in-the-loop for high-impact operations.
-3. **CRD-mediated coordination**: The WRC module creates McpServer CRDs (`managed: true`, the default) and patches Context CRDs. The HCC's MCP Server Sync and MCPAccessCtrl Sync watch these CRDs and create the corresponding infrastructure.
-4. **Transport triggers delegation**: Workloads with a `transport` field cause the WRC module to create an McpServer CRD (`managed: true`, the default, handled by MCP Server Sync for Deployment + Service) and patch the Context CRD (handled by MCPAccessCtrl Sync for NetworkPolicies). Workloads without `transport` are created directly by the WRC module.
-5. **MCP Server Sync treats all McpServer CRDs uniformly**: No conditional logic based on `ownerReference`. Whether a McpServer CRD was created manually or by the WRC module, MCP Server Sync always creates Deployment + Service. The ownerRef serves only for Kubernetes garbage collection cascade.
-6. **Dependency ordering**: The WRC module handles topological sort and creates resources in order.
-7. **Status tracking**: The WRC module updates WorkflowRecipe status with per-workload phases.
-8. **Rollback coordination**: The WRC module deletes McpServer CRDs (triggering MCP Server Sync cleanup via DELETE watch events) and patches Context CRD (removing from allowlist). Non-MCP resources are deleted directly.
+1. **Controller architecture**: The WRC is a standalone Deployment (`workflow-recipes`) in the `control-plane` namespace, separate from the HCC Deployment (which runs the 3 synchronizers: MCP Host, AccessCtrl, MCP Server). The two controllers have separate images and separate ServiceAccounts, and interact only through CRDs via the Kubernetes API.
+2. **WRC MCP interface**: Besides reconciling CRDs, the WRC exposes an MCP server (StreamableHTTP at `:8082/mcp/v1`) whose tools include `deploy_recipe`, `rollback_recipe`, and `delete_recipe`, so a recipe can be deployed either by creating a WorkflowRecipe CRD or by an agent calling the tool. Tool-driven deployments are authorized by a caller-`contextRef` check: a request whose identity `contextRef` does not match the recipe's is rejected with 403 (`workflow-recipes/src/mcp/handlers.ts`). This is the authorization boundary for agent-triggered deployments — not a human-in-the-loop gate.
+3. **CRD-mediated coordination**: The WRC creates McpServer CRDs and patches Context CRDs. The HCC's MCP Server Sync and MCPAccessCtrl Sync watch these CRDs and create the corresponding infrastructure — the MCP Server Sync only owns the runtime of `managed: true` (stdio) servers.
+4. **Transport triggers delegation**: Workloads with a `transport` field cause the WRC to create an McpServer CRD and patch the Context CRD (handled by MCPAccessCtrl Sync for NetworkPolicies). The `managed` flag follows the transport: `stdio` → `managed: true`, and the MCP Server Sync creates the Deployment (with stdio-bridge sidecar); `streamableHttp` / `sse` → `managed: false`, and the WRC creates the Deployment and Service itself. Workloads without `transport` are created directly by the WRC.
+5. **MCP Server Sync keys off `managed`, not `ownerReference`**: No conditional logic based on who created the McpServer CRD. It creates Deployment + Service for every `managed: true` McpServer, whether created manually or by the WRC, and leaves `managed: false` servers alone. The ownerRef serves only for Kubernetes garbage collection cascade.
+6. **Dependency ordering**: The WRC handles topological sort and creates resources in order.
+7. **Status tracking**: The WRC updates WorkflowRecipe status with per-workload phases.
+8. **Rollback coordination**: The WRC deletes McpServer CRDs (triggering MCP Server Sync cleanup via DELETE watch events) and patches Context CRD (removing from allowlist). Non-MCP resources are deleted directly.
 
 ---
 
@@ -377,12 +376,12 @@ apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
   name: <recipe-name>
-  namespace: mcp-server
+  namespace: sandbox-recipes # WorkflowRecipe CRDs are always stored here
   labels:
     clerum.io/recipe-version: '<semver>'
 spec:
   description: '<what this recipe does>'
-  contextRef: '<context-name>' # Required when any workload has transport; references a Context CRD
+  contextRef: '<context-name>' # Optional; references a Context CRD. If omitted, a transport workload gets a private `wf-<recipeName>` Context derived during MCP delegation
 
   # --- Parameterization (Section 3.8) ---
   inputContract: { ... } # JSON Schema defining required inputs
@@ -393,50 +392,41 @@ spec:
   activeProfile: '<profile-name>' # Which profile to activate
 
   # --- Computed Values (Section 5.5) ---
-  computedValues: # Optional. CEL expressions for derived values
-    - name: memoryLimit
+  computed: # Optional. Derived values from a sandboxed arithmetic/ternary
+    - name: memoryLimit #   evaluator. `{{...}}` is NOT valid here (Section 5.5.2).
       expression: 'inputs.memoryRequest * 2'
-    - name: replicaCount
-      expression: 'inputs.baseReplicas + inputs.extraReplicas'
-
-  # --- WRO Detection Fields (populated by WRO pipeline, do NOT set manually) ---
-  # See WRO-SPECIFICATION.md for the detection algorithm.
-  recipeId: '' # Optional. Auto-generated sha256 of canonical sequence when detected by WRO.
-  version: '' # Optional. Semantic version (e.g., "1.0.0").
-  signatures: # Optional. Populated by WRO pattern detection.
-    - patternId: '' # Unique pattern identifier
-      canonicalSequence: [...] # Ordered tool-call sequence
-      metrics: # Detection metrics
-        support: 0
-        agents: 0
-        avgTokens: 0
-  serverization: # Optional. Deployment configuration for serverization.
-    image: '' # Container image for the serverized recipe
-    mcpServerName: '' # MCP server name for registration
-    namespace: mcp-server # Target namespace (default: mcp-server)
-    resources: {} # Resource requests/limits
-
-  # --- WRO Marketplace Fields (optional) ---
-  capabilities: { ... } # Capability declarations (optional)
-  requirements: { ... } # Requirement declarations (optional)
 
   # --- Inter-Recipe Dependencies (Section 6.3) ---
-  dependsOn: # Recipes that must be 'active' before this recipe deploys
+  dependencies: # Recipes that must be 'active' before this recipe deploys
     - name: <recipe-name> # Required. Name of the dependent WorkflowRecipe
-      namespace: mcp-server # Optional. Defaults to same namespace
+      namespace: sandbox-recipes # Optional. Defaults to same namespace
       cascadeRollback: false # Optional. Auto-rollback when dependency fails (default: false)
-      maxWaitMinutes: 30 # Optional. Max time to wait for dependency to reach 'active' (default: 30)
+      maxWaitMinutes: 10 # Optional. Max time to wait for dependency to reach 'active' (default: 10)
 
   # --- Core Composition ---
-  workloads: [...] # Required. Array of workload definitions
+  workloads: [...] # Array of workload definitions (optional; may be empty for steps-only recipes)
   resources: [...] # Array of shared resource definitions (optional)
   bindings: [...] # Array of inter-workload communication declarations (optional)
 
   # --- Recipe-Wide Settings ---
   security:
-    isolationLevel: standard # minimal | standard | strict
-  dryRun: false # Preview mode (Section 13)
+    isolationLevel:
+      standard # minimal | standard | strict. No CRD default;
+      # the reconciler falls back to `minimal` when omitted (Section 8).
 ```
+
+`spec` has no `required` list. The CRD instead requires (CEL rule R2) that a
+recipe define **at least one of** `workloads` or `steps` — `workloads` has
+`minItems: 0`, so workflow-only (steps-only) recipes are valid.
+
+The complete `spec` property set is: `description`, `gfs`, `contextRef`,
+`coordinatorImage`, `runtimeEgress`, `agent`, `steps`, `mcpServers`, `output`,
+`scheduling`, `triggers`, `runRetention`, `ui`, `workloads`, `webhooks`,
+`oauthClients`, `pluginWorkloadSdk`, `resources`, `bindings`, `inputs`,
+`inputContract`, `activeProfile`, `profiles`, `computed`, `security`,
+`dependencies`. Anything else — including `recipeId`, `version`, `signatures`,
+`serverization`, `capabilities`, and `requirements` — is **not** in the schema
+and is pruned by the API server.
 
 ### 3.1.1 Workflow Steps
 
@@ -516,7 +506,8 @@ WRC-managed output PVCs get a run-scoped one-shot
 the subPath, creates only that directory chain, and makes it writable by the
 non-root workflow UID/GID `1000`. Operator-provided `output.claimName` PVCs do
 not get ownership mutation, so operators must pre-provision permissions for
-UID/GID `1000`. PVCs declared under `workloads[].volumes` remain
+UID/GID `1000`. PVCs declared under `spec.resources[]` (mounted through
+`workloads[].volumeMounts`) or under `workloads[].volumeClaimTemplates` remain
 workload/service storage and are not treated as workflow output storage.
 
 Upgrade note: recipes that previously relied on the cluster-wide
@@ -545,16 +536,17 @@ workloads:
     imagePullSecrets: # Optional. List of Secret names for private registries.
       - <secret-name> # Secrets must exist in the workload's namespace.
 
-    # --- Standard Kubernetes workload fields ---
-    # replicas, port, command, args, env, resources, volumeMounts, serviceAccount,
-    # and type-specific fields (schedule, backoffLimit, parallelism, etc.) are
-    # supported as-is. See https://kubernetes.io/docs/concepts/workloads/
-    # Only Clerum-specific extensions are documented below.
+    # --- Supported workload fields ---
+    # The complete workloads[] property set is: id, type, image, imagePullPolicy,
+    # port, replicas, command, args, env, volumeMounts, envSecret, resources,
+    # healthCheck, dependsOn, imagePullSecrets, oauthClientRefs, egressBindings,
+    # includeWhen, transport, security, schedule, timeZone, serviceName,
+    # volumeClaimTemplates, backoffLimit. Anything else is pruned by the API
+    # server (structural schema) and silently ignored.
     #
-    # Required: resources.limits.cpu and resources.limits.memory (enforced by security policy).
-    # env supports Clerum-specific sources (Section 3.4).
-    # envSecret provides batch secret mapping (Section 3.4.1).
-    # volumeMounts supports resourceRef (Section 3.5).
+    # env carries literal name/value pairs only (Section 3.4).
+    # envSecret provides Secret-backed env vars (Section 3.4.1).
+    # volumeMounts take name + mountPath, where name is a resources[] id (Section 3.5).
 
     # --- Conditional Inclusion (Section 4) ---
     includeWhen: '{{inputs.<key>}}' # Optional. Include only when boolean input is true.
@@ -562,16 +554,21 @@ workloads:
     # --- Deployment ordering ---
     dependsOn: [...] # List of workload IDs that must be ready/completed first.
 
-    # --- MCP Server registration (optional, deployment/statefulset only) ---
+    # --- MCP Server registration (optional) ---
+    # transport is an OBJECT. Its presence makes this workload an MCP server.
     transport:
-      streamableHttp # If set, this workload is registered as an MCP server.
-      # Values: streamableHttp | sse | stdio
+      type: streamableHttp # streamableHttp | sse | stdio
+      path: /mcp # Optional. HTTP path for the MCP endpoint.
       # stdio: WRC sets managed:true on McpServer CRD;
       #   HCC injects stdio-bridge sidecar (HTTP-to-stdio proxy)
 
     # --- Health check (Clerum abstraction over K8s probes) ---
+    # `type` has NO schema default and NO reconciler fallback: the probe builder
+    # attaches a handler only when type is http, tcp, or exec. Omit it and the
+    # generated Deployment carries a handler-less Probe, which the API server
+    # rejects with "must specify a handler type". Always set it.
     healthCheck:
-      type: http # http | tcp | exec (default: http if path set, tcp if only port)
+      type: http # http | tcp | exec. Required in practice (see above).
       path: /health # HTTP GET path (liveness + readiness). Only for type: http.
       port: 3000 # Port for health check (http and tcp).
       command: [...] # Command for exec probe. Only for type: exec.
@@ -580,37 +577,28 @@ workloads:
       timeoutSeconds: 5 # Max seconds per probe attempt (default: K8s default 1).
       failureThreshold: 3 # Consecutive failures before marking unhealthy (default: K8s default 3).
 
-    # --- External Ingress (optional, deployment/statefulset only) (Section 10) ---
-    ingress:
-      host: api.example.com # Required. Hostname for the Ingress resource.
-      path: / # URL path (default: /).
-      pathType: Prefix # Prefix | Exact | ImplementationSpecific (default: Prefix).
-      tls: true # Auto-create cert-manager Certificate (default: false).
-      ingressClassName: nginx # Ingress class (default: from cluster default).
-      annotations: { ... } # Additional Ingress annotations.
+    # --- External egress (optional) ---
+    egressBindings: # Max 20. Allows this workload to reach an external endpoint.
+      - egressClass: exact-host # exact-host (default) | public-web
+        dns: api.example.com # DNS hostname (exact-host only).
+        port: 443
+        protocol: TCP # TCP | UDP
 
-    # --- Multi-container (optional) ---
-    sidecars:
-      - name: <sidecar-name>
-        image: <sidecar-image>
-        port: <port>
-        env: [...]
-        resources: { ... }
-    initContainers:
-      - name: <init-name>
-        image: <init-image>
-        command: [...]
-        env: [...]
+    # NOTE: there is no `ingress`, `sidecars`, `initContainers`, or `autoscaling`
+    # field on workloads[]. External ingress and HPAs are not implemented
+    # (Section 24.2); multi-container pods are not part of the schema.
 
     # --- CronJob-specific (type: cronjob) ---
-    schedule: '0 * * * *' # Required for cronjob. Cron expression.
+    schedule: '0 * * * *' # Required for cronjob (CEL-enforced). Cron expression.
     timeZone: 'America/New_York' # Optional. IANA timezone (K8s 1.27+). Default: cluster UTC.
-    # Standard CronJob fields (concurrencyPolicy, restartPolicy, activeDeadlineSeconds,
-    # startingDeadlineSeconds, successfulJobsHistoryLimit, failedJobsHistoryLimit) supported as-is.
+    # `schedule` and `timeZone` are the ONLY cronjob knobs in the schema.
+    # concurrencyPolicy, restartPolicy, activeDeadlineSeconds, startingDeadlineSeconds,
+    # successfulJobsHistoryLimit and failedJobsHistoryLimit are NOT fields — they are pruned.
 
     # --- Job-specific (type: job) ---
-    # Standard Job fields (restartPolicy, backoffLimit, activeDeadlineSeconds,
-    # parallelism, completions) supported as-is.
+    backoffLimit: 3 # Optional. The ONLY job knob in the schema.
+    # restartPolicy, activeDeadlineSeconds, parallelism and completions are NOT
+    # fields — they are pruned.
 
     # --- DaemonSet-specific (type: daemonset) ---
     # Requires explicit operator annotation (OPA policy: clerum.io/daemonset-approved).
@@ -629,47 +617,40 @@ workloads:
     # - clerum.io/context: <contextRef>
     # - clerum.io/managed-by: workflow-recipes
     # PVCs do NOT have ownerReferences (data retention on recipe deletion)
-
-    # --- Autoscaling (optional, deployment/statefulset only) ---
-    autoscaling:
-      minReplicas: 2
-      maxReplicas: 20
-      targetCPUUtilizationPercentage: 70
 ```
 
 ### 3.3 Resource Schema
 
-Each entry in `resources[]`. Standard Kubernetes resource fields (`storageClass`, `accessMode`, `size`, `data`, `stringData`) are supported as-is. See [Kubernetes documentation](https://kubernetes.io/docs/concepts/storage/persistent-volumes/). Only Clerum-specific extensions are documented below.
+Each entry in `resources[]`. The schema carries Kubernetes-shaped fields (`storageClass`, `accessMode`, `size`, `data`) with their usual meaning — see the [Kubernetes documentation](https://kubernetes.io/docs/concepts/storage/persistent-volumes/) — plus the Clerum-specific `generateKeys`. There is **no** `stringData` field; it is pruned.
 
 ```yaml
 resources:
   # --- PersistentVolumeClaim ---
   - id: <unique-name> # Required. Unique within this recipe.
     type: pvc
-    storageClass: <storage-class> # Required. e.g., "do-block-storage"
-    size: 10Gi # Required. Storage size.
-    includeWhen: '{{inputs.<key>}}' # Optional. Conditional inclusion (Section 4).
+    storageClass: <storage-class> # e.g., "do-block-storage"
+    size: 10Gi # Storage size. Required for PVC.
+    accessMode: ReadWriteOnce # ReadWriteOnce | ReadOnlyMany | ReadWriteMany
 
   # --- Secret ---
   # WARNING: Values in `data` are stored in plaintext in the WorkflowRecipe CRD.
-  # For sensitive values, use `generateKeys` or reference pre-existing K8s Secrets via `secretKeyRef`.
+  # For sensitive values, use `generateKeys` or a pre-provisioned K8s Secret via `envSecret`.
   - id: <unique-name>
     type: secret
     data: { KEY_NAME: 'value' } # Static key-value pairs (optional, non-sensitive only).
-    generateKeys: # Clerum-specific: auto-generated keys.
-      - key: PASSWORD
-        length: 32 # Generates a cryptographically random alphanumeric string.
-      - key: EXTERNAL_API_TOKEN
-        length:
-          0 # 0 = operator-supplied. Recipe enters `pending-operator-input`.
-          # Operator populates via `kubectl edit secret <recipe>-<resource-id>`.
-          # Controller polls every 30s. Timeout: 24h -> `failed`.
+    generateKeys: # Clerum-specific: plain list of Secret KEYS to auto-generate
+      - PASSWORD # random values for. There is no per-key `length` option.
+      - API_TOKEN
 
   # --- ConfigMap ---
   - id: <unique-name>
     type: configmap
     data: { config.yaml: 'setting: value' }
 ```
+
+`resources[]` items support only `id`, `type`, `storageClass`, `size`,
+`accessMode`, `data`, and `generateKeys`. There is **no** `includeWhen` on
+resources — conditional inclusion applies to workloads only (Section 4).
 
 ### 3.4 Environment Variables
 
@@ -775,9 +756,9 @@ spec:
 
 | Aspect          | `env[]`                      | `envSecret`                   |
 | --------------- | ---------------------------- | ----------------------------- |
-| **Use case**    | Mixed sources, single values | Multiple keys from one Secret |
+| **Use case**    | Literal / templated values   | Multiple keys from one Secret |
 | **Syntax**      | Verbose per-entry            | Concise batch mapping         |
-| **Flexibility** | High (4 different sources)   | Focused on K8s Secrets only   |
+| **Flexibility** | Literal `value` strings only | Focused on K8s Secrets only   |
 | **Combination** | ✅ Can use both              | ✅ Can use both               |
 
 When both `env` and `envSecret` are specified, the reconciler merges them. Duplicate `envVar` names are resolved with `envSecret` taking precedence (Kubernetes last-writer-wins semantics apply during env var injection).
@@ -786,13 +767,13 @@ When both `env` and `envSecret` are specified, the reconciler merges them. Dupli
 
 - The Secret referenced by `envSecret.name` must exist in the same namespace as the WorkflowRecipe.
 - The reconciler does NOT create the Secret — it is assumed to be pre-provisioned by the operator or external secret management system.
-- If the Secret does not exist, the workload will be created but pod startup will fail with `ContainerCreating` state and error `Unexpected adversarial event: InvalidVariableName`. This is intentional Kubernetes behavior.
+- If the Secret does not exist, the workload is still created, but the reconciler keeps the required `secretKeyRef`, so the kubelet cannot start the container and surfaces a `CreateContainerConfigError` (the pod stays out of `Running`). This is intentional — a genuinely-absent key is a visible failure signal, not a silent drop (`workflow-recipes/src/reconciler/resourceBuilder.ts`).
 
 **Security considerations:**
 
 - `envSecret` is the **recommended** method for MCP server credentials because it never stores secret values in the WorkflowRecipe CRD.
 - The `env[].value` field should ONLY be used for non-sensitive configuration (log levels, feature flags, etc.).
-- For operator-supplied secrets, use `resources[].generateKeys` with `length: 0` (see §3.3).
+- For auto-generated secrets, list the key names under `resources[].generateKeys` (see §3.3). For operator- or externally-supplied secrets, pre-provision a K8s Secret and reference it through `envSecret`.
 
 `envSecret` values are not template-rendered. They remain Kubernetes
 `secretKeyRef` entries in the generated pod spec.
@@ -828,73 +809,78 @@ recipe runs) but still fails closed at the reconciler until labeled.
 
 ```yaml
 volumeMounts:
-  # From a shared resource (PVC, ConfigMap, Secret)
-  - resourceRef: <resource-id>
-    mountPath: /data
-    readOnly: false # Default: false
-
-  # From a host path (DaemonSet only, requires operator annotation clerum.io/hostpath-approved)
-  - hostPath: /proc
-    mountPath: /host/proc
-    readOnly: true
-
-  # EmptyDir (ephemeral, pod-scoped)
-  - emptyDir: true
-    mountPath: /tmp
-    sizeLimit: 1Gi # Optional. Max size.
+  # `name` is the id of a shared resource (PVC, ConfigMap, Secret) in resources[]
+  - name: <resource-id> # Required.
+    mountPath: /data # Required.
+    subPath: '' # Optional.
+    readOnly: false # Optional. Default: false
 ```
 
+Only `name`, `mountPath`, `subPath`, and `readOnly` exist. There is no
+`resourceRef`, no `hostPath`, and no `emptyDir`/`sizeLimit` in the schema —
+those keys are pruned by the API server, which then rejects the mount for a
+missing required `name`.
+
 ### 3.6 Bindings
+
+`spec.bindings[]` declares **inter-workload** traffic only. Each item requires
+`from`, `to`, and `port`; the only other field is `protocol` (`TCP` | `UDP`,
+default `TCP`). There is no `to: external` keyword and no `dns`/`cidr` field on
+bindings — those keys are pruned.
 
 ```yaml
 bindings:
   # --- Inter-workload binding ---
   - from: <workload-id> # Source workload
     to: <workload-id> # Destination workload
-    protocol: tcp # tcp | udp (default: tcp)
+    protocol: TCP # TCP | UDP (default: TCP)
     port: 5432 # Destination port
-
-  # --- External egress binding (by DNS hostname — preferred) ---
-  - from: <workload-id> # Source workload (including MCP workloads with transport)
-    to: external # Reserved keyword for external endpoints
-    dns: 'api.airtable.com' # Exact DNS hostname (resolved to CIDR at reconcile time)
-    port: 443 # Destination port
-    protocol: tcp # tcp | udp (default: tcp)
-
-  # --- External egress binding (by specific CIDR) ---
-  - from: <workload-id> # Source workload
-    to: external # Reserved keyword for external endpoints
-    cidr: '104.18.0.0/16' # Specific CIDR block (NOT 0.0.0.0/0)
-    port: 443 # Destination port
-    protocol: tcp # tcp | udp (default: tcp)
 ```
 
-**External binding fields** (mutually exclusive — specify `dns` OR `cidr`, not both):
+**External egress** is declared per workload with `workloads[].egressBindings[]`
+(max 20 entries), not with bindings:
 
-| Field  | Type   | Required            | Description                                                                                                                                              |
-| ------ | ------ | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dns`  | string | One of `dns`/`cidr` | Exact DNS hostname. Resolved to IP addresses at reconcile time by the HCC. Re-resolved periodically (default: 300s). **Preferred** for external APIs.    |
-| `cidr` | string | One of `dns`/`cidr` | Specific CIDR block. **Must be a targeted range** — open ranges (`0.0.0.0/0`, `::/0`) are rejected by CEL validation. Use for endpoints with stable IPs. |
+```yaml
+workloads:
+  - id: airtable-mcp
+    # ...
+    egressBindings:
+      - egressClass: exact-host # exact-host (default) | public-web
+        dns: 'api.airtable.com' # DNS hostname (exact-host only)
+        port: 443
+        protocol: TCP
+```
 
-**Constraint: No open CIDR ranges.** The `cidr` field rejects `0.0.0.0/0` and `::/0` to force recipe authors to declare specific destinations. This prevents accidental unrestricted egress. For external APIs, prefer `dns` which is more readable and maintains the principle of least privilege.
+| Field         | Type    | Description                                                                                                          |
+| ------------- | ------- | -------------------------------------------------------------------------------------------------------------------- |
+| `egressClass` | enum    | `exact-host` (default) targets one DNS hostname plus port. `public-web` is an explicit opt-in for public TCP 80/443. |
+| `dns`         | string  | DNS hostname of the external service. Resolved to an `ipBlock` at reconcile time.                                    |
+| `port`        | integer | 1-65535.                                                                                                             |
+| `protocol`    | enum    | `TCP` \| `UDP`.                                                                                                      |
+
+**No raw CIDR anywhere.** The schema deliberately does not accept a static CIDR
+for external egress; destinations are declared as DNS hostnames and resolved by
+the controller. `public-web` permits public TCP 80/443 while keeping private,
+metadata, cluster-internal, link-local, multicast, and reserved ranges blocked
+by NetworkPolicy.
 
 Each **inter-workload** binding generates a NetworkPolicy rule:
 
 - **Ingress** on `to` workload: allow from `from` workload pods on `port`
 - **Egress** on `from` workload: allow to `to` workload pods on `port`
 
-Each **external** binding generates an egress NetworkPolicy rule on the `from` workload allowing traffic to the resolved IP(s) on the specified port. For `dns`-based bindings, the HCC resolves the hostname and generates CIDR-based NetworkPolicy rules; the resolved IPs are stored in the McpServer CRD status for auditability. `egressClass: public-web` is allowed only when the workflow explicitly requests public web access; it permits public TCP 80/443 while keeping private, metadata, cluster-internal, link-local, multicast, and reserved ranges blocked.
+Each **egressBinding** generates an egress NetworkPolicy rule on the declaring workload allowing traffic to the resolved IP(s) on the specified port. The HCC resolves the hostname and generates ipBlock-based NetworkPolicy rules; the resolved IPs are stored in the McpServer CRD status for auditability.
 
-**MCP workloads and external egress**: Workloads with `transport` field can declare `to: external` bindings. The WRC propagates these bindings to the McpServer CRD as `spec.egressBindings[]`. The HCC reads these bindings and generates egress NetworkPolicy rules in the `mcp-server` namespace alongside the L2 context-allow rules. This closes the egress gap for MCP servers that depend on external APIs (e.g., Airtable, GitHub, Slack). Without an explicit `to: external` binding, MCP server pods can only reach DNS (L1) and internal services (L2/L3) — all other egress is denied by L0.
+**MCP workloads and external egress**: Workloads with a `transport` object can declare `egressBindings`. The WRC propagates them to the McpServer CRD as `spec.egressBindings[]`. The HCC reads these bindings and generates egress NetworkPolicy rules in the `mcp-server` namespace alongside the L2 context-allow rules. This closes the egress gap for MCP servers that depend on external APIs (e.g., Airtable, GitHub, Slack). Without an explicit egress binding, MCP server pods can only reach DNS (L1) and internal services (L2/L3) — all other egress is denied by L0.
 
 Registry-installed recipes and MCP servers follow the same contract. Registry
 metadata with exact `domains`/`ports` installs exact-host egress. Temporary
 registry metadata `wideCidr:true` installs explicit `egressClass: public-web`;
 the value must not be interpreted as raw unrestricted cluster egress.
 
-Workloads with `transport` field also automatically get an additional ingress rule allowing traffic from the `mcp-host` namespace on their primary port. For recipe-based MCP workloads, this is handled by the HCC's MCPAccessCtrl Sync when the WRC module patches the Context CRD (see Section 6.1). For standalone MCP servers (no recipe), the HCC's MCP Server Sync and MCPAccessCtrl Sync handle this directly.
+Workloads with `transport` field also automatically get an additional ingress rule allowing traffic from the `mcp-host` namespace on their primary port. For recipe-based MCP workloads, this is handled by the HCC's MCPAccessCtrl Sync when the WRC patches the Context CRD (see Section 6.1). For standalone MCP servers (no recipe), the HCC's MCP Server Sync and MCPAccessCtrl Sync handle this directly.
 
-**Risk classification**: External bindings with `dns` or restricted `cidr` trigger MEDIUM risk classification. Recipes with external bindings require operator approval when `autoApproveMaxRisk` is `none` or `low`. The approval notification includes the DNS hostname or CIDR, port, and protocol for each external binding, allowing the operator to verify that the requested egress is legitimate.
+**Risk classification**: Egress bindings trigger MEDIUM risk classification. Recipes with external egress require operator approval when auto-approval is restricted. The approval notification includes the DNS hostname, port, and protocol for each egress binding, allowing the operator to verify that the requested egress is legitimate.
 
 **Note on ephemeral workloads**: Bindings involving CronJob or Job workloads only apply while those pods exist. The NetworkPolicy is always present but only matches running pods.
 
@@ -903,65 +889,69 @@ Workloads with `transport` field also automatically get an additional ingress ru
 ```yaml
 security:
   isolationLevel: standard # minimal | standard | strict
+  allowContextRef: false # optional; must be true for a recipe to bind an existing shared Context (see §8)
 ```
 
-See Section 8 for full security model details.
+There is deliberately **no CRD-level default** for `isolationLevel`. When
+`spec.security.isolationLevel` is omitted, the reconciler falls back to
+`minimal`. See Section 8 for full security model details.
 
 ### 3.8 Input Parameterization
 
-Recipes can declare an `inputContract` (JSON Schema) and accept `inputs` values that are interpolated into the recipe using `{{inputs.<key>}}` syntax. This enables recipe reuse across environments without duplicating YAML.
+Recipes can declare an `inputContract` (JSON Schema) and accept `inputs` values that are interpolated into the recipe using `{{inputs.<key>}}` syntax.
+
+**Interpolation is limited to `env[].value`, `command[]`, and `args[]`** (Section 3.4). It does **not** reach `image`, `replicas`, `resources.limits.*`, `resources.requests.*`, or `resources[].size`. Those fields are consumed raw, so a `{{...}}` placeholder in them either fails CRD admission (`replicas` is `type: integer` — a string is rejected outright) or is passed through literally to Kubernetes as an invalid image reference / invalid quantity. Vary those values per environment with `profiles` (Section 5), not with templates.
 
 ```yaml
 spec:
   inputContract:
     type: object
-    required: [imageTag, replicas]
+    required: [logLevel]
     properties:
-      imageTag:
+      logLevel:
         type: string
-        description: 'Docker image tag for the MCP server'
-        default: 'latest'
-      replicas:
-        type: integer
-        minimum: 1
-        maximum: 10
-        default: 2
+        default: 'info'
+      dbName:
+        type: string
+        default: 'knowledge'
       cacheEnabled:
         type: boolean
         default: false
         description: 'Deploy Redis cache alongside the MCP server'
-      dbStorageSize:
-        type: string
-        default: '10Gi'
 
   inputs:
-    imageTag: '2.1.0'
-    replicas: 3
+    logLevel: 'debug'
+    dbName: 'knowledge'
     cacheEnabled: true
-    dbStorageSize: '50Gi'
 
   workloads:
     - id: mcp-server
       type: deployment
-      image: 'your-registry.example.com/evenfire/mcp-knowledge:{{inputs.imageTag}}'
-      replicas: '{{inputs.replicas}}'
+      image: 'your-registry.example.com/evenfire/mcp-knowledge:2.1.0' # literal — not templated
+      replicas: 3 # integer literal — not templated
+      env:
+        - name: LOG_LEVEL
+          value: '{{inputs.logLevel}}' # templated
+        - name: DB_NAME
+          value: '{{inputs.dbName}}' # templated
 
   resources:
     - id: pg-data
       type: pvc
-      size: '{{inputs.dbStorageSize}}'
+      size: 50Gi # literal — not templated
 ```
 
 **Resolution rules**:
 
-Resolution happens in two phases:
+Resolution happens at reconciliation time only:
 
-1. **Admission time** (CEL rules): Validates structural constraints — `inputContract` schema compliance, `includeWhen` format, profile references. No template resolution occurs here.
-2. **Reconciliation time** (WorkflowRecipe Reconciler): Resolves all `{{inputs.<key>}}` templates, applies profile overrides, evaluates `includeWhen` conditions, and generates child resources.
+1. **Admission time**: Nothing input-related is validated. `spec.inputContract`, `spec.inputs`, and `spec.profiles` are all preserve-unknown-fields objects with no CEL rules (§11) and there is no validating webhook. `inputContract` is **not** enforced by the API server — a recipe whose `inputs` violate its own contract is admitted.
+2. **Reconciliation time** (WorkflowRecipe Reconciler): Resolves `{{inputs.<key>}}` templates in the three templated fields, applies profile overrides, evaluates `includeWhen` conditions, and generates child resources.
 
-- If `inputContract` is defined, `inputs` are validated against it at admission. Missing required fields without defaults are rejected.
-- If `inputContract` is not defined, `inputs` is ignored.
-- Input values are string-interpolated into the YAML before type coercion. The controller parses the resulting values into their expected types.
+- `inputContract` is consumed by the reconciler for **one purpose only**: harvesting `properties.*.default` values as the lowest precedence layer (`extractSchemaDefaults`). `required`, `type`, `enum`, `minimum`, and every other JSON Schema keyword in it are **not** enforced anywhere in the reconcile path.
+- A missing input surfaces late: the reconcile fails with `Unresolved template reference: "inputs.<key>"` the first time a template references it (§16.6). An input that is declared but never templated is silently unused.
+- If `inputContract` is not defined, `inputs` still work — they are simply layered without defaults.
+- Interpolation is textual and produces a string. Because it only runs on `env[].value`, `command[]`, and `args[]` — all of which are strings in the pod spec — there is no type coercion step.
 - Profile overrides (Section 5) are applied to `inputs` before template resolution.
 
 ---
@@ -981,7 +971,11 @@ Without conditional inclusion, every workload in a recipe is always deployed. Th
 
 ### 4.2 The `includeWhen` Field
 
-Workloads and resources can declare an `includeWhen` field that references a boolean input parameter. When the referenced input evaluates to `false`, the workload or resource is excluded from deployment.
+**Workloads** can declare an `includeWhen` field that references a boolean input parameter. In a recipe **without** `spec.steps`, when the referenced input evaluates to `false` the workload is excluded from deployment.
+
+> **`includeWhen` has NO effect in a steps-based (workflow) recipe.** The reconciler treats a recipe as a workflow when `spec.steps` is non-empty (`workflowRecipeReconciler.ts:1142`), and that branch deploys `spec.workloads` directly — `filterByIncludeWhen` is called only in the non-workflow branch (`:1689`). In a recipe with `spec.steps`, `includeWhen` is silently ignored and the workload is **always** deployed. Everything in this section describes steps-less recipes only.
+
+`includeWhen` exists on `workloads[]` only. `resources[]` has no `includeWhen` field — the reconciler passes resources through unchanged — so a PVC, Secret, or ConfigMap declared in `resources[]` is always created, even when the only workload that mounts it is excluded.
 
 ```yaml
 spec:
@@ -1031,20 +1025,35 @@ spec:
       storageClass: do-block-storage
       accessMode: ReadWriteOnce
       size: 5Gi
-      includeWhen: '{{inputs.cacheEnabled}}' # PVC excluded when Redis is excluded
+      # NOTE: this PVC is created even when redis is excluded — resources[]
+      # has no includeWhen. Size the recipe accordingly.
 ```
 
 ### 4.3 Resolution Rules
 
-1. `includeWhen` must reference a boolean input: `{{inputs.<key>}}` where the key resolves to a JSON Schema `boolean` type.
-2. Format is validated at admission time (CEL regex check). Actual boolean evaluation happens at reconciliation time (WorkflowRecipe Reconciler), after input resolution and profile application but before resource creation.
-3. When `includeWhen` resolves to `false`:
-   - The workload or resource is completely excluded from the deployment pipeline.
+1. `includeWhen` accepts **exactly one form**: the literal string `{{inputs.<key>}}` (optional inner whitespace; `<key>` must be `\w+`). This is not a general expression language and it is not the general template engine — `includeWhen` has its own anchored resolver (`includeWhenFilter.ts`). **No other form works.** Every other _string_ you can write here is silently ignored rather than rejected; the only value that fails loudly is a non-string one, which the CRD's `type: string` rejects at admission:
+
+   | Written                    | Result                                                                 |
+   | -------------------------- | ---------------------------------------------------------------------- |
+   | `'{{inputs.enabled}}'`     | Resolved against the resolved inputs. The only supported form.          |
+   | `'{{computed.enabled}}'`   | **No match → workload silently excluded.** Use `{{inputs.enabled}}` — computed values are merged into the resolved inputs (rule 6). |
+   | `'true'` (quoted string)   | **No match → workload silently excluded.** To always include, omit `includeWhen` entirely. |
+   | `true` (unquoted YAML boolean) | Rejected at admission — the CRD types `includeWhen` as `string`. This is the one bad value that _does_ fail loudly. |
+   | `'{{inputs.a}}-{{inputs.b}}'`, `'not {{inputs.x}}'`, or any surrounding text | **No match → workload silently excluded.** The regex is anchored; no concatenation, negation, or comparison is supported. |
+
+   There is no error and no `failed` status for any of the silently-excluded rows — see §16.6.
+
+   > The CRD `description` for this field reads _"CEL expression evaluated against inputs"_. **That is inaccurate** — no CEL evaluator is involved, and none of CEL's operators work here. Trust this table (and `includeWhenFilter.ts`) over `kubectl explain`.
+
+2. The key must resolve to a value the filter considers truthy. Falsy: `false`, `"false"`, `"0"`, `0`, `""`, `null`, and — critically — a key that is absent or a template that did not match. Everything else is truthy.
+3. Evaluation happens at reconciliation time (WorkflowRecipe Reconciler), after input resolution and profile application but before resource creation — and **only on the non-workflow (steps-less) path**. A recipe with `spec.steps` never runs the filter at all (§4.2).
+4. In a steps-less recipe, when `includeWhen` resolves to `false`:
+   - The workload is completely excluded from the deployment pipeline.
    - Any `bindings[]` referencing the excluded workload are silently skipped (no error).
    - Any `dependsOn` references to the excluded workload are silently removed.
-   - Any `env[].valueFrom.resourceRef` references to an excluded resource cause a validation error (fail-fast).
-4. When `includeWhen` resolves to `true` or is absent: the workload/resource is included normally.
-5. The `includeWhen` field is validated by a CEL rule to ensure it references a valid input key (see Section 11).
+5. When `includeWhen` resolves to `true` or is absent: the workload is included normally.
+6. **Computed values are reachable — but only through `inputs.`.** `spec.computed` results are merged into the resolved inputs as the highest-precedence layer (§5.5.3), so a computed value named `enabled` is gated with `{{inputs.enabled}}`. `{{computed.enabled}}` does **not** work here even though it works in `env[].value` (§5.5.4).
+7. Resources are never excluded — see §4.2.
 
 ### 4.4 Interaction with Bindings and Dependencies
 
@@ -1052,7 +1061,7 @@ When a workload is excluded via `includeWhen`:
 
 - **Bindings**: Any binding with `from` or `to` referencing the excluded workload is silently dropped. No NetworkPolicy is generated for it.
 - **dependsOn**: Any workload with `dependsOn` listing the excluded workload has that dependency removed. If the excluded workload was the only dependency, the dependent workload proceeds immediately.
-- **resourceRef in env**: If a workload references an excluded resource via `env[].valueFrom.resourceRef`, this is a validation error. The recipe author must also conditionally include the dependent workload, or use `secretKeyRef` to reference a pre-existing Secret.
+- **Resources**: Shared resources are unaffected. A PVC or Secret whose only consumer was excluded is still created.
 
 ---
 
@@ -1068,26 +1077,18 @@ Every real-world deployment needs staging vs. production differences (replicas, 
 
 Profiles are named sets of input overrides declared within the recipe. They are the primary mechanism for environment-specific parameterization.
 
+**A profile can only change what an input can reach.** Inputs reach exactly three
+places: `includeWhen`, and the templated fields `env[].value`, `command[]`,
+`args[]` (§3.4, §16.5). Putting `replicas`, `imageTag`, `cpuLimit`, or
+`memoryLimit` in a profile does **nothing** — `workloads[].replicas`,
+`image`, and `resources.limits.*` are consumed raw and are never templated. Vary
+those with Kustomize overlays (§5.6), not with profiles.
+
 ```yaml
 spec:
   inputContract:
     type: object
-    required: [imageTag, replicas]
     properties:
-      imageTag:
-        type: string
-        default: 'latest'
-      replicas:
-        type: integer
-        minimum: 1
-        maximum: 20
-        default: 1
-      cpuLimit:
-        type: string
-        default: '500m'
-      memoryLimit:
-        type: string
-        default: '256Mi'
       cacheEnabled:
         type: boolean
         default: false
@@ -1095,32 +1096,46 @@ spec:
         type: string
         enum: ['debug', 'info', 'warn', 'error']
         default: 'info'
+      samplingRate:
+        type: string
+        default: '0.01'
 
   profiles:
     staging:
-      replicas: 1
-      cpuLimit: '500m'
-      memoryLimit: '256Mi'
       cacheEnabled: false
       logLevel: 'debug'
+      samplingRate: '1.0'
 
     production:
-      replicas: 3
-      cpuLimit: '2'
-      memoryLimit: '1Gi'
       cacheEnabled: true
       logLevel: 'warn'
+      samplingRate: '0.01'
 
     load-test:
-      replicas: 10
-      cpuLimit: '4'
-      memoryLimit: '4Gi'
       cacheEnabled: true
       logLevel: 'info'
+      samplingRate: '0.5'
 
   activeProfile: production # Selects which profile to activate
   inputs:
-    imageTag: '2.1.0' # Base inputs (always applied)
+    logLevel: 'info' # Base inputs (always applied)
+
+  workloads:
+    - id: api
+      type: deployment
+      image: your-registry.example.com/evenfire/api:2.1.0 # literal — image is NOT templated
+      replicas: 3 # integer literal — replicas is NOT templated
+      env: # the only place the profile values actually land
+        - name: LOG_LEVEL
+          value: '{{inputs.logLevel}}'
+        - name: SAMPLING_RATE
+          value: '{{inputs.samplingRate}}'
+
+    - id: redis
+      type: deployment
+      image: redis:7-alpine
+      port: 6379
+      includeWhen: '{{inputs.cacheEnabled}}' # profile-driven inclusion
 ```
 
 ### 5.3 Resolution Order
@@ -1139,52 +1154,85 @@ Where `<<` means "overridden by."
 
 ### 5.4 Profile Validation Rules
 
-- Profile keys must be valid `inputContract` property names. A profile cannot introduce keys not declared in `inputContract`.
-- Profile values must pass `inputContract` type validation. A profile value of `"abc"` for a `type: integer` field is rejected.
-- `activeProfile` must reference a declared profile name. An unknown profile name is rejected at admission time.
+**Nothing about profiles is validated at admission.** The CRD has no CEL rule
+touching `profiles` or `activeProfile` (§11), and `profiles` is a
+preserve-unknown-fields map. The rules below are reconciler behaviour:
+
+- `activeProfile` must reference a declared profile name. An unknown name is **not** rejected at admission — the reconciler throws `Profile "<name>" not found. Available: [...]` at reconcile time and the recipe fails.
+- Profile keys are merged over `inputs` as-is. A key not declared in `inputContract` is **not** rejected; it simply becomes another entry in the resolved input map (and is unusable unless a `{{inputs.<key>}}` template reads it).
+- Profile values are **not** type-checked against `inputContract`. A `"abc"` for a `type: integer` property is merged verbatim and reaches templates as the string it is.
 - If `activeProfile` is not set, profiles have no effect and only `inputs` values are used.
 - Profiles do not cascade. Only the active profile is applied. There is no profile inheritance.
 
 ### 5.5 Computed Values
 
-Computed values allow derived values to be calculated from inputs using CEL expressions. This addresses the common pattern of "memory limit = 2x memory request" without requiring external calculation.
+Computed values allow derived values to be calculated from inputs. This addresses the common pattern of "memory limit = 2x memory request" without requiring external calculation.
 
 #### 5.5.1 Schema
 
+The field is `spec.computed` (there is no `computedValues` field — it would be pruned).
+
 ```yaml
 spec:
-  computedValues:
+  computed:
     - name: <unique-name> # Required. Used as {{computed.<name>}}
-      expression: '<CEL-expression>' # Required. CEL expression referencing inputs
+      expression: '<expression>' # Required
 ```
 
-#### 5.5.2 Supported CEL Operations
+#### 5.5.2 Supported Expression Operations
 
-| Category            | Operations                                           | Example                                     |
-| ------------------- | ---------------------------------------------------- | ------------------------------------------- | ---------------------- | --------------------------------- |
-| **Arithmetic**      | `+`, `-`, `*`, `/`, `%`                              | `inputs.memoryRequest * 2`                  |
-| **Comparison**      | `<`, `>`, `<=`, `>=`, `==`, `!=`                     | `inputs.replicas > 3 ? 3 : inputs.replicas` |
-| **Logical**         | `&&`, `                                              |                                             | `, `!`, `?:` (ternary) | `inputs.enableCache ? 1024 : 256` |
-| **String**          | `contains()`, `startsWith()`, `endsWith()`, `size()` | `inputs.name.startsWith("prod")`            |
-| **Type conversion** | `int()`, `string()`, `double()`                      | `int(inputs.timeoutMs / 1000)`              |
-| **Math**            | `max()`, `min()`, `abs()`                            | `max(inputs.replicas, 1)`                   |
+Expressions are evaluated by a sandboxed recursive-descent evaluator (no `eval`, not CEL). It supports:
+
+| Category       | Operations                       | Example                           |
+| -------------- | -------------------------------- | --------------------------------- |
+| **Input refs** | `inputs.KEY`                     | `inputs.memoryRequest`            |
+| **Arithmetic** | `+`, `-`, `*`, `/`               | `inputs.memoryRequest * 2`        |
+| **Comparison** | `<`, `>`, `<=`, `>=`, `==`, `!=` | `inputs.replicas > 3`             |
+| **Ternary**    | `?:`                             | `inputs.enableCache ? 1024 : 256` |
+| **Literals**   | numbers, single/double quotes    | `'warn'`                          |
+| **Grouping**   | `( )`                            | `(inputs.a + inputs.b) * 2`       |
+
+String concatenation uses `+` with string operands. There are no built-in
+functions (`int()`, `max()`, `min()`, `contains()` etc. are not available).
+
+**Clerum template syntax (`{{...}}`) is NOT valid inside an expression.** The
+tokenizer rejects `{` with `Unexpected character '{'`, and the only reference
+form the parser accepts is `inputs.KEY` (a bare identifier such as `postgres`
+is also rejected). An expression like `'postgres://{{postgres:host}}:5432'`
+fails the reconcile with a `ComputedValueError`. (The `spec.computed`
+_description_ text in the CRD suggests otherwise; the evaluator is
+authoritative.)
 
 #### 5.5.3 Resolution Order
 
-Computed values are resolved AFTER inputs and profiles:
+Two orders matter, and they are not the same.
+
+**Evaluation input.** `spec.computed` expressions are evaluated against the
+**raw `spec.inputs` map only** — before `inputContract` defaults and profile
+overrides are layered in. An expression that references a key supplied _only_
+by an `inputContract` `default` or by `profiles[activeProfile]` fails with
+`Unresolved reference 'inputs.X'`. Keys used in expressions must be present in
+`spec.inputs`.
+
+**Final merge.** The evaluated results are then layered on top of the resolved
+inputs, so `{{inputs.<key>}}` and `{{computed.<key>}}` see:
 
 ```
 1. inputContract.defaults
 2. inputs
 3. profiles[activeProfile]
-4. computedValues (can reference inputs, not other computed values)
+4. computed (highest precedence)
 ```
 
-**Important**: Computed values cannot reference other computed values (no chaining). Each expression can only reference `inputs.*` directly.
+**Chaining is supported.** Entries are evaluated in array order and each result
+is merged back into the evaluation map, so a later expression may reference an
+earlier computed value as `inputs.<earlier-name>` (note: `inputs.`, not
+`computed.`).
 
 #### 5.5.4 Usage in Templates
 
-Computed values are accessible via `{{computed.<name>}}` template syntax:
+Computed values are accessible via `{{computed.<name>}}` template syntax — in
+`env[].value`, `command[]`, and `args[]`, and **only** there:
 
 ```yaml
 spec:
@@ -1196,7 +1244,13 @@ spec:
         default: 128
     required: [memoryRequest]
 
-  computedValues:
+  # REQUIRED for the expression below: computed reads the raw spec.inputs map,
+  # so relying on the inputContract `default: 128` alone would fail the
+  # reconcile with "Unresolved reference 'inputs.memoryRequest'" (§5.5.3).
+  inputs:
+    memoryRequest: 128
+
+  computed:
     - name: memoryLimit
       expression: 'inputs.memoryRequest * 2'
 
@@ -1204,60 +1258,92 @@ spec:
     - id: api
       type: deployment
       image: app:1.0
-      resources:
-        requests:
-          memory: '{{inputs.memoryRequest}}Mi'
-        limits:
-          memory: '{{computed.memoryLimit}}Mi'
+      env:
+        - name: MEMORY_REQUEST_MI
+          value: '{{inputs.memoryRequest}}'
+        - name: MEMORY_LIMIT_MI
+          value: '{{computed.memoryLimit}}'
 ```
+
+> `{{...}}` resolution only runs on `env[].value`, `command[]`, and `args[]`
+> (Section 3.4). `resources.requests.*` / `resources.limits.*` are **not**
+> templated — a `{{computed.memoryLimit}}Mi` written there reaches the API
+> server literally and is rejected as an invalid resource quantity.
+
+> **Do not use `{{computed.<name>}}` in `includeWhen`.** `includeWhen` is
+> resolved by a different pass whose regex accepts only `{{inputs.<key>}}`
+> (§4.3, §16.5). A `{{computed.<name>}}` there does not match, resolves to
+> `undefined`, and **silently excludes the workload** — no error, no `failed`
+> status. Because computed results are merged into the resolved inputs at the
+> highest precedence (§5.5.3), reference the computed value through `inputs.`
+> instead:
+>
+> ```yaml
+> # `computed` reads the raw spec.inputs map (§5.5.3), so `tier` must be set
+> # here — an inputContract default alone would fail the reconcile.
+> inputs:
+>   tier: premium
+>
+> computed:
+>   - name: cacheEnabled
+>     expression: 'inputs.tier == "premium"'
+>
+> workloads:
+>   - id: cache
+>     type: deployment
+>     image: redis:7
+>     # CORRECT — computed values are reachable through the inputs namespace.
+>     includeWhen: '{{inputs.cacheEnabled}}'
+>     # WRONG — '{{computed.cacheEnabled}}' would silently drop this workload.
+> ```
 
 #### 5.5.5 Validation Rules
 
-- Maximum 10 computed values per recipe (CEL enforcement).
-- Expression must compile at admission time (invalid CEL rejected).
-- Expression can only reference `inputs.*` (no `computed.*`, no `resources.*`).
-- Division by zero returns error at admission time if detectable, otherwise at reconciliation.
-- Type mismatch (string + integer) returns error at admission.
+Both `name` and `expression` are required on every entry (CRD schema). The
+remaining rules are enforced by the reconciler at reconciliation time, not by
+CEL at admission:
 
-#### 5.5.6 CEL Validation Rule
+- An expression that fails to parse or evaluate fails the reconcile.
+- Expressions reference `inputs.*` only. A later entry may reference an earlier
+  computed value, but still through the `inputs.` prefix (Section 5.5.3).
+- `{{...}}` template syntax inside an expression fails to tokenize.
+- Division by zero and type mismatches surface at reconciliation.
 
-```yaml
-- rule: >-
-    !has(self.computedValues) ||
-    self.computedValues.size() <= 10
-  message: 'Maximum 10 computedValues per recipe.'
+There are no dedicated CEL rules for `spec.computed` in the CRD.
 
-- rule: >-
-    !has(self.computedValues) ||
-    self.computedValues.all(cv,
-      !cv.expression.contains("computed."))
-  message: 'Computed values cannot reference other computed values.'
-```
-
-#### 5.5.7 Examples
+#### 5.5.6 Examples
 
 ```yaml
 # Example 1: Memory sizing
-computedValues:
+computed:
   - name: memoryLimit
-    expression: "inputs.memoryRequest * 2"
-  - name: heapSize
-    expression: "int(inputs.memoryRequest * 0.75)"
+    expression: 'inputs.memoryRequest * 2'
 
-# Example 2: Replica calculation with bounds
-computedValues:
-  - name: effectiveReplicas
-    expression: "max(min(inputs.desiredReplicas, 10), 1)"
-
-# Example 3: Feature flag derived value
-computedValues:
+# Example 2: Feature flag derived value
+computed:
   - name: cacheSize
-    expression: "inputs.enableCache ? 512 : 0"
+    expression: 'inputs.enableCache ? 512 : 0'
 
-# Example 4: String-based conditional
-computedValues:
+# Example 3: String-based conditional
+computed:
   - name: logLevel
     expression: "inputs.environment == 'production' ? 'warn' : 'debug'"
+
+# Example 4: Chaining — a later entry reads an earlier one via inputs.<name>
+computed:
+  - name: memoryLimit
+    expression: 'inputs.memoryRequest * 2'
+  - name: memoryHeadroom
+    expression: 'inputs.memoryLimit - inputs.memoryRequest'
+```
+
+To build a connection string, do it in `env[].value` — which _is_ template-
+resolved — not in a computed expression:
+
+```yaml
+env:
+  - name: DATABASE_URL
+    value: 'postgres://{{postgres:host}}:5432'
 ```
 
 ### 5.6 Kustomize Overlay Pattern (Alternative)
@@ -1296,8 +1382,6 @@ flowchart TB
     APPLY["kubectl apply"]
     ADMIT["Admission<br/>Validation"]
     APPROVE["Operator<br/>Approval"]
-    DRYRUN{"dryRun?"}
-    PREVIEW["Store preview<br/>in status"]
     RESOLVE["Resolve Inputs"]
     INCLUDE["Eval includeWhen"]
     RESOURCES["Create Shared<br/>Resources"]
@@ -1307,9 +1391,7 @@ flowchart TB
     MCPREG["MCP Registration"]
     ACTIVE["status: active"]
 
-    APPLY --> ADMIT --> APPROVE --> DRYRUN
-    DRYRUN -->|"Yes"| PREVIEW
-    DRYRUN -->|"No"| RESOLVE --> INCLUDE --> RESOURCES --> WORKLOADS --> NP --> SEC --> ACTIVE
+    APPLY --> ADMIT --> APPROVE --> RESOLVE --> INCLUDE --> RESOURCES --> WORKLOADS --> NP --> SEC --> ACTIVE
     WORKLOADS -->|"has transport"| MCPREG
     MCPREG --> NP
 
@@ -1322,26 +1404,25 @@ flowchart TB
     classDef storage fill:#F3F4F6,stroke:#6B7280,color:#374151
 
     class APPLY user
-    class ADMIT,APPROVE,DRYRUN operator
+    class ADMIT,APPROVE operator
     class RESOLVE,INCLUDE,WORKLOADS workload
-    class RESOURCES,PREVIEW storage
+    class RESOURCES storage
     class NP,SEC security
     class MCPREG crd
     class ACTIVE service
 ```
 
-| Step                        | Detail                                                                   |
-| --------------------------- | ------------------------------------------------------------------------ |
-| **Admission Validation**    | CEL rules, inputContract schema, profile validation                      |
-| **Operator Approval**       | Checked against WorkflowRecipePolicy CRD                                 |
-| **Store preview**           | Manifests stored in `status.preview`, pipeline stops                     |
-| **Resolve Inputs**          | Merge order: defaults, then inputs, then activeProfile                   |
-| **Eval includeWhen**        | Conditional inclusion evaluated on all workloads and resources           |
-| **Create Shared Resources** | PVCs, Secrets, ConfigMaps                                                |
-| **Create Workloads**        | Created in `dependsOn` topological order                                 |
-| **Create NetworkPolicies**  | HCC creates deny-all base + binding rules via Context CRD reconciliation |
-| **Apply Security Context**  | Based on `isolationLevel`                                                |
-| **MCP Registration**        | Creates McpServer CRD + patches Context allowlist                        |
+| Step                        | Detail                                                                             |
+| --------------------------- | ---------------------------------------------------------------------------------- |
+| **Admission Validation**    | Structural schema + the 25 CEL rules (§11). No inputContract or profile validation |
+| **Operator Approval**       | Checked against WorkflowRecipePolicy CRD                                           |
+| **Resolve Inputs**          | Merge order: defaults, then inputs, then activeProfile                             |
+| **Eval includeWhen**        | Conditional inclusion evaluated on workloads                                       |
+| **Create Shared Resources** | PVCs, Secrets, ConfigMaps                                                          |
+| **Create Workloads**        | Created in `dependsOn` topological order                                           |
+| **Create NetworkPolicies**  | HCC creates deny-all base + binding rules via Context CRD reconciliation           |
+| **Apply Security Context**  | Based on `isolationLevel`                                                          |
+| **MCP Registration**        | Creates McpServer CRD + patches Context allowlist                                  |
 
 **Pipeline detail — workload creation (all types follow the same path):**
 
@@ -1355,36 +1436,42 @@ For each included workload in workloads[] (respecting dependsOn order):
     +-- type: daemonset   --> Create DaemonSet
     |
     +-- If workload has transport (MCP delegation, NOT a pipeline fork):
-    |       Create McpServer CRD (managed: true, ownerRef → WorkflowRecipe)
-    |       Patch Context: add to mcpServers[] allowlist (max 100 entries)
-    |       HCC's MCP Server Sync detects new McpServer CRD → creates Deployment + Service
+    |       Create McpServer CRD (ownerRef → WorkflowRecipe)
+    |         transport.type: stdio          → managed: true
+    |                                          HCC's MCP Server Sync creates the Deployment
+    |                                          (with stdio-bridge sidecar)
+    |         transport.type: streamableHttp → managed: false
+    |                       | sse              WRC creates the Deployment + Service itself
+    |       Patch Context: add to mcpServers[] allowlist
     |       HCC's MCPAccessCtrl Sync detects Context update → creates/updates NetworkPolicies
-    |
-    +-- If workload has ingress:
-            Create Ingress resource (Section 10)
 ```
 
-**Context CRD mcpServers[] constraint**: The `mcpServers[]` array in a Context CRD MUST NOT exceed 100 entries. CEL validation: `self.mcpServers.size() <= 100`. When the WRC module patches the Context CRD to add an MCP server to the allowlist, it uses server-side apply with field manager `workflow-recipes`. Concurrent patches from multiple recipe reconciliations use distinct field managers. On 409 Conflict, the WRC module retries with exponential backoff (max 3 retries, 1s/2s/4s).
+**Context CRD mcpServers[] patching**: The Context CRD's `mcpServers[]` is a plain
+`array` of strings with no `maxItems` and no `x-kubernetes-validations` — there
+is no CEL size cap on the allowlist. When the WRC patches the Context CRD to add
+an MCP server, it uses server-side apply with field manager `workflow-recipes`.
+Concurrent patches from multiple recipe reconciliations use distinct field
+managers. On 409 Conflict, the WRC retries with exponential backoff.
 
-**Controller resource creation — WRC module creates recipe resources, other HCC synchronizers handle MCP lifecycle:**
+**Controller resource creation — WRC creates recipe resources, the HCC synchronizers handle MCP lifecycle:**
 
-| Resource Type                                  | Created By               | Creation Method                                                          |
-| ---------------------------------------------- | ------------------------ | ------------------------------------------------------------------------ |
-| Non-MCP Deployments + Services                 | HCC (WRC module)         | Direct K8s creation (server-side apply)                                  |
-| StatefulSets + Headless Services               | HCC (WRC module)         | Direct K8s creation (server-side apply)                                  |
-| CronJobs, Jobs, DaemonSets                     | HCC (WRC module)         | Direct K8s creation (server-side apply)                                  |
-| NetworkPolicies (deny-all + bindings + access) | HCC (MCPAccessCtrl Sync) | Created via Context CRD watch event (sole owner of all NetworkPolicies)  |
-| PVCs, Secrets, ConfigMaps                      | HCC (WRC module)         | Direct K8s creation (server-side apply)                                  |
-| Ingress                                        | HCC (WRC module)         | Direct K8s creation (server-side apply)                                  |
-| McpServer CRD                                  | HCC (WRC module)         | CRD creation (`managed: true`, the default; `ownerRef → WorkflowRecipe`) |
-| MCP server Deployment + Service                | HCC (MCP Server Sync)    | Created via McpServer CRD watch event                                    |
-| Context NetworkPolicies                        | HCC (MCPAccessCtrl Sync) | Created via Context watch event                                          |
+| Resource Type                                  | Created By               | Creation Method                                                                                                    |
+| ---------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Non-MCP Deployments + Services                 | WRC                      | Direct K8s creation (server-side apply)                                                                            |
+| StatefulSets + Headless Services               | WRC                      | Direct K8s creation (server-side apply)                                                                            |
+| CronJobs, Jobs, DaemonSets                     | WRC                      | Direct K8s creation (server-side apply)                                                                            |
+| NetworkPolicies (deny-all + bindings + access) | HCC (MCPAccessCtrl Sync) | Created via Context CRD watch event (sole owner of all NetworkPolicies)                                            |
+| PVCs, Secrets, ConfigMaps                      | WRC                      | Direct K8s creation (server-side apply)                                                                            |
+| McpServer CRD                                  | WRC                      | CRD creation (`managed: true` for stdio, `managed: false` for `streamableHttp`/`sse`; `ownerRef → WorkflowRecipe`) |
+| Deployment + Service for HTTP MCP workloads    | WRC                      | Direct K8s creation (server-side apply)                                                                            |
+| Deployment for stdio MCP workloads             | HCC (MCP Server Sync)    | Created via McpServer CRD watch event (`managed: true`)                                                            |
+| Context NetworkPolicies                        | HCC (MCPAccessCtrl Sync) | Created via Context watch event                                                                                    |
 
-All resources created by the WRC module carry an `ownerReference` pointing to the WorkflowRecipe CRD, enabling Kubernetes garbage collection on recipe deletion. McpServer CRDs created by the WRC module are `managed: true` (the default) with `ownerRef → WorkflowRecipe`; when the recipe is deleted, K8s GC cascades the deletion, and the MCP Server Sync handles cleanup of the associated Deployment + Service via its DELETE watch event.
+All resources created by the WRC carry an `ownerReference` pointing to the WorkflowRecipe CRD, enabling Kubernetes garbage collection on recipe deletion. McpServer CRDs created by the WRC carry `ownerRef → WorkflowRecipe`; when the recipe is deleted, K8s GC cascades the deletion. For `managed: true` (stdio) servers, the MCP Server Sync additionally cleans up the Deployment it created, via its DELETE watch event.
 
-**WorkflowRecipe Reconciler location**: The WRC runs as a reconciler module within the Host Context Controller (HCC) in the `control-plane` namespace. It runs in the same process as the HCC's 3 synchronizers and does not expose an MCP interface. It validates WorkflowRecipes, resolves inputs/profiles/computed values, performs topological sort for dependencies, creates non-MCP resources directly, and delegates MCP-enabled workloads to the MCP Server Sync via McpServer CRDs. WRC reconciler code currently lives in `workflow-recipes/src/reconciler/`. Pending integration into `host-context-controller/src/wrc/` as described in the platform architecture.
+**WorkflowRecipe Reconciler location**: The WRC runs as its own `workflow-recipes` Deployment in the `control-plane` namespace, separate from the HCC Deployment. It validates WorkflowRecipes, resolves inputs/profiles/computed values, performs topological sort for dependencies, creates non-MCP resources directly, and delegates MCP-enabled workloads to the MCP Server Sync via McpServer CRDs. It also exposes an MCP interface (`:8082/mcp/v1`) for tool-driven recipe operations (see §2). WRC reconciler code lives in `workflow-recipes/src/reconciler/`.
 
-**MCP vs Non-MCP resource distinction**: The controller architecture splits WorkflowRecipe resources into two categories based on whether a workload has a `transport` field. MCP workloads (those with `transport`) are delegated to the MCP Server Sync via McpServer CRDs — the MCP Server Sync creates their Deployment and Service, and the MCPAccessCtrl Sync creates their NetworkPolicies. Non-MCP workloads (StatefulSets, CronJobs, Jobs, etc. without `transport`) are created directly by the WRC module as standard Kubernetes resources. Critically, NetworkPolicies for **all** workloads — both MCP and non-MCP — are owned exclusively by the MCPAccessCtrl Sync. The WRC module communicates binding requirements through CRD fields and annotations; it never creates NetworkPolicy resources itself. Non-MCP workloads are never directly accessible by agents — they are accessed by MCP workloads within the same recipe via bindings. For the complete WRC permission model (access control, NetworkPolicy enforcement, and implementation gaps), see [Platform Architecture Section 6](../architecture/platform-topology.md#6-workflow-recipe-controller-wrc).
+**MCP vs Non-MCP resource distinction**: The controller architecture splits WorkflowRecipe resources into two categories based on whether a workload has a `transport` field. MCP workloads (those with `transport`) always get an McpServer CRD for registration/discovery, and the MCPAccessCtrl Sync creates their NetworkPolicies. Their **runtime** ownership depends on the transport: `stdio` workloads are delegated to the MCP Server Sync (`managed: true`), which creates the Deployment with the stdio-bridge sidecar; `streamableHttp` and `sse` workloads are `managed: false` and the WRC creates their Deployment and Service directly. Non-MCP workloads (StatefulSets, CronJobs, Jobs, etc. without `transport`) are created directly by the WRC as standard Kubernetes resources. Critically, NetworkPolicies for **all** workloads — both MCP and non-MCP — are owned exclusively by the MCPAccessCtrl Sync. The WRC communicates binding requirements through CRD fields and annotations; it never creates NetworkPolicy resources itself. Non-MCP workloads are never directly accessible by agents — they are accessed by MCP workloads within the same recipe via bindings. For the complete WRC permission model (access control, NetworkPolicy enforcement, and implementation gaps), see [Platform Architecture Section 6](../architecture/platform-topology.md#6-workflow-recipe-controller-wrc).
 
 ### 6.2 Dependency Ordering
 
@@ -1402,10 +1489,10 @@ When `dependsOn` is specified, the controller uses a topological sort to determi
 
 ### 6.3 Inter-Recipe Dependencies
 
-Recipes can declare dependencies on other recipes via `spec.dependsOn`. The controller resolves these before deploying:
+Recipes can declare dependencies on other recipes via `spec.dependencies` (note: `dependsOn` at the top level of `spec` does not exist — `dependsOn` is only a field on `steps[]` and `workloads[]`). The controller resolves these before deploying:
 
-1. **Dependency check**: For each entry in `dependsOn[]`, the controller looks up the referenced WorkflowRecipe CRD. If the referenced recipe does not exist, the recipe status transitions to `failed` with a descriptive error.
-2. **Wait for active**: The recipe remains in `pending` until all referenced recipes are in `active` state. The controller polls every 30 seconds. Each dependency has a `maxWaitMinutes` timeout (default: 30) that defines the maximum time the recipe will wait for that dependency to reach `active` state. If the timeout is exceeded, the recipe transitions to `failed` with reason `"DependencyTimeout: <dependency-name> did not reach active state within <maxWaitMinutes> minutes"`.
+1. **Dependency check**: For each entry in `dependencies[]`, the controller looks up the referenced WorkflowRecipe CRD. If the referenced recipe does not exist, the recipe status transitions to `failed` with a descriptive error.
+2. **Wait for active**: The recipe remains in `pending` until all referenced recipes are in `active` state. The controller polls every 30 seconds. Each dependency has a `maxWaitMinutes` timeout (default: 10) that defines the maximum time the recipe will wait for that dependency to reach `active` state. If the timeout is exceeded, the recipe transitions to `failed` with reason `"DependencyTimeout: <dependency-name> did not reach active state within <maxWaitMinutes> minutes"`.
 3. **Cascading failure (cascadeRollback: false)**: If a dependency recipe transitions from `active` to `failed` or `degraded`, the dependent recipe emits a warning event but does NOT automatically roll back. The operator decides.
 4. **Cascading failure (cascadeRollback: true)**: If a dependency with `cascadeRollback: true` fails, the dependent recipe transitions to `degraded` and triggers automatic rollback. Rollback order is: dependents first, dependencies last.
 5. **Cascading deletion**: If a dependency recipe is deleted while a dependent recipe is `active`, the dependent recipe transitions to `degraded` with message "dependency <name> deleted".
@@ -1446,9 +1533,9 @@ apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
   name: mcp-airtable
-  namespace: mcp-server
+  namespace: sandbox-recipes
 spec:
-  dependsOn:
+  dependencies:
     - name: postgres-db
       cascadeRollback: true # Hard dependency: rollback if DB fails
       maxWaitMinutes: 15 # Database should be ready within 15 minutes
@@ -1460,11 +1547,23 @@ spec:
       type: deployment
       image: clerum/mcp-airtable:1.0.0
       env:
+        # IMPORTANT: `{{...}}` cannot cross a recipe boundary. The template
+        # context is built ONLY from THIS recipe's workloads and resources
+        # (buildTemplateContext), so `{{postgres-db:host}}` — a *dependency
+        # recipe* name — would throw UnresolvedTemplateError and fail the
+        # reconcile. Address another recipe's Service by its DNS name instead.
+        # Use the dependency's Service DNS name literally (check it with
+        # `kubectl get svc -n sandbox-recipes -l clerum.io/recipe=postgres-db`).
         - name: DATABASE_URL
-          value: 'postgres://{{postgres-db:host}}:5432/airtable'
+          value: 'postgres://<postgres-db-service>.sandbox-recipes.svc.cluster.local:5432/airtable'
         - name: REDIS_URL
-          value: '{{redis-cache:host}}:6379'
+          value: '<redis-cache-service>.sandbox-recipes.svc.cluster.local:6379'
 ```
+
+`spec.dependencies` only orders deployment; it does **not** extend the template
+context. `{{workload-id:host}}` / `{{workload-id:port}}` resolve only against
+workloads declared in the same recipe, and `{{resource-id:KEY}}` only against
+that recipe's `resources[]`.
 
 ```yaml
 # Example 2: Multiple MCP servers sharing optional cache
@@ -1473,9 +1572,9 @@ apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
   name: mcp-slack
-  namespace: mcp-server
+  namespace: sandbox-recipes
 spec:
-  dependsOn:
+  dependencies:
     - name: redis-cache
       cascadeRollback: false # Cache is nice-to-have, not required
   workloads:
@@ -1484,14 +1583,7 @@ spec:
       image: clerum/mcp-slack:1.0.0
 ```
 
-**Cross-namespace dependencies (MVP restriction)**: For MVP, `dependsOn[].namespace` MUST be the same as the recipe's namespace (`mcp-server`). Cross-namespace dependencies are reserved for post-MVP. CEL validation enforces this:
-
-```yaml
-- rule: >-
-    !has(self.dependsOn) ||
-    self.dependsOn.all(d, !has(d.namespace) || d.namespace == 'mcp-server')
-  message: "For MVP, dependsOn[].namespace must be 'mcp-server'. Cross-namespace dependencies are reserved for post-MVP."
-```
+**Cross-namespace dependencies**: `dependencies[].namespace` is optional and defaults to the recipe's own namespace. There is no CEL rule constraining it to a particular namespace.
 
 ### 6.4 Rollback
 
@@ -1506,13 +1598,12 @@ spec:
 1. Delete workloads in reverse topological order.
    - For Jobs that have already completed: skip (cannot undo database changes).
    - For StatefulSets: delete the workload but retain PVCs.
-2. For MCP-enabled workloads (transport field): delete McpServer CRD (HCC detects DELETE event and removes Deployment + Service), patch Context CRD to remove from `mcpServers[]` allowlist.
-3. Delete Ingress resources (if any).
-4. Patch Context CRD to remove binding information (HCC then deletes associated NetworkPolicies).
-5. PVCs are NOT deleted (prevents data loss; operator must clean up manually via `kubectl delete pvc -l clerum.io/recipe=<name>`).
-6. Notify operator with failure details.
+2. For MCP-enabled workloads (transport field): delete the McpServer CRD and patch the Context CRD to remove the entry from the `mcpServers[]` allowlist. For a `managed: true` (stdio) server, HCC detects the DELETE event and removes the Deployment it created; for a `managed: false` (`streamableHttp`/`sse`) server, the WRC deletes the Deployment + Service it created itself.
+3. Patch Context CRD to remove binding information (HCC then deletes associated NetworkPolicies).
+4. PVCs are NOT deleted (prevents data loss; operator must clean up manually via `kubectl delete pvc -l clerum.io/recipe=<name>`).
+5. Notify operator with failure details.
 
-**Note**: The WRC module owns all recipe resources via ownerReference. For non-MCP resources, rollback is direct deletion. For MCP-enabled workloads, deleting the McpServer CRD triggers HCC's MCP Server Sync to clean up the Deployment + Service via its DELETE watch event. The McpServer CRD has `ownerReference → WorkflowRecipe`, so it is automatically garbage-collected when the recipe is deleted. The WRC module explicitly patches the Context CRD to remove the allowlist entry, ensuring immediate discovery invalidation before GC completes.
+**Note**: The WRC owns all recipe resources via ownerReference. For non-MCP resources, rollback is direct deletion. For MCP-enabled workloads, deleting the McpServer CRD triggers HCC's MCP Server Sync to clean up the Deployment + Service via its DELETE watch event. The McpServer CRD has `ownerReference → WorkflowRecipe`, so it is automatically garbage-collected when the recipe is deleted. The WRC explicitly patches the Context CRD to remove the allowlist entry, ensuring immediate discovery invalidation before GC completes.
 
 **Mass failure**: If no workloads reached `ready`/`completed`, rollback is a no-op. Status moves to `failed` with aggregated error messages.
 
@@ -1583,25 +1674,24 @@ If rollback fails or the controller is permanently unavailable, the operator can
 
 ```bash
 # List all resources from a specific recipe (NetworkPolicies are owned by HCC)
-kubectl get all,pvc,ingress -l clerum.io/recipe=<name> -n mcp-server
+kubectl get all,pvc -l clerum.io/recipe=<name> -n sandbox-recipes
 
 # Delete all orphaned resources (except PVCs; NetworkPolicies are managed by HCC)
-kubectl delete deploy,sts,cronjob,job,ds,svc,ingress \
-  -l clerum.io/recipe=<name> -n mcp-server
+kubectl delete deploy,sts,cronjob,job,ds,svc \
+  -l clerum.io/recipe=<name> -n sandbox-recipes
 ```
 
 #### 6.4.6 Degraded-to-Failed Transition
 
 When a recipe enters `degraded` state (workload not ready after the deploying timeout):
 
-- The deploying timeout is configurable via `WorkflowRecipePolicy.governance.deployingTimeoutMinutes` (default: 10, range: 5-60). Clusters with autoscaler may need longer timeouts (e.g., 20-30 minutes) to allow node provisioning.
+- The deploying timeout and the degraded grace period are **not** WorkflowRecipePolicy fields — there is no `governance.deployingTimeoutMinutes` and no `governance.degradedGracePeriodMinutes` (Section 15.1 lists the policy's full property set). Both are controller-internal.
 - The timer starts from the workload's creation timestamp (not the recipe's).
 - The timer is per-workload. If workload A is ready but workload B hits the timeout, only workload B triggers the degraded state.
 - Once in `degraded`, the recipe stays there until:
   - The workload becomes ready → recipe returns to `active`
-  - The grace period elapses without recovery → recipe transitions to `failed` with automatic rollback. Grace period is configurable via `WorkflowRecipePolicy.governance.degradedGracePeriodMinutes` (default: 30, range: 10-120).
+  - The grace period elapses without recovery → recipe transitions to `failed` with automatic rollback.
   - Operator triggers manual rollback via annotation
-- The total maximum time from deploy to automatic failure is `deployingTimeoutMinutes + degradedGracePeriodMinutes` (default: 40 minutes).
 
 #### 6.4.7 CronJob Rollback Behavior
 
@@ -1631,13 +1721,11 @@ All generated Kubernetes resources follow:
 <recipe-name>-<workload-id>         --> Deployment/StatefulSet/CronJob/Job/DaemonSet
 <recipe-name>-<workload-id>         --> Service (same name as workload)
 <recipe-name>-<resource-id>         --> PVC/Secret/ConfigMap
-<recipe-name>-<workload-id>-hpa     --> HorizontalPodAutoscaler
 <recipe-name>-<workload-id>-np      --> NetworkPolicy
 <recipe-name>-<workload-id>-sa      --> ServiceAccount
-<recipe-name>-<workload-id>-ingress --> Ingress
 ```
 
-**Length constraint**: The combined `<recipe-name>-<workload-id>` must not exceed 53 characters, leaving room for suffixes like `-ingress`, `-hpa`, `-np`, `-sa` (Kubernetes label values max 63 characters).
+**Length constraint**: The combined `<recipe-name>-<workload-id>` must not exceed 53 characters, leaving room for suffixes like `-np` and `-sa` (Kubernetes label values max 63 characters).
 
 ### 7.2 Labels
 
@@ -1654,79 +1742,21 @@ labels:
 
 ### 7.3 Owner References
 
-Workload resources (Deployments, StatefulSets, CronJobs, Jobs, DaemonSets, Services, HPAs, ServiceAccounts, Ingresses) have an `ownerReference` pointing to the WorkflowRecipe CRD, enabling Kubernetes garbage collection on recipe deletion. NetworkPolicies are owned by HCC and cleaned up via Context CRD patch (not ownerReference).
+Workload resources (Deployments, StatefulSets, CronJobs, Jobs, DaemonSets, Services, ServiceAccounts) have an `ownerReference` pointing to the WorkflowRecipe CRD, enabling Kubernetes garbage collection on recipe deletion. NetworkPolicies are owned by HCC and cleaned up via Context CRD patch (not ownerReference).
 
 **PVCs do NOT get owner references** to prevent accidental data loss on recipe deletion. PVC lifecycle is governed by the `clerum.io/pvc-retention` annotation on the WorkflowRecipe:
 
-| Annotation Value      | Behavior on Deletion/Rollback                                                                                                                                                | Use Case                             |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `retain` (default)    | PVCs are preserved. Labeled with `clerum.io/recipe: <name>` for manual cleanup.                                                                                              | Production databases, stateful data  |
-| `delete`              | PVCs are deleted during recipe deletion (step 6 of cleanup sequence). On rollback, PVCs are still retained.                                                                  | Ephemeral caches, test environments  |
-| `delete-after-days:N` | PVCs are retained on deletion but annotated with `clerum.io/delete-after: <timestamp+N days>`. A CronJob (deployed by HCC's WRC module) garbage-collects expired PVCs daily. | Staging environments, temporary data |
+| Annotation Value      | Behavior on Deletion/Rollback                                                                                                                                       | Use Case                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `retain` (default)    | PVCs are preserved. Labeled with `clerum.io/recipe: <name>` for manual cleanup.                                                                                     | Production databases, stateful data  |
+| `delete`              | PVCs are deleted during recipe deletion (step 5 of cleanup sequence). On rollback, PVCs are still retained.                                                         | Ephemeral caches, test environments  |
+| `delete-after-days:N` | PVCs are retained on deletion but annotated with `clerum.io/delete-after: <timestamp+N days>`. A CronJob (deployed by the WRC) garbage-collects expired PVCs daily. | Staging environments, temporary data |
 
-**Configuration in WorkflowRecipePolicy**:
-
-```yaml
-governance:
-  pvcRetentionPolicy: retain # Default policy: retain | delete | delete-after-days:N
-  pvcRetentionOverride: true # Allow per-recipe override via annotation (default: true)
-```
-
-When `pvcRetentionOverride: false`, the policy-level `pvcRetentionPolicy` is enforced and per-recipe annotations are ignored.
+PVC retention is driven **only** by the per-recipe annotation above. WorkflowRecipePolicy has no `governance.pvcRetentionPolicy` / `governance.pvcRetentionOverride` field — see Section 15.1 for the policy's actual property set.
 
 ### 7.4 Server-Side Apply
 
 All resources are applied using Server-Side Apply with field manager `workflow-recipes`.
-
-### 7.5 Correlation ID for End-to-End Tracing
-
-Every WorkflowRecipe MUST generate a `clerum.io/correlation-id` annotation containing a UUIDv4 value at creation time. This annotation is propagated to ALL child resources created by the recipe, enabling end-to-end tracing across all HCC modules (WRC, MCP Server Sync, MCPAccessCtrl Sync).
-
-**Generation**: The WorkflowRecipe Reconciler generates the correlation ID on the first reconciliation of a new recipe and stores it in the recipe's annotations. If the annotation already exists (e.g., set by the user or a GitOps tool), the existing value is preserved.
-
-**Propagation**: The correlation ID is copied to the `metadata.annotations` of every child resource:
-
-| Resource Type                                         | Annotation Propagated                  |
-| ----------------------------------------------------- | -------------------------------------- |
-| McpServer CRDs                                        | Yes                                    |
-| Deployments, StatefulSets, CronJobs, Jobs, DaemonSets | Yes                                    |
-| Services                                              | Yes                                    |
-| NetworkPolicies                                       | Yes                                    |
-| PVCs, Secrets, ConfigMaps                             | Yes                                    |
-| Ingresses                                             | Yes                                    |
-| Context CRD patches                                   | Yes (added as annotation on the patch) |
-
-**Example**:
-
-```yaml
-apiVersion: clerum.io/v1alpha1
-kind: WorkflowRecipe
-metadata:
-  name: knowledge-base
-  namespace: mcp-server
-  annotations:
-    clerum.io/correlation-id: 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
-spec:
-  # ...
----
-# Generated child Deployment carries the same correlation ID:
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: knowledge-base-mcp-server
-  namespace: mcp-server
-  annotations:
-    clerum.io/correlation-id: 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
-  labels:
-    clerum.io/managed-by: workflow-recipes
-    clerum.io/recipe: knowledge-base
-spec:
-  # ...
-```
-
-**Cross-module tracing**: When the WRC module creates an McpServer CRD with the correlation ID, the MCP Server Sync reads it from the CRD's annotations and propagates it to the MCP server's Deployment and Service. This enables tracing a request from the original WorkflowRecipe through to the final MCP server pod.
-
-**Validation**: The correlation ID must be a valid UUIDv4 string (36 characters, format `xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`). If a user provides an invalid format, the WorkflowRecipe Reconciler replaces it with a newly generated UUIDv4 and emits a warning event.
 
 ---
 
@@ -1738,11 +1768,10 @@ Clerum Recipes enforces security controls at the CRD schema level, making them m
 
 ### 8.1 Default Security Context
 
-Every container in every workload gets this security context (the base applied at all isolation levels):
+Every container in every workload gets this base security context, applied at all isolation levels:
 
 ```yaml
 securityContext:
-  runAsNonRoot: true
   allowPrivilegeEscalation: false
   capabilities:
     drop: ['ALL']
@@ -1750,34 +1779,31 @@ securityContext:
     type: RuntimeDefault
 ```
 
-Pod-level security context:
-
-```yaml
-podSecurityContext:
-  runAsNonRoot: true
-  fsGroup: 65534
-  seccompProfile:
-    type: RuntimeDefault
-```
+`runAsNonRoot` and `readOnlyRootFilesystem` are **not** part of that base — they
+are added from `standard` upwards (§8.2). `spec.security.isolationLevel` has no
+CRD-level default; when it is omitted the reconciler uses `minimal`.
 
 ### 8.2 Isolation Levels
 
-#### `minimal` -- For development and testing
+#### `minimal` -- Default when `isolationLevel` is omitted; for development and images that expect root
 
 ```yaml
-# Container security context (base + NET_BIND_SERVICE, writable rootfs)
+# Container security context (base only — root is permitted, rootfs is writable)
 securityContext:
-  runAsNonRoot: true
+  runAsNonRoot: false # allows root, for images like mongo, nginx, redis
   allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
   capabilities:
     drop: ['ALL']
-    add: ['NET_BIND_SERVICE']
   seccompProfile:
     type: RuntimeDefault
-  # readOnlyRootFilesystem: false (allows tmp writes)
 ```
 
-#### `standard` -- Default for production (recommended)
+No capabilities are added at `minimal`. `NET_BIND_SERVICE` (and `CHOWN`,
+`FOWNER`, `DAC_OVERRIDE`) are only added when the recipe author sets
+`workloads[].security.addCapabilities` explicitly (§8.5.2).
+
+#### `standard` -- Recommended for production (must be set explicitly)
 
 ```yaml
 # Container security context (base + read-only rootfs)
@@ -1794,11 +1820,10 @@ securityContext:
 #### `strict` -- For sensitive workloads
 
 ```yaml
-# Container security context (everything from standard, plus fixed UID/GID)
+# Container security context — IDENTICAL to `standard`.
+# runAsUser/runAsGroup/fsGroup are set at the POD level, not here.
 securityContext:
   runAsNonRoot: true
-  runAsUser: 65534 # nobody
-  runAsGroup: 65534
   readOnlyRootFilesystem: true
   allowPrivilegeEscalation: false
   capabilities:
@@ -1808,91 +1833,80 @@ securityContext:
 
 # Pod-level additions:
 podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 65534
+  runAsUser: 65534 # nobody
   runAsGroup: 65534
   fsGroup: 65534
-  seccompProfile:
-    type: RuntimeDefault
 
 # Pod spec (NOT inside securityContext):
-automountServiceAccountToken: false # Unless serviceAccount is specified
+automountServiceAccountToken: false
+
+# Pod labels added at `strict`:
+labels:
+  pod-security.kubernetes.io/enforce: restricted
+  pod-security.kubernetes.io/enforce-version: latest
 ```
+
+A per-workload `security.runAsUser` / `runAsGroup` / `fsGroup` override (§8.5.2)
+also lands on `podSecurityContext`, at any isolation level.
 
 ### 8.3 Security Summary
 
-| Level      | Pod Security Standard | runAsNonRoot | readOnlyRootFilesystem | allowPrivilegeEscalation | Capabilities                   | seccomp        |
-| ---------- | --------------------- | ------------ | ---------------------- | ------------------------ | ------------------------------ | -------------- |
-| `minimal`  | Baseline              | true         | false                  | false                    | drop ALL, add NET_BIND_SERVICE | RuntimeDefault |
-| `standard` | Restricted            | true         | true                   | false                    | drop ALL                       | RuntimeDefault |
-| `strict`   | Restricted + extras   | true         | true                   | false                    | drop ALL                       | RuntimeDefault |
+| Level                | Pod Security Standard | runAsNonRoot | readOnlyRootFilesystem | allowPrivilegeEscalation | Capabilities | seccomp        |
+| -------------------- | --------------------- | ------------ | ---------------------- | ------------------------ | ------------ | -------------- |
+| `minimal` (fallback) | Baseline              | false        | false                  | false                    | drop ALL     | RuntimeDefault |
+| `standard`           | Restricted            | true         | true                   | false                    | drop ALL     | RuntimeDefault |
+| `strict`             | Restricted + extras   | true         | true                   | false                    | drop ALL     | RuntimeDefault |
 
 **Always enforced (all levels)**:
 
-- `runAsNonRoot: true`
 - `allowPrivilegeEscalation: false`
+- `capabilities: drop: ['ALL']`
 - `seccompProfile: type: RuntimeDefault`
-- Resource limits required on every container
 - No `hostNetwork`, `hostPID`, `hostIPC`
 - No `privileged: true`
-- Image must come from allowed registries (OPA policy)
+
+**Not enforced at `minimal`**: `runAsNonRoot` and `readOnlyRootFilesystem`. A recipe
+that omits `spec.security.isolationLevel` runs at `minimal` and its containers may
+run as root. Set `isolationLevel: standard` (or `strict`) to enforce non-root.
+A workload can also pin a specific non-root UID with `security.runAsUser` (§8.5.2),
+which forces `runAsNonRoot: true` for that workload regardless of level.
 
 ### 8.4 OPA/Gatekeeper Policies
 
-| Policy                                          | Enforcement                                                                                                                                                                                                                                                                                                                                 |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Max workloads per recipe                        | **5**                                                                                                                                                                                                                                                                                                                                       |
-| Max containers per pod (main + sidecars + init) | 5                                                                                                                                                                                                                                                                                                                                           |
-| Required resource limits                        | All containers (main, sidecars, initContainers) must have `resources.limits`                                                                                                                                                                                                                                                                |
-| Image registry allowlist                        | Only `your-registry.example.com/evenfire/*` and approved registries. Applies to all images including init containers and sidecars.                                                                                                                                                                                                          |
-| No privileged containers                        | `securityContext.privileged` must be `false` or absent                                                                                                                                                                                                                                                                                      |
-| No host namespaces                              | `hostNetwork`, `hostPID`, `hostIPC` must be `false` or absent                                                                                                                                                                                                                                                                               |
-| No hostPath volumes                             | Except DaemonSets with `clerum.io/hostpath-approved: "true"` annotation                                                                                                                                                                                                                                                                     |
-| CronJob schedule bounds                         | Minimum interval: 5 minutes                                                                                                                                                                                                                                                                                                                 |
-| PVC size limits                                 | Max 500Gi per PVC, max 1Ti total per recipe                                                                                                                                                                                                                                                                                                 |
-| Volume type restrictions                        | Only `persistentVolumeClaim`, `configMap`, `secret`, `emptyDir` allowed (plus `hostPath` for approved DaemonSets)                                                                                                                                                                                                                           |
-| DaemonSet requires approval                     | DaemonSets require explicit `clerum.io/daemonset-approved: "true"` annotation                                                                                                                                                                                                                                                               |
-| Binding port range                              | Port must be 1-65535                                                                                                                                                                                                                                                                                                                        |
-| Ingress requires approval                       | Ingress-enabled workloads require `clerum.io/ingress-approved: "true"` annotation                                                                                                                                                                                                                                                           |
-| External CIDR validation                        | `bindings[].cidr` must NOT include private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), link-local/metadata range (169.254.0.0/16), or Kubernetes API server CIDR. The 169.254.0.0/16 block covers cloud provider metadata services (AWS 169.254.169.254, GCP, DigitalOcean) which could leak cloud credentials to recipe workloads. |
-| Image digest or immutable tag required          | Images must use a digest (`@sha256:...`) or a tag matching `^v?\d+\.\d+\.\d+`. The `:latest` tag is rejected. Prevents supply chain attacks via mutable tags.                                                                                                                                                                               |
-| Namespace allowlist enforcement                 | `metadata.namespace` on the WorkflowRecipe CRD must be `sandbox-recipes`. Recipe YAML namespace is not authoritative in Control UI/API flows, and direct cluster writes outside `sandbox-recipes` are denied by admission policy.                                                                                                           |
-| DaemonSet risk escalation                       | DaemonSet deployment generates a HIGH risk notification to the operator (not just annotation check). The notification includes node count and estimated resource impact.                                                                                                                                                                    |
-| Profile input re-validation                     | Input values provided by `spec.profiles[].inputs` are re-validated against `spec.inputContract` after profile application. A profile that violates inputContract constraints (e.g., `replicas: 100` when max is 10) is rejected at admission.                                                                                               |
-| Aggregate resource limits per recipe            | The sum of all workload `resources.limits.cpu` must not exceed `maxAggregateCPU`, and the sum of all `resources.limits.memory` must not exceed `maxAggregateMemory`. Prevents a single recipe from consuming disproportionate cluster resources.                                                                                            |
+> These are **external** policy-engine rules, not CRD schema constraints. Nothing in this table is enforced by the WorkflowRecipe CRD unless explicitly noted. Where a CRD-level ceiling exists it is called out below.
+
+| Policy                                 | Enforcement                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Max workloads per recipe               | The CRD caps `spec.workloads` at `maxItems: 25`. A tighter per-namespace ceiling can be set with WorkflowRecipePolicy `governance.maxWorkloadsPerRecipe`.                                                                                                                                                                                                                                                                                                                              |
+| Required resource limits               | A policy engine can require `resources.limits` on every workload. The CRD does **not** require it (Section 11) — `workloads[].resources` is entirely optional.                                                                                                                                                                                                                                                                                                                         |
+| Image registry allowlist               | Only `your-registry.example.com/evenfire/*` and approved registries. Also expressible with WorkflowRecipePolicy `detection.imageAllowlist` / `imageDenylist`.                                                                                                                                                                                                                                                                                                                          |
+| No privileged containers               | `securityContext.privileged` must be `false` or absent                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| No host namespaces                     | `hostNetwork`, `hostPID`, `hostIPC` must be `false` or absent                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| No hostPath volumes                    | Except DaemonSets with `clerum.io/hostpath-approved: "true"` annotation                                                                                                                                                                                                                                                                                                                                                                                                                |
+| CronJob schedule bounds                | Minimum interval: 5 minutes                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| PVC size limits                        | Max 500Gi per PVC, max 1Ti total per recipe                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Volume type restrictions               | The CRD only ever emits `persistentVolumeClaim`, `configMap`, and `secret` volumes — `emptyDir` and `hostPath` are not expressible in `resources[]` or `volumeMounts` at all (Sections 3.3, 3.5).                                                                                                                                                                                                                                                                                      |
+| DaemonSet requires approval            | DaemonSets require explicit `clerum.io/daemonset-approved: "true"` annotation                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Binding port range                     | Port must be 1-65535                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| External egress range validation       | Egress declared via `workloads[].egressBindings[]` resolves to public addresses only. Private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), the link-local/metadata range (169.254.0.0/16), and the Kubernetes API server CIDR are excluded from generated NetworkPolicies. The 169.254.0.0/16 block covers cloud provider metadata services (AWS 169.254.169.254, GCP, DigitalOcean) which could leak cloud credentials to recipe workloads. Raw CIDR is not an accepted input. |
+| Image digest or immutable tag required | Images must use a digest (`@sha256:...`) or a tag matching `^v?\d+\.\d+\.\d+`. The `:latest` tag is rejected. Prevents supply chain attacks via mutable tags.                                                                                                                                                                                                                                                                                                                          |
+| Namespace allowlist enforcement        | `metadata.namespace` on the WorkflowRecipe CRD must be `sandbox-recipes`. Recipe YAML namespace is not authoritative in Control UI/API flows, and direct cluster writes outside `sandbox-recipes` are denied by admission policy.                                                                                                                                                                                                                                                      |
+| DaemonSet risk escalation              | DaemonSet deployment generates a HIGH risk notification to the operator (not just annotation check). The notification includes node count and estimated resource impact.                                                                                                                                                                                                                                                                                                               |
+| Profile input re-validation            | Input values provided by `spec.profiles[].inputs` are re-validated against `spec.inputContract` after profile application. A profile that violates inputContract constraints (e.g., `replicas: 100` when max is 10) is rejected at admission.                                                                                                                                                                                                                                          |
+| Aggregate resource limits per recipe   | The sum of all workload `resources.limits.cpu` must not exceed `maxAggregateCPU`, and the sum of all `resources.limits.memory` must not exceed `maxAggregateMemory`. Prevents a single recipe from consuming disproportionate cluster resources.                                                                                                                                                                                                                                       |
 
 #### 8.4.1 Aggregate Resource Limit Validation
 
-Per-workload resource limits (enforced by the `require-resource-limits` policy above) are necessary but not sufficient. A recipe with 8 workloads, each requesting 4 CPU and 4Gi memory, would consume 32 CPU and 32Gi -- potentially exhausting an entire node pool. Aggregate limits provide a recipe-level ceiling.
+A recipe with 8 workloads, each requesting 4 CPU and 4Gi memory, would consume 32 CPU and 32Gi -- potentially exhausting an entire node pool. Aggregate limits provide a recipe-level ceiling.
 
-**Configuration in WorkflowRecipePolicy**:
-
-```yaml
-apiVersion: clerum.io/v1alpha1
-kind: WorkflowRecipePolicy
-metadata:
-  name: default-policy
-  namespace: mcp-server
-spec:
-  limits:
-    maxAggregateCPU: '16' # Max total CPU across all workloads in a recipe
-    maxAggregateMemory: '32Gi' # Max total memory across all workloads in a recipe
-```
-
-**CEL validation rule** (enforced at admission time):
-
-```yaml
-x-kubernetes-validations:
-  # --- Aggregate CPU limit per recipe ---
-  # NOTE: CEL operates on string values for CPU/memory. This rule uses a simplified
-  # integer check for millicore values. Full unit conversion (e.g., "2" to 2000m)
-  # is performed by the controller at reconciliation time as a secondary validation.
-  - rule: >-
-      self.workloads.all(w,
-        has(w.resources) && has(w.resources.limits) &&
-        has(w.resources.limits.cpu) && has(w.resources.limits.memory))
-    message: 'All workloads must specify resources.limits.cpu and resources.limits.memory for aggregate validation.'
-```
+**None of this is enforced by the WorkflowRecipe CRD.** There is no
+`x-kubernetes-validations` rule requiring `resources.limits` on workloads
+(Section 11 lists every CEL rule that exists), and `spec.limits` is not a
+WorkflowRecipePolicy field either (Section 15.1 lists the policy's full
+property set). A recipe with no `resources` block at all is admitted. Both the
+per-workload requirement and any aggregate ceiling must come from an external
+policy engine such as OPA/Gatekeeper — or, for the per-workload ceiling only,
+from WorkflowRecipePolicy `detection.maxResourceLimits`.
 
 **OPA/Gatekeeper policy example** (for full unit-aware validation):
 
@@ -1975,7 +1989,7 @@ spec:
         }
 ```
 
-**Note**: Aggregate limits include only the main container per workload. Sidecar and initContainer resource limits are validated individually (per the `require-resource-limits` policy) but are NOT included in the aggregate sum. This simplifies calculation and avoids double-counting initContainers that run sequentially, not concurrently.
+**Note**: Each workload contributes exactly one container to the sum. Multi-container pods (sidecars, user-declared initContainers) are not part of the schema (Sections 10, 24.2), so there is nothing else to count.
 
 #### 8.4.2 OPA Policy Tiers
 
@@ -1994,7 +2008,7 @@ OPA/Gatekeeper policies are organized into two implementation tiers. Tier 1 is m
 
 **Tier 2 (Post-MVP)**:
 
-All remaining policies from the table above, including: max workloads per recipe, max containers per pod, no host namespaces, CronJob schedule bounds, PVC size limits, volume type restrictions, DaemonSet approval, binding port range, ingress approval, external CIDR validation, DaemonSet risk escalation, profile input re-validation, and aggregate resource limits.
+All remaining policies from the table above, including: max workloads per recipe, max containers per pod, no host namespaces, CronJob schedule bounds, PVC size limits, volume type restrictions, DaemonSet approval, binding port range, external egress range validation, DaemonSet risk escalation, profile input re-validation, and aggregate resource limits.
 
 **Implementation note**: Tier 1 policies MUST be deployed and validated before any WorkflowRecipe is admitted to the cluster. Tier 2 policies are deployed incrementally as the platform matures, with each policy tested in `dryrun` enforcement mode before switching to `deny`.
 
@@ -2002,7 +2016,7 @@ All remaining policies from the table above, including: max workloads per recipe
 
 #### 8.4.3 Context CRD Patch Restriction Policy (Tier 1)
 
-The HCC's WRC module has `patch` permission on Context CRDs (needed to add recipe-created MCP servers to `spec.mcpServers[]`). However, Kubernetes RBAC cannot restrict patches to specific fields. An OPA policy MUST enforce that the `host-context-controller` ServiceAccount can only modify `spec.mcpServers[]` entries on Context CRDs via the WRC module:
+The the WRC has `patch` permission on Context CRDs (needed to add recipe-created MCP servers to `spec.mcpServers[]`). However, Kubernetes RBAC cannot restrict patches to specific fields. An OPA policy MUST enforce that the `host-context-controller` ServiceAccount can only modify `spec.mcpServers[]` entries on Context CRDs via the WRC:
 
 ```yaml
 apiVersion: constraints.gatekeeper.sh/v1beta1
@@ -2019,7 +2033,7 @@ spec:
   parameters:
     allowedServiceAccounts:
       - name: workflow-recipes
-        namespace: mcp-server
+        namespace: control-plane
         allowedFields: ['spec.mcpServers']
 ```
 
@@ -2027,10 +2041,10 @@ spec:
 
 ### 8.5 RBAC Requirements
 
-The HCC uses a single ServiceAccount for all its modules:
+The WRC and the HCC are separate Deployments with separate ServiceAccounts:
 
-1. **WRC module** (within `host-context-controller` in `control-plane`): WorkflowRecipeReconciler. Creates non-MCP resources directly, creates McpServer CRDs (`managed: true`, the default), and patches Context CRDs.
-2. **3 Synchronizers** (within `host-context-controller` in `control-plane`): MCP Server Sync + MCPAccessCtrl Sync + MCP Host Sync + Discovery REST API. Manages MCP server Deployment + Service lifecycle and NetworkPolicy generation from Context CRD.
+1. **WRC** — Deployment `workflow-recipes` in `control-plane`, ServiceAccount `workflow-recipes`. Creates non-MCP resources directly, creates the Deployment + Service for `streamableHttp`/`sse` transport workloads (`managed: false`), creates McpServer CRDs, and patches Context CRDs.
+2. **HCC** — Deployment `host-context-controller` in `control-plane`, ServiceAccount `host-context-controller`. Runs the 3 Synchronizers (MCP Server Sync + MCPAccessCtrl Sync + MCP Host Sync) and the Discovery REST API. Manages the Deployment lifecycle of `managed: true` (stdio) MCP servers and NetworkPolicy generation from Context CRD.
 
 See [Platform Architecture Section 14](../architecture/platform-topology.md#14-design-decisions) for the complete design decisions covering the controller architecture.
 
@@ -2068,10 +2082,7 @@ rules:
   - apiGroups: ['']
     resources: ['pods', 'events']
     verbs: ['get', 'list', 'watch']
-  # Ingress (NetworkPolicies are owned exclusively by HCC)
-  - apiGroups: ['networking.k8s.io']
-    resources: ['ingresses']
-    verbs: ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']
+  # NetworkPolicies are owned exclusively by HCC — WRC needs no networking verbs
   # Leases (leader election)
   - apiGroups: ['coordination.k8s.io']
     resources: ['leases']
@@ -2081,7 +2092,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: workflow-recipes
-  namespace: mcp-server
+  namespace: sandbox-recipes
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -2089,14 +2100,14 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: workflow-recipes
-    namespace: mcp-server
+    namespace: control-plane
 ```
 
-The HCC runs in `control-plane` with a single ServiceAccount (`host-context-controller`). The WRC module shares the HCC's ServiceAccount, which has permissions for creating workload resources (StatefulSets, CronJobs, etc.), managing CRDs, and MCP server lifecycle management. Cross-namespace recipe dependencies (Section 6.3) require a separate RoleBinding in the target namespace granting read-only access to WorkflowRecipe CRDs.
+The WRC runs in `control-plane` under its own `workflow-recipes` ServiceAccount, which has permissions for creating workload resources (StatefulSets, CronJobs, etc.), managing CRDs, and delegating MCP server lifecycle. The HCC runs under the separate `host-context-controller` ServiceAccount. Cross-namespace recipe dependencies (Section 6.3) require a separate RoleBinding in the target namespace granting read-only access to WorkflowRecipe CRDs.
 
 ### 8.6 Agent Context and contextRef Validation
 
-When a recipe is deployed (via `kubectl apply` or control-api), the `contextRef` of the recipe MUST match a valid Context CRD. The WRC module validates this during reconciliation. This prevents cross-context privilege escalation where a recipe references a context it should not have access to.
+When a recipe is deployed (via `kubectl apply` or control-api), the `contextRef` of the recipe MUST match a valid Context CRD. The WRC validates this during reconciliation. This prevents cross-context privilege escalation where a recipe references a context it should not have access to.
 
 **Validation rule**: An agent operating within Context `X` can only deploy recipes where `spec.contextRef` equals `X`. For example:
 
@@ -2104,7 +2115,7 @@ When a recipe is deployed (via `kubectl apply` or control-api), the `contextRef`
 - Agent in context `"supervised"` can only deploy recipes with `contextRef: "supervised"`.
 - A recipe with `contextRef: "autonomous"` submitted by an agent in context `"supervised"` is rejected.
 
-**Registry-only deployments**: The WRC module does not accept raw `recipe_yaml` for deployment. All deployments reference recipes by `recipe_name` from the registry, ensuring supply chain verification (cosign signature, OCI provenance) is enforced for all production deployments. The `kubectl apply --dry-run=server` path accepts `recipe_yaml` for validation only and never persists or deploys.
+**Registry-only deployments**: The WRC does not accept raw `recipe_yaml` for deployment. All deployments reference recipes by `recipe_name` from the registry, ensuring supply chain verification (cosign signature, OCI provenance) is enforced for all production deployments. The `kubectl apply --dry-run=server` path accepts `recipe_yaml` for validation only and never persists or deploys.
 
 A `--skip-verification` flag is available for development/testing environments with the following mandatory safeguards:
 
@@ -2113,10 +2124,10 @@ A `--skip-verification` flag is available for development/testing environments w
 - The flag is DISABLED by default in production configurations
 - Supply chain verification (cosign signature, OCI provenance) remains mandatory for all production deployments
 
-**Enforcement point**: The WRC module validates this during reconciliation (before creating any child resources):
+**Enforcement point**: The WRC validates this during reconciliation (before creating any child resources):
 
-1. The WRC module reads the `spec.contextRef` from the WorkflowRecipe CRD.
-2. The WRC module validates that the referenced Context CRD exists and is valid.
+1. The WRC reads the `spec.contextRef` from the WorkflowRecipe CRD.
+2. The WRC validates that the referenced Context CRD exists and is valid.
 3. If they do not match, the tool returns an error: `"contextRef mismatch: recipe references context '<recipe-context>' but agent operates in context '<agent-context>'. Cross-context deployment is not permitted."`.
 
 **Rationale**: Without this validation, an agent in a restricted context could deploy a recipe that references a permissive Context CRD, effectively escalating its own privileges by making the recipe's MCP servers available in a broader context than the agent was granted.
@@ -2205,26 +2216,27 @@ workloads:
 - Runs as root only for the init container with `CHOWN`, `FOWNER`, and `DAC_OVERRIDE`; the main container still runs non-root with the normal isolation profile
 - Should be used only when the cluster Pod Security policy and storage backend require this explicit ownership preparation
 
-**Pending — `capabilities.add` per workload (restricted allowlist)**
+**`security.addCapabilities` per workload (restricted allowlist)** — IMPLEMENTED
 
-For images that genuinely need specific capabilities. Restricted to a safe allowlist to prevent security regression. Requires GAP 5 (OPA) first.
+For images that genuinely need specific capabilities. The field is a flat array
+(there is no `capabilities.add` sub-object) and the CRD enum restricts it to a
+safe allowlist:
 
 ```yaml
 workloads:
   - id: redis
     security:
-      capabilities:
-        add: ['NET_BIND_SERVICE'] # Only from allowlist
+      addCapabilities: ['NET_BIND_SERVICE'] # Only from the enum below
 ```
 
-**Capability allowlist** (OPA-enforced):
+**Capability allowlist** (enforced by the CRD enum — anything else is rejected at admission):
 
 - `NET_BIND_SERVICE` — bind to ports < 1024
 - `CHOWN` — change file ownership (for PVC init)
-- `SETUID` / `SETGID` — user switching (for images requiring `gosu`)
+- `FOWNER` — bypass ownership checks on file operations
 - `DAC_OVERRIDE` — bypass file permission checks (rare, requires justification)
 
-Any capability NOT in the allowlist is rejected at admission. `SYS_ADMIN`, `SYS_PTRACE`, `NET_RAW`, and other dangerous capabilities are **never** allowed.
+`SETUID`/`SETGID` are **not** permitted, and neither are `SYS_ADMIN`, `SYS_PTRACE`, `NET_RAW`, or any other capability outside the four values above.
 
 #### 8.5.3 Image Compatibility Matrix
 
@@ -2280,13 +2292,13 @@ spec:
 
 Bindings add ingress/egress rules on top of the deny-all default. Among CRD-as-Package tools (kro, Crossplane, KubeVela), this automatic NetworkPolicy generation from a declarative communication graph is not available. Calico, Cilium, and Istio provide similar or more granular network isolation at the CNI/service mesh level, but those operate outside the CRD-as-Package model.
 
-> **Pod-level isolation**: All NetworkPolicies generated by HCC MUST include `podSelector.matchLabels` with `clerum.io/recipe: {recipe-name}` to ensure workloads from different recipes cannot communicate with each other even within the same namespace, unless explicitly permitted by a binding. The WRC module communicates binding information to the MCPAccessCtrl Sync via the Context CRD patch; HCC's MCPAccessCtrl Sync is the sole owner of all NetworkPolicies.
+> **Pod-level isolation**: All NetworkPolicies generated by HCC MUST include `podSelector.matchLabels` with `clerum.io/recipe: {recipe-name}` to ensure workloads from different recipes cannot communicate with each other even within the same namespace, unless explicitly permitted by a binding. The WRC communicates binding information to the MCPAccessCtrl Sync via the Context CRD patch; HCC's MCPAccessCtrl Sync is the sole owner of all NetworkPolicies.
 
 ### 9.3 MCP Workload Network Rules
 
-MCP workloads (with `transport` field) get their mcp-host ingress rule from HCC. When the WRC module patches the Context CRD to add an MCP server, HCC's MCPAccessCtrl Sync generates a NetworkPolicy rule allowing ingress from mcp-host pods on the workload's transport port. This rule is created alongside the deny-all default and binding rules -- HCC's MCPAccessCtrl Sync is the sole owner of all NetworkPolicies across all runtime namespaces.
+MCP workloads (with `transport` field) get their mcp-host ingress rule from HCC. When the WRC patches the Context CRD to add an MCP server, HCC's MCPAccessCtrl Sync generates a NetworkPolicy rule allowing ingress from mcp-host pods on the workload's transport port. This rule is created alongside the deny-all default and binding rules -- HCC's MCPAccessCtrl Sync is the sole owner of all NetworkPolicies across all runtime namespaces.
 
-**External egress for MCP workloads**: When an MCP workload has `to: external` bindings (Section 3.6), the WRC propagates these to the McpServer CRD as `spec.egressBindings[]`:
+**External egress for MCP workloads**: When an MCP workload declares `egressBindings` (Section 3.6), the WRC propagates these to the McpServer CRD as `spec.egressBindings[]`:
 
 ```yaml
 # McpServer CRD generated by WRC (includes egress bindings)
@@ -2333,11 +2345,7 @@ spec:
           protocol: TCP
 ```
 
-### 9.4 Ingress Network Rules
-
-When a workload has an `ingress` field, HCC adds an ingress rule to the workload's NetworkPolicy allowing traffic from the ingress controller namespace on the workload's port. The WRC module communicates ingress requirements via the Context CRD patch. See Section 10.
-
-### 9.5 CNI Capability Check
+### 9.4 CNI Capability Check
 
 NetworkPolicy resources are only enforced if the cluster's CNI (Container Network Interface) plugin supports them. Not all CNI plugins enforce NetworkPolicy (e.g., basic Flannel without a policy engine does not). HCC (as the sole NetworkPolicy owner) SHOULD verify CNI NetworkPolicy support on startup.
 
@@ -2354,114 +2362,31 @@ NetworkPolicy resources are only enforced if the cluster's CNI (Container Networ
    ```
 5. The temporary NetworkPolicy is deleted after the check.
 
-**Deployment blocking**: If NetworkPolicy enforcement cannot be verified, the operator SHOULD block deployment of recipes with `security.isolationLevel: standard` or `security.isolationLevel: strict`. Recipes with `isolationLevel: minimal` are allowed with a warning. The blocking behavior is configurable via WorkflowRecipePolicy:
+**Deployment blocking is NOT implemented.** The check is advisory: it warns, it does not gate. WorkflowRecipePolicy has no `spec.networkPolicy` block and no `requireCNISupport` field (Section 15.1 lists the policy's full property set), so there is no supported way to make a missing/unverified CNI fail a recipe. A recipe with `isolationLevel: standard` or `strict` still deploys on a cluster whose CNI silently ignores NetworkPolicies.
 
-```yaml
-spec:
-  networkPolicy:
-    requireCNISupport: true # Default: true. Set to false to allow deployment without verified CNI support.
-```
-
-When `requireCNISupport: true` (default) and CNI support is not verified, the recipe transitions to `failed` with message `"NetworkPolicy enforcement cannot be verified. Recipe requires isolationLevel 'standard' or 'strict' which depends on CNI NetworkPolicy support. Set WorkflowRecipePolicy.spec.networkPolicy.requireCNISupport to false to override."`.
-
-**Rationale**: Without this check, operators may deploy recipes believing they have network isolation when the CNI does not actually enforce it, creating a false sense of security.
+**Rationale for the warning**: without it, operators may deploy recipes believing they have network isolation when the CNI does not actually enforce it, creating a false sense of security. Verifying CNI NetworkPolicy enforcement remains an operator responsibility.
 
 ---
 
-## 10. External Ingress
+## 10. External Ingress — Not Implemented
 
-**Inspired by**: kro Ingress templates, Helm Ingress templates
+There is **no** `ingress` field on `workloads[]`. The WorkflowRecipe CRD has no
+Ingress support: an `ingress:` block written into a workload is pruned by the
+Kubernetes structural schema and no Ingress resource is ever created. There are
+also no ingress-related CEL rules in the CRD.
 
-### 10.1 The Problem
+External ingress (Ingress + cert-manager) is tracked as Not Yet Implemented in
+Section 24.2. Recipe-hosted UIs are exposed through `spec.ui` (a sandbox-UI
+embed), not through a cluster Ingress.
 
-Without Ingress support, workloads cannot be exposed outside the Kubernetes cluster. This blocks external API gateways, webhook receivers, and public-facing MCP servers.
+The supported ways to reach a recipe from outside the recipe's own namespace are:
 
-### 10.2 Ingress Field
-
-Workloads of type `deployment` or `statefulset` can declare an `ingress` field:
-
-```yaml
-workloads:
-  - id: api-gateway
-    type: deployment
-    image: your-registry.example.com/evenfire/api-gateway:1.0.0
-    port: 8080
-    ingress:
-      host: api.example.com
-      path: /
-      pathType: Prefix
-      tls: true # Auto-creates cert-manager Certificate
-      ingressClassName: nginx
-      annotations:
-        nginx.ingress.kubernetes.io/rate-limit-rps: '50'
-    resources:
-      requests: { cpu: '100m', memory: '128Mi' }
-      limits: { cpu: '500m', memory: '256Mi' }
-```
-
-### 10.3 Generated Ingress Resource
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: <recipe>-<workload-id>-ingress
-  namespace: mcp-server
-  labels:
-    clerum.io/managed-by: workflow-recipes
-    clerum.io/recipe: <recipe-name>
-    clerum.io/workload: <workload-id>
-  annotations:
-    # User-specified annotations merged here
-spec:
-  ingressClassName: <ingressClassName>
-  rules:
-    - host: <host>
-      http:
-        paths:
-          - path: <path>
-            pathType: <pathType>
-            backend:
-              service:
-                name: <recipe>-<workload-id>
-                port:
-                  number: <workload-port>
-  tls: # Only when tls: true
-    - hosts:
-        - <host>
-      secretName: <recipe>-<workload-id>-tls
-```
-
-### 10.4 Security Requirements
-
-Exposing workloads externally increases the attack surface. The following controls apply:
-
-1. **OPA policy**: Ingress-enabled workloads require the annotation `clerum.io/ingress-approved: "true"` on the WorkflowRecipe CRD. Without this annotation, the recipe is rejected at admission time.
-2. **Operator approval**: Ingress creation is included in the operator approval workflow. The approval notification includes the hostname and path being exposed.
-3. **TLS enforcement**: When `tls: true`, the controller creates a cert-manager Certificate resource. When `tls: false`, the ingress operates without TLS (allowed but flagged in the approval notification as a security concern).
-4. **NetworkPolicy integration**: HCC (sole NetworkPolicy owner) adds an ingress rule to the workload's NetworkPolicy allowing traffic from the ingress controller namespace, based on binding information in the Context CRD.
-
-### 10.5 CEL Validation
-
-```yaml
-# Ingress only on deployment/statefulset
-- rule: >-
-    self.workloads.all(w,
-      !has(w.ingress) || w.type in ['deployment', 'statefulset'])
-  message: 'ingress is only valid for deployment or statefulset workloads.'
-
-# Ingress requires port
-- rule: >-
-    self.workloads.all(w,
-      !has(w.ingress) || has(w.port))
-  message: 'Workloads with ingress must specify a port.'
-
-# Ingress host is required
-- rule: >-
-    self.workloads.all(w,
-      !has(w.ingress) || has(w.ingress.host))
-  message: 'ingress.host is required when ingress is specified.'
-```
+- **MCP transport** — a workload with a `transport` object is registered as an
+  MCP server and reachable from `mcp-host` (Section 2.6).
+- **Webhooks** — `spec.webhooks[]` mounts verified routes on a per-recipe
+  webhook gateway in the `webhook-ingress` namespace.
+- **UI embed** — `spec.ui` exposes a single-replica, non-MCP deployment workload
+  through the sandbox UI.
 
 ---
 
@@ -2469,171 +2394,56 @@ Exposing workloads externally increases the attack surface. The following contro
 
 The WorkflowRecipe CRD uses [CEL (Common Expression Language)](https://kubernetes.io/docs/reference/using-api/cel/) validation rules to enforce schema constraints at admission time. This avoids the need for validating webhooks.
 
-```yaml
-x-kubernetes-validations:
-  # --- workloads must exist ---
-  - rule: 'has(self.workloads) && self.workloads.size() > 0'
-    message: 'spec.workloads must be specified and non-empty.'
-    reason: Invalid
+The spec-level rules in the shipped CRD are numbered in comments (R1-R18, W1, O1/O3/O4, PS1-PS3). Their exact messages:
 
-  # --- CronJob must have schedule ---
-  - rule: >-
-      self.workloads.all(w, w.type != 'cronjob' || has(w.schedule))
-    message: "Workloads of type 'cronjob' must specify a schedule."
+| ID  | Message                                                                                                                                                                 |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R1  | `agent requires steps: cannot define agent without workflow steps`                                                                                                      |
+| R2  | `recipe must define at least workloads or steps`                                                                                                                        |
+| R3  | `duplicate step IDs are not allowed`                                                                                                                                    |
+| R4  | `spec.scheduling requires spec.steps to be non-empty`                                                                                                                   |
+| R5  | `spec.scheduling.cron must be a valid five-field cron expression`                                                                                                       |
+| R6  | `spec.triggers must declare at least one of onDemand or schedule`                                                                                                       |
+| R7  | `spec.triggers.schedule.cron must be a valid five-field cron expression`                                                                                                |
+| R8  | `step cannot define both run and instruction`                                                                                                                           |
+| R9  | `step must have exactly one of: run, instruction unless spec.coordinatorImage is set`                                                                                   |
+| R10 | `step cannot define both run and agent`                                                                                                                                 |
+| R11 | `snippet mcp allowedTools.include must not contain wildcards`                                                                                                           |
+| R12 | `runtimeEgress.http.allowedHosts must contain public DNS hostnames for exact-host and must be omitted for public-web`                                                   |
+| R13 | `snippet HTTP exact-host allowedHosts must be declared in spec.runtimeEgress.http.allowedHosts; public-web requires spec.runtimeEgress.http.egressClass public-web ...` |
+| R14 | `snippet mcp servers require explicit allowedTools.include`                                                                                                             |
+| R15 | `spec.ui.workloadRef must reference an existing workloads[].id`                                                                                                         |
+| R16 | `the workload referenced by spec.ui.workloadRef must be type=deployment with replicas=1 and no transport`                                                               |
+| R17 | `spec.ui.egress.internal[].workloadRef must reference a non-MCP-server workload`                                                                                        |
+| R18 | `spec.ui.defaultPath must not include a scheme prefix`                                                                                                                  |
+| W1  | `spec.webhooks[].id must be unique within webhooks[]`                                                                                                                   |
+| O1  | `spec.oauthClients requires either spec.ui or a workloads[].oauthClientRefs consumer for every client`                                                                  |
+| O3  | `spec.oauthClients[].id must be unique within oauthClients[]`                                                                                                           |
+| O4  | `workloads[].oauthClientRefs is not allowed on MCP transport workloads`                                                                                                 |
+| PS1 | `spec.pluginWorkloadSdk must declare at least one capability family (promptBridge or clientNotifications)`                                                              |
+| PS2 | `spec.pluginWorkloadSdk.clientNotifications.allowedEventTypes must not contain wildcards`                                                                               |
+| PS3 | `spec.pluginWorkloadSdk.promptBridge.allowedModels must not contain wildcards`                                                                                          |
 
-  # --- CronJob/Job must NOT have replicas ---
-  - rule: >-
-      self.workloads.all(w,
-        !(w.type in ['cronjob', 'job']) || !has(w.replicas))
-    message: "Workloads of type 'cronjob' or 'job' must not specify replicas."
+Item-level rules also exist:
 
-  # --- DaemonSet must NOT have replicas ---
-  - rule: >-
-      self.workloads.all(w, w.type != 'daemonset' || !has(w.replicas))
-    message: "Workloads of type 'daemonset' must not specify replicas."
+- `workloads[]`: `CronJob workloads must specify a schedule`.
+- `steps[]`: `run` and `instruction` are mutually exclusive; `run` and `agent` are mutually exclusive; `run must define type=snippet with language and code`.
+- `webhooks[]`: W4, W7, W8, W9, W12, W13, W14 (methods must include POST; `secretRef` required for every scheme except `jwt-bearer-jwks`; `replay` required iff `hmac-sha256-timestamp-body`; `jwksUrl`/`issuer`/`audience` required iff `jwt-bearer-jwks`; `jwksUrl` must be an https multi-label DNS host; GET only with `setupHandshake`; `meta-hub-challenge` requires `setupHandshake.secretRef` plus GET).
+- `spec.ui`: `ui.defaultPath must not be a protocol-relative URL`.
 
-  # --- Workload IDs must be unique ---
-  - rule: >-
-      self.workloads.all(w,
-        self.workloads.filter(w2, w2.id == w.id).size() == 1)
-    message: 'Workload IDs must be unique within spec.workloads.'
+Two rules are deliberately **not** CEL — they exceed the per-CRD CEL cost budget at
+the workload ceiling and are enforced by the WRC reconciler instead, surfaced as
+status conditions: **W2** (`webhooks[].workloadRef` references an existing non-MCP
+deployment workload) and **PS4** (`allowedCallers` reference existing `workloads[].id`).
 
-  # --- Resource IDs must be unique ---
-  - rule: >-
-      !has(self.resources) ||
-      self.resources.all(r,
-        self.resources.filter(r2, r2.id == r.id).size() == 1)
-    message: 'Resource IDs must be unique within spec.resources.'
+**Bounds, not CEL rules**: `spec.workloads` has `minItems: 0` / `maxItems: 25`
+(a steps-only recipe is valid — see R2); `spec.steps` `maxItems: 100`;
+`spec.webhooks` `maxItems: 16`; `spec.oauthClients` `maxItems: 8`;
+`workloads[].replicas` `minimum: 0` / `maximum: 20`.
 
-  # --- Workload and resource IDs must not collide ---
-  - rule: >-
-      !has(self.resources) ||
-      self.workloads.all(w,
-        !self.resources.exists(r, r.id == w.id))
-    message: 'Workload IDs and resource IDs must be disjoint to avoid naming collisions.'
-
-  # --- dependsOn must reference existing workloads ---
-  - rule: >-
-      self.workloads.all(w,
-        !has(w.dependsOn) ||
-        w.dependsOn.all(dep,
-          self.workloads.exists(target, target.id == dep)))
-    message: 'dependsOn must reference IDs of other workloads in this recipe.'
-
-  # --- No self-dependency ---
-  - rule: >-
-      self.workloads.all(w,
-        !has(w.dependsOn) ||
-        !w.dependsOn.exists(dep, dep == w.id))
-    message: 'A workload cannot depend on itself.'
-
-  # --- Resource limits required on all workloads ---
-  - rule: >-
-      self.workloads.all(w,
-        has(w.resources) && has(w.resources.limits) &&
-        has(w.resources.limits.memory) && has(w.resources.limits.cpu))
-    message: 'All workloads must specify resources.limits.memory and resources.limits.cpu.'
-
-  # --- bindings must reference existing workloads ---
-  - rule: >-
-      !has(self.bindings) ||
-      self.bindings.all(b,
-        self.workloads.exists(w, w.id == b.from) &&
-        (b.to == 'external' || self.workloads.exists(w, w.id == b.to)))
-    message: "bindings.from and bindings.to must reference workload IDs (or 'external' for egress)."
-
-  # --- external bindings must specify dns OR cidr (not both, not neither) ---
-  - rule: >-
-      !has(self.bindings) ||
-      self.bindings.all(b,
-        b.to != 'external' ||
-        (has(b.dns) && !has(b.cidr)) || (!has(b.dns) && has(b.cidr)))
-    message: "External bindings must specify exactly one of 'dns' or 'cidr' (not both)."
-
-  # --- external bindings must NOT use open CIDR ranges ---
-  - rule: >-
-      !has(self.bindings) ||
-      self.bindings.all(b,
-        b.to != 'external' || !has(b.cidr) ||
-        (b.cidr != '0.0.0.0/0' && b.cidr != '::/0'))
-    message: "External bindings with cidr must use a specific range. Open ranges (0.0.0.0/0, ::/0) are not allowed — use 'dns' for external APIs or specify a targeted CIDR."
-
-  # --- schedule field only on cronjob ---
-  - rule: >-
-      self.workloads.all(w,
-        !has(w.schedule) || w.type == 'cronjob')
-    message: 'The schedule field is only valid for type=cronjob.'
-
-  # --- timeZone field only on cronjob ---
-  - rule: >-
-      self.workloads.all(w,
-        !has(w.timeZone) || w.type == 'cronjob')
-    message: 'The timeZone field is only valid for type=cronjob.'
-
-  # --- Max workloads per recipe ---
-  - rule: 'self.workloads.size() <= 8'
-    message: 'A recipe may contain at most 8 workloads.'
-
-  # --- transport only on deployment/statefulset ---
-  - rule: >-
-      self.workloads.all(w,
-        !has(w.transport) || w.type in ['deployment', 'statefulset'])
-    message: 'The transport field is only valid for deployment or statefulset workloads.'
-
-  # --- contextRef required when any workload has transport ---
-  - rule: >-
-      self.workloads.all(w, !has(w.transport)) || has(self.contextRef)
-    message: 'spec.contextRef is required when any workload has a transport field (references a Context CRD).'
-
-  # --- autoscaling only on deployment/statefulset ---
-  - rule: >-
-      self.workloads.all(w,
-        !has(w.autoscaling) || w.type in ['deployment', 'statefulset'])
-    message: 'autoscaling is only valid for deployment or statefulset workloads.'
-
-  # --- ingress only on deployment/statefulset ---
-  - rule: >-
-      self.workloads.all(w,
-        !has(w.ingress) || w.type in ['deployment', 'statefulset'])
-    message: 'ingress is only valid for deployment or statefulset workloads.'
-
-  # --- ingress requires port ---
-  - rule: >-
-      self.workloads.all(w,
-        !has(w.ingress) || has(w.port))
-    message: 'Workloads with ingress must specify a port.'
-
-  # --- ingress host is required ---
-  - rule: >-
-      self.workloads.all(w,
-        !has(w.ingress) || has(w.ingress.host))
-    message: 'ingress.host is required when ingress is specified.'
-
-  # --- includeWhen must reference an inputs field ---
-  - rule: >-
-      self.workloads.all(w,
-        !has(w.includeWhen) ||
-        w.includeWhen.matches('^\\{\\{inputs\\.[a-zA-Z_][a-zA-Z0-9_]*\\}\\}$'))
-    message: 'includeWhen must reference a boolean input: {{inputs.<key>}}'
-
-  # --- includeWhen on resources must reference an inputs field ---
-  - rule: >-
-      !has(self.resources) ||
-      self.resources.all(r,
-        !has(r.includeWhen) ||
-        r.includeWhen.matches('^\\{\\{inputs\\.[a-zA-Z_][a-zA-Z0-9_]*\\}\\}$'))
-    message: 'Resource includeWhen must reference a boolean input: {{inputs.<key>}}'
-
-  # --- activeProfile must reference a declared profile ---
-  - rule: >-
-      !has(self.activeProfile) ||
-      (has(self.profiles) && self.activeProfile in self.profiles)
-    message: 'activeProfile must reference a profile declared in spec.profiles.'
-
-  # --- Profile keys must be valid inputContract properties ---
-  # NOTE: This rule validates structural integrity. Full type validation
-  # happens in the controller after input resolution.
-```
+There is no CEL rule for ingress, autoscaling, CIDR ranges, `includeWhen` format,
+workload/resource ID uniqueness, `resources.limits` presence, or a maximum of 8
+workloads — none of those exist in the shipped CRD.
 
 **Why CEL over validating webhooks**: CEL runs at admission time with zero infrastructure -- no webhook deployment, no TLS certificates, no availability concerns. These rules go directly in the CRD definition.
 
@@ -2649,12 +2459,13 @@ CEL and OPA/Gatekeeper are complementary validation layers with distinct executi
 
 **Execution order**: CRD schema validation runs first at Kubernetes admission. It enforces the absolute ceiling of 25 workloads per recipe and 25 `spec.ui.egress.internal[]` entries. Control API and WRC then enforce `CLERUM_WORKFLOW_MAX_WORKLOADS_PER_RECIPE` and `CLERUM_WORKFLOW_UI_EGRESS_INTERNAL_MAX_ITEMS` (both default 25, max 25), and `WorkflowRecipePolicy.governance.maxWorkloadsPerRecipe` may lower the effective workload limit further per namespace.
 
-**CEL limitations (validated by controller at reconciliation time instead)**:
+**Not covered by CEL at all (handled by the controller at reconciliation time, or not at all)**:
 
-- Circular dependency detection (cycles of length >= 2) — requires topological sort algorithm.
-- `includeWhen` boolean type verification — CEL cannot cross-reference `inputContract.properties` to verify the key is `type: boolean`.
-- Template resolution — CEL validates format (`{{inputs.*}}` regex), controller resolves actual values.
-- Profile value type checking — CEL validates `activeProfile` references a declared profile, controller validates profile values match `inputContract` types.
+- Circular dependency detection (cycles of length >= 2) — requires topological sort algorithm; done by the controller.
+- `includeWhen` — there is no CEL rule for its format or for the referenced key's type.
+- Template syntax — there is **no** CEL format check on `{{inputs.*}}`. Templates are only resolved (fail-closed) by the reconciler.
+- Profiles — there is **no** CEL rule validating `activeProfile` against the declared profile names, and none validating profile value types (§5.4). An unknown `activeProfile` is admitted and then fails the reconcile.
+- `inputContract` — a preserve-unknown-fields blob with no CEL rule; `inputs` are **not** validated against it at admission (§3.8).
 
 ---
 
@@ -2672,12 +2483,12 @@ reference this canonical state machine.
 | #   | State                    | Description                                                                                                                                                         |
 | --- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | `candidate`              | Newly detected by WRO or manually created. Auto-published to registry (SOUL.md driven).                                                                             |
-| 2   | `pending-approval`       | Waiting for risk-based operator approval decision. Entered when risk >= `autoApproveMaxRisk` threshold.                                                             |
+| 2   | `pending-approval`       | Waiting for risk-based operator approval decision. Entered when approval is required by policy.                                                                     |
 | 3   | `approved`               | Operator has approved the recipe for deployment.                                                                                                                    |
 | 4   | `pending`                | Waiting for dependency (`dependsOn` references to reach `active`).                                                                                                  |
-| 5   | `pending-operator-input` | Waiting for operator to provide Secrets/ConfigMaps (e.g., `generateKeys` with `length: 0`).                                                                         |
+| 5   | `pending-operator-input` | Waiting for the operator to pre-provision a Kubernetes Secret/ConfigMap the recipe references (e.g. an `envSecret.name` that does not exist yet).                   |
 | 6   | `deploying`              | Creating Kubernetes resources, waiting for pod readiness.                                                                                                           |
-| 7   | `testing`                | Shadow execution validation. Auto-promotes after `autoPromoteAfter` runs (default: 10).                                                                             |
+| 7   | `testing`                | Shadow execution validation. Auto-promotes to `active` after `WorkflowRecipePolicy.deployment.autoPromoteAfterSeconds` **seconds** (not runs).                      |
 | 8   | `active`                 | All workloads healthy and serving production traffic.                                                                                                               |
 | 9   | `degraded`               | Workload not ready or dependency failure (`cascadeRollback: false`). Operator decides next action.                                                                  |
 | 10  | `deprecated`             | Unused (`unusedDays` threshold exceeded), or operator denied the recipe (with annotation `clerum.io/denial-reason`). Resources cleaned up after `cleanupAfterDays`. |
@@ -2685,7 +2496,7 @@ reference this canonical state machine.
 | 12  | `failed`                 | Terminal failure state. Deployment or rollback completed with errors.                                                                                               |
 | 13  | `rollback-failed`        | Rollback could not complete, manual intervention required. Terminal state.                                                                                          |
 
-> **Note**: `denied` is NOT a state. When an operator denies a recipe, it transitions to `deprecated` with annotation `clerum.io/denial-reason` explaining the rationale. `preview` is NOT a state. When `dryRun: true`, the recipe enters `candidate` with condition `type: PreviewReady` in `status.conditions[]`.
+> **Note**: `denied` is NOT a state. When an operator denies a recipe, it transitions to `deprecated` with annotation `clerum.io/denial-reason` explaining the rationale. `preview` is NOT a state, and there is no `dryRun` field (Section 13).
 
 **State transitions**:
 
@@ -2700,8 +2511,8 @@ reference this canonical state machine.
 stateDiagram-v2
     [*] --> candidate : pattern detection / recipe creation
 
-    candidate --> pending_approval : risk >= autoApproveMaxRisk
-    candidate --> approved : risk < autoApproveMaxRisk (auto-approve)
+    candidate --> pending_approval : governance.requireApproval: true
+    candidate --> approved : governance.requireApproval: false (auto-approve)
 
     pending_approval --> approved : operator approves
     pending_approval --> deprecated : operator denies (annotation: denial-reason)
@@ -2718,7 +2529,7 @@ stateDiagram-v2
     deploying --> degraded : not ready after timeout
     deploying --> rolling_back : deploy failure triggers auto-rollback
 
-    testing --> active : autoPromoteAfter threshold met
+    testing --> active : autoPromoteAfterSeconds elapsed
     testing --> failed : successRate below threshold
 
     active --> deprecated : unused > unusedDays
@@ -2750,8 +2561,8 @@ stateDiagram-v2
 **Key transitions** (text form for reference):
 
 ```
-candidate --> pending-approval           (risk >= autoApproveMaxRisk)
-candidate --> approved                   (risk < autoApproveMaxRisk, auto-approve)
+candidate --> pending-approval           (governance.requireApproval: true)
+candidate --> approved                   (governance.requireApproval: false, auto-approve)
 pending-approval --> approved            (operator approves)
 pending-approval --> deprecated          (operator denies, annotation: clerum.io/denial-reason)
 approved --> pending                     (has unresolved dependsOn)
@@ -2762,7 +2573,7 @@ pending-operator-input --> deploying     (inputs provided)
 deploying --> testing                    (resources created, shadow mode)
 deploying --> degraded                   (not ready after timeout)
 deploying --> rolling-back               (deploy failure triggers auto-rollback)
-testing --> active                       (autoPromoteAfter threshold met)
+testing --> active                       (autoPromoteAfterSeconds elapsed)
 active --> deprecated                    (unused > unusedDays)
 active --> degraded                      (workload unhealthy, cascadeRollback: false)
 active --> rolling-back                  (workload unhealthy, cascadeRollback: true)
@@ -2778,7 +2589,7 @@ rolling-back --> rollback-failed         (rollback itself fails)
 
 - `candidate` --> `active` (must go through `pending-approval` or `approved` --> `deploying`)
 - `candidate` --> `deploying` (must be approved first)
-- `candidate` --> `approved` when risk >= `autoApproveMaxRisk` (must go through `pending-approval`)
+- `candidate` --> `approved` when approval is required (must go through `pending-approval`)
 - `pending-approval` --> `deploying` (must go through `approved`)
 - `failed` --> `active` (must go through `candidate` for retry)
 - `rollback-failed` --> any state (terminal; manual cleanup required)
@@ -2788,7 +2599,11 @@ rolling-back --> rollback-failed         (rollback itself fails)
 1. Resets `status.workloads[].phase` to `pending` for all workloads
 2. Preserves existing PVCs and Secrets (does not recreate)
 3. Transitions to `candidate`, re-entering the approval flow
-4. Increments `status.retryCount` (max 3 retries, configurable via `WorkflowRecipePolicy.governance.maxRetries`)
+
+Retry counting is controller-internal. There is **no** `status.retryCount`
+property in the CRD status schema (§12.2) — the status object is structural with
+no `x-kubernetes-preserve-unknown-fields`, so such a key would be pruned — and
+there is no `WorkflowRecipePolicy.governance.maxRetries` field.
 
 This avoids the overhead of deleting and recreating the entire recipe (which loses status history and correlation ID) while still requiring re-approval for safety.
 
@@ -2808,6 +2623,12 @@ CLI tools (e.g., `clerum status`) SHOULD display the visible state prominently w
 
 ### 12.2 Status Schema
 
+The complete `status` property set is: `phase`, `message`, `lastTransitionTime`,
+`workloads[]`, `workflowExecution`, `steps[]`, `artifacts[]`, `workloadInstances`,
+`resourceInstances`, `pluginWorkloadSdk`, `conditions[]`. There is no
+`status.activeProfile`, no `status.resources[]`, no `status.summary`, and no
+`status.preview`.
+
 ```yaml
 status:
   phase:
@@ -2816,61 +2637,43 @@ status:
     # degraded | deprecated | rolling-back | failed | rollback-failed
   message: 'All workloads healthy'
   lastTransitionTime: '2026-02-26T12:00:00Z'
-  activeProfile: 'production' # Which profile was activated (if any)
 
   workloads:
     - id: postgres
       type: statefulset
-      phase: ready # pending | creating | ready | failed | excluded
-      replicas: 1
-      readyReplicas: 1
-
-    - id: redis
-      type: deployment
-      phase: excluded # Excluded via includeWhen
-      excludeReason: 'inputs.cacheEnabled is false'
-
-    - id: migrate
-      type: job
-      phase: completed # pending | creating | running | completed | failed
-      succeeded: 1
+      phase: ready
+      ready: true
 
     - id: mcp-server
       type: deployment
       phase: ready
-      replicas: 2
-      readyReplicas: 2
-      mcpServerName: knowledge-base-mcp-server # If transport is set
+      ready: true
 
-  resources:
-    - id: pg-data
-      type: pvc
-      phase: bound # pending | bound | failed | excluded
+  workflowExecution:
+    phase: completed # pending | initializing | running | recovering | completed | failed | cancelled
 
-    - id: db-creds
-      type: secret
-      phase: created # pending | created | failed
+  steps:
+    - id: merge
+      phase: completed # pending | running | completed | failed | skipped
+      executor: snippet # agentic | snippet | custom
+
+  artifacts: []
+
+  # Maps of recipe id -> materialized Kubernetes object name
+  workloadInstances:
+    mcp-server: knowledge-base-mcp-server
+  resourceInstances:
+    pg-data: knowledge-base-pg-data
 
   conditions:
-    - type: AllWorkloadsReady
-      status: 'True'
+    - type: EnvSecretOwnershipDenied
+      status: 'False'
+      reason: NoForeignSecretRefs
       lastTransitionTime: '2026-02-26T12:00:00Z'
-    - type: AllResourcesBound
-      status: 'True'
-      lastTransitionTime: '2026-02-26T11:59:50Z'
-    - type: IngressConfigured
-      status: 'True'
-      lastTransitionTime: '2026-02-26T12:00:05Z'
-
-  summary:
-    workloadCount: 3 # Total active workloads (excludes includeWhen=false)
-    resourceCount: 2 # Total active resources
-    excludedCount: 1 # Workloads/resources excluded via includeWhen
-
-  preview: # Only populated when dryRun: true (Section 13)
-    manifests: [...]
-    validationErrors: [...]
 ```
+
+The active profile is read from **`spec.activeProfile`** (the recipe's own input),
+not from status.
 
 ### 12.3 Printer Columns
 
@@ -2881,16 +2684,20 @@ additionalPrinterColumns:
     jsonPath: .status.phase
   - name: Profile
     type: string
-    jsonPath: .status.activeProfile
-    description: 'Active environment profile'
+    jsonPath: .spec.activeProfile
   - name: Workloads
     type: integer
-    jsonPath: .status.summary.workloadCount
-    description: 'Number of active workloads (computed by controller)'
-  - name: Ready
+    jsonPath: .spec.workloads
+    description: 'Number of workloads in the recipe.'
+  - name: Triggers
     type: string
-    jsonPath: .status.conditions[?(@.type=="AllWorkloadsReady")].status
-    description: 'All workloads ready'
+    jsonPath: .spec.triggers
+    description: 'Trigger configuration (onDemand, schedule, or both).'
+    priority: 1
+  - name: Workflow
+    type: string
+    jsonPath: .status.workflowExecution.phase
+    description: 'Workflow execution phase (if applicable).'
   - name: Age
     type: date
     jsonPath: .metadata.creationTimestamp
@@ -2899,12 +2706,12 @@ additionalPrinterColumns:
 Example `kubectl get workflowrecipes`:
 
 ```
-NAME               PHASE                  PROFILE      WORKLOADS   READY   AGE
-airtable-mcp       active                 production   1           True    5d
-knowledge-base     active                 production   3           True    3d
-etl-pipeline       active                 staging      3           True    1d
-backup-system      pending-operator-input              3           False   12h
-api-gateway        candidate              production   4           False   1h
+NAME               PHASE                  PROFILE      WORKLOADS   WORKFLOW    AGE
+airtable-mcp       active                 production   1                       5d
+knowledge-base     active                 production   3                       3d
+etl-pipeline       active                 staging      3                       1d
+backup-system      pending-operator-input              3                       12h
+api-gateway        candidate              production   4                       1h
 ```
 
 ### 12.4 Admission Webhook for State Machine Transitions
@@ -2942,7 +2749,7 @@ webhooks:
     clientConfig:
       service:
         name: workflow-recipes
-        namespace: mcp-server
+        namespace: control-plane
         path: /validate-status-transition
     failurePolicy: Fail
     sideEffects: None
@@ -2968,77 +2775,23 @@ webhooks:
 
 ---
 
-## 13. Dry-Run and Preview Mode
+## 13. Dry-Run and Preview Mode — Not Implemented
 
-**Inspired by**: Helm `helm template`, Terraform `terraform plan`, WRO shadow mode
+There is **no** `spec.dryRun` field in the WorkflowRecipe CRD and no
+`status.preview` object. A recipe that sets `dryRun: true` has that key pruned by
+the Kubernetes structural schema and **deploys for real** — do not rely on it as
+a preview gate. This is tracked as Not Yet Implemented in Section 24.2.
 
-### 13.1 The Problem
-
-Operators need to review exactly what resources a recipe will create before committing to deployment. This is especially important for recipes with complex conditional logic, multiple workloads, and environment-specific profiles.
-
-### 13.2 The `dryRun` Field
-
-```yaml
-spec:
-  dryRun: true # Preview mode
-```
-
-When `dryRun: true`, the WorkflowRecipe Reconciler:
-
-1. Validates the recipe (inputContract, CEL rules, OPA policies).
-2. Resolves all inputs (defaults, base inputs, active profile).
-3. Evaluates all `includeWhen` conditions.
-4. Generates all child manifests (Deployments, Services, NetworkPolicies, Ingresses, etc.).
-5. Stores the generated manifests in `status.preview.manifests[]`.
-6. Keeps `status.phase: candidate` and adds condition `type: PreviewReady, status: "True"` to `status.conditions[]`. (`preview` is NOT a separate state -- see Section 12.1.)
-7. Does NOT create any resources.
-
-### 13.3 Preview Output
-
-```yaml
-status:
-  phase: candidate
-  message: 'Dry-run complete. 7 resources would be created.'
-  preview:
-    manifests:
-      - kind: Deployment
-        name: knowledge-base-mcp-server
-        yaml: |
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: knowledge-base-mcp-server
-            # ... full generated manifest
-      - kind: Service
-        name: knowledge-base-mcp-server
-        yaml: |
-          # ...
-      - kind: NetworkPolicy
-        name: knowledge-base-mcp-server-np
-        yaml: |
-          # ...
-    validationErrors: [] # Empty when validation passes
-    excludedWorkloads:
-      - id: redis
-        reason: 'inputs.cacheEnabled is false'
-    summary:
-      totalResources: 7
-      workloads: 3
-      services: 2
-      networkPolicies: 3
-      ingresses: 1
-      pvcs: 1
-```
-
-### 13.4 Transition to Deployment
-
-To deploy after preview, set `dryRun: false`:
+To inspect a recipe before it takes effect, use the standard Kubernetes
+server-side dry run, which validates against admission (CEL, policy) without
+persisting the object:
 
 ```bash
-kubectl patch workflowrecipe knowledge-base --type merge -p '{"spec":{"dryRun":false}}'
+kubectl apply -f recipe.yaml --dry-run=server
 ```
 
-The WorkflowRecipe Reconciler detects the `dryRun: false` change on a `candidate` recipe with `PreviewReady` condition and proceeds with the normal deployment pipeline.
+Note that server-side dry run validates the WorkflowRecipe itself; it does not
+render the child manifests the WRC would generate.
 
 ---
 
@@ -3084,127 +2837,102 @@ This section describes the `WorkflowRecipePolicy` CRD and the approval workflow.
 
 ### 15.1 WorkflowRecipePolicy CRD
 
-**This is the single source of truth for the WorkflowRecipePolicy schema.** All other documents reference this section.
+**This is the single source of truth for the WorkflowRecipePolicy schema.**
+
+`spec` is the only required top-level field. The complete `spec` property set is:
+`description`, `allowContextRef`, `governance`, `detection`, `publication`,
+`deployment`, `notification`, `deprecation`. The CRD has no
+`x-kubernetes-validations` and no status subresource. Any other key (for example
+`contextRef`, `limits`, or `networkPolicy`) is pruned.
 
 ```yaml
 apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipePolicy
 metadata:
   name: default-policy
-  namespace: mcp-server
+  namespace: sandbox-recipes
 spec:
-  contextRef: 'context1' # References Context CRD (REQUIRED)
+  description: 'Default governance policy for recipe deployment'
 
-  # --- Governance: Operational limits ---
+  # Widens the default-deny on spec.contextRef for agentic recipes. Both this
+  # AND the recipe's own spec.security.allowContextRef must be true.
+  allowContextRef: false
+
+  # --- Governance: operational limits ---
   governance:
-    maxWorkloadsPerRecipe: 25 # Configurable lower/equal to the CRD ceiling of 25
-    maxMcpServersPerContext: 20 # Policy limit (recipe-created servers only)
-    # NOTE: Two distinct limits apply to MCP servers per context:
-    #
-    # | Limit                      | Value | Scope                              | Enforced By              |
-    # |----------------------------|-------|------------------------------------|--------------------------|
-    # | maxMcpServersPerContext     | 20    | Recipe-created MCP servers only    | WorkflowRecipePolicy CRD |
-    # | mcpServers[] array max     | 100   | ALL MCP servers (recipe + standalone + infra) | Context CRD CEL rule |
-    #
-    # A context could have 80 standalone servers (MongoDB, Airtable, etc.)
-    # + 20 recipe-created servers = 100 total. These are complementary limits
-    # at different enforcement layers, not conflicting values.
-    allowedWorkloadTypes: # Workload types permitted in recipes
-      - Deployment
-      - StatefulSet
-      - CronJob
-      - Job
-      - DaemonSet
-    imageAllowlist: # Allowed container image registries
-      - 'your-registry.example.com/evenfire/*' # Current production registry
-      - 'registry.clerum.io/*' # Target registry
-    resourceLimits:
-      maxCpuPerWorkload: '4'
-      maxMemoryPerWorkload: '8Gi'
+    requireApproval: true # Recipes require approval before deployment
+    maxWorkloadsPerRecipe: 25 # Min 1. May lower the CRD ceiling of 25
+    maxReplicasPerWorkload: 5 # Min 1
+    allowedWorkloadTypes: # LOWERCASE enum. Empty = all types allowed
+      - deployment
+      - statefulset
+      - cronjob
+      - job
+      - daemonset
+    requiredSecurityLevel: standard # minimal | standard | strict
 
-  # --- Detection: WRO pattern detection config ---
+  # --- Detection: image and resource constraints ---
   detection:
-    minSupport: 20 # Minimum pattern occurrences
-    minAgents: 2 # Minimum floor per security requirement
-    windowMinutes: 43200 # Detection window (30 days)
-    ngramRange: # N-gram size range for pattern detection
-      min: 2
-      max: 6
-    minAvgTokens: 1500 # Minimum average tokens per pattern
-    minEstimatedSavingsPct: 25 # Minimum savings percentage to qualify
+    enabled: true
+    scanOnDeploy: true
+    imageAllowlist: # Glob patterns. If set, only matching images are permitted
+      - 'your-registry.example.com/evenfire/*'
+    imageDenylist: [] # Glob patterns. Matching images are always rejected
+    allowedStorageClasses:
+      - do-block-storage
+    maxResourceLimits: # Max resource limits per container
+      cpu: '4'
+      memory: '8Gi'
 
-  # --- Publication: Auto-publish to registry ---
+  # --- Publication: registry settings ---
   publication:
-    autoPublish: true # Overridable via SOUL.md
+    registry: '' # Registry URL for recipe publication
+    autoPublish: true
 
-  # --- Deployment: Recipe deployment config ---
+  # --- Deployment behavior ---
   deployment:
-    enabled: false # Default off (requires explicit enablement)
-    autoApproveMaxRisk: none # none | low (risk threshold for auto-approval)
-    namespaceAllowlist: # Namespaces where recipes can be deployed
-      - 'mcp-server'
-
-  # --- Risk Classification (Algorithm) ---
-  # Risk is computed algorithmically, not configured manually.
-  # The controller evaluates rules in order (first match wins):
-  #
-  # HIGH triggers:
-  # - Any workload with type: daemonset
-  # - Any workload with ingress configured
-  # - Any workload requesting > governance.resourceLimits thresholds
-  # - Recipe with > governance.maxWorkloadsPerRecipe workloads
-  # - Recipe with inter-recipe dependencies (spec.dependsOn non-empty)
-  #
-  # MEDIUM triggers:
-  # - Any binding with to: external (dns or restricted CIDR — open ranges are rejected by CEL)
-  # - Any workload with type: statefulset
-  # - Any resource with generateKeys
-  # - Recipe with > 3 workloads
-  # - Total PVC storage > 50Gi
-  #
-  # LOW: All recipes that match none of the above triggers
-  #
-  # NOTE: The previous HIGH trigger for cidr: "0.0.0.0/0" is no longer applicable —
-  # CEL validation now rejects open CIDR ranges. All external bindings are MEDIUM.
+    autoPromoteAfterSeconds: 300 # Seconds before auto-promoting testing -> active
+    rollbackOnFailure: true
+    maxConcurrentDeploys: 3
 
   # --- Notification ---
   notification:
-    channelRef: 'ops-channel' # CommunicationChannel CRD reference
-    webhookUrl: '' # Alternative to channelRef
-    maxPerHour: 20 # Rate limit notifications
-    deduplicationWindowHours: 24 # Suppress duplicate notifications within window
+    channels: [] # Notification channel references
+    events: # deploy | rollback | failed | deprecated
+      - deploy
+      - rollback
+      - failed
 
   # --- Deprecation ---
   deprecation:
-    unusedDays: 7 # Mark deprecated after N days without use
-    cleanupAfterDays: 30 # Delete resources after N days deprecated
+    gracePeriodDays: 30 # Days before a deprecated recipe is removed
+    autoDeprecateInactiveDays: 7 # Days of inactivity before auto-deprecation
 ```
+
+Notes:
+
+- `allowedWorkloadTypes` values are **lowercase** (`deployment`, not `Deployment`) — capitalized values are rejected at admission.
+- `imageAllowlist` / `imageDenylist` live under `detection`, not `governance`.
+- No field on this CRD carries a schema default.
 
 ### 15.2 Approval Workflow
 
-The approval workflow is driven entirely by the `autoApproveMaxRisk` field in WorkflowRecipePolicy. There is NO separate `approvalMode` field.
+The approval gate is driven by `governance.requireApproval` in
+WorkflowRecipePolicy. There is no `approvalMode` field and no
+`deployment.autoApproveMaxRisk` field on the CRD.
 
 ```
 Recipe applied (kubectl apply / agent-generated)
     |
     v
-WorkflowRecipe Reconciler evaluates risk classification
+WRC reads the WorkflowRecipePolicy in the recipe's namespace
     |
-    +-- autoApproveMaxRisk: none
-    |       --> ALL recipes require approval
-    |       --> Set status.phase: pending-approval
-    |
-    +-- autoApproveMaxRisk: low
-    |       +-- risk == LOW --> Auto-approve, proceed to deployment
-    |       +-- risk == MEDIUM or HIGH --> Set status.phase: pending-approval
-    |
-    +-- risk <= autoApproveMaxRisk
-    |       --> Auto-approve (candidate --> approved)
+    +-- governance.requireApproval: false
     |       --> Proceed to deployment
     |
-    +-- risk > autoApproveMaxRisk
+    +-- governance.requireApproval: true
             --> Set status.phase: pending-approval
-            --> Send notification to operator (via channelRef or webhookUrl)
+            --> Notify operator (notification.channels / notification.events)
             --> Wait for operator response
                 |
                 +-- Approved: clerum.io/approved: "true" annotation
@@ -3237,57 +2965,74 @@ Template strings (`{{resource:KEY}}`, `{{workload:host}}`, `{{inputs.*}}`) are r
 - **Injection via input values**: An input value containing `{{...}}` could trigger unintended template resolution.
 - **Information disclosure**: Templates that reference non-existent resources could leak error messages with internal state.
 
-### 16.2 Escaping
+### 16.2 No Escaping — Literal `{{` Is Not Expressible
 
-To include literal `{{` in a value without template resolution, use the escape sequence `\{{`:
+There is **no escape sequence**. The resolver is a single `String.replace` over
+`/\{\{([^}]+)\}\}/g`, and every match must resolve to an input, computed value,
+workload `host`/`port`, or resource key; anything else throws
+`UnresolvedTemplateError` and fails the reconcile. `\{{` is not special-cased —
+the backslash is just a literal character preceding a `{{` that still matches the
+regex.
 
-```yaml
-env:
-  - name: DISPLAY_FORMAT
-    value: "Value is: \\{{not-a-template}}"
-    # Resolves to: "Value is: {{not-a-template}}"
-```
+Consequence: a `{{...}}` sequence that is _meant_ to be literal cannot be placed
+in `env[].value`, `command[]`, or `args[]`. It will fail the reconcile rather
+than render. If a container needs a literal `{{`, build it at runtime inside the
+container (or source it from a Secret/ConfigMap projected with `envSecret` /
+`volumeMounts`, which are not template-rendered).
 
-The WorkflowRecipe Reconciler processes escape sequences AFTER template resolution. This means `\{{` is never evaluated as a template.
+### 16.3 No Multi-Pass Resolution
 
-### 16.3 Resolution Depth Limit
+Resolution is **single-pass**. A substituted value is never re-scanned, so a
+resource value that itself contains `{{...}}` is emitted verbatim (there is no
+"depth of 2" indirection, and equally no recursion risk). Templates can only be
+written directly in the three templated container fields — plus `includeWhen`,
+which has its own separate resolver (§16.5).
 
-Templates are resolved with a maximum depth of **2 levels**:
+### 16.4 Input Sanitization — Not Implemented
 
-- Level 1: `{{resource:KEY}}` resolves to the resource value.
-- Level 2: If the resolved value itself contains `{{...}}`, it is resolved once more.
-- Level 3+: Any remaining `{{...}}` patterns in the output are treated as literal strings (no further resolution).
-
-This prevents recursive resolution while allowing one level of indirection (e.g., a Secret value that references another resource).
-
-### 16.4 Input Sanitization
-
-Input values provided via `spec.inputs` are sanitized before template resolution:
-
-| Rule                                          | Implementation                                                    |
-| --------------------------------------------- | ----------------------------------------------------------------- |
-| Template patterns in input values are escaped | Any `{{` in input values is replaced with `\{{` before resolution |
-| Maximum input value length                    | 10,000 characters per value                                       |
-| Maximum total inputs size                     | 100KB across all input values                                     |
-| Null bytes rejected                           | Input values containing `\0` are rejected at admission            |
+`spec.inputs` is a bare `x-kubernetes-preserve-unknown-fields` object in the CRD
+and the reconciler does not transform its values. There is **no** escaping of
+`{{` inside input values, **no** per-value length cap, **no** total-size cap, and
+**no** null-byte rejection. Because an input value is substituted textually into
+`env[].value` / `command[]` / `args[]` and the result is not re-scanned (§16.3),
+an input containing `{{...}}` lands literally in the pod spec — it does not
+trigger a second resolution round. Recipe authors — and any agent generating a
+recipe — remain responsible for the content of `spec.inputs`; the only hard
+limits are Kubernetes object size (etcd ~1.5MB, §23.8).
 
 ### 16.5 Template Locations
 
-Template patterns (`{{...}}`) are supported in workload `env[].value`,
-`command[]`, and `args[]` string fields. Existing image interpolation behavior
-is outside the scope of issue #231 and remains unchanged.
+There are **two independent** template passes in the reconciler, and they do not
+share a resolver:
 
-| Field                      | Template Allowed  | Reason                                                                                                                                                        |
-| -------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `env[].value`              | Yes               | Kubernetes-shaped string value resolved before Pod creation                                                                                                   |
-| `command[]`, `args[]`      | Yes               | Entrypoint/CMD string arrays resolved before Pod creation                                                                                                     |
-| `image`                    | Existing behavior | Input interpolation, not changed by #231                                                                                                                      |
-| `env[].valueFrom.template` | **No**            | Not implemented in #231; use `env.value` for non-sensitive rendered strings and `envSecret` for secrets                                                       |
-| `resources[].data` values  | **No**            | Prevents nested secret referencing (a Secret value containing `{{other-secret:KEY}}` would resolve at creation time, bypassing RBAC on the referenced Secret) |
-| `labels`, `annotations`    | **No**            | Metadata must be static for consistent label selectors                                                                                                        |
-| `volumeMounts[].mountPath` | **No**            | Mount paths must be deterministic                                                                                                                             |
+1. `resolveWorkloadTemplates` — the general engine. It resolves `env[].value`,
+   `command[]`, and `args[]`, and only those. It understands `{{inputs.*}}`,
+   `{{computed.*}}`, `{{<workload-id>:host}}` / `{{<workload-id>:port}}`, and
+   `{{<resource-id>:KEY}}` (§3.4).
+2. `filterByIncludeWhen` — a separate, much narrower resolver for
+   `workloads[].includeWhen` (`includeWhenFilter.ts`). Its regex is anchored and
+   accepts **only** the exact literal form `{{inputs.<key>}}`. It runs _before_
+   `resolveWorkloadTemplates`, and it fails **silently** (§16.6, §4.3). It runs
+   **only on the non-workflow (steps-less) path** — in a recipe with `spec.steps`
+   it is never called, so `includeWhen` is ignored entirely (§4.2).
 
-The WorkflowRecipe Reconciler validates all `resources[].data` values at reconciliation time. If any value matches the regex `\{\{[^}]+\}\}` (unescaped template pattern), the recipe transitions to `failed` with error `"template patterns are not allowed in resources[].data"`. This prevents a resource from acting as an indirect secret proxy.
+Every other field is consumed raw.
+
+| Field                                             | Template Allowed | Reason                                                                                                                                     |
+| ------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `env[].value`                                     | Yes              | Kubernetes-shaped string value resolved before Pod creation                                                                                |
+| `command[]`, `args[]`                             | Yes              | Entrypoint/CMD string arrays resolved before Pod creation                                                                                  |
+| `includeWhen`                                     | `{{inputs.<key>}}` **only** | Resolved by `filterByIncludeWhen`, not `resolveWorkloadTemplates`. Any other string (`{{computed.x}}`, `'true'`, or any surrounding text) does not match, resolves to `undefined`, and **silently excludes the workload**. |
+| `image`                                           | **No**           | Consumed raw. A `{{...}}` here reaches Kubernetes literally and is an invalid image reference.                                             |
+| `replicas`                                        | **No**           | `type: integer` — a `{{...}}` string is rejected at admission.                                                                             |
+| `resources.requests.*`, `resources.limits.*`      | **No**           | Consumed raw. A `{{...}}` here is an invalid resource quantity.                                                                            |
+| `resources[].size`, `volumeClaimTemplates[].size` | **No**           | Consumed raw. A `{{...}}` here is an invalid PVC quantity.                                                                                 |
+| `env[].valueFrom.template`                        | **No**           | Not implemented; use `env.value` for non-sensitive rendered strings and `envSecret` for secrets                                            |
+| `resources[].data` values                         | **No**           | Copied verbatim into the generated Secret/ConfigMap. A `{{...}}` here is neither resolved nor rejected — it is stored as a literal string. |
+| `labels`, `annotations`                           | **No**           | Metadata must be static for consistent label selectors                                                                                     |
+| `volumeMounts[].mountPath`                        | **No**           | Mount paths must be deterministic                                                                                                          |
+
+The reconciler does **not** scan `resources[].data` for template patterns: `buildSecret` / `buildConfigMap` iterate the map and copy each value through unchanged (base64-encoding it for Secrets). Nothing rejects a `{{...}}` there, and nothing resolves it — the literal characters end up in the Secret/ConfigMap. Note that a Secret _value_ referenced from `env[].value` as `{{secret-id:KEY}}` **is** substituted into the pod spec at reconcile time, so do not treat `resources[].data` as an RBAC boundary (see the plaintext warning in §3.3).
 
 ### 16.6 Error Behavior
 
@@ -3297,19 +3042,25 @@ The WorkflowRecipe Reconciler validates all `resources[].data` values at reconci
 | Template references non-existent input key                | Validation error at reconciliation time. Recipe status: `failed`.                                                 |
 | Resolution produces empty string                          | Allowed. Empty string is a valid resolved value.                                                                  |
 | Unresolved `{{...}}` remains in workload env/command/args | Fail-closed before workload resources are created.                                                                |
+| Unresolvable `includeWhen` (not the literal `{{inputs.<key>}}` form), steps-less recipe | **Fail-silent, not fail-closed.** The condition resolves to `undefined`, which is falsy, so the workload is **quietly excluded** — no error, no `failed` status, no mention of the workload anywhere in `status`. If it was the only workload, the recipe fails with the misleading message `All workloads excluded by includeWhen conditions`. |
+| Any `includeWhen`, recipe with `spec.steps` | **Ignored.** The workflow branch never calls `filterByIncludeWhen`, so the workload is deployed regardless of the condition — including conditions that would exclude it on the steps-less path (§4.2). |
 
-### 16.7 Sidecar and InitContainer Coverage
+> **`includeWhen` is the one place a typo is not caught.** Everywhere else an
+> unresolved `{{...}}` fails the reconcile loudly. In `includeWhen`, a
+> misspelled key, a `{{computed.*}}` reference, or the literal string `'true'`
+> all silently delete the workload from the deployment. If a workload you
+> expected is simply absent, check its `includeWhen` first.
 
-The template sanitization pipeline described in this section must apply equally
-to sidecar and initContainer fields if those workload fields are introduced.
-Issue #231 only covers the main workload container fields currently present in
-the CRD:
+### 16.7 Scope of the Template Pass
 
-1. **Input sanitization**: Any `{{` patterns in input values are escaped before resolution, regardless of where the template appears.
-2. **Template locations**: The template location rules (Section 16.5) apply to sidecar and initContainer fields identically when those fields are introduced. `env[].valueFrom.template` is not implemented by #231.
-3. **Validation at reconciliation time**: The WorkflowRecipe Reconciler rejects unresolved template references before creating any resources.
+There are no `sidecars` or `initContainers` fields on `workloads[]` (Section 3.2), so there is no additional container surface to template. The general template pass (`resolveWorkloadTemplates`) covers the three templated container fields — `env[].value`, `command[]`, `args[]` (Section 16.5). Its only safety property is **fail-closed resolution**:
 
-This ensures that sidecars and initContainers cannot be used as a bypass vector for template injection.
+1. Unresolvable `{{...}}` references throw before any workload resource is created.
+2. References whose path contains a prototype-pollution key (`__proto__`, `constructor`, `prototype`, `__defineGetter__`, `__defineSetter__`, `__lookupGetter__`, `__lookupSetter__`) are blocked with a `TemplateInjectionError`.
+
+Neither property extends to `includeWhen`, which is resolved by a separate pass (`filterByIncludeWhen`) that is fail-**silent** rather than fail-closed (Section 16.6).
+
+There is no input sanitization step (§16.4) and no re-resolution pass (§16.3). Should multi-container pods ever be added to the schema, the template pass would need to be extended to cover them.
 
 ---
 
@@ -3368,7 +3119,7 @@ apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
   name: temp-pipeline
-  namespace: mcp-server
+  namespace: sandbox-recipes
   annotations:
     clerum.io/pvc-retention: 'delete'
 spec:
@@ -3416,12 +3167,11 @@ All WorkflowRecipe CRDs MUST have a finalizer `clerum.io/recipe-cleanup` that gu
 | 2    | Delete all child Deployments, StatefulSets, CronJobs, Jobs, DaemonSets              | Verify each resource returns 404.                                                                        |
 | 3    | Delete all child Services                                                           | Verify 404.                                                                                              |
 | 4    | Patch Context CRD to remove binding info (HCC deletes NetworkPolicies)              | Verify Context CRD patch succeeded.                                                                      |
-| 5    | Delete all child Ingress resources                                                  | Verify 404.                                                                                              |
-| 6    | Delete PVCs (only if `clerum.io/pvc-retention: "delete"`)                           | Verify 404 or skip if retention is `retain`.                                                             |
-| 7    | Delete Secrets and ConfigMaps                                                       | Verify 404.                                                                                              |
-| 8    | Patch Context CRD: remove all `mcpServers[]` allowlist entries added by this recipe | Verify patch succeeded.                                                                                  |
-| 9    | Clean up approval records (Kubernetes Events tagged with recipe name)               | Best-effort; Events have TTL and are eventually cleaned by Kubernetes.                                   |
-| 10   | Remove the `clerum.io/recipe-cleanup` finalizer                                     | WorkflowRecipe is now deleted from etcd.                                                                 |
+| 5    | Delete PVCs (only if `clerum.io/pvc-retention: "delete"`)                           | Verify 404 or skip if retention is `retain`.                                                             |
+| 6    | Delete Secrets and ConfigMaps                                                       | Verify 404.                                                                                              |
+| 7    | Patch Context CRD: remove all `mcpServers[]` allowlist entries added by this recipe | Verify patch succeeded.                                                                                  |
+| 8    | Clean up approval records (Kubernetes Events tagged with recipe name)               | Best-effort; Events have TTL and are eventually cleaned by Kubernetes.                                   |
+| 9    | Remove the `clerum.io/recipe-cleanup` finalizer                                     | WorkflowRecipe is now deleted from etcd.                                                                 |
 
 **Failure handling**: If any cleanup step fails after 5 retries with exponential backoff (1s, 2s, 4s, 8s, 16s):
 
@@ -3436,7 +3186,7 @@ apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
   name: knowledge-base
-  namespace: mcp-server
+  namespace: sandbox-recipes
   finalizers:
     - clerum.io/recipe-cleanup
 spec:
@@ -3458,16 +3208,15 @@ The finalizer ensures all these concerns are addressed synchronously before the 
 
 ### 19.1 Recipe Creation Rate Limiting
 
-| Limit                          | Default     | Configurable                                              |
-| ------------------------------ | ----------- | --------------------------------------------------------- |
-| Max recipes per namespace      | 50          | WorkflowRecipePolicy `limits.maxRecipesPerNamespace`      |
-| Max creation rate per agent    | 10 per hour | WorkflowRecipePolicy `limits.maxCreationsPerAgentPerHour` |
-| Max total recipes cluster-wide | 200         | Global OPA policy                                         |
+**WorkflowRecipePolicy has no `spec.limits` block.** There is no
+`limits.maxRecipesPerNamespace` and no `limits.maxCreationsPerAgentPerHour`
+field (Section 15.1 lists the policy's full property set), so recipe-count and
+recipe-creation-rate ceilings are not expressible through the policy CRD.
 
-When limits are exceeded:
-
-- Admission webhook rejects the recipe with HTTP 429 and a descriptive message.
-- WRO reduces detection cycle frequency to avoid exceeding limits.
+The only concurrency ceiling the policy CRD offers is
+`deployment.maxConcurrentDeploys`. Recipe-count and creation-rate limits must
+come from an external policy engine (OPA/Gatekeeper) or a namespace
+ResourceQuota, and are not implemented in this tree.
 
 ### 19.2 Status Update Coalescing
 
@@ -3494,7 +3243,7 @@ WorkflowRecipe CRD version migration follows standard Kubernetes conversion webh
 
 **Note**: The `inputContract` field uses `includeWhen` boolean semantics that must be preserved during conversion. See [Kubernetes CRD Versioning](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definition-versioning/) for standard patterns.
 
-> **Approval bypass caveat**: GitOps auto-sync does NOT bypass the approval gate. Recipes synced via ArgoCD/Flux still require approval if `autoApproveMaxRisk` is exceeded.
+> **Approval bypass caveat**: GitOps auto-sync does NOT bypass the approval gate. Recipes synced via ArgoCD/Flux still require approval if `governance.requireApproval` is true.
 
 ---
 
@@ -3502,9 +3251,14 @@ WorkflowRecipe CRD version migration follows standard Kubernetes conversion webh
 
 WorkflowRecipe CRDs integrate with GitOps controllers (ArgoCD, Flux) using standard patterns. Store recipe manifests in Git and apply via your GitOps pipeline.
 
-**Important caveat**: GitOps auto-sync does NOT bypass the approval gate. Recipes synced via ArgoCD/Flux still require operator approval if `autoApproveMaxRisk` is exceeded. The `pending-approval` state blocks reconciliation regardless of the sync source. See Section 20 for the full approval bypass caveat.
+**Important caveat**: GitOps auto-sync does NOT bypass the approval gate. Recipes synced via ArgoCD/Flux still require operator approval if `governance.requireApproval` is true. The `pending-approval` state blocks reconciliation regardless of the sync source. See Section 20 for the full approval bypass caveat.
 
 ## 22. Examples
+
+> All WorkflowRecipe CRDs are stored in the `sandbox-recipes` namespace. Direct
+> writes to any other namespace are denied by admission policy (§8.4). The
+> `mcp-server` namespace is where the MCP transport children materialize — it is
+> not where the recipe object lives.
 
 ### 22.1 Simple MCP Server
 
@@ -3513,7 +3267,7 @@ apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
   name: airtable-mcp
-  namespace: mcp-server
+  namespace: sandbox-recipes
 spec:
   description: 'Airtable MCP server'
   contextRef: context1
@@ -3523,22 +3277,33 @@ spec:
       type: deployment
       image: your-registry.example.com/evenfire/mcp-airtable:1.2.0
       port: 3000
-      transport: streamableHttp
-      env:
-        - name: AIRTABLE_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: airtable-credentials
-              key: api-key
+      transport:
+        type: streamableHttp
+      # Secrets are projected with envSecret — env[] has no valueFrom.
+      envSecret:
+        name: airtable-credentials
+        keys:
+          - secretKey: api-key
+            envVar: AIRTABLE_API_KEY
+      egressBindings:
+        - egressClass: exact-host
+          dns: api.airtable.com
+          port: 443
+          protocol: TCP
       resources:
         requests: { cpu: '100m', memory: '128Mi' }
         limits: { cpu: '500m', memory: '256Mi' }
       healthCheck:
+        type: http # required — a healthCheck without `type` yields a handler-less probe (§3.2)
         path: /health
         port: 3000
 ```
 
-**Generates**: 1 McpServer CRD (`managed: true`, the default; `ownerRef → WorkflowRecipe`; Deployment + Service created by HCC) + 1 Context CRD patch + 1 NetworkPolicy (all NetworkPolicies created and managed by HCC)
+The `airtable-credentials` Secret must carry an ownership label
+(`clerum.io/owner-recipe=airtable-mcp` or `clerum.io/shared=true`) or the
+reconciler fails closed with an `EnvSecretOwnershipDenied` condition (§3.4.1).
+
+**Generates**: 1 Deployment + 1 Service (created by the WRC — this is a `streamableHttp` workload, so its McpServer CRD is `managed: false`) + 1 McpServer CRD (`ownerRef → WorkflowRecipe`, registration/discovery record) + 1 Context CRD patch + NetworkPolicies (all NetworkPolicies created and managed by HCC). Had the transport been `stdio`, the McpServer CRD would be `managed: true` and HCC's MCP Server Sync would create the Deployment instead.
 
 ### 22.2 MCP Server + PostgreSQL with Environment Profiles
 
@@ -3547,94 +3312,88 @@ apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
   name: knowledge-base
-  namespace: mcp-server
+  namespace: sandbox-recipes
 spec:
   description: 'Knowledge-base MCP with dedicated PostgreSQL'
   contextRef: context1
 
+  # Only `includeWhen` and the three templated fields (env[].value, command[],
+  # args[]) consume inputs. `replicas`, `image`, `resources.limits.*` and
+  # `resources[].size` are NOT templated (§3.4, §16.5), so they are written as
+  # literals here and must be varied per environment with Kustomize overlays
+  # (§5.6) rather than with profiles.
   inputContract:
     type: object
-    required: [imageTag]
+    required: [logLevel]
     properties:
-      imageTag:
+      logLevel:
         type: string
-        default: '2.0.0'
-      replicas:
-        type: integer
-        minimum: 1
-        maximum: 10
-        default: 1
-      pgStorageSize:
-        type: string
-        default: '10Gi'
-      cpuLimit:
-        type: string
-        default: '500m'
-      memoryLimit:
-        type: string
-        default: '256Mi'
+        default: 'info'
       cacheEnabled:
         type: boolean
         default: false
 
   profiles:
     staging:
-      replicas: 1
-      pgStorageSize: '10Gi'
-      cpuLimit: '500m'
-      memoryLimit: '256Mi'
+      logLevel: 'debug'
       cacheEnabled: false
     production:
-      replicas: 3
-      pgStorageSize: '50Gi'
-      cpuLimit: '2'
-      memoryLimit: '1Gi'
+      logLevel: 'warn'
       cacheEnabled: true
 
   activeProfile: production
   inputs:
-    imageTag: '2.1.0'
+    logLevel: 'info'
+
+  security:
+    isolationLevel: standard # Without this, the recipe runs at `minimal` (root allowed)
 
   resources:
     - id: pg-data
       type: pvc
       storageClass: do-block-storage
       accessMode: ReadWriteOnce
-      size: '{{inputs.pgStorageSize}}'
+      size: 50Gi # literal — resources[].size is not templated
 
     - id: db-creds
       type: secret
-      generateKeys:
-        - key: POSTGRES_USER
-          length: 0
-        - key: POSTGRES_PASSWORD
-          length: 32
-        - key: POSTGRES_DB
-          length: 0
+      generateKeys: # Plain list of key names — no `length`
+        - POSTGRES_PASSWORD
+      data:
+        POSTGRES_USER: kb
+        POSTGRES_DB: knowledge
 
+    # NOTE: resources[] has no includeWhen — this PVC is created even when
+    # cacheEnabled is false and the redis workload is excluded.
     - id: redis-data
       type: pvc
       storageClass: do-block-storage
       accessMode: ReadWriteOnce
       size: 5Gi
-      includeWhen: '{{inputs.cacheEnabled}}'
 
   workloads:
     - id: postgres
       type: statefulset
       image: postgres:16-alpine
       port: 5432
+      security: # postgres UID — see §8.5
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+      envSecret:
+        name: knowledge-base-db-creds # <recipe>-<resource-id>
+        keys:
+          - secretKey: POSTGRES_USER
+            envVar: POSTGRES_USER
+          - secretKey: POSTGRES_PASSWORD
+            envVar: POSTGRES_PASSWORD
+          - secretKey: POSTGRES_DB
+            envVar: POSTGRES_DB
       env:
-        - name: POSTGRES_USER
-          valueFrom: { resourceRef: db-creds, key: POSTGRES_USER }
-        - name: POSTGRES_PASSWORD
-          valueFrom: { resourceRef: db-creds, key: POSTGRES_PASSWORD }
-        - name: POSTGRES_DB
-          valueFrom: { resourceRef: db-creds, key: POSTGRES_DB }
         - name: PGDATA
           value: /var/lib/postgresql/data/pgdata
       volumeMounts:
-        - resourceRef: pg-data
+        - name: pg-data # `name` is the resources[] id
           mountPath: /var/lib/postgresql/data
       resources:
         requests: { cpu: '250m', memory: '512Mi' }
@@ -3645,8 +3404,11 @@ spec:
       image: redis:7-alpine
       port: 6379
       includeWhen: '{{inputs.cacheEnabled}}'
+      security:
+        runAsUser: 999
+        runAsGroup: 999
       volumeMounts:
-        - resourceRef: redis-data
+        - name: redis-data
           mountPath: /data
       resources:
         requests: { cpu: '100m', memory: '128Mi' }
@@ -3654,20 +3416,31 @@ spec:
 
     - id: mcp-server
       type: deployment
-      image: 'your-registry.example.com/evenfire/mcp-knowledge:{{inputs.imageTag}}'
-      replicas: '{{inputs.replicas}}'
+      image: 'your-registry.example.com/evenfire/mcp-knowledge:2.1.0' # literal — image is not templated
+      replicas: 3 # integer literal — replicas is `type: integer`, a template string is rejected at admission
       port: 3000
-      transport: streamableHttp
+      transport:
+        type: streamableHttp
       env:
-        - name: DATABASE_URL
-          valueFrom:
-            template: 'postgresql://{{db-creds:POSTGRES_USER}}:{{db-creds:POSTGRES_PASSWORD}}@{{postgres:host}}:5432/{{db-creds:POSTGRES_DB}}'
+        # Templates resolve in env[].value. Do not put credentials here —
+        # POSTGRES_PASSWORD arrives via envSecret below.
+        - name: DATABASE_HOST
+          value: '{{postgres:host}}'
+        - name: LOG_LEVEL
+          value: '{{inputs.logLevel}}' # profile-driven
+      envSecret:
+        name: knowledge-base-db-creds
+        keys:
+          - secretKey: POSTGRES_USER
+            envVar: PGUSER
+          - secretKey: POSTGRES_PASSWORD
+            envVar: PGPASSWORD
+          - secretKey: POSTGRES_DB
+            envVar: PGDATABASE
       resources:
         requests: { cpu: '100m', memory: '128Mi' }
-        limits:
-          cpu: '{{inputs.cpuLimit}}'
-          memory: '{{inputs.memoryLimit}}'
-      healthCheck: { path: /health, port: 3000 }
+        limits: { cpu: '2', memory: '1Gi' } # literals — resources.limits.* is not templated
+      healthCheck: { type: http, path: /health, port: 3000 } # `type` is required (§3.2)
 
   bindings:
     - from: mcp-server
@@ -3678,8 +3451,8 @@ spec:
       port: 6379
 ```
 
-**With production profile**: 1 StatefulSet, 1 Redis Deployment, 1 McpServer CRD, 1+1 PVCs, 1 Secret, 3 NetworkPolicies
-**With staging profile**: 1 StatefulSet, 1 McpServer CRD, 1 PVC, 1 Secret, 2 NetworkPolicies (Redis excluded)
+**With production profile** (`cacheEnabled: true`): 1 StatefulSet, 1 Redis Deployment, 1 McpServer CRD, 2 PVCs, 1 Secret. `LOG_LEVEL=warn`.
+**With staging profile** (`cacheEnabled: false`): 1 StatefulSet, 1 McpServer CRD, 2 PVCs (the redis PVC is still created — `resources[]` has no `includeWhen`), 1 Secret. Redis workload excluded, `LOG_LEVEL=debug`.
 
 ### 22.3 Database Migration + MCP Server
 
@@ -3688,10 +3461,13 @@ apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
   name: inventory-service
-  namespace: mcp-server
+  namespace: sandbox-recipes
 spec:
   description: 'MCP server with migration job -- server starts after migration succeeds'
   contextRef: context1
+
+  security:
+    isolationLevel: standard
 
   resources:
     - id: pg-data
@@ -3702,29 +3478,34 @@ spec:
     - id: db-creds
       type: secret
       generateKeys:
-        - key: POSTGRES_USER
-          length: 0
-        - key: POSTGRES_DB
-          length: 0
-        - key: POSTGRES_PASSWORD
-          length: 32
+        - POSTGRES_PASSWORD
+      data:
+        POSTGRES_USER: inventory
+        POSTGRES_DB: inventory
 
   workloads:
     - id: postgres
       type: statefulset
       image: postgres:16-alpine
       port: 5432
+      security:
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+      envSecret:
+        name: inventory-service-db-creds
+        keys:
+          - secretKey: POSTGRES_USER
+            envVar: POSTGRES_USER
+          - secretKey: POSTGRES_PASSWORD
+            envVar: POSTGRES_PASSWORD
+          - secretKey: POSTGRES_DB
+            envVar: POSTGRES_DB
       env:
-        - name: POSTGRES_USER
-          valueFrom: { resourceRef: db-creds, key: POSTGRES_USER }
-        - name: POSTGRES_PASSWORD
-          valueFrom: { resourceRef: db-creds, key: POSTGRES_PASSWORD }
-        - name: POSTGRES_DB
-          valueFrom: { resourceRef: db-creds, key: POSTGRES_DB }
         - name: PGDATA
           value: /var/lib/postgresql/data/pgdata
       volumeMounts:
-        - resourceRef: pg-data
+        - name: pg-data
           mountPath: /var/lib/postgresql/data
       resources:
         requests: { cpu: '250m', memory: '512Mi' }
@@ -3734,20 +3515,21 @@ spec:
       type: job
       image: your-registry.example.com/evenfire/db-migrator:1.0.0
       backoffLimit: 3
-      activeDeadlineSeconds: 300
+      # dependsOn is the ordering mechanism: the WRC waits for postgres to be
+      # Ready before creating this Job. There are no initContainers in the schema.
       dependsOn: [postgres]
-      initContainers:
-        - name: wait-for-db
-          image: busybox:1.36
-          command: ['sh', '-c', 'until nc -z $DB_HOST 5432; do sleep 2; done']
-          env:
-            - name: DB_HOST
-              valueFrom:
-                template: '{{postgres:host}}'
       env:
-        - name: DATABASE_URL
-          valueFrom:
-            template: 'postgresql://{{db-creds:POSTGRES_USER}}:{{db-creds:POSTGRES_PASSWORD}}@{{postgres:host}}:5432/{{db-creds:POSTGRES_DB}}'
+        - name: DATABASE_HOST
+          value: '{{postgres:host}}'
+      envSecret:
+        name: inventory-service-db-creds
+        keys:
+          - secretKey: POSTGRES_USER
+            envVar: PGUSER
+          - secretKey: POSTGRES_PASSWORD
+            envVar: PGPASSWORD
+          - secretKey: POSTGRES_DB
+            envVar: PGDATABASE
       resources:
         requests: { cpu: '100m', memory: '128Mi' }
         limits: { cpu: '500m', memory: '256Mi' }
@@ -3757,16 +3539,25 @@ spec:
       image: your-registry.example.com/evenfire/mcp-inventory:2.0.0
       replicas: 2
       port: 3000
-      transport: streamableHttp
+      transport:
+        type: streamableHttp
       dependsOn: [migrate]
       env:
-        - name: DATABASE_URL
-          valueFrom:
-            template: 'postgresql://{{db-creds:POSTGRES_USER}}:{{db-creds:POSTGRES_PASSWORD}}@{{postgres:host}}:5432/{{db-creds:POSTGRES_DB}}'
+        - name: DATABASE_HOST
+          value: '{{postgres:host}}'
+      envSecret:
+        name: inventory-service-db-creds
+        keys:
+          - secretKey: POSTGRES_USER
+            envVar: PGUSER
+          - secretKey: POSTGRES_PASSWORD
+            envVar: PGPASSWORD
+          - secretKey: POSTGRES_DB
+            envVar: PGDATABASE
       resources:
         requests: { cpu: '100m', memory: '128Mi' }
         limits: { cpu: '500m', memory: '256Mi' }
-      healthCheck: { path: /health, port: 3000 }
+      healthCheck: { type: http, path: /health, port: 3000 }
 
   bindings:
     - from: migrate
@@ -3786,7 +3577,7 @@ apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
   name: etl-pipeline
-  namespace: mcp-server
+  namespace: sandbox-recipes
 spec:
   description: 'Three-stage ETL: extract (hourly), transform (daily), report (weekly)'
 
@@ -3799,8 +3590,7 @@ spec:
     - id: api-creds
       type: secret
       generateKeys:
-        - key: API_TOKEN
-          length: 0
+        - API_TOKEN
 
   workloads:
     - id: extract
@@ -3808,15 +3598,16 @@ spec:
       image: your-registry.example.com/evenfire/etl-extract:1.0.0
       schedule: '0 * * * *'
       timeZone: 'America/New_York'
-      concurrencyPolicy: Forbid
-      activeDeadlineSeconds: 3300
+      envSecret:
+        name: etl-pipeline-api-creds
+        keys:
+          - secretKey: API_TOKEN
+            envVar: API_TOKEN
       env:
-        - name: API_TOKEN
-          valueFrom: { resourceRef: api-creds, key: API_TOKEN }
         - name: OUTPUT_DIR
           value: /data/raw
       volumeMounts:
-        - resourceRef: staging
+        - name: staging
           mountPath: /data
       resources:
         requests: { cpu: '500m', memory: '512Mi' }
@@ -3827,15 +3618,13 @@ spec:
       image: your-registry.example.com/evenfire/etl-transform:1.0.0
       schedule: '30 2 * * *'
       timeZone: 'America/New_York'
-      concurrencyPolicy: Forbid
-      activeDeadlineSeconds: 7200
       env:
         - name: INPUT_DIR
           value: /data/raw
         - name: OUTPUT_DIR
           value: /data/processed
       volumeMounts:
-        - resourceRef: staging
+        - name: staging
           mountPath: /data
       resources:
         requests: { cpu: '1', memory: '2Gi' }
@@ -3846,29 +3635,31 @@ spec:
       image: your-registry.example.com/evenfire/etl-report:1.0.0
       schedule: '0 6 * * 1'
       timeZone: 'America/New_York'
-      concurrencyPolicy: Forbid
-      activeDeadlineSeconds: 3600
       volumeMounts:
-        - resourceRef: staging
+        - name: staging
           mountPath: /data
       resources:
         requests: { cpu: '250m', memory: '256Mi' }
         limits: { cpu: '1', memory: '1Gi' }
 ```
 
-### 22.5 API Gateway with External Ingress
+### 22.5 Workload with External Egress
+
+There is no `ingress` field (§10). A workload that must reach an external API
+declares `egressBindings` instead.
 
 ```yaml
 apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
   name: api-gateway
-  namespace: mcp-server
-  annotations:
-    clerum.io/ingress-approved: 'true'
+  namespace: sandbox-recipes
 spec:
-  description: 'Public API gateway with TLS and rate limiting'
+  description: 'Gateway MCP server that calls an upstream public API'
   contextRef: context1
+
+  security:
+    isolationLevel: standard
 
   workloads:
     - id: gateway
@@ -3876,63 +3667,24 @@ spec:
       image: your-registry.example.com/evenfire/api-gateway:2.0.0
       replicas: 3
       port: 8080
-      transport: streamableHttp
-      ingress:
-        host: api.clerum.example.com
-        path: /
-        tls: true
-        ingressClassName: nginx
-        annotations:
-          nginx.ingress.kubernetes.io/rate-limit-rps: '100'
-          nginx.ingress.kubernetes.io/proxy-body-size: '10m'
+      transport:
+        type: streamableHttp
+      egressBindings:
+        - egressClass: exact-host
+          dns: api.upstream.example.com
+          port: 443
+          protocol: TCP
       resources:
         requests: { cpu: '250m', memory: '256Mi' }
         limits: { cpu: '1', memory: '512Mi' }
-      healthCheck: { path: /health, port: 8080 }
+      healthCheck: { type: http, path: /health, port: 8080 }
 ```
-
-### 22.6 Dry-Run Preview
-
-```yaml
-apiVersion: clerum.io/v1alpha1
-kind: WorkflowRecipe
-metadata:
-  name: preview-test
-  namespace: mcp-server
-spec:
-  description: 'Testing recipe in preview mode'
-  dryRun: true
-  activeProfile: production
-
-  inputContract:
-    properties:
-      replicas:
-        type: integer
-        default: 1
-
-  profiles:
-    staging:
-      replicas: 1
-    production:
-      replicas: 5
-
-  workloads:
-    - id: worker
-      type: deployment
-      image: your-registry.example.com/evenfire/worker:1.0.0
-      replicas: '{{inputs.replicas}}'
-      resources:
-        requests: { cpu: '100m', memory: '128Mi' }
-        limits: { cpu: '500m', memory: '256Mi' }
-```
-
-**Result**: `status.phase: candidate` with condition `type: PreviewReady` and all generated manifests in `status.preview.manifests[]`. No resources created.
 
 ## 23. Caveats, Limitations and Trade-offs
 
 ### 23.1 Single Namespace
 
-All workloads in a recipe are deployed to the same namespace (`mcp-server`). Cross-namespace recipes are not supported. This simplifies RBAC and NetworkPolicy management. Multi-tenancy is achieved through Context CRDs (see [Platform Architecture §10](../architecture/platform-topology.md#10-context-crd-and-multi-tenancy)), not namespace separation. Each context groups agents with specific MCP servers, providing logical isolation without namespace proliferation.
+WorkflowRecipe CRDs live in `sandbox-recipes`; a recipe's non-MCP workloads are deployed there, and MCP transport workloads materialize in the `mcp-server` child namespace. A recipe cannot spread its workloads across arbitrary namespaces. This simplifies RBAC and NetworkPolicy management. Multi-tenancy is achieved through Context CRDs (see [Platform Architecture §10](../architecture/platform-topology.md#10-context-crd-and-multi-tenancy)), not namespace separation. Each context groups agents with specific MCP servers, providing logical isolation without namespace proliferation.
 
 ### 23.2 PVC Data Persistence
 
@@ -3942,9 +3694,9 @@ PVCs created by recipes are not deleted on rollback or recipe deletion. Cleanup 
 
 DaemonSets run on every node. OPA policy requires the `clerum.io/daemonset-approved: "true"` annotation before the recipe can be applied.
 
-### 23.4 HPA Interaction with Replicas
+### 23.4 No Autoscaling
 
-When `autoscaling` is present, the `replicas` field is the initial count before HPA activates. `minReplicas` becomes the effective floor. VPA is not supported.
+There is no `autoscaling` field on `workloads[]` and no HorizontalPodAutoscaler is ever generated. `replicas` (0-20) is the fixed replica count. HPA and VPA are not supported.
 
 ### 23.5 Resource Quotas
 
@@ -3952,7 +3704,7 @@ The controller does not enforce namespace ResourceQuotas. Operators must configu
 
 ### 23.6 Secret Rotation
 
-Secrets created via `generateKeys` are generated once at creation time. For rotation, use External Secrets Operator and reference via `secretKeyRef`.
+Secrets created via `generateKeys` are generated once at creation time. For rotation, use External Secrets Operator to maintain a pre-provisioned Secret and project it with `envSecret`.
 
 ### 23.7 Template Resolution Limitations
 
@@ -3964,49 +3716,41 @@ Subject to Kubernetes etcd size limits (~1.5MB). The CRD schema enforces a maxim
 
 ### 23.9 Inter-Recipe Dependency Scope
 
-Inter-recipe dependencies (`spec.dependsOn`) support deployment ordering across recipes within the same cluster. The controller polls for dependency status every 30 seconds. Cascading rollback is configurable per-dependency via `cascadeRollback` field (default: false). Hard dependencies (databases, message queues) should set `cascadeRollback: true`; soft dependencies (caches, monitoring) should use default. See Section 6.3 for full semantics and examples.
+Inter-recipe dependencies (`spec.dependencies`) support deployment ordering across recipes within the same cluster. The controller polls for dependency status every 30 seconds. Cascading rollback is configurable per-dependency via `cascadeRollback` field (default: false), and each dependency has a `maxWaitMinutes` timeout (default: 10). Hard dependencies (databases, message queues) should set `cascadeRollback: true`; soft dependencies (caches, monitoring) should use default. See Section 6.3 for full semantics and examples.
 
 ### 23.10 StatefulSet Storage
 
 `ReadWriteOnce` PVCs bind to a single node. For multi-replica StatefulSets, use `volumeClaimTemplates` instead of shared PVCs from `resources[]`.
 
-### 23.11 External Egress via Bindings
+### 23.11 External Egress
 
-Without an explicit `to: external` binding, workloads cannot reach endpoints outside the cluster (deny-all egress, DNS-only). This applies equally to **all workloads** — including MCP server workloads with `transport` field.
-
-**DNS-based egress (preferred)**:
+Without an explicit `workloads[].egressBindings[]` entry, workloads cannot reach endpoints outside the cluster (deny-all egress, DNS-only). This applies equally to **all workloads** — including MCP server workloads with a `transport` object.
 
 ```yaml
-bindings:
-  - from: airtable-mcp
-    to: external
-    dns: 'api.airtable.com'
-    port: 443
+workloads:
+  - id: airtable-mcp
+    # ...
+    egressBindings:
+      - egressClass: exact-host
+        dns: 'api.airtable.com'
+        port: 443
+        protocol: TCP
 ```
 
-The HCC resolves the hostname to IP addresses and generates a CIDR-based egress NetworkPolicy. Resolution is refreshed periodically (default: 300s) to handle DNS changes. The resolved IPs are stored in the McpServer CRD `status.resolvedEgress[]` for operator auditability.
-
-**CIDR-based egress (for stable IPs)**:
-
-```yaml
-bindings:
-  - from: airtable-mcp
-    to: external
-    cidr: '104.18.0.0/16'
-    port: 443
-```
+The HCC resolves the hostname to IP addresses and generates an ipBlock-based egress NetworkPolicy. Resolution is refreshed periodically to handle DNS changes. The resolved IPs are stored in the McpServer CRD status for operator auditability.
 
 **Restrictions**:
 
-- Open ranges (`0.0.0.0/0`, `::/0`) are rejected by CEL validation — recipe authors must declare specific destinations
-- Each external binding must specify exactly one of `dns` or `cidr` (not both)
-- External bindings trigger MEDIUM risk classification and require operator approval when `autoApproveMaxRisk` is `none` or `low`
+- There is no `cidr` / `ipBlock` input. Raw CIDR is deliberately not accepted anywhere in the schema — destinations are DNS hostnames, resolved by the controller.
+- `egressClass: public-web` is the only way to open broad public access; it permits public TCP 80/443 while keeping private, metadata, cluster-internal, link-local, multicast, and reserved ranges blocked, and it must not declare `dns`, `port`, or `protocol`.
+- Maximum 20 egress bindings per workload.
+- External egress triggers MEDIUM risk classification and requires operator approval when the policy requires it.
 
-**Propagation for MCP workloads**: When a workload with `transport` declares `to: external` bindings, the WRC includes these as `spec.egressBindings[]` on the McpServer CRD it creates. The HCC reads `egressBindings` and generates egress NetworkPolicy rules in the `mcp-server` namespace. This ensures that MCP servers like Airtable, GitHub, or Slack can reach their external APIs while maintaining the deny-all baseline.
+**Propagation for MCP workloads**: When a workload with `transport` declares `egressBindings`, the WRC includes them as `spec.egressBindings[]` on the McpServer CRD it creates. The HCC reads `egressBindings` and generates egress NetworkPolicy rules in the `mcp-server` namespace. This ensures that MCP servers like Airtable, GitHub, or Slack can reach their external APIs while maintaining the deny-all baseline.
 
 ### 23.12 ConfigMap Updates
 
-ConfigMap changes do not trigger pod restarts. Use a reloader sidecar if needed.
+ConfigMap changes do not trigger pod restarts. Roll the workload (e.g. bump the image tag or delete the pod) to pick up new values — the schema has no sidecar/reloader mechanism.
 
 ### 23.13 Constrained Resource Types
 
@@ -4014,14 +3758,15 @@ ConfigMap changes do not trigger pod restarts. Use a reloader sidecar if needed.
 
 ### 23.14 Limited Templating with Computed Values
 
-Template syntax: `{{inputs.*}}`, `{{resource:key}}`, `{{workload:host}}`, `{{computed.*}}`.
+Template syntax: `{{inputs.*}}`, `{{resource:key}}`, `{{workload:host}}`, `{{computed.*}}` — resolved only in `env[].value`, `command[]`, and `args[]` (Section 16.5).
 
-No loops, no arbitrary conditionals in templates. Computed values (Section 5.5) provide a constrained alternative to Helm-style template functions:
+No loops, no arbitrary conditionals in templates. `spec.computed` (Section 5.5) provides a constrained alternative to Helm-style template functions:
 
-- Simple CEL expressions for derived values (e.g., `inputs.memory * 2`)
-- Maximum 10 computed values per recipe
-- No chaining (computed values cannot reference other computed values)
-- Validated at admission time
+- Simple expressions for derived values (e.g., `inputs.memory * 2`) — arithmetic, comparison, ternary, literals; no built-in functions
+- Chaining works: entries evaluate in order and a later expression can read an earlier computed value as `inputs.<name>`
+- Expressions read the **raw `spec.inputs`** map — not `inputContract` defaults, not profile overrides (Section 5.5.3)
+- `{{...}}` template syntax is not valid inside an expression
+- Evaluated by the reconciler, not by CEL at admission
 
 For complex transformations, compute values externally and pass as inputs.
 
@@ -4039,11 +3784,11 @@ The `timeZone` field on CronJob workloads requires Kubernetes 1.27 or later. On 
 
 ### 23.18 WorkflowRecipe Reconciler Isolation
 
-The WorkflowRecipe Reconciler runs as a module within the Host Context Controller (HCC) in the `control-plane` namespace. The WRC is a pure CRD reconciler — it does not expose an MCP interface. It runs in the same process as the HCC's 3 synchronizers (MCP Host, AccessCtrl, MCP Server), sharing the same ServiceAccount and pod. The WRC module interacts with other HCC synchronizers through CRDs (McpServer and Context) via the Kubernetes API. WRC reconciler code currently lives in `workflow-recipes/src/reconciler/`. Pending integration into `host-context-controller/src/wrc/` as described in the platform architecture.
+The WorkflowRecipe Reconciler runs as its own `workflow-recipes` Deployment in the `control-plane` namespace, with its own container image, its own ServiceAccount (`workflow-recipes`), and its own port (8082). It is a separate process and pod from the HCC Deployment (`host-context-controller`, port 8081), which runs the 3 synchronizers (MCP Host, AccessCtrl, MCP Server). The WRC interacts with the HCC synchronizers only through CRDs (McpServer and Context) via the Kubernetes API; it additionally serves an MCP interface on its own port (`:8082/mcp/v1`) for tool-driven recipe operations (see §2). WRC reconciler code lives in `workflow-recipes/src/reconciler/`.
 
 ### 23.19 Single Namespace Scope
 
-All recipes deploy to the `mcp-server` namespace, sharing ResourceQuota and RBAC scope. Mitigation: per-recipe resource limits are enforced via OPA policies (Section 8), and the rate limiting system (Section 19) prevents any single agent from exhausting namespace resources. Multi-namespace support is deferred.
+All WorkflowRecipe CRDs are stored in the `sandbox-recipes` namespace, sharing ResourceQuota and RBAC scope; MCP transport children land in the `mcp-server` namespace. Mitigation: per-recipe resource limits must be enforced via an external policy engine (Section 8) — recipe-count and creation-rate limits are not implemented (Section 19.1). Multi-namespace support is deferred.
 
 ---
 
@@ -4063,10 +3808,10 @@ This section tracks what has been implemented, validated, and deployed from this
 | VolumeClaimTemplates for StatefulSets                                             | 3.2     | E2E + unit                           | Deployed                          |
 | VCT volume filtering (auto-exclude emptyDir for VCT names)                        | 7       | Unit tests                           | Deployed                          |
 | Bindings and NetworkPolicy generation (delegated to HCC)                          | 9       | 26 policyEnforcer + E2E              | Deployed                          |
-| Egress bindings (dns/cidr per workload)                                           | 9       | mcpDelegation tests                  | Deployed                          |
+| Egress bindings (dns per workload, no raw CIDR)                                   | 9       | mcpDelegation tests                  | Deployed                          |
 | Template interpolation (`{{workload-id:field}}` colon syntax)                     | 16      | 21 templateEngine tests              | Deployed                          |
 | inputContract + inputs + profiles + activeProfile                                 | 4, 5    | 20 inputResolver + 17 computedValues | Deployed                          |
-| Computed values (CEL expressions)                                                 | 5.5     | 17 tests                             | Deployed                          |
+| Computed values (`spec.computed` expressions)                                     | 5.5     | 17 tests                             | Deployed                          |
 | includeWhen conditional deployment                                                | 4       | 16 tests                             | Deployed                          |
 | Dependency graph (topological sort, cycle detection)                              | 6       | 12 tests                             | Deployed                          |
 | 13-phase state machine (candidate through rollback-failed)                        | 12      | 39 stateMachine tests                | Deployed                          |
@@ -4078,16 +3823,18 @@ This section tracks what has been implemented, validated, and deployed from this
 
 ### 24.2 Not Yet Implemented
 
-| Feature                                                         | Section | Priority | Notes                                      |
-| --------------------------------------------------------------- | ------- | -------- | ------------------------------------------ |
-| Dry-run and preview mode                                        | 13      | Medium   | No code evidence                           |
-| Rate limiting                                                   | 19      | Low      | Deferred to post-MVP                       |
-| CRD version migration                                           | 20      | Low      | Only v1alpha1 exists                       |
-| GitOps integration                                              | 21      | Low      | Deferred                                   |
-| External ingress (Ingress + cert-manager)                       | 10      | Medium   | Deferred                                   |
-| Inter-recipe dependencies reconciler (dependsOn across recipes) | 6.3     | Medium   | CRD schema exists, reconciler code pending |
-| Per-workload ServiceAccount + RBAC                              | 8       | Medium   | Deferred                                   |
-| Finalizers and PVC retention logic                              | 18      | Medium   | Constant defined, full cleanup pending     |
+| Feature                                                    | Section | Priority | Notes                                      |
+| ---------------------------------------------------------- | ------- | -------- | ------------------------------------------ |
+| Dry-run and preview mode                                   | 13      | Medium   | No `dryRun` field, no `status.preview`     |
+| Rate limiting                                              | 19      | Low      | Deferred to post-MVP                       |
+| CRD version migration                                      | 20      | Low      | Only v1alpha1 exists                       |
+| GitOps integration                                         | 21      | Low      | Deferred                                   |
+| External ingress (Ingress + cert-manager)                  | 10      | Medium   | Deferred — no `ingress` field in the CRD   |
+| Autoscaling (HPA per workload)                             | --      | Low      | No `autoscaling` field in the CRD          |
+| Multi-container pods (sidecars / initContainers)           | --      | Low      | Not in the CRD schema                      |
+| Inter-recipe dependencies reconciler (`spec.dependencies`) | 6.3     | Medium   | CRD schema exists, reconciler code pending |
+| Per-workload ServiceAccount + RBAC                         | 8       | Medium   | Deferred                                   |
+| Finalizers and PVC retention logic                         | 18      | Medium   | Constant defined, full cleanup pending     |
 
 ### 24.3 Test Summary
 

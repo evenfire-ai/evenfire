@@ -12,7 +12,7 @@ WRC runs as a **separate process** from the host-context-controller (HCC). While
 
 ## Key Features
 
-- **13-state lifecycle** -- WorkflowRecipe CRDs progress through a state machine: `candidate` -> `pending-approval` -> `approved` -> `pending` -> `deploying` -> `testing` -> `active` (plus `degraded`, `rolling-back`, `failed`, `deprecated`, `rollback-failed` terminal states)
+- **13-state lifecycle** -- WorkflowRecipe CRDs progress through a state machine: `candidate` -> `pending-approval` -> `approved` -> `pending` -> `deploying` -> `testing` -> `active` (plus `pending-operator-input`, `degraded`, `rolling-back`, `failed`, `deprecated`, `rollback-failed` states)
 - **Namespace splitting** -- MCP workloads deploy to `mcp-server`; non-MCP workloads deploy to `sandbox-recipes`. In the current recipe schema, MCP workloads are the ones that opt into MCP delegation via `transport`.
 - **envSecret** -- Maps individual keys from a K8s Secret to container environment variables without exposing the entire Secret
 - **Per-workload security overrides** -- `runAsUser`, `runAsGroup`, `fsGroup`, and `addCapabilities` let images like PostgreSQL (UID 70) and MongoDB (UID 999) run under their expected user while maintaining `runAsNonRoot: true` and `DROP ALL`
@@ -22,14 +22,14 @@ WRC runs as a **separate process** from the host-context-controller (HCC). While
 - **MCP delegation** -- Transport-enabled workloads create McpServer CRDs: HTTP transports use `managed: false` because WRC owns the runtime, while stdio transports use `managed: true` because HCC owns the stdio-bridge runtime
 - **Policy enforcement** -- Validates recipes against cluster-wide WorkflowRecipePolicy CRDs before deployment
 - **Agentic workflows** -- Recipes with `spec.steps[]` spawn a Coordinator pod that executes multi-step LLM workflows via mcp-host, with step dependency resolution, model config overrides, and status reporting
-- **MCP server interface** -- Exposes `list-recipes`, `get-recipe`, `deploy-recipe`, `delete-recipe`, and `get-recipe-status` tools via MCP (StreamableHTTP on port 8082)
+- **MCP server interface** -- Exposes `deploy_recipe`, `list_recipes`, `get_recipe_status`, `rollback_recipe`, `delete_recipe`, `validate_recipe`, `search_registry`, and `list_policies` tools via MCP (StreamableHTTP on port 8082)
 
 ## Architecture
 
 ```
 WorkflowRecipe CRD (K8s watch)
         ↓
-WRC Reconciler (14 numbered steps, labeled 2-9a; Step 1 implicit)
+WRC Reconciler (19 numbered steps, labeled 2-10; Step 1 implicit)
   ├── inputResolver     → resolve defaults + profiles
   ├── templateEngine    → {{...}} substitution
   ├── dependencyGraph   → topological sort
@@ -44,7 +44,7 @@ Coordinator Pod (for workflow recipes with steps[])
   └── sdkRuntime → snippet and agentic step execution
 ```
 
-> **Step numbering note:** In `workflowRecipeReconciler.ts`, the `// Step N` comments start at **Step 2** and run through **Step 9a**, totalling 14 numbered steps (including sub-steps 2.5, 3a, 4a, 7b, 7c, 9a). **Step 1 is implicit** — it's the workflow-detection and non-deployable-phase guard that runs before the main `try` block (roughly lines 176-329 of the reconciler). The `WorkflowRecipe` with `steps[]` (coordinator-driven execution) follows a separate branch and delegates to `workflowReconciler.ts` rather than using the numbered steps above.
+> **Step numbering note:** In `workflowRecipeReconciler.ts`, the `// Step N` comments start at **Step 2** and run through **Step 10**, totalling 19 numbered steps (2, 2.5, 3, 3a, 4, 4a, 5, 6, 7, 7a, 7b, 7c, 8, 9, 9b, 9c, 9d, 9a, 10 — note 9a appears after 9b-9d in the source). **Step 1 is implicit** — it's the namespace allowlist, workflow-detection and non-deployable-phase guard that runs at the top of `reconcile()`, before the main `try` block. The `WorkflowRecipe` with `steps[]` (coordinator-driven execution) follows a separate branch and delegates to `workflowReconciler.ts` rather than using the numbered steps above.
 
 ## Environment Variables
 
@@ -73,7 +73,10 @@ npm run dev
 ## Docker Build
 
 ```bash
-docker build -t clerum/workflow-recipes:latest ./workflow-recipes
+# Build context must be the repo root -- the Dockerfile COPYs shared packages
+# (packages/workflow-runtime-core, packages/workflow-recipe-capability-policy,
+# packages/image-policy) that live outside workflow-recipes/.
+docker build -t clerum/workflow-recipes:latest -f workflow-recipes/Dockerfile .
 ```
 
 The Dockerfile exposes port 8082 and runs as non-root (`USER node`).
@@ -128,10 +131,10 @@ src/
 ├── registry/              # Container registry client
 ├── mcp/
 │   ├── server.ts          # MCP StreamableHTTP server
-│   ├── tools.ts           # Tool definitions (list/get/deploy/delete/status)
+│   ├── tools.ts           # Tool definitions (deploy/list/status/rollback/delete/validate/search/policies)
 │   └── handlers.ts        # Tool handler implementations
 ├── reconciler/
-│   ├── workflowRecipeReconciler.ts  # 14 numbered steps (2-9a); Step 1 implicit at reconcile() entry
+│   ├── workflowRecipeReconciler.ts  # 19 numbered steps (2-10); Step 1 implicit at reconcile() entry
 │   ├── resourceBuilder.ts           # K8s manifest builders
 │   ├── securityContext.ts           # Security context with overrides
 │   ├── stateMachine.ts              # 13-phase state machine

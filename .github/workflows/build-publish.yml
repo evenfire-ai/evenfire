@@ -36,6 +36,10 @@ jobs:
   detect:
     name: Detect changed images
     runs-on: ubuntu-latest
+    # Publishing targets ghcr.io/evenfire-ai/*, which forks cannot write to.
+    # Guarding the entry job cascades: build-push needs detect, notify-infra
+    # needs build-push, so a fork skips the whole workflow cleanly.
+    if: github.repository == 'evenfire-ai/evenfire'
     outputs:
       force_all: ${{ steps.base.outputs.force_all }}
       channel-reader: ${{ steps.filter.outputs.channel-reader }}

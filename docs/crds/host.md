@@ -36,6 +36,15 @@ represents a single LLM agent instance.
 | `spec.approval.channels.slack.enabled` | boolean | no | Whether Slack users can approve. |
 | `spec.approval.channels.slack.approvers` | string[] | no | List of Slack user IDs allowed to approve. |
 | `spec.approval.tools` | object | no | Per-tool approval override map for native mcp-host tools. Map of tool name (e.g. `http_request`, `shell_exec`) to boolean: `true` forces approval, `false` skips approval. Absent entries fall through to each tool's built-in default. MCP tools (named `serverName__toolName`) are NOT covered. See `mcp-host/README.md#per-tool-approval-overrides` for the v1 tool list and warning behavior. |
+| `spec.desktop` | object | no | Desktop environment configuration. |
+| `spec.desktop.browser` | boolean | no | Enable Playwright browser tools (`browser_open`, `browser_screenshot`, etc.). |
+| `spec.desktop.x11` | boolean | no | Enable X11 desktop tools (`desktop_screenshot`, `desktop_click`, `desktop_type`, etc.). |
+| `spec.personalization` | object | no | Identity files (admin-managed, read-only to the agent). |
+| `spec.personalization.enabled` | boolean | no | Whether mcp-host should reconcile identity files from this block. |
+| `spec.personalization.identity` | string | no | Content of `IDENTITY.md` (system-prompt section "## Identity"). |
+| `spec.personalization.soul` | string | no | Content of `SOUL.md` (system-prompt section "## Core Values"). |
+| `spec.personalization.agents` | string | no | Content of `AGENTS.md` (system-prompt section "## Agent Instructions"). |
+| `spec.personalization.user` | string | no | Content of `USER.md` (system-prompt section "## User Context"). |
 
 ## Additional Printer Columns
 
