@@ -41,6 +41,36 @@ WRC then splits the spec across three namespaces:
 
 **Do NOT set `contextRef` on an agentic (`spec.steps`) recipe.** control-api rejects a steps-based recipe that sets `spec.contextRef` unless the recipe ALSO sets `spec.security.allowContextRef: true` AND a `WorkflowRecipePolicy` with `allowContextRef: true` exists in `sandbox-recipes` (operator-owned, absent by default). Omit it: WRC auto-creates a private Context `wf-<recipeName>` with no sharing and no policy required.
 
+### 1.2 "Plugin" vs `WorkflowRecipe` — which word to use when
+
+Both words are used around Clerum/Evenfire, and the overlap is the most common point of confusion for new recipe authors. They answer different questions — and "plugin" is a bigger idea than "a recipe that happens to be published":
+
+- **`WorkflowRecipe`** answers *"what do I author and apply?"* It's the CRD (`apiVersion: clerum.io/v1alpha1`, `kind: WorkflowRecipe`) this entire guide teaches you to write, `kubectl apply`, and that WRC reconciles — the one packaging format that ships today. You'll see platform-level docs list "Plugin" in a table next to `Host` / `Context` / `McpServer` / `CommunicationChannel` / `SharedFileSystem` as if it were its own resource kind — as of this writing that's product-level shorthand, not a separate CRD you'll find alongside `WorkflowRecipe` in §16's authoritative schema source. `WorkflowRecipe` is what you actually author to build one.
+- **"Plugin"** answers *"what am I building?"* It's the product term for a **rich, self-contained extension** — one that combines workflow steps (`spec.steps`, agentic and/or platform-run code), one or more backing workloads (databases, workers, jobs), and, where it needs them, inbound webhooks (§8), an embedded UI the desktop app can surface (§6), and the governed workload SDK for controlled side effects (§1.2.1). It's contrasted with a bare **MCP server** (§5) — a `WorkflowRecipe` with nothing but a `transport`-bearing workload, which just adds one tool to an agent's toolbox and isn't usually called a "plugin" on its own.
+
+So: **you build a plugin by writing exactly one `WorkflowRecipe`** — same CRD, same fields, same sections of this guide. "Plugin" describes the *shape and richness* of what the recipe declares, not a separate artifact layered on top of it, and **not** whether it's been published anywhere. **Publishing to the registry** (`registry.evenfire.ai`, §14) is a distribution step — it makes an already-built plugin discoverable and installable by other operators through the Control UI catalog (`/registry`, §13). It doesn't change what the recipe is: a plugin you `kubectl apply` for your own cluster and never publish is just as much a plugin as one that's public in the catalog — it's simply a private, unshared one.
+
+#### 1.2.1 `spec.pluginWorkloadSdk` — one capability a plugin can opt into
+
+Don't confuse the "plugin" umbrella above with **`spec.pluginWorkloadSdk`** specifically — a narrower, real field (currently gated behind the `PLUGIN_WORKLOAD_SDK_ENABLED` feature flag) that lets one workload *inside* the recipe request two tightly-scoped side effects through the recipe's mcp-host: a one-shot LLM call (`promptBridge`) and a notification intent (`clientNotifications`) — without that workload ever seeing provider keys or control-api credentials. It's one optional ingredient a plugin can use, not a synonym for "plugin" itself: a UI + database + webhook-handler plugin never has to touch `pluginWorkloadSdk` to be a plugin, and declaring the field has nothing to do with whether the recipe is published.
+
+#### 1.2.2 What "richer" means, concretely
+
+Every ingredient below is optional, and a plugin can mix any subset of them — there's no checklist you must complete before something counts as a plugin instead of a bare MCP server. Each one maps to a section of this guide for the *authoring* side, and to where an operator or end user actually encounters it once the recipe is installed:
+
+| Ingredient | Author it via | Operator sees it (Control UI) | End user sees it (Desktop App) |
+|---|---|---|---|
+| Backing workloads (DB, worker, cron, …) | `spec.workloads[]` (§4) | **Workloads** / **Conditions** tabs (§13.4) | — not user-facing |
+| One or more MCP tools | `transport:` on a workload (§5) | Same install/status surface as any recipe | Agents call the tool; not a standalone UI |
+| Workflow steps (agentic and/or code) | `spec.steps` (§10) | **Run…** button, **Runs** history tab (§13, §13.4) | Trigger the plugin, watch multi-step execution |
+| Inbound webhooks | `spec.webhooks[]` (§8) | Provision the webhook Secret (§14.4) | External systems (Slack, Stripe, GitHub, …) trigger it directly — no UI involved |
+| An embedded web UI | `spec.ui` (§6) | Install/configure the UI workload | Open the plugin's own UI inside an authenticated webview |
+| OAuth-connected integrations | `spec.oauthClients[]` (§7) | Grant per-user, or connect a recipe-owned `service` grant for background access (§7.5) | Click "Connect" inside the plugin's UI |
+| Governed LLM calls / notifications | `spec.pluginWorkloadSdk` (§1.2.1) | Declared on the recipe, not separately operated | Indirect — powers in-plugin prompt calls or notifications |
+| Who may see/run it | Control UI **Members** tab (§13) | Grant/revoke per-user access | — |
+
+A plugin with nothing but `spec.steps` and no UI, webhooks, or workloads is still a plugin. So is a UI-only plugin with no steps at all. The dividing line from "MCP server" (§5) isn't a field you set — it's that the recipe is doing more than exposing one tool.
+
 ---
 
 ## 2. Top-level fields
