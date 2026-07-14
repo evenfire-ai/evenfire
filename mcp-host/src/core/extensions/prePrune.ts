@@ -12,23 +12,21 @@
  *   4. Strip historical media (image content parts) from anything before
  *      the latest user message.
  *
- * Filosofía: CPU local es gratis comparado con tokens del LLM. Cada pasada
- * es individualmente toggleable y un no-op si la condición no aplica. Si el
- * flag master está apagado, la función NO se invoca; los tiers existentes
- * corren bit-idénticos al pre-T1.2.
+ * Philosophy: local CPU is cheap compared to LLM tokens. Each pass is
+ * individually toggleable and a no-op if its condition doesn't apply. If the
+ * master flag is off, the function is NOT invoked; the existing tiers run
+ * bit-identical to pre-T1.2.
  *
- * Spec: `.specs/mcp-hermes/implementation-plans/T1.2-pre-pruning.md`.
- *
- * Invariantes críticas:
- *   - **Linkages preserved**: pre-prune nunca inserta ni borra mensajes,
- *     nunca toca `tool_call_id` ni `assistant.tool_calls[].id`. Sólo
- *     muta `content` (string) y `arguments` (objeto). El caller corre
- *     `validateToolLinkages` post-step como red de seguridad hard-fail.
- *   - **Protected tail**: los últimos K turns (K = `protectedTailTurns`)
- *     viven completos. Pre-prune sólo opera en `[0, protectedTailStart)`.
- *   - **Pure**: la función retorna una copia con los mensajes mutados
- *     reemplazados por copias nuevas; las entradas intactas mantienen
- *     identidad referencial. Caller decide cuándo asignar.
+ * Critical invariants:
+ *   - **Linkages preserved**: pre-prune never inserts or deletes messages,
+ *     never touches `tool_call_id` or `assistant.tool_calls[].id`. It only
+ *     mutates `content` (string) and `arguments` (object). The caller runs
+ *     `validateToolLinkages` as a post-step hard-fail safety net.
+ *   - **Protected tail**: the last K turns (K = `protectedTailTurns`) stay
+ *     complete. Pre-prune only operates on `[0, protectedTailStart)`.
+ *   - **Pure**: the function returns a copy with mutated messages replaced
+ *     by new copies; untouched entries keep referential identity. Caller
+ *     decides when to assign.
  */
 import { createHash } from 'node:crypto'
 import { Counter } from 'prom-client'

@@ -414,7 +414,7 @@ kubectl get namespace sandbox-recipes
 
 ---
 
-## Feature Status (2026-03-21)
+## Feature Status
 
 | Component                                                                    | Status                                                                                  |
 | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
@@ -431,15 +431,10 @@ kubectl get namespace sandbox-recipes
 
 ---
 
-## Phase 5 Cluster Findings (merged from WORKFLOW-STAGE5)
+## Two-Pod Workflow — Cluster Validation Findings
 
-> Merged 2026-04-13 from `docs/deploy/WORKFLOW-STAGE5-CLUSTER-FINDINGS.md` during
-> docs audit Sub-plan 4.
->
-> These are architectural adjustments discovered during validation of the
-> **Two-Pod Workflow** model (coordinator + mcp_host) on a real minikube cluster.
-> Original validation date: 2026-03-21, branch `feat/testing-and-desktop-recipes`,
-> key commit `653e470`.
+Architectural adjustments discovered during validation of the **Two-Pod
+Workflow** model (coordinator + mcp_host) on a real minikube cluster.
 
 ### Executive Summary
 
