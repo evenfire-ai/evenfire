@@ -65,6 +65,9 @@ five steps live together.
    APIs; an allowed domain is an exact public DNS hostname, not a wildcard or
    URL.
 
+   ![Control UI EgressEditor on the Edit Connector page: exact-host mode with allowed domain api.airtable.com, allowed ports, and an egress summary capped at a maximum of 20](../assets/control-ui-egress-editor.png)
+   *Dev cluster, demo tenant.*
+
 5. **Govern what gets installed** — `RegistryCatalog`
    (`components/RegistryCatalog.tsx`), at `/registry`: marketplace entries
    (connectors and plugins) with trust levels (high / mid / low) and a
