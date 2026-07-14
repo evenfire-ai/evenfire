@@ -1580,7 +1580,7 @@ The canonical sandbox-UI shape is "thin static-asset UI pod + sibling credential
 
 `control-api` ServiceAccount needs:
 
-- `mcp-server` ns: Role `control-api-mcp-resources` covering `contexts`, `mcpservers`, `workflowrecipes` — `deploy/base/mcp-server/rbac.yaml`.
+- `mcp-server` ns: Role `control-api-mcp-resources` covering `contexts`, `mcpservers` — `deploy/base/mcp-server/rbac.yaml`.
 - `sandbox-recipes` ns: Role `control-api-workflow-recipes-sandbox` for `workflowrecipes` — `deploy/base/sandbox-recipes/rbac.yaml`.
 
 Both are part of the `deploy/base` kustomize bases (each namespace's `kustomization.yaml` lists `rbac.yaml`) and are applied with the rest of the deployment manifests. Without them, all `/api/v1/admin/recipes` calls return 500.
@@ -1601,17 +1601,19 @@ Same UI handles in-place edits (`/workflow-recipes/[ns]/[name]?edit=1`), uninsta
 > Use this path for CI pipelines, bulk operations, or scripting. For one-off installs, use the Control UI (§13.2). Manual `kubectl` / `curl` paths bypass the UI's pre-flight validation, defaults, and audit trail.
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:8090/api/v1/admin/auth/login \
+# Login sets an HttpOnly session cookie (control_ui_admin_session) — it does
+# NOT return a token in the body. Store it in a cookie jar with -c, then send
+# it back with -b; the admin gate ignores the Authorization header.
+curl -s -c /tmp/clerum-admin.jar -X POST http://localhost:8090/api/v1/admin/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"<password>"}' | jq -r '.token')
+  -d '{"username":"admin","password":"<password>"}' | jq .
 
-curl -s -X POST http://localhost:8090/api/v1/admin/recipes \
-  -H "Authorization: Bearer $TOKEN" \
+curl -s -b /tmp/clerum-admin.jar -X POST http://localhost:8090/api/v1/admin/recipes \
   -H "Content-Type: application/json" \
   -d @recipe.json | jq .
 ```
 
-API routes (all require `Authorization: Bearer <admin_jwt>`):
+API routes (all require the `control_ui_admin_session` cookie from login):
 
 | Method | Route |
 |---|---|
@@ -1724,8 +1726,8 @@ kubectl get workflowrecipe <name> -n sandbox-recipes \
 kubectl get workflowrecipe <name> -n sandbox-recipes \
   -o jsonpath='{.status.workflowExecution.phase}'
 
-# Via control-api
-curl -s -H "Authorization: Bearer $TOKEN" \
+# Via control-api (reuse the login cookie jar from §13.3)
+curl -s -b /tmp/clerum-admin.jar \
   http://localhost:8090/api/v1/admin/recipes/<name>/status | jq .
 ```
 
@@ -2118,7 +2120,7 @@ yq -o=json '.' recipe.yaml > recipe.json
 python3 -c 'import sys,yaml,json; json.dump(yaml.safe_load(open("recipe.yaml")),sys.stdout,indent=2)' > recipe.json
 ```
 
-**Recipe naming inside the cluster.** When a recipe is installed from the registry (the Control-UI path), the installed CR is **not** named after your `metadata.name`. (A direct `kubectl apply -f recipe.yaml`, §13, does keep it.) Control-API derives the name from the **registry entry** name and version: `recipe-<entry-name>-v<version-with-dashes>-<hash8>` (e.g. `recipe-sales-crm-v1-0-0-87c8cacc`; `control-api/src/routes/admin/registry.ts`). Your `metadata.name` is not carried over as a label — the only label applied at install is `clerum.io/managed-by: control-api`; the catalog entry name and version are stored as the **annotations** `clerum.io/catalog-id` and `clerum.io/catalog-version` (org-scoped names are illegal label values). So `kubectl get workflowrecipe <metadata.name>` returns `NotFound`. Look it up by substring or by annotation:
+**Recipe naming inside the cluster.** When a recipe is installed from the registry (the Control-UI path), the installed CR is **not** named after your `metadata.name`. (A direct `kubectl apply -f recipe.yaml`, §13, does keep it.) Control-API derives the name from the **registry entry** name and version: `mcp-<entry-name>-v<version-with-dashes>-<hash8>` (e.g. `mcp-sales-crm-v1-0-0-87c8cacc`; `control-api/src/routes/admin/registry.ts`). Your `metadata.name` is not carried over as a label — the only label applied at install is `clerum.io/managed-by: control-api`; the catalog entry name and version are stored as the **annotations** `clerum.io/catalog-id` and `clerum.io/catalog-version` (org-scoped names are illegal label values). So `kubectl get workflowrecipe <metadata.name>` returns `NotFound`. Look it up by substring or by annotation:
 
 ```bash
 kubectl get workflowrecipes -A | grep <your-entry-name>
@@ -2176,14 +2178,14 @@ Steps 4 and 6 are the only operator-action steps; the rest is platform automatio
 
 **Step 2 — `spec.description` spells out every prerequisite.** The Slack OAuth app, the redirect URI to register (`http://<control-api-host>/api/v1/oauth-callback/slack-bot`), and the `kubectl create secret generic slack-oauth-creds ...` command.
 
-**Step 3 — publish via Control UI.** Open **Marketplace** → **Recipes** → **+ Install Recipe** → paste JSON → **Validate** → **Deploy Recipe**. The entry is now in Clerum's centralized registry and visible to every cluster.
+**Step 3 — publish via Control UI.** Open the **Registry → Publish** page (`/registry/publish`) → paste JSON → **Validate** → **Publish**. The entry is now in Clerum's centralized registry and visible to every cluster.
 
 **Step 4 — operators install it.** From any Clerum cluster's Control UI: discover, create the prerequisite Secret, click Install.
 
 **Step 5 — verify on a test install:**
 
 ```bash
-# The installed CR is named recipe-<entry>-v<version>-<hash>, NOT
+# The installed CR is named mcp-<entry>-v<version>-<hash>, NOT
 # "sandbox-ui-oauth-hello" (§14.5) — resolve it first.
 RECIPE=$(kubectl get workflowrecipes -n sandbox-recipes -o name \
   | grep sandbox-ui-oauth-hello)

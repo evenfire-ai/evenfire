@@ -63,7 +63,7 @@ NetworkPolicy owned by whichever component is responsible for that selector.
 | [mcp-proxy](mcp-proxy/)                   | Optional centralized MCP router (`MCP_PROXY_ENABLED`); discovers servers via HCC       |
 | [stdio-bridge](stdio-bridge/)             | Sidecar translating stdio MCP transport to StreamableHTTP; injected by HCC             |
 | [nginx-egress-proxy](nginx-egress-proxy/) | Image only — the pinned egress path HCC deploys for remote (`spec.remote`) MCP servers |
-| [mcp-servers](mcp-servers/)               | First-party MCP servers (Airtable, MongoDB, Playwright, web-search, …)                 |
+| [mcp-servers](mcp-servers/)               | Platform-packaged MCP servers — first-party (Airtable, web-search) plus upstream images (MongoDB, Playwright, …) |
 
 ### Recipes & sandbox — `sandbox-recipes`, `sandbox-ui` (both deny-all)
 

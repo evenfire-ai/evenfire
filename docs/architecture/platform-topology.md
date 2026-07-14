@@ -748,7 +748,7 @@ flowchart TD
 
 **What it does**: Creates a `NetworkPolicy` in each runtime namespace that selects all pods (`podSelector: {}`) and blocks all ingress and all egress traffic with no exceptions.
 
-**Applied to**: `mcp-server`, `sandbox-recipes`, `rpc-proxy`, `sandbox-ui` — HCC's four runtime namespaces (`CONTEXT_MAPPER_RUNTIME_NAMESPACES`). `mcp-host` is not one of them: it gets an equivalent static `deny-all-mcp-host` policy from `deploy/base/mcp-host/networkpolicies.yaml` instead (see §19.4.3).
+**Applied to**: `mcp-server`, `sandbox-recipes`, `rpc-proxy`, `sandbox-ui` — HCC's four runtime namespaces (`CONTEXT_MAPPER_RUNTIME_NAMESPACES`). `mcp-host` is not one of them: it gets an equivalent static `deny-all-mcp-host` policy from `deploy/base/mcp-host/networkpolicies.yaml` instead (see §19, item 3).
 
 **Why it matters**: This is the foundation of the entire security model. Without L0, any pod deployed into a runtime namespace could immediately communicate with any other pod in the cluster. L0 ensures that the **default state is zero connectivity** — nothing works until a higher layer explicitly opens a path. This is analogous to `iptables -P INPUT DROP` and `iptables -P OUTPUT DROP` in Linux.
 

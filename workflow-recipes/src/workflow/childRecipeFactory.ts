@@ -64,8 +64,8 @@ const K8S_LABEL_VALUE_MAX = 63
 
 // Short-form run-id suffix used by buildDbRunChildName. 8 hex chars =
 // 32 bits of entropy, which lifts the parent-stem budget to 54 bytes
-// (63 − 1 separator − 8 suffix). Birthday-bound collision ≈ 2³² runs
-// per parent (~136 years at 1 run/sec). See §2.3 of
+// (63 − 1 separator − 8 suffix). Birthday-bound collision ≈ 2¹⁶ (~65k)
+// runs of the same parent. See §2.3 of
 // docs/architecture/workflow-recipe-naming.md.
 const RUN_ID_SHORT_LEN = 8
 
