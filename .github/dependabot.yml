@@ -1,0 +1,49 @@
+version: 2
+
+# Dependency updates for a repo with ~33 npm workspaces.
+#
+# Two deliberate choices to keep this useful rather than noisy:
+#   - `directories` globs instead of one `updates` block per service. Dependabot
+#     skips any matched directory without a manifest, so this stays correct as
+#     services are added or removed.
+#   - Minor/patch updates are GROUPED into a single PR per ecosystem. Ungrouped,
+#     33 workspaces would open dozens of PRs a week and the signal would be
+#     ignored — which is the same as having no dependency updates at all.
+#
+# Security updates are NOT grouped: GitHub raises those separately and they should
+# land on their own, reviewable, fast.
+
+updates:
+  - package-ecosystem: npm
+    directories:
+      - '/' # root tooling (prettier, commitlint, husky)
+      - '/*' # every top-level service
+      - '/packages/*' # workflow-sdk, workflow-runtime-core, image-policy, …
+      - '/mcp-servers/*' # web-search, doc-generator
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: 'chore(deps)'
+      prefix-development: 'chore(deps-dev)'
+
+  - package-ecosystem: github-actions
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: 'ci(deps)'
