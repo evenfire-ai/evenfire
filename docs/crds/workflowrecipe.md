@@ -149,15 +149,15 @@ flowchart TB
     class PP,CP user
 ```
 
-| Node                        | Detail                                                                              |
-| --------------------------- | ----------------------------------------------------------------------------------- |
-| **External REST API + UI**  | external-rest-api, profile-ui, WorkflowRecipePolicy CRDs                            |
-| **Control API + UI**        | control-api, control-ui (platform management)                                       |
-| **Channel Reader**          | Telegram, Email, Slack adapters                                                     |
-| **MCP Host**                | Agent + MCP Client + WRO                                                            |
-| **Host Context Controller** | 3 Synchronizers (MCP Host, AccessCtrl, MCP Server) + Discovery API (:8081)          |
+| Node                        | Detail                                                                                        |
+| --------------------------- | --------------------------------------------------------------------------------------------- |
+| **External REST API + UI**  | external-rest-api, profile-ui, WorkflowRecipePolicy CRDs                                      |
+| **Control API + UI**        | control-api, control-ui (platform management)                                                 |
+| **Channel Reader**          | Telegram, Email, Slack adapters                                                               |
+| **MCP Host**                | Agent + MCP Client + WRO                                                                      |
+| **Host Context Controller** | 3 Synchronizers (MCP Host, AccessCtrl, MCP Server) + Discovery API (:8081)                    |
 | **WRC**                     | `workflow-recipes` Deployment (:8082) — WorkflowRecipe reconciler + MCP interface (`/mcp/v1`) |
-| **MCP Servers**             | MongoDB, Airtable, etc.                                                             |
+| **MCP Servers**             | MongoDB, Airtable, etc.                                                                       |
 
 > **Full architecture details**: See [Platform Architecture](../architecture/platform-topology.md) for the complete 7-namespace architecture, service map, data flow, and controller architecture. This is a reference diagram only — the architecture document is the source of truth.
 
@@ -523,6 +523,45 @@ historical bytes surface as `artifact_gone`.
 reported, and Control UI points users to `status.artifacts[]` for complete
 files. Prompt interpolation such as `{{merge:output}}` receives the same kind
 of bounded preview; full reports must move through `/output` artifacts instead.
+
+### 3.1.2 Step Approval Gates (`steps[].requiresApproval`)
+
+`requiresApproval` turns a step into a human-in-the-loop gate. The step **pauses before execution** and the coordinator waits for an explicit approve decision from `target.userId` (or any member of `target.teamId`). Use it for steps with irreversible side effects — posting to a customer channel, writing to a system of record, issuing a refund.
+
+| Field            | Type    | Required | Description                                                                                         |
+| ---------------- | ------- | -------- | --------------------------------------------------------------------------------------------------- |
+| `target`         | object  | **Yes**  | Who must approve. Exactly one of `userId` or `teamId` (schema `oneOf`).                             |
+| `target.userId`  | string  | No\*     | Target user identifier. Max 253 chars.                                                              |
+| `target.teamId`  | string  | No\*     | Target team identifier. Max 253 chars.                                                              |
+| `message`        | string  | **Yes**  | Prompt shown to the approver. 1–2000 chars.                                                         |
+| `timeoutSeconds` | integer | No       | Approval TTL. No decision in the window ⇒ step auto-rejected as expired. 30–604800, default `3600`. |
+
+\* `target` is a `oneOf` — supply **exactly one** of `userId` / `teamId`. Both, or neither, is rejected at admission.
+
+```yaml
+spec:
+  agent:
+    provider: claude
+    model: claude-3-opus
+  steps:
+    - id: draft-summary
+      instruction: 'Summarize this week's reconciliation breaks.'
+    - id: post-summary
+      dependsOn: [draft-summary]
+      instruction: 'Post {{draft-summary:output}} to the finance channel.'
+      requiresApproval:
+        target:
+          teamId: finance-ops
+        message: 'Approve posting the reconciliation summary to #finance?'
+        timeoutSeconds: 7200
+```
+
+**What gets rejected**
+
+- The `oneOf` on `target`: exactly one of `userId` / `teamId`.
+- `message` must be non-empty (`minLength: 1`).
+- A step cannot pair `requiresApproval` with `run` (reconciler, surfaced as a failed phase): approval is an agentic-broker feature, so **snippet steps cannot gate**.
+- `requiresApproval` on a recipe with no agentic broker (`mcp-host`) fails: _"step requires an agentic broker for approval"_.
 
 ### 3.2 Workload Schema
 
@@ -956,6 +995,409 @@ Resolution happens at reconciliation time only:
 
 ---
 
+### 3.9 Agent Configuration (`spec.agent`)
+
+The **default LLM configuration** for every agentic (`instruction`) step. Steps may override `model` / `provider` via `steps[].agent`. The reconciler resolves the recipe's `mcp-host` agent from `spec.agent` first, then falls back to the first step declaring a _complete_ agent.
+
+| Field                 | Type   | Required | Description                                                                                                      |
+| --------------------- | ------ | -------- | ---------------------------------------------------------------------------------------------------------------- |
+| `model`               | string | No\*     | LLM model name (e.g. `gpt-4o`, `claude-3-opus`).                                                                 |
+| `provider`            | string | No\*     | Enum: `openai`, `claude`, `zai`, `bailian`.                                                                      |
+| `secretRef.name`      | string | No       | Secret holding the API key.                                                                                      |
+| `secretRef.namespace` | string | No       | Secret namespace.                                                                                                |
+| `soulRef.storageRef`  | object | No       | `SOUL.md` in object storage: `bucket`, `key`, `provider` (`s3`\|`gcs`\|`spaces`\|`minio`), `region`, `endpoint`. |
+
+\* The schema marks no field required, but the reconciler treats an agent as usable only when **both** `provider` and `model` are set. A half-declared `spec.agent` behaves as if absent.
+
+```yaml
+spec:
+  agent:
+    provider: claude
+    model: claude-3-opus
+    secretRef:
+      name: llm-provider-key
+  steps:
+    - id: classify
+      instruction: 'Classify the inbound ticket.'
+```
+
+**What gets rejected**
+
+- **CEL R1** — `agent requires steps: cannot define agent without workflow steps`. There is no "agent for a workloads-only recipe".
+- A `provider` outside the four-value enum.
+- An `instruction` step with no resolvable agent: _"step requires an agent configuration"_.
+
+### 3.10 MCP Servers (`spec.mcpServers`)
+
+Names the MCP servers workflow steps may reach. **You usually do not need this**: any workload in the recipe declaring `transport` and a `port` gets its endpoint auto-computed. Declare entries explicitly only to reach an MCP server that is **not** a workload of this recipe.
+
+| Field      | Type   | Required | Description                                               |
+| ---------- | ------ | -------- | --------------------------------------------------------- |
+| `id`       | string | **Yes**  | Identifier steps reference in `steps[].mcpServers[]`.     |
+| `endpoint` | string | No\*     | MCP HTTP endpoint. Auto-computed for transport workloads. |
+
+\* An entry with no `endpoint` that also does not correspond to a transport workload contributes nothing — the reconciler only merges entries carrying both `id` and `endpoint`.
+
+Auto-computed endpoints take the shape `http://<server>.<namespace>.svc.cluster.local:<port><transport.path|/mcp>`. Workload-derived entries **override** a hand-declared entry with the same `id`.
+
+```yaml
+spec:
+  mcpServers:
+    - id: web-search
+      endpoint: http://web-search.mcp-server.svc.cluster.local:3000/mcp
+  steps:
+    - id: research
+      instruction: 'Research the vendor and summarize findings.'
+      mcpServers: [web-search]
+```
+
+**What gets rejected**
+
+- `id` is required on every entry.
+- No CEL rule cross-checks `steps[].mcpServers[]` against this list — the **reconciler** does, failing with _"Step references MCP server not found in MCP workloads or mcpServers (with endpoint)"_.
+- `steps[].mcpServers` is capped at `maxItems: 20`.
+- There is **no** `transport` field on `spec.mcpServers[]` items; setting one is silently pruned by the API server.
+
+### 3.11 Workflow Output (`spec.output`)
+
+Where a workflow's results land. `destination: pvc` is the artifact path — the runtime mounts `/output`, the coordinator writes files there, and WRC records each in `status.artifacts[]`.
+
+| Field         | Type   | Required | Description                                                                                        |
+| ------------- | ------ | -------- | -------------------------------------------------------------------------------------------------- |
+| `destination` | string | No       | Enum: `configmap`, `secret`, `stdout`, `pvc`.                                                      |
+| `name`        | string | No       | Target object name (for `configmap` / `secret`).                                                   |
+| `namespace`   | string | No       | Target namespace.                                                                                  |
+| `claimName`   | string | No       | Existing output PVC in `sandbox-recipes`. WRC mounts it but never creates, resizes, or deletes it. |
+| `format`      | string | No       | Enum: `pdf`, `xlsx`, `json`, `text`, `html`, `multi`.                                              |
+| `storageSize` | string | No       | Pattern `^[0-9]+(Mi\|Gi)$`. No schema default; the runtime uses `256Mi`.                           |
+
+```yaml
+spec:
+  output:
+    destination: pvc
+    format: pdf
+    storageSize: 1Gi
+```
+
+**What gets rejected**
+
+- **CEL** — `output.claimName requires output.destination=pvc`.
+- `storageSize` must match `^[0-9]+(Mi|Gi)$` — `1G`, `1024M` and `1Ti` are all rejected.
+
+### 3.12 Runtime Egress (`spec.runtimeEgress`)
+
+The recipe-wide egress intent for the **workflow runtime** (snippet-runner and custom-coordinator pods). It is the shared allowlist that per-step snippet HTTP capabilities must be a subset of. Distinct from `workloads[].egressBindings` (§3.2), which governs long-lived workload pods.
+
+| Field               | Type     | Required | Description                                                                                                                                                           |
+| ------------------- | -------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `http.egressClass`  | string   | No       | Enum `exact-host` (default) or `public-web`. `public-web` is an explicit opt-in for public TCP 80/443 with private, metadata, link-local and reserved ranges blocked. |
+| `http.allowedHosts` | string[] | No       | Max 20, each max 253, pattern `^[a-z0-9][a-z0-9.-]*[a-z0-9]$`.                                                                                                        |
+
+```yaml
+spec:
+  runtimeEgress:
+    http:
+      egressClass: exact-host
+      allowedHosts:
+        - api.stripe.com
+```
+
+**What gets rejected**
+
+- **CEL R12** — with `public-web`, `allowedHosts` must be absent or empty. With `exact-host`, every host must contain a `.` and must **not** be an IPv4 literal, `localhost`, or any `*.local` / `*.internal` / `*.svc` / `*.cluster.local` / `kubernetes.default` / `metadata.goog` form.
+- **CEL R13** — a snippet cannot reach a host the recipe did not declare here.
+- The host pattern is lowercase-only: `API.stripe.com` is rejected.
+
+> For `exact-host`, DNS refresh retains previous public CIDRs for an overlap window (`WRC_RUNTIME_EGRESS_DNS_OVERLAP_SECONDS`). Treat that as a bounded trust window, not merely an availability setting.
+
+### 3.13 Triggers (`spec.triggers`)
+
+When and how the recipe may run. Presence of a sub-field enables that mode. A recipe with **no** `spec.triggers` falls back to legacy behavior: implicit on-demand with approval required. This is the canonical shape; `spec.scheduling` (§3.14) is its predecessor.
+
+| Field                        | Type     | Required  | Description                                                                                 |
+| ---------------------------- | -------- | --------- | ------------------------------------------------------------------------------------------- |
+| `onDemand`                   | object   | No        | **Presence** enables manual triggering. Without it, nothing can trigger the recipe by hand. |
+| `onDemand.requiresApproval`  | boolean  | No        | Route each manual trigger through the approval gateway. Default `true`.                     |
+| `onDemand.allowedActors`     | string[] | No        | Max 3; enum `user`, `autonomous`, `scheduled`. Default `[user]`.                            |
+| `schedule`                   | object   | No        | **Presence** enables cron scheduling.                                                       |
+| `schedule.cron`              | string   | **Yes**\* | Five-field cron. See the warning below.                                                     |
+| `schedule.timezone`          | string   | No        | IANA timezone. Default `UTC`.                                                               |
+| `schedule.concurrencyPolicy` | string   | No        | Enum `Forbid` (default), `Replace`, `Allow`.                                                |
+| `schedule.suspend`           | boolean  | No        | Stop firing new triggers. Default `false`.                                                  |
+
+\* Required within `schedule` when `schedule` is present.
+
+```yaml
+spec:
+  triggers:
+    onDemand:
+      requiresApproval: false
+      allowedActors: [user, autonomous]
+    schedule:
+      cron: '0 9 * * 1' # 09:00 every Monday
+      timezone: America/New_York
+```
+
+> ⚠️ **Named day-of-week and month values are rejected.** `0 9 * * MON` fails CEL R7: each field must be `*` or match `[0-9,\-*/]`. Use the numeric form (`0 9 * * 1`). The same applies to `spec.scheduling.cron` (CEL R5).
+
+**What gets rejected**
+
+- **CEL R6** — `spec.triggers` must declare at least one of `onDemand` or `schedule`. An empty `triggers: {}` is rejected; `onDemand: {}` is valid and enables manual triggering with defaults.
+- **CEL R7** — the cron regex above.
+
+**Runtime behavior.** Scheduling is **Postgres-backed, not a Kubernetes CronJob**: WRC keeps a `workflow_schedules` row in sync and the advance loop lives in a control-api worker. `enabled = NOT suspend`, so suspending keeps the row rather than deleting it.
+
+### 3.14 Scheduling (`spec.scheduling`) — legacy
+
+The predecessor of `spec.triggers.schedule` (§3.13), still accepted for backwards compatibility. The reconciler prefers `spec.triggers.schedule`. **Prefer `spec.triggers` in new recipes.**
+
+| Field                    | Type    | Required | Description                                                       |
+| ------------------------ | ------- | -------- | ----------------------------------------------------------------- |
+| `cron`                   | string  | **Yes**  | Five-field cron, numeric only (see §3.13 warning). Max 100 chars. |
+| `timezone`               | string  | No       | IANA timezone. Default `UTC`.                                     |
+| `concurrencyPolicy`      | string  | No       | Enum `Forbid` (default), `Replace`, `Allow`.                      |
+| `successfulHistoryLimit` | integer | No       | Successful child CRDs to retain. Min 0, default `3`.              |
+| `failedHistoryLimit`     | integer | No       | Failed child CRDs to retain. Min 0, default `1`.                  |
+| `suspend`                | boolean | No       | Stop firing new triggers. Default `false`.                        |
+
+**What gets rejected**
+
+- **CEL R4** — `spec.scheduling requires spec.steps to be non-empty`. Scheduling a workloads-only recipe is rejected.
+- **CEL R5** — the same numeric-only cron regex.
+
+### 3.15 Run Retention (`spec.runRetention`)
+
+How long completed runs stay live before the archive cron moves them to `workflow_runs_audit` and deletes the child WorkflowRecipe. Also carries the safety valve that force-fails a run that never terminates.
+
+| Field                     | Type    | Required | Description                                                                                      |
+| ------------------------- | ------- | -------- | ------------------------------------------------------------------------------------------------ |
+| `successfulHistoryLimit`  | integer | No       | Keep the last N successful runs. 0–50, default `5`.                                              |
+| `failedHistoryLimit`      | integer | No       | Keep the last N failed runs. 0–100, default `20`.                                                |
+| `ttlSecondsAfterFinished` | integer | No       | Retain the finished run, child CRD and run-scoped artifacts. 0–2592000, default `2592000` (30d). |
+| `maxRunDurationSeconds`   | integer | No       | Force-fail active runs exceeding this. Min 1, default `604800` (7d).                             |
+
+No CEL rules — enforcement is purely by the schema bounds above.
+
+### 3.16 Sandbox UI (`spec.ui`)
+
+Exposes **one** recipe workload as a sandbox UI, deployed into the `sandbox-ui` namespace and reachable from the Desktop App through rpc-proxy. Zero or one UI per recipe.
+
+| Field               | Type    | Required | Description                                                                              |
+| ------------------- | ------- | -------- | ---------------------------------------------------------------------------------------- |
+| `workloadRef`       | string  | **Yes**  | ID of the `workloads[]` entry serving UI HTTP traffic.                                   |
+| `port`              | integer | **Yes**  | TCP port serving HTTP. 1–65535.                                                          |
+| `title`             | string  | No       | Title in the Desktop App picker. Max 100.                                                |
+| `icon`              | string  | No       | Inline base64 `data:` URI, max 32 KB. Remote URLs are intentionally unsupported.         |
+| `defaultPath`       | string  | No       | Path the embed loads first. Default `/`.                                                 |
+| `egress.internal[]` | array   | No       | Max 25. Sibling workloads the UI may reach (`workloadRef` + `port`).                     |
+| `egress.external[]` | array   | No       | Max 20. Each requires `fqdn` + `port`; optional `reason`. Static CIDRs are not accepted. |
+
+Default egress for a UI workload is **deny-all except DNS**.
+
+```yaml
+spec:
+  workloads:
+    - id: dashboard
+      type: deployment
+      image: ghcr.io/acme/dashboard:2.1.0
+      port: 8080
+      replicas: 1
+  ui:
+    workloadRef: dashboard
+    port: 8080
+    title: Acme Dashboard
+```
+
+**What gets rejected**
+
+- **CEL R15** — `workloadRef` must reference an existing `workloads[].id`.
+- **CEL R16** — that workload must be `type: deployment`, `replicas: 1`, and have **no** `transport`. An MCP-server workload cannot double as the UI.
+- **CEL R17** — `egress.internal[].workloadRef` must reference a non-MCP-server workload.
+- **CEL R18** and an item-level rule — `defaultPath` may not carry a scheme prefix or be protocol-relative (`//evil.example`).
+
+> `port` passes CRD range validation but is **separately gated at runtime**: rpc-proxy enforces an admin allow-list (`RPC_PROXY_SANDBOX_UI_ALLOWED_PORTS`, default `8080`). A port outside it is admitted by the CRD and then rejected with `502 port_not_allowed` on the first view.
+
+### 3.17 Webhooks (`spec.webhooks`)
+
+Mounts verified inbound HTTP routes for external providers. Each entry becomes a route on a per-recipe [webhook-gateway](../../webhook-gateway/) pod that verifies the provider signature and forwards the verified payload to a non-MCP workload. Public URL shape:
+
+```text
+<host>/api/v1/webhook/<recipeNs>/<recipeName>/<id>
+```
+
+Max 16 webhooks per recipe.
+
+| Field                 | Type     | Required | Description                                                                                                                                      |
+| --------------------- | -------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`                  | string   | **Yes**  | Appears in the public URL. Pattern `^[a-z0-9-]{1,63}$`.                                                                                          |
+| `workloadRef`         | string   | **Yes**  | A `type: deployment` workload with **no** `transport`.                                                                                           |
+| `path`                | string   | **Yes**  | Path the handler workload sees. Must start with `/`; rejects `..`, `.`, `//`, whitespace.                                                        |
+| `verification`        | object   | **Yes**  | Signature verification (below).                                                                                                                  |
+| `methods`             | string[] | No       | Max 2, enum `POST`, `GET`. Default `[POST]`.                                                                                                     |
+| `maxBodyBytes`        | integer  | No       | 1024–10485760, default `1048576` (1 MiB).                                                                                                        |
+| `optional`            | boolean  | No       | Default `false`. When true, a missing Secret leaves the webhook **dormant** (every request → `410 Gone`) instead of marking the recipe degraded. |
+| `cors.allowedOrigins` | string[] | No       | Max 32, exact-match origins (scheme + host + optional port; no path, no wildcards). Omitted ⇒ server-to-server only; preflights return 403.      |
+| `replay`              | object   | No\*     | `timestampHeader` + `toleranceSec` (10–3600, default `300`). Required **iff** scheme is `hmac-sha256-timestamp-body`.                            |
+
+**`verification` fields**
+
+| Field                           | Required | Description                                                                                                                                          |
+| ------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scheme`                        | **Yes**  | Enum: `hmac-sha256-body`, `hmac-sha256-timestamp-body`, `jwt-bearer-jwks`, `static-bearer`.                                                          |
+| `secretRef` (`name`,`key`)      | No\*     | Secret in the recipe's `sandbox-recipes` namespace. Required for **every scheme except** `jwt-bearer-jwks`.                                          |
+| `signatureHeader`               | No       | Required for `hmac-*` schemes (checked at reconcile).                                                                                                |
+| `signaturePrefix`               | No       | Stripped before decoding (e.g. `sha256=`, `v1=`).                                                                                                    |
+| `signatureEncoding`             | No       | Enum `hex` (default), `base64`.                                                                                                                      |
+| `tokenHeader`                   | No       | `static-bearer` only. Defaults to `Authorization`.                                                                                                   |
+| `tokenPrefix`                   | No       | `static-bearer` only. Defaults to `"Bearer "`; an explicit empty string means the whole header value is the token (Telegram style).                  |
+| `jwksUrl`, `issuer`, `audience` | No\*     | All three required **iff** scheme is `jwt-bearer-jwks`.                                                                                              |
+| `setupHandshake.strategy`       | No       | Enum: `meta-hub-challenge`, `slack-url-verification`, `stripe-verify`. Only the strategy's exact request shape bypasses body-signature verification. |
+
+```yaml
+spec:
+  webhooks:
+    - id: stripe-events
+      workloadRef: bot-api
+      path: /hooks/stripe
+      verification:
+        scheme: hmac-sha256-timestamp-body
+        secretRef:
+          name: stripe-webhook
+          key: signing-secret
+        signatureHeader: Stripe-Signature
+        signaturePrefix: 'v1='
+      replay:
+        timestampHeader: Stripe-Signature
+        toleranceSec: 300
+```
+
+**What gets rejected**
+
+| Rule | Rejects                                                                                                      |
+| ---- | ------------------------------------------------------------------------------------------------------------ |
+| W1   | Duplicate `id` within `webhooks[]`.                                                                          |
+| W4   | `methods` that omit `POST`. A GET-only webhook is rejected.                                                  |
+| W7   | A missing `verification.secretRef` for any scheme except `jwt-bearer-jwks` — **even when `optional: true`**. |
+| W8   | Missing `replay` when scheme is `hmac-sha256-timestamp-body`.                                                |
+| W9   | Missing `jwksUrl` / `issuer` / `audience` when scheme is `jwt-bearer-jwks`.                                  |
+| W12  | A `jwksUrl` that is not `https://` with a multi-label DNS host (no IP literals, no localhost).               |
+| W13  | `GET` in `methods` without a `setupHandshake`.                                                               |
+| W14  | `meta-hub-challenge` without both a `secretRef` and `GET` in `methods`.                                      |
+| W2   | (Reconciler, not CEL) `workloadRef` not an existing transport-less `deployment`.                             |
+
+> `stripe-verify` is accepted by the config schema but **not implemented yet** in the gateway.
+
+### 3.18 OAuth Clients (`spec.oauthClients`)
+
+The OAuth providers a recipe **acts on behalf of**. Each entry names a known-shape provider adapter — control-api owns the authorize/token URLs and response parsing, so recipes cannot speak OAuth to arbitrary endpoints — plus Secret pointers for the provider-side credentials. Max 8 per recipe.
+
+A declared client needs **at least one** consumer:
+
+1. **Foreground** — end-user OAuth delivered into the sandbox UI embed (`spec.ui`, §3.16).
+2. **Background** — `backgroundAccess: true` clients referenced from `workloads[].oauthClientRefs` on non-MCP workloads. This mounts the recipe OAuth broker token read-only and grants egress to the control-api broker route.
+
+| Field              | Type     | Required | Description                                                                                                                                                                     |
+| ------------------ | -------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`               | string   | **Yes**  | Pattern `^[a-z0-9-]{1,63}$`. Surfaced as the `clientId` on `clerum:oauth?` URLs.                                                                                                |
+| `provider`         | string   | **Yes**  | Enum: `salesforce`, `slack`, `notion`, `microsoft-graph`, `google`.                                                                                                             |
+| `clientIdRef`      | object   | **Yes**  | `{ name, key }` — Secret holding the OAuth `client_id`.                                                                                                                         |
+| `clientSecretRef`  | object   | **Yes**  | `{ name, key }` — Secret holding the OAuth `client_secret`.                                                                                                                     |
+| `scopes`           | string[] | No       | Max 32. Provider-specific syntax.                                                                                                                                               |
+| `backgroundAccess` | boolean  | No       | Allows an operator to connect this client as a recipe-owned `service` grant, so background workloads obtain tokens with no end user present. Requires an offline/refresh scope. |
+
+```yaml
+spec:
+  workloads:
+    - id: sync-worker
+      type: deployment
+      image: ghcr.io/acme/salesforce-sync:1.4.0
+      oauthClientRefs: [salesforce-crm]
+  oauthClients:
+    - id: salesforce-crm
+      provider: salesforce
+      clientIdRef: { name: salesforce-oauth, key: client-id }
+      clientSecretRef: { name: salesforce-oauth, key: client-secret }
+      scopes: [api, refresh_token]
+      backgroundAccess: true
+```
+
+**What gets rejected**
+
+- **CEL O1** — every client needs a consumer (`spec.ui`, or a `workloads[].oauthClientRefs`). A client nothing consumes is dead config.
+- **CEL O3** — duplicate `id`.
+- **CEL O4** — `oauthClientRefs` on an MCP transport workload. MCP workloads reach providers through the MCP proxy and must not also get a broker-token mount.
+- A `provider` outside the five-value enum — adding a provider is a control-api change, not a recipe change.
+
+### 3.19 Plugin Workload SDK (`spec.pluginWorkloadSdk`)
+
+Opts plugin workloads into two **controlled side-effect channels**:
+
+- **`promptBridge`** — a one-shot LLM call routed through the recipe's `mcp-host`. A request may select a model within `allowedModels` but never the provider: the provider bound to the recipe's `mcp-host` wins.
+- **`clientNotifications`** — notification _intent_ authorized by control-api and delivered by the Notification Service. Targets are opaque refs, never raw channel addresses.
+
+Declaring this block forces an always-on `mcp-host`. Runtime enforcement is additionally gated by the `PLUGIN_WORKLOAD_SDK_ENABLED` flag.
+
+| Field                                        | Type     | Required  | Description                                                                 |
+| -------------------------------------------- | -------- | --------- | --------------------------------------------------------------------------- |
+| `promptBridge.allowedModels`                 | string[] | No        | Max 32.                                                                     |
+| `promptBridge.maxOutputTokens`               | integer  | No        | Min 1.                                                                      |
+| `promptBridge.maxRequestsPerRun`             | integer  | No        | Min 1.                                                                      |
+| `promptBridge.maxConcurrentInvocations`      | integer  | No        | Min 1. Runtime default 5.                                                   |
+| `promptBridge.maxInvocationsPerMinute`       | integer  | No        | Min 1. Runtime default 60.                                                  |
+| `clientNotifications.allowedEventTypes`      | string[] | **Yes**\† | 1–64 entries.                                                               |
+| `clientNotifications.allowedTargetRefs`      | string[] | No        | Max 64.                                                                     |
+| `clientNotifications.allowedUserRefs`        | boolean  | No        | Whether `userRef` targets are permitted.                                    |
+| `clientNotifications.maxNotificationsPerRun` | integer  | No        | Min 1.                                                                      |
+| `allowedCallers`                             | string[] | No        | Workload ids permitted to call the SDK. **Empty = all declared workloads.** |
+| `idempotencyKeyPattern`                      | string   | No        | Regex; runtime default `^[a-zA-Z0-9_-]{1,128}$`. Must compile.              |
+
+† Required within `clientNotifications` when that block is present.
+
+> The "runtime default" values are **not** schema defaults — the CRD injects no default for any `pluginWorkloadSdk` field. Omit a field and the runtime applies its own default.
+
+**What gets rejected**
+
+- **CEL PS1** — at least one of `promptBridge` / `clientNotifications`.
+- **CEL PS2 / PS3** — no wildcards in `allowedEventTypes` or `allowedModels`. Only explicit admin grants (control-api) may use wildcards.
+- **PS4** (reconciler) — `allowedCallers` entries must reference existing `workloads[].id`.
+- `promptBridge` needs a resolvable agent — and since CEL R1 forbids `spec.agent` without `spec.steps`, a workloads-only recipe cannot supply one. A `clientNotifications`-only recipe needs no agent.
+
+### 3.20 Global File System (`spec.gfs`)
+
+Declares the recipe's **intents** against [GFS](globalfilesystem.md). It is a declaration of desire, **not a grant**:
+
+- **`publishTargets`** — folders where the recipe may publish artifact **references**. Publishing creates a GFS resource pointing at the artifact-store object; bytes are never copied.
+- **`mounts`** — GFS resources surfaced to the recipe's `mcp-host`. **Intent only**: a mount is wired only if the host identity _already_ holds the declared scopes. Insufficient scope yields a `PendingMount`, never an escalation.
+
+> Editing `spec.gfs` never grants access. A recipe author cannot widen their own GFS permissions by editing the CRD.
+
+| Field                     | Type     | Required | Description                                                                          |
+| ------------------------- | -------- | -------- | ------------------------------------------------------------------------------------ |
+| `publishTargets[].drive`  | string   | **Yes**  | Drive the target lives on.                                                           |
+| `publishTargets[].target` | string   | **Yes**  | Destination folder — resourceId (32-hex) or path.                                    |
+| `mounts[].drive`          | string   | **Yes**  | Drive the mount target lives on.                                                     |
+| `mounts[].target`         | string   | **Yes**  | Mount target — resourceId or path.                                                   |
+| `mounts[].scopes`         | string[] | **Yes**  | Enum per item: `gfs.read`, `gfs.write`, `gfs.delete`, `gfs.manage_acl`, `gfs.share`. |
+
+```yaml
+spec:
+  gfs:
+    publishTargets:
+      - drive: main
+        target: /finance/reports
+    mounts:
+      - drive: main
+        target: /finance/inputs
+        scopes: [gfs.read]
+```
+
+**What gets rejected**
+
+- No CEL rules — enforcement is schema shape plus runtime.
+- A scope outside the five-value enum.
+- Runtime: a coordinator with `publishTargets` fails loudly if the GFS access token is not wired (_"GFS_ACCESS_FILE is required when spec.gfs.publishTargets is configured"_).
+- Runtime: mounts exceeding the host identity's scopes surface as `PendingMount`; the recipe is **not** escalated.
+
 ## 4. Conditional Resource Inclusion
 
 **Inspired by**: kro `includeWhen`, Helm `{{- if }}`
@@ -1033,13 +1475,13 @@ spec:
 
 1. `includeWhen` accepts **exactly one form**: the literal string `{{inputs.<key>}}` (optional inner whitespace; `<key>` must be `\w+`). This is not a general expression language and it is not the general template engine — `includeWhen` has its own anchored resolver (`includeWhenFilter.ts`). **No other form works.** Every other _string_ you can write here is silently ignored rather than rejected; the only value that fails loudly is a non-string one, which the CRD's `type: string` rejects at admission:
 
-   | Written                    | Result                                                                 |
-   | -------------------------- | ---------------------------------------------------------------------- |
-   | `'{{inputs.enabled}}'`     | Resolved against the resolved inputs. The only supported form.          |
-   | `'{{computed.enabled}}'`   | **No match → workload silently excluded.** Use `{{inputs.enabled}}` — computed values are merged into the resolved inputs (rule 6). |
-   | `'true'` (quoted string)   | **No match → workload silently excluded.** To always include, omit `includeWhen` entirely. |
-   | `true` (unquoted YAML boolean) | Rejected at admission — the CRD types `includeWhen` as `string`. This is the one bad value that _does_ fail loudly. |
-   | `'{{inputs.a}}-{{inputs.b}}'`, `'not {{inputs.x}}'`, or any surrounding text | **No match → workload silently excluded.** The regex is anchored; no concatenation, negation, or comparison is supported. |
+   | Written                                                                      | Result                                                                                                                              |
+   | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+   | `'{{inputs.enabled}}'`                                                       | Resolved against the resolved inputs. The only supported form.                                                                      |
+   | `'{{computed.enabled}}'`                                                     | **No match → workload silently excluded.** Use `{{inputs.enabled}}` — computed values are merged into the resolved inputs (rule 6). |
+   | `'true'` (quoted string)                                                     | **No match → workload silently excluded.** To always include, omit `includeWhen` entirely.                                          |
+   | `true` (unquoted YAML boolean)                                               | Rejected at admission — the CRD types `includeWhen` as `string`. This is the one bad value that _does_ fail loudly.                 |
+   | `'{{inputs.a}}-{{inputs.b}}'`, `'not {{inputs.x}}'`, or any surrounding text | **No match → workload silently excluded.** The regex is anchored; no concatenation, negation, or comparison is supported.           |
 
    There is no error and no `failed` status for any of the silently-excluded rows — see §16.6.
 
@@ -3018,32 +3460,32 @@ share a resolver:
 
 Every other field is consumed raw.
 
-| Field                                             | Template Allowed | Reason                                                                                                                                     |
-| ------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `env[].value`                                     | Yes              | Kubernetes-shaped string value resolved before Pod creation                                                                                |
-| `command[]`, `args[]`                             | Yes              | Entrypoint/CMD string arrays resolved before Pod creation                                                                                  |
+| Field                                             | Template Allowed            | Reason                                                                                                                                                                                                                     |
+| ------------------------------------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `env[].value`                                     | Yes                         | Kubernetes-shaped string value resolved before Pod creation                                                                                                                                                                |
+| `command[]`, `args[]`                             | Yes                         | Entrypoint/CMD string arrays resolved before Pod creation                                                                                                                                                                  |
 | `includeWhen`                                     | `{{inputs.<key>}}` **only** | Resolved by `filterByIncludeWhen`, not `resolveWorkloadTemplates`. Any other string (`{{computed.x}}`, `'true'`, or any surrounding text) does not match, resolves to `undefined`, and **silently excludes the workload**. |
-| `image`                                           | **No**           | Consumed raw. A `{{...}}` here reaches Kubernetes literally and is an invalid image reference.                                             |
-| `replicas`                                        | **No**           | `type: integer` — a `{{...}}` string is rejected at admission.                                                                             |
-| `resources.requests.*`, `resources.limits.*`      | **No**           | Consumed raw. A `{{...}}` here is an invalid resource quantity.                                                                            |
-| `resources[].size`, `volumeClaimTemplates[].size` | **No**           | Consumed raw. A `{{...}}` here is an invalid PVC quantity.                                                                                 |
-| `env[].valueFrom.template`                        | **No**           | Not implemented; use `env.value` for non-sensitive rendered strings and `envSecret` for secrets                                            |
-| `resources[].data` values                         | **No**           | Copied verbatim into the generated Secret/ConfigMap. A `{{...}}` here is neither resolved nor rejected — it is stored as a literal string. |
-| `labels`, `annotations`                           | **No**           | Metadata must be static for consistent label selectors                                                                                     |
-| `volumeMounts[].mountPath`                        | **No**           | Mount paths must be deterministic                                                                                                          |
+| `image`                                           | **No**                      | Consumed raw. A `{{...}}` here reaches Kubernetes literally and is an invalid image reference.                                                                                                                             |
+| `replicas`                                        | **No**                      | `type: integer` — a `{{...}}` string is rejected at admission.                                                                                                                                                             |
+| `resources.requests.*`, `resources.limits.*`      | **No**                      | Consumed raw. A `{{...}}` here is an invalid resource quantity.                                                                                                                                                            |
+| `resources[].size`, `volumeClaimTemplates[].size` | **No**                      | Consumed raw. A `{{...}}` here is an invalid PVC quantity.                                                                                                                                                                 |
+| `env[].valueFrom.template`                        | **No**                      | Not implemented; use `env.value` for non-sensitive rendered strings and `envSecret` for secrets                                                                                                                            |
+| `resources[].data` values                         | **No**                      | Copied verbatim into the generated Secret/ConfigMap. A `{{...}}` here is neither resolved nor rejected — it is stored as a literal string.                                                                                 |
+| `labels`, `annotations`                           | **No**                      | Metadata must be static for consistent label selectors                                                                                                                                                                     |
+| `volumeMounts[].mountPath`                        | **No**                      | Mount paths must be deterministic                                                                                                                                                                                          |
 
 The reconciler does **not** scan `resources[].data` for template patterns: `buildSecret` / `buildConfigMap` iterate the map and copy each value through unchanged (base64-encoding it for Secrets). Nothing rejects a `{{...}}` there, and nothing resolves it — the literal characters end up in the Secret/ConfigMap. Note that a Secret _value_ referenced from `env[].value` as `{{secret-id:KEY}}` **is** substituted into the pod spec at reconcile time, so do not treat `resources[].data` as an RBAC boundary (see the plaintext warning in §3.3).
 
 ### 16.6 Error Behavior
 
-| Scenario                                                  | Behavior                                                                                                          |
-| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Template references non-existent resource                 | Validation error at reconciliation time. Recipe status: `failed` with message identifying the dangling reference. |
-| Template references non-existent input key                | Validation error at reconciliation time. Recipe status: `failed`.                                                 |
-| Resolution produces empty string                          | Allowed. Empty string is a valid resolved value.                                                                  |
-| Unresolved `{{...}}` remains in workload env/command/args | Fail-closed before workload resources are created.                                                                |
+| Scenario                                                                                | Behavior                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Template references non-existent resource                                               | Validation error at reconciliation time. Recipe status: `failed` with message identifying the dangling reference.                                                                                                                                                                                                                               |
+| Template references non-existent input key                                              | Validation error at reconciliation time. Recipe status: `failed`.                                                                                                                                                                                                                                                                               |
+| Resolution produces empty string                                                        | Allowed. Empty string is a valid resolved value.                                                                                                                                                                                                                                                                                                |
+| Unresolved `{{...}}` remains in workload env/command/args                               | Fail-closed before workload resources are created.                                                                                                                                                                                                                                                                                              |
 | Unresolvable `includeWhen` (not the literal `{{inputs.<key>}}` form), steps-less recipe | **Fail-silent, not fail-closed.** The condition resolves to `undefined`, which is falsy, so the workload is **quietly excluded** — no error, no `failed` status, no mention of the workload anywhere in `status`. If it was the only workload, the recipe fails with the misleading message `All workloads excluded by includeWhen conditions`. |
-| Any `includeWhen`, recipe with `spec.steps` | **Ignored.** The workflow branch never calls `filterByIncludeWhen`, so the workload is deployed regardless of the condition — including conditions that would exclude it on the steps-less path (§4.2). |
+| Any `includeWhen`, recipe with `spec.steps`                                             | **Ignored.** The workflow branch never calls `filterByIncludeWhen`, so the workload is deployed regardless of the condition — including conditions that would exclude it on the steps-less path (§4.2).                                                                                                                                         |
 
 > **`includeWhen` is the one place a typo is not caught.** Everywhere else an
 > unresolved `{{...}}` fails the reconcile loudly. In `includeWhen`, a

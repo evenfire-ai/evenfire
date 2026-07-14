@@ -46,6 +46,22 @@ Environment variables:
 - `EXTERNAL_REST_API_JWT_PUBLIC_KEY`: RSA public key used to verify session JWTs locally in `external-rest-api` (RS256).
 - `EXTERNAL_REST_API_JWT_ISSUER`: Expected `iss` claim for session JWT verification.
 - `EXTERNAL_REST_API_JWT_AUDIENCE`: Expected `aud` claim for session JWT verification.
+- `EXTERNAL_REST_API_JSON_BODY_LIMIT`: Max JSON request body accepted by Express (default `150mb`).
+- `EXTERNAL_REST_API_PROFILE_SESSION_COOKIE_TTL_SECONDS`: Profile session cookie lifetime in seconds (default `43200` — 12h). Must be a positive integer.
+
+Returned to the desktop app by `GET /api/v1/desktop/environment`, so setup can
+discover where to reach the platform. The dev defaults point at localhost; set
+these in any real deployment:
+
+- `EXTERNAL_REST_API_PUBLIC_BASE_URL`: Publicly reachable base URL of **this** service (dev default `http://127.0.0.1:8091`). Trailing slashes stripped.
+- `EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL`: `rpc-proxy` base URL advertised to the desktop app (dev default `http://127.0.0.1:8094`). Trailing slashes stripped.
+- `EXTERNAL_REST_API_DESKTOP_APP_NAME`: Desktop app name in that payload (default `Evenfire`).
+- `EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL`: Base URL for the release link from `GET /api/v1/desktop/release` (default `https://github.com/evenfire-ai/evenfire/releases`).
+
+> `EXTERNAL_REST_API_PG_CONNECTION_STRING` exists in `src/db.ts` but is **not
+> live**: nothing imports `db.ts` or `src/repositories/`, and `initDb()` is never
+> called. All data access goes through `control-api` (see the delegated security
+> model below). Setting it has no effect.
 
 Session JWT issuance is centralized in `control-api`. `external-rest-api` verifies session JWTs locally with a public key and still uses `control-api` for internal profile/team operations.
 

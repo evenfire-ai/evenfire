@@ -190,6 +190,16 @@ Auth settings:
 - `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL`: profile-ui URL used for invitation links and desktop setup.
 - `CONTROL_API_DESKTOP_APP_NAME`: desktop app name associated with invitation flow configs.
 
+Issuance and image controls:
+
+- `CONTROL_API_ALLOWED_ISSUANCE_NAMESPACES`: comma-separated allowlist of namespaces a caller may mint host/provisioner tokens for (default: `mcp-host,sandbox-recipes`). Values are lowercased and de-duplicated. A startup guard **rejects boot** unless the list contains both the hosts and sandbox namespaces.
+- `CONTROL_API_REMOTE_MCP_EGRESS_PROXY_IMAGE`: image stamped into `spec.image` for remote-MCP entries installed from the registry (default `clerum/nginx-egress-proxy:0.1.0`).
+
+OAuth secrets — **both are required in production**; control-api refuses to start without them (see [Generating Secrets and Keys](#generating-secrets-and-keys)):
+
+- `CONTROL_API_OAUTH_STATE_HMAC_SECRET`: HMAC secret for OAuth state parameters.
+- `CONTROL_API_OAUTH_ENCRYPTION_KEY`: encryption key for stored OAuth tokens.
+
 Route-policy controls:
 
 - `CONTROL_API_POLICY_AUTH_AUDIENCE`: expected audience used by protected route-policy checks.
