@@ -27,7 +27,7 @@
     "@slack/web-api": "^7.0.0",
     "grammy": "^1.21.0",
     "imapflow": "^1.0.164",
-    "nodemailer": "^6.9.0"
+    "nodemailer": "^9.0.3"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
