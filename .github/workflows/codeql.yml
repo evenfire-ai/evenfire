@@ -1,0 +1,48 @@
+name: CodeQL
+
+# Static analysis for a platform whose pitch is a security model: deny-all
+# networking, approval gates, signature-verified webhooks, scoped RPC tokens.
+# The code enforcing those claims (rpc-proxy's JWT chain, webhook-gateway's HMAC
+# verification, HCC's NetworkPolicy generation) had no SAST gate before this.
+#
+# build-mode: none — CodeQL analyses JS/TS from source and does not need the ~33
+# workspaces built, which keeps this a single job rather than a matrix.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so newly-published CodeQL queries reach the default branch even in
+    # a quiet week. Monday 07:00 UTC.
+    - cron: '0 7 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      security-events: write # upload results to the Security tab
+      actions: read
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-and-quality
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:javascript-typescript'
