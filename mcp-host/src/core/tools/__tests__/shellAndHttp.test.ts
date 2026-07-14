@@ -86,6 +86,36 @@ describe('HttpRequestTool', () => {
     expect(result.content).toContain('DNS resolution failed')
   })
 
+  // An IP-literal host never reaches DNS (resolve4/resolve6 reject on a literal),
+  // so a guard that only inspects DNS-resolved addresses never runs. The literal
+  // itself must be checked before the DNS step.
+  it.each([
+    ['http://169.254.169.254/latest/meta-data/', 'cloud metadata'],
+    ['http://127.0.0.1/admin', 'loopback'],
+    ['http://10.0.0.1/internal', 'RFC 1918'],
+    ['http://192.168.1.1/router', 'RFC 1918'],
+    ['http://[::1]/admin', 'IPv6 loopback'],
+    ['http://[::ffff:169.254.169.254]/', 'IPv4-mapped metadata'],
+  ])('should block IP-literal host %s (%s) with an empty allowlist', async url => {
+    const tool = new HttpRequestTool([]) // default config: no allowlist
+    const result = await tool.execute({ url })
+
+    expect(result.is_error).toBe(true)
+    // Must be blocked by the guard, not merely fail to connect — a connection
+    // error would also set is_error, so assert on the reason.
+    expect(result.content).toContain('private IP')
+  })
+
+  it('should fail closed when DNS fails and NO allowlist is configured', async () => {
+    const tool = new HttpRequestTool([])
+    const result = await tool.execute({
+      url: 'http://definitely-does-not-exist-12345.example.com/test',
+    })
+
+    expect(result.is_error).toBe(true)
+    expect(result.content).toContain('Cannot verify IP safety')
+  })
+
   it('should detect IPv6 private/loopback addresses (Risk 3.5.3c)', () => {
     expect(isPrivateIp('::1')).toBe(true) // IPv6 loopback
     expect(isPrivateIp('::')).toBe(true) // Unspecified
