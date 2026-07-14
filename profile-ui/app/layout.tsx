@@ -5,7 +5,7 @@ import { ToastProvider } from '@components/Toast'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Clerum Profile UI',
+  title: 'Evenfire Profile UI',
   description: 'User profile and team membership management',
   icons: {
     icon: '/brand/logo.svg',
