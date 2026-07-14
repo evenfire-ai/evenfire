@@ -56,6 +56,14 @@ spec:
 Both `channelId` and `chatType` are required on every `telegram[]` entry; the
 API server rejects the resource without them.
 
+## In the Control UI
+
+External Channels → `/communication-channels` → **Create** builds the same
+`CommunicationChannel` resource as the CRD path above: pick the host, the
+Telegram provider, add the bot token as a write-only credential, and grant
+access to specific users/teams — the allowed-identity list that becomes
+`userIds` on the resource. See [Control UI](../surfaces/control-ui.md).
+
 ## Approvals over Telegram
 
 When approval policy enables Telegram approvers, approval requests arrive with
