@@ -434,7 +434,7 @@ sequenceDiagram
     end
 ```
 
-**Trust is layered, not binary.** The registry verifies recipe _authorship and integrity_ (who published it, has it been tampered with). Sanitization verifies _runtime safety_ (this specific configuration cannot escalate privilege inside our cluster). Today that safety is narrower than the name suggests: it **only applies to `managed: true` servers** (so the default HTTP/SSE recipe path bypasses it entirely), it is achieved mostly by **rewriting** the spec rather than refusing it, its resource clamp is unit-naive, and the image-host allowlist is **audit-only** until an operator sets `CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true`. Treat the gate as partial privilege containment on the HCC-owned path, not as a cluster-wide admission barrier.
+**Trust is layered, not binary.** The registry verifies recipe _authorship and integrity_ (who published it, has it been tampered with). Sanitization verifies _runtime safety_ (this specific configuration cannot escalate privilege inside our cluster). That safety is narrower than the name suggests: it **only applies to `managed: true` servers** (so the default HTTP/SSE recipe path bypasses it entirely), it is achieved mostly by **rewriting the McpServer CRD's `spec`** (via `sanitizeCrdSpec()`, above) rather than refusing it, its resource clamp is unit-naive, and the image-host allowlist is **audit-only** until an operator sets `CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true`. Treat the gate as partial privilege containment on the HCC-owned path, not as a cluster-wide admission barrier.
 
 > **Cross-reference**: The McpServer status fields are defined in [§4.2 McpServer CRD Status](#42-mcpserver-crd-status).
 

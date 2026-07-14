@@ -36,7 +36,40 @@ evenfire is a Kubernetes-native platform for LLM orchestration with multi-channe
 
 ### System Diagram
 
-> **[Open in Excalidraw](https://link.excalidraw.com/l/7VPzoB0Tohx/3YpKQJgCG6o)** - Interactive high-level architecture diagram showing all services, namespaces, and data flows.
+Scoped to the four services this document covers — for the full 12-namespace platform (all ~18 services), see [platform-topology.md §1](platform-topology.md#1-platform-architecture-12-namespaces).
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'fontSize':'12px'}}}%%
+flowchart LR
+    USER["User (Telegram/Email/Slack)"]
+    CR["channel-reader<br/>(channels ns)"]
+    MH["mcp-host<br/>(mcp-host ns)"]
+    HCC["host-context-controller<br/>(control-plane ns)"]
+    MCP["MCP Servers<br/>(mcp-server ns)"]
+
+    CC[("CommunicationChannel")]
+    HOST[("Host")]
+    CTX[("Context")]
+    MCS[("McpServer")]
+
+    USER -->|message| CR
+    CR -->|"POST /v1/runtime/messages"| MH
+    MH -->|response| CR
+    MH -.->|MCP tool calls| MCP
+    HCC -->|creates Deployment + Service| MCP
+    HCC -->|generates NetworkPolicies| MCP
+    HCC -->|discovery API :8081| MH
+
+    CC -.watched by.-> CR
+    HOST -.watched by.-> MH
+    CTX -.watched by.-> HCC
+    MCS -.watched by.-> HCC
+
+    classDef ctrl fill:#EDE9FE,stroke:#7C3AED,color:#5B21B6
+    classDef crd fill:#DBEAFE,stroke:#3B82F6,color:#1E40AF
+    class HCC ctrl
+    class CC,HOST,CTX,MCS crd
+```
 
 ### Services covered in this document
 
@@ -255,7 +288,33 @@ spec:
 
 ### CRD Relationship Diagram
 
-> **[Open in Excalidraw](https://link.excalidraw.com/l/7VPzoB0Tohx/3YpKQJgCG6o)** - Interactive diagram showing CRD relationships, fields, secret references, and which services watch each CRD.
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'fontSize':'12px'}}}%%
+flowchart TD
+    CC["CommunicationChannel<br/>spec.hostRef"]
+    HOST["Host<br/>spec.contextRef, spec.secretRef"]
+    CTX["Context<br/>spec.mcpServers[] allowlist"]
+    MCS["McpServer<br/>spec.contextRef, spec.auth.secretRef"]
+    SEC1[("Secret: LLM API keys")]
+    SEC2[("Secret: MCP server credentials")]
+
+    CC -->|hostRef| HOST
+    HOST -->|contextRef| CTX
+    HOST -->|secretRef| SEC1
+    CTX -->|"mcpServers[] names"| MCS
+    MCS -->|contextRef back-reference| CTX
+    MCS -->|auth.secretRef| SEC2
+
+    WCR["channel-reader watches"] -.-> CC
+    WMH["mcp-host watches"] -.-> HOST
+    WHCC["host-context-controller watches"] -.-> CTX
+    WHCC -.-> MCS
+
+    classDef crd fill:#DBEAFE,stroke:#3B82F6,color:#1E40AF
+    classDef svc fill:#EDE9FE,stroke:#7C3AED,color:#5B21B6
+    class CC,HOST,CTX,MCS crd
+    class WCR,WMH,WHCC svc
+```
 
 ---
 
@@ -561,7 +620,17 @@ In-memory FIFO queue with priority support. Processes one task at a time.
 
 Processes tasks one at a time from the queue. Supports multi-turn LLM tool calling.
 
-> **[Open in Excalidraw](https://link.excalidraw.com/l/7VPzoB0Tohx/3YpKQJgCG6o)** - Interactive state machine diagram with states (idle, processing, waiting_tool, error), transitions, queue details, and tool execution flow.
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'fontSize':'12px'}}}%%
+stateDiagram-v2
+    [*] --> idle
+    idle --> processing: dequeue task (priority-sorted)
+    processing --> waiting_tool: LLM requests tool call
+    waiting_tool --> processing: tool result added to history
+    processing --> idle: text response — responseCallback invoked, task completed
+    processing --> error: LLM call fails / maxToolCallsPerTask exceeded / maxTaskDuration exceeded
+    error --> idle: task marked failed, retried if retryCount < maxRetries
+```
 
 **Task execution flow**:
 
@@ -785,7 +854,25 @@ The controller reconciles five CRDs: `McpServer`, `Context`, `Host`,
 
 Two independent reconciliation loops watch CRDs and manage Kubernetes resources:
 
-> **[Open in Excalidraw](https://link.excalidraw.com/l/7VPzoB0Tohx/3YpKQJgCG6o)** - Interactive diagram showing both the McpServer Watch Loop (Deployment/Service reconciliation) and the Context Watch Loop (NetworkPolicy reconciliation).
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'fontSize':'12px'}}}%%
+flowchart LR
+    subgraph L1["McpServer Watch Loop"]
+        MCS["McpServer CRD<br/>created/modified"] --> SEC["1. Secret validation"]
+        SEC --> DEP["2. Build Deployment<br/>(labels, env, probes, resources)"]
+        DEP --> SVC["3. Create ClusterIP Service"]
+        SVC --> CONFLICT["4. 409? preserve resourceVersion,<br/>replace"]
+        CONFLICT --> SIDECAR["5. stdio-bridge sidecar<br/>(managed:true + stdio transport)"]
+        SIDECAR --> STATUS["6. Patch status:<br/>NetworkReady, DeploymentReady"]
+    end
+    subgraph L2["Context Watch Loop"]
+        CTX["Context CRD<br/>created/modified"] --> NP["Generate NetworkPolicies<br/>per (context, server) pair"]
+    end
+    STATUS -.->|orphan cleanup on startup| MCS
+
+    classDef ctrl fill:#EDE9FE,stroke:#7C3AED,color:#5B21B6
+    class MCS,CTX ctrl
+```
 
 ### Deployment Reconciliation (McpServerReconciler)
 
@@ -1089,7 +1176,27 @@ For comprehensive testing documentation, see [mcp-servers/README.md §Testing](.
 
 ### Namespace Layout & NetworkPolicy Strategy
 
-> **[Open in Excalidraw](https://link.excalidraw.com/l/7VPzoB0Tohx/3YpKQJgCG6o)** - Interactive diagram showing the layered NetworkPolicy model: default deny, API allow, and per-context allow rules.
+Scoped to the four namespaces on the message path — for the full deny-all model across all 12 namespaces, see [platform-topology.md §2](platform-topology.md#2-security-architecture-deny-all-by-default).
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'fontSize':'12px'}}}%%
+flowchart LR
+    subgraph DEFAULT["L0: Default Deny — deny-all-&lt;ns&gt;"]
+        MH["mcp-host"]
+        MS["mcp-server"]
+    end
+    HCC["host-context-controller<br/>(control-plane)"]
+    HCC -->|"L1: allow-dns-egress,<br/>allow-hcc-api-egress"| MH
+    HCC -->|"L1: allow-dns-egress,<br/>allow-hcc-api-egress"| MS
+    HCC -->|"L2: ctx-{context}-{server}<br/>per Context CRD"| MS
+    MH -->|"L2 allow: mcp-host → MCP server"| MS
+    MS -->|"L3: egressBindings"| EXT["External APIs"]
+
+    classDef deny fill:#FEF2F2,stroke:#DC2626,color:#991B1B
+    classDef ctrl fill:#EDE9FE,stroke:#7C3AED,color:#5B21B6
+    class MH,MS deny
+    class HCC ctrl
+```
 
 `deploy/base/namespaces.yaml` declares ten namespaces: `channels`, `control-plane`, `mcp-host`, `mcp-server`, `profiles`, `rpc-proxy`, `sandbox-recipes`, `sandbox-ui`, `webhook-ingress`, `gfs`. The core four for the message path are:
 
@@ -1160,7 +1267,26 @@ The platform runs three distinct token flows, all RS256-signed:
 
 Complete flow of a user message from Telegram through to an LLM-generated response:
 
-> **[Open in Excalidraw](https://link.excalidraw.com/l/7VPzoB0Tohx/3YpKQJgCG6o)** - Interactive sequence diagram showing the complete message lifecycle across all 5 actors.
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'fontSize':'12px'}}}%%
+sequenceDiagram
+    participant U as User (Telegram)
+    participant CR as channel-reader
+    participant MH as mcp-host
+    participant LLM as LLM + MCP
+
+    U->>CR: "What users are in the database?"
+    CR->>CR: poll cycle drains message,<br/>check CommunicationChannel allowlist
+    CR->>MH: POST /v1/runtime/messages<br/>(x-clerum-edge-* headers)
+    MH->>MH: create Task, enqueue (priority: normal)
+    MH->>MH: dequeue (idle → processing),<br/>build system prompt w/ MCP capabilities
+    MH->>LLM: call LLM with messages + tool definitions
+    LLM->>LLM: requests mongodb-server__find_documents(...)
+    MH->>LLM: MCP Client calls MongoDB server (StreamableHTTP)
+    LLM-->>MH: tool result added to history,<br/>LLM called again → final text response
+    MH->>CR: responseCallback invoked,<br/>{success:true, response:"..."}
+    CR->>U: bot.api.sendMessage() reply
+```
 
 | Step | Actor              | Action                                                                                                                                                                                                                                          |
 | ---- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
