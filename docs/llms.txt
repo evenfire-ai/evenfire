@@ -19,6 +19,13 @@
 - Architecture overview: architecture/overview.md
 - Platform topology / NetworkPolicies: architecture/platform-topology.md
 
+## Surfaces (the UIs)
+
+- Surfaces index (who uses what): surfaces/README.md
+- Control UI (admin console): surfaces/control-ui.md
+- Desktop App (end-user client, distribution): surfaces/desktop-app.md
+- Profile UI (invitation, profile): surfaces/profile-ui.md
+
 ## How-to
 
 - Connect Telegram: how-to/connect-telegram.md
@@ -55,3 +62,8 @@
 - ../workflow-recipes/README.md
 - ../control-api/README.md
 - ../charts/clerum-crds/README.md
+- ../control-ui/README.md — admin console routes, config, tests
+- ../desktop-app/README.md — Electron client, scopes, endpoint table, E2E
+- ../profile-ui/README.md — profile and invitation flows
+- ../rpc-proxy/README.md — external JWT-gated gateway for desktop traffic
+- ../external-rest-api/README.md — auth, profiles, teams, RPC-token brokerage

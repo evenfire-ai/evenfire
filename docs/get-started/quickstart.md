@@ -74,7 +74,9 @@ npm run ui     # runs Control UI (:3000), Profile UI (:3001), and the Desktop Ap
 Log into the **Desktop App** as `test@clerum.io` / `changeme123!` and message
 the `chatllm` agent. Ask it to do something real — _"run `uname -a`"_ or
 _"generate a one-page PDF about Kubernetes NetworkPolicies"_ — and approve the
-tool call right in the chat when the approval gate fires.
+tool call right in the chat when the approval gate fires. For what else is on
+screen — live activity, artifacts, sandbox UIs — see
+[Desktop App](../surfaces/desktop-app.md).
 
 ## 4. Say hello — the API
 
@@ -151,4 +153,5 @@ Details: [Connect Telegram](../how-to/connect-telegram.md).
 | Tune the approval gates   | [Configure approvals](../how-to/configure-approvals.md)                                        |
 | Understand the design     | [Why evenfire](../concepts/why-evenfire.md) · [Security model](../../README.md#security-model) |
 | Deep deployment reference | [Minikube guide](../deploy/minikube.md) · [Production notes](../deploy/production.md)          |
+| Tour the other UIs        | [Surfaces index](../surfaces/README.md)                                                        |
 | Learning paths            | [Learning path](learning-path.md)                                                              |
