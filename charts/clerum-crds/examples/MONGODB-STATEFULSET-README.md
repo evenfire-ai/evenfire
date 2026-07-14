@@ -181,6 +181,5 @@ curl http://localhost:3000/mcp/tools/list
 
 ## See Also
 
-- [MongoDB StatefulSet Gap Analysis](../../../docs/archive/workflow-recipes/validation/MONGODB-STATEFULSET-GAP.md)
 - [WorkflowRecipe CRD Reference](../../../docs/crds/workflowrecipe.md)
 - [E2E Testing Guide](../../../mcp-servers/README.md#testing)
