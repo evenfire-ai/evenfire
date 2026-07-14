@@ -9,7 +9,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/evenfire-ai/evenfire/ci-public.yml?branch=main&label=CI)](https://github.com/evenfire-ai/evenfire/actions)
 [![GitHub release](https://img.shields.io/github/v/release/evenfire-ai/evenfire?sort=semver)](https://github.com/evenfire-ai/evenfire/releases)
 
-[What is evenfire](#what-is-evenfire) · [The platform](#the-platform) · [Get started](#get-started-minikube) · [Architecture](#architecture) · [Security model](#security-model) · [Docs](docs/README.md) · [License](#community-and-license)
+[What is evenfire](#what-is-evenfire) · [The platform](#the-platform) · [See it work](#see-it-work) · [Why evenfire](#why-evenfire) · [Get started](#get-started-minikube) · [Architecture](#architecture) · [Security model](#security-model) · [Docs](docs/README.md) · [License](#community-and-license)
 
 ---
 
@@ -20,14 +20,12 @@ actions** — on **your** infrastructure. Agents converse across Telegram, Email
 Slack, and a desktop app; call tools over the
 [Model Context Protocol](https://modelcontextprotocol.io) (MCP); compose
 multi-step workflows; and draw on teams, shared files, and cost budgets — while
-risky actions wait for a human "yes." Every piece of the fleet — agents,
+risky actions pause for human review. Every piece of the fleet — agents,
 connectors, channels, workflows, policies — is a Kubernetes custom resource, so
 your platform is version-controlled, reviewable configuration. You bring your
 own model keys; prompts and data stay in your environment.
 
-One command (`make minikube-setup`) stands up the whole platform on a local
-cluster — operators, NetworkPolicies, the JWT chain, control plane, and a seeded
-agent.
+One command (`make minikube-setup`) brings the whole platform up locally.
 
 > **Naming:** the code uses the project's internal name **clerum** —
 > `clerum.io` CRDs, `CLERUM_*` env vars, `clerum-*` packages. **evenfire** is
