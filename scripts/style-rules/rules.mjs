@@ -8,7 +8,7 @@
  *   - check({ file, content, lines }): returns array of { line, message }
  *
  * Rules are intentionally kept narrow and project-scoped. The canonical doc
- * is `docs/agents/control-ui-desktop-app.md`; per-app pattern docs live
+ * is `docs/agents/frontend-style-rules.md`; per-app pattern docs live
  * inside each app (e.g. `desktop-app/ui/docs/STYLE_STANDARDIZATION.md`).
  */
 
