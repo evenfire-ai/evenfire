@@ -87,10 +87,11 @@ Connectors → `/mcp-servers` → **Create** builds the same `McpServer` resourc
 as Option B, through a guided form (identity, transport/runtime, secrets) plus
 an `EgressEditor` step for the egress policy: closed-by-default, with
 private, metadata, link-local, and reserved IPv4 ranges rejected outright.
-Registry installs check the connector image against an allowlist that is
-audit-mode by default — a mismatch is logged, not blocked, unless an operator
-turns on enforcement; this is separate from the sha256 digest pinning used
-for custom coordinator images. See [Control UI](../surfaces/control-ui.md).
+Both this form and registry installs check the connector image against an
+allowlist that is audit-mode by default — a mismatch is logged, not blocked,
+unless an operator turns on enforcement; this is separate from the sha256
+digest pinning used for custom coordinator images. See
+[Control UI](../surfaces/control-ui.md).
 
 ![Control UI connectors list at /mcp-servers](../assets/control-ui-connectors.png)
 *Dev cluster, demo tenant.*

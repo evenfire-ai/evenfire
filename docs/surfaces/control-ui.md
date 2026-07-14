@@ -73,7 +73,8 @@ five steps live together.
    (connectors and plugins) with trust levels (high / mid / low) and a
    guided install flow, plus org-scoped publish API keys (create / reveal /
    revoke) at `/registry/keys`. Connector images are checked against an
-   allowlist, audit-mode by default — a violation is logged, not blocked,
+   allowlist, audit-mode by default, on both the direct `/mcp-servers`
+   Create form and registry installs — a violation is logged, not blocked,
    unless an operator explicitly turns on enforcement. sha256 digest pinning
    is a different mechanism: it applies to custom coordinator images in
    workflow recipes, not to connector images, and it is required by default
