@@ -16,6 +16,14 @@ on it; changes to MPL-licensed files must stay under MPL when distributed,
 while larger works that combine with this code may carry their own licenses.
 See [LICENSE](../LICENSE).
 
+### Is multi-tenancy or hosting included?
+
+No. This repo is the full **single-tenant** platform — one organization per
+deployment. Multi-tenant provisioning, the hosted registry control plane, and
+member registration belong to the managed **evenfire hosted** service and are
+not open source. What you self-host is complete and not feature-gated. See
+[Open core: self-host vs hosted](concepts/open-core-and-hosted.md).
+
 ### Why do I keep seeing “clerum”?
 
 Internal code name. Public name is evenfire. See
