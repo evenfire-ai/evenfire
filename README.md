@@ -12,11 +12,11 @@
 [What is evenfire](#what-is-evenfire) · [The platform](#the-platform) · [See it work](#see-it-work) · [Why evenfire](#why-evenfire) · [Get started](#get-started-minikube) · [Architecture](#architecture) · [Security model](#security-model) · [Docs](docs/README.md) · [License](#community-and-license)
 
 <p align="center">
-  <img src="docs/assets/desktop-app-approval.webp" alt="Desktop App: an agent tool call held at an in-chat approval gate with Approve and Deny buttons" width="49%" />
+  <img src="docs/assets/desktop-app-sandbox-ui.webp" alt="Desktop App: the LeadForge prospecting plugin rendered inside the app, with its own dashboard, outreach pipeline, approval queue, and charts" width="49%" />
   <img src="docs/assets/control-ui-usage-dashboard.webp" alt="Control UI: the Cost &amp; Usage console with token totals and a stacked area chart of usage by agent" width="49%" />
 </p>
 
-<p align="center"><sub><b>Left:</b> the Desktop App holds a risky tool call at an in-chat approval gate. <b>Right:</b> the Control UI console governs the fleet — usage, budgets, and model prices. <a href="docs/surfaces/README.md">Tour all three UIs →</a></sub></p>
+<p align="center"><sub><b>Left:</b> a plugin renders its own full UI — the LeadForge prospecting app, approval queue and all — inside the Desktop App. <b>Right:</b> the Control UI console governs the fleet — usage, budgets, and model prices. <a href="docs/surfaces/README.md">Tour all three UIs →</a></sub></p>
 
 ---
 
