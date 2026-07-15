@@ -50,5 +50,6 @@ It does not rank or name competing products.
 ## Related
 
 - [Why evenfire](why-evenfire.md)
+- [Open core: self-host vs hosted](open-core-and-hosted.md)
 - [Security model](../../README.md#security-model)
 - [Code names](code-names.md)
