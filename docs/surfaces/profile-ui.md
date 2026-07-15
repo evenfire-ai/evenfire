@@ -62,6 +62,7 @@ overlays (`make minikube-deploy-all`). There is no per-service
 `make deploy`.
 
 ```bash
+make install-all && npm --prefix control-ui install
 npm run ui    # Control UI, Desktop App, and Profile UI together
 ```
 
