@@ -43,7 +43,9 @@ kubectl apply -f ./charts/clerum-crds/crds/
 4. **Signing / JWT keys** — bootstrap scripts under `scripts/` and deploy docs.
 5. **Control plane services** — `host-context-controller`, `control-api`, proxies.
 6. **Agent runtime** — `mcp-host`, `channel-reader`, bridges.
-7. **UIs** — `control-ui`, `profile-ui` (and desktop distribution separately).
+7. **UIs** — `control-ui`, `profile-ui`; the desktop client is distributed to
+   users rather than deployed —
+   see [surfaces/desktop-app.md](../surfaces/desktop-app.md#ship-it-to-your-users).
 8. **First Host + Context + channel** — smallest viable declarative config.
 9. **Connectors** — McpServers on an allowlisted Context.
 10. **Observability** — metrics + log stack; alert on approval backlog and 5xx.

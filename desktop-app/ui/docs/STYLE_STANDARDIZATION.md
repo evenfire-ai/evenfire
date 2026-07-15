@@ -1,6 +1,6 @@
 # Style Standardization — desktop-app/ui
 
-This document is the authoritative reference for **how a page is built in desktop-app/ui** after the layout/token consolidation refactor. It complements the cross-app rules in [`../../../docs/agents/control-ui-desktop-app.md`](../../../docs/agents/control-ui-desktop-app.md) — read that first; this doc adds desktop-app-specific patterns.
+This document is the authoritative reference for **how a page is built in desktop-app/ui** after the layout/token consolidation refactor. It complements the cross-app rules in [`../../../docs/agents/frontend-style-rules.md`](../../../docs/agents/frontend-style-rules.md) — read that first; this doc adds desktop-app-specific patterns.
 
 When in doubt, mimic an existing post-refactor page (`ContextsPage`, `WorkflowsPage`, `TeamsPage`, `McpServersPage`) before inventing.
 

@@ -36,7 +36,7 @@ One command (`make minikube-setup`) brings the whole platform up locally.
 
 ## The platform
 
-evenfire is not just an agent runtime — it is eight first-class capabilities,
+evenfire is not just an agent runtime — it is nine first-class capabilities,
 each backed by code in this repo and declared as configuration. Start anywhere;
 each pillar links to its depth.
 
@@ -45,6 +45,15 @@ each pillar links to its depth.
   desktop, and workspace files, plus artifact generation, persistent memory, and
   human-in-the-loop approvals on the risky calls. →
   [mcp-host/README.md](mcp-host/README.md)
+- **Console & client** — the two surfaces you work in day to day. A **Control UI** console where
+  admins govern the fleet: token usage by team, model, agent, and desktop user;
+  budgets and model prices; per-tool approval overrides; connector egress
+  policy; a trust-rated connector registry. And an Electron **Desktop App**
+  where people actually use the agents: chat, a live tool-call view, in-chat
+  approvals, and artifacts — no Telegram bot and no curl required. (A third,
+  smaller **Profile UI** is where invited members accept an invite and set a
+  password on the way in.) →
+  [docs/surfaces/README.md](docs/surfaces/README.md)
 - **Connectors (MCP)** — governed MCP servers with per-`Context` allowlists
   enforced by NetworkPolicy (not convention); any stdio tool plugs in through
   the bridge; remote SaaS connectors sit behind a pinned egress proxy. →
@@ -163,7 +172,9 @@ npm run ui              # Control UI + Profile UI + Desktop App
 
 Log in as `test@clerum.io` / `changeme123!`, message the `chatllm` agent, and
 ask it to run a command or generate a PDF — then approve the tool call from the
-chat.
+chat. The Desktop App is the client you just used; Control UI is the admin
+console for the same fleet — both are toured in
+[docs/surfaces/](docs/surfaces/README.md).
 
 Prefer the API path? The full curl walkthrough exercises the real session →
 scoped-RPC → rpc-proxy JWT chain, with troubleshooting notes:
@@ -179,11 +190,14 @@ scoped-RPC → rpc-proxy JWT chain, with troubleshooting notes:
 flowchart LR
     TG([Telegram / Email / Slack]) --> CR[channel-reader]
     DA([Desktop app]) --> RP["rpc-proxy<br/>(scoped JWTs)"]
+    ADM([Admin]) --> CU["control-ui<br/>(console)"] --> CAPI["control-api"]
+    CAPI --> CRDS[("clerum.io CRDs")]
     CR --> MH["mcp-host<br/>agent runtime · approval gate"]
     RP --> MH
     MH <--> LLM[("OpenAI · Claude<br/>Z.AI · Bailian")]
     MH --> HCC["host-context-controller<br/>connector discovery"]
     MH --> MP[mcp-proxy] --> MCP["MCP servers<br/>(HTTP · stdio via bridge)"]
+    CRDS -.watched by.-> HCC
     HCC -. "reconciles CRDs,<br/>generates NetworkPolicies" .-> MCP
 ```
 
@@ -192,7 +206,10 @@ Messages arrive through `channel-reader` or the desktop app (via `rpc-proxy`).
 MCP tools — pausing for human approval when policy requires it.
 `host-context-controller` reconciles `Host`, `Context`, and `McpServer` CRDs
 into Deployments, Services, and NetworkPolicies; the `workflow-recipes` operator
-does the same for multi-step workflow workloads. Ports, token flows, and the
+does the same for multi-step workflow workloads. Admins drive the same CRDs
+from the Control UI console through `control-api`, so the declarative substrate
+is what the UI writes, not something it bypasses — see
+[docs/surfaces/README.md](docs/surfaces/README.md). Ports, token flows, and the
 four-layer network model live in the architecture docs:
 [ARCHITECTURE.md](ARCHITECTURE.md) ·
 [docs/architecture/overview.md](docs/architecture/overview.md) ·

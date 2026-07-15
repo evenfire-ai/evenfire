@@ -60,6 +60,33 @@ Yes — evenfire is Kubernetes-native; `make minikube-setup` gives you the full
 platform on a local cluster in minutes. (Contributors hacking on a single
 service can run it standalone in dev mode — see that service's README.)
 
+### Which UI am I supposed to use?
+
+Depends on who you are: **Control UI** if you administer the platform —
+admin login, governs the fleet (agents, connectors, budgets, approvals, the
+registry). **Desktop App** if you use agents — chat, approvals, artifacts.
+**Profile UI** is where an invited member lands to accept an invitation and
+set a password, on the way to installing the Desktop App. See the persona
+matrix: [Which surface is for me?](surfaces/README.md#which-surface-is-for-me).
+
+### Do I need kubectl to run day-to-day?
+
+No, for day-2 operations: agents, connectors, channels, and approvals all have
+Control UI screens, and each one writes the same CRD you would otherwise
+apply by hand. Budgets and the registry are Control UI screens too, but
+they are **not** CRD-backed: budgets live in control-api's own Postgres, while
+the registry catalog lives in a separate registry service that control-api
+calls over HTTP (`CLERUM_REGISTRY_URL`). Neither is reachable with
+`kubectl apply`. Yes, for install and for GitOps — bootstrapping the
+platform is still `make` and `kubectl`. See
+[Quickstart](get-started/quickstart.md) and [Production notes](deploy/production.md).
+
+### Can I ship the desktop app to my users?
+
+Yes — `electron-forge` is already configured with makers for
+dmg/squirrel/deb/rpm/zip, covering macOS, Windows, and Linux. See
+[Ship it to your users](surfaces/desktop-app.md#ship-it-to-your-users).
+
 ### How many CRDs are there?
 
 Eight under `clerum.io`: Host, Context, McpServer, CommunicationChannel,

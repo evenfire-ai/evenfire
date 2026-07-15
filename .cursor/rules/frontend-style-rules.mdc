@@ -7,7 +7,7 @@ globs:
 alwaysApply: false
 ---
 
-Apply the shared UI rules in `docs/agents/control-ui-desktop-app.md` when working inside these paths:
+Apply the shared UI rules in `docs/agents/frontend-style-rules.md` when working inside these paths:
 
 - `control-ui/**`
 - `desktop-app/ui/**`

@@ -73,9 +73,10 @@ flowchart LR
 
 ### Services covered in this document
 
-These four are the message path. For the other services — the UIs, control-api,
-external-rest-api, rpc-proxy, the WRC, the webhook and file planes — see
-[/ARCHITECTURE.md](../../ARCHITECTURE.md).
+These four are the message path. For the control plane, the edge, and the
+webhook and file planes, see [/ARCHITECTURE.md](../../ARCHITECTURE.md). For the
+three human surfaces — the Control UI console, the Desktop App client, and the
+Profile UI — see [docs/surfaces/](../surfaces/README.md).
 
 | Service                     | Directory                  | Namespace       | Port | Role                                                                                                 |
 | --------------------------- | -------------------------- | --------------- | ---- | ---------------------------------------------------------------------------------------------------- |
@@ -83,6 +84,20 @@ external-rest-api, rpc-proxy, the WRC, the webhook and file planes — see
 | **mcp-host**                | `/mcp-host`                | `mcp-host`      | 8080 | Central LLM service with agent state machine, message queue, and MCP tool calling                    |
 | **host-context-controller** | `/host-context-controller` | `control-plane` | 8081 | K8s operator managing MCP server Deployments/Services/NetworkPolicies; REST API for server discovery |
 | **MCP Servers**             | `/mcp-servers`             | `mcp-server`    | 3000 | First-party MCP servers (airtable, alphavantage, doc-generator, mongodb, playwright, web-search)     |
+
+### Human surfaces
+
+The message path above is one of two ways into the platform. The other is the
+Desktop App, which reaches `mcp-host` through `rpc-proxy` with a short-lived,
+scope-narrowed JWT — never a `control-api` token (see
+[platform-topology.md §9](platform-topology.md#9-rpc-proxy-namespace) for the
+rpc-proxy trust boundary and the desktop flow in depth). The Control UI sits on
+the other side entirely: it is admin-authenticated, talks only to
+`control-api`, and writes the same CRDs this document describes. Neither
+surface can act as the other, and channel users (Telegram/Slack/email) never
+touch either one — their traffic is the message path above. See
+[docs/surfaces/](../surfaces/README.md) for the full persona-to-surface
+matrix, including the Profile UI.
 
 ### Key Design Principles
 
