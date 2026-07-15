@@ -86,7 +86,8 @@ each pillar links to its depth.
 - **Cost & governance** — token budgets per scope with block/warn decisions
   (opt-in via `CLERUM_BUDGETS_ENABLED`), usage and LLM-price accounting,
   `WorkflowRecipePolicy`, and a connector-image allowlist. →
-  [docs/crds/workflowrecipepolicy.md](docs/crds/workflowrecipepolicy.md)
+  [docs/crds/workflowrecipepolicy.md](docs/crds/workflowrecipepolicy.md),
+  [track usage & set budgets](docs/how-to/token-budgets-and-usage.md)
 - **Config as code** — the entire fleet is eight `clerum.io` CRDs:
   version-controlled, reviewable, and `kubectl`/GitOps-friendly. →
   [docs/crds/README.md](docs/crds/README.md)
