@@ -1,7 +1,7 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { ChannelCredentialsPanel } from '@components/ChannelCredentialsPanel'
 import type { CredentialDraft } from '@components/ChannelCredentialsPanel/types'
@@ -10,20 +10,33 @@ import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { CreateStepFlow } from '@components/CreateStepFlow'
 import { DashboardLayout } from '@components/DashboardLayout'
+import { SegmentedControl } from '@components/SegmentedControl'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconBroadcast } from '@components/Sidebar/icons'
-import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
+import { IconCopy } from '@components/icons'
 import { Button, Field, TextInput } from '@components/ui'
 import { apiGet, apiSend } from '@lib/api'
 import type { ChannelType } from '@lib/channelTypes'
+import { copyTextToClipboard } from '@lib/clipboard'
+import {
+  COMMUNICATION_CHANNEL_PROVIDERS,
+  COMMUNICATION_CHANNEL_PROVIDER_OPTIONS,
+  type CommunicationChannelProvider,
+  communicationChannelProviderServiceLabel,
+} from '@lib/communicationChannelProviders'
+import {
+  type CommunicationChannelItem,
+  teamsWebhookPathForChannelName,
+  teamsWebhookUrlForChannelName,
+} from '@lib/communicationChannels'
 import { toKebabCase, toKebabInput } from '@lib/string'
 
 type HostItem = {
   metadata?: { name?: string }
 }
 
-type ChannelProvider = Extract<ChannelType, 'telegram' | 'slack'>
+type ChannelProvider = CommunicationChannelProvider
 
 type DraftState = {
   accessTeamIds: string[]
@@ -32,12 +45,18 @@ type DraftState = {
   slackBotHandle: string
   slackReplyOnlyWhenMentioned: boolean
   slackReplyInThreads: boolean
+  teamsAppName: string
+  teamsAppId: string
+  teamsTenantId: string
+  teamsReplyOnlyWhenMentioned: boolean
   telegramBotHandle: string
   telegramReplyOnlyWhenMentioned: boolean
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const TEAMS_BOT_NAME_RE = /^[a-z][a-z0-9-]{1,62}[a-z0-9]$/
+const LOCAL_TEAMS_ENDPOINT_ORIGIN = 'https://<public-webhook-origin>'
 const STEPS = ['Channel', 'Provider'] as const
-const CHANNEL_PROVIDERS: readonly ChannelProvider[] = ['telegram', 'slack'] as const
 
 const STEP_DETAILS = [
   {
@@ -52,12 +71,10 @@ const STEP_DETAILS = [
   },
 ] as const
 
-function labelForProvider(type: ChannelProvider): string {
-  return type === 'telegram' ? 'Telegram' : 'Slack'
-}
-
 function requiredCredentialKeysForProvider(type: ChannelProvider): Array<keyof CredentialDraft> {
-  return type === 'telegram' ? ['telegram-bot-token'] : ['slack-signing-secret', 'slack-bot-token']
+  if (type === 'telegram') return ['telegram-bot-token']
+  if (type === 'teams') return ['teams-app-password']
+  return ['slack-signing-secret', 'slack-bot-token']
 }
 
 function credentialLabel(key: keyof CredentialDraft): string {
@@ -68,9 +85,35 @@ function credentialLabel(key: keyof CredentialDraft): string {
       return 'Slack signing secret'
     case 'slack-bot-token':
       return 'Slack Bot User OAuth token'
+    case 'teams-app-password':
+      return 'CLIENT_SECRET'
     default:
       return String(key)
   }
+}
+
+function toTeamsBotNameInput(value: string): string {
+  return toKebabInput(value).slice(0, 64)
+}
+
+function isValidTeamsBotName(value: string): boolean {
+  return TEAMS_BOT_NAME_RE.test(value.trim())
+}
+
+function commandEndpointForTeams(webhookUrl: string | null): string {
+  if (!webhookUrl) return `${LOCAL_TEAMS_ENDPOINT_ORIGIN}/webhooks/teams/<target>`
+  if (/^https?:\/\//i.test(webhookUrl)) return webhookUrl
+  return `${LOCAL_TEAMS_ENDPOINT_ORIGIN}${webhookUrl.startsWith('/') ? webhookUrl : `/${webhookUrl}`}`
+}
+
+function buildTeamsAppCreateCommand(params: { botName: string; endpoint: string }): string {
+  const botName = params.botName.trim() || '<bot-name>'
+  return [
+    'teams app create \\',
+    `  --name "${botName}" \\`,
+    `  --endpoint "${params.endpoint}" \\`,
+    '  --env .env',
+  ].join('\n')
 }
 
 function providerSettings(provider: ChannelProvider, draft: DraftState) {
@@ -84,26 +127,61 @@ function providerSettings(provider: ChannelProvider, draft: DraftState) {
       slack: [],
     }
   }
+  if (provider === 'slack') {
+    return {
+      telegram: [],
+      slack: [],
+      slackSettings: {
+        botHandle: draft.slackBotHandle.trim(),
+        replyOnlyWhenMentioned: draft.slackReplyOnlyWhenMentioned,
+        replyInThreads: draft.slackReplyInThreads,
+      },
+    }
+  }
   return {
     telegram: [],
     slack: [],
-    slackSettings: {
-      botHandle: draft.slackBotHandle.trim(),
-      replyOnlyWhenMentioned: draft.slackReplyOnlyWhenMentioned,
-      replyInThreads: draft.slackReplyInThreads,
+    teams: [],
+    teamsSettings: {
+      appName: draft.teamsAppName.trim(),
+      appId: draft.teamsAppId.trim(),
+      tenantId: draft.teamsTenantId.trim(),
+      replyOnlyWhenMentioned: draft.teamsReplyOnlyWhenMentioned,
     },
   }
 }
 
+function providerFromParam(value: string | null): ChannelProvider | null {
+  return COMMUNICATION_CHANNEL_PROVIDERS.find(provider => provider === value) ?? null
+}
+
+function extractChannel(response: unknown, name: string): CommunicationChannelItem | null {
+  if (!response || typeof response !== 'object') return null
+  const direct = response as CommunicationChannelItem
+  if (direct.metadata || direct.spec) return direct
+  const wrapped = response as {
+    channel?: CommunicationChannelItem
+    item?: CommunicationChannelItem
+  }
+  if (wrapped.item) return wrapped.item
+  if (wrapped.channel) return wrapped.channel
+  const list = response as { items?: CommunicationChannelItem[] }
+  return list.items?.find(item => item.metadata?.name === name) ?? null
+}
+
 export default function CreateCommunicationChannelPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { showToast } = useToast()
+  const copyFrom = searchParams.get('copyFrom')?.trim() || ''
+  const copyProvider = providerFromParam(searchParams.get('provider'))
 
   const [loadingHosts, setLoadingHosts] = useState(true)
   const [hosts, setHosts] = useState<HostItem[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [step, setStep] = useState(0)
+  const [canUseBrowserWebhookOrigin, setCanUseBrowserWebhookOrigin] = useState(false)
 
   const [channelName, setChannelName] = useState('')
   const [activeProvider, setActiveProvider] = useState<ChannelProvider>('telegram')
@@ -112,14 +190,42 @@ export default function CreateCommunicationChannelPage() {
     accessUserIds: [],
     hostRef: '',
     slackBotHandle: '',
-    slackReplyOnlyWhenMentioned: false,
+    slackReplyOnlyWhenMentioned: true,
     slackReplyInThreads: false,
+    teamsAppName: '',
+    teamsAppId: '',
+    teamsTenantId: '',
+    teamsReplyOnlyWhenMentioned: true,
     telegramBotHandle: '',
     telegramReplyOnlyWhenMentioned: true,
   })
   const [pendingCredentials, setPendingCredentials] = useState<CredentialDraft>({})
+  const appliedCopyKeyRef = useRef<string | null>(null)
 
   const visibleChannelTypes = useMemo<ChannelType[]>(() => [activeProvider], [activeProvider])
+  const normalizedChannelName = toKebabCase(channelName)
+  const teamsWebhookUrl = useMemo(
+    () =>
+      normalizedChannelName
+        ? canUseBrowserWebhookOrigin
+          ? teamsWebhookUrlForChannelName(normalizedChannelName)
+          : teamsWebhookPathForChannelName(normalizedChannelName)
+        : null,
+    [canUseBrowserWebhookOrigin, normalizedChannelName]
+  )
+  const teamsAppCreateCommand = useMemo(
+    () =>
+      buildTeamsAppCreateCommand({
+        botName: draft.teamsAppName,
+        endpoint: commandEndpointForTeams(teamsWebhookUrl),
+      }),
+    [draft.teamsAppName, teamsWebhookUrl]
+  )
+  const teamsBotNameIsValid = isValidTeamsBotName(draft.teamsAppName)
+
+  useEffect(() => {
+    setCanUseBrowserWebhookOrigin(true)
+  }, [])
 
   useEffect(() => {
     async function loadHosts() {
@@ -137,6 +243,51 @@ export default function CreateCommunicationChannelPage() {
 
     void loadHosts()
   }, [])
+
+  useEffect(() => {
+    if (!copyFrom || !copyProvider) return
+    const copyKey = `${copyFrom}:${copyProvider}`
+    if (appliedCopyKeyRef.current === copyKey) return
+    appliedCopyKeyRef.current = copyKey
+
+    async function loadCopySource() {
+      setError('')
+      try {
+        const response = await apiGet(
+          `/api/v1/admin/communication-channels/${encodeURIComponent(copyFrom)}`
+        ).catch(async error => {
+          if (error instanceof Error && error.message.includes('404')) {
+            return apiGet('/api/v1/admin/communication-channels')
+          }
+          throw error
+        })
+        const source = extractChannel(response, copyFrom)
+        if (!source) {
+          setError(`Communication channel ${copyFrom} was not found.`)
+          return
+        }
+        const spec = source.spec || {}
+        setChannelName('')
+        setStep(0)
+        setActiveProvider(copyProvider)
+        setPendingCredentials({})
+        setDraft(current => ({
+          ...current,
+          accessTeamIds: spec.access?.teams || [],
+          accessUserIds: spec.access?.users || [],
+          hostRef: spec.hostRef || '',
+        }))
+      } catch (copyError) {
+        setError(
+          copyError instanceof Error
+            ? copyError.message
+            : 'Failed to load communication channel copy source'
+        )
+      }
+    }
+
+    void loadCopySource()
+  }, [copyFrom, copyProvider])
 
   function updateHostRef(hostRef: string) {
     setDraft(current => ({
@@ -181,6 +332,16 @@ export default function CreateCommunicationChannelPage() {
     await handleCreateChannel()
   }
 
+  async function copyTeamsAppCreateCommand() {
+    const copied = await copyTextToClipboard(teamsAppCreateCommand)
+    showToast(
+      copied
+        ? 'Teams bot command copied.'
+        : 'Could not copy to clipboard. Select the command and copy it manually.',
+      { tone: copied ? 'success' : 'error' }
+    )
+  }
+
   async function handleCreateChannel() {
     if (!validateIdentityStep()) return
 
@@ -201,6 +362,20 @@ export default function CreateCommunicationChannelPage() {
     if (activeProvider === 'slack' && !draft.slackBotHandle.trim()) {
       setError('Slack App Name is required.')
       return
+    }
+    if (activeProvider === 'teams') {
+      if (!isValidTeamsBotName(draft.teamsAppName)) {
+        setError('Name must start with a letter and use lowercase letters, numbers, and hyphens.')
+        return
+      }
+      if (!UUID_RE.test(draft.teamsAppId.trim())) {
+        setError('CLIENT_ID must be a valid UUID.')
+        return
+      }
+      if (!UUID_RE.test(draft.teamsTenantId.trim())) {
+        setError('TENANT_ID must be a valid UUID.')
+        return
+      }
     }
 
     setSaving(true)
@@ -315,16 +490,13 @@ export default function CreateCommunicationChannelPage() {
                 </div>
               ) : (
                 <div className="cu-form-stack cu-agent-form-stack--wide">
-                  <TabBar<ChannelProvider>
+                  <SegmentedControl<ChannelProvider>
                     ariaLabel="Communication channel provider"
-                    activeValue={activeProvider}
-                    className="cu-tabs--flush"
+                    value={activeProvider}
+                    className="cu-segmented-control--flush cu-segmented-control--full"
+                    disabled={saving}
                     onChange={handleProviderChange}
-                    options={CHANNEL_PROVIDERS.map(type => ({
-                      value: type,
-                      label: labelForProvider(type),
-                      disabled: saving,
-                    }))}
+                    options={COMMUNICATION_CHANNEL_PROVIDER_OPTIONS}
                   />
 
                   {activeProvider === 'telegram' ? (
@@ -379,7 +551,7 @@ export default function CreateCommunicationChannelPage() {
                         visibleChannelTypes={visibleChannelTypes}
                       />
                     </ProviderPanel>
-                  ) : (
+                  ) : activeProvider === 'slack' ? (
                     <ProviderPanel
                       provider="slack"
                       description="Install your Slack app in the workspace, then paste the Signing Secret and Bot User OAuth token. The workspace is detected when a user verifies a Slack conversation."
@@ -427,6 +599,130 @@ export default function CreateCommunicationChannelPage() {
                             }))
                           }
                           placeholder="Your Slack App"
+                          disabled={saving}
+                          autoComplete="off"
+                        />
+                      </Field>
+                      <ChannelCredentialsPanel
+                        ccName={channelName.trim()}
+                        pending={true}
+                        presentation="inline"
+                        onPendingChange={setPendingCredentials}
+                        visibleChannelTypes={visibleChannelTypes}
+                      />
+                    </ProviderPanel>
+                  ) : (
+                    <ProviderPanel
+                      provider="teams"
+                      description="Use a Microsoft Teams bot for one tenant. Add the bot details and client secret, then users can verify conversations from Teams."
+                      checked={draft.teamsReplyOnlyWhenMentioned}
+                      disabled={saving}
+                      onCheckedChange={checked =>
+                        setDraft(current => ({
+                          ...current,
+                          teamsReplyOnlyWhenMentioned: checked,
+                        }))
+                      }
+                    >
+                      <section className="cu-teams-setup">
+                        <div>
+                          <p className="cu-section-title">Create the Teams bot</p>
+                          <p className="cu-muted">
+                            Run the Teams CLI command, then copy the generated bot values into this
+                            channel.
+                          </p>
+                        </div>
+                        <Field
+                          description="Use lowercase letters, numbers, and hyphens. The name must start with a letter."
+                          htmlFor="teams-app-name"
+                          label="Name"
+                          required
+                        >
+                          <TextInput
+                            id="teams-app-name"
+                            value={draft.teamsAppName}
+                            onChange={event =>
+                              setDraft(current => ({
+                                ...current,
+                                teamsAppName: toTeamsBotNameInput(event.target.value),
+                              }))
+                            }
+                            placeholder="evenfire-bot"
+                            disabled={saving}
+                            autoComplete="off"
+                            invalid={Boolean(draft.teamsAppName) && !teamsBotNameIsValid}
+                          />
+                        </Field>
+                        <ol className="cu-teams-setup__instructions">
+                          <li>
+                            Run this from the project directory that has the Teams CLI project.
+                          </li>
+                          <li>
+                            The command writes generated Teams bot values into <code>.env</code>.
+                          </li>
+                          <li>
+                            In Teams Developer Portal, enable{' '}
+                            <strong>Upload and download files</strong> for the Bot feature.
+                          </li>
+                          <li>Paste CLIENT_ID, TENANT_ID, and CLIENT_SECRET below.</li>
+                        </ol>
+                        <div className="cu-command-block">
+                          <div className="cu-command-block__toolbar">
+                            <span>Bash</span>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="sm"
+                              className="cu-command-block__copy"
+                              onClick={copyTeamsAppCreateCommand}
+                              disabled={saving || !teamsBotNameIsValid}
+                              aria-label="Copy Teams bot create command"
+                            >
+                              <IconCopy width={15} height={15} />
+                              Copy
+                            </Button>
+                          </div>
+                          <pre className="cu-command-block__pre">
+                            <code>{teamsAppCreateCommand}</code>
+                          </pre>
+                        </div>
+                      </section>
+                      <Field
+                        description="CLIENT_ID from the generated .env file."
+                        htmlFor="teams-app-id"
+                        label="CLIENT_ID"
+                        required
+                      >
+                        <TextInput
+                          id="teams-app-id"
+                          value={draft.teamsAppId}
+                          onChange={event =>
+                            setDraft(current => ({
+                              ...current,
+                              teamsAppId: event.target.value,
+                            }))
+                          }
+                          placeholder="00000000-0000-0000-0000-000000000000"
+                          disabled={saving}
+                          autoComplete="off"
+                        />
+                      </Field>
+                      <Field
+                        description="TENANT_ID from the generated .env file."
+                        htmlFor="teams-tenant-id"
+                        label="TENANT_ID"
+                        required
+                      >
+                        <TextInput
+                          id="teams-tenant-id"
+                          value={draft.teamsTenantId}
+                          onChange={event =>
+                            setDraft(current => ({
+                              ...current,
+                              teamsTenantId: event.target.value,
+                            }))
+                          }
+                          placeholder="00000000-0000-0000-0000-000000000000"
                           disabled={saving}
                           autoComplete="off"
                         />
@@ -504,9 +800,7 @@ function ProviderPanel({
     <section className="cu-channel-provider-panel">
       <div className="cu-channel-provider-panel__head">
         <div>
-          <p className="cu-section-title">
-            {provider === 'slack' ? 'Slack app' : `${labelForProvider(provider)} bot`}
-          </p>
+          <p className="cu-section-title">{communicationChannelProviderServiceLabel(provider)}</p>
           <p className="cu-muted">
             {description || 'Add credentials and default bot behavior for confirmed conversations.'}
           </p>

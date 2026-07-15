@@ -15,7 +15,7 @@ import type { Attachment, ProviderTargetIdentity } from './types'
  */
 export interface OutgoingMessage {
   content: string
-  channelType: 'telegram' | 'email' | 'slack'
+  channelType: 'telegram' | 'email' | 'slack' | 'teams'
   channelId: string
   sender: string
   timestamp: string
@@ -89,10 +89,12 @@ export interface WorkflowApprovalResolveResponse {
 }
 
 export interface WorkflowResultRequestPayload {
-  workflowName: string
+  workflowName?: string
+  workflowRunId?: string
+  artifactName?: string
   providerIdentity: ProviderIdentity
   source: {
-    channelType: 'telegram' | 'slack'
+    channelType: 'telegram' | 'slack' | 'teams'
     channelId: string
     sender: string
     messageId: string
@@ -122,8 +124,19 @@ export type SlackLinkSessionConfirmResponse =
       error?: string
     }
 
+export type TeamsLinkSessionConfirmResponse =
+  | {
+      ok: true
+      account?: unknown
+      replyInThreads?: boolean | null
+    }
+  | {
+      ok?: false
+      error?: string
+    }
+
 export interface ChannelReaderRuntimeSource {
-  channelType: 'telegram' | 'email' | 'slack'
+  channelType: 'telegram' | 'email' | 'slack' | 'teams'
   channelId: string
   sender: string
 }
@@ -371,7 +384,25 @@ export class RPCClient {
   }
 
   async downloadWorkflowResult(message: Message, workflowName: string): Promise<MessageResponse> {
-    if (!message.providerIdentity) {
+    return this.requestWorkflowResult(message, { workflowName })
+  }
+
+  async downloadWorkflowResultByRun(
+    message: Message,
+    workflowRunId: string,
+    artifactName?: string
+  ): Promise<MessageResponse> {
+    return this.requestWorkflowResult(message, {
+      workflowRunId,
+      ...(artifactName?.trim() ? { artifactName: artifactName.trim() } : {}),
+    })
+  }
+
+  private async requestWorkflowResult(
+    message: Message,
+    result: Pick<WorkflowResultRequestPayload, 'workflowName' | 'workflowRunId' | 'artifactName'>
+  ): Promise<MessageResponse> {
+    if (!message.providerIdentity || message.channelType === 'email') {
       return {
         success: false,
         error: {
@@ -384,10 +415,10 @@ export class RPCClient {
     }
 
     const payload: WorkflowResultRequestPayload = {
-      workflowName,
+      ...result,
       providerIdentity: message.providerIdentity,
       source: {
-        channelType: message.channelType as 'telegram' | 'slack',
+        channelType: message.channelType,
         channelId: message.channelId,
         sender: message.sender,
         messageId: message.messageId,
@@ -575,6 +606,8 @@ export class RPCClient {
     providerUserId: string
     providerWorkspaceId: string
     providerChannelId: string
+    providerChannelType?: string | null
+    providerChannelTitle?: string | null
     providerTarget: ProviderTargetIdentity
   }): Promise<{ ok: true; account?: unknown } | { ok: false; error: string }> {
     const communicationChannelRef =
@@ -598,6 +631,8 @@ export class RPCClient {
           providerUserId: params.providerUserId,
           providerWorkspaceId: params.providerWorkspaceId,
           providerChannelId: params.providerChannelId,
+          providerChannelType: params.providerChannelType ?? null,
+          providerChannelTitle: params.providerChannelTitle ?? null,
           communicationChannelRef,
         }),
       }
@@ -615,6 +650,67 @@ export class RPCClient {
         body && typeof body === 'object' && 'error' in body && body.error
           ? String(body.error)
           : `slack_verification_failed_${response.status}`,
+    }
+  }
+
+  async confirmTeamsLinkSession(params: {
+    nonce: string
+    providerUserId: string
+    providerWorkspaceId: string
+    providerChannelId: string
+    providerChannelType?: string | null
+    providerChannelTitle?: string | null
+    providerTeamId?: string | null
+    providerTeamsChannelId?: string | null
+    serviceUrl?: string | null
+    providerTarget: ProviderTargetIdentity
+  }): Promise<
+    { ok: true; account?: unknown; replyInThreads?: boolean | null } | { ok: false; error: string }
+  > {
+    const communicationChannelRef =
+      params.providerTarget.communicationChannelNamespace &&
+      params.providerTarget.communicationChannelName
+        ? `${params.providerTarget.communicationChannelNamespace}/${params.providerTarget.communicationChannelName}`
+        : ''
+    const response = await fetch(
+      `${this.baseUrl}/v1/runtime/workflow-approval-mediums/link-sessions/confirm`,
+      {
+        method: 'POST',
+        signal: AbortSignal.timeout(15_000),
+        headers: this.runtimeHeaders({
+          channelType: 'teams',
+          channelId: params.providerChannelId,
+          sender: params.providerUserId,
+        }),
+        body: JSON.stringify({
+          nonce: params.nonce,
+          medium: 'teams',
+          providerUserId: params.providerUserId,
+          providerWorkspaceId: params.providerWorkspaceId,
+          providerChannelId: params.providerChannelId,
+          providerChannelType: params.providerChannelType ?? null,
+          providerChannelTitle: params.providerChannelTitle ?? null,
+          providerTeamId: params.providerTeamId ?? null,
+          providerTeamsChannelId: params.providerTeamsChannelId ?? null,
+          serviceUrl: params.serviceUrl ?? null,
+          communicationChannelRef,
+        }),
+      }
+    )
+    const body = (await response.json().catch(() => ({}))) as TeamsLinkSessionConfirmResponse
+    if (response.ok && body.ok) {
+      return {
+        ok: true,
+        ...(body.account !== undefined ? { account: body.account } : {}),
+        ...(body.replyInThreads !== undefined ? { replyInThreads: body.replyInThreads } : {}),
+      }
+    }
+    return {
+      ok: false,
+      error:
+        body && typeof body === 'object' && 'error' in body && body.error
+          ? String(body.error)
+          : `teams_verification_failed_${response.status}`,
     }
   }
 
@@ -644,7 +740,7 @@ export class RPCClient {
   async getCronResults(): Promise<
     Array<{
       id: string
-      origin: { channelType: 'telegram' | 'email' | 'slack'; channelId: string; sender: string }
+      origin: ChannelReaderRuntimeSource
       response: string
       attachments?: Attachment[]
       cronJobId: string
@@ -662,7 +758,7 @@ export class RPCClient {
       const data = (await response.json()) as {
         results: Array<{
           id: string
-          origin: { channelType: 'telegram' | 'email' | 'slack'; channelId: string; sender: string }
+          origin: ChannelReaderRuntimeSource
           response: string
           attachments?: Attachment[]
           cronJobId: string

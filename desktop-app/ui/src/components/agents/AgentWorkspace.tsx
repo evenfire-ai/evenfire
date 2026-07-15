@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
-import { useAuthContext } from '@contexts/AuthContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
@@ -68,7 +67,6 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     handleSelectChatAgent: onSelectChatAgent,
     handleOpenContextDetails,
   } = useNavigationContext()
-  const { me } = useAuthContext()
   const { agentNames } = useAgentsDataController()
   const { contextIds, loading: contextsLoading, error: contextsError } = useContextsDataController()
   const { agentContextByName, selectedAgentMcpServers } = useMcpServersDataController({
@@ -107,10 +105,6 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   const isChatMode = mode === 'chat'
   const isChatScrollNavMode = isChatMode && Boolean(activeChatId)
   const rootBreadcrumbLabel = mode === 'chat' ? 'Chat' : 'Agents'
-  const rawWelcomeName = me?.name?.trim() || 'there'
-  const welcomeName = rawWelcomeName
-    ? `${rawWelcomeName.charAt(0).toUpperCase()}${rawWelcomeName.slice(1)}`
-    : 'there'
   const rootBreadcrumbItem: PageBreadcrumbItem =
     mode === 'chat' && selectedAgent
       ? {
@@ -217,14 +211,14 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     </span>
   )
 
-  // Chat-mode breadcrumb agent label. The agent NAME always shows; the route
-  // (sections) 3-dots menu only shows on the new-chat landing (no active chat).
-  // Inside an active conversation the breadcrumb shows the agent name alone —
-  // the 3-dots is dropped to keep the session header clean.
+  // Chat-mode breadcrumb agent label. The agent NAME always shows. The route
+  // (sections) 3-dots menu shows ONLY inside an active conversation — the
+  // new-chat landing keeps its own agent selector (with 3-dots) in the title
+  // row, so the breadcrumb there shows only the root "Chat" item.
   const agentBreadcrumbLabel = isChatMode ? (
     <span className="agent-workspace-agent-breadcrumb-actions">
       {selectedAgent || 'Agent'}
-      {isChatMode && !activeChatId ? chatAgentRouteMenu : null}
+      {isChatMode && activeChatId ? chatAgentRouteMenu : null}
     </span>
   ) : (
     selectedAgent || 'Agent'
@@ -292,12 +286,13 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
                       ? [{ label: rootBreadcrumbLabel, onClick: onBackToAgents }]
                       : [rootBreadcrumbItem]),
                     // Chat-mode breadcrumb rules:
-                    //  - Welcome-back / new-chat landing (no active chat): the
-                    //    agent selector lives in the title row, so the breadcrumb
-                    //    shows ONLY the root "Chat" item — no agent name, no dots.
+                    //  - New-chat landing (no active chat): the agent selector
+                    //    lives in the title row, so the breadcrumb shows ONLY the
+                    //    root "Chat" item — no agent name, no dots.
                     //  - Active conversation: breadcrumb = root "Chat" + the agent
-                    //    NAME only (the 3-dots route menu is dropped — see
-                    //    agentBreadcrumbLabel — to keep the session header clean).
+                    //    NAME plus the 3-dots route menu (see agentBreadcrumbLabel)
+                    //    so the user can jump to Details / Connectors / etc.
+                    //    without leaving the session.
                     ...(mode === 'chat' && !activeChatId ? [] : [agentBreadcrumbItem]),
                     ...(mode === 'agents'
                       ? [
@@ -490,9 +485,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
           {isChatMode && !activeChatId && (
             <>
               <div className="agent-workspace-greeting-row">
-                <h2 className="agent-workspace-greeting">
-                  Welcome back {welcomeName}! New chat with
-                </h2>
+                <h2 className="agent-workspace-greeting">New chat with</h2>
                 {agentSwitcherLabel}
               </div>
               <ComposerPanel inline />

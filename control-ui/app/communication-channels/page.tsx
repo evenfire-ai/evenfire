@@ -6,6 +6,7 @@ import { AuthGate } from '@components/AuthGate'
 import { CommunicationChannelsTable } from '@components/CommunicationChannelsTable'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { apiGet, isSilentApiError } from '@lib/api'
+import type { CommunicationChannelProvider } from '@lib/communicationChannelProviders'
 import type { CommunicationChannelItem } from '@lib/communicationChannels'
 
 export default function CommunicationChannelsPage() {
@@ -36,6 +37,14 @@ export default function CommunicationChannelsPage() {
     void loadAll()
   }, [])
 
+  function copyChannel(name: string, provider: CommunicationChannelProvider) {
+    const params = new URLSearchParams({
+      copyFrom: name,
+      provider,
+    })
+    router.push(`/communication-channels/new?${params.toString()}`)
+  }
+
   return (
     <AuthGate>
       <DashboardLayout>
@@ -47,6 +56,7 @@ export default function CommunicationChannelsPage() {
           onRefresh={loadAll}
           refreshing={loading}
           onCreateChannel={() => router.push('/communication-channels/new')}
+          onCopyChannel={copyChannel}
           onOpenChannel={name =>
             router.push(`/communication-channels/${encodeURIComponent(name)}/edit`)
           }

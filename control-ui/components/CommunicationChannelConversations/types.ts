@@ -1,7 +1,7 @@
 import type { CommunicationChannelGroup } from '@lib/communicationChannels'
 
 export type CommunicationChannelConversation = CommunicationChannelGroup & {
-  provider: 'telegram' | 'slack'
+  provider: 'telegram' | 'slack' | 'teams'
 }
 
 export type CommunicationChannelConversationsTableProps = {

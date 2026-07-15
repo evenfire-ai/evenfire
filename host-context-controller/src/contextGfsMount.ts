@@ -31,7 +31,7 @@ export function decideMountStatus(
   if (intent.scopes.length === 0) {
     return 'PendingMount'
   }
-  return intent.scopes.every((scope) => heldScopes.has(scope)) ? 'Mounted' : 'PendingMount'
+  return intent.scopes.every(scope => heldScopes.has(scope)) ? 'Mounted' : 'PendingMount'
 }
 
 /** Confirms which scopes the Context identity actually holds on the target. */

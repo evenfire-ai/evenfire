@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import {
-  applyResourcePatch,
-  ResourcePatchError,
-  type ResourcePatch,
-} from '../src/routes/gfs/resources.js'
 import type { GfsCaller, GrantsDb } from '../src/routes/gfs/grants.js'
+import {
+  type ResourcePatch,
+  ResourcePatchError,
+  applyResourcePatch,
+} from '../src/routes/gfs/resources.js'
 
 /**
  * P2-S05 — move/rename write path (control-api half). Drives applyResourcePatch
@@ -38,12 +38,54 @@ interface GrantRow {
 }
 
 const RESOURCES: Record<string, ResRow> = {
-  [FILE]: { resource_id: FILE, drive: 'main', parent_resource_id: SRC, name: 'a.md', kind: 'file', version: 2 },
-  [SRC]: { resource_id: SRC, drive: 'main', parent_resource_id: null, name: 'src', kind: 'directory', version: 0 },
-  [DEST]: { resource_id: DEST, drive: 'main', parent_resource_id: null, name: 'dest', kind: 'directory', version: 0 },
-  [DEST_OTHER_DRIVE]: { resource_id: DEST_OTHER_DRIVE, drive: 'other', parent_resource_id: null, name: 'x', kind: 'directory', version: 0 },
-  [DEST_FILE]: { resource_id: DEST_FILE, drive: 'main', parent_resource_id: SRC, name: 'f.md', kind: 'file', version: 0 },
-  [DIR]: { resource_id: DIR, drive: 'main', parent_resource_id: SRC, name: 'd', kind: 'directory', version: 0 },
+  [FILE]: {
+    resource_id: FILE,
+    drive: 'main',
+    parent_resource_id: SRC,
+    name: 'a.md',
+    kind: 'file',
+    version: 2,
+  },
+  [SRC]: {
+    resource_id: SRC,
+    drive: 'main',
+    parent_resource_id: null,
+    name: 'src',
+    kind: 'directory',
+    version: 0,
+  },
+  [DEST]: {
+    resource_id: DEST,
+    drive: 'main',
+    parent_resource_id: null,
+    name: 'dest',
+    kind: 'directory',
+    version: 0,
+  },
+  [DEST_OTHER_DRIVE]: {
+    resource_id: DEST_OTHER_DRIVE,
+    drive: 'other',
+    parent_resource_id: null,
+    name: 'x',
+    kind: 'directory',
+    version: 0,
+  },
+  [DEST_FILE]: {
+    resource_id: DEST_FILE,
+    drive: 'main',
+    parent_resource_id: SRC,
+    name: 'f.md',
+    kind: 'file',
+    version: 0,
+  },
+  [DIR]: {
+    resource_id: DIR,
+    drive: 'main',
+    parent_resource_id: SRC,
+    name: 'd',
+    kind: 'directory',
+    version: 0,
+  },
 }
 
 function mockDb(opts?: { grants?: GrantRow[]; update?: 'ok' | 'empty' | 'conflict' }): GrantsDb {
@@ -73,7 +115,11 @@ function mockDb(opts?: { grants?: GrantRow[]; update?: 'ok' | 'empty' | 'conflic
   }
 }
 
-const operator: GfsCaller = { isOperator: true, subjects: new Set(['operator:']), actorKey: 'operator:' }
+const operator: GfsCaller = {
+  isOperator: true,
+  subjects: new Set(['operator:']),
+  actorKey: 'operator:',
+}
 function user(id: string): GfsCaller {
   return { isOperator: false, subjects: new Set([`user:${id}`]), actorKey: `user:${id}` }
 }
@@ -92,7 +138,7 @@ async function patch(
   body: ResourcePatch
 ): Promise<{ version: number; audited: unknown[] }> {
   const audited: unknown[] = []
-  const { version } = await applyResourcePatch(db, caller, 'main', id, body, async (p) => {
+  const { version } = await applyResourcePatch(db, caller, 'main', id, body, async p => {
     audited.push(p)
   })
   return { version, audited }
@@ -135,17 +181,21 @@ describe('applyResourcePatch — move', () => {
   })
 
   it('forbids a cross-drive move (cross_boundary)', async () => {
-    await expect(patch(mockDb(), operator, FILE, { newParentId: DEST_OTHER_DRIVE })).rejects.toMatchObject({
+    await expect(
+      patch(mockDb(), operator, FILE, { newParentId: DEST_OTHER_DRIVE })
+    ).rejects.toMatchObject({
       status: 403,
       code: 'cross_boundary',
     })
   })
 
   it('rejects moving into a non-directory', async () => {
-    await expect(patch(mockDb(), operator, FILE, { newParentId: DEST_FILE })).rejects.toMatchObject({
-      status: 400,
-      code: 'not_a_directory',
-    })
+    await expect(patch(mockDb(), operator, FILE, { newParentId: DEST_FILE })).rejects.toMatchObject(
+      {
+        status: 400,
+        code: 'not_a_directory',
+      }
+    )
   })
 
   it('a user needs write+delete on src parent AND write on dest parent', async () => {
@@ -168,7 +218,9 @@ describe('applyResourcePatch — move', () => {
 
 describe('applyResourcePatch — concurrency + guards', () => {
   it('a stale If-Match is precondition_failed', async () => {
-    await expect(patch(mockDb(), operator, FILE, { newName: 'b.md', ifMatch: 1 })).rejects.toMatchObject({
+    await expect(
+      patch(mockDb(), operator, FILE, { newName: 'b.md', ifMatch: 1 })
+    ).rejects.toMatchObject({
       status: 412,
       code: 'precondition_failed',
     })
@@ -180,13 +232,17 @@ describe('applyResourcePatch — concurrency + guards', () => {
   })
 
   it('a concurrent version bump (no rows updated) is precondition_failed', async () => {
-    await expect(patch(mockDb({ update: 'empty' }), operator, FILE, { newName: 'b.md' })).rejects.toMatchObject({
+    await expect(
+      patch(mockDb({ update: 'empty' }), operator, FILE, { newName: 'b.md' })
+    ).rejects.toMatchObject({
       status: 412,
     })
   })
 
   it('a sibling-name collision is already_exists', async () => {
-    await expect(patch(mockDb({ update: 'conflict' }), operator, FILE, { newParentId: DEST })).rejects.toMatchObject({
+    await expect(
+      patch(mockDb({ update: 'conflict' }), operator, FILE, { newParentId: DEST })
+    ).rejects.toMatchObject({
       status: 409,
       code: 'already_exists',
     })
@@ -216,7 +272,7 @@ describe('applyResourcePatch — security guards (review findings)', () => {
     const db = mockDb({ grants: [grant('owner', FILE, 'read')] }) // no write
     const audited: Array<{ outcome?: string }> = []
     await expect(
-      applyResourcePatch(db, user('owner'), 'main', FILE, { newName: 'b.md' }, async (p) => {
+      applyResourcePatch(db, user('owner'), 'main', FILE, { newName: 'b.md' }, async p => {
         audited.push(p)
       })
     ).rejects.toMatchObject({ status: 403 })

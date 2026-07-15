@@ -79,4 +79,22 @@ export function validateCommunicationChannelConfig(channelCRD: CommunicationChan
       }
     }
   }
+
+  if (spec.teams) {
+    for (let i = 0; i < spec.teams.length; i++) {
+      const group = spec.teams[i]
+      const label = `Teams group[${i}] in channel "${name}"`
+
+      if (!group.channelId || group.channelId.trim() === '') {
+        throw new Error(`Invalid ${label}: channelId cannot be empty.`)
+      }
+      if (!group.tenantId || group.tenantId.trim() === '') {
+        throw new Error(`Invalid ${label}: tenantId cannot be empty.`)
+      }
+      const emptyUserIds = (group.userIds ?? []).filter(id => !id || id.trim() === '')
+      if (emptyUserIds.length > 0) {
+        throw new Error(`Invalid ${label}: userIds contains empty values.`)
+      }
+    }
+  }
 }

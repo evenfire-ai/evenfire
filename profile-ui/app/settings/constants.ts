@@ -1,5 +1,7 @@
 import type { ProfileChannelSection, SocialChannelTab } from './types'
 
+export const APPROVAL_ACCOUNT_DISPLAY_NAME_MAX_LENGTH = 120
+
 export const EMAIL_CHANNEL_SECTION: ProfileChannelSection = {
   key: 'emails',
   title: 'Contact emails',
@@ -33,6 +35,13 @@ export const PROFILE_SOCIAL_CHANNEL_TABS: SocialChannelTab[] = [
     label: 'Slack',
     description: 'Connect Slack conversations for agent chat and workflow approvals.',
     sections: SLACK_CHANNEL_SECTIONS,
+    status: 'active',
+  },
+  {
+    key: 'teams',
+    label: 'Teams',
+    description: 'Connect Microsoft Teams conversations for agent chat and workflow approvals.',
+    sections: [],
     status: 'active',
   },
 ]

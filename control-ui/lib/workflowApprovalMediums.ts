@@ -3,7 +3,7 @@ import { apiGet, apiSend } from './api'
 export type WorkflowApprovalMediumAccount = {
   id: string
   userId: string
-  medium: 'telegram' | 'slack'
+  medium: 'telegram' | 'slack' | 'teams'
   providerUserId: string
   providerWorkspaceId: string | null
   providerChannelId: string | null

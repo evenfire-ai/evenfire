@@ -17,9 +17,11 @@ metadata:
   name: control-api-hosts-and-secrets
   namespace: mcp-host
 rules:
+  # patch on hosts: control-api already holds `update` (⊇ patch); patch added
+  # for race-free wake-annotation semantics (merge-patch, no read-modify-write).
   - apiGroups: ['clerum.io']
     resources: ['hosts']
-    verbs: ['get', 'list', 'create', 'update', 'delete']
+    verbs: ['get', 'list', 'create', 'update', 'patch', 'delete']
   # SharedFileSystem CRDs (always in mcp-host ns) — Control UI admin endpoints
   # under /api/v1/admin/shared-filesystems list/get/create/delete CRDs and the
   # proxy endpoint reads the CRD before forwarding to the per-SFS wfc.
@@ -87,6 +89,12 @@ rules:
     verbs: ['get', 'list', 'watch', 'patch', 'update']
   - apiGroups: ['clerum.io']
     resources: ['sharedfilesystems/status']
+    verbs: ['get', 'patch', 'update']
+  # Stateless-agent lifecycle: mirrors the sharedfilesystems/status precedent
+  # above — HCC writes Host.status.lifecycle (state) + conditions through the
+  # /status subresource while reconciling suspended/waking stateless Hosts.
+  - apiGroups: ['clerum.io']
+    resources: ['hosts/status']
     verbs: ['get', 'patch', 'update']
   # Init Jobs for the SharedFileSystem PVC (chown/seed/mkdir directories[]).
   - apiGroups: ['batch']

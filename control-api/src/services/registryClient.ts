@@ -7,6 +7,7 @@
  */
 import { config } from '../config.js'
 import { rootLogger } from '../observability/logger.js'
+import { resolveMachineCreds } from './registryConnectionDb.js'
 
 const API_BASE = `${config.registryUrl}/api/v1`
 
@@ -75,13 +76,30 @@ export async function mintToken(envOverride?: NodeJS.ProcessEnv): Promise<string
   const now = Date.now()
   if (cached && now < cached.expiresAt - 30_000) return cached.token
 
-  // Env precedence: explicit override wins; otherwise process.env (which is
-  // what config also reads, but routes through env directly here so tests can
-  // mutate without rebuilding the config singleton).
-  const id = env.CLERUM_REGISTRY_CLIENT_ID || (envOverride ? '' : config.registryClientId)
-  const secret =
-    env.CLERUM_REGISTRY_CLIENT_SECRET || (envOverride ? '' : config.registryClientSecret)
+  // Env precedence: explicit override wins; otherwise process.env / config
+  // (which is what config also reads, but routes through env directly here so
+  // tests can mutate without rebuilding the config singleton). This resolves
+  // MANAGED creds — env/Secret, unchanged from before.
+  let id = env.CLERUM_REGISTRY_CLIENT_ID || (envOverride ? '' : config.registryClientId)
+  let secret = env.CLERUM_REGISTRY_CLIENT_SECRET || (envOverride ? '' : config.registryClientSecret)
+  // Single source of truth for the registry base URL — env override wins for
+  // tests/minikube, else config.registryUrl (mandatory + allowlisted when auth
+  // is on). resolveMachineCreds no longer carries a `url`.
   const url = env.CLERUM_REGISTRY_URL || (envOverride ? '' : config.registryUrl)
+
+  // When creds are still absent AND no explicit env override is in play, fall
+  // through to the mode-aware resolver: managed → config env creds (a no-op
+  // here, already resolved above); self-hosted → the registry_connection DB row
+  // populated at claim. An explicit envOverride short-circuits this so the
+  // env-driven test/minikube paths never touch the DB.
+  if ((!id || !secret) && !envOverride) {
+    const resolved = await resolveMachineCreds()
+    if (resolved) {
+      id = id || resolved.clientId
+      secret = secret || resolved.clientSecret
+    }
+  }
+
   const authEnabledRaw = env.CLERUM_REGISTRY_AUTH_ENABLED
   const authEnabled =
     authEnabledRaw === undefined
@@ -93,7 +111,7 @@ export async function mintToken(envOverride?: NodeJS.ProcessEnv): Promise<string
   if (!id || !secret) {
     if (!authEnabled) return '' // minikube / auth-off
     throw new Error(
-      'CLERUM_REGISTRY_CLIENT_ID and CLERUM_REGISTRY_CLIENT_SECRET are required when auth is enabled'
+      'registry machine credentials unavailable (env in managed mode, DB row in self-hosted)'
     )
   }
 

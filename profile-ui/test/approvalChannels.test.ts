@@ -67,6 +67,22 @@ test('approvalAccountDisplayName prefers the communication channel name', () => 
   ])
 })
 
+test('approvalAccountDisplayName prefers a custom account display name', () => {
+  const account: WorkflowApprovalMediumAccount = {
+    id: 'account-1',
+    userId: 'user-1',
+    medium: 'teams',
+    providerUserId: 'teams-user',
+    providerWorkspaceId: 'tenant-1',
+    providerChannelId: 'conversation-1',
+    displayName: 'Leadership approvals',
+    targets: [{ ...target, id: 'teams:target', medium: 'teams', channelName: 'teams-channel' }],
+  }
+
+  assert.equal(approvalAccountDisplayName(account), 'Leadership approvals')
+  assert.equal(approvalAccountChannelName(account), 'Leadership approvals')
+})
+
 test('approval account helpers expose disconnected state without targets', () => {
   const account: WorkflowApprovalMediumAccount = {
     id: 'account-1',

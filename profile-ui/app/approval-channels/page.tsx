@@ -39,7 +39,9 @@ function LoadingSkeleton() {
 }
 
 function settingsPathForMedium(medium: string): string {
-  return medium === 'slack' ? '/settings/social/slack' : '/settings/social/telegram'
+  if (medium === 'slack') return '/settings/social/slack'
+  if (medium === 'teams') return '/settings/social/teams'
+  return '/settings/social/telegram'
 }
 
 function ApprovalChannelsContent() {

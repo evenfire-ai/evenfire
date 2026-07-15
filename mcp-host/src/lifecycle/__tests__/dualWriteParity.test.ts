@@ -14,7 +14,7 @@ describe('Dual-write parity', () => {
 
   it('enqueue creates matching pending record', () => {
     const task = mq.createInternalTask('test content')
-    lc.register(task) // simulates messageHandler ordering
+    // Single-admission contract: mq.enqueue (admit) is the registration point.
     mq.enqueue(task)
     expect(lc.getStatus(task.id)).toBe('pending')
     expect(mq.getTask(task.id)?.status).toBe('pending')
@@ -22,7 +22,6 @@ describe('Dual-write parity', () => {
 
   it('dequeue writes processing to both', () => {
     const task = mq.createInternalTask('test')
-    lc.register(task)
     mq.enqueue(task)
     mq.dequeue()
     expect(lc.getStatus(task.id)).toBe('processing')
@@ -31,7 +30,6 @@ describe('Dual-write parity', () => {
 
   it('completeTask writes completed to both', () => {
     const task = mq.createInternalTask('test')
-    lc.register(task)
     mq.enqueue(task)
     mq.dequeue()
     mq.completeTask(task)
@@ -41,7 +39,6 @@ describe('Dual-write parity', () => {
 
   it('failTask writes failed to both', () => {
     const task = mq.createInternalTask('test')
-    lc.register(task)
     mq.enqueue(task)
     mq.dequeue()
     mq.failTask(task, {
@@ -60,7 +57,6 @@ describe('Dual-write parity', () => {
     // The TaskRecord is updated; task.status sync for pending tasks is handled in Phase E
     // (queue subscriber / readonly enforcement). Here we verify the lifecycle side.
     const task = mq.createInternalTask('test')
-    lc.register(task)
     mq.enqueue(task)
     const outcome = lc.transition(task.id, 'cancelled', 'user_requested')
     expect(outcome.kind).toBe('applied')

@@ -357,9 +357,11 @@ async function deliverOne(
       outcome = resolved.token
         ? await sendTelegramDelivery(delivery, cfg, resolved.token)
         : 'no_bot'
-    } else {
+    } else if (delivery.medium === 'slack') {
       const resolved = await resolveChannelBotToken(delivery, 'slack', resolver)
       outcome = resolved.token ? await sendSlackDelivery(delivery, cfg, resolved.token) : 'no_bot'
+    } else {
+      outcome = 'no_bot'
     }
   } catch (error) {
     // Secret/CC read failure (RBAC, timeout, 5xx) — retryable, NOT no_bot.

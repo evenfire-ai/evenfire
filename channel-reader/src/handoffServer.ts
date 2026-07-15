@@ -6,6 +6,7 @@ const MAX_HANDOFF_BODY_BYTES = 256 * 1024
 export type SlackMessageHandoff = {
   kind: 'slack.message'
   content: string
+  workflowRunId?: string
   providerUserId: string
   providerWorkspaceId: string
   providerChannelId: string
@@ -22,6 +23,8 @@ export type SlackEnrollmentHandoff = {
   providerUserId: string
   providerWorkspaceId: string
   providerChannelId: string
+  providerChannelType?: string | null
+  providerChannelTitle?: string | null
   providerEventId?: string | null
   providerMessageTs?: string | null
   responseThreadTs?: string | null
@@ -30,10 +33,77 @@ export type SlackEnrollmentHandoff = {
 
 export type SlackHandoffRequest = SlackMessageHandoff | SlackEnrollmentHandoff
 
+export type TeamsMessageHandoff = {
+  kind: 'teams.message'
+  content: string
+  workflowRunId?: string
+  providerUserId: string
+  providerWorkspaceId: string
+  providerChannelId: string
+  providerConversationId: string
+  providerReplyToMessageId?: string | null
+  providerChannelType?: string | null
+  providerEventId: string
+  providerMessageId: string
+  serviceUrl: string
+  providerTarget: ProviderTargetIdentity
+  rawData?: Record<string, unknown>
+}
+
+export type TeamsEnrollmentHandoff = {
+  kind: 'teams.enrollment'
+  nonce: string
+  providerUserId: string
+  providerWorkspaceId: string
+  providerChannelId: string
+  providerConversationId: string
+  providerReplyToMessageId?: string | null
+  providerChannelType?: string | null
+  providerChannelTitle?: string | null
+  providerTeamId?: string | null
+  providerTeamsChannelId?: string | null
+  providerEventId?: string | null
+  providerMessageId?: string | null
+  serviceUrl: string
+  providerTarget: ProviderTargetIdentity
+}
+
+export type TeamsFileConsentHandoff = {
+  kind: 'teams.file-consent'
+  action: 'accept' | 'decline'
+  workflowRunId: string
+  artifactName: string
+  providerUserId: string
+  providerWorkspaceId: string
+  providerChannelId: string
+  providerConversationId: string
+  providerReplyToMessageId: string
+  providerChannelType?: string | null
+  providerEventId: string
+  providerMessageId: string
+  serviceUrl: string
+  uploadInfo?: {
+    contentUrl: string
+    uploadUrl: string
+    uniqueId: string
+    name?: string
+    fileType?: string
+  }
+  providerTarget: ProviderTargetIdentity
+}
+
+export type TeamsHandoffRequest =
+  | TeamsMessageHandoff
+  | TeamsEnrollmentHandoff
+  | TeamsFileConsentHandoff
+export type ProviderHandoffRequest = SlackHandoffRequest | TeamsHandoffRequest
+
 export type SlackHandoffResponse = { ok: true } | { ok: false; status: number; error: string }
+export type ProviderHandoffResponse = SlackHandoffResponse
 
 export type SlackHandoffHandler = {
   handleSlackHandoff(request: SlackHandoffRequest): Promise<SlackHandoffResponse>
+  handleTeamsHandoff?(request: TeamsHandoffRequest): Promise<ProviderHandoffResponse>
 }
 
 class HandoffBodyError extends Error {
@@ -83,7 +153,9 @@ export function createChannelReaderHandoffServer(
         return
       }
 
-      if (req.method !== 'POST' || req.url !== '/internal/slack/handoff') {
+      const isSlackHandoff = req.url === '/internal/slack/handoff'
+      const isTeamsHandoff = req.url === '/internal/teams/handoff'
+      if (req.method !== 'POST' || (!isSlackHandoff && !isTeamsHandoff)) {
         writeJson(res, 404, { error: 'not_found' })
         return
       }
@@ -94,8 +166,12 @@ export function createChannelReaderHandoffServer(
       }
 
       const body = await readBody(req)
-      const payload = JSON.parse(body.toString('utf8')) as SlackHandoffRequest
-      const result = await handler.handleSlackHandoff(payload)
+      const payload = JSON.parse(body.toString('utf8')) as ProviderHandoffRequest
+      const result = isTeamsHandoff
+        ? handler.handleTeamsHandoff
+          ? await handler.handleTeamsHandoff(payload as TeamsHandoffRequest)
+          : { ok: false as const, status: 501, error: 'teams_handoff_not_configured' }
+        : await handler.handleSlackHandoff(payload as SlackHandoffRequest)
       if (!result.ok) {
         writeJson(res, result.status, { ok: false, error: result.error })
         return

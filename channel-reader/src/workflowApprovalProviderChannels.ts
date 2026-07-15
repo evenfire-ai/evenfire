@@ -33,6 +33,14 @@ export function hostRefForProviderIdentity(
       )
       if (group) return hostRef
     }
+    if (identity.medium === 'teams') {
+      const group = channelCRD.spec.teams?.find(
+        item =>
+          item.channelId === identity.providerChannelId &&
+          item.tenantId === identity.providerWorkspaceId
+      )
+      if (group) return hostRef
+    }
   }
   return null
 }
@@ -57,17 +65,24 @@ export function getConfiguredProviderChannelGroups(
     const communicationChannelNamespace = channelCRD.namespace?.trim()
     const communicationChannelName = channelCRD.name?.trim()
     if (!communicationChannelNamespace || !communicationChannelName) continue
-    const groups = medium === 'telegram' ? channelCRD.spec.telegram : channelCRD.spec.slack
+    const groups =
+      medium === 'telegram'
+        ? channelCRD.spec.telegram
+        : medium === 'slack'
+          ? channelCRD.spec.slack
+          : channelCRD.spec.teams
     for (const group of groups ?? []) {
       const channelId = group.channelId?.trim()
       if (!channelId) continue
       const providerWorkspaceId =
         medium === 'slack' && 'workspaceId' in group && typeof group.workspaceId === 'string'
           ? group.workspaceId.trim()
-          : null
-      if (medium === 'slack' && !providerWorkspaceId) {
+          : medium === 'teams' && 'tenantId' in group && typeof group.tenantId === 'string'
+            ? group.tenantId.trim()
+            : null
+      if ((medium === 'slack' || medium === 'teams') && !providerWorkspaceId) {
         console.warn(
-          `[WorkflowApproval] Skipping Slack notification delivery group ${channelCRD.namespace}/${channelCRD.name} channel ${channelId}: workspaceId is required for workflow approval delivery.`
+          `[WorkflowApproval] Skipping ${medium} notification delivery group ${channelCRD.namespace}/${channelCRD.name} channel ${channelId}: workspace/tenant id is required for workflow approval delivery.`
         )
         continue
       }

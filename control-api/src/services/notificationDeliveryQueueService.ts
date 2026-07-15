@@ -1,8 +1,10 @@
 import { type DbClient, pool, withTransaction } from '../db.js'
 
+type NotificationDeliveryMedium = 'telegram' | 'slack' | 'teams'
+
 type ClaimedNotificationDeliveryBase = {
   id: string
-  medium: 'telegram' | 'slack'
+  medium: NotificationDeliveryMedium
   providerUserId: string
   providerWorkspaceId: string | null
   providerChannelId: string
@@ -44,10 +46,11 @@ export type WorkflowRunCompletedNotificationDelivery = ClaimedNotificationDelive
     recipeNamespace: string
     recipeName: string
     phase: 'Succeeded' | 'Failed' | 'Canceled'
-    providerMedium: 'telegram' | 'slack'
+    providerMedium: NotificationDeliveryMedium
     providerChannelId: string
     providerWorkspaceId?: string | null
     providerThreadId?: string | null
+    hasDownloadableItems?: boolean
     completedAt?: string
     message?: string
   }
@@ -88,12 +91,12 @@ export type WorkflowApprovalUserBoundNotificationDelivery = (
   mcpHostRef: string
 }
 
-const SUPPORTED_DELIVERY_MEDIA = new Set(['telegram', 'slack'])
+const SUPPORTED_DELIVERY_MEDIA = new Set(['telegram', 'slack', 'teams'])
 const MAX_PROVIDER_CHANNEL_IDS = 100
 
-function normalizeMedium(value: unknown): 'telegram' | 'slack' | null {
+function normalizeMedium(value: unknown): NotificationDeliveryMedium | null {
   const medium = typeof value === 'string' ? value.trim().toLowerCase() : ''
-  return SUPPORTED_DELIVERY_MEDIA.has(medium) ? (medium as 'telegram' | 'slack') : null
+  return SUPPORTED_DELIVERY_MEDIA.has(medium) ? (medium as NotificationDeliveryMedium) : null
 }
 
 function normalizeProviderChannelIds(values: unknown): string[] {
@@ -359,7 +362,7 @@ export async function claimNotificationDeliveries(params: {
     throw new Error('host_ref_required')
   }
   const providerWorkspaceId = normalizeProviderWorkspaceId(params.providerWorkspaceId)
-  if (medium === 'slack' && !providerWorkspaceId) {
+  if (medium !== 'telegram' && !providerWorkspaceId) {
     throw new Error('provider_workspace_id_required')
   }
   const limit = normalizeLimit(params.limit)
@@ -371,10 +374,7 @@ export async function claimNotificationDeliveries(params: {
                 wama.medium,
                 wama.provider_user_id,
                 wama.provider_workspace_id,
-                CASE WHEN $1 = 'telegram'
-                  THEN war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}'
-                  ELSE wama.provider_channel_id
-                END AS provider_channel_id,
+                war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}' AS provider_channel_id,
                 CASE nd.priority WHEN 'high' THEN 0 ELSE 1 END AS sort_priority,
                 nd.created_at
            FROM notification_deliveries nd
@@ -403,17 +403,15 @@ export async function claimNotificationDeliveries(params: {
             AND nd.status IN ('queued', 'retrying')
             AND nd.next_attempt_at <= NOW()
             AND (nd.expires_at IS NULL OR nd.expires_at > NOW())
+            AND war.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' = $1
+            AND war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}' = ANY($2::text[])
             AND (
-                  (
-                    $1 = 'telegram'
-                    AND war.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' = 'telegram'
-                    AND war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}' = ANY($2::text[])
-                  )
-                  OR (
-                    $1 <> 'telegram'
-                    AND wama.provider_channel_id IS NOT NULL
-                    AND wama.provider_channel_id = ANY($2::text[])
-                  )
+                  $1 = 'telegram'
+                  OR war.payload #>> '{metadata,workflowTrigger,providerBinding,providerWorkspaceId}' = $5
+                )
+            AND (
+                  $1 = 'telegram'
+                  OR wama.provider_channel_id = war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}'
                 )
         UNION ALL
          SELECT nd.id,
@@ -475,10 +473,7 @@ export async function claimNotificationDeliveries(params: {
                 wama.medium,
                 wama.provider_user_id,
                 wama.provider_workspace_id,
-                CASE WHEN $1 = 'telegram'
-                  THEN war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}'
-                  ELSE wama.provider_channel_id
-                END AS provider_channel_id,
+                war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}' AS provider_channel_id,
                 CASE nd.priority WHEN 'high' THEN 0 ELSE 1 END AS sort_priority,
                 nd.created_at
            FROM notification_deliveries nd
@@ -507,17 +502,15 @@ export async function claimNotificationDeliveries(params: {
             AND (nd.expires_at IS NULL OR nd.expires_at > NOW())
             AND war.status IN ('approved', 'denied', 'cancelled', 'expired', 'consumed')
             AND nd.payload->>'status' IN ('approved', 'denied', 'cancelled', 'expired', 'consumed')
+            AND war.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' = $1
+            AND war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}' = ANY($2::text[])
             AND (
-                  (
-                    $1 = 'telegram'
-                    AND war.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' = 'telegram'
-                    AND war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}' = ANY($2::text[])
-                  )
-                  OR (
-                    $1 <> 'telegram'
-                    AND wama.provider_channel_id IS NOT NULL
-                    AND wama.provider_channel_id = ANY($2::text[])
-                  )
+                  $1 = 'telegram'
+                  OR war.payload #>> '{metadata,workflowTrigger,providerBinding,providerWorkspaceId}' = $5
+                )
+            AND (
+                  $1 = 'telegram'
+                  OR wama.provider_channel_id = war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}'
                 )
         UNION ALL
          -- Case 2: workflow-recipe approval WITHOUT a conversational origin

@@ -60,6 +60,8 @@ spec:
           value: sandbox-ui
         - name: HCC_EXTERNAL_EGRESS_RESYNC_SEC
           value: "300"
+        - name: HCC_HOST_K8S_REQUEST_TIMEOUT_MS
+          value: "30000"
         - name: CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE
           value: clerum/stdio-bridge:0.9.5
         # workspace-files-controller (per-SharedFileSystem) — see config.ts wfc*

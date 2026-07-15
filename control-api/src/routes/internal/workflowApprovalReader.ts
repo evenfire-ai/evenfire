@@ -8,6 +8,7 @@ import {
   requireInternalToken,
 } from '../../middleware/internalServiceAuth.js'
 import { tryDecodeSlackTargetId } from '../../utils/slackTargetId.js'
+import { tryDecodeTeamsTargetId } from '../../utils/teamsTargetId.js'
 
 /**
  * Figure D reader → control-api CONSULTA endpoint (spec §10.3, diagram step 6).
@@ -21,7 +22,7 @@ import { tryDecodeSlackTargetId } from '../../utils/slackTargetId.js'
  *
  * Wire shape:
  *   GET /api/v1/internal/workflow-approval-reader/approvals/:id/can-approve
- *       ?medium=<telegram|slack>&providerUserId=<id>&channelAlias=<8-hex>
+ *       ?medium=<telegram|slack|teams>&providerUserId=<id>&channelAlias=<8-hex>
  *   Auth: reader → control-api internal service token (static bearer,
  *         x-service-token: workflow-approval-reader). Reuses internalServiceAuth
  *         — same pattern as rpc-proxy / webhook-proxy. NOT a new JWT.
@@ -49,6 +50,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // (16 hex / 64-bit).
 const CHANNEL_ALIAS_LEN = 16
 const CHANNEL_ALIAS_RE = new RegExp(`^[0-9a-f]{${CHANNEL_ALIAS_LEN}}$`, 'i')
+const TEAMS_BOT_CONNECTOR_SCOPE = 'https://api.botframework.com/.default'
 
 type CanApproveReason =
   | 'approval_not_found'
@@ -69,6 +71,13 @@ type CommunicationChannelResource = {
       replyOnlyWhenMentioned?: boolean
       workspaceId?: string
     }
+    teams?: Array<{ channelId?: string; tenantId?: string }>
+    teamsSettings?: {
+      appId?: string
+      appName?: string
+      replyOnlyWhenMentioned?: boolean
+      tenantId?: string
+    }
   }
 }
 
@@ -79,7 +88,7 @@ type SecretResource = {
 function resolveCommunicationChannelRef(
   channels: CommunicationChannelResource[],
   params: {
-    medium: 'telegram' | 'slack'
+    medium: 'telegram' | 'slack' | 'teams'
     providerWorkspaceId: string
     providerChannelId: string
   }
@@ -96,6 +105,13 @@ function resolveCommunicationChannelRef(
     if (params.medium === 'telegram') {
       return (channel.spec?.telegram ?? []).some(
         item => item.channelId === params.providerChannelId
+      )
+    }
+    if (params.medium === 'teams') {
+      return (channel.spec?.teams ?? []).some(
+        item =>
+          item.tenantId === params.providerWorkspaceId &&
+          item.channelId === params.providerChannelId
       )
     }
     return (channel.spec?.slack ?? []).some(
@@ -151,6 +167,49 @@ function slackWorkspaceIdForChannel(channel: CommunicationChannelResource): stri
     if (workspaceId) return workspaceId
   }
   return null
+}
+
+function teamsTenantIdForChannel(channel: CommunicationChannelResource): string | null {
+  const settingsTenant = channel.spec?.teamsSettings?.tenantId?.trim()
+  if (settingsTenant) return settingsTenant
+  for (const group of channel.spec?.teams ?? []) {
+    const tenantId = group.tenantId?.trim()
+    if (tenantId) return tenantId
+  }
+  return null
+}
+
+async function resolveTeamsTarget(gateway: K8sGateway, targetId: string) {
+  const target = tryDecodeTeamsTargetId(targetId)
+  if (!target) return { ok: false as const, status: 400, error: 'invalid_target_id' }
+
+  const channel = (await gateway.getResource(
+    'communicationchannels',
+    target.name,
+    target.namespace
+  )) as CommunicationChannelResource
+  const name = channel.metadata?.name?.trim()
+  const namespace = channel.metadata?.namespace?.trim()
+  const hostRef = channel.spec?.hostRef?.trim()
+  const appId = channel.spec?.teamsSettings?.appId?.trim()
+  const appName = channel.spec?.teamsSettings?.appName?.trim()
+  const tenantId = teamsTenantIdForChannel(channel)
+  const secretName = channel.spec?.credentialsSecretRef?.name?.trim()
+  if (!name || !namespace || !hostRef || !appId || !tenantId || !secretName) {
+    return { ok: false as const, status: 409, error: 'teams_target_not_ready' }
+  }
+  return {
+    ok: true as const,
+    channel,
+    secretName,
+    hostRef,
+    appId,
+    appName,
+    tenantId,
+    communicationChannelRef: `${namespace}/${name}`,
+    channelName: name,
+    channelNamespace: namespace,
+  }
 }
 
 function slackPayloadFromRawBody(rawBody: Buffer): unknown {
@@ -228,9 +287,64 @@ function providerJsonHeaders(value: string): Headers {
   const headers = new Headers()
   headers.set('Content-Type', 'application/json')
   // The split literals avoid false-positive secret-scanner alerts in generated
-  // bundles; the runtime header is the standard Slack Web API bearer token.
+  // bundles; the runtime header is the standard provider bearer token.
   headers.set('Authoriz' + 'ation', `${'Be' + 'arer'} ${value}`)
   return headers
+}
+
+function stripTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, '')
+}
+
+function isAllowedTeamsServiceUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'https:') return false
+    const hostname = url.hostname.toLowerCase()
+    return (
+      hostname === 'smba.trafficmanager.net' ||
+      hostname.endsWith('.smba.trafficmanager.net') ||
+      hostname === 'botframework.com' ||
+      hostname.endsWith('.botframework.com')
+    )
+  } catch {
+    return false
+  }
+}
+
+async function fetchTeamsBotAccessToken(params: {
+  appId: string
+  tenantId: string
+  appPassword: string
+}): Promise<{ ok: true; accessToken: string } | { ok: false; status: number; error: string }> {
+  const body = new URLSearchParams({
+    client_id: params.appId,
+    client_secret: params.appPassword,
+    grant_type: 'client_credentials',
+    scope: TEAMS_BOT_CONNECTOR_SCOPE,
+  })
+  const response = await fetch(
+    `https://login.microsoftonline.com/${encodeURIComponent(params.tenantId)}/oauth2/v2.0/token`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body,
+    }
+  )
+  const tokenBody = (await response.json().catch(() => ({}))) as {
+    access_token?: string
+    error?: string
+  }
+  if (!response.ok || !tokenBody.access_token) {
+    return {
+      ok: false,
+      status: response.status || 502,
+      error: tokenBody.error || 'teams_token_exchange_failed',
+    }
+  }
+  return { ok: true, accessToken: tokenBody.access_token }
 }
 
 export function createInternalWorkflowApprovalReaderRouter(gateway: K8sGateway): Router {
@@ -248,12 +362,14 @@ export function createInternalWorkflowApprovalReaderRouter(gateway: K8sGateway):
         const providerWorkspaceId = String(req.query.providerWorkspaceId || '').trim()
         const providerChannelId = String(req.query.providerChannelId || '').trim()
 
-        if (medium !== 'telegram' && medium !== 'slack') {
+        if (medium !== 'telegram' && medium !== 'slack' && medium !== 'teams') {
           res.status(400).json({ error: 'unsupported_medium' })
           return
         }
-        if (medium === 'slack' && !providerWorkspaceId) {
-          res.status(400).json({ error: 'slack_workspace_id_required' })
+        if (medium !== 'telegram' && !providerWorkspaceId) {
+          res.status(400).json({
+            error: medium === 'teams' ? 'teams_tenant_id_required' : 'slack_workspace_id_required',
+          })
           return
         }
         if (!providerChannelId) {
@@ -277,6 +393,114 @@ export function createInternalWorkflowApprovalReaderRouter(gateway: K8sGateway):
           return
         }
         res.status(200).json({ communicationChannelRef: result.ref })
+      } catch (err) {
+        next(err)
+      }
+    }
+  )
+
+  router.get(
+    '/internal/workflow-approval-reader/teams-targets/:targetId/resolve',
+    requireInternalToken,
+    requireInternalService('workflow-approval-reader'),
+    async (req, res, next) => {
+      try {
+        const resolved = await resolveTeamsTarget(gateway, String(req.params.targetId || ''))
+        if (!resolved.ok) {
+          res.status(resolved.status).json({ error: resolved.error })
+          return
+        }
+        res.status(200).json({
+          ok: true,
+          hostRef: resolved.hostRef,
+          communicationChannelRef: resolved.communicationChannelRef,
+          providerWorkspaceId: resolved.tenantId,
+          appId: resolved.appId,
+          appName: resolved.appName ?? '',
+          tenantId: resolved.tenantId,
+          replyOnlyWhenMentioned:
+            resolved.channel.spec?.teamsSettings?.replyOnlyWhenMentioned === true,
+          channelName: resolved.channelName,
+          channelNamespace: resolved.channelNamespace,
+        })
+      } catch (err) {
+        next(err)
+      }
+    }
+  )
+
+  router.post(
+    '/internal/workflow-approval-reader/teams-targets/:targetId/update-message',
+    requireInternalToken,
+    requireInternalService('workflow-approval-reader'),
+    async (req, res, next) => {
+      try {
+        const resolved = await resolveTeamsTarget(gateway, String(req.params.targetId || ''))
+        if (!resolved.ok) {
+          res.status(resolved.status).json({ error: resolved.error })
+          return
+        }
+        const conversationId = String(req.body?.conversationId || '').trim()
+        const messageId = String(req.body?.messageId || '').trim()
+        const serviceUrl = String(req.body?.serviceUrl || '').trim()
+        const text = String(req.body?.text || '').trim()
+        if (!conversationId || !messageId || !serviceUrl || !text) {
+          res.status(400).json({ error: 'invalid_teams_message_update' })
+          return
+        }
+        if (!isAllowedTeamsServiceUrl(serviceUrl)) {
+          res.status(400).json({ error: 'invalid_teams_service_url' })
+          return
+        }
+
+        const secret = (await gateway.getSecret(
+          resolved.secretName,
+          resolved.channelNamespace
+        )) as SecretResource
+        const appPassword = decodeSecretString(secret, 'teams-app-password')
+        if (!appPassword) {
+          res.status(409).json({ error: 'teams_app_password_missing' })
+          return
+        }
+        const token = await fetchTeamsBotAccessToken({
+          appId: resolved.appId,
+          tenantId: resolved.tenantId,
+          appPassword,
+        })
+        if (!token.ok) {
+          res.status(502).json({
+            error: 'teams_token_exchange_failed',
+            providerError: token.error,
+          })
+          return
+        }
+
+        const response = await fetch(
+          `${stripTrailingSlashes(serviceUrl)}/v3/conversations/${encodeURIComponent(
+            conversationId
+          )}/activities/${encodeURIComponent(messageId)}`,
+          {
+            method: 'PUT',
+            headers: providerJsonHeaders(token.accessToken),
+            body: JSON.stringify({
+              type: 'message',
+              text,
+              attachments: [],
+            }),
+          }
+        )
+        const body = (await response.json().catch(() => ({}))) as {
+          id?: string
+          error?: string
+        }
+        if (!response.ok) {
+          res.status(502).json({
+            error: 'teams_update_failed',
+            providerError: body.error || `http_${response.status}`,
+          })
+          return
+        }
+        res.status(200).json({ ok: true, id: body.id ?? messageId })
       } catch (err) {
         next(err)
       }
@@ -484,15 +708,17 @@ export function createInternalWorkflowApprovalReaderRouter(gateway: K8sGateway):
           .trim()
           .toLowerCase()
 
-        if (medium !== 'telegram' && medium !== 'slack') {
+        if (medium !== 'telegram' && medium !== 'slack' && medium !== 'teams') {
           res.status(400).json({ error: 'unsupported_medium' })
           return
         }
-        if (medium === 'slack' && !providerWorkspaceId) {
-          res.status(400).json({ error: 'slack_workspace_id_required' })
+        if (medium !== 'telegram' && !providerWorkspaceId) {
+          res.status(400).json({
+            error: medium === 'teams' ? 'teams_tenant_id_required' : 'slack_workspace_id_required',
+          })
           return
         }
-        if (medium === 'slack' && !providerChannelId) {
+        if (medium !== 'telegram' && !providerChannelId) {
           res.status(400).json({ error: 'provider_channel_id_required' })
           return
         }
@@ -546,8 +772,8 @@ export function createInternalWorkflowApprovalReaderRouter(gateway: K8sGateway):
           [
             medium,
             providerUserId,
-            medium === 'slack' ? providerWorkspaceId : null,
-            medium === 'slack' ? providerChannelId : null,
+            medium !== 'telegram' ? providerWorkspaceId : null,
+            medium !== 'telegram' ? providerChannelId : null,
           ]
         )
         const rows = accounts.rows as Array<{ communicationChannelRef: string }>

@@ -116,4 +116,28 @@ describe('RPCClient workflow provider boundary', () => {
       },
     })
   })
+
+  it('requests the exact workflow run selected by a provider button', async () => {
+    const workflowRunId = '11111111-2222-4333-8444-555555555555'
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ success: true, status: 'completed', response: 'Ready.' }),
+    } as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await new RPCClient('http://mcp-host.test').downloadWorkflowResultByRun(
+      telegramMessage(),
+      workflowRunId,
+      'result.pdf'
+    )
+
+    expect(result.success).toBe(true)
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      workflowRunId,
+      artifactName: 'result.pdf',
+      providerIdentity: { medium: 'telegram', providerUserId: '123456' },
+    })
+    expect(JSON.parse(String(init.body))).not.toHaveProperty('workflowName')
+  })
 })

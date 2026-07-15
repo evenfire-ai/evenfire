@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  assertIssuerMaySubject,
   IssuerSubjectClassError,
+  assertIssuerMaySubject,
   isIssuerAllowedForSubject,
 } from '../src/auth/issuerSubjectClass.js'
 
@@ -13,10 +13,14 @@ import {
 
 describe('assertIssuerMaySubject — allowed crosses', () => {
   it('hcc may mint a 1st-party host', () => {
-    expect(() => assertIssuerMaySubject({ issuer: 'hcc', subjectType: 'host', party: '1st' })).not.toThrow()
+    expect(() =>
+      assertIssuerMaySubject({ issuer: 'hcc', subjectType: 'host', party: '1st' })
+    ).not.toThrow()
   })
   it('wrc may mint a 3rd-party host', () => {
-    expect(() => assertIssuerMaySubject({ issuer: 'wrc', subjectType: 'host', party: '3rd' })).not.toThrow()
+    expect(() =>
+      assertIssuerMaySubject({ issuer: 'wrc', subjectType: 'host', party: '3rd' })
+    ).not.toThrow()
   })
   it('session may mint a user', () => {
     expect(() => assertIssuerMaySubject({ issuer: 'session', subjectType: 'user' })).not.toThrow()
@@ -56,8 +60,12 @@ describe('assertIssuerMaySubject — guards', () => {
 
 describe('isIssuerAllowedForSubject', () => {
   it('reports the mapping as booleans', () => {
-    expect(isIssuerAllowedForSubject({ issuer: 'hcc', subjectType: 'host', party: '1st' })).toBe(true)
-    expect(isIssuerAllowedForSubject({ issuer: 'wrc', subjectType: 'host', party: '1st' })).toBe(false)
+    expect(isIssuerAllowedForSubject({ issuer: 'hcc', subjectType: 'host', party: '1st' })).toBe(
+      true
+    )
+    expect(isIssuerAllowedForSubject({ issuer: 'wrc', subjectType: 'host', party: '1st' })).toBe(
+      false
+    )
     expect(isIssuerAllowedForSubject({ issuer: 'session', subjectType: 'user' })).toBe(true)
   })
 })

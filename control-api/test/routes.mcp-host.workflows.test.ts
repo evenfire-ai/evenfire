@@ -599,6 +599,83 @@ describe('routes/mcp-host/workflows', () => {
     expect(mockGetRun).not.toHaveBeenCalled()
   })
 
+  it('lists artifacts for the exact provider workflow run and conversation', async () => {
+    const targetUserId = '00000000-0000-4000-8000-000000000001'
+    const workflowRunId = '11111111-2222-4333-8444-555555555555'
+    const teamsConversationId = `a:${'A'.repeat(129)}`
+    const exactRun = makeRunRow({
+      run_id: workflowRunId,
+      child_recipe_name: 'test-recipe-run-1',
+      child_recipe_namespace: 'sandbox-recipes',
+      approval_target_user_id: targetUserId,
+      approval_target_team_id: null,
+    })
+    mockPoolQuery.mockImplementation((sql: string) => {
+      if (String(sql).includes('FROM workflow_runs wr')) {
+        return Promise.resolve({ rows: [exactRun], rowCount: 1 })
+      }
+      return Promise.resolve({ rows: [{ ok: 1 }], rowCount: 1 })
+    })
+    mockGetRun.mockResolvedValue(exactRun)
+
+    const app = makeApp(['test-recipe', 'test-recipe-run-1'], {
+      'test-recipe-run-1': [
+        {
+          name: 'result.pdf',
+          format: 'pdf',
+          sizeBytes: 123,
+          createdAt: '2026-07-14T12:01:00.000Z',
+        },
+      ],
+    })
+    const res = await request(app)
+      .get(
+        `/workflows/runs/${workflowRunId}/artifacts?targetUserId=${targetUserId}&workflowConversationId=${teamsConversationId}`
+      )
+      .set('Authorization', 'Bearer shared-host-control-token')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      workflowRunId,
+      workflowName: 'test-recipe',
+      artifacts: [{ name: 'result.pdf', format: 'pdf' }],
+    })
+    const exactRunQuery = mockPoolQuery.mock.calls.find(call =>
+      String(call[0]).includes('WHERE wr.run_id = $1')
+    )
+    expect(exactRunQuery?.[1]).toEqual([
+      workflowRunId,
+      targetUserId,
+      null,
+      'chatllm',
+      teamsConversationId,
+    ])
+  })
+
+  it('accepts a maximum-length Teams channel thread conversation', async () => {
+    const targetUserId = '00000000-0000-4000-8000-000000000001'
+    const workflowRunId = '11111111-2222-4333-8444-555555555555'
+    const teamsConversationId = `19:${'A'.repeat(479)}@thread.tacv2;messageid=post-1`
+
+    const res = await request(makeApp(['test-recipe']))
+      .get(
+        `/workflows/runs/${workflowRunId}/artifacts?targetUserId=${targetUserId}&workflowConversationId=${teamsConversationId}`
+      )
+      .set('Authorization', 'Bearer shared-host-control-token')
+
+    expect(res.status).toBe(404)
+    const exactRunQuery = mockPoolQuery.mock.calls.find(call =>
+      String(call[0]).includes('WHERE wr.run_id = $1')
+    )
+    expect(exactRunQuery?.[1]).toEqual([
+      workflowRunId,
+      targetUserId,
+      null,
+      'chatllm',
+      teamsConversationId,
+    ])
+  })
+
   it('returns parsed JSON artifact content for agent workflow result reads', async () => {
     const targetUserId = '00000000-0000-4000-8000-000000000001'
     const latestRun = makeRunRow({
@@ -760,9 +837,21 @@ describe('routes/mcp-host/workflows', () => {
         '/workflows/sandbox-recipes/test-recipe/runs/latest/artifacts/report.pdf/download?targetUserId=00000000-0000-4000-8000-000000000001&workflowConversationId=bad/../thread'
       )
       .set('Author' + 'ization', ['Bear', 'er shared-read-token'].join(''))
+    const oversizedDirectTeamsConversation = await request(makeApp(['test-recipe']))
+      .get(
+        `/workflows/sandbox-recipes/test-recipe/runs/latest/artifacts/report.pdf/download?targetUserId=00000000-0000-4000-8000-000000000001&workflowConversationId=a:${'A'.repeat(511)}`
+      )
+      .set('Author' + 'ization', ['Bear', 'er shared-read-token'].join(''))
+    const oversizedChannelTeamsConversation = await request(makeApp(['test-recipe']))
+      .get(
+        `/workflows/sandbox-recipes/test-recipe/runs/latest/artifacts/report.pdf/download?targetUserId=00000000-0000-4000-8000-000000000001&workflowConversationId=19:${'A'.repeat(510)}`
+      )
+      .set('Author' + 'ization', ['Bear', 'er shared-read-token'].join(''))
 
     expect(bothTargets.status).toBe(400)
     expect(badConversation.status).toBe(400)
+    expect(oversizedDirectTeamsConversation.status).toBe(400)
+    expect(oversizedChannelTeamsConversation.status).toBe(400)
     expect(mockGetRun).not.toHaveBeenCalled()
   })
 

@@ -125,7 +125,7 @@ describe('AppService.invokeHostMessage', () => {
     expect(service.authClient.switchTeam).toHaveBeenCalledWith('teamless-token', 'team-1')
     expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
       'team-token',
-      ['host:message:invoke', 'host:task:read'],
+      ['host:message:invoke', 'host:task:read', 'host:wake:write'],
       ['pro-agent']
     )
     __setChatStoreBaseDirForTests(null)
@@ -176,7 +176,7 @@ describe('AppService.invokeHostMessage', () => {
     ).resolves.toEqual({ success: true, response: 'ok' })
     expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
       'teamless-token',
-      ['host:message:invoke', 'host:task:read'],
+      ['host:message:invoke', 'host:task:read', 'host:wake:write'],
       ['pro-agent']
     )
     expect(service.rpcClient.invokeHostMessage).toHaveBeenCalled()

@@ -165,6 +165,25 @@ export type WorkerOp =
   | { kind: 'update_session_counters'; sessionId: string; counters: SessionCountersUpdate }
   | { kind: 'update_session_prompt_stable_hash'; sessionId: string; stableHash: string }
   | { kind: 'insert_message'; payload: MessageRow }
+  | {
+      /**
+       * D3 (stateless-agents) — a turn boundary: the boundary message (user
+       * message at turn start / assistant message at turn complete) and the
+       * session-state flip commit in ONE SQLite transaction. A crash between
+       * the two writes can therefore never leave `active_task_id` pointing at
+       * a task whose boundary message is absent (or vice versa) — the pair is
+       * all-or-nothing on disk.
+       */
+      kind: 'persist_turn_boundary'
+      message: MessageRow
+      sessionId: string
+      state: string
+      /**
+       * Same semantics as `update_session_state.activeTaskId`:
+       * undefined = keep current, a string = set it, null = clear it.
+       */
+      activeTaskId?: string | null
+    }
   | { kind: 'replace_messages'; sessionId: string; messages: MessageRow[] }
   | { kind: 'insert_pending_approval'; payload: PendingApprovalRow }
   | { kind: 'delete_pending_approval'; requestId: string }
@@ -232,6 +251,7 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'update_session_counters':
     case 'update_session_prompt_stable_hash':
     case 'insert_message':
+    case 'persist_turn_boundary':
     case 'replace_messages':
     case 'insert_pending_approval':
     case 'delete_pending_approval':

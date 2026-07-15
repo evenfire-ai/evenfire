@@ -12,6 +12,7 @@ const ALLOWED_CREDENTIAL_KEYS = new Set([
   'telegram-bot-token',
   'slack-signing-secret',
   'slack-bot-token',
+  'teams-app-password',
   'email-username',
   'email-password',
 ])

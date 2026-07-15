@@ -42,6 +42,7 @@ import {
   PasswordLoginResult,
   PendingApprovalLite,
   PendingWorkflowApproval,
+  PrewarmHostResult,
   ProfileSettingsOpenOptions,
   RpcAllowedServersResult,
   RpcScope,
@@ -62,8 +63,11 @@ import {
   WorkflowRunArtifactsResult,
 } from './types.js'
 
-const HOST_MESSAGE_SCOPES: RpcScope[] = ['host:message:invoke']
-const HOST_TASK_RESULT_SCOPES: RpcScope[] = ['host:message:invoke', 'host:task:read']
+const HOST_WAKEABLE_OPERATION_SCOPES: RpcScope[] = [
+  'host:message:invoke',
+  'host:task:read',
+  'host:wake:write',
+]
 const HOST_STATUS_SCOPES: RpcScope[] = ['host:status:read']
 const HOST_ACTIVITY_SCOPES: RpcScope[] = ['host:activity:read']
 const HOST_SESSION_SCOPES: RpcScope[] = ['host:session:read']
@@ -78,6 +82,27 @@ const SANDBOX_UI_VIEW_SCOPES: RpcScope[] = ['sandbox:ui:view']
 // sentinel that doesn't collide with any real host. rpc-proxy's view/*
 // path doesn't read hostRefs; the cookie + path pair is the per-recipe gate.
 const SANDBOX_UI_HOST_REF_SENTINEL = 'sandbox-ui'
+
+// Pre-warm cooldown: client-side hygiene so catalog refreshes or rapid app
+// reloads don't spam the wake route (control-api rate-limits anyway). Attempts —
+// including failed ones — are recorded up front so a failing wake is never
+// silently retried by the next catalog refresh inside the window.
+const PREWARM_COOLDOWN_MS = 60_000
+// Bounded map: evict the oldest attempt entry past this many distinct hosts.
+const PREWARM_COOLDOWN_MAX_HOSTS = 256
+// Bounded wake re-emission: HCC's raw watch is known to lose events, and a
+// single projected wake annotation then goes unseen until the ~300s resync.
+// The reactive message path compensates by re-triggering every 15s while
+// holding (rpc-proxy wakeAndHold); prewarm mirrors that backstop with a
+// BOUNDED loop tied to one catalog-driven invocation: while the wake route
+// answers 202 wake-requested (HCC has not acted — the CR is still suspended),
+// re-POST up to this many more times at this interval. The interval exceeds
+// control-api's 2s coalesce window, so each re-POST bumps the Postgres
+// generation and re-projects a fresh watch event. 200 active is the
+// acknowledgment that HCC acted — stop immediately, as on any other status
+// or error. Never a persistent loop, never coupled to the status stream.
+const PREWARM_REEMIT_MAX_ATTEMPTS = 2
+const PREWARM_REEMIT_INTERVAL_MS = 10_000
 
 function compareSemverLike(left: string, right: string): number {
   const parse = (value: string) =>
@@ -190,6 +215,8 @@ export class AppService {
   private teamContextQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
+  private readonly prewarmAttemptAtByHostRef = new Map<string, number>()
+  private readonly prewarmReemitLoopHostRefs = new Set<string>()
   private hostStatusStreams = new Map<
     string,
     {
@@ -244,6 +271,25 @@ export class AppService {
       details.includes('(403)') &&
       details.includes('forbidden')
     )
+  }
+
+  /**
+   * Maps rpc-proxy's structured host-availability 503s ({code:'host_waking'}
+   * from the wake-and-hold subsystem, {code:'host_draining'} from the mcp-host
+   * DRAINING fence) to a stable Error. Electron IPC serializes errors down to
+   * their message string, so the renderer keys its "waking" presentation off
+   * the code token carried in this message.
+   */
+  private static toHostAvailabilityError(hostRef: string, error: unknown): Error | null {
+    if (!(error instanceof ApiError) || error.status !== 503) return null
+    const body = String(error.bodyText || '')
+    if (body.includes('"host_waking"')) {
+      return new Error(`host_waking: agent host "${hostRef}" is waking up — retry shortly`)
+    }
+    if (body.includes('"host_draining"')) {
+      return new Error(`host_draining: agent host "${hostRef}" is draining — retry shortly`)
+    }
+    return null
   }
 
   private rememberWorkflowApprovalTeam(approval: PendingWorkflowApproval): void {
@@ -1440,7 +1486,10 @@ export class AppService {
       throw new Error('hostRef is required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
-    const rpc = await this.issueRpcTokenForHostRefs(HOST_TASK_RESULT_SCOPES, effectiveHostRefs)
+    const rpc = await this.issueRpcTokenForHostRefs(
+      HOST_WAKEABLE_OPERATION_SCOPES,
+      effectiveHostRefs
+    )
     const outgoingAttachmentCount = Array.isArray(request.attachments)
       ? request.attachments.length
       : 0
@@ -1467,15 +1516,29 @@ export class AppService {
         options
       )
     } catch (error) {
+      const availabilityError = AppService.toHostAvailabilityError(targetHostRef, error)
+      if (availabilityError) throw availabilityError
       if (AppService.shouldRefreshRpcToken(error)) {
         this.rpcTokenManager.clear()
-        const retried = await this.issueRpcTokenForHostRefs(HOST_MESSAGE_SCOPES, effectiveHostRefs)
-        return this.rpcClient.invokeHostMessage(
-          retried.token,
-          targetHostRef,
-          contextualRequest,
-          options
+        const retried = await this.issueRpcTokenForHostRefs(
+          HOST_WAKEABLE_OPERATION_SCOPES,
+          effectiveHostRefs
         )
+        try {
+          return await this.rpcClient.invokeHostMessage(
+            retried.token,
+            targetHostRef,
+            contextualRequest,
+            options
+          )
+        } catch (retryError) {
+          const retryAvailabilityError = AppService.toHostAvailabilityError(
+            targetHostRef,
+            retryError
+          )
+          if (retryAvailabilityError) throw retryAvailabilityError
+          throw retryError
+        }
       }
       throw error
     }
@@ -1495,14 +1558,17 @@ export class AppService {
       throw new Error('taskId is required')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
-    const rpc = await this.issueRpcTokenForHostRefs(HOST_TASK_RESULT_SCOPES, effectiveHostRefs)
+    const rpc = await this.issueRpcTokenForHostRefs(
+      HOST_WAKEABLE_OPERATION_SCOPES,
+      effectiveHostRefs
+    )
     try {
       return await this.rpcClient.getTaskResult(rpc.token, targetHostRef, targetTaskId)
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
         this.rpcTokenManager.clear()
         const retried = await this.issueRpcTokenForHostRefs(
-          HOST_TASK_RESULT_SCOPES,
+          HOST_WAKEABLE_OPERATION_SCOPES,
           effectiveHostRefs
         )
         return this.rpcClient.getTaskResult(retried.token, targetHostRef, targetTaskId)
@@ -1527,6 +1593,109 @@ export class AppService {
         return this.rpcClient.getHostStatus(retried.token, targetHostRef)
       }
       throw error
+    }
+  }
+
+  /**
+   * Fire-and-forget pre-warm of a (possibly suspended) stateless host.
+   *
+   * POSTs the rpc-proxy wake route with the same RPC token the app already
+   * uses for messages so the pod is Ready by the time the user types. Every
+   * response on the wake contract is terminal (200 active / 202
+   * wake-requested / 409 not-stateless) — no polling. A 202 means HCC has NOT
+   * acted yet and its raw watch can lose the single projected event, so a
+   * bounded background re-emission ({@link runPrewarmReemissionLoop}) re-POSTs
+   * while 202 persists — up to PREWARM_REEMIT_MAX_ATTEMPTS times, then gives
+   * up to the reactive message path. Failures are
+   * warn-logged here (hostRef + reason, never the token) and returned as a
+   * structured result instead of thrown, so the renderer's login/catalog path
+   * can never be blocked or broken by prewarm.
+   *
+   * MUST only be invoked from authenticated access-catalog paths — never from
+   * the host status stream lifecycle, whose ~300s token-TTL reconnects would
+   * resurrect a suspended host forever.
+   */
+  async prewarmHost(hostRef: string, hostRefs?: string[]): Promise<PrewarmHostResult> {
+    const targetHostRef = String(hostRef || '').trim()
+    if (!targetHostRef) {
+      throw new Error('hostRef is required')
+    }
+    const now = Date.now()
+    const lastAttemptAt = this.prewarmAttemptAtByHostRef.get(targetHostRef)
+    if (lastAttemptAt !== undefined && now - lastAttemptAt < PREWARM_COOLDOWN_MS) {
+      return { requested: false, skipped: 'cooldown' }
+    }
+    if (this.prewarmReemitLoopHostRefs.has(targetHostRef)) {
+      // Structural backstop behind the cooldown gate: even if this host's
+      // cooldown entry was evicted from the bounded map, never run two
+      // re-emission loops for the same host at once.
+      return { requested: false, skipped: 'in-flight' }
+    }
+    this.prewarmAttemptAtByHostRef.delete(targetHostRef)
+    if (this.prewarmAttemptAtByHostRef.size >= PREWARM_COOLDOWN_MAX_HOSTS) {
+      const oldestHostRef = this.prewarmAttemptAtByHostRef.keys().next().value
+      if (oldestHostRef !== undefined) {
+        this.prewarmAttemptAtByHostRef.delete(oldestHostRef)
+      }
+    }
+    this.prewarmAttemptAtByHostRef.set(targetHostRef, now)
+    const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    try {
+      const rpc = await this.issueRpcTokenForHostRefs(
+        HOST_WAKEABLE_OPERATION_SCOPES,
+        effectiveHostRefs
+      )
+      const result = await this.rpcClient.prewarmHost(rpc.token, targetHostRef)
+      if (result.status === 'wake-requested') {
+        // HCC has not acted yet and its watch may have lost the event. Run
+        // the bounded background re-emission tied to THIS catalog-driven
+        // invocation — the renderer never awaits it, and the cooldown gate
+        // (checked above, not refreshed by re-emits) keeps it single-flight.
+        this.prewarmReemitLoopHostRefs.add(targetHostRef)
+        void this.runPrewarmReemissionLoop(targetHostRef, rpc.token)
+      }
+      return { requested: true, status: result.status }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[AppService] prewarmHost failed host=${targetHostRef}: ${message}`)
+      return { requested: false, error: message }
+    }
+  }
+
+  /** Injectable so tests stay deterministic; fake timers advance it. */
+  private prewarmReemitDelay = (ms: number): Promise<void> =>
+    new Promise(resolve => setTimeout(resolve, ms))
+
+  /**
+   * Bounded background wake re-emission (see PREWARM_REEMIT_* constants).
+   * Re-POSTs the wake while the route keeps answering 202 wake-requested;
+   * stops immediately on 200 active (HCC acted), on any other status, on any
+   * error, or after the bounded attempts — then the reactive message path is
+   * the backstop. Runs at most once per hostRef (prewarmReemitLoopHostRefs)
+   * and never touches the cooldown map, so re-emits cannot extend or refresh
+   * the cooldown window. Deliberately NOT reachable from the host status
+   * stream lifecycle — the anti-flap invariant is unchanged.
+   */
+  private async runPrewarmReemissionLoop(hostRef: string, rpcToken: string): Promise<void> {
+    try {
+      for (let attempt = 1; attempt <= PREWARM_REEMIT_MAX_ATTEMPTS; attempt++) {
+        await this.prewarmReemitDelay(PREWARM_REEMIT_INTERVAL_MS)
+        const result = await this.rpcClient.prewarmHost(rpcToken, hostRef)
+        console.info(
+          `[AppService] prewarmHost re-emit host=${hostRef} attempt=${attempt} status=${result.status}`
+        )
+        if (result.status !== 'wake-requested') {
+          return
+        }
+      }
+      console.warn(
+        `[AppService] prewarmHost re-emission gave up host=${hostRef} after ${PREWARM_REEMIT_MAX_ATTEMPTS} re-emits: wake still unacknowledged; the reactive message path will cover the user's message`
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[AppService] prewarmHost re-emit failed host=${hostRef}: ${message}`)
+    } finally {
+      this.prewarmReemitLoopHostRefs.delete(hostRef)
     }
   }
 
@@ -2157,7 +2326,7 @@ export class AppService {
     const targetTaskId = String(taskId || '').trim()
     if (!targetHostRef) throw new Error('hostRef is required')
     if (!targetTaskId) throw new Error('taskId is required')
-    const rpc = await this.issueRpcTokenForHostRefs(HOST_MESSAGE_SCOPES, [targetHostRef])
+    const rpc = await this.issueRpcTokenForHostRefs(HOST_WAKEABLE_OPERATION_SCOPES, [targetHostRef])
     try {
       await this.rpcClient.cancelTask(rpc.token, targetHostRef, targetTaskId)
     } catch (error) {
@@ -2165,7 +2334,9 @@ export class AppService {
       // outright, unlike invoke/getTaskResult).
       if (AppService.shouldRefreshRpcToken(error)) {
         this.rpcTokenManager.clear()
-        const retried = await this.issueRpcTokenForHostRefs(HOST_MESSAGE_SCOPES, [targetHostRef])
+        const retried = await this.issueRpcTokenForHostRefs(HOST_WAKEABLE_OPERATION_SCOPES, [
+          targetHostRef,
+        ])
         await this.rpcClient.cancelTask(retried.token, targetHostRef, targetTaskId)
         return
       }

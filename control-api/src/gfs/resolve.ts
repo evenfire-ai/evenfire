@@ -35,7 +35,10 @@ export function parseGfsUri(uri: string): ParsedGfsUri {
   if (typeof uri !== 'string' || !uri.startsWith('gfs://')) {
     throw new GfsUriError(`not a gfs URI: ${JSON.stringify(uri)}`)
   }
-  const segments = uri.slice('gfs://'.length).split('/').filter(s => s.length > 0)
+  const segments = uri
+    .slice('gfs://'.length)
+    .split('/')
+    .filter(s => s.length > 0)
   if (segments.length < 2) {
     throw new GfsUriError(`gfs URI must be gfs://<drive>/<resource>: ${uri}`)
   }

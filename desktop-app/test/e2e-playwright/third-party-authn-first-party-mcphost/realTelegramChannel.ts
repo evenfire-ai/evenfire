@@ -32,11 +32,11 @@ export function realTelegramConfigOrNull(): RealTelegramConfig | null {
   const providerChannelId = process.env.E2E_REAL_TELEGRAM_CHAT_ID || ''
   if (!botToken || !providerUserId || !providerChannelId) return null
   return {
-    botName: process.env.E2E_REAL_TELEGRAM_BOT_NAME || 'ExampleBot',
+    botName: process.env.E2E_REAL_TELEGRAM_BOT_NAME || 'AlfmoltyBot',
     botToken,
     providerUserId,
     providerChannelId,
-    visualUsername: process.env.E2E_REAL_TELEGRAM_USERNAME || 'example_user',
+    visualUsername: process.env.E2E_REAL_TELEGRAM_USERNAME || 'alfredolopez80',
   }
 }
 

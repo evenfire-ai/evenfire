@@ -180,7 +180,11 @@ function setPreflightHeaders(
 
 function isWorkflowApprovalReaderRoute(url: string): boolean {
   const noQuery = url.split('?')[0].split('#')[0]
-  return /^\/webhooks\/telegram\/?$/.test(noQuery) || /^\/webhooks\/slack\/[^/]+\/?$/.test(noQuery)
+  return (
+    /^\/webhooks\/telegram\/?$/.test(noQuery) ||
+    /^\/webhooks\/slack\/[^/]+\/?$/.test(noQuery) ||
+    /^\/webhooks\/teams\/[^/]+\/?$/.test(noQuery)
+  )
 }
 
 /**

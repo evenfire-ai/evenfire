@@ -13,6 +13,15 @@ function formatAgentFileReference(
   return `${filesystemName}${path.startsWith('/') ? path : `/${path}`}`
 }
 
+function formatGlobalFileReference(
+  reference: Extract<ComposerReferenceAttachment, { type: 'global_file' }>
+): string {
+  const label = normalizeComposerReferenceName(reference.label)
+  const gfsUri = normalizeComposerReferenceName(reference.gfsUri)
+  if (!gfsUri) return ''
+  return label ? `${label} (${gfsUri})` : gfsUri
+}
+
 export function buildComposerReferencesPromptSection(
   references: ComposerReferenceAttachment[]
 ): string | null {
@@ -46,7 +55,17 @@ export function buildComposerReferencesPromptSection(
     .map(formatAgentFileReference)
     .filter(Boolean)
 
-  if (!plugins.length && !connectors.length && !agentFiles.length) return null
+  const globalFiles = references
+    .filter(
+      (reference): reference is Extract<ComposerReferenceAttachment, { type: 'global_file' }> =>
+        reference.type === 'global_file'
+    )
+    .map(formatGlobalFileReference)
+    .filter(Boolean)
+
+  if (!plugins.length && !connectors.length && !agentFiles.length && !globalFiles.length) {
+    return null
+  }
 
   const lines = [
     'USER-ATTACHED CONTEXT: The user selected these capabilities/files for this message. Prefer them when they are relevant to the request.',
@@ -67,6 +86,12 @@ export function buildComposerReferencesPromptSection(
   if (agentFiles.length) {
     lines.push(
       `Agent Files: ${agentFiles.join(', ')}. Use clerum__context_files_list and clerum__context_files_read to inspect these paths before relying on their contents.`
+    )
+  }
+
+  if (globalFiles.length) {
+    lines.push(
+      `Global Files: ${globalFiles.join(', ')}. These files were explicitly selected by the user. Use clerum__gfs_resolve for each gfs:// URI, then clerum__gfs_read with its drive and resourceId before relying on its contents.`
     )
   }
 

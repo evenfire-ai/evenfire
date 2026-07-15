@@ -26,11 +26,14 @@ export interface InProcessWorkerHandle {
   crash: (code?: number) => void
 }
 
-export function createInProcessWorker(dbPath: string = ':memory:'): InProcessWorkerHandle {
+export function createInProcessWorker(
+  dbPath: string = ':memory:',
+  opts: { barrierMode?: boolean } = {}
+): InProcessWorkerHandle {
   const ee = new EventEmitter()
   ee.setMaxListeners(50)
   const db = new Database(dbPath)
-  applyPragmas(db)
+  applyPragmas(db, { barrierMode: opts.barrierMode === true })
   runMigrations(db)
   const deps = createDispatcher(db)
   let alive = true
@@ -109,8 +112,12 @@ export interface StoreHandle {
   shutdown: () => Promise<void>
 }
 
-export function makeSqliteStore(opts: { dbPath?: string; cacheSize?: number } = {}): StoreHandle {
-  const worker = createInProcessWorker(opts.dbPath ?? ':memory:')
+export function makeSqliteStore(
+  opts: { dbPath?: string; cacheSize?: number; barrierMode?: boolean } = {}
+): StoreHandle {
+  const worker = createInProcessWorker(opts.dbPath ?? ':memory:', {
+    barrierMode: opts.barrierMode,
+  })
   const persistQueue = new PersistQueue(worker.worker, {
     syncTimeoutMs: 2000,
     asyncTimeoutMs: 5000,

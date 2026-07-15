@@ -1,6 +1,6 @@
 import { controlApiRequest, controlApiRequestWithStatus } from '../controlApiClient.js'
 
-export type WorkflowApprovalMedium = 'telegram' | 'slack' | 'discord'
+export type WorkflowApprovalMedium = 'telegram' | 'slack' | 'teams' | 'discord'
 
 export type WorkflowApprovalMediumAccount = {
   id: string
@@ -9,6 +9,11 @@ export type WorkflowApprovalMediumAccount = {
   providerUserId: string
   providerWorkspaceId: string | null
   providerChannelId: string | null
+  communicationChannelRef?: string | null
+  displayName?: string | null
+  providerChannelType?: string | null
+  providerChannelTitle?: string | null
+  providerChannelHandle?: string | null
   disabledAt: string | null
   isPreferred?: boolean
   targets?: ApprovalChannelTarget[]
@@ -16,7 +21,7 @@ export type WorkflowApprovalMediumAccount = {
 
 export type ApprovalChannelTarget = {
   id: string
-  medium: 'telegram' | 'slack'
+  medium: 'telegram' | 'slack' | 'teams'
   agentName: string
   channelName: string
   channelNamespace: string
@@ -124,6 +129,21 @@ export async function preferWorkflowApprovalMedium(
     `/external/workflow-approval-mediums/${encodeURIComponent(accountId)}/preference`,
     {
       userSessionToken: sessionToken,
+    }
+  )
+}
+
+export async function updateWorkflowApprovalMediumDisplayName(
+  sessionToken: string,
+  accountId: string,
+  displayName: string | null
+): Promise<{ ok: true; account: WorkflowApprovalMediumAccount }> {
+  return controlApiRequest(
+    'PATCH',
+    `/external/workflow-approval-mediums/${encodeURIComponent(accountId)}/display-name`,
+    {
+      userSessionToken: sessionToken,
+      body: { displayName },
     }
   )
 }

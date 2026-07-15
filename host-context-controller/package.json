@@ -1,6 +1,6 @@
 {
   "name": "clerum-host-context-controller",
-  "version": "0.1.113",
+  "version": "0.1.150",
   "description": "Host Context Controller - provides McpServer CRDs to mcp-host via REST API",
   "main": "dist/main.js",
   "engines": {
@@ -20,7 +20,7 @@
     "mcp",
     "host-context-controller"
   ],
-  "license": "MPL-2.0",
+  "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
     "@clerum/image-policy": "file:../packages/image-policy",
     "@clerum/workflow-recipe-capability-policy": "file:../packages/workflow-recipe-capability-policy",

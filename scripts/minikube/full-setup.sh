@@ -206,41 +206,6 @@ else
   warn "No .env found in ${PROJECT_DIR} or main repo — channel-reader + LLM secrets will use placeholders"
 fi
 
-# ── Model provider inference ───────────────────────────────────────────
-# The seeded Host CRD (step 6f) takes its provider/model from these vars.
-# If CLERUM_MODEL_PROVIDER is unset, infer it when exactly one LLM API key
-# is present; abort when several keys make the choice ambiguous.
-if [ -z "${CLERUM_MODEL_PROVIDER:-}" ]; then
-  PROVIDER_KEYS=()
-  INFERRED_PROVIDER=""
-  [ -n "${OPENAI_API_KEY:-}" ]  && { PROVIDER_KEYS+=("OPENAI_API_KEY");  INFERRED_PROVIDER="openai"; }
-  [ -n "${CLAUDE_API_KEY:-}" ]  && { PROVIDER_KEYS+=("CLAUDE_API_KEY");  INFERRED_PROVIDER="claude"; }
-  [ -n "${ZAI_API_KEY:-}" ]     && { PROVIDER_KEYS+=("ZAI_API_KEY");     INFERRED_PROVIDER="zai"; }
-  [ -n "${BAILIAN_API_KEY:-}" ] && { PROVIDER_KEYS+=("BAILIAN_API_KEY"); INFERRED_PROVIDER="bailian"; }
-  if [ "${#PROVIDER_KEYS[@]}" -eq 1 ]; then
-    export CLERUM_MODEL_PROVIDER="$INFERRED_PROVIDER"
-    log "CLERUM_MODEL_PROVIDER not set — inferred '${CLERUM_MODEL_PROVIDER}' from ${PROVIDER_KEYS[0]}"
-  elif [ "${#PROVIDER_KEYS[@]}" -gt 1 ]; then
-    err "CLERUM_MODEL_PROVIDER is not set and multiple LLM API keys are present: ${PROVIDER_KEYS[*]}"
-    err "Set CLERUM_MODEL_PROVIDER=openai|claude|zai|bailian in .env so the seeded Host uses the right key, then re-run."
-    exit 1
-  else
-    warn "CLERUM_MODEL_PROVIDER not set and no LLM API key found — seeded Host will default to zai/glm-5.1 with placeholder keys."
-    warn "The agent will NOT reply until a real API key is set in .env and setup is re-run."
-  fi
-fi
-
-# Default model follows the provider (mirrors mcp-host/src/llm/registryCore.ts defaults).
-if [ -z "${CLERUM_MODEL_NAME:-}" ]; then
-  case "${CLERUM_MODEL_PROVIDER:-zai}" in
-    openai)  CLERUM_MODEL_NAME="gpt-5.4-mini" ;;
-    claude)  CLERUM_MODEL_NAME="claude-sonnet-4-6" ;;
-    bailian) CLERUM_MODEL_NAME="qwen3-coder-plus" ;;
-    *)       CLERUM_MODEL_NAME="glm-5.1" ;;
-  esac
-  export CLERUM_MODEL_NAME
-fi
-
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 KC="kubectl --context=${PROFILE}"
 TOTAL_STEPS=12
@@ -605,7 +570,7 @@ $KC apply -f "${PROJECT_DIR}/deploy/overlays/minikube/instances/"
 ok "CRD instances applied (Host, Context, CommunicationChannel)"
 
 # 6f. Apply Host model from .env/default E2E model
-log "Applying Host model from .env/default E2E model (${CLERUM_MODEL_PROVIDER:-zai}/${CLERUM_MODEL_NAME})..."
+log "Applying Host model from .env/default E2E model (${CLERUM_MODEL_PROVIDER:-zai}/${CLERUM_MODEL_NAME:-glm-5.1})..."
 cat <<HOSTEOF | $KC apply -f -
 apiVersion: clerum.io/v1alpha1
 kind: Host
@@ -618,7 +583,7 @@ spec:
   secretRef: chatllm-api-keys
   model:
     provider: ${CLERUM_MODEL_PROVIDER:-zai}
-    name: ${CLERUM_MODEL_NAME}
+    name: ${CLERUM_MODEL_NAME:-glm-5.1}
   workflowControl:
     scopes:
       - workflow:list
@@ -861,19 +826,25 @@ done
 
 # ----------------------------------------------------------------------
 # gfs serving provisioning (runs once pods are up, so control-api has applied
-# migration 0043 that creates the gfs_controller role). gfsc fails closed
+# migration 0048 that creates the gfs_controller role). gfsc fails closed
 # without BOTH: (a) its JWT public key in gfs-config, and (b) the gfs_controller
 # DB LOGIN + DSN in gfs-controller-db. The inline JWT sync (6g) only covers
-# mcp-host-config, so these gfs-specific steps are explicit here. Idempotent +
-# best-effort (warn, never abort the whole setup).
+# mcp-host-config, so these gfs-specific steps are explicit here. Idempotent.
+# FAIL LOUD: when the GFS stack is deployed, a provisioning failure ABORTS the
+# setup — continuing would hand the user a cluster whose GFS plane 503s on
+# every operation (issue #775).
 # ----------------------------------------------------------------------
 if $KC get configmap gfs-config -n gfs &>/dev/null; then
   log "Provisioning gfs serving (public key → gfs-config + gfs_controller DB login)..."
-  bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}" || warn "gfs public-key sync had issues"
+  if ! bash "${SCRIPT_DIR}/sync-auth-key.sh" --context="${PROFILE}"; then
+    err "gfs public-key sync FAILED — gfsc cannot verify tokens. Fix and re-run."
+    exit 1
+  fi
   if CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/provision-gfs-db.sh"; then
     ok "gfs serving provisioned (gfsc can verify tokens + reach the permission store)"
   else
-    warn "gfs DB provisioning had issues — gfsc /readyz will fail closed until resolved"
+    err "gfs DB provisioning FAILED — gfsc /readyz will fail closed and every GFS operation will 503. Fix and re-run."
+    exit 1
   fi
 else
   log "gfs-config not present — skipping gfs serving provisioning"

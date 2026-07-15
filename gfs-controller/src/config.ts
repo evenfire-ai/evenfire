@@ -31,6 +31,14 @@ export interface GfsConfig {
    * path. A tuning knob, not a fail-loud requirement (has a safe default).
    */
   decisionCacheTtlMs: number
+  /**
+   * Cadence (ms) of the fresh-connection credential probe inside readiness
+   * (issue #775): at most one NEW database connection per interval verifies
+   * that the DSN still authenticates and the role keeps its grants — the pool
+   * alone cannot see a rotated password. Tuning knob with a safe default;
+   * garbage values fail loud.
+   */
+  credentialProbeIntervalMs: number
   devMode: boolean
 }
 
@@ -39,6 +47,16 @@ function required(name: string, devMode: boolean, devDefault?: string): string {
   if (value !== undefined && value !== '') return value
   if (devMode && devDefault !== undefined) return devDefault
   throw new Error(`[gfsc] required environment variable ${name} is not set`)
+}
+
+function tuningMs(name: string, defaultMs: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return defaultMs
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`[gfsc] ${name} must be a positive number of milliseconds, got: ${raw}`)
+  }
+  return value
 }
 
 export function loadConfig(): GfsConfig {
@@ -53,6 +71,7 @@ export function loadConfig(): GfsConfig {
     publicKey: process.env.GFS_JWT_PUBLIC_KEY || '',
     driveName: process.env.GFS_DRIVE_NAME || 'main',
     decisionCacheTtlMs: Number(process.env.GFS_DECISION_CACHE_TTL_MS || 5000),
+    credentialProbeIntervalMs: tuningMs('GFS_CREDENTIAL_PROBE_INTERVAL_MS', 60000),
     devMode,
   }
 }

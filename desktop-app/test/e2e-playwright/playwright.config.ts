@@ -27,6 +27,15 @@ export default defineConfig({
   timeout: 240_000,
   retries: 0,
   workers: 1,
-  reporter: 'list',
+  reporter: [
+    ['list'],
+    ['html', { open: 'never', outputFolder: path.resolve(__dirname, 'playwright-report') }],
+  ],
+  outputDir: path.resolve(__dirname, 'test-results'),
   globalSetup: path.resolve(__dirname, 'global-setup.ts'),
+  use: {
+    screenshot: 'only-on-failure',
+    trace: 'retain-on-failure',
+    video: 'retain-on-failure',
+  },
 })

@@ -10,7 +10,7 @@ Per-service **unit tests** live inside each service's own `test/` directory. Thi
 
 | Directory            | Scope            | Description                                                                                                                                                                                                                                                                                                                                                                 |
 | -------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mcp-host/`          | Service-specific | 22 test files covering mcp-host endpoints: approval flow, context compaction, CRD reconciliation, cron scheduling, extension config, health, legacy removal, MCP compaction, message flow, native tools, resilience, software creation (generic + specialized), Telegram channel E2E, and tool discovery.                                                                   |
+| `mcp-host/`          | Service-specific | 16 test files covering mcp-host endpoints: approval flow, context compaction, CRD reconciliation, cron scheduling, extension config, health, legacy removal, MCP compaction, message flow, native tools, resilience, software creation (generic + specialized), Telegram channel E2E, and tool discovery.                                                                   |
 | `rpc-proxy/`         | Service-specific | Security-focused E2E suite for the internet-facing `rpc-proxy`. Tests JWT hardening, auth header enforcement, route authorization, JSON-RPC validation, upstream error mapping, and MCP session bootstrap. Starts a real rpc-proxy process with local stubs. See `rpc-proxy/README.md`.                                                                                     |
 | `external-rest-api/` | Service-specific | Security-focused E2E suite for `external-rest-api`. Covers password/google login, session token hardening, claim binding, RPC token brokerage, and upstream failure handling. Starts a real external-rest-api process with local stubs. See `external-rest-api/README.md`.                                                                                                  |
 | `integration/`       | Cross-service    | Tests that span multiple services on a live cluster: API contract validation (`contracts`), channel-reader to mcp-host forwarding, control-api K8s reconciliation (HostOverview, WorkflowRecipe CRUD), MCP proxy routing, profiles chain (external-rest-api -> control-api -> rpc-proxy -> mcp-host), and full WorkflowRecipe lifecycle (coordinator + mcp_host Pod model). |
@@ -266,13 +266,13 @@ Desktop App regression.
 
 ### Vitest suites (rpc-proxy, external-rest-api)
 
-- Node.js 24+
+- Node.js 22+
 - Dependencies installed for `tests/e2e` and the target service
 - **No cluster required** -- these suites use local deterministic stubs
 
 ### Playwright suites
 
-- Node.js 24+
+- Node.js 22+
 - Browsers installed (`npx playwright install chromium`)
 - Cluster running with control-ui accessible (default `http://localhost:3000`)
 

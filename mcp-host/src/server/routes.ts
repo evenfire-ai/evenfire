@@ -459,7 +459,7 @@ function isProviderIdentity(
   if (!value || typeof value !== 'object') return false
   const record = value as Record<string, unknown>
   const hasRequiredIdentity =
-    (record.medium === 'telegram' || record.medium === 'slack') &&
+    (record.medium === 'telegram' || record.medium === 'slack' || record.medium === 'teams') &&
     typeof record.providerUserId === 'string' &&
     record.providerUserId.trim().length > 0 &&
     typeof record.providerChannelId === 'string' &&
@@ -475,7 +475,7 @@ function isProviderIdentity(
   ) {
     return false
   }
-  if (record.medium === 'slack') {
+  if (record.medium === 'slack' || record.medium === 'teams') {
     return (
       typeof record.providerWorkspaceId === 'string' && record.providerWorkspaceId.trim().length > 0
     )
@@ -489,13 +489,13 @@ function isProviderResolveIdentity(
   if (!value || typeof value !== 'object') return false
   const record = value as Record<string, unknown>
   const hasRequiredIdentity =
-    (record.medium === 'telegram' || record.medium === 'slack') &&
+    (record.medium === 'telegram' || record.medium === 'slack' || record.medium === 'teams') &&
     typeof record.providerUserId === 'string' &&
     record.providerUserId.trim().length > 0 &&
     typeof record.providerChannelId === 'string' &&
     record.providerChannelId.trim().length > 0
   if (!hasRequiredIdentity) return false
-  if (record.medium === 'slack') {
+  if (record.medium === 'slack' || record.medium === 'teams') {
     return (
       typeof record.providerWorkspaceId === 'string' && record.providerWorkspaceId.trim().length > 0
     )
@@ -657,7 +657,9 @@ function isWorkflowResultSource(value: unknown): value is ProviderWorkflowResult
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const source = value as Record<string, unknown>
   return (
-    (source.channelType === 'telegram' || source.channelType === 'slack') &&
+    (source.channelType === 'telegram' ||
+      source.channelType === 'slack' ||
+      source.channelType === 'teams') &&
     typeof source.channelId === 'string' &&
     source.channelId.trim().length > 0 &&
     typeof source.sender === 'string' &&
@@ -683,8 +685,26 @@ export async function handleProviderWorkflowResultRequestRoute(
 
     const parsed = req.body as Record<string, unknown>
     const workflowName = typeof parsed.workflowName === 'string' ? parsed.workflowName.trim() : ''
-    if (!workflowName) {
-      badRequest(res, 'workflowName is required')
+    const workflowRunId =
+      typeof parsed.workflowRunId === 'string' ? parsed.workflowRunId.trim() : ''
+    const artifactName = typeof parsed.artifactName === 'string' ? parsed.artifactName.trim() : ''
+    if (!workflowName && !workflowRunId) {
+      badRequest(res, 'workflowName or workflowRunId is required')
+      return
+    }
+    if (workflowName && workflowRunId) {
+      badRequest(res, 'workflowName and workflowRunId are mutually exclusive')
+      return
+    }
+    if (artifactName && !workflowRunId) {
+      badRequest(res, 'artifactName requires workflowRunId')
+      return
+    }
+    if (
+      workflowRunId &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(workflowRunId)
+    ) {
+      badRequest(res, 'workflowRunId must be a UUID')
       return
     }
     if (!isProviderResolveIdentity(parsed.providerIdentity)) {
@@ -716,7 +736,9 @@ export async function handleProviderWorkflowResultRequestRoute(
 
     const result = await handlers.providerWorkflowResultRequestHandler(
       {
-        workflowName,
+        ...(workflowName ? { workflowName } : {}),
+        ...(workflowRunId ? { workflowRunId } : {}),
+        ...(artifactName ? { artifactName } : {}),
         providerIdentity: parsed.providerIdentity,
         source: parsed.source,
       },
@@ -788,7 +810,7 @@ export async function handleWorkflowApprovalNotificationClaimRoute(
     }
     const body = bodyRecord(req.body)
     const medium = nullableString(body.medium)
-    if (medium !== 'telegram' && medium !== 'slack') {
+    if (medium !== 'telegram' && medium !== 'slack' && medium !== 'teams') {
       badRequest(res, 'medium is required')
       return
     }
@@ -838,7 +860,7 @@ export async function handleWorkflowApprovalNotificationTerminalRoute(
     const providerUserId = nullableString(body.providerUserId)
     const providerChannelId = nullableString(body.providerChannelId)
     const hostRef = nullableString(body.hostRef)
-    if (medium !== 'telegram' && medium !== 'slack') {
+    if (medium !== 'telegram' && medium !== 'slack' && medium !== 'teams') {
       badRequest(res, 'medium is required')
       return
     }
@@ -893,7 +915,7 @@ export async function handleWorkflowApprovalMediumEnrollmentRoute(
     const providerUserId = nullableString(body.providerUserId)
     const providerChannelId = nullableString(body.providerChannelId)
     const communicationChannelRef = nullableString(body.communicationChannelRef)
-    if (!nonce || (medium !== 'telegram' && medium !== 'slack')) {
+    if (!nonce || (medium !== 'telegram' && medium !== 'slack' && medium !== 'teams')) {
       badRequest(res, 'nonce and medium are required')
       return
     }
@@ -917,6 +939,8 @@ export async function handleWorkflowApprovalMediumEnrollmentRoute(
       providerUserId,
       providerWorkspaceId: nullableString(body.providerWorkspaceId),
       providerChannelId,
+      providerChannelType: nullableString(body.providerChannelType),
+      serviceUrl: nullableString(body.serviceUrl),
       communicationChannelRef,
     })
     json(res, result.ok ? 200 : 409, result)

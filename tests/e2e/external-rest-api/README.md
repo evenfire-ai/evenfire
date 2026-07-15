@@ -9,7 +9,7 @@ This suite validates the internet-facing `external-rest-api` with a security-fir
 
 ## Prerequisites
 
-- Node.js 24+ installed.
+- Node.js 22+ installed.
 - Dependencies installed for:
   - `tests/e2e`
   - `external-rest-api`

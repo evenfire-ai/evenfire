@@ -17,15 +17,15 @@
  */
 import { expect, request, test } from '@playwright/test'
 import { E2E_TEST_EMAIL } from '../../testUser.js'
+import { adminSessionCookieHeader } from '../helpers/session-cookie'
 
 const CONTROL_API = process.env.CONTROL_API_URL ?? 'http://127.0.0.1:8090'
 
 async function apiGet<T>(path: string): Promise<T> {
-  const token = process.env.PLAYWRIGHT_ADMIN_TOKEN ?? ''
   const ctx = await request.newContext({ baseURL: CONTROL_API })
   try {
     const res = await ctx.get(path, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: adminSessionCookieHeader(),
     })
     if (!res.ok()) throw new Error(`${res.status()} on GET ${path}`)
     return (await res.json()) as T

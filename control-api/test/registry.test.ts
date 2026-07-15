@@ -1,12 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import jwt from 'jsonwebtoken'
-import { createPublicKey, generateKeyPairSync } from 'node:crypto'
+import { generateKeyPairSync } from 'node:crypto'
 import request from 'supertest'
 import { config } from '../src/config.js'
 // Imported after mocks so the route file picks up the mocked deps.
 import { createRegistryRouter } from '../src/routes/registry.js'
-import { registrySyntheticUsername } from '../src/services/registryVoucher.js'
 
 // Mock adminAuthService so the route can fetch the admin's username from
 // control_admin_users without touching pg. Mirrors the pattern in
@@ -61,7 +60,23 @@ vi.mock('../src/db.js', () => ({
   withTransaction: vi.fn(),
 }))
 
+// Voucher v2 requires mode-aware signing material. registry.test.ts uses the
+// REAL config + real mintIdentityVoucher (only db/auth are mocked), so — per
+// review correction C-I2 — inject managed-mode v2 material here (else every
+// mint throws VoucherUnavailableError → 500 and the 429/200 tests fail).
+function voucherKeypair() {
+  return generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  })
+}
+
 describe('POST /registry/identity-voucher', () => {
+  const origMode = config.registryConnectionMode
+  const origKey = config.registryVoucherPrivateKey
+  const origKid = config.registryVoucherKid
+
   beforeEach(() => {
     adminSvc.findAdminById.mockReset()
     uiAuth.requireAuthForControlUI.mockReset()
@@ -79,6 +94,17 @@ describe('POST /registry/identity-voucher', () => {
     // window — otherwise loops in other tests would consume this test's quota.
     rateLimitCounts.clear()
     mockPoolQuery.mockClear()
+    // C-I2: managed-mode v2 material so mintIdentityVoucher succeeds.
+    const { privateKey } = voucherKeypair()
+    ;(config as Record<string, unknown>).registryConnectionMode = 'managed'
+    ;(config as Record<string, unknown>).registryVoucherPrivateKey = privateKey
+    ;(config as Record<string, unknown>).registryVoucherKid = 'key-uuid-default'
+  })
+
+  afterEach(() => {
+    ;(config as Record<string, unknown>).registryConnectionMode = origMode
+    ;(config as Record<string, unknown>).registryVoucherPrivateKey = origKey
+    ;(config as Record<string, unknown>).registryVoucherKid = origKid
   })
 
   it('returns 401 when auth middleware rejects the request', async () => {
@@ -95,7 +121,11 @@ describe('POST /registry/identity-voucher', () => {
     expect(res.status).toBe(401)
   })
 
-  it('returns 200 with a valid RS256 voucher JWT for authenticated admins', async () => {
+  it('returns 200 with a voucher-v2 JWT (kid header, minimal payload)', async () => {
+    const { privateKey, publicKey } = voucherKeypair()
+    ;(config as Record<string, unknown>).registryConnectionMode = 'managed'
+    ;(config as Record<string, unknown>).registryVoucherPrivateKey = privateKey
+    ;(config as Record<string, unknown>).registryVoucherKid = 'key-uuid-77'
     adminSvc.findAdminById.mockResolvedValue({
       id: 'admin-uuid-123',
       username: 'alice',
@@ -106,37 +136,30 @@ describe('POST /registry/identity-voucher', () => {
     const app = express()
     app.use(express.json())
     app.use(createRegistryRouter())
-
     const res = await request(app).post('/registry/identity-voucher').send({}).expect(200)
 
     expect(typeof res.body.voucher).toBe('string')
 
-    // Voucher must be a valid RS256 JWT signed with the admin private key
-    // (we verify with the matching public key derived from the same secret).
-    const publicKey = createPublicKey(config.adminJwtPrivateKey).export({
-      type: 'spki',
-      format: 'pem',
-    })
+    const header = jwt.decode(res.body.voucher, { complete: true })!.header
+    expect(header.kid).toBe('key-uuid-77')
+
     const payload = jwt.verify(res.body.voucher, publicKey, {
       algorithms: ['RS256'],
       issuer: 'control-api',
       audience: 'registry-api',
     }) as jwt.JwtPayload
-
     expect(payload.iss).toBe('control-api')
     expect(payload.aud).toBe('registry-api')
     expect(payload.sub).toBe('admin-uuid-123')
-    // Synthetic registry identity is deployment-namespaced (see registrySyntheticUsername):
-    // never a reserved bareword, unique per deployment.
-    const expectedUsername = registrySyntheticUsername({ id: 'admin-uuid-123', username: 'alice' } as never)
-    expect(payload.username).toBe(expectedUsername)
-    expect(payload.email).toBe(`${expectedUsername}@control-api.local`)
+    // v2 drops the synthetic identity + iat.
+    expect(payload.username).toBeUndefined()
+    expect(payload.email).toBeUndefined()
+    expect(payload.iat).toBeUndefined()
     expect(typeof payload.jti).toBe('string')
     expect((payload.jti as string).length).toBeGreaterThan(0)
-    expect(typeof payload.iat).toBe('number')
     expect(typeof payload.exp).toBe('number')
-    expect((payload.exp as number) - (payload.iat as number)).toBeLessThanOrEqual(60)
-    expect((payload.exp as number) - (payload.iat as number)).toBeGreaterThan(0)
+    expect((payload.exp as number) - Math.floor(Date.now() / 1000)).toBeGreaterThan(0)
+    expect((payload.exp as number) - Math.floor(Date.now() / 1000)).toBeLessThanOrEqual(60)
   })
 
   it('returns 401 when the admin record cannot be found in the database', async () => {
@@ -192,59 +215,5 @@ describe('POST /registry/identity-voucher', () => {
     const res = await request(app).post('/registry/identity-voucher')
     expect(res.status).toBe(401)
     expect(res.body).toEqual({ error: 'unauthorized' })
-  })
-
-  describe('signing key precedence', () => {
-    const originalKey = config.registryVoucherPrivateKey
-
-    afterEach(() => {
-      // Restore after each test to avoid leaking key state into other suites.
-      ;(config as { registryVoucherPrivateKey: string }).registryVoucherPrivateKey = originalKey
-    })
-
-    it('signs with config.registryVoucherPrivateKey when it is set (not adminJwtPrivateKey)', async () => {
-      // Generate a dedicated voucher keypair for this test.
-      const { privateKey, publicKey } = generateKeyPairSync('rsa', {
-        modulusLength: 2048,
-        publicKeyEncoding: { type: 'spki', format: 'pem' },
-        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-      })
-
-      // Inject the dedicated key.
-      ;(config as { registryVoucherPrivateKey: string }).registryVoucherPrivateKey = privateKey
-
-      adminSvc.findAdminById.mockResolvedValue({
-        id: 'admin-uuid-123',
-        username: 'alice',
-        role: 'admin',
-        status: 'active',
-      })
-
-      const app = express()
-      app.use(express.json())
-      app.use(createRegistryRouter())
-      const res = await request(app).post('/registry/identity-voucher').send({}).expect(200)
-
-      // Must verify against the dedicated public key, NOT the admin key.
-      const payload = jwt.verify(res.body.voucher, publicKey, {
-        algorithms: ['RS256'],
-        issuer: 'control-api',
-        audience: 'registry-api',
-      }) as jwt.JwtPayload
-      expect(payload.sub).toBe('admin-uuid-123')
-
-      // Sanity: the admin key MUST NOT verify this voucher.
-      const adminPubKey = createPublicKey(config.adminJwtPrivateKey).export({
-        type: 'spki',
-        format: 'pem',
-      })
-      expect(() =>
-        jwt.verify(res.body.voucher, adminPubKey, {
-          algorithms: ['RS256'],
-          issuer: 'control-api',
-          audience: 'registry-api',
-        })
-      ).toThrow()
-    })
   })
 })

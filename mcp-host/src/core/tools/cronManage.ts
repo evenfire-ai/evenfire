@@ -1,8 +1,26 @@
 import { CronScheduler } from '../../agent/cronScheduler'
 import type { CronJob } from '../../agent/types'
 import type { IncomingMessage } from '../../server'
+import {
+  STATELESS_ALLOW_CRON_MANAGE_ENV,
+  statelessCronManageAllowed,
+} from '../../statelessCronPolicy'
 import { Tool } from '../interfaces'
 import { ToolOutput } from '../types'
+
+/**
+ * Cron×stateless notice — appended to EVERY cron_manage response on a
+ * stateless host (all actions, including reads and errors) so the LLM always
+ * relays the cost consequence of active schedules to the user in their
+ * language.
+ */
+export const STATELESS_CRON_NOTICE =
+  'Note: this agent is stateless and normally suspends when idle. Active scheduled tasks ' +
+  'keep it running continuously -- it will not suspend until all schedules are removed or disabled.'
+
+export const STATELESS_CRON_FORBIDDEN_MESSAGE = `cron_manage create/enable is disabled on stateless hosts by default. Set ${STATELESS_ALLOW_CRON_MANAGE_ENV}=true only for hosts that require persistent schedules.`
+
+const STATELESS_FORBIDDEN_ACTIONS = new Set(['create', 'enable'])
 
 /**
  * Native tool for managing cron jobs.
@@ -14,7 +32,10 @@ import { ToolOutput } from '../types'
 export class CronManageTool implements Tool {
   constructor(
     private readonly scheduler: CronScheduler,
-    private readonly sourceMessage?: IncomingMessage
+    private readonly sourceMessage?: IncomingMessage,
+    /** Cron×stateless: appends STATELESS_CRON_NOTICE to every response. */
+    private readonly statelessLifecycle: boolean = false,
+    private readonly allowStatelessCronManage: boolean = statelessCronManageAllowed()
   ) {}
 
   name() {
@@ -27,7 +48,8 @@ export class CronManageTool implements Tool {
       'get (show one job by ID), create (new recurring job with a cron schedule and prompt), ' +
       'delete (remove a job), enable/disable (toggle a job), trigger (run a job immediately). ' +
       'Cron expressions use 5-part format: minute hour day month weekday. ' +
-      'This tool requires approval before execution.'
+      'On stateless hosts, create/enable are disabled by default; when explicitly allowed, ' +
+      'create/enable require approval before execution.'
     )
   }
 
@@ -68,7 +90,7 @@ export class CronManageTool implements Tool {
   }
 
   requiresApproval() {
-    return true
+    return !this.statelessCronForbidden()
   }
 
   /**
@@ -93,6 +115,10 @@ export class CronManageTool implements Tool {
     const action = params.action as string
 
     try {
+      if (this.statelessCronForbidden() && STATELESS_FORBIDDEN_ACTIONS.has(action)) {
+        return this.error(STATELESS_CRON_FORBIDDEN_MESSAGE, startTime)
+      }
+
       switch (action) {
         case 'list':
           return this.success(
@@ -203,7 +229,7 @@ export class CronManageTool implements Tool {
 
   private success(data: unknown, startTime: number): ToolOutput {
     return {
-      content: JSON.stringify(data, null, 2),
+      content: this.withStatelessNotice(JSON.stringify(data, null, 2)),
       duration_ms: Date.now() - startTime,
       is_error: false,
     }
@@ -211,9 +237,19 @@ export class CronManageTool implements Tool {
 
   private error(message: string, startTime: number): ToolOutput {
     return {
-      content: message,
+      content: this.withStatelessNotice(message),
       duration_ms: Date.now() - startTime,
       is_error: true,
     }
+  }
+
+  /** Cron×stateless: every response on a stateless host carries the notice. */
+  private withStatelessNotice(content: string): string {
+    if (!this.statelessLifecycle || !this.allowStatelessCronManage) return content
+    return `${content}\n\n${STATELESS_CRON_NOTICE}`
+  }
+
+  private statelessCronForbidden(): boolean {
+    return this.statelessLifecycle && !this.allowStatelessCronManage
   }
 }

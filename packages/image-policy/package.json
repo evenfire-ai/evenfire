@@ -12,5 +12,5 @@
       "default": "./index.cjs"
     }
   },
-  "license": "MPL-2.0"
+  "license": "MIT"
 }

@@ -63,7 +63,7 @@ export type ManagedPendingInvitation = {
   canResend: boolean
 }
 
-export type NotificationPreferenceMedium = 'telegram' | 'slack'
+export type NotificationPreferenceMedium = 'telegram' | 'slack' | 'teams'
 
 export type NotificationPreferences = {
   preferredMedium: NotificationPreferenceMedium | null

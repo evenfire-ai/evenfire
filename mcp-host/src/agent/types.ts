@@ -93,7 +93,7 @@ export interface CronJob {
   createdAt: Date
   createdBy?: string // Task ID that created this cron
   origin?: {
-    channelType: 'telegram' | 'email' | 'slack' | 'rpc'
+    channelType: 'telegram' | 'email' | 'slack' | 'teams' | 'rpc'
     channelId: string
     sender: string
   }

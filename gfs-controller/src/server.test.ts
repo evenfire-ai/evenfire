@@ -12,6 +12,7 @@ const baseConfig: GfsConfig = {
   publicKey: "",
   driveName: "main",
   decisionCacheTtlMs: 5000,
+  credentialProbeIntervalMs: 60_000,
   devMode: true,
 };
 

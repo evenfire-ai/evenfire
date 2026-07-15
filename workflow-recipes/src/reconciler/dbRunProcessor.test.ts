@@ -332,6 +332,7 @@ describe('createDbRunProcessor', () => {
     )
     expect(upserts[1]?.params?.[2]).toBe('Running')
     expect(upserts[1]?.params?.[6]).toBeNull()
+    expect(client.calls.indexOf(upserts[0]!)).toBeLessThan(client.calls.indexOf(terminalUpdate!))
 
     expect(onRunTerminal).toHaveBeenCalledWith('run-1', 'Succeeded')
   })

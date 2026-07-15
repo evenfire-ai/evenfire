@@ -365,6 +365,15 @@ export interface HostDesktopSpec {
   x11?: boolean
 }
 
+export interface HostLifecycleSpec {
+  /**
+   * Enable the stateless agent lifecycle: mcp-host persists session state to
+   * SQLite on the workspace PVC and HCC may scale the Deployment to 0 while
+   * status.lifecycle.state is `suspended`. Default false.
+   */
+  stateless?: boolean
+}
+
 export type HostWorkflowControlScope =
   | 'workflow:list'
   | 'workflow:read'
@@ -384,13 +393,62 @@ export interface HostSpec {
   model?: HostModelSpec
   approval?: Record<string, unknown>
   desktop?: HostDesktopSpec
+  lifecycle?: HostLifecycleSpec
   workflowControl?: HostWorkflowControlSpec
+}
+
+export type HostLifecycleState = 'active' | 'draining' | 'suspended'
+
+export interface HostCondition {
+  type: string
+  status: 'True' | 'False' | 'Unknown'
+  reason?: string
+  message?: string
+  lastTransitionTime?: string
+}
+
+/**
+ * Durable lifecycle state persisted in the Host status subresource. HCC
+ * derives Deployment replicas from `state` on every reconcile, so a suspended
+ * Host survives HCC restarts and periodic resyncs (the state lives in the
+ * CRD, not in HCC memory).
+ */
+export interface HostLifecycleStatus {
+  state: HostLifecycleState
+  /**
+   * Highest observed Host generation whose wake trigger has been handled.
+   * Written by the mcp-host runtime; HCC only preserves it across writes.
+   */
+  wakeHandledGeneration: number
+  /** Human-readable explanation when the stateless request was rejected. */
+  reason?: string
+}
+
+export interface HostCrdStatus {
+  lifecycle?: HostLifecycleStatus
+  conditions?: HostCondition[]
 }
 
 export interface HostCRD {
   name: string
   namespace: string
+  generation?: number
+  /**
+   * metadata.resourceVersion of the CR at the time it was read. Preserved by
+   * readFreshHost so the heartbeat-path status writers can pass it back as an
+   * optimistic-concurrency precondition: a stale write is rejected 409 and
+   * retried against a fresh read. Undefined for watch-cache snapshots that
+   * never carried it -- those writers read fresh before writing.
+   */
+  resourceVersion?: string
+  /**
+   * Host CR metadata annotations. Carries the control-api-projected
+   * `clerum.io/wake-requested` monotonic wake generation consumed by the
+   * HCC wake fast-path (Stage 4.3).
+   */
+  annotations?: Record<string, string>
   spec: HostSpec
+  status?: HostCrdStatus
 }
 
 // ─── CommunicationChannel CRD ──────────────────────────────────────────────

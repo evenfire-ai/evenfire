@@ -1,100 +1,125 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ResultStore } from "../resultStore";
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ResultStore } from '../resultStore'
 
 interface TestEntry {
-  value: string;
-  storedAt: number;
+  value: string
+  storedAt: number
 }
 
 function createStore(ttlMs: number = 1000): ResultStore<TestEntry> {
-  return new ResultStore<TestEntry>(ttlMs, (e) => e.storedAt);
+  return new ResultStore<TestEntry>(ttlMs, e => e.storedAt)
 }
 
-describe("ResultStore", () => {
+describe('ResultStore', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
-  });
+    vi.useFakeTimers()
+  })
 
   afterEach(() => {
-    vi.useRealTimers();
-  });
+    vi.useRealTimers()
+  })
 
-  it("should store and retrieve entries", () => {
-    const store = createStore();
-    store.set("a", { value: "hello", storedAt: Date.now() });
+  it('should store and retrieve entries', () => {
+    const store = createStore()
+    store.set('a', { value: 'hello', storedAt: Date.now() })
 
-    const result = store.get("a");
-    expect(result).toBeDefined();
-    expect(result!.value).toBe("hello");
-  });
+    const result = store.get('a')
+    expect(result).toBeDefined()
+    expect(result!.value).toBe('hello')
+  })
 
-  it("should return undefined for missing entries", () => {
-    const store = createStore();
-    expect(store.get("missing")).toBeUndefined();
-  });
+  it('should return undefined for missing entries', () => {
+    const store = createStore()
+    expect(store.get('missing')).toBeUndefined()
+  })
 
-  it("should delete entries", () => {
-    const store = createStore();
-    store.set("a", { value: "hello", storedAt: Date.now() });
-    expect(store.delete("a")).toBe(true);
-    expect(store.get("a")).toBeUndefined();
-  });
+  it('should delete entries', () => {
+    const store = createStore()
+    store.set('a', { value: 'hello', storedAt: Date.now() })
+    expect(store.delete('a')).toBe(true)
+    expect(store.get('a')).toBeUndefined()
+  })
 
-  it("should evict entries older than TTL on get()", () => {
-    const store = createStore(100); // 100ms TTL
-    store.set("old", { value: "stale", storedAt: Date.now() });
+  it('should evict entries older than TTL on get()', () => {
+    const store = createStore(100) // 100ms TTL
+    store.set('old', { value: 'stale', storedAt: Date.now() })
 
-    vi.advanceTimersByTime(200); // advance past TTL
+    vi.advanceTimersByTime(200) // advance past TTL
 
-    expect(store.get("old")).toBeUndefined();
-  });
+    expect(store.get('old')).toBeUndefined()
+  })
 
-  it("should keep entries within TTL", () => {
-    const store = createStore(1000);
-    store.set("fresh", { value: "ok", storedAt: Date.now() });
+  it('should keep entries within TTL', () => {
+    const store = createStore(1000)
+    store.set('fresh', { value: 'ok', storedAt: Date.now() })
 
-    vi.advanceTimersByTime(500); // within TTL
+    vi.advanceTimersByTime(500) // within TTL
 
-    expect(store.get("fresh")).toBeDefined();
-  });
+    expect(store.get('fresh')).toBeDefined()
+  })
 
-  it("should getAndDelete in one call", () => {
-    const store = createStore();
-    store.set("a", { value: "hello", storedAt: Date.now() });
+  it('should getAndDelete in one call', () => {
+    const store = createStore()
+    store.set('a', { value: 'hello', storedAt: Date.now() })
 
-    const result = store.getAndDelete("a");
-    expect(result).toBeDefined();
-    expect(result!.value).toBe("hello");
+    const result = store.getAndDelete('a')
+    expect(result).toBeDefined()
+    expect(result!.value).toBe('hello')
 
     // Should be gone now
-    expect(store.get("a")).toBeUndefined();
-  });
+    expect(store.get('a')).toBeUndefined()
+  })
 
-  it("should return undefined from getAndDelete for missing entries", () => {
-    const store = createStore();
-    expect(store.getAndDelete("missing")).toBeUndefined();
-  });
+  it('should return undefined from getAndDelete for missing entries', () => {
+    const store = createStore()
+    expect(store.getAndDelete('missing')).toBeUndefined()
+  })
 
-  it("should list entries via entries()", () => {
-    const store = createStore();
-    const now = Date.now();
-    store.set("a", { value: "one", storedAt: now });
-    store.set("b", { value: "two", storedAt: now });
+  it('should list entries via entries()', () => {
+    const store = createStore()
+    const now = Date.now()
+    store.set('a', { value: 'one', storedAt: now })
+    store.set('b', { value: 'two', storedAt: now })
 
-    const entries = store.entries();
-    expect(entries).toHaveLength(2);
-  });
+    const entries = store.entries()
+    expect(entries).toHaveLength(2)
+  })
 
-  it("should evict stale entries from entries()", () => {
-    const store = createStore(100);
-    store.set("old", { value: "stale", storedAt: Date.now() });
+  it('should evict stale entries from entries()', () => {
+    const store = createStore(100)
+    store.set('old', { value: 'stale', storedAt: Date.now() })
 
-    vi.advanceTimersByTime(200);
+    vi.advanceTimersByTime(200)
 
-    store.set("new", { value: "fresh", storedAt: Date.now() });
+    store.set('new', { value: 'fresh', storedAt: Date.now() })
 
-    const entries = store.entries();
-    expect(entries).toHaveLength(1);
-    expect(entries[0][0]).toBe("new");
-  });
-});
+    const entries = store.entries()
+    expect(entries).toHaveLength(1)
+    expect(entries[0][0]).toBe('new')
+  })
+
+  it('countWhere counts only live entries matching the predicate', () => {
+    const store = createStore()
+    const now = Date.now()
+    store.set('a', { value: 'keep', storedAt: now })
+    store.set('b', { value: 'skip', storedAt: now })
+    store.set('c', { value: 'keep', storedAt: now })
+
+    expect(store.countWhere(e => e.value === 'keep')).toBe(2)
+    expect(store.countWhere(e => e.value === 'skip')).toBe(1)
+    expect(store.countWhere(() => true)).toBe(3)
+    expect(store.countWhere(() => false)).toBe(0)
+  })
+
+  it('countWhere evicts stale entries before counting', () => {
+    const store = createStore(100)
+    store.set('old', { value: 'keep', storedAt: Date.now() })
+
+    vi.advanceTimersByTime(200) // past TTL
+
+    store.set('new', { value: 'keep', storedAt: Date.now() })
+
+    // The stale "old" entry is cleaned up first, so only "new" is counted.
+    expect(store.countWhere(e => e.value === 'keep')).toBe(1)
+  })
+})

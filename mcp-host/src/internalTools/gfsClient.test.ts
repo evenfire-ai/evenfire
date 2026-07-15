@@ -99,6 +99,30 @@ describe('gfs runtime gfsc client', () => {
     )
   })
 
+  it('surfaces the fail-closed not_mounted envelope intact on resolve (issue #775)', async () => {
+    // Regression guard: the Desktop App and the agent distinguish a permission
+    // store outage (503 not_mounted) from an authorization denial (403) by the
+    // ERROR BODY this client propagates. Softening or rewrapping it would turn
+    // an infrastructure failure into an ambiguous tool error.
+    const envelope = JSON.stringify({
+      ok: false,
+      error: {
+        code: 'not_mounted',
+        message:
+          'permission store unavailable: password authentication failed for user "gfs_controller"',
+      },
+    })
+    const fetchFn = vi.fn(async () => textResponse(envelope, 503))
+    const client = createGfscClient({
+      get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
+      fetch: fetchFn,
+    })
+
+    await expect(client.resolve({ uri: 'gfs://main/docs/report.md' })).rejects.toThrow(
+      `gfsc 503: ${envelope}`
+    )
+  })
+
   it('surfaces gfsc transient failures with the status text when the body is empty', async () => {
     const fetchFn = vi.fn(async () => textResponse('', 503, 'Service Unavailable'))
     const client = createGfscClient({

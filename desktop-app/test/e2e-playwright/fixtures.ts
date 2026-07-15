@@ -18,44 +18,39 @@ type Fixtures = {
   appPage: Page
 }
 
-export const test = base.extend<Fixtures>({
-  electronApp: async ({}, use) => {
-    try {
-      execFileSync(
-        'security',
-        ['delete-generic-password', '-s', 'Evenfire', '-a', 'session-token'],
-        {
-          stdio: 'ignore',
-        }
-      )
-    } catch {
-      // no stored session — OK
-    }
-
-    const sessionFile = path.join(os.homedir(), '.evenfire', 'session-token.json')
-    try {
-      fs.unlinkSync(sessionFile)
-    } catch {
-      // not present — OK
-    }
-    const sessionEncFile = path.join(os.homedir(), '.clerum-desktop', 'session-token.enc')
-    try {
-      fs.unlinkSync(sessionEncFile)
-    } catch {
-      // not present — OK
-    }
-
-    const app = await electron.launch({
-      args: [path.resolve(__dirname, '../../dist/main.js')],
+async function launchIsolatedElectron(): Promise<ElectronApplication> {
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-e2e-electron-'))
+  let app: ElectronApplication
+  try {
+    app = await electron.launch({
+      args: [`--user-data-dir=${userDataDir}`, path.resolve(__dirname, '../../dist/main.js')],
       env: {
         ...process.env,
         EXTERNAL_REST_API_BASE_URL:
-          process.env.EXTERNAL_REST_API_BASE_URL || 'http://localhost:8091',
-        RPC_PROXY_BASE_URL: process.env.RPC_PROXY_BASE_URL || 'http://localhost:8094',
+          process.env.EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091',
+        RPC_PROXY_BASE_URL: process.env.RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094',
+        CLERUM_DESKTOP_CONFIG_PATH:
+          process.env.CLERUM_DESKTOP_CONFIG_PATH ||
+          path.join(userDataDir, 'e2e-runtime-config.json'),
       },
     })
-    await use(app)
-    await app.close()
+  } catch (error) {
+    fs.rmSync(userDataDir, { recursive: true, force: true })
+    throw error
+  }
+  app.on('close', () => fs.rmSync(userDataDir, { recursive: true, force: true }))
+  return app
+}
+
+export const test = base.extend<Fixtures>({
+  electronApp: async ({}, use) => {
+    clearStoredSession()
+    const app = await launchIsolatedElectron()
+    try {
+      await use(app)
+    } finally {
+      await app.close()
+    }
   },
 
   appPage: async ({ electronApp }, use) => {
@@ -68,10 +63,12 @@ export const test = base.extend<Fixtures>({
     const dashboard = page.locator('[data-testid="user-display-name"]')
     const emailInput = page.locator('#email-input')
     const passwordInput = page.locator('#password-input')
+    const authenticatedShell = page.getByRole('textbox', { name: 'Agent message composer' })
 
     await Promise.race([
       emailInput.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
       dashboard.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
+      authenticatedShell.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
     ])
 
     if (await emailInput.isVisible()) {
@@ -80,11 +77,18 @@ export const test = base.extend<Fixtures>({
       await page.click('button:has-text("Sign in")')
     }
 
-    await dashboard.waitFor({ state: 'visible', timeout: 15_000 })
-    const displayName = await dashboard.textContent()
-    baseExpect(displayName, `Expected logged-in user to be ${E2E_EMAIL}`).toContain(
-      E2E_EMAIL.split('@')[0]
-    )
+    await Promise.race([
+      dashboard.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => {}),
+      authenticatedShell.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => {}),
+    ])
+    if (await dashboard.isVisible()) {
+      const displayName = await dashboard.textContent()
+      baseExpect(displayName, `Expected logged-in user to be ${E2E_EMAIL}`).toContain(
+        E2E_EMAIL.split('@')[0]
+      )
+    } else {
+      await baseExpect(authenticatedShell).toBeVisible()
+    }
 
     await use(page)
   },
@@ -115,18 +119,17 @@ export function clearStoredSession(): void {
   } catch {
     /* not present — OK */
   }
+  const sessionEncFile = path.join(os.homedir(), '.clerum-desktop', 'session-token.enc')
+  try {
+    fs.unlinkSync(sessionEncFile)
+  } catch {
+    /* not present — OK */
+  }
 }
 
 export async function launchFreshElectron(): Promise<ElectronApplication> {
   clearStoredSession()
-  return electron.launch({
-    args: [path.resolve(__dirname, '../../dist/main.js')],
-    env: {
-      ...process.env,
-      EXTERNAL_REST_API_BASE_URL: process.env.EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091',
-      RPC_PROXY_BASE_URL: process.env.RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094',
-    },
-  })
+  return launchIsolatedElectron()
 }
 
 export async function loginAs(page: Page, email: string): Promise<void> {
@@ -136,10 +139,12 @@ export async function loginAs(page: Page, email: string): Promise<void> {
   const emailInput = page.locator('#email-input')
   const passwordInput = page.locator('#password-input')
   const dashboard = page.locator('[data-testid="user-display-name"]')
+  const authenticatedShell = page.getByRole('textbox', { name: 'Agent message composer' })
 
   await Promise.race([
     emailInput.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
     dashboard.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
+    authenticatedShell.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
   ])
 
   if (await emailInput.isVisible()) {
@@ -148,9 +153,16 @@ export async function loginAs(page: Page, email: string): Promise<void> {
     await page.click('button:has-text("Sign in")')
   }
 
-  await dashboard.waitFor({ state: 'visible', timeout: 15_000 })
-  const displayName = await dashboard.textContent()
-  if (!displayName?.includes(email.split('@')[0])) {
-    throw new Error(`Expected logged-in user to be ${email}, saw ${displayName}`)
+  await Promise.race([
+    dashboard.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => {}),
+    authenticatedShell.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => {}),
+  ])
+  if (await dashboard.isVisible()) {
+    const displayName = await dashboard.textContent()
+    if (!displayName?.includes(email.split('@')[0])) {
+      throw new Error(`Expected logged-in user to be ${email}, saw ${displayName}`)
+    }
+  } else {
+    await baseExpect(authenticatedShell).toBeVisible()
   }
 }

@@ -4,7 +4,7 @@ import type { McpServerStatusEntry } from '../mcp/serverStatus'
 import type { TaskError } from '../queue/types'
 
 export interface ProviderIdentity {
-  medium: 'telegram' | 'slack'
+  medium: 'telegram' | 'slack' | 'teams'
   providerUserId: string
   providerWorkspaceId?: string | null
   providerChannelId: string
@@ -25,7 +25,7 @@ export interface ProviderDecisionIdentity extends ProviderIdentity {
 
 export interface IncomingMessage {
   content: string
-  channelType: 'telegram' | 'email' | 'slack' | 'rpc'
+  channelType: 'telegram' | 'email' | 'slack' | 'teams' | 'rpc'
   channelId: string
   sender: string
   timestamp: string
@@ -191,10 +191,12 @@ export interface ProviderWorkflowApprovalResolve {
   providerIdentity: ProviderIdentity
 }
 export interface ProviderWorkflowResultRequest {
-  workflowName: string
+  workflowName?: string
+  workflowRunId?: string
+  artifactName?: string
   providerIdentity: ProviderIdentity
   source: {
-    channelType: 'telegram' | 'slack'
+    channelType: 'telegram' | 'slack' | 'teams'
     channelId: string
     sender: string
     messageId: string
@@ -205,7 +207,7 @@ export interface ProviderWorkflowResultRequest {
 export interface ProviderMessageAuthorization {
   providerIdentity: ProviderIdentity
 }
-export type WorkflowApprovalNotificationMedium = 'telegram' | 'slack'
+export type WorkflowApprovalNotificationMedium = 'telegram' | 'slack' | 'teams'
 export interface WorkflowApprovalNotificationClaim {
   medium: WorkflowApprovalNotificationMedium
   providerChannelIds: string[]
@@ -252,10 +254,12 @@ export interface TelegramWorkflowApprovalVerification {
 }
 export interface WorkflowApprovalMediumEnrollment {
   nonce: string
-  medium: 'telegram' | 'slack'
+  medium: 'telegram' | 'slack' | 'teams'
   providerUserId: string
   providerWorkspaceId?: string | null
   providerChannelId: string
+  providerChannelType?: string | null
+  serviceUrl?: string | null
   communicationChannelRef?: string | null
 }
 export type WorkflowApprovalMediumEnrollmentHandler = (

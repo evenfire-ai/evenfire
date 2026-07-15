@@ -45,6 +45,7 @@ function adapter(channelType: 'telegram' | 'slack'): ChannelAdapter {
 
 describe('workflow.run.completed notification delivery', () => {
   it('sends Telegram completion text without creating pending approval state', async () => {
+    const workflowRunId = '11111111-2222-4333-8444-555555555555'
     const telegram = adapter('telegram')
     const sendReply = vi.fn(async () => undefined)
     const rpcClient = {
@@ -62,7 +63,7 @@ describe('workflow.run.completed notification delivery', () => {
           providerChannelId: 'telegram-chat-1',
           attempts: 1,
           payload: {
-            workflowRunId: 'run-1',
+            workflowRunId,
             approvalRequestId: 'approval-1',
             recipeNamespace: 'sandbox-recipes',
             recipeName: 'due-diligence',
@@ -70,7 +71,8 @@ describe('workflow.run.completed notification delivery', () => {
             providerMedium: 'telegram' as const,
             providerChannelId: 'telegram-chat-1',
             providerWorkspaceId: null,
-            message: 'Workflow due-diligence completed. Results are ready. Reply: download result',
+            hasDownloadableItems: true,
+            message: 'Workflow due-diligence completed. Results are ready.',
           },
         },
       ]),
@@ -89,7 +91,7 @@ describe('workflow.run.completed notification delivery', () => {
 
     expect(telegram.sendMessage).toHaveBeenCalledWith(
       'telegram-chat-1',
-      '<a href="tg://user?id=123456">User</a> Workflow due-diligence completed. Results are ready. Reply: download result from your verified account.',
+      '<a href="tg://user?id=123456">User</a> Workflow due-diligence completed. Results are ready for the verified user.',
       undefined,
       undefined,
       {
@@ -98,7 +100,7 @@ describe('workflow.run.completed notification delivery', () => {
           [
             {
               text: 'Download result',
-              callbackData: telegramWorkflowResultCallbackData('due-diligence'),
+              callbackData: telegramWorkflowResultCallbackData(workflowRunId),
             },
           ],
         ],
@@ -183,31 +185,10 @@ describe('workflow.run.completed notification delivery', () => {
     )
     expect(slack.sendMessage).toHaveBeenCalledWith(
       'C123',
-      '<@U123> Workflow due-diligence finished with status Failed. Reply: download result from your verified account to check available results.',
+      '<@U123> Workflow due-diligence finished with status Failed.',
       undefined,
       undefined,
-      {
-        slackBlocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: '<@U123> Workflow due-diligence finished with status Failed. Reply: download result from your verified account to check available results.',
-            },
-          },
-          {
-            type: 'actions',
-            elements: [
-              {
-                type: 'button',
-                action_id: 'workflow_result_download',
-                text: { type: 'plain_text', text: 'Download result' },
-                value: 'workflow_result:due-diligence',
-              },
-            ],
-          },
-        ],
-      }
+      undefined
     )
     expect(notificationDeliveryClient.acknowledge).toHaveBeenCalledWith('delivery-2', {
       medium: 'slack',

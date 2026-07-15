@@ -7,6 +7,7 @@ describe('desktop runtime config', () => {
   const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
   const originalExternalRestApiBaseUrl = process.env.EXTERNAL_REST_API_BASE_URL
   const originalRpcProxyBaseUrl = process.env.RPC_PROXY_BASE_URL
+  const originalDesktopAppName = process.env.DESKTOP_APP_NAME
   let tempUserDataDir: string | null = null
 
   afterEach(async () => {
@@ -24,6 +25,11 @@ describe('desktop runtime config', () => {
       delete process.env.RPC_PROXY_BASE_URL
     } else {
       process.env.RPC_PROXY_BASE_URL = originalRpcProxyBaseUrl
+    }
+    if (originalDesktopAppName === undefined) {
+      delete process.env.DESKTOP_APP_NAME
+    } else {
+      process.env.DESKTOP_APP_NAME = originalDesktopAppName
     }
 
     if (tempUserDataDir) {
@@ -77,5 +83,41 @@ describe('desktop runtime config', () => {
     })
     expect(config.externalRestApiBaseUrl).toBe('http://127.0.0.1:8091')
     expect(config.rpcProxyBaseUrl).toBe('http://127.0.0.1:8094')
+  })
+
+  it('preserves env-provided localhost runtime ports without selecting the fixed localhost profile', async () => {
+    tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+    delete process.env.CLERUM_DESKTOP_CONFIG_PATH
+    delete process.env.DESKTOP_APP_NAME
+    process.env.EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:21770'
+    process.env.RPC_PROXY_BASE_URL = 'http://127.0.0.1:21773'
+
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: vi.fn((name: string) =>
+          name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+        ),
+        isPackaged: false,
+        isReady: vi.fn(() => true),
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+
+    const { config, getDesktopRuntimeConfigState } = await import('../config.js')
+
+    expect(config.externalRestApiBaseUrl).toBe('http://127.0.0.1:21770')
+    expect(config.rpcProxyBaseUrl).toBe('http://127.0.0.1:21773')
+
+    const state = getDesktopRuntimeConfigState()
+    const localhostOption = state.options.find(option => option.id === '__localhost__')
+
+    expect(state.configured).toBe(true)
+    expect(state.isLocalhost).toBe(true)
+    expect(state.activeOptionId).toBeNull()
+    expect(localhostOption).toMatchObject({
+      externalRestApiBaseUrl: 'http://127.0.0.1:8091',
+      rpcProxyBaseUrl: 'http://127.0.0.1:8094',
+    })
   })
 })

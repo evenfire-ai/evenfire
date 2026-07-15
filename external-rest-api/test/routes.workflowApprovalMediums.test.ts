@@ -10,6 +10,7 @@ const serviceMock = vi.hoisted(() => ({
   listApprovalChannelTargets: vi.fn(),
   listWorkflowApprovalMediums: vi.fn(),
   preferWorkflowApprovalMedium: vi.fn(),
+  updateWorkflowApprovalMediumDisplayName: vi.fn(),
   disableWorkflowApprovalMedium: vi.fn(),
 }))
 const authTokenMock = vi.hoisted(() => ({
@@ -165,8 +166,9 @@ describe('routes/workflowApprovalMediums', () => {
     expect(serviceMock.confirmWorkflowApprovalMediumChallenge).not.toHaveBeenCalled()
   })
 
-  it('confirms, lists, prefers, and disables verified medium accounts', async () => {
+  it('confirms, lists, prefers, renames, and disables verified medium accounts', async () => {
     authTokenMock.verifyToken
+      .mockReturnValueOnce({ userId: 'user-1', exp: 9999999999 })
       .mockReturnValueOnce({ userId: 'user-1', exp: 9999999999 })
       .mockReturnValueOnce({ userId: 'user-1', exp: 9999999999 })
       .mockReturnValueOnce({ userId: 'user-1', exp: 9999999999 })
@@ -179,6 +181,10 @@ describe('routes/workflowApprovalMediums', () => {
     serviceMock.preferWorkflowApprovalMedium.mockResolvedValueOnce({
       ok: true,
       account: { id: 'account-1', isPreferred: true },
+    })
+    serviceMock.updateWorkflowApprovalMediumDisplayName.mockResolvedValueOnce({
+      ok: true,
+      account: { id: 'account-1', displayName: 'Leadership' },
     })
     serviceMock.disableWorkflowApprovalMedium.mockResolvedValueOnce(undefined)
 
@@ -194,6 +200,11 @@ describe('routes/workflowApprovalMediums', () => {
     await request(makeApp())
       .put('/workflow-approval-mediums/99999999-8888-7777-6666-555555555555/preference')
       .set('Authorization', 'Bearer session-token')
+      .expect(200)
+    await request(makeApp())
+      .patch('/workflow-approval-mediums/99999999-8888-7777-6666-555555555555/display-name')
+      .set('Authorization', 'Bearer session-token')
+      .send({ displayName: '  Leadership  ' })
       .expect(200)
     await request(makeApp())
       .delete('/workflow-approval-mediums/99999999-8888-7777-6666-555555555555')
@@ -212,10 +223,33 @@ describe('routes/workflowApprovalMediums', () => {
       'session-token',
       '99999999-8888-7777-6666-555555555555'
     )
+    expect(serviceMock.updateWorkflowApprovalMediumDisplayName).toHaveBeenCalledWith(
+      'session-token',
+      '99999999-8888-7777-6666-555555555555',
+      'Leadership'
+    )
     expect(serviceMock.disableWorkflowApprovalMedium).toHaveBeenCalledWith(
       'session-token',
       '99999999-8888-7777-6666-555555555555'
     )
+  })
+
+  it('rejects invalid workflow approval medium display names before control-api', async () => {
+    authTokenMock.verifyToken.mockReturnValue({ userId: 'user-1', exp: 9999999999 })
+
+    await request(makeApp())
+      .patch('/workflow-approval-mediums/99999999-8888-7777-6666-555555555555/display-name')
+      .set('Authorization', 'Bearer session-token')
+      .send({})
+      .expect(400, { error: 'display_name_required' })
+
+    await request(makeApp())
+      .patch('/workflow-approval-mediums/99999999-8888-7777-6666-555555555555/display-name')
+      .set('Authorization', 'Bearer session-token')
+      .send({ displayName: 123 })
+      .expect(400, { error: 'display_name_must_be_string' })
+
+    expect(serviceMock.updateWorkflowApprovalMediumDisplayName).not.toHaveBeenCalled()
   })
 
   it('passes includeDisabled when listing workflow approval mediums', async () => {

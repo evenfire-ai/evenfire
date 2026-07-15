@@ -103,7 +103,11 @@ export async function findVerifiedOperationalMediumAccount(
   options: { channelBinding?: OperationalMediumChannelBinding } = {}
 ): Promise<VerifiedMediumAccount | null> {
   const identity = normalizeMediumIdentity(identityInput)
-  if (identity.medium !== 'telegram' && identity.medium !== 'slack') {
+  if (
+    identity.medium !== 'telegram' &&
+    identity.medium !== 'slack' &&
+    identity.medium !== 'teams'
+  ) {
     return findVerifiedMediumAccount(identity, db)
   }
   if (identity.medium === 'telegram' && identity.providerWorkspaceId) {
@@ -132,6 +136,7 @@ export async function findVerifiedOperationalMediumAccount(
               provider_workspace_id AS "providerWorkspaceId",
               provider_channel_id AS "providerChannelId",
               communication_channel_ref AS "communicationChannelRef",
+              display_name AS "displayName",
               disabled_at AS "disabledAt"
          FROM workflow_approval_medium_accounts
         WHERE medium = $1
@@ -181,6 +186,7 @@ export async function findVerifiedOperationalMediumAccount(
             provider_workspace_id AS "providerWorkspaceId",
             provider_channel_id AS "providerChannelId",
             communication_channel_ref AS "communicationChannelRef",
+            display_name AS "displayName",
             disabled_at AS "disabledAt"
       FROM workflow_approval_medium_accounts
       WHERE medium = $1

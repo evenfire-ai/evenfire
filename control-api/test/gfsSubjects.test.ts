@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
-  isOperatorId,
   type Principal,
+  type SubjectsDb,
+  isOperatorId,
   resolvePrincipalSubjects,
   resolveSubjectMembers,
-  type SubjectsDb,
   subjectKey,
 } from '../src/gfs/subjects.js'
 
@@ -41,7 +41,7 @@ describe('subjectKey', () => {
 
 describe('resolvePrincipalSubjects', () => {
   it('expands a user to itself plus every active team it belongs to', async () => {
-    const { db } = mockDb((text) =>
+    const { db } = mockDb(text =>
       text.includes('FROM team_members') ? [{ team_id: 't1' }, { team_id: 't2' }] : []
     )
     const subjects = await resolvePrincipalSubjects(db, { type: 'user', id: 'u1' })
@@ -51,7 +51,9 @@ describe('resolvePrincipalSubjects', () => {
   it('filters team membership to active rows (deny-by-default on soft-deleted)', async () => {
     const { db, queries } = mockDb(() => [])
     await resolvePrincipalSubjects(db, { type: 'user', id: 'u1' })
-    expect(queries.some((q) => q.includes('team_members') && q.includes("status = 'active'"))).toBe(true)
+    expect(queries.some(q => q.includes('team_members') && q.includes("status = 'active'"))).toBe(
+      true
+    )
   })
 
   it('a host resolves to only its own key (context bindings are P3)', async () => {
@@ -72,16 +74,14 @@ describe('resolvePrincipalSubjects', () => {
 
 describe('resolveSubjectMembers', () => {
   it('expands a team to its active member user ids', async () => {
-    const { db } = mockDb((text) =>
+    const { db } = mockDb(text =>
       text.includes('FROM team_members') ? [{ user_id: 'a' }, { user_id: 'b' }] : []
     )
     expect(await resolveSubjectMembers(db, { type: 'team', id: 't1' })).toEqual(['a', 'b'])
   })
 
   it('expands operator to all active admin ids', async () => {
-    const { db } = mockDb((text) =>
-      text.includes('control_admin_users') ? [{ id: 'admin1' }] : []
-    )
+    const { db } = mockDb(text => (text.includes('control_admin_users') ? [{ id: 'admin1' }] : []))
     expect(await resolveSubjectMembers(db, { type: 'operator' })).toEqual(['admin1'])
   })
 

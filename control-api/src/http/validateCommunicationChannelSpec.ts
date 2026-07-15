@@ -61,8 +61,46 @@ export function validateCommunicationChannelSpec(spec: Record<string, unknown>):
       message: 'replyInThreads must be a boolean',
     })
   }
+  const teamsSettings = isRecord(spec.teamsSettings) ? spec.teamsSettings : null
+  if (teamsSettings?.appName !== undefined) {
+    const appName = typeof teamsSettings.appName === 'string' ? teamsSettings.appName.trim() : ''
+    if (!appName || appName.length > 80) {
+      errors.push({
+        field: 'spec.teamsSettings.appName',
+        message: 'appName must be a non-empty Teams app name',
+      })
+    }
+  }
+  if (teamsSettings?.appId !== undefined) {
+    const appId = typeof teamsSettings.appId === 'string' ? teamsSettings.appId.trim() : ''
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(appId)) {
+      errors.push({
+        field: 'spec.teamsSettings.appId',
+        message: 'appId must be a Microsoft app/client UUID',
+      })
+    }
+  }
+  if (teamsSettings?.tenantId !== undefined) {
+    const tenantId = typeof teamsSettings.tenantId === 'string' ? teamsSettings.tenantId.trim() : ''
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId)) {
+      errors.push({
+        field: 'spec.teamsSettings.tenantId',
+        message: 'tenantId must be a Microsoft Entra tenant UUID',
+      })
+    }
+  }
+  if (
+    teamsSettings?.replyOnlyWhenMentioned !== undefined &&
+    typeof teamsSettings.replyOnlyWhenMentioned !== 'boolean'
+  ) {
+    errors.push({
+      field: 'spec.teamsSettings.replyOnlyWhenMentioned',
+      message: 'replyOnlyWhenMentioned must be a boolean',
+    })
+  }
   const telegram = spec.telegram
   const slack = spec.slack
+  const teams = spec.teams
 
   if (Array.isArray(telegram))
     telegram.forEach((entry, index) => {
@@ -127,7 +165,59 @@ export function validateCommunicationChannelSpec(spec: Record<string, unknown>):
           })
         }
       })
-      for (const key of ['confirmedByUserId', 'confirmedAt'] as const) {
+      for (const key of [
+        'conversationType',
+        'title',
+        'confirmedByUserId',
+        'confirmedAt',
+      ] as const) {
+        const value = group[key]
+        if (value !== undefined && value !== null && typeof value !== 'string') {
+          errors.push({
+            field: `${field}.${key}`,
+            message: `${key} must be a string`,
+          })
+        }
+      }
+    })
+  }
+  if (Array.isArray(teams)) {
+    teams.forEach((entry, index) => {
+      const group = isRecord(entry) ? entry : {}
+      const field = `spec.teams[${index}]`
+      const channelId = typeof group.channelId === 'string' ? group.channelId.trim() : ''
+      if (!channelId) {
+        errors.push({ field: `${field}.channelId`, message: 'channelId is required' })
+      }
+      const tenantId = typeof group.tenantId === 'string' ? group.tenantId.trim() : ''
+      if (!tenantId) {
+        errors.push({ field: `${field}.tenantId`, message: 'tenantId is required' })
+      } else if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId)
+      ) {
+        errors.push({
+          field: `${field}.tenantId`,
+          message: 'tenantId must be a Microsoft Entra tenant UUID',
+        })
+      }
+      const userIds = Array.isArray(group.userIds) ? group.userIds : []
+      userIds.forEach((userId, userIndex) => {
+        if (typeof userId !== 'string' || !userId.trim()) {
+          errors.push({
+            field: `${field}.userIds[${userIndex}]`,
+            message: 'userIds cannot contain empty values',
+          })
+        }
+      })
+      for (const key of [
+        'serviceUrl',
+        'conversationType',
+        'teamId',
+        'teamsChannelId',
+        'title',
+        'confirmedByUserId',
+        'confirmedAt',
+      ] as const) {
         const value = group[key]
         if (value !== undefined && value !== null && typeof value !== 'string') {
           errors.push({

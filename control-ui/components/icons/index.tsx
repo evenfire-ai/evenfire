@@ -91,6 +91,26 @@ export function IconPencil({ title, ...props }: IconProps) {
   )
 }
 
+export function IconCopy({ title, ...props }: IconProps) {
+  const p = iconSize(props)
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      {...p}
+    >
+      {title ? <title>{title}</title> : null}
+      <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+      <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+    </svg>
+  )
+}
+
 export function IconMoreHorizontal({ title, ...props }: IconProps) {
   const p = iconSize(props)
   return (
@@ -108,6 +128,67 @@ export function IconMoreHorizontal({ title, ...props }: IconProps) {
       <circle cx="12" cy="12" r="1" />
       <circle cx="19" cy="12" r="1" />
       <circle cx="5" cy="12" r="1" />
+    </svg>
+  )
+}
+
+export function IconDownload({ title, ...props }: IconProps) {
+  const p = iconSize(props)
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      {...p}
+    >
+      {title ? <title>{title}</title> : null}
+      <path d="M12 3v12" />
+      <path d="m7 10 5 5 5-5" />
+      <path d="M5 21h14" />
+    </svg>
+  )
+}
+
+export function IconUpload({ title, ...props }: IconProps) {
+  const p = iconSize(props)
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      {...p}
+    >
+      {title ? <title>{title}</title> : null}
+      <path d="M12 16V4" />
+      <path d="m7 9 5-5 5 5" />
+      <path d="M5 21h14" />
+    </svg>
+  )
+}
+
+export function IconChevronRight({ title, ...props }: IconProps) {
+  const p = iconSize(props)
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      {...p}
+    >
+      {title ? <title>{title}</title> : null}
+      <path d="m9 18 6-6-6-6" />
     </svg>
   )
 }

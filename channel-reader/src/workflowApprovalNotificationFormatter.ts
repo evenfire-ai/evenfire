@@ -23,7 +23,7 @@ export type FormatNotificationDeliveryOptions = {
 const TELEGRAM_PROVIDER_USER_ID_RE = /^\d{1,20}$/
 const SLACK_PROVIDER_USER_ID_RE = /^[UW][A-Z0-9]{2,31}$/
 const CHANNEL_ALIAS_LEN = 16
-const WORKFLOW_RECIPE_NAME_RE = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const APPROVAL_ACTION_RE =
   /^([a-z]+):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?::.*)?$/i
 
@@ -116,50 +116,65 @@ function slackApprovalSendOptions(
   }
 }
 
+function teamsApprovalSendOptions(
+  delivery: ApprovalRequestedNotificationDelivery,
+  options: FormatNotificationDeliveryOptions
+): SendMessageOptions | undefined {
+  if (delivery.medium !== 'teams') return undefined
+
+  const workflowRef = `${delivery.payload.recipeNamespace}/${delivery.payload.recipeName}`
+  const rawActions =
+    delivery.payload.actions && delivery.payload.actions.length > 0
+      ? delivery.payload.actions
+      : [
+          { id: `approve:${delivery.payload.approvalRequestId}`, label: 'Approve' },
+          { id: `deny:${delivery.payload.approvalRequestId}`, label: 'Deny' },
+        ]
+  const actions = rawActions
+    .map(action => {
+      const match = action.id.match(APPROVAL_ACTION_RE)
+      const decision = approvalActionKind(action.id)
+      if (!match || !decision) return null
+      return {
+        title: action.label || (decision === 'approve' ? 'Approve' : 'Deny'),
+        value: slackApprovalActionValue({
+          decision,
+          approvalRequestId: match[2] || delivery.payload.approvalRequestId,
+          workflowRef,
+          communicationChannelRef: options.communicationChannelRef,
+        }),
+        ...(decision === 'approve' ? { style: 'positive' as const } : {}),
+        ...(decision === 'deny' ? { style: 'destructive' as const } : {}),
+      }
+    })
+    .filter((action): action is NonNullable<typeof action> => !!action)
+
+  return actions.length > 0 ? { teamsActions: actions } : undefined
+}
+
 function completionMessageForPhase(
   recipeName: string,
   phase: WorkflowRunCompletedNotificationDelivery['payload']['phase'],
-  sharedChannel: boolean
+  sharedChannel: boolean,
+  hasDownloadableItems: boolean
 ): string {
   if (phase === 'Succeeded') {
+    if (!hasDownloadableItems) {
+      return 'Workflow ' + recipeName + ' completed.'
+    }
     return sharedChannel
-      ? 'Workflow ' +
-          recipeName +
-          ' completed. Results are ready. Reply: download result from your verified account.'
-      : 'Workflow ' + recipeName + ' completed. Results are ready. Reply: download result'
+      ? 'Workflow ' + recipeName + ' completed. Results are ready for the verified user.'
+      : 'Workflow ' + recipeName + ' completed. Results are ready.'
   }
-  return sharedChannel
-    ? 'Workflow ' +
-        recipeName +
-        ' finished with status ' +
-        phase +
-        '. Reply: download result from your verified account to check available results.'
-    : 'Workflow ' +
-        recipeName +
-        ' finished with status ' +
-        phase +
-        '. Reply: download result to check available results.'
+  return 'Workflow ' + recipeName + ' finished with status ' + phase + '.'
 }
 
 function formatWorkflowApprovalNotification(
   delivery: ApprovalRequestedNotificationDelivery,
   options: FormatNotificationDeliveryOptions
 ): FormattedNotificationDelivery {
-  const title = delivery.payload.title?.trim() || 'Workflow approval requested'
   const recipeName = delivery.payload.recipeName
-  const rawBody = delivery.payload.body?.trim()
-  const body =
-    rawBody && !rawBody.includes(`${delivery.payload.recipeNamespace}/${recipeName}`)
-      ? rawBody
-      : `Approval requested for workflow ${recipeName}.`
-  const content = [
-    title,
-    body,
-    '',
-    delivery.medium === 'slack'
-      ? 'Reply \\approve ' + recipeName + ' to approve or \\deny ' + recipeName + ' to deny.'
-      : 'Reply /approve ' + recipeName + ' to approve or /deny ' + recipeName + ' to deny.',
-  ].join('\n')
+  const content = `Approve workflow ${recipeName}?`
   return {
     content,
     ...(delivery.medium === 'telegram'
@@ -185,15 +200,17 @@ function formatWorkflowApprovalNotification(
             ],
           },
         }
-      : { sendOptions: slackApprovalSendOptions(delivery, content, options) }),
+      : delivery.medium === 'slack'
+        ? { sendOptions: slackApprovalSendOptions(delivery, content, options) }
+        : { sendOptions: teamsApprovalSendOptions(delivery, options) }),
   }
 }
 
 function telegramResultSendOptions(
-  workflowName: string,
+  workflowRunId: string,
   base: SendMessageOptions = {}
 ): SendMessageOptions | undefined {
-  const callbackData = telegramWorkflowResultCallbackData(workflowName)
+  const callbackData = telegramWorkflowResultCallbackData(workflowRunId)
   if (!callbackData) return undefined
   return {
     ...base,
@@ -202,11 +219,11 @@ function telegramResultSendOptions(
 }
 
 function slackResultSendOptions(
-  workflowName: string,
+  workflowRunId: string,
   content: string
 ): SendMessageOptions | undefined {
-  const normalized = workflowName.trim()
-  if (!WORKFLOW_RECIPE_NAME_RE.test(normalized)) return undefined
+  const normalized = workflowRunId.trim()
+  if (!UUID_RE.test(normalized)) return undefined
   return {
     slackBlocks: [
       { type: 'section', text: { type: 'mrkdwn', text: content } },
@@ -217,7 +234,7 @@ function slackResultSendOptions(
             type: 'button',
             action_id: 'workflow_result_download',
             text: { type: 'plain_text', text: 'Download result' },
-            value: `workflow_result:${normalized}`,
+            value: `workflow_result_run:${normalized}`,
           },
         ],
       },
@@ -225,19 +242,43 @@ function slackResultSendOptions(
   }
 }
 
+function teamsResultSendOptions(workflowRunId: string): SendMessageOptions | undefined {
+  const normalized = workflowRunId.trim()
+  if (!UUID_RE.test(normalized)) return undefined
+  return {
+    teamsActions: [{ title: 'Download result', value: `workflow_result_run:${normalized}` }],
+  }
+}
+
+function workflowCompletionHasDownloadableItems(
+  delivery: WorkflowRunCompletedNotificationDelivery
+): boolean {
+  return delivery.payload.phase === 'Succeeded' && delivery.payload.hasDownloadableItems === true
+}
+
 function formatWorkflowRunCompletedNotification(
   delivery: WorkflowRunCompletedNotificationDelivery
 ): FormattedNotificationDelivery {
   const recipeName = delivery.payload.recipeName?.trim() || 'workflow'
+  const workflowRunId = delivery.payload.workflowRunId?.trim() || ''
   const sharedChannel = isSharedProviderChannel(delivery)
-  const message = completionMessageForPhase(recipeName, delivery.payload.phase, sharedChannel)
+  const hasDownloadableItems = workflowCompletionHasDownloadableItems(delivery)
+  const message = completionMessageForPhase(
+    recipeName,
+    delivery.payload.phase,
+    sharedChannel,
+    hasDownloadableItems
+  )
   if (!sharedChannel) {
-    const sendOptions =
-      delivery.medium === 'telegram'
-        ? telegramResultSendOptions(recipeName)
+    const sendOptions = hasDownloadableItems
+      ? delivery.medium === 'telegram'
+        ? telegramResultSendOptions(workflowRunId)
         : delivery.medium === 'slack'
-          ? slackResultSendOptions(recipeName, message)
-          : undefined
+          ? slackResultSendOptions(workflowRunId, message)
+          : delivery.medium === 'teams'
+            ? teamsResultSendOptions(workflowRunId)
+            : undefined
+      : undefined
     return {
       content: message,
       ...(sendOptions ? { sendOptions } : {}),
@@ -246,7 +287,9 @@ function formatWorkflowRunCompletedNotification(
 
   if (delivery.medium === 'slack' && SLACK_PROVIDER_USER_ID_RE.test(delivery.providerUserId)) {
     const content = '<@' + delivery.providerUserId + '> ' + message
-    const sendOptions = slackResultSendOptions(recipeName, content)
+    const sendOptions = hasDownloadableItems
+      ? slackResultSendOptions(workflowRunId, content)
+      : undefined
     return { content, ...(sendOptions ? { sendOptions } : {}) }
   }
 
@@ -254,7 +297,9 @@ function formatWorkflowRunCompletedNotification(
     delivery.medium === 'telegram' &&
     TELEGRAM_PROVIDER_USER_ID_RE.test(delivery.providerUserId)
   ) {
-    const sendOptions = telegramResultSendOptions(recipeName, { parseMode: 'telegram-html' })
+    const sendOptions = hasDownloadableItems
+      ? telegramResultSendOptions(workflowRunId, { parseMode: 'telegram-html' })
+      : undefined
     return {
       content:
         '<a href="tg://user?id=' +
@@ -265,12 +310,15 @@ function formatWorkflowRunCompletedNotification(
     }
   }
 
-  const sendOptions =
-    delivery.medium === 'telegram'
-      ? telegramResultSendOptions(recipeName)
+  const sendOptions = hasDownloadableItems
+    ? delivery.medium === 'telegram'
+      ? telegramResultSendOptions(workflowRunId)
       : delivery.medium === 'slack'
-        ? slackResultSendOptions(recipeName, 'Verified user ' + message)
-        : undefined
+        ? slackResultSendOptions(workflowRunId, 'Verified user ' + message)
+        : delivery.medium === 'teams'
+          ? teamsResultSendOptions(workflowRunId)
+          : undefined
+    : undefined
   return {
     content: 'Verified user ' + message,
     ...(sendOptions ? { sendOptions } : {}),

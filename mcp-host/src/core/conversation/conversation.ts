@@ -165,8 +165,15 @@ export class ConversationManager {
   /**
    * Start a new turn in the conversation.
    * Transitions: Idle → Processing
+   *
+   * **D3 durability barrier**: awaits the store's `persistTurnStart` — under
+   * the SQLite store the user message + state flip commit as ONE transaction
+   * before the turn proceeds (retry semantics replay from the last persisted
+   * user message). On a rejected write the in-RAM mutation is rolled back
+   * (same rationale as `suspendForApproval`) and the error propagates so the
+   * caller fails the task loudly.
    */
-  startTurn(conversation: Conversation, userInput: string, taskId: string): Turn {
+  async startTurn(conversation: Conversation, userInput: string, taskId: string): Promise<Turn> {
     if (conversation.state !== ConversationState.Idle) {
       throw new ConversationError(
         `Cannot start turn: conversation is ${conversation.state}`,
@@ -191,15 +198,34 @@ export class ConversationManager {
     }
 
     conversation.turns.push(turn)
-    void this.store.persistTurnStart(conversation, userInput)
+    try {
+      await Promise.resolve(this.store.persistTurnStart(conversation, userInput))
+    } catch (err) {
+      // Roll back the in-RAM mutation so the cached conversation is not left
+      // poisoned in Processing — the next startTurn would otherwise throw
+      // InvalidTransition forever. The ordinal consumed by the failed write
+      // stays consumed (holes are legal; UNIQUE collisions are not).
+      conversation.turns.pop()
+      conversation.state = ConversationState.Idle
+      conversation.activeTaskId = undefined
+      conversation.updated_at = new Date()
+      throw err
+    }
     return turn
   }
 
   /**
    * Complete the current turn with a response.
    * Transitions: Processing → Idle
+   *
+   * **D3 durability barrier**: awaits the store's `persistTurnComplete` —
+   * under the SQLite store the assistant message + state flip +
+   * `active_task_id` clear commit as ONE transaction. Callers MUST await this
+   * BEFORE ACKing the client (`responseCallback`) so an acknowledged turn is
+   * always durable. A rejected write propagates — never swallowed — and the
+   * caller fails the turn (see TaskExecutor.handleLoopResult).
    */
-  completeTurn(conversation: Conversation, response: string): void {
+  async completeTurn(conversation: Conversation, response: string): Promise<void> {
     if (conversation.state !== ConversationState.Processing) {
       throw new ConversationError(
         `Cannot complete turn: conversation is ${conversation.state}`,
@@ -217,7 +243,7 @@ export class ConversationManager {
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — turn done, no task in flight
     conversation.updated_at = new Date()
-    void this.store.persistTurnComplete(conversation, response)
+    await Promise.resolve(this.store.persistTurnComplete(conversation, response))
   }
 
   /**
@@ -316,8 +342,13 @@ export class ConversationManager {
   /**
    * Fail the current turn.
    * Transitions: Processing → Idle
+   *
+   * Awaited durability barrier (parity with completeTurn): the failure ACK
+   * sent after this resolves must describe a state that is already durable —
+   * under the SQLite store the state flip + `active_task_id` clear commit as
+   * one awaited worker op. A rejected write propagates — never swallowed.
    */
-  failTurn(conversation: Conversation): void {
+  async failTurn(conversation: Conversation): Promise<void> {
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — turn done, no task in flight
@@ -327,7 +358,7 @@ export class ConversationManager {
     if (currentTurn) {
       currentTurn.completed_at = new Date()
     }
-    void this.store.persistTurnFail(conversation)
+    await Promise.resolve(this.store.persistTurnFail(conversation))
   }
 
   /**

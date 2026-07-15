@@ -24,6 +24,14 @@ export type PendingCronResult = {
   // compatibility of the wire contract with channel-reader's `pollCronResults`.
   // It never carries an approval payload — cron results cannot be `waiting_approval`.
   status?: 'completed'
+  /**
+   * Epoch ms of the first read via GET /cron/results (delivered-on-read,
+   * stamped by main.ts getCronResults). The explicit ACK delete remains the
+   * strong consumption signal; this stamp only stops a fetched-but-unACKed
+   * result from pinning the stateless `pendingResults` idle gauge for the
+   * full TTL (see runtime/resultDelivery.ts).
+   */
+  deliveredAt?: number
 }
 
 export interface CronDispatchDeps {
@@ -32,11 +40,29 @@ export interface CronDispatchDeps {
     set(id: string, entry: PendingCronResult): void
   }
   sanitizeAttachments: (attachments?: Attachment[]) => Attachment[] | undefined
+  /**
+   * Cron×stateless in-flight marker (fixes the drained-gauge race). A one-shot
+   * cron task flips `conversation.activeTaskId = undefined` (completeTurn)
+   * BEFORE its `responseCallback` populates `pendingCronResults`, so there is a
+   * bounded window where BOTH the `activeTask` and `pendingResults` conditions
+   * read false and the stateless heartbeat could report `drained` -> HCC
+   * suspends -> the not-yet-stored result is lost. The marker is armed here at
+   * trigger time (well before the flip) and pins `pendingResults` for the whole
+   * window; it is cleared on the task's terminal lifecycle transition (which
+   * fires AFTER the result is stored on success, or on failure where no result
+   * is produced and pinning is correctly dropped). Optional so non-stateless
+   * wirings and existing tests stay byte-identical.
+   */
+  cronResultsInFlight?: { add(id: string): void }
 }
 
 export function wireCronDispatch(cronScheduler: CronScheduler, deps: CronDispatchDeps): void {
   cronScheduler.on('cron:triggered', ({ job, task: cronTask }: { job: CronJob; task: Task }) => {
     if (job.origin) {
+      // Arm the in-flight marker at trigger time -- synchronously, before the
+      // task ever runs and therefore before completeTurn flips activeTaskId.
+      // Guaranteed cleared on the terminal lifecycle transition (see main.ts).
+      deps.cronResultsInFlight?.add(cronTask.id)
       // Capture origin once: CronJob.origin is never reassigned after creation,
       // but the callback runs later (async), so binding it to a const removes the
       // non-null assertions and is robust to any future mutation of the job object.

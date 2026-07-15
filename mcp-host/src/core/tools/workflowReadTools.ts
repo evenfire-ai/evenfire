@@ -14,8 +14,8 @@ import {
   workflowTargetSchema,
 } from './workflowShared'
 
-const WORKFLOW_RESULT_ARTIFACT_POLL_ATTEMPTS = 30
-const WORKFLOW_RESULT_ARTIFACT_POLL_INTERVAL_MS = 1_000
+const DEFAULT_WORKFLOW_RESULT_ARTIFACT_POLL_ATTEMPTS = 180
+const DEFAULT_WORKFLOW_RESULT_ARTIFACT_POLL_INTERVAL_MS = 1_000
 const DEFAULT_WORKFLOW_RESULT_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024
 const WORKFLOW_RESULT_BINARY_PREVIEW_MESSAGE = 'Artifact is available for download.'
 const WORKFLOW_RESULT_FILE_MIME_BY_EXT = new Map([
@@ -33,6 +33,39 @@ function workflowResultAttachmentMaxBytes(getEnv: (key: string) => string | unde
   return Number.isSafeInteger(parsed) && parsed > 0
     ? parsed
     : DEFAULT_WORKFLOW_RESULT_ATTACHMENT_MAX_BYTES
+}
+
+function positiveIntegerEnv(
+  getEnv: (key: string) => string | undefined,
+  key: string,
+  fallback: number
+): number {
+  const parsed = Number(getEnv(key) || '')
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function workflowResultArtifactPollAttempts(getEnv: (key: string) => string | undefined): number {
+  return positiveIntegerEnv(
+    getEnv,
+    'CLERUM_WORKFLOW_RESULT_ARTIFACT_POLL_ATTEMPTS',
+    DEFAULT_WORKFLOW_RESULT_ARTIFACT_POLL_ATTEMPTS
+  )
+}
+
+function workflowResultArtifactPollIntervalMs(getEnv: (key: string) => string | undefined): number {
+  return positiveIntegerEnv(
+    getEnv,
+    'CLERUM_WORKFLOW_RESULT_ARTIFACT_POLL_INTERVAL_MS',
+    DEFAULT_WORKFLOW_RESULT_ARTIFACT_POLL_INTERVAL_MS
+  )
+}
+
+function isRetryableWorkflowResultArtifactListError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return (
+    /Workflow broker request failed \((404|410|502|503|504)\)/.test(error.message) ||
+    /\b(fetch failed|timeout|aborted)\b/i.test(error.message)
+  )
 }
 
 function safeAttachmentFilename(raw: string): string {
@@ -184,6 +217,7 @@ async function workflowResultArtifactDownload(params: {
         caption: `Workflow artifact: ${filename} (${sizeBytes} bytes)`,
         sourceTool: 'workflow_result',
         lane: 'workflow_result',
+        artifactName: params.artifactName,
         sizeBytes,
       }
     }
@@ -589,6 +623,140 @@ export class WorkflowResultTool extends WorkflowTool {
     }
   }
 
+  async executeForRun(workflowRunId: string, artifactName?: string): Promise<ToolOutput> {
+    const start = Date.now()
+    this.resultAttachments = undefined
+    try {
+      const data = await this.runForRun(workflowRunId, artifactName)
+      return {
+        content: JSON.stringify(data, null, 2),
+        duration_ms: Date.now() - start,
+        is_error: false,
+        attachments: this.resultAttachments,
+      }
+    } catch (err) {
+      return {
+        content: `Error: ${err instanceof Error ? err.message : String(err)}`,
+        duration_ms: Date.now() - start,
+        is_error: true,
+      }
+    }
+  }
+
+  private authenticatedConversationTarget(): Record<string, unknown> {
+    const conversationId = this.workflowCallerContext?.conversationId?.trim()
+    if (
+      !conversationId ||
+      (!this.workflowCallerContext?.targetUserId && !this.workflowCallerContext?.targetTeamId)
+    ) {
+      throw new Error('workflow_result is available only in an authenticated workflow conversation')
+    }
+    return {
+      ...(this.workflowCallerContext.targetUserId
+        ? { targetUserId: this.workflowCallerContext.targetUserId }
+        : {}),
+      ...(this.workflowCallerContext.targetTeamId
+        ? { targetTeamId: this.workflowCallerContext.targetTeamId }
+        : {}),
+      workflowConversationId: conversationId,
+    }
+  }
+
+  private async readWorkflowResult(params: {
+    listPath: string
+    downloadPath: (artifactName: string) => string
+    fallbackWorkflowName: string
+    requestedArtifactName?: string
+  }): Promise<{
+    workflowName: string
+    artifact: Record<string, unknown> | null
+    result: unknown
+  }> {
+    let listResult: unknown
+    let listRecord: Record<string, unknown> = {}
+    let canonicalWorkflowName = params.fallbackWorkflowName
+    let artifact: Record<string, unknown> | null = null
+    let lastListError: unknown
+    const pollAttempts = workflowResultArtifactPollAttempts(this.getEnv)
+    const pollIntervalMs = workflowResultArtifactPollIntervalMs(this.getEnv)
+    for (let attempt = 0; attempt < pollAttempts; attempt++) {
+      try {
+        listResult = await this.client.request(params.listPath)
+        lastListError = undefined
+        listRecord =
+          listResult && typeof listResult === 'object' && !Array.isArray(listResult)
+            ? (listResult as Record<string, unknown>)
+            : {}
+        canonicalWorkflowName = workflowNameFromRecord(listRecord) || params.fallbackWorkflowName
+        artifact = pickWorkflowResultArtifact(
+          artifactRecords(listResult),
+          params.requestedArtifactName ?? ''
+        )
+        if (artifact) break
+      } catch (error) {
+        if (!isRetryableWorkflowResultArtifactListError(error)) throw error
+        lastListError = error
+      }
+      if (attempt < pollAttempts - 1) {
+        await sleep(pollIntervalMs)
+      }
+    }
+    if (!artifact) {
+      return {
+        workflowName: canonicalWorkflowName,
+        artifact: null,
+        result: {
+          artifacts: [],
+          message: lastListError
+            ? 'Workflow result artifacts are still being prepared for this run.'
+            : 'No workflow result artifacts are available for this run yet.',
+        },
+      }
+    }
+    const artifactName = typeof artifact.name === 'string' ? artifact.name : ''
+    const { contentResult, attachment } = await workflowResultArtifactDownload({
+      client: this.client,
+      downloadPath: params.downloadPath(artifactName),
+      artifactName,
+      getEnv: this.getEnv,
+    })
+    this.resultAttachments = attachment ? [attachment] : undefined
+    console.log(
+      `[WorkflowResult] Artifact attachment count for ${artifactName}: ${
+        this.resultAttachments?.length ?? 0
+      }`
+    )
+    return {
+      workflowName: canonicalWorkflowName,
+      artifact,
+      result: contentResult,
+    }
+  }
+
+  private async runForRun(workflowRunId: string, artifactName?: string): Promise<unknown> {
+    const normalizedRunId = workflowRunId.trim()
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalizedRunId)) {
+      throw new Error('Invalid workflow run ID')
+    }
+    const target = this.authenticatedConversationTarget()
+    const result = await this.readWorkflowResult({
+      listPath: appendApprovalTargetQuery(
+        `/api/v1/workflows/runs/${encodeURIComponent(normalizedRunId)}/artifacts`,
+        target
+      ),
+      downloadPath: name =>
+        appendApprovalTargetQuery(
+          `/api/v1/workflows/runs/${encodeURIComponent(
+            normalizedRunId
+          )}/artifacts/${encodeURIComponent(name)}/download`,
+          target
+        ),
+      fallbackWorkflowName: 'workflow',
+      ...(artifactName?.trim() ? { requestedArtifactName: artifactName.trim() } : {}),
+    })
+    return sanitizeWorkflowResultForAuthenticatedChat(result)
+  }
+
   async run(params: Record<string, unknown>): Promise<unknown> {
     const conversationId = this.workflowCallerContext?.conversationId?.trim()
     const authenticated = Boolean(
@@ -632,57 +800,17 @@ export class WorkflowResultTool extends WorkflowTool {
         )}/runs/latest/artifacts`,
         target
       )
-      let listResult: unknown
-      let listRecord: Record<string, unknown> = {}
-      let canonicalWorkflowName = name
-      let artifact: Record<string, unknown> | null = null
-      for (let attempt = 0; attempt < WORKFLOW_RESULT_ARTIFACT_POLL_ATTEMPTS; attempt++) {
-        listResult = await this.client.request(listPath)
-        listRecord =
-          listResult && typeof listResult === 'object' && !Array.isArray(listResult)
-            ? (listResult as Record<string, unknown>)
-            : {}
-        canonicalWorkflowName = workflowNameFromRecord(listRecord) || name
-        artifact = pickWorkflowResultArtifact(artifactRecords(listResult), '')
-        if (artifact) break
-        if (attempt < WORKFLOW_RESULT_ARTIFACT_POLL_ATTEMPTS - 1) {
-          await sleep(WORKFLOW_RESULT_ARTIFACT_POLL_INTERVAL_MS)
-        }
-      }
-      if (!artifact) {
-        return {
-          workflowName: canonicalWorkflowName,
-          artifact: null,
-          result: {
-            artifacts: [],
-            message: 'No workflow result artifacts are available for this run yet.',
-          },
-        }
-      }
-      const artifactName = typeof artifact.name === 'string' ? artifact.name : ''
-      const downloadPath = appendApprovalTargetQuery(
-        `/api/v1/workflows/${encodeURIComponent(namespace)}/${encodeURIComponent(
-          name
-        )}/runs/latest/artifacts/${encodeURIComponent(artifactName)}/download`,
-        target
-      )
-      const { contentResult, attachment } = await workflowResultArtifactDownload({
-        client: this.client,
-        downloadPath,
-        artifactName,
-        getEnv: this.getEnv,
+      return this.readWorkflowResult({
+        listPath,
+        downloadPath: artifactName =>
+          appendApprovalTargetQuery(
+            `/api/v1/workflows/${encodeURIComponent(namespace)}/${encodeURIComponent(
+              name
+            )}/runs/latest/artifacts/${encodeURIComponent(artifactName)}/download`,
+            target
+          ),
+        fallbackWorkflowName: name,
       })
-      this.resultAttachments = attachment ? [attachment] : undefined
-      console.log(
-        `[WorkflowResult] Artifact attachment count for ${artifactName}: ${
-          this.resultAttachments?.length ?? 0
-        }`
-      )
-      return {
-        workflowName: canonicalWorkflowName,
-        artifact,
-        result: contentResult,
-      }
     })
 
     return sanitizeWorkflowResultForAuthenticatedChat(

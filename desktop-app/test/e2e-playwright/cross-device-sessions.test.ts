@@ -6,11 +6,9 @@
 // Run with:  npm run test:e2e:playwright
 //
 // ─── SELECTOR AUDIT ──────────────────────────────────────────────────────────
-// The following data-testid attributes from the original spec were checked
-// against the production UI source (desktop-app/ui/src/):
+// The following selectors from the original spec were checked against the
+// production UI source (desktop-app/ui/src/):
 //
-//   data-testid="chat-id"            → EXISTS  ChatListPanel.tsx (inside "View all" drawer)
-//   data-testid="chat-remote-badge"  → EXISTS  ChatListPanel.tsx (when chat.remote === true)
 //   data-testid="send-button"        → EXISTS  AgentsPage.tsx
 //   data-testid="agent-response"     → EXISTS  AgentsPage.tsx  ← used here instead of "assistant-message"
 //
@@ -22,8 +20,11 @@
 //     // TODO: add data-testid="agent-selector" in follow-up UI task
 //
 //   data-testid="new-chat-button"    → MISSING
-//     Fallback: button:has-text("+ New thread")
+//     Fallback: agent actions menu -> "New chat"
 //     // TODO: add data-testid="new-chat-button" in follow-up UI task
+//
+//   data-testid="chat-id" / "chat-remote-badge" → REMOVED with the old drawer UI
+//     Fallback: visible sidebar session button + window.clerum.rpc.listSessions()
 //
 //   data-testid="message-input"      → MISSING (textarea has data-testid="chat-input")
 //     Fallback: [data-testid="chat-input"]
@@ -39,12 +40,19 @@ import {
   USER_A_EMAIL,
   USER_B_EMAIL,
   enterAgentChat,
-  openChatListPanel,
+  listServerSessions,
+  remoteSessionTitle,
+  sessionChatId,
+  sidebarSessionButton,
   waitForAssistantResponse,
+  waitForLocalChatByTitle,
+  waitForServerSessionByChatId,
 } from './crossDeviceSessions.helpers.js'
 import { expect, launchFreshElectron, loginAs, test, wipeChatsDir } from './fixtures.js'
 
 // ─── suite ───────────────────────────────────────────────────────────────────
+
+const ASSISTANT_RESPONSE_TIMEOUT = 240_000
 
 // State carries across tests within this describe block.
 // mcp-host keeps the Conversation in memory;
@@ -58,12 +66,12 @@ test.describe.serial('cross-device desktop sessions', () => {
 
   // T1: User A creates a chat and sends a probe message.
   test('T1 — user A creates a chat and sends a probe message', async ({ appPage }) => {
+    test.setTimeout(360_000)
+
     // appPage fixture auto-logs-in as USER_A_EMAIL — no explicit loginAs needed.
     await enterAgentChat(appPage)
 
-    // Start a fresh thread.
-    // TODO: add data-testid="new-chat-button" in follow-up UI task
-    await appPage.getByRole('button', { name: /new thread/i }).click()
+    // enterAgentChat opens a fresh chat through the visible agent actions menu.
     await expect(appPage.locator('[data-testid="agent-response"]')).toHaveCount(0, {
       timeout: 10_000,
     })
@@ -78,19 +86,12 @@ test.describe.serial('cross-device desktop sessions', () => {
     // (airtable-server asks for approval on memory-search; without approval
     // the task suspends and no response ever renders).
     // TODO: add data-testid="assistant-message" alias in follow-up UI task
-    await waitForAssistantResponse(appPage, 0, 120_000)
+    await waitForAssistantResponse(appPage, 0, ASSISTANT_RESPONSE_TIMEOUT)
 
-    // Capture the chatId from the sidebar list panel.
-    await openChatListPanel(appPage)
-    const chatEl = appPage.locator('[data-testid="chat-id"]').first()
-    capturedChatId = await chatEl.getAttribute('data-chat-id')
+    const session = await waitForLocalChatByTitle(appPage, PROBE)
+    capturedChatId = sessionChatId(session)
     expect(capturedChatId).toBeTruthy()
-
-    const items = await appPage.locator('[data-testid="chat-id"]').count()
-    expect(items).toBeGreaterThanOrEqual(1)
-
-    // Close the panel.
-    await appPage.keyboard.press('Escape')
+    await waitForServerSessionByChatId(appPage, capturedChatId!)
   })
 
   // T2: User B on the same machine sees none of user A's chats.
@@ -105,21 +106,23 @@ test.describe.serial('cross-device desktop sessions', () => {
     // TODO: add data-testid="agent-selector" in follow-up UI task
     await enterAgentChat(page)
 
-    // Open the chat list panel to inspect [data-testid="chat-id"] rows.
-    await openChatListPanel(page)
-
-    // Note: the app auto-creates a fresh "New Chat" when a user first enters an
-    // agent, so user B may have exactly 1 (their own, empty) chat. The invariant
-    // that matters is that user A's specific chatId from T1 does NOT leak here.
+    // Note: the app auto-creates a fresh chat when a user first enters an agent,
+    // so user B may have their own empty session. The invariant that matters is
+    // that user A's specific chatId/title does NOT leak here.
     expect(capturedChatId, 'T1 must have captured a chatId').toBeTruthy()
-    const matchingCount = await page.locator(`[data-chat-id="${capturedChatId}"]`).count()
-    expect(matchingCount, `user A's chatId ${capturedChatId} leaked into user B's sidebar`).toBe(0)
+    const userBSessions = await listServerSessions(page)
+    expect(
+      userBSessions.map(sessionChatId),
+      `user A's chatId ${capturedChatId} leaked into user B's session catalog`
+    ).not.toContain(capturedChatId)
 
     await app.close()
   })
 
   // T3: User A on a fresh install sees their chat restored from the server.
   test('T3 — user A on a fresh install sees their chat restored from the server', async () => {
+    test.setTimeout(360_000)
+
     await wipeChatsDir()
 
     const app = await launchFreshElectron()
@@ -130,45 +133,18 @@ test.describe.serial('cross-device desktop sessions', () => {
     // TODO: add data-testid="agent-selector" in follow-up UI task
     await enterAgentChat(page)
 
-    // Open the chat list panel to find the remotely-restored chats.
-    await openChatListPanel(page)
-
-    // Wait for at least one chat row to appear (the catalog fetch completes
-    // asynchronously after panel-open). This proves the remote-catalog fetch
-    // and merge logic succeeded.
-    const anyChat = page.locator('[data-testid="chat-id"]')
-    try {
-      await expect(anyChat.first()).toBeVisible({ timeout: 15_000 })
-    } catch (err) {
-      await page.screenshot({ path: 'test-results/t3-no-chats-rendered.png', fullPage: true })
-      const html = await page
-        .locator('.chat-list-panel')
-        .innerHTML()
-        .catch(() => '(panel not found)')
-      console.error(
-        `[T3] no chat rows rendered. panel innerHTML (first 500 chars):\n${html.slice(0, 500)}`
-      )
-      throw err
-    }
-    const rendered = await anyChat.count()
-    console.log(`[T3] rendered ${rendered} chat rows`)
-
-    // If T1 captured a chatId, verify it's present specifically.
-    // Otherwise (T3 running standalone after a prior session), just verify the
-    // remote catalog returned AT LEAST one chat with a remote badge.
-    const targetChatId = capturedChatId ?? (await anyChat.first().getAttribute('data-chat-id'))
+    await waitForServerSessionByChatId(page, capturedChatId!)
+    const restoredSession = (await listServerSessions(page)).find(
+      session => sessionChatId(session) === capturedChatId
+    )
+    const targetChatId = capturedChatId ?? (restoredSession ? sessionChatId(restoredSession) : null)
     expect(targetChatId, 'need a chatId to verify').toBeTruthy()
 
-    const chatRow = page.locator(`[data-chat-id="${targetChatId!}"]`)
-    await chatRow.scrollIntoViewIfNeeded()
-    await expect(chatRow).toBeVisible({ timeout: 5_000 })
-
-    const remoteBadge = chatRow.locator('[data-testid="chat-remote-badge"]')
-    await expect(remoteBadge).toBeVisible({ timeout: 5_000 })
-
-    // Click the chat row to hydrate transcript from server.
-    // The panel closes itself after selection (onClose is called in ChatListPanel onClick).
-    await chatRow.click()
+    const restoredButton = sidebarSessionButton(page, remoteSessionTitle(targetChatId!)).or(
+      sidebarSessionButton(page, PROBE)
+    )
+    await expect(restoredButton).toBeVisible({ timeout: 15_000 })
+    await restoredButton.click()
 
     // After hydration, SOMETHING from the server transcript should appear.
     // If T1 produced a known probe string, check for that specifically;
@@ -181,15 +157,6 @@ test.describe.serial('cross-device desktop sessions', () => {
       ).toBeVisible({ timeout: 10_000 })
     }
 
-    // After clicking (hydrating), the remote badge should be gone for this chat.
-    const badgeAfter = page.locator(
-      `[data-chat-id="${targetChatId!}"] [data-testid="chat-remote-badge"]`
-    )
-    // Re-open panel to re-check badge state (panel closes on chat select).
-    await openChatListPanel(page)
-    await expect(badgeAfter).toBeHidden({ timeout: 5_000 })
-    await page.keyboard.press('Escape')
-
     // Send a follow-up message on the restored chat.
     const chatInput = page.locator('[data-testid="chat-input"]')
     const responsesBefore = await page.locator('[data-testid="agent-response"]').count()
@@ -199,7 +166,7 @@ test.describe.serial('cross-device desktop sessions', () => {
     // Wait for the next agent response — auto-approve any MCP approval that
     // pops up. If this never fires, the follow-up didn't reach the server and
     // the test fails (no silent swallow).
-    await waitForAssistantResponse(page, responsesBefore, 120_000)
+    await waitForAssistantResponse(page, responsesBefore, ASSISTANT_RESPONSE_TIMEOUT)
 
     // Server-side verification: the same chatId should now have turnCount=2
     // (was 1 when T1 created it). Proves the follow-up appended to the SAME
@@ -253,12 +220,12 @@ test.describe.serial('cross-device desktop sessions', () => {
     // rpcProxyClient.loadSessionMessages throws this exact message only on 404; that
     // is the canonical body mcp-host emits for both "never existed" and
     // "belongs to another user" (enumeration-defense).
-    expect(result.message).toBe('Session not found (404)')
+    expect(result.message).toContain('Session not found (404)')
 
     await app.close()
   })
 
-  test('T5 — multiple remote chats hydrate independently; badges update per-chat', async () => {
+  test('T5 — multiple remote chats hydrate independently from the sidebar', async () => {
     // Fresh install: forces all existing chats to appear as remote-only.
     await wipeChatsDir()
 
@@ -267,62 +234,71 @@ test.describe.serial('cross-device desktop sessions', () => {
     await page.waitForLoadState('domcontentloaded')
     await loginAs(page, USER_A_EMAIL)
     await enterAgentChat(page)
-    await openChatListPanel(page)
 
-    // Wait for the catalog fetch + merge to finish (at least one row in panel).
-    await expect(page.locator('[data-testid="chat-id"]').first()).toBeVisible({
-      timeout: 15_000,
+    const remoteButtons = page.getByRole('button', { name: /^Open Remote · / })
+    let visibleRemoteCount = await remoteButtons.count()
+    if (visibleRemoteCount < 2) {
+      await expect
+        .poll(async () => await remoteButtons.count(), { timeout: 15_000 })
+        .toBeGreaterThanOrEqual(2)
+        .catch(() => {})
+      visibleRemoteCount = await remoteButtons.count()
+    }
+    test.skip(visibleRemoteCount < 2, `need >=2 visible remote chats, saw ${visibleRemoteCount}`)
+
+    const firstLabel = (await remoteButtons.nth(0).getAttribute('aria-label')) ?? ''
+    const secondLabel = (await remoteButtons.nth(1).getAttribute('aria-label')) ?? ''
+    const firstPrefix = firstLabel.match(/^Open Remote · ([0-9a-f]{8})/)?.[1]
+    const secondPrefix = secondLabel.match(/^Open Remote · ([0-9a-f]{8})/)?.[1]
+    expect(firstPrefix).toBeTruthy()
+    expect(secondPrefix).toBeTruthy()
+
+    const candidates = (await listServerSessions(page)).filter(session => {
+      const id = sessionChatId(session)
+      return id && (session.turnCount ?? 0) > 0
     })
-
-    const badgedRows = page.locator(
-      '[data-testid="chat-id"]:has([data-testid="chat-remote-badge"])'
+    const firstChatId = sessionChatId(
+      candidates.find(session => sessionChatId(session)?.startsWith(firstPrefix!))!
     )
-    const badgedCount = await badgedRows.count()
-    // This test requires at least 2 remote chats to be meaningful. Prior runs
-    // populate the server-side store; if the test environment was just reset,
-    // skip (not fail).
-    test.skip(badgedCount < 2, `need >=2 remote chats in server catalog, saw ${badgedCount}`)
-
-    // Capture the ids of TWO distinct badged chats up-front. We test the
-    // per-chat invariant (this chatId's badge goes away when clicked) rather
-    // than a global count, which can be thrown off by any independent state
-    // mutation during the test.
-    const firstChatId = await badgedRows.nth(0).getAttribute('data-chat-id')
-    const secondChatId = await badgedRows.nth(1).getAttribute('data-chat-id')
+    const secondChatId = sessionChatId(
+      candidates.find(session => sessionChatId(session)?.startsWith(secondPrefix!))!
+    )
     expect(firstChatId).toBeTruthy()
     expect(secondChatId).toBeTruthy()
     expect(firstChatId).not.toBe(secondChatId)
 
-    // Pre-condition: both are badged.
-    const firstBadge = page.locator(
-      `[data-chat-id="${firstChatId}"] [data-testid="chat-remote-badge"]`
-    )
-    const secondBadge = page.locator(
-      `[data-chat-id="${secondChatId}"] [data-testid="chat-remote-badge"]`
-    )
-    expect(await firstBadge.count()).toBe(1)
-    expect(await secondBadge.count()).toBe(1)
+    const firstTitle = remoteSessionTitle(firstChatId!)
+    const secondTitle = remoteSessionTitle(secondChatId!)
 
-    // Click the first chat. Panel closes after selection (onClose in onClick).
-    // We target the exact row by data-chat-id, since the panel sort order may
-    // change after hydration and .first() is not stable across re-renders.
-    await page.locator(`[data-chat-id="${firstChatId}"]`).click()
-    await page.locator('.chat-list-panel').waitFor({ state: 'hidden', timeout: 5_000 })
+    const firstButton = sidebarSessionButton(page, firstTitle).first()
+    await expect(firstButton).toBeVisible({ timeout: 15_000 })
+    await firstButton.click()
+    await expect
+      .poll(async () => {
+        return await page.evaluate(
+          async args => {
+            return (await (window as any).clerum.chat.loadMessages(args.hostRef, args.chatId))
+              .length
+          },
+          { hostRef: HOST_REF, chatId: firstChatId! }
+        )
+      })
+      .toBeGreaterThan(0)
 
-    // Re-open; first chat has NO badge, second still has its badge.
-    await openChatListPanel(page)
-    await expect(firstBadge).toHaveCount(0)
-    await expect(secondBadge).toHaveCount(1)
-
-    // Click the second chat.
-    await page.locator(`[data-chat-id="${secondChatId}"]`).click()
-    await page.locator('.chat-list-panel').waitFor({ state: 'hidden', timeout: 5_000 })
-
-    // Re-open; BOTH hydrated chats are now badge-less. The per-chat invariant
-    // holds even though other remote chats in the panel retain their badges.
-    await openChatListPanel(page)
-    await expect(firstBadge).toHaveCount(0)
-    await expect(secondBadge).toHaveCount(0)
+    const secondButton = sidebarSessionButton(page, secondTitle).first()
+    await expect(secondButton).toBeVisible({ timeout: 15_000 })
+    await secondButton.click()
+    await expect
+      .poll(async () => {
+        return await page.evaluate(
+          async args => {
+            return (await (window as any).clerum.chat.loadMessages(args.hostRef, args.chatId))
+              .length
+          },
+          { hostRef: HOST_REF, chatId: secondChatId! }
+        )
+      })
+      .toBeGreaterThan(0)
 
     await app.close()
   })

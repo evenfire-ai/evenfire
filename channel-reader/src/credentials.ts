@@ -13,6 +13,7 @@ import type { CommunicationChannelCRD } from './types'
 export interface ResolvedCredentials {
   telegramBotToken?: string
   slackBotToken?: string
+  teamsAppPassword?: string
   emailUsername?: string
   emailPassword?: string
 }
@@ -61,6 +62,7 @@ export class CredentialsResolver {
     return {
       telegramBotToken: decode(data['telegram-bot-token']),
       slackBotToken: decode(data['slack-bot-token']),
+      teamsAppPassword: decode(data['teams-app-password']),
       emailUsername: decode(data['email-username']),
       emailPassword: decode(data['email-password']),
     }
@@ -80,6 +82,7 @@ export class DevCredentialsResolver {
     return {
       telegramBotToken: process.env.CLERUM_TELEGRAM_BOT_TOKEN,
       slackBotToken: process.env.CLERUM_SLACK_BOT_TOKEN,
+      teamsAppPassword: process.env.CLERUM_TEAMS_APP_PASSWORD,
       emailUsername: process.env.CLERUM_EMAIL_USERNAME,
       emailPassword: process.env.CLERUM_EMAIL_PASSWORD,
     }

@@ -1,5 +1,9 @@
 import type { ReaderConfig } from './config.js'
-import type { ReaderEnrollmentCommand, ReaderMessageCommand } from './decisionHandler.js'
+import type {
+  ReaderEnrollmentCommand,
+  ReaderMessageCommand,
+  ReaderTeamsFileConsentCommand,
+} from './decisionHandler.js'
 import { fetchWithTimeout, timeoutErrorName } from './httpTimeout.js'
 import { readerLogger } from './logger.js'
 
@@ -12,6 +16,14 @@ export type SlackTargetHandoffContext = {
   communicationChannelRef: string
   providerWorkspaceId: string
   replyInThreads: boolean
+  replyOnlyWhenMentioned: boolean
+}
+
+export type TeamsTargetHandoffContext = {
+  targetId: string
+  hostRef: string
+  communicationChannelRef: string
+  providerWorkspaceId: string
   replyOnlyWhenMentioned: boolean
 }
 
@@ -33,7 +45,8 @@ function channelReaderUrl(cfg: ReaderConfig, hostRef: string): string | null {
 
 async function postHandoff(
   cfg: ReaderConfig,
-  target: SlackTargetHandoffContext,
+  target: SlackTargetHandoffContext | TeamsTargetHandoffContext,
+  path: '/internal/slack/handoff' | '/internal/teams/handoff',
   body: Record<string, unknown>
 ): Promise<{ ok: true } | { ok: false; status?: number; error: string }> {
   if (!cfg.channelReaderHandoffToken) {
@@ -46,7 +59,7 @@ async function postHandoff(
 
   try {
     const response = await fetchWithTimeout(
-      `${baseUrl}/internal/slack/handoff`,
+      `${baseUrl}${path}`,
       {
         method: 'POST',
         headers: {
@@ -85,9 +98,10 @@ export async function handoffSlackMessageToChannelReader(
   const responseThreadTs = target.replyInThreads
     ? command.threadTs || command.providerMessageTs
     : null
-  return postHandoff(cfg, target, {
+  return postHandoff(cfg, target, '/internal/slack/handoff', {
     kind: 'slack.message',
     content: command.content,
+    ...(command.workflowRunId ? { workflowRunId: command.workflowRunId } : {}),
     providerUserId: command.providerUserId,
     providerWorkspaceId: command.providerWorkspaceId,
     providerChannelId: command.providerChannelId,
@@ -112,15 +126,103 @@ export async function handoffSlackEnrollmentToChannelReader(
   const channelRef = splitCommunicationChannelRef(target.communicationChannelRef)
   if (!channelRef) return { ok: false, status: 400, error: 'invalid_communication_channel_ref' }
   const responseThreadTs = target.replyInThreads ? threadTs || providerMessageTs || null : null
-  return postHandoff(cfg, target, {
+  return postHandoff(cfg, target, '/internal/slack/handoff', {
     kind: 'slack.enrollment',
     nonce: enrollment.nonce,
     providerUserId: enrollment.providerUserId,
     providerWorkspaceId: enrollment.providerWorkspaceId,
     providerChannelId: enrollment.providerChannelId,
+    providerChannelType: enrollment.providerChannelType ?? null,
+    providerChannelTitle: enrollment.providerChannelTitle ?? null,
     providerEventId: enrollment.providerEventId ?? null,
     providerMessageTs: providerMessageTs ?? null,
     responseThreadTs,
+    providerTarget: {
+      hostRef: target.hostRef,
+      communicationChannelNamespace: channelRef.namespace,
+      communicationChannelName: channelRef.name,
+    },
+  })
+}
+
+export async function handoffTeamsMessageToChannelReader(
+  cfg: ReaderConfig,
+  target: TeamsTargetHandoffContext,
+  command: ReaderMessageCommand & {
+    serviceUrl?: string | null
+    providerChannelType?: string | null
+  }
+): Promise<{ ok: true } | { ok: false; status?: number; error: string }> {
+  const channelRef = splitCommunicationChannelRef(target.communicationChannelRef)
+  if (!channelRef) return { ok: false, status: 400, error: 'invalid_communication_channel_ref' }
+  return postHandoff(cfg, target, '/internal/teams/handoff', {
+    kind: 'teams.message',
+    content: command.content,
+    ...(command.workflowRunId ? { workflowRunId: command.workflowRunId } : {}),
+    providerUserId: command.providerUserId,
+    providerWorkspaceId: command.providerWorkspaceId,
+    providerChannelId: command.providerChannelId,
+    providerConversationId: command.providerConversationId,
+    providerReplyToMessageId: command.providerReplyToMessageId ?? command.providerMessageTs,
+    providerChannelType: command.providerChannelType ?? null,
+    providerEventId: command.providerEventId,
+    providerMessageId: command.providerMessageTs,
+    serviceUrl: command.serviceUrl ?? '',
+    providerTarget: {
+      hostRef: target.hostRef,
+      communicationChannelNamespace: channelRef.namespace,
+      communicationChannelName: channelRef.name,
+    },
+  })
+}
+
+export async function handoffTeamsFileConsentToChannelReader(
+  cfg: ReaderConfig,
+  target: TeamsTargetHandoffContext,
+  command: ReaderTeamsFileConsentCommand
+): Promise<{ ok: true } | { ok: false; status?: number; error: string }> {
+  const channelRef = splitCommunicationChannelRef(target.communicationChannelRef)
+  if (!channelRef) return { ok: false, status: 400, error: 'invalid_communication_channel_ref' }
+  return postHandoff(cfg, target, '/internal/teams/handoff', {
+    kind: 'teams.file-consent',
+    ...command,
+    providerTarget: {
+      hostRef: target.hostRef,
+      communicationChannelNamespace: channelRef.namespace,
+      communicationChannelName: channelRef.name,
+    },
+  })
+}
+
+export async function handoffTeamsEnrollmentToChannelReader(
+  cfg: ReaderConfig,
+  target: TeamsTargetHandoffContext,
+  enrollment: ReaderEnrollmentCommand & {
+    serviceUrl?: string | null
+    providerChannelType?: string | null
+    providerChannelTitle?: string | null
+    providerTeamId?: string | null
+    providerTeamsChannelId?: string | null
+  },
+  providerMessageId?: string | null
+): Promise<{ ok: true } | { ok: false; status?: number; error: string }> {
+  const channelRef = splitCommunicationChannelRef(target.communicationChannelRef)
+  if (!channelRef) return { ok: false, status: 400, error: 'invalid_communication_channel_ref' }
+  return postHandoff(cfg, target, '/internal/teams/handoff', {
+    kind: 'teams.enrollment',
+    nonce: enrollment.nonce,
+    providerUserId: enrollment.providerUserId,
+    providerWorkspaceId: enrollment.providerWorkspaceId,
+    providerChannelId: enrollment.providerChannelId,
+    providerConversationId: enrollment.providerConversationId,
+    providerReplyToMessageId: enrollment.providerReplyToMessageId ?? providerMessageId ?? null,
+    providerChannelType: enrollment.providerChannelType ?? null,
+    providerChannelTitle: enrollment.providerChannelTitle ?? null,
+    providerTeamId: enrollment.providerTeamId ?? null,
+    providerTeamsChannelId: enrollment.providerTeamsChannelId ?? null,
+    providerEventId: enrollment.providerEventId ?? null,
+    providerMessageId: providerMessageId ?? null,
+    serviceUrl: enrollment.serviceUrl ?? '',
     providerTarget: {
       hostRef: target.hostRef,
       communicationChannelNamespace: channelRef.namespace,

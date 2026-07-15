@@ -9,3 +9,20 @@ export const RECIPE_LABEL = 'clerum.io/recipe'
 export const HOST_LABEL = 'clerum.io/host'
 export const INFRA_POLICY_TYPE = 'infrastructure'
 export const EXTERNAL_EGRESS_POLICY_TYPE = 'external-egress'
+
+// ─── Stateless heartbeat lifecycle reasons (Stage 3) ────────────────────────
+/** status.lifecycle.reason written when the D8 idle gate suspends a Host. */
+export const LIFECYCLE_REASON_SUSPENDED_IDLE = 'idle'
+/** Prefix for status.lifecycle.reason naming the D8 condition blocking suspension. */
+export const SUSPEND_BLOCKED_REASON_PREFIX = 'SuspendBlocked: '
+/**
+ * True for lifecycle reasons owned by the stateless heartbeat tracker. The
+ * host reconciler preserves these across accepted-lifecycle re-assessments so
+ * a reconcile-loop status write does not erase the tracker's published state.
+ */
+export function isHeartbeatManagedLifecycleReason(reason: string | undefined): reason is string {
+  return (
+    reason === LIFECYCLE_REASON_SUSPENDED_IDLE ||
+    (reason !== undefined && reason.startsWith(SUSPEND_BLOCKED_REASON_PREFIX))
+  )
+}

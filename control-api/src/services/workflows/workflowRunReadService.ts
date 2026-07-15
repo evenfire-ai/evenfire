@@ -27,6 +27,11 @@ type ApprovalScopedWorkflowRunRow = WorkflowRunRow & {
   approval_target_team_member_user_id?: string | null
 }
 
+export type ProviderScopedWorkflowRunRow = WorkflowRunRow & {
+  approval_target_user_id: string | null
+  approval_target_team_id: string | null
+}
+
 function userRunScope(caller: WorkflowRouteCaller): UserRunScope | null {
   if (caller.kind !== 'user-session') return null
   const ids = new Set([caller.claims.userId, getWorkflowPrincipalId(caller)])
@@ -109,9 +114,16 @@ export async function canCallerReadWorkflowRunWithApprovalTarget(
          FROM workflow_approval_requests war
          JOIN workflow_approval_trigger_intents wati
            ON wati.approval_request_id = war.id
+         LEFT JOIN team_members tm
+           ON tm.team_id = war.target_team_id
+          AND tm.user_id = $2::uuid
+          AND tm.status = 'active'
         WHERE war.id = $1
           AND (
-            ($2::uuid IS NOT NULL AND war.target_user_id = $2::uuid)
+            ($2::uuid IS NOT NULL AND (
+              war.target_user_id = $2::uuid
+              OR tm.user_id IS NOT NULL
+            ))
             OR ($3::uuid IS NOT NULL AND war.target_team_id = $3::uuid)
           )
           AND wati.trigger_namespace = war.recipe_namespace
@@ -152,6 +164,55 @@ export async function canCallerReadWorkflowRunWithApprovalTarget(
     [row.approval_request_id, scope.principalIds, scope.teamId, scope.userId]
   )
   return (result.rowCount ?? 0) > 0
+}
+
+export async function getProviderScopedWorkflowRun(params: {
+  caller: WorkflowRouteCaller
+  runId: string
+  approvalTarget: WorkflowApprovalTarget
+  conversationId: string
+  db?: DbClient
+}): Promise<ProviderScopedWorkflowRunRow | null> {
+  const { caller, runId, approvalTarget, conversationId, db = pool } = params
+  if (caller.kind !== 'mcp-host-control') return null
+  if (!approvalTarget.targetUserId && !approvalTarget.targetTeamId) return null
+
+  const callerKey = getMcpHostCallerKey(caller.claims)
+  const result = await db.query(
+    `SELECT wr.*,
+            war.target_user_id AS approval_target_user_id,
+            war.target_team_id AS approval_target_team_id
+       FROM workflow_runs wr
+       JOIN workflow_approval_requests war
+         ON war.id = wr.approval_request_id
+       JOIN workflow_approval_trigger_intents wati
+         ON wati.approval_request_id = war.id
+       LEFT JOIN team_members tm
+         ON tm.team_id = war.target_team_id
+        AND tm.user_id = $2::uuid
+        AND tm.status = 'active'
+      WHERE wr.run_id = $1
+        AND (
+          ($2::uuid IS NOT NULL AND (
+            war.target_user_id = $2::uuid
+            OR tm.user_id IS NOT NULL
+          ))
+          OR ($3::uuid IS NOT NULL AND war.target_team_id = $3::uuid)
+        )
+        AND wati.trigger_namespace = wr.recipe_namespace
+        AND wati.trigger_name = wr.recipe_name
+        AND wati.trigger_caller_key = $4
+        AND war.payload->'metadata'->'workflowTrigger'->>'conversationId' = $5
+      LIMIT 1`,
+    [
+      runId,
+      approvalTarget.targetUserId ?? null,
+      approvalTarget.targetTeamId ?? null,
+      callerKey,
+      conversationId,
+    ]
+  )
+  return (result.rows[0] as ProviderScopedWorkflowRunRow | undefined) ?? null
 }
 
 function actorFromDbRow(row: WorkflowRunRow): CanonicalRunActor | null {

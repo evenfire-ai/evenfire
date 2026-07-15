@@ -39,6 +39,21 @@ export type WorkflowApprovalCoordinatorOptions = {
   sendReply: (message: Message, content: string) => Promise<void>
 }
 
+type TeamsThreadTarget = {
+  conversationId: string
+  replyToMessageId: string
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
 export class WorkflowApprovalCoordinator {
   private readonly rpcClient: WorkflowApprovalRpcClient
   private readonly notificationDeliveryClient: WorkflowApprovalNotificationClient | null
@@ -68,10 +83,11 @@ export class WorkflowApprovalCoordinator {
   ): Promise<void> {
     if (!command) return
     if (
-      command.providerIdentity.medium === 'slack' &&
+      (command.providerIdentity.medium === 'slack' ||
+        command.providerIdentity.medium === 'teams') &&
       !command.providerIdentity.providerWorkspaceId
     ) {
-      await this.sendReply(msg, 'Unable to verify Slack workspace identity for this approval.')
+      await this.sendReply(msg, 'Unable to verify provider workspace identity for this approval.')
       return
     }
 
@@ -109,10 +125,11 @@ export class WorkflowApprovalCoordinator {
   ): Promise<void> {
     if (!command) return
     if (
-      command.providerIdentity.medium === 'slack' &&
+      (command.providerIdentity.medium === 'slack' ||
+        command.providerIdentity.medium === 'teams') &&
       !command.providerIdentity.providerWorkspaceId
     ) {
-      await this.sendReply(msg, 'Unable to verify Slack workspace identity for this approval.')
+      await this.sendReply(msg, 'Unable to verify provider workspace identity for this approval.')
       return
     }
 
@@ -144,7 +161,7 @@ export class WorkflowApprovalCoordinator {
   async pollNotifications(): Promise<void> {
     if (!this.notificationDeliveryClient) return
 
-    for (const medium of ['telegram', 'slack'] as const) {
+    for (const medium of ['telegram', 'slack', 'teams'] as const) {
       const providerChannelGroups = getConfiguredProviderChannelGroups(medium, this.getChannels())
       if (providerChannelGroups.length === 0) continue
 
@@ -203,10 +220,11 @@ export class WorkflowApprovalCoordinator {
       const message = formatNotificationDelivery(delivery, {
         communicationChannelRef: `${channelRef.namespace}/${channelRef.name}`,
       })
+      const teamsThreadTarget = this.teamsThreadTarget(delivery, channelRef)
       await adapter.sendMessage(
-        delivery.providerChannelId,
+        teamsThreadTarget?.conversationId ?? delivery.providerChannelId,
         message.content,
-        undefined,
+        teamsThreadTarget?.replyToMessageId,
         undefined,
         message.sendOptions
       )
@@ -237,6 +255,49 @@ export class WorkflowApprovalCoordinator {
         )
       }
     }
+  }
+
+  private teamsThreadTarget(
+    delivery: NotificationDelivery,
+    channelRef: { namespace: string; name: string }
+  ): TeamsThreadTarget | null {
+    if (delivery.medium !== 'teams') return null
+    const channel = this.getChannels().find(
+      item => item.namespace === channelRef.namespace && item.name === channelRef.name
+    )
+    const group = channel?.spec.teams?.find(
+      item =>
+        item.channelId === delivery.providerChannelId &&
+        item.tenantId === delivery.providerWorkspaceId
+    )
+    if (group?.replyInThreads === false) return null
+
+    if (delivery.eventType === 'approval.requested') {
+      const metadata = asRecord(delivery.payload.metadata)
+      const workflowTrigger = asRecord(metadata?.workflowTrigger)
+      const providerBinding = asRecord(workflowTrigger?.providerBinding)
+      if (optionalString(providerBinding?.medium) !== 'teams') return null
+      return this.validTeamsThreadTarget(
+        optionalString(workflowTrigger?.conversationId),
+        optionalString(providerBinding?.providerThreadId)
+      )
+    }
+
+    if (delivery.eventType === 'workflow.run.completed') {
+      return this.validTeamsThreadTarget(
+        optionalString(delivery.payload.providerConversationId),
+        optionalString(delivery.payload.providerThreadId)
+      )
+    }
+
+    return null
+  }
+
+  private validTeamsThreadTarget(
+    conversationId: string | null,
+    replyToMessageId: string | null
+  ): TeamsThreadTarget | null {
+    return conversationId && replyToMessageId ? { conversationId, replyToMessageId } : null
   }
 
   private async resolveDecisionCommand(

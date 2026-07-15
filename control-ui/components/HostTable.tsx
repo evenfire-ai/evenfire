@@ -2,6 +2,7 @@
 
 import React, { useMemo, useState } from 'react'
 import { getProviderLabel } from '../lib/llm'
+import type { HostItem, HostLifecycleInfo, HostRef } from './HostTable.types'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconRobot } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
@@ -10,20 +11,57 @@ import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
 import { IconRefresh, IconX } from './icons'
 
-type HostItem = {
-  metadata?: { name?: string; namespace?: string }
-  spec?: Record<string, unknown>
-}
-
-type HostRef = { name: string; namespace: string }
-
 const HOST_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
-  { key: 'namespace', label: 'Namespace', width: '22%' },
-  { key: 'context', label: 'Context', width: '22%' },
+  { key: 'lifecycle', label: 'Lifecycle', width: '10rem' },
+  { key: 'namespace', label: 'Namespace', width: '18%' },
+  { key: 'context', label: 'Context', width: '20%' },
   { key: 'model', label: 'Model', minWidth: '8rem' },
   { key: 'actions', width: '3.5rem', align: 'right', ariaLabel: 'Actions' },
 ]
+
+function getHostLifecycleInfo(host: HostItem): HostLifecycleInfo {
+  const isStateless = host.spec?.lifecycle?.stateless === true
+  const rejection = host.status?.conditions?.find(
+    condition =>
+      condition.type === 'StatelessEnableRejected' &&
+      String(condition.status || '').toLowerCase() === 'true'
+  )
+  const rejectedReason = String(rejection?.message || rejection?.reason || '').trim()
+  const state = rejection
+    ? 'blocked'
+    : isStateless
+      ? String(host.status?.lifecycle?.state || '').trim()
+      : ''
+  const reason = rejection
+    ? rejectedReason
+    : isStateless
+      ? String(host.status?.lifecycle?.reason || '').trim()
+      : ''
+  const label = isStateless ? 'Stateless' : 'Stateful'
+  const details = [state, reason].filter(Boolean).join(' - ')
+  return {
+    kind: rejection ? 'blocked' : isStateless ? 'stateless' : 'stateful',
+    label,
+    state,
+    reason,
+    title: details ? `${label}: ${details}` : `${label} agent`,
+  }
+}
+
+function HostLifecycleBadge({ lifecycle }: { lifecycle: HostLifecycleInfo }) {
+  return (
+    <span
+      className={`cu-host-lifecycle cu-host-lifecycle--${lifecycle.kind}`}
+      title={lifecycle.title}
+      aria-label={lifecycle.title}
+    >
+      <span className="cu-host-lifecycle__dot" aria-hidden="true" />
+      <span className="cu-host-lifecycle__label">{lifecycle.label}</span>
+      {lifecycle.state ? <span className="cu-host-lifecycle__state">{lifecycle.state}</span> : null}
+    </span>
+  )
+}
 
 export function HostTable({
   items,
@@ -62,13 +100,23 @@ export function HostTable({
     if (!normalizedSearch) return rows
     return rows.filter(({ name, namespace, item }) => {
       const spec = item.spec || {}
+      const lifecycle = getHostLifecycleInfo(item)
       const contextRef = String(spec.contextRef || '').trim()
       const modelProvider = String(
         (spec.model as { provider?: string } | undefined)?.provider || ''
       )
       const modelName = String((spec.model as { name?: string } | undefined)?.name || '')
       const modelProviderLabel = modelProvider ? getProviderLabel(modelProvider) : ''
-      return [name, namespace, contextRef, modelProviderLabel, modelName]
+      return [
+        name,
+        namespace,
+        lifecycle.label,
+        lifecycle.state,
+        lifecycle.reason,
+        contextRef,
+        modelProviderLabel,
+        modelName,
+      ]
         .join(' ')
         .toLowerCase()
         .includes(normalizedSearch)
@@ -123,7 +171,7 @@ export function HostTable({
               <TableHeaderRow columns={HOST_COLUMNS} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={5} rows={4} />
+              <SkeletonTableRows columns={6} rows={4} />
             </tbody>
           </table>
         </div>
@@ -153,6 +201,7 @@ export function HostTable({
                   modelProviderLabel || modelName
                     ? `${modelProviderLabel}${modelProviderLabel && modelName ? '/' : ''}${modelName}`
                     : '-'
+                const lifecycle = getHostLifecycleInfo(item)
                 const openAgent = () => onOpen({ namespace, name })
                 return (
                   <tr
@@ -181,7 +230,10 @@ export function HostTable({
                         {name}
                       </button>
                     </td>
-                    <td style={{ color: 'var(--cu-text-soft)' }}>{namespace}</td>
+                    <td>
+                      <HostLifecycleBadge lifecycle={lifecycle} />
+                    </td>
+                    <td className="cu-table__cell-soft">{namespace}</td>
                     <td>
                       {contextClickable ? (
                         <button
@@ -196,11 +248,11 @@ export function HostTable({
                           {contextRef}
                         </button>
                       ) : (
-                        <span style={{ color: 'var(--cu-text-muted)' }}>{contextRef}</span>
+                        <span className="cu-table__cell-muted">{contextRef}</span>
                       )}
                     </td>
-                    <td style={{ color: 'var(--cu-text-soft)', fontSize: '0.8125rem' }}>{model}</td>
-                    <td style={{ textAlign: 'right' }} onClick={e => e.stopPropagation()}>
+                    <td className="cu-table__cell-soft">{model}</td>
+                    <td className="cu-table__cell-actions" onClick={e => e.stopPropagation()}>
                       <button
                         type="button"
                         className="cu-btn cu-btn--icon cu-btn--danger-icon"

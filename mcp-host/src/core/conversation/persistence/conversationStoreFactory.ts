@@ -26,6 +26,11 @@ export interface ConversationStoreFactoryOptions {
   asyncTimeoutMs: number
   checkpointEveryWrites: number
   heartbeatMs: number
+  /**
+   * D3 — durability barrier (`PRAGMA synchronous = FULL` in the worker).
+   * Set when the stateless lifecycle is enabled or `CLERUM_DB_BARRIER_MODE=full`.
+   */
+  barrierMode?: boolean
   /** TTL for persisted pending-approval rows. Defaults to 7d inside the store. */
   pendingApprovalTtlMs?: number
   /** Optional override for the compiled worker script path (used by tests). */
@@ -61,6 +66,7 @@ function spawnWorker(opts: ConversationStoreFactoryOptions): Worker {
       dbPath: opts.dbPath,
       checkpointEveryWrites: opts.checkpointEveryWrites,
       heartbeatMs: opts.heartbeatMs,
+      barrierMode: opts.barrierMode === true,
     },
   })
 }

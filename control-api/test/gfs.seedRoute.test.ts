@@ -11,7 +11,11 @@ class FakeStore implements SeedResourceStore {
     name: string
     pathCache: string
   }): Promise<string> {
-    this.calls.push({ drive: input.drive, parentResourceId: input.parentResourceId, name: input.name })
+    this.calls.push({
+      drive: input.drive,
+      parentResourceId: input.parentResourceId,
+      name: input.name,
+    })
     return `res-${++this.seq}`
   }
 }
@@ -24,9 +28,13 @@ describe('seedRootDirectoriesToHttp', () => {
   })
 
   it('400 when rootDirectories is not a string[]', async () => {
-    expect((await seedRootDirectoriesToHttp(new FakeStore(), { drive: 'main', rootDirectories: 'x' })).status).toBe(400)
     expect(
-      (await seedRootDirectoriesToHttp(new FakeStore(), { drive: 'main', rootDirectories: [1, 2] })).status
+      (await seedRootDirectoriesToHttp(new FakeStore(), { drive: 'main', rootDirectories: 'x' }))
+        .status
+    ).toBe(400)
+    expect(
+      (await seedRootDirectoriesToHttp(new FakeStore(), { drive: 'main', rootDirectories: [1, 2] }))
+        .status
     ).toBe(400)
   })
 

@@ -35,7 +35,11 @@ export interface MintRequestClass {
 }
 
 /** The single authoritative mapping. Adding a row is the ONLY way to allow a cross. */
-const ALLOWED: ReadonlyArray<{ issuer: GfsIssuer; subjectType: GfsMintableSubjectType; party?: HostParty }> = [
+const ALLOWED: ReadonlyArray<{
+  issuer: GfsIssuer
+  subjectType: GfsMintableSubjectType
+  party?: HostParty
+}> = [
   { issuer: 'hcc', subjectType: 'host', party: '1st' },
   { issuer: 'wrc', subjectType: 'host', party: '3rd' },
   { issuer: 'session', subjectType: 'user' },
@@ -43,7 +47,7 @@ const ALLOWED: ReadonlyArray<{ issuer: GfsIssuer; subjectType: GfsMintableSubjec
 
 export function isIssuerAllowedForSubject(req: MintRequestClass): boolean {
   return ALLOWED.some(
-    (row) =>
+    row =>
       row.issuer === req.issuer &&
       row.subjectType === req.subjectType &&
       // party is only meaningful for host; for user both sides are undefined.
