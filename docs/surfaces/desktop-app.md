@@ -171,7 +171,9 @@ service, a teammate's, or local `make`-forwarded services — from the app's own
 proxy address follows from that environment; there is no second URL to enter.
 Environments can also be pre-seeded for a fleet through Profile UI's
 `evenfire://desktop-environment` deep link or a `CLERUM_DESKTOP_CONFIG_PATH`
-config file.
+config file. Adding and switching environments, the invitation setup path, and
+how a packaged app surfaces a **required** update are covered in
+[Desktop setup & updates](../how-to/desktop-setup-and-updates.md).
 
 Two variables **do** apply to a packaged build, read from the environment or
 the bundled `.env.prod`: `MEMBER_REGISTRATION_SERVICE_BASE_URL` — which has

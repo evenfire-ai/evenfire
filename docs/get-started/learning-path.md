@@ -7,7 +7,9 @@ Pick the path that matches what you want to do.
 1. [Quickstart](quickstart.md) — `make minikube-setup`, then message the seeded
    `chatllm` agent from the desktop app or the API
 2. Tour the [Desktop App](../surfaces/desktop-app.md) — screens, live activity,
-   in-chat approvals, and artifacts, beyond the one message you just sent
+   in-chat approvals, and artifacts, beyond the one message you just sent.
+   To point it at more than one instance or handle updates, see
+   [Desktop setup & updates](../how-to/desktop-setup-and-updates.md)
 3. Optional: connect [Telegram](../how-to/connect-telegram.md)
 4. Read [Why evenfire](../concepts/why-evenfire.md)
 
