@@ -1,8 +1,13 @@
 # How to: configure human-in-the-loop approvals
 
-evenfire treats tool execution as untrusted by default. MCP tool calls can
-**suspend** until an explicit approve or deny. Pending approvals are persisted
-so they survive pod restarts.
+The approval system is **on by default** (`CLERUM_ENABLE_APPROVAL` defaults to
+`true`). **MCP tool calls always require approval** — they **suspend** until an
+explicit approve or deny, and the per-tool overrides below do not apply to them.
+Among **native** tools, five require approval by default — `shell_exec`,
+`http_request`, `cron_manage`, `browser_open`, and `browser_navigate` — while
+every other native tool runs without prompting; each native tool can be flipped
+with a per-tool override on `Host.spec.approval`. Pending approvals are
+persisted so they survive pod restarts.
 
 ## Mental model
 
@@ -12,7 +17,7 @@ so they survive pod restarts.
    configured).
 4. Runtime continues or aborts.
 
-## Dev / Compose
+## Dev mode (no cluster)
 
 Environment knobs on `mcp-host` (see [mcp-host README](../../mcp-host/README.md)):
 

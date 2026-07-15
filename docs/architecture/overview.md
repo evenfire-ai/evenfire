@@ -1138,7 +1138,7 @@ The MCP servers maintain comprehensive test coverage validating CRD configuratio
 | **Total Test Files** | 8 files       |
 | **Total Unit Tests** | ~110 tests    |
 | **Test Framework**   | Vitest 4.0.18 |
-| **Environment**      | Node.js 20.x+ |
+| **Environment**      | Node.js 24.x+ |
 
 #### Test Organization
 

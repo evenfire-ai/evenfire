@@ -26,8 +26,10 @@ runtime and multi-channel surfaces.
 
 ## What evenfire optimizes for
 
-1. **Human-in-the-loop by default** — MCP tool calls pause for explicit
-   approve/deny; pending approvals survive restarts.
+1. **Human-in-the-loop by default** — with the approval system on (the default),
+   MCP tool calls always pause for explicit approve/deny, as do the risky native
+   tools (`shell_exec`, `http_request`, `cron_manage`, `browser_open`,
+   `browser_navigate`); pending approvals survive restarts.
 2. **Least privilege at the network layer** — a `Context` allowlists MCP
    servers; unlisted servers are unreachable via default-deny NetworkPolicies.
 3. **Declarative fleet** — Hosts, channels, connectors, and workflows are

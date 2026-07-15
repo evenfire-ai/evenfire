@@ -15,7 +15,7 @@ named `chatllm` you can message immediately.
 - **minikube** v1.30+ (`brew install minikube`)
 - **kubectl**
 - **python3** (used by the JWT key sync)
-- **Node.js 20+** (service builds; desktop app)
+- **Node.js 24+** (service builds; desktop app)
 - One LLM API key: OpenAI, Anthropic Claude, Z.AI, or Alibaba Bailian
 
 ## 1. Configure
@@ -51,6 +51,8 @@ minikube's Docker → deploy → readiness wait with auto-recovery → seed → 
 
 It seeds for you:
 
+> Seeded credentials below are for local minikube only — change them before any shared or production-like environment.
+
 - an agent: Host `chatllm` + Context `context1` + a CommunicationChannel
 - a desktop/API login: **`test@clerum.io` / `changeme123!`**
 - a Control UI admin: **`admin` / `changeme123!`**
@@ -68,6 +70,7 @@ Useful re-runs: `make minikube-setup ARGS="--skip-build"` (redeploy in ~1 min) �
 ## 3. Say hello — desktop app
 
 ```bash
+make install-all && npm --prefix control-ui install
 npm run ui     # runs Control UI (:3000), Profile UI (:3001), and the Desktop App
 ```
 
