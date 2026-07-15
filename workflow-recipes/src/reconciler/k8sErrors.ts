@@ -93,7 +93,7 @@ const TRANSPORT_PREFIXED_PHRASE_RE = new RegExp(
 
 /**
  * Node renders socket errors as `<syscall> <CODE> <addr>` (e.g.
- * `connect ETIMEDOUT 203.0.113.10:443`, `read ECONNRESET`,
+ * `connect ETIMEDOUT 203.0.113.1:443`, `read ECONNRESET`,
  * `getaddrinfo EAI_AGAIN host`) and node-fetch wraps them as
  * `request to <url> failed, reason: connect ETIMEDOUT …`.
  *

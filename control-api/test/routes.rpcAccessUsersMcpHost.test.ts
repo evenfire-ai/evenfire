@@ -4,15 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { K8sGateway } from "../src/k8s.js";
 
 /**
- * HTTP-level tests for the authorization gate that was the subject of the
- * 2026-04-09 production incident:
+ * HTTP-level tests for the authorization gate on:
  *
  *   GET /rpc/access/users/:userId/mcp-hosts/:hostRef
  *
- * See .local-notes/incident-403-user-agents-authorization-gap.md for the
- * full forensic reconstruction. This file locks down the HANDLER contract
- * so a future refactor cannot silently re-introduce the 403 without us
- * noticing.
+ * This file locks down the HANDLER contract so a future refactor cannot
+ * silently re-introduce a missing-authorization 403 without us noticing.
  *
  * Scope of these tests: the HANDLER logic (control-api/src/routes/rpc-access/users.ts:95-120).
  * The handler implements THREE independent authorization checks after the

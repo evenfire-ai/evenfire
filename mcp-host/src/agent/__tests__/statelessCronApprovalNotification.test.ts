@@ -62,7 +62,9 @@ describe('buildApprovalNotification — cron×stateless prompt (cron×stateless)
     const msg = buildNotification(makeApproval(), cliConfig, 'telegram')
     expect(msg.startsWith(STATELESS_CRON_APPROVAL_PROMPT)).toBe(true)
     expect(msg).toContain('Request ID: approval-test-1')
-    expect(msg).toContain('Please approve via CLI: POST /approve')
+    expect(msg).toContain('Please approve via CLI: POST /v1/runtime/approvals/approve')
+    // F16 guard: the server serves ONLY the full route; a bare `POST /approve` is a 404 instruction.
+    expect(msg).not.toMatch(/POST \/approve(?![\w/])/)
   })
 
   it('keeps the generic lead for every other approval (regression guard)', () => {

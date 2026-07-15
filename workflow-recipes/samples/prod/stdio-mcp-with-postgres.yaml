@@ -38,7 +38,7 @@ spec:
 
     - id: pg-stdio-mcp
       type: deployment
-      image: us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mock-stdio-mcp-server:prod
+      image: ghcr.io/evenfire-ai/mock-stdio-mcp-server:prod
       imagePullPolicy: Always
       imagePullSecrets:
         - clerum

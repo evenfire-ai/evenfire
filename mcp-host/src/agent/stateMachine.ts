@@ -1136,7 +1136,7 @@ export class AgentStateMachine extends EventEmitter {
           ? channelType === 'slack'
             ? 'Use the approval controls to continue or cancel.'
             : 'Reply /approve or /deny to this message.'
-          : `Request ID: ${approval.request_id}. Please approve via CLI: POST /approve`)
+          : `Request ID: ${approval.request_id}. Please approve via CLI: POST /v1/runtime/approvals/approve`)
       )
     }
 
@@ -1154,7 +1154,7 @@ export class AgentStateMachine extends EventEmitter {
       `Tool \`${approval.tool_name}\` requires approval. ` +
       `Parameters: ${paramSummary}. ` +
       `Request ID: ${approval.request_id}. ` +
-      `Please approve via CLI: POST /approve`
+      `Please approve via CLI: POST /v1/runtime/approvals/approve`
     )
   }
 

@@ -878,9 +878,7 @@ export function HostWizard({
 
       // Associate authorized users and teams with the new agent in a single
       // atomic call each, rather than looping N×(GET+PUT) per selection.
-      // Uses the agent-centric endpoints PUT /admin/agents/:name/users|teams
-      // added as part of the incident fix. See:
-      //   .local-notes/incident-403-user-agents-authorization-gap.md
+      // Uses the agent-centric endpoints PUT /admin/agents/:name/users|teams.
       if (selectedUserIds.length > 0) {
         await updateAgentUsers(normalizedHostName, selectedUserIds)
       }

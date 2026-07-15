@@ -26,7 +26,7 @@ spec:
   workloads:
     - id: airtable-mcp
       type: deployment
-      image: us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/airtable-mcp-server:latest
+      image: ghcr.io/evenfire-ai/airtable-mcp-server:latest
       imagePullSecrets:
         - clerum  # GCP Artifact Registry secret
       replicas: 1

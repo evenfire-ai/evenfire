@@ -66,7 +66,7 @@ spec:
   egress:
     - to:
         - ipBlock:
-            cidr: 203.0.113.10/32
+            cidr: 203.0.113.1/32
       ports:
         - port: 443
           protocol: TCP
@@ -91,10 +91,10 @@ assert_bump_tag() {
   cat > "$tmp/kustomization.yaml" <<'YAML'
 images:
   - name: clerum/mcp-host
-    newName: us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mcp-host-slim
+    newName: ghcr.io/evenfire-ai/mcp-host-slim
     newTag: "sha-OLD"
   - name: clerum/rpc-proxy
-    newName: us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/rpc-proxy
+    newName: ghcr.io/evenfire-ai/rpc-proxy
     newTag: "0.9.8"
 YAML
   bash deploy/scripts/bump-image-tag.sh "$tmp" mcp-host sha-NEW >/dev/null 2>&1

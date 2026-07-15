@@ -27,15 +27,15 @@ test('normalizeProfileChannels fills missing social network keys', () => {
 })
 
 test('uniqueTrimmed removes blanks and exact duplicates while preserving order', () => {
-  assert.deepEqual(uniqueTrimmed([' @alfredo ', '', '@alfredo', '@other']), ['@alfredo', '@other'])
+  assert.deepEqual(uniqueTrimmed([' @testuser ', '', '@testuser', '@other']), ['@testuser', '@other'])
 })
 
 test('normalizeProfileChannels stores Telegram handles with @ prefix', () => {
   assert.deepEqual(
     normalizeProfileChannels({
-      telegramHandles: [' alfredo ', '@other'],
+      telegramHandles: [' testuser ', '@other'],
     }).telegramHandles,
-    ['@alfredo', '@other']
+    ['@testuser', '@other']
   )
 })
 
@@ -44,7 +44,7 @@ test('profile channel draft serializes only non-empty values', () => {
   const draft = channelsToDraft(
     {
       emails: ['a@example.com'],
-      telegramHandles: ['@alfredo'],
+      telegramHandles: ['@testuser'],
       slackUserNames: [],
       telegramIds: [],
       discordUserNames: [],
@@ -58,7 +58,7 @@ test('profile channel draft serializes only non-empty values', () => {
 
   assert.deepEqual(draftToChannels(draft), {
     emails: ['a@example.com'],
-    telegramHandles: ['@alfredo'],
+    telegramHandles: ['@testuser'],
     slackUserNames: [],
     telegramIds: ['123456789'],
     discordUserNames: [],
@@ -71,7 +71,7 @@ test('appendDraftValue normalizes Telegram handles and adds verified chat IDs wi
   const draft = channelsToDraft(
     {
       emails: [],
-      telegramHandles: ['@alfredo'],
+      telegramHandles: ['@testuser'],
       slackUserNames: [],
       telegramIds: [],
       discordUserNames: [],
@@ -80,7 +80,7 @@ test('appendDraftValue normalizes Telegram handles and adds verified chat IDs wi
     () => `row-${++nextId}`
   )
 
-  const duplicate = appendDraftValue(draft, 'telegramHandles', ' alfredo ', () => 'duplicate')
+  const duplicate = appendDraftValue(draft, 'telegramHandles', ' testuser ', () => 'duplicate')
   assert.equal(duplicate, draft)
 
   const appended = appendDraftValue(draft, 'telegramIds', ' 721954225 ', () => 'verified-chat')

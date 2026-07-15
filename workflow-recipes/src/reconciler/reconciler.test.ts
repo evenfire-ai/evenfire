@@ -7828,7 +7828,7 @@ describe('WorkflowRecipeReconciler', () => {
     function etimedout(): Error {
       return Object.assign(
         new Error(
-          'request to https://203.0.113.10/api/v1/namespaces/sandbox-recipes/services/app failed, reason: connect ETIMEDOUT 203.0.113.10:443'
+          'request to https://203.0.113.1/api/v1/namespaces/sandbox-recipes/services/app failed, reason: connect ETIMEDOUT 203.0.113.1:443'
         ),
         { code: 'ETIMEDOUT', name: 'FetchError' }
       )
@@ -7888,7 +7888,7 @@ describe('WorkflowRecipeReconciler', () => {
         status: {
           phase: 'failed',
           message:
-            'FetchError: request to https://203.0.113.10/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies failed, reason: connect ETIMEDOUT 203.0.113.10:443',
+            'FetchError: request to https://203.0.113.1/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies failed, reason: connect ETIMEDOUT 203.0.113.1:443',
           workloads: [{ id: 'app', type: 'deployment', phase: 'deployed', ready: true }],
         },
       })
@@ -8080,11 +8080,11 @@ describe('WorkflowRecipeReconciler', () => {
     it('self-heals recipes latched by the real dev API-timeout messages', async () => {
       const devMessages = [
         // helpdesk — pre-deploy Context allowlist fetch
-        'Error: Pre-deploy failed for WorkflowRecipe "recipe-helpdesk-v1-0-0-4549198b". WRC cannot start transport workloads until HCC can reconcile child McpServers: Error: Pre-deploy Context allowlist failed for "recipe-helpdesk-v1-0-0-4549198b": request to https://203.0.113.10/apis/clerum.io/v1alpha1/namespaces/mcp-server/contexts/context1 failed, reason: connect ETIMEDOUT 203.0.113.10:443',
+        'Error: Pre-deploy failed for WorkflowRecipe "recipe-helpdesk-v1-0-0-4549198b". WRC cannot start transport workloads until HCC can reconcile child McpServers: Error: Pre-deploy Context allowlist failed for "recipe-helpdesk-v1-0-0-4549198b": request to https://203.0.113.1/apis/clerum.io/v1alpha1/namespaces/mcp-server/contexts/context1 failed, reason: connect ETIMEDOUT 203.0.113.1:443',
         // leadforge — NetworkPolicy fetch
-        'FetchError: request to https://203.0.113.10/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies/wl-egress-recipe-leadforge-app-v1-0-0-bdb457b6-prospector-api failed, reason: connect ETIMEDOUT 203.0.113.10:443',
+        'FetchError: request to https://203.0.113.1/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies/wl-egress-recipe-leadforge-app-v1-0-0-bdb457b6-prospector-api failed, reason: connect ETIMEDOUT 203.0.113.1:443',
         // recap — NetworkPolicy list
-        'FetchError: request to https://203.0.113.10/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies failed, reason: connect ETIMEDOUT 203.0.113.10:443',
+        'FetchError: request to https://203.0.113.1/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies failed, reason: connect ETIMEDOUT 203.0.113.1:443',
       ]
       for (const message of devMessages) {
         const recipe = makeRecipe({

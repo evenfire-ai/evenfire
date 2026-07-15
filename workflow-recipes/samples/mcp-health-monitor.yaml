@@ -8,7 +8,7 @@ spec:
   workloads:
     - id: health-monitor
       type: daemonset
-      image: us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/health-monitor:latest
+      image: ghcr.io/evenfire-ai/health-monitor:latest
       port: 9090
       resources:
         requests:

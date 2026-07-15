@@ -478,7 +478,7 @@ describe('network/gateway intent (manifest-level)', () => {
       expect(kustomization).toContain('patches/k8s-api-ip-mcp-host.yaml')
       expect(patch).toContain('name: allow-k8s-api-egress-mcp-host')
       expect(patch).toContain('namespace: mcp-host')
-      expect(patch).toContain('cidr: 203.0.113.10/32')
+      expect(patch).toContain('cidr: 203.0.113.1/32')
       expect(patch).toContain('port: 443')
       expect(patch).toContain('port: 8443')
     }

@@ -66,12 +66,12 @@ export function createRpcAccessUsersRouter(gateway: K8sGateway): Router {
   )
 
   // Authorization gate: verifies the user has an explicit user_agents row for
-  // the requested host. This check was introduced in 4d8f9a7 (2026-03-10) but
-  // the population path (HostWizard Step 5 "Access") was not enforced, causing
-  // a ~30-day production incident where agents created without selecting users
-  // were silently unusable. Fixed in 61d62d2 + 48ff7d6 (2026-04-09/10).
-  // Population: PUT /admin/agents/:agentName/users (agentAccess.setAgentUsers).
-  // Tests: test/routes.rpcAccessUsersMcpHost.test.ts (16 cases).
+  // the requested host (directly, or via team membership) before returning the
+  // host's invocation URL. Without an explicit grant, an agent created without
+  // selecting any authorized users would otherwise be silently unusable by
+  // everyone. Population: PUT /admin/agents/:agentName/users
+  // (agentAccess.setAgentUsers). Tests: test/routes.rpcAccessUsersMcpHost.test.ts
+  // (16 cases).
   router.get(
     '/rpc/access/users/:userId/mcp-hosts/:hostRef',
     requireValidRpcAccessTokenAny([

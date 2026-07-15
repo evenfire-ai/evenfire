@@ -19,7 +19,7 @@ for env in gcp-dev gcp-prod; do
   # `value: …` on the NEXT line — capture both.
   prefixes="$(printf '%s\n' "$rendered" | grep -A1 -E 'ALLOWED_IMAGE_PREFIXES' || true)"
   echo "--- $env allowlist lines ---"; printf '%s\n' "$prefixes"
-  if ! printf '%s\n' "$prefixes" | grep -q 'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/'; then
+  if ! printf '%s\n' "$prefixes" | grep -q 'ghcr.io/evenfire-ai/'; then
     echo "::error::[$env] allowlist missing real AR prefix"; fail=1
   fi
   if printf '%s\n' "$prefixes" | grep -qE '\$\{GCP_PROJECT\}|example\.com/'; then

@@ -267,7 +267,7 @@ describe('runToolUseLoop workflow trigger recovery', () => {
       JSON.stringify({
         items: [
           {
-            name: 'e2e-risk-review-alfredo-personal',
+            name: 'e2e-risk-review-testuser-personal',
             inputs: [],
           },
         ],
@@ -293,7 +293,7 @@ describe('runToolUseLoop workflow trigger recovery', () => {
 
     expect(result.type).toBe('response')
     if (result.type === 'response') {
-      expect(result.content).toContain('e2e-risk-review-alfredo-personal')
+      expect(result.content).toContain('e2e-risk-review-testuser-personal')
       expect(result.content).toContain('Required business inputs: none')
       expect(result.content).not.toContain('e2e-ondemand-approval')
     }

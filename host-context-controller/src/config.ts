@@ -384,7 +384,7 @@ export const config: Config = {
   // stdio-bridge sidecar image
   stdioBridgeImage: getEnv(
     'CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE',
-    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/stdio-bridge:0.1.0'
+    'ghcr.io/evenfire-ai/stdio-bridge:0.1.0'
   )!,
 
   // stdio-bridge sidecar resource defaults
@@ -437,7 +437,7 @@ export const config: Config = {
   // Host runtime defaults
   hostImage: getEnv(
     'CONTEXT_MAPPER_HOST_IMAGE',
-    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mcp-host:0.6.0'
+    'ghcr.io/evenfire-ai/mcp-host:0.6.0'
   )!,
   hostImagePullPolicy: getEnv('CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY', 'Always') as
     | 'Always'
@@ -493,7 +493,7 @@ export const config: Config = {
   // workspace-files-controller (per-SharedFileSystem) reconciliation defaults
   wfcImage: getEnv(
     'CONTEXT_MAPPER_WFC_IMAGE',
-    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/workspace-files-controller:0.1.0'
+    'ghcr.io/evenfire-ai/workspace-files-controller:0.1.0'
   )!,
   wfcImagePullPolicy: getEnv('CONTEXT_MAPPER_WFC_IMAGE_PULL_POLICY', 'IfNotPresent') as
     | 'Always'
