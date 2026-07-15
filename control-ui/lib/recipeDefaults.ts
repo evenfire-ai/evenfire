@@ -30,7 +30,7 @@ export const DEFAULT_OPERATOR_DEFAULTS: OperatorDefaults = {
     nonMcpWorkloads: 'sandbox-recipes',
   },
   registry: {
-    prefix: 'ghcr.io/evenfire-ai/',
+    prefix: 'us-central1-docker.pkg.dev/your-gcp-project/clerum/',
     imagePullSecrets: [],
   },
 }

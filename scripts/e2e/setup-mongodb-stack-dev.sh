@@ -6,8 +6,8 @@
 set -eo pipefail
 umask 077
 
-KCTX="${KUBECONTEXT:-gke_${GCP_PROJECT}_us-central1-a_example-dev}"
-REGISTRY="us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum"
+KCTX="${KUBECONTEXT:-gke_your-gcp-project_us-central1-a_example-dev}"
+REGISTRY="us-central1-docker.pkg.dev/your-gcp-project/clerum"
 DB_SRC="mongodb/mongodb-community-server:7.0-ubi8"
 DB_TARGET="$REGISTRY/mongodb-community-server:7.0-ubi8"
 MCP_SRC="mongodb/mongodb-mcp-server:latest"

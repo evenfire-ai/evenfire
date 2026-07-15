@@ -16,7 +16,7 @@ Seed catalog plus live `example-dev` resources:
 PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH \
   node scripts/pr314/audit-registry-egress.mjs \
   --live \
-  --context gke_${GCP_PROJECT}_us-central1-a_example-dev
+  --context gke_your-gcp-project_us-central1-a_example-dev
 ```
 
 The audit is read-only. It reports:
@@ -98,7 +98,7 @@ Dry-run live patch plan:
 PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH \
   node scripts/pr314/prepare-registry-egress-migration.mjs \
   --live \
-  --context gke_${GCP_PROJECT}_us-central1-a_example-dev
+  --context gke_your-gcp-project_us-central1-a_example-dev
 ```
 
 Apply exact-host patches only:
@@ -107,7 +107,7 @@ Apply exact-host patches only:
 PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH \
   node scripts/pr314/prepare-registry-egress-migration.mjs \
   --live \
-  --context gke_${GCP_PROJECT}_us-central1-a_example-dev \
+  --context gke_your-gcp-project_us-central1-a_example-dev \
   --apply
 ```
 
@@ -117,7 +117,7 @@ Apply explicit `public-web` patches too:
 PATH=/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH \
   node scripts/pr314/prepare-registry-egress-migration.mjs \
   --live \
-  --context gke_${GCP_PROJECT}_us-central1-a_example-dev \
+  --context gke_your-gcp-project_us-central1-a_example-dev \
   --allow-public-web \
   --apply
 ```

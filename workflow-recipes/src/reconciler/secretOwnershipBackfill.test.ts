@@ -247,10 +247,10 @@ describe('mapRecipeListToBackfillRecipes', () => {
 
 describe('isProdContext', () => {
   it('flags the clerum prod context', () => {
-    expect(isProdContext('gke_${GCP_PROJECT}_us-central1-a_clerum')).toBe(true)
+    expect(isProdContext('gke_your-gcp-project_us-central1-a_clerum')).toBe(true)
   })
   it('does NOT flag dev / test / minikube contexts', () => {
-    expect(isProdContext('gke_${GCP_PROJECT}_us-central1-a_example-dev')).toBe(false)
+    expect(isProdContext('gke_your-gcp-project_us-central1-a_example-dev')).toBe(false)
     expect(isProdContext('clerum-test')).toBe(false)
     expect(isProdContext('minikube')).toBe(false)
   })

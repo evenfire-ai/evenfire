@@ -1,7 +1,7 @@
 .PHONY: build clean install dev docker-build docker-push docker-push-cross
 
 # Variables
-REGISTRY ?= us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum
+REGISTRY ?= us-central1-docker.pkg.dev/your-gcp-project/clerum
 IMAGE_NAME ?= mcp-proxy
 TAG      ?= $(shell git describe --tags --always 2>/dev/null || echo "latest")
 

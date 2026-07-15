@@ -2,7 +2,7 @@
 
 Helper scripts to set up, verify, diagnose, and exercise the `mongodb-mcp-stack`
 WorkflowRecipe on the `example-dev` GKE cluster
-(`gke_${GCP_PROJECT}_us-central1-a_example-dev`).
+(`gke_your-gcp-project_us-central1-a_example-dev`).
 
 All scripts respect `KUBECONTEXT` env var; default is example-dev. Each script
 wraps `kubectl` with `--context "$KCTX"` so the shell's current-context is

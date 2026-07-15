@@ -66,7 +66,7 @@ is_branch_scoped_minikube_context() {
 CONTEXT_OK=0
 DEFAULT_ALLOWED_CONTEXTS=(
   "clerum-test"                                    # minikube
-  "gke_${GCP_PROJECT}_us-central1-a_example-dev"  # GKE dev
+  "gke_your-gcp-project_us-central1-a_example-dev"  # GKE dev
 )
 IFS=',' read -r -a EXTRA_ALLOWED <<<"${ALLOWED_CONTEXTS:-}"
 for allowed in "${DEFAULT_ALLOWED_CONTEXTS[@]}" "${EXTRA_ALLOWED[@]}"; do
