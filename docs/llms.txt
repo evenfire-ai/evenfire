@@ -14,6 +14,7 @@
 
 - Why evenfire: concepts/why-evenfire.md
 - When to use evenfire (categories): concepts/when-to-use-evenfire.md
+- Open core (self-host vs evenfire hosted): concepts/open-core-and-hosted.md
 - Claims guardrails: meta/claims-guardrails.md
 - Code names (evenfire vs clerum): concepts/code-names.md
 - Architecture overview: architecture/overview.md

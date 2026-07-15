@@ -26,6 +26,7 @@ Use this index for long-form docs.
 | -------------------------------------------------------- | -------------------------------------------------------------------- |
 | [Why evenfire](concepts/why-evenfire.md)                 | Problem, audience, design intent                                     |
 | [When to use evenfire](concepts/when-to-use-evenfire.md) | Fit vs personal assistants / in-process frameworks (categories only) |
+| [Open core: self-host vs hosted](concepts/open-core-and-hosted.md) | What's in this repo vs the managed evenfire hosted service |
 | [Code names](concepts/code-names.md)                     | evenfire vs clerum                                                   |
 | [Architecture overview](architecture/overview.md)        | Services, CRDs, message lifecycle, NetworkPolicy model               |
 | [Platform topology](architecture/platform-topology.md)   | Namespaces, controller split, deny-all baseline                      |

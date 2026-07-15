@@ -70,3 +70,4 @@ See [When to use evenfire](when-to-use-evenfire.md) for category-level fit.
 - [Quickstart](../get-started/quickstart.md) — try the agent runtime locally
 - [Security model](../../README.md#security-model) — four enforcement layers
 - [Architecture overview](../architecture/overview.md) — services and lifecycle
+- [Open core: self-host vs hosted](open-core-and-hosted.md) — what's in this repo vs the managed service

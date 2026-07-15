@@ -48,6 +48,7 @@ connector path exercised.
 1. [Production deploy notes](../deploy/production.md)
 2. Security model + [SECURITY.md](../../SECURITY.md)
 3. License (MPL-2.0) in root [README](../../README.md#community-and-license) and [LICENSE](../../LICENSE)
+4. What's OSS vs the managed service: [Open core: self-host vs hosted](../concepts/open-core-and-hosted.md)
 
 ## Stuck?
 
