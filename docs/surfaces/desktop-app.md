@@ -124,6 +124,7 @@ process handlers before any privileged call runs.
 From the repository root:
 
 ```bash
+make install-all && npm --prefix control-ui install
 npm run app   # desktop app only
 npm run ui    # Control UI, Desktop App, and Profile UI together
 ```

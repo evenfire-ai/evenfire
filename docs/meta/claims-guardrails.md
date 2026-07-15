@@ -33,7 +33,7 @@ caveats over absolute language.
 - Public name **evenfire** / code name **clerum** (`clerum.io`, `CLERUM_*`)
 - Single-service dev mode (`CLERUM_DEV_MODE`) is **not** full platform security
 - Budgets are cost control, not security
-- Approvals default-on for **MCP** tools (native tool overrides exist)
+- Approvals default-on for **MCP** tools (always) and for the five risky **native** tools (`shell_exec`, `http_request`, `cron_manage`, `browser_open`, `browser_navigate`); per-tool overrides on `Host.spec.approval` apply to native tools only
 
 ## Review checklist
 

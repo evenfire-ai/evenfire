@@ -49,9 +49,9 @@ five steps live together.
    the host detail page. A per-tool approval editor with three settings —
    **Default / Required / Skip** — and a risk hint whenever an override
    loosens a tool whose built-in default is Required (for example, setting
-   `shell_exec` or `http_request` to Skip). Approvals are default-on for MCP
-   tools; native tools carry per-tool overrides, and the safe default per
-   native tool is baked into `mcp-host`. Of the always-on native tools the
+   `shell_exec` or `http_request` to Skip). MCP tools always require approval;
+   native tools carry per-tool overrides, and the safe default per native tool
+   is baked into `mcp-host`. Of the always-on native tools the
    editor lists, only `http_request` and `shell_exec` default to Required and
    the rest to Skip; conditionally-registered tools carry their own defaults
    (`cron_manage` and the desktop `browser_open` / `browser_navigate` tools
@@ -163,6 +163,7 @@ invitation and password-reset form posts — is in
 ## Run it
 
 ```bash
+make install-all && npm --prefix control-ui install
 npm run web   # port-forwards control-api to :8090, waits for health, starts Control UI alone
 npm run ui    # starts Control UI, Desktop App, and Profile UI together
 ```
