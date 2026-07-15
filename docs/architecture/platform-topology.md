@@ -419,11 +419,11 @@ sequenceDiagram
         HCC->>K8s: Ready = True (WrcOwnedRuntimeReady) — WRC built the Deployment
     else spec.managed = true (stdio recipe servers, control-api servers)
         Note over HCC: sanitizeCrdSpec() — coerce, do not reject
-        HCC->>HCC: Drop imagePullPolicy; force non-root gid/fsGroup
+        HCC->>HCC: Drop imagePullPolicy, force non-root gid/fsGroup
         HCC->>HCC: Strip forbidden capabilities and env vars
         HCC->>HCC: Clamp resource limits (unit-naive — see table)
 
-        HCC->>HCC: Validate Secret; classify image against allowlist
+        HCC->>HCC: Validate Secret, classify image against allowlist
 
         alt Secret invalid, or image denied in enforce mode
             HCC->>K8s: status.conditions[Ready] = False (reason + message)
