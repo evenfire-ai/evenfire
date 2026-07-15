@@ -19,8 +19,8 @@ We aim to **acknowledge within 3 business days** and to keep you informed of
 the fix timeline. Please give us a reasonable window before any public
 disclosure.
 
-If `security@evenfire.ai` is unreachable, use the maintainers listed in
-[GOVERNANCE.md](GOVERNANCE.md) / the GitHub org owners via a private channel.
+If `security@evenfire.ai` is unreachable, reach the core maintainers / GitHub
+org owners via a private channel (see [GOVERNANCE.md](GOVERNANCE.md)).
 
 ## Supported versions
 

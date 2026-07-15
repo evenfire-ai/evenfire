@@ -642,7 +642,7 @@ workloads:
     # --- DaemonSet-specific (type: daemonset) ---
     # Requires explicit operator annotation (OPA policy: clerum.io/daemonset-approved).
 
-    # --- StatefulSet-specific (type: stateset) ---
+    # --- StatefulSet-specific (type: statefulset) ---
     # A headless Service (clusterIP: None) is auto-created for stable pod DNS.
     # Pod DNS: <recipe>-<workload-id>-N.<recipe>-<workload-id>.<namespace>.svc.cluster.local
     volumeClaimTemplates: # Per-replica PVCs (StatefulSet only).

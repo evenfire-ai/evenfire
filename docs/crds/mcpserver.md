@@ -137,7 +137,7 @@ An McpServer with `spec.remote` must declare at least one `egressBinding`.
 | `spec.egressBindings[].egressClass` | string | no | Egress class. `exact-host` is the default for `dns`/`cidr` bindings. `public-web` is explicit public TCP 80/443 egress with private, metadata, cluster-internal, link-local, multicast, and reserved ranges blocked. |
 | `spec.egressBindings[].dns` | string | no | DNS hostname to resolve (e.g. `api.openai.com`). Mutually exclusive with `cidr`. |
 | `spec.egressBindings[].cidr` | string | no | Public IPv4 CIDR range (e.g. `203.0.114.10/32`). Mutually exclusive with `dns`. Must use canonical network notation and must not overlap private, metadata, link-local, documentation, multicast, or reserved IPv4 ranges (this rejects `0.0.0.0/0` and any RFC1918 range such as `10.0.0.0/8`). |
-| `spec.egressBindings[].port` | integer | yes | Destination port number. |
+| `spec.egressBindings[].port` | integer | conditional | Destination port number. Required for `exact-host` bindings; `public-web` bindings must omit it. |
 | `spec.egressBindings[].protocol` | string | no | Network protocol for exact-host bindings. One of: `TCP`, `UDP`. If omitted, the controller treats exact-host as `TCP`; public-web must omit this field. |
 
 Validation rules enforce that exactly one of `dns` or `cidr` must be set per binding, and

@@ -57,9 +57,9 @@ and an admin's Control UI session cannot invoke agents through `rpc-proxy`.
 Channel users — people talking to an agent over Telegram, Slack, or email —
 never touch any of these UIs. Their messages reach the platform through
 `channel-reader`, and when a tool call needs a human decision, the approval
-arrives right in that same conversation: an inline button on Telegram and
-Slack, or a reply command (`/approve <name>`) on email. See
-[Configure approvals](../how-to/configure-approvals.md).
+arrives right in that same conversation: a reply command (`/approve` /
+`/deny`) on any channel, plus inline Approve/Deny buttons on Telegram and
+Slack. See [Configure approvals](../how-to/configure-approvals.md).
 
 ## Next
 

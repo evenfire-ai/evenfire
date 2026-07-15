@@ -80,15 +80,17 @@ the parent stem, which truncates user-chosen parent names mid-word (e.g.
 `competitive-intel-report` → `competitive-intel-repor`) and erodes
 debuggability.
 
-Truncating the run ID to 8 characters (first octet of the UUID, 32 bits
-of entropy) raises the parent-stem budget to `63 − 8 − 1 = 54` bytes
-while keeping the collision probability inside a single parent at
+Truncating the run ID to 8 characters (the first 8 hex characters of the
+UUID, 32 bits of entropy) raises the parent-stem budget to `63 − 8 − 1 = 54`
+bytes while bounding the collision probability inside a single parent at
 
-> 50 % after roughly 2³² ≈ 4.3 billion runs (birthday bound)
+> ~50 % after roughly 2¹⁶ ≈ 65,000 runs of the **same** parent (birthday
+> bound on a 32-bit suffix)
 
-For reference: even at 1 run/second, that is **136 years** of continuous
-triggering on a single parent recipe. We treat this as safe for both
-development and production.
+This is a per-parent bound — only runs that share one parent recipe draw from
+the same 32-bit suffix space, so the practical risk depends on how often a
+single parent is triggered. Callers that expect high run counts on one parent
+can widen the space with a longer `short-run-id` (below).
 
 If a caller explicitly opts into higher collision resistance they can
 pass a longer `short-run-id` — the function accepts it and shortens the
