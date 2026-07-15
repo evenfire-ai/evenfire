@@ -71,3 +71,4 @@ npm run ui    # Control UI, Desktop App, and Profile UI together
 - [UI Surfaces](README.md) — the persona matrix across all three consoles
 - [Control UI](control-ui.md) — the admin console
 - [Desktop App](desktop-app.md) — the end-user client
+- [Desktop setup & updates](../how-to/desktop-setup-and-updates.md) — environments and the update flow after handoff
