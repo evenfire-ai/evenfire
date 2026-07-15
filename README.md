@@ -45,12 +45,14 @@ each pillar links to its depth.
   desktop, and workspace files, plus artifact generation, persistent memory, and
   human-in-the-loop approvals on the risky calls. →
   [mcp-host/README.md](mcp-host/README.md)
-- **Console & client** — the two human surfaces. A **Control UI** console where
+- **Console & client** — the two surfaces you work in day to day. A **Control UI** console where
   admins govern the fleet: token usage by team, model, agent, and desktop user;
   budgets and model prices; per-tool approval overrides; connector egress
   policy; a trust-rated connector registry. And an Electron **Desktop App**
   where people actually use the agents: chat, a live tool-call view, in-chat
-  approvals, and artifacts — no Telegram bot and no curl required. →
+  approvals, and artifacts — no Telegram bot and no curl required. (A third,
+  smaller **Profile UI** is where invited members accept an invite and set a
+  password on the way in.) →
   [docs/surfaces/README.md](docs/surfaces/README.md)
 - **Connectors (MCP)** — governed MCP servers with per-`Context` allowlists
   enforced by NetworkPolicy (not convention); any stdio tool plugs in through

@@ -74,8 +74,9 @@ matrix: [Which surface is for me?](surfaces/README.md#which-surface-is-for-me).
 No, for day-2 operations: agents, connectors, channels, and approvals all have
 Control UI screens, and each one writes the same CRD you would otherwise
 apply by hand. Budgets and the registry are Control UI screens too, but
-they are **not** CRD-backed — both live in control-api's own store (Postgres
-and the registry catalog), reachable through the Control UI or its API, not
+they are **not** CRD-backed: budgets live in control-api's own Postgres, while
+the registry catalog lives in a separate registry service that control-api
+calls over HTTP (`CLERUM_REGISTRY_URL`). Neither is reachable with
 `kubectl apply`. Yes, for install and for GitOps — bootstrapping the
 platform is still `make` and `kubectl`. See
 [Quickstart](get-started/quickstart.md) and [Production notes](deploy/production.md).

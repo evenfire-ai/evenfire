@@ -48,8 +48,9 @@ access token, and the app can only reach `rpc-proxy` with it (source:
 reaches `control-api` and nothing else, and every dashboard page sits behind
 an admin login — it is not an open dashboard (source: `control-ui/README.md`
 § Authentication). Neither surface can act as the other: an end user's
-Desktop App session cannot reach CRDs, secrets, or usage data, and an admin's
-Control UI session cannot invoke agents through `rpc-proxy`.
+Desktop App session cannot reach secrets, cost records, or the admin control
+plane — its only CRD read is the access-checked `WorkflowRecipe` passthrough —
+and an admin's Control UI session cannot invoke agents through `rpc-proxy`.
 
 ## Where the surfaces are not the answer
 
