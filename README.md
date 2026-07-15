@@ -179,8 +179,9 @@ npm run ui              # Control UI + Profile UI + Desktop App
 
 Log in as `test@clerum.io` / `changeme123!`, message the `chatllm` agent, and
 ask it to run a command or generate a PDF — then approve the tool call from the
-chat. The Desktop App is the client you just used; Control UI is the admin
-console for the same fleet — both are toured in
+chat. These are seeded local-minikube credentials — change them before any
+shared or production-like environment. The Desktop App is the client you just
+used; Control UI is the admin console for the same fleet — both are toured in
 [docs/surfaces/](docs/surfaces/README.md).
 
 Prefer the API path? The full curl walkthrough exercises the real session →
