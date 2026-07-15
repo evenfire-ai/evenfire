@@ -1,4 +1,4 @@
-# Shared Frontend Agent Rules
+# Frontend style rules (control-ui, desktop-app/ui, profile-ui)
 
 These rules apply only when editing files under `control-ui/**`, `desktop-app/ui/**`, and `profile-ui/**`.
 

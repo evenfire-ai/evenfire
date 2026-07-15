@@ -79,6 +79,17 @@ Per-tool overrides for **native** tools are documented in
 [mcp-host README](../../mcp-host/README.md). MCP tools use server/tool naming
 and platform defaults — treat “require approval” as the safe baseline.
 
+## Option C — the Control UI
+
+The host detail page in Control UI has a per-tool approval editor
+(`HostApprovalSection`) with three settings per native tool — **Default /
+Required / Skip** — plus a risk hint when an override loosens a tool whose
+built-in default is Required (for example `shell_exec` or `http_request` set
+to Skip). Saving writes the same `spec.approval.tools` field on the `Host`
+CRD shown above; it is a front end for it, not a second mechanism. MCP tools
+stay approval-required by default regardless of what is set here. See
+[Control UI](../surfaces/control-ui.md).
+
 ## Where humans approve
 
 | Surface | Typical use |

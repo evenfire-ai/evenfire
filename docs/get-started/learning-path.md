@@ -6,8 +6,10 @@ Pick the path that matches what you want to do.
 
 1. [Quickstart](quickstart.md) — `make minikube-setup`, then message the seeded
    `chatllm` agent from the desktop app or the API
-2. Optional: connect [Telegram](../how-to/connect-telegram.md)
-3. Read [Why evenfire](../concepts/why-evenfire.md)
+2. Tour the [Desktop App](../surfaces/desktop-app.md) — screens, live activity,
+   in-chat approvals, and artifacts, beyond the one message you just sent
+3. Optional: connect [Telegram](../how-to/connect-telegram.md)
+4. Read [Why evenfire](../concepts/why-evenfire.md)
 
 **Success looks like:** an LLM reply (desktop, API, or Telegram) — and an
 approval gate firing when you ask the agent to run a real tool.
@@ -17,7 +19,9 @@ approval gate firing when you ask the agent to run a real tool.
 1. [Why evenfire](../concepts/why-evenfire.md) and [When to use evenfire](../concepts/when-to-use-evenfire.md)
 2. Root [README security model](../../README.md#security-model)
 3. [Architecture overview](../architecture/overview.md) (skim services + message lifecycle)
-4. [CRD reference index](../crds/README.md)
+4. [Surfaces index](../surfaces/README.md) — the three UIs, who each is for, and
+   what each may reach
+5. [CRD reference index](../crds/README.md)
 
 **Success looks like:** you can explain Host → Context → McpServer and why
 NetworkPolicies matter.

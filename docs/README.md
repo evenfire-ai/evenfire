@@ -32,6 +32,15 @@ Use this index for long-form docs.
 | [Non-MCP services](architecture/non-mcp-services.md)     | Namespace splitting and L0–L3 policy layers                          |
 | [Diagrams](architecture/diagrams/)                       | Excalidraw sources                                                   |
 
+## Surfaces (the UIs)
+
+| Doc                                     | Description                                                                |
+| ---------------------------------------- | ---------------------------------------------------------------------------- |
+| [Surfaces index](surfaces/README.md)   | Which UI is for whom, and what each may reach                             |
+| [Control UI](surfaces/control-ui.md)   | Admin console: usage, budgets, approvals, egress, registry                |
+| [Desktop App](surfaces/desktop-app.md) | End-user client: chat, live activity, approvals, artifacts; how to ship it |
+| [Profile UI](surfaces/profile-ui.md)   | Member front door: invitation, password, desktop handoff                  |
+
 ## How-to guides
 
 | Doc                                                            | Description                         |
@@ -65,7 +74,7 @@ Use this index for long-form docs.
 | Doc                                                             | Description                   |
 | --------------------------------------------------------------- | ----------------------------- |
 | [WorkflowRecipe guide](agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md)  | Authoring recipes, for agents |
-| [control-ui & desktop-app](agents/control-ui-desktop-app.md)    | UI surfaces, for agents       |
+| [Frontend style rules](agents/frontend-style-rules.md)          | CSS tokens, page shells, component rules for the three UIs |
 | [WorkflowRecipe naming](architecture/workflow-recipe-naming.md) | Generated resource-name rules |
 
 ## Community & trust
@@ -91,6 +100,8 @@ Use this index for long-form docs.
 | Ship to a real cluster               | [Production notes](deploy/production.md)                 |
 | Debug E2E                            | [E2E guide](testing/e2e-guide.md)                        |
 | Feed docs to an LLM                  | [llms.txt](llms.txt)                                     |
+| Use the admin console               | [Control UI](surfaces/control-ui.md)                     |
+| Chat with an agent from the desktop | [Desktop App](surfaces/desktop-app.md)                   |
 
 > **Note:** Contributor-local working artifacts live under `docs/superpowers/`
 > on each checkout. They are git-ignored and intentionally not part of the repo.

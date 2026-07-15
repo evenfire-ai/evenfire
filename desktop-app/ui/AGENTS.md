@@ -2,7 +2,7 @@
 
 This is one of three frontend projects in the monorepo. It follows two layered sources of truth:
 
-1. **Cross-app rules** — [`../../docs/agents/control-ui-desktop-app.md`](../../docs/agents/control-ui-desktop-app.md). Tokens, primitives, accessibility, semantic headings, etc. Read first.
+1. **Cross-app rules** — [`../../docs/agents/frontend-style-rules.md`](../../docs/agents/frontend-style-rules.md). Tokens, primitives, accessibility, semantic headings, etc. Read first.
 2. **desktop-app-specific patterns** — [`docs/STYLE_STANDARDIZATION.md`](./docs/STYLE_STANDARDIZATION.md). The page shell, tabs, DataGrid, where pages live, and what not to extend. **Read this before touching any page or shared style.**
 
 If those two docs disagree (they shouldn't), the cross-app doc wins for token/primitive concerns; STYLE_STANDARDIZATION wins for desktop-app layout shape.
@@ -13,7 +13,7 @@ If those two docs disagree (they shouldn't), the cross-app doc wins for token/pr
 - **Class prefix:** `da-` for shared, primitive-style classes (e.g. `da-grid`). Page shell and tabs use unprefixed semantic names (`page`, `page-card`, `page-tabs`) — that's intentional, don't migrate them.
 - **Global stylesheet:** `src/styles.css` — shared layout, primitives, patterns. Add new shared classes here at the end of the relevant section. **Do not** create new component-level `.css` files.
 - **Common controls:** `src/components/Common/<Component>/index.tsx` with colocated `types.ts`, re-exported from `src/components/Common/index.ts` — `Button`, `IconButton`, `TabButton`, `MenuItem`, `NavItem`, `Pill`, `SelectableOption`, `TextInput`, `SelectInput`, `Field`, `Badge`, `StatusBanner`, `EmptyState`, `DetailRow`, `ToastStack`. Use them; don't recreate.
-- **Control behavior:** Follow the shared control rules from `../../docs/agents/control-ui-desktop-app.md`: compose the Common controls before adding native button/tab/menu/option markup, and never use hover `transform`, `translate`, `top`, `margin`, or `filter` effects for interactive controls. Hover states should use background, border, text color, or shadow.
+- **Control behavior:** Follow the shared control rules from `../../docs/agents/frontend-style-rules.md`: compose the Common controls before adding native button/tab/menu/option markup, and never use hover `transform`, `translate`, `top`, `margin`, or `filter` effects for interactive controls. Hover states should use background, border, text color, or shadow.
 - **Pages:** `src/pages/` — top-level pages are flat `<Name>Page.tsx`; only auth/error pages use folder-based `<Name>Page/index.tsx`.
 
 ## Quick rules (the things that drift first)
