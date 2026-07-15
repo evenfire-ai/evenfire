@@ -196,7 +196,7 @@ const TEMPLATES: RecipeTemplate[] = [
             {
               id: 'mongodb-mcp',
               type: 'deployment',
-              image: 'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mcp-mongodb:latest',
+              image: 'ghcr.io/evenfire-ai/mcp-mongodb:latest',
               port: 3000,
               transport: { type: 'streamableHttp' },
               envSecret: {

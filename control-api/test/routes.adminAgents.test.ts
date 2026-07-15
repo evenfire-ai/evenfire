@@ -7,9 +7,9 @@ import { createAdminRouter } from '../src/routes/admin/index.js'
 /**
  * HTTP-level tests for the admin agents router.
  *
- * Covers the NEW PUT /admin/agents/:agentName/users|teams endpoints
- * introduced in commit 61d62d2 as the structural fix for the incident
- * documented in .local-notes/incident-403-user-agents-authorization-gap.md
+ * Covers PUT /admin/agents/:agentName/users|teams, the endpoints that grant
+ * explicit user/team access to an agent so it is invocable via the rpc-access
+ * authorization gate.
  *
  * The endpoints wrap setAgentUsers/setAgentTeams service functions and
  * delegate to bulkSetLinkedItems (destructive semantics: replace the full

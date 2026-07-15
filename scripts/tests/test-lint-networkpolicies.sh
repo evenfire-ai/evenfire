@@ -62,7 +62,7 @@ write_policy "${TMP_DIR}/safe-specific.yaml" '    - ports:
           protocol: TCP
       to:
         - ipBlock:
-            cidr: 203.0.113.10/32'
+            cidr: 203.0.113.1/32'
 run_lint "${TMP_DIR}/safe-specific.yaml" >/dev/null
 echo "PASS: lint-networkpolicies allows explicit port plus specific destination"
 

@@ -35,7 +35,7 @@ describe('extracted helpers (behavior parity with coordinator)', () => {
 describe('classifyPluginImage', () => {
   it('accepts current first-party + evenfire images against the default allowlist', () => {
     for (const img of [
-      'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/airtable-mcp-server:latest',
+      'ghcr.io/evenfire-ai/airtable-mcp-server:latest',
       'example.com/acme/forecast:1.2.3',
       'mongodb/mongodb-mcp-server:latest',
       'mcr.microsoft.com/playwright/mcp@sha256:' + 'a'.repeat(64),
@@ -90,7 +90,7 @@ describe('classifyPluginImage', () => {
 describe('DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES', () => {
   it('covers the current fleet hosts + evenfire', () => {
     expect(DEFAULTS).toEqual([
-      'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/',
+      'ghcr.io/evenfire-ai/',
       'example.com/',
       'mongodb/',
       'mcr.microsoft.com/',

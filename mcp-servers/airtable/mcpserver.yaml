@@ -13,7 +13,7 @@ spec:
     Airtable MCP Server - provides tools for interacting with Airtable bases
     including listing bases, querying and searching records, creating/updating/deleting
     records, managing tables and fields, and working with comments.
-  image: us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/airtable-mcp-server:latest
+  image: ghcr.io/evenfire-ai/airtable-mcp-server:latest
   imagePullPolicy: Always
   transport:
     type: streamableHttp

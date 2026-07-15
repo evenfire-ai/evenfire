@@ -51,7 +51,7 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
     test.setTimeout(900_000)
     expect(process.env.E2E_WORKFLOW_APPROVAL_QUADRANTS ?? '').not.toBe('1')
 
-    const userARecipe = makeScopedE2ERecipeName('alfredo-personal')
+    const userARecipe = makeScopedE2ERecipeName('testuser-personal')
     const userBRecipe = makeScopedE2ERecipeName('belen-personal')
     const teamOnlyRecipe = makeScopedE2ERecipeName('acme-team')
     const membershipOnlyRecipe = makeScopedE2ERecipeName('membership-only')
@@ -67,7 +67,7 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
     const telegramUserA: TelegramClientIdentity = {
       providerUserId: String(800_000_000 + telegramIdentitySeed * 10 + 1),
       providerChannelId: String(810_000_000 + telegramIdentitySeed * 10 + 1),
-      conversationLabel: 'Alfredo Lopez - Telegram private chat',
+      conversationLabel: 'Test User - Telegram private chat',
     }
     const telegramUserB: TelegramClientIdentity = {
       providerUserId: String(800_000_000 + telegramIdentitySeed * 10 + 2),
@@ -77,7 +77,7 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
     const telegramUserAWrongChannel: TelegramClientIdentity = {
       providerUserId: telegramUserA.providerUserId,
       providerChannelId: String(810_000_000 + telegramIdentitySeed * 10 + 3),
-      conversationLabel: 'Alfredo Lopez - Telegram secondary chat',
+      conversationLabel: 'Test User - Telegram secondary chat',
     }
     const telegramMessageBase = Math.floor(Date.now() / 1000) * 1000
     let telegramPage: Page | null = null

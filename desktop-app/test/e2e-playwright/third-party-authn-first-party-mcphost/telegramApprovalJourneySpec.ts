@@ -67,12 +67,12 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
     const verifiedTelegramIdentity: TelegramClientIdentity = {
       providerUserId: TELEGRAM_CHAT_ID,
       providerChannelId: TELEGRAM_CHAT_ID,
-      conversationLabel: 'Alfredo Lopez - verified Telegram private chat',
+      conversationLabel: 'Test User - verified Telegram private chat',
     }
     const wrongChannelIdentity: TelegramClientIdentity = {
       providerUserId: verifiedTelegramIdentity.providerUserId,
       providerChannelId: `${TELEGRAM_CHAT_ID}-wrong`,
-      conversationLabel: 'Alfredo Lopez - Telegram wrong chat',
+      conversationLabel: 'Test User - Telegram wrong chat',
     }
     const unboundIdentity: TelegramClientIdentity = {
       providerUserId: `${verifiedTelegramIdentity.providerUserId}-unbound`,

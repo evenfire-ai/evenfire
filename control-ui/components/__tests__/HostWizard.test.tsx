@@ -6,12 +6,10 @@ import { HostWizard } from '../HostWizard'
 import { ToastProvider } from '../Toast'
 
 /**
- * Tests for the HostWizard refactor that closes the authorization gap
- * described in .local-notes/incident-403-user-agents-authorization-gap.md
- *
- * The incident root cause: admins were creating agents without selecting
- * any user in the "Access" step (labeled "optional"), which silently left
- * them unusable by everyone. The fix adds:
+ * Tests for the HostWizard refactor that closes an authorization gap: admins
+ * could create agents without selecting any user in the "Access" step
+ * (labeled "optional"), which silently left them unusable by everyone. The
+ * fix adds:
  *
  *   1. A visible empty-access note when selection is empty
  *   2. A non-blocking access reminder before continuing

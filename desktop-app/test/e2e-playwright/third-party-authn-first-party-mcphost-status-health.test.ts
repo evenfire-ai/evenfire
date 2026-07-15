@@ -51,7 +51,7 @@ type TelegramClientIdentity = TelegramMediumBinding & {
 const DEFAULT_TELEGRAM_CLIENT_IDENTITY: TelegramClientIdentity = {
   providerUserId: TELEGRAM_PROVIDER_USER_ID,
   providerChannelId: TELEGRAM_CHAT_ID,
-  conversationLabel: 'Alfredo Lopez - Telegram private chat',
+  conversationLabel: 'Test User - Telegram private chat',
 }
 
 async function click(locator: Locator): Promise<void> {

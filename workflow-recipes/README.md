@@ -112,7 +112,6 @@ Test files are co-located with source in `src/` (e.g., `reconciler/resourceBuild
 ## Further Reading
 
 - [WorkflowRecipe CRD reference](../docs/crds/workflowrecipe.md)
-- [Workflow Recipes feature hub](../docs/features/workflow-recipes.md)
 
 ## Source Layout
 
