@@ -12,6 +12,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Every service with a `test` script belongs here. Keep in sync with
+        # TEST_SERVICES in the root Makefile — a service in one but not the other
+        # means its tests run in only half the places contributors look.
         service:
           - mcp-host
           - channel-reader
@@ -19,6 +22,18 @@ jobs:
           - control-api
           - mcp-proxy
           - workflow-recipes
+          - gfs-controller
+          - workspace-files-controller
+          - rpc-proxy
+          - webhook-gateway
+          - webhook-proxy
+          - workflow-approval-request-reader
+          - stdio-bridge
+          - external-rest-api
+          - desktop-app
+          - mcp-servers
+          - packages/workflow-runtime-core
+          - packages/workflow-sdk
 
     steps:
       - uses: actions/checkout@v4
@@ -29,17 +44,18 @@ jobs:
           cache: npm
           cache-dependency-path: ${{ matrix.service }}/package-lock.json
 
-      # workflow-recipes and control-api both consume @clerum/workflow-runtime-core
-      # via a `file:../packages/workflow-runtime-core` dependency. Build that package
-      # first so its dist/ exists before the service's `npm ci` links it in — otherwise
-      # the service build fails with TS2307 "Cannot find module '@clerum/workflow-runtime-core'".
+      # workflow-recipes, control-api and packages/workflow-sdk all consume
+      # @clerum/workflow-runtime-core via a `file:../packages/workflow-runtime-core`
+      # dependency. Build that package first so its dist/ exists before the service's
+      # `npm ci` links it in — otherwise the build fails with TS2307
+      # "Cannot find module '@clerum/workflow-runtime-core'".
       - name: Install workflow-runtime-core dependencies
-        if: matrix.service == 'workflow-recipes' || matrix.service == 'control-api'
+        if: matrix.service == 'workflow-recipes' || matrix.service == 'control-api' || matrix.service == 'packages/workflow-sdk'
         working-directory: packages/workflow-runtime-core
         run: npm ci
 
       - name: Build workflow-runtime-core
-        if: matrix.service == 'workflow-recipes' || matrix.service == 'control-api'
+        if: matrix.service == 'workflow-recipes' || matrix.service == 'control-api' || matrix.service == 'packages/workflow-sdk'
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
@@ -57,6 +73,13 @@ jobs:
 
       # Typecheck against the base tsconfig (covers src + test dirs).
       # This catches errors in test files that tsconfig.build.json may exclude.
+      #
+      # mcp-servers is skipped: it has no root tsconfig.json (only the web-search and
+      # doc-generator sub-projects have one), so `tsc --noEmit` there resolves no
+      # project and just prints its help text. Adding a strict root tsconfig surfaces
+      # ~10 pre-existing type errors in its __tests__ — worth fixing, but as its own
+      # change rather than smuggled into a CI-coverage PR.
       - name: Typecheck (tsc --noEmit)
+        if: matrix.service != 'mcp-servers'
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit

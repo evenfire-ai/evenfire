@@ -10,9 +10,9 @@ name: Build & Publish
 # build_all=true rebuilds the whole matrix (use this for the first publish, or
 # to repopulate ghcr).
 #
-# Quickstart images (mcp-host, channel-reader — the docker-compose services) are
-# built multi-arch (amd64 + arm64) so Apple-Silicon users can pull-and-run. The
-# rest are amd64-only (they deploy to amd64 GKE).
+# mcp-host and channel-reader are built multi-arch (amd64 + arm64) so
+# Apple-Silicon users can pull-and-run. The rest are amd64-only (they deploy
+# to amd64 GKE).
 
 on:
   push:
@@ -36,6 +36,10 @@ jobs:
   detect:
     name: Detect changed images
     runs-on: ubuntu-latest
+    # Publishing targets ghcr.io/evenfire-ai/*, which forks cannot write to.
+    # Guarding the entry job cascades: build-push needs detect, notify-infra
+    # needs build-push, so a fork skips the whole workflow cleanly.
+    if: github.repository == 'evenfire-ai/evenfire'
     outputs:
       force_all: ${{ steps.base.outputs.force_all }}
       channel-reader: ${{ steps.filter.outputs.channel-reader }}
@@ -84,7 +88,7 @@ jobs:
       - name: Detect changed paths
         id: filter
         if: steps.base.outputs.force_all != 'true'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           base: ${{ github.event.before }}
           filters: |
@@ -260,11 +264,11 @@ jobs:
 
       - name: Set up QEMU
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to ghcr.io
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
@@ -300,7 +304,7 @@ jobs:
 
       - name: Build and push
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ steps.buildargs.outputs.context }}
           file: ${{ steps.buildargs.outputs.file }}
