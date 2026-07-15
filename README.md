@@ -102,18 +102,24 @@ comes back to the channel:
 
 ```mermaid
 sequenceDiagram
+    autonumber
     actor U as User
     participant H as mcp-host agent
     participant L as LLM
     participant A as Human approver
     U->>H: Message on Telegram / Slack / desktop
+    activate H
     H->>L: Prompt plus tool definitions
     L-->>H: Wants to call shell_exec
     Note over H,A: shell_exec is approval-gated
     H->>A: Approval request in the channel
-    A-->>H: Approve
+    Note over H: Task suspended, survives pod restarts
+    deactivate H
+    A-->>H: Approve (or Deny)
+    activate H
     H->>H: Run tool, build artifact
     H-->>U: Final reply plus attachment
+    deactivate H
 ```
 
 A tool call that needs approval suspends the task and tells the caller exactly
