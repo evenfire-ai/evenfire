@@ -133,9 +133,16 @@ export interface ConversationStore {
 
   /** Called once per new conversation (right after `set`). */
   persistSessionCreate(conv: Conversation, opts: GetOrCreateOptions): Promise<void> | void
-  /** Called when a turn starts (user message appended). */
+  /** Called when a turn starts (user message appended). D3: durable stores
+   *  commit the user message + state flip as ONE transaction and return a
+   *  promise the caller MUST await (the durability barrier for retry
+   *  semantics); the in-memory store stays a sync no-op. */
   persistTurnStart(conv: Conversation, userInput: string): Promise<void> | void
-  /** Called when a turn completes (assistant final response appended). */
+  /** Called when a turn completes (assistant final response appended). D3:
+   *  durable stores commit the assistant message + state flip +
+   *  `active_task_id` clear as ONE transaction and return a promise the
+   *  caller MUST await before ACKing the client; the in-memory store stays a
+   *  sync no-op. */
   persistTurnComplete(conv: Conversation, response: string): Promise<void> | void
   /** Called when a turn is cancelled (synthetic response injected). */
   persistTurnCancel(conv: Conversation): Promise<void> | void

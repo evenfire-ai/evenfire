@@ -32,6 +32,7 @@ import { useAuthController } from './domain/useAuthController'
 import { useChannelNotificationPreferencesController } from './domain/useChannelNotificationPreferencesController'
 import { useContextsDataController } from './domain/useContextsDataController'
 import { useDesktopController } from './domain/useDesktopController'
+import { useHostPrewarmController } from './domain/useHostPrewarmController'
 import { useMcpServerController } from './domain/useMcpServerController'
 import { useMcpServersDataController } from './domain/useMcpServersDataController'
 import { useNavigationController } from './domain/useNavigationController'
@@ -284,6 +285,12 @@ export function useAppController() {
     navItem: nav.navItem,
     isAuthenticated: auth.isAuthenticated,
     agentProviderByName: agentsData.agentProviderByName,
+  })
+
+  // ─── Host pre-warm (authenticated catalog only — see the hook's anti-flapping doc) ───
+  useHostPrewarmController({
+    agentNames: agentsData.agentNames,
+    isAuthenticated: auth.isAuthenticated,
   })
 
   // ─── Desktop ───

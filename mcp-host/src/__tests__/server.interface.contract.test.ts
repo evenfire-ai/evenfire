@@ -31,14 +31,14 @@ function rpcEdgeHeaders(userId = 'user-1'): Record<string, string> {
 }
 
 function channelReaderEdgeHeaders(
-  source: { channelType: 'telegram' | 'slack'; channelId: string; sender: string },
+  source: { channelType: 'telegram' | 'slack' | 'teams'; channelId: string; sender: string },
   extra: Record<string, string> = {}
 ): Record<string, string> {
   return providerEdgeHeaders('channel-reader', source, extra)
 }
 
 function workflowApprovalReaderEdgeHeaders(
-  source: { channelType: 'telegram' | 'slack'; channelId: string; sender: string },
+  source: { channelType: 'telegram' | 'slack' | 'teams'; channelId: string; sender: string },
   extra: Record<string, string> = {}
 ): Record<string, string> {
   return providerEdgeHeaders('workflow-approval-request-reader', source, extra)
@@ -46,7 +46,7 @@ function workflowApprovalReaderEdgeHeaders(
 
 function providerEdgeHeaders(
   caller: 'channel-reader' | 'workflow-approval-request-reader',
-  source: { channelType: 'telegram' | 'slack'; channelId: string; sender: string },
+  source: { channelType: 'telegram' | 'slack' | 'teams'; channelId: string; sender: string },
   extra: Record<string, string> = {}
 ): Record<string, string> {
   const hostRef = extra['x-clerum-edge-host-ref'] ?? 'chatllm'
@@ -572,6 +572,67 @@ describe('RPCServer v1 runtime interface contract', () => {
         })
       )
 
+      const teamsPayload = {
+        workflowName: 'due-diligence',
+        providerIdentity: {
+          medium: 'teams',
+          providerUserId: '29:teams-user-1',
+          providerWorkspaceId: 'tenant-1',
+          providerChannelId: '19:direct-chat@thread.v2',
+          providerEventId: 'teams:tenant-1:19:direct-chat@thread.v2:activity-1',
+        },
+        source: {
+          channelType: 'teams',
+          channelId: '19:direct-chat@thread.v2',
+          sender: '29:teams-user-1',
+          messageId: 'activity-1',
+          timestamp: '2026-06-01T00:00:00.000Z',
+        },
+      }
+      const teamsResponse = await fetch(`${baseUrl}/v1/runtime/workflow-results/latest`, {
+        method: 'POST',
+        headers: channelReaderEdgeHeaders(
+          {
+            channelType: 'teams',
+            channelId: '19:direct-chat@thread.v2',
+            sender: '29:teams-user-1',
+          },
+          { 'Content-Type': 'application/json' }
+        ),
+        body: JSON.stringify(teamsPayload),
+      })
+      expect(teamsResponse.status).toBe(200)
+      expect(onProviderWorkflowResult).toHaveBeenCalledWith(
+        teamsPayload,
+        expect.objectContaining({
+          caller: 'channel-reader',
+          channelType: 'teams',
+          channelId: '19:direct-chat@thread.v2',
+          sender: '29:teams-user-1',
+        })
+      )
+
+      const workflowRunId = '11111111-2222-4333-8444-555555555555'
+      const exactRunPayload = {
+        workflowRunId,
+        artifactName: 'result.pdf',
+        providerIdentity: payload.providerIdentity,
+        source: payload.source,
+      }
+      const exactRunResponse = await fetch(`${baseUrl}/v1/runtime/workflow-results/latest`, {
+        method: 'POST',
+        headers: channelReaderEdgeHeaders(
+          { channelType: 'telegram', channelId: 'telegram-chat-1', sender: '123456' },
+          { 'Content-Type': 'application/json' }
+        ),
+        body: JSON.stringify(exactRunPayload),
+      })
+      expect(exactRunResponse.status).toBe(200)
+      expect(onProviderWorkflowResult).toHaveBeenCalledWith(
+        exactRunPayload,
+        expect.objectContaining({ caller: 'channel-reader' })
+      )
+
       const mismatchedSource = await fetch(`${baseUrl}/v1/runtime/workflow-results/latest`, {
         method: 'POST',
         headers: channelReaderEdgeHeaders(
@@ -581,7 +642,7 @@ describe('RPCServer v1 runtime interface contract', () => {
         body: JSON.stringify(payload),
       })
       expect(mismatchedSource.status).toBe(403)
-      expect(onProviderWorkflowResult).toHaveBeenCalledTimes(1)
+      expect(onProviderWorkflowResult).toHaveBeenCalledTimes(3)
     } finally {
       await server.stop()
     }

@@ -10,10 +10,11 @@ import type { K8sGateway } from '../k8s.js'
 // would force a build-pipeline rewrite of channel-reader for ~40 lines. Keep the
 // two in sync by hand. See `.ralph/plans/figure-d-multibot-pr1.md` (Option C).
 
-/** Bot credentials the delivery worker needs (Telegram + Slack; no email). */
+/** Bot credentials the delivery worker needs (Telegram + Slack + Teams; no email). */
 export interface ResolvedChannelCredentials {
   telegramBotToken?: string
   slackBotToken?: string
+  teamsAppPassword?: string
 }
 
 /** Minimal gateway surface: only what the resolver actually calls. */
@@ -97,6 +98,7 @@ export class CommunicationChannelCredentialsResolver {
     return {
       telegramBotToken: decode(data['telegram-bot-token']),
       slackBotToken: decode(data['slack-bot-token']),
+      teamsAppPassword: decode(data['teams-app-password']),
     }
   }
 }

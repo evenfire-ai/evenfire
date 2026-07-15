@@ -8,7 +8,7 @@ import {
 
 const LINK_SESSION_PROVIDER_USER_ID = '__reader_link__'
 const LINK_SESSION_HASH_PREFIX = 'reader-link-sha256'
-const SLACK_LINK_SESSION_TTL_SECONDS = 2 * 60
+const LINK_SESSION_TTL_SECONDS = 2 * 60
 
 export type WorkflowApprovalLinkSession = {
   id: string
@@ -21,13 +21,15 @@ function nonceHash(nonce: string): string {
   return `${LINK_SESSION_HASH_PREFIX}:${createHash('sha256').update(nonce).digest('hex')}`
 }
 
-function randomSlackVerificationCode(): string {
+function randomVerificationCode(): string {
   return String(randomInt(0, 1_000_000)).padStart(6, '0')
 }
 
-function assertFigureDMedium(medium: string): 'telegram' | 'slack' {
+function assertFigureDMedium(medium: string): 'telegram' | 'slack' | 'teams' {
   const normalized = medium.trim().toLowerCase()
-  if (normalized === 'telegram' || normalized === 'slack') return normalized
+  if (normalized === 'telegram' || normalized === 'slack' || normalized === 'teams') {
+    return normalized
+  }
   throw new Error('unsupported_medium')
 }
 
@@ -43,6 +45,7 @@ export async function createMediumLinkSession(params: {
   medium: string
   providerWorkspaceId?: unknown
   communicationChannelRef?: unknown
+  replyInThreads?: unknown
 }): Promise<WorkflowApprovalLinkSession> {
   const medium = assertFigureDMedium(params.medium)
   if (medium === 'telegram') {
@@ -50,12 +53,18 @@ export async function createMediumLinkSession(params: {
   }
   const providerWorkspaceId = normalizeLinkSessionWorkspace(params.providerWorkspaceId)
   const communicationChannelRef = normalizeLinkSessionWorkspace(params.communicationChannelRef)
+  if (params.replyInThreads !== undefined && typeof params.replyInThreads !== 'boolean') {
+    throw new Error('reply_in_threads_must_be_boolean')
+  }
+  const replyInThreads =
+    medium === 'teams' && params.replyInThreads !== undefined ? params.replyInThreads : null
 
-  const nonce = randomSlackVerificationCode()
+  const nonce = randomVerificationCode()
   const result = await pool.query(
     `INSERT INTO workflow_approval_medium_challenges
-       (user_id, medium, provider_user_id, provider_workspace_id, provider_channel_id, code_hash, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, NOW() + interval '1 second' * $7)
+       (user_id, medium, provider_user_id, provider_workspace_id, provider_channel_id, code_hash,
+        expires_at, reply_in_threads)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW() + interval '1 second' * $7, $8)
      RETURNING id, expires_at AS "expiresAt"`,
     [
       params.userId,
@@ -64,7 +73,8 @@ export async function createMediumLinkSession(params: {
       providerWorkspaceId,
       communicationChannelRef,
       nonceHash(nonce),
-      SLACK_LINK_SESSION_TTL_SECONDS,
+      LINK_SESSION_TTL_SECONDS,
+      replyInThreads,
     ]
   )
   const row = result.rows[0] as { id: string; expiresAt: string }
@@ -83,9 +93,16 @@ export async function confirmMediumLinkSessionFromReader(params: {
     userId: string,
     identity: ReturnType<typeof normalizeMediumIdentity>
   ) => Promise<{ ok: true } | { ok: false; error: string }>
-}): Promise<{ ok: true; account: VerifiedMediumAccount } | { ok: false; error: string }> {
+}): Promise<
+  | { ok: true; account: VerifiedMediumAccount; replyInThreads: boolean | null }
+  | { ok: false; error: string }
+> {
   const identity = normalizeMediumIdentity(params.identity)
-  if (identity.medium !== 'telegram' && identity.medium !== 'slack') {
+  if (
+    identity.medium !== 'telegram' &&
+    identity.medium !== 'slack' &&
+    identity.medium !== 'teams'
+  ) {
     return { ok: false, error: 'unsupported_medium' }
   }
   if (identity.medium === 'telegram') {
@@ -93,6 +110,9 @@ export async function confirmMediumLinkSessionFromReader(params: {
   }
   if (identity.medium === 'slack' && !identity.providerWorkspaceId) {
     return { ok: false, error: 'slack_workspace_id_required' }
+  }
+  if (identity.medium === 'teams' && !identity.providerWorkspaceId) {
+    return { ok: false, error: 'teams_tenant_id_required' }
   }
   if (!identity.providerChannelId) {
     return { ok: false, error: 'provider_channel_id_required' }
@@ -117,12 +137,16 @@ async function confirmMediumLinkSessionInTransaction(
     userId: string,
     identity: ReturnType<typeof normalizeMediumIdentity>
   ) => Promise<{ ok: true } | { ok: false; error: string }>
-): Promise<{ ok: true; account: VerifiedMediumAccount } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; account: VerifiedMediumAccount; replyInThreads: boolean | null }
+  | { ok: false; error: string }
+> {
   const session = await db.query(
     `SELECT id,
             user_id AS "userId",
             provider_workspace_id AS "providerWorkspaceId",
             provider_channel_id AS "communicationChannelRef",
+            reply_in_threads AS "replyInThreads",
             expires_at <= NOW() AS "isExpired",
             consumed_at AS "consumedAt"
        FROM workflow_approval_medium_challenges
@@ -138,6 +162,7 @@ async function confirmMediumLinkSessionInTransaction(
         userId: string
         providerWorkspaceId: string | null
         communicationChannelRef: string | null
+        replyInThreads: boolean | null
         isExpired: boolean
         consumedAt: string | null
       }
@@ -170,7 +195,7 @@ async function confirmMediumLinkSessionInTransaction(
       WHERE id = $1`,
     [row.id]
   )
-  return { ok: true, account: accountResult.account }
+  return { ok: true, account: accountResult.account, replyInThreads: row.replyInThreads }
 }
 
 async function upsertVerifiedMediumAccount(
@@ -198,7 +223,10 @@ async function upsertVerifiedMediumAccount(
                  medium,
                  provider_user_id AS "providerUserId",
                  provider_workspace_id AS "providerWorkspaceId",
-                 provider_channel_id AS "providerChannelId"`,
+                 provider_channel_id AS "providerChannelId",
+                 communication_channel_ref AS "communicationChannelRef",
+                 display_name AS "displayName",
+                 disabled_at AS "disabledAt"`,
       [
         userId,
         identity.medium,
@@ -238,7 +266,10 @@ async function selectExistingVerifiedMediumAccount(
             medium,
             provider_user_id AS "providerUserId",
             provider_workspace_id AS "providerWorkspaceId",
-            provider_channel_id AS "providerChannelId"
+            provider_channel_id AS "providerChannelId",
+            communication_channel_ref AS "communicationChannelRef",
+            display_name AS "displayName",
+            disabled_at AS "disabledAt"
        FROM workflow_approval_medium_accounts
       WHERE medium = $1
         AND provider_user_id = $2
@@ -276,7 +307,10 @@ async function refreshExistingVerifiedMediumAccount(
                medium,
                provider_user_id AS "providerUserId",
                provider_workspace_id AS "providerWorkspaceId",
-               provider_channel_id AS "providerChannelId"`,
+               provider_channel_id AS "providerChannelId",
+               communication_channel_ref AS "communicationChannelRef",
+               display_name AS "displayName",
+               disabled_at AS "disabledAt"`,
     [row.id, communicationChannelRef]
   )
   return { ok: true, account: account.rows[0] as VerifiedMediumAccount }

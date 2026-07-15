@@ -2,7 +2,7 @@ import * as k8s from '@kubernetes/client-node'
 import { config } from './config.js'
 import { HostEnvService } from './services/hostEnvService.js'
 import { HostOverviewService } from './services/hostOverviewService.js'
-import { ResourceService } from './services/resourceService.js'
+import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
 import { SecretService } from './services/secretService.js'
 import { ClerumResourceType, HostOverview, SecretUpsertRequest } from './types.js'
 
@@ -229,12 +229,52 @@ export class K8sGateway {
     plural: ClerumResourceType,
     name: string,
     body: {
-      metadata?: { labels?: Record<string, string>; annotations?: Record<string, string> }
+      // metadata.resourceVersion is the AP-6 reader's-version precondition —
+      // see ResourceService.updateResource for the conflict semantics.
+      metadata?: {
+        labels?: Record<string, string>
+        annotations?: Record<string, string>
+        resourceVersion?: string
+      }
       spec: Record<string, unknown>
     },
     namespace?: string
   ): Promise<unknown> {
     return this.resources.updateResource(plural, name, body, namespace)
+  }
+
+  /**
+   * Write-only annotation projection via JSON merge patch. See
+   * ResourceService.patchResourceAnnotations for the concurrency rationale.
+   */
+  async patchResourceAnnotations(
+    plural: ClerumResourceType,
+    name: string,
+    annotations: Record<string, string>,
+    namespace?: string
+  ): Promise<unknown> {
+    return this.resources.patchResourceAnnotations(plural, name, annotations, namespace)
+  }
+
+  /**
+   * Non-regressing (monotonic) projection of a numeric annotation. See
+   * ResourceService.patchAnnotationMonotonic for the ordering invariant and
+   * why a blind merge patch is unsafe for the wake-generation projection.
+   */
+  async patchAnnotationMonotonic(
+    plural: ClerumResourceType,
+    name: string,
+    annotationKey: string,
+    generation: number,
+    namespace?: string
+  ): Promise<unknown> {
+    return this.resources.patchAnnotationMonotonic(
+      plural,
+      name,
+      annotationKey,
+      generation,
+      namespace
+    )
   }
 
   async mutateResource(
@@ -259,6 +299,19 @@ export class K8sGateway {
    * Replace a Host with the supplied spec and explicit metadata.resourceVersion.
    * This sends the caller's resourceVersion through so K8s enforces optimistic
    * concurrency and returns 409 on stale updates.
+   *
+   * AP-6 invariant (shared with ResourceService.updateResource/mutateResource):
+   * platform-owned `clerum.io/*` annotations are write-only projections
+   * (e.g. `clerum.io/wake-requested`, see hostWakeService.ts). Before replacing,
+   * this reads the CURRENT server object's annotations and routes them through
+   * `mergeAnnotationsForReplace`, so any `clerum.io/*` key present on the live
+   * object survives the replace unless the caller EXPLICITLY sets that exact
+   * key — regardless of what annotations map the caller sends (or omits). The
+   * internal read harvests annotations only; the caller's resourceVersion
+   * remains the optimistic-concurrency precondition. Personalization (the sole
+   * caller today) sends no writable-annotation contract, so its behavior is
+   * unchanged; this is defense-in-depth so a future annotations-bearing caller
+   * cannot silently drop the platform projection.
    */
   async replaceHost(body: {
     metadata: {
@@ -270,6 +323,19 @@ export class K8sGateway {
     }
     spec: Record<string, unknown>
   }): Promise<{ metadata?: { resourceVersion?: string } }> {
+    const current = (await this.customApi.getNamespacedCustomObject({
+      group: 'clerum.io',
+      version: 'v1alpha1',
+      namespace: body.metadata.namespace,
+      plural: 'hosts',
+      name: body.metadata.name,
+    })) as { metadata?: { annotations?: Record<string, string> } }
+
+    const annotations = mergeAnnotationsForReplace(
+      current.metadata?.annotations,
+      body.metadata.annotations
+    )
+
     return (await this.customApi.replaceNamespacedCustomObject({
       group: 'clerum.io',
       version: 'v1alpha1',
@@ -279,7 +345,10 @@ export class K8sGateway {
       body: {
         apiVersion: 'clerum.io/v1alpha1',
         kind: 'Host',
-        metadata: body.metadata,
+        metadata: {
+          ...body.metadata,
+          ...(annotations && { annotations }),
+        },
         spec: body.spec,
       },
     })) as { metadata?: { resourceVersion?: string } }

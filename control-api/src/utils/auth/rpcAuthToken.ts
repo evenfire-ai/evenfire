@@ -32,6 +32,7 @@ function defaultScopesForRole(role: TeamRole): RpcScope[] {
       'host:status:read',
       'host:activity:read',
       'host:message:invoke',
+      'host:wake:write',
       'host:task:read',
       'host:approval:write',
       'host:session:read',

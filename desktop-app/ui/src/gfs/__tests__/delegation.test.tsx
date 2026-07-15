@@ -46,7 +46,8 @@ describe('GfsDelegationPanel', () => {
     expect(screen.queryByRole('button', { name: 'write' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Create share' })).toBeNull()
 
-    fireEvent.change(screen.getByLabelText('subject'), { target: { value: 'u2' } })
+    fireEvent.click(screen.getByLabelText('subject'))
+    fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
     fireEvent.click(screen.getByRole('button', { name: 'read' }))
     fireEvent.click(screen.getByRole('button', { name: 'Grant' }))
 
@@ -77,7 +78,8 @@ describe('GfsDelegationPanel', () => {
         onGrant={onGrant}
       />
     )
-    fireEvent.change(screen.getByLabelText('subject'), { target: { value: 'u2' } })
+    fireEvent.click(screen.getByLabelText('subject'))
+    fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
     fireEvent.click(screen.getByRole('button', { name: 'read' }))
     fireEvent.click(screen.getByRole('button', { name: 'Grant' }))
 
@@ -94,7 +96,7 @@ describe('GfsDelegationPanel', () => {
       />
     )
 
-    expect(screen.getByLabelText('subject')).toHaveProperty('tagName', 'SELECT')
+    expect(screen.getByLabelText('subject')).toHaveProperty('tagName', 'BUTTON')
     expect(screen.getByRole('button', { name: 'Grant' })).toHaveProperty('disabled', true)
     expect(screen.queryByPlaceholderText(/uuid/i)).toBeNull()
   })
@@ -112,14 +114,16 @@ describe('GfsDelegationPanel', () => {
     )
 
     const subjectType = screen.getByLabelText('Subject type')
-    expect(subjectType.textContent).toContain('User')
-    expect(subjectType.textContent).toContain('Team')
-    expect(subjectType.textContent).not.toContain('Operator')
-    expect(subjectType.textContent).not.toContain('Host')
-    expect(subjectType.textContent).not.toContain('Context')
+    fireEvent.click(subjectType)
+    expect(screen.getByRole('option', { name: 'User' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'Team' })).toBeTruthy()
+    expect(screen.queryByRole('option', { name: 'Operator' })).toBeNull()
+    expect(screen.queryByRole('option', { name: 'Host' })).toBeNull()
+    expect(screen.queryByRole('option', { name: 'Context' })).toBeNull()
 
-    fireEvent.change(subjectType, { target: { value: 'team' } })
-    expect(screen.getByLabelText('subject').textContent).toContain('Core Team')
-    expect(screen.getByLabelText('subject').textContent).not.toContain('Delegate User')
+    fireEvent.click(screen.getByRole('option', { name: 'Team' }))
+    fireEvent.click(screen.getByLabelText('subject'))
+    expect(screen.getByRole('option', { name: 'Core Team' })).toBeTruthy()
+    expect(screen.queryByRole('option', { name: 'Delegate User' })).toBeNull()
   })
 })

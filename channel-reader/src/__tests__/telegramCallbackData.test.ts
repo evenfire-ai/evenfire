@@ -7,26 +7,31 @@ import {
 
 describe('Telegram workflow result callback data', () => {
   it('round trips deterministic workflow result callback data', () => {
-    const callbackData = telegramWorkflowResultCallbackData('due-diligence-package')
+    const workflowRunId = '11111111-2222-3333-4444-555555555555'
+    const callbackData = telegramWorkflowResultCallbackData(workflowRunId)
 
-    expect(callbackData).toBe('wf:r:due-diligence-package')
+    expect(callbackData).toBe(`wf:r:${workflowRunId}`)
     expect(parseTelegramCallbackData(callbackData!)).toEqual({
       kind: 'workflowResult',
-      workflowName: 'due-diligence-package',
+      workflowRunId,
     })
   })
 
-  it('rejects workflow names that cannot be represented safely in Telegram callbacks', () => {
+  it('rejects malformed workflow run IDs', () => {
     expect(telegramWorkflowResultCallbackData('Due Diligence')).toBeNull()
-    expect(telegramWorkflowResultCallbackData('-due-diligence')).toBeNull()
-    expect(telegramWorkflowResultCallbackData('due-diligence-')).toBeNull()
-    expect(telegramWorkflowResultCallbackData('due-diligence_' + 'x'.repeat(10))).toBeNull()
-    expect(telegramWorkflowResultCallbackData('due-diligence-' + 'x'.repeat(60))).toBeNull()
+    expect(telegramWorkflowResultCallbackData('11111111-2222-3333-4444')).toBeNull()
   })
 
-  it('keeps legacy result callbacks parseable without inventing a workflow name', () => {
+  it('keeps legacy result callbacks parseable without inventing a workflow run', () => {
     expect(parseTelegramCallbackData(TELEGRAM_WORKFLOW_RESULT_CALLBACK_DATA)).toEqual({
       kind: 'workflowResult',
+    })
+  })
+
+  it('keeps previously delivered recipe-name callbacks working', () => {
+    expect(parseTelegramCallbackData('wf:r:due-diligence-package')).toEqual({
+      kind: 'workflowResult',
+      workflowName: 'due-diligence-package',
     })
   })
 })

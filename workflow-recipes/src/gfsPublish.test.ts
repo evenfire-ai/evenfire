@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { planPublish, PublishError, resolvePublishedStatus } from './gfsPublish'
+import { PublishError, planPublish, resolvePublishedStatus } from './gfsPublish'
 
 /**
  * P4-S06 — artifact-reference publishing. Publish creates a gfs resource that
@@ -23,19 +23,29 @@ describe('planPublish', () => {
   })
 
   it('rejects a publish without an artifactRef (publishing is by reference)', () => {
-    expect(() => planPublish({ drive: 'main', parentResourceId: 'f', name: 'x', artifactRef: '' })).toThrow(
-      PublishError
-    )
+    expect(() =>
+      planPublish({ drive: 'main', parentResourceId: 'f', name: 'x', artifactRef: '' })
+    ).toThrow(PublishError)
   })
 
   it('rejects an invalid name (slash and control chars — no drift vs move/resources)', () => {
     expect(() =>
-      planPublish({ drive: 'main', parentResourceId: 'f', name: 'a/b', artifactRef: 'artifact://x' })
+      planPublish({
+        drive: 'main',
+        parentResourceId: 'f',
+        name: 'a/b',
+        artifactRef: 'artifact://x',
+      })
     ).toThrow(/path_invalid|invalid name/i)
     // control chars (e.g. tab/NUL) must be rejected here too — the review found
     // this validator had drifted from move.ts / resources.ts.
     expect(() =>
-      planPublish({ drive: 'main', parentResourceId: 'f', name: 'a\tb', artifactRef: 'artifact://x' })
+      planPublish({
+        drive: 'main',
+        parentResourceId: 'f',
+        name: 'a\tb',
+        artifactRef: 'artifact://x',
+      })
     ).toThrow(PublishError)
   })
 })

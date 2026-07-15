@@ -1,12 +1,25 @@
 'use client'
 
 import React, { useCallback, useEffect, useState } from 'react'
-import { IconFolder, IconServer, IconSharedFiles } from '@components/Sidebar/icons'
+import { IconFolder, IconServer } from '@components/Sidebar/icons'
+import {
+  IconChevronRight,
+  IconCopy,
+  IconDownload,
+  IconPencil,
+  IconTrash,
+  IconUpload,
+  IconX,
+} from '@components/icons'
+import { FileUploadModal } from '@components/FileUploadModal'
 import { useToast } from '@components/Toast'
-import { Button } from '@components/ui'
-import { apiGet, apiSend, isSilentApiError } from '@lib/api'
+import { Button, TextInput } from '@components/ui'
+import { apiGet, apiSend, gfsDownload, isSilentApiError } from '@lib/api'
 import { normalizeGfsResourceName } from '@lib/gfsResourceName'
 import { GfsGrantPanel } from './GfsGrantPanel'
+import { GfsResourceMenu } from './GfsResourceMenu'
+import { NewFolderModal } from './NewFolderModal'
+import { TablePanelHeader } from './TablePanelHeader'
 
 /** A child node as returned by /api/v1/gfs/tree and /resources/:id/children. */
 interface GfsChild {
@@ -35,15 +48,6 @@ interface Crumb {
 
 const DRIVE = 'main'
 
-function GfsCopyLinkIcon(): React.JSX.Element {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <rect x="8" y="8" width="11" height="11" rx="2" />
-      <path d="M5 15H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1" />
-    </svg>
-  )
-}
-
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
   if (bytes < 1024) return `${bytes} B`
@@ -55,12 +59,6 @@ function formatBytes(bytes: number): string {
     unit = units[index + 1]
   }
   return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${unit}`
-}
-
-function resourceMeta(child: GfsChild): string {
-  const kind = child.kind === 'directory' ? 'Folder' : 'File'
-  if (child.kind === 'directory') return kind
-  return `${kind} / ${formatBytes(child.bytes)} / v${child.version}`
 }
 
 async function fileToEncodedData(file: File): Promise<string> {
@@ -87,16 +85,27 @@ function ridOfResourceId(resourceId: string): string {
 export function GfsBrowser(): React.JSX.Element {
   const { showToast } = useToast()
   const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: null, rid: null, name: '/' }])
-  const [forwardCrumbs, setForwardCrumbs] = useState<Crumb[]>([])
   const [items, setItems] = useState<GfsChild[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   // Operator selects a resource to delegate access on (grant/share panel).
   const [selected, setSelected] = useState<GfsChild | null>(null)
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [renameName, setRenameName] = useState('')
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  // New-folder dialog (replaces the native window.prompt flow).
+  const [newFolderOpen, setNewFolderOpen] = useState(false)
+  const [creatingFolder, setCreatingFolder] = useState(false)
+  const [createFolderError, setCreateFolderError] = useState<string | null>(null)
+  const [uploadOpen, setUploadOpen] = useState(false)
+  const [uploadCandidate, setUploadCandidate] = useState<File | null>(null)
+  const [uploading, setUploading] = useState(false)
+  // Resource IDs currently streaming a download (disables that row's button).
+  const [downloadingIds, setDownloadingIds] = useState<ReadonlySet<string>>(() => new Set())
 
   const current = crumbs[crumbs.length - 1]
-  const currentLabel = current?.name === '/' ? 'Drive root' : current?.name || 'Drive root'
+  const currentLabel = current?.name === '/' ? DRIVE : current?.name || DRIVE
 
   const load = useCallback(async (crumb: Crumb, cursor?: string): Promise<void> => {
     setLoading(true)
@@ -135,29 +144,22 @@ export function GfsBrowser(): React.JSX.Element {
     // Reload whenever the current folder changes (navigation).
   }, [current, load])
 
+  useEffect(() => {
+    if (!selected) return
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setSelected(null)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selected])
+
   function openDirectory(child: GfsChild): void {
     if (child.kind !== 'directory') return
-    setForwardCrumbs([])
     setCrumbs(prev => [...prev, { id: child.resourceId, rid: child.rid, name: child.name }])
   }
 
   function goToCrumb(index: number): void {
-    setForwardCrumbs(crumbs.slice(index + 1))
     setCrumbs(crumbs.slice(0, index + 1))
-  }
-
-  function goBack(): void {
-    if (crumbs.length <= 1) return
-    const nextForward = crumbs[crumbs.length - 1]
-    if (nextForward) setForwardCrumbs(stack => [nextForward, ...stack])
-    setCrumbs(crumbs.slice(0, -1))
-  }
-
-  function goForward(): void {
-    const [nextCrumb, ...rest] = forwardCrumbs
-    if (!nextCrumb) return
-    setCrumbs(stack => [...stack, nextCrumb])
-    setForwardCrumbs(rest)
   }
 
   async function copyGfsUri(uri: string): Promise<void> {
@@ -174,27 +176,38 @@ export function GfsBrowser(): React.JSX.Element {
     await load(current)
   }
 
-  async function createFolder(): Promise<void> {
+  function openNewFolder(): void {
+    if (!current?.id) return
+    setCreateFolderError(null)
+    setNewFolderOpen(true)
+  }
+
+  async function createFolder(requestedName: string): Promise<void> {
     const rid = current?.rid ?? (current?.id ? ridOfResourceId(current.id) : null)
     if (!rid) return
-    const requestedName = window.prompt('Folder name')
-    if (!requestedName?.trim()) return
+    setCreatingFolder(true)
+    setCreateFolderError(null)
     try {
-      const name = await normalizeGfsResourceName(requestedName.trim())
+      const name = await normalizeGfsResourceName(requestedName)
       await apiSend('POST', `/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(rid)}/children`, {
         name,
         kind: 'directory',
       })
       showToast('Folder created.', { tone: 'success' })
+      setNewFolderOpen(false)
       await refreshCurrent()
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Could not create folder.', { tone: 'error' })
+      // Keep the modal open so the operator can adjust the name and retry.
+      setCreateFolderError(err instanceof Error ? err.message : 'Could not create folder.')
+    } finally {
+      setCreatingFolder(false)
     }
   }
 
   async function uploadFile(file: File | null | undefined): Promise<void> {
     const rid = current?.rid ?? (current?.id ? ridOfResourceId(current.id) : null)
     if (!rid || !file) return
+    setUploading(true)
     try {
       const name = await normalizeGfsResourceName(file.name)
       await apiSend('POST', `/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(rid)}/children`, {
@@ -203,15 +216,31 @@ export function GfsBrowser(): React.JSX.Element {
         contentBase64: await fileToEncodedData(file),
       })
       showToast('File uploaded.', { tone: 'success' })
+      setUploadCandidate(null)
+      setUploadOpen(false)
       await refreshCurrent()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not upload file.', { tone: 'error' })
+    } finally {
+      setUploading(false)
     }
   }
 
-  async function renameResource(child: GfsChild): Promise<void> {
-    const requestedName = window.prompt('New name', child.name)
-    if (!requestedName?.trim()) return
+  function closeUploadModal(): void {
+    if (uploading) return
+    setUploadOpen(false)
+    setUploadCandidate(null)
+  }
+
+  function openManage(child: GfsChild, mode?: 'rename' | 'delete'): void {
+    setSelected(child)
+    setRenameName(child.name)
+    setRenameOpen(mode === 'rename')
+    setDeleteOpen(mode === 'delete')
+  }
+
+  async function renameResource(child: GfsChild, requestedName: string): Promise<void> {
+    if (!requestedName.trim()) return
     try {
       const name = await normalizeGfsResourceName(requestedName.trim())
       if (name === child.name) return
@@ -222,6 +251,7 @@ export function GfsBrowser(): React.JSX.Element {
         { drive: DRIVE }
       )
       showToast('Resource renamed.', { tone: 'success' })
+      setSelected(null)
       await refreshCurrent()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not rename resource.', {
@@ -242,19 +272,37 @@ export function GfsBrowser(): React.JSX.Element {
         }
       )
       showToast('File replaced.', { tone: 'success' })
+      if (selected?.resourceId === child.resourceId) setSelected(null)
       await refreshCurrent()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not replace file.', { tone: 'error' })
     }
   }
 
+  async function downloadFile(child: GfsChild): Promise<void> {
+    if (downloadingIds.has(child.resourceId)) return
+    setDownloadingIds(prev => new Set(prev).add(child.resourceId))
+    try {
+      await gfsDownload(child.rid, child.name)
+      showToast('File downloaded.', { tone: 'success' })
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not download file.', { tone: 'error' })
+    } finally {
+      setDownloadingIds(prev => {
+        const next = new Set(prev)
+        next.delete(child.resourceId)
+        return next
+      })
+    }
+  }
+
   async function deleteResource(child: GfsChild): Promise<void> {
-    if (!window.confirm(`Delete ${child.name}?`)) return
     try {
       await apiSend('DELETE', `/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(child.rid)}`, {
         ifMatch: child.version,
       })
       showToast('Resource deleted.', { tone: 'success' })
+      setSelected(null)
       await refreshCurrent()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not delete resource.', {
@@ -265,246 +313,147 @@ export function GfsBrowser(): React.JSX.Element {
 
   return (
     <section className="cu-gfs" aria-label="Global File System browser">
-      <header className="cu-gfs__header">
-        <div className="cu-gfs__title-group">
-          <span className="cu-gfs__hero-icon" aria-hidden="true">
-            <IconSharedFiles />
-          </span>
-          <div>
-            <p className="cu-gfs__eyebrow">Operator browser</p>
-            <h1>Global File System</h1>
-            <p className="cu-gfs__description">
-              Browse delegated folders as a tree and manage access grants from the admin plane.
-            </p>
-          </div>
-        </div>
-        <div className="cu-gfs-toolbar" aria-label="Global File System navigation">
-          <div className="cu-gfs-toolbar__nav" aria-label="Folder history">
-            <Button size="sm" variant="ghost" disabled={crumbs.length <= 1} onClick={goBack}>
-              Back
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={forwardCrumbs.length === 0}
-              onClick={goForward}
-            >
-              Forward
-            </Button>
-          </div>
-          <div className="cu-gfs__drive" aria-label={`Drive ${DRIVE}`}>
-            <span className="cu-gfs__drive-label">Drive</span>
-            <strong>{DRIVE}</strong>
-          </div>
-        </div>
-      </header>
+      <div className="cu-card cu-card--viewport-fill">
+        <TablePanelHeader
+          title={
+            <>
+              <IconFolder /> Global File System
+            </>
+          }
+          subtitle="Browse and manage drive resources and access grants from the admin plane."
+        />
 
-      {error ? (
-        <p className="cu-gfs__alert" role="alert">
-          {error}
-        </p>
-      ) : null}
-
-      <div className="cu-gfs-explorer">
-        <aside className="cu-gfs-tree" aria-label="Global File System folder tree">
-          <div className="cu-gfs-tree__header">
-            <span className="cu-gfs-tree__icon" aria-hidden="true">
-              <IconSharedFiles />
-            </span>
-            <div>
-              <span className="cu-gfs-tree__label">Drive map</span>
-              <strong>{DRIVE}</strong>
-            </div>
+        {error ? (
+          <div className="cu-banner cu-banner--error" role="alert">
+            {error}
           </div>
-          <ol className="cu-gfs-tree__list">
-            {crumbs.map((crumb, index) => (
-              <li
-                className={`cu-gfs-tree__item${
-                  index === crumbs.length - 1 ? ' cu-gfs-tree__item--active' : ''
-                }`}
-                key={`${crumb.id ?? 'root'}-${index}`}
-                style={{ '--cu-gfs-depth': index } as React.CSSProperties}
-              >
-                <button
-                  className="cu-gfs-tree__button"
-                  type="button"
-                  onClick={() => goToCrumb(index)}
-                  aria-current={index === crumbs.length - 1 ? 'page' : undefined}
-                >
-                  <span className="cu-gfs-tree__branch" aria-hidden="true" />
-                  <span className="cu-gfs-tree__glyph" aria-hidden="true">
-                    <IconFolder />
-                  </span>
-                  <span>{crumb.name === '/' ? DRIVE : crumb.name}</span>
-                </button>
-              </li>
-            ))}
-            {items.map(child => (
-              <li
-                className="cu-gfs-tree__item cu-gfs-tree__item--child"
-                key={`tree-${child.resourceId}`}
-                style={{ '--cu-gfs-depth': crumbs.length } as React.CSSProperties}
-              >
-                {child.kind === 'directory' ? (
-                  <button
-                    className="cu-gfs-tree__button"
-                    type="button"
-                    onClick={() => openDirectory(child)}
-                  >
-                    <span className="cu-gfs-tree__branch" aria-hidden="true" />
-                    <span className="cu-gfs-tree__glyph" aria-hidden="true">
-                      <IconFolder />
-                    </span>
-                    <span>{child.name}</span>
-                  </button>
-                ) : (
-                  <span className="cu-gfs-tree__button cu-gfs-tree__button--file">
-                    <span className="cu-gfs-tree__branch" aria-hidden="true" />
-                    <span className="cu-gfs-tree__glyph" aria-hidden="true">
-                      <IconServer />
-                    </span>
-                    <span>{child.name}</span>
-                  </span>
-                )}
-              </li>
-            ))}
-          </ol>
-        </aside>
+        ) : null}
 
         <div className="cu-gfs-panel">
           <div className="cu-gfs-panel__toolbar">
-            <div className="cu-gfs-panel__title">
-              <span className="cu-gfs-panel__icon" aria-hidden="true">
-                <IconFolder />
-              </span>
-              <div>
-                <span className="cu-gfs__eyebrow">Current folder</span>
-                <strong>{currentLabel}</strong>
-              </div>
-            </div>
-            <div className="cu-gfs-panel__chips" aria-label="Current folder metadata">
-              <span className="cu-chip">{items.length} visible</span>
-              <span className="cu-chip">Read + write + delegate</span>
+            <nav aria-label="Breadcrumb" className="cu-gfs-breadcrumb">
+              {crumbs.map((crumb, index) => (
+                <span className="cu-gfs-breadcrumb__item" key={`${crumb.id ?? 'root'}-${index}`}>
+                  {index > 0 ? <IconChevronRight width={14} height={14} /> : null}
+                  <button
+                    className="cu-gfs-breadcrumb__button"
+                    type="button"
+                    onClick={() => goToCrumb(index)}
+                    aria-current={index === crumbs.length - 1 ? 'page' : undefined}
+                  >
+                    {crumb.name === '/' ? DRIVE : crumb.name}
+                  </button>
+                </span>
+              ))}
+            </nav>
+            <div className="cu-gfs-panel__actions">
               <Button
-                size="sm"
-                variant="ghost"
+                className="cu-gfs-create-action"
+                variant="primary"
                 disabled={!current?.id}
-                onClick={() => void createFolder()}
+                onClick={openNewFolder}
               >
+                <IconFolder />
                 New folder
               </Button>
-              <label
-                className="cu-btn cu-btn--ghost cu-btn--sm cu-gfs-file-action"
-                aria-disabled={!current?.id}
+              <Button
+                className="cu-gfs-create-action"
+                disabled={!current?.id}
+                onClick={() => {
+                  setUploadCandidate(null)
+                  setUploadOpen(true)
+                }}
               >
+                <IconUpload width={18} height={18} />
                 Upload file
-                <input
-                  className="sr-only"
-                  disabled={!current?.id}
-                  type="file"
-                  onChange={event => {
-                    const file = event.currentTarget.files?.[0]
-                    event.currentTarget.value = ''
-                    void uploadFile(file)
-                  }}
-                />
-              </label>
+              </Button>
             </div>
           </div>
 
-          {current?.id ? (
-            <p className="cu-gfs__upload-warning" role="note">
-              <strong>Upload size warning:</strong> GFS uploads currently use JSON/base64. The
-              service accepts 150 MB request bodies, so use raw files around 110 MB or smaller until
-              streaming uploads are available.
-            </p>
-          ) : null}
-
-          <nav aria-label="Breadcrumb" className="cu-gfs-breadcrumb">
-            {crumbs.map((crumb, index) => (
-              <span className="cu-gfs-breadcrumb__item" key={`${crumb.id ?? 'root'}-${index}`}>
-                <button
-                  className="cu-gfs-breadcrumb__button"
-                  type="button"
-                  onClick={() => goToCrumb(index)}
-                >
-                  {crumb.name === '/' ? DRIVE : crumb.name}
-                </button>
-                {index < crumbs.length - 1 ? (
-                  <span className="cu-gfs-breadcrumb__separator" aria-hidden="true">
-                    /
-                  </span>
-                ) : null}
-              </span>
-            ))}
-          </nav>
+          <div className="cu-gfs-list__toolbar">
+            <span>{items.length} items</span>
+            <span>Use the three-dot menu to manage a resource.</span>
+          </div>
 
           {loading && items.length === 0 ? (
             <p className="cu-gfs__state">Loading resources...</p>
           ) : (
-            <ul className="cu-gfs-list" aria-label="Current folder resources">
-              {items.map(child => (
-                <li className="cu-gfs-list__row" key={child.resourceId}>
-                  <span className="cu-gfs-list__icon" aria-hidden="true">
-                    {child.kind === 'directory' ? <IconFolder /> : <IconServer />}
-                  </span>
-                  <span className="cu-gfs-list__identity">
-                    <span className="cu-gfs-list__name">
-                      {child.kind === 'directory' ? (
-                        <button
-                          className="cu-gfs-list__name-button"
-                          type="button"
-                          onClick={() => openDirectory(child)}
-                        >
-                          {child.name}
-                        </button>
-                      ) : (
-                        <span>{child.name}</span>
-                      )}
+            <div className="cu-gfs-list-frame">
+              <div className="cu-gfs-list__head" aria-hidden="true">
+                <span />
+                <span>Name</span>
+                <span>Type</span>
+                <span>Size</span>
+                <span className="cu-gfs-list__head-actions">Actions</span>
+              </div>
+              <ul className="cu-gfs-list" aria-label="Current folder resources">
+                {items.map(child => (
+                  <li className="cu-gfs-list__row" key={child.resourceId}>
+                    <span className="cu-gfs-list__icon" aria-hidden="true">
+                      {child.kind === 'directory' ? <IconFolder /> : <IconServer />}
                     </span>
-                    <span className="cu-gfs-list__meta">{resourceMeta(child)}</span>
-                  </span>
-                  <span className="cu-gfs-list__actions">
-                    <Button
-                      className="cu-gfs-list__copy"
-                      size="sm"
-                      variant="ghost"
-                      title={child.gfsUri}
-                      aria-label={`Copy GFS link for ${child.name}`}
-                      onClick={() => void copyGfsUri(child.gfsUri)}
-                    >
-                      <GfsCopyLinkIcon />
-                    </Button>
-                    {child.kind !== 'directory' ? (
-                      <label className="cu-btn cu-btn--ghost cu-btn--sm cu-gfs-file-action">
-                        Replace
-                        <input
-                          className="sr-only"
-                          type="file"
-                          onChange={event => {
-                            const file = event.currentTarget.files?.[0]
-                            event.currentTarget.value = ''
-                            void replaceFile(child, file)
-                          }}
-                        />
-                      </label>
-                    ) : null}
-                    <Button size="sm" variant="ghost" onClick={() => void renameResource(child)}>
-                      Rename
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => void deleteResource(child)}>
-                      Delete
-                    </Button>
-                    <Button size="sm" onClick={() => setSelected(child)}>
-                      Manage access
-                    </Button>
-                  </span>
-                </li>
-              ))}
-              {items.length === 0 && !loading ? (
-                <li className="cu-gfs-list__empty">No resources are visible in this folder.</li>
-              ) : null}
-            </ul>
+                    <span className="cu-gfs-list__identity">
+                      <span className="cu-gfs-list__name">
+                        {child.kind === 'directory' ? (
+                          <button
+                            className="cu-gfs-list__name-button"
+                            type="button"
+                            onClick={() => openDirectory(child)}
+                          >
+                            {child.name}
+                          </button>
+                        ) : (
+                          <span>{child.name}</span>
+                        )}
+                      </span>
+                      <span className="cu-gfs-list__meta">Version {child.version}</span>
+                    </span>
+                    <span className="cu-gfs-list__value">
+                      {child.kind === 'directory' ? 'Folder' : 'File'}
+                    </span>
+                    <span className="cu-gfs-list__value">
+                      {child.kind === 'directory' ? '—' : formatBytes(child.bytes)}
+                    </span>
+                    <span className="cu-gfs-list__actions">
+                      {child.kind !== 'directory' ? (
+                        <Button
+                          className="cu-gfs-list__download"
+                          size="sm"
+                          variant="ghost"
+                          title={`Download ${child.name}`}
+                          aria-label={`Download ${child.name}`}
+                          disabled={downloadingIds.has(child.resourceId)}
+                          onClick={() => void downloadFile(child)}
+                        >
+                          <IconDownload width={18} height={18} />
+                        </Button>
+                      ) : null}
+                      <GfsResourceMenu
+                        resourceName={child.name}
+                        resourceUri={child.gfsUri}
+                        downloading={downloadingIds.has(child.resourceId)}
+                        onManage={() => openManage(child)}
+                        onOpen={child.kind === 'directory' ? () => openDirectory(child) : undefined}
+                        onDownload={
+                          child.kind !== 'directory' ? () => void downloadFile(child) : undefined
+                        }
+                        onReplace={
+                          child.kind !== 'directory'
+                            ? file => void replaceFile(child, file)
+                            : undefined
+                        }
+                        onCopyLink={() => void copyGfsUri(child.gfsUri)}
+                        onRename={() => openManage(child, 'rename')}
+                        onDelete={() => openManage(child, 'delete')}
+                      />
+                    </span>
+                  </li>
+                ))}
+                {items.length === 0 && !loading ? (
+                  <li className="cu-gfs-list__empty">No resources are visible in this folder.</li>
+                ) : null}
+              </ul>
+            </div>
           )}
 
           {nextCursor ? (
@@ -520,17 +469,244 @@ export function GfsBrowser(): React.JSX.Element {
       </div>
 
       {selected ? (
-        <div className="cu-gfs__grant-panel">
-          <GfsGrantPanel
-            resource={{
-              resourceId: selected.resourceId,
-              name: selected.name,
-              gfsUri: selected.gfsUri,
-              kind: selected.kind,
-            }}
-            onClose={() => setSelected(null)}
-          />
+        <div
+          className="cu-modal-backdrop cu-gfs-manage-modal"
+          role="presentation"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) setSelected(null)
+          }}
+        >
+          <section
+            className="cu-gfs-manage-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cu-gfs-manage-title"
+          >
+            <header className="cu-gfs-manage-dialog__header">
+              <span
+                className={`cu-gfs-manage-dialog__icon${selected.kind === 'directory' ? ' cu-gfs-manage-dialog__icon--folder' : ''}`}
+                aria-hidden="true"
+              >
+                {selected.kind === 'directory' ? <IconFolder /> : <IconServer />}
+              </span>
+              <span className="cu-gfs-manage-dialog__heading">
+                <span className="cu-gfs__eyebrow">
+                  Manage {selected.kind === 'directory' ? 'folder' : 'file'}
+                </span>
+                <h3 id="cu-gfs-manage-title">{selected.name}</h3>
+                <span className="cu-gfs-manage-dialog__meta">
+                  <span className="cu-gfs-manage-dialog__badge">
+                    {selected.kind === 'directory' ? 'Folder' : 'File'}
+                  </span>
+                  <span>Version {selected.version}</span>
+                  {selected.kind !== 'directory' ? <span>{formatBytes(selected.bytes)}</span> : null}
+                </span>
+              </span>
+              <Button
+                className="cu-gfs-manage-dialog__close"
+                variant="ghost"
+                aria-label="Close manage dialog"
+                onClick={() => setSelected(null)}
+              >
+                <IconX width={18} height={18} />
+              </Button>
+            </header>
+
+            <div className="cu-gfs-manage-dialog__body">
+              <section className="cu-gfs-manage-section cu-gfs-manage-section--actions">
+                <div className="cu-gfs-manage-section__header">
+                  <span>Resource</span>
+                  <h4>Quick actions</h4>
+                  <p>Manage this resource without leaving the browser.</p>
+                </div>
+
+                <div className="cu-gfs-manage-resource-link">
+                  <span>
+                    <small>GFS location</small>
+                    <code title={selected.gfsUri}>{selected.gfsUri}</code>
+                  </span>
+                  <Button
+                    variant="ghost"
+                    aria-label={`Copy GFS link for ${selected.name}`}
+                    onClick={() => void copyGfsUri(selected.gfsUri)}
+                  >
+                    <IconCopy width={17} height={17} />
+                  </Button>
+                </div>
+
+                <div className="cu-gfs-manage-actions">
+                  {selected.kind === 'directory' ? (
+                    <Button
+                      className="cu-gfs-manage-action"
+                      variant="ghost"
+                      onClick={() => {
+                        setSelected(null)
+                        openDirectory(selected)
+                      }}
+                    >
+                      <span className="cu-gfs-manage-action__icon">
+                        <IconFolder />
+                      </span>
+                      <span>
+                        <strong>Open folder</strong>
+                        <small>Browse its contents</small>
+                      </span>
+                    </Button>
+                  ) : (
+                    <>
+                      <label className="cu-btn cu-btn--ghost cu-gfs-manage-action cu-gfs-file-action">
+                        <span className="cu-gfs-manage-action__icon">
+                          <IconUpload width={18} height={18} />
+                        </span>
+                        <span>
+                          <strong>Replace file</strong>
+                          <small>Upload a new version</small>
+                        </span>
+                        <input
+                          aria-label={`Replace ${selected.name}`}
+                          className="sr-only"
+                          type="file"
+                          onChange={event => {
+                            const file = event.currentTarget.files?.[0]
+                            event.currentTarget.value = ''
+                            void replaceFile(selected, file)
+                          }}
+                        />
+                      </label>
+                      <Button
+                        className="cu-gfs-manage-action"
+                        variant="ghost"
+                        disabled={downloadingIds.has(selected.resourceId)}
+                        onClick={() => void downloadFile(selected)}
+                      >
+                        <span className="cu-gfs-manage-action__icon">
+                          <IconDownload width={18} height={18} />
+                        </span>
+                        <span>
+                          <strong>Download</strong>
+                          <small>Save a local copy</small>
+                        </span>
+                      </Button>
+                    </>
+                  )}
+                  <Button
+                    className="cu-gfs-manage-action"
+                    variant="ghost"
+                    onClick={() => {
+                      setRenameName(selected.name)
+                      setRenameOpen(true)
+                      setDeleteOpen(false)
+                    }}
+                  >
+                    <span className="cu-gfs-manage-action__icon">
+                      <IconPencil width={18} height={18} />
+                    </span>
+                    <span>
+                      <strong>Rename</strong>
+                      <small>Change the display name</small>
+                    </span>
+                  </Button>
+                  <Button
+                    className="cu-gfs-manage-action cu-gfs-manage-action--danger"
+                    variant="ghost"
+                    onClick={() => {
+                      setDeleteOpen(true)
+                      setRenameOpen(false)
+                    }}
+                  >
+                    <span className="cu-gfs-manage-action__icon">
+                      <IconTrash width={18} height={18} />
+                    </span>
+                    <span>
+                      <strong>Delete</strong>
+                      <small>Remove this resource</small>
+                    </span>
+                  </Button>
+                </div>
+
+                {renameOpen ? (
+                  <form
+                    className="cu-gfs-manage-inline-form"
+                    aria-label="Rename resource"
+                    onSubmit={event => {
+                      event.preventDefault()
+                      void renameResource(selected, renameName)
+                    }}
+                  >
+                    <label>
+                      <span>New name</span>
+                      <TextInput
+                        autoFocus
+                        value={renameName}
+                        onChange={event => setRenameName(event.currentTarget.value)}
+                      />
+                    </label>
+                    <Button variant="primary" type="submit" disabled={!renameName.trim()}>
+                      Save
+                    </Button>
+                    <Button variant="ghost" onClick={() => setRenameOpen(false)}>
+                      Cancel
+                    </Button>
+                  </form>
+                ) : null}
+
+                {deleteOpen ? (
+                  <div
+                    className="cu-gfs-manage-inline-form"
+                    role="alertdialog"
+                    aria-label="Delete resource"
+                  >
+                    <span>Delete {selected.name}?</span>
+                    <Button variant="danger" onClick={() => void deleteResource(selected)}>
+                      Delete
+                    </Button>
+                    <Button variant="ghost" onClick={() => setDeleteOpen(false)}>
+                      Cancel
+                    </Button>
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="cu-gfs-manage-section cu-gfs-manage-section--access">
+                <div className="cu-gfs-manage-section__header">
+                  <span>Sharing</span>
+                  <h4>Access</h4>
+                  <p>Choose who can use this resource and what they can do.</p>
+                </div>
+                <GfsGrantPanel
+                  resource={{
+                    resourceId: selected.resourceId,
+                    name: selected.name,
+                    gfsUri: selected.gfsUri,
+                    kind: selected.kind,
+                  }}
+                />
+              </section>
+            </div>
+          </section>
         </div>
+      ) : null}
+
+      {newFolderOpen ? (
+        <NewFolderModal
+          folderLabel={currentLabel}
+          pending={creatingFolder}
+          error={createFolderError}
+          onCreate={name => void createFolder(name)}
+          onCancel={() => setNewFolderOpen(false)}
+        />
+      ) : null}
+
+      {uploadOpen ? (
+        <FileUploadModal
+          busy={uploading}
+          file={uploadCandidate}
+          fileSummary={uploadCandidate ? `${formatBytes(uploadCandidate.size)} selected` : undefined}
+          guidance="For reliable uploads, use files around 110 MB or smaller."
+          onClose={closeUploadModal}
+          onFileChange={setUploadCandidate}
+          onUpload={() => void uploadFile(uploadCandidate)}
+        />
       ) : null}
     </section>
   )

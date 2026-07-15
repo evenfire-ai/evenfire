@@ -5,6 +5,7 @@ import * as notificationDeliveryQueueService from '../src/services/notificationD
 import * as userApprovalRequestService from '../src/services/userApprovalRequestService.js'
 import * as workflowApprovalMediumLinkSessionService from '../src/services/workflowApprovalMediumLinkSessionService.js'
 import * as workflowApprovalMediumOperationalIdentityService from '../src/services/workflowApprovalMediumOperationalIdentityService.js'
+import * as workflowApprovalMediumTeamsVerificationService from '../src/services/workflowApprovalMediumTeamsVerificationService.js'
 import * as workflowApprovalMediumTelegramProviderEventService from '../src/services/workflowApprovalMediumTelegramProviderEventService.js'
 import * as workflowApprovalMediumTelegramVerificationService from '../src/services/workflowApprovalMediumTelegramVerificationService.js'
 import * as workflowApprovalProviderDecisionService from '../src/services/workflowApprovalProviderDecisionService.js'
@@ -37,6 +38,10 @@ vi.mock('../src/services/workflowApprovalMediumTelegramProviderEventService.js',
 }))
 vi.mock('../src/services/workflowApprovalMediumTelegramVerificationService.js', () => ({
   userCanAccessTelegramCommunicationChannel: vi.fn(),
+}))
+vi.mock('../src/services/workflowApprovalMediumTeamsVerificationService.js', () => ({
+  addTeamsTargetAssociation: vi.fn(),
+  resolveTeamsCommunicationChannelTarget: vi.fn(),
 }))
 vi.mock('../src/services/workflowApprovalTelegramChannelGateService.js', () => ({
   verifyTelegramOperationalChannelBinding: vi.fn(),
@@ -1729,6 +1734,112 @@ describe('User Approval Request Routes', () => {
             providerChannelId: 'D123',
             communicationChannelRef: 'channels/cc-a',
           }),
+        })
+      )
+    })
+
+    it('persists and returns the Teams thread reply preference during confirmation', async () => {
+      const auth = issueProviderDecisionControlToken(['workflow:approval:resolve'])
+      const target = {
+        channelNamespace: 'channels',
+        channelName: 'teams-a',
+        providerWorkspaceId: 'tenant-1',
+      }
+      vi.mocked(
+        workflowApprovalMediumLinkSessionService.confirmMediumLinkSessionFromReader
+      ).mockResolvedValueOnce({
+        ok: true,
+        account: {
+          id: 'account-1',
+          userId: 'user-1',
+          providerUserId: 'teams-user-1',
+          providerWorkspaceId: 'tenant-1',
+          providerChannelId: 'conversation-1',
+        } as never,
+        replyInThreads: false,
+      })
+      vi.mocked(
+        workflowApprovalMediumTeamsVerificationService.resolveTeamsCommunicationChannelTarget
+      ).mockResolvedValueOnce(target as never)
+
+      const res = await request(app)
+        .post('/api/v1/workflow-approval-mediums/link-sessions/confirm')
+        .set('Authorization', `Bearer ${auth}`)
+        .send({
+          nonce: '123456',
+          medium: 'teams',
+          providerUserId: 'teams-user-1',
+          providerWorkspaceId: 'tenant-1',
+          providerChannelId: 'conversation-1',
+          providerChannelType: 'channel',
+          providerChannelTitle: 'General',
+          providerTeamId: 'team-1',
+          providerTeamsChannelId: 'channel-1',
+          serviceUrl: 'https://smba.trafficmanager.net/amer/',
+          communicationChannelRef: 'channels/teams-a',
+        })
+
+      expect(res.status).toBe(200)
+      expect(res.body.replyInThreads).toBe(false)
+      expect(
+        workflowApprovalMediumTeamsVerificationService.addTeamsTargetAssociation
+      ).toHaveBeenCalledWith(
+        gateway,
+        target,
+        expect.objectContaining({
+          userId: 'user-1',
+          providerChannelId: 'conversation-1',
+          replyInThreads: false,
+        })
+      )
+    })
+
+    it('does not overwrite Teams thread replies when the link session omits the preference', async () => {
+      const auth = issueProviderDecisionControlToken(['workflow:approval:resolve'])
+      const target = {
+        channelNamespace: 'channels',
+        channelName: 'teams-a',
+        providerWorkspaceId: 'tenant-1',
+      }
+      vi.mocked(
+        workflowApprovalMediumLinkSessionService.confirmMediumLinkSessionFromReader
+      ).mockResolvedValueOnce({
+        ok: true,
+        account: {
+          id: 'account-1',
+          userId: 'user-1',
+          providerUserId: 'teams-user-1',
+          providerWorkspaceId: 'tenant-1',
+          providerChannelId: 'conversation-1',
+        } as never,
+        replyInThreads: null,
+      })
+      vi.mocked(
+        workflowApprovalMediumTeamsVerificationService.resolveTeamsCommunicationChannelTarget
+      ).mockResolvedValueOnce(target as never)
+
+      const res = await request(app)
+        .post('/api/v1/workflow-approval-mediums/link-sessions/confirm')
+        .set('Authorization', `Bearer ${auth}`)
+        .send({
+          nonce: '123456',
+          medium: 'teams',
+          providerUserId: 'teams-user-1',
+          providerWorkspaceId: 'tenant-1',
+          providerChannelId: 'conversation-1',
+          providerChannelType: 'channel',
+          providerChannelTitle: 'General',
+          communicationChannelRef: 'channels/teams-a',
+        })
+
+      expect(res.status).toBe(200)
+      expect(
+        workflowApprovalMediumTeamsVerificationService.addTeamsTargetAssociation
+      ).toHaveBeenCalledWith(
+        gateway,
+        target,
+        expect.not.objectContaining({
+          replyInThreads: expect.any(Boolean),
         })
       )
     })

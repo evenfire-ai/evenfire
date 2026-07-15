@@ -13,8 +13,9 @@ import { config } from './config'
 import { gfsDefaultFactoryConfig } from './gfsConfig'
 import { GfsReconciler } from './gfsReconciler'
 import { ControlApiGfsSeedClient } from './gfsSeedClient'
-import { HostReconciler, type ResolvedSfsMount } from './hostReconciler'
+import { HostFleetReconcileError, HostReconciler, type ResolvedSfsMount } from './hostReconciler'
 import { K8sGfsApi } from './k8s/gfsK8sApi'
+import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
 import { pvcName as sfsPvcName } from './k8s/sharedFileSystemFactory'
 import { NetworkPolicyReconciler } from './networkPolicyReconciler'
 import { McpServerReconciler } from './reconciler'
@@ -36,6 +37,7 @@ import {
 
 // Only initialize K8s client if not in dev mode
 let customObjectsApi: k8s.CustomObjectsApi | null = null
+let hostCustomObjectsApi: k8s.CustomObjectsApi | null = null
 let coreApi: k8s.CoreV1Api | null = null
 let kc: k8s.KubeConfig | null = null
 
@@ -43,6 +45,11 @@ if (!config.devMode) {
   kc = new k8s.KubeConfig()
   kc.loadFromDefault()
   customObjectsApi = kc.makeApiClient(k8s.CustomObjectsApi)
+  hostCustomObjectsApi = makeHostK8sApiClient(
+    kc,
+    k8s.CustomObjectsApi,
+    config.hostK8sRequestTimeoutMs
+  )
   coreApi = kc.makeApiClient(k8s.CoreV1Api)
 }
 
@@ -65,6 +72,64 @@ const PLURAL_COMMUNICATIONCHANNELS = 'communicationchannels'
 const EXTERNAL_EGRESS_RETRY_DELAYS_MS = [5000, 15000, 30000]
 const EXTERNAL_EGRESS_RESYNC_MAX_CONCURRENCY = 10
 const EXTERNAL_EGRESS_RESYNC_JITTER_MS = 5000
+const COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS = 5000
+const COMMUNICATION_CHANNEL_FLEET_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 300000]
+const HOST_CACHE_RECOVERY_RETRY_MS = 5000
+const HOST_WATCH_RECONCILE_RETRY_DELAYS_MS = [5000, 15000, 30000]
+
+type CommunicationChannelSnapshot = {
+  channels: CommunicationChannelCRD[]
+  resourceVersion?: string
+}
+
+type HostSnapshot = {
+  hosts: HostCRD[]
+  resourceVersion?: string
+}
+
+type HostFleetReconcileMode = 'full' | 'lifecycle'
+type HostWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
+
+type HostFleetReconcileRequest = {
+  reason: string
+  mode: HostFleetReconcileMode
+  ccLifecycleGeneration?: number
+}
+
+type PendingHostFleetReconcile = HostFleetReconcileRequest & {
+  promise: Promise<void>
+  resolve: () => void
+}
+
+type ActiveHostFleetReconcile = HostFleetReconcileRequest & { promise: Promise<void> }
+
+function hostFleetRequestCovers(
+  active: HostFleetReconcileRequest,
+  requested: HostFleetReconcileRequest
+): boolean {
+  const modeCovered = active.mode === 'full' || requested.mode === 'lifecycle'
+  if (!modeCovered) return false
+  if (requested.ccLifecycleGeneration === undefined) return true
+  return active.ccLifecycleGeneration === requested.ccLifecycleGeneration
+}
+
+function mergeHostFleetRequests(
+  pending: HostFleetReconcileRequest,
+  requested: HostFleetReconcileRequest
+): HostFleetReconcileRequest {
+  const pendingGeneration = pending.ccLifecycleGeneration
+  const requestedGeneration = requested.ccLifecycleGeneration
+  return {
+    reason: requested.reason,
+    mode: pending.mode === 'full' || requested.mode === 'full' ? 'full' : 'lifecycle',
+    ccLifecycleGeneration:
+      pendingGeneration === undefined
+        ? requestedGeneration
+        : requestedGeneration === undefined
+          ? pendingGeneration
+          : Math.max(pendingGeneration, requestedGeneration),
+  }
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -195,15 +260,15 @@ export async function listAllContexts(): Promise<ContextCRD[]> {
 /**
  * List all Host CRDs in host namespace.
  */
-export async function listAllHosts(): Promise<HostCRD[]> {
-  if (!customObjectsApi) {
+async function listHostSnapshot(): Promise<HostSnapshot> {
+  if (!hostCustomObjectsApi) {
     throw new Error('K8s client not initialized - are you in dev mode?')
   }
 
   try {
     console.log(`[K8s] Listing all Hosts in namespace ${config.hostNamespace}`)
 
-    const response = await customObjectsApi.listNamespacedCustomObject({
+    const response = await hostCustomObjectsApi.listNamespacedCustomObject({
       group: GROUP,
       version: VERSION,
       namespace: config.hostNamespace,
@@ -211,24 +276,40 @@ export async function listAllHosts(): Promise<HostCRD[]> {
     })
 
     const list = response as {
+      metadata?: { resourceVersion?: string }
       items: Array<{
-        metadata: { name: string; namespace?: string }
+        metadata: {
+          name: string
+          namespace?: string
+          generation?: number
+          resourceVersion?: string
+          annotations?: Record<string, string>
+        }
         spec: HostSpec
+        status?: HostCRD['status']
       }>
     }
 
     const hosts = list.items.map(item => ({
       name: item.metadata.name,
       namespace: item.metadata.namespace || config.hostNamespace,
+      generation: item.metadata.generation,
+      resourceVersion: item.metadata.resourceVersion,
+      annotations: item.metadata.annotations,
       spec: item.spec,
+      status: item.status,
     }))
 
     console.log(`[K8s] Found ${hosts.length} Host(s)`)
-    return hosts
+    return { hosts, resourceVersion: list.metadata?.resourceVersion }
   } catch (error) {
     console.error('[K8s] Failed to list Hosts:', error)
     throw error
   }
+}
+
+export async function listAllHosts(): Promise<HostCRD[]> {
+  return (await listHostSnapshot()).hosts
 }
 
 /**
@@ -348,6 +429,16 @@ export async function listAllGlobalFileSystems(): Promise<GlobalFileSystemCRD[]>
  * (telegram[], email[], slack[]).
  */
 export async function listAllCommunicationChannels(): Promise<CommunicationChannelCRD[]> {
+  return (await listCommunicationChannelSnapshot()).channels
+}
+
+/**
+ * List a complete CommunicationChannel snapshot together with the resource
+ * version from which a watch can continue. The snapshot and watch must be
+ * paired: a raw watch alone cannot prove that the cache contains channels
+ * created before the controller connected.
+ */
+async function listCommunicationChannelSnapshot(): Promise<CommunicationChannelSnapshot> {
   if (!customObjectsApi) {
     throw new Error('K8s client not initialized - are you in dev mode?')
   }
@@ -360,6 +451,7 @@ export async function listAllCommunicationChannels(): Promise<CommunicationChann
       plural: PLURAL_COMMUNICATIONCHANNELS,
     })
     const list = response as {
+      metadata?: { resourceVersion?: string }
       items: Array<{
         metadata: { name: string; namespace?: string }
         spec: { hostRef: string; credentialsSecretRef?: { name: string } }
@@ -376,7 +468,7 @@ export async function listAllCommunicationChannels(): Promise<CommunicationChann
       },
     }))
     console.log(`[K8s] Found ${ccs.length} CommunicationChannel(s)`)
-    return ccs
+    return { channels: ccs, resourceVersion: list.metadata?.resourceVersion }
   } catch (error) {
     console.error('[K8s] Failed to list CommunicationChannels:', error)
     throw error
@@ -443,10 +535,40 @@ export class McpServerWatcher implements McpServerProvider {
   private contexts: Map<string, ContextCRD> = new Map()
   private sharedFileSystems: Map<string, SharedFileSystemCRD> = new Map()
   private communicationChannels: Map<string, CommunicationChannelCRD> = new Map()
-  // B2: tracks whether the CC initial list has completed (ccCacheSynced).
-  // Set to true once the startup block finishes; used by HostReconciler to
-  // decide whether it is safe to scale channel-reader replicas to 0.
+  // A watch callback can still settle after its stream reports completion.
+  // Host reconciles change the mcp-host pod template, so stale callbacks must
+  // never replay an older Host spec after a replacement watch is active.
+  private hostWatchGeneration = 0
+  // Event revisions fence async retries within the current resourceVersion-
+  // continuing stream. Watch generation fences callbacks from retired streams.
+  private hostWatchRevision = 0
+  private readonly latestHostWatchEventRevisions = new Map<string, number>()
+  private readonly hostWatchRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly hostWatchRetryAttempts = new Map<string, number>()
+  private hostCacheSynced = false
+  private hostCacheRecoveryTimer: ReturnType<typeof setTimeout> | null = null
+  // Host events and inventory passes share one mutation tail. A watch paired
+  // with the LIST resourceVersion makes queued events causally newer than the
+  // immutable snapshot reconciled ahead of them.
+  private hostConvergenceTail: Promise<void> = Promise.resolve()
+  // B2: tracks whether the CC snapshot is paired with a continuing watch.
+  // Set to true only while a complete snapshot is paired with a live watch;
+  // used by HostReconciler to make fail-closed lifecycle decisions.
   private ccCacheSynced = false
+  private ccWatchGeneration = 0
+  private ccCacheRecoveryTimer: ReturnType<typeof setTimeout> | null = null
+  private ccCacheRecoveryInFlight: Promise<boolean> | null = null
+  private ccLifecycleGeneration = 0
+  private ccAppliedLifecycleGeneration = -1
+  private ccFleetRetryTimer: ReturnType<typeof setTimeout> | null = null
+  private ccFleetRetryAttempt = 0
+  private hostFleetReconcileInFlight: ActiveHostFleetReconcile | null = null
+  private hostFleetReconcilePending: PendingHostFleetReconcile | null = null
+  private resolveHostFleetShutdown: () => void = () => {}
+  private readonly hostFleetShutdown = new Promise<void>(resolve => {
+    this.resolveHostFleetShutdown = resolve
+  })
+  private hostResyncInFlight: Promise<void> | null = null
   private changeCallback?: () => void
   private stopped = false
   private reconciler: McpServerReconciler
@@ -531,13 +653,445 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   /**
-   * B2: Returns true once the CC initial-list startup block has finished.
-   * HostReconciler gates the replica scale-down decision on this flag so it
-   * never scales an existing live channel-reader to 0 based on a still-empty
-   * cache during startup.
+   * B2: Returns true while the CC cache is backed by a complete snapshot and
+   * its resourceVersion-continuing watch. HostReconciler gates scale-down and
+   * stateless eligibility on this flag.
    */
   isCommunicationChannelCacheSynced(): boolean {
     return this.ccCacheSynced
+  }
+
+  private installCommunicationChannelSnapshot(snapshot: CommunicationChannelSnapshot): void {
+    this.communicationChannels.clear()
+    for (const channel of snapshot.channels) {
+      this.communicationChannels.set(channel.name, channel)
+    }
+  }
+
+  private beginCommunicationChannelLifecycleTransition(): number {
+    this.ccLifecycleGeneration += 1
+    this.ccFleetRetryAttempt = 0
+    if (this.ccFleetRetryTimer) {
+      clearTimeout(this.ccFleetRetryTimer)
+      this.ccFleetRetryTimer = null
+    }
+    return this.ccLifecycleGeneration
+  }
+
+  private markCommunicationChannelLifecycleApplied(generation: number): void {
+    if (generation !== this.ccLifecycleGeneration) return
+    this.ccAppliedLifecycleGeneration = generation
+    this.ccFleetRetryAttempt = 0
+    if (this.ccFleetRetryTimer) {
+      clearTimeout(this.ccFleetRetryTimer)
+      this.ccFleetRetryTimer = null
+    }
+  }
+
+  private scheduleCommunicationChannelFleetRetry(request: HostFleetReconcileRequest): void {
+    const generation = request.ccLifecycleGeneration
+    if (generation === undefined) return
+    if (
+      this.stopped ||
+      generation !== this.ccLifecycleGeneration ||
+      generation === this.ccAppliedLifecycleGeneration ||
+      this.ccFleetRetryTimer
+    ) {
+      return
+    }
+    const delayIndex = Math.min(
+      this.ccFleetRetryAttempt,
+      COMMUNICATION_CHANNEL_FLEET_RETRY_DELAYS_MS.length - 1
+    )
+    const retryDelay = COMMUNICATION_CHANNEL_FLEET_RETRY_DELAYS_MS[delayIndex]
+    this.ccFleetRetryAttempt += 1
+    this.ccFleetRetryTimer = setTimeout(() => {
+      this.ccFleetRetryTimer = null
+      if (
+        this.stopped ||
+        generation !== this.ccLifecycleGeneration ||
+        generation === this.ccAppliedLifecycleGeneration
+      ) {
+        return
+      }
+      void this.requestHostFleetReconcile(
+        'CommunicationChannel lifecycle convergence retry',
+        generation,
+        request.mode
+      )
+    }, retryDelay)
+  }
+
+  /**
+   * Rebuild the channel cache from an authoritative list after startup or watch
+   * recovery. Until the paired watch is connected, keep stateless eligibility
+   * fail-closed; a partial stream cannot prove there are no channels.
+   */
+  private async recoverCommunicationChannelCache(): Promise<boolean> {
+    if (this.stopped) return false
+    if (this.ccCacheRecoveryInFlight) return this.ccCacheRecoveryInFlight
+    if (this.ccCacheRecoveryTimer) {
+      clearTimeout(this.ccCacheRecoveryTimer)
+      this.ccCacheRecoveryTimer = null
+    }
+
+    const recovery = (async (): Promise<boolean> => {
+      this.ccCacheSynced = false
+      try {
+        const snapshot = await listCommunicationChannelSnapshot()
+        if (this.stopped) return false
+        const watchGeneration = await this.restartCommunicationChannelWatch(snapshot)
+        if (
+          this.stopped ||
+          watchGeneration !== this.ccWatchGeneration ||
+          this.ccWatchRequest === null
+        ) {
+          return false
+        }
+        this.ccCacheSynced = true
+        const lifecycleGeneration = this.beginCommunicationChannelLifecycleTransition()
+        console.log(
+          `[K8s] Recovered ${snapshot.channels.length} CommunicationChannel(s) into cache ` +
+            '(ccCacheSynced=true)'
+        )
+        void this.requestHostFleetReconcile('CommunicationChannel recovery', lifecycleGeneration)
+        return true
+      } catch (error) {
+        console.error(
+          '[K8s] CommunicationChannel cache recovery failed; stateless lifecycle remains held active:',
+          error
+        )
+        return false
+      }
+    })()
+
+    this.ccCacheRecoveryInFlight = recovery
+    try {
+      return await recovery
+    } finally {
+      if (this.ccCacheRecoveryInFlight === recovery) {
+        this.ccCacheRecoveryInFlight = null
+      }
+      if (!this.stopped && !this.ccCacheSynced) {
+        this.scheduleCommunicationChannelCacheRecovery()
+      }
+    }
+  }
+
+  private scheduleCommunicationChannelCacheRecovery(): void {
+    if (this.stopped || this.ccCacheRecoveryTimer) return
+    this.ccCacheRecoveryTimer = setTimeout(() => {
+      this.ccCacheRecoveryTimer = null
+      void this.recoverCommunicationChannelCache()
+    }, COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS)
+  }
+
+  private clearAllHostWatchRetries(): void {
+    for (const timer of this.hostWatchRetryTimers.values()) clearTimeout(timer)
+    this.hostWatchRetryTimers.clear()
+    this.hostWatchRetryAttempts.clear()
+    this.latestHostWatchEventRevisions.clear()
+  }
+
+  private retireHostWatch(): void {
+    this.hostCacheSynced = false
+    this.hostWatchGeneration += 1
+    if (this.hostWatchRequest) {
+      this.hostWatchRequest.abort()
+      this.hostWatchRequest = null
+    }
+    this.clearAllHostWatchRetries()
+  }
+
+  private installHostSnapshot(snapshot: HostSnapshot): void {
+    this.hosts.clear()
+    for (const host of snapshot.hosts) this.hosts.set(host.name, host)
+  }
+
+  private async recoverHostInventoryAndWatch(): Promise<HostCRD[]> {
+    this.retireHostWatch()
+    const snapshot = await listHostSnapshot()
+    if (this.stopped) return []
+    if (!snapshot.resourceVersion) {
+      throw new Error('Host snapshot missing resourceVersion')
+    }
+
+    this.installHostSnapshot(snapshot)
+    const watchGeneration = await this.startHostWatch(snapshot.resourceVersion)
+    if (
+      this.stopped ||
+      watchGeneration !== this.hostWatchGeneration ||
+      this.hostWatchRequest === null
+    ) {
+      throw new Error('Host snapshot could not be paired with an active watch')
+    }
+
+    this.hostCacheSynced = true
+    if (this.hostCacheRecoveryTimer) {
+      clearTimeout(this.hostCacheRecoveryTimer)
+      this.hostCacheRecoveryTimer = null
+    }
+    return snapshot.hosts
+  }
+
+  private scheduleHostCacheRecovery(): void {
+    if (this.stopped || this.hostCacheRecoveryTimer) return
+    this.hostCacheRecoveryTimer = setTimeout(() => {
+      this.hostCacheRecoveryTimer = null
+      void this.requestHostFleetReconcile('Host watch recovery', undefined, 'full')
+    }, HOST_CACHE_RECOVERY_RETRY_MS)
+  }
+
+  private serializeHostConvergence<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.hostConvergenceTail.then(work)
+    this.hostConvergenceTail = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
+  }
+
+  private isCurrentHostWatchEvent(
+    type: HostWatchEventType,
+    host: HostCRD,
+    eventRevision: number
+  ): boolean {
+    if (this.latestHostWatchEventRevisions.get(host.name) !== eventRevision) return false
+    if (type === 'DELETED') return !this.hosts.has(host.name)
+    const current = this.hosts.get(host.name)
+    if (!current) return false
+    if (current.generation === undefined || host.generation === undefined) return true
+    return current.generation <= host.generation
+  }
+
+  private clearHostWatchRetry(name: string): void {
+    const timer = this.hostWatchRetryTimers.get(name)
+    if (timer) clearTimeout(timer)
+    this.hostWatchRetryTimers.delete(name)
+    this.hostWatchRetryAttempts.delete(name)
+  }
+
+  private completeHostWatchEvent(name: string, eventRevision: number): void {
+    if (this.latestHostWatchEventRevisions.get(name) !== eventRevision) return
+    this.clearHostWatchRetry(name)
+    this.latestHostWatchEventRevisions.delete(name)
+  }
+
+  private async reconcileHostWatchEvent(
+    type: HostWatchEventType,
+    host: HostCRD,
+    eventRevision: number
+  ): Promise<void> {
+    if (this.stopped || !this.isCurrentHostWatchEvent(type, host, eventRevision)) return
+    if (type === 'DELETED') {
+      await this.hostReconciler.reconcileDelete(host.name, host.namespace)
+    } else {
+      await this.hostReconciler.reconcile(host)
+    }
+  }
+
+  private scheduleHostWatchReconcileRetry(
+    type: HostWatchEventType,
+    host: HostCRD,
+    eventRevision: number
+  ): void {
+    if (
+      this.stopped ||
+      !this.isCurrentHostWatchEvent(type, host, eventRevision) ||
+      this.hostWatchRetryTimers.has(host.name)
+    ) {
+      return
+    }
+    const attempt = (this.hostWatchRetryAttempts.get(host.name) ?? 0) + 1
+    const retryDelay = HOST_WATCH_RECONCILE_RETRY_DELAYS_MS[attempt - 1]
+    if (retryDelay === undefined) {
+      console.error(
+        `[K8s] Host watch reconciliation retry exhausted for ${host.name} after ${HOST_WATCH_RECONCILE_RETRY_DELAYS_MS.length} attempts`
+      )
+      this.completeHostWatchEvent(host.name, eventRevision)
+      return
+    }
+
+    this.hostWatchRetryAttempts.set(host.name, attempt)
+    console.warn(
+      `[K8s] Scheduling Host watch reconciliation retry ${attempt}/${HOST_WATCH_RECONCILE_RETRY_DELAYS_MS.length} ` +
+        `for ${host.name} in ${retryDelay}ms`
+    )
+    const timer = setTimeout(() => {
+      this.hostWatchRetryTimers.delete(host.name)
+      void this.retryHostWatchReconcile(type, host, eventRevision)
+    }, retryDelay)
+    this.hostWatchRetryTimers.set(host.name, timer)
+  }
+
+  private async retryHostWatchReconcile(
+    type: HostWatchEventType,
+    host: HostCRD,
+    eventRevision: number
+  ): Promise<void> {
+    if (this.stopped || !this.isCurrentHostWatchEvent(type, host, eventRevision)) {
+      this.completeHostWatchEvent(host.name, eventRevision)
+      return
+    }
+    try {
+      await this.serializeHostConvergence(() =>
+        this.reconcileHostWatchEvent(type, host, eventRevision)
+      )
+      this.completeHostWatchEvent(host.name, eventRevision)
+    } catch (error) {
+      console.error(`[K8s] Host watch reconciliation retry failed for ${host.name}:`, error)
+      this.scheduleHostWatchReconcileRetry(type, host, eventRevision)
+    }
+  }
+
+  private performHostFleetReconcile(request: HostFleetReconcileRequest): Promise<void> {
+    return this.serializeHostConvergence(() => this.performHostFleetReconcileOnce(request))
+  }
+
+  private async performHostFleetReconcileOnce(request: HostFleetReconcileRequest): Promise<void> {
+    if (this.stopped) return
+    const { reason, mode, ccLifecycleGeneration } = request
+    if (
+      mode === 'lifecycle' &&
+      ccLifecycleGeneration !== undefined &&
+      ccLifecycleGeneration !== this.ccLifecycleGeneration
+    ) {
+      return
+    }
+    try {
+      let hosts: HostCRD[]
+      if (mode === 'full') {
+        hosts = await this.recoverHostInventoryAndWatch()
+        if (this.stopped) return
+        console.log(`[K8s] Reconciling ${hosts.length} Host(s) after ${reason}`)
+        await this.hostReconciler.fullReconcile(hosts)
+      } else {
+        // Lifecycle convergence consumes the resourceVersion-continuing Host
+        // cache and never runs destructive orphan cleanup. If continuity was
+        // lost, rebuild LIST -> WATCH first so no Host can be missed.
+        hosts = this.hostCacheSynced
+          ? [...this.hosts.values()]
+          : await this.recoverHostInventoryAndWatch()
+        if (
+          this.stopped ||
+          (ccLifecycleGeneration !== undefined &&
+            ccLifecycleGeneration !== this.ccLifecycleGeneration)
+        ) {
+          return
+        }
+        console.log(`[K8s] Reconciling ${hosts.length} Host(s) for lifecycle after ${reason}`)
+        await this.hostReconciler.reconcileHosts(hosts)
+      }
+      if (!this.stopped) {
+        if (ccLifecycleGeneration !== undefined) {
+          this.markCommunicationChannelLifecycleApplied(ccLifecycleGeneration)
+        }
+        console.log(`[K8s] Completed Host reconciliation after ${reason}`)
+      }
+    } catch (error) {
+      console.error(`[K8s] Host reconciliation after ${reason} failed:`, error)
+      if (!this.stopped && ccLifecycleGeneration !== undefined) {
+        if (error instanceof HostFleetReconcileError && error.hostFailures.length === 0) {
+          this.markCommunicationChannelLifecycleApplied(ccLifecycleGeneration)
+        } else {
+          // Retry Host convergence without coupling the lifecycle ladder to
+          // orphan cleanup. A later periodic full pass retries cleanup work.
+          this.scheduleCommunicationChannelFleetRetry({
+            ...request,
+            mode: error instanceof HostFleetReconcileError ? 'lifecycle' : request.mode,
+          })
+        }
+      }
+    } finally {
+      // The paired watch can end while fullReconcile is still active. Its
+      // timer may then be coalesced into this same pass, so every exit must
+      // re-arm recovery while inventory continuity remains unknown.
+      if (!this.stopped && !this.hostCacheSynced) {
+        this.scheduleHostCacheRecovery()
+      }
+    }
+  }
+
+  /**
+   * Cache transitions, periodic resyncs, and retries can request a fleet pass
+   * concurrently. Generic and covered same-generation requests reuse existing
+   * work; a full inventory pass queues behind lifecycle-only work when needed.
+   * Only the latest newer lifecycle generation may occupy one trailing slot.
+   * Each caller waits only for the pass that covers its request, so startup
+   * cannot be extended forever by a sustained retry stream.
+   */
+  private requestHostFleetReconcile(
+    reason: string,
+    ccLifecycleGeneration?: number,
+    mode?: HostFleetReconcileMode
+  ): Promise<void> {
+    if (this.stopped) return Promise.resolve()
+    const requestMode = mode ?? (ccLifecycleGeneration === undefined ? 'full' : 'lifecycle')
+    if (
+      ccLifecycleGeneration !== undefined &&
+      (ccLifecycleGeneration !== this.ccLifecycleGeneration ||
+        (requestMode === 'lifecycle' &&
+          ccLifecycleGeneration === this.ccAppliedLifecycleGeneration))
+    ) {
+      return Promise.resolve()
+    }
+
+    const request: HostFleetReconcileRequest = {
+      reason,
+      mode: requestMode,
+      ccLifecycleGeneration,
+    }
+    const active = this.hostFleetReconcileInFlight
+    if (!active) {
+      return this.waitForHostFleetOrShutdown(this.startHostFleetReconcile(request))
+    }
+    if (hostFleetRequestCovers(active, request)) {
+      return this.waitForHostFleetOrShutdown(active.promise)
+    }
+
+    if (!this.hostFleetReconcilePending) {
+      let resolve!: () => void
+      const promise = new Promise<void>(resolvePromise => {
+        resolve = resolvePromise
+      })
+      this.hostFleetReconcilePending = {
+        ...request,
+        promise,
+        resolve,
+      }
+    } else {
+      const merged = mergeHostFleetRequests(this.hostFleetReconcilePending, request)
+      this.hostFleetReconcilePending.reason = merged.reason
+      this.hostFleetReconcilePending.mode = merged.mode
+      this.hostFleetReconcilePending.ccLifecycleGeneration = merged.ccLifecycleGeneration
+    }
+    return this.waitForHostFleetOrShutdown(this.hostFleetReconcilePending.promise)
+  }
+
+  private waitForHostFleetOrShutdown(coverage: Promise<void>): Promise<void> {
+    return Promise.race([coverage, this.hostFleetShutdown])
+  }
+
+  private startHostFleetReconcile(request: HostFleetReconcileRequest): Promise<void> {
+    const promise = this.performHostFleetReconcile(request)
+    const active: ActiveHostFleetReconcile = { ...request, promise }
+    this.hostFleetReconcileInFlight = active
+
+    const settle = () => {
+      if (this.hostFleetReconcileInFlight !== active) return
+      this.hostFleetReconcileInFlight = null
+      const pending = this.hostFleetReconcilePending
+      this.hostFleetReconcilePending = null
+      if (!pending) return
+      if (this.stopped) {
+        pending.resolve()
+        return
+      }
+      const trailing = this.startHostFleetReconcile(pending)
+      void trailing.then(pending.resolve, pending.resolve)
+    }
+    void promise.then(settle, settle)
+    return promise
   }
 
   private contextsReferencingSfs(sfsName: string): Array<{ namespace: string; name: string }> {
@@ -646,16 +1200,18 @@ export class McpServerWatcher implements McpServerProvider {
    * No-op when the Host is unknown (CC arrived before Host CRD, or for a
    * Host that has been deleted). The next fullReconcile recovers.
    *
-   * Errors are logged and swallowed — the CC watch must continue running
-   * even if one Host reconcile fails.
+   * Errors are logged and reported as `false` so the watch remains alive while
+   * its caller schedules bounded fleet convergence.
    */
-  private async reconcileHostsReferencingCC(hostRef: string): Promise<void> {
+  private async reconcileHostsReferencingCC(hostRef: string): Promise<boolean> {
     const host = this.hosts.get(hostRef)
-    if (!host) return
+    if (!host) return true
     try {
       await this.hostReconciler.reconcile(host)
+      return true
     } catch (err) {
       console.error(`[K8s] Host re-reconcile after CC change failed for "${host.name}":`, err)
+      return false
     }
   }
 
@@ -732,6 +1288,14 @@ export class McpServerWatcher implements McpServerProvider {
    */
   getHostReconciler(): HostReconciler {
     return this.hostReconciler
+  }
+
+  /**
+   * Look up a cached Host CRD by name (Stage 3: the stateless lifecycle
+   * tracker resolves the heartbeat's hostRef through this).
+   */
+  getHost(name: string): HostCRD | undefined {
+    return this.hosts.get(name)
   }
 
   /**
@@ -891,50 +1455,64 @@ export class McpServerWatcher implements McpServerProvider {
       )
     }
 
-    // ── CommunicationChannel initial load — MUST complete before Host fullReconcile ──
-    // (B2) HostReconciler.buildChannelReaderDeployment gates the replica scale-down
-    // decision on ccCacheSyncedFn(). If the flag is false (cache not yet loaded),
-    // the B2 gate preserves existing Deployment replicas rather than scaling to 0.
-    // Setting ccCacheSynced=true HERE — synchronously, before the Host try/catch
-    // below — guarantees that the first fullReconcile sees a correct CC count and
-    // can safely apply the normal ccCount > 0 ? 1 : 0 logic.
-    //
-    // Failure path: if the CC list fails, ccCacheSynced stays false and every
-    // subsequent buildChannelReaderDeployment on the 409 path will preserve the
-    // existing Deployment replicas (Task 4 gate). The Host reconcile still runs
-    // (it is outside this try/catch) so mcp-host pods are not blocked.
+    // ── CommunicationChannel snapshot + watch — MUST complete before Host fullReconcile ──
+    // A stateless Host may suspend only after this controller has a complete
+    // CommunicationChannel snapshot and a watch continuing from that snapshot's
+    // resourceVersion. A raw watch cannot prove it saw pre-existing channels.
+    let initialCCSnapshot: CommunicationChannelSnapshot | undefined
     try {
-      const initialCCs = await listAllCommunicationChannels()
-      for (const cc of initialCCs) {
-        this.communicationChannels.set(cc.name, cc)
-      }
-      this.ccCacheSynced = true
-      console.log(
-        `[K8s] Loaded ${initialCCs.length} CommunicationChannel(s) into cache (ccCacheSynced=true)`
-      )
+      initialCCSnapshot = await listCommunicationChannelSnapshot()
+      this.installCommunicationChannelSnapshot(initialCCSnapshot)
     } catch (error) {
       console.error(
         '[K8s] CommunicationChannel initial load failed; ccCacheSynced remains false ' +
-          '(B2 will preserve existing channel-reader replicas):',
+          '(B2 preserves channel-reader replicas and holds stateless lifecycle active):',
         error
       )
+    }
+    try {
+      const watchGeneration = await this.startCommunicationChannelWatch(
+        initialCCSnapshot?.resourceVersion
+      )
+      if (
+        initialCCSnapshot?.resourceVersion &&
+        watchGeneration === this.ccWatchGeneration &&
+        this.ccWatchRequest !== null
+      ) {
+        this.ccCacheSynced = true
+        console.log(
+          `[K8s] Loaded ${initialCCSnapshot.channels.length} CommunicationChannel(s) into cache ` +
+            '(ccCacheSynced=true)'
+        )
+      } else if (initialCCSnapshot) {
+        console.error(
+          '[K8s] CommunicationChannel snapshot could not be paired with an active watch; ' +
+            'ccCacheSynced remains false'
+        )
+      }
+    } catch (error) {
+      this.ccCacheSynced = false
+      console.error(
+        '[K8s] CommunicationChannel watch failed to start; ccCacheSynced remains false:',
+        error
+      )
+    }
+    if (!this.ccCacheSynced) {
+      this.scheduleCommunicationChannelCacheRecovery()
     }
 
-    try {
-      const initialHosts = await listAllHosts()
-      for (const host of initialHosts) {
-        this.hosts.set(host.name, host)
-      }
-      console.log(
-        `[K8s] Running initial Host reconciliation... (ccCacheSynced=${this.ccCacheSynced})`
-      )
-      await this.hostReconciler.fullReconcile(initialHosts)
-    } catch (error) {
-      console.error(
-        '[K8s] Skipping initial Host reconciliation because host discovery failed:',
-        error
-      )
-    }
+    console.log(
+      `[K8s] Running initial Host reconciliation... (ccCacheSynced=${this.ccCacheSynced})`
+    )
+    const initialLifecycleGeneration =
+      this.ccLifecycleGeneration === 0
+        ? this.beginCommunicationChannelLifecycleTransition()
+        : this.ccLifecycleGeneration
+    await this.requestHostFleetReconcile(
+      'initial Host reconciliation',
+      initialLifecycleGeneration,
+      'full'
+    )
 
     // ── SharedFileSystem initial load + reconciliation ──
     try {
@@ -969,10 +1547,8 @@ export class McpServerWatcher implements McpServerProvider {
 
     await this.startMcpServerWatch()
     await this.startContextWatch()
-    await this.startHostWatch()
     await this.startSharedFileSystemWatch()
     await this.startGlobalFileSystemWatch()
-    await this.startCommunicationChannelWatch()
 
     const resyncSec = config.hostResyncIntervalSec
     if (resyncSec > 0) {
@@ -1167,8 +1743,8 @@ export class McpServerWatcher implements McpServerProvider {
 
       // Reconcile the affected Host(s). For MODIFIED with hostRef change,
       // reconcile both. Duplicate reconciles for the same hostRef are
-      // collapsed via a Set. reconcileHostsReferencingCC is no-throw
-      // (handles its own errors) so the watch loop stays alive.
+      // collapsed via a Set. reconcileHostsReferencingCC is no-throw and
+      // reports failures so the watch loop stays alive while recovery is queued.
       //
       // Additionally patch the per-Host channel-reader Deployment's
       // credentials-revision annotation so the pod rolls when its CC set
@@ -1179,8 +1755,11 @@ export class McpServerWatcher implements McpServerProvider {
       if (previousHostRef && previousHostRef !== cc.spec.hostRef) {
         affectedHostRefs.add(previousHostRef)
       }
+      let needsFleetRetry = false
       for (const hostRef of affectedHostRefs) {
-        await this.reconcileHostsReferencingCC(hostRef)
+        if (!(await this.reconcileHostsReferencingCC(hostRef))) {
+          needsFleetRetry = true
+        }
         try {
           await this.hostReconciler.patchChannelReaderRevisionAnnotation(hostRef)
         } catch (err) {
@@ -1188,7 +1767,16 @@ export class McpServerWatcher implements McpServerProvider {
             `[K8s] channel-reader revision patch after CC change failed for "${hostRef}":`,
             err
           )
+          needsFleetRetry = true
         }
+      }
+      if (needsFleetRetry) {
+        const lifecycleGeneration = this.beginCommunicationChannelLifecycleTransition()
+        void this.requestHostFleetReconcile(
+          'CommunicationChannel event convergence fallback',
+          lifecycleGeneration,
+          'lifecycle'
+        )
       }
     }
   }
@@ -1200,35 +1788,114 @@ export class McpServerWatcher implements McpServerProvider {
    * HostReconciler.countCommunicationChannels (#281). Mirrors the
    * SharedFileSystem watch — auto-restart on disconnect.
    */
-  private async startCommunicationChannelWatch(): Promise<void> {
+  private async startCommunicationChannelWatch(resourceVersion?: string): Promise<number> {
+    const watchGeneration = ++this.ccWatchGeneration
+    await this.openCommunicationChannelWatch(resourceVersion, watchGeneration)
+    return watchGeneration
+  }
+
+  private async restartCommunicationChannelWatch(
+    snapshot: CommunicationChannelSnapshot
+  ): Promise<number> {
+    if (!snapshot.resourceVersion) {
+      throw new Error('CommunicationChannel snapshot missing resourceVersion')
+    }
+    const watchGeneration = ++this.ccWatchGeneration
+    if (this.ccWatchRequest) {
+      this.ccWatchRequest.abort()
+      this.ccWatchRequest = null
+    }
+    this.installCommunicationChannelSnapshot(snapshot)
+    await this.openCommunicationChannelWatch(snapshot.resourceVersion, watchGeneration)
+    return watchGeneration
+  }
+
+  private async openCommunicationChannelWatch(
+    resourceVersion: string | undefined,
+    watchGeneration: number
+  ): Promise<void> {
     const path = `/apis/${GROUP}/${VERSION}/namespaces/${config.channelsNamespace}/${PLURAL_COMMUNICATIONCHANNELS}`
     console.log(`[K8s] Starting CommunicationChannel watch`)
 
-    const watchCallback = this.getCommunicationChannelWatchCallback()
+    let watchEnded = false
+    const applyWatchEvent = this.getCommunicationChannelWatchCallback()
+    const watchCallback = async (
+      type: string,
+      apiObj: {
+        metadata: { name: string; namespace?: string }
+        spec: { hostRef: string; credentialsSecretRef?: { name: string } }
+      }
+    ) => {
+      if (watchEnded || this.stopped || watchGeneration !== this.ccWatchGeneration) return
+      await applyWatchEvent(type, apiObj)
+    }
 
     const doneCallback = (err: Error | null) => {
-      if (this.stopped) return
+      if (watchEnded || this.stopped || watchGeneration !== this.ccWatchGeneration) return
+      watchEnded = true
+      this.ccWatchRequest = null
+      this.ccCacheSynced = false
+      const lifecycleGeneration = this.beginCommunicationChannelLifecycleTransition()
       if (err) {
         console.error('[K8s] CommunicationChannel watch error:', err)
       }
-      console.log('[K8s] CommunicationChannel watch ended, restarting...')
-      setTimeout(() => this.startCommunicationChannelWatch(), err ? 5000 : 1000)
+      console.log(
+        '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery'
+      )
+      void this.requestHostFleetReconcile(
+        'CommunicationChannel watch interruption',
+        lifecycleGeneration
+      )
+      this.scheduleCommunicationChannelCacheRecovery()
     }
 
-    this.ccWatchRequest = await this.watch.watch(path, {}, watchCallback, doneCallback)
+    const request = await this.watch.watch(
+      path,
+      resourceVersion ? { resourceVersion } : {},
+      watchCallback,
+      doneCallback
+    )
+    if (this.stopped || watchGeneration !== this.ccWatchGeneration || watchEnded) {
+      request.abort()
+      if (!this.stopped && watchGeneration === this.ccWatchGeneration && watchEnded) {
+        throw new Error('CommunicationChannel watch ended before request initialization completed')
+      }
+      return
+    }
+    this.ccWatchRequest = request
   }
 
-  private async runHostResync(): Promise<void> {
-    if (this.stopped) return
-    try {
-      const hosts = await listAllHosts()
-      this.hosts.clear()
-      for (const h of hosts) this.hosts.set(h.name, h)
-      console.log(`[K8s] Periodic resync: reconciling ${hosts.length} Host(s)`)
-      await this.hostReconciler.fullReconcile(hosts)
-    } catch (error) {
-      console.error('[K8s] Periodic Host resync failed:', error)
+  private runHostResync(): Promise<void> {
+    if (this.stopped) return Promise.resolve()
+    if (this.hostResyncInFlight) return this.hostResyncInFlight
+
+    const run = this.performHostResync()
+    this.hostResyncInFlight = run
+    const settle = () => {
+      if (this.hostResyncInFlight === run) this.hostResyncInFlight = null
     }
+    void run.then(settle, settle)
+    return run
+  }
+
+  private async performHostResync(): Promise<void> {
+    if (!this.ccCacheSynced) {
+      await this.recoverCommunicationChannelCache()
+      return
+    }
+    const pendingLifecycleGeneration =
+      this.ccLifecycleGeneration !== this.ccAppliedLifecycleGeneration
+        ? this.ccLifecycleGeneration
+        : undefined
+    if (pendingLifecycleGeneration !== undefined) {
+      await this.requestHostFleetReconcile(
+        'Periodic lifecycle convergence',
+        pendingLifecycleGeneration,
+        'lifecycle'
+      )
+      if (this.ccAppliedLifecycleGeneration !== pendingLifecycleGeneration) return
+    }
+    await this.requestHostFleetReconcile('Periodic resync', undefined, 'full')
   }
 
   /**
@@ -1678,49 +2345,92 @@ export class McpServerWatcher implements McpServerProvider {
   /**
    * Start watching Host CRDs for runtime reconciliation.
    */
-  private async startHostWatch(): Promise<void> {
+  private async startHostWatch(resourceVersion: string): Promise<number> {
+    if (!resourceVersion) {
+      throw new Error('Host watch requires a snapshot resourceVersion')
+    }
     const path = `/apis/${GROUP}/${VERSION}/namespaces/${config.hostNamespace}/${PLURAL_HOSTS}`
+    const watchGeneration = ++this.hostWatchGeneration
+    if (this.hostWatchRequest) {
+      this.hostWatchRequest.abort()
+      this.hostWatchRequest = null
+    }
     console.log(`[K8s] Starting Host watch`)
+    let watchEnded = false
 
     const watchCallback = async (
       type: string,
-      apiObj: { metadata: { name: string; namespace?: string }; spec: HostSpec }
+      apiObj: {
+        metadata: {
+          name: string
+          namespace?: string
+          generation?: number
+          resourceVersion?: string
+          annotations?: Record<string, string>
+        }
+        spec: HostSpec
+        status?: HostCRD['status']
+      }
     ) => {
+      if (watchEnded || this.stopped || watchGeneration !== this.hostWatchGeneration) return
       const host: HostCRD = {
         name: apiObj.metadata.name,
         namespace: apiObj.metadata.namespace || config.hostNamespace,
+        generation: apiObj.metadata.generation,
+        resourceVersion: apiObj.metadata.resourceVersion,
+        annotations: apiObj.metadata.annotations,
         spec: apiObj.spec,
+        status: apiObj.status,
       }
 
       console.log(`[K8s] Host watch event: ${type} for ${host.name}`)
 
-      if (type === 'ADDED' || type === 'MODIFIED') {
+      if (type !== 'ADDED' && type !== 'MODIFIED' && type !== 'DELETED') return
+      const eventType: HostWatchEventType = type
+      this.clearHostWatchRetry(host.name)
+      const eventRevision = ++this.hostWatchRevision
+      this.latestHostWatchEventRevisions.set(host.name, eventRevision)
+      if (eventType === 'ADDED' || eventType === 'MODIFIED') {
         this.hosts.set(host.name, host)
-      } else if (type === 'DELETED') {
+      } else {
         this.hosts.delete(host.name)
       }
 
       try {
-        if (type === 'ADDED' || type === 'MODIFIED') {
-          await this.hostReconciler.reconcile(host)
-        } else if (type === 'DELETED') {
-          await this.hostReconciler.reconcileDelete(host.name, host.namespace)
-        }
+        await this.serializeHostConvergence(() =>
+          this.reconcileHostWatchEvent(eventType, host, eventRevision)
+        )
+        this.completeHostWatchEvent(host.name, eventRevision)
       } catch (error) {
         console.error(`[K8s] Host reconciliation failed for ${host.name}:`, error)
+        this.scheduleHostWatchReconcileRetry(eventType, host, eventRevision)
       }
     }
 
     const doneCallback = (err: Error | null) => {
-      if (this.stopped) return
+      if (watchEnded || this.stopped || watchGeneration !== this.hostWatchGeneration) return
+      watchEnded = true
+      this.hostWatchRequest = null
+      this.hostCacheSynced = false
+      this.hostWatchGeneration += 1
+      this.clearAllHostWatchRetries()
       if (err) {
         console.error('[K8s] Host watch error:', err)
       }
-      console.log('[K8s] Host watch ended, restarting...')
-      setTimeout(() => this.startHostWatch(), err ? 5000 : 1000)
+      console.log('[K8s] Host watch ended; rebuilding the Host snapshot before watch recovery')
+      this.scheduleHostCacheRecovery()
     }
 
-    this.hostWatchRequest = await this.watch.watch(path, {}, watchCallback, doneCallback)
+    const request = await this.watch.watch(path, { resourceVersion }, watchCallback, doneCallback)
+    if (this.stopped || watchGeneration !== this.hostWatchGeneration || watchEnded) {
+      request.abort()
+      if (!this.stopped && watchGeneration !== this.hostWatchGeneration && watchEnded) {
+        throw new Error('Host watch ended before request initialization completed')
+      }
+      return watchGeneration
+    }
+    this.hostWatchRequest = request
+    return watchGeneration
   }
 
   /**
@@ -1728,6 +2438,26 @@ export class McpServerWatcher implements McpServerProvider {
    */
   stop(): void {
     this.stopped = true
+    this.ccCacheSynced = false
+    this.hostCacheSynced = false
+    this.hostWatchGeneration += 1
+    this.ccWatchGeneration += 1
+    this.resolveHostFleetShutdown()
+    this.hostFleetReconcilePending?.resolve()
+    this.hostFleetReconcilePending = null
+    if (this.ccCacheRecoveryTimer) {
+      clearTimeout(this.ccCacheRecoveryTimer)
+      this.ccCacheRecoveryTimer = null
+    }
+    if (this.ccFleetRetryTimer) {
+      clearTimeout(this.ccFleetRetryTimer)
+      this.ccFleetRetryTimer = null
+    }
+    if (this.hostCacheRecoveryTimer) {
+      clearTimeout(this.hostCacheRecoveryTimer)
+      this.hostCacheRecoveryTimer = null
+    }
+    this.clearAllHostWatchRetries()
     if (this.resyncTimer) {
       clearInterval(this.resyncTimer)
       this.resyncTimer = null

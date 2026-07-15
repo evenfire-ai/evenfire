@@ -4,7 +4,7 @@ import type {
 } from '@/app/types/approvalChannels'
 
 export type TelegramVerificationPanelProps = {
-  medium?: 'telegram' | 'slack'
+  medium?: 'telegram' | 'slack' | 'teams'
   targets: ApprovalChannelTarget[]
   accounts: WorkflowApprovalMediumAccount[]
   disabled: boolean

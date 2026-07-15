@@ -45,6 +45,11 @@ export type Metadata = {
   namespace?: string
   labels?: Record<string, string>
   annotations?: Record<string, string>
+  /**
+   * Server-assigned version of the read. Carried back on save as the AP-6
+   * optimistic-concurrency precondition (docs/architecture/stateless-invariants.md).
+   */
+  resourceVersion?: string
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'
@@ -628,9 +633,24 @@ export type ContextResource = {
   spec?: ContextSpec
   status?: { sharedFileSystems?: ContextSharedFileSystemStatus[] }
 }
+export type HostLifecycleSpec = { stateless?: boolean }
+export type HostStatusCondition = {
+  type?: string
+  status?: string
+  reason?: string
+  message?: string
+}
 export type HostResource = {
   metadata?: Metadata
-  spec?: AnyRecord & { contextRef?: string; model?: { provider?: string; name?: string } }
+  spec?: AnyRecord & {
+    contextRef?: string
+    model?: { provider?: string; name?: string }
+    lifecycle?: HostLifecycleSpec
+  }
+  status?: AnyRecord & {
+    lifecycle?: { state?: string; reason?: string }
+    conditions?: HostStatusCondition[]
+  }
 }
 export type McpServerResource = {
   metadata?: Metadata
@@ -899,21 +919,29 @@ export function sfsDownloadUrl(sfsName: string, relPath: string): string {
   return `${base}${sfsProxyUrl(sfsName, '/download')}${q}`
 }
 
-async function sfsFetchFileBlob(sfsName: string, relPath: string): Promise<Blob> {
-  const resp = await fetch(sfsDownloadUrl(sfsName, relPath), {
-    credentials: 'include',
-  })
+async function fetchAuthenticatedFileBlob(url: string): Promise<Blob> {
+  const resp = await fetch(url, { credentials: 'include' })
   if (!resp.ok) {
+    if (resp.status === 401) handleUnauthorized()
     let msg = `Download failed (${resp.status})`
     try {
-      const body = await resp.json()
-      if (body?.error) msg = String(body.error)
+      const body = (await resp.json()) as {
+        error?: string | { message?: string; code?: string }
+      }
+      if (typeof body.error === 'string') msg = body.error
+      else if (body.error?.message || body.error?.code) {
+        msg = body.error.message || body.error.code || msg
+      }
     } catch {
       /* ignore */
     }
     throw new Error(msg)
   }
   return resp.blob()
+}
+
+async function sfsFetchFileBlob(sfsName: string, relPath: string): Promise<Blob> {
+  return fetchAuthenticatedFileBlob(sfsDownloadUrl(sfsName, relPath))
 }
 
 function sfsFileName(relPath: string): string {
@@ -954,7 +982,7 @@ function sfsBrowserCanPreview(blob: Blob, fileName: string): boolean {
   )
 }
 
-function sfsTriggerBlobDownload(blob: Blob, fileName: string): void {
+function triggerBlobDownload(blob: Blob, fileName: string): void {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -973,7 +1001,7 @@ function sfsTriggerBlobDownload(blob: Blob, fileName: string): void {
  */
 export async function sfsDownload(sfsName: string, relPath: string): Promise<void> {
   const blob = await sfsFetchFileBlob(sfsName, relPath)
-  sfsTriggerBlobDownload(blob, sfsFileName(relPath))
+  triggerBlobDownload(blob, sfsFileName(relPath))
 }
 
 export async function sfsOpenOrDownload(
@@ -986,7 +1014,7 @@ export async function sfsOpenOrDownload(
 
   if (!targetWindow || targetWindow.closed || !sfsBrowserCanPreview(blob, fileName)) {
     if (targetWindow && !targetWindow.closed) targetWindow.close()
-    sfsTriggerBlobDownload(blob, fileName)
+    triggerBlobDownload(blob, fileName)
     return
   }
 
@@ -1048,6 +1076,31 @@ export async function sfsUpload(
     throw new Error(`${res.status} ${res.statusText} - ${detail}`)
   }
   return res.json()
+}
+
+// ── Global File System file download (operator content proxy) ────────────────
+// Mirrors sfsDownload: the operator proxy streams raw bytes from
+// GET /api/v1/gfs/proxy/v1/resources/:rid/content (gfsc serveContent). gfsc does
+// NOT set Content-Disposition, so the browser can't infer the filename — callers
+// pass child.name explicitly. Auth is the same HttpOnly admin cookie the rest of
+// control-ui sends (credentials: 'include'); it cannot be a plain <a href>.
+export function gfsDownloadUrl(rid: string): string {
+  const base = process.env.NEXT_PUBLIC_CONTROL_API_BASE_URL || '/control-api'
+  return `${base}/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(rid)}/content`
+}
+
+async function gfsFetchFileBlob(rid: string): Promise<Blob> {
+  return fetchAuthenticatedFileBlob(gfsDownloadUrl(rid))
+}
+
+/**
+ * Trigger a browser download of a single GFS file. Fetches the raw content
+ * through the operator-scoped GFS proxy with the admin session cookie,
+ * materializes a Blob, and clicks a temporary anchor pointing at the object URL.
+ */
+export async function gfsDownload(rid: string, fileName: string): Promise<void> {
+  const blob = await gfsFetchFileBlob(rid)
+  triggerBlobDownload(blob, fileName)
 }
 
 export type EnvVar = { name: string; value: string }
@@ -2931,7 +2984,6 @@ async function registryCodedRequest(
     body: body ? JSON.stringify(body) : undefined,
   })
   if (!res.ok) {
-    if (res.status === 401) handleUnauthorized() // genuine session-expiry only (registry 401 → 502 server-side)
     let code = ''
     let org: string | undefined
     try {
@@ -2941,6 +2993,13 @@ async function registryCodedRequest(
     } catch {
       /* no body */
     }
+    // A 401 is a genuine session-expiry (→ force re-auth) UNLESS it carries the
+    // connect-claim endpoint's `claim_rejected` overload: control-api maps the
+    // registry's invalid_pop / invalid_claim_token to 401 { error:'claim_rejected' }
+    // so the operator sees an inline "token was rejected" message instead of being
+    // bounced to login. Every other 401 (Unauthorized / unauthorized) means the
+    // session is gone. (Registry keys 401 → 502 server-side, so never reaches here.)
+    if (res.status === 401 && code !== 'claim_rejected') handleUnauthorized()
     const error = new Error(`${res.status} ${code || res.statusText}`) as Error & {
       status?: number
       code?: string
@@ -2972,4 +3031,57 @@ export async function createRegistryApiKey(
 }
 export async function revokeRegistryApiKey(id: string): Promise<void> {
   await registryCodedRequest('DELETE', `/api/v1/admin/registry/keys/${encodeURIComponent(id)}`)
+}
+
+// ─── Self-hosted registry connect flow (spec §6.1/§6.3) ───────────────────────
+// Drives control-api's /api/v1/admin/registry/connect endpoints (Plan A1 Task 7,
+// control-api/src/routes/admin/registryConnect.ts). GET polls the registry status
+// endpoint, so state ∈ disconnected|pending|approved|rejected|connected — the panel
+// renders one view per state. Uses registryCodedRequest so it can branch on err.code
+// (not_self_hosted, already_connected, not_pending, claim_expired, claim_rejected).
+//
+// GET fields by state: connected → { deploymentId, org }; pending/approved/rejected
+// → { deploymentId, requestedOrgName }; disconnected → {}. All fields optional below.
+// There is NO rejection_reason in the contract.
+
+export type RegistryConnectionState =
+  | 'disconnected'
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'connected'
+export type RegistryConnectionStatus = {
+  state: RegistryConnectionState
+  deploymentId?: string
+  requestedOrgName?: string
+  org?: string
+}
+
+export async function getRegistryConnection(): Promise<RegistryConnectionStatus> {
+  return registryCodedRequest(
+    'GET',
+    '/api/v1/admin/registry/connect'
+  ) as Promise<RegistryConnectionStatus>
+}
+
+export async function requestRegistryConnection(input: {
+  requestedOrgName: string
+  contactEmail: string
+}): Promise<RegistryConnectionStatus> {
+  return registryCodedRequest('POST', '/api/v1/admin/registry/connect/request', {
+    requested_org_name: input.requestedOrgName,
+    contact_email: input.contactEmail,
+  }) as Promise<RegistryConnectionStatus>
+}
+
+export async function submitRegistryClaim(input: {
+  claimToken: string
+}): Promise<{ state: 'connected'; org: string }> {
+  return registryCodedRequest('POST', '/api/v1/admin/registry/connect/claim', {
+    claim_token: input.claimToken,
+  }) as Promise<{ state: 'connected'; org: string }>
+}
+
+export async function disconnectRegistryConnection(): Promise<void> {
+  await registryCodedRequest('DELETE', '/api/v1/admin/registry/connect')
 }

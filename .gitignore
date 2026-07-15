@@ -2,7 +2,9 @@
 .env.*
 !.env.example
 !.env.test
+!.env.e2e.example
 !.env.dev.example
+!.env.quickstart.example
 .env.local
 .env.dev
 .env.prod

@@ -22,7 +22,7 @@ spec:
       schema:
         openAPIV3Schema:
           type: object
-          description: CommunicationChannel defines one or more communication channel groups (Telegram, Email, Slack) with agent-scoped access grants.
+          description: CommunicationChannel defines one or more communication channel groups (Telegram, Email, Slack, Teams) with agent-scoped access grants.
           properties:
             spec:
               type: object
@@ -38,7 +38,8 @@ spec:
                   description: |
                     Secret in the `channels` namespace holding provider credentials for this CC.
                     Channel-reader reads these keys at runtime by channel type:
-                      telegram-bot-token, slack-bot-token, email-username, email-password.
+                      telegram-bot-token, slack-bot-token, teams-app-password,
+                      email-username, email-password.
                     Slack app setup also stores slack-signing-secret for signed
                     Events and Interactivity callbacks.
                     Auto-created and named `cc-<ccname>-credentials` when credentials are
@@ -173,6 +174,12 @@ spec:
                         type: string
                         pattern: '^T[A-Z0-9]+$'
                         description: Slack workspace/team ID used for stable identity.
+                      conversationType:
+                        type: string
+                        description: Slack conversation type captured at setup.
+                      title:
+                        type: string
+                        description: Slack conversation title captured at setup.
                       userIds:
                         type: array
                         description: Allowed Slack user IDs for this group. Required for workflow approval decisions.
@@ -212,6 +219,77 @@ spec:
                       description: >
                         If true, Slack app responses are posted in a thread for the triggering
                         message and follow-up messages in that thread continue there.
+                teams:
+                  type: array
+                  description: >
+                    List of confirmed Microsoft Teams conversations. Workflow approval decisions
+                    require stable Teams user IDs, tenant ID, and conversation ID.
+                  items:
+                    type: object
+                    required:
+                      - channelId
+                      - tenantId
+                    properties:
+                      channelId:
+                        type: string
+                        description: Teams conversation ID from the Bot Framework activity.
+                      tenantId:
+                        type: string
+                        pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                        description: Microsoft Entra tenant ID for this Teams conversation.
+                      serviceUrl:
+                        type: string
+                        description: Bot Framework service URL captured from the activity.
+                      conversationType:
+                        type: string
+                        description: Teams conversation type such as personal, groupChat, or channel.
+                      teamId:
+                        type: string
+                        description: Teams team ID when the conversation belongs to a team channel.
+                      teamsChannelId:
+                        type: string
+                        description: Teams channel ID when the conversation belongs to a team channel.
+                      userIds:
+                        type: array
+                        description: Allowed Teams user IDs for this conversation.
+                        minItems: 1
+                        items:
+                          type: string
+                      title:
+                        type: string
+                        description: Teams conversation title captured at setup.
+                      confirmedByUserId:
+                        type: string
+                        description: Clerum user id that confirmed this conversation.
+                      confirmedAt:
+                        type: string
+                        format: date-time
+                        description: Time this conversation was confirmed.
+                      replyInThreads:
+                        type: boolean
+                        description: >
+                          If false, Teams bot responses are posted at the conversation root.
+                          Missing values default to replying in the source thread.
+                teamsSettings:
+                  type: object
+                  description: >
+                    Public Microsoft Teams app metadata and global bot behavior for conversations
+                    confirmed later. The app client secret stays in credentialsSecretRef.
+                  properties:
+                    appName:
+                      type: string
+                      description: Teams app or bot name shown during user setup.
+                    tenantId:
+                      type: string
+                      pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                      description: Microsoft Entra tenant ID for the Teams bot.
+                    appId:
+                      type: string
+                      pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                      description: Microsoft app/client ID for the Teams bot.
+                    replyOnlyWhenMentioned:
+                      type: boolean
+                      description: If true, process Teams messages only when the bot is mentioned.
       additionalPrinterColumns:
         - name: Host
           type: string
@@ -228,5 +306,9 @@ spec:
           type: integer
           jsonPath: .spec.slack
           description: Number of Slack groups
+        - name: Teams Groups
+          type: integer
+          jsonPath: .spec.teams
+          description: Number of Teams conversations
       subresources:
         status: {}

@@ -3,16 +3,18 @@ import { getVerifiedMediumAccountById } from './workflowApprovalMediumIdentitySe
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+type WorkflowApprovalNotificationMedium = 'telegram' | 'slack' | 'teams'
+
 export type UserNotificationPreferences = {
-  preferredMedium: 'telegram' | 'slack' | null
+  preferredMedium: WorkflowApprovalNotificationMedium | null
   preferredAccountId: string | null
   channelFallbackEnabled: boolean
-  verifiedMedia: Array<'telegram' | 'slack'>
+  verifiedMedia: WorkflowApprovalNotificationMedium[]
 }
 
-function normalizePreferredMedium(value: unknown): 'telegram' | 'slack' | null {
+function normalizePreferredMedium(value: unknown): WorkflowApprovalNotificationMedium | null {
   const medium = typeof value === 'string' ? value.trim().toLowerCase() : ''
-  if (medium === 'telegram' || medium === 'slack') return medium
+  if (medium === 'telegram' || medium === 'slack' || medium === 'teams') return medium
   return null
 }
 
@@ -48,7 +50,7 @@ export async function getUserNotificationPreferences(
     | undefined
   const verifiedMedia = (mediaResult.rows as Array<{ medium: string | null }>)
     .map(row => normalizePreferredMedium(row.medium))
-    .filter((medium): medium is 'telegram' | 'slack' => medium !== null)
+    .filter((medium): medium is WorkflowApprovalNotificationMedium => medium !== null)
 
   return {
     preferredMedium: normalizePreferredMedium(prefsRow?.preferredMedium),

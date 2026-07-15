@@ -26,6 +26,7 @@ import type { WorkflowRecipeListResult } from '../../../../src/types'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
 import { AnnotationCanvas } from './AnnotationCanvas'
 import { ComposerAgentFilesModal } from './ComposerAgentFilesModal'
+import { ComposerGlobalFilesModal } from './ComposerGlobalFilesModal'
 
 type ComposerPanelProps = {
   inline?: boolean
@@ -35,6 +36,7 @@ type ComposerPanelProps = {
 function getComposerReferenceTypeLabel(type: ComposerReferenceAttachment['type']): string {
   if (type === 'plugin') return 'Plugin'
   if (type === 'connector') return 'Connector'
+  if (type === 'global_file') return 'Global File'
   return 'Agent File'
 }
 
@@ -45,6 +47,7 @@ function getComposerImageTooltip(attachment: ComposerImageAttachment): string {
 function getComposerReferenceIcon(type: ComposerReferenceAttachment['type']) {
   if (type === 'plugin') return <IconWorkflows />
   if (type === 'connector') return <IconConnectors />
+  if (type === 'global_file') return <IconAttachFile />
   return <IconContexts />
 }
 
@@ -91,6 +94,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const [pluginsLoaded, setPluginsLoaded] = useState(false)
   const [pluginsError, setPluginsError] = useState<string | null>(null)
   const [agentFilesModalOpen, setAgentFilesModalOpen] = useState(false)
+  const [globalFilesModalOpen, setGlobalFilesModalOpen] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const [previewAttachmentId, setPreviewAttachmentId] = useState<string | null>(null)
   // Per-chat draft from the module-scoped store. Typing only re-renders this
@@ -289,6 +293,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     setComposerSubmenu(null)
     setAgentFilesModalOpen(true)
   }, [agentFilesAvailable, agentFilesLoading, selectedAgentContext])
+
+  const openGlobalFilesModal = useCallback(() => {
+    setComposerMenuOpen(false)
+    setComposerSubmenu(null)
+    setComposerAttachmentError(null)
+    setGlobalFilesModalOpen(true)
+  }, [])
 
   const readFileAsDataUrl = useCallback(
     (file: File) =>
@@ -631,6 +642,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                     </MenuItem>
                     <MenuItem
                       leadingIcon={<IconAttachFile />}
+                      onClick={openGlobalFilesModal}
+                      role="menuitem"
+                    >
+                      Global File System
+                    </MenuItem>
+                    <MenuItem
+                      leadingIcon={<IconAttachFile />}
                       onClick={openUploadPicker}
                       role="menuitem"
                     >
@@ -816,16 +834,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       )}
       {agentError ? (
         <div className="composer-footer">
-          <div className="composer-error" role="alert">
-            <p className="error-text">{agentError}</p>
-            {failedAgentSend?.message ? (
-              <details className="error-details">
-                <summary>Technical details</summary>
-                <pre>{failedAgentSend.message}</pre>
-              </details>
-            ) : null}
-            <div className="action-row">
-              {failedAgentSend && (
+          {failedAgentSend?.kind === 'waking' ? (
+            <div className="composer-error" role="status" data-testid="waking-state">
+              <p className="error-text">
+                Agent is waking up — this usually takes under a minute. Your message was not
+                delivered yet.
+              </p>
+              <div className="action-row">
                 <Button
                   color="neutral"
                   onClick={onRetryFailedSend}
@@ -835,9 +850,32 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 >
                   Retry last send
                 </Button>
-              )}
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="composer-error" role="alert">
+              <p className="error-text">{agentError}</p>
+              {failedAgentSend?.message ? (
+                <details className="error-details">
+                  <summary>Technical details</summary>
+                  <pre>{failedAgentSend.message}</pre>
+                </details>
+              ) : null}
+              <div className="action-row">
+                {failedAgentSend && (
+                  <Button
+                    color="neutral"
+                    onClick={onRetryFailedSend}
+                    disabled={agentSending}
+                    size="xs"
+                    variant="ghost"
+                  >
+                    Retry last send
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       ) : null}
 
@@ -853,6 +891,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           contextId={selectedAgentContext}
           onAdd={onAddComposerReferenceAttachments}
           onClose={() => setAgentFilesModalOpen(false)}
+        />
+      ) : null}
+      {globalFilesModalOpen ? (
+        <ComposerGlobalFilesModal
+          onAdd={onAddComposerReferenceAttachments}
+          onClose={() => setGlobalFilesModalOpen(false)}
         />
       ) : null}
     </div>

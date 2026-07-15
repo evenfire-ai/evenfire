@@ -5,7 +5,8 @@ import {
   HostReconciler,
   resolveWorkflowControlScopes,
 } from '../src/hostReconciler'
-import { HostCRD } from '../src/types'
+import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClient'
+import { HostCRD, type HostWorkflowControlScope } from '../src/types'
 import {
   asAppsApi,
   asCoreApi,
@@ -181,6 +182,30 @@ describe('HostReconciler', () => {
       expect.objectContaining({ namespace: 'channels' }),
     ])
     expect(reconciler.getStatus('alpha-host')).toMatchObject({ deployed: true, ready: true })
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledWith(
+      'alpha-host',
+      DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES
+    )
+  })
+
+  it('mints first-party workflow scopes when an external CommunicationChannel references a host without spec.channels', async () => {
+    const { reconciler } = createReconciler()
+    reconciler.setCountCommunicationChannels(() => 1)
+
+    await reconciler.reconcile(
+      makeHost({
+        spec: {
+          host: 'alpha-host',
+          contextRef: 'context-a',
+          secretRef: 'host-secret',
+        },
+      })
+    )
+
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledWith(
+      'alpha-host',
+      DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES
+    )
   })
 
   it('fails closed when referenced secret is missing', async () => {
@@ -1019,6 +1044,179 @@ describe('reconcileChannelReaderDeployment', () => {
     })
   })
 
+  it('does not replace a converged channel-reader Deployment with server defaults', async () => {
+    const { reconciler, appsApi, coreApi } = createReconciler()
+    const host = makeHost({ name: 'a' })
+    const existing = structuredClone(
+      (reconciler as any).buildChannelReaderDeployment(host, '')
+    ) as k8s.V1Deployment
+    const deploymentSpec = existing.spec
+    if (!deploymentSpec?.template.spec) throw new Error('expected channel-reader PodSpec')
+    const podSpec = deploymentSpec.template.spec
+
+    existing.metadata = {
+      ...existing.metadata,
+      resourceVersion: '42',
+      uid: 'channel-reader-uid',
+      generation: 7,
+      creationTimestamp: new Date('2026-07-10T00:00:00Z'),
+    }
+    existing.status = { readyReplicas: 1, availableReplicas: 1 }
+    existing.spec = {
+      ...deploymentSpec,
+      progressDeadlineSeconds: 600,
+      revisionHistoryLimit: 10,
+      strategy: {
+        type: 'RollingUpdate',
+        rollingUpdate: { maxSurge: '25%', maxUnavailable: '25%' },
+      },
+      template: {
+        ...deploymentSpec.template,
+        metadata: {
+          ...deploymentSpec.template.metadata,
+          annotations: { 'kubectl.kubernetes.io/restartedAt': '2026-07-10T00:00:00Z' },
+        },
+        spec: {
+          ...podSpec,
+          securityContext: {},
+          dnsPolicy: 'ClusterFirst',
+          restartPolicy: 'Always',
+          schedulerName: 'default-scheduler',
+          serviceAccount: podSpec.serviceAccountName,
+          terminationGracePeriodSeconds: 30,
+          containers: podSpec.containers.map(container => ({
+            ...container,
+            terminationMessagePath: '/dev/termination-log',
+            terminationMessagePolicy: 'File',
+            env: container.env?.map(env =>
+              env.valueFrom?.fieldRef
+                ? {
+                    ...env,
+                    valueFrom: {
+                      ...env.valueFrom,
+                      fieldRef: { ...env.valueFrom.fieldRef, apiVersion: 'v1' },
+                    },
+                  }
+                : env
+            ),
+          })),
+        },
+      },
+    }
+    appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
+    appsApi.readNamespacedDeployment.mockResolvedValue(existing)
+    coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
+
+    await (reconciler as any).reconcileChannelReaderDeployment(host)
+
+    expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+  })
+
+  it('replaces a channel-reader Deployment with a non-default strategy', async () => {
+    const { reconciler, appsApi, coreApi } = createReconciler()
+    const host = makeHost({ name: 'a' })
+    const existing = structuredClone(
+      (reconciler as any).buildChannelReaderDeployment(host, '')
+    ) as k8s.V1Deployment
+    existing.metadata = { ...existing.metadata, resourceVersion: '42' }
+    existing.spec!.strategy = { type: 'Recreate' }
+    appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
+    appsApi.readNamespacedDeployment.mockResolvedValue(existing)
+    appsApi.replaceNamespacedDeployment.mockResolvedValue({})
+    coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
+
+    await (reconciler as any).reconcileChannelReaderDeployment(host)
+
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
+  })
+
+  it('clears a stale controller-owned revision while preserving operational annotations', async () => {
+    const { reconciler, appsApi, coreApi } = createReconciler()
+    const host = makeHost({ name: 'a' })
+    const existing = structuredClone(
+      (reconciler as any).buildChannelReaderDeployment(host, '')
+    ) as k8s.V1Deployment
+    existing.metadata = { ...existing.metadata, resourceVersion: '42' }
+    existing.spec!.template.metadata = {
+      ...existing.spec!.template.metadata,
+      annotations: {
+        'clerum.io/credentials-revision': 'stale-revision',
+        'kubectl.kubernetes.io/restartedAt': '2026-07-10T00:00:00Z',
+      },
+    }
+    appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
+    appsApi.readNamespacedDeployment.mockResolvedValue(existing)
+    appsApi.replaceNamespacedDeployment.mockResolvedValue({})
+    coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
+
+    await (reconciler as any).reconcileChannelReaderDeployment(host)
+
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
+    const replacement = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
+      .body as k8s.V1Deployment
+    expect(
+      replacement.spec?.template.metadata?.annotations?.['clerum.io/credentials-revision']
+    ).toBeUndefined()
+    expect(
+      replacement.spec?.template.metadata?.annotations?.['kubectl.kubernetes.io/restartedAt']
+    ).toBe('2026-07-10T00:00:00Z')
+  })
+
+  it('stops retrying when a fresh channel-reader Deployment converges after a conflict', async () => {
+    const { reconciler, appsApi, coreApi } = createReconciler()
+    const host = makeHost({ name: 'a' })
+    const stale = structuredClone(
+      (reconciler as any).buildChannelReaderDeployment(host, '')
+    ) as k8s.V1Deployment
+    stale.metadata = { ...stale.metadata, resourceVersion: '42' }
+    stale.spec!.template.spec!.containers[0].image = 'clerum/channel-reader:stale'
+    const converged = structuredClone(
+      (reconciler as any).buildChannelReaderDeployment(host, '')
+    ) as k8s.V1Deployment
+    converged.metadata = { ...converged.metadata, resourceVersion: '43' }
+
+    appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
+    appsApi.readNamespacedDeployment
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(converged)
+    appsApi.replaceNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
+    coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
+
+    await (reconciler as any).reconcileChannelReaderDeployment(host)
+
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(3)
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
+  })
+
+  it('does not overwrite a channel-reader whose ownership changes during a retry', async () => {
+    const { reconciler, appsApi, coreApi } = createReconciler()
+    const host = makeHost({ name: 'a' })
+    const stale = structuredClone(
+      (reconciler as any).buildChannelReaderDeployment(host, '')
+    ) as k8s.V1Deployment
+    stale.metadata = { ...stale.metadata, resourceVersion: '42' }
+    stale.spec!.template.spec!.containers[0].image = 'clerum/channel-reader:stale'
+    const foreign = structuredClone(stale)
+    foreign.metadata = {
+      ...foreign.metadata,
+      resourceVersion: '43',
+      labels: { ...foreign.metadata?.labels, 'clerum.io/host': 'other-host' },
+    }
+
+    appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
+    appsApi.readNamespacedDeployment
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(foreign)
+    appsApi.replaceNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
+    coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
+
+    await (reconciler as any).reconcileChannelReaderDeployment(host)
+
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
+  })
+
   it('reads existing Secret revision and writes annotation on initial create', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
     appsApi.createNamespacedDeployment.mockResolvedValue({})
@@ -1058,14 +1256,14 @@ describe('reconcileChannelReaderDeployment', () => {
     expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 
-  it('returns gracefully when read-after-409 races with deletion (404)', async () => {
+  it('surfaces a transient failure when read-after-409 races with deletion (404)', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
     appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
     appsApi.readNamespacedDeployment.mockRejectedValue({ code: 404 })
     coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
     await expect(
       (reconciler as any).reconcileChannelReaderDeployment(makeHost({ name: 'a' }))
-    ).resolves.toBeUndefined()
+    ).rejects.toMatchObject({ code: 404 })
     expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 })
@@ -1095,12 +1293,14 @@ describe('reconcile / reconcileDelete with channel-reader', () => {
     await expect(reconciler.reconcileDelete('a', 'mcp-host')).resolves.toBeUndefined()
   })
 
-  it('records channel-reader failure in status.message while preserving deployed/ready', async () => {
+  it('records channel-reader failure and rejects so the caller can retry convergence', async () => {
     const { reconciler } = createReconciler()
     vi.spyOn(reconciler as any, 'reconcileChannelReaderDeployment').mockRejectedValue(
       new Error('boom')
     )
-    await reconciler.reconcile(makeHost({ name: 'a' }))
+    await expect(reconciler.reconcile(makeHost({ name: 'a' }))).rejects.toThrow(
+      'Failed to converge channel-reader resources for Host "a"'
+    )
     expect(reconciler.getStatus('a')).toMatchObject({
       deployed: true,
       ready: true,
@@ -1320,7 +1520,7 @@ describe('setCountCommunicationChannels', () => {
 })
 
 describe('resolveWorkflowControlScopes (F25)', () => {
-  const DEFAULT = [
+  const DEFAULT: HostWorkflowControlScope[] = [
     'workflow:list',
     'workflow:read',
     'workflow:trigger',
@@ -1328,18 +1528,20 @@ describe('resolveWorkflowControlScopes (F25)', () => {
     'workflow:approval:decide',
   ]
 
-  it('exports the canonical first-party default scope set', () => {
+  it('exports the canonical first-party scope set for explicit declarations', () => {
     expect(DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES).toEqual(DEFAULT)
   })
 
-  it('defaults to the first-party scope set when workflowControl is absent (the Control-UI Host gap)', () => {
-    // A Host created without the block (e.g. via the Control UI) must still get
-    // workflow:approval:resolve, else mcp-host fail-closes Telegram/Slack access.
-    expect(resolveWorkflowControlScopes(undefined)).toEqual(DEFAULT)
+  it('does not grant workflow-control scopes when workflowControl is absent without channel ingress', () => {
+    expect(resolveWorkflowControlScopes(undefined)).toEqual([])
   })
 
-  it('defaults when the block is present but scopes is omitted', () => {
-    expect(resolveWorkflowControlScopes({})).toEqual(DEFAULT)
+  it('defaults first-party workflow-control scopes when a channel-bearing Host omits workflowControl', () => {
+    expect(resolveWorkflowControlScopes(undefined, { hasChannelIngress: true })).toEqual(DEFAULT)
+  })
+
+  it('does not grant workflow-control scopes when the block is present but scopes is omitted', () => {
+    expect(resolveWorkflowControlScopes({})).toEqual([])
   })
 
   it('honors an explicit empty scopes list as an intentional opt-out (does NOT default)', () => {
@@ -1354,7 +1556,7 @@ describe('resolveWorkflowControlScopes (F25)', () => {
   })
 
   it('returns a fresh array (callers may sort/mutate without corrupting the default)', () => {
-    const a = resolveWorkflowControlScopes(undefined)
+    const a = resolveWorkflowControlScopes({ scopes: DEFAULT })
     a.sort()
     expect(DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES).toEqual(DEFAULT)
   })

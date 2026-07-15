@@ -78,14 +78,14 @@ describe('AppService.cancelTask', () => {
     mockCancelTask.mockResolvedValue(undefined)
   })
 
-  it('issues RPC token with HOST_MESSAGE_SCOPES then calls rpcClient.cancelTask', async () => {
+  it('issues a wake-capable RPC token then calls rpcClient.cancelTask', async () => {
     const svc = makeService()
 
     await svc.cancelTask('myhost', 'abc')
 
     expect(mockGetOrIssue).toHaveBeenCalledWith(
       'session-token',
-      ['host:message:invoke'],
+      ['host:message:invoke', 'host:task:read', 'host:wake:write'],
       ['myhost']
     )
     expect(mockCancelTask).toHaveBeenCalledWith('rpc-token', 'myhost', 'abc')

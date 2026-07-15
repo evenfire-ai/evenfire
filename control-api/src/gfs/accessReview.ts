@@ -43,6 +43,6 @@ export function effectiveGrantsPerSubject(grants: GrantRecord[]): SubjectAccess[
     .map(([subjectKey, subjectGrants]) => ({
       subjectKey,
       grants: subjectGrants,
-      effectiveBits: Array.from(new Set(subjectGrants.flatMap((sg) => sg.permissions))).sort(),
+      effectiveBits: Array.from(new Set(subjectGrants.flatMap(sg => sg.permissions))).sort(),
     }))
 }

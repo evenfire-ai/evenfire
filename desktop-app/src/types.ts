@@ -6,6 +6,7 @@ export type RpcScope =
   | 'host:status:read'
   | 'host:activity:read'
   | 'host:message:invoke'
+  | 'host:wake:write'
   | 'host:task:read'
   | 'host:approval:write'
   | 'host:session:read'
@@ -614,6 +615,25 @@ export type HostRuntimeHealth = {
   observedAt: string
 }
 
+/**
+ * Result of a client-initiated pre-warm of a (possibly suspended) stateless
+ * host. `requested` is true when the wake route answered with one of its
+ * terminal contract statuses (200 `active`, 202 `wake-requested`,
+ * 409 `not-stateless`). `skipped: 'cooldown'` means a recent attempt for the
+ * same hostRef suppressed the HTTP call entirely; `skipped: 'in-flight'`
+ * means that attempt's bounded re-emission loop is still running (structural
+ * single-loop-per-host guarantee). `error` carries the failure
+ * message for any other outcome — the caller treats prewarm as
+ * fire-and-forget, so failures surface here (and in main-process logs), never
+ * as a thrown error.
+ */
+export type PrewarmHostResult = {
+  requested: boolean
+  status?: string
+  skipped?: 'cooldown' | 'in-flight'
+  error?: string
+}
+
 export type HostStatusStreamEvent =
   | { type: 'open'; hostRef: string; observedAt: string }
   | { type: 'status'; status: HostRuntimeStatus }
@@ -917,7 +937,7 @@ export interface MessageToolStep {
 
 export interface ChatMessageAttachment {
   id: string
-  type: 'plugin' | 'connector' | 'agent_file' | 'uploaded_file' | 'response_file'
+  type: 'plugin' | 'connector' | 'agent_file' | 'global_file' | 'uploaded_file' | 'response_file'
   label: string
   tooltip?: string
   addedOrder?: number

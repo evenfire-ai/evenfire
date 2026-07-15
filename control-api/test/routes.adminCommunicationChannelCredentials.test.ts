@@ -136,6 +136,7 @@ describe('admin communicationchannels — credentials cascade', () => {
       })
 
     expect(res.status).toBe(200)
+    expect(gatewayMock.getResource).toHaveBeenCalledTimes(1)
     // The ref must have been re-injected by preserveCommunicationChannelCredentialsSecretRef
     expect(gatewayMock.updateResource).toHaveBeenCalledWith(
       'communicationchannels',

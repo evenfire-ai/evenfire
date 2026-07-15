@@ -199,6 +199,8 @@ export async function submitMcpHostEnrollment(
           providerUserId: command.providerUserId,
           providerWorkspaceId: command.providerWorkspaceId ?? null,
           providerChannelId: command.providerChannelId ?? null,
+          providerChannelType: command.providerChannelType ?? null,
+          serviceUrl: command.serviceUrl ?? null,
           communicationChannelRef,
         }),
       },

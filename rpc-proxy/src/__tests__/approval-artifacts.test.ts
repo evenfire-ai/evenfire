@@ -36,8 +36,18 @@ const serviceMock = vi.hoisted(() => ({
   },
 }))
 
+const controlApiMock = vi.hoisted(() => ({
+  fetchUserAllowedServersFromControlApi: vi.fn(),
+  fetchHostConnectionFromControlApi: vi.fn(),
+  // Stage 5 wake-and-hold consults the control-api wake endpoint whenever an
+  // upstream host looks down. Defaulting to 409 not-stateless preserves the
+  // legacy 502 contract for the host-down cases exercised in this file.
+  requestHostWakeFromControlApi: vi.fn().mockResolvedValue({ kind: 'not-stateless' }),
+}))
+
 vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../services/mcpProxyService.js', () => serviceMock)
+vi.mock('../services/controlApiRestService.js', () => controlApiMock)
 
 // ── Helpers ─────────────────────────────────────────────────────────
 const VALID_CLAIMS = {
@@ -546,7 +556,7 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
       .expect(404)
   })
 
-  it('returns 502 when upstream fetch rejects', async () => {
+  it('returns 502 when upstream fetch rejects and the host is not stateless', async () => {
     authTokenMock.verifyRpcToken.mockReturnValue({
       ...VALID_CLAIMS,
       scopes: ['host:message:invoke'],
@@ -558,7 +568,10 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
       .post('/rpc/hosts/chatllm/tasks/abc/cancel')
       .set('authorization', 'Bearer token')
 
+    // Host-down now consults the wake endpoint (Stage 5); the 409
+    // not-stateless answer keeps today's 502 contract intact.
     expect(res.status).toBe(502)
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledWith('chatllm', 'token')
   })
 
   it('returns 504 when upstream fetch aborts (timeout)', async () => {

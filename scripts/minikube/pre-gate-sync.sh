@@ -226,9 +226,15 @@ sync_mcp_host_auth_key() {
 provision_gfs_serving() {
   if ${KC} get configmap gfs-config -n gfs >/dev/null 2>&1; then
     log "Provisioning gfs serving before ${GATE_NAME}"
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/provision-gfs-db.sh"
+    # FAIL LOUD: with the GFS stack deployed, a broken gfs_controller credential
+    # means every GFS operation 503s (issue #775). Continuing would burn the
+    # whole gate run on a cluster that cannot pass.
+    if ! CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/provision-gfs-db.sh"; then
+      log "ERROR: gfs DB provisioning FAILED — gfsc cannot authorize any operation. Aborting ${GATE_NAME} pre-gate sync."
+      exit 1
+    fi
   else
-    log "Skipping gfs serving provisioning (gfs-config not found)"
+    log "Skipping gfs serving provisioning (gfs-config not found — GFS stack not deployed)"
   fi
 
   sync_mcp_host_auth_key
@@ -341,9 +347,17 @@ if [[ "${cluster_changed}" == "true" ]]; then
     fi
   )
 
+  rollout_if_present control-plane control-postgres
+  rollout_if_present control-plane control-api
+  # The base manifest no longer declares connection-string (provisioning-owned
+  # key), so deploy-all cannot clobber it. Provisioning must still run AFTER
+  # control-api migrations (0048 creates the least-privilege gfs_controller
+  # role) for fresh profiles and to converge any stale credential before the
+  # rest of the gate observes service readiness.
+  provision_gfs_serving
+
   ensure_evenfire_registry
 
-  rollout_if_present control-plane control-api
   rollout_if_present control-plane host-context-controller
   rollout_if_present control-plane workflow-recipes
   rollout_if_present control-plane control-ui
@@ -353,7 +367,19 @@ if [[ "${cluster_changed}" == "true" ]]; then
   rollout_if_present channels clerum-channel-reader
   rollout_if_present channels clerum-workflow-approval-request-reader
   rollout_if_present registry registry-api
-  provision_gfs_serving
+
+  # gfsc health is part of a clean baseline for GFS-backed gates: prove the
+  # permission-store wiring (Secret populated, pods postdate the rotation,
+  # /readyz green) once the rollouts settle. Gated on the deployments existing
+  # because a brand-new profile may not have reconciled gfsc yet; the strict
+  # fail-loud checks live in verify-gfs.sh.
+  if ${KC} get configmap gfs-config -n gfs >/dev/null 2>&1 \
+     && ${KC} -n gfs get deployment -l clerum.io/managed-by=host-context-controller -o name 2>/dev/null | grep -q .; then
+    log "Verifying gfs permission-store wiring"
+    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/scripts/minikube/verify-gfs.sh"
+  else
+    log "SKIPPING gfs permission-store verification (gfs-config or gfsc deployments not present yet) — GFS-backed gates on this profile are NOT proven"
+  fi
 
   log "Cluster status after sync"
   ${KC} get deploy -A --no-headers 2>/dev/null | grep -v kube-system || true

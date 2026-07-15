@@ -6,6 +6,8 @@ export type SlackVerificationClient = {
     providerUserId: string
     providerWorkspaceId: string
     providerChannelId: string
+    providerChannelType?: string | null
+    providerChannelTitle?: string | null
     providerTarget: ProviderTargetIdentity
   }): Promise<{ ok: true; account?: unknown } | { ok: false; error: string }>
 }
@@ -32,6 +34,8 @@ export async function handleSlackVerificationCommand(params: {
   nonce: string | null
   providerUserId: string | null
   providerWorkspaceId: string | null
+  providerChannelType?: string | null
+  providerChannelTitle?: string | null
   providerTarget: ProviderTargetIdentity | null
   verificationClient: SlackVerificationClient | null
   sendReply: (content: string) => Promise<void>
@@ -58,6 +62,8 @@ export async function handleSlackVerificationCommand(params: {
       providerUserId: params.providerUserId,
       providerWorkspaceId: params.providerWorkspaceId,
       providerChannelId: params.channelId,
+      providerChannelType: params.providerChannelType ?? null,
+      providerChannelTitle: params.providerChannelTitle ?? null,
       providerTarget: params.providerTarget,
     })
     await params.sendReply(

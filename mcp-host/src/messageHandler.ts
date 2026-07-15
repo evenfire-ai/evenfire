@@ -3,7 +3,7 @@ import { LlmErrorCode } from './core/errors'
 import type { Attachment } from './core/types'
 import type { TaskLifecycle } from './lifecycle/taskLifecycle'
 import { MessageQueue, Task, TaskResponsePayload } from './queue'
-import type { TaskError } from './queue'
+import type { TaskError, TaskStatus } from './queue'
 import { ResultStore } from './resultStore'
 import type { IncomingMessage, MessageResponse } from './server'
 import { parseBackgroundPrefix, serializeSessionKey } from './session'
@@ -16,6 +16,26 @@ export interface PendingTaskEntry {
   error?: TaskError
   model: string
   storedAt: number
+  /**
+   * True only for the C3 recoverability entry written by the SYNC resolve path
+   * (handleResponse's \`if (!this.resolved)\` branch). Such a result was already
+   * delivered INLINE to the sync caller's socket; it exists solely so a
+   * socket-death duplicate that received \`{status:pending,taskId:priorId}\` can
+   * still poll GET /v1/runtime/tasks/:id/result and recover the outcome. It is
+   * NOT genuinely-pending work (nobody is waiting to consume it), so it must
+   * NOT pin the stateless \`pendingResults\` idle gauge, which would otherwise
+   * block drain/suspend forever after any sync turn. Async results
+   * (executeAsync) leave this undefined and DO count toward pendingResults.
+   */
+  deliveredInline?: boolean
+  /**
+   * Epoch ms of the first successful owner READ of this entry (poll on
+   * GET /v1/runtime/tasks/:id/result — main.ts handleTaskResult). Same class
+   * as \`deliveredInline\`: a fetched result is recoverability cache — it stays
+   * for repeat polls (multi-reader idempotency) but must not pin the stateless
+   * \`pendingResults\` idle gauge (see runtime/resultDelivery.ts).
+   */
+  deliveredAt?: number
   source: {
     channelType: string
     channelId: string
@@ -91,9 +111,21 @@ export class IncomingMessageHandler {
     return new Promise<MessageResponse>(resolve => {
       this.resolve = resolve
 
-      // Invariant I12: lifecycle.register MUST run before sessionProcessor.enqueue
-      this.deps.taskLifecycle.register(this.task)
-      this.deps.messageQueue.enqueue(this.task)
+      // Single admission sink. MessageQueue.admit registers the lifecycle
+      // record (Invariant I12: registration precedes sessionProcessor.enqueue
+      // below) and rejects duplicates — a suppressed duplicate resolves
+      // immediately and NEVER starts a second execution.
+      const admission = this.deps.messageQueue.admit(this.task)
+      if (!admission.admitted && admission.reason !== 'queue_full') {
+        this.resolved = true
+        resolve(this.duplicateSuppressedResponse(admission))
+        return
+      }
+      if (!admission.admitted) {
+        // queue_full keeps the legacy contract: the task still executes via
+        // SessionProcessor, so register here to satisfy Invariant I12.
+        this.deps.taskLifecycle.register(this.task)
+      }
       console.log(`[Main] Message queued as task ${this.task.id}`)
 
       // Dispatch to SessionProcessor if available
@@ -121,6 +153,18 @@ export class IncomingMessageHandler {
    * for polling via GET /v1/runtime/tasks/:taskId/result.
    */
   executeAsync(): MessageResponse {
+    // Single admission sink — runs before any listener wiring so a suppressed
+    // duplicate attaches nothing, leaks nothing, and NEVER executes again.
+    const admission = this.deps.messageQueue.admit(this.task)
+    if (!admission.admitted && admission.reason !== 'queue_full') {
+      return this.duplicateSuppressedResponse(admission)
+    }
+    if (!admission.admitted) {
+      // queue_full keeps the legacy contract: the task still executes via
+      // SessionProcessor, so register here to satisfy Invariant I12.
+      this.deps.taskLifecycle.register(this.task)
+    }
+
     // Override responseCallback to store results in pendingTaskResults
     this.task.responseCallback = async payload => {
       const attachments = this.deps.sanitizeAttachments(payload.attachments)
@@ -206,9 +250,6 @@ export class IncomingMessageHandler {
       this.deps.messageQueue.on('task:failed', onFinalFailure)
     }
 
-    // Invariant I12: lifecycle.register MUST run before sessionProcessor.enqueue
-    this.deps.taskLifecycle.register(this.task)
-    this.deps.messageQueue.enqueue(this.task)
     console.log(`[Main] Message queued as async task ${this.task.id}`)
 
     // Dispatch to SessionProcessor if available
@@ -232,11 +273,92 @@ export class IncomingMessageHandler {
     }
   }
 
+  /**
+   * Build the response for a suppressed duplicate delivery. The duplicate is
+   * NEVER executed:
+   *   - prior task completed → replay the recorded outcome (duplicate-suppressed success)
+   *   - prior task failed/cancelled → replay the recorded terminal error
+   *   - prior task still in flight → attach/no-op: the in-flight execution
+   *     answers; callers can poll GET /v1/runtime/tasks/:taskId/result with
+   *     the prior task id.
+   * Fail-loud: every suppression is logged with task id + prior state.
+   */
+  private duplicateSuppressedResponse(admission: {
+    reason: 'duplicate_task_id' | 'duplicate_delivery'
+    priorTaskId: string
+    priorStatus: TaskStatus
+  }): MessageResponse {
+    const { reason, priorTaskId, priorStatus } = admission
+    console.warn(
+      `[Main] duplicate delivery suppressed (${reason}) — message ` +
+        `${this.message.channelType}:${this.message.channelId}:${this.message.messageId} ` +
+        `is already task ${priorTaskId} (status=${priorStatus}); no new execution started`
+    )
+    const record = this.deps.taskLifecycle.get(priorTaskId)
+    if (priorStatus === 'completed') {
+      return {
+        success: true,
+        status: 'completed',
+        response: record?.response,
+        attachments: this.deps.sanitizeAttachments(record?.attachments),
+        model: this.deps.getModel(),
+        taskId: priorTaskId,
+      }
+    }
+    if (priorStatus === 'failed' || priorStatus === 'cancelled') {
+      const error: TaskError = record?.error ?? {
+        code: 'TASK_ALREADY_TERMINAL',
+        message: `Duplicate delivery suppressed — original task ${priorTaskId} is ${priorStatus}`,
+        retryable: false,
+        provider: 'unknown',
+      }
+      return {
+        success: false,
+        error,
+        model: this.deps.getModel(),
+        taskId: priorTaskId,
+      }
+    }
+    // pending / processing / waiting_approval — in flight; the first delivery
+    // owns result delivery. Attach by returning the prior task id as pending.
+    return {
+      success: true,
+      status: 'pending',
+      taskId: priorTaskId,
+    }
+  }
+
   private async handleResponse(payload: TaskResponsePayload): Promise<void> {
     const attachments = this.deps.sanitizeAttachments(payload.attachments)
 
     if (!this.resolved) {
       this.resolved = true
+      // C3: the SYNC path binds the outcome to THIS request's socket via the
+      // resolver below. If rpc-proxy's wake-and-hold retries the same messageId
+      // after a socket death, the admission sink suppresses the duplicate and
+      // returns { status: 'pending', taskId: priorId } — but without persisting
+      // here, GET /v1/runtime/tasks/:priorId/result would find nothing and the
+      // turn's result would be LOST (never re-executed, but unpollable). Persist
+      // the terminal outcome keyed by task id (mirrors executeAsync's store) so
+      // the suppressed duplicate's returned taskId is actually recoverable.
+      // Tag it deliveredInline: the sync caller already got this answer on its
+      // own socket via the resolve() below, so this entry is recoverability
+      // cache only and must be EXCLUDED from the pendingResults idle gauge
+      // (otherwise every sync turn would pin the gauge and block suspend).
+      this.deps.pendingTaskResults.set(this.task.id, {
+        status: payload.error ? 'failed' : 'completed',
+        response: payload.response,
+        attachments,
+        error: payload.error,
+        model: this.deps.getModel(),
+        storedAt: Date.now(),
+        deliveredInline: true,
+        source: {
+          channelType: this.message.channelType,
+          channelId: this.message.channelId,
+          sender: this.message.sender,
+        },
+      })
       if (payload.error) {
         this.resolve({
           success: false,
@@ -254,8 +376,12 @@ export class IncomingMessageHandler {
       }
     } else {
       console.log(`[Main] Storing post-approval result for task ${this.task.id}`)
+      // Compute the terminal status from the payload (parity with the sync
+      // branch above and executeAsync): a post-approval turn can FAIL, and
+      // hardcoding 'completed' here made the poll report success:false with
+      // a contradictory status:'completed'.
       this.deps.pendingTaskResults.set(this.task.id, {
-        status: 'completed',
+        status: payload.error ? 'failed' : 'completed',
         response: payload.response,
         attachments,
         error: payload.error,

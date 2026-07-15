@@ -499,42 +499,58 @@ export class SqliteConversationStore implements ConversationStore {
     })
   }
 
-  persistTurnStart(conv: Conversation, userInput: string): void {
+  /**
+   * D3 (stateless-agents) — the user message and the state flip commit as ONE
+   * worker op = ONE SQLite transaction, awaited (`enqueueSync`) so the turn
+   * only proceeds once the user message passed the durability barrier. Retry
+   * semantics depend on it: after a crash, the last persisted user message is
+   * the replay anchor, and a torn start (message without `active_task_id`, or
+   * vice versa) is impossible by construction.
+   */
+  async persistTurnStart(conv: Conversation, userInput: string): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
     this.reconcilePinning(sessionKey, conv)
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
     const ordinal = state.nextOrdinal++
     const turnNumber = state.nextTurnNumber
-    this.persistQueue.enqueueAsync(sessionKey, {
-      kind: 'insert_message',
-      payload: {
-        session_id: conv.id,
-        ordinal,
-        role: 'user',
-        content: userInput,
-        content_parts: null,
-        tool_call_id: null,
-        tool_calls: null,
-        tool_name: null,
-        timestamp: Date.now() / 1000,
-        token_count: null,
-        finish_reason: null,
-        spillover_ref: null,
-        is_error: 0,
-        turn_number: turnNumber,
+    await this.persistQueue.enqueueSync(
+      {
+        kind: 'persist_turn_boundary',
+        message: {
+          session_id: conv.id,
+          ordinal,
+          role: 'user',
+          content: userInput,
+          content_parts: null,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: Date.now() / 1000,
+          token_count: null,
+          finish_reason: null,
+          spillover_ref: null,
+          is_error: 0,
+          turn_number: turnNumber,
+        },
+        sessionId: conv.id,
+        state: conv.state,
+        // D.1 — mirror the in-RAM activeTaskId (set by startTurn) to the column.
+        activeTaskId: conv.activeTaskId ?? null,
       },
-    })
-    this.persistQueue.enqueueAsync(sessionKey, {
-      kind: 'update_session_state',
-      sessionId: conv.id,
-      state: conv.state,
-      // D.1 — mirror the in-RAM activeTaskId (set by startTurn) to the column.
-      activeTaskId: conv.activeTaskId ?? null,
-    })
+      sessionKey
+    )
   }
 
-  persistTurnComplete(conv: Conversation, response: string): void {
+  /**
+   * D3 (stateless-agents) — the final assistant message, the state flip AND
+   * the `active_task_id` clear commit as ONE worker op = ONE SQLite
+   * transaction, awaited (`enqueueSync`) so the caller (TaskExecutor) only
+   * ACKs the client once the turn is durable. A crash between the two former
+   * async ops could leave `active_task_id` dirty — which would block a future
+   * suspend gate forever — or ACK a turn that was never written.
+   */
+  async persistTurnComplete(conv: Conversation, response: string): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
     this.reconcilePinning(sessionKey, conv)
@@ -546,38 +562,38 @@ export class SqliteConversationStore implements ConversationStore {
     // accumulated it in RAM via recordSessionUsage). reconstruct sums these back
     // onto the Turn on cold-load.
     const turn = conv.turns[conv.turns.length - 1]
-    this.persistQueue.enqueueAsync(sessionKey, {
-      kind: 'insert_message',
-      payload: {
-        session_id: conv.id,
-        ordinal,
-        role: 'assistant',
-        content: response,
-        content_parts: null,
-        tool_call_id: null,
-        tool_calls: null,
-        tool_name: null,
-        timestamp: Date.now() / 1000,
-        token_count: null,
-        finish_reason: 'stop',
-        spillover_ref: null,
-        is_error: 0,
-        turn_number: turnNumber,
-        input_tokens: turn?.input_tokens ?? null,
-        output_tokens: turn?.output_tokens ?? null,
-        cache_read_tokens: turn?.cache_read_tokens ?? null,
-        cache_write_tokens: turn?.cache_write_tokens ?? null,
+    await this.persistQueue.enqueueSync(
+      {
+        kind: 'persist_turn_boundary',
+        message: {
+          session_id: conv.id,
+          ordinal,
+          role: 'assistant',
+          content: response,
+          content_parts: null,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: Date.now() / 1000,
+          token_count: null,
+          finish_reason: 'stop',
+          spillover_ref: null,
+          is_error: 0,
+          turn_number: turnNumber,
+          input_tokens: turn?.input_tokens ?? null,
+          output_tokens: turn?.output_tokens ?? null,
+          cache_read_tokens: turn?.cache_read_tokens ?? null,
+          cache_write_tokens: turn?.cache_write_tokens ?? null,
+        },
+        sessionId: conv.id,
+        state: conv.state,
+        activeTaskId: null, // D.1 — turn complete clears the in-flight task
       },
-    })
-    this.persistQueue.enqueueAsync(sessionKey, {
-      kind: 'update_session_state',
-      sessionId: conv.id,
-      state: conv.state,
-      activeTaskId: null, // D.1 — turn complete clears the in-flight task
-    })
+      sessionKey
+    )
   }
 
-  persistTurnCancel(conv: Conversation): void {
+  async persistTurnCancel(conv: Conversation): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
     this.reconcilePinning(sessionKey, conv)
@@ -587,47 +603,64 @@ export class SqliteConversationStore implements ConversationStore {
     state.nextTurnNumber += 1
     // Stamp the partial per-turn total accumulated before cancellation.
     const turn = conv.turns[conv.turns.length - 1]
-    this.persistQueue.enqueueAsync(sessionKey, {
-      kind: 'insert_message',
-      payload: {
-        session_id: conv.id,
-        ordinal,
-        role: 'assistant',
-        content: '[Task cancelled by user before completion]',
-        content_parts: null,
-        tool_call_id: null,
-        tool_calls: null,
-        tool_name: null,
-        timestamp: Date.now() / 1000,
-        token_count: null,
-        finish_reason: 'stop',
-        spillover_ref: null,
-        is_error: 0,
-        turn_number: turnNumber,
-        input_tokens: turn?.input_tokens ?? null,
-        output_tokens: turn?.output_tokens ?? null,
-        cache_read_tokens: turn?.cache_read_tokens ?? null,
-        cache_write_tokens: turn?.cache_write_tokens ?? null,
+    // ATOMIC boundary (matches persistTurnComplete): the cancel message insert
+    // and the state='idle' + activeTaskId=null clear commit as ONE transaction.
+    // A torn write here (two separate async ops) could crash between them and
+    // leave active_task_id dirty on an 'idle' session that NO boot reaper
+    // matches — the D8 gate would then report activeWork forever and the Host
+    // would never suspend. One op = no torn state.
+    await this.persistQueue.enqueueSync(
+      {
+        kind: 'persist_turn_boundary',
+        message: {
+          session_id: conv.id,
+          ordinal,
+          role: 'assistant',
+          content: '[Task cancelled by user before completion]',
+          content_parts: null,
+          tool_call_id: null,
+          tool_calls: null,
+          tool_name: null,
+          timestamp: Date.now() / 1000,
+          token_count: null,
+          finish_reason: 'stop',
+          spillover_ref: null,
+          is_error: 0,
+          turn_number: turnNumber,
+          input_tokens: turn?.input_tokens ?? null,
+          output_tokens: turn?.output_tokens ?? null,
+          cache_read_tokens: turn?.cache_read_tokens ?? null,
+          cache_write_tokens: turn?.cache_write_tokens ?? null,
+        },
+        sessionId: conv.id,
+        state: 'idle',
+        activeTaskId: null, // D.1 — cancel clears the in-flight task
       },
-    })
-    this.persistQueue.enqueueAsync(sessionKey, {
-      kind: 'update_session_state',
-      sessionId: conv.id,
-      state: 'idle',
-      activeTaskId: null, // D.1 — cancel clears the in-flight task
-    })
+      sessionKey
+    )
   }
 
-  persistTurnFail(conv: Conversation): void {
+  /**
+   * Awaited durability barrier (parity with persistTurnComplete /
+   * persistTurnCancel): the failure ACK the caller sends after this resolves
+   * must describe a state that is already durable. The former fire-and-forget
+   * `enqueueAsync` left a window where a crash after the failure ACK could
+   * resurrect a 'processing' session with a dirty active_task_id. A rejected
+   * write propagates to the caller — never swallowed — like its siblings.
+   */
+  async persistTurnFail(conv: Conversation): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
     this.reconcilePinning(sessionKey, conv)
-    this.persistQueue.enqueueAsync(sessionKey, {
-      kind: 'update_session_state',
-      sessionId: conv.id,
-      state: 'idle',
-      activeTaskId: null, // D.1 — fail clears the in-flight task
-    })
+    await this.persistQueue.enqueueSync(
+      {
+        kind: 'update_session_state',
+        sessionId: conv.id,
+        state: 'idle',
+        activeTaskId: null, // D.1 — fail clears the in-flight task
+      },
+      sessionKey
+    )
   }
 
   persistToolCall(conv: Conversation, toolCall: TurnToolCall): void {

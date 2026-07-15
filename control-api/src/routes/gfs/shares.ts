@@ -3,18 +3,18 @@ import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
 import {
-  assertMayGrant,
-  auditMutation,
-  driveOf,
   GfsGrantError,
   type GfsPermission,
   type GfsSubjectType,
+  UUID_RE,
+  assertMayGrant,
+  auditMutation,
+  driveOf,
   parsePermissions,
   parseSubject,
   requestIdOf,
   resolveCaller,
   subjectKey,
-  UUID_RE,
 } from './grants.js'
 
 /**
@@ -72,7 +72,15 @@ export async function handleShareWrite(req: Request, res: Response): Promise<voi
        DO UPDATE SET permissions = EXCLUDED.permissions,
                      include_descendants = EXCLUDED.include_descendants,
                      created_by = EXCLUDED.created_by`,
-      [drive, resourceId, subject.type, subject.id ?? '', permissions, includeDescendants, caller.actorKey]
+      [
+        drive,
+        resourceId,
+        subject.type,
+        subject.id ?? '',
+        permissions,
+        includeDescendants,
+        caller.actorKey,
+      ]
     )
     await auditMutation(pool, {
       actorKey: caller.actorKey,

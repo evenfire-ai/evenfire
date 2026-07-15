@@ -37,7 +37,7 @@ spec:
                   description: Reference to the context (e.g. context1) used for MPC servers and secrets.
                 secretRef:
                   type: string
-                  description: Name of the Kubernetes Secret containing API keys (openai-api-key, claude-api-key, zai-api-key, bailian-api-key).
+                  description: Name of the Kubernetes Secret containing API keys (openai-api-key, claude-api-key, zai-api-key).
                 channels:
                   type: array
                   description: List of CommunicationChannel names this host interacts with.
@@ -130,6 +130,23 @@ spec:
                     x11:
                       type: boolean
                       description: Enable X11 desktop tools (desktop_screenshot, desktop_click, desktop_type, etc.).
+                lifecycle:
+                  type: object
+                  description: >-
+                    Runtime lifecycle configuration. Cross-field constraints
+                    (no CommunicationChannels, no desktop, satisfiable
+                    SharedFileSystem co-location) are enforced at reconcile
+                    time via the StatelessEnableRejected status condition, not
+                    by this schema.
+                  properties:
+                    stateless:
+                      type: boolean
+                      default: false
+                      description: >-
+                        Enable the stateless agent lifecycle. mcp-host
+                        persists session state to SQLite on the workspace PVC
+                        and the operator may scale the Deployment to 0 while
+                        status.lifecycle.state is suspended.
                 workflowControl:
                   type: object
                   description: >-
@@ -171,6 +188,54 @@ spec:
                     user:
                       type: string
                       description: Content of USER.md (system-prompt section "## User Context").
+            status:
+              type: object
+              properties:
+                lifecycle:
+                  type: object
+                  description: >-
+                    Durable stateless-lifecycle state. host-context-controller
+                    derives Deployment replicas from state on every reconcile,
+                    so a suspended Host survives controller restarts and
+                    periodic resyncs.
+                  required:
+                    - state
+                    - wakeHandledGeneration
+                  properties:
+                    state:
+                      type: string
+                      enum:
+                        - active
+                        - draining
+                        - suspended
+                    wakeHandledGeneration:
+                      type: integer
+                      description: Highest observed Host generation whose wake trigger has been handled.
+                    reason:
+                      type: string
+                      description: Human-readable explanation when the stateless request was rejected.
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - 'True'
+                          - 'False'
+                          - 'Unknown'
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
       additionalPrinterColumns:
         - name: Host
           type: string

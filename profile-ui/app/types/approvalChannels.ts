@@ -1,6 +1,6 @@
 export type ApprovalChannelTarget = {
   id: string
-  medium: 'telegram' | 'slack'
+  medium: 'telegram' | 'slack' | 'teams'
   agentName: string
   channelName: string
   channelNamespace: string
@@ -15,10 +15,11 @@ export type ApprovalChannelTarget = {
 export type WorkflowApprovalMediumAccount = {
   id: string
   userId: string
-  medium: 'telegram' | 'slack' | 'discord'
+  medium: 'telegram' | 'slack' | 'teams' | 'discord'
   providerUserId: string
   providerWorkspaceId: string | null
   providerChannelId: string | null
+  displayName?: string | null
   providerChannelType?: string | null
   providerChannelTitle?: string | null
   providerChannelHandle?: string | null
@@ -58,7 +59,8 @@ export type CreateWorkflowApprovalMediumChallengeInput =
     }
 
 export type CreateWorkflowApprovalMediumLinkSessionInput = {
-  medium: 'slack'
+  medium: 'slack' | 'teams'
   targetId: string
   providerWorkspaceId?: string | null
+  replyInThreads?: boolean
 }

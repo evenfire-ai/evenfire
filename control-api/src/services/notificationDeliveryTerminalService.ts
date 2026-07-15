@@ -3,16 +3,18 @@ import { markSdkNotificationDelivered } from './pluginWorkloadSdkInvocationAudit
 
 const SDK_NOTIFICATION_EVENT_TYPE = 'plugin_workload_sdk.notification'
 
+type NotificationDeliveryMedium = 'telegram' | 'slack' | 'teams'
+
 export type ResolvePendingWorkflowApprovalDeliveryResult =
   | { status: 'found'; approvalRequestId: string }
   | { status: 'not_found' }
   | { status: 'ambiguous' }
 
-const SUPPORTED_DELIVERY_MEDIA = new Set(['telegram', 'slack'])
+const SUPPORTED_DELIVERY_MEDIA = new Set(['telegram', 'slack', 'teams'])
 
-function normalizeMedium(value: unknown): 'telegram' | 'slack' | null {
+function normalizeMedium(value: unknown): NotificationDeliveryMedium | null {
   const medium = typeof value === 'string' ? value.trim().toLowerCase() : ''
-  return SUPPORTED_DELIVERY_MEDIA.has(medium) ? (medium as 'telegram' | 'slack') : null
+  return SUPPORTED_DELIVERY_MEDIA.has(medium) ? (medium as NotificationDeliveryMedium) : null
 }
 
 function normalizeHostRef(value: unknown): string {
@@ -214,6 +216,9 @@ async function updateTerminalNotificationDelivery(
                        )
                        OR (
                          $2 <> 'telegram'
+                         AND notification_deliveries.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' = $2
+                         AND notification_deliveries.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}' = $3
+                         AND notification_deliveries.payload #>> '{metadata,workflowTrigger,providerBinding,providerWorkspaceId}' = $5
                          AND wama.provider_channel_id = $3
                        )
                      )
@@ -260,6 +265,9 @@ async function updateTerminalNotificationDelivery(
                        )
                        OR (
                          $2 <> 'telegram'
+                         AND war.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' = $2
+                         AND war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}' = $3
+                         AND war.payload #>> '{metadata,workflowTrigger,providerBinding,providerWorkspaceId}' = $5
                          AND wama.provider_channel_id = $3
                        )
                      )
@@ -340,7 +348,7 @@ function normalizeDeliveryBindingParams(params: {
   providerChannelId?: unknown
   providerWorkspaceId?: unknown
   hostRef?: unknown
-}): ['telegram' | 'slack', string, string, string | null] {
+}): [NotificationDeliveryMedium, string, string, string | null] {
   const medium = normalizeMedium(params.medium)
   if (!medium) {
     throw new Error('unsupported_notification_medium')
@@ -355,7 +363,7 @@ function normalizeDeliveryBindingParams(params: {
     throw new Error('host_ref_required')
   }
   const providerWorkspaceId = normalizeProviderWorkspaceId(params.providerWorkspaceId)
-  if (medium === 'slack' && !providerWorkspaceId) {
+  if (medium !== 'telegram' && !providerWorkspaceId) {
     throw new Error('provider_workspace_id_required')
   }
   return [medium, providerChannelId, hostRef, providerWorkspaceId]
@@ -376,7 +384,7 @@ function normalizeTerminalParams(params: {
   providerChannelId?: unknown
   providerWorkspaceId?: unknown
   hostRef?: unknown
-}): [string, 'telegram' | 'slack', string, string, string | null, string] {
+}): [string, NotificationDeliveryMedium, string, string, string | null, string] {
   const [medium, providerChannelId, hostRef, providerWorkspaceId] =
     normalizeDeliveryBindingParams(params)
   const providerUserId = normalizeProviderUserId(params.providerUserId)

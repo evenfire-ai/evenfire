@@ -134,6 +134,9 @@ export function extractAssistantReply(response: HostMessageResponse): string {
 
 export function classifyErrorKind(message: string): AppErrorKind {
   const value = message.toLowerCase()
+  // Structured host-availability codes from rpc-proxy (host_waking) and the
+  // mcp-host DRAINING fence (host_draining): the host is coming up, not broken.
+  if (value.includes('host_waking') || value.includes('host_draining')) return 'waking'
   if (value.includes('timeout') || value.includes('gateway') || value.includes('network'))
     return 'network'
   if (
@@ -186,6 +189,8 @@ export function isNetworkError(err: unknown): boolean {
 }
 
 export function errorRecoveryHint(kind: AppErrorKind): string {
+  if (kind === 'waking')
+    return 'The agent host is starting up. Retry in a few seconds — no message was delivered.'
   if (kind === 'network')
     return 'Temporary connectivity issue. Retry in a few seconds or check backend health.'
   if (kind === 'auth')

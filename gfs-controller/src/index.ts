@@ -7,6 +7,7 @@ import { AccessibleResourceStore } from "./authz/accessibleStore";
 import { DecisionCache } from "./authz/cache";
 import { InvalidationListener, ListenClient } from "./authz/invalidation";
 import { DbAuditSink, PermissionClient } from "./authz/permissionClient";
+import { createPermissionStoreProbe } from "./authz/storeProbe";
 import { resolveAuthzContext } from "./authz/subjectResolver";
 import { loadConfig } from "./config";
 import { PgResourceStore } from "./db/resourceStore";
@@ -87,14 +88,16 @@ async function main(): Promise<void> {
       const info = await stat(config.storageMountPath);
       return info.isDirectory();
     },
-    pingPermissionStore: async () => {
-      const client = await pool.connect();
-      try {
-        await client.query("SELECT 1");
-      } finally {
-        client.release();
-      }
-    },
+    // Fresh-connection credential probe (issue #775): the pool alone cannot
+    // detect a rotated password — its idle clients authenticated before the
+    // rotation and the readiness cadence keeps one alive forever. The probe
+    // keeps the fast pool ping AND dials a brand-new client (amortized) so a
+    // stale DSN or missing migration-0048 grants flips the pod NotReady.
+    pingPermissionStore: createPermissionStoreProbe({
+      pool,
+      connectionString: config.pgConnectionString,
+      intervalMs: config.credentialProbeIntervalMs,
+    }),
   };
 
   // ── Read serving plane (the brokered file API) ──────────────────────────────

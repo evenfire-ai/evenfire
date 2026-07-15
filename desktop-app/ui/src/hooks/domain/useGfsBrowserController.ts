@@ -214,8 +214,10 @@ export function useGfsBrowserController() {
           version: resource.version ?? 0,
         },
       ])
+      return true
     } catch (error) {
       setOpenError(toMessage(error))
+      return false
     } finally {
       setResolving(false)
     }

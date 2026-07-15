@@ -3,7 +3,7 @@
  *
  * Phase 6: Defines the hierarchical permission model:
  *   Host CRD (approval config)
- *     -> Channel-level permission (telegram/email/slack)
+ *     -> Channel-level permission (telegram/email/slack/teams)
  *       -> Per-user approval permission
  */
 
@@ -39,7 +39,7 @@ export interface ChannelApprovalConfig {
  */
 export interface ApprovalConfig {
   defaultPolicy: ApprovalPolicy
-  channels: Partial<Record<'telegram' | 'email' | 'slack', ChannelApprovalConfig>>
+  channels: Partial<Record<'telegram' | 'email' | 'slack' | 'teams', ChannelApprovalConfig>>
   /**
    * Per-tool approval overrides for native tools. Key = native tool name
    * (e.g. "http_request", "shell_exec"). Value:
@@ -56,7 +56,7 @@ export interface ApprovalConfig {
 
 /**
  * An approval or denial decision from a user.
- * Sent via POST /v1/runtime/approvals/approve or POST /v1/runtime/approvals/deny.
+ * Sent via POST /approve or POST /deny.
  */
 export interface ApprovalDecision {
   userId: string

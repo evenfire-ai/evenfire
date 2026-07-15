@@ -66,7 +66,10 @@ function validateName(raw: string): string {
 /** Validate + plan a publish. Throws PublishError; the caller checks `write`. */
 export function planPublish(req: PublishRequest): PublishPlan {
   if (typeof req.artifactRef !== 'string' || req.artifactRef.length === 0) {
-    throw new PublishError('invalid_request', 'artifactRef is required (publishing is by reference)')
+    throw new PublishError(
+      'invalid_request',
+      'artifactRef is required (publishing is by reference)'
+    )
   }
   if (!req.parentResourceId) {
     throw new PublishError('invalid_request', 'parentResourceId is required')

@@ -10,6 +10,7 @@ const PROJECTS = [
     packagePath: 'external-rest-api/package.json',
     codePrefixes: ['external-rest-api/src/', 'external-rest-api/test/'],
     codeFiles: ['external-rest-api/tsconfig.json'],
+    ignoredFiles: ['external-rest-api/src/releaseManifest.ts'],
   },
   {
     name: 'rpc-proxy',
@@ -56,11 +57,13 @@ function changedFiles() {
 }
 
 function codeChanged(project, files) {
-  return files.some(
-    filePath =>
+  return files.some(filePath => {
+    if (project.ignoredFiles?.includes(filePath)) return false
+    return (
       project.codePrefixes.some(prefix => filePath.startsWith(prefix)) ||
       project.codeFiles.includes(filePath)
-  )
+    )
+  })
 }
 
 if (!previousRef || /^0+$/.test(previousRef)) {

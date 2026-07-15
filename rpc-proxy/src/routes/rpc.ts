@@ -1,4 +1,6 @@
 import { Router } from 'express'
+import type { Response as ExpressResponse } from 'express'
+import { randomUUID } from 'crypto'
 import { config } from '../config.js'
 import {
   type AuthedRequest,
@@ -7,6 +9,10 @@ import {
   requireScope,
 } from '../middleware/auth.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
+import {
+  type HostWakeApiResponse,
+  requestHostWakeFromControlApi,
+} from '../services/controlApiRestService.js'
 import {
   type HostRuntimeMessageRequest,
   forwardCancelToHost,
@@ -21,8 +27,18 @@ import {
   resolveServerConnectionForUser,
   validateRpcRequest,
 } from '../services/mcpProxyService.js'
+import { isWakeEligibleHostError, respondWithWakeAndHold } from '../services/wakeAndHold.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
+
+/** Pre-wake host error mapping: AbortError → 504, everything else → 502. */
+function respondUpstreamUnavailable(res: ExpressResponse, error: unknown): void {
+  if (error instanceof Error && error.name === 'AbortError') {
+    res.status(504).json({ error: 'Gateway Timeout' })
+    return
+  }
+  res.status(502).json({ error: 'Upstream host unavailable' })
+}
 
 class ProxyArtifactTooLargeError extends Error {
   constructor(readonly maxBytes: number) {
@@ -175,12 +191,36 @@ export function createRpcRouter(): Router {
         // Identity invariant: rpc-proxy is the sole authority on the Desktop
         // RPC envelope. Ignore client-supplied channel, sender, host, and
         // metadata values; derive them from the route and signed JWT.
+        //
+        // Per-request idempotency identity (D1): the delivery id must be UNIQUE
+        // per inbound HTTP request, NOT a function of content. A content-hash
+        // key would suppress legitimate duplicate turns — a user sending
+        // identical content twice in one thread ("yes", "ok", "retry") within
+        // mcp-host's dedup TTL would have the FIRST answer replayed and the 2nd
+        // turn silently dropped.
+        //
+        // Prefer a client-supplied Idempotency-Key header when present (lets the
+        // Desktop App scope its own retries); otherwise mint a fresh random
+        // nonce. It is computed exactly ONCE here — before the first forward —
+        // and carried on the single forwardedBody object reused by BOTH the
+        // initial forward and the wake-and-hold retry (attemptUpstream reuses
+        // the same object and never recomputes the id). So a socket-death retry
+        // of ONE request re-presents the SAME messageId — mcp-host's admission
+        // sink (MessageQueue.deliveryKeyOf) dedups it (duplicate_delivery →
+        // replay) instead of re-executing the turn — while two DISTINCT sends
+        // (even byte-identical content) get distinct ids and both execute.
+        const clientIdempotencyKey =
+          typeof req.headers['idempotency-key'] === 'string'
+            ? req.headers['idempotency-key'].trim()
+            : ''
+        const deliveryMessageId = clientIdempotencyKey || randomUUID()
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
           channelId: hostRef,
           hostRef,
           sender: auth.sub,
+          messageId: deliveryMessageId,
           metadata: rpcInvocationContext(auth),
           threadId: typeof body.threadId === 'string' ? body.threadId : undefined,
           attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
@@ -193,19 +233,141 @@ export function createRpcRouter(): Router {
         console.info(
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=host-message-rest${isAsync ? ' (async)' : ''} attachments=${attachmentCount}`
         )
-        const response = await forwardHostMessageToHost(host, forwardedBody, { async: isAsync })
-        res.status(200).json(response)
+        let upstreamResponse: Record<string, unknown> | null = null
+        try {
+          upstreamResponse = await forwardHostMessageToHost(host, forwardedBody, {
+            async: isAsync,
+          })
+        } catch (error) {
+          console.warn(
+            `[RPC_PROXY] host message forward failed host=${hostRef} error=${
+              error instanceof Error ? error.message : String(error)
+            }`
+          )
+          if (isWakeEligibleHostError(error)) {
+            // Stateless wake-and-hold: a down or draining host triggers a
+            // control-api wake (and possibly a bounded hold) instead of the
+            // generic 502. Non-stateless hosts fall back to the legacy path.
+            await respondWithWakeAndHold({
+              res,
+              hostRef,
+              host,
+              rpcAccessToken,
+              tokenExpMs: auth.exp * 1000,
+              attemptUpstream: async () => {
+                const retried = await forwardHostMessageToHost(host, forwardedBody, {
+                  async: isAsync,
+                })
+                res.status(200).json(retried)
+              },
+              respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+            })
+            return
+          }
+          respondUpstreamUnavailable(res, error)
+          return
+        }
+        // The upstream accepted the message: the request is resolved. Writing
+        // the success response OUTSIDE the catch above guarantees a failure in
+        // the write itself can never be classified as "host down" and re-enter
+        // the wake path (which would re-forward an already-delivered message).
+        res.status(200).json(upstreamResponse)
       } catch (error) {
         console.warn(
           `[RPC_PROXY] host message forward failed host=${String(req.params.hostRef || '').trim()} error=${
             error instanceof Error ? error.message : String(error)
           }`
         )
-        if (error instanceof Error && error.name === 'AbortError') {
-          res.status(504).json({ error: 'Gateway Timeout' })
+        respondUpstreamUnavailable(res, error)
+      }
+    }
+  )
+
+  // Pre-warm a suspended stateless host. The Desktop App calls this when the
+  // user opens the agent view so the cold wake overlaps with the user reading
+  // history/typing. Fire-and-forget: control-api owns dedup/coalescing/
+  // rate-limiting and the monotonic wake generation — this route only passes
+  // its answer through. NO hold and NO readiness polling here (that is the
+  // held-request path in wakeAndHold.ts).
+  router.post(
+    '/rpc/hosts/:hostRef/wake',
+    requireRpcAuth,
+    requireScope('host:wake:write'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const auth = req.auth!
+        const rpcAccessToken = extractAuthToken(req)
+        const hostRef = String(req.params.hostRef || '').trim()
+        if (!hostRef) {
+          res.status(400).json({ error: 'hostRef is required' })
           return
         }
-        res.status(502).json({ error: 'Upstream host unavailable' })
+
+        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
+          teamId: auth.teamId,
+        })
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
+
+        console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=host-wake`)
+        let wake: HostWakeApiResponse
+        try {
+          wake = await requestHostWakeFromControlApi(hostRef, rpcAccessToken)
+        } catch (error) {
+          console.warn(
+            `[RPC_PROXY] host wake request failed host=${hostRef} error=${
+              error instanceof Error ? error.message : String(error)
+            }`
+          )
+          res.status(502).json({ error: 'Control API host wake unavailable' })
+          return
+        }
+
+        switch (wake.kind) {
+          case 'active':
+            res.status(200).json({
+              status: 'active',
+              ...(wake.wakeGeneration !== null ? { wakeGeneration: wake.wakeGeneration } : {}),
+            })
+            return
+          case 'wake-requested':
+            res.status(202).json({
+              status: 'wake-requested',
+              ...(wake.wakeGeneration !== null ? { wakeGeneration: wake.wakeGeneration } : {}),
+            })
+            return
+          case 'not-stateless':
+            res.status(409).json({ status: 'not-stateless' })
+            return
+          case 'unknown':
+            res.status(404).json({ status: 'unknown' })
+            return
+          case 'rate-limited':
+            res.setHeader('Retry-After', String(Math.max(1, Math.ceil(wake.retryAfterSeconds))))
+            res.status(429).json({
+              error: 'Host wake rate limited',
+              retryAfterSeconds: wake.retryAfterSeconds,
+            })
+            return
+          case 'auth':
+            // control-api rejected the caller's rpc access token — mirror it.
+            res.status(wake.status).json({ error: 'Control API rejected the rpc access token' })
+            return
+          default: {
+            // Exhaustiveness guard: a future HostWakeApiResponse kind must
+            // answer 502 instead of leaving the request hanging until the
+            // client times out.
+            const unhandledWake: never = wake
+            void unhandledWake
+            console.warn(`[RPC_PROXY] unhandled host wake response kind host=${hostRef}`)
+            res.status(502).json({ error: 'Unhandled wake response' })
+            return
+          }
+        }
+      } catch (error) {
+        next(error)
       }
     }
   )
@@ -452,21 +614,39 @@ export function createRpcRouter(): Router {
         console.info(
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-task-result taskId=${taskId}`
         )
-        const result = await forwardTaskResultFromHost(host, taskId)
-        if (!result) {
-          res.status(404).json({ error: 'Task result not found' })
-          return
+        const attemptTaskResult = async () => {
+          const result = await forwardTaskResultFromHost(host, taskId)
+          if (!result) {
+            res.status(404).json({ error: 'Task result not found' })
+            return
+          }
+          res.status(200).json(result)
         }
-        res.status(200).json(result)
+        try {
+          await attemptTaskResult()
+        } catch (error) {
+          console.warn(
+            `[RPC_PROXY] task result forward failed error=${error instanceof Error ? error.message : String(error)}`
+          )
+          if (isWakeEligibleHostError(error)) {
+            await respondWithWakeAndHold({
+              res,
+              hostRef,
+              host,
+              rpcAccessToken,
+              tokenExpMs: auth.exp * 1000,
+              attemptUpstream: attemptTaskResult,
+              respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+            })
+            return
+          }
+          respondUpstreamUnavailable(res, error)
+        }
       } catch (error) {
         console.warn(
           `[RPC_PROXY] task result forward failed error=${error instanceof Error ? error.message : String(error)}`
         )
-        if (error instanceof Error && error.name === 'AbortError') {
-          res.status(504).json({ error: 'Gateway Timeout' })
-          return
-        }
-        res.status(502).json({ error: 'Upstream host unavailable' })
+        respondUpstreamUnavailable(res, error)
       }
     }
   )
@@ -502,24 +682,42 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=cancel-task taskId=${taskId}`
         )
 
-        const result = await forwardCancelToHost(host, taskId, auth.sub)
-        if (result.body) {
-          res
-            .status(result.status)
-            .type(result.contentType || 'application/json')
-            .send(result.body)
-        } else {
-          res.status(result.status).end()
+        const attemptCancel = async () => {
+          const result = await forwardCancelToHost(host, taskId, auth.sub)
+          if (result.body) {
+            res
+              .status(result.status)
+              .type(result.contentType || 'application/json')
+              .send(result.body)
+          } else {
+            res.status(result.status).end()
+          }
+        }
+        try {
+          await attemptCancel()
+        } catch (error) {
+          console.warn(
+            `[RPC_PROXY] cancel forward failed error=${error instanceof Error ? error.message : String(error)}`
+          )
+          if (isWakeEligibleHostError(error)) {
+            await respondWithWakeAndHold({
+              res,
+              hostRef,
+              host,
+              rpcAccessToken,
+              tokenExpMs: auth.exp * 1000,
+              attemptUpstream: attemptCancel,
+              respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+            })
+            return
+          }
+          respondUpstreamUnavailable(res, error)
         }
       } catch (error) {
         console.warn(
           `[RPC_PROXY] cancel forward failed error=${error instanceof Error ? error.message : String(error)}`
         )
-        if (error instanceof Error && error.name === 'AbortError') {
-          res.status(504).json({ error: 'Gateway Timeout' })
-          return
-        }
-        res.status(502).json({ error: 'Upstream host unavailable' })
+        respondUpstreamUnavailable(res, error)
       }
     }
   )

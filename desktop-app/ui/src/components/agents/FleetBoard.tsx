@@ -250,8 +250,8 @@ export function FleetBoard() {
                     <tr
                       key={row.agent}
                       className="da-table__row--clickable agents-table-row-clickable"
-                      {...clickableRowProps(() => onSelectAgent(row.agent), {
-                        ariaLabel: `Open conversation with ${row.agent}`,
+                      {...clickableRowProps(() => onOpenAgentWorkspace(row.agent, 'details'), {
+                        ariaLabel: `Open details for ${row.agent}`,
                       })}
                     >
                       <td className="da-table__cell">

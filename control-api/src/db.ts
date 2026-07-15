@@ -4,6 +4,7 @@ import {
   applyPluginWorkloadSdkSchema,
   dropPluginWorkloadSdkSuperAdminApprovedColumn,
 } from './services/pluginWorkloadSdkSchema.js'
+import { applyRegistryConnectionSchema } from './services/registryConnectionSchema.js'
 
 export type DbClient = {
   query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
@@ -792,6 +793,18 @@ async function applyBaselineSchema(db: DbClient): Promise<void> {
 
 export async function applyWorkflowRunCompletedNotificationTrigger(db: DbClient): Promise<void> {
   await db.query(`
+    CREATE OR REPLACE FUNCTION workflow_run_step_output_jsonb(raw_value TEXT) RETURNS JSONB AS $$
+    BEGIN
+      IF raw_value IS NULL OR btrim(raw_value) = '' THEN
+        RETURN NULL;
+      END IF;
+
+      RETURN raw_value::jsonb;
+    EXCEPTION WHEN others THEN
+      RETURN NULL;
+    END;
+    $$ LANGUAGE plpgsql IMMUTABLE;
+
     CREATE OR REPLACE FUNCTION notify_workflow_run_update() RETURNS trigger AS $$
     BEGIN
       IF TG_OP = 'UPDATE'
@@ -817,10 +830,15 @@ export async function applyWorkflowRunCompletedNotificationTrigger(db: DbClient)
             'providerMedium', war.payload #>> '{metadata,workflowTrigger,providerBinding,medium}',
             'providerChannelId', war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}',
             'providerWorkspaceId', war.payload #>> '{metadata,workflowTrigger,providerBinding,providerWorkspaceId}',
+            'providerConversationId', war.payload #>> '{metadata,workflowTrigger,conversationId}',
             'providerThreadId', war.payload #>> '{metadata,workflowTrigger,providerBinding,providerThreadId}',
+            'hasDownloadableItems', wr_outputs.has_downloadable_items,
             'message', CASE
-              WHEN NEW.phase = 'Succeeded' THEN 'Workflow ' || NEW.recipe_name || ' completed. Results are ready. Reply: download result'
-              ELSE 'Workflow ' || NEW.recipe_name || ' finished with status ' || NEW.phase || '. Reply: download result to check available results.'
+              WHEN NEW.phase = 'Succeeded' AND wr_outputs.has_downloadable_items
+                THEN 'Workflow ' || NEW.recipe_name || ' completed. Results are ready.'
+              WHEN NEW.phase = 'Succeeded'
+                THEN 'Workflow ' || NEW.recipe_name || ' completed.'
+              ELSE 'Workflow ' || NEW.recipe_name || ' finished with status ' || NEW.phase || '.'
             END
           ),
           'normal',
@@ -829,8 +847,46 @@ export async function applyWorkflowRunCompletedNotificationTrigger(db: DbClient)
         FROM workflow_approval_requests war
         JOIN workflow_approval_trigger_intents wati
           ON wati.approval_request_id = war.id
+        CROSS JOIN LATERAL (
+          SELECT EXISTS (
+            SELECT 1
+              FROM workflow_run_steps wrs
+              CROSS JOIN LATERAL (
+                SELECT workflow_run_step_output_jsonb(wrs.output) AS output_json
+              ) wrs_output
+             WHERE wrs.run_id = NEW.run_id
+               AND (
+                 NULLIF(wrs_output.output_json #>> '{artifact,name}', '') IS NOT NULL
+                 OR CASE
+                      WHEN jsonb_typeof(wrs_output.output_json->'artifacts') = 'array'
+                        THEN jsonb_array_length(wrs_output.output_json->'artifacts') > 0
+                      ELSE false
+                    END
+                 OR EXISTS (
+                   SELECT 1
+                     FROM jsonb_array_elements(
+                       CASE
+                         WHEN jsonb_typeof(wrs.tools_called) = 'array' THEN wrs.tools_called
+                         ELSE '[]'::jsonb
+                       END
+                     ) AS tool_call
+                     CROSS JOIN LATERAL (
+                       SELECT CASE
+                         WHEN jsonb_typeof(tool_call->'result') = 'object'
+                           THEN tool_call->'result'
+                         WHEN jsonb_typeof(tool_call->'result') = 'string'
+                           THEN workflow_run_step_output_jsonb(tool_call->>'result')
+                         ELSE NULL
+                       END AS result_json
+                     ) tool_result
+                    WHERE tool_result.result_json->>'success' = 'true'
+                      AND NULLIF(tool_result.result_json #>> '{artifact,name}', '') IS NOT NULL
+                 )
+               )
+          ) AS has_downloadable_items
+        ) wr_outputs
         WHERE war.id = NEW.approval_request_id
-          AND war.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' IN ('telegram', 'slack')
+          AND war.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' IN ('telegram', 'slack', 'teams')
           AND NULLIF(war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}', '') IS NOT NULL
         ON CONFLICT (dedupe_key) DO NOTHING;
       END IF;
@@ -994,6 +1050,7 @@ async function applyWorkflowApprovalMediumSchema(db: DbClient): Promise<void> {
       provider_workspace_id TEXT NULL,
       provider_channel_id TEXT NULL,
       communication_channel_ref TEXT NULL,
+      display_name TEXT NULL,
       verified_at TIMESTAMPTZ NOT NULL,
       disabled_at TIMESTAMPTZ NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1027,6 +1084,7 @@ async function applyWorkflowApprovalMediumSchema(db: DbClient): Promise<void> {
       expires_at TIMESTAMPTZ NOT NULL,
       consumed_at TIMESTAMPTZ NULL,
       attempts INTEGER NOT NULL DEFAULT 0,
+      reply_in_threads BOOLEAN NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
@@ -2515,6 +2573,82 @@ const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0048_gfs_permission_store',
     apply: applyGfsPermissionStoreSchema,
+  },
+  {
+    version: '0049_registry_connection',
+    apply: applyRegistryConnectionSchema,
+  },
+  {
+    version: '0050_host_wake_generations',
+    apply: async db => {
+      // Monotonic wake-generation counter for stateless Hosts (Stage 4.1).
+      // The counter lives in Postgres — NOT in the Host CR annotation —
+      // because the admin facade full-replaces Host metadata and could
+      // clobber a read-modify-write on the annotation. The wake endpoint
+      // bumps the generation here atomically (INSERT ... ON CONFLICT DO
+      // UPDATE ... RETURNING) and only PROJECTS the value onto the
+      // `clerum.io/wake-requested` annotation, never reads it back.
+      //
+      // `last_projected_at` implements server-side coalescence: concurrent
+      // wakes for the same host within a short window still increment the
+      // generation, but only the caller that moves `last_projected_at`
+      // re-projects the annotation (N wakes => 1 annotation patch).
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS host_wake_generations (
+          host_ref TEXT PRIMARY KEY,
+          generation BIGINT NOT NULL DEFAULT 0,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          last_projected_at TIMESTAMPTZ
+        );
+      `)
+    },
+  },
+  {
+    version: '0051_host_heartbeats',
+    apply: async db => {
+      // Stateless heartbeat ingest (JWT-plane realignment): mcp-host pods
+      // POST D8 activity snapshots to control-api's /mcp-host facade
+      // (identity bound to the runtime token's hostRefs[0] claim, never the
+      // path); HCC polls the rows via /api/v1/auth/mcp-host/heartbeats
+      // (InternalControl, iss=hcc) and feeds its StatelessLifecycleTracker.
+      //
+      // One row per host — the latest beat wins. The tracker's idle decision
+      // derives from the payload's last_activity_ts, so no row history is
+      // needed; `received_at` drives the poller's `since` cursor.
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS host_heartbeats (
+          host_ref TEXT PRIMARY KEY,
+          pod_uid TEXT NOT NULL,
+          active_work BOOLEAN NOT NULL,
+          conditions JSONB NOT NULL,
+          last_activity_ts BIGINT NOT NULL,
+          state TEXT NOT NULL,
+          received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `)
+    },
+  },
+  {
+    version: '0052_workflow_approval_medium_display_name',
+    apply: async db => {
+      await db.query(`
+        ALTER TABLE workflow_approval_medium_accounts
+          ADD COLUMN IF NOT EXISTS display_name TEXT NULL;
+      `)
+    },
+  },
+  {
+    version: '0053_workflow_approval_medium_reply_in_threads',
+    apply: async db => {
+      await db.query(`
+        ALTER TABLE workflow_approval_medium_challenges
+          ADD COLUMN IF NOT EXISTS reply_in_threads BOOLEAN NULL;
+      `)
+    },
+  },
+  {
+    version: '0054_workflow_run_completed_notification_download_detection',
+    apply: applyWorkflowRunCompletedNotificationTrigger,
   },
 ]
 

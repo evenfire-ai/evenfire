@@ -128,8 +128,8 @@ async function seedConversation(
 ) {
   const key = `${userSub}:rpc:${agent}:${chatId}`
   const conv = await convManager.getOrCreate(key)
-  convManager.startTurn(conv, userInput, 'test-task')
-  convManager.completeTurn(conv, response)
+  await convManager.startTurn(conv, userInput, 'test-task')
+  await convManager.completeTurn(conv, response)
   return conv
 }
 
@@ -214,7 +214,7 @@ describe('Cross-device desktop sessions — integration regression guard', () =>
     // Mirrors the full CM lifecycle a real submit-approve flow would take.
     const key = 'user-A:rpc:agent-x:chat-1'
     const conv = await convManager.getOrCreate(key)
-    convManager.startTurn(conv, 'please do X', 'test-task')
+    await convManager.startTurn(conv, 'please do X', 'test-task')
 
     // Enter AwaitingApproval — the state the 2026-03-28 hot-fix was protecting.
     const pendingApproval = {
@@ -231,7 +231,7 @@ describe('Cross-device desktop sessions — integration regression guard', () =>
     // created a NEW empty conversation under a different userId, causing
     // the catalog read below to return 0 items.
     await convManager.approve(conv, false)
-    convManager.completeTurn(conv, 'done')
+    await convManager.completeTurn(conv, 'done')
 
     // Catalog for user-A must show exactly one session, not two.
     const listRes = await request(app)
@@ -284,7 +284,7 @@ describe('Cross-device desktop sessions — integration regression guard', () =>
 
   it('processing session exposes state=processing + activeTaskId', async () => {
     const conv = await convManager.getOrCreate('user-A:rpc:agent-x:chat-1')
-    convManager.startTurn(conv, 'long task', 'task-running') // no completeTurn → in flight
+    await convManager.startTurn(conv, 'long task', 'task-running') // no completeTurn → in flight
 
     const listRes = await request(app)
       .get('/v1/runtime/sessions')
@@ -305,7 +305,7 @@ describe('Cross-device desktop sessions — integration regression guard', () =>
 
   it('awaiting_approval session exposes pendingApproval (displayName only, no tool_name leak)', async () => {
     const conv = await convManager.getOrCreate('user-A:rpc:agent-x:chat-1')
-    convManager.startTurn(conv, 'do X', 'task-suspended')
+    await convManager.startTurn(conv, 'do X', 'task-suspended')
     await convManager.suspendForApproval(conv, {
       request_id: 'req-9',
       tool_name: 'shell_exec',

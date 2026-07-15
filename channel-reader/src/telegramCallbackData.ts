@@ -1,11 +1,16 @@
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const WORKFLOW_NAME_RE = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/
-
 const APPROVAL_CALLBACK_RE = /^wf:([ad]):([0-9a-f-]{36})$/i
-const RESULT_CALLBACK_RE = /^wf:r:([a-z0-9][a-z0-9.-]*[a-z0-9])$/i
+const RESULT_CALLBACK_RE = /^wf:r:([0-9a-f-]{36})$/i
+const LEGACY_RESULT_CALLBACK_RE = /^wf:r:([a-z0-9][a-z0-9.-]*[a-z0-9])$/i
+const TOOL_APPROVAL_CALLBACK_RE = /^tool:([ald]):([A-Za-z0-9_-]{16})$/
 export const TELEGRAM_WORKFLOW_RESULT_CALLBACK_DATA = 'wf:r'
 
 export type TelegramCallbackAction =
+  | {
+      kind: 'toolApprovalDecision'
+      decision: 'approve' | 'approveAlways' | 'deny'
+      actionToken: string
+    }
   | {
       kind: 'workflowApprovalDecision'
       decision: 'approve' | 'deny'
@@ -13,6 +18,7 @@ export type TelegramCallbackAction =
     }
   | {
       kind: 'workflowResult'
+      workflowRunId?: string
       workflowName?: string
     }
 
@@ -40,12 +46,29 @@ export function parseTelegramCallbackData(
 ): TelegramCallbackAction | null {
   const data = value?.trim()
   if (!data) return null
+  const toolApprovalMatch = TOOL_APPROVAL_CALLBACK_RE.exec(data)
+  if (toolApprovalMatch) {
+    return {
+      kind: 'toolApprovalDecision',
+      decision:
+        toolApprovalMatch[1] === 'a'
+          ? 'approve'
+          : toolApprovalMatch[1] === 'l'
+            ? 'approveAlways'
+            : 'deny',
+      actionToken: toolApprovalMatch[2],
+    }
+  }
   if (data === TELEGRAM_WORKFLOW_RESULT_CALLBACK_DATA) {
     return { kind: 'workflowResult' }
   }
   const resultMatch = RESULT_CALLBACK_RE.exec(data)
-  if (resultMatch) {
-    return { kind: 'workflowResult', workflowName: resultMatch[1] }
+  if (resultMatch && UUID_RE.test(resultMatch[1])) {
+    return { kind: 'workflowResult', workflowRunId: resultMatch[1] }
+  }
+  const legacyResultMatch = LEGACY_RESULT_CALLBACK_RE.exec(data)
+  if (legacyResultMatch) {
+    return { kind: 'workflowResult', workflowName: legacyResultMatch[1] }
   }
 
   const match = APPROVAL_CALLBACK_RE.exec(data)
@@ -59,9 +82,9 @@ export function parseTelegramCallbackData(
   }
 }
 
-export function telegramWorkflowResultCallbackData(workflowName: string): string | null {
-  const normalized = workflowName.trim()
-  if (!WORKFLOW_NAME_RE.test(normalized)) return null
+export function telegramWorkflowResultCallbackData(workflowRunId: string): string | null {
+  const normalized = workflowRunId.trim()
+  if (!UUID_RE.test(normalized)) return null
   const value = `wf:r:${normalized}`
   return Buffer.byteLength(value, 'utf8') <= 64 ? value : null
 }

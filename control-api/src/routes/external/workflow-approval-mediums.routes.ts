@@ -13,12 +13,18 @@ import { createMediumLinkSession } from '../../services/workflowApprovalMediumLi
 import {
   listVerifiedMediumAccountsWithPreference,
   preferVerifiedMediumAccount,
+  updateVerifiedMediumAccountDisplayName,
 } from '../../services/workflowApprovalMediumPreferenceService.js'
 import {
   attachSlackTargetsToAccounts,
   listSlackApprovalTargets,
   resolveSlackProviderEventTarget,
 } from '../../services/workflowApprovalMediumSlackVerificationService.js'
+import {
+  attachTeamsTargetsToAccounts,
+  listTeamsApprovalTargets,
+  resolveTeamsProviderEventTarget,
+} from '../../services/workflowApprovalMediumTeamsVerificationService.js'
 import {
   attachTelegramTargetsToAccounts,
   disableVerifiedMediumAccountWithTelegramAssociations,
@@ -30,6 +36,7 @@ import {
 } from '../../services/workflowApprovalMediumTelegramVerificationService.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const DISPLAY_NAME_MAX_LENGTH = 120
 
 function statusForTargetError(error: string): number {
   if (error === 'invalid_target_id') return 400
@@ -37,6 +44,8 @@ function statusForTargetError(error: string): number {
   if (error === 'telegram_target_not_ready') return 409
   if (error === 'slack_target_not_found') return 404
   if (error === 'slack_target_not_ready') return 409
+  if (error === 'teams_target_not_found') return 404
+  if (error === 'teams_target_not_ready') return 409
   return 400
 }
 
@@ -44,6 +53,19 @@ function optionalString(value: unknown): string | null {
   if (value === undefined || value === null) return null
   const normalized = String(value).trim()
   return normalized ? normalized : null
+}
+
+function displayNameFromBody(body: unknown): string | null {
+  const value =
+    body && typeof body === 'object' && 'displayName' in body
+      ? (body as { displayName?: unknown }).displayName
+      : undefined
+  if (value === undefined) throw new Error('display_name_required')
+  if (value === null) return null
+  if (typeof value !== 'string') throw new Error('display_name_must_be_string')
+  const normalized = value.trim()
+  if (normalized.length > DISPLAY_NAME_MAX_LENGTH) throw new Error('display_name_too_long')
+  return normalized || null
 }
 
 export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway): Router {
@@ -94,6 +116,9 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
           if (medium === 'slack') {
             return res.status(400).json({ error: 'slack_target_required' })
           }
+          if (medium === 'teams') {
+            return res.status(400).json({ error: 'teams_target_required' })
+          }
           const result = await createMediumChallenge({
             userId: claims.userId,
             identity: {
@@ -119,6 +144,9 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
             return res.status(statusForTargetError(err.message)).json({ error: err.message })
           }
           if (err instanceof Error && err.message === 'slack_target_required') {
+            return res.status(400).json({ error: err.message })
+          }
+          if (err instanceof Error && err.message === 'teams_target_required') {
             return res.status(400).json({ error: err.message })
           }
           if (err instanceof Error && err.message === 'invalid_target_id') {
@@ -166,6 +194,27 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
               target,
             })
           }
+          if (medium === 'teams' && targetId) {
+            const target = await resolveTeamsProviderEventTarget({
+              gateway,
+              userId: claims.userId,
+              targetId,
+            })
+            const result = await createMediumLinkSession({
+              userId: claims.userId,
+              medium,
+              providerWorkspaceId: target.providerWorkspaceId,
+              communicationChannelRef: `${target.channelNamespace}/${target.channelName}`,
+              replyInThreads: body.replyInThreads,
+            })
+            return res.status(202).json({
+              linkSessionId: result.id,
+              nonce: result.nonce,
+              expiresAt: result.expiresAt,
+              deepLinkUrl: result.deepLinkUrl,
+              target,
+            })
+          }
           const result = await createMediumLinkSession({
             userId: claims.userId,
             medium,
@@ -183,9 +232,12 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
             (err.message === 'unsupported_medium' ||
               err.message === 'telegram_target_required' ||
               err.message === 'slack_workspace_id_required' ||
+              err.message === 'teams_tenant_id_required' ||
               err.message === 'invalid_provider_workspace_id' ||
+              err.message === 'reply_in_threads_must_be_boolean' ||
               err.message === 'invalid_target_id' ||
-              err.message.startsWith('slack_target'))
+              err.message.startsWith('slack_target') ||
+              err.message.startsWith('teams_target'))
           ) {
             return res.status(statusForTargetError(err.message)).json({ error: err.message })
           }
@@ -259,7 +311,12 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
             claims.userId,
             baseItems
           )
-          const items = await attachSlackTargetsToAccounts(gateway, claims.userId, telegramAttached)
+          const slackAttached = await attachSlackTargetsToAccounts(
+            gateway,
+            claims.userId,
+            telegramAttached
+          )
+          const items = await attachTeamsTargetsToAccounts(gateway, claims.userId, slackAttached)
           return res.status(200).json({ items })
         } catch (err) {
           next(err)
@@ -278,7 +335,7 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
           const extReq = req as ExternalAuthedRequest
           const claims = extReq.externalAuth
           if (!claims) return res.status(401).json({ error: 'Unauthorized' })
-          const [telegramTargets, slackTargets] = await Promise.all([
+          const [telegramTargets, slackTargets, teamsTargets] = await Promise.all([
             listTelegramApprovalTargets({
               gateway,
               userId: claims.userId,
@@ -287,9 +344,13 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
               gateway,
               userId: claims.userId,
             }),
+            listTeamsApprovalTargets({
+              gateway,
+              userId: claims.userId,
+            }),
           ])
           return res.status(200).json({
-            items: [...telegramTargets.items, ...slackTargets.items],
+            items: [...telegramTargets.items, ...slackTargets.items, ...teamsTargets.items],
           })
         } catch (err) {
           next(err)
@@ -316,6 +377,43 @@ export function createExternalWorkflowApprovalMediumsRouter(gateway: K8sGateway)
           if (!account) return res.status(404).json({ error: 'medium_account_not_found' })
           return res.status(200).json({ ok: true, account })
         } catch (err) {
+          next(err)
+        }
+      })()
+    }
+  )
+
+  router.patch(
+    '/external/workflow-approval-mediums/:id/display-name',
+    mcpHostHttpMetrics('external_workflow_approval_medium_display_name'),
+    requireValidExternalSessionToken,
+    (req, res, next) => {
+      void (async () => {
+        try {
+          const extReq = req as ExternalAuthedRequest
+          const claims = extReq.externalAuth
+          const accountId = String(req.params.id || '').trim()
+          if (!claims) return res.status(401).json({ error: 'Unauthorized' })
+          if (!UUID_RE.test(accountId)) {
+            return res.status(400).json({ error: 'Invalid account id format' })
+          }
+          const displayName = displayNameFromBody(req.body ?? {})
+          const account = await updateVerifiedMediumAccountDisplayName({
+            userId: claims.userId,
+            accountId,
+            displayName,
+          })
+          if (!account) return res.status(404).json({ error: 'medium_account_not_found' })
+          return res.status(200).json({ ok: true, account })
+        } catch (err) {
+          if (
+            err instanceof Error &&
+            (err.message === 'display_name_required' ||
+              err.message === 'display_name_must_be_string' ||
+              err.message === 'display_name_too_long')
+          ) {
+            return res.status(400).json({ error: err.message })
+          }
           next(err)
         }
       })()

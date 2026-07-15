@@ -69,6 +69,27 @@ function makeSlackMessage(content: string): Message {
   }
 }
 
+function makeTeamsMessage(content: string, overrides: Partial<Message> = {}): Message {
+  return {
+    channelType: 'teams',
+    channelId: '19:channel-1@thread.tacv2;messageid=root-post-1',
+    sender: 'teams-user-1',
+    content,
+    timestamp: new Date('2026-05-12T12:00:00.000Z'),
+    messageId: 'activity-1',
+    threadId: 'root-post-1',
+    providerIdentity: {
+      medium: 'teams',
+      providerUserId: 'teams-user-1',
+      providerWorkspaceId: 'tenant-1',
+      providerChannelId: '19:channel-1@thread.tacv2',
+      providerChannelType: 'channel',
+      providerEventId: 'teams:tenant-1:conversation-1:activity-1',
+    },
+    ...overrides,
+  }
+}
+
 function makeChannel(): CommunicationChannelCRD {
   return {
     name: 'chatllm-telegram',
@@ -86,6 +107,9 @@ describe('async progress flow — SSE-driven approval', () => {
     const editedContents: string[] = []
     const sentReplies: Array<{ channelId: string; content: string }> = []
 
+    const editMessage = vi.fn<ChannelAdapter['editMessage']>(async (_c, _m, content) => {
+      editedContents.push(content)
+    })
     const adapter: ChannelAdapter = {
       channelType: 'telegram',
       connect: vi.fn(),
@@ -95,9 +119,7 @@ describe('async progress flow — SSE-driven approval', () => {
         sentReplies.push({ channelId, content })
         return `bot-msg-${sentReplies.length}`
       }),
-      editMessage: vi.fn(async (_c, _m, content) => {
-        editedContents.push(content)
-      }),
+      editMessage,
     }
 
     const rpcClient = {
@@ -150,6 +172,37 @@ describe('async progress flow — SSE-driven approval', () => {
     expect(editedContents).toContain(
       'Tool `mcp-tavily-remote__tavily_research` requires approval. Reply /approve or /deny.'
     )
+    const approvalEdit = editMessage.mock.calls.find(call => call[2].includes('requires approval'))
+    expect(approvalEdit?.[3]?.telegramInlineKeyboard).toEqual([
+      [
+        expect.objectContaining({
+          text: 'Approve',
+          callbackData: expect.stringMatching(/^tool:a:/),
+        }),
+        expect.objectContaining({ text: 'Deny', callbackData: expect.stringMatching(/^tool:d:/) }),
+      ],
+      [
+        expect.objectContaining({
+          text: 'Always approve',
+          callbackData: expect.stringMatching(/^tool:l:/),
+        }),
+      ],
+    ])
+    const editCountAfterApprovalPrompt = editMessage.mock.calls.length
+    stream.fireProgress([
+      {
+        toolCallId: 'tool-progress-after-approval-prompt',
+        toolName: 'mcp-tavily-remote__tavily_research',
+        displayName: 'Mcp-tavily-remote',
+        intentSummary: 'Still working',
+        iteration: 1,
+        stepIndex: 1,
+        totalSteps: 1,
+        state: 'running',
+      },
+    ])
+    await new Promise(r => setTimeout(r, 20))
+    expect(editMessage).toHaveBeenCalledTimes(editCountAfterApprovalPrompt)
 
     // 2. User replies /approve. handleApprovalCommand sends the approval HTTP,
     //    sends the "Approved." reply, and RETURNS — no inline polling.
@@ -338,6 +391,253 @@ describe('async progress flow — SSE-driven approval', () => {
     expect(streamCalls[0].closed).toBe(true)
 
     vi.useRealTimers()
+  })
+
+  it('renders Slack tool approval buttons in the originating thread', async () => {
+    streamCalls.length = 0
+    const editMessage = vi.fn<ChannelAdapter['editMessage']>(async () => undefined)
+    const adapter: ChannelAdapter = {
+      channelType: 'slack',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async () => 'slack-status-approval-1'),
+      editMessage,
+    }
+    const rpcClient = {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi.fn(async () => ({
+        success: true,
+        status: 'pending' as const,
+        taskId: 'task-slack-button-1',
+      })),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(async () => ({
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId: 'task-slack-button-1',
+          requestId: 'approval-slack-button-1',
+          userId: 'U123',
+          notification: 'HTTP search requires approval.',
+        },
+      })),
+      sendApproval: vi.fn(async () => ({ success: true })),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['slack', adapter]]),
+      channels: [],
+      sleep: async () => undefined,
+    })
+    const source = makeSlackMessage('<@U999> search the web')
+    source.threadId = '1710000000.000000'
+
+    await reader.handleMessages([source])
+    streamCalls[0].fireSuspended({
+      taskId: 'task-slack-button-1',
+      requestId: 'approval-slack-button-1',
+      toolName: 'http_request',
+      displayName: 'HTTP search',
+      reason: 'approval_required',
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const approvalEdit = editMessage.mock.calls.find(
+      call => call[2] === 'HTTP search requires approval.'
+    )
+    const actions = approvalEdit?.[3]?.slackBlocks?.find(block => block.type === 'actions')
+    expect(actions).toMatchObject({
+      type: 'actions',
+      elements: [
+        expect.objectContaining({
+          action_id: 'tool_approval_approve',
+          value: expect.stringMatching(/^tool:a:/),
+        }),
+        expect.objectContaining({
+          action_id: 'tool_approval_always',
+          value: expect.stringMatching(/^tool:l:/),
+        }),
+        expect.objectContaining({
+          action_id: 'tool_approval_deny',
+          value: expect.stringMatching(/^tool:d:/),
+        }),
+      ],
+    })
+    streamCalls[0].fireTerminal({ taskId: 'task-slack-button-1', status: 'cancelled' })
+  })
+
+  it('routes a Teams tool button through the original runtime conversation', async () => {
+    streamCalls.length = 0
+    const editMessage = vi.fn<ChannelAdapter['editMessage']>(async () => undefined)
+    const adapter: ChannelAdapter = {
+      channelType: 'teams',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async () => 'teams-status-1'),
+      editMessage,
+    }
+    const rpcClient = {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi.fn(async () => ({
+        success: true,
+        status: 'pending' as const,
+        taskId: 'task-teams-button-1',
+      })),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(async () => ({
+        success: true,
+        status: 'waiting_approval' as const,
+        approval: {
+          taskId: 'task-teams-button-1',
+          requestId: 'approval-teams-button-1',
+          userId: 'teams-user-1',
+          notification: 'HTTP search requires approval.',
+        },
+      })),
+      sendApproval: vi.fn(async () => ({ success: true })),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['teams', adapter]]),
+      channels: [],
+      sleep: async () => undefined,
+    })
+
+    await reader.handleMessages([makeTeamsMessage('Search the web')])
+    streamCalls[0].fireSuspended({
+      taskId: 'task-teams-button-1',
+      requestId: 'approval-teams-button-1',
+      toolName: 'http_request',
+      displayName: 'HTTP search',
+      reason: 'approval_required',
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const approvalEdit = editMessage.mock.calls.find(
+      call => call[2] === 'HTTP search requires approval.'
+    )
+    const approveAction = approvalEdit?.[3]?.teamsActions?.find(
+      action => action.title === 'Approve'
+    )
+    expect(approveAction?.value).toMatch(/^tool:a:[A-Za-z0-9_-]{16}$/)
+
+    await reader.handleMessages([
+      makeTeamsMessage(approveAction!.value, {
+        channelId: '19:channel-1@thread.tacv2',
+        messageId: 'button-activity-1',
+        providerIdentity: {
+          medium: 'teams',
+          providerUserId: 'teams-user-1',
+          providerWorkspaceId: 'tenant-1',
+          providerChannelId: '19:channel-1@thread.tacv2',
+          providerChannelType: 'channel',
+          providerEventId: 'teams:tenant-1:conversation-1:button-activity-1',
+        },
+      }),
+    ])
+
+    expect(rpcClient.sendApproval).toHaveBeenCalledWith(
+      'teams-user-1',
+      'approval-teams-button-1',
+      false,
+      'teams',
+      '19:channel-1@thread.tacv2;messageid=root-post-1'
+    )
+    expect(editMessage).toHaveBeenCalledWith(
+      '19:channel-1@thread.tacv2;messageid=root-post-1',
+      'teams-status-1',
+      'Approved. Processing...',
+      undefined
+    )
+    streamCalls[0].fireTerminal({ taskId: 'task-teams-button-1', status: 'cancelled' })
+  })
+
+  it('does not let a slow Teams progress edit overwrite the terminal response', async () => {
+    streamCalls.length = 0
+    let releaseProgressEdit!: () => void
+    const progressEditBlocked = new Promise<void>(resolve => {
+      releaseProgressEdit = resolve
+    })
+    const editedContents: string[] = []
+    const editMessage = vi.fn<ChannelAdapter['editMessage']>(
+      async (_channelId, _messageId, content) => {
+        editedContents.push(content)
+        if (editedContents.length === 1) await progressEditBlocked
+      }
+    )
+    const adapter: ChannelAdapter = {
+      channelType: 'teams',
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async () => 'teams-status-race-1'),
+      editMessage,
+    }
+    const rpcClient = {
+      healthCheck: vi.fn(async () => true),
+      sendMessage: vi.fn(async () => ({
+        success: true,
+        status: 'pending' as const,
+        taskId: 'task-teams-race-1',
+      })),
+      getBaseUrl: vi.fn(() => 'http://mcp-host.test'),
+      getTaskResult: vi.fn(async () => ({
+        success: true,
+        status: 'completed' as const,
+        response: 'The final World Cup answer.',
+      })),
+      sendApproval: vi.fn(),
+      sendDenial: vi.fn(),
+      sendWorkflowApprovalDecision: vi.fn(async () => ({ success: true })),
+      getCronResults: vi.fn(async () => []),
+      acknowledgeCronResult: vi.fn(),
+    }
+    const reader = new ChannelReader({
+      rpcClient,
+      adapters: new Map([['teams', adapter]]),
+      channels: [],
+      sleep: async () => undefined,
+    })
+
+    await reader.handleMessages([makeTeamsMessage('How is the World Cup going?')])
+    const stream = streamCalls[0]
+    const completedStep: import('../src/types').ProgressStep = {
+      toolCallId: 'tool-1',
+      toolName: 'memory_search',
+      displayName: 'Memory search',
+      intentSummary: 'Search memory',
+      iteration: 1,
+      stepIndex: 1,
+      totalSteps: 1,
+      state: 'completed',
+      durationMs: 6,
+    }
+    stream.fireProgress([completedStep])
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(editMessage).toHaveBeenCalledTimes(1)
+
+    stream.fireTerminal({ taskId: 'task-teams-race-1', status: 'completed' })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(editMessage).toHaveBeenCalledTimes(1)
+
+    releaseProgressEdit()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(editedContents).toHaveLength(2)
+    expect(editedContents[1]).toContain('The final World Cup answer.')
+
+    stream.fireProgress([{ ...completedStep, toolCallId: 'tool-late' }])
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(editedContents).toHaveLength(2)
   })
 
   it('routes /deny and sends "Denied." reply', async () => {

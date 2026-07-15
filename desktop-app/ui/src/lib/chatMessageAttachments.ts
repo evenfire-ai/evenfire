@@ -20,6 +20,18 @@ function normalizeAttachmentLabel(label: string): string {
 
 function formatParsedAttachmentLabel(type: ChatMessageAttachment['type'], label: string): string {
   const normalizedLabel = normalizeAttachmentLabel(label)
+  if (type === 'global_file') {
+    const labeledReference = normalizedLabel.match(/^(.*?)\s+\(gfs:\/\/[^)]+\)$/i)
+    if (labeledReference?.[1]?.trim()) return labeledReference[1].trim()
+    const normalizedPath = normalizedLabel.replace(/^gfs:\/\/[^/]+\//i, '').replace(/\/+$/g, '')
+    const basename = normalizedPath.split('/').filter(Boolean).pop()
+    if (!basename) return normalizedLabel
+    try {
+      return decodeURIComponent(basename)
+    } catch {
+      return basename
+    }
+  }
   if (type !== 'agent_file') return normalizedLabel
   const normalizedPath = normalizedLabel.replace(/^\/+|\/+$/g, '')
   return normalizedPath.split('/').filter(Boolean).pop() || normalizedLabel
@@ -64,7 +76,7 @@ export function buildChatMessageAttachments(
   referenceAttachments: ComposerReferenceAttachment[]
 ): ChatMessageAttachment[] {
   const referenceItems = referenceAttachments.map((attachment, index): ChatMessageAttachment => {
-    const type = attachment.type === 'agent_file' ? 'agent_file' : attachment.type
+    const type = attachment.type
     return {
       id: attachment.id,
       type,
@@ -74,7 +86,9 @@ export function buildChatMessageAttachments(
           ? 'Plugin'
           : attachment.type === 'connector'
             ? 'Connector'
-            : 'Agent File',
+            : attachment.type === 'global_file'
+              ? 'Global File'
+              : 'Agent File',
       addedOrder: attachmentOrder(attachment, index),
     }
   })
@@ -97,6 +111,7 @@ export function getChatMessageAttachmentTypeLabel(type: ChatMessageAttachment['t
   if (type === 'plugin') return 'Plugin'
   if (type === 'connector') return 'Connector'
   if (type === 'agent_file') return 'Agent File'
+  if (type === 'global_file') return 'Global File'
   if (type === 'response_file') return 'Generated File'
   return 'Uploaded File'
 }
@@ -205,6 +220,11 @@ export function parseChatMessageDisplay(content: string): ParsedChatMessageDispl
         } else if (promptLine.startsWith('Agent Files:')) {
           for (const label of parseAttachmentList(promptLine.slice('Agent Files:'.length))) {
             const attachment = createParsedAttachment('agent_file', label, attachments.length)
+            if (attachment) attachments.push(attachment)
+          }
+        } else if (promptLine.startsWith('Global Files:')) {
+          for (const label of parseAttachmentList(promptLine.slice('Global Files:'.length))) {
+            const attachment = createParsedAttachment('global_file', label, attachments.length)
             if (attachment) attachments.push(attachment)
           }
         }

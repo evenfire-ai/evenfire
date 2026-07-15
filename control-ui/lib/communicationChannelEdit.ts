@@ -1,7 +1,5 @@
-import type { ChannelType } from './channelTypes'
+import type { CommunicationChannelProvider } from './communicationChannelProviders'
 import type { CommunicationChannelGroup, CommunicationChannelItem } from './communicationChannels'
-
-export type CommunicationChannelProvider = Extract<ChannelType, 'telegram' | 'slack'>
 
 export type CommunicationChannelDraftState = {
   accessTeamIds: string[]
@@ -13,6 +11,11 @@ export type CommunicationChannelDraftState = {
   slackReplyOnlyWhenMentioned: boolean
   slackReplyInThreads: boolean
   slackWorkspaceId: string
+  teams: CommunicationChannelGroup[]
+  teamsAppName: string
+  teamsAppId: string
+  teamsTenantId: string
+  teamsReplyOnlyWhenMentioned: boolean
   telegram: CommunicationChannelGroup[]
   telegramBotHandle: string
   telegramReplyOnlyWhenMentioned: boolean
@@ -33,11 +36,7 @@ export function hasTelegramConfig(
     'telegram' | 'telegramBotHandle' | 'telegramReplyOnlyWhenMentioned'
   >
 ): boolean {
-  return (
-    draft.telegram.length > 0 ||
-    Boolean(draft.telegramBotHandle.trim()) ||
-    draft.telegramReplyOnlyWhenMentioned
-  )
+  return draft.telegram.length > 0 || Boolean(draft.telegramBotHandle.trim())
 }
 
 export function hasSlackConfig(
@@ -53,9 +52,21 @@ export function hasSlackConfig(
   return (
     draft.slack.length > 0 ||
     Boolean(draft.slackBotHandle.trim()) ||
-    Boolean(draft.slackWorkspaceId.trim()) ||
-    draft.slackReplyOnlyWhenMentioned ||
-    draft.slackReplyInThreads
+    Boolean(draft.slackWorkspaceId.trim())
+  )
+}
+
+export function hasTeamsConfig(
+  draft: Pick<
+    CommunicationChannelDraftState,
+    'teams' | 'teamsAppName' | 'teamsAppId' | 'teamsTenantId' | 'teamsReplyOnlyWhenMentioned'
+  >
+): boolean {
+  return (
+    draft.teams.length > 0 ||
+    Boolean(draft.teamsAppName.trim()) ||
+    Boolean(draft.teamsAppId.trim()) ||
+    Boolean(draft.teamsTenantId.trim())
   )
 }
 
@@ -76,6 +87,12 @@ export function createCommunicationChannelDraft(
     slackReplyOnlyWhenMentioned: spec.slackSettings?.replyOnlyWhenMentioned === true,
     slackReplyInThreads: spec.slackSettings?.replyInThreads === true,
     slackWorkspaceId: spec.slackSettings?.workspaceId || '',
+    teams: spec.teams || [],
+    teamsAppName:
+      spec.teamsSettings?.appName || annotationValue(item, ['clerum.io/teams-app-name']),
+    teamsAppId: spec.teamsSettings?.appId || '',
+    teamsTenantId: spec.teamsSettings?.tenantId || '',
+    teamsReplyOnlyWhenMentioned: spec.teamsSettings?.replyOnlyWhenMentioned === true,
     telegram: spec.telegram || [],
     telegramBotHandle:
       spec.telegramSettings?.botHandle ||
@@ -90,12 +107,14 @@ export function communicationChannelInitialTab(
   const draft = createCommunicationChannelDraft(item)
   if (hasTelegramConfig(draft)) return 'telegram'
   if (hasSlackConfig(draft)) return 'slack'
+  if (hasTeamsConfig(draft)) return 'teams'
   return 'telegram'
 }
 
 export function buildCommunicationChannelSpec(draft: CommunicationChannelDraftState) {
   const telegramEnabled = hasTelegramConfig(draft)
   const slackEnabled = hasSlackConfig(draft)
+  const teamsEnabled = hasTeamsConfig(draft)
   return {
     hostRef: draft.hostRef.trim(),
     ...(draft.credentialsSecretRef?.name
@@ -126,6 +145,17 @@ export function buildCommunicationChannelSpec(draft: CommunicationChannelDraftSt
             ...(draft.slackWorkspaceId.trim()
               ? { workspaceId: draft.slackWorkspaceId.trim() }
               : {}),
+          },
+        }
+      : {}),
+    ...(teamsEnabled
+      ? {
+          teams: draft.teams,
+          teamsSettings: {
+            ...(draft.teamsAppName.trim() ? { appName: draft.teamsAppName.trim() } : {}),
+            ...(draft.teamsAppId.trim() ? { appId: draft.teamsAppId.trim() } : {}),
+            ...(draft.teamsTenantId.trim() ? { tenantId: draft.teamsTenantId.trim() } : {}),
+            replyOnlyWhenMentioned: draft.teamsReplyOnlyWhenMentioned,
           },
         }
       : {}),

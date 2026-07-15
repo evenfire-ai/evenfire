@@ -12,14 +12,13 @@
  * exceed the bits it was given. This module composes those two pieces; it adds
  * no new authority.
  */
-
 import {
-  assertMayGrant,
   type GfsCaller,
-  type GfsPermission,
   GfsGrantError,
+  type GfsPermission,
   type GfsSubject,
   type GrantsDb,
+  assertMayGrant,
 } from '../routes/gfs/grants.js'
 import { type Principal, resolvePrincipalSubjects } from './subjects.js'
 

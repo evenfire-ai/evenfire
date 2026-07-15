@@ -108,6 +108,80 @@ YAML
   rm -rf "$tmp"
 }
 
+assert_apply_registry_secrets_patches_voucher_material() {
+  local tmp log_file patch_file out
+  tmp="$(mktemp -d)"
+  log_file="$tmp/kubectl.log"
+  patch_file="$tmp/control-api-voucher-patch.json"
+
+  cat > "$tmp/kubectl" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+LOG_FILE="${TEST_LOG_FILE:?}"
+PATCH_FILE="${TEST_PATCH_FILE:?}"
+args="$*"
+printf '%s\n' "$args" >>"$LOG_FILE"
+
+if [[ "$args" == *" create secret generic registry-client-credentials "* ]]; then
+  cat <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registry-client-credentials
+YAML
+  exit 0
+fi
+
+if [[ "$args" == *" apply -f -"* ]]; then
+  cat >/dev/null
+  echo "secret/registry-client-credentials configured"
+  exit 0
+fi
+
+if [[ "$args" == *" patch secret control-api-secrets "* ]]; then
+  for arg in "$@"; do
+    case "$arg" in
+      --patch-file=*) cp "${arg#--patch-file=}" "$PATCH_FILE" ;;
+    esac
+  done
+  echo "secret/control-api-secrets patched"
+  exit 0
+fi
+
+echo "unexpected kubectl args: $args" >&2
+exit 1
+STUB
+  chmod +x "$tmp/kubectl"
+  printf '%s' 'test-private-key' >"$tmp/voucher.key"
+
+  out="$(
+    TEST_LOG_FILE="$log_file" \
+      TEST_PATCH_FILE="$patch_file" \
+      PATH="$tmp:$PATH" \
+      CONTEXT=clerum-test \
+      CLIENT_ID=test-client \
+      CLIENT_SECRET=test-secret \
+      CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY_FILE="$tmp/voucher.key" \
+      CONTROL_API_REGISTRY_VOUCHER_KID=test-kid \
+      bash scripts/apply-registry-secrets.sh 2>&1
+  )"
+
+  if jq -e \
+    '.stringData.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY == "test-private-key" and
+     .stringData.CONTROL_API_REGISTRY_VOUCHER_KID == "test-kid"' \
+    "$patch_file" >/dev/null &&
+    grep -q 'patch secret control-api-secrets' "$log_file"; then
+    pass "apply-registry-secrets patches voucher key and kid"
+  else
+    fail "apply-registry-secrets did not patch voucher key and kid"
+    echo "$out"
+    cat "$log_file"
+    cat "$patch_file" 2>/dev/null || true
+  fi
+
+  rm -rf "$tmp"
+}
+
 assert_db_migration_job_uses_ci_suffix() {
   local tmp overlay log_file
   tmp="$(mktemp -d)"
@@ -1246,6 +1320,7 @@ assert_setup_dev_overrides
 assert_teardown_dev
 assert_detect_k8s_api_ip
 assert_bump_tag
+assert_apply_registry_secrets_patches_voucher_material
 assert_db_migration_job_uses_ci_suffix
 assert_db_migration_handles_concurrent_create_race
 assert_db_migration_reports_missing_migrate_artifact

@@ -2,14 +2,14 @@
  * Thin API client for test helpers — wraps fetch against control-api.
  * Used to set up / tear down test data without going through the UI.
  */
+import { adminSessionCookieHeader } from './session-cookie'
 
 const CONTROL_API_URL = process.env.CONTROL_API_URL ?? 'http://127.0.0.1:8090'
 
 function adminHeaders(): Record<string, string> {
-  const token = process.env.PLAYWRIGHT_ADMIN_TOKEN ?? ''
   return {
     'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...adminSessionCookieHeader(),
   }
 }
 
@@ -38,6 +38,19 @@ export type TeamListItem = {
   id: string
   name: string
   memberCount: number
+}
+
+export type HostCr = {
+  metadata?: { name?: string }
+  spec?: Record<string, unknown> & {
+    channels?: string[]
+    lifecycle?: { stateless?: boolean }
+    workflowControl?: { scopes?: string[] }
+  }
+  status?: {
+    lifecycle?: { state?: string; reason?: string }
+    conditions?: Array<{ type?: string; status?: string; reason?: string; message?: string }>
+  }
 }
 
 export const controlApi = {
@@ -91,6 +104,88 @@ export const controlApi = {
       await this.deleteRecipe(name)
     } catch {
       // ignore — recipe may not exist (404) or cluster may be unreachable
+    }
+  },
+
+  async getHost(name: string): Promise<HostCr> {
+    return apiFetch<HostCr>('GET', `/api/v1/admin/hosts/${encodeURIComponent(name)}`)
+  },
+
+  async createHost(host: unknown): Promise<unknown> {
+    return apiFetch<unknown>('POST', '/api/v1/admin/hosts', host)
+  },
+
+  /**
+   * RV-absent legacy update (last-write-wins) — mirrors an API caller that
+   * does not send metadata.resourceVersion. The AP-6 conflict test uses it
+   * as the legitimate out-of-band second actor.
+   */
+  async updateHost(name: string, host: unknown): Promise<unknown> {
+    return apiFetch<unknown>('PUT', `/api/v1/admin/hosts/${encodeURIComponent(name)}`, host)
+  },
+
+  async deleteHost(name: string): Promise<void> {
+    await apiFetch<unknown>('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(name)}`)
+  },
+
+  async ensureHostDeleted(name: string): Promise<void> {
+    try {
+      await this.deleteHost(name)
+    } catch {
+      // ignore — host may not exist (404) or cluster may be unreachable
+    }
+  },
+
+  async deleteContext(name: string): Promise<void> {
+    await apiFetch<unknown>('DELETE', `/api/v1/admin/contexts/${encodeURIComponent(name)}`)
+  },
+
+  /**
+   * Create a control-api-managed host secret (labeled clerum.io/host-secret,
+   * the label the Host wizard's "Use existing secret" picker lists). Mirrors
+   * the wizard's own POST /api/v1/admin/secrets payload.
+   */
+  async createHostSecret(name: string, stringData: Record<string, string>): Promise<void> {
+    await apiFetch<unknown>('POST', '/api/v1/admin/secrets', {
+      name,
+      namespace: 'mcp-host',
+      labels: { 'clerum.io/host-secret': 'true' },
+      stringData,
+    })
+  },
+
+  async ensureSecretDeleted(name: string): Promise<void> {
+    try {
+      await apiFetch<unknown>('DELETE', `/api/v1/admin/secrets/${encodeURIComponent(name)}`)
+    } catch {
+      // ignore — secret may not exist (404) or cluster may be unreachable
+    }
+  },
+
+  async ensureContextDeleted(name: string): Promise<void> {
+    try {
+      await this.deleteContext(name)
+    } catch {
+      // ignore — context may not exist (404) or cluster may be unreachable
+    }
+  },
+
+  async createCommunicationChannel(channel: unknown): Promise<unknown> {
+    return apiFetch<unknown>('POST', '/api/v1/admin/communication-channels', channel)
+  },
+
+  async deleteCommunicationChannel(name: string): Promise<void> {
+    await apiFetch<unknown>(
+      'DELETE',
+      `/api/v1/admin/communication-channels/${encodeURIComponent(name)}`
+    )
+  },
+
+  async ensureCommunicationChannelDeleted(name: string): Promise<void> {
+    try {
+      await this.deleteCommunicationChannel(name)
+    } catch {
+      // ignore — channel may not exist (404) or cluster may be unreachable
     }
   },
 }

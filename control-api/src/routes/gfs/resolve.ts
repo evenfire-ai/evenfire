@@ -1,14 +1,14 @@
 import type { Router } from 'express'
 import { pool } from '../../db.js'
-import { asyncHandler } from '../../http/asyncHandler.js'
-import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
 import {
   DbResolveStore,
   GfsUriError,
-  ResolvedResource,
   ResolveStore,
+  ResolvedResource,
   resolveGfsUri,
 } from '../../gfs/resolve.js'
+import { asyncHandler } from '../../http/asyncHandler.js'
+import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
 
 export interface GfsResourceView {
   resourceId: string
@@ -61,7 +61,12 @@ export async function byPathToHttp(
   drive: unknown,
   path: unknown
 ): Promise<HttpResult> {
-  if (typeof drive !== 'string' || drive.length === 0 || typeof path !== 'string' || path.length === 0) {
+  if (
+    typeof drive !== 'string' ||
+    drive.length === 0 ||
+    typeof path !== 'string' ||
+    path.length === 0
+  ) {
     return { status: 400, body: { error: 'missing_drive_or_path' } }
   }
   const resolved = await store.getByPath(drive, path)

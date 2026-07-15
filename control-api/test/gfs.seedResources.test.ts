@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   DbSeedResourceStore,
   SeedDb,
-  seedRootDirectories,
   SeedResourceStore,
+  seedRootDirectories,
 } from '../src/gfs/seedResources.js'
 
 interface Row {
@@ -55,9 +55,7 @@ describe('seedRootDirectories (synthetic root model)', () => {
     const store = new FakeStore()
     await seedRootDirectories(store, 'main', ['/system/published-workflow-artifacts'])
     const system = [...store.rows.values()].find(r => r.row.name === 'system')!
-    const leaf = [...store.rows.values()].find(
-      r => r.row.name === 'published-workflow-artifacts'
-    )!
+    const leaf = [...store.rows.values()].find(r => r.row.name === 'published-workflow-artifacts')!
     expect(leaf.row.parentResourceId).toBe(system.id)
     expect(leaf.row.pathCache).toBe('/system/published-workflow-artifacts')
     expect(system.row.pathCache).toBe('/system')

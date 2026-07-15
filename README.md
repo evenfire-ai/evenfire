@@ -203,7 +203,7 @@ flowchart LR
     CAPI --> CRDS[("clerum.io CRDs")]
     CR --> MH["mcp-host<br/>agent runtime · approval gate"]
     RP --> MH
-    MH <--> LLM[("LLM providers")]
+    MH <--> LLM[("OpenAI · Claude<br/>Z.AI · Bailian")]
     MH --> HCC["host-context-controller<br/>connector discovery"]
     MH --> MP[mcp-proxy] --> MCP["MCP servers<br/>(HTTP · stdio via bridge)"]
     CRDS -.watched by.-> HCC
@@ -297,13 +297,9 @@ Reference: [docs/crds/README.md](docs/crds/README.md).
 | Z.AI             | `zai`            | `glm-5.1`           |
 | Alibaba Bailian  | `bailian`        | `qwen3-coder-plus`  |
 
-One interface across every provider — swap an agent's model, or switch providers
-entirely, by editing two fields on its Host CRD (`spec.model.provider` and
-`spec.model.name`). It's a config change, not a code change, and workflow-recipe
-steps can override the model per step. New providers are added data-first, so the
-list keeps growing; OpenAI-compatible endpoints can plug in as registry
-descriptors where the code supports it. Keys live in a Kubernetes Secret you
-create (dev mode: environment variables). Details:
+Four providers behind one interface; OpenAI-compatible endpoints can plug in as
+registry descriptors where the code supports it. Keys live in a Kubernetes
+Secret you create (dev mode: environment variables). Details:
 [mcp-host/README.md](mcp-host/README.md).
 
 ---

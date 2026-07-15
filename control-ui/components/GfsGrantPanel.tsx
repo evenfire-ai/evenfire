@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { useToast } from '@components/Toast'
-import { Button, CheckboxField, Field, FormSection, SelectInput } from '@components/ui'
+import { Button, CheckboxField, Field, SelectInput } from '@components/ui'
 import { GFS_GRANT_SUBJECT_TYPE_OPTIONS } from '@constants/gfsGrantSubjects'
 import {
   type AdminUser,
@@ -40,7 +40,7 @@ import {
 const PERMISSION_BITS = ['read', 'write', 'delete', 'manage_acl', 'share'] as const
 const DRIVE = 'main'
 
-export function GfsGrantPanel({ resource, onClose }: GfsGrantPanelProps): React.JSX.Element {
+export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Element {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [users, setUsers] = useState<AdminUser[]>([])
@@ -162,7 +162,7 @@ export function GfsGrantPanel({ resource, onClose }: GfsGrantPanelProps): React.
   }
 
   return (
-    <FormSection title={`Manage access — ${resource.name}`} description={resource.gfsUri}>
+    <div className="cu-gfs-grant-panel">
       <Field
         label="Subject type"
         htmlFor="gfs-grant-subject-type"
@@ -244,9 +244,6 @@ export function GfsGrantPanel({ resource, onClose }: GfsGrantPanelProps): React.
         <Button disabled={!canSubmit || !canCreateShare} onClick={() => submit('share')}>
           Create share
         </Button>
-        <Button variant="ghost" onClick={onClose}>
-          Close
-        </Button>
       </div>
       {error ? (
         <p role="alert" className="cu-field__error">
@@ -254,6 +251,6 @@ export function GfsGrantPanel({ resource, onClose }: GfsGrantPanelProps): React.
         </p>
       ) : null}
       {confirmDialog}
-    </FormSection>
+    </div>
   )
 }

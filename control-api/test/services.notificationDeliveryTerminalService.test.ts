@@ -81,6 +81,12 @@ describe('notificationDeliveryTerminalService', () => {
     expect(ackSql).toContain(
       "notification_deliveries.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}' = $3"
     )
+    expect(ackSql).toContain(
+      "notification_deliveries.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' = $2"
+    )
+    expect(ackSql).toContain(
+      "notification_deliveries.payload #>> '{metadata,workflowTrigger,providerBinding,providerWorkspaceId}' = $5"
+    )
     expect(ackSql).toContain('wama.provider_channel_id = $3')
     expect(ackSql).toContain('wama.provider_user_id = $6')
     expect(ackSql).toContain('wama.provider_workspace_id = $5')
@@ -92,6 +98,12 @@ describe('notificationDeliveryTerminalService', () => {
     )
     expect(ackSql).toContain(
       "war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}' = $3"
+    )
+    expect(ackSql).toContain(
+      "war.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' = $2"
+    )
+    expect(ackSql).toContain(
+      "war.payload #>> '{metadata,workflowTrigger,providerBinding,providerWorkspaceId}' = $5"
     )
     expect(ackSql).toContain("wr.phase IN ('Succeeded', 'Failed', 'Canceled')")
     expect(ackSql).toContain("notification_deliveries.payload->>'providerMedium' = wama.medium")

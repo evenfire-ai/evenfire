@@ -27,6 +27,18 @@ rules:
   - clerum.io
   resources:
   - hosts
+  verbs:
+  - get
+  - list
+  - create
+  - update
+  # patch: race-free JSON merge-patch of Host metadata.annotations
+  # (clerum.io/wake-requested) written by the stateless-agent wake endpoint.
+  - patch
+  - delete
+- apiGroups:
+  - clerum.io
+  resources:
   - contexts
   - communicationchannels
   - mcpservers

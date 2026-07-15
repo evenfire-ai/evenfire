@@ -191,6 +191,8 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('rpc:getTaskResult', { hostRef, taskId, hostRefs }),
     getHostStatus: (hostRef: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:getHostStatus', { hostRef, hostRefs }),
+    prewarmHost: (hostRef: string, hostRefs?: string[]) =>
+      ipcRenderer.invoke('rpc:prewarmHost', { hostRef, hostRefs }),
     getHostActivity: (
       hostRef: string,
       limit?: number,

@@ -27,7 +27,8 @@ export class WorkflowTriggerTool extends WorkflowTool {
   requiresApproval(): boolean {
     if (
       this.workflowCallerContext?.originChannelType === 'telegram' ||
-      this.workflowCallerContext?.originChannelType === 'slack'
+      this.workflowCallerContext?.originChannelType === 'slack' ||
+      this.workflowCallerContext?.originChannelType === 'teams'
     ) {
       return false
     }
@@ -184,7 +185,8 @@ export class WorkflowTriggerTool extends WorkflowTool {
     const providerBinding =
       this.workflowCallerContext?.providerChannelId &&
       (this.workflowCallerContext.originChannelType === 'telegram' ||
-        this.workflowCallerContext.originChannelType === 'slack')
+        this.workflowCallerContext.originChannelType === 'slack' ||
+        this.workflowCallerContext.originChannelType === 'teams')
         ? {
             medium: this.workflowCallerContext.originChannelType,
             providerChannelId: this.workflowCallerContext.providerChannelId,

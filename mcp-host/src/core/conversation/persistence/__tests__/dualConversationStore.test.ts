@@ -13,7 +13,7 @@ describe('DualConversationStore — dual-write parity', () => {
       const manager = new ConversationManager(dual)
 
       const conv = await manager.getOrCreate('u-1:rpc:a:default')
-      manager.startTurn(conv, 'hello', 'test-task')
+      await manager.startTurn(conv, 'hello', 'test-task')
       await manager.suspendForApproval(conv, {
         request_id: 'req-parity',
         tool_name: 'shell_exec',

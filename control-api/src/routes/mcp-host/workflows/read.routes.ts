@@ -26,8 +26,10 @@ import {
   listWorkflowRunArtifacts,
 } from '../../../services/workflows/workflowRunArtifactService.js'
 import {
+  type ProviderScopedWorkflowRunRow,
   getLatestRun,
   getLatestWorkflowRunWithApprovalTarget,
+  getProviderScopedWorkflowRun,
   getWorkflowHealth,
 } from '../../../services/workflows/workflowRunReadService.js'
 import {
@@ -37,6 +39,9 @@ import {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const CONVERSATION_ID_RE = /^[a-zA-Z0-9._:-]{1,128}$/
+// Teams uses opaque a: and 19: IDs; channel targets add @thread and ;messageid= suffixes.
+const TEAMS_CONVERSATION_ID_RE = /^(?:a|19):[a-zA-Z0-9._:@;=+-]+$/
+const TEAMS_CONVERSATION_ID_MAX_LENGTH = 512
 const RECIPE_NAME_RE = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/
 const TARGET_LABEL_MAX_LENGTH = 120
 const MAX_AGENT_WORKFLOW_ARTIFACT_BYTES = 256 * 1024
@@ -91,7 +96,10 @@ function parseConversationIdQuery(req: Request, res: Response): string | null {
     res.status(400).json({ error: 'workflowConversationId is required' })
     return null
   }
-  if (!CONVERSATION_ID_RE.test(rawConversationId)) {
+  const isValidTeamsConversationId =
+    rawConversationId.length <= TEAMS_CONVERSATION_ID_MAX_LENGTH &&
+    TEAMS_CONVERSATION_ID_RE.test(rawConversationId)
+  if (!CONVERSATION_ID_RE.test(rawConversationId) && !isValidTeamsConversationId) {
     res.status(400).json({ error: 'Invalid workflowConversationId format' })
     return null
   }
@@ -129,6 +137,13 @@ function handleWorkflowArtifactError(res: Response, err: unknown): boolean {
     return true
   }
   return false
+}
+
+function approvalTargetForProviderRun(run: ProviderScopedWorkflowRunRow): WorkflowApprovalTarget {
+  if (run.approval_target_user_id) {
+    return { targetUserId: run.approval_target_user_id }
+  }
+  return run.approval_target_team_id ? { targetTeamId: run.approval_target_team_id } : {}
 }
 
 function isJsonArtifact(artifactName: string, contentType: string): boolean {
@@ -383,6 +398,116 @@ export function createMcpHostWorkflowReadRoutes(gateway: K8sGateway): Router {
           res.status(404).json({ error: `Recipe ${ns}/${name} not found` })
           return
         }
+        throw err
+      }
+    })
+  )
+
+  router.get(
+    '/workflows/runs/:runId/artifacts',
+    asyncHandler(async (req: Request, res: Response) => {
+      const caller = requireMcpHostControlWorkflowCaller(req, res)
+      if (!caller) return
+      if (!requireMcpHostControlScope(caller, res, 'workflow:read')) return
+      if (!UUID_RE.test(req.params.runId)) {
+        res.status(400).json({ error: 'Invalid workflow run ID' })
+        return
+      }
+      const requestedTarget = parseApprovalTargetQuery(req, res)
+      if (!requestedTarget) return
+      const conversationId = parseConversationIdQuery(req, res)
+      if (!conversationId) return
+
+      try {
+        const run = await getProviderScopedWorkflowRun({
+          caller,
+          runId: req.params.runId,
+          approvalTarget: requestedTarget,
+          conversationId,
+        })
+        if (!run) {
+          res.status(404).json({ error: `Workflow run ${req.params.runId} not found` })
+          return
+        }
+        const artifacts = await listWorkflowRunArtifacts({
+          gateway,
+          caller,
+          recipeNamespace: run.recipe_namespace,
+          recipeName: run.recipe_name,
+          runId: run.run_id,
+          approvalTarget: approvalTargetForProviderRun(run),
+        })
+        res.status(200).json({
+          workflowRunId: run.run_id,
+          workflowName: run.recipe_name,
+          artifacts,
+        })
+      } catch (err) {
+        if (handleWorkflowArtifactError(res, err)) return
+        throw err
+      }
+    })
+  )
+
+  router.get(
+    '/workflows/runs/:runId/artifacts/:artifactName/download',
+    asyncHandler(async (req: Request, res: Response) => {
+      const caller = requireMcpHostControlWorkflowCaller(req, res)
+      if (!caller) return
+      if (!requireMcpHostControlScope(caller, res, 'workflow:read')) return
+      if (!UUID_RE.test(req.params.runId)) {
+        res.status(400).json({ error: 'Invalid workflow run ID' })
+        return
+      }
+      const requestedTarget = parseApprovalTargetQuery(req, res)
+      if (!requestedTarget) return
+      const conversationId = parseConversationIdQuery(req, res)
+      if (!conversationId) return
+
+      try {
+        const run = await getProviderScopedWorkflowRun({
+          caller,
+          runId: req.params.runId,
+          approvalTarget: requestedTarget,
+          conversationId,
+        })
+        if (!run) {
+          res.status(404).json({ error: `Workflow run ${req.params.runId} not found` })
+          return
+        }
+        const result = await downloadWorkflowRunArtifact({
+          gateway,
+          caller,
+          recipeNamespace: run.recipe_namespace,
+          recipeName: run.recipe_name,
+          runId: run.run_id,
+          artifactName: req.params.artifactName,
+          approvalTarget: approvalTargetForProviderRun(run),
+          maxBytes: MAX_AGENT_WORKFLOW_ARTIFACT_DOWNLOAD_BYTES,
+        })
+        if (result.status !== 200) {
+          res.status(result.status).json(result.body)
+          return
+        }
+        const body = Buffer.isBuffer(result.body)
+          ? result.body
+          : Buffer.from(JSON.stringify(result.body), 'utf8')
+        const filename = filenameFromContentDisposition(
+          result.headers['content-disposition'],
+          req.params.artifactName
+        )
+        res
+          .status(200)
+          .set({
+            'Content-Type': result.headers['content-type'] || 'application/octet-stream',
+            'Content-Length': String(body.byteLength),
+            'Content-Disposition': `attachment; filename="${filename}"`,
+            'X-Clerum-Artifact-Name': req.params.artifactName,
+            'X-Clerum-Artifact-Filename': filename,
+          })
+          .send(body)
+      } catch (err) {
+        if (handleWorkflowArtifactError(res, err)) return
         throw err
       }
     })

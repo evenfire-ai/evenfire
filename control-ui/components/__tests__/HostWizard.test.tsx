@@ -332,6 +332,26 @@ describe('HostWizard — submit path uses the atomic agent-centric endpoints', (
         })
       )
     })
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'PUT',
+        '/api/v1/admin/hosts/agent-with-channel',
+        expect.objectContaining({
+          spec: expect.objectContaining({
+            channels: ['new-telegram-channel'],
+            workflowControl: {
+              scopes: [
+                'workflow:list',
+                'workflow:read',
+                'workflow:trigger',
+                'workflow:approval:resolve',
+                'workflow:approval:decide',
+              ],
+            },
+          }),
+        })
+      )
+    })
   })
 })
 
@@ -370,5 +390,63 @@ describe('HostWizard — baseline render', () => {
   it('starts on Step 0 (Agent metadata name)', async () => {
     await renderWizard()
     expect(screen.getByPlaceholderText(/agent-name/i)).toBeInTheDocument()
+  })
+})
+
+describe('HostWizard — Agent type (stateless lifecycle)', () => {
+  it('renders the Agent type selector on step 0 with Stateful selected by default', async () => {
+    await renderWizard()
+
+    const stateful = screen.getByRole('radio', { name: /Stateful \(always on\)/i })
+    const stateless = screen.getByRole('radio', { name: /Stateless \(suspends when idle\)/i })
+    expect(stateful).toBeChecked()
+    expect(stateless).not.toBeChecked()
+    expect(
+      screen.getByText(/communication channels keep stateless agents always-on/i)
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/requires no active communication channels/i)).not.toBeInTheDocument()
+  })
+
+  it('omits spec.lifecycle from the created Host when Stateful is kept (absent = disabled)', async () => {
+    await renderWizard()
+    await walkToAccessStep({ agentName: 'stateful-agent' })
+    await continueFromAccessToChannels()
+    fireEvent.click(screen.getByRole('button', { name: /Skip channel setup/i }))
+
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'PUT',
+        '/api/v1/admin/hosts/stateful-agent',
+        expect.any(Object)
+      )
+    })
+    const hostCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[1] === '/api/v1/admin/hosts/stateful-agent')
+    expect(hostCall).toBeDefined()
+    const payload = hostCall![2] as { spec: Record<string, unknown> }
+    expect('lifecycle' in payload.spec).toBe(false)
+    expect('workflowControl' in payload.spec).toBe(false)
+  })
+
+  it('carries spec.lifecycle.stateless=true on the created Host when Stateless is selected', async () => {
+    await renderWizard()
+
+    fireEvent.click(screen.getByRole('radio', { name: /Stateless \(suspends when idle\)/i }))
+    expect(screen.getByRole('radio', { name: /Stateless \(suspends when idle\)/i })).toBeChecked()
+
+    await walkToAccessStep({ agentName: 'stateless-agent' })
+    await continueFromAccessToChannels()
+    fireEvent.click(screen.getByRole('button', { name: /Skip channel setup/i }))
+
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'PUT',
+        '/api/v1/admin/hosts/stateless-agent',
+        expect.objectContaining({
+          spec: expect.objectContaining({ lifecycle: { stateless: true } }),
+        })
+      )
+    })
   })
 })

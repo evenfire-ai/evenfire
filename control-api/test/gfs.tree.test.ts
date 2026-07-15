@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest'
 import {
   ChildRow,
   ChildrenStore,
+  GfsTreeError,
+  MAX_LIMIT,
   clampLimit,
   decodeCursor,
   encodeCursor,
-  GfsTreeError,
   listChildrenPaged,
-  MAX_LIMIT,
   toChildView,
 } from '../src/gfs/tree.js'
 
@@ -16,7 +16,14 @@ function rid(n: number): string {
 }
 
 function child(name: string, n: number): ChildRow {
-  return { resourceId: rid(n), name, kind: 'directory', pathCache: `/${name}`, bytes: 0, version: 0 }
+  return {
+    resourceId: rid(n),
+    name,
+    kind: 'directory',
+    pathCache: `/${name}`,
+    bytes: 0,
+    version: 0,
+  }
 }
 
 class FakeChildrenStore implements ChildrenStore {

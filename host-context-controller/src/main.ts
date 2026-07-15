@@ -10,6 +10,7 @@
  * and skips Kubernetes reconciliation.
  */
 import { config } from './config'
+import { HeartbeatPoller } from './heartbeatPoller'
 import { SecretInformer } from './informers/secretInformer'
 import {
   McpServerProvider,
@@ -18,12 +19,18 @@ import {
   getKubeConfig,
 } from './k8sClient'
 import { ContextMapperServer } from './server'
-import { assertInternalControlJwtHmacSecret } from './utils/internalControlSigner'
+import { StatelessLifecycleTracker } from './statelessLifecycleTracker'
+import {
+  assertInternalControlJwtHmacSecret,
+  signInternalControlJwt,
+} from './utils/internalControlSigner'
 
 let provider: McpServerProvider | null = null
 let server: ContextMapperServer | null = null
 let secretInformer: SecretInformer | null = null
 let channelSecretInformer: SecretInformer | null = null
+let lifecycleTracker: StatelessLifecycleTracker | null = null
+let heartbeatPoller: HeartbeatPoller | null = null
 let isShuttingDown = false
 
 /**
@@ -40,6 +47,8 @@ async function shutdown(signal: string): Promise<void> {
 
   secretInformer?.stop()
   channelSecretInformer?.stop()
+  heartbeatPoller?.stop()
+  lifecycleTracker?.stop()
   provider?.stop()
   await server?.stop()
 
@@ -99,11 +108,43 @@ async function main(): Promise<void> {
 
   // Create and start the REST API server
   // Extract hostReconciler from production provider for desktop spec checks
-  const hostReconciler =
-    provider instanceof McpServerWatcher ? provider.getHostReconciler() : undefined
+  const watcher = provider instanceof McpServerWatcher ? provider : null
+  const hostReconciler = watcher ? watcher.getHostReconciler() : undefined
   const hasDesktopFn = hostReconciler
     ? (hostRef: string) => hostReconciler.hasDesktop(hostRef)
     : undefined
+
+  // Stateless heartbeat consumption — mcp-host pods authenticate their
+  // heartbeats toward control-api's /mcp-host facade (control-api is the
+  // ONLY verifier of plane JWTs); HCC POLLS the ingested rows via the
+  // InternalControl feed and feeds the lifecycle tracker, which DECIDES.
+  // The drain decision is made durable as status.lifecycle.state='draining'
+  // and control-api answers the emitter's {drain} from the Host CR.
+  if (watcher && hostReconciler) {
+    const tracker = new StatelessLifecycleTracker({
+      idleMinutes: config.statelessIdleMinutes,
+      idleFloorMinutes: config.statelessIdleFloorMinutes,
+      drainGraceMs: config.statelessDrainGraceMs,
+      maxUptimeHours: config.statelessMaxUptimeHours,
+      reconciler: hostReconciler,
+      getHost: hostRef => watcher.getHost(hostRef),
+    })
+    lifecycleTracker = tracker
+    heartbeatPoller = new HeartbeatPoller({
+      pollIntervalMs: config.heartbeatPollMs,
+      controlApiBaseUrl: config.controlApiBaseUrl,
+      tracker,
+      getHost: hostRef => watcher.getHost(hostRef),
+      markHostDraining: (host, entryWakeHandledGeneration) =>
+        hostReconciler.markHostDrainingFromHeartbeat(host, entryWakeHandledGeneration),
+      signInternalControlJwt: () => signInternalControlJwt(),
+    })
+    heartbeatPoller.start()
+    console.log(
+      `[Main] Stateless heartbeat poller started (interval=${config.heartbeatPollMs}ms, ` +
+        `target=${config.controlApiBaseUrl})`
+    )
+  }
   server = new ContextMapperServer(provider, config.port, hostReconciler, hasDesktopFn)
   await server.start()
 

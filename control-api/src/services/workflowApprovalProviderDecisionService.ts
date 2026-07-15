@@ -216,10 +216,17 @@ export async function recordProviderApprovalDecision(
   if (identity.medium === 'slack' && !identity.providerWorkspaceId) {
     return { ok: false, status: 400, error: 'slack_workspace_id_required' }
   }
+  if (identity.medium === 'teams' && !identity.providerWorkspaceId) {
+    return { ok: false, status: 400, error: 'teams_tenant_id_required' }
+  }
   if (!identity.providerChannelId) {
     return { ok: false, status: 400, error: 'provider_channel_id_required' }
   }
-  if (identity.medium !== 'telegram' && identity.medium !== 'slack') {
+  if (
+    identity.medium !== 'telegram' &&
+    identity.medium !== 'slack' &&
+    identity.medium !== 'teams'
+  ) {
     return { ok: false, status: 400, error: 'unsupported_provider_medium' }
   }
 
@@ -240,6 +247,14 @@ export async function recordProviderApprovalDecision(
     !providerEventId.startsWith(`telegram:${identity.providerChannelId}:`)
   ) {
     return { ok: false, status: 400, error: 'telegram_provider_event_binding_mismatch' }
+  }
+  if (
+    identity.medium === 'teams' &&
+    !providerEventId.startsWith(
+      `teams:${identity.providerWorkspaceId}:${identity.providerChannelId}:`
+    )
+  ) {
+    return { ok: false, status: 400, error: 'teams_provider_event_binding_mismatch' }
   }
   if (identity.medium === 'telegram') {
     const channelType = normalizeTelegramProviderChannelType(

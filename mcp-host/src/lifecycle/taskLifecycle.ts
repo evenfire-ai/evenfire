@@ -48,10 +48,16 @@ export class TaskLifecycle extends EventEmitter {
   /**
    * Create a TaskRecord with status='pending' and emit transition(null → pending, 'created').
    * Idempotent: registering an existing id is a no-op (no record overwrite, no emission).
+   * Under the single-admission contract (MessageQueue.admit is the only
+   * production registration point), a call that lands here is a genuine
+   * duplicate delivery — log it truthfully and loudly with the prior state.
    */
   register(task: Task): void {
-    if (this.records.has(task.id)) {
-      console.warn(`[TaskLifecycle] register ignored — id already registered: ${task.id}`)
+    const existing = this.records.get(task.id)
+    if (existing) {
+      console.warn(
+        `[TaskLifecycle] duplicate registration suppressed — id already registered: ${task.id} (status=${existing.status})`
+      )
       return
     }
     const now = new Date()
