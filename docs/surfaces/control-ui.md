@@ -43,7 +43,9 @@ five steps live together.
    choice is the opposite and deliberate: a `block` budget whose spend cannot
    be computed denies the task (`budget_eval_error`) rather than silently
    bypass the cap (`control-api/src/services/budgets/check.ts`), while a `warn`
-   budget that errors is skipped entirely.
+   budget that errors is skipped entirely. For the operator walkthrough —
+   enabling budgets, scoping one, and reading a `block` vs `warn` decision — see
+   [Track usage & set budgets](../how-to/token-budgets-and-usage.md).
 
 3. **Gate it** — `HostApprovalSection` (`components/HostApprovalSection`), on
    the host detail page. A per-tool approval editor with three settings —

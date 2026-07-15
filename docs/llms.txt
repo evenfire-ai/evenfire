@@ -33,6 +33,7 @@
 - Configure approvals: how-to/configure-approvals.md
 - Add MCP server: how-to/add-mcp-server.md
 - Desktop setup & updates (environments, invitation, updates): how-to/desktop-setup-and-updates.md
+- Track usage & set token budgets: how-to/token-budgets-and-usage.md
 - Minikube full stack: deploy/minikube.md
 - Production checklist: deploy/production.md
 - WorkflowRecipes ops: deploy/workflow-recipes-guide.md
