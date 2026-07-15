@@ -95,7 +95,7 @@ denial ("audit mode, allowing") for a non-allowlisted image and still builds
 it, by default. This allowlist is separate from the sha256 digest pinning
 used for custom coordinator images. See [Control UI](../surfaces/control-ui.md).
 
-![Control UI connectors list at /mcp-servers](../assets/control-ui-connectors.png)
+![Control UI connectors list at /mcp-servers](../assets/control-ui-connectors.webp)
 *Dev cluster, demo tenant.*
 
 ## Stdio vs HTTP
