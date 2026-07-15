@@ -35,7 +35,7 @@
 #   - web-search MCP image pullable: ghcr.io/aas-ee/open-web-search:latest
 #
 # Env overrides:
-#   CONTEXT         — kubectl context (default: gke_${GCP_PROJECT}_us-central1-a_example-dev)
+#   CONTEXT         — kubectl context (default: gke_your-gcp-project_us-central1-a_example-dev)
 #   ADMIN_USER      — admin username (default: admin)       [propagated but spec hardcodes]
 #   ADMIN_PASS      — admin password (default: changeme123!)   [propagated but spec hardcodes]
 #   SPEC            — Playwright spec path (default: e2e/gke-workflow-mythos.spec.ts)
@@ -48,7 +48,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-CONTEXT="${CONTEXT:-gke_${GCP_PROJECT}_us-central1-a_example-dev}"
+CONTEXT="${CONTEXT:-gke_your-gcp-project_us-central1-a_example-dev}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-changeme123!}"
 SPEC="${SPEC:-e2e/gke-workflow-mythos.spec.ts}"
@@ -73,7 +73,7 @@ command -v npx     >/dev/null 2>&1 || die "npx not on PATH"
 # Context must exist; fail fast with a readable error rather than a
 # cryptic kubectl "context not found" later inside the PF loop.
 if ! kubectl config get-contexts -o name | grep -Fxq "$CONTEXT"; then
-  die "kubectl context '$CONTEXT' not found. Run 'gcloud container clusters get-credentials example-dev --zone us-central1-a --project ${GCP_PROJECT}' first."
+  die "kubectl context '$CONTEXT' not found. Run 'gcloud container clusters get-credentials example-dev --zone us-central1-a --project your-gcp-project' first."
 fi
 
 # Reject if the literal dev services aren't reachable — typical on a

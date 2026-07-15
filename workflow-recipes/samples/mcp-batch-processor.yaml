@@ -8,7 +8,7 @@ spec:
   workloads:
     - id: batch-processor
       type: job
-      image: ghcr.io/evenfire-ai/batch-processor:latest
+      image: us-central1-docker.pkg.dev/your-gcp-project/clerum/batch-processor:latest
       backoffLimit: 2
       command: ['node', 'process.js']
       env:

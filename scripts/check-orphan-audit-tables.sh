@@ -3,7 +3,7 @@
 # Read-only: only SELECTs against information_schema.
 #
 # Usage:
-#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_example-dev \
+#   CONTEXT=gke_your-gcp-project_us-central1-a_example-dev \
 #     ./scripts/check-orphan-audit-tables.sh
 
 set -euo pipefail

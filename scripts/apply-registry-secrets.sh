@@ -3,7 +3,7 @@
 # Run this in each cluster (clerum, example-dev) BEFORE `kubectl apply -k`.
 #
 # Usage:
-#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_clerum \
+#   CONTEXT=gke_your-gcp-project_us-central1-a_clerum \
 #   CLIENT_ID=example-prod-control-api \
 #   CLIENT_SECRET=<secret> \
 #   CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY_FILE=/path/to/voucher.key \
@@ -24,7 +24,7 @@
 # kubectl argv.
 set -euo pipefail
 
-CONTEXT="${CONTEXT:?Must set CONTEXT to one of: gke_${GCP_PROJECT}_us-central1-a_clerum, gke_${GCP_PROJECT}_us-central1-a_example-dev, clerum-test}"
+CONTEXT="${CONTEXT:?Must set CONTEXT to one of: gke_your-gcp-project_us-central1-a_clerum, gke_your-gcp-project_us-central1-a_example-dev, clerum-test}"
 CLIENT_ID="${CLIENT_ID:?Must set CLIENT_ID (e.g. example-prod-control-api)}"
 CLIENT_SECRET="${CLIENT_SECRET:?Must set CLIENT_SECRET}"
 NAMESPACE="${NAMESPACE:-control-plane}"
@@ -34,13 +34,13 @@ VOUCHER_KID="${CONTROL_API_REGISTRY_VOUCHER_KID:-}"
 
 # Safety check: reject contexts not in the approved Clerum list.
 case "$CONTEXT" in
-  gke_${GCP_PROJECT}_us-central1-a_clerum|\
-  gke_${GCP_PROJECT}_us-central1-a_example-dev|\
+  gke_your-gcp-project_us-central1-a_clerum|\
+  gke_your-gcp-project_us-central1-a_example-dev|\
   clerum-test)
     ;;
   *)
     echo "ERROR: CONTEXT '$CONTEXT' is not an approved Clerum cluster." >&2
-    echo "Allowed: gke_${GCP_PROJECT}_us-central1-a_clerum, gke_${GCP_PROJECT}_us-central1-a_example-dev, clerum-test" >&2
+    echo "Allowed: gke_your-gcp-project_us-central1-a_clerum, gke_your-gcp-project_us-central1-a_example-dev, clerum-test" >&2
     exit 1
     ;;
 esac

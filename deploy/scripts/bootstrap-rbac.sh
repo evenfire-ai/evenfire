@@ -32,11 +32,11 @@ set -euo pipefail
 # USAGE
 # =====
 #   # Against example-dev (GKE)
-#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_example-dev \
+#   CONTEXT=gke_your-gcp-project_us-central1-a_example-dev \
 #     bash deploy/scripts/bootstrap-rbac.sh
 #
 #   # Against clerum prod (GKE) — requires CONFIRM=yes
-#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_clerum \
+#   CONTEXT=gke_your-gcp-project_us-central1-a_clerum \
 #     CONFIRM=yes \
 #     bash deploy/scripts/bootstrap-rbac.sh
 #

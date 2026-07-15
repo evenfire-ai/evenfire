@@ -1,6 +1,6 @@
 .PHONY: install build dev docker-build docker-push docker-push-cross
 
-REGISTRY ?= us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum
+REGISTRY ?= us-central1-docker.pkg.dev/your-gcp-project/clerum
 IMAGE_NAME ?= rpc-proxy
 TAG      ?= $(shell git describe --tags --always 2>/dev/null || echo "latest")
 

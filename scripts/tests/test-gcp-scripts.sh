@@ -91,10 +91,10 @@ assert_bump_tag() {
   cat > "$tmp/kustomization.yaml" <<'YAML'
 images:
   - name: clerum/mcp-host
-    newName: ghcr.io/evenfire-ai/mcp-host-slim
+    newName: us-central1-docker.pkg.dev/your-gcp-project/clerum/mcp-host-slim
     newTag: "sha-OLD"
   - name: clerum/rpc-proxy
-    newName: ghcr.io/evenfire-ai/rpc-proxy
+    newName: us-central1-docker.pkg.dev/your-gcp-project/clerum/rpc-proxy
     newTag: "0.9.8"
 YAML
   bash deploy/scripts/bump-image-tag.sh "$tmp" mcp-host sha-NEW >/dev/null 2>&1
@@ -469,7 +469,7 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  out="$(TEST_LOG_FILE="$log_file" PATH="$tmp:$PATH" CONTEXT=gke_${GCP_PROJECT}_us-central1-a_example-dev \
+  out="$(TEST_LOG_FILE="$log_file" PATH="$tmp:$PATH" CONTEXT=gke_your-gcp-project_us-central1-a_example-dev \
     bash deploy/scripts/bootstrap-rbac.sh 2>&1 || true)"
 
   if [[ "$out" == *"deploy/base/cluster-wide/clusterroles.yaml"* ]] && \

@@ -192,7 +192,7 @@ describe('issue #637 ownership backfill CLI contract', () => {
       recipes: [recipe('recipe-a', 'alpha')],
       namespaces: { 'mcp-server': {}, 'sandbox-ui': {}, 'sandbox-recipes': { alpha: {} } },
     })
-    const result = h.run(['--context', 'gke_${GCP_PROJECT}_us-central1-a_clerum', '--apply'])
+    const result = h.run(['--context', 'gke_your-gcp-project_us-central1-a_clerum', '--apply'])
     expect(result.status).toBe(2)
     expect(result.stderr).toContain('without CONFIRM=yes')
     expect(h.read().namespaces['sandbox-recipes'].alpha).toEqual({})

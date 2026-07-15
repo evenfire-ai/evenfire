@@ -51,7 +51,7 @@ function matchesAllowedImagePrefix(image, rawPrefix) {
 // fully-qualified 'docker.io/mongodb/x' — add the docker.io/-qualified prefix
 // too if an org publishes that form.
 const DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES = Object.freeze([
-  'ghcr.io/evenfire-ai/',
+  'us-central1-docker.pkg.dev/your-gcp-project/clerum/',
   'example.com/',
   'mongodb/',
   'mcr.microsoft.com/',

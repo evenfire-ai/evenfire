@@ -48,7 +48,7 @@
 .PHONY: cluster-env-check cluster-start cluster-stop cluster-delete cluster-setup cluster-setup-simple cluster-status
 
 # Docker build (existing)
-REGISTRY ?= us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum
+REGISTRY ?= us-central1-docker.pkg.dev/your-gcp-project/clerum
 IMAGE_NAME ?= workflow-recipes
 TAG      ?= $(shell git describe --tags --always 2>/dev/null || echo "latest")
 

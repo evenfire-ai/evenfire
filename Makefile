@@ -366,10 +366,10 @@ minikube-verify-network-policy: ## Prove NetworkPolicy enforcement in clerum-tes
 	@CONTEXT="$(MINIKUBE_PROFILE)" scripts/minikube/verify-network-policy-enforcement.sh
 
 # E2E_CONTEXT drives which cluster desktop-app Playwright runs against.
-# Only these are permitted; "gke_${GCP_PROJECT}_us-central1-a_clerum" (prod) is hard-blocked.
+# Only these are permitted; "gke_your-gcp-project_us-central1-a_clerum" (prod) is hard-blocked.
 E2E_CONTEXT ?= clerum-test
-E2E_DESKTOP_ALLOWED_CONTEXTS := clerum-test gke_${GCP_PROJECT}_us-central1-a_example-dev
-E2E_PROD_CONTEXT := gke_${GCP_PROJECT}_us-central1-a_clerum
+E2E_DESKTOP_ALLOWED_CONTEXTS := clerum-test gke_your-gcp-project_us-central1-a_example-dev
+E2E_PROD_CONTEXT := gke_your-gcp-project_us-central1-a_clerum
 
 .PHONY: e2e-desktop-app
 e2e-desktop-app: ## Deterministic desktop-app Playwright E2E (validates context → pf → seed → test). Override with E2E_CONTEXT=<ctx>

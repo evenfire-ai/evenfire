@@ -1479,7 +1479,7 @@ describe('POST /admin/registry/install — evenfire imagePullSecrets attach', ()
     vi.mocked(getEntryVersion).mockResolvedValueOnce({
       ...baseEntry,
       mcp_server_meta: {
-        imageRef: 'ghcr.io/evenfire-ai/airtable-mcp:1.0',
+        imageRef: 'us-central1-docker.pkg.dev/your-gcp-project/clerum/airtable-mcp:1.0',
         port: 3000,
       },
     } as any)
