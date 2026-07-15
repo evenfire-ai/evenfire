@@ -28,7 +28,7 @@ five steps live together.
    makes per-person attribution possible — no other surface in the platform
    can answer "whose usage is this."
 
-   ![Control UI usage dashboard: stacked-area token usage over time, grouped by agent](../assets/control-ui-usage-dashboard.png)
+   ![Control UI usage dashboard: stacked-area token usage over time, grouped by agent](../assets/control-ui-usage-dashboard.webp)
    *Dev cluster, demo tenant.*
 
 2. **Cap it** — `TokenBudgetTable` (`/cost/token-budgets`) and
@@ -58,7 +58,7 @@ five steps live together.
    also default to Required). See
    [Configure approvals](../how-to/configure-approvals.md).
 
-   ![Control UI per-tool approval editor on a host detail page](../assets/control-ui-approval-editor.png)
+   ![Control UI per-tool approval editor on a host detail page](../assets/control-ui-approval-editor.webp)
    *Dev cluster, demo tenant.*
 
 4. **Constrain it** — `EgressEditor` (`components/EgressEditor.tsx`, model in
@@ -71,7 +71,7 @@ five steps live together.
    APIs; an allowed domain is an exact public DNS hostname, not a wildcard or
    URL.
 
-   ![Control UI EgressEditor on the Edit Connector page: exact-host mode with allowed domain api.airtable.com, allowed ports, and an egress summary capped at a maximum of 20](../assets/control-ui-egress-editor.png)
+   ![Control UI EgressEditor on the Edit Connector page: exact-host mode with allowed domain api.airtable.com, allowed ports, and an egress summary capped at a maximum of 20](../assets/control-ui-egress-editor.webp)
    *Dev cluster, demo tenant.*
 
 5. **Govern what gets installed** — `RegistryCatalog`
@@ -90,7 +90,7 @@ five steps live together.
    applies to custom coordinator images in workflow recipes, not to
    connector images, and it is required by default there.
 
-   ![Control UI registry catalog at /registry showing trust levels and the install flow](../assets/control-ui-registry-install.png)
+   ![Control UI registry catalog at /registry showing trust levels and the install flow](../assets/control-ui-registry-install.webp)
    *Dev cluster, demo tenant.*
 
 ## Every screen writes a CRD

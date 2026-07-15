@@ -34,7 +34,7 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
    answer carries a collapsed summary of the tool calls behind it, plus the
    input and output token counts for the thread.
 
-   ![Evenfire Desktop App chat with the chatllm agent: the agent's answer sits above a collapsed "More details · 1 tool" summary, with thread token counts in the header](../assets/desktop-app-chat.png)
+   ![Evenfire Desktop App chat with the chatllm agent: the agent's answer sits above a collapsed "More details · 1 tool" summary, with thread token counts in the header](../assets/desktop-app-chat.webp)
    *Dev cluster, demo tenant.*
 
 5. **Watch it work.** `ProgressStepper` renders the tool calls as they run —
@@ -46,7 +46,7 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
    reasoning / chain-of-thought content, and it is **read-only** — it is
    never used to submit messages, only to observe what is already running.
 
-   ![ProgressStepper in the Desktop App: a completed sqlite-mcp list_tables step showing its 21 ms duration, the tool-call row collapsed beneath the agent's answer](../assets/desktop-app-progress-stepper.png)
+   ![ProgressStepper in the Desktop App: a completed sqlite-mcp list_tables step showing its 21 ms duration, the tool-call row collapsed beneath the agent's answer](../assets/desktop-app-progress-stepper.webp)
    *Dev cluster, demo tenant.*
 
 6. **Approve the gated call.** When a tool call needs a human decision, the
@@ -56,7 +56,7 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
    [Configure approvals](../how-to/configure-approvals.md) for how the
    Required / Skip / Default policy behind that prompt is set.
 
-   ![In-chat approval gate in the Desktop App: an MCP tool call is held with the message "requires approval" and Approve / Deny buttons](../assets/desktop-app-approval.png)
+   ![In-chat approval gate in the Desktop App: an MCP tool call is held with the message "requires approval" and Approve / Deny buttons](../assets/desktop-app-approval.webp)
    *Dev cluster, demo tenant.*
 
 7. **Collect the artifact.** Completed work surfaces through the
@@ -88,7 +88,7 @@ Two screens worth calling out specifically:
   everything the plugin's UI loads comes through `rpc-proxy`. The plugin gets
   a real interface; it does not get a second client to install.
 
-  ![The LeadForge plugin's dashboard rendered inside the Evenfire Desktop App: the app's own icon rail and "Back to apps" bar surround a recipe-supplied prospecting UI showing contact, company, and outreach-funnel counters](../assets/desktop-app-sandbox-ui.png)
+  ![The LeadForge plugin's dashboard rendered inside the Evenfire Desktop App: the app's own icon rail and "Back to apps" bar surround a recipe-supplied prospecting UI showing contact, company, and outreach-funnel counters](../assets/desktop-app-sandbox-ui.webp)
   *Dev cluster, demo tenant.*
 
 ## How it is wired
