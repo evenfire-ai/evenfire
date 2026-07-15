@@ -6,10 +6,12 @@ a person who is not the platform admin actually drives an agent, with no
 Telegram bot and no curl in sight. It authenticates through
 `external-rest-api`, obtains short-lived scoped RPC tokens, and does
 everything else — messages, activity, approvals, sandbox UIs — through
-`rpc-proxy`. It **never holds a `control-api` token**: the desktop app cannot
-read a CRD, a secret, or a cost record, no matter who is signed in. See [UI
-Surfaces](README.md) for how the three consoles divide the platform, and the
-[Control UI](control-ui.md) for the admin side of that split.
+`rpc-proxy`. It **never holds a `control-api` token**: no secrets, no cost
+records, no admin control plane, no matter who is signed in. The one
+control-plane resource an end user reads is the `WorkflowRecipe` their user or
+team is authorized for, and only through `external-rest-api`'s access-checked
+passthrough. See [UI Surfaces](README.md) for how the three consoles divide the
+platform, and the [Control UI](control-ui.md) for the admin side of that split.
 
 ## The daily loop
 
@@ -44,7 +46,7 @@ Surfaces](README.md) for how the three consoles divide the platform, and the
    reasoning / chain-of-thought content, and it is **read-only** — it is
    never used to submit messages, only to observe what is already running.
 
-   ![Expanded ProgressStepper in the Desktop App: a completed sqlite-mcp list_tables step showing a 99ms duration and the JSON payload it returned](../assets/desktop-app-progress-stepper.png)
+   ![ProgressStepper in the Desktop App: a completed sqlite-mcp list_tables step showing its 21 ms duration, the tool-call row collapsed beneath the agent's answer](../assets/desktop-app-progress-stepper.png)
    *Dev cluster, demo tenant.*
 
 6. **Approve the gated call.** When a tool call needs a human decision, the
@@ -126,10 +128,12 @@ npm run app   # desktop app only
 npm run ui    # Control UI, Desktop App, and Profile UI together
 ```
 
-Both commands reuse the same Makefile port-forward targets
-(`make minikube-pf-desktop` → control-api on `:8090`, external-rest-api on
-`:8091`, rpc-proxy on `:8094`), wait for the ports to become reachable, start
+Both commands port-forward the same three services — control-api on `:8090`,
+external-rest-api on `:8091`, rpc-proxy on `:8094` — via the
+`minikube-pf-control-api`, `minikube-pf-external-api`, and
+`minikube-pf-rpc-proxy` targets, wait for the ports to become reachable, start
 the frontend process, and tear every port-forward down together on exit.
+(`make minikube-pf-desktop` starts the same three forwards standalone.)
 
 ## Ship it to your users
 
@@ -156,11 +160,22 @@ runs `npm run build` first, via the forge `prePackage` hook):
 | `make:linux:x64`    | linux    | x64   |
 | `make:linux:arm64`  | linux    | arm64 |
 
-Every packaged build needs to be pointed at the services it will talk to at
-runtime, the same three variables `desktop-app/README.md` documents for
-local development: `EXTERNAL_REST_API_BASE_URL`, `RPC_PROXY_BASE_URL`, and
-`MEMBER_REGISTRATION_SERVICE_BASE_URL` — the last has **no working default**;
-left unset, it silently falls back to the placeholder `https://example.com`.
+You ship **one** packaged app, not a build per customer. A packaged build does
+**not** read `EXTERNAL_REST_API_BASE_URL` or `RPC_PROXY_BASE_URL` from the
+environment — those apply only to unpackaged dev runs, since
+`desktop-app/src/config.ts` gates them behind `!app.isPackaged`. Instead, each
+user points the installed app at whatever instance they want — your hosted
+service, a teammate's, or local `make`-forwarded services — from the app's own
+**Environment** screen: name it, paste the External REST API URL, Save. The RPC
+proxy address follows from that environment; there is no second URL to enter.
+Environments can also be pre-seeded for a fleet through Profile UI's
+`evenfire://desktop-environment` deep link or a `CLERUM_DESKTOP_CONFIG_PATH`
+config file.
+
+Two variables **do** apply to a packaged build, read from the environment or
+the bundled `.env.prod`: `MEMBER_REGISTRATION_SERVICE_BASE_URL` — which has
+**no working default**, so left unset it silently falls back to the placeholder
+`https://example.com` — and `REQUEST_TIMEOUT_MS`.
 
 Code signing, notarization, and auto-update are **not covered here** — that
 work is deferred, and this page does not say whether the produced artifacts

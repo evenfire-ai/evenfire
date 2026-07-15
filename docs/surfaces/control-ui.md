@@ -34,13 +34,16 @@ five steps live together.
 2. **Cap it** — `TokenBudgetTable` (`/cost/token-budgets`) and
    `LlmPriceTable` (`/cost/llm-prices`): per-1M-token model prices (input,
    output, cache read/write) and budgets with a scope, a period, and a
-   progress bar against the limit. Budgets are cost control and fail
-   open — they are **not** a security boundary. A budget can be set to
-   `warn` (observation only, never denies) or `block` (denies new tasks once
-   over the limit), but even a `block` budget's check is fail-open: if the
-   check itself cannot run — a broken lookup, a transport error — the task is
-   waved through rather than stopped, so a denial always reflects a real
-   budget verdict, never an infrastructure hiccup.
+   progress bar against the limit. Budgets are cost control and are **not** a
+   security boundary. A budget can be set to `warn` (observation only, never
+   denies) or `block` (denies new tasks once over the limit). The cross-service
+   call is fail-open: if mcp-host cannot reach control-api's budget check — a
+   timeout, a transport error, a non-200 — the task is waved through rather
+   than stopped (`mcp-host/src/budget/budgetClient.ts`). Inside control-api the
+   choice is the opposite and deliberate: a `block` budget whose spend cannot
+   be computed denies the task (`budget_eval_error`) rather than silently
+   bypass the cap (`control-api/src/services/budgets/check.ts`), while a `warn`
+   budget that errors is skipped entirely.
 
 3. **Gate it** — `HostApprovalSection` (`components/HostApprovalSection`), on
    the host detail page. A per-tool approval editor with three settings —
@@ -48,8 +51,11 @@ five steps live together.
    loosens a tool whose built-in default is Required (for example, setting
    `shell_exec` or `http_request` to Skip). Approvals are default-on for MCP
    tools; native tools carry per-tool overrides, and the safe default per
-   native tool is baked into `mcp-host` — most default to Skip, but
-   `http_request` and `shell_exec` default to Required. See
+   native tool is baked into `mcp-host`. Of the always-on native tools the
+   editor lists, only `http_request` and `shell_exec` default to Required and
+   the rest to Skip; conditionally-registered tools carry their own defaults
+   (`cron_manage` and the desktop `browser_open` / `browser_navigate` tools
+   also default to Required). See
    [Configure approvals](../how-to/configure-approvals.md).
 
    ![Control UI per-tool approval editor on a host detail page](../assets/control-ui-approval-editor.png)
@@ -93,8 +99,11 @@ Sidebar destinations map to canonical App Router routes
 (`components/Sidebar/constants.tsx`). Every route either writes a `clerum.io`
 custom resource directly or manages a control-api-owned resource that isn't a
 CRD (registry entries, publisher credentials, users/teams, secrets, outputs,
-cost records, settings). See the [CRD reference](../crds/README.md) for the
-full schema of each resource.
+cost records, global-file resources and grants, settings). See the
+[CRD reference](../crds/README.md) for the full schema of each resource. One
+caveat to the heading: the `GlobalFileSystem` CRD itself is applied out of band
+(kustomize), and the Global Files screen only manages the brokered gfs
+resources and grants inside it — it never writes that CR.
 
 | Sidebar label     | Route                                                    | CRD / control-api resource                    |
 | ------------------ | --------------------------------------------------------- | ---------------------------------------------- |
@@ -102,7 +111,7 @@ full schema of each resource.
 | Connectors         | `/mcp-servers`                                           | `McpServer`                                     |
 | Plugins            | `/workflow-recipes`                                      | `WorkflowRecipe`                                |
 | Shared Files       | `/shared-filesystems`                                    | `SharedFileSystem`                              |
-| Global Files       | `/gfs`                                                   | `GlobalFileSystem`                              |
+| Global Files       | `/gfs`                                                   | gfs resources & grants (non-CRD)               |
 | Marketplace        | `/registry`                                              | registry (non-CRD)                             |
 | Publisher          | `/publisher`                                             | publisher (non-CRD)                             |
 | External Channels  | `/communication-channels`                                | `CommunicationChannel`                          |
@@ -116,13 +125,19 @@ full schema of each resource.
 Secret **values are write-only from the UI**: the Secrets screen lets an
 admin create or replace a value, but never displays one back.
 
+The **Publisher** entry appears in the sidebar only when publishing is enabled
+for the org (`isPublisherEnabled`, `components/Sidebar/index.tsx`); it is hidden
+otherwise.
+
 ## How it is wired
 
 The browser only ever calls same-origin `/control-api/*`. A Next.js route
 handler (`app/control-api/[...path]/route.ts`) proxies those requests
 server-side to `CONTROL_API_INTERNAL_URL`, stripping hop-by-hop headers, with
-a 30 s upstream timeout. The browser never holds a `control-api` credential
-or knows its internal address.
+a 30 s upstream timeout. The browser never holds a `control-api` bearer token
+and never learns its internal address — the admin session is an HttpOnly
+cookie that page JavaScript cannot read, forwarded upstream by the route
+handler.
 
 ```mermaid
 flowchart LR

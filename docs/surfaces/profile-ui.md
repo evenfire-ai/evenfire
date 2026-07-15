@@ -20,8 +20,9 @@ Surfaces](README.md) for how the three consoles divide the platform.
    GET /api/v1/invitations/token/:token` before it renders.
 3. **They accept it**, then **set a password** on the same screen: the
    invitation token, email, invitation id, and new password all go to
-   `external-rest-api POST /api/v1/invitations/password`; the temporary
-   invitation session never leaves the server.
+   `external-rest-api POST /api/v1/invitations/password`; the invitation
+   session token is never returned in the response body or exposed to page
+   JavaScript — external-rest-api sets it as an HttpOnly cookie.
 4. **Profile UI offers a Download Evenfire link** — not an automatic
    handoff. The member installs the [Desktop App](desktop-app.md)
    themselves.
