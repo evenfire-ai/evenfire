@@ -455,7 +455,8 @@ export const config: Config = {
   })(),
   memberRegistrationServiceHmacKid:
     process.env.CONTROL_API_MEMBER_REGISTRATION_HMAC_KID || 'example-dev',
-  memberRegistrationTenantId: process.env.CONTROL_API_MEMBER_REGISTRATION_TENANT_ID || 'example-dev',
+  memberRegistrationTenantId:
+    process.env.CONTROL_API_MEMBER_REGISTRATION_TENANT_ID || 'example-dev',
   inviteAcceptBaseUrl:
     process.env.CONTROL_API_INVITE_ACCEPT_BASE_URL ||
     process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL ||
@@ -765,10 +766,7 @@ if (config.registryAuthEnabled) {
 
   // URL allowlist applies in BOTH modes: self-hosted clerum still points at the
   // central example.com (spec §14.3 — per-deployment URLs out of scope).
-  const allowed = [
-    'https://example.com',
-    'http://registry-api.registry.svc.cluster.local:8085',
-  ]
+  const allowed = ['https://example.com', 'http://registry-api.registry.svc.cluster.local:8085']
   if (process.env.CLERUM_DEV_MODE === 'true') {
     allowed.push('http://localhost:8085')
   }

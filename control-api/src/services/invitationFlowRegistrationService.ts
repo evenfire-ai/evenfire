@@ -1,6 +1,6 @@
 import { config } from '../config.js'
-import { rootLogger } from '../observability/logger.js'
 import { memberRegistrationServiceRequest } from '../memberRegistrationServiceClient.js'
+import { rootLogger } from '../observability/logger.js'
 
 export function buildInviteAcceptUrl(token: string): string {
   const base = config.inviteAcceptBaseUrl.replace(/\/+$/, '')

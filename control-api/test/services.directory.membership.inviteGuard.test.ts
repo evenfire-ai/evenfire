@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createManagedInvitationForUser } from '../src/services/directory/membership.js'
 
 const mockPoolQuery = vi.fn()
 vi.mock('../src/db.js', () => ({
@@ -23,8 +24,6 @@ vi.mock('../src/services/invitationFlowRegistrationService.js', () => ({
   buildInviteAcceptUrl: (t: string) => `https://p.example/invitations/${t}`,
 }))
 
-import { createManagedInvitationForUser } from '../src/services/directory/membership.js'
-
 beforeEach(() => {
   mockPoolQuery.mockReset()
   mockConfig.memberRegistrationMode = 'offline'
@@ -33,10 +32,17 @@ beforeEach(() => {
 describe('createManagedInvitationForUser offline existing-user guard', () => {
   it('offline: rejects inviting a pre-existing user email', async () => {
     // manager-roles query returns inviter role on the team
-    mockPoolQuery.mockResolvedValueOnce({ rows: [{ team_id: 't1', role: 'inviter', team_name: 'T' }] })
+    mockPoolQuery.mockResolvedValueOnce({
+      rows: [{ team_id: 't1', role: 'inviter', team_name: 'T' }],
+    })
     // existing-user probe returns a row
     mockPoolQuery.mockResolvedValueOnce({ rows: [{ id: 'existing-user' }] })
-    const result = await createManagedInvitationForUser('mgr', 'existing@b.com', [{ teamId: 't1', role: 'member' }], 'Name')
+    const result = await createManagedInvitationForUser(
+      'mgr',
+      'existing@b.com',
+      [{ teamId: 't1', role: 'member' }],
+      'Name'
+    )
     expect(result).toEqual({ error: 'member_email_exists' })
   })
 })

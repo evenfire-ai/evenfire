@@ -1,4 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  buildInviteAcceptUrl,
+  registerAndSendInvitation,
+  storeDesktopAuthorizationToken,
+  validateInvitationFlowToken,
+} from '../src/services/invitationFlowRegistrationService.js'
 
 const mockConfig = vi.hoisted(() => ({
   memberRegistrationMode: 'offline' as 'remote' | 'offline',
@@ -13,13 +19,6 @@ vi.mock('../src/config.js', () => ({ config: mockConfig }))
 vi.mock('../src/utils/auth/memberRegistrationSigner.js', () => ({
   signMemberRegistrationJwt: () => 'test-jwt',
 }))
-
-import {
-  buildInviteAcceptUrl,
-  registerAndSendInvitation,
-  storeDesktopAuthorizationToken,
-  validateInvitationFlowToken,
-} from '../src/services/invitationFlowRegistrationService.js'
 
 const getInvitationByToken = vi.fn()
 vi.mock('../src/services/directory/index.js', () => ({ getInvitationByToken }))
