@@ -5,6 +5,7 @@ import {
   dropPluginWorkloadSdkSuperAdminApprovedColumn,
 } from './services/pluginWorkloadSdkSchema.js'
 import { applyRegistryConnectionSchema } from './services/registryConnectionSchema.js'
+import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 
 export type DbClient = {
   query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
@@ -2649,6 +2650,10 @@ const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0054_workflow_run_completed_notification_download_detection',
     apply: applyWorkflowRunCompletedNotificationTrigger,
+  },
+  {
+    version: '0055_member_registration_credentials',
+    apply: applyMemberRegistrationCredentialsSchema,
   },
 ]
 
