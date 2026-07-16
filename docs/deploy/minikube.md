@@ -82,6 +82,16 @@ make minikube-pre-gate-sync GATE=<gate-name> ARGS="--force-cluster-sync --skip-p
 this distribution**. There is no `member-registration` overlay, manifest, or deploy
 script in this tree, so `make minikube-setup` cannot deploy it.
 
+> control-api also has a **hosted mode**
+> (`CONTROL_API_MEMBER_REGISTRATION_MODE=hosted`) that sends invitation emails
+> via evenfire's shared registration hub with nothing to deploy — see [Member
+> invitations on self-hosted](../how-to/member-invitations-self-hosted.md).
+> It does not apply here: hosted mode requires real, publicly resolvable
+> `CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL` / `CONTROL_API_CONTROL_UI_BASE_URL`
+> domains and refuses `localhost`/IP literals, so a stock minikube deploy
+> (127.0.0.1 defaults) cannot use it. This section's sibling-checkout path
+> remains the only option for local minikube.
+
 `scripts/minikube/full-setup.sh` looks for a sibling checkout at
 `../evenfire-member-registration` (override with `EVENFIRE_MEMBER_REGISTRATION_DIR`).
 Without it, setup simply prints a warning and continues:

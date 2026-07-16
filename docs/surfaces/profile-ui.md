@@ -35,7 +35,11 @@ Surfaces](README.md) for how the three consoles divide the platform.
    hands it back to the installed app through the `evenfire://desktop-setup`
    deep link.
 
-Step 5's lookup and completion both depend on `member-registration-service`,
+Steps 1–3 above don't need a deployed sibling service for this: self-hosted
+control-api can send the invitation email and validate the token itself via
+evenfire's shared registration hub — see [Member invitations on
+self-hosted](../how-to/member-invitations-self-hosted.md) (hosted mode). Step
+5's lookup and completion still depend on `member-registration-service`,
 which is **not in this repository** — see the Desktop App page's
 [`member-registration-service` gap](desktop-app.md#the-member-registration-service-gap)
 for what breaks without it.
