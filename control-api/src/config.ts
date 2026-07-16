@@ -18,10 +18,12 @@ type Config = {
   internalControlJwtWrcHmacSecret: string
   internalControlJwtHccHmacSecret: string
   allowedIssuanceNamespaces: string[]
+  memberRegistrationMode: 'remote' | 'offline'
   memberRegistrationServiceBaseUrl: string
   memberRegistrationServiceHmacSecret: string
   memberRegistrationServiceHmacKid: string
   memberRegistrationTenantId: string
+  inviteAcceptBaseUrl: string
   desktopExternalRestApiBaseUrl: string
   desktopRpcProxyBaseUrl: string
   desktopProfileUiBaseUrl: string
@@ -396,6 +398,9 @@ const RPC_JWT_PUBLIC_KEY = normalizePem(
   process.env.CONTROL_API_RPC_JWT_PUBLIC_KEY || publicKeyFromPrivateKey(RPC_JWT_PRIVATE_KEY)
 )
 
+const memberRegistrationMode: 'remote' | 'offline' =
+  process.env.CONTROL_API_MEMBER_REGISTRATION_MODE === 'offline' ? 'offline' : 'remote'
+
 export const config: Config = {
   port: Number(process.env.CONTROL_API_PORT || 8090),
   jsonBodyLimit: process.env.CONTROL_API_JSON_BODY_LIMIT || '150mb',
@@ -429,11 +434,18 @@ export const config: Config = {
   allowedIssuanceNamespaces: parseCsvList(
     process.env.CONTROL_API_ALLOWED_ISSUANCE_NAMESPACES || `${HOSTS_NAMESPACE},${SANDBOX_NAMESPACE}`
   ),
-  memberRegistrationServiceBaseUrl: requiredOrDevDefault(
-    'CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL',
-    'http://member-registration-service.profiles.svc.cluster.local:8092/api/v1'
-  ),
+  memberRegistrationMode,
+  memberRegistrationServiceBaseUrl:
+    memberRegistrationMode === 'offline'
+      ? process.env.CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL || ''
+      : requiredOrDevDefault(
+          'CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL',
+          'http://member-registration-service.profiles.svc.cluster.local:8092/api/v1'
+        ),
   memberRegistrationServiceHmacSecret: (() => {
+    if (memberRegistrationMode === 'offline') {
+      return process.env.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET || ''
+    }
     const value = requiredOrDevDefault(
       'CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET',
       'dev-member-registration-hmac-secret'
@@ -444,6 +456,10 @@ export const config: Config = {
   memberRegistrationServiceHmacKid:
     process.env.CONTROL_API_MEMBER_REGISTRATION_HMAC_KID || 'example-dev',
   memberRegistrationTenantId: process.env.CONTROL_API_MEMBER_REGISTRATION_TENANT_ID || 'example-dev',
+  inviteAcceptBaseUrl:
+    process.env.CONTROL_API_INVITE_ACCEPT_BASE_URL ||
+    process.env.CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL ||
+    'http://127.0.0.1:3001',
   desktopExternalRestApiBaseUrl:
     process.env.CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091',
   desktopRpcProxyBaseUrl:
@@ -821,4 +837,15 @@ if (process.env.NODE_ENV === 'production') {
       )
     }
   }
+}
+
+if (
+  process.env.NODE_ENV === 'production' &&
+  memberRegistrationMode === 'offline' &&
+  process.env.CONTROL_API_ALLOW_OFFLINE_IN_PROD !== 'true'
+) {
+  throw new Error(
+    '[SECURITY] offline member-registration mode is not permitted in production. ' +
+      'Set CONTROL_API_ALLOW_OFFLINE_IN_PROD=true to override.'
+  )
 }
