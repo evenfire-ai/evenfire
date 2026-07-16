@@ -12,6 +12,7 @@ export async function registerAndSendControlAdminInvitation(
     'POST',
     '/control-admin-invitations/invitations',
     {
+      destinationBaseUrl: config.controlUiBaseUrl,
       body: {
         email,
         invitationUuid,
@@ -34,6 +35,7 @@ export async function validateControlAdminInvitationToken(
     email: string
     invitationUuid: string
   }>('POST', '/control-admin-invitations/validate', {
+    destinationBaseUrl: config.controlUiBaseUrl,
     body: {
       token,
       email,
@@ -55,6 +57,7 @@ export async function registerAndSendControlAdminEmailConfirmation(
     'POST',
     '/control-admin-email-confirmations/confirmations',
     {
+      destinationBaseUrl: config.controlUiBaseUrl,
       body: {
         email,
         confirmationUuid,
@@ -76,6 +79,7 @@ export async function validateControlAdminEmailConfirmationToken(
     email: string
     confirmationUuid: string
   }>('POST', '/control-admin-email-confirmations/validate', {
+    destinationBaseUrl: config.controlUiBaseUrl,
     body: {
       token,
       email,
@@ -97,6 +101,7 @@ export async function registerAndSendControlAdminPasswordReset(
     'POST',
     '/control-admin-password-resets/resets',
     {
+      destinationBaseUrl: config.controlUiBaseUrl,
       body: {
         email,
         resetUuid,
@@ -118,6 +123,7 @@ export async function validateControlAdminPasswordResetToken(
     email: string
     resetUuid: string
   }>('POST', '/control-admin-password-resets/validate', {
+    destinationBaseUrl: config.controlUiBaseUrl,
     body: {
       token,
       email,
