@@ -19,6 +19,7 @@ import {
   validateInvitationFlowToken,
 } from '../../services/invitationFlowRegistrationService.js'
 import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
+import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
 
 function invitationLookupIpKey(req: {
   ip?: string
@@ -49,7 +50,8 @@ export function createExternalInvitationsRouter(): Router {
         let validation: { email: string; invitationUuid: string }
         try {
           validation = await validateInvitationFlowToken(token)
-        } catch {
+        } catch (error) {
+          if (memberRegistrationErrorResponse(error)) throw error
           return res.status(400).json({ error: 'invalid_invitation' })
         }
         const invitation = await getInvitationByToken(validation.invitationUuid)
@@ -85,7 +87,8 @@ export function createExternalInvitationsRouter(): Router {
         let validation: { email: string; invitationUuid: string }
         try {
           validation = await validateInvitationFlowToken(token, email)
-        } catch {
+        } catch (error) {
+          if (memberRegistrationErrorResponse(error)) throw error
           return res.status(400).json({ error: 'invalid_invitation' })
         }
         if (validation.invitationUuid !== invitationId) {
@@ -247,7 +250,8 @@ export function createExternalInvitationsRouter(): Router {
       let validation: { email: string; invitationUuid: string }
       try {
         validation = await validateInvitationFlowToken(token, email)
-      } catch {
+      } catch (error) {
+        if (memberRegistrationErrorResponse(error)) throw error
         return res.status(400).json({ error: 'invalid_invitation' })
       }
       const result = await acceptInvitationForEmail(validation.email, validation.invitationUuid)
