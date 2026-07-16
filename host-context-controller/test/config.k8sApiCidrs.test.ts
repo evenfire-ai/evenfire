@@ -13,9 +13,9 @@ describe('config.k8sApiCidrs', () => {
   })
 
   it('parses a comma-separated value', async () => {
-    process.env.CONTEXT_MAPPER_K8S_API_CIDRS = '203.0.113.10/32,10.128.0.2/32'
+    process.env.CONTEXT_MAPPER_K8S_API_CIDRS = '203.0.113.1/32,10.128.0.2/32'
     const { config } = await import('../src/config')
-    expect(config.k8sApiCidrs).toEqual(['203.0.113.10/32', '10.128.0.2/32'])
+    expect(config.k8sApiCidrs).toEqual(['203.0.113.1/32', '10.128.0.2/32'])
   })
 
   it('crashes module load on an over-broad value (fail-closed)', async () => {

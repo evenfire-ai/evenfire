@@ -1,6 +1,7 @@
 import { config } from './config.js'
 import { initDb, pool } from './db.js'
 import { K8sGateway } from './k8s.js'
+import { assertRegistryConnectionReady } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
 import {
   startAdminRevokedTokenCleanup,
@@ -44,6 +45,10 @@ async function main(): Promise<void> {
 
   await initDb()
   console.log('[ControlAPI] Database initialized')
+
+  // Self-hosted fail-fast (spec §8 / §14.3): refuse to boot a registry-enabled
+  // self-hosted deployment that has no registry_connection identity row.
+  await assertRegistryConnectionReady()
 
   startExpiryCron(config.userApprovalRequestExpiryIntervalMs)
   startPluginWorkloadSdkMaintenanceCron()

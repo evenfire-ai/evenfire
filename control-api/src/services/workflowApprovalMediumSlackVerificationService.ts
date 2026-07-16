@@ -21,6 +21,8 @@ type CommunicationChannelResource = {
 type SlackGroup = {
   channelId?: string
   workspaceId?: string
+  conversationType?: string
+  title?: string
   userIds?: string[]
   userNames?: string[]
   replyOnlyWhenMentioned?: boolean
@@ -56,6 +58,8 @@ export type SlackIdentity = {
   providerUserId: string
   providerWorkspaceId: string
   providerChannelId: string
+  providerChannelType?: string | null
+  providerChannelTitle?: string | null
 }
 
 const SLACK_WORKSPACE_ID_RE = /^T[A-Z0-9]+$/
@@ -311,6 +315,8 @@ export async function addSlackTargetAssociation(
         ...(existing ?? {}),
         channelId: identity.providerChannelId,
         workspaceId: identity.providerWorkspaceId,
+        ...(identity.providerChannelType ? { conversationType: identity.providerChannelType } : {}),
+        ...(identity.providerChannelTitle ? { title: identity.providerChannelTitle } : {}),
         userIds: [...userIds],
         confirmedByUserId: identity.userId,
         confirmedAt,

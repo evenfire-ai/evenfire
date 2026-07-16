@@ -22,5 +22,4 @@ export type GfsGrantResource = {
 
 export interface GfsGrantPanelProps {
   resource: GfsGrantResource
-  onClose: () => void
 }

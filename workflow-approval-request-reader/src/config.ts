@@ -39,7 +39,7 @@ function csvSet(value: string): Set<string> {
       .filter(Boolean)
   )
   for (const medium of media) {
-    if (medium !== 'telegram' && medium !== 'slack') {
+    if (medium !== 'telegram' && medium !== 'slack' && medium !== 'teams') {
       throw new Error(`WORKFLOW_APPROVAL_READER_ENABLED_MEDIA unsupported medium: ${medium}`)
     }
   }
@@ -66,6 +66,11 @@ const primaryMcpHostRef =
   process.env.MCP_HOST_REF ||
   ''
 
+const mcpHostMessageTimeoutMs = intFromEnv(
+  'WORKFLOW_APPROVAL_READER_MCP_HOST_MESSAGE_TIMEOUT_MS',
+  120_000
+)
+
 export const config: ReaderConfig = {
   port: Number(process.env.WORKFLOW_APPROVAL_READER_PORT || 8098),
   mcpHostBaseUrl: primaryMcpHostBaseUrl,
@@ -77,10 +82,7 @@ export const config: ReaderConfig = {
   mcpHostTargetsFile: process.env.WORKFLOW_APPROVAL_READER_MCP_HOST_TARGETS_FILE,
   enabledMedia: csvSet(process.env.WORKFLOW_APPROVAL_READER_ENABLED_MEDIA || 'telegram,slack'),
   mcpHostTimeoutMs: intFromEnv('WORKFLOW_APPROVAL_READER_MCP_HOST_TIMEOUT_MS', 5000),
-  mcpHostMessageTimeoutMs: intFromEnv(
-    'WORKFLOW_APPROVAL_READER_MCP_HOST_MESSAGE_TIMEOUT_MS',
-    120_000
-  ),
+  mcpHostMessageTimeoutMs,
   rateLimitWindowMs: intFromEnv('WORKFLOW_APPROVAL_READER_RATE_LIMIT_WINDOW_MS', 60_000),
   rateLimitMaxRequests: intFromEnv('WORKFLOW_APPROVAL_READER_RATE_LIMIT_MAX_REQUESTS', 120),
   telegramWebhookSecret: process.env.WORKFLOW_APPROVAL_READER_TELEGRAM_SECRET,
@@ -95,6 +97,6 @@ export const config: ReaderConfig = {
     process.env.WORKFLOW_APPROVAL_READER_CHANNEL_READER_HANDOFF_TOKEN || '',
   channelReaderHandoffTimeoutMs: intFromEnv(
     'WORKFLOW_APPROVAL_READER_CHANNEL_READER_HANDOFF_TIMEOUT_MS',
-    5000
+    mcpHostMessageTimeoutMs
   ),
 }

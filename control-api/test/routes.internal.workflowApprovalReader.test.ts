@@ -3,6 +3,7 @@ import { createHash, createHmac } from 'node:crypto'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { encodeSlackTargetId } from '../src/utils/slackTargetId.js'
+import { encodeTeamsTargetId } from '../src/utils/teamsTargetId.js'
 import { MockGateway } from './mockGateway.js'
 
 const READER_TOKEN = 'dev-wa-reader-token'
@@ -97,6 +98,37 @@ async function seedSlackTarget(
     },
   })
   return encodeSlackTargetId('channels', name)
+}
+
+async function seedTeamsTarget(
+  gateway: MockGateway,
+  overrides: { tenantId?: string | null; name?: string } = {}
+): Promise<string> {
+  const name = overrides.name ?? 'teams-bot'
+  const tenantId = overrides.tenantId === undefined ? 'tenant-1' : overrides.tenantId
+  await gateway.createResource(
+    'communicationchannels',
+    {
+      metadata: { name },
+      spec: {
+        credentialsSecretRef: { name: 'teams-app-credentials' },
+        hostRef: 'sandbox-recipes/agent-a',
+        teamsSettings: {
+          appId: 'teams-app-1',
+          appName: 'evenfire',
+          replyOnlyWhenMentioned: true,
+          ...(tenantId ? { tenantId } : {}),
+        },
+      },
+    },
+    'channels'
+  )
+  gateway.seedSecret('teams-app-credentials', 'channels', {
+    data: {
+      'teams-app-password': b64('teams-app-secret'),
+    },
+  })
+  return encodeTeamsTargetId('channels', name)
 }
 
 describe('GET /api/v1/internal/workflow-approval-reader/approvals/:id/can-approve', () => {
@@ -385,5 +417,91 @@ describe('Slack target proxy routes', () => {
       text: 'agent reply',
       ts: '1710000000.000002',
     })
+  })
+})
+
+describe('Teams target proxy routes', () => {
+  let app: ReturnType<typeof createApp>
+  let gateway: MockGateway
+  let targetId: string
+
+  beforeEach(async () => {
+    mockPoolQuery.mockReset()
+    gateway = new MockGateway('channels')
+    targetId = await seedTeamsTarget(gateway)
+    app = createApp(gateway as never)
+  })
+
+  it('updates Teams messages through the stored app credentials', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ access_token: 'teams-access-token' }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'activity-1' }),
+      } as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const res = await authedPost(
+      app,
+      `/api/v1/internal/workflow-approval-reader/teams-targets/${encodeURIComponent(
+        targetId
+      )}/update-message`,
+      {
+        conversationId: '19:channel-1@thread.tacv2',
+        messageId: 'activity-1',
+        serviceUrl: 'https://smba.trafficmanager.net/amer/',
+        text: 'Approved. Workflow approval recorded.',
+      }
+    )
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, id: 'activity-1' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[0]?.[0]).toContain(
+      'https://login.microsoftonline.com/tenant-1/oauth2/v2.0/token'
+    )
+    const tokenInit = fetchMock.mock.calls[0]?.[1] as RequestInit
+    expect(String(tokenInit.body)).toContain('client_id=teams-app-1')
+    expect(String(tokenInit.body)).toContain('client_secret=teams-app-secret')
+
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      'https://smba.trafficmanager.net/amer/v3/conversations/19%3Achannel-1%40thread.tacv2/activities/activity-1'
+    )
+    const updateInit = fetchMock.mock.calls[1]?.[1] as RequestInit
+    const headers = updateInit.headers as Headers
+    expect(headers.get('Authorization')).toBe('Bearer teams-access-token')
+    expect(JSON.parse(String(updateInit.body))).toEqual({
+      type: 'message',
+      text: 'Approved. Workflow approval recorded.',
+      attachments: [],
+    })
+  })
+
+  it('rejects Teams message updates with unsupported service URLs', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const res = await authedPost(
+      app,
+      `/api/v1/internal/workflow-approval-reader/teams-targets/${encodeURIComponent(
+        targetId
+      )}/update-message`,
+      {
+        conversationId: '19:channel-1@thread.tacv2',
+        messageId: 'activity-1',
+        serviceUrl: 'http://attacker.example.com',
+        text: 'Approved. Workflow approval recorded.',
+      }
+    )
+
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'invalid_teams_service_url' })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

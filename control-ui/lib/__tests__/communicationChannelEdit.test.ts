@@ -33,6 +33,24 @@ describe('communication channel edit helpers', () => {
     expect(communicationChannelInitialTab(item)).toBe('slack')
   })
 
+  it('selects Teams when Teams has real config and other providers only have defaults', () => {
+    const item = channel({
+      spec: {
+        hostRef: 'chatllm',
+        telegramSettings: { replyOnlyWhenMentioned: false },
+        slackSettings: { replyOnlyWhenMentioned: false, replyInThreads: false },
+        teamsSettings: {
+          appName: 'evenfire',
+          appId: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82',
+          tenantId: '21e08d37-8d53-4144-87cb-557b8298aed3',
+          replyOnlyWhenMentioned: true,
+        },
+      },
+    })
+
+    expect(communicationChannelInitialTab(item)).toBe('teams')
+  })
+
   it('hydrates Telegram bot handle from the legacy annotation fallback', () => {
     const draft = createCommunicationChannelDraft(
       channel({
@@ -61,6 +79,11 @@ describe('communication channel edit helpers', () => {
       slackReplyOnlyWhenMentioned: false,
       slackReplyInThreads: false,
       slackWorkspaceId: '',
+      teams: [],
+      teamsAppName: '',
+      teamsAppId: '',
+      teamsTenantId: '',
+      teamsReplyOnlyWhenMentioned: false,
       telegram: [],
       telegramBotHandle: '',
       telegramReplyOnlyWhenMentioned: false,
@@ -77,6 +100,35 @@ describe('communication channel edit helpers', () => {
         botHandle: 'Eventfire Test App',
         replyOnlyWhenMentioned: false,
         replyInThreads: false,
+      },
+    })
+  })
+
+  it('does not save providers that only have default boolean settings', () => {
+    const spec = buildCommunicationChannelSpec({
+      accessTeamIds: [],
+      accessUserIds: ['user-1'],
+      hostRef: 'chatllm',
+      slack: [],
+      slackBotHandle: '',
+      slackReplyOnlyWhenMentioned: true,
+      slackReplyInThreads: true,
+      slackWorkspaceId: '',
+      teams: [],
+      teamsAppName: '',
+      teamsAppId: '',
+      teamsTenantId: '',
+      teamsReplyOnlyWhenMentioned: true,
+      telegram: [],
+      telegramBotHandle: '',
+      telegramReplyOnlyWhenMentioned: true,
+    })
+
+    expect(spec).toEqual({
+      hostRef: 'chatllm',
+      access: {
+        users: ['user-1'],
+        teams: [],
       },
     })
   })

@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  deploy/scripts/provision-gfs-runtime.sh --context <kube-context> --overlay <overlay-dir> [--allow-prod] [--skip-auth-sync]
+  deploy/scripts/provision-gfs-runtime.sh --context <kube-context> --overlay <overlay-dir> [--allow-prod] [--skip-auth-sync] [--skip-instances]
 
 Runs the post-overlay GFS runtime provisioning steps and applies overlay CRD
 instances. Production contexts require --allow-prod; the Makefile prod target
@@ -22,6 +22,7 @@ CONTEXT=""
 OVERLAY=""
 ALLOW_PROD="0"
 SKIP_SYNC="0"
+SKIP_INSTANCES="0"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -47,6 +48,13 @@ while [ $# -gt 0 ]; do
       ;;
     --skip-auth-sync)
       SKIP_SYNC="1"
+      shift
+      ;;
+    --skip-instances)
+      # GFS DB provisioning only — do NOT apply the overlay's CRD instances
+      # (Host/Context/CommunicationChannel/GlobalFileSystem). Used by the prod
+      # promotion pipeline, where instance management stays a gated runbook op.
+      SKIP_INSTANCES="1"
       shift
       ;;
     -h|--help)
@@ -99,6 +107,15 @@ fi
 log "Provisioning gfsc database access"
 CONTEXT="$CONTEXT" bash deploy/scripts/provision-gfs-db.sh
 
+if [ "$SKIP_INSTANCES" = "1" ]; then
+  # DB-credential heal ONLY: skip the instances apply AND the
+  # GlobalFileSystem-Ready wait below. provision-gfs-db.sh already rolled the
+  # gfsc deployments and waited for their rollout, which is exactly the
+  # surface this mode changes — entering the CR readiness gate here would
+  # couple every prod promotion to overall GFS health once the CR exists.
+  log "Skipping CRD instances apply and GlobalFileSystem readiness wait (--skip-instances)"
+  exit 0
+fi
 if [ -d "$INSTANCES_DIR" ]; then
   log "Applying CRD instances from $INSTANCES_DIR"
   kctl apply -f "$INSTANCES_DIR"

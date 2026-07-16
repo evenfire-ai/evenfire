@@ -1,7 +1,6 @@
 {
   "name": "clerum-workflow-approval-request-reader",
   "version": "0.1.0",
-  "license": "MPL-2.0",
   "description": "Normalizes third-party approval callbacks and submits decisions to workflow runtime mcp-hosts",
   "main": "dist/main.js",
   "engines": {

@@ -1,0 +1,58 @@
+# Three-tier PriorityClass scheme (stateless agents).
+#
+# The scheduler preempts strictly LOWER-priority pods, and prefers evicting the
+# LOWEST-priority pods that free enough capacity. Tiers:
+#
+#   clerum-batch            (-10)  eviction-ELIGIBLE. Recipe Jobs/CronJobs and
+#                                  sandbox-recipes workloads. An interactive
+#                                  host wake preferentially evicts these.
+#   clerum-service          (0)    protected default tier. MCP servers,
+#                                  always-on hosts, control plane. Same value
+#                                  as unclassed pods, so declaring it is
+#                                  documentation + explicit intent, not a
+#                                  behavior change.
+#   clerum-interactive-host (100)  interactive host wake pods. Preempts
+#                                  lower-priority pods when the node is full.
+#
+# HONEST RESIDUAL: priority alone does not make the service tier untouchable.
+# When a full node has no clerum-batch pods to evict, a value-100 wake pod CAN
+# still preempt priority-0 pods (unclassed or clerum-service). The mitigation
+# is capacity planning: interactive host requests are kept small so a wake
+# fits without evicting the service tier, and batch pods are the preferred
+# (and normally sufficient) eviction target. Do not describe this scheme as
+# absolute protection for services.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: clerum-batch
+value: -10
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: >-
+  Preemptible batch tier — recipe Jobs/CronJobs and sandbox-recipes workloads.
+  May be evicted by interactive host wakes (clerum-interactive-host).
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: clerum-service
+value: 0
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: >-
+  Protected default tier — MCP servers, always-on hosts, control plane. Equal
+  to the priority of unclassed pods (0); interactive wakes prefer evicting
+  clerum-batch (-10), but on a node with no batch pods priority-0 pods can
+  still be preempted by clerum-interactive-host (100) — see residual note.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: clerum-interactive-host
+value: 100
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: >-
+  Interactive host wake tier — stateless Host pods scaled up on demand. Keeps
+  requests small (capacity planning) so a wake prefers evicting clerum-batch
+  pods rather than the priority-0 service tier.

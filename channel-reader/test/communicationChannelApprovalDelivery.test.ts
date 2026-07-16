@@ -130,11 +130,7 @@ describe('CommunicationChannel approval delivery path', () => {
     expect(replies).toEqual([
       {
         channelId: 'telegram-chat-1',
-        content:
-          'Approve workflow trigger\n' +
-          'Approval requested for workflow due-diligence.\n' +
-          '\n' +
-          'Reply /approve due-diligence to approve or /deny due-diligence to deny.',
+        content: 'Approve workflow due-diligence?',
         options: {
           telegramInlineKeyboard: [
             [
@@ -238,10 +234,7 @@ describe('CommunicationChannel approval delivery path', () => {
     await reader.handleMessages([makeMessage('/approve due-diligence')])
 
     expect(replies).toEqual([
-      'Approve workflow trigger\n' +
-        'Approval requested for workflow due-diligence.\n' +
-        '\n' +
-        'Reply /approve due-diligence to approve or /deny due-diligence to deny.',
+      'Approve workflow due-diligence?',
       'No pending workflow approval found for due-diligence. Use the workflow name shown in the approval request.',
     ])
     expect(notificationDeliveryClient.acknowledge).toHaveBeenCalledWith('delivery-2', {
@@ -301,7 +294,7 @@ describe('CommunicationChannel approval delivery path', () => {
 
       expect(notificationDeliveryClient.fetchDeliveries).not.toHaveBeenCalled()
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('workspaceId is required for workflow approval delivery')
+        expect.stringContaining('workspace/tenant id is required for workflow approval delivery')
       )
     } finally {
       warnSpy.mockRestore()

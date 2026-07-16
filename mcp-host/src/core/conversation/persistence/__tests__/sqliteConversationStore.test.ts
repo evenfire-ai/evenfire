@@ -16,7 +16,7 @@ describe('SqliteConversationStore — basic round-trip', () => {
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'hello', 'test-task')
+      await manager.startTurn(conv, 'hello', 'test-task')
       const approval: PendingApproval = {
         request_id: 'req-1',
         tool_name: 'shell_exec',
@@ -47,7 +47,7 @@ describe('SqliteConversationStore — basic round-trip', () => {
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'hello', 'test-task')
+      await manager.startTurn(conv, 'hello', 'test-task')
       await manager.suspendForApproval(conv, {
         request_id: 'req-2',
         tool_name: 'shell_exec',
@@ -131,7 +131,7 @@ describe('SqliteConversationStore — session token counters', () => {
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'hello', 'task-1')
+      await manager.startTurn(conv, 'hello', 'task-1')
       // two LLM calls within the turn (e.g. tool loop)
       manager.recordSessionUsage(conv, {
         input_tokens: 100,
@@ -145,7 +145,7 @@ describe('SqliteConversationStore — session token counters', () => {
         cache_read_tokens: 3,
         cache_write_tokens: 0,
       })
-      manager.completeTurn(conv, 'done')
+      await manager.completeTurn(conv, 'done')
 
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
 
@@ -238,7 +238,7 @@ describe('SqliteConversationStore — cold-start rehydration', () => {
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'hi', 'test-task')
+      await manager.startTurn(conv, 'hi', 'test-task')
       await manager.suspendForApproval(conv, {
         request_id: 'req-cold',
         tool_name: 'shell_exec',
@@ -272,7 +272,7 @@ describe('SqliteConversationStore — cold-start rehydration', () => {
       for (let i = 0; i < 3; i++) {
         const key = `u-${i}:rpc:agent:default`
         const conv = await manager.getOrCreate(key)
-        manager.startTurn(conv, `msg ${i}`, 'test-task')
+        await manager.startTurn(conv, `msg ${i}`, 'test-task')
         await manager.suspendForApproval(conv, {
           request_id: `req-${i}`,
           tool_name: 'shell_exec',
@@ -315,7 +315,7 @@ describe('SqliteConversationStore — LRU eviction with pinning', () => {
     try {
       const manager = new ConversationManager(handle.store)
       const convA = await manager.getOrCreate('u-1:rpc:a:default')
-      manager.startTurn(convA, 'hi', 'test-task')
+      await manager.startTurn(convA, 'hi', 'test-task')
       await manager.suspendForApproval(convA, {
         request_id: 'pinned',
         tool_name: 'shell_exec',
@@ -343,7 +343,7 @@ describe('SqliteConversationStore — LRU eviction with pinning', () => {
       // Two pinned sessions exhaust the cache.
       for (let i = 0; i < 2; i++) {
         const conv = await manager.getOrCreate(`u-${i}:rpc:a:default`)
-        manager.startTurn(conv, `hi-${i}`, 'test-task')
+        await manager.startTurn(conv, `hi-${i}`, 'test-task')
         await manager.suspendForApproval(conv, {
           request_id: `req-${i}`,
           tool_name: 'shell_exec',
@@ -425,7 +425,7 @@ describe('SqliteConversationStore — B8 spillover_ref round-trip', () => {
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'do a thing', 'test-task')
+      await manager.startTurn(conv, 'do a thing', 'test-task')
 
       manager.recordToolCall(conv, {
         name: 'shell_exec',
@@ -462,7 +462,7 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'hola', 'task-abc')
+      await manager.startTurn(conv, 'hola', 'task-abc')
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
 
       expect(conv.activeTaskId).toBe('task-abc') // RAM
@@ -477,8 +477,8 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'hola', 'task-abc')
-      manager.completeTurn(conv, 'done')
+      await manager.startTurn(conv, 'hola', 'task-abc')
+      await manager.completeTurn(conv, 'done')
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
 
       expect(conv.activeTaskId).toBeUndefined()
@@ -498,9 +498,9 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
       try {
         const manager = new ConversationManager(handle.store)
         const conv = await manager.getOrCreate(SESSION_KEY)
-        manager.startTurn(conv, 'hola', 'task-xyz')
+        await manager.startTurn(conv, 'hola', 'task-xyz')
         if (variant === 'cancel') manager.cancelTurn(conv)
-        else manager.failTurn(conv)
+        else await manager.failTurn(conv)
         await handle.persistQueue.drainSessionKey(SESSION_KEY)
 
         expect(conv.activeTaskId).toBeUndefined()
@@ -511,12 +511,36 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
     }
   })
 
+  it('persistTurnFail is an awaited durability barrier: the failed-turn state is durable when it resolves', async () => {
+    const handle = await freshStore()
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'hola', 'task-fail-barrier')
+
+      // Mirror of the completeTurn barrier assertions: await the ACK, then
+      // read the durable row DIRECTLY — deliberately NO drainSessionKey.
+      // Under the former fire-and-forget enqueueAsync the write could still
+      // be sitting in the persist queue at this point.
+      await manager.failTurn(conv)
+
+      const row = handle.worker.db
+        .prepare('SELECT state, active_task_id FROM sessions WHERE id = ?')
+        .get(conv.id) as { state: string; active_task_id: string | null } | undefined
+      expect(row?.state).toBe('idle')
+      expect(row?.active_task_id).toBeNull()
+      expect(conv.activeTaskId).toBeUndefined()
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
   it('suspendForApproval preserves active_task_id (same task across approval)', async () => {
     const handle = await freshStore()
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'hola', 'task-1')
+      await manager.startTurn(conv, 'hola', 'task-1')
       await manager.suspendForApproval(conv, {
         request_id: 'req-1',
         tool_name: 'shell_exec',
@@ -544,7 +568,7 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
     try {
       const manager = new ConversationManager(denyHandle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'do X', 'task-deny')
+      await manager.startTurn(conv, 'do X', 'task-deny')
       await manager.suspendForApproval(conv, {
         request_id: 'req-d',
         tool_name: 'shell_exec',
@@ -572,7 +596,7 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
     try {
       const manager = new ConversationManager(approveHandle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'do Y', 'task-approve')
+      await manager.startTurn(conv, 'do Y', 'task-approve')
       await manager.suspendForApproval(conv, {
         request_id: 'req-a',
         tool_name: 'shell_exec',
@@ -600,7 +624,7 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'hola', 'task-reload')
+      await manager.startTurn(conv, 'hola', 'task-reload')
       await manager.suspendForApproval(conv, {
         request_id: 'req-reload',
         tool_name: 'shell_exec',
@@ -641,7 +665,7 @@ describe('SqliteConversationStore — processing reaper (D.2)', () => {
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'long task', 'task-ghost') // processing, never completed
+      await manager.startTurn(conv, 'long task', 'task-ghost') // processing, never completed
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
 
       const now = Date.now()
@@ -695,13 +719,13 @@ describe('SqliteConversationStore — processing reaper (D.2)', () => {
 
       // idle session
       const idleConv = await manager.getOrCreate('u-1:rpc:agent-x:idle-chat')
-      manager.startTurn(idleConv, 'hi', 'task-i')
-      manager.completeTurn(idleConv, 'done')
+      await manager.startTurn(idleConv, 'hi', 'task-i')
+      await manager.completeTurn(idleConv, 'done')
       await handle.persistQueue.drainSessionKey('u-1:rpc:agent-x:idle-chat')
 
       // awaiting_approval session
       const awaitConv = await manager.getOrCreate('u-1:rpc:agent-x:await-chat')
-      manager.startTurn(awaitConv, 'do X', 'task-a')
+      await manager.startTurn(awaitConv, 'do X', 'task-a')
       await manager.suspendForApproval(awaitConv, {
         request_id: 'req-1',
         tool_name: 'shell_exec',
@@ -730,7 +754,7 @@ describe('SqliteConversationStore — processing reaper (D.2)', () => {
       const manager = new ConversationManager(handle.store)
       for (const key of ['u-1:rpc:agent-x:c1', 'u-1:rpc:agent-x:c2', 'u-1:rpc:agent-x:c3']) {
         const conv = await manager.getOrCreate(key)
-        manager.startTurn(conv, 'task', `task-${key}`)
+        await manager.startTurn(conv, 'task', `task-${key}`)
         await handle.persistQueue.drainSessionKey(key)
       }
       const reaped = await handle.store.reapProcessingSessions!(Date.now())
@@ -749,7 +773,7 @@ describe('SqliteConversationStore — processing reaper (D.2)', () => {
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'ghost task', 'task-ghost')
+      await manager.startTurn(conv, 'ghost task', 'task-ghost')
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
       await handle.store.reapProcessingSessions!(Date.now())
 
@@ -759,7 +783,7 @@ describe('SqliteConversationStore — processing reaper (D.2)', () => {
       const reloaded = await manager.getOrCreate(SESSION_KEY)
       expect(reloaded.state).toBe(ConversationState.Idle)
       expect(reloaded.activeTaskId).toBeUndefined()
-      expect(() => manager.startTurn(reloaded, 'fresh task', 'task-fresh')).not.toThrow()
+      await expect(manager.startTurn(reloaded, 'fresh task', 'task-fresh')).resolves.toBeDefined()
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
 
       // The fresh user message landed (no ordinal collision with the synthetic).
@@ -801,7 +825,7 @@ describe('SqliteConversationStore — awaiting-approval reaper (D.8 / F7)', () =
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'do X', 'task-await')
+      await manager.startTurn(conv, 'do X', 'task-await')
       await manager.suspendForApproval(conv, APPROVAL)
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
 
@@ -858,7 +882,7 @@ describe('SqliteConversationStore — awaiting-approval reaper (D.8 / F7)', () =
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'do X', 'task-live')
+      await manager.startTurn(conv, 'do X', 'task-live')
       await manager.suspendForApproval(conv, APPROVAL)
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
 
@@ -884,7 +908,7 @@ describe('SqliteConversationStore — awaiting-approval reaper (D.8 / F7)', () =
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'do X', 'task-orphan')
+      await manager.startTurn(conv, 'do X', 'task-orphan')
       await manager.suspendForApproval(conv, APPROVAL)
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
 
@@ -909,12 +933,12 @@ describe('SqliteConversationStore — awaiting-approval reaper (D.8 / F7)', () =
     try {
       const manager = new ConversationManager(handle.store)
       const idleConv = await manager.getOrCreate('u-1:rpc:agent-x:idle-chat')
-      manager.startTurn(idleConv, 'hi', 'task-i')
-      manager.completeTurn(idleConv, 'done')
+      await manager.startTurn(idleConv, 'hi', 'task-i')
+      await manager.completeTurn(idleConv, 'done')
       await handle.persistQueue.drainSessionKey('u-1:rpc:agent-x:idle-chat')
 
       const procConv = await manager.getOrCreate('u-1:rpc:agent-x:proc-chat')
-      manager.startTurn(procConv, 'long', 'task-p')
+      await manager.startTurn(procConv, 'long', 'task-p')
       await handle.persistQueue.drainSessionKey('u-1:rpc:agent-x:proc-chat')
 
       const reaped = await handle.store.reapExpiredAwaitingApprovalSessions!(FAR_FUTURE)
@@ -933,7 +957,7 @@ describe('SqliteConversationStore — awaiting-approval reaper (D.8 / F7)', () =
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'do X', 'task-await')
+      await manager.startTurn(conv, 'do X', 'task-await')
       await manager.suspendForApproval(conv, APPROVAL)
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
       await handle.store.reapExpiredAwaitingApprovalSessions!(FAR_FUTURE)
@@ -941,7 +965,7 @@ describe('SqliteConversationStore — awaiting-approval reaper (D.8 / F7)', () =
       const reloaded = await manager.getOrCreate(SESSION_KEY)
       expect(reloaded.state).toBe(ConversationState.Idle)
       expect(reloaded.activeTaskId).toBeUndefined()
-      expect(() => manager.startTurn(reloaded, 'fresh task', 'task-fresh')).not.toThrow()
+      await expect(manager.startTurn(reloaded, 'fresh task', 'task-fresh')).resolves.toBeDefined()
     } finally {
       await handle.shutdown()
     }
@@ -963,7 +987,7 @@ describe('SqliteConversationStore — reapAwaitingApprovalSessions (S1, reap-all
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'do X', 'task-live-s1')
+      await manager.startTurn(conv, 'do X', 'task-live-s1')
       await manager.suspendForApproval(conv, APPROVAL)
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
 
@@ -1022,7 +1046,7 @@ describe('SqliteConversationStore — reapAwaitingApprovalSessions (S1, reap-all
       for (let i = 0; i < total; i++) {
         const key = `u-1:rpc:agent-x:chat-s1-${i}`
         const conv = await manager.getOrCreate(key)
-        manager.startTurn(conv, 'do X', `task-s1-${i}`)
+        await manager.startTurn(conv, 'do X', `task-s1-${i}`)
         await manager.suspendForApproval(conv, {
           ...APPROVAL,
           request_id: `req-s1-${i}`,
@@ -1052,7 +1076,7 @@ describe('SqliteConversationStore — reapAwaitingApprovalSessions (S1, reap-all
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      manager.startTurn(conv, 'do X', 'task-expired')
+      await manager.startTurn(conv, 'do X', 'task-expired')
       await manager.suspendForApproval(conv, APPROVAL)
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
 

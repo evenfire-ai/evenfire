@@ -96,6 +96,7 @@ function getChatMessageAttachmentIcon(type: ChatMessageAttachment['type']) {
   if (type === 'plugin') return <IconWorkflows />
   if (type === 'connector') return <IconConnectors />
   if (type === 'agent_file') return <IconContexts />
+  if (type === 'global_file') return <IconAttachFile />
   return <IconAttachFile />
 }
 

@@ -32,6 +32,10 @@ import {
   resolveSlackCommunicationChannelTarget,
   userCanAccessSlackCommunicationChannel,
 } from '../../services/workflowApprovalMediumSlackVerificationService.js'
+import {
+  addTeamsTargetAssociation,
+  resolveTeamsCommunicationChannelTarget,
+} from '../../services/workflowApprovalMediumTeamsVerificationService.js'
 import { confirmTelegramProviderEventChallenge } from '../../services/workflowApprovalMediumTelegramProviderEventService.js'
 import { userCanAccessTelegramCommunicationChannel } from '../../services/workflowApprovalMediumTelegramVerificationService.js'
 import { recordProviderApprovalDecision } from '../../services/workflowApprovalProviderDecisionService.js'
@@ -277,8 +281,15 @@ function parseProviderIdentityFromBody(
   ) {
     return { ok: false, status: 400, error: 'provider identity exceeds maximum length' }
   }
-  if (medium === 'slack' && !providerWorkspaceId?.trim()) {
-    return { ok: false, status: 400, error: 'slack workspace identity is required' }
+  if ((medium === 'slack' || medium === 'teams') && !providerWorkspaceId?.trim()) {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        medium === 'teams'
+          ? 'teams tenant identity is required'
+          : 'slack workspace identity is required',
+    }
   }
   if (!providerChannelId?.trim()) {
     return { ok: false, status: 400, error: 'provider channel identity is required' }
@@ -990,6 +1001,9 @@ export function createUserApprovalRequestsRoutes(gateway: K8sGateway): Router {
           let validatedSlackTarget: Awaited<
             ReturnType<typeof resolveSlackCommunicationChannelTarget>
           > | null = null
+          let validatedTeamsTarget: Awaited<
+            ReturnType<typeof resolveTeamsCommunicationChannelTarget>
+          > | null = null
           const result = await confirmMediumLinkSessionFromReader({
             nonce: String(body.nonce || '').trim(),
             identity: {
@@ -1000,7 +1014,7 @@ export function createUserApprovalRequestsRoutes(gateway: K8sGateway): Router {
               communicationChannelRef,
             },
             validateSession:
-              medium === 'slack'
+              medium === 'slack' || medium === 'teams'
                 ? async (userId, identity) => {
                     if (!communicationChannelRef) {
                       return { ok: false, error: 'communication_channel_ref_required' }
@@ -1010,13 +1024,29 @@ export function createUserApprovalRequestsRoutes(gateway: K8sGateway): Router {
                       return { ok: false, error: 'invalid_communication_channel_ref' }
                     }
                     try {
-                      const target = await resolveSlackCommunicationChannelTarget({
-                        gateway,
-                        userId,
-                        channelNamespace,
-                        channelName,
-                      })
-                      validatedSlackTarget = target
+                      const target =
+                        medium === 'teams'
+                          ? await resolveTeamsCommunicationChannelTarget({
+                              gateway,
+                              userId,
+                              channelNamespace,
+                              channelName,
+                            })
+                          : await resolveSlackCommunicationChannelTarget({
+                              gateway,
+                              userId,
+                              channelNamespace,
+                              channelName,
+                            })
+                      if (medium === 'teams') {
+                        validatedTeamsTarget = target as Awaited<
+                          ReturnType<typeof resolveTeamsCommunicationChannelTarget>
+                        >
+                      } else {
+                        validatedSlackTarget = target as Awaited<
+                          ReturnType<typeof resolveSlackCommunicationChannelTarget>
+                        >
+                      }
                       if (
                         identity.providerWorkspaceId !== nullableString(body.providerWorkspaceId)
                       ) {
@@ -1026,7 +1056,12 @@ export function createUserApprovalRequestsRoutes(gateway: K8sGateway): Router {
                     } catch (err) {
                       return {
                         ok: false,
-                        error: err instanceof Error ? err.message : 'slack_target_not_found',
+                        error:
+                          err instanceof Error
+                            ? err.message
+                            : medium === 'teams'
+                              ? 'teams_target_not_found'
+                              : 'slack_target_not_found',
                       }
                     }
                   }
@@ -1046,7 +1081,11 @@ export function createUserApprovalRequestsRoutes(gateway: K8sGateway): Router {
                     ? 404
                     : result.error === 'slack_target_not_ready'
                       ? 409
-                      : 400
+                      : result.error === 'teams_target_not_found'
+                        ? 404
+                        : result.error === 'teams_target_not_ready'
+                          ? 409
+                          : 400
             return res.status(status).json({ ok: false, error: result.error })
           }
           if (medium === 'slack' && communicationChannelRef) {
@@ -1080,10 +1119,58 @@ export function createUserApprovalRequestsRoutes(gateway: K8sGateway): Router {
                 providerUserId: account.providerUserId,
                 providerWorkspaceId: account.providerWorkspaceId,
                 providerChannelId: account.providerChannelId,
+                providerChannelType: nullableString(body.providerChannelType),
+                providerChannelTitle: nullableString(body.providerChannelTitle),
               })
             }
           }
-          return res.status(200).json({ ok: true, account: result.account })
+          if (medium === 'teams' && communicationChannelRef) {
+            const [channelNamespace, channelName] = communicationChannelRef.split('/')
+            const account = result.account as
+              | {
+                  userId?: string
+                  providerUserId?: string
+                  providerWorkspaceId?: string | null
+                  providerChannelId?: string | null
+                }
+              | undefined
+            if (
+              channelNamespace &&
+              channelName &&
+              account?.userId &&
+              account.providerUserId &&
+              account.providerWorkspaceId &&
+              account.providerChannelId
+            ) {
+              const target =
+                validatedTeamsTarget ??
+                (await resolveTeamsCommunicationChannelTarget({
+                  gateway,
+                  userId: account.userId,
+                  channelNamespace,
+                  channelName,
+                }))
+              await addTeamsTargetAssociation(gateway, target, {
+                userId: account.userId,
+                providerUserId: account.providerUserId,
+                providerWorkspaceId: account.providerWorkspaceId,
+                providerChannelId: account.providerChannelId,
+                providerChannelType: nullableString(body.providerChannelType),
+                providerChannelTitle: nullableString(body.providerChannelTitle),
+                providerTeamId: nullableString(body.providerTeamId),
+                providerTeamsChannelId: nullableString(body.providerTeamsChannelId),
+                serviceUrl: nullableString(body.serviceUrl),
+                ...(typeof result.replyInThreads === 'boolean'
+                  ? { replyInThreads: result.replyInThreads }
+                  : {}),
+              })
+            }
+          }
+          return res.status(200).json({
+            ok: true,
+            account: result.account,
+            replyInThreads: result.replyInThreads,
+          })
         } catch (err) {
           next(err)
         }

@@ -131,6 +131,19 @@ ready_pod_name() {
   return 1
 }
 
+# Count every Running pod, including unready or terminating pods. Suspend
+# assertions use this instead of ready_pod_name so an unready pod cannot be
+# mistaken for a fully terminated workload.
+running_pod_count() {
+  local ns=$1 label=$2 rows
+  if ! rows="$(kctl get pods -n "$ns" -l "$label" \
+    --field-selector=status.phase=Running -o name)"; then
+    echo "running_pod_count: failed to list Running pods in ${ns} for selector ${label}" >&2
+    return 1
+  fi
+  printf '%s\n' "$rows" | awk 'NF { count++ } END { print count + 0 }'
+}
+
 wait_for_pod() {
   local ns=$1 label=$2 timeout=$3 elapsed=0
   while [ $elapsed -lt "$timeout" ]; do

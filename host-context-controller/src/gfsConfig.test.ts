@@ -31,7 +31,7 @@ describe('gfsDefaultFactoryConfig', () => {
     process.env.CONTEXT_MAPPER_NODELOCAL_DNS_CIDR = '203.0.113.10/32'
     expect(gfsDefaultFactoryConfig().nodeLocalDnsCidr).toBe('203.0.113.10/32')
 
-    process.env.CONTEXT_MAPPER_NODELOCAL_DNS_CIDR = '34.118.224.0/24'
+    process.env.CONTEXT_MAPPER_NODELOCAL_DNS_CIDR = '203.0.113.0/24'
     expect(() => gfsDefaultFactoryConfig()).toThrow(/expected \/32 CIDR/)
   })
 })

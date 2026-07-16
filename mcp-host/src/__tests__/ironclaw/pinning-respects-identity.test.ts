@@ -21,7 +21,7 @@ describe('IronClaw identity invariant: pinned sessions survive LRU pressure', ()
       const manager = new ConversationManager(handle.store)
       const pinnedKey = 'pinned:rpc:agent:default'
       const pinnedConv = await manager.getOrCreate(pinnedKey)
-      manager.startTurn(pinnedConv, 'do dangerous', 'test-task')
+      await manager.startTurn(pinnedConv, 'do dangerous', 'test-task')
       await manager.suspendForApproval(pinnedConv, {
         request_id: 'req-pinned',
         tool_name: 'shell_exec',
@@ -53,7 +53,7 @@ describe('IronClaw identity invariant: pinned sessions survive LRU pressure', ()
       const manager = new ConversationManager(handle.store)
       const pinnedKey = 'busy:rpc:agent:default'
       const pinnedConv = await manager.getOrCreate(pinnedKey)
-      manager.startTurn(pinnedConv, 'a long task', 'test-task')
+      await manager.startTurn(pinnedConv, 'a long task', 'test-task')
       // Processing state — should be pinned by reconcilePinning.
       for (let i = 0; i < 32; i++) {
         await manager.getOrCreate(`u-${i}:rpc:agent:default`)

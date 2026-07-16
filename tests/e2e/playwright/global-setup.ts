@@ -3,7 +3,9 @@
  *
  * Runs once before all tests:
  *   1. Verifies Control UI and Control API are reachable
- *   2. Performs admin login and stores token in PLAYWRIGHT_ADMIN_TOKEN env var
+ *   2. Performs admin login (cookie-only session since commit 0230b3166),
+ *      persists the storageState for the authedPage fixture, and exports the
+ *      session cookie VALUE in PLAYWRIGHT_ADMIN_TOKEN for API-only consumers
  *   3. Verifies Desktop App is built (for electron tests)
  *
  * Prerequisites:
@@ -13,6 +15,7 @@
 import { request } from '@playwright/test'
 import fs from 'fs'
 import path from 'path'
+import { CONTROL_UI_ADMIN_SESSION_COOKIE } from './helpers/session-cookie'
 
 const CONTROL_UI_URL = process.env.CONTROL_UI_URL ?? 'http://127.0.0.1:3000'
 const CONTROL_API_URL = process.env.CONTROL_API_URL ?? 'http://127.0.0.1:8090'
@@ -40,7 +43,7 @@ export default async function globalSetup(): Promise<void> {
     await uiCtx.dispose()
   }
 
-  // ── 2. Admin login → store token ──────────────────────────────────────────
+  // ── 2. Admin login → persist session-cookie storageState ──────────────────
   const apiCtx = await request.newContext({ baseURL: CONTROL_API_URL })
   try {
     const res = await apiCtx.post('/api/v1/admin/auth/login', {
@@ -53,24 +56,33 @@ export default async function globalSetup(): Promise<void> {
       throw new Error(`Admin login failed (HTTP ${res.status()}): ${body}`)
     }
 
-    const body = (await res.json()) as { token?: string }
-    if (!body.token) {
-      throw new Error('Admin login response missing token field')
+    // Cookie-only admin session (commit 0230b3166): the login body is
+    // {me: {id, username, email, role}} and the session travels in the
+    // httpOnly CONTROL_UI_ADMIN_SESSION_COOKIE captured by this context.
+    const body = (await res.json()) as { me?: { username?: string } }
+    if (!body.me?.username) {
+      throw new Error('Admin login response missing me.username field')
     }
+    console.log(`[playwright] ✓ Admin login verified (session cookie for ${body.me.username})`)
 
-    // Store for use in API-only test fixtures (crd-config-validation)
-    process.env.PLAYWRIGHT_ADMIN_TOKEN = body.token
-    console.log(`[playwright] ✓ Admin login verified (token acquired)`)
-
-    // ── 2b. Save authenticated token for the authedPage fixture ────────────
-    // Persist the raw token instead of a full storageState snapshot. The
-    // fixture injects localStorage via addInitScript before the app loads,
-    // which is more stable than relying on storageState/localStorage capture.
+    // ── 2b. Save storageState (cookies) for the authedPage fixture ─────────
     const authDir = path.join(__dirname, '.auth')
     fs.mkdirSync(authDir, { recursive: true })
-    const authFile = path.join(authDir, 'admin-token.json')
-    fs.writeFileSync(authFile, JSON.stringify({ token: body.token }, null, 2), 'utf8')
-    console.log(`[playwright] ✓ Admin token saved to .auth/admin-token.json`)
+    const authFile = path.join(authDir, 'admin-session.json')
+    const state = await apiCtx.storageState({ path: authFile })
+    console.log(`[playwright] ✓ Admin session storageState saved to .auth/admin-session.json`)
+
+    // PLAYWRIGHT_ADMIN_TOKEN now carries the session COOKIE VALUE (not a
+    // bearer token). API-only consumers send it back as a Cookie header via
+    // helpers/session-cookie.ts adminSessionCookieHeader().
+    const sessionCookie = state.cookies.find(c => c.name === CONTROL_UI_ADMIN_SESSION_COOKIE)
+    if (!sessionCookie?.value) {
+      throw new Error(
+        `Admin login did not set the ${CONTROL_UI_ADMIN_SESSION_COOKIE} cookie ` +
+          `(cookies captured: ${state.cookies.map(c => c.name).join(', ') || 'none'})`
+      )
+    }
+    process.env.PLAYWRIGHT_ADMIN_TOKEN = sessionCookie.value
   } catch (err) {
     throw new Error(
       `Admin login failed at ${CONTROL_API_URL}.\n` +

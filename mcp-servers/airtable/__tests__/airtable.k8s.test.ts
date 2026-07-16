@@ -152,7 +152,7 @@ function generateExpectedDeployment(): K8sDeployment {
             {
               name: 'airtable-server',
               image:
-                'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/airtable-mcp-server:latest',
+                'us-central1-docker.pkg.dev/your-gcp-project/clerum/airtable-mcp-server:latest',
               ports: [
                 {
                   containerPort: 3000,
@@ -296,7 +296,7 @@ describe('Airtable MCP Server - Kubernetes Deployment', () => {
 
       it('should use correct image', () => {
         expect(container.image).toBe(
-          'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/airtable-mcp-server:latest'
+          'us-central1-docker.pkg.dev/your-gcp-project/clerum/airtable-mcp-server:latest'
         )
       })
 
@@ -467,7 +467,7 @@ describe('Airtable MCP Server - Kubernetes Deployment', () => {
 
     it('should map CRD image to container image', () => {
       expect(crd.spec.image).toBe(
-        'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/airtable-mcp-server:latest'
+        'us-central1-docker.pkg.dev/your-gcp-project/clerum/airtable-mcp-server:latest'
       )
       const deployment = generateExpectedDeployment()
       expect(deployment.spec.template.spec.containers[0].image).toBe(crd.spec.image)

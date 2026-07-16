@@ -33,6 +33,36 @@ describe('chat message attachments', () => {
     ])
   })
 
+  it('restores friendly global file labels after composer prompt content reloads', () => {
+    const parsed = parseChatMessageDisplay(
+      [
+        'summarize this report',
+        '',
+        'USER-ATTACHED CONTEXT: The user selected these capabilities/files for this message. Prefer them when they are relevant to the request.',
+        'Global Files: quarterly-report.pdf (gfs://main/0123456789abcdef). These files were explicitly selected by the user. Use clerum__gfs_resolve for each gfs:// URI.',
+      ].join('\n')
+    )
+
+    expect(parsed.content).toBe('summarize this report')
+    expect(parsed.attachments).toMatchObject([
+      { type: 'global_file', label: 'quarterly-report.pdf' },
+    ])
+  })
+
+  it('uses the basename for legacy raw global file URI attachments', () => {
+    const parsed = parseChatMessageDisplay(
+      [
+        'inspect this',
+        'USER-ATTACHED CONTEXT: The user selected these capabilities/files for this message. Prefer them when they are relevant to the request.',
+        'Global Files: gfs://main/archive/legacy-report.pdf. These files were explicitly selected by the user.',
+      ].join('\n')
+    )
+
+    expect(parsed.attachments).toMatchObject([
+      { type: 'global_file', label: 'legacy-report.pdf' },
+    ])
+  })
+
   it('builds display attachments in composer insertion order', () => {
     const references: ComposerReferenceAttachment[] = [
       {

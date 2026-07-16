@@ -4,11 +4,83 @@ import { lookup } from 'node:dns/promises'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
+import { K8sConflictError } from '../src/services/resourceService.js'
 import { MockGateway } from './mockGateway.js'
 
 vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(),
 }))
+
+class PruningCommunicationChannelGateway extends MockGateway {
+  override async createResource(
+    plural: Parameters<MockGateway['createResource']>[0],
+    body: Parameters<MockGateway['createResource']>[1],
+    namespace?: string
+  ): Promise<unknown> {
+    if (plural !== 'communicationchannels') return super.createResource(plural, body, namespace)
+    const { teamsSettings: _teamsSettings, ...spec } = body.spec
+    return super.createResource(plural, { ...body, spec }, namespace)
+  }
+}
+
+class PruningFirstUpdateCommunicationChannelGateway extends MockGateway {
+  private prunedUpdates = 0
+  private resourceVersion = 'rv-1'
+  readonly updateBodies: Array<Parameters<MockGateway['updateResource']>[2]> = []
+
+  override async getResource(
+    plural: Parameters<MockGateway['getResource']>[0],
+    name: Parameters<MockGateway['getResource']>[1],
+    namespace?: string
+  ): Promise<unknown> {
+    const resource = (await super.getResource(plural, name, namespace)) as {
+      metadata?: Record<string, unknown>
+    }
+    if (plural !== 'communicationchannels') return resource
+    return {
+      ...resource,
+      metadata: {
+        ...resource.metadata,
+        resourceVersion: this.resourceVersion,
+      },
+    }
+  }
+
+  override async updateResource(
+    plural: Parameters<MockGateway['updateResource']>[0],
+    name: Parameters<MockGateway['updateResource']>[1],
+    body: Parameters<MockGateway['updateResource']>[2],
+    namespace?: string
+  ): Promise<unknown> {
+    this.updateBodies.push(body)
+    if (plural !== 'communicationchannels' || this.prunedUpdates > 0) {
+      const updated = (await super.updateResource(plural, name, body, namespace)) as {
+        metadata?: Record<string, unknown>
+      }
+      this.resourceVersion = 'rv-3'
+      return {
+        ...updated,
+        metadata: {
+          ...updated.metadata,
+          resourceVersion: this.resourceVersion,
+        },
+      }
+    }
+    this.prunedUpdates += 1
+    const { teamsSettings: _teamsSettings, ...spec } = body.spec
+    const updated = (await super.updateResource(plural, name, { ...body, spec }, namespace)) as {
+      metadata?: Record<string, unknown>
+    }
+    this.resourceVersion = 'rv-2'
+    return {
+      ...updated,
+      metadata: {
+        ...updated.metadata,
+        resourceVersion: this.resourceVersion,
+      },
+    }
+  }
+}
 
 describe('routes/resources', () => {
   it('creates and fetches resources (positive flow)', async () => {
@@ -82,6 +154,178 @@ describe('routes/resources', () => {
 
     expect(listRes.body.items).toHaveLength(1)
     expect(listRes.body.items[0].metadata.name).toBe('agent-a-telegram')
+  })
+
+  it('filters Teams communication channels by confirmed user id when requested', async () => {
+    const gateway = new MockGateway('channels')
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+
+    await gateway.createResource(
+      'communicationchannels',
+      {
+        metadata: { name: 'agent-a-teams' },
+        spec: {
+          hostRef: 'agent-a',
+          teams: [{ channelId: '19:channel@thread.tacv2', confirmedByUserId: 'user-1' }],
+        },
+      },
+      'channels'
+    )
+    await gateway.createResource(
+      'communicationchannels',
+      {
+        metadata: { name: 'agent-b-teams' },
+        spec: {
+          hostRef: 'agent-b',
+          teams: [{ channelId: '19:other@thread.tacv2', confirmedByUserId: 'user-2' }],
+        },
+      },
+      'channels'
+    )
+
+    const listRes = await request(app)
+      .get('/admin/communication-channels?confirmedByUserId=user-1')
+      .expect(200)
+
+    expect(listRes.body.items).toHaveLength(1)
+    expect(listRes.body.items[0].metadata.name).toBe('agent-a-teams')
+  })
+
+  it('persists Teams settings and credentials on communication channel create', async () => {
+    const gateway = new MockGateway('channels')
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+
+    const res = await request(app)
+      .post('/admin/communication-channels')
+      .send({
+        metadata: { name: 'teams-channel' },
+        spec: {
+          hostRef: 'chatllm',
+          access: { users: ['user-1'], teams: [] },
+          teams: [],
+          teamsSettings: {
+            appName: 'evenfire',
+            appId: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82',
+            tenantId: '21e08d37-8d53-4144-87cb-557b8298aed3',
+            replyOnlyWhenMentioned: true,
+          },
+        },
+        credentials: {
+          'teams-app-password': 'secret-value',
+        },
+      })
+      .expect(201)
+
+    expect(res.body.spec.teamsSettings).toEqual({
+      appName: 'evenfire',
+      appId: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82',
+      tenantId: '21e08d37-8d53-4144-87cb-557b8298aed3',
+      replyOnlyWhenMentioned: true,
+    })
+    expect(res.body.spec.credentialsSecretRef).toEqual({
+      name: 'cc-teams-channel-credentials',
+    })
+    const secret = (await gateway.getSecret('cc-teams-channel-credentials', 'channels')) as {
+      stringData?: Record<string, string>
+    }
+    expect(secret.stringData?.['teams-app-password']).toBe('secret-value')
+  })
+
+  it('rejects and rolls back when the cluster prunes Teams settings', async () => {
+    const gateway = new PruningCommunicationChannelGateway('channels')
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+
+    const res = await request(app)
+      .post('/admin/communication-channels')
+      .send({
+        metadata: { name: 'teams-channel' },
+        spec: {
+          hostRef: 'chatllm',
+          access: { users: ['user-1'], teams: [] },
+          teams: [],
+          teamsSettings: {
+            appName: 'evenfire',
+            appId: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82',
+            tenantId: '21e08d37-8d53-4144-87cb-557b8298aed3',
+            replyOnlyWhenMentioned: true,
+          },
+        },
+        credentials: {
+          'teams-app-password': 'secret-value',
+        },
+      })
+      .expect(409)
+
+    expect(res.body.code).toBe('communication_channel_crd_outdated')
+    expect(res.body.error).toContain('spec.teamsSettings.appName')
+    await expect(
+      gateway.getResource('communicationchannels', 'teams-channel', 'channels')
+    ).rejects.toThrow('not found')
+    await expect(gateway.getSecret('cc-teams-channel-credentials', 'channels')).rejects.toThrow(
+      'not found'
+    )
+  })
+
+  it('rejects and restores the prior communication channel spec when update prunes Teams settings', async () => {
+    const gateway = new PruningFirstUpdateCommunicationChannelGateway('channels')
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+    const previousSpec = {
+      hostRef: 'chatllm',
+      access: { users: ['user-1'], teams: [] },
+      teams: [],
+      teamsSettings: {
+        appName: 'evenfire',
+        appId: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82',
+        tenantId: '21e08d37-8d53-4144-87cb-557b8298aed3',
+        replyOnlyWhenMentioned: true,
+      },
+      credentialsSecretRef: { name: 'cc-teams-channel-credentials' },
+    }
+
+    await gateway.createResource(
+      'communicationchannels',
+      {
+        metadata: { name: 'teams-channel' },
+        spec: previousSpec,
+      },
+      'channels'
+    )
+
+    const res = await request(app)
+      .put('/admin/communication-channels/teams-channel')
+      .send({
+        spec: {
+          ...previousSpec,
+          access: { users: ['user-1', 'user-2'], teams: [] },
+        },
+      })
+      .expect(409)
+
+    expect(res.body.code).toBe('communication_channel_crd_outdated')
+    expect(res.body.error).toContain('spec.teamsSettings.appName')
+    expect(gateway.updateBodies).toHaveLength(2)
+    expect(
+      (gateway.updateBodies[0].metadata as { resourceVersion?: string } | undefined)
+        ?.resourceVersion
+    ).toBe('rv-1')
+    expect(
+      (gateway.updateBodies[1].metadata as { resourceVersion?: string } | undefined)
+        ?.resourceVersion
+    ).toBe('rv-2')
+    const stored = (await gateway.getResource(
+      'communicationchannels',
+      'teams-channel',
+      'channels'
+    )) as { spec?: Record<string, unknown> }
+    expect(stored.spec).toEqual(previousSpec)
   })
 
   it('returns 500 on update for unknown resource and 404 for bad route', async () => {
@@ -592,6 +836,250 @@ describe('routes/resources', () => {
           },
         })
         .expect(200)
+    })
+  })
+
+  describe('Host spec.lifecycle round-trip and validation', () => {
+    function makeApp() {
+      const gateway = new MockGateway('mcp-server')
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminResourcesRouter(gateway as never))
+      return { app, gateway }
+    }
+
+    it('persists lifecycle.stateless=true on create (object handed to the k8s client)', async () => {
+      const { app, gateway } = makeApp()
+      const res = await request(app)
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'host-sl' },
+          spec: { contextRef: 'c1', lifecycle: { stateless: true } },
+        })
+        .expect(201)
+      expect(res.body.spec.lifecycle).toEqual({ stateless: true })
+
+      const stored = (await gateway.getResource('hosts', 'host-sl', config.hostsNamespace)) as {
+        spec: Record<string, unknown>
+      }
+      expect(stored.spec.lifecycle).toEqual({ stateless: true })
+    })
+
+    it('preserves lifecycle verbatim when the update payload echoes it', async () => {
+      const { app, gateway } = makeApp()
+      await request(app)
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'host-echo' },
+          spec: { contextRef: 'c1', lifecycle: { stateless: true } },
+        })
+        .expect(201)
+
+      const updated = await request(app)
+        .put('/admin/hosts/host-echo')
+        .send({ spec: { contextRef: 'c1', lifecycle: { stateless: true } } })
+        .expect(200)
+      expect(updated.body.spec.lifecycle).toEqual({ stateless: true })
+
+      const stored = (await gateway.getResource('hosts', 'host-echo', config.hostsNamespace)) as {
+        spec: Record<string, unknown>
+      }
+      expect(stored.spec.lifecycle).toEqual({ stateless: true })
+    })
+
+    it('forwards the AP-6 reader resourceVersion to the gateway on PUT', async () => {
+      const { app, gateway } = makeApp()
+      await request(app)
+        .post('/admin/hosts')
+        .send({ metadata: { name: 'host-rv' }, spec: { contextRef: 'c1' } })
+        .expect(201)
+
+      let seenResourceVersion: string | undefined
+      const gw = gateway as unknown as {
+        updateResource: (
+          plural: string,
+          name: string,
+          body: { metadata?: { resourceVersion?: string }; spec: Record<string, unknown> },
+          namespace?: string
+        ) => Promise<unknown>
+      }
+      const realUpdate = gw.updateResource.bind(gateway)
+      gw.updateResource = async (plural, name, body, namespace) => {
+        seenResourceVersion = body.metadata?.resourceVersion
+        return realUpdate(plural, name, body, namespace)
+      }
+
+      await request(app)
+        .put('/admin/hosts/host-rv')
+        .send({ metadata: { resourceVersion: '42' }, spec: { contextRef: 'c1' } })
+        .expect(200)
+      expect(seenResourceVersion).toBe('42')
+    })
+
+    it('maps a stale reader resourceVersion (K8sConflictError) to 409 {error:conflict, reason:resource_changed}', async () => {
+      const { app, gateway } = makeApp()
+      await request(app)
+        .post('/admin/hosts')
+        .send({ metadata: { name: 'host-stale' }, spec: { contextRef: 'c1' } })
+        .expect(201)
+
+      const gw = gateway as unknown as { updateResource: () => Promise<unknown> }
+      gw.updateResource = async () => {
+        throw new K8sConflictError('hosts/host-stale changed since it was read')
+      }
+
+      const res = await request(app)
+        .put('/admin/hosts/host-stale')
+        .send({ metadata: { resourceVersion: '1' }, spec: { contextRef: 'c2' } })
+        .expect(409)
+      expect(res.body).toEqual({ error: 'conflict', reason: 'resource_changed' })
+
+      // The stale payload never reached the store — spec unchanged.
+      const stored = (await gateway.getResource('hosts', 'host-stale', config.hostsNamespace)) as {
+        spec: Record<string, unknown>
+      }
+      expect(stored.spec.contextRef).toBe('c1')
+    })
+
+    it('exposes spec.lifecycle and status.lifecycle + StatelessEnableRejected on get and list', async () => {
+      const { app, gateway } = makeApp()
+      await gateway.createResource(
+        'hosts',
+        {
+          metadata: { name: 'host-status' },
+          spec: { contextRef: 'c1', lifecycle: { stateless: true } },
+          status: {
+            lifecycle: {
+              state: 'suspended',
+              wakeHandledGeneration: 3,
+              reason: 'SuspendBlocked: drain pending',
+            },
+            conditions: [
+              {
+                type: 'StatelessEnableRejected',
+                status: 'True',
+                reason: 'ActiveCommunicationChannels',
+                message: 'stateless rejected: host has active CommunicationChannels',
+              },
+            ],
+          },
+        },
+        config.hostsNamespace
+      )
+
+      const getRes = await request(app).get('/admin/hosts/host-status').expect(200)
+      expect(getRes.body.spec.lifecycle).toEqual({ stateless: true })
+      expect(getRes.body.status.lifecycle.state).toBe('suspended')
+      expect(getRes.body.status.lifecycle.reason).toBe('SuspendBlocked: drain pending')
+      const condition = getRes.body.status.conditions.find(
+        (c: { type: string }) => c.type === 'StatelessEnableRejected'
+      )
+      expect(condition).toMatchObject({
+        status: 'True',
+        reason: 'ActiveCommunicationChannels',
+        message: 'stateless rejected: host has active CommunicationChannels',
+      })
+
+      const listRes = await request(app).get('/admin/hosts').expect(200)
+      const item = listRes.body.items.find(
+        (h: { metadata: { name: string } }) => h.metadata.name === 'host-status'
+      )
+      expect(item.spec.lifecycle).toEqual({ stateless: true })
+      expect(item.status.lifecycle.state).toBe('suspended')
+      expect(
+        item.status.conditions.some((c: { type: string }) => c.type === 'StatelessEnableRejected')
+      ).toBe(true)
+    })
+
+    it('round-trip: get -> edit unrelated field -> update with echoed spec keeps lifecycle', async () => {
+      const { app } = makeApp()
+      await request(app)
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'host-rt' },
+          spec: { contextRef: 'c1', lifecycle: { stateless: true } },
+        })
+        .expect(201)
+
+      const fetched = await request(app).get('/admin/hosts/host-rt').expect(200)
+      const echoedSpec = { ...fetched.body.spec, contextRef: 'c2' }
+      await request(app).put('/admin/hosts/host-rt').send({ spec: echoedSpec }).expect(200)
+
+      const after = await request(app).get('/admin/hosts/host-rt').expect(200)
+      expect(after.body.spec.lifecycle).toEqual({ stateless: true })
+      expect(after.body.spec.contextRef).toBe('c2')
+    })
+
+    it('mirrors the spec.desktop contract: an update WITHOUT lifecycle strips it (full spec replace)', async () => {
+      const { app, gateway } = makeApp()
+      await request(app)
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'host-strip' },
+          spec: { contextRef: 'c1', lifecycle: { stateless: true } },
+        })
+        .expect(201)
+
+      await request(app)
+        .put('/admin/hosts/host-strip')
+        .send({ spec: { contextRef: 'c1' } })
+        .expect(200)
+
+      const stored = (await gateway.getResource('hosts', 'host-strip', config.hostsNamespace)) as {
+        spec: Record<string, unknown>
+      }
+      expect(stored.spec.lifecycle).toBeUndefined()
+    })
+
+    it('rejects lifecycle that is not an object with 422 on create and update', async () => {
+      const { app } = makeApp()
+      const createRes = await request(app)
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'host-bad' },
+          spec: { contextRef: 'c1', lifecycle: 'stateless' },
+        })
+        .expect(422)
+      expect(createRes.body.errors).toEqual(
+        expect.arrayContaining([expect.objectContaining({ field: 'spec.lifecycle' })])
+      )
+
+      await request(app)
+        .post('/admin/hosts')
+        .send({ metadata: { name: 'host-bad' }, spec: { contextRef: 'c1' } })
+        .expect(201)
+      const updateRes = await request(app)
+        .put('/admin/hosts/host-bad')
+        .send({ spec: { contextRef: 'c1', lifecycle: [true] } })
+        .expect(422)
+      expect(updateRes.body.errors).toEqual(
+        expect.arrayContaining([expect.objectContaining({ field: 'spec.lifecycle' })])
+      )
+    })
+
+    it('rejects non-boolean and missing stateless with 422 and a spec.lifecycle.stateless field path', async () => {
+      const { app } = makeApp()
+      const nonBoolean = await request(app)
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'host-badbool' },
+          spec: { contextRef: 'c1', lifecycle: { stateless: 'yes' } },
+        })
+        .expect(422)
+      expect(nonBoolean.body.errors).toEqual(
+        expect.arrayContaining([expect.objectContaining({ field: 'spec.lifecycle.stateless' })])
+      )
+
+      const missing = await request(app)
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'host-missing' },
+          spec: { contextRef: 'c1', lifecycle: {} },
+        })
+        .expect(422)
+      expect(missing.body.errors).toEqual(
+        expect.arrayContaining([expect.objectContaining({ field: 'spec.lifecycle.stateless' })])
+      )
     })
   })
 

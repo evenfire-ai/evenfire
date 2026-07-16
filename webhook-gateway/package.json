@@ -20,7 +20,7 @@
     "gateway",
     "clerum"
   ],
-  "license": "MPL-2.0",
+  "license": "SEE LICENSE IN LICENSE",
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^20.10.0",

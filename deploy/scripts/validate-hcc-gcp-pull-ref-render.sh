@@ -28,7 +28,7 @@ required_empty = [
 # to the neutral placeholder.
 required_values = {
   "CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES" =>
-    "us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/,example.com/,mongodb/,mcr.microsoft.com/,clerum/",
+    "us-central1-docker.pkg.dev/your-gcp-project/clerum/,example.com/,mongodb/,mcr.microsoft.com/,clerum/",
 }
 
 def fail!(overlay, message)

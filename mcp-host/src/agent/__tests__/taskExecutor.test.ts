@@ -174,6 +174,19 @@ function attachSlackProviderIdentity(task: Task): void {
   }
 }
 
+function attachTeamsProviderIdentity(task: Task): void {
+  task.sourceMessage!.channelType = 'teams'
+  task.sourceMessage!.channelId = 'teams-conversation'
+  task.sourceMessage!.threadId = 'teams-thread-1'
+  task.sourceMessage!.providerIdentity = {
+    medium: 'teams',
+    providerUserId: 'teams-user-1',
+    providerWorkspaceId: 'teams-tenant-1',
+    providerChannelId: 'teams-conversation',
+    providerEventId: 'teams:teams-tenant-1:teams-conversation:activity-1',
+  }
+}
+
 describe('TaskExecutor', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -389,6 +402,72 @@ describe('TaskExecutor', () => {
       response:
         'Could not verify this Slack workspace conversation for workflow access. Use the verified Slack workspace conversation connected to your Clerum account, then list workflows again.',
     })
+  })
+
+  it('uses Teams-specific workflow verification copy for unverified Teams conversations', async () => {
+    vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValueOnce(null)
+
+    const deps = createDeps()
+    const task = createTask('List workflows')
+    attachTeamsProviderIdentity(task)
+    const executor = new TaskExecutor(task, deps)
+
+    await executor.run()
+
+    expect(resolveProviderWorkflowCallerContext).toHaveBeenCalledTimes(1)
+    expect(runToolUseLoop).not.toHaveBeenCalled()
+    expect(task.responseCallback).toHaveBeenCalledWith({
+      response:
+        'Could not verify this Microsoft Teams conversation for workflow access. Use the verified Teams conversation connected to your Clerum account, then list workflows again.',
+    })
+  })
+
+  it('exposes workflow tools for verified Teams provider messages', async () => {
+    const restoreEnv = enableWorkflowProcessEnv()
+    vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValueOnce({
+      targetUserId: '00000000-0000-4000-8000-000000000001',
+      conversationId: 'teams-thread-1',
+      originChannelType: 'teams',
+      providerUserId: 'teams-user-1',
+      providerWorkspaceId: 'teams-tenant-1',
+      providerChannelId: 'teams-conversation',
+      providerEventId: 'teams:teams-tenant-1:teams-conversation:activity-1',
+      sourceThreadId: 'teams-thread-1',
+      sourceMessageContent: 'Run research-summary-workflow topic "the first pokemon"',
+    })
+    vi.mocked(runToolUseLoop).mockImplementationOnce(async (loopConfig: any) => {
+      loopConfig.events.emit({
+        type: 'tool:called',
+        data: { toolName: 'workflow_trigger' },
+        timestamp: new Date(),
+      })
+      return {
+        type: 'response',
+        content: 'I can run that workflow.',
+      } as any
+    })
+
+    try {
+      const deps = createDeps()
+      const task = createTask('Run research-summary-workflow topic "the first pokemon"')
+      attachTeamsProviderIdentity(task)
+      const executor = new TaskExecutor(task, deps)
+
+      await executor.run()
+
+      expect(resolveProviderWorkflowCallerContext).toHaveBeenCalledTimes(1)
+      expect(runToolUseLoop).toHaveBeenCalledTimes(1)
+      const loopConfig = vi.mocked(runToolUseLoop).mock.calls[0][0] as any
+      const toolNames = loopConfig.toolRegistry.listDefinitions().map((def: any) => def.name)
+      expect(toolNames).toContain('workflow_list')
+      expect(toolNames).toContain('workflow_trigger')
+      expect(task.responseCallback).toHaveBeenCalledWith({
+        response: 'I can run that workflow.',
+        attachments: undefined,
+      })
+    } finally {
+      restoreEnv()
+    }
   })
 
   it('fails closed for unverified provider workflow trigger requests before the loop', async () => {
@@ -1238,5 +1317,55 @@ describe('TaskExecutor — SSE redaction canary', () => {
     // marker shows up in at least one payload. This guards against a future
     // refactor that accidentally turns redaction into a no-op.
     expect(allText).toContain('[REDACTED:PROBE_SECRET]')
+  })
+})
+
+describe('D3 durability barrier — a turn is never ACKed when the persist fails', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('fails the task and never calls responseCallback when persistTurnComplete rejects', async () => {
+    const { InMemoryConversationStore } = await import('../../core/conversation/conversationStore')
+    class RejectingStore extends InMemoryConversationStore {
+      persistTurnComplete(): void {
+        throw new Error('simulated fsync failure')
+      }
+    }
+    const deps = createDeps({ conversationManager: new ConversationManager(new RejectingStore()) })
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      type: 'response',
+      content: 'Done!',
+    })
+    const task = createTask('Hello')
+
+    const executor = new TaskExecutor(task, deps)
+    await executor.run()
+
+    expect(task.responseCallback).not.toHaveBeenCalled()
+    expect(deps.onComplete).not.toHaveBeenCalled()
+    expect(deps.onFail).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails the task before the LLM loop when persistTurnStart rejects', async () => {
+    const { InMemoryConversationStore } = await import('../../core/conversation/conversationStore')
+    class RejectingStore extends InMemoryConversationStore {
+      persistTurnStart(): void {
+        throw new Error('simulated fsync failure')
+      }
+    }
+    const deps = createDeps({ conversationManager: new ConversationManager(new RejectingStore()) })
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      type: 'response',
+      content: 'Done!',
+    })
+    const task = createTask('Hello')
+
+    const executor = new TaskExecutor(task, deps)
+    await executor.run()
+
+    expect(runToolUseLoop).not.toHaveBeenCalled()
+    expect(task.responseCallback).not.toHaveBeenCalled()
+    expect(deps.onFail).toHaveBeenCalledTimes(1)
   })
 })

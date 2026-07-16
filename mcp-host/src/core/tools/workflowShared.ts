@@ -11,7 +11,7 @@ export type WorkflowCallerContext = {
   targetUserId?: string
   targetTeamId?: string
   conversationId?: string
-  originChannelType?: 'rpc' | 'telegram' | 'slack'
+  originChannelType?: 'rpc' | 'telegram' | 'slack' | 'teams'
   providerUserId?: string
   providerWorkspaceId?: string | null
   providerChannelId?: string

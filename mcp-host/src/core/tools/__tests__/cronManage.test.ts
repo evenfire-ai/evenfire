@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CronScheduler } from '../../../agent/cronScheduler'
 import { MessageQueue } from '../../../queue/messageQueue'
-import { CronManageTool } from '../cronManage'
+import { CronManageTool, STATELESS_CRON_NOTICE } from '../cronManage'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -509,5 +509,59 @@ describe('CronManageTool — ownership (F4)', () => {
     expect(JSON.parse((await tool.execute({ action: 'list' })).content)).toHaveLength(1)
     const got = await tool.execute({ action: 'get', jobId: aJobId })
     expect(got.is_error).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cron×stateless notice
+// ---------------------------------------------------------------------------
+
+describe('CronManageTool — stateless notice (cron×stateless)', () => {
+  let scheduler: CronScheduler
+
+  beforeEach(() => {
+    scheduler = createScheduler()
+  })
+
+  afterEach(() => scheduler.stop())
+
+  it('appends the exact notice when stateless cron management is explicitly allowed', async () => {
+    const tool = new CronManageTool(scheduler, undefined, true, true)
+
+    const list = await tool.execute({ action: 'list' })
+    expect(list.is_error).toBe(false)
+    expect(list.content).toContain(STATELESS_CRON_NOTICE)
+
+    const created = await tool.execute({
+      action: 'create',
+      name: 'daily',
+      schedule: '0 0 * * *',
+      task: 'do the thing',
+    })
+    expect(created.is_error).toBe(false)
+    expect(created.content).toContain(STATELESS_CRON_NOTICE)
+
+    const err = await tool.execute({ action: 'get' }) // missing jobId → error
+    expect(err.is_error).toBe(true)
+    expect(err.content).toContain(STATELESS_CRON_NOTICE)
+  })
+
+  it('pins the exact user-facing notice text', () => {
+    expect(STATELESS_CRON_NOTICE).toBe(
+      'Note: this agent is stateless and normally suspends when idle. Active scheduled tasks ' +
+        'keep it running continuously -- it will not suspend until all schedules are removed or disabled.'
+    )
+  })
+
+  it('does not append the notice on a non-stateless host (default and explicit false)', async () => {
+    for (const tool of [
+      new CronManageTool(scheduler),
+      new CronManageTool(scheduler, undefined, false),
+    ]) {
+      const list = await tool.execute({ action: 'list' })
+      expect(list.content).not.toContain(STATELESS_CRON_NOTICE)
+      const err = await tool.execute({ action: 'get' })
+      expect(err.content).not.toContain(STATELESS_CRON_NOTICE)
+    }
   })
 })

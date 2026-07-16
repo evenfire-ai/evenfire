@@ -56,6 +56,47 @@ export function isLockedPath(relativePath: string): boolean {
   return LOCKED_IDENTITY_FILES.has(normalized)
 }
 
+// D3 (stateless-agents) §1.2 — the session database and its WAL laterals are
+// platform state, never agent-writable. The db may live at the workspace root
+// (workspace PVC) or under CLERUM_SESSION_DB_DIR; the guard rejects the
+// basenames at ANY depth (defense in depth — same trust model as the identity
+// files: POSIX perms are the OS backstop, this is the loud tool-level gate).
+export const PROTECTED_STATE_DB_FILES: ReadonlySet<string> = new Set([
+  'state.db',
+  'state.db-wal',
+  'state.db-shm',
+])
+
+/** Reserved directory for stateless-lifecycle runtime state. */
+export const PROTECTED_STATE_DIR = '.clerum-state'
+
+export function stateDbProtectedMessage(filename: string): string {
+  return `${filename} is part of the session state database and cannot be accessed by the agent.`
+}
+
+export class StateDbPathError extends Error {
+  constructor(filename: string) {
+    super(stateDbProtectedMessage(filename))
+    this.name = 'StateDbPathError'
+  }
+}
+
+/**
+ * True when — after normalization — any path segment is `.clerum-state` or
+ * the basename is one of the protected state-db files, at any depth.
+ *
+ * Returns true for: "state.db", "./state.db", "state.db-wal", "a/state.db",
+ * ".clerum-state/x". Returns false for: "state.db.bak", "notes/state.database".
+ */
+export function isStateDbPath(relativePath: string): boolean {
+  if (typeof relativePath !== 'string' || relativePath.length === 0) return false
+  const normalized = path.posix.normalize(relativePath)
+  const segments = normalized.split('/').filter(s => s.length > 0 && s !== '.')
+  if (segments.includes(PROTECTED_STATE_DIR)) return true
+  const base = segments[segments.length - 1]
+  return base !== undefined && PROTECTED_STATE_DB_FILES.has(base)
+}
+
 /**
  * Agent-facing workspace surface, implemented by both {@link WorkspaceService}
  * (the flat Pod-wide store) and `ScopedWorkspace` (the per-user routing view).
@@ -153,6 +194,9 @@ export class WorkspaceService implements Workspace {
     if (isLockedPath(relativePath)) {
       throw new LockedFileError(relativePath)
     }
+    if (isStateDbPath(relativePath)) {
+      throw new StateDbPathError(relativePath)
+    }
     const resolved = this.resolvePath(relativePath)
     scanWriteContent(relativePath, content, Buffer.byteLength(content, 'utf-8'))
     await this.mutexFor(resolved).runExclusive(async () => {
@@ -172,6 +216,9 @@ export class WorkspaceService implements Workspace {
   async append(relativePath: string, content: string, opts?: { scan?: boolean }): Promise<void> {
     if (isLockedPath(relativePath)) {
       throw new LockedFileError(relativePath)
+    }
+    if (isStateDbPath(relativePath)) {
+      throw new StateDbPathError(relativePath)
     }
     const resolved = this.resolvePath(relativePath)
     await this.mutexFor(resolved).runExclusive(async () => {
@@ -193,6 +240,9 @@ export class WorkspaceService implements Workspace {
   async delete(relativePath: string): Promise<void> {
     if (isLockedPath(relativePath)) {
       throw new LockedFileError(relativePath)
+    }
+    if (isStateDbPath(relativePath)) {
+      throw new StateDbPathError(relativePath)
     }
     await fs.unlink(this.resolvePath(relativePath))
   }

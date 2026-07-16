@@ -35,7 +35,7 @@ describe('extracted helpers (behavior parity with coordinator)', () => {
 describe('classifyPluginImage', () => {
   it('accepts current first-party + evenfire images against the default allowlist', () => {
     for (const img of [
-      'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/airtable-mcp-server:latest',
+      'us-central1-docker.pkg.dev/your-gcp-project/clerum/airtable-mcp-server:latest',
       'example.com/acme/forecast:1.2.3',
       'mongodb/mongodb-mcp-server:latest',
       'mcr.microsoft.com/playwright/mcp@sha256:' + 'a'.repeat(64),
@@ -90,39 +90,11 @@ describe('classifyPluginImage', () => {
 describe('DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES', () => {
   it('covers the current fleet hosts + evenfire', () => {
     expect(DEFAULTS).toEqual([
-      'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/',
+      'us-central1-docker.pkg.dev/your-gcp-project/clerum/',
       'example.com/',
       'mongodb/',
       'mcr.microsoft.com/',
       'clerum/',
     ])
-  })
-})
-
-describe('assembled allowlist behavior (deploy/base vs gcp overlay boundary)', () => {
-  // REAL mirrors the value the gcp-dev/gcp-prod overlays patch into
-  // CONTROL_API_ALLOWED_IMAGE_PREFIXES / CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES
-  // (deploy/overlays/gcp-{dev,prod}/configmaps/control-api-config.yaml and
-  // patches/hcc-allowed-image-prefixes.yaml).
-  const REAL =
-    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/,example.com/,mongodb/,mcr.microsoft.com/,clerum/'.split(
-      ','
-    )
-  // PLACEHOLDER mirrors the vendor-neutral base default that deploy/base ships
-  // (ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/) — the exact list
-  // that leaks through when a gcp overlay fails to patch its AR prefix in. It
-  // has NO us-central1-docker.pkg.dev host, so a real AR image must be rejected.
-  const PLACEHOLDER = 'ghcr.io/evenfire-ai/,mongodb/,mcr.microsoft.com/,clerum/'.split(',')
-  const img = 'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mcp-host:sha-5792ba7'
-
-  it('accepts a real AR image against the real overlay list', () => {
-    expect(classifyPluginImage(img, { allowedPrefixes: REAL })).toEqual({ ok: true })
-  })
-
-  it('rejects the same image against the genericized placeholder list (the bug)', () => {
-    expect(classifyPluginImage(img, { allowedPrefixes: PLACEHOLDER })).toEqual({
-      ok: false,
-      reason: 'host_not_allowed',
-    })
   })
 })

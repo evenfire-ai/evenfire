@@ -56,6 +56,10 @@ type Config = {
    * be configured with the matching CONTROL_API_PUBLIC_KEY.
    */
   registryVoucherPrivateKey: string
+  // The registry-assigned key_id (uuid) used as the voucher `kid` header in
+  // MANAGED mode (spec §14.2). Delivered by MCC in the registry-voucher Secret
+  // as CONTROL_API_REGISTRY_VOUCHER_KID. Self-hosted reads kid from the DB row.
+  registryVoucherKid: string
   // Registry consumer config — added in Path A.
   // CLERUM_REGISTRY_URL: where to find the registry. Required; validated
   // against an allowlist at startup (see validateConfig).
@@ -65,6 +69,10 @@ type Config = {
   registryClientSecret: string
   // Toggle. False = no Bearer header, no startup credential check (minikube).
   registryAuthEnabled: boolean
+  // Explicit credential + kid source discriminator (spec §14.3 / S10). NEVER
+  // absence-based: managed = env/Secret, self-hosted = the registry_connection
+  // DB row. Required when registryAuthEnabled; logged at boot.
+  registryConnectionMode: 'managed' | 'self-hosted'
   adminAuthMaxFailures: number
   adminAuthLockMinutes: number
   adminBootstrapUsername: string
@@ -115,6 +123,10 @@ type Config = {
   approvalRlExternalPerMin: number
   oauthBrokerRlPerMin: number
   adminPublicTokenRlPerMin: number
+  // Stateless-agent wake endpoint: per-host wake rate limit + server-side
+  // coalescence window for the wake-annotation projection.
+  hostWakeRlPerMin: number
+  hostWakeCoalesceWindowMs: number
   approvalMediumChallengeTtlSec: number
   telegramProviderEventChallengeTtlSec: number
   approvalMediumChallengeMaxAttempts: number
@@ -274,6 +286,13 @@ const WORKFLOW_STEP_MCP_SERVERS_MAX_ITEMS_CEILING = 20
 
 function normalizePem(value: string): string {
   return value.replace(/\\n/g, '\n').trim()
+}
+
+function parseRegistryConnectionMode(): 'managed' | 'self-hosted' {
+  const raw = process.env.REGISTRY_CONNECTION_MODE
+  if (raw === undefined || raw === '') return 'managed' // default; requiredness enforced in the guard below
+  if (raw === 'managed' || raw === 'self-hosted') return raw
+  throw new Error(`REGISTRY_CONNECTION_MODE must be 'managed' or 'self-hosted' (got '${raw}')`)
 }
 
 function publicKeyFromPrivateKey(privateKey: string): string {
@@ -459,10 +478,12 @@ export const config: Config = {
   registryVoucherPrivateKey: normalizePem(
     process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY ?? ''
   ),
+  registryVoucherKid: process.env.CONTROL_API_REGISTRY_VOUCHER_KID ?? '',
   registryUrl: process.env.CLERUM_REGISTRY_URL ?? '',
   registryClientId: process.env.CLERUM_REGISTRY_CLIENT_ID ?? '',
   registryClientSecret: process.env.CLERUM_REGISTRY_CLIENT_SECRET ?? '',
   registryAuthEnabled: process.env.CLERUM_REGISTRY_AUTH_ENABLED === 'true',
+  registryConnectionMode: parseRegistryConnectionMode(),
   adminAuthMaxFailures: Number(process.env.CONTROL_API_ADMIN_AUTH_MAX_FAILURES || 5),
   adminAuthLockMinutes: Number(process.env.CONTROL_API_ADMIN_AUTH_LOCK_MINUTES || 15),
   adminBootstrapUsername: requiredOrDevDefault('CONTROL_API_ADMIN_BOOTSTRAP_USERNAME', 'admin'),
@@ -573,6 +594,24 @@ export const config: Config = {
   approvalRlExternalPerMin: Number(process.env.APPROVAL_RL_EXTERNAL_PER_MIN || 60),
   oauthBrokerRlPerMin: Number(process.env.CONTROL_API_OAUTH_BROKER_RL_PER_MIN || 60),
   adminPublicTokenRlPerMin: Number(process.env.CONTROL_API_ADMIN_PUBLIC_TOKEN_RL_PER_MIN || 20),
+  // Default derived from the wake mechanism's worst case, not picked ad hoc.
+  // rpc-proxy's wake-and-hold loop re-triggers POST /rpc/hosts/:hostRef/wake
+  // every wakeRetriggerMs=15000 for up to wakeMaxHoldMs=90000 (defaults in
+  // rpc-proxy/src/config.ts), so one held request costs
+  // 1 + floor(90000/15000) = 7 calls per rpc-proxy instance; rpc-proxy runs
+  // replicas: 2 (deploy/base/rpc-proxy/rpc-proxy.yaml) with per-instance
+  // dedup, so the mechanism alone can emit 14 calls / 90s (~9.4/min) per
+  // host. Desktop prewarm adds a burst of up to 3 calls per device.
+  // Middleware order in routes/rpc-access/hosts.ts is limiter BEFORE
+  // handler, and the hostWakeCoalesceWindowMs coalescer runs INSIDE the
+  // handler (it coalesces annotation projections, not calls) — coalesced
+  // calls therefore still consume rate-limit budget, so this budget must
+  // cover RAW calls (the arithmetic above counts raw calls). 30/min is >=3x
+  // the single-hold mechanism volume and covers one held wake plus prewarm
+  // bursts from a few concurrent devices (4 x 3 = 12) plus a real message.
+  // Derivation is regression-guarded by test/config.hostWakeRateLimit.test.ts.
+  hostWakeRlPerMin: Number(process.env.CONTROL_API_HOST_WAKE_RL_PER_MIN || 30),
+  hostWakeCoalesceWindowMs: Number(process.env.CONTROL_API_HOST_WAKE_COALESCE_WINDOW_MS || 2000),
   approvalMediumChallengeTtlSec: Number(
     process.env.WORKFLOW_APPROVAL_MEDIUM_CHALLENGE_TTL_SEC || 60 * 60
   ),
@@ -699,14 +738,17 @@ for (const key of NAMESPACE_KEYS) {
 // credentials and refuse a registry URL outside the allowlist (defense against
 // cross-environment misconfiguration sending writes to the wrong registry).
 if (config.registryAuthEnabled) {
-  if (!config.registryClientId) {
-    throw new Error('CLERUM_REGISTRY_CLIENT_ID is required when CLERUM_REGISTRY_AUTH_ENABLED=true')
-  }
-  if (!config.registryClientSecret) {
+  // Mode must be set EXPLICITLY when the registry is enabled — never inferred
+  // from which credentials happen to be present (S10: no silent split-brain).
+  if (!process.env.REGISTRY_CONNECTION_MODE) {
     throw new Error(
-      'CLERUM_REGISTRY_CLIENT_SECRET is required when CLERUM_REGISTRY_AUTH_ENABLED=true'
+      'REGISTRY_CONNECTION_MODE is required (managed|self-hosted) when CLERUM_REGISTRY_AUTH_ENABLED=true'
     )
   }
+  console.log(`[ControlAPI] Registry connection mode: ${config.registryConnectionMode}`)
+
+  // URL allowlist applies in BOTH modes: self-hosted clerum still points at the
+  // central example.com (spec §14.3 — per-deployment URLs out of scope).
   const allowed = [
     'https://example.com',
     'http://registry-api.registry.svc.cluster.local:8085',
@@ -719,21 +761,41 @@ if (config.registryAuthEnabled) {
       `CLERUM_REGISTRY_URL=${config.registryUrl} is not in the registry URL allowlist: ${allowed.join(', ')}`
     )
   }
+
+  if (config.registryConnectionMode === 'managed') {
+    // Managed machine creds live in env (unchanged).
+    if (!config.registryClientId) {
+      throw new Error(
+        'CLERUM_REGISTRY_CLIENT_ID is required in managed mode with registry auth enabled'
+      )
+    }
+    if (!config.registryClientSecret) {
+      throw new Error(
+        'CLERUM_REGISTRY_CLIENT_SECRET is required in managed mode with registry auth enabled'
+      )
+    }
+    // Voucher v2 material is MANDATORY in managed mode (M3 cutover done — no
+    // break-glass legacy fallback remains).
+    if (!config.registryVoucherPrivateKey) {
+      throw new Error(
+        'CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY is required in managed mode (voucher v2)'
+      )
+    }
+    if (!config.registryVoucherKid) {
+      throw new Error('CONTROL_API_REGISTRY_VOUCHER_KID is required in managed mode (voucher v2)')
+    }
+  }
+  // self-hosted: env creds/material NOT required here — they come from the
+  // registry_connection row. The "no row" fail-fast is an async guard in main.ts
+  // AFTER initDb (config.ts is sync and cannot query Postgres). See Task 8.
 }
 
 // Production safety check: reject known dev keys at startup
 if (process.env.NODE_ENV === 'production') {
-  // Voucher-key fallback warning: if a dedicated voucher key isn't set, we
-  // sign vouchers with the admin JWT key. That works but couples two
-  // unrelated trust domains (admin sessions vs. registry vouchers). Surface
-  // this loudly so the dedicate-a-key task can't sit forgotten.
-  if (!config.registryVoucherPrivateKey || config.registryVoucherPrivateKey.trim() === '') {
-    console.warn(
-      '[SECURITY] CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY is unset in production; ' +
-        'falling back to adminJwtPrivateKey. Provision a dedicated voucher keypair ' +
-        '(see control-api/src/routes/registry.ts header comment for rationale).'
-    )
-  }
+  // NOTE: the old voucher-key fallback WARN (dedicated key unset → sign with the
+  // admin JWT key) is gone. Under voucher v2 a managed prod boot without the
+  // dedicated key/kid FAILS FAST in the registryAuthEnabled guard above (unless
+  // break-glass), so there is no silent fallback left to warn about.
 
   const devKeyFingerprint = 'MIIEvAIBADANBgkqhkiG9w0BAQEFAASC' // start of DEV_RPC_JWT_PRIVATE_KEY
   const devSessionFingerprint = 'MIIEvgIBADANBgkqhkiG9w0BAQEFAASC' // start of DEV_SESSION_JWT_PRIVATE_KEY

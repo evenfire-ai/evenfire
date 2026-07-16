@@ -25,6 +25,16 @@ type Config = {
   activityStreamMaxConcurrent: number
   activityStreamMaxPerUser: number
   activityStreamMaxPerUserHost: number
+  /**
+   * Stateless wake-and-hold (Stage 5): a request hitting a down/draining
+   * stateless host is parked while control-api wakes the pod, bounded by
+   * `wakeMaxHoldMs`. Readiness is re-checked every `wakePollMs` and the wake
+   * is re-triggered every `wakeRetriggerMs` (covers a dropped HCC watch
+   * event). See src/services/wakeAndHold.ts.
+   */
+  wakeMaxHoldMs: number
+  wakePollMs: number
+  wakeRetriggerMs: number
   hccBaseUrl: string
   hostNamespace: string
   desktopCookieName: string
@@ -125,6 +135,15 @@ export function parseArtifactDownloadMaxBytes(rawMb: string): number {
   return bytes
 }
 
+export function parsePositiveIntMs(name: string, raw: string): number {
+  const trimmed = raw.trim()
+  const n = Number(trimmed)
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`${name} contains invalid value "${trimmed}" (must be a positive integer)`)
+  }
+  return n
+}
+
 const DEV_RPC_JWT_PUBLIC_KEY = normalizePem(`-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArCIYGHehMPpGKePxaKQa
 rDX5yrzifU5i4fzpI3EtkKSU6s5ug7EkKxc2DdMekoqXe9vr7qKyVwiilUIusXLX
@@ -182,6 +201,18 @@ export const config: Config = {
   activityStreamMaxPerUser: Number(process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER || 3),
   activityStreamMaxPerUserHost: Number(
     process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST || 1
+  ),
+  wakeMaxHoldMs: parsePositiveIntMs(
+    'RPC_PROXY_WAKE_MAX_HOLD_MS',
+    process.env.RPC_PROXY_WAKE_MAX_HOLD_MS || '90000'
+  ),
+  wakePollMs: parsePositiveIntMs(
+    'RPC_PROXY_WAKE_POLL_MS',
+    process.env.RPC_PROXY_WAKE_POLL_MS || '2000'
+  ),
+  wakeRetriggerMs: parsePositiveIntMs(
+    'RPC_PROXY_WAKE_RETRIGGER_MS',
+    process.env.RPC_PROXY_WAKE_RETRIGGER_MS || '15000'
   ),
   hccBaseUrl: requiredOrDevDefault(
     'RPC_PROXY_HCC_BASE_URL',

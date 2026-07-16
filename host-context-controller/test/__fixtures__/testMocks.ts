@@ -16,6 +16,7 @@ export type MockAppsApi = {
 export type MockCoreApi = {
   createNamespacedService: MockApiMethod
   readNamespacedService: MockApiMethod
+  listNamespacedService: MockApiMethod
   replaceNamespacedService: MockApiMethod
   deleteNamespacedService: MockApiMethod
   readNamespacedSecret: MockApiMethod
@@ -35,6 +36,7 @@ export type MockCoreApi = {
   createNamespacedServiceAccount: MockApiMethod
   readNamespacedServiceAccount: MockApiMethod
   deleteNamespacedServiceAccount: MockApiMethod
+  listNamespacedPod: MockApiMethod
 }
 
 export type MockCustomApi = {
@@ -144,6 +146,7 @@ export function createMockCoreApi(): MockCoreApi {
         spec: { clusterIP: '10.0.0.1' },
       } as MockK8sResource)
     ),
+    listNamespacedService: vi.fn().mockResolvedValue({ items: [] }),
     replaceNamespacedService: vi.fn().mockResolvedValue({}),
     deleteNamespacedService: vi.fn().mockResolvedValue({}),
     readNamespacedSecret: vi.fn(({ name }: { name?: string } = {}) =>
@@ -181,6 +184,8 @@ export function createMockCoreApi(): MockCoreApi {
       } as MockK8sResource)
     ),
     deleteNamespacedServiceAccount: vi.fn().mockResolvedValue({}),
+    // wfc pod node-placement lookup for the stateless SFS co-location check.
+    listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }),
   }
 }
 
@@ -189,7 +194,16 @@ export function createMockCustomApi(): MockCustomApi {
     patchNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     patchNamespacedCustomObjectStatus: vi.fn().mockResolvedValue({}),
     createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
-    getNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+    getNamespacedCustomObject: vi.fn().mockResolvedValue({
+      metadata: { name: 'stateless-host', namespace: 'mcp-host' },
+      spec: {
+        host: 'stateless-host',
+        contextRef: 'context-a',
+        secretRef: 'host-secret',
+        lifecycle: { stateless: true },
+      },
+      status: { lifecycle: { state: 'suspended', wakeHandledGeneration: 0 } },
+    }),
     getNamespacedCustomObjectStatus: vi.fn().mockResolvedValue({ status: { conditions: [] } }),
     replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     deleteNamespacedCustomObject: vi.fn().mockResolvedValue({}),

@@ -33,7 +33,7 @@ describe('isRetryableInfraError', () => {
     // FetchError carries the socket code on `.code` as a string.
     const err = Object.assign(
       new Error(
-        'request to https://203.0.113.10/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies failed, reason: connect ETIMEDOUT 203.0.113.10:443'
+        'request to https://203.0.113.1/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies failed, reason: connect ETIMEDOUT 203.0.113.1:443'
       ),
       { code: 'ETIMEDOUT', name: 'FetchError' }
     )
@@ -65,14 +65,14 @@ describe('isRetryableInfraError', () => {
   it('matches a wrapped error message that lost its .code', () => {
     // WRC re-wraps pre-deploy failures: `new Error("Pre-deploy ... : connect ETIMEDOUT ...")`.
     const wrapped = new Error(
-      'Pre-deploy Context allowlist failed for "recipe-helpdesk": request to https://203.0.113.10/... failed, reason: connect ETIMEDOUT 203.0.113.10:443'
+      'Pre-deploy Context allowlist failed for "recipe-helpdesk": request to https://203.0.113.1/... failed, reason: connect ETIMEDOUT 203.0.113.1:443'
     )
     expect(isRetryableInfraError(wrapped)).toBe(true)
   })
 
   it('matches a persisted status.message string (already-latched recipe)', () => {
     const persisted =
-      'FetchError: request to https://203.0.113.10/apis/apps/v1/namespaces/sandbox-recipes/deployments/x failed, reason: connect ETIMEDOUT 203.0.113.10:443'
+      'FetchError: request to https://203.0.113.1/apis/apps/v1/namespaces/sandbox-recipes/deployments/x failed, reason: connect ETIMEDOUT 203.0.113.1:443'
     expect(isRetryableInfraError(persisted)).toBe(true)
   })
 
@@ -111,7 +111,7 @@ describe('isRetryableInfraError', () => {
   })
 
   it('DOES match the anchored transport shapes (syscall-prefixed / reason:)', () => {
-    expect(isRetryableInfraError('connect ETIMEDOUT 203.0.113.10:443')).toBe(true)
+    expect(isRetryableInfraError('connect ETIMEDOUT 203.0.113.1:443')).toBe(true)
     expect(isRetryableInfraError('read ECONNRESET')).toBe(true)
     expect(isRetryableInfraError('getaddrinfo EAI_AGAIN registry.example.com')).toBe(true)
     expect(

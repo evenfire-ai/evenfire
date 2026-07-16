@@ -1,6 +1,6 @@
 {
   "name": "clerum-channel-reader",
-  "version": "0.1.63",
+  "version": "0.1.77",
   "description": "Watches CommunicationChannel CRDs and fetches messages from Telegram, Email, and Slack",
   "main": "dist/main.js",
   "engines": {
@@ -21,7 +21,7 @@
     "slack",
     "email"
   ],
-  "license": "MPL-2.0",
+  "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
     "@kubernetes/client-node": "^1.0.0",
     "@slack/web-api": "^7.0.0",

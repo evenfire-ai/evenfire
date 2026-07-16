@@ -37,6 +37,26 @@ export function kindFromPlural(plural: ClerumResourceType): string {
   }
 }
 
+/**
+ * Parse a projected numeric-generation annotation value.
+ *
+ * Returns the parsed non-negative integer, or null when the annotation is
+ * absent OR unparseable. A null result means "no known projected value" so the
+ * monotonic projector treats it as safe-to-write (there is nothing to regress
+ * below). We do NOT throw on a garbage value: the annotation is a write-only
+ * projection and control-api is its sole writer, so a non-numeric value can
+ * only come from external tampering — overwriting it with the authoritative
+ * Postgres generation is the correct, self-healing outcome.
+ */
+export function parseProjectedGeneration(raw: string | undefined): number | null {
+  if (raw === undefined) return null
+  const trimmed = raw.trim()
+  if (!/^[0-9]+$/.test(trimmed)) return null
+  const parsed = Number(trimmed)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) return null
+  return parsed
+}
+
 /** Add non-empty namespace value(s) to a Set. Handles string | string[]. */
 export function addNonEmpty(set: Set<string>, value: string | string[] | undefined): void {
   if (Array.isArray(value)) {

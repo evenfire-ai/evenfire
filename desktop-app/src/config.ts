@@ -479,12 +479,13 @@ const envRuntimeConfigured = Boolean(
   process.env.EXTERNAL_REST_API_BASE_URL?.trim() &&
   process.env.RPC_PROXY_BASE_URL?.trim()
 )
+const envMatchesLocalhostOption = configsMatch(envRuntimeConfig, localhostRuntimeConfig)
 
 function shouldPreferLocalhostByDefault(): boolean {
   return (
     !app?.isPackaged &&
     Boolean(process.env.ELECTRON_RENDERER_URL?.trim()) &&
-    isLocalhostRuntimeConfig(envRuntimeConfig)
+    envMatchesLocalhostOption
   )
 }
 const loadedProfilesState = loadStoredProfilesSync()
@@ -495,7 +496,7 @@ if (
   !activeStoredProfile &&
   activeRuntimeOptionId !== LOCALHOST_OPTION_ID &&
   envRuntimeConfigured &&
-  isLocalhostRuntimeConfig(envRuntimeConfig)
+  envMatchesLocalhostOption
 ) {
   activeRuntimeOptionId = LOCALHOST_OPTION_ID
 }
@@ -565,7 +566,7 @@ export function hydrateDesktopRuntimeConfig(): void {
   }
 
   if (envRuntimeConfigured) {
-    activeRuntimeOptionId = isLocalhostRuntimeConfig(envRuntimeConfig) ? LOCALHOST_OPTION_ID : null
+    activeRuntimeOptionId = envMatchesLocalhostOption ? LOCALHOST_OPTION_ID : null
     applyRuntimeConfig(envRuntimeConfig, true)
     return
   }
@@ -715,9 +716,7 @@ export async function deleteDesktopRuntimeConfigOption(optionId: string): Promis
       activeRuntimeOptionId = fallbackProfile.id
       applyRuntimeConfig(fallbackProfile.config, true)
     } else if (envRuntimeConfigured) {
-      activeRuntimeOptionId = isLocalhostRuntimeConfig(envRuntimeConfig)
-        ? LOCALHOST_OPTION_ID
-        : null
+      activeRuntimeOptionId = envMatchesLocalhostOption ? LOCALHOST_OPTION_ID : null
       applyRuntimeConfig(envRuntimeConfig, true)
     } else if (shouldPreferLocalhostByDefault()) {
       activeRuntimeOptionId = LOCALHOST_OPTION_ID

@@ -13,26 +13,36 @@ export function ccCredentialsSecretName(ccName: string): string {
   return `cc-${ccName}-credentials`
 }
 
+function credentialsSecretRefName(spec: Record<string, unknown> | null | undefined): string | null {
+  const ref = spec?.credentialsSecretRef
+  if (!ref || typeof ref !== 'object' || Array.isArray(ref)) return null
+  const name = (ref as { name?: unknown }).name
+  return typeof name === 'string' && name.trim() ? name.trim() : null
+}
+
 export async function preserveCommunicationChannelCredentialsSecretRef(
   gateway: K8sGateway,
   name: string,
   ns: string,
-  spec: Record<string, unknown>
+  spec: Record<string, unknown>,
+  existingSpec?: Record<string, unknown> | null
 ): Promise<Record<string, unknown>> {
   if (spec.credentialsSecretRef) return spec
 
-  let existingSecretRef: { name?: string } | undefined
-  try {
-    const existing = (await gateway.getResource('communicationchannels', name, ns)) as {
-      spec?: { credentialsSecretRef?: { name?: string } }
+  let existingSecretRefName = credentialsSecretRefName(existingSpec)
+  if (existingSpec === undefined) {
+    try {
+      const existing = (await gateway.getResource('communicationchannels', name, ns)) as {
+        spec?: Record<string, unknown>
+      }
+      existingSecretRefName = credentialsSecretRefName(existing.spec)
+    } catch (err) {
+      if (extractK8sStatusCode(err) !== 404) throw err
     }
-    existingSecretRef = existing.spec?.credentialsSecretRef
-  } catch (err) {
-    if (extractK8sStatusCode(err) !== 404) throw err
   }
 
-  if (existingSecretRef?.name) {
-    return { ...spec, credentialsSecretRef: { name: existingSecretRef.name } }
+  if (existingSecretRefName) {
+    return { ...spec, credentialsSecretRef: { name: existingSecretRefName } }
   }
 
   const defaultSecretName = ccCredentialsSecretName(name)

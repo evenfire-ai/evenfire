@@ -11,9 +11,9 @@ import { useConfirmDialog } from '@components/ConfirmDialog'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
+import { SegmentedControl } from '@components/SegmentedControl'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconBroadcast } from '@components/Sidebar/icons'
-import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
 import { apiGet, apiSend, isSilentApiError } from '@lib/api'
 import type { ChannelType } from '@lib/channelTypes'
@@ -25,11 +25,18 @@ import {
   createCommunicationChannelDraft,
 } from '@lib/communicationChannelEdit'
 import {
+  COMMUNICATION_CHANNEL_PROVIDERS,
+  COMMUNICATION_CHANNEL_PROVIDER_OPTIONS,
+  type CommunicationChannelProvider,
+  communicationChannelProviderServiceLabel,
+} from '@lib/communicationChannelProviders'
+import {
   type CommunicationChannelItem,
   slackWebhookUrlForChannel,
+  teamsWebhookUrlForChannel,
 } from '@lib/communicationChannels'
 
-type ChannelProvider = Extract<ChannelType, 'telegram' | 'slack'>
+type ChannelProvider = CommunicationChannelProvider
 type DraftState = CommunicationChannelDraftState
 
 type HostItem = {
@@ -39,12 +46,6 @@ type HostItem = {
 type HostsResponse = {
   hosts?: HostItem[]
   items?: HostItem[]
-}
-
-const CHANNEL_PROVIDERS: readonly ChannelProvider[] = ['telegram', 'slack'] as const
-
-function labelForProvider(type: ChannelProvider): string {
-  return type === 'telegram' ? 'Telegram' : 'Slack'
 }
 
 function extractChannel(response: unknown, name: string): CommunicationChannelItem | null {
@@ -65,7 +66,9 @@ function conversationsForProvider(
   provider: ChannelProvider,
   draft: DraftState
 ): CommunicationChannelConversation[] {
-  return (provider === 'telegram' ? draft.telegram : draft.slack).map(group => ({
+  const conversations =
+    provider === 'telegram' ? draft.telegram : provider === 'slack' ? draft.slack : draft.teams
+  return conversations.map(group => ({
     ...group,
     provider,
   }))
@@ -139,6 +142,7 @@ export default function EditCommunicationChannelPage() {
   const visibleChannelTypes = useMemo<ChannelType[]>(() => [activeTab], [activeTab])
   const activeConversations = draft ? conversationsForProvider(activeTab, draft) : []
   const slackRequestUrl = item ? slackWebhookUrlForChannel(item) : null
+  const teamsRequestUrl = item ? teamsWebhookUrlForChannel(item) : null
 
   async function persistDraft(nextDraft: DraftState, successMessage: string) {
     setSaving(true)
@@ -178,10 +182,15 @@ export default function EditCommunicationChannelPage() {
             ...draft,
             telegram: draft.telegram.filter(group => group.channelId !== conversation.channelId),
           }
-        : {
-            ...draft,
-            slack: draft.slack.filter(group => group.channelId !== conversation.channelId),
-          }
+        : conversation.provider === 'slack'
+          ? {
+              ...draft,
+              slack: draft.slack.filter(group => group.channelId !== conversation.channelId),
+            }
+          : {
+              ...draft,
+              teams: draft.teams.filter(group => group.channelId !== conversation.channelId),
+            }
     await persistDraft(nextDraft, 'Conversation deleted.')
   }
 
@@ -191,6 +200,17 @@ export default function EditCommunicationChannelPage() {
     showToast(
       copied
         ? 'Slack Request URL copied.'
+        : 'Could not copy to clipboard. Select the URL and copy it manually.',
+      { tone: copied ? 'success' : 'error' }
+    )
+  }
+
+  async function copyTeamsRequestUrl() {
+    if (!teamsRequestUrl) return
+    const copied = await copyTextToClipboard(teamsRequestUrl)
+    showToast(
+      copied
+        ? 'Teams Request URL copied.'
         : 'Could not copy to clipboard. Select the URL and copy it manually.',
       { tone: copied ? 'success' : 'error' }
     )
@@ -255,23 +275,20 @@ export default function EditCommunicationChannelPage() {
                 </span>
               </div>
 
-              <TabBar<ChannelProvider>
+              <SegmentedControl<ChannelProvider>
                 ariaLabel="Communication channel providers"
-                activeValue={activeTab}
-                className="cu-tabs--flush"
+                value={activeTab}
+                className="cu-segmented-control--flush cu-segmented-control--full"
+                disabled={saving}
                 onChange={setActiveTab}
-                options={CHANNEL_PROVIDERS.map(type => ({
-                  value: type,
-                  label: labelForProvider(type),
-                  disabled: saving,
-                }))}
+                options={COMMUNICATION_CHANNEL_PROVIDER_OPTIONS}
               />
 
               <section className="cu-channel-provider-panel">
                 <div className="cu-channel-provider-panel__head">
                   <div>
                     <p className="cu-section-title">
-                      {activeTab === 'slack' ? 'Slack app' : `${labelForProvider(activeTab)} bot`}
+                      {communicationChannelProviderServiceLabel(activeTab)}
                     </p>
                     <p className="cu-muted">
                       {activeTab === 'slack'
@@ -286,7 +303,9 @@ export default function EditCommunicationChannelPage() {
                     checked={
                       activeTab === 'telegram'
                         ? draft.telegramReplyOnlyWhenMentioned
-                        : draft.slackReplyOnlyWhenMentioned
+                        : activeTab === 'slack'
+                          ? draft.slackReplyOnlyWhenMentioned
+                          : draft.teamsReplyOnlyWhenMentioned
                     }
                     disabled={saving}
                     onChange={event =>
@@ -297,7 +316,9 @@ export default function EditCommunicationChannelPage() {
                                 ...current,
                                 telegramReplyOnlyWhenMentioned: event.target.checked,
                               }
-                            : { ...current, slackReplyOnlyWhenMentioned: event.target.checked }
+                            : activeTab === 'slack'
+                              ? { ...current, slackReplyOnlyWhenMentioned: event.target.checked }
+                              : { ...current, teamsReplyOnlyWhenMentioned: event.target.checked }
                           : current
                       )
                     }
@@ -363,7 +384,7 @@ export default function EditCommunicationChannelPage() {
                       Public bot username, with or without the leading @.
                     </span>
                   </div>
-                ) : (
+                ) : activeTab === 'slack' ? (
                   <>
                     <div className="cu-banner cu-banner--info">
                       Store the Slack app Signing Secret and Bot User OAuth token here. The Signing
@@ -417,6 +438,91 @@ export default function EditCommunicationChannelPage() {
                       </div>
                       <span className="cu-field__hint">
                         Use this URL for Slack Event Subscriptions and Interactivity.
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="cu-banner cu-banner--info">
+                      Store the CLIENT_SECRET value here, not the Microsoft secret ID. CLIENT_ID and
+                      TENANT_ID identify the Microsoft Teams bot that receives messages for this
+                      channel.
+                    </div>
+                    <div className="cu-field">
+                      <label htmlFor="teams-app-name">Name</label>
+                      <input
+                        id="teams-app-name"
+                        className="cu-input"
+                        value={draft.teamsAppName}
+                        onChange={event =>
+                          setDraft(current =>
+                            current ? { ...current, teamsAppName: event.target.value } : current
+                          )
+                        }
+                        placeholder="Your Teams Bot"
+                        disabled={saving}
+                        autoComplete="off"
+                      />
+                      <span className="cu-field__hint">
+                        Name shown in the Teams bot creation output and Profile UI setup
+                        instructions.
+                      </span>
+                    </div>
+                    <div className="cu-field">
+                      <label htmlFor="teams-app-id">CLIENT_ID</label>
+                      <input
+                        id="teams-app-id"
+                        className="cu-input"
+                        value={draft.teamsAppId}
+                        onChange={event =>
+                          setDraft(current =>
+                            current ? { ...current, teamsAppId: event.target.value } : current
+                          )
+                        }
+                        placeholder="00000000-0000-0000-0000-000000000000"
+                        disabled={saving}
+                        autoComplete="off"
+                      />
+                      <span className="cu-field__hint">
+                        CLIENT_ID from the generated .env file.
+                      </span>
+                    </div>
+                    <div className="cu-field">
+                      <label htmlFor="teams-tenant-id">TENANT_ID</label>
+                      <input
+                        id="teams-tenant-id"
+                        className="cu-input"
+                        value={draft.teamsTenantId}
+                        onChange={event =>
+                          setDraft(current =>
+                            current ? { ...current, teamsTenantId: event.target.value } : current
+                          )
+                        }
+                        placeholder="00000000-0000-0000-0000-000000000000"
+                        disabled={saving}
+                        autoComplete="off"
+                      />
+                      <span className="cu-field__hint">
+                        TENANT_ID from the generated .env file.
+                      </span>
+                    </div>
+                    <div className="cu-field">
+                      <span className="cu-field__label">Teams Request URL</span>
+                      <div className="cu-copy-field">
+                        <div className="cu-readonly-field cu-copy-field__value">
+                          {teamsRequestUrl || 'Unavailable'}
+                        </div>
+                        <button
+                          type="button"
+                          className="cu-btn cu-btn--secondary"
+                          onClick={copyTeamsRequestUrl}
+                          disabled={!teamsRequestUrl || saving}
+                        >
+                          Copy
+                        </button>
+                      </div>
+                      <span className="cu-field__hint">
+                        Use this URL as the Messaging endpoint for the Teams bot app.
                       </span>
                     </div>
                   </>

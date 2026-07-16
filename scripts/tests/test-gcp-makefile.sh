@@ -54,14 +54,14 @@ assert_succeeds_dry gcp-prod-status
 assert_succeeds_dry gcp-prod-verify-networkpolicies
 
 # Every gcp-prod-* kubectl/helm invocation must pin --context (Task 3)
-assert_contains gcp-prod-deploy-all        "--context gke_${GCP_PROJECT}_us-central1-a_clerum"
-assert_contains gcp-prod-deploy-instances  "--context gke_${GCP_PROJECT}_us-central1-a_clerum"
-assert_contains gcp-prod-restart-all       "--context gke_${GCP_PROJECT}_us-central1-a_clerum"
-assert_contains gcp-prod-status            "--context gke_${GCP_PROJECT}_us-central1-a_clerum"
-assert_contains gcp-prod-deploy-crds       "--kube-context gke_${GCP_PROJECT}_us-central1-a_clerum"
-assert_contains gcp-prod-bootstrap-rbac    "CONTEXT=gke_${GCP_PROJECT}_us-central1-a_clerum"
+assert_contains gcp-prod-deploy-all        "--context gke_your-gcp-project_us-central1-a_clerum"
+assert_contains gcp-prod-deploy-instances  "--context gke_your-gcp-project_us-central1-a_clerum"
+assert_contains gcp-prod-restart-all       "--context gke_your-gcp-project_us-central1-a_clerum"
+assert_contains gcp-prod-status            "--context gke_your-gcp-project_us-central1-a_clerum"
+assert_contains gcp-prod-deploy-crds       "--kube-context gke_your-gcp-project_us-central1-a_clerum"
+assert_contains gcp-prod-bootstrap-rbac    "CONTEXT=gke_your-gcp-project_us-central1-a_clerum"
 assert_contains gcp-prod-verify-networkpolicies "--overlay gcp-prod"
-assert_contains gcp-prod-verify-networkpolicies "--context gke_${GCP_PROJECT}_us-central1-a_clerum"
+assert_contains gcp-prod-verify-networkpolicies "--context gke_your-gcp-project_us-central1-a_clerum"
 assert_contains gcp-prod-deploy-all        "run-control-api-db-migration.sh"
 assert_contains gcp-prod-deploy-service    "run-control-api-db-migration.sh"
 assert_contains gcp-prod-deploy-all        "provision-gfs-runtime.sh"
@@ -124,7 +124,7 @@ assert_no_gate_on_readonly gcp-prod-pf-desktop
 assert_no_gate_on_readonly gcp-prod-pf-all
 
 # ── Dev namespace ──
-DEV_CTX="gke_${GCP_PROJECT}_us-central1-a_example-dev"
+DEV_CTX="gke_your-gcp-project_us-central1-a_example-dev"
 
 assert_contains gcp-dev-deploy-all       "--context $DEV_CTX"
 assert_contains gcp-dev-deploy-all       "deploy/overlays/gcp-dev"

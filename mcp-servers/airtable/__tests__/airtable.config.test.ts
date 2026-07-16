@@ -149,7 +149,7 @@ describe('Airtable MCP Server - CRD Configuration', () => {
   describe('Image Configuration', () => {
     it('should use correct image registry', () => {
       expect(crd.spec.image).toBe(
-        'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/airtable-mcp-server:latest'
+        'us-central1-docker.pkg.dev/your-gcp-project/clerum/airtable-mcp-server:latest'
       )
     })
 

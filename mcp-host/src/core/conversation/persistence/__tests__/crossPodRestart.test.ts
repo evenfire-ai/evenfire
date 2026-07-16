@@ -36,7 +36,7 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
     const sessionKey = 'user-1:rpc:agent:default'
 
     const convA = await managerA.getOrCreate(sessionKey)
-    managerA.startTurn(convA, 'do dangerous thing', 'test-task')
+    await managerA.startTurn(convA, 'do dangerous thing', 'test-task')
     await managerA.suspendForApproval(convA, {
       request_id: 'req-cross-pod',
       tool_name: 'shell_exec',
@@ -72,7 +72,7 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
     const sessionKey = 'user-1:rpc:agent:default'
 
     const convA = await managerA.getOrCreate(sessionKey)
-    managerA.startTurn(convA, 'do safe thing', 'test-task')
+    await managerA.startTurn(convA, 'do safe thing', 'test-task')
     await managerA.suspendForApproval(convA, {
       request_id: 'req-approve',
       tool_name: 'shell_exec',
@@ -100,7 +100,7 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
     const managerA = new ConversationManager(podA.store)
     const sessionKey = 'user-1:rpc:agent:default'
     const convA = await managerA.getOrCreate(sessionKey)
-    managerA.startTurn(convA, 'long running task', 'task-ghost')
+    await managerA.startTurn(convA, 'long running task', 'task-ghost')
     await podA.persistQueue.drainSessionKey(sessionKey)
     await podA.shutdown() // crash mid-task: no complete/fail/cancel
 
@@ -122,7 +122,7 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
       // The chat is usable again: a fresh startTurn must not throw
       // "conversation is processing".
       const managerB = new ConversationManager(podB.store)
-      expect(() => managerB.startTurn(conv!, 'retry', 'task-retry')).not.toThrow()
+      await expect(managerB.startTurn(conv!, 'retry', 'task-retry')).resolves.toBeDefined()
     } finally {
       await podB.shutdown()
     }

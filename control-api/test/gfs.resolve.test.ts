@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   DbResolveStore,
   GfsUriError,
-  parseGfsUri,
   ResolveDb,
-  ResolvedResource,
   ResolveStore,
+  ResolvedResource,
+  parseGfsUri,
   resolveGfsUri,
 } from '../src/gfs/resolve.js'
 

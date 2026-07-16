@@ -2,17 +2,18 @@ import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
 import {
   normalizeGenericDecision,
-  normalizeProviderEnrollment,
   normalizeProviderDecision,
+  normalizeProviderEnrollment,
   normalizeProviderMessage,
   normalizeSlackDecision,
+  normalizeTeamsDecision,
+  normalizeTeamsFileConsent,
   normalizeTelegramDecision,
 } from '../src/decisionHandler.js'
 
 const APPROVAL_ID = '99999999-8888-7777-6666-555555555555'
-const COMPACT_APPROVAL_ID = Buffer.from(APPROVAL_ID.replace(/-/g, ''), 'hex').toString(
-  'base64url'
-)
+const WORKFLOW_RUN_ID = '11111111-2222-3333-4444-555555555555'
+const COMPACT_APPROVAL_ID = Buffer.from(APPROVAL_ID.replace(/-/g, ''), 'hex').toString('base64url')
 const RUNTIME_ROUTE_ALIAS = createHash('sha256')
   .update('sandbox-recipes/runtime-recipe')
   .digest('hex')
@@ -102,7 +103,10 @@ describe('decisionHandler', () => {
         message: { chat: { id: 456 } },
       },
     })
-    expect(result).toMatchObject({ decision: 'approve', mcpHostRef: 'sandbox-recipes/runtime-recipe' })
+    expect(result).toMatchObject({
+      decision: 'approve',
+      mcpHostRef: 'sandbox-recipes/runtime-recipe',
+    })
     expect(result?.channelAlias).toBeUndefined()
   })
 
@@ -166,6 +170,42 @@ describe('decisionHandler', () => {
     ).toBeNull()
   })
 
+  it('normalizes Teams Adaptive Card approval decisions', () => {
+    const channelAlias = 'abcdef0123456789'
+    expect(
+      normalizeTeamsDecision({
+        type: 'invoke',
+        id: 'activity-1',
+        serviceUrl: 'https://smba.trafficmanager.net/amer/',
+        from: { id: 'teams-user-1' },
+        conversation: {
+          id: '19:channel-1@thread.tacv2;messageid=root-post-1',
+          conversationType: 'channel',
+          tenantId: '21e08d37-8d53-4144-87cb-557b8298aed3',
+        },
+        channelData: {
+          tenant: { id: '21e08d37-8d53-4144-87cb-557b8298aed3' },
+          channel: { id: '19:channel-1@thread.tacv2' },
+        },
+        value: {
+          action: `approve:${APPROVAL_ID}:sandbox-recipes/runtime-recipe:${channelAlias}`,
+        },
+      })
+    ).toMatchObject({
+      medium: 'teams',
+      decision: 'approve',
+      approvalRequestId: APPROVAL_ID,
+      mcpHostRef: 'sandbox-recipes/runtime-recipe',
+      providerUserId: 'teams-user-1',
+      providerWorkspaceId: '21e08d37-8d53-4144-87cb-557b8298aed3',
+      providerChannelId: '19:channel-1@thread.tacv2',
+      providerChannelType: 'channel',
+      providerEventId:
+        'teams:21e08d37-8d53-4144-87cb-557b8298aed3:' + '19:channel-1@thread.tacv2:activity-1',
+      channelAlias,
+    })
+  })
+
   it('normalizes Telegram /start enrollment callbacks', () => {
     expect(
       normalizeProviderEnrollment('telegram', {
@@ -200,6 +240,137 @@ describe('decisionHandler', () => {
     })
   })
 
+  it('uses the stable Teams channel id for enrollment and keeps the thread id for replies', () => {
+    const result = normalizeProviderEnrollment('teams', {
+      type: 'message',
+      id: 'activity-1',
+      text: '<at>evenfire</at> verify 123456',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      from: { id: 'teams-user-1' },
+      conversation: {
+        id: '19:channel-1@thread.tacv2;messageid=post-1',
+        conversationType: 'channel',
+        tenantId: 'tenant-1',
+      },
+      channelData: {
+        tenant: { id: 'tenant-1' },
+        channel: { id: '19:channel-1@thread.tacv2' },
+      },
+    })
+
+    expect(result).toMatchObject({
+      medium: 'teams',
+      nonce: '123456',
+      providerUserId: 'teams-user-1',
+      providerWorkspaceId: 'tenant-1',
+      providerChannelId: '19:channel-1@thread.tacv2',
+      providerConversationId: '19:channel-1@thread.tacv2;messageid=post-1',
+      providerReplyToMessageId: 'post-1',
+      providerChannelType: 'channel',
+    })
+  })
+
+  it('captures Teams conversation metadata during enrollment', () => {
+    expect(
+      normalizeProviderEnrollment('teams', {
+        type: 'message',
+        id: 'activity-1',
+        text: '<at>evenfire</at> verify 123456',
+        serviceUrl: 'https://smba.trafficmanager.net/amer/',
+        from: { id: 'teams-user-1', name: 'Josue Sosa' },
+        conversation: {
+          id: '19:channel-1@thread.tacv2;messageid=post-1',
+          conversationType: 'channel',
+          tenantId: 'tenant-1',
+        },
+        channelData: {
+          tenant: { id: 'tenant-1' },
+          team: { id: 'team-1', name: 'Engineering' },
+          channel: { id: '19:channel-1@thread.tacv2', name: 'General' },
+        },
+      })
+    ).toMatchObject({
+      providerChannelTitle: 'General',
+      providerTeamId: 'team-1',
+      providerTeamsChannelId: '19:channel-1@thread.tacv2',
+    })
+  })
+
+  it('maps different Teams posts to one verified channel identity', () => {
+    const teamsMessage = (postId: string, activityId: string) => ({
+      type: 'message',
+      id: activityId,
+      text: '<at>evenfire</at> hello',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      from: { id: 'teams-user-1' },
+      conversation: {
+        id: `19:channel-1@thread.tacv2;messageid=${postId}`,
+        conversationType: 'channel',
+        tenantId: 'tenant-1',
+      },
+      channelData: {
+        tenant: { id: 'tenant-1' },
+        channel: { id: '19:channel-1@thread.tacv2' },
+      },
+    })
+
+    const first = normalizeProviderMessage('teams', teamsMessage('post-1', 'activity-1'))
+    const second = normalizeProviderMessage('teams', teamsMessage('post-2', 'activity-2'))
+
+    expect(first?.providerChannelId).toBe('19:channel-1@thread.tacv2')
+    expect(second?.providerChannelId).toBe('19:channel-1@thread.tacv2')
+    expect(first?.providerConversationId).toBe('19:channel-1@thread.tacv2;messageid=post-1')
+    expect(second?.providerConversationId).toBe('19:channel-1@thread.tacv2;messageid=post-2')
+    expect(first?.providerReplyToMessageId).toBe('post-1')
+    expect(second?.providerReplyToMessageId).toBe('post-2')
+  })
+
+  it('uses the Teams reply root when a message is sent inside an existing post thread', () => {
+    const result = normalizeProviderMessage('teams', {
+      type: 'message',
+      id: 'reply-activity-1',
+      replyToId: 'root-post-1',
+      text: '<at>evenfire</at> hello',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      from: { id: 'teams-user-1' },
+      conversation: {
+        id: '19:channel-1@thread.tacv2',
+        conversationType: 'channel',
+        tenantId: 'tenant-1',
+      },
+      channelData: {
+        tenant: { id: 'tenant-1' },
+        channel: { id: '19:channel-1@thread.tacv2' },
+      },
+    })
+
+    expect(result?.providerConversationId).toBe('19:channel-1@thread.tacv2')
+    expect(result?.providerReplyToMessageId).toBe('root-post-1')
+    expect(result?.providerMessageTs).toBe('reply-activity-1')
+  })
+
+  it('keeps a personal Teams chat scoped to its conversation', () => {
+    const result = normalizeProviderMessage('teams', {
+      type: 'message',
+      id: 'activity-1',
+      text: 'hello',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      from: { id: 'teams-user-1' },
+      conversation: {
+        id: 'personal-conversation-1',
+        conversationType: 'personal',
+        tenantId: 'tenant-1',
+      },
+      channelData: {
+        tenant: { id: 'tenant-1' },
+      },
+    })
+
+    expect(result?.providerChannelId).toBe('personal-conversation-1')
+    expect(result?.providerConversationId).toBe('personal-conversation-1')
+    expect(result?.providerReplyToMessageId).toBe('activity-1')
+  })
+
   it('normalizes Slack message envelopes by message timestamp instead of envelope id', () => {
     const payload = {
       type: 'event_callback',
@@ -226,7 +397,7 @@ describe('decisionHandler', () => {
       normalizeProviderMessage('slack', {
         type: 'block_actions',
         trigger_id: 'trigger-1',
-        actions: [{ value: 'workflow_result:due-diligence-package', action_ts: '171.0002' }],
+        actions: [{ value: `workflow_result_run:${WORKFLOW_RUN_ID}`, action_ts: '171.0002' }],
         user: { id: 'U123' },
         team: { id: 'T123' },
         channel: { id: 'C123' },
@@ -235,13 +406,74 @@ describe('decisionHandler', () => {
       })
     ).toMatchObject({
       medium: 'slack',
-      content: 'download result due-diligence-package',
+      content: 'Download the completed workflow result',
+      workflowRunId: WORKFLOW_RUN_ID,
       providerUserId: 'U123',
       providerWorkspaceId: 'T123',
       providerChannelId: 'C123',
       providerEventId: 'slack:T123:C123:trigger-1',
       providerMessageTs: '171.0001',
       threadTs: '170.9999',
+    })
+  })
+
+  it('normalizes accepted Teams file consent invokes', () => {
+    expect(
+      normalizeTeamsFileConsent({
+        type: 'invoke',
+        name: 'fileConsent/invoke',
+        id: 'consent-activity-1',
+        serviceUrl: 'https://smba.trafficmanager.net/amer/',
+        from: { id: 'teams-user-1' },
+        conversation: {
+          id: 'personal-conversation-1',
+          conversationType: 'personal',
+          tenantId: 'tenant-1',
+        },
+        channelData: { tenant: { id: 'tenant-1' } },
+        value: {
+          action: 'accept',
+          context: { workflowRunId: WORKFLOW_RUN_ID, artifactName: 'result.pdf' },
+          uploadInfo: {
+            contentUrl: 'https://tenant.sharepoint.com/result.pdf',
+            uploadUrl: 'https://tenant.sharepoint.com/upload-session',
+            uniqueId: 'file-1',
+            name: 'result.pdf',
+            fileType: 'pdf',
+          },
+        },
+      })
+    ).toMatchObject({
+      action: 'accept',
+      workflowRunId: WORKFLOW_RUN_ID,
+      artifactName: 'result.pdf',
+      providerConversationId: 'personal-conversation-1',
+      uploadInfo: {
+        uploadUrl: 'https://tenant.sharepoint.com/upload-session',
+        uniqueId: 'file-1',
+      },
+    })
+  })
+
+  it('normalizes Slack tool approval buttons as threaded channel messages', () => {
+    expect(
+      normalizeProviderMessage('slack', {
+        type: 'block_actions',
+        trigger_id: 'trigger-tool-1',
+        user: { id: 'U123' },
+        team: { id: 'T123' },
+        channel: { id: 'C123' },
+        message: { ts: '1710000000.000002', thread_ts: '1710000000.000001' },
+        actions: [{ value: 'tool:l:abcdefghijklmnop' }],
+      })
+    ).toMatchObject({
+      medium: 'slack',
+      content: 'tool:l:abcdefghijklmnop',
+      providerUserId: 'U123',
+      providerWorkspaceId: 'T123',
+      providerChannelId: 'C123',
+      providerMessageTs: '1710000000.000002',
+      threadTs: '1710000000.000001',
     })
   })
 

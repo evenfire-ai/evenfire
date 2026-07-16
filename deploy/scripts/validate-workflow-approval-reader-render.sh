@@ -42,7 +42,7 @@ files.each do |overlay, path|
     fail!(overlay, "unexpected image #{image}") unless image == "clerum/workflow-approval-request-reader:test"
     fail!(overlay, "unexpected imagePullPolicy #{pull_policy}") unless pull_policy == "IfNotPresent"
   else
-    expected_prefix = "us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/workflow-approval-request-reader:"
+    expected_prefix = "us-central1-docker.pkg.dev/your-gcp-project/clerum/workflow-approval-request-reader:"
     fail!(overlay, "image is not rewritten to Artifact Registry: #{image}") unless image.start_with?(expected_prefix)
     fail!(overlay, "unexpected imagePullPolicy #{pull_policy}") unless pull_policy == "Always"
   end

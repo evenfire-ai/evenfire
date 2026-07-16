@@ -2,7 +2,7 @@ apiVersion: v2
 name: clerum-crds
 description: Custom Resource Definitions for Clerum (CommunicationChannel, Context, Host, McpServer, WorkflowRecipe, WorkflowRecipePolicy). WorkflowRun CRD has been removed; workflow runs are now DB-first in control-postgres.
 type: application
-version: 0.6.1
+version: 0.7.0
 appVersion: "1"
 keywords:
   - clerum

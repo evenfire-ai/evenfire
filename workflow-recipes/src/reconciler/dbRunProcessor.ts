@@ -474,22 +474,6 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
     const client = await opts.pool.connect()
     try {
       await client.query('BEGIN')
-      if (mappedPhase && TERMINAL_PHASES.has(mappedPhase)) {
-        const res = await client.query(UPDATE_RUN_TERMINAL, [
-          mappedPhase,
-          execution?.completedAt ?? null,
-          runId,
-        ])
-        if (res.rowCount && res.rowCount > 0) {
-          opts.onRunTerminal?.(runId, mappedPhase)
-        }
-      } else {
-        // Non-terminal sync — just bump heartbeat. Do NOT overwrite `phase`
-        // here: the legacy reconciler preserved Running when no execution
-        // phase was present (see "does not overwrite running phase" test).
-        await client.query(UPDATE_RUN_PROGRESS, [runId])
-      }
-
       for (const step of recipe.status?.steps ?? []) {
         await client.query(UPSERT_STEP, [
           runId,
@@ -504,6 +488,22 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
             : null,
           (step as { error?: string }).error ?? null,
         ])
+      }
+
+      if (mappedPhase && TERMINAL_PHASES.has(mappedPhase)) {
+        const res = await client.query(UPDATE_RUN_TERMINAL, [
+          mappedPhase,
+          execution?.completedAt ?? null,
+          runId,
+        ])
+        if (res.rowCount && res.rowCount > 0) {
+          opts.onRunTerminal?.(runId, mappedPhase)
+        }
+      } else {
+        // Non-terminal sync — just bump heartbeat. Do NOT overwrite `phase`
+        // here: the legacy reconciler preserved Running when no execution
+        // phase was present (see "does not overwrite running phase" test).
+        await client.query(UPDATE_RUN_PROGRESS, [runId])
       }
       await client.query('COMMIT')
     } catch (err) {

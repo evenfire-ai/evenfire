@@ -8,6 +8,7 @@ export type RpcScope =
   | 'host:status:read'
   | 'host:activity:read'
   | 'host:message:invoke'
+  | 'host:wake:write'
   | 'host:workflow-approval:decide'
   | 'host:task:read'
   | 'host:approval:write'
@@ -23,6 +24,7 @@ export const RPC_SCOPES: RpcScope[] = [
   'host:status:read',
   'host:activity:read',
   'host:message:invoke',
+  'host:wake:write',
   'host:workflow-approval:decide',
   'host:task:read',
   'host:approval:write',

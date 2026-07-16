@@ -7,6 +7,7 @@ import { useConfirmDialog } from '../../../components/ConfirmDialog'
 import { CreateFlowPanel } from '../../../components/CreateFlowPanel'
 import { CreatePageHeader } from '../../../components/CreatePageHeader'
 import { DashboardLayout } from '../../../components/DashboardLayout'
+import { FileUploadModal } from '@components/FileUploadModal'
 import { IconFolder, IconServer } from '../../../components/Sidebar/icons'
 import { SkeletonTableRows } from '../../../components/SkeletonTableRows'
 import { TableHeaderRow } from '../../../components/TableHeaderRow'
@@ -66,8 +67,6 @@ export default function SharedFileSystemDetailsPage() {
   const [renameDraft, setRenameDraft] = useState('')
   const [mkdirDraft, setMkdirDraft] = useState('')
   const [uploadFile, setUploadFile] = useState<File | null>(null)
-  const [uploadDragOver, setUploadDragOver] = useState(false)
-  const fileInputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
   const dragCounter = useRef(0)
   type UploadItem = {
@@ -211,7 +210,6 @@ export default function SharedFileSystemDetailsPage() {
       showToast(`Uploaded ${uploadFile.name}.`, { tone: 'success' })
       setUploadFile(null)
       setShowUpload(false)
-      if (fileInputRef.current) fileInputRef.current.value = ''
       await loadEntries()
     } catch (e) {
       flashError(e, 'Upload failed')
@@ -223,8 +221,6 @@ export default function SharedFileSystemDetailsPage() {
   function resetUploadDialog() {
     setShowUpload(false)
     setUploadFile(null)
-    setUploadDragOver(false)
-    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   async function uploadMany(files: File[]) {
@@ -265,17 +261,6 @@ export default function SharedFileSystemDetailsPage() {
     dragCounter.current = 0
     const files = Array.from(e.dataTransfer.files || [])
     if (files.length > 0) void uploadMany(files)
-  }
-
-  function onUploadDialogDrop(e: React.DragEvent<HTMLLabelElement>) {
-    e.preventDefault()
-    e.stopPropagation()
-    setUploadDragOver(false)
-    if (busy) return
-    const [file] = Array.from(e.dataTransfer.files || [])
-    if (!file) return
-    setUploadFile(file)
-    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   async function onDelete(entry: WfcDirEntry) {
@@ -694,80 +679,17 @@ export default function SharedFileSystemDetailsPage() {
 
       {/* upload modal */}
       {showUpload && (
-        <ModalShell title="Upload file" onClose={() => !busy && resetUploadDialog()}>
-          <div className="cu-upload-file-flow">
-            <input
-              id="upload-file"
-              type="file"
-              className="sr-only"
-              ref={fileInputRef}
-              onChange={e => {
-                setUploadFile(e.target.files?.[0] ?? null)
-                setUploadDragOver(false)
-              }}
-              disabled={busy}
-            />
-            <label
-              htmlFor="upload-file"
-              className={`cu-upload-dropzone${
-                uploadDragOver ? ' cu-upload-dropzone--active' : ''
-              }${busy ? ' cu-upload-dropzone--disabled' : ''}`}
-              onDragEnter={e => {
-                e.preventDefault()
-                e.stopPropagation()
-                if (e.dataTransfer.types.includes('Files')) setUploadDragOver(true)
-              }}
-              onDragOver={e => {
-                e.preventDefault()
-                e.stopPropagation()
-                if (e.dataTransfer.types.includes('Files')) e.dataTransfer.dropEffect = 'copy'
-              }}
-              onDragLeave={e => {
-                e.preventDefault()
-                e.stopPropagation()
-                if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
-                setUploadDragOver(false)
-              }}
-              onDrop={onUploadDialogDrop}
-            >
-              <span className="cu-upload-dropzone__icon" aria-hidden="true">
-                <IconServer />
-              </span>
-              <span className="cu-upload-dropzone__text">
-                <strong>{uploadFile ? uploadFile.name : 'Drop a file here'}</strong>
-                <span>
-                  {uploadFile
-                    ? `${formatBytes(uploadFile.size)} selected`
-                    : 'Drag and drop, or click to browse'}
-                </span>
-              </span>
-            </label>
-            <p className="cu-upload-file-flow__destination">
-              Uploads to{' '}
-              <code>
-                {joinPath(path, uploadFile?.name || '<selected-file>') || '<selected-file>'}
-              </code>
-            </p>
-          </div>
-          <div className="cu-modal-panel__foot">
-            <button
-              type="button"
-              className="cu-btn cu-btn--ghost cu-btn--sm"
-              onClick={resetUploadDialog}
-              disabled={busy}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary"
-              onClick={() => void onUpload()}
-              disabled={busy || !uploadFile}
-            >
-              {busy ? 'Uploading…' : 'Upload'}
-            </button>
-          </div>
-        </ModalShell>
+        <FileUploadModal
+          busy={busy}
+          destination={
+            joinPath(path, uploadFile?.name || '<selected-file>') || '<selected-file>'
+          }
+          file={uploadFile}
+          fileSummary={uploadFile ? `${formatBytes(uploadFile.size)} selected` : undefined}
+          onClose={resetUploadDialog}
+          onFileChange={setUploadFile}
+          onUpload={() => void onUpload()}
+        />
       )}
 
       {/* rename modal */}

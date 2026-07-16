@@ -24,7 +24,7 @@ export type ProfileChannelSection = {
   addLabel: string
 }
 
-export type SocialChannelTabKey = 'telegram' | 'slack'
+export type SocialChannelTabKey = 'telegram' | 'slack' | 'teams'
 
 export type SocialChannelTab = {
   key: SocialChannelTabKey

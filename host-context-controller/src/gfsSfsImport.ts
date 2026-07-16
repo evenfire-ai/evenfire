@@ -35,8 +35,8 @@ export class SfsImportError extends Error {
 }
 
 function joinUnderSfs(sfsName: string, rel: string): string {
-  const clean = rel.split('/').filter((s) => s.length > 0 && s !== '.' && s !== '..')
-  if (clean.length !== rel.split('/').filter((s) => s.length > 0).length) {
+  const clean = rel.split('/').filter(s => s.length > 0 && s !== '.' && s !== '..')
+  if (clean.length !== rel.split('/').filter(s => s.length > 0).length) {
     throw new SfsImportError('path_invalid', `unsafe SFS path: ${JSON.stringify(rel)}`)
   }
   return [SFS_IMPORT_ROOT, sfsName, ...clean].join('/')
@@ -47,7 +47,7 @@ export function importSfsTree(sfsName: string, entries: SfsEntry[]): ImportedRes
   if (!sfsName || sfsName.includes('/')) {
     throw new SfsImportError('path_invalid', `invalid sfs name: ${JSON.stringify(sfsName)}`)
   }
-  return entries.map((entry) => ({
+  return entries.map(entry => ({
     path: joinUnderSfs(sfsName, entry.path),
     kind: entry.kind,
     readOnly: true,

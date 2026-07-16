@@ -163,3 +163,25 @@ export interface QueueEvent {
   task?: Task
   timestamp: Date
 }
+
+/**
+ * Outcome of MessageQueue.admit() — the single task-admission sink.
+ *
+ * - `queue_full`: ordering queue at capacity. admit() does NOT register the
+ *   task; the channel path (messageHandler) preserves the legacy contract by
+ *   registering and dispatching to SessionProcessor anyway.
+ * - `duplicate_task_id`: this exact task id already has a lifecycle record —
+ *   a re-admission of an already-admitted task. Never re-executed.
+ * - `duplicate_delivery`: a different task id was already admitted for the
+ *   same delivery identity (channelType:channelId:sender:messageId) and its
+ *   lifecycle record is still live. Never re-executed.
+ */
+export type AdmissionOutcome =
+  | { admitted: true }
+  | { admitted: false; reason: 'queue_full' }
+  | {
+      admitted: false
+      reason: 'duplicate_task_id' | 'duplicate_delivery'
+      priorTaskId: string
+      priorStatus: TaskStatus
+    }

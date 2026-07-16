@@ -126,9 +126,16 @@ export class PersistQueue {
             this.writeChain.delete(sessionKey)
           }
         })
+      // The chain derivative must never surface the rejection itself — the
+      // caller gets it via the returned `next` (loud there). Without the
+      // rejection handler a failed sync write would ALSO raise a process-level
+      // unhandledRejection from this internal bookkeeping copy (D3).
       this.writeChain.set(
         sessionKey,
-        next.then(() => undefined)
+        next.then(
+          () => undefined,
+          () => undefined
+        )
       )
       return next
     }

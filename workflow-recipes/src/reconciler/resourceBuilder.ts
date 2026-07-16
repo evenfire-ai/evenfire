@@ -906,6 +906,14 @@ function buildPodTemplate(
       // moment any RoleBinding grants the namespace SA `get secrets`. Removing
       // the token is a control that holds regardless of RBAC drift.
       automountServiceAccountToken: false,
+      // Three-tier PriorityClass scheme (stateless agents): recipe-created
+      // non-transport workloads (Jobs, CronJobs, and sandbox-recipes
+      // Deployments/StatefulSets/DaemonSets) run as preemptible batch
+      // ('clerum-batch', value -10) so an interactive host wake
+      // ('clerum-interactive-host', value 100) preferentially evicts them.
+      // Transport workloads are serving pods in the mcp-server namespace and
+      // stay unclassed (priority 0 = protected service tier).
+      priorityClassName: workload.transport ? undefined : 'clerum-batch',
       imagePullSecrets,
     },
   }

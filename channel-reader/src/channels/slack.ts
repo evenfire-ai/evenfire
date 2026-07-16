@@ -119,6 +119,30 @@ function unsupportedAttachmentNote(count: number): string {
   return `${count} ${label} generated but could not be delivered to Slack.`
 }
 
+type SlackConversationMetadata = {
+  providerChannelType?: string | null
+  providerChannelTitle?: string | null
+}
+
+function recordBoolean(record: Record<string, unknown>, key: string): boolean {
+  return record[key] === true
+}
+
+function slackConversationType(channel: Record<string, unknown>): string | null {
+  if (recordBoolean(channel, 'is_im')) return 'im'
+  if (recordBoolean(channel, 'is_mpim')) return 'mpim'
+  if (recordBoolean(channel, 'is_private') || recordBoolean(channel, 'is_group')) {
+    return 'private_channel'
+  }
+  if (recordBoolean(channel, 'is_channel')) return 'channel'
+  return null
+}
+
+function slackConversationName(channel: Record<string, unknown>): string | null {
+  const name = typeof channel.name === 'string' ? channel.name.trim() : ''
+  return name || null
+}
+
 export class SlackAdapter implements ChannelAdapter {
   readonly channelType = 'slack' as const
 
@@ -281,11 +305,17 @@ export class SlackAdapter implements ChannelAdapter {
 
           if (isSlackVerifyCommand(text)) {
             const providerTarget = options?.providerTarget ?? this.defaultProviderTarget
+            const conversationMetadata = await this.getConversationMetadata(
+              resolvedChannelId,
+              userId
+            )
             void handleSlackVerificationCommand({
               channelId: resolvedChannelId,
               nonce: parseSlackVerifyCommand(text),
               providerUserId: userId,
               providerWorkspaceId,
+              providerChannelType: conversationMetadata.providerChannelType ?? null,
+              providerChannelTitle: conversationMetadata.providerChannelTitle ?? null,
               providerTarget,
               verificationClient: this.verificationClient,
               sendReply: async content => {
@@ -518,6 +548,49 @@ export class SlackAdapter implements ChannelAdapter {
     }
   }
 
+  async getConversationMetadata(
+    channelId: string,
+    providerUserId?: string | null
+  ): Promise<SlackConversationMetadata> {
+    if (!this.client) return {}
+    const resolvedChannelId = await this.resolveChannelId(channelId)
+    if (!resolvedChannelId) return {}
+
+    try {
+      const response = await this.client.conversations.info({ channel: resolvedChannelId })
+      const channel =
+        response.channel && typeof response.channel === 'object'
+          ? (response.channel as Record<string, unknown>)
+          : {}
+      const providerChannelType = slackConversationType(channel)
+      let title: string | null = null
+
+      if (providerChannelType === 'im') {
+        const slackUserId =
+          (typeof channel.user === 'string' ? channel.user.trim() : '') ||
+          providerUserId?.trim() ||
+          ''
+        const username = slackUserId ? await this.getUsername(slackUserId) : ''
+        title = username ? `@${username.replace(/^@/, '')}` : null
+      } else {
+        const name = slackConversationName(channel)
+        title = name && providerChannelType !== 'mpim' ? `#${name.replace(/^#/, '')}` : name
+      }
+
+      return {
+        ...(providerChannelType ? { providerChannelType } : {}),
+        ...(title ? { providerChannelTitle: title } : {}),
+      }
+    } catch (err) {
+      console.warn(
+        `[Slack] Could not read conversation metadata for ${channelId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      )
+      return {}
+    }
+  }
+
   async sendMessage(
     channelId: string,
     content: string,
@@ -649,7 +722,12 @@ export class SlackAdapter implements ChannelAdapter {
     }
   }
 
-  async editMessage(channelId: string, messageId: string, content: string): Promise<void> {
+  async editMessage(
+    channelId: string,
+    messageId: string,
+    content: string,
+    options?: SendMessageOptions
+  ): Promise<void> {
     if (!this.client) {
       console.warn('[Slack] Not connected, cannot edit message')
       return
@@ -666,6 +744,7 @@ export class SlackAdapter implements ChannelAdapter {
         channel: resolvedChannelId,
         ts: messageId,
         text: content,
+        blocks: (options?.slackBlocks ?? []) as never,
       })
     } catch (err) {
       console.error(

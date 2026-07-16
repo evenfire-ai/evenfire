@@ -8,7 +8,7 @@
  * - API 400 (credentials-required) surfaces the specific error message via StatusBanner
  *
  * Create polish:
- * - provider setup uses Telegram and Slack tabs with provider-scoped credentials
+ * - provider setup uses a Telegram/Slack/Teams segmented selector with provider-scoped credentials
  * - route fields are absent because conversations are confirmed from Profile UI
  */
 import React from 'react'
@@ -18,10 +18,16 @@ import { ToastProvider } from '@components/Toast'
 import CreateCommunicationChannelPage from '../../app/communication-channels/new/page'
 import * as api from '../../lib/api'
 
-const mockPush = vi.fn()
+const mockNavigation = vi.hoisted(() => ({
+  push: vi.fn(),
+  searchParams: new URLSearchParams(),
+}))
+const mockPush = mockNavigation.push
+const mockSearchParams = mockNavigation.searchParams
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: mockPush }),
+  useSearchParams: () => mockSearchParams,
 }))
 
 vi.mock('@components/AuthGate', () => ({
@@ -48,6 +54,14 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+beforeEach(() => {
+  Array.from(mockSearchParams.keys()).forEach(key => mockSearchParams.delete(key))
+  vi.mocked(api.apiGet).mockResolvedValue({ items: [{ metadata: { name: 'agent-a' } }] })
+  vi.mocked(api.apiSend).mockResolvedValue({})
+  vi.mocked(api.getAgentTeams).mockResolvedValue({ items: [] })
+  vi.mocked(api.getAgentUsers).mockResolvedValue({ items: [] })
+})
+
 /** Shared helper: fill step 1 and advance to step 2. */
 async function fillStep1AndContinue() {
   await waitFor(() => {
@@ -63,7 +77,7 @@ async function fillStep1AndContinue() {
 }
 
 function selectTelegramAndToken() {
-  fireEvent.click(screen.getByRole('tab', { name: 'Telegram' }))
+  fireEvent.click(screen.getByRole('radio', { name: 'Telegram' }))
   fireEvent.change(screen.getByPlaceholderText('@your_bot'), {
     target: { value: '@clerum_test_bot' },
   })
@@ -185,18 +199,228 @@ describe('CreateCommunicationChannelPage — provider setup', () => {
 
     await fillStep1AndContinue()
 
-    expect(screen.getByRole('tab', { name: 'Telegram' })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: 'Slack' })).toBeInTheDocument()
-    expect(screen.queryByRole('tab', { name: 'Email' })).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('radiogroup', { name: 'Communication channel provider' })
+    ).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: 'Telegram' })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: 'Slack' })).toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: 'Email' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('Telegram Bot Token')).toBeInTheDocument()
     expect(screen.getByPlaceholderText('@your_bot')).toBeInTheDocument()
+    expect(
+      screen.getByRole('checkbox', { name: /answer only when the bot is mentioned/i })
+    ).toBeChecked()
     expect(screen.queryByLabelText('Slack Signing Secret')).not.toBeInTheDocument()
     expect(screen.queryByRole('combobox', { name: /telegram chat type/i })).not.toBeInTheDocument()
     expect(screen.queryByPlaceholderText(/Telegram channel ID/i)).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Slack' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'Slack' }))
+    expect(
+      screen.getByRole('checkbox', { name: /answer only when the app is mentioned/i })
+    ).toBeChecked()
     expect(screen.getByLabelText('Slack Signing Secret')).toBeInTheDocument()
     expect(screen.getByLabelText('Slack Bot User OAuth Token')).toBeInTheDocument()
     expect(screen.queryByLabelText('Telegram Bot Token')).not.toBeInTheDocument()
+  })
+
+  it('shows a Teams bot create command using generated .env labels and channel endpoint', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    expect(
+      screen.getByRole('checkbox', { name: /answer only when the bot is mentioned/i })
+    ).toBeChecked()
+
+    const botNameInput = screen.getByLabelText(/^Name/)
+    fireEvent.change(botNameInput, {
+      target: { value: 'Evenfire Bot!' },
+    })
+
+    expect(botNameInput).toHaveValue('evenfire-bot')
+    expect(
+      screen.getByText(/The command writes generated Teams bot values into/i)
+    ).toBeInTheDocument()
+    expect(screen.getByText('Upload and download files')).toBeInTheDocument()
+
+    const command = screen.getByText(/teams app create/).closest('pre')
+    expect(command).toHaveTextContent('teams app create')
+    expect(command).toHaveTextContent('--name "evenfire-bot"')
+    expect(command).toHaveTextContent('/webhooks/teams/')
+    expect(command).toHaveTextContent('--env .env')
+    expect(screen.getByLabelText(/^CLIENT_ID/)).toBeInTheDocument()
+    expect(screen.getByLabelText(/^TENANT_ID/)).toBeInTheDocument()
+    expect(screen.getByLabelText('CLIENT_SECRET')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Copy Teams bot create command' })).toBeEnabled()
+  })
+
+  it('validates Teams CLIENT_ID and TENANT_ID before submission', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), {
+      target: { value: 'evenfire-bot' },
+    })
+    fireEvent.change(screen.getByLabelText('CLIENT_SECRET'), {
+      target: { value: 'secret' },
+    })
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
+      target: { value: 'not-a-uuid' },
+    })
+    fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
+      target: { value: '21e08d37-8d53-4144-87cb-557b8298aed3' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+
+    expect(await screen.findByText('CLIENT_ID must be a valid UUID.')).toBeInTheDocument()
+    expect(api.apiSend).not.toHaveBeenCalled()
+  })
+
+  it('submits Teams settings and credentials with UUID values', async () => {
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await fillStep1AndContinue()
+    fireEvent.click(screen.getByRole('radio', { name: 'Microsoft Teams' }))
+    fireEvent.change(screen.getByLabelText(/^Name/), {
+      target: { value: 'evenfire-bot' },
+    })
+    fireEvent.change(screen.getByLabelText(/^CLIENT_ID/), {
+      target: { value: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82' },
+    })
+    fireEvent.change(screen.getByLabelText(/^TENANT_ID/), {
+      target: { value: '21e08d37-8d53-4144-87cb-557b8298aed3' },
+    })
+    fireEvent.change(screen.getByLabelText('CLIENT_SECRET'), {
+      target: { value: 'secret' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    expect(api.apiSend).toHaveBeenCalledWith(
+      'POST',
+      '/api/v1/admin/communication-channels',
+      expect.objectContaining({
+        metadata: { name: 'my-channel' },
+        spec: expect.objectContaining({
+          hostRef: 'agent-a',
+          teamsSettings: {
+            appName: 'evenfire-bot',
+            appId: '7e9cdb6c-87e8-4b1e-b291-76f7b8bdbe82',
+            tenantId: '21e08d37-8d53-4144-87cb-557b8298aed3',
+            replyOnlyWhenMentioned: true,
+          },
+        }),
+        credentials: { 'teams-app-password': 'secret' },
+      })
+    )
+  })
+
+  it('prefills copied access and agent while creating the selected provider', async () => {
+    mockSearchParams.set('copyFrom', 'source-channel')
+    mockSearchParams.set('provider', 'slack')
+    vi.mocked(api.getAgentTeams).mockResolvedValue({
+      items: [{ id: 'team-a', name: 'Team A' }],
+    })
+    vi.mocked(api.getAgentUsers).mockResolvedValue({
+      items: [
+        {
+          id: 'user-a',
+          email: 'user-a@example.com',
+          name: 'User A',
+          displayName: 'User A',
+        },
+      ],
+    })
+    vi.mocked(api.apiGet).mockImplementation(async path => {
+      if (path === '/api/v1/admin/hosts') {
+        return { items: [{ metadata: { name: 'agent-a' } }] }
+      }
+      if (path === '/api/v1/admin/communication-channels/source-channel') {
+        return {
+          metadata: { name: 'source-channel' },
+          spec: {
+            access: {
+              teams: ['team-a'],
+              users: ['user-a'],
+            },
+            hostRef: 'agent-a',
+            telegram: [],
+            telegramSettings: {
+              botHandle: '@source_bot',
+              replyOnlyWhenMentioned: true,
+            },
+          },
+        }
+      }
+      return { items: [] }
+    })
+
+    render(
+      <ToastProvider>
+        <CreateCommunicationChannelPage />
+      </ToastProvider>
+    )
+
+    await waitFor(() => {
+      expect(screen.queryByText('Loading agents...')).not.toBeInTheDocument()
+    })
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /agent reference/i })).toHaveTextContent('agent-a')
+    })
+    expect(screen.getByPlaceholderText(/channel-name/i)).toHaveValue('')
+
+    fireEvent.change(screen.getByPlaceholderText(/channel-name/i), {
+      target: { value: 'copied-channel' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    const slackOption = await screen.findByRole('radio', { name: 'Slack' })
+    expect(slackOption).toHaveAttribute('aria-checked', 'true')
+    await waitFor(() => {
+      expect(screen.getByRole('tab', { name: 'Members (1)' })).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByPlaceholderText('Your Slack App'), {
+      target: { value: 'Evenfire Test App' },
+    })
+    fireEvent.change(screen.getByLabelText('Slack Signing Secret'), {
+      target: { value: 'signing-secret' },
+    })
+    fireEvent.change(screen.getByLabelText('Slack Bot User OAuth Token'), {
+      target: { value: 'xoxb-token' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create channel' }))
+
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalled()
+    })
+
+    const [, , body] = vi.mocked(api.apiSend).mock.calls[0] as [
+      string,
+      string,
+      {
+        spec: {
+          access: { teams: string[]; users: string[] }
+          hostRef: string
+          slackSettings?: { botHandle?: string }
+        }
+      },
+    ]
+    expect(body.spec.hostRef).toBe('agent-a')
+    expect(body.spec.access).toEqual({ teams: ['team-a'], users: ['user-a'] })
+    expect(body.spec.slackSettings?.botHandle).toBe('Evenfire Test App')
   })
 })

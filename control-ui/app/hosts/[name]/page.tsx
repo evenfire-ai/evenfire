@@ -24,6 +24,7 @@ import {
   updateAdminTeamAgents,
   updateAdminUserAgents,
 } from '../../../lib/api'
+import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
 import {
   LLM_PROVIDER_OPTIONS,
   type LlmProvider,
@@ -47,6 +48,15 @@ function parseHostTab(value: string | undefined): HostTab {
   return HOST_TABS.includes(value as HostTab) ? (value as HostTab) : HOST_DEFAULT_TAB
 }
 
+// Cron×stateless: map the machine-readable suspend-blocked reason to
+// operator-friendly text. Every other reason renders verbatim.
+function friendlyLifecycleReason(reason: string): string {
+  if (reason === 'SuspendBlocked: activeCronSchedules') {
+    return 'Not suspending: active scheduled tasks keep this agent awake'
+  }
+  return reason
+}
+
 export default function HostDetailsPage() {
   const params = useParams<{ name: string; tab?: string }>()
   const router = useRouter()
@@ -55,6 +65,15 @@ export default function HostDetailsPage() {
 
   const routeName = decodeURIComponent(params.name || '')
   const mountedRef = useRef(true)
+
+  // AP-6 — resourceVersion of the READ THE EDIT FORM WAS BUILT FROM.
+  // Captured at form load (loadData), NOT from the pre-save re-fetch inside
+  // saveHost: the optimistic-concurrency guard must cover the whole human
+  // edit window. Anchoring it to the pre-save re-fetch would only guard the
+  // milliseconds between that re-fetch and the PUT, silently blessing any
+  // concurrent change that landed while the operator was editing — exactly
+  // the stale-echo overwrite AP-6 exists to prevent.
+  const formResourceVersionRef = useRef('')
 
   const [activeTab, setActiveTab] = useState<HostTab>(() => parseHostTab(params.tab))
   const [busy, setBusy] = useState(false)
@@ -79,6 +98,11 @@ export default function HostDetailsPage() {
   const [approvalToolsData, setApprovalToolsData] = useState<Record<string, boolean> | undefined>(
     undefined
   )
+  const [statelessDraft, setStatelessDraft] = useState(false)
+  const [savedStateless, setSavedStateless] = useState(false)
+  const [lifecycleState, setLifecycleState] = useState('')
+  const [lifecycleReason, setLifecycleReason] = useState('')
+  const [statelessRejectionMessage, setStatelessRejectionMessage] = useState('')
 
   const [availableContexts, setAvailableContexts] = useState<string[]>([])
   const [availableSecrets, setAvailableSecrets] = useState<string[]>([])
@@ -166,6 +190,9 @@ export default function HostDetailsPage() {
       } = detail
       if (!mountedRef.current) return
       const spec = host.spec || {}
+      // AP-6: remember the version of THIS read — the edit drafts below are
+      // built from it, so it is the correct precondition for the eventual save.
+      formResourceVersionRef.current = String(host.metadata?.resourceVersion || '')
       setHostNameDraft(String(host.metadata?.name || routeName))
       setHostDisplayDraft(String(spec.host || host.metadata?.name || routeName))
       setContextRefDraft(String(spec.contextRef || ''))
@@ -184,6 +211,23 @@ export default function HostDetailsPage() {
       )
       const rawTools = (spec.approval as { tools?: Record<string, boolean> } | undefined)?.tools
       setApprovalToolsData(rawTools && typeof rawTools === 'object' ? rawTools : undefined)
+      const specStateless = spec.lifecycle?.stateless === true
+      setStatelessDraft(specStateless)
+      setSavedStateless(specStateless)
+      setLifecycleState(String(host.status?.lifecycle?.state ?? ''))
+      setLifecycleReason(String(host.status?.lifecycle?.reason ?? ''))
+      const rejection = (host.status?.conditions ?? []).find(
+        condition => condition.type === 'StatelessEnableRejected' && condition.status === 'True'
+      )
+      setStatelessRejectionMessage(
+        rejection
+          ? String(
+              rejection.message ||
+                rejection.reason ||
+                'Stateless mode was rejected by the platform.'
+            )
+          : ''
+      )
 
       const contextIds = (contextsList || [])
         .map(item => String(item.spec?.contextId || item.metadata?.name || '').trim())
@@ -210,9 +254,9 @@ export default function HostDetailsPage() {
     void loadData()
   }, [routeName])
 
-  async function saveHost() {
+  async function saveHost(): Promise<boolean> {
     const nextHostName = hostNameDraft.trim()
-    if (!nextHostName) return
+    if (!nextHostName) return false
 
     setBusy(true)
     setError('')
@@ -220,6 +264,8 @@ export default function HostDetailsPage() {
       // Re-fetch to preserve fields that aren't editable in this form. K8s
       // replaceNamespacedCustomObject is a full replace, not a merge.
       const currentHost = await getHost(routeName)
+      const currentLifecycle = currentHost.spec?.lifecycle
+      const currentWorkflowControl = currentHost.spec?.workflowControl
       const nextSpec = {
         ...currentHost.spec,
         host: hostDisplayDraft.trim() || nextHostName,
@@ -230,6 +276,14 @@ export default function HostDetailsPage() {
           provider: providerDraft,
           name: modelNameDraft.trim(),
         },
+        // Echo spec.lifecycle explicitly: the admin facade full-replaces the
+        // spec, so leaving lifecycle implicit would strip the stateless flag.
+        ...(statelessDraft || currentLifecycle
+          ? { lifecycle: { ...currentLifecycle, stateless: statelessDraft } }
+          : {}),
+        ...(channelsDraft.length > 0 && currentWorkflowControl === undefined
+          ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
+          : {}),
       }
 
       if (nextHostName !== routeName) {
@@ -293,7 +347,7 @@ export default function HostDetailsPage() {
           await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`)
           showToast('Agent renamed and updated.', { tone: 'success' })
           router.replace(`/hosts/${encodeURIComponent(nextHostName)}`)
-          return
+          return true
         } catch (renameError) {
           const rollbackErrors: string[] = []
           if (createdNewHost) {
@@ -354,13 +408,36 @@ export default function HostDetailsPage() {
         }
       }
 
+      const formResourceVersion = formResourceVersionRef.current
       await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
+        // AP-6: carry the resourceVersion captured at form load so the API
+        // rejects this save with 409 {error:'conflict'} if the Host changed
+        // while the operator was editing, instead of silently overwriting the
+        // concurrent change with this form's stale echo.
+        ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
         spec: nextSpec,
       })
       await loadData()
       showToast('Agent configuration saved.', { tone: 'success' })
+      return true
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to save agent')
+      const status = (e as { status?: number } | null)?.status
+      const code = (e as { code?: string } | null)?.code
+      if (status === 409 && code === 'conflict') {
+        // AP-6 conflict: the Host changed between the form-load read and this
+        // save. The resourceVersion precondition is whole-object (K8s has no
+        // field-level precondition), so the true cause may be another operator's
+        // edit OR the agent's own lifecycle machine ticking (HCC bumping
+        // status.lifecycle / wake-requested on a stateless host). The 409 carries
+        // no field diff, so the message must cover both causes without asserting
+        // the wrong one — while keeping the reload + re-apply recovery.
+        setError(
+          "This agent changed since you opened the form (another edit, or the agent's own lifecycle state updated). Reload to see the latest, then re-apply your change."
+        )
+      } else {
+        setError(e instanceof Error ? e.message : 'Failed to save agent')
+      }
+      return false
     } finally {
       setBusy(false)
     }
@@ -557,6 +634,11 @@ export default function HostDetailsPage() {
     >
       {activeTab === 'details' && (
         <>
+          {statelessRejectionMessage ? (
+            <div className="cu-banner cu-banner--warning" style={{ marginBottom: '1rem' }}>
+              <strong>Stateless mode rejected:</strong> {statelessRejectionMessage}
+            </div>
+          ) : null}
           <div
             style={{
               display: 'flex',
@@ -567,9 +649,18 @@ export default function HostDetailsPage() {
               marginBottom: '1rem',
             }}
           >
-            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-              Agent configuration and settings.
-            </p>
+            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+              <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
+                Agent configuration and settings.
+              </p>
+              {savedStateless && lifecycleState ? (
+                <span className="cu-chip">
+                  {`Lifecycle: ${lifecycleState}${
+                    lifecycleReason ? ` — ${friendlyLifecycleReason(lifecycleReason)}` : ''
+                  }`}
+                </span>
+              ) : null}
+            </div>
             {!editingOverview && (
               <button
                 type="button"
@@ -651,6 +742,31 @@ export default function HostDetailsPage() {
                 <div className="cu-field__readonly">{modelNameDraft || '-'}</div>
               )}
             </div>
+            <div className="cu-field">
+              <label htmlFor="host-agent-type">Agent type</label>
+              {editingOverview ? (
+                <>
+                  <select
+                    id="host-agent-type"
+                    value={statelessDraft ? 'stateless' : 'stateful'}
+                    onChange={e => setStatelessDraft(e.target.value === 'stateless')}
+                    disabled={busy}
+                  >
+                    <option value="stateful">Stateful (always on)</option>
+                    <option value="stateless">Stateless (suspends when idle)</option>
+                  </select>
+                  <span className="cu-field__hint">
+                    Stateless agents suspend after the idle window and wake on demand. Communication
+                    channels keep stateless agents always-on unless the cluster explicitly enables
+                    wake-on-interaction; desktop still requires a stateful agent.
+                  </span>
+                </>
+              ) : (
+                <div className="cu-field__readonly">
+                  {statelessDraft ? 'Stateless (suspends when idle)' : 'Stateful (always on)'}
+                </div>
+              )}
+            </div>
             <div className="cu-field" style={{ marginBottom: 0 }}>
               <label htmlFor="host-secret">Secret ref</label>
               {editingOverview ? (
@@ -689,8 +805,11 @@ export default function HostDetailsPage() {
                 type="button"
                 className="cu-btn cu-btn--primary"
                 onClick={async () => {
-                  await saveHost()
-                  setEditingOverview(false)
+                  // AP-6: stay in edit mode on failure so the operator's
+                  // draft survives alongside the error/conflict banner.
+                  if (await saveHost()) {
+                    setEditingOverview(false)
+                  }
                 }}
                 disabled={busy || !hostNameDraft.trim()}
               >
@@ -804,8 +923,9 @@ export default function HostDetailsPage() {
                           type="button"
                           className="cu-btn cu-btn--icon cu-btn--toolbar"
                           onClick={async () => {
-                            await saveHost()
-                            setEditingContext(false)
+                            if (await saveHost()) {
+                              setEditingContext(false)
+                            }
                           }}
                           disabled={busy}
                           aria-label="Save context"

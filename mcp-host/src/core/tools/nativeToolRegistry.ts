@@ -7,6 +7,7 @@ import {
 } from '../../capabilities/toolCatalogTools'
 import { buildGfsReadTools, buildGfsWriteTools } from '../../internalTools/gfs'
 import { createGfscClient, hasGfsRuntimeAccess } from '../../internalTools/gfsClient'
+import type { LlmProvider } from '../../llm/registryCore'
 import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
 import { INTERNAL_TOOLS, getOutputDir, resolveInternalTools } from '../../workflow/internalTools'
@@ -148,7 +149,12 @@ export class NativeToolRegistry implements ToolRegistry {
     // of clerum__tool_search). Constant per host/session, so it is cache-safe.
     // Appended as a trailing optional so existing positional call sites stay
     // valid; only taskExecutor passes it.
-    dynamicToolsEnabled?: boolean
+    dynamicToolsEnabled?: boolean,
+    // §13 (stateless agents): the ACTIVE LLM provider steers shell_exec
+    // credential-slot stripping — only the active provider's credential env
+    // var survives into the child env. Appended as a trailing optional so
+    // existing positional call sites stay valid; only taskExecutor passes it.
+    activeLlmProvider?: LlmProvider
   ) {
     // file_read/file_write are scoped to the per-user root when a ScopedWorkspace
     // is wired (F1c) — they operate on a raw path string, not the Workspace
@@ -174,7 +180,8 @@ export class NativeToolRegistry implements ToolRegistry {
         config.workspacePath,
         config.shellTimeout,
         config.envAllowlist,
-        dynamicEnvProvider
+        dynamicEnvProvider,
+        activeLlmProvider
       )
     )
     this.register(new HttpRequestTool(config.httpAllowlist))
@@ -190,7 +197,9 @@ export class NativeToolRegistry implements ToolRegistry {
     }
 
     if (cronScheduler) {
-      this.register(new CronManageTool(cronScheduler, sourceMessage))
+      this.register(
+        new CronManageTool(cronScheduler, sourceMessage, config.statelessLifecycle === true)
+      )
     }
 
     const gfsEnv = {

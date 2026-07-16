@@ -4,7 +4,8 @@ import type { CredentialField } from './types'
  * Credential keys that can be stored on a CommunicationChannel credential
  * Secret. Keys MUST match the values accepted by control-api's per-CC
  * credentials route. Runtime readers currently consume Telegram bot token,
- * Slack Bot User OAuth token, Slack Signing Secret, and email credentials.
+ * Slack Bot User OAuth token, Slack Signing Secret, Teams bot password, and
+ * email credentials.
  */
 export const CHANNEL_CREDENTIAL_FIELDS: CredentialField[] = [
   {
@@ -28,6 +29,14 @@ export const CHANNEL_CREDENTIAL_FIELDS: CredentialField[] = [
     placeholder: 'xoxb-…',
     helpText:
       'Required after the app is installed in the workspace. Used to read and send messages.',
+  },
+  {
+    channelType: 'teams',
+    key: 'teams-app-password',
+    label: 'CLIENT_SECRET',
+    placeholder: 'CLIENT_SECRET',
+    helpText:
+      'Use the CLIENT_SECRET value from the generated .env file, not a Microsoft secret ID.',
   },
   {
     channelType: 'email',

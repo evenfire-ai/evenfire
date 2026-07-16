@@ -27,8 +27,8 @@ describe('compaction ↔ durable transcript invariant (FU2, spec §8 "does not a
     const manager = new ConversationManager()
     const conv = await manager.getOrCreate('user-fu2')
     for (let i = 1; i <= count; i++) {
-      manager.startTurn(conv, `User message ${i}`, `task-${i}`)
-      manager.completeTurn(conv, `Assistant response ${i}`)
+      await manager.startTurn(conv, `User message ${i}`, `task-${i}`)
+      await manager.completeTurn(conv, `Assistant response ${i}`)
     }
     return { manager, conv }
   }

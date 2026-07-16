@@ -12,7 +12,20 @@ function typeLabel(conversation: CommunicationChannelConversation): string {
   if (conversation.chatType === 'supergroup') return 'Supergroup'
   if (conversation.chatType === 'group') return 'Group'
   if (conversation.chatType === 'private') return 'Private chat'
+  if (conversation.conversationType === 'personal') return 'Personal chat'
+  if (conversation.conversationType === 'groupChat') return 'Group chat'
+  if (conversation.conversationType === 'channel') return 'Channel'
+  if (conversation.conversationType === 'private_channel') return 'Private channel'
+  if (conversation.conversationType === 'im') return 'Direct message'
+  if (conversation.conversationType === 'mpim') return 'Group direct message'
+  if (conversation.provider === 'teams') return 'Teams conversation'
   return conversation.provider === 'telegram' ? 'Telegram chat' : 'Slack conversation'
+}
+
+function providerLabel(provider: CommunicationChannelConversation['provider']): string {
+  if (provider === 'telegram') return 'Telegram'
+  if (provider === 'slack') return 'Slack'
+  return 'Teams'
 }
 
 function displayName(conversation: CommunicationChannelConversation): string {
@@ -62,7 +75,7 @@ export function CommunicationChannelConversationsTable({
             const key = conversationKey(conversation, index)
             return (
               <tr key={key}>
-                <td>{conversation.provider === 'telegram' ? 'Telegram' : 'Slack'}</td>
+                <td>{providerLabel(conversation.provider)}</td>
                 <td>{typeLabel(conversation)}</td>
                 <td>
                   <span className="cu-channel-conversations-table__name">

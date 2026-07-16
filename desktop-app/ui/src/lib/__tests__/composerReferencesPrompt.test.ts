@@ -30,6 +30,14 @@ describe('composer references prompt helpers', () => {
         kind: 'file',
         label: 'assets/invite.png',
       },
+      {
+        id: 'global-file:report',
+        type: 'global_file',
+        resourceId: 'resource-1',
+        drive: 'main',
+        gfsUri: 'gfs://main/0123456789abcdef',
+        label: 'quarterly-report.pdf',
+      },
     ]
 
     const prompt = buildComposerReferencesPromptSection(references)
@@ -40,6 +48,8 @@ describe('composer references prompt helpers', () => {
     expect(prompt).toContain('prefix before "__" exactly matches')
     expect(prompt).toContain('Agent Files: assets/invite.png')
     expect(prompt).toContain('clerum__context_files_read')
+    expect(prompt).toContain('Global Files: quarterly-report.pdf (gfs://main/0123456789abcdef)')
+    expect(prompt).toContain('clerum__gfs_resolve')
   })
 
   it('leaves request content unchanged when no references are attached', () => {

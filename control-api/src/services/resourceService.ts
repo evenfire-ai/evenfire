@@ -6,13 +6,32 @@ import {
   ClerumResourceType,
   ResourceListResponse,
 } from '../types.js'
-import { addNonEmpty, extractK8sStatus, kindFromPlural } from './resourceServiceHelpers.js'
+import {
+  addNonEmpty,
+  extractK8sStatus,
+  kindFromPlural,
+  parseProjectedGeneration,
+} from './resourceServiceHelpers.js'
 
 export class K8sNotFoundError extends Error {
   readonly httpStatus = 404
   constructor(message: string) {
     super(message)
     this.name = 'K8sNotFoundError'
+  }
+}
+
+/**
+ * AP-6 (docs/architecture/stateless-invariants.md): the caller supplied the
+ * resourceVersion it READ and the object changed since that read. Retrying
+ * would re-apply the same stale payload over the concurrent write, so the
+ * conflict is surfaced to the caller instead of being retried away.
+ */
+export class K8sConflictError extends Error {
+  readonly httpStatus = 409
+  constructor(message: string) {
+    super(message)
+    this.name = 'K8sConflictError'
   }
 }
 
@@ -29,6 +48,36 @@ type ResourceMutation = {
   metadata?: { labels?: Record<string, string>; annotations?: Record<string, string> }
   spec: Record<string, unknown>
 } | null
+
+/** Annotation keys under this prefix are platform-owned write-only projections. */
+const PLATFORM_ANNOTATION_PREFIX = 'clerum.io/'
+
+/**
+ * Merge annotations for a full-replace write (updateResource/mutateResource).
+ *
+ * - `incoming === undefined` — the caller did not touch annotations: the
+ *   server's current map survives verbatim (legacy behavior).
+ * - `incoming` provided — caller-owned keys keep replace semantics (the
+ *   incoming map wins per key, omission clears), but platform-owned
+ *   `clerum.io/*` keys present on the server are re-added unless the caller
+ *   EXPLICITLY sets that exact key. Platform annotations are write-only
+ *   projections owned by control-api/HCC (e.g. `clerum.io/wake-requested`,
+ *   see hostWakeService.ts) — an admin PUT that happens to carry an
+ *   annotations map must never erase them (AP-6 companion fix).
+ */
+export function mergeAnnotationsForReplace(
+  current: Record<string, string> | undefined,
+  incoming: Record<string, string> | undefined
+): Record<string, string> | undefined {
+  if (incoming === undefined) return current
+  const merged: Record<string, string> = { ...incoming }
+  for (const [key, value] of Object.entries(current ?? {})) {
+    if (key.startsWith(PLATFORM_ANNOTATION_PREFIX) && !(key in incoming)) {
+      merged[key] = value
+    }
+  }
+  return merged
+}
 
 export class ResourceService {
   // Allowed namespaces derived from config at construction time.
@@ -174,13 +223,31 @@ export class ResourceService {
     plural: ClerumResourceType,
     name: string,
     body: {
-      metadata?: { labels?: Record<string, string>; annotations?: Record<string, string> }
+      metadata?: {
+        labels?: Record<string, string>
+        annotations?: Record<string, string>
+        /**
+         * AP-6 — reader's-version precondition. When present, this is the
+         * resourceVersion the CALLER READ (e.g. the version the control-ui
+         * edit form was built from). It is used as the replace precondition
+         * INSTEAD of the server's current version, and a 409 surfaces as
+         * K8sConflictError without retrying: re-reading only to re-apply the
+         * same stale payload is the lost-update bug optimistic concurrency
+         * exists to prevent. When absent, legacy last-write-wins behavior is
+         * preserved (server-version precondition + bounded retry) for
+         * API-only callers that intentionally replace whatever is current.
+         */
+        resourceVersion?: string
+      }
       spec: Record<string, unknown>
     },
     namespace?: string
   ): Promise<unknown> {
     const ns = this.resolveNamespace(plural, namespace)
-    const maxAttempts = 3
+    const readerResourceVersion = body.metadata?.resourceVersion || undefined
+    // With a reader-supplied precondition a retry can never succeed with the
+    // same payload, so the loop collapses to a single attempt.
+    const maxAttempts = readerResourceVersion ? 1 : 3
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const current = (await this.getResource(plural, name, ns)) as {
         metadata?: {
@@ -190,6 +257,10 @@ export class ResourceService {
         }
       }
 
+      const annotations = mergeAnnotationsForReplace(
+        current.metadata?.annotations,
+        body.metadata?.annotations
+      )
       const resource: ClerumResource = {
         apiVersion: `${CLERUM_GROUP}/${CLERUM_VERSION}`,
         kind: kindFromPlural(plural),
@@ -198,8 +269,7 @@ export class ResourceService {
           namespace: ns,
           ...(current.metadata?.labels && { labels: current.metadata.labels }),
           ...(body.metadata?.labels && { labels: body.metadata.labels }),
-          ...(current.metadata?.annotations && { annotations: current.metadata.annotations }),
-          ...(body.metadata?.annotations && { annotations: body.metadata.annotations }),
+          ...(annotations && { annotations }),
         },
         spec: body.spec,
       }
@@ -215,18 +285,165 @@ export class ResourceService {
             ...resource,
             metadata: {
               ...resource.metadata,
-              resourceVersion: current.metadata?.resourceVersion,
+              resourceVersion: readerResourceVersion ?? current.metadata?.resourceVersion,
             },
           },
         })
       } catch (err) {
-        if (extractK8sStatus(err) === 409 && attempt < maxAttempts) {
-          continue
+        if (extractK8sStatus(err) === 409) {
+          if (readerResourceVersion) {
+            throw new K8sConflictError(
+              `${plural}/${name} changed since it was read (stale resourceVersion ${readerResourceVersion})`
+            )
+          }
+          if (attempt < maxAttempts) {
+            continue
+          }
         }
         throw err
       }
     }
     throw new Error(`Failed to update ${plural}/${name} after ${maxAttempts} attempts`)
+  }
+
+  /**
+   * Merge-patch ONLY metadata.annotations of a custom object.
+   *
+   * Unlike updateResource/mutateResource this is a single server-side JSON
+   * merge patch: no read-modify-write, no resourceVersion, no retry loop —
+   * concurrent full replaces (e.g. the admin facade) cannot clobber it and it
+   * cannot clobber them. Used for write-only annotation projections such as
+   * `clerum.io/wake-requested`.
+   */
+  async patchResourceAnnotations(
+    plural: ClerumResourceType,
+    name: string,
+    annotations: Record<string, string>,
+    namespace?: string
+  ): Promise<unknown> {
+    const ns = this.resolveNamespace(plural, namespace)
+    try {
+      return await this.customApi.patchNamespacedCustomObject(
+        {
+          group: CLERUM_GROUP,
+          version: CLERUM_VERSION,
+          namespace: ns,
+          plural,
+          name,
+          body: { metadata: { annotations } },
+        },
+        k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch)
+      )
+    } catch (err) {
+      if (extractK8sStatus(err) === 404) {
+        throw new K8sNotFoundError(`${plural}/${name} not found in namespace ${ns}`)
+      }
+      throw err
+    }
+  }
+
+  /**
+   * Monotonically project a single numeric annotation whose value must never
+   * regress under concurrent writers.
+   *
+   * Why this exists (and why a blind `patchResourceAnnotations` merge patch is
+   * unsafe here): the wake generation is a strictly monotonic counter in
+   * Postgres (the source of truth). The annotation is only a WRITE-ONLY
+   * PROJECTION of that counter for HCC to observe. A blind merge patch carries
+   * no ordering guarantee — with coalesce-window = 0 or control-api replicas
+   * > 1, a slower gen=5 patch can land AFTER a faster gen=6 patch and REGRESS
+   * the projected annotation. HCC advances `wakeHandledGeneration` up to the
+   * value it observes; a regressed projection can briefly exceed the projected
+   * value and SUPPRESS a later legitimate wake event. Bounded (the host still
+   * wakes via resync) but it violates the "strictly monotonic projection"
+   * invariant this projection is supposed to uphold.
+   *
+   * Fix: max-semantics with an optimistic-concurrency precondition.
+   *   - Read the current projected value. If it is already >= the new
+   *     generation, do NOT patch (never regress).
+   *   - Otherwise merge-patch the annotation WITH the object's
+   *     `metadata.resourceVersion` as a precondition. The apiserver rejects
+   *     the patch with 409 if the object changed since the read; on 409 we
+   *     re-read and re-evaluate max-semantics, which also lets a concurrent
+   *     higher-generation write win the race.
+   * The generation itself always comes from Postgres — this method only
+   * decides WHETHER (and with which precondition) to project it.
+   */
+  async patchAnnotationMonotonic(
+    plural: ClerumResourceType,
+    name: string,
+    annotationKey: string,
+    generation: number,
+    namespace?: string
+  ): Promise<unknown> {
+    if (!Number.isFinite(generation) || generation < 0 || !Number.isInteger(generation)) {
+      throw new Error(
+        `patchAnnotationMonotonic: generation must be a non-negative integer, got ${generation}`
+      )
+    }
+    const ns = this.resolveNamespace(plural, namespace)
+    const maxAttempts = 5
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const current = (await this.getResource(plural, name, ns)) as {
+        metadata?: {
+          annotations?: Record<string, string>
+          resourceVersion?: string
+        }
+      }
+      const projected = parseProjectedGeneration(current.metadata?.annotations?.[annotationKey])
+      if (projected !== null && projected >= generation) {
+        // The annotation already projects an equal-or-higher generation.
+        // Patching would regress (lower value) or be a no-op (equal value):
+        // in both cases skip, preserving the monotonic invariant.
+        return current
+      }
+
+      const resourceVersion = current.metadata?.resourceVersion
+      if (!resourceVersion) {
+        // Fail loud: without a resourceVersion we cannot enforce the
+        // optimistic-concurrency precondition, so a blind patch could regress
+        // the projection — exactly the bug this method exists to prevent.
+        throw new Error(
+          `patchAnnotationMonotonic: ${plural}/${name} has no metadata.resourceVersion; cannot project ${annotationKey} safely`
+        )
+      }
+
+      try {
+        // metadata.resourceVersion in a merge-patch body is honored by the
+        // apiserver as an optimistic-concurrency precondition: the patch is
+        // rejected with 409 if the object changed since the read above.
+        return await this.customApi.patchNamespacedCustomObject(
+          {
+            group: CLERUM_GROUP,
+            version: CLERUM_VERSION,
+            namespace: ns,
+            plural,
+            name,
+            body: {
+              metadata: {
+                resourceVersion,
+                annotations: { [annotationKey]: String(generation) },
+              },
+            },
+          },
+          k8s.setHeaderOptions('Content-Type', k8s.PatchStrategy.MergePatch)
+        )
+      } catch (err) {
+        const status = extractK8sStatus(err)
+        if (status === 404) {
+          throw new K8sNotFoundError(`${plural}/${name} not found in namespace ${ns}`)
+        }
+        if (status === 409 && attempt < maxAttempts) {
+          // The object changed under us (concurrent projection or unrelated
+          // metadata write). Re-read and re-evaluate max-semantics.
+          continue
+        }
+        throw err
+      }
+    }
+    throw new Error(
+      `patchAnnotationMonotonic: failed to project ${annotationKey}=${generation} onto ${plural}/${name} after ${maxAttempts} attempts`
+    )
   }
 
   async mutateResource(
@@ -244,6 +461,12 @@ export class ResourceService {
         return current
       }
 
+      // Same per-key merge as updateResource: platform-owned clerum.io/*
+      // annotations survive unless the mutation explicitly sets that key.
+      const annotations = mergeAnnotationsForReplace(
+        current.metadata?.annotations,
+        next.metadata?.annotations
+      )
       const resource: ClerumResource = {
         apiVersion: `${CLERUM_GROUP}/${CLERUM_VERSION}`,
         kind: kindFromPlural(plural),
@@ -252,8 +475,7 @@ export class ResourceService {
           namespace: ns,
           ...(current.metadata?.labels && { labels: current.metadata.labels }),
           ...(next.metadata?.labels && { labels: next.metadata.labels }),
-          ...(current.metadata?.annotations && { annotations: current.metadata.annotations }),
-          ...(next.metadata?.annotations && { annotations: next.metadata.annotations }),
+          ...(annotations && { annotations }),
         },
         spec: next.spec,
       }

@@ -2166,3 +2166,48 @@ describe('recipe OAuth broker token', () => {
     ).toBe(BROKER_PATH)
   })
 })
+
+// ─── PriorityClass (three-tier scheme, stateless agents) ────────────
+
+describe('priorityClassName — clerum-batch on non-transport workloads', () => {
+  it('buildJob sets clerum-batch on the pod template', () => {
+    const w: JobDef = { id: 'migrate', type: 'job', image: 'migrate:latest' }
+    const job = buildJob(w, makeRecipe())
+    expect(job.spec?.template.spec?.priorityClassName).toBe('clerum-batch')
+  })
+
+  it('buildCronJob sets clerum-batch on the job pod template', () => {
+    const w: CronJobDef = { id: 'backup', type: 'cronjob', image: 'pg:15', schedule: '0 2 * * *' }
+    const cj = buildCronJob(w, makeRecipe())
+    expect(cj.spec?.jobTemplate.spec?.template.spec?.priorityClassName).toBe('clerum-batch')
+  })
+
+  it('buildDeployment (sandbox, no transport) sets clerum-batch', () => {
+    const w: DeploymentDef = { id: 'app', type: 'deployment', image: 'app:latest' }
+    const dep = buildDeployment(w, makeRecipe())
+    expect(dep.spec?.template.spec?.priorityClassName).toBe('clerum-batch')
+  })
+
+  it('buildStatefulSet (sandbox, no transport) sets clerum-batch', () => {
+    const w: StatefulSetDef = { id: 'db', type: 'statefulset', image: 'postgres:16-alpine' }
+    const { statefulSet } = buildStatefulSet(w, makeRecipe())
+    expect(statefulSet.spec?.template.spec?.priorityClassName).toBe('clerum-batch')
+  })
+
+  it('buildDaemonSet (sandbox, no transport) sets clerum-batch', () => {
+    const w: DaemonSetDef = { id: 'agent', type: 'daemonset', image: 'agent:latest' }
+    const ds = buildDaemonSet(w, makeRecipe())
+    expect(ds.spec?.template.spec?.priorityClassName).toBe('clerum-batch')
+  })
+
+  it('transport (MCP serving) workloads stay UNCLASSED — priority 0 service tier', () => {
+    const w: DeploymentDef = {
+      id: 'mcp',
+      type: 'deployment',
+      image: 'mcp:latest',
+      transport: { type: 'streamableHttp' },
+    }
+    const dep = buildDeployment(w, makeRecipe())
+    expect(dep.spec?.template.spec?.priorityClassName).toBeUndefined()
+  })
+})

@@ -18,6 +18,7 @@ import {
   updateAgentUsers,
 } from '@/lib/api'
 import { cn } from '@/lib/cn'
+import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '@/lib/hostWorkflowControl'
 import {
   LLM_PROVIDER_OPTIONS,
   type LlmProvider,
@@ -50,7 +51,7 @@ const CHANNEL_PROVIDER_OPTIONS: Array<{ value: ChannelProvider; label: string; m
 function createNewChannelDraft(): NewChannelDraft {
   return {
     slackBotHandle: '',
-    slackReplyOnlyWhenMentioned: false,
+    slackReplyOnlyWhenMentioned: true,
     slackReplyInThreads: false,
     telegramBotHandle: '',
     telegramReplyOnlyWhenMentioned: true,
@@ -307,6 +308,7 @@ export function HostWizard({
 
   const [provider, setProvider] = useState<LlmProvider>('openai')
   const [modelName, setModelName] = useState(getDefaultModel('openai'))
+  const [stateless, setStateless] = useState(false)
   const [users, setUsers] = useState<
     Array<{ id: string; email: string; name: string | null; displayName: string | null }>
   >([])
@@ -702,6 +704,7 @@ export function HostWizard({
     setZaiApiKey('')
     setProvider('openai')
     setModelName(getDefaultModel('openai'))
+    setStateless(false)
     setSelectedUserIds([])
     setSelectedTeamIds([])
     setAccessTab('members')
@@ -849,6 +852,10 @@ export function HostWizard({
               provider,
               name: modelName,
             },
+            ...(stateless ? { lifecycle: { stateless: true } } : {}),
+            ...(channelRefs.length > 0
+              ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
+              : {}),
           },
         },
         {
@@ -861,15 +868,17 @@ export function HostWizard({
               provider,
               name: modelName,
             },
+            ...(stateless ? { lifecycle: { stateless: true } } : {}),
+            ...(channelRefs.length > 0
+              ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
+              : {}),
           },
         }
       )
 
       // Associate authorized users and teams with the new agent in a single
       // atomic call each, rather than looping N×(GET+PUT) per selection.
-      // Uses the agent-centric endpoints PUT /admin/agents/:name/users|teams
-      // added as part of the incident fix. See:
-      //   .local-notes/incident-403-user-agents-authorization-gap.md
+      // Uses the agent-centric endpoints PUT /admin/agents/:name/users|teams.
       if (selectedUserIds.length > 0) {
         await updateAgentUsers(normalizedHostName, selectedUserIds)
       }
@@ -942,6 +951,48 @@ export function HostWizard({
               </span>
             </Field>
             <div className="cu-agent-namespace">Namespace: {HOST_NAMESPACE}</div>
+            <div className="cu-agent-access-section">
+              <strong id="agent-type-label">Agent type</strong>
+              <span className="cu-muted cu-agent-access-hint">
+                Stateless agents suspend after the idle window and wake on demand. Communication
+                channels keep stateless agents always-on unless the cluster explicitly enables
+                wake-on-interaction; desktop still requires a stateful agent.
+              </span>
+              <div
+                className="cu-agent-radio-group"
+                role="radiogroup"
+                aria-labelledby="agent-type-label"
+              >
+                <label className="cu-agent-radio cu-agent-radio--card">
+                  <input
+                    type="radio"
+                    name="agent-type"
+                    checked={!stateless}
+                    onChange={() => setStateless(false)}
+                  />
+                  <span className="cu-agent-radio__copy">
+                    <span className="cu-agent-radio__title">Stateful (always on)</span>
+                    <span className="cu-agent-radio__description">
+                      The agent keeps running continuously and responds immediately.
+                    </span>
+                  </span>
+                </label>
+                <label className="cu-agent-radio cu-agent-radio--card">
+                  <input
+                    type="radio"
+                    name="agent-type"
+                    checked={stateless}
+                    onChange={() => setStateless(true)}
+                  />
+                  <span className="cu-agent-radio__copy">
+                    <span className="cu-agent-radio__title">Stateless (suspends when idle)</span>
+                    <span className="cu-agent-radio__description">
+                      The platform suspends the agent when idle and wakes it on demand.
+                    </span>
+                  </span>
+                </label>
+              </div>
+            </div>
             <div className="cu-agent-info-card">
               <IconInfoCircle width={16} height={16} />
               <div>

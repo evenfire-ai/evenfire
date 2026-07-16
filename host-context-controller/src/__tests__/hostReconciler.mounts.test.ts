@@ -78,22 +78,55 @@ const CHANNEL_READER_DECISION_KEY = 'mcp-host-workflow-approval-decision-token'
 const CHANNEL_READER_ACTIVITY_KEY = 'mcp-host-activity-token'
 const CHANNEL_READER_CRON_READ_KEY = 'mcp-host-cron-read-token'
 const CHANNEL_READER_CRON_ACK_KEY = 'mcp-host-cron-ack-token'
+const BOOTSTRAP_STATE_KEY = 'clerum.io/' + ['runtime', 'token', 'bootstrap', 'state'].join('-')
+
+type BootstrapOptions = {
+  forceFreshForWake?: boolean
+  targetSuspended?: boolean
+}
+
+type RuntimeTokenProvision = {
+  revision: string
+  scopeHash: string
+}
 
 function b64(value: string): string {
   return Buffer.from(value, 'utf8').toString('base64')
 }
 
-function runtimeSecret(host = makeHost(), annotations: Record<string, string> = {}): k8s.V1Secret {
+function b64url(value: string): string {
+  return Buffer.from(value, 'utf8').toString('base64url')
+}
+
+/** Unsigned-looking JWT with a numeric `exp` claim -- HCC only decodes, never verifies. */
+function fakeJwt(expEpochSec: number): string {
+  const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
+  const payload = b64url(JSON.stringify({ exp: expEpochSec }))
+  return `${header}.${payload}.fake-signature`
+}
+
+const FAR_FUTURE_EXP_SEC = Math.floor(Date.parse('2999-01-01T00:00:00.000Z') / 1000)
+
+function runtimeSecret(
+  host = makeHost(),
+  annotations: Record<string, string> = {},
+  refreshToken: string = fakeJwt(FAR_FUTURE_EXP_SEC)
+): k8s.V1Secret {
   return {
     metadata: {
       name: `host-${host.name}-mcp-host-runtime-tokens`,
       namespace: host.namespace,
       resourceVersion: 'rv-1',
+      labels: {
+        'clerum.io/managed-by': 'host-context-controller',
+        'clerum.io/host': host.name,
+        'clerum.io/component': 'mcp-host-runtime-token',
+      },
       annotations,
     },
     data: {
       [ACCESS_KEY]: b64('runtime-access-existing'),
-      [REFRESH_KEY]: b64('runtime-refresh-existing'),
+      [REFRESH_KEY]: b64(refreshToken),
       [CONTROL_KEY]: b64('workflow-control-existing'),
       [GFS_KEY]: b64('gfs-runtime-existing'),
     },
@@ -152,11 +185,13 @@ function runtimeSecretAnnotations(host = makeHost(), refreshBefore = '2999-01-01
 function deploymentWithRevision(
   revision: string,
   readyReplicas = 1,
-  annotations: Record<string, string> = {}
+  annotations: Record<string, string> = {},
+  replicas = 1
 ): k8s.V1Deployment {
   return {
     metadata: { name: 'team-mission', namespace: 'mcp-host' },
     spec: {
+      replicas,
       template: {
         metadata: {
           annotations: { ...annotations, 'clerum.io/runtime-token-revision': revision },
@@ -262,16 +297,19 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
-    expect(result).toBe('deployed-revision')
+    expect(result.revision).toBe('deployed-revision')
     expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
     expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
   })
 
-  it('rolls a degraded deployment forward to the current Secret revision without issuing again', async () => {
+  it('keeps a matching fresh bootstrap stable while booting, then marks it consumed when Ready', async () => {
+    // A fresh Secret already matches the Deployment template. Reconciles while
+    // that Pod is still becoming Ready must not mint again and trigger another
+    // ReplicaSet, or a RWO workspace can remain in a rollout loop.
     const host = makeHost()
     const secret = runtimeSecret(host, runtimeSecretAnnotations(host))
     const helper = HostReconciler as unknown as {
@@ -280,21 +318,35 @@ describe('HostReconciler runtime credential Secret revision', () => {
       ) => string | null
     }
     const currentSecretRevision = helper.runtimeTokenSecretRevisionFromSecret(secret)
+    const deployment = deploymentWithRevision(currentSecretRevision!, 0)
+    secret.metadata!.annotations![BOOTSTRAP_STATE_KEY] = 'fresh'
     const { reconciler, coreApi } = runtimeSecretReconciler({
       secret,
-      deployment: deploymentWithRevision('older-deployed-revision', 0),
+      deployment,
     })
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
-    expect(result).toBe(currentSecretRevision)
-    expect(result).toMatch(/^[a-f0-9]{64}$/)
+    expect(result.revision).toBe(currentSecretRevision)
     expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
     expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+
+    deployment.status!.readyReplicas = 1
+    await (
+      reconciler as unknown as {
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
+      }
+    ).ensureMcpHostRuntimeTokenSecret(host)
+
+    expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
+    expect(replacedRuntimeSecret(coreApi).metadata?.annotations?.[BOOTSTRAP_STATE_KEY]).toBe(
+      'consumed'
+    )
   })
 
   it('refreshes bootstrap credentials without rolling a healthy deployment', async () => {
@@ -306,11 +358,11 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
-    expect(result).toBe('deployed-revision')
+    expect(result.revision).toBe('deployed-revision')
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
     expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
     const replaceBody = replacedRuntimeSecret(coreApi)
@@ -320,8 +372,71 @@ describe('HostReconciler runtime credential Secret revision', () => {
     expect(
       replaceBody.metadata?.annotations?.['clerum.io/runtime-token-refresh-before']
     ).toBeDefined()
+    expect(replaceBody.metadata?.annotations?.['clerum.io/runtime-token-rollout-required']).toBe(
+      'false'
+    )
     expect(replaceBody.metadata?.annotations?.['clerum.io/gfs-token-refresh-before']).toBeDefined()
     expect(replaceBody.stringData?.[GFS_KEY]).toBe('gfs-runtime-value')
+  })
+
+  it('preserves a pending rollout across retries and clears it after the Deployment converges', async () => {
+    const host = makeHost()
+    const secret = runtimeSecret(host, {
+      ...runtimeSecretAnnotations(host),
+      [BOOTSTRAP_STATE_KEY]: 'fresh',
+      'clerum.io/runtime-token-rollout-required': 'true',
+    })
+    const helper = HostReconciler as unknown as {
+      runtimeTokenSecretRevisionFromSecret: (value: k8s.V1Secret) => string | null
+    }
+    const secretRevision = helper.runtimeTokenSecretRevisionFromSecret(secret)!
+    const deployment = deploymentWithRevision('pre-scope-revision')
+    const { reconciler, coreApi } = runtimeSecretReconciler({ secret, deployment })
+    const internals = reconciler as unknown as {
+      ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
+    }
+
+    const retryResult = await internals.ensureMcpHostRuntimeTokenSecret(host)
+
+    expect(retryResult.revision).toBe(secretRevision)
+    expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
+    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+
+    deployment.spec!.template.metadata!.annotations!['clerum.io/runtime-token-revision'] =
+      secretRevision
+    const convergedResult = await internals.ensureMcpHostRuntimeTokenSecret(host)
+
+    expect(convergedResult.revision).toBe(secretRevision)
+    const consumed = replacedRuntimeSecret(coreApi)
+    expect(consumed.metadata?.annotations?.[BOOTSTRAP_STATE_KEY]).toBe('consumed')
+    expect(consumed.metadata?.annotations?.['clerum.io/runtime-token-rollout-required']).toBe(
+      'false'
+    )
+  })
+
+  it('treats a legacy fresh Secret newer than the Deployment as rollout pending', async () => {
+    const host = makeHost()
+    const secret = runtimeSecret(host, {
+      ...runtimeSecretAnnotations(host),
+      [BOOTSTRAP_STATE_KEY]: 'fresh',
+    })
+    const helper = HostReconciler as unknown as {
+      runtimeTokenSecretRevisionFromSecret: (value: k8s.V1Secret) => string | null
+    }
+    const secretRevision = helper.runtimeTokenSecretRevisionFromSecret(secret)!
+    const { reconciler } = runtimeSecretReconciler({
+      secret,
+      deployment: deploymentWithRevision('legacy-deployment-revision'),
+    })
+
+    const result = await (
+      reconciler as unknown as {
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
+      }
+    ).ensureMcpHostRuntimeTokenSecret(host)
+
+    expect(result.revision).toBe(secretRevision)
+    expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
   })
 
   it('refreshes an expiring mounted gfs credential without rolling a healthy deployment', async () => {
@@ -336,21 +451,22 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
-    expect(result).toBe('deployed-revision')
+    expect(result.revision).toBe('deployed-revision')
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
     expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
     expect(replacedRuntimeSecret(coreApi).stringData?.[GFS_KEY]).toBe('gfs-runtime-value')
   })
 
-  it('does not re-issue an unconsumed fresh bootstrap Secret for a healthy deployment', async () => {
+  it('retains fresh bootstrap until a matching Deployment is Ready', async () => {
     const host = makeHost()
     const secret = runtimeSecret(host, {
       ...runtimeSecretAnnotations(host, '2000-01-01T00:00:00.000Z'),
       'clerum.io/runtime-token-refresh-expires-at': '2999-01-01T00:00:00.000Z',
+      [BOOTSTRAP_STATE_KEY]: 'fresh',
     })
     const { reconciler, coreApi } = runtimeSecretReconciler({
       secret,
@@ -359,11 +475,11 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
-    expect(result).toBe('deployed-revision')
+    expect(result.revision).toBe('deployed-revision')
     expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
     expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
   })
@@ -390,7 +506,7 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
@@ -399,8 +515,8 @@ describe('HostReconciler runtime credential Secret revision', () => {
       replaceBody.metadata?.annotations?.['clerum.io/runtime-token-secret-revision']
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
     expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
-    expect(result).toBe(newRevision)
-    expect(result).not.toBe(currentSecretRevision)
+    expect(result.revision).toBe(newRevision)
+    expect(result.revision).not.toBe(currentSecretRevision)
   })
 
   it('re-issues an unconsumed bootstrap Secret after its refresh token expires', async () => {
@@ -416,11 +532,11 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
-    expect(result).toBe('deployed-revision')
+    expect(result.revision).toBe('deployed-revision')
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
     expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
   })
@@ -434,15 +550,15 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
     const replaceBody = replacedRuntimeSecret(coreApi)
     const newRevision =
       replaceBody.metadata?.annotations?.['clerum.io/runtime-token-secret-revision']
-    expect(result).toBe(newRevision)
-    expect(result).toMatch(/^[a-f0-9]{64}$/)
+    expect(result.revision).toBe(newRevision)
+    expect(result.revision).toMatch(/^[a-f0-9]{64}$/)
   })
 
   it('forces rollout when runtime token contract metadata changes', async () => {
@@ -458,7 +574,7 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
@@ -467,14 +583,18 @@ describe('HostReconciler runtime credential Secret revision', () => {
     const replaceBody = replacedRuntimeSecret(coreApi)
     const newRevision =
       replaceBody.metadata?.annotations?.['clerum.io/runtime-token-secret-revision']
-    expect(result).toBe(newRevision)
-    expect(result).not.toBe('deployed-revision')
+    expect(result.revision).toBe(newRevision)
+    expect(result.revision).not.toBe('deployed-revision')
     expect(replaceBody.metadata?.annotations?.['clerum.io/runtime-token-issuer']).toBe(
       'control-api'
     )
   })
 
-  it('rolls current runtime Secret revision when the Deployment is missing', async () => {
+  it('mints a fresh runtime Secret when the Deployment is missing', async () => {
+    // No Deployment -> the full reconcile creates it and a brand-new pod boots
+    // and reads its bootstrap refresh token from this Secret. That token must
+    // be freshly minted and un-revoked, so an exp-based reuse of the existing
+    // (possibly-rotated-and-revoked) Secret is unsafe here.
     const host = makeHost()
     const secret = runtimeSecret(host, runtimeSecretAnnotations(host))
     const helper = HostReconciler as unknown as {
@@ -490,13 +610,18 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
-    expect(result).toBe(currentSecretRevision)
-    expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
-    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
+    const newRevision =
+      replacedRuntimeSecret(coreApi).metadata?.annotations?.[
+        'clerum.io/runtime-token-secret-revision'
+      ]
+    expect(result.revision).toBe(newRevision)
+    expect(result.revision).not.toBe(currentSecretRevision)
   })
 
   it('repairs missing runtime metadata without rolling a healthy deployment', async () => {
@@ -508,11 +633,11 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
-    expect(result).toBe('deployed-revision')
+    expect(result.revision).toBe('deployed-revision')
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
     expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
     const replaceBody = replacedRuntimeSecret(coreApi)
@@ -534,11 +659,11 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
-    expect(result).toBe('deployed-revision')
+    expect(result.revision).toBe('deployed-revision')
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
     expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
     const replaceBody = replacedRuntimeSecret(coreApi)
@@ -555,13 +680,235 @@ describe('HostReconciler runtime credential Secret revision', () => {
 
     const result = await (
       reconciler as unknown as {
-        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<string>
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
       }
     ).ensureMcpHostRuntimeTokenSecret(host)
 
-    expect(result).toMatch(/^[a-f0-9]{64}$/)
-    expect(result).not.toBe(emptyInputHash)
+    expect(result.revision).toMatch(/^[a-f0-9]{64}$/)
+    expect(result.revision).not.toBe(emptyInputHash)
     expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
+  })
+
+  it('reuses a valid HCC-owned Secret with a far-future refresh exp without issuing or rolling', async () => {
+    const host = makeHost()
+    const secret = runtimeSecret(host, runtimeSecretAnnotations(host))
+    const { reconciler, coreApi } = runtimeSecretReconciler({
+      secret,
+      deployment: deploymentWithRevision('deployed-revision', 1),
+    })
+
+    const result = await (
+      reconciler as unknown as {
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
+      }
+    ).ensureMcpHostRuntimeTokenSecret(host)
+
+    // Pod-template revision annotation stays exactly what the deployment carries.
+    expect(result.revision).toBe('deployed-revision')
+    expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
+    expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled()
+    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('handles zero-replica bootstrap material for wake, recovery, and suspension', async () => {
+    // Revoked-on-wake regression: a suspended Host scales its Deployment to 0.
+    // The wake fast-path patches replicas back to 1 and a NEW pod boots and
+    // reads its bootstrap refresh token from this Secret. If the pre-suspend
+    // pod already rotated, the copy in the Secret is REVOKED even though its
+    // decoded `exp` is far in the future. The exp-based reuse must NOT fire for
+    // a booting pod -- the reconcile mints a fresh, un-revoked pair and rolls.
+    const host = makeHost()
+    const secret = runtimeSecret(host, runtimeSecretAnnotations(host))
+    const helper = HostReconciler as unknown as {
+      runtimeTokenSecretRevisionFromSecret: (
+        s: Pick<k8s.V1Secret, 'data' | 'stringData'>
+      ) => string | null
+    }
+    const reusedRevision = helper.runtimeTokenSecretRevisionFromSecret(secret)
+    const deployment = deploymentWithRevision('suspended-revision', 0, {}, 0)
+    // Deployment scaled to 0 with no Ready replica -- the wake target state.
+    const { reconciler, coreApi } = runtimeSecretReconciler({
+      secret,
+      deployment,
+    })
+
+    const result = await (
+      reconciler as unknown as {
+        ensureMcpHostRuntimeTokenSecret: (
+          h: HostCRD,
+          options?: BootstrapOptions
+        ) => Promise<RuntimeTokenProvision>
+      }
+    ).ensureMcpHostRuntimeTokenSecret(host, {
+      forceFreshForWake: true,
+      targetSuspended: false,
+    })
+
+    // Must NOT reuse: a fresh token pair is issued and persisted.
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
+    const newRevision =
+      replacedRuntimeSecret(coreApi).metadata?.annotations?.[
+        'clerum.io/runtime-token-secret-revision'
+      ]
+    expect(result.revision).toBe(newRevision)
+    expect(result.revision).not.toBe(reusedRevision)
+
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    coreApi.replaceNamespacedSecret.mockClear()
+    await (
+      reconciler as unknown as {
+        ensureMcpHostRuntimeTokenSecret: (
+          h: HostCRD,
+          options?: BootstrapOptions
+        ) => Promise<RuntimeTokenProvision>
+      }
+    ).ensureMcpHostRuntimeTokenSecret(host, { targetSuspended: false })
+
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
+
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    coreApi.replaceNamespacedSecret.mockClear()
+    deployment.spec!.replicas = 1
+    await (
+      reconciler as unknown as {
+        ensureMcpHostRuntimeTokenSecret: (
+          h: HostCRD,
+          options?: BootstrapOptions
+        ) => Promise<RuntimeTokenProvision>
+      }
+    ).ensureMcpHostRuntimeTokenSecret(host, { targetSuspended: true })
+
+    expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
+    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('reuses a far-exp Secret for a running Ready pod without minting or rolling (churn fix preserved)', async () => {
+    // Steady-state reconcile of a running, Ready pod (readyReplicas>0). The pod
+    // rotates its refresh token in memory and never re-reads the Secret, so the
+    // exp-based reuse is correct here -- this is the HCC-restart churn fix. It
+    // must NOT be re-broken by the revoked-on-wake guard: no mint, no roll.
+    const host = makeHost()
+    const secret = runtimeSecret(host, runtimeSecretAnnotations(host))
+    const { reconciler, coreApi } = runtimeSecretReconciler({
+      secret,
+      deployment: deploymentWithRevision('deployed-revision', 1),
+    })
+
+    const result = await (
+      reconciler as unknown as {
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
+      }
+    ).ensureMcpHostRuntimeTokenSecret(host)
+
+    expect(result.revision).toBe('deployed-revision')
+    expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
+    expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled()
+    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('issues and persists refresh-expiry metadata when the Secret is missing', async () => {
+    const host = makeHost()
+    const { reconciler, coreApi } = runtimeSecretReconciler({ deployment: null })
+
+    const result = await (
+      reconciler as unknown as {
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
+      }
+    ).ensureMcpHostRuntimeTokenSecret(host)
+
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
+    expect(coreApi.createNamespacedSecret).toHaveBeenCalledTimes(1)
+    const created = (
+      coreApi.createNamespacedSecret.mock.calls[0] as unknown as [{ body: k8s.V1Secret }]
+    )[0].body
+    const expiresAt = created.metadata?.annotations?.['clerum.io/runtime-token-refresh-expires-at']
+    expect(expiresAt).toBeDefined()
+    // Issuer mock reports refreshExpiresInSeconds=3600 -> expiry is in the future.
+    expect(Date.parse(expiresAt!)).toBeGreaterThan(Date.now())
+    expect(result.revision).toMatch(/^[a-f0-9]{64}$/)
+    expect(result.scopeHash).toBe(
+      created.metadata?.annotations?.['clerum.io/runtime-token-scope-hash']
+    )
+  })
+
+  it('rotates when the refresh token exp is inside the rotate-before window', async () => {
+    const host = makeHost()
+    // 1h of remaining lifetime -- inside the 24h CONTEXT_MAPPER_RUNTIME_TOKEN_ROTATE_BEFORE_S default.
+    const nearExpSec = Math.floor(Date.now() / 1000) + 3600
+    const secret = runtimeSecret(host, runtimeSecretAnnotations(host), fakeJwt(nearExpSec))
+    const helper = HostReconciler as unknown as {
+      runtimeTokenSecretRevisionFromSecret: (
+        s: Pick<k8s.V1Secret, 'data' | 'stringData'>
+      ) => string | null
+    }
+    const currentSecretRevision = helper.runtimeTokenSecretRevisionFromSecret(secret)
+    const { reconciler, coreApi } = runtimeSecretReconciler({
+      secret,
+      deployment: deploymentWithRevision(currentSecretRevision!, 0),
+    })
+
+    const result = await (
+      reconciler as unknown as {
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
+      }
+    ).ensureMcpHostRuntimeTokenSecret(host)
+
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
+    const replaceBody = replacedRuntimeSecret(coreApi)
+    const newRevision =
+      replaceBody.metadata?.annotations?.['clerum.io/runtime-token-secret-revision']
+    expect(result.revision).toBe(newRevision)
+    expect(result.revision).not.toBe(currentSecretRevision)
+  })
+
+  it('rotates loudly when the refresh token is not a parsable JWT', async () => {
+    const host = makeHost()
+    const secret = runtimeSecret(host, runtimeSecretAnnotations(host), 'not-a-jwt')
+    const { reconciler, coreApi } = runtimeSecretReconciler({
+      secret,
+      deployment: deploymentWithRevision('deployed-revision', 1),
+    })
+
+    const result = await (
+      reconciler as unknown as {
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
+      }
+    ).ensureMcpHostRuntimeTokenSecret(host)
+
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
+    // Healthy pod keeps running on its current material; fresh Secret is staged.
+    expect(result.revision).toBe('deployed-revision')
+  })
+
+  it('replaces a Secret that is not HCC-owned for this Host and rolls onto the trusted one', async () => {
+    const host = makeHost()
+    const secret = runtimeSecret(host, runtimeSecretAnnotations(host))
+    secret.metadata!.labels = { 'clerum.io/managed-by': 'user' }
+    const { reconciler, coreApi } = runtimeSecretReconciler({
+      secret,
+      deployment: deploymentWithRevision('deployed-revision', 1),
+    })
+
+    const result = await (
+      reconciler as unknown as {
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
+      }
+    ).ensureMcpHostRuntimeTokenSecret(host)
+
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
+    const replaceBody = replacedRuntimeSecret(coreApi)
+    expect(replaceBody.metadata?.labels).toMatchObject({
+      'clerum.io/managed-by': 'host-context-controller',
+      'clerum.io/host': host.name,
+    })
+    expect(result.revision).toBe(
+      replaceBody.metadata?.annotations?.['clerum.io/runtime-token-secret-revision']
+    )
   })
 })
 

@@ -115,6 +115,11 @@ export type HostRuntimeMessageRequest = {
   channelType?: string
   sender?: string
   hostRef?: string
+  // Stable idempotency identity for cross-delivery duplicate suppression at
+  // mcp-host (MessageQueue.deliveryKeyOf keys on messageId). MUST be identical
+  // across the first forward and the wake-and-hold retry so a re-forwarded turn
+  // is deduped (replayed) instead of re-executed.
+  messageId?: string
   [key: string]: unknown
 }
 

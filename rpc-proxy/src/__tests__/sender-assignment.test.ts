@@ -77,8 +77,16 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
       .expect(200)
 
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
-    const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
-    expect(forwardedBody).toEqual({
+    const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1] as {
+      messageId?: unknown
+    }
+    // D1: messageId is now a PER-REQUEST unique idempotency id (random nonce),
+    // NOT derived from content — a content-hash key would suppress legitimate
+    // identical turns. Assert it is a non-empty string separately; every OTHER
+    // envelope field is still server-derived and overrides client input.
+    expect(typeof forwardedBody.messageId).toBe('string')
+    expect((forwardedBody.messageId as string).length).toBeGreaterThan(0)
+    expect(forwardedBody).toMatchObject({
       content: 'hi',
       channelType: 'rpc',
       channelId: 'chatllm',

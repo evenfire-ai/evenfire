@@ -49,8 +49,34 @@ export interface SlackConfig {
   userNames?: string[]
   /** Stable Slack workspace/team ID, for example T0123456789. */
   workspaceId?: string
+  /** Slack conversation type captured at setup, such as channel, private_channel, im, or mpim. */
+  conversationType?: string
+  /** Slack conversation display name captured at setup. */
+  title?: string
+  /** User id of the member who verified this Slack conversation for approvals. */
+  confirmedByUserId?: string
+  confirmedAt?: string
   /** When true, require Slack app mention <@BOT_USER_ID> in the message text. */
   replyOnlyWhenMentioned?: boolean
+}
+
+/**
+ * Microsoft Teams conversation configuration.
+ */
+export interface TeamsConfig {
+  channelId: string
+  tenantId?: string
+  serviceUrl?: string
+  conversationType?: string
+  teamId?: string
+  teamsChannelId?: string
+  userIds?: string[]
+  confirmedByUserId?: string
+  confirmedAt?: string
+  title?: string
+  replyOnlyWhenMentioned?: boolean
+  /** Defaults to true. False posts bot responses at the conversation root. */
+  replyInThreads?: boolean
 }
 
 /**
@@ -75,6 +101,13 @@ export interface CommunicationChannelSpec {
     replyInThreads?: boolean
   }
   slack?: SlackConfig[]
+  teamsSettings?: {
+    appName?: string
+    appId?: string
+    tenantId?: string
+    replyOnlyWhenMentioned?: boolean
+  }
+  teams?: TeamsConfig[]
 }
 
 /**
@@ -106,7 +139,7 @@ export interface ProviderTargetIdentity {
 }
 
 export interface ProviderIdentity {
-  medium: 'telegram' | 'slack'
+  medium: 'telegram' | 'slack' | 'teams'
   providerUserId: string
   providerWorkspaceId?: string | null
   providerChannelId: string
@@ -119,7 +152,7 @@ export interface ProviderIdentity {
  * Represents a message from any channel.
  */
 export interface Message {
-  channelType: 'telegram' | 'email' | 'slack'
+  channelType: 'telegram' | 'email' | 'slack' | 'teams'
   channelId: string
   sender: string
   content: string
@@ -184,6 +217,7 @@ export interface Attachment {
   sourceTool?: string
   lane?: 'workflow_result' | 'internal_generated_artifact' | 'tool_image'
   artifactFormat?: string
+  artifactName?: string
   sizeBytes?: number
   redactionState?: 'applied' | 'scanned' | 'skipped:binary'
   producer?: string
@@ -193,13 +227,18 @@ export interface SendMessageOptions {
   parseMode?: 'telegram-html'
   telegramInlineKeyboard?: TelegramInlineKeyboardButton[][]
   slackBlocks?: SlackBlock[]
+  teamsActions?: Array<{
+    title: string
+    value: string
+    style?: 'positive' | 'destructive'
+  }>
 }
 
 /**
  * Channel adapter interface.
  */
 export interface ChannelAdapter {
-  readonly channelType: 'telegram' | 'email' | 'slack'
+  readonly channelType: 'telegram' | 'email' | 'slack' | 'teams'
 
   connect(credentials?: AdapterCredentials): Promise<void>
   disconnect(): Promise<void>
@@ -224,12 +263,21 @@ export interface ChannelAdapter {
     options?: SendMessageOptions
   ): Promise<string | undefined>
 
-  editMessage(channelId: string, messageId: string, content: string): Promise<void>
+  editMessage(
+    channelId: string,
+    messageId: string,
+    content: string,
+    options?: SendMessageOptions
+  ): Promise<void>
 }
 
 export interface AdapterCredentials {
   telegramBotToken?: string
   slackBotToken?: string
+  teamsAppId?: string
+  teamsAppPassword?: string
+  teamsTenantId?: string
+  teamsServiceUrlsByConversationId?: Map<string, string>
   emailUsername?: string
   emailPassword?: string
   providerTarget?: ProviderTargetIdentity

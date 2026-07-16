@@ -487,12 +487,32 @@ section_voucher() {
     fail "Voucher missing jti"
   fi
 
-  local ttl
-  ttl=$(echo "$payload" | jq -r '(.exp - .iat) // 0')
+  # v2: iat is dropped (payload is exactly {iss,aud,sub,jti,exp}); TTL is exp - now.
+  local now ttl
+  now=$(date -u +%s)
+  ttl=$(echo "$payload" | jq -r --argjson now "$now" '(.exp - $now) // 0')
   if [ "$ttl" -le 60 ] && [ "$ttl" -gt 0 ]; then
     ok "Voucher TTL within (0, 60]s — got ${ttl}s"
   else
     fail "Voucher TTL out of bounds: ${ttl}s"
+  fi
+
+  # v2: payload must NOT carry email/username (INV-1 wire-format rule).
+  if echo "$payload" | jq -e 'has("email") or has("username")' >/dev/null 2>&1; then
+    fail "Voucher v2 must not carry email/username claims"
+  else
+    ok "Voucher v2 payload carries no email/username"
+  fi
+
+  # v2: header carries a kid (base64url-decode field 1 of the JWT).
+  local hdr_b64 hdr
+  hdr_b64=$(echo "$voucher" | cut -d. -f1)
+  while [ $(( ${#hdr_b64} % 4 )) -ne 0 ]; do hdr_b64="${hdr_b64}="; done
+  hdr=$(echo "$hdr_b64" | tr '_-' '/+' | base64 -d 2>/dev/null || echo "")
+  if echo "$hdr" | jq -e '.kid | type == "string" and length > 0' >/dev/null 2>&1; then
+    ok "Voucher v2 header carries a kid"
+  else
+    fail "Voucher v2 header missing kid (header=$hdr)"
   fi
 
   # ── Signature verification ──────────────────────────────────────

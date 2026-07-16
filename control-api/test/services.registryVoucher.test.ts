@@ -1,22 +1,25 @@
 // control-api/test/services.registryVoucher.test.ts
-import { generateKeyPairSync } from 'node:crypto'
-import jwt from 'jsonwebtoken'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import jwt from 'jsonwebtoken'
+import { generateKeyPairSync } from 'node:crypto'
+import { __resetRegistryConnectionCacheForTests } from '../src/services/registryConnectionDb.js'
+import { VoucherUnavailableError, mintIdentityVoucher } from '../src/services/registryVoucher.js'
 
 const { cfg } = vi.hoisted(() => ({
-  cfg: { registryVoucherPrivateKey: '', adminJwtPrivateKey: '', registryClientId: '' } as {
-    registryVoucherPrivateKey: string
-    adminJwtPrivateKey: string
-    registryClientId: string
-  },
+  cfg: {
+    registryConnectionMode: 'managed',
+    registryVoucherPrivateKey: '',
+    registryVoucherKid: '',
+    adminJwtPrivateKey: '',
+    registryClientId: '',
+    oauthEncryptionKey: '',
+  } as Record<string, unknown>,
 }))
 vi.mock('../src/config.js', () => ({ config: cfg }))
-
-import {
-  VoucherUnavailableError,
-  mintIdentityVoucher,
-  registrySyntheticUsername,
-} from '../src/services/registryVoucher.js'
+// self-hosted branch queries the DB — not exercised in the managed tests below.
+vi.mock('../src/db.js', () => ({
+  pool: { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }) },
+}))
 
 function keypair() {
   return generateKeyPairSync('rsa', {
@@ -26,75 +29,57 @@ function keypair() {
   })
 }
 const admin = { id: 'admin-1', username: 'alice' } as never
-const REGISTRY_USERNAME = /^[a-z0-9][a-z0-9_-]{0,62}$/
 
 afterEach(() => {
+  __resetRegistryConnectionCacheForTests()
+  cfg.registryConnectionMode = 'managed'
   cfg.registryVoucherPrivateKey = ''
+  cfg.registryVoucherKid = ''
   cfg.adminJwtPrivateKey = ''
   cfg.registryClientId = ''
   vi.restoreAllMocks()
 })
 
-describe('mintIdentityVoucher', () => {
-  it('signs an RS256 voucher with a deployment-namespaced identity', () => {
+describe('mintIdentityVoucher — voucher v2 (managed)', () => {
+  it('emits a kid header and a payload of EXACTLY {iss,aud,sub,jti,exp}', async () => {
     const { publicKey, privateKey } = keypair()
     cfg.registryVoucherPrivateKey = privateKey
-    cfg.registryClientId = 'example-dev-control-api'
-    const token = mintIdentityVoucher(admin)
-    const decoded = jwt.verify(token, publicKey, {
+    cfg.registryVoucherKid = 'key-uuid-42'
+    const token = await mintIdentityVoucher(admin)
+
+    const header = jwt.decode(token, { complete: true })!.header
+    expect(header.alg).toBe('RS256')
+    expect(header.kid).toBe('key-uuid-42')
+
+    const payload = jwt.verify(token, publicKey, {
       algorithms: ['RS256'],
       issuer: 'control-api',
       audience: 'registry-api',
     }) as jwt.JwtPayload
-    expect(decoded.sub).toBe('admin-1')
-    expect(decoded.username).toBe('example-dev-control-api-alice')
-    expect(decoded.email).toBe('example-dev-control-api-alice@control-api.local')
-    expect(typeof decoded.jti).toBe('string')
-    expect(decoded.exp! - decoded.iat!).toBe(60)
+    expect(payload.sub).toBe('admin-1')
+    expect(typeof payload.jti).toBe('string')
+    expect(typeof payload.exp).toBe('number')
+    // v2 drops these three:
+    expect(payload.email).toBeUndefined()
+    expect(payload.username).toBeUndefined()
+    expect(payload.iat).toBeUndefined()
+    // exactly the five keys
+    expect(Object.keys(payload).sort()).toEqual(['aud', 'exp', 'iss', 'jti', 'sub'])
+    // TTL asserted against now (iat is gone)
+    expect(payload.exp! - Math.floor(Date.now() / 1000)).toBeLessThanOrEqual(60)
+    expect(payload.exp! - Math.floor(Date.now() / 1000)).toBeGreaterThan(0)
   })
 
-  it('falls back to adminJwtPrivateKey when registryVoucherPrivateKey is empty string (|| not ??)', () => {
-    const { publicKey, privateKey } = keypair()
-    cfg.registryVoucherPrivateKey = '' // documented default
-    cfg.adminJwtPrivateKey = privateKey
-    cfg.registryClientId = 'example-dev-control-api'
-    const token = mintIdentityVoucher(admin)
-    expect(() => jwt.verify(token, publicKey, { algorithms: ['RS256'] })).not.toThrow()
+  it('does NOT fall back to adminJwtPrivateKey — throws when the dedicated key is unset', async () => {
+    cfg.registryVoucherPrivateKey = ''
+    cfg.registryVoucherKid = 'key-uuid-42'
+    cfg.adminJwtPrivateKey = keypair().privateKey // present, but must be ignored
+    await expect(mintIdentityVoucher(admin)).rejects.toBeInstanceOf(VoucherUnavailableError)
   })
 
-  it('throws VoucherUnavailableError when no signing key is configured', () => {
-    expect(() => mintIdentityVoucher(admin)).toThrow(VoucherUnavailableError)
-  })
-})
-
-describe('registrySyntheticUsername', () => {
-  it('namespaces by the registry client id so reserved names are avoided', () => {
-    cfg.registryClientId = 'example-dev-control-api'
-    const u = registrySyntheticUsername({ id: 'x', username: 'admin' } as never)
-    expect(u).toBe('example-dev-control-api-admin')
-    expect(u).not.toBe('admin') // never a registry-reserved bareword (admin/root/api/...)
-    expect(u).toMatch(REGISTRY_USERNAME)
-  })
-
-  it('maps the same admin username on different deployments to different registry users', () => {
-    cfg.registryClientId = 'example-dev-control-api'
-    const dev = registrySyntheticUsername({ id: 'x', username: 'admin' } as never)
-    cfg.registryClientId = 'example-prod-control-api'
-    const prod = registrySyntheticUsername({ id: 'x', username: 'admin' } as never)
-    expect(dev).not.toBe(prod) // no cross-deployment collision on the shared registry
-  })
-
-  it('sanitizes non-conforming usernames to the registry pattern', () => {
-    cfg.registryClientId = 'example-prod-control-api'
-    expect(registrySyntheticUsername({ id: 'x', username: 'Root.User' } as never)).toMatch(
-      REGISTRY_USERNAME
-    )
-  })
-
-  it('uses a safe default prefix when the client id is unset', () => {
-    cfg.registryClientId = ''
-    const u = registrySyntheticUsername({ id: 'abc', username: 'jose' } as never)
-    expect(u).toBe('control-api-jose')
-    expect(u).toMatch(REGISTRY_USERNAME)
+  it('throws when the kid is unset', async () => {
+    cfg.registryVoucherPrivateKey = keypair().privateKey
+    cfg.registryVoucherKid = ''
+    await expect(mintIdentityVoucher(admin)).rejects.toBeInstanceOf(VoucherUnavailableError)
   })
 })
