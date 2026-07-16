@@ -1589,6 +1589,16 @@ export async function createManagedInvitationForUser(
     }
   }
 
+  if (config.memberRegistrationMode === 'offline') {
+    const existing = await pool.query(
+      `SELECT id FROM users WHERE lower(email) = lower($1) LIMIT 1`,
+      [normalizedEmail]
+    )
+    if (existing.rows[0]) {
+      return { error: 'member_email_exists' as const }
+    }
+  }
+
   const fallbackName = normalizedEmail.split('@')[0] || normalizedEmail
   if (normalizedInviteeName) {
     const updatedUser = await pool.query(

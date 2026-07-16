@@ -110,6 +110,9 @@ export function createExternalMembersRouter(): Router {
       )
       if ('error' in result) {
         if (result.error === 'forbidden') return res.status(403).json({ error: 'forbidden' })
+        if (result.error === 'member_email_exists') {
+          return res.status(409).json({ error: 'member_email_exists' })
+        }
         return res.status(400).json({ error: 'invalid_payload' })
       }
       return res.status(201).json(result.invitation)
