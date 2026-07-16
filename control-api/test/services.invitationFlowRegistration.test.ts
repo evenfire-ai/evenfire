@@ -18,7 +18,11 @@ import {
   buildInviteAcceptUrl,
   registerAndSendInvitation,
   storeDesktopAuthorizationToken,
+  validateInvitationFlowToken,
 } from '../src/services/invitationFlowRegistrationService.js'
+
+const getInvitationByToken = vi.fn()
+vi.mock('../src/services/directory/index.js', () => ({ getInvitationByToken }))
 
 const fetchSpy = vi.fn()
 beforeEach(() => {
@@ -53,6 +57,31 @@ describe('registerAndSendInvitation — offline vs remote', () => {
     await registerAndSendInvitation('a@b.com', 'tok-123', 'Team', 'i', 'e', {})
     expect(fetchSpy).toHaveBeenCalledTimes(1)
     expect(String(fetchSpy.mock.calls[0][0])).toContain('/invitations-flow/invitations')
+  })
+})
+
+describe('validateInvitationFlowToken — offline', () => {
+  beforeEach(() => {
+    mockConfig.memberRegistrationMode = 'offline'
+    getInvitationByToken.mockReset()
+  })
+
+  it('echoes the input token as invitationUuid for a valid invitation', async () => {
+    // shaped like invitationResponse — intentionally has NO `token` field
+    getInvitationByToken.mockResolvedValue({ id: 'row-id', email: 'a@b.com', status: 'pending' })
+    const result = await validateInvitationFlowToken('  tok-123  ', 'A@B.com')
+    expect(getInvitationByToken).toHaveBeenCalledWith('tok-123')
+    expect(result).toEqual({ email: 'a@b.com', invitationUuid: 'tok-123' })
+  })
+
+  it('throws when the invitation is missing/invalid', async () => {
+    getInvitationByToken.mockResolvedValue(null)
+    await expect(validateInvitationFlowToken('nope')).rejects.toThrow()
+  })
+
+  it('throws when the supplied email does not match', async () => {
+    getInvitationByToken.mockResolvedValue({ id: 'row-id', email: 'a@b.com', status: 'pending' })
+    await expect(validateInvitationFlowToken('tok-123', 'other@b.com')).rejects.toThrow()
   })
 })
 

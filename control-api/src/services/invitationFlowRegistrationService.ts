@@ -51,6 +51,18 @@ export async function validateInvitationFlowToken(
   token: string,
   email?: string
 ): Promise<{ email: string; invitationUuid: string }> {
+  if (config.memberRegistrationMode === 'offline') {
+    const { getInvitationByToken } = await import('./directory/index.js')
+    const invitation = await getInvitationByToken(token.trim())
+    if (!invitation) {
+      throw new Error('invalid_invitation')
+    }
+    if (email && invitation.email.toLowerCase() !== email.trim().toLowerCase()) {
+      throw new Error('invalid_invitation')
+    }
+    return { email: invitation.email, invitationUuid: token.trim() }
+  }
+
   const result = await memberRegistrationServiceRequest<{
     valid: true
     email: string
