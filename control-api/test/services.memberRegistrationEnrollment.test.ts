@@ -204,6 +204,46 @@ describe('memberRegistrationEnrollment', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('escalates the backoff on repeated malformed 2xx mint bodies instead of resetting to the 5s base every time', async () => {
+    // If the failure counter is cleared as soon as response.ok is true (before
+    // the body-shape check), a hub that keeps returning 2xx with a malformed
+    // body will re-mint at the 5s base forever — transientFailure() bumps the
+    // counter back to 1 every attempt, so BACKOFF_BASE_MS * 2**(1-1) never
+    // escalates. The network-error/5xx paths don't have this bug because they
+    // never touch the counter before calling transientFailure().
+    const fetchMock = vi.fn().mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ nope: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(ensureEnrollment('profile.acme.com')).rejects.toBeInstanceOf(
+      MemberRegistrationUnavailableError
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(5_000 + 1) // past the 5s base backoff (failures=1)
+    await expect(ensureEnrollment('profile.acme.com')).rejects.toBeInstanceOf(
+      MemberRegistrationUnavailableError
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    vi.advanceTimersByTime(5_000 + 1) // still inside the escalated 10s window (failures=2)
+    await expect(ensureEnrollment('profile.acme.com')).rejects.toBeInstanceOf(
+      MemberRegistrationUnavailableError
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(2) // served from cache — no re-mint yet
+
+    vi.advanceTimersByTime(5_000 + 1) // now past the escalated 10s window
+    await expect(ensureEnrollment('profile.acme.com')).rejects.toBeInstanceOf(
+      MemberRegistrationUnavailableError
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
   it('rejects localhost / IP-literal / dotless hosts with the misconfiguration error, never fetching', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)

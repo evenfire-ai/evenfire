@@ -110,7 +110,6 @@ async function enroll(domain: string): Promise<MemberRegistrationCredential> {
     throw transientFailure(domain, `member-registration hub error (${response.status})`)
   }
 
-  consecutiveTransientFailures.delete(domain)
   const minted = (await response.json()) as { tenantId?: unknown; kid?: unknown; secret?: unknown }
   if (
     typeof minted.tenantId !== 'string' ||
@@ -119,6 +118,11 @@ async function enroll(domain: string): Promise<MemberRegistrationCredential> {
   ) {
     throw transientFailure(domain, 'member-registration hub returned a malformed mint response')
   }
+  // Only reset the backoff counter once the mint body is known well-formed —
+  // resetting as soon as response.ok is true (before this check) would let a
+  // hub that keeps returning 2xx with a malformed body re-mint at the 5s base
+  // forever instead of escalating toward BACKOFF_CAP_MS.
+  consecutiveTransientFailures.delete(domain)
 
   const { inserted } = await insertMemberRegistrationCredential({
     boundDomain: domain,
