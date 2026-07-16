@@ -1,6 +1,10 @@
 import bcrypt from 'bcryptjs'
+import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
-import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
+import {
+  buildInviteAcceptUrl,
+  registerAndSendInvitation,
+} from '../invitationFlowRegistrationService.js'
 import type { InviteRole, TeamRole } from './types.js'
 import {
   normalizeChannels,
@@ -615,13 +619,16 @@ async function createInvitationForTeamsRecord(
   if (!pending) {
     throw new Error('Failed to activate invitation after registration')
   }
-  return invitationForTeamsResponse(
+  const response = invitationForTeamsResponse(
     {
       ...pending,
       team_name: inserted.invitation.team_name,
     },
     inserted.teams
   )
+  return config.memberRegistrationMode === 'offline'
+    ? { ...response, inviteAcceptUrl: buildInviteAcceptUrl(inserted.invitation.token) }
+    : response
 }
 
 export async function createInvitation(
