@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import request from 'supertest'
 import express from 'express'
+import request from 'supertest'
+import { createApp } from '../src/app.js'
+import { MemberRegistrationUnavailableError } from '../src/services/memberRegistrationErrors.js'
+import { MockGateway } from './mockGateway.js'
 
 const adminReg = vi.hoisted(() => ({
   registerAndSendControlAdminInvitation: vi.fn(),
@@ -12,13 +15,10 @@ const adminReg = vi.hoisted(() => ({
 }))
 vi.mock('../src/services/controlAdminInvitationRegistrationService.js', () => adminReg)
 vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
-  rateLimitMiddleware: () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
-    next(),
+  rateLimitMiddleware:
+    () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
+      next(),
 }))
-
-import { createApp } from '../src/app.js'
-import { MockGateway } from './mockGateway.js'
-import { MemberRegistrationUnavailableError } from '../src/services/memberRegistrationErrors.js'
 
 describe('app: member-registration unavailability maps to 503 (real error middleware)', () => {
   beforeEach(() => {

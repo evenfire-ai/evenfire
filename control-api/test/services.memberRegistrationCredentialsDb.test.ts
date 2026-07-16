@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { deriveOAuthEncryptionKey, encryptOAuthSecret } from '../src/oauth/encryption.js'
 import {
-  deriveOAuthEncryptionKey,
-  encryptOAuthSecret,
-} from '../src/oauth/encryption.js'
+  getActiveMemberRegistrationCredential,
+  insertMemberRegistrationCredential,
+} from '../src/services/memberRegistrationCredentialsDb.js'
 
 const OAUTH_KEY_HEX = 'ab'.repeat(32)
 
@@ -13,11 +14,6 @@ vi.mock('../src/config.js', () => ({ config: cfg }))
 
 const db = vi.hoisted(() => ({ pool: { query: vi.fn() } }))
 vi.mock('../src/db.js', () => db)
-
-import {
-  getActiveMemberRegistrationCredential,
-  insertMemberRegistrationCredential,
-} from '../src/services/memberRegistrationCredentialsDb.js'
 
 const KEY = deriveOAuthEncryptionKey(OAUTH_KEY_HEX)
 

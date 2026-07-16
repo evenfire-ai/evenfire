@@ -36,8 +36,8 @@ import {
   provisionAdminDesktopWorkspace,
   setInvitationPasswordForUser,
 } from '../../services/directory/index.js'
-import { signAdminToken } from '../../utils/auth/adminAuthToken.js'
 import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
+import { signAdminToken } from '../../utils/auth/adminAuthToken.js'
 import {
   CONTROL_UI_ADMIN_SESSION_COOKIE,
   clearHttpOnlySessionCookie,

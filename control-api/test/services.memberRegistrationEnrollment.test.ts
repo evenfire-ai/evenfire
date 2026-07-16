@@ -1,4 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  __resetMemberRegistrationEnrollmentForTests,
+  ensureEnrollment,
+  normalizeEnrollmentHost,
+  runBootEnrollment,
+} from '../src/services/memberRegistrationEnrollment.js'
+import {
+  MemberRegistrationMisconfiguredError,
+  MemberRegistrationUnavailableError,
+} from '../src/services/memberRegistrationErrors.js'
 
 const { cfg } = vi.hoisted(() => ({
   cfg: {
@@ -24,17 +34,6 @@ vi.mock('../src/observability/logger.js', () => ({
     error: (...args: unknown[]) => logSink.lines.push(JSON.stringify(args)),
   },
 }))
-
-import {
-  MemberRegistrationMisconfiguredError,
-  MemberRegistrationUnavailableError,
-} from '../src/services/memberRegistrationErrors.js'
-import {
-  __resetMemberRegistrationEnrollmentForTests,
-  ensureEnrollment,
-  normalizeEnrollmentHost,
-  runBootEnrollment,
-} from '../src/services/memberRegistrationEnrollment.js'
 
 const CRED = {
   boundDomain: 'profile.acme.com',
@@ -277,9 +276,7 @@ describe('memberRegistrationEnrollment', () => {
   it('runBootEnrollment dedupes hosts sharing a hostname and no-ops in remote mode', async () => {
     const fetchMock = vi.fn().mockResolvedValue(mintResponse())
     vi.stubGlobal('fetch', fetchMock)
-    store.getActiveMemberRegistrationCredential
-      .mockResolvedValueOnce(null)
-      .mockResolvedValue(CRED)
+    store.getActiveMemberRegistrationCredential.mockResolvedValueOnce(null).mockResolvedValue(CRED)
     cfg.desktopProfileUiBaseUrl = 'https://apps.acme.com:3001'
     cfg.controlUiBaseUrl = 'https://apps.acme.com:3000'
     await runBootEnrollment()

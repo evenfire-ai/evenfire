@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import crypto from 'node:crypto'
+import {
+  registerAndSendControlAdminInvitation,
+  validateControlAdminInvitationToken,
+} from '../src/services/controlAdminInvitationRegistrationService.js'
+import {
+  registerAndSendInvitation,
+  validateInvitationFlowToken,
+} from '../src/services/invitationFlowRegistrationService.js'
 
 const { cfg } = vi.hoisted(() => ({
   cfg: {
@@ -21,7 +29,10 @@ vi.mock('../src/config.js', () => ({ config: cfg }))
 
 // Per-domain credentials so a transposed wrapper→host mapping is DETECTABLE
 // (spec §8.8 directional assertion).
-const CREDS: Record<string, { boundDomain: string; tenantId: string; kid: string; secret: string }> = {
+const CREDS: Record<
+  string,
+  { boundDomain: string; tenantId: string; kid: string; secret: string }
+> = {
   'profile.acme.com': {
     boundDomain: 'profile.acme.com',
     tenantId: 'ext-profile',
@@ -40,12 +51,6 @@ const enrollment = vi.hoisted(() => ({
   normalizeEnrollmentHost: (baseUrl: string) => new URL(baseUrl).hostname.toLowerCase(),
 }))
 vi.mock('../src/services/memberRegistrationEnrollment.js', () => enrollment)
-
-import { registerAndSendInvitation, validateInvitationFlowToken } from '../src/services/invitationFlowRegistrationService.js'
-import {
-  registerAndSendControlAdminInvitation,
-  validateControlAdminInvitationToken,
-} from '../src/services/controlAdminInvitationRegistrationService.js'
 
 function decodeAuthKid(fetchMock: ReturnType<typeof vi.fn>, callIndex: number) {
   const [, init] = fetchMock.mock.calls[callIndex]

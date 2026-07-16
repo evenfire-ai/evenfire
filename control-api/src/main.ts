@@ -7,11 +7,11 @@ import {
   startAdminRevokedTokenCleanup,
   stopAdminRevokedTokenCleanup,
 } from './services/adminAuthService.js'
-import { runBootEnrollment } from './services/memberRegistrationEnrollment.js'
 import {
   startBudgetReservationSweepCron,
   stopBudgetReservationSweepCron,
 } from './services/budgetReservationSweepCron.js'
+import { runBootEnrollment } from './services/memberRegistrationEnrollment.js'
 import {
   startPluginWorkloadSdkMaintenanceCron,
   stopPluginWorkloadSdkMaintenanceCron,

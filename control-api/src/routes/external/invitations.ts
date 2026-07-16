@@ -18,8 +18,8 @@ import {
   storeDesktopAuthorizationToken,
   validateInvitationFlowToken,
 } from '../../services/invitationFlowRegistrationService.js'
-import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
 import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
+import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
 
 function invitationLookupIpKey(req: {
   ip?: string
