@@ -25,6 +25,8 @@ data:
   # control-api authenticates with a per-tenant HMAC JWT — the dev-default
   # kid/tenant/secret seeded into the sibling postgres tenant_credentials table.
   CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL: 'http://member-registration-service.registration.svc.cluster.local:8092/api/v1'
+  CONTROL_API_MEMBER_REGISTRATION_MODE: 'offline'
+  CONTROL_API_INVITE_ACCEPT_BASE_URL: 'http://127.0.0.1:3001'
   CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL: 'http://127.0.0.1:8091'
   CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL: 'http://127.0.0.1:8094'
   CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL: 'http://127.0.0.1:3001'
