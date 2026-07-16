@@ -17,6 +17,7 @@ vi.mock('../src/utils/auth/memberRegistrationSigner.js', () => ({
 import {
   buildInviteAcceptUrl,
   registerAndSendInvitation,
+  storeDesktopAuthorizationToken,
 } from '../src/services/invitationFlowRegistrationService.js'
 
 const fetchSpy = vi.fn()
@@ -52,5 +53,20 @@ describe('registerAndSendInvitation — offline vs remote', () => {
     await registerAndSendInvitation('a@b.com', 'tok-123', 'Team', 'i', 'e', {})
     expect(fetchSpy).toHaveBeenCalledTimes(1)
     expect(String(fetchSpy.mock.calls[0][0])).toContain('/invitations-flow/invitations')
+  })
+})
+
+describe('storeDesktopAuthorizationToken — offline vs remote', () => {
+  it('offline: does not call fetch', async () => {
+    mockConfig.memberRegistrationMode = 'offline'
+    await storeDesktopAuthorizationToken('a@b.com', 'auth-tok')
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('remote: calls fetch against the registration service', async () => {
+    mockConfig.memberRegistrationMode = 'remote'
+    await storeDesktopAuthorizationToken('a@b.com', 'auth-tok')
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(String(fetchSpy.mock.calls[0][0])).toContain('/invitations-flow/desktop-authorizations')
   })
 })
