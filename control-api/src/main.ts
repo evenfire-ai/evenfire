@@ -7,6 +7,7 @@ import {
   startAdminRevokedTokenCleanup,
   stopAdminRevokedTokenCleanup,
 } from './services/adminAuthService.js'
+import { runBootEnrollment } from './services/memberRegistrationEnrollment.js'
 import {
   startBudgetReservationSweepCron,
   stopBudgetReservationSweepCron,
@@ -49,6 +50,10 @@ async function main(): Promise<void> {
   // Self-hosted fail-fast (spec §8 / §14.3): refuse to boot a registry-enabled
   // self-hosted deployment that has no registry_connection identity row.
   await assertRegistryConnectionReady()
+
+  // Hosted member-registration self-enrollment (spec §8.4): degrade, never
+  // block — runBootEnrollment never rejects; failures log and retry on demand.
+  await runBootEnrollment()
 
   startExpiryCron(config.userApprovalRequestExpiryIntervalMs)
   startPluginWorkloadSdkMaintenanceCron()
