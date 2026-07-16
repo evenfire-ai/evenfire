@@ -1,5 +1,11 @@
 import { config } from '../config.js'
+import { rootLogger } from '../observability/logger.js'
 import { memberRegistrationServiceRequest } from '../memberRegistrationServiceClient.js'
+
+export function buildInviteAcceptUrl(token: string): string {
+  const base = config.inviteAcceptBaseUrl.replace(/\/+$/, '')
+  return `${base}/invitations/${token}`
+}
 
 export async function registerAndSendInvitation(
   email: string,
@@ -12,6 +18,14 @@ export async function registerAndSendInvitation(
     teamNames?: string[]
   } = {}
 ): Promise<void> {
+  if (config.memberRegistrationMode === 'offline') {
+    rootLogger.info(
+      { event: 'invite_registration_offline', email },
+      'offline member-registration: skipping remote invitation send'
+    )
+    return
+  }
+
   await memberRegistrationServiceRequest<{ sent: true; registered: true }>(
     'POST',
     '/invitations-flow/invitations',
@@ -57,6 +71,14 @@ export async function storeDesktopAuthorizationToken(
   email: string,
   authorizationToken: string
 ): Promise<void> {
+  if (config.memberRegistrationMode === 'offline') {
+    rootLogger.info(
+      { event: 'desktop_authorization_offline', email },
+      'offline member-registration: desktop authorization not persisted'
+    )
+    return
+  }
+
   await memberRegistrationServiceRequest<{ stored: true }>(
     'POST',
     '/invitations-flow/desktop-authorizations',
