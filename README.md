@@ -9,7 +9,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/evenfire-ai/evenfire/ci-public.yml?branch=main&label=CI)](https://github.com/evenfire-ai/evenfire/actions)
 [![GitHub release](https://img.shields.io/github/v/release/evenfire-ai/evenfire?sort=semver)](https://github.com/evenfire-ai/evenfire/releases)
 
-[What is evenfire](#what-is-evenfire) · [The platform](#the-platform) · [See it work](#see-it-work) · [Why evenfire](#why-evenfire) · [Get started](#get-started-minikube) · [Architecture](#architecture) · [Security model](#security-model) · [Docs](docs/README.md) · [License](#community-and-license)
+[What is evenfire](#what-is-evenfire) · [The platform](#the-platform) · [Why evenfire](#why-evenfire) · [See it work](#see-it-work) · [Get started](#get-started-minikube) · [Architecture](#architecture) · [Security model](#security-model) · [Docs](docs/README.md) · [License](#community-and-license)
 
 <p align="center">
   <img src="docs/assets/desktop-app-sandbox-ui.webp" alt="Desktop App: the LeadForge prospecting plugin rendered inside the app, with its own dashboard, outreach pipeline, approval queue, and charts" width="49%" />
@@ -33,11 +33,6 @@ your platform is version-controlled, reviewable configuration. You bring your
 own model keys; prompts and data stay in your environment.
 
 One command (`make minikube-setup`) brings the whole platform up locally.
-
-> **Naming:** the code uses the project's internal name **clerum** —
-> `clerum.io` CRDs, `CLERUM_*` env vars, `clerum-*` packages. **evenfire** is
-> the public name of the same project. Details:
-> [docs/concepts/code-names.md](docs/concepts/code-names.md).
 
 ---
 
@@ -94,6 +89,20 @@ each pillar links to its depth.
 
 ---
 
+## Why evenfire
+
+- **vs a hosted assistant** — you own the data and the infrastructure. Prompts,
+  files, and model keys never leave your environment; there is no vendor in the
+  request path.
+- **vs an in-process agent framework** — real isolation and governance:
+  per-agent pods, default-deny networking, multi-tenant teams and roles, and
+  approvals enforced by the platform rather than by the calling application.
+- **vs rolling your own** — batteries included: channels, approvals, a connector
+  registry, shared files, and cost accounting, all declared as configuration
+  instead of assembled by hand.
+
+---
+
 ## See it work
 
 A user asks an agent to do something with a side effect. The agent picks a tool,
@@ -102,24 +111,18 @@ comes back to the channel:
 
 ```mermaid
 sequenceDiagram
-    autonumber
     actor U as User
     participant H as mcp-host agent
     participant L as LLM
     participant A as Human approver
     U->>H: Message on Telegram / Slack / desktop
-    activate H
     H->>L: Prompt plus tool definitions
     L-->>H: Wants to call shell_exec
     Note over H,A: shell_exec is approval-gated
     H->>A: Approval request in the channel
-    Note over H: Task suspended, survives pod restarts
-    deactivate H
-    A-->>H: Approve (or Deny)
-    activate H
+    A-->>H: Approve
     H->>H: Run tool, build artifact
     H-->>U: Final reply plus attachment
-    deactivate H
 ```
 
 A tool call that needs approval suspends the task and tells the caller exactly
@@ -142,20 +145,6 @@ what is waiting:
 The prompt surfaces wherever the user already is — inline Approve/Deny buttons on
 Telegram (or `/approve <target>`), a Slack Approve button, or the desktop app's
 in-chat gate; pending approvals survive pod restarts.
-
----
-
-## Why evenfire
-
-- **vs a hosted assistant** — you own the data and the infrastructure. Prompts,
-  files, and model keys never leave your environment; there is no vendor in the
-  request path.
-- **vs an in-process agent framework** — real isolation and governance:
-  per-agent pods, default-deny networking, multi-tenant teams and roles, and
-  approvals enforced by the platform rather than by the calling application.
-- **vs rolling your own** — batteries included: channels, approvals, a connector
-  registry, shared files, and cost accounting, all declared as configuration
-  instead of assembled by hand.
 
 ---
 
@@ -190,6 +179,11 @@ chat. These are seeded local-minikube credentials — change them before any
 shared or production-like environment. The Desktop App is the client you just
 used; Control UI is the admin console for the same fleet — both are toured in
 [docs/surfaces/](docs/surfaces/README.md).
+
+> **Naming:** the code uses the project's internal name **clerum** —
+> `clerum.io` CRDs, `CLERUM_*` env vars, `clerum-*` packages. **evenfire** is
+> the public name of the same project. Details:
+> [docs/concepts/code-names.md](docs/concepts/code-names.md).
 
 Prefer the API path? The full curl walkthrough exercises the real session →
 scoped-RPC → rpc-proxy JWT chain, with troubleshooting notes:
@@ -368,7 +362,8 @@ namespace).
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — dev loop, what we accept
 - **[SECURITY.md](SECURITY.md)** — private vulnerability disclosure
-- **[GOVERNANCE.md](GOVERNANCE.md)** · **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)**
+- **[GOVERNANCE.md](GOVERNANCE.md)** — who decides what, and how
+- **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** — community expectations
 
 evenfire is **open source** under the [Mozilla Public License 2.0](LICENSE)
 (MPL-2.0) — an OSI-approved, file-level copyleft license. Use it, modify it,
