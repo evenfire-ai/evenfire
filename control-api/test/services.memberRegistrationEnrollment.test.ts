@@ -284,6 +284,45 @@ describe('memberRegistrationEnrollment', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('escalates the backoff on repeated persist failures during a sustained Postgres outage', async () => {
+    // Mirrors 'escalates the backoff on repeated malformed 2xx mint bodies':
+    // a single 5s-window sample isn't enough to prove escalation, because a
+    // counter that gets reset on every attempt (bug: deleting the counter
+    // right after the mint body validates, before the persist block) also
+    // produces a 5s backoff on the FIRST retry — it only diverges from the
+    // correct behavior on the SECOND retry, which must wait 10s, not 5s.
+    const fetchMock = vi.fn().mockImplementation(async () => mintResponse())
+    vi.stubGlobal('fetch', fetchMock)
+    store.insertMemberRegistrationCredential.mockRejectedValue(new Error('pg down'))
+
+    await expect(ensureEnrollment('profile.acme.com')).rejects.toBeInstanceOf(
+      MemberRegistrationUnavailableError
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(5_000 + 1) // past the 5s base backoff (failures=1)
+    await expect(ensureEnrollment('profile.acme.com')).rejects.toBeInstanceOf(
+      MemberRegistrationUnavailableError
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    vi.advanceTimersByTime(5_000 + 1) // still inside the escalated 10s window (failures=2)
+    await expect(ensureEnrollment('profile.acme.com')).rejects.toBeInstanceOf(
+      MemberRegistrationUnavailableError
+    )
+    // Fails against the unfixed code: the counter is deleted before the
+    // persist block, so every failure computes failures=1 and re-mints every
+    // 5s instead of escalating — this call would observe fetchMock called 3
+    // times instead of still being served from the negative cache.
+    expect(fetchMock).toHaveBeenCalledTimes(2) // served from cache — no re-mint yet
+
+    vi.advanceTimersByTime(5_000 + 1) // now past the escalated 10s window
+    await expect(ensureEnrollment('profile.acme.com')).rejects.toBeInstanceOf(
+      MemberRegistrationUnavailableError
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
   it('rejects localhost / IP-literal / dotless hosts with the misconfiguration error, never fetching', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)

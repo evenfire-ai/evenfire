@@ -126,11 +126,6 @@ async function enroll(domain: string): Promise<MemberRegistrationCredential> {
   ) {
     throw transientFailure(domain, 'member-registration hub returned a malformed mint response')
   }
-  // Only reset the backoff counter once the mint body is known well-formed —
-  // resetting as soon as response.ok is true (before this check) would let a
-  // hub that keeps returning 2xx with a malformed body re-mint at the 5s base
-  // forever instead of escalating toward BACKOFF_CAP_MS.
-  consecutiveTransientFailures.delete(domain)
 
   let inserted: boolean
   let winner: MemberRegistrationCredential | null
@@ -151,6 +146,14 @@ async function enroll(domain: string): Promise<MemberRegistrationCredential> {
   if (!winner) {
     throw transientFailure(domain, 'credential row missing after insert')
   }
+  // Only reset the backoff counter on genuine full success — after the mint
+  // body is well-formed AND the credential is durably persisted/adopted. The
+  // counter must survive every failure path up to and including a persist
+  // failure or a missing post-insert row, or a sustained outage on any of
+  // those paths would re-mint at the 5s base forever instead of escalating
+  // toward BACKOFF_CAP_MS (the exact orphan storm the design forbids).
+  consecutiveTransientFailures.delete(domain)
+
   if (!inserted) {
     rootLogger.warn(
       {
