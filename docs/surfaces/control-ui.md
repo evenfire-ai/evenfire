@@ -90,7 +90,10 @@ five steps live together.
    off (the shipped default), or blocks it and logs a denial when
    enforcement is on. sha256 digest pinning is a different mechanism: it
    applies to custom coordinator images in workflow recipes, not to
-   connector images, and it is required by default there.
+   connector images, and it is required by default there. A self-hosted
+   deployment [connects to the registry](../how-to/connect-to-registry.md) once
+   (operator-approved) before it can install or
+   [publish](../how-to/publish-plugin-to-registry.md) under its own org.
 
    ![Control UI registry catalog at /registry showing trust levels and the install flow](../assets/control-ui-registry-install.webp)
    *Dev cluster, demo tenant.*

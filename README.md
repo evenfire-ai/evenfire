@@ -74,7 +74,9 @@ each pillar links to its depth.
   governed registry (entries carry trust levels and an `author`); build custom
   coordinator images with `@clerum/workflow-sdk`; install through a governed
   flow. →
-  [packages/workflow-sdk/README.md](packages/workflow-sdk/README.md)
+  [packages/workflow-sdk/README.md](packages/workflow-sdk/README.md),
+  [connect to the registry](docs/how-to/connect-to-registry.md),
+  [publish a plugin](docs/how-to/publish-plugin-to-registry.md)
 - **Teams & access** — profiles, teams, roles (admin / inviter / member),
   invitations, and session → scoped-RPC token brokerage. →
   [external-rest-api/README.md](external-rest-api/README.md),

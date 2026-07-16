@@ -51,6 +51,8 @@ Use this index for long-form docs.
 | [Add an MCP server](how-to/add-mcp-server.md)                  | Dev-mode JSON or CRD allowlist path |
 | [Desktop setup & updates](how-to/desktop-setup-and-updates.md) | Environments, invitation setup, updates |
 | [Track usage & set budgets](how-to/token-budgets-and-usage.md) | Enable budgets, scope, block vs warn |
+| [Connect to the registry](how-to/connect-to-registry.md)       | Self-hosted registry connect flow   |
+| [Publish a plugin](how-to/publish-plugin-to-registry.md)       | Publish under your org with an `efrk_` key |
 | [Minikube full stack](deploy/minikube.md)                      | Local Kubernetes platform           |
 | [Production notes](deploy/production.md)                       | Checklist and in-repo deploy assets |
 | [WorkflowRecipes operations](deploy/workflow-recipes-guide.md) | Recipe ops, RBAC, debugging         |
