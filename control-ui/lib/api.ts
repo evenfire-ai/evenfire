@@ -1641,6 +1641,7 @@ export async function inviteAdminTeamMember(
       token: string
       status: 'pending'
       created_at: string
+      inviteAcceptUrl?: string
     }>
   }
   return apiSend(
@@ -1656,6 +1657,7 @@ export async function inviteAdminTeamMember(
     token: string
     status: 'pending'
     created_at: string
+    inviteAcceptUrl?: string
   }>
 }
 

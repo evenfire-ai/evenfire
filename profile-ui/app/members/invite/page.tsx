@@ -50,6 +50,7 @@ export default function InviteMemberPage() {
   const [loadingTeams, setLoadingTeams] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [inviteAcceptUrl, setInviteAcceptUrl] = useState('')
   const emailValid = EMAIL_PATTERN.test(email.trim())
   const nameValid = Boolean(name.trim())
   const selectedTeamIds = useMemo(() => Object.keys(inviteRoles), [inviteRoles])
@@ -121,12 +122,24 @@ export default function InviteMemberPage() {
     setInviteRoles(current => ({ ...current, [team.id]: nextRole }))
   }
 
+  async function copyInviteAcceptUrl() {
+    try {
+      await navigator.clipboard.writeText(inviteAcceptUrl)
+      showToast('Invitation link copied.', { tone: 'success' })
+    } catch {
+      showToast('Could not copy to clipboard. Select the link and copy it manually.', {
+        tone: 'error',
+      })
+    }
+  }
+
   async function sendInvite() {
     if (!canSubmit) return
     setSaving(true)
     setError('')
+    setInviteAcceptUrl('')
     try {
-      await inviteManagedMember(
+      const created = await inviteManagedMember(
         email.trim().toLowerCase(),
         name.trim(),
         selectedTeams.map(team => ({
@@ -134,6 +147,11 @@ export default function InviteMemberPage() {
           role: inviteRoles[team.id] || 'member',
         }))
       )
+      if (created?.inviteAcceptUrl) {
+        setInviteAcceptUrl(created.inviteAcceptUrl)
+        showToast('Invitation created. Copy the link to share it.', { tone: 'success' })
+        return // stay on the page so the admin can copy the link
+      }
       showToast('Invitation sent.', { tone: 'success' })
       router.push('/members')
     } catch (nextError) {
@@ -241,6 +259,17 @@ export default function InviteMemberPage() {
                     </div>
                   )}
                 </div>
+              ) : null}
+
+              {inviteAcceptUrl ? (
+                <FormField label="Invitation link">
+                  <div className="cu-team-member-picker">
+                    <TextInput id="invite-accept-url" value={inviteAcceptUrl} readOnly />
+                    <Button variant="ghost" onClick={() => void copyInviteAcceptUrl()}>
+                      Copy link
+                    </Button>
+                  </div>
+                </FormField>
               ) : null}
 
               {error ? <div className="message message--error">{error}</div> : null}

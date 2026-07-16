@@ -272,8 +272,10 @@ export async function inviteManagedMember(
   email: string,
   name: string,
   teams: Array<{ teamId: string; role: Role }>
-) {
-  return apiSend('POST', '/api/v1/members/invite', { email, name, teams })
+): Promise<{ inviteAcceptUrl?: string }> {
+  return apiSend('POST', '/api/v1/members/invite', { email, name, teams }) as Promise<{
+    inviteAcceptUrl?: string
+  }>
 }
 
 export async function updateManagedMemberRole(userId: string, teamId: string, role: Role) {

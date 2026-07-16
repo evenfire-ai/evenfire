@@ -14,6 +14,7 @@ import { IconTrash } from '@components/icons'
 import { Button, CheckboxField, Field, TextInput } from '@components/ui'
 import { createMemberFromControlAdmin, getAdminTeams, inviteAdminTeamMember } from '@lib/api'
 import type { TeamRole } from '@lib/api'
+import { copyTextToClipboard } from '@lib/clipboard'
 import { permissionsForTeamRole, setDeletePermission, setInvitePermission } from '@lib/teamRoles'
 
 const STEPS = ['Member', 'Team'] as const
@@ -65,6 +66,7 @@ export default function CreateMemberPage() {
   const [loadingTeams, setLoadingTeams] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [inviteAcceptUrl, setInviteAcceptUrl] = useState('')
   const hasTeams = teams.length > 0
   const teamOptions = useMemo(
     () =>
@@ -133,10 +135,21 @@ export default function CreateMemberPage() {
     return !loadingTeams && isMemberIdentityValid()
   }
 
+  async function copyInviteAcceptUrl() {
+    const copied = await copyTextToClipboard(inviteAcceptUrl)
+    showToast(
+      copied
+        ? 'Invitation link copied.'
+        : 'Could not copy to clipboard. Select the link and copy it manually.',
+      { tone: copied ? 'success' : 'error' }
+    )
+  }
+
   async function handleCreateMember() {
     if (!canSubmit) return
     setSaving(true)
     setError('')
+    setInviteAcceptUrl('')
     try {
       const payload = {
         name: name.trim(),
@@ -155,7 +168,14 @@ export default function CreateMemberPage() {
         window.sessionStorage.removeItem(`control-admin-member-reuse-password:${sourceAdminId}`)
         showToast(`Member created for ${payload.email}.`, { tone: 'success' })
       } else {
-        await inviteAdminTeamMember(null, payload)
+        const created = await inviteAdminTeamMember(null, payload)
+        if (created?.inviteAcceptUrl) {
+          setInviteAcceptUrl(created.inviteAcceptUrl)
+          showToast(`Invitation created for ${payload.email}. Copy the link to share it.`, {
+            tone: 'success',
+          })
+          return // stay on the page so the admin can copy the link
+        }
         showToast(`Invitation sent to ${payload.email}.`, { tone: 'success' })
       }
       router.push('/profile-admin/users')
@@ -362,6 +382,17 @@ export default function CreateMemberPage() {
                   </div>
                 )}
               </div>
+            ) : null}
+
+            {inviteAcceptUrl ? (
+              <Field label="Invitation link" htmlFor="invite-accept-url">
+                <div className="cu-team-member-picker">
+                  <TextInput id="invite-accept-url" value={inviteAcceptUrl} readOnly />
+                  <Button variant="ghost" size="sm" onClick={() => void copyInviteAcceptUrl()}>
+                    Copy link
+                  </Button>
+                </div>
+              </Field>
             ) : null}
 
             {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
