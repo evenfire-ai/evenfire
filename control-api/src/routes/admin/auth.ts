@@ -37,6 +37,7 @@ import {
   setInvitationPasswordForUser,
 } from '../../services/directory/index.js'
 import { signAdminToken } from '../../utils/auth/adminAuthToken.js'
+import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
 import {
   CONTROL_UI_ADMIN_SESSION_COOKIE,
   clearHttpOnlySessionCookie,
@@ -247,7 +248,7 @@ export function createAdminAuthRouter(): Router {
   router.post(
     '/admin/auth/password-reset/validate',
     publicAdminTokenRateLimit('password_reset_validate'),
-    async (req, res, _next) => {
+    async (req, res, next) => {
       try {
         const token = String(req.body?.token || '').trim()
         const email = String(req.body?.email || '')
@@ -275,6 +276,7 @@ export function createAdminAuthRouter(): Router {
           resetUuid: validation.resetUuid,
         })
       } catch (error) {
+        if (memberRegistrationErrorResponse(error)) return next(error)
         res.status(400).json({ error: 'invalid_password_reset' })
       }
     }
@@ -309,7 +311,8 @@ export function createAdminAuthRouter(): Router {
         let validation: { email: string; resetUuid: string }
         try {
           validation = await validateControlAdminPasswordResetToken(token, email)
-        } catch {
+        } catch (error) {
+          if (memberRegistrationErrorResponse(error)) throw error
           res.status(400).json({ error: 'invalid_password_reset' })
           return
         }
@@ -369,6 +372,7 @@ export function createAdminAuthRouter(): Router {
           desktopAccess,
         })
       } catch (error) {
+        if (memberRegistrationErrorResponse(error)) return next(error)
         res.status(400).json({ error: 'invalid_invitation' })
       }
     }
@@ -469,7 +473,7 @@ export function createAdminAuthRouter(): Router {
   router.post(
     '/admin/auth/control-admin-email-confirmations/validate',
     publicAdminTokenRateLimit('email_confirmation_validate'),
-    async (req, res, _next) => {
+    async (req, res, next) => {
       try {
         const token = String(req.body?.token || '').trim()
         const email = String(req.body?.email || '')
@@ -500,6 +504,7 @@ export function createAdminAuthRouter(): Router {
           confirmationUuid: validation.confirmationUuid,
         })
       } catch (error) {
+        if (memberRegistrationErrorResponse(error)) return next(error)
         res.status(400).json({ error: 'invalid_confirmation' })
       }
     }
@@ -526,7 +531,8 @@ export function createAdminAuthRouter(): Router {
         let validation: { email: string; confirmationUuid: string }
         try {
           validation = await validateControlAdminEmailConfirmationToken(token, email || undefined)
-        } catch {
+        } catch (error) {
+          if (memberRegistrationErrorResponse(error)) throw error
           res.status(400).json({ error: 'invalid_confirmation' })
           return
         }
