@@ -19,9 +19,14 @@ See [LICENSE](../LICENSE).
 ### Is multi-tenancy or hosting included?
 
 No. This repo is the full **single-tenant** platform — one organization per
-deployment. Multi-tenant provisioning, the hosted registry control plane, and
-member registration belong to the managed **evenfire hosted** service and are
-not open source. What you self-host is complete and not feature-gated. See
+deployment. Multi-tenant provisioning and the hosted registry control plane
+belong to the managed **evenfire hosted** service and are not open source.
+Member registration is similar — the invitation-signup backend itself is an
+extracted sibling service, not open source — but self-hosted deployments don't
+need to run it: hosted mode sends invitation emails via evenfire's shared
+registration hub with one env var. See [Member invitations on
+self-hosted](how-to/member-invitations-self-hosted.md). What you self-host is
+complete and not feature-gated. See
 [Open core: self-host vs hosted](concepts/open-core-and-hosted.md).
 
 ### Why do I keep seeing “clerum”?

@@ -193,6 +193,13 @@ extracted sibling service, expected in-cluster at
 for one flow: invitation profile lookup and desktop setup completion during
 the invitation/activation flow.
 
+Self-hosted control-api can send and validate the invitation itself with no
+sibling service at all, via **hosted mode** — see [Member invitations on
+self-hosted](../how-to/member-invitations-self-hosted.md). That does not
+close this page's gap: the lookup and setup-completion calls above are made
+by the desktop app directly, not by control-api, so they still need
+`member-registration-service` configured separately.
+
 **Without it, you can still log in and drive agents. You cannot complete an
 invitation-based signup.** Point `MEMBER_REGISTRATION_SERVICE_BASE_URL` at
 your own deployment of it — see [Ship it to your users](#ship-it-to-your-users)
