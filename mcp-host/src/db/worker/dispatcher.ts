@@ -404,6 +404,60 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         return { ok: true }
       })
 
+    case 'persist_turn_boundary':
+      // D3 (stateless-agents) — boundary message + session-state flip in ONE
+      // transaction. Mirrors the exact row/counter shape of `insert_message`
+      // plus the state semantics of `update_session_state` so a crash between
+      // the two writes is impossible by construction.
+      return withBusyRetry(() => {
+        const tx = db.transaction(() => {
+          s.insertMessage.run({
+            session_id: op.message.session_id,
+            ordinal: op.message.ordinal,
+            role: op.message.role,
+            content: op.message.content,
+            content_parts: op.message.content_parts,
+            tool_call_id: op.message.tool_call_id,
+            tool_calls: op.message.tool_calls,
+            tool_name: op.message.tool_name,
+            timestamp: op.message.timestamp,
+            token_count: op.message.token_count,
+            finish_reason: op.message.finish_reason,
+            spillover_ref: op.message.spillover_ref,
+            is_error: op.message.is_error,
+            turn_number: op.message.turn_number,
+            input_tokens: op.message.input_tokens ?? null,
+            output_tokens: op.message.output_tokens ?? null,
+            cache_read_tokens: op.message.cache_read_tokens ?? null,
+            cache_write_tokens: op.message.cache_write_tokens ?? null,
+          })
+          s.updateSessionCounters.run({
+            id: op.message.session_id,
+            message_count_delta: 1,
+            tool_call_count_delta: op.message.role === 'assistant' && op.message.tool_calls ? 1 : 0,
+            input_tokens_delta: 0,
+            output_tokens_delta: 0,
+            cache_read_tokens_delta: 0,
+            cache_write_tokens_delta: 0,
+            cache_reported: 0,
+          })
+          s.updateSessionState.run({
+            id: op.sessionId,
+            state: op.state,
+            ended_at: null,
+            end_reason: null,
+            active_task_id: op.activeTaskId ?? null,
+          })
+          // null means "clear" — COALESCE can't, so run the dedicated
+          // statement in the SAME transaction (see 'update_session_state').
+          if (op.activeTaskId === null) {
+            s.clearSessionActiveTask.run({ id: op.sessionId })
+          }
+        })
+        tx.immediate()
+        return { ok: true }
+      })
+
     case 'replace_messages':
       return withBusyRetry(() => {
         const tx = db.transaction(() => {

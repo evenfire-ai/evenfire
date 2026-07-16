@@ -77,6 +77,16 @@ else
   fail "pre-gate sync does not build workflow-runtime-core before dependent package tests"
 fi
 
+control_api_rollout_line="$(grep -nF 'rollout_if_present control-plane control-api' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+gfs_provision_line="$(grep -nF 'provision_gfs_serving' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
+if [[ -n "$control_api_rollout_line" &&
+      -n "$gfs_provision_line" &&
+      "$control_api_rollout_line" -lt "$gfs_provision_line" ]]; then
+  pass "pre-gate sync waits for control-api migrations before gfs provisioning"
+else
+  fail "pre-gate sync can provision gfs before control-api migrations"
+fi
+
 if grep -Fq 'MINIKUBE_MULTI_NODE=true' "$REGISTRY_SCRIPT" &&
    grep -Fq 'minikube --profile="${PROFILE}" image load localhost:5000/registry-api:test' "$REGISTRY_SCRIPT" &&
    grep -Fq 'eval "$(minikube --profile="${PROFILE}" docker-env)"' "$REGISTRY_SCRIPT"; then

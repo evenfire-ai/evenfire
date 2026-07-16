@@ -48,7 +48,7 @@ kubectl apply -f mcpserver.yaml
 
 See `mcpserver.yaml` for the full CRD spec. Key fields:
 
-- **Image**: `us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/airtable-mcp-server:latest`
+- **Image**: `us-central1-docker.pkg.dev/your-gcp-project/clerum/airtable-mcp-server:latest`
 - **Namespace**: `mcp-server`
 - **Transport**: StreamableHTTP at `http://airtable-server.mcp-server.svc.cluster.local:3000/mcp`
 - **EgressBindings**: `api.airtable.com:443/TCP` so HCC can generate the required outbound NetworkPolicy

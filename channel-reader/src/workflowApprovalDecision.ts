@@ -83,6 +83,20 @@ export function providerIdentityFromMessage(message: Message): ProviderIdentity 
     }
   }
 
+  if (message.channelType === 'teams') {
+    const providerUserId = rawString(message.rawData, 'fromId') ?? message.sender
+    const providerWorkspaceId =
+      rawString(message.rawData, 'tenantId') ?? rawString(message.rawData, 'providerWorkspaceId')
+    if (!providerWorkspaceId) return null
+    return {
+      medium: 'teams',
+      providerUserId,
+      providerWorkspaceId,
+      providerChannelId: message.channelId,
+      providerEventId: `teams:${providerWorkspaceId}:${message.channelId}:${message.messageId}`,
+    }
+  }
+
   return null
 }
 

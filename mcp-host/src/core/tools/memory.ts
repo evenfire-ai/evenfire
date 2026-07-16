@@ -1,5 +1,10 @@
 import type { Workspace } from '../../workspace/service'
-import { adminManagedIdentityFileMessage, isLockedPath } from '../../workspace/service'
+import {
+  adminManagedIdentityFileMessage,
+  isLockedPath,
+  isStateDbPath,
+  stateDbProtectedMessage,
+} from '../../workspace/service'
 import { Tool } from '../interfaces'
 import { ToolOutput } from '../types'
 
@@ -107,6 +112,7 @@ export class PersistentMemoryWriteTool implements Tool {
     if (
       err instanceof Error &&
       (err.name === 'LockedFileError' ||
+        err.name === 'StateDbPathError' ||
         err.name === 'MemoryScanRejectionError' ||
         err.name === 'CrossUserAccessError')
     ) {
@@ -158,6 +164,15 @@ export class PersistentMemoryWriteTool implements Tool {
     if (isLockedPath(filePath)) {
       return {
         content: adminManagedIdentityFileMessage(filePath),
+        duration_ms: Date.now() - startTime,
+        is_error: true,
+      }
+    }
+
+    // D3 — the session state database is platform state, never agent-writable.
+    if (isStateDbPath(filePath)) {
+      return {
+        content: stateDbProtectedMessage(filePath),
         duration_ms: Date.now() - startTime,
         is_error: true,
       }

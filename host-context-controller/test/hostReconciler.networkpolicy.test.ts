@@ -193,7 +193,10 @@ describe('HostReconciler.reconcile — NP wiring', () => {
     vi.spyOn(reconciler as any, 'ensureHostServiceAccount').mockResolvedValue(undefined)
     vi.spyOn(reconciler as any, 'ensureHostRole').mockResolvedValue(undefined)
     vi.spyOn(reconciler as any, 'ensureHostRoleBinding').mockResolvedValue(undefined)
-    vi.spyOn(reconciler as any, 'ensureMcpHostRuntimeTokenSecret').mockResolvedValue(undefined)
+    vi.spyOn(reconciler as any, 'provisionRuntimeTokenRevision').mockResolvedValue({
+      revision: 'runtime-revision',
+      scopeHash: (HostReconciler as any).runtimeTokenScopeHash(HOST, false),
+    })
     vi.spyOn(reconciler as any, 'ensurePvc').mockResolvedValue(undefined)
     vi.spyOn(reconciler as any, 'ensureService').mockResolvedValue(undefined)
     vi.spyOn(reconciler as any, 'ensureDeployment').mockResolvedValue(undefined)

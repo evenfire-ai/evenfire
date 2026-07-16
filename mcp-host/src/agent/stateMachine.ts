@@ -18,6 +18,7 @@ import type { ConversationStore } from '../core/conversation/conversationStore'
 // Phase 6 imports
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
+import { STATELESS_CRON_APPROVAL_PROMPT } from '../core/extensions/mcpApprovalGateController'
 // Core architecture imports
 import { SimpleEventEmitter } from '../core/orchestration/eventEmitter'
 import { BasicSafety } from '../core/safety/safety'
@@ -1122,6 +1123,21 @@ export class AgentStateMachine extends EventEmitter {
         `Approval needed to run workflow ${workflowName}.`,
         'Please approve through the configured approval channel.',
       ].join(' ')
+    }
+
+    if (approval.description === STATELESS_CRON_APPROVAL_PROMPT) {
+      // Cron×stateless gate: the user must see the cost consequence, not
+      // the generic tool-approval line. Parameters stay visible for
+      // transparency; the approve/deny instructions mirror the generic paths.
+      return (
+        `${approval.description} ` +
+        `Parameters: ${paramSummary}. ` +
+        (canApproveViaChannel
+          ? channelType === 'slack'
+            ? 'Use the approval controls to continue or cancel.'
+            : 'Reply /approve or /deny to this message.'
+          : `Request ID: ${approval.request_id}. Please approve via CLI: POST /v1/runtime/approvals/approve`)
+      )
     }
 
     if (canApproveViaChannel) {

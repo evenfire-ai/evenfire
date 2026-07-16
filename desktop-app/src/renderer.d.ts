@@ -20,6 +20,7 @@ import {
   PasswordLoginResult,
   PendingApprovalLite,
   PendingWorkflowApproval,
+  PrewarmHostResult,
   ProfileSettingsOpenOptions,
   RpcAllowedServersResult,
   SessionLifecycleState,
@@ -321,6 +322,7 @@ declare global {
           hostRefs?: string[]
         ) => Promise<HostMessageResponse>
         getHostStatus: (hostRef: string, hostRefs?: string[]) => Promise<HostRuntimeStatus>
+        prewarmHost: (hostRef: string, hostRefs?: string[]) => Promise<PrewarmHostResult>
         getHostActivity: (
           hostRef: string,
           limit?: number,

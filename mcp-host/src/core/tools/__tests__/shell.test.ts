@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
+import { mkdtemp, readFile, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { ALL_PROVIDERS, LlmProvider, PROVIDERS } from '../../../llm/registryCore'
 import { ShellTool } from '../shell'
 
 let workspacePath: string
@@ -299,6 +300,115 @@ describe('ShellTool', () => {
       // Just check it doesn't throw and PATH was passed through.
       expect(result.is_error).toBe(false)
       expect(result.content).toContain('-/')
+    })
+  })
+
+  describe('credential-slot stripping (§13 stateless agents)', () => {
+    const SLOT_ENV_NAMES = ALL_PROVIDERS.map(p => PROVIDERS[p].envName)
+    // Probes every registry slot in one shell round-trip: NAME=value or NAME=ABSENT.
+    const probeCommand =
+      'echo "' + SLOT_ENV_NAMES.map(n => n + '=${' + n + ':-ABSENT}').join(';') + '"'
+
+    const setAllSlotsInProcessEnv = (): (() => void) => {
+      const previous: Record<string, string | undefined> = {}
+      for (const name of SLOT_ENV_NAMES) {
+        previous[name] = process.env[name]
+        process.env[name] = 'parent-' + name
+      }
+      return () => {
+        for (const name of SLOT_ENV_NAMES) {
+          if (previous[name] === undefined) delete process.env[name]
+          else process.env[name] = previous[name]!
+        }
+      }
+    }
+
+    const expectOnlyActiveSlot = (
+      content: string,
+      active: LlmProvider | undefined,
+      prefix: string
+    ) => {
+      for (const provider of ALL_PROVIDERS) {
+        const envName = PROVIDERS[provider].envName
+        if (provider === active) {
+          expect(content).toContain(envName + '=' + prefix + envName)
+        } else {
+          expect(content).toContain(envName + '=ABSENT')
+        }
+      }
+    }
+
+    it('with all slots in the parent env, ONLY the active slot survives — each other slot is absent', async () => {
+      const restore = setAllSlotsInProcessEnv()
+      try {
+        const tool = new ShellTool(
+          workspacePath,
+          5000,
+          ['PATH', ...SLOT_ENV_NAMES],
+          () => ({}),
+          'claude'
+        )
+        const result = await tool.execute({ command: probeCommand })
+        expect(result.is_error).toBe(false)
+        expectOnlyActiveSlot(result.content as string, 'claude', 'parent-')
+      } finally {
+        restore()
+      }
+    })
+
+    it('rotating the active provider changes which slot survives', async () => {
+      const restore = setAllSlotsInProcessEnv()
+      try {
+        const openaiTool = new ShellTool(
+          workspacePath,
+          5000,
+          [...SLOT_ENV_NAMES],
+          () => ({}),
+          'openai'
+        )
+        const r1 = await openaiTool.execute({ command: probeCommand })
+        expectOnlyActiveSlot(r1.content as string, 'openai', 'parent-')
+
+        const zaiTool = new ShellTool(workspacePath, 5000, [...SLOT_ENV_NAMES], () => ({}), 'zai')
+        const r2 = await zaiTool.execute({ command: probeCommand })
+        expectOnlyActiveSlot(r2.content as string, 'zai', 'parent-')
+      } finally {
+        restore()
+      }
+    })
+
+    it('strips inactive slots layered via dynamicEnvProvider (ConfigStore) too', async () => {
+      const storeEnv: Record<string, string> = {}
+      for (const name of SLOT_ENV_NAMES) storeEnv[name] = 'store-' + name
+      const tool = new ShellTool(workspacePath, 5000, ['PATH'], () => storeEnv, 'bailian')
+      const result = await tool.execute({ command: probeCommand })
+      expect(result.is_error).toBe(false)
+      expectOnlyActiveSlot(result.content as string, 'bailian', 'store-')
+    })
+
+    it('without an active provider ALL credential slots are stripped (secure default)', async () => {
+      const restore = setAllSlotsInProcessEnv()
+      try {
+        const tool = new ShellTool(workspacePath, 5000, ['PATH', ...SLOT_ENV_NAMES])
+        const result = await tool.execute({ command: probeCommand })
+        expect(result.is_error).toBe(false)
+        expectOnlyActiveSlot(result.content as string, undefined, '')
+      } finally {
+        restore()
+      }
+    })
+
+    it('non-credential env vars are untouched by the stripping pass', async () => {
+      const tool = new ShellTool(
+        workspacePath,
+        5000,
+        ['PATH'],
+        () => ({ UNRELATED_VAR: 'kept' }),
+        'openai'
+      )
+      const result = await tool.execute({ command: 'echo "$UNRELATED_VAR"' })
+      expect(result.is_error).toBe(false)
+      expect(result.content).toContain('kept')
     })
   })
 })

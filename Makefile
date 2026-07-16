@@ -41,8 +41,6 @@ SERVICES := \
 	webhook-proxy \
 	webhook-gateway \
 	stdio-bridge \
-	gfs-controller \
-	workspace-files-controller \
 	desktop-app \
 	mcp-servers \
 	packages/workflow-runtime-core \
@@ -50,7 +48,6 @@ SERVICES := \
 
 # Services that have unit tests (vitest)
 TEST_SERVICES := \
-	channel-reader \
 	workflow-approval-request-reader \
 	mcp-host \
 	host-context-controller \
@@ -62,8 +59,6 @@ TEST_SERVICES := \
 	webhook-proxy \
 	webhook-gateway \
 	stdio-bridge \
-	gfs-controller \
-	workspace-files-controller \
 	desktop-app \
 	mcp-servers \
 	packages/workflow-runtime-core \
@@ -106,13 +101,6 @@ test-unit-all: ## Run unit tests across all services
 		echo "FAILED:$$failed"; exit 1; \
 	fi
 	@echo "All unit tests passed."
-
-.PHONY: test-counts
-test-counts: ## Print unit-test file/case counts (*.test.ts excl. node_modules, tests/e2e, dist)
-	@files=$$(find . -name '*.test.ts' -not -path '*/node_modules/*' -not -path './tests/e2e/*' -not -path '*/dist/*' | wc -l | tr -d ' '); \
-	cases=$$(find . -name '*.test.ts' -not -path '*/node_modules/*' -not -path './tests/e2e/*' -not -path '*/dist/*' -print0 | xargs -0 grep -hE '^[[:space:]]*(it|test)\(' | wc -l | tr -d ' '); \
-	echo "Unit test files: $$files"; \
-	echo "Unit test cases: $$cases"
 
 # ── Build Preflight ──────────────────────────────────────────────────
 .PHONY: build-preflight
@@ -173,6 +161,10 @@ minikube-verify-images: ## Verify all image SHAs match between local Docker and 
 minikube-verify: ## Verify all McpServers have resolved envSecrets (standalone smoke check)
 	@KUBE_CONTEXT=$(MINIKUBE_PROFILE) bash scripts/minikube/verify-mcpserver-secrets.sh
 
+.PHONY: minikube-verify-gfs
+minikube-verify-gfs: ## Verify gfs permission-store wiring (Secret DSN populated, gfsc rolled after rotation, /readyz green)
+	@CONTEXT=$(MINIKUBE_PROFILE) bash scripts/minikube/verify-gfs.sh
+
 # ── Minikube Deploy ────────────────────────────────────────────────────
 # Individual stack deploys removed — use minikube-deploy-all or minikube-setup.
 # The old targets (minikube-deploy-core, -mcp, -profiles, -channels, -ui)
@@ -197,6 +189,22 @@ minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@# rpc-proxy-secrets after each full overlay apply so Desktop/rpc-proxy/mcp-host
 	@# stay on the same JWT validation key.
 	@$(MAKE) --no-print-directory minikube-sync-auth-key
+	@# The overlay apply may recreate/replace the gfs-controller-db Secret (and
+	@# the one-time transition to the provisioning-owned connection-string key
+	@# removes the legacy empty key from last-applied). When the GFS stack is
+	@# deployed AND control-api is Ready (migration 0048 applied), re-provision
+	@# the gfs_controller DSN so gfsc never runs with an empty or stale
+	@# credential (issue #775). Fails loud if provisioning itself fails. When
+	@# control-api is not Ready yet (fresh cluster mid-setup), provisioning is
+	@# deferred LOUDLY to the full-setup/pre-gate-sync flow that already orders
+	@# it after control-api migrations.
+	@if kubectl --context=$(MINIKUBE_PROFILE) get configmap gfs-config -n gfs >/dev/null 2>&1; then \
+		if kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1; then \
+			CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/provision-gfs-db.sh; \
+		else \
+			echo "[minikube-deploy-all] control-api not Ready — gfs DSN provisioning DEFERRED to full-setup/pre-gate-sync ordering (gfsc stays fail-closed until then)"; \
+		fi; \
+	fi
 
 .PHONY: minikube-verify-networkpolicies
 minikube-verify-networkpolicies: ## Verify rendered minikube NetworkPolicies exist in cluster
@@ -327,12 +335,8 @@ minikube-pf-rpc-proxy: ## Port-forward RPC Proxy → localhost:8094
 	scripts/dev/resilient-kubectl-port-forward.sh "$(MINIKUBE_PROFILE)" rpc-proxy rpc-proxy 8094 8094
 
 .PHONY: minikube-pf-mcp-host
-minikube-pf-mcp-host: ## Port-forward MCP Host → localhost:8080 (service is named after the Host CRD, e.g. chatllm)
-	@if $(KC) get svc chatllm -n mcp-host >/dev/null 2>&1; then \
-		$(KC) port-forward svc/chatllm -n mcp-host 8080:8080; \
-	else \
-		$(KC) port-forward svc/mcp-host -n mcp-host 8080:8080; \
-	fi
+minikube-pf-mcp-host: ## Port-forward MCP Host → localhost:8080
+	$(KC) port-forward svc/mcp-host -n mcp-host 8080:8080
 
 .PHONY: minikube-pf-desktop
 minikube-pf-desktop: ## Port-forward all services needed by Desktop App (background)
@@ -362,10 +366,10 @@ minikube-verify-network-policy: ## Prove NetworkPolicy enforcement in clerum-tes
 	@CONTEXT="$(MINIKUBE_PROFILE)" scripts/minikube/verify-network-policy-enforcement.sh
 
 # E2E_CONTEXT drives which cluster desktop-app Playwright runs against.
-# Only these are permitted; "gke_${GCP_PROJECT}_us-central1-a_clerum" (prod) is hard-blocked.
+# Only these are permitted; "gke_your-gcp-project_us-central1-a_clerum" (prod) is hard-blocked.
 E2E_CONTEXT ?= clerum-test
-E2E_DESKTOP_ALLOWED_CONTEXTS := clerum-test gke_${GCP_PROJECT}_us-central1-a_example-dev
-E2E_PROD_CONTEXT := gke_${GCP_PROJECT}_us-central1-a_clerum
+E2E_DESKTOP_ALLOWED_CONTEXTS := clerum-test gke_your-gcp-project_us-central1-a_example-dev
+E2E_PROD_CONTEXT := gke_your-gcp-project_us-central1-a_clerum
 
 .PHONY: e2e-desktop-app
 e2e-desktop-app: ## Deterministic desktop-app Playwright E2E (validates context → pf → seed → test). Override with E2E_CONTEXT=<ctx>
@@ -805,6 +809,41 @@ test-e2e-figure-b: ## Run 1st-party AuthN, 3rd-party MCP-Host recipe sandbox wor
 test-e2e-figure-b-gateway-resilience: ## Run 1st-party AuthN, 3rd-party MCP-Host gateway resilience gate
 	@echo "Running 1st-party AuthN, 3rd-party MCP-Host gateway resilience gate..."
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-figure-b-gateway-resilience.sh
+
+.PHONY: test-e2e-stateless-phase0
+test-e2e-stateless-phase0: ## Run stateless cold-start Phase-0 measurement (p95 gate + JSON artifact)
+	@echo "Running stateless cold-start Phase-0 measurement..."
+	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/stateless-cold-start-measure.sh
+
+.PHONY: test-e2e-stateless-durability
+test-e2e-stateless-durability: ## Run stateless host durability E2E gate (Phase 1a; needs port-forwards + seeded chatllm-stateless)
+	@echo "Running stateless durability E2E gate..."
+	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-durability.sh
+
+.PHONY: test-e2e-stateless-suspend-wake
+test-e2e-stateless-suspend-wake: ## Run stateless suspend/wake E2E gate (Phase 1 API + Phase 2 Desktop Playwright; needs port-forwards + seeded chatllm-stateless)
+	@echo "Running stateless suspend/wake E2E gate..."
+	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-suspend-wake.sh
+
+.PHONY: test-e2e-stateless-wake-recovery
+test-e2e-stateless-wake-recovery: ## Run stateless wake-recovery latency gate (R1 warm draining / R2 cold suspended / R3 drained-window p95 budgets; needs port-forwards + seeded chatllm-stateless)
+	@echo "Running stateless wake-recovery latency gate..."
+	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-wake-recovery.sh
+
+.PHONY: test-e2e-hcc-communicationchannel-watch-recovery
+test-e2e-hcc-communicationchannel-watch-recovery: ## Run isolated minikube HCC watch-recovery fault-injection gate
+	@echo "Running HCC CommunicationChannel watch-recovery gate..."
+	E2E_HCC_WATCH_FAULT_INJECTION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-communicationchannel-watch-recovery.sh
+
+.PHONY: test-e2e-stateless-multinode
+test-e2e-stateless-multinode: ## Run stateless multi-node lane (opt-in: STATELESS_MULTINODE_GATE=1; needs >=2 schedulable nodes; exit 3 = cross-node UNVERIFIED)
+	@echo "Running stateless multi-node lane..."
+	STATELESS_MULTINODE_GATE=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-multinode.sh
+
+.PHONY: test-e2e-stateless-idle-calibration
+test-e2e-stateless-idle-calibration: ## Run stateless T_idle calibration sweep (compressed-local; needs port-forwards + seeded chatllm-stateless; ~26 min default matrix)
+	@echo "Running stateless T_idle calibration sweep..."
+	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-idle-calibration.sh
 
 .PHONY: test-e2e-deps
 test-e2e-deps: ## Install tests/e2e dependencies when missing

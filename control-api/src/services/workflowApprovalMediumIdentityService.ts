@@ -3,7 +3,7 @@ import { config } from '../config.js'
 import { type DbClient, pool, withTransaction } from '../db.js'
 import { enqueueWorkflowApprovalMediumChallengeDelivery } from './workflowApprovalMediumChallengeDeliveryService.js'
 
-export type WorkflowApprovalMedium = 'telegram' | 'slack' | 'discord'
+export type WorkflowApprovalMedium = 'telegram' | 'slack' | 'teams' | 'discord'
 
 export type MediumIdentityInput = {
   medium: string
@@ -25,6 +25,7 @@ export type VerifiedMediumAccount = {
   providerWorkspaceId: string | null
   providerChannelId: string | null
   communicationChannelRef: string | null
+  displayName: string | null
   disabledAt: string | null
 }
 
@@ -33,7 +34,7 @@ export type MediumChallenge = {
   expiresAt: string
 }
 
-const SUPPORTED_MEDIA = new Set<WorkflowApprovalMedium>(['telegram', 'slack', 'discord'])
+const SUPPORTED_MEDIA = new Set<WorkflowApprovalMedium>(['telegram', 'slack', 'teams', 'discord'])
 const CODE_RE = /^\d{6}$/
 const PROVIDER_IDENTITY_PART_MAX = 256
 
@@ -135,6 +136,9 @@ export async function createMediumChallenge(params: {
   if (identity.medium === 'slack') {
     throw new Error('slack_target_required')
   }
+  if (identity.medium === 'teams') {
+    throw new Error('teams_target_required')
+  }
   const code = generateSixDigitCode()
   const codeHash = createChallengeCodeHash({
     userId: params.userId,
@@ -219,6 +223,7 @@ export async function confirmMediumChallenge(params: {
     if (row.isExpired) return { ok: false, error: 'challenge_expired' }
     if (row.medium === 'telegram') return { ok: false, error: 'telegram_target_required' }
     if (row.medium === 'slack') return { ok: false, error: 'slack_target_required' }
+    if (row.medium === 'teams') return { ok: false, error: 'teams_target_required' }
     if (row.attempts >= config.approvalMediumChallengeMaxAttempts) {
       return { ok: false, error: 'too_many_attempts' }
     }
@@ -300,6 +305,7 @@ export async function listVerifiedMediumAccounts(
             provider_user_id AS "providerUserId",
             provider_workspace_id AS "providerWorkspaceId",
             provider_channel_id AS "providerChannelId",
+            display_name AS "displayName",
             disabled_at AS "disabledAt"
        FROM workflow_approval_medium_accounts
       WHERE user_id = $1${options.includeDisabled ? '' : ' AND disabled_at IS NULL'}
@@ -324,6 +330,7 @@ export async function getVerifiedMediumAccountById(
             provider_user_id AS "providerUserId",
             provider_workspace_id AS "providerWorkspaceId",
             provider_channel_id AS "providerChannelId",
+            display_name AS "displayName",
             disabled_at AS "disabledAt"
        FROM workflow_approval_medium_accounts
       WHERE id = $1 AND user_id = $2 AND disabled_at IS NULL
@@ -375,6 +382,7 @@ export async function findVerifiedMediumAccount(
             provider_user_id AS "providerUserId",
             provider_workspace_id AS "providerWorkspaceId",
             provider_channel_id AS "providerChannelId",
+            display_name AS "displayName",
             disabled_at AS "disabledAt"
        FROM workflow_approval_medium_accounts
       WHERE medium = $1

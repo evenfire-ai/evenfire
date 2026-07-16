@@ -113,6 +113,14 @@ export async function callReasoningForIteration(
       }
     }
 
+    // Latency attribution — one event per reasoning roundtrip (covers the
+    // single transport retry above when it fires). Consumed by the
+    // TaskExecutor [TurnTiming] recorder; with no subscriber this is a no-op.
+    config.events.emit({
+      type: 'llm:completed',
+      data: { iteration, durationMs: Date.now() - callStartedAt },
+      timestamp: new Date(),
+    })
     return { result, continuingFromToolResults }
   } finally {
     if (heartbeatInterval) clearInterval(heartbeatInterval)

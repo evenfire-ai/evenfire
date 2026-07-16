@@ -1,8 +1,12 @@
 import type { Router } from 'express'
 import { pool } from '../../db.js'
+import {
+  DbSeedResourceStore,
+  SeedResourceStore,
+  seedRootDirectories,
+} from '../../gfs/seedResources.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireInternalControlJwt } from '../../middleware/internalControlJwt.js'
-import { DbSeedResourceStore, seedRootDirectories, SeedResourceStore } from '../../gfs/seedResources.js'
 
 export interface HttpResult {
   status: number

@@ -11,7 +11,7 @@ vi.mock('../src/config', () => ({
     rpcProxyNamespace: 'rpc-proxy',
     runtimeNamespaces: ['mcp-server', 'rpc-proxy', 'sandbox-recipes'],
     port: 8081,
-    k8sApiCidrs: ['203.0.113.10/32', '10.128.0.2/32'],
+    k8sApiCidrs: ['203.0.113.1/32', '10.128.0.2/32'],
   },
 }))
 
@@ -48,7 +48,7 @@ describe('ensureK8sApiEgress', () => {
     const np = k8sApiEgressFor('mcp-server')
     expect(np).toBeDefined()
     const blocks = np!.spec!.egress![0].to!.map(t => t.ipBlock!.cidr)
-    expect(blocks).toEqual(['203.0.113.10/32', '10.128.0.2/32'])
+    expect(blocks).toEqual(['203.0.113.1/32', '10.128.0.2/32'])
   })
 
   it('applies the same CIDR set to every runtime namespace', async () => {

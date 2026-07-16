@@ -29,7 +29,7 @@
 #   # Live dev — explicit disposable fixture + opt-in required:
 #   E2E_RECIPE_NAME=mongodb-mcp-stack \
 #     ALLOW_LIVE_DEV_STATUS_MUTATION=i-understand-the-risk \
-#     CONTEXT=gke_${GCP_PROJECT}_us-central1-a_example-dev \
+#     CONTEXT=gke_your-gcp-project_us-central1-a_example-dev \
 #     ./scripts/e2e/e2e-workflow-transient-self-heal.sh
 #
 # Environment:
@@ -60,7 +60,7 @@ if [[ -z "${CONTEXT:-}" ]]; then
   exit 2
 fi
 case "$CONTEXT" in
-  clerum-test|clerum-codex-*|clerum-detached-*|gke_${GCP_PROJECT}_us-central1-a_example-dev) ;;
+  clerum-test|clerum-codex-*|clerum-detached-*|gke_your-gcp-project_us-central1-a_example-dev) ;;
   *)
     echo -e "${RED}ERROR:${NC} refusing to run against non-allowed context '$CONTEXT'."
     exit 2
@@ -74,7 +74,7 @@ esac
 # Disposable minikube/branch profiles (clerum-test, clerum-codex-*, clerum-*)
 # are safe with no opt-in; the live dev context requires BOTH an explicit
 # opt-in AND an explicit target recipe (no auto-select on shared dev).
-LIVE_DEV_CONTEXT="gke_${GCP_PROJECT}_us-central1-a_example-dev"
+LIVE_DEV_CONTEXT="gke_your-gcp-project_us-central1-a_example-dev"
 if [[ "$CONTEXT" == "$LIVE_DEV_CONTEXT" ]]; then
   case "${ALLOW_LIVE_DEV_STATUS_MUTATION:-}" in
     i-understand-the-risk) ;;

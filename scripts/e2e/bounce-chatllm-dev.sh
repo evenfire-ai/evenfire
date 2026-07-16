@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 umask 077
-KCTX="${KUBECONTEXT:-gke_${GCP_PROJECT}_us-central1-a_example-dev}"
+KCTX="${KUBECONTEXT:-gke_your-gcp-project_us-central1-a_example-dev}"
 
 log() { echo "[chatllm] $*" >&2; }
 

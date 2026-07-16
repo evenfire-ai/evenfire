@@ -105,3 +105,83 @@ export async function fetchHostConnectionFromControlApi(
     headers: {},
   }
 }
+
+/**
+ * Discriminated view of the control-api wake endpoint contract (Stage 4.1):
+ *   200 {status:'active'[, wakeGeneration]}  running or drain-cancelled
+ *   202 {status:'wake-requested', ...}       wake recorded, pod not up yet
+ *   404 {status:'unknown'}                   Host CR absent
+ *   409 {status:'not-stateless'}             lifecycle kill-switch off
+ *   429 {error, retryAfterSeconds}           per-host wake rate limit
+ *   401/403                                  rpc access token rejected
+ */
+export type HostWakeApiResponse =
+  | { kind: 'active'; wakeGeneration: number | null }
+  | { kind: 'wake-requested'; wakeGeneration: number | null }
+  | { kind: 'not-stateless' }
+  | { kind: 'unknown' }
+  | { kind: 'rate-limited'; retryAfterSeconds: number }
+  | { kind: 'auth'; status: number }
+
+async function drainBody(response: Response): Promise<void> {
+  try {
+    await response.arrayBuffer()
+  } catch {
+    /* draining is best effort; the status code already carries the answer */
+  }
+}
+
+export async function requestHostWakeFromControlApi(
+  hostRef: string,
+  rpcAccessToken: string
+): Promise<HostWakeApiResponse> {
+  const response = await fetch(
+    `${controlApiBaseUrl()}/rpc/hosts/${encodeURIComponent(hostRef)}/wake`,
+    {
+      method: 'POST',
+      headers: controlApiHeaders(rpcAccessToken),
+    }
+  )
+
+  if (response.status === 401 || response.status === 403) {
+    await drainBody(response)
+    return { kind: 'auth', status: response.status }
+  }
+  if (response.status === 404) {
+    await drainBody(response)
+    return { kind: 'unknown' }
+  }
+  if (response.status === 409) {
+    await drainBody(response)
+    return { kind: 'not-stateless' }
+  }
+  if (response.status === 429) {
+    const headerSeconds = Number(response.headers.get('retry-after'))
+    let bodySeconds = Number.NaN
+    try {
+      const parsed = (await response.json()) as { retryAfterSeconds?: unknown }
+      if (typeof parsed?.retryAfterSeconds === 'number') bodySeconds = parsed.retryAfterSeconds
+    } catch {
+      /* header below is the authoritative fallback; a missing pair fails loud */
+    }
+    const retryAfterSeconds =
+      Number.isFinite(headerSeconds) && headerSeconds > 0 ? headerSeconds : bodySeconds
+    if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds <= 0) {
+      throw new Error('Control API host wake returned 429 without a usable Retry-After')
+    }
+    return { kind: 'rate-limited', retryAfterSeconds }
+  }
+  if (response.status === 200 || response.status === 202) {
+    const parsed = (await response.json()) as { status?: unknown; wakeGeneration?: unknown }
+    const wakeGeneration = typeof parsed?.wakeGeneration === 'number' ? parsed.wakeGeneration : null
+    if (response.status === 200 && parsed?.status === 'active') {
+      return { kind: 'active', wakeGeneration }
+    }
+    if (response.status === 202 && parsed?.status === 'wake-requested') {
+      return { kind: 'wake-requested', wakeGeneration }
+    }
+    throw new Error(`Control API host wake returned unexpected body for status ${response.status}`)
+  }
+  await drainBody(response)
+  throw new Error(`Control API host wake failed (${response.status})`)
+}

@@ -11,6 +11,10 @@ import type { IncomingMessage } from '../server'
 const CONVERSATION_ID_RE = /^[a-zA-Z0-9._:-]{1,128}$/
 
 function conversationIdForMessage(message: IncomingMessage): string {
+  if (message.channelType === 'teams' && message.channelId.trim()) {
+    return message.channelId.trim()
+  }
+
   const raw =
     typeof message.threadId === 'string' && message.threadId.trim()
       ? message.threadId.trim()
@@ -22,10 +26,21 @@ function conversationIdForMessage(message: IncomingMessage): string {
 function providerIdentityPayload(message: IncomingMessage): Record<string, unknown> | null {
   const identity = message.providerIdentity
   if (!identity) return null
-  if (identity.medium !== 'telegram' && identity.medium !== 'slack') return null
+  if (
+    identity.medium !== 'telegram' &&
+    identity.medium !== 'slack' &&
+    identity.medium !== 'teams'
+  ) {
+    return null
+  }
   if (!identity.providerUserId?.trim()) return null
   if (!identity.providerChannelId?.trim()) return null
-  if (identity.medium === 'slack' && !identity.providerWorkspaceId?.trim()) return null
+  if (
+    (identity.medium === 'slack' || identity.medium === 'teams') &&
+    !identity.providerWorkspaceId?.trim()
+  ) {
+    return null
+  }
   return {
     medium: identity.medium,
     providerUserId: identity.providerUserId,
@@ -40,7 +55,12 @@ export async function resolveProviderWorkflowCallerContext(
   message: IncomingMessage | undefined,
   getEnv: EnvGetter = defaultEnv
 ): Promise<WorkflowCallerContext | null> {
-  if (!message || (message.channelType !== 'telegram' && message.channelType !== 'slack')) {
+  if (
+    !message ||
+    (message.channelType !== 'telegram' &&
+      message.channelType !== 'slack' &&
+      message.channelType !== 'teams')
+  ) {
     return null
   }
 

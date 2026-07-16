@@ -424,6 +424,8 @@ describe('DefaultPromptBuilder', () => {
     expect(msg.content).toContain('use `workflow_result`')
     expect(msg.content).toContain('use `workflow_status` or `workflow_health` for started')
     expect(msg.content).toContain('Do not use `workflow_result` to confirm that a workflow started')
+    expect(msg.content).toContain('use the same workflow recipe name from that trigger')
+    expect(msg.content).toContain('do not switch to unrelated task-board')
     expect(msg.content).toContain('answer directly in chat text')
     expect(msg.content).toContain('do not call dashboard, document, image')
     expect(msg.content).toContain('Never ask for or include namespace')

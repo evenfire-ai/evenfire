@@ -160,7 +160,7 @@ export type AppNotification = {
   dedupeKey?: string
 }
 
-export type AppErrorKind = 'network' | 'auth' | 'validation' | 'upstream' | 'unknown'
+export type AppErrorKind = 'network' | 'auth' | 'validation' | 'upstream' | 'waking' | 'unknown'
 
 export type FailedAgentSend = {
   content: string
@@ -278,7 +278,18 @@ export type ComposerAgentFileReference = {
   label: string
 }
 
+export type ComposerGlobalFileReference = {
+  id: string
+  addedOrder?: number
+  type: 'global_file'
+  resourceId: string
+  drive: string
+  gfsUri: string
+  label: string
+}
+
 export type ComposerReferenceAttachment =
   | ComposerPluginReference
   | ComposerConnectorReference
   | ComposerAgentFileReference
+  | ComposerGlobalFileReference

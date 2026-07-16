@@ -17,6 +17,7 @@ export async function listVerifiedMediumAccountsWithPreference(
             provider_workspace_id AS "providerWorkspaceId",
             provider_channel_id AS "providerChannelId",
             communication_channel_ref AS "communicationChannelRef",
+            display_name AS "displayName",
             disabled_at AS "disabledAt",
             ROW_NUMBER() OVER (
               ORDER BY updated_at DESC, created_at DESC, id
@@ -45,9 +46,33 @@ export async function preferVerifiedMediumAccount(params: {
                 provider_workspace_id AS "providerWorkspaceId",
                 provider_channel_id AS "providerChannelId",
                 communication_channel_ref AS "communicationChannelRef",
+                display_name AS "displayName",
                 disabled_at AS "disabledAt",
                 true AS "isPreferred"`,
     [params.accountId, params.userId]
   )
   return (result.rows[0] as PreferredMediumAccount | undefined) ?? null
+}
+
+export async function updateVerifiedMediumAccountDisplayName(params: {
+  userId: string
+  accountId: string
+  displayName: string | null
+}): Promise<VerifiedMediumAccount | null> {
+  const result = await pool.query(
+    `UPDATE workflow_approval_medium_accounts
+        SET display_name = $3
+      WHERE id = $1 AND user_id = $2
+      RETURNING id,
+                user_id AS "userId",
+                medium,
+                provider_user_id AS "providerUserId",
+                provider_workspace_id AS "providerWorkspaceId",
+                provider_channel_id AS "providerChannelId",
+                communication_channel_ref AS "communicationChannelRef",
+                display_name AS "displayName",
+                disabled_at AS "disabledAt"`,
+    [params.accountId, params.userId, params.displayName]
+  )
+  return (result.rows[0] as VerifiedMediumAccount | undefined) ?? null
 }

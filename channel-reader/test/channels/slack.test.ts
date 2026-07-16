@@ -15,10 +15,11 @@ const slackState = vi.hoisted(() => ({
     auth: { test: ReturnType<typeof vi.fn> }
     conversations: {
       history: ReturnType<typeof vi.fn>
+      info: ReturnType<typeof vi.fn>
       list: ReturnType<typeof vi.fn>
     }
     users: { info: ReturnType<typeof vi.fn> }
-    chat: { postMessage: ReturnType<typeof vi.fn> }
+    chat: { postMessage: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> }
     files: { uploadV2: ReturnType<typeof vi.fn> }
   }>,
 }))
@@ -50,6 +51,10 @@ vi.mock('@slack/web-api', () => ({
       },
       conversations: {
         history: vi.fn().mockResolvedValue({ messages: [], ok: true }),
+        info: vi.fn().mockResolvedValue({
+          channel: { id: 'C12345', name: 'general', is_channel: true },
+          ok: true,
+        }),
         list: vi.fn().mockResolvedValue({ channels: [], ok: true }),
       },
       users: {
@@ -60,6 +65,7 @@ vi.mock('@slack/web-api', () => ({
       },
       chat: {
         postMessage: vi.fn().mockResolvedValue({ ts: '1234567890.000001', ok: true }),
+        update: vi.fn().mockResolvedValue({ ok: true }),
       },
       files: {
         uploadV2: vi.fn().mockResolvedValue({ ok: true }),
@@ -138,6 +144,45 @@ describe('Slack verification command parsing', () => {
 
   it('redacts Slack verification messages that mention the app', () => {
     expect(redactSlackVerificationText('<@UBOT888> verify 123456')).toBe('verify [redacted]')
+  })
+})
+
+describe('SlackAdapter — conversation metadata', () => {
+  it('reads the Slack conversation title and type for confirmed conversations', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const client = slackState.instances[0]!
+
+    client.conversations.info.mockResolvedValueOnce({
+      channel: { id: 'G12345', name: 'leadership', is_private: true },
+      ok: true,
+    })
+
+    await expect(adapter.getConversationMetadata('G12345', 'U123')).resolves.toEqual({
+      providerChannelType: 'private_channel',
+      providerChannelTitle: '#leadership',
+    })
+    expect(client.conversations.info).toHaveBeenCalledWith({ channel: 'G12345' })
+  })
+
+  it('uses the Slack user display name for direct-message metadata', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const client = slackState.instances[0]!
+
+    client.conversations.info.mockResolvedValueOnce({
+      channel: { id: 'D12345', is_im: true, user: 'U123' },
+      ok: true,
+    })
+    client.users.info.mockResolvedValueOnce({
+      user: { name: 'josue' },
+      ok: true,
+    })
+
+    await expect(adapter.getConversationMetadata('D12345', null)).resolves.toEqual({
+      providerChannelType: 'im',
+      providerChannelTitle: '@josue',
+    })
   })
 })
 
@@ -252,6 +297,10 @@ describe('SlackAdapter — fetchMessages()', () => {
             ],
             ok: true,
           }),
+          info: vi.fn().mockResolvedValue({
+            channel: { id: 'C12345', name: 'general', is_channel: true },
+            ok: true,
+          }),
           list: vi.fn().mockResolvedValue({ channels: [], ok: true }),
         },
         users: {
@@ -303,6 +352,10 @@ describe('SlackAdapter — fetchMessages()', () => {
                 ts: '1700000001.000007',
               },
             ],
+            ok: true,
+          }),
+          info: vi.fn().mockResolvedValue({
+            channel: { id: 'C12345', name: 'general', is_channel: true },
             ok: true,
           }),
           list: vi.fn().mockResolvedValue({ channels: [], ok: true }),
@@ -528,6 +581,10 @@ describe('SlackAdapter — fetchMessages()', () => {
             messages: [{ user: 'U123', text: '<@U_BOT888> fake', ts: '1700000008.000001' }],
             ok: true,
           }),
+          info: vi.fn().mockResolvedValue({
+            channel: { id: 'C12345', name: 'general', is_channel: true },
+            ok: true,
+          }),
           list: vi.fn().mockResolvedValue({ channels: [], ok: true }),
         },
         users: {
@@ -567,6 +624,10 @@ describe('SlackAdapter — fetchMessages()', () => {
             messages: [{ user: 'U123', text: '/approve', ts: '1700000009.000001' }],
             ok: true,
           }),
+          info: vi.fn().mockResolvedValue({
+            channel: { id: 'C12345', name: 'general', is_channel: true },
+            ok: true,
+          }),
           list: vi.fn().mockResolvedValue({ channels: [], ok: true }),
         },
         users: {
@@ -604,6 +665,10 @@ describe('SlackAdapter — fetchMessages()', () => {
         },
         conversations: {
           history: vi.fn().mockResolvedValue({ messages: [], ok: true }),
+          info: vi.fn().mockResolvedValue({
+            channel: { id: 'C12345', name: 'general', is_channel: true },
+            ok: true,
+          }),
           list: vi.fn().mockResolvedValue({ channels: [], ok: true }),
         },
         users: {
@@ -647,6 +712,10 @@ describe('SlackAdapter — fetchMessages()', () => {
             messages: [{ user: 'U123', text: '/deny', ts: '1700000010.000001' }],
             ok: true,
           }),
+          info: vi.fn().mockResolvedValue({
+            channel: { id: 'C12345', name: 'general', is_channel: true },
+            ok: true,
+          }),
           list: vi.fn().mockResolvedValue({ channels: [], ok: true }),
         },
         users: {
@@ -685,6 +754,10 @@ describe('SlackAdapter — fetchMessages()', () => {
         conversations: {
           history: vi.fn().mockResolvedValue({
             messages: [{ user: 'U123', text: '/approve always', ts: '1700000011.000001' }],
+            ok: true,
+          }),
+          info: vi.fn().mockResolvedValue({
+            channel: { id: 'C12345', name: 'general', is_channel: true },
             ok: true,
           }),
           list: vi.fn().mockResolvedValue({ channels: [], ok: true }),
@@ -746,6 +819,44 @@ describe('SlackAdapter — sendMessage()', () => {
         blocks: slackBlocks,
       })
     )
+  })
+
+  it('updates tool approval blocks and clears them from progress messages', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const client = slackState.instances[0]!
+    const blocks = [
+      { type: 'section' as const, text: { type: 'mrkdwn' as const, text: 'Approval needed' } },
+      {
+        type: 'actions' as const,
+        elements: [
+          {
+            type: 'button' as const,
+            action_id: 'tool_approval_approve',
+            text: { type: 'plain_text' as const, text: 'Approve' },
+            value: 'tool:a:abcdefghijklmnop',
+          },
+        ],
+      },
+    ]
+
+    await adapter.editMessage('C12345', '1234567890.000001', 'Approval needed', {
+      slackBlocks: blocks,
+    })
+    await adapter.editMessage('C12345', '1234567890.000001', 'Approved. Processing...')
+
+    expect(client.chat.update).toHaveBeenNthCalledWith(1, {
+      channel: 'C12345',
+      ts: '1234567890.000001',
+      text: 'Approval needed',
+      blocks,
+    })
+    expect(client.chat.update).toHaveBeenNthCalledWith(2, {
+      channel: 'C12345',
+      ts: '1234567890.000001',
+      text: 'Approved. Processing...',
+      blocks: [],
+    })
   })
 
   it('uploads workflow result documents to Slack files', async () => {

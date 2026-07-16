@@ -6,7 +6,6 @@ import { parseK8sApiCidrs, parseNodeLocalDnsCidr } from './k8sApiCidrs'
 import { ContextCRD, McpServerCRD } from './types'
 
 export const DEFAULT_EGRESS_PROXY_IMAGE = 'clerum/nginx-egress-proxy:0.1.0'
-
 export interface Config {
   // Dev mode - if true, reads servers from env var instead of K8s
   devMode: boolean
@@ -84,6 +83,13 @@ export interface Config {
   // Host runtime reconciliation defaults
   hostImage: string
   hostImagePullPolicy: 'Always' | 'IfNotPresent' | 'Never'
+  // Pull policy override for STATELESS host pods (Stage 6, W5). Empty =
+  // inherit hostImagePullPolicy. IfNotPresent is honored only for immutable
+  // image references (@sha256: digest or a sha-<gitsha> tag); a mutable
+  // reference is refused loudly (error log + StatelessPullPolicyRejected
+  // condition) and the pod keeps Always — see hostReconciler's
+  // resolveStatelessImagePullPolicy.
+  statelessImagePullPolicy: '' | 'Always' | 'IfNotPresent' | 'Never'
   mcpServerImagePullPolicy: 'Always' | 'IfNotPresent' | 'Never'
   hostImagePullSecretName: string
   hostPort: number
@@ -149,6 +155,10 @@ export interface Config {
   // event drops on long K8s watch disconnects. 0 disables.
   hostResyncIntervalSec: number
 
+  // Per-request deadline for finite Kubernetes calls on the serialized Host
+  // convergence path. Watches keep their independent long-lived lifecycle.
+  hostK8sRequestTimeoutMs: number
+
   // Periodic SharedFileSystem fullReconcile interval (seconds). The SFS watch
   // fires only on SFS CRD changes, not on PVC binding / wfc pod readiness, so
   // this drives truthful-status auto-recovery (#592): a SharedFileSystem stuck
@@ -167,6 +177,14 @@ export interface Config {
   // healthy running pods.
   mcpHostBootstrapRefreshBeforeSec: number
 
+  // Rotate the mcp-host bootstrap runtime-token Secret when the refresh
+  // token's REAL expiry (the JWT `exp` claim, decoded without signature
+  // verification) is closer than this many seconds. Set via
+  // CONTEXT_MAPPER_RUNTIME_TOKEN_ROTATE_BEFORE_S; default 24h (86400).
+  // Bounded at decision time to half the token's observed lifetime so
+  // short-lived dev/test tokens cannot rotate on every reconcile.
+  runtimeTokenRotateBeforeSec: number
+
   // Periodic external-egress DNS resync interval (seconds). Re-resolves
   // McpServer.spec.egressBindings so DNS changes and failures converge without
   // requiring a watch event. 0 disables.
@@ -177,6 +195,21 @@ export interface Config {
   // without blocking; enforce mode blocks the workload build.
   allowedPluginImagePrefixes: string[]
   enforcePluginImageAllowlist: boolean
+
+  // ─── Stateless heartbeat + D8 idle gate (Stage 3) ─────────────────────
+  // Idle window before a stateless Host is drain-eligible (minutes).
+  statelessIdleMinutes: number
+  // Platform floor for the idle window: effective T_idle = max(idle, floor).
+  statelessIdleFloorMinutes: number
+  // Grace after a drain:true verdict before suspending without a drained report.
+  statelessDrainGraceMs: number
+  // Max pod uptime ceiling — an older pod drains regardless of activity (hours).
+  statelessMaxUptimeHours: number
+  // Cadence of HCC's control-api heartbeat poll (ms). mcp-host heartbeats
+  // are ingested by control-api's /mcp-host facade (Host JWT verified there);
+  // HCC only CONSUMES them via the InternalControl feed
+  // (GET /api/v1/auth/mcp-host/heartbeats) — it never verifies Host JWTs.
+  heartbeatPollMs: number
 }
 
 function getEnv(key: string, defaultValue?: string): string | undefined {
@@ -188,6 +221,42 @@ function getEnvInt(key: string, defaultValue: number): number {
   if (!value) return defaultValue
   const parsed = parseInt(value, 10)
   return isNaN(parsed) ? defaultValue : parsed
+}
+
+/**
+ * CONTEXT_MAPPER_HEARTBEAT_POLL_MS — cadence of HCC's control-api heartbeat
+ * poll. Fails config load loudly on a non-positive-integer value: a silent
+ * default over garbage would hide a typo'd cadence in production.
+ */
+export function parseHeartbeatPollMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 10_000
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `CONTEXT_MAPPER_HEARTBEAT_POLL_MS must be a positive integer (milliseconds), got '${raw}'`
+    )
+  }
+  return parsed
+}
+
+export function parseHostK8sRequestTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined) return 30_000
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer (milliseconds), got '${raw}'`
+    )
+  }
+  return parsed
+}
+
+export function validateRemovedStatelessCommunicationChannelPolicy(raw: string | undefined): void {
+  if (raw === undefined || raw.trim() === '') return
+  throw new Error(
+    "CLERUM_STATELESS_COMMUNICATION_CHANNEL_POLICY is no longer supported; CommunicationChannel-connected Hosts are always kept active until channel wake/redrive is implemented (got '" +
+      raw +
+      "')"
+  )
 }
 
 function getEnvBool(key: string, defaultValue: boolean): boolean {
@@ -268,6 +337,10 @@ function parseDevAuthTokens(): Map<string, string> {
 
 const devMode = getEnvBool('CLERUM_DEV_MODE', false)
 
+validateRemovedStatelessCommunicationChannelPolicy(
+  getEnv('CLERUM_STATELESS_COMMUNICATION_CHANNEL_POLICY')
+)
+
 export const config: Config = {
   devMode,
 
@@ -311,7 +384,7 @@ export const config: Config = {
   // stdio-bridge sidecar image
   stdioBridgeImage: getEnv(
     'CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE',
-    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/stdio-bridge:0.1.0'
+    'us-central1-docker.pkg.dev/your-gcp-project/clerum/stdio-bridge:0.1.0'
   )!,
 
   // stdio-bridge sidecar resource defaults
@@ -364,9 +437,14 @@ export const config: Config = {
   // Host runtime defaults
   hostImage: getEnv(
     'CONTEXT_MAPPER_HOST_IMAGE',
-    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mcp-host:0.6.0'
+    'us-central1-docker.pkg.dev/your-gcp-project/clerum/mcp-host:0.6.0'
   )!,
   hostImagePullPolicy: getEnv('CONTEXT_MAPPER_HOST_IMAGE_PULL_POLICY', 'Always') as
+    | 'Always'
+    | 'IfNotPresent'
+    | 'Never',
+  statelessImagePullPolicy: getEnv('CONTEXT_MAPPER_STATELESS_IMAGE_PULL_POLICY', '') as
+    | ''
     | 'Always'
     | 'IfNotPresent'
     | 'Never',
@@ -415,7 +493,7 @@ export const config: Config = {
   // workspace-files-controller (per-SharedFileSystem) reconciliation defaults
   wfcImage: getEnv(
     'CONTEXT_MAPPER_WFC_IMAGE',
-    'us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/workspace-files-controller:0.1.0'
+    'us-central1-docker.pkg.dev/your-gcp-project/clerum/workspace-files-controller:0.1.0'
   )!,
   wfcImagePullPolicy: getEnv('CONTEXT_MAPPER_WFC_IMAGE_PULL_POLICY', 'IfNotPresent') as
     | 'Always'
@@ -467,6 +545,10 @@ export const config: Config = {
   // for runtime-auth degraded mcp-host pods; use only for diagnostic runs.
   hostResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_HOST_RESYNC_SEC', 300),
 
+  // Every finite Kubernetes request that can hold Host convergence gets its
+  // own deadline. Watch streams are intentionally excluded.
+  hostK8sRequestTimeoutMs: parseHostK8sRequestTimeoutMs(getEnv('HCC_HOST_K8S_REQUEST_TIMEOUT_MS')),
+
   // Periodic SharedFileSystem resync (default 60s). Re-evaluates PVC bind + wfc
   // readiness so a transient Initializing/Degraded converges to Ready (#592).
   sfsResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_SFS_RESYNC_SEC', 60),
@@ -478,6 +560,10 @@ export const config: Config = {
     'HCC_MCP_HOST_RUNTIME_BOOTSTRAP_REFRESH_BEFORE_SEC',
     900
   ),
+
+  // Refresh-token near-expiry rotation window (default 24h). Documented in
+  // the ClerumConfig interface above.
+  runtimeTokenRotateBeforeSec: getEnvInt('CONTEXT_MAPPER_RUNTIME_TOKEN_ROTATE_BEFORE_S', 86_400),
 
   // Periodic external-egress DNS resync (default 5 min). 0 disables.
   externalEgressResyncIntervalSec: getEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 300),
@@ -492,4 +578,11 @@ export const config: Config = {
     .map(s => s.trim())
     .filter(s => s.length > 0),
   enforcePluginImageAllowlist: getEnvBool('CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST', false),
+
+  // Stateless heartbeat + D8 idle gate (Stage 3).
+  statelessIdleMinutes: getEnvInt('CONTEXT_MAPPER_STATELESS_IDLE_MINUTES', 30),
+  statelessIdleFloorMinutes: getEnvInt('CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES', 15),
+  statelessDrainGraceMs: getEnvInt('CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS', 60000),
+  statelessMaxUptimeHours: getEnvInt('CONTEXT_MAPPER_STATELESS_MAX_UPTIME_HOURS', 72),
+  heartbeatPollMs: parseHeartbeatPollMs(getEnv('CONTEXT_MAPPER_HEARTBEAT_POLL_MS')),
 }

@@ -66,25 +66,28 @@ describe('config: production voucher key guard', () => {
     vi.resetModules()
   })
 
-  it('warns when registryVoucherPrivateKey is unset and fallback is in effect', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  it('throws in managed mode when CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY is unset', async () => {
+    process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'true'
+    process.env.CLERUM_REGISTRY_URL = 'https://example.com'
+    process.env.REGISTRY_CONNECTION_MODE = 'managed'
+    process.env.CLERUM_REGISTRY_CLIENT_ID = 'id'
+    process.env.CLERUM_REGISTRY_CLIENT_SECRET = 's'
+    process.env.CONTROL_API_REGISTRY_VOUCHER_KID = 'key-uuid'
     delete process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY
-
-    await import('../src/config.js')
-
-    expect(warnSpy).toHaveBeenCalled()
-    const calls = warnSpy.mock.calls.map(c => String(c[0]))
-    expect(calls.some(m => /registry.*voucher/i.test(m) && /fallback|adminJwt/i.test(m))).toBe(true)
+    await expect(() => import('../src/config.js')).rejects.toThrow(
+      /CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY/
+    )
   })
 
-  it('does not warn about voucher fallback when registryVoucherPrivateKey is set', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  it('boots in managed mode with the dedicated voucher key + kid set', async () => {
+    process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'true'
+    process.env.CLERUM_REGISTRY_URL = 'https://example.com'
+    process.env.REGISTRY_CONNECTION_MODE = 'managed'
+    process.env.CLERUM_REGISTRY_CLIENT_ID = 'id'
+    process.env.CLERUM_REGISTRY_CLIENT_SECRET = 's'
     process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY = generateNonDevPem()
-
-    await import('../src/config.js')
-
-    const calls = warnSpy.mock.calls.map(c => String(c[0]))
-    expect(calls.some(m => /registry.*voucher/i.test(m) && /fallback/i.test(m))).toBe(false)
+    process.env.CONTROL_API_REGISTRY_VOUCHER_KID = 'key-uuid'
+    await expect(import('../src/config.js')).resolves.toBeDefined()
   })
 
   it('rejects default dev internal service tokens in production', async () => {

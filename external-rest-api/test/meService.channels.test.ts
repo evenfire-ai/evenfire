@@ -6,18 +6,18 @@ describe('meService channel mappings', () => {
     expect(
       normalizeChannels({
         emails: [' user@example.com '],
-        telegramHandles: [' @alfredo '],
+        telegramHandles: [' @testuser '],
         telegramIds: [' 123456789 '],
         slackUserNames: [' U123 '],
-        discordUserNames: [' alfredo '],
+        discordUserNames: [' testuser '],
         whatsappNumbers: [' +15551234567 '],
       })
     ).toEqual({
       emails: ['user@example.com'],
-      telegramHandles: ['@alfredo'],
+      telegramHandles: ['@testuser'],
       telegramIds: ['123456789'],
       slackUserNames: ['U123'],
-      discordUserNames: ['alfredo'],
+      discordUserNames: ['testuser'],
       whatsappNumbers: ['+15551234567'],
     })
   })

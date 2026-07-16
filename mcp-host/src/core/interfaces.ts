@@ -209,4 +209,7 @@ export interface NativeToolConfig {
   httpAllowlist: string[]
   envAllowlist: string[]
   memoryMaxSize: number
+  /** Cron×stateless (CLERUM_STATELESS_LIFECYCLE): steers the cron_manage
+   *  stateless notice. Optional so existing construction sites stay valid. */
+  statelessLifecycle?: boolean
 }

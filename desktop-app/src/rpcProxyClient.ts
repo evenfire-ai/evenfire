@@ -133,6 +133,36 @@ export class RpcProxyClient {
     )
   }
 
+  /**
+   * Pre-warms a stateless host: asks rpc-proxy to scale the suspended pod
+   * back up so it is Ready before the user's first message. Every response on
+   * the wake contract is terminal — no polling, no retry:
+   *   200 {status:'active'}          host already running
+   *   202 {status:'wake-requested'}  scale-up triggered
+   *   409 {status:'not-stateless'}   always-on host; nothing to wake
+   * Anything else (401/403/404/5xx) is an error for the caller to log.
+   */
+  async prewarmHost(rpcAccessToken: string, hostRef: string): Promise<{ status: string }> {
+    const response = await fetch(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/wake`), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${rpcAccessToken}` },
+    })
+    if (response.status === 200 || response.status === 202 || response.status === 409) {
+      const payload = (await response.json()) as { status?: string }
+      const status = payload?.status
+      if (status !== 'active' && status !== 'wake-requested' && status !== 'not-stateless') {
+        throw new ApiError(
+          `Prewarm returned a contract-violating body (${response.status}): status=${String(status)}`,
+          response.status,
+          JSON.stringify(payload)
+        )
+      }
+      return { status }
+    }
+    const body = await readErrorBody(response)
+    throw new ApiError(`Prewarm failed (${response.status}): ${body}`, response.status, body)
+  }
+
   async getHostHealth(rpcAccessToken: string, hostRef: string): Promise<HostRuntimeHealth> {
     return requestJson<HostRuntimeHealth>(
       'GET',

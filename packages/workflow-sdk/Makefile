@@ -1,4 +1,4 @@
-REGISTRY ?= us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum
+REGISTRY ?= us-central1-docker.pkg.dev/your-gcp-project/clerum
 IMAGE    ?= clerum-workflow-base
 VERSION  ?= $(shell git describe --tags --always 2>/dev/null || echo "latest")
 

@@ -40,13 +40,17 @@ import type { Attachment, Conversation } from './core/types'
 import { ConversationState } from './core/types'
 import { wireActivityEvents } from './eventWiring'
 import { HostWatcher, getHost } from './k8sClient'
+import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
+import { isTerminal } from './lifecycle/types'
+import type { TransitionEvent } from './lifecycle/types'
 import { SingleTurnProvider, createLLMProvider } from './llm'
 import { PromptCache } from './llm/promptCache'
 import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import './logger'
 import { McpManager } from './mcp'
+import { startMcpInitializationInBackground } from './mcpBackgroundInit'
 import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
 import { maybeCreatePluginWorkloadSdkServer } from './pluginWorkloadSdk/server'
 import type { PluginWorkloadSdkServer } from './pluginWorkloadSdk/server/sdkServer'
@@ -55,6 +59,7 @@ import { progressReporterRegistry } from './progress/sseProgressReporter'
 import { MessageQueue, Task, TaskResponsePayload } from './queue'
 import { ResultStore } from './resultStore'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
+import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'
 import {
   HostActivityEvent,
   HostActivitySnapshotResponse,
@@ -80,6 +85,12 @@ import {
 } from './server/wireProjections'
 import { SessionProcessor } from './session'
 import { approxDecodedBytes } from './shared/encoding'
+import {
+  StatelessBootError,
+  assertStatelessBootConfig,
+  resolveSessionDbPathFrom,
+} from './statelessBootGuard'
+import { StatelessCronPolicyError, assertStatelessCronPolicyConfig } from './statelessCronPolicy'
 import { ApiKeys, HostCRD, McpServerInfo } from './types'
 import { UsageReporter } from './usage/usageReporter'
 import { setOutputDirHostAccessor } from './workflow/internalTools'
@@ -131,6 +142,8 @@ let agent: AgentStateMachine | null = null
 let cronScheduler: CronScheduler | null = null
 let sessionProcessor: SessionProcessor | null = null
 let isShuttingDown = false
+// Stage 3 (stateless-agents) — heartbeat emitter + DRAINING fence holder.
+let statelessHeartbeat: StatelessHeartbeat | null = null
 
 // Shared mcp-host → control-api auth credential. Built once at startup
 // from MCP_HOST_RUNTIME_* env (HCC- or WRC-injected) and passed to every
@@ -174,6 +187,19 @@ const pendingTaskResults = new ResultStore<PendingTaskEntry>(
 const pendingCronResults = new ResultStore<PendingCronResult>(30 * 60 * 1000, entry =>
   entry.timestamp.getTime()
 )
+
+/**
+ * Cron×stateless in-flight marker set (drained-gauge race fix). Holds the ids
+ * of cron tasks that have fired but whose result has not yet been written to
+ * `pendingCronResults`. `wireCronDispatch` arms an id at trigger time (before
+ * the task runs, hence before completeTurn flips `activeTaskId`), and the
+ * TaskLifecycle terminal listener below clears it. It ORs into the heartbeat's
+ * `pendingResults` condition so the gauge never reads both `activeTask` and
+ * `pendingResults` false during the window between the activeTaskId flip and
+ * the cron-result store — a window in which a `drained` report would let HCC
+ * suspend the pod and lose the not-yet-stored one-shot result.
+ */
+const cronResultsInFlight = new Set<string>()
 
 function resolveHostRef(task?: Task): string {
   return (
@@ -674,20 +700,22 @@ function setupUsageReporting(): void {
 }
 
 /**
- * Resolve the absolute path where `state.db` should live. Production uses
- * the workspace PVC; dev/test fall back to a tmpdir copy so the file lives
- * outside the repo.
+ * Resolve the absolute path where `state.db` should live. D3 §1.2 precedence:
+ * `CLERUM_SESSION_DB_DIR` (dedicated PVC mount injected by HCC) → explicit
+ * `CLERUM_SESSION_DB_PATH` → the workspace PVC → tmpdir fallback (dev/test
+ * only; forbidden — throws — under the stateless lifecycle).
  */
 function resolveSessionDbPath(): string {
-  if (config.sessionDbPath) return config.sessionDbPath
   const memoryCfg = currentHost?.spec.memory || config.memory
   const wp = memoryCfg?.workspacePath ?? config.memory.workspacePath
-  if (memoryCfg?.enabled && wp) {
-    return path.join(wp, 'state.db')
-  }
-  // No PVC available — dev / ephemeral fallback. State is lost across
-  // restarts; expected for unit-level smoke tests.
-  return path.join(require('node:os').tmpdir(), 'clerum-state.db')
+  return resolveSessionDbPathFrom({
+    statelessLifecycle: config.statelessLifecycle,
+    sessionDbDir: config.sessionDbDir,
+    sessionDbPath: config.sessionDbPath,
+    workspaceMemoryEnabled: memoryCfg?.enabled === true,
+    workspacePath: wp ?? '',
+    tmpFallbackPath: path.join(require('node:os').tmpdir(), 'clerum-state.db'),
+  })
 }
 
 /**
@@ -711,6 +739,9 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
     )
   }
 
+  // D3 §1.1 — durability barrier (PRAGMA synchronous = FULL): always on under
+  // the stateless lifecycle; always-on Hosts opt in via CLERUM_DB_BARRIER_MODE=full.
+  const barrierMode = config.statelessLifecycle || config.dbBarrierModeFull
   const handle = createConversationStore({
     mode: config.sessionStoreMode,
     dbPath,
@@ -720,11 +751,13 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
     checkpointEveryWrites: config.dbCheckpointEveryWrites,
     heartbeatMs: config.dbWorkerHeartbeatMs,
     pendingApprovalTtlMs: config.pendingApprovalTtlMs,
+    barrierMode,
   })
 
   agent.setConversationStore(handle.store)
   console.log(
-    `[Main] Conversation store mode=${handle.mode} dbPath=${dbPath} cacheSize=${config.conversationCacheSize}`
+    `[Main] Conversation store mode=${handle.mode} dbPath=${dbPath} ` +
+      `cacheSize=${config.conversationCacheSize} barrierMode=${barrierMode ? 'full' : 'normal'}`
   )
 
   // Wire the cold-start loader so `agent.bootstrap()` (called below) can
@@ -840,7 +873,7 @@ async function initializeAgent(): Promise<void> {
   }
 
   // Create cron scheduler and inject into agent
-  cronScheduler = new CronScheduler(messageQueue)
+  cronScheduler = new CronScheduler(messageQueue, { statelessLifecycle: config.statelessLifecycle })
   agent.setCronScheduler(cronScheduler)
 
   // Wire activity events (agent, queue, core events -> activity hub)
@@ -886,6 +919,20 @@ async function initializeAgent(): Promise<void> {
     sessionProcessor,
     pendingCronResults,
     sanitizeAttachments,
+    cronResultsInFlight,
+  })
+
+  // Cron×stateless drained-gauge race fix: clear the in-flight marker on the
+  // task's terminal lifecycle transition. On success this fires AFTER the cron
+  // responseCallback has stored the result in pendingCronResults (which then
+  // pins the gauge on its own), closing the window without double-counting; on
+  // failure/cancel it fires with no result produced, correctly unpinning. A
+  // non-cron task's id is simply never in the set, so this is a cheap no-op for
+  // channel/sync/async tasks.
+  taskLifecycle!.on('transition', (event: TransitionEvent) => {
+    if (isTerminal(event.to)) {
+      cronResultsInFlight.delete(event.taskId)
+    }
   })
 
   // T2.1 — Construct the durable conversation store (no-op in `memory`
@@ -1147,6 +1194,12 @@ async function handleTaskResult(
       error: result.error,
       model: result.model,
     }
+    // D8 delivered-on-read: this poll RETURNED the terminal result to its
+    // verified owner — from here the entry is recoverability cache, not
+    // pending work. Stamp it (idempotent, NO delete: repeat polls keep
+    // replaying it for the TTL) so the stateless pendingResults gauge unpins
+    // now instead of blocking suspend for the full 10-min TTL.
+    markResultDelivered(result)
     // Desktop can have multiple task-result readers for the same turn: the
     // tracker, stream recovery, and the chat renderer can all reconcile the
     // durable task result. Keep task file attachments idempotent for the
@@ -1264,7 +1317,9 @@ async function handleProviderWorkflowResultRequest(
   input: ProviderWorkflowResultRequest
 ): Promise<MessageResponse> {
   const message: IncomingMessage = {
-    content: `Download workflow result for ${input.workflowName}`,
+    content: input.workflowRunId
+      ? 'Download the completed workflow result'
+      : `Download workflow result for ${input.workflowName}`,
     channelType: input.source.channelType,
     channelId: input.source.channelId,
     sender: input.source.sender,
@@ -1306,7 +1361,9 @@ async function handleProviderWorkflowResultRequest(
     getEnv: key => env[key] ?? process.env[key],
     workflowCallerContext: context,
   })
-  const result = await tool.execute({ name: input.workflowName })
+  const result = input.workflowRunId
+    ? await tool.executeForRun(input.workflowRunId, input.artifactName)
+    : await tool.execute({ name: input.workflowName })
   return {
     success: !result.is_error,
     status: 'completed',
@@ -1363,6 +1420,12 @@ function getCronResults(caller?: RuntimeCallerContext): Array<PendingCronResult 
     ...entry,
   }))
   for (const [id, entry] of filteredEntries) {
+    // D8 delivered-on-read: the caller fetched this cron result. Stamp it
+    // BEFORE markFileAttachmentsDelivered (which re-sets a spread copy) so
+    // the stamp survives. A read is delivery — the explicit ACK delete below
+    // remains the strong consumption signal; the stamp only unpins the
+    // stateless pendingResults idle gauge.
+    markResultDelivered(entry)
     markFileAttachmentsDelivered(pendingCronResults, id, entry)
   }
 
@@ -1704,6 +1767,133 @@ async function startRPCServer(): Promise<void> {
 }
 
 /**
+ * Stage 3 (stateless-agents) — start the push heartbeat emitter and wire the
+ * reversible DRAINING fence into the runtime intake route. No-op unless
+ * CLERUM_STATELESS_LIFECYCLE=true. Fails loud on missing prerequisites: a
+ * stateless Host that cannot report activity would poison HCC's suspend
+ * decisions, so degrading silently is not an option.
+ */
+function startStatelessHeartbeat(): void {
+  if (!config.statelessLifecycle) return
+  if (!rpcServer) {
+    throw new Error(
+      '[Main] startStatelessHeartbeat requires the RPC server to be constructed first'
+    )
+  }
+  const handle = conversationStoreHandle
+  if (!handle) {
+    throw new Error(
+      '[Main] CLERUM_STATELESS_LIFECYCLE=true requires CLERUM_SESSION_STORE=sqlite|dual — ' +
+        'the heartbeat activity conditions come from the durable conversation store'
+    )
+  }
+  const persistQueue = handle.persistQueue
+  if (!persistQueue) {
+    throw new Error(
+      '[Main] stateless heartbeat requires the sqlite persist queue for the final drain checkpoint'
+    )
+  }
+  // Guaranteed by the startup guard; re-checked here so this function fails
+  // loud even if invoked outside the guarded boot path.
+  const gatewayBaseUrl = config.mcpHostGatewayUrl
+  if (!gatewayBaseUrl) {
+    throw new Error(
+      '[Main] CLERUM_STATELESS_LIFECYCLE=true requires MCP_HOST_GATEWAY_URL — the heartbeat ' +
+        "targets control-api's /mcp-host facade via the workflow-approval gateway"
+    )
+  }
+  // Share the refreshing runtime-auth holder used by every other runtime
+  // consumer (approvals, usage). auth.accessToken is updated IN PLACE by the
+  // refresh path (persistRotatedTokens handles rotation-on-use), so the
+  // heartbeat always presents a live token — unlike a static process.env read,
+  // which freezes at boot and 401s once the ~300s access token expires.
+  if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
+  const heartbeatAuth = runtimeAuth!
+  // Arm the proactive refresher HERE — the heartbeat is a first-class runtime
+  // token consumer and must not depend on setupUsageReporting()/workflow mode
+  // (which early-return in a conversational stateless host) to keep the shared
+  // access token live. Idempotent: safe to double-arm if another path already did.
+  startRuntimeAuthProactiveRefresh(heartbeatAuth)
+  const heartbeat = new StatelessHeartbeat({
+    enabled: true,
+    hostRef: config.hostName,
+    podUid: config.podUid,
+    gatewayBaseUrl,
+    intervalMs: config.statelessHeartbeatIntervalMs,
+    // Read the CURRENT access token from the shared runtime-auth holder each
+    // tick. It is refreshed in place by the runtime auth path, so an expired
+    // boot token is transparently replaced (env vars, by contrast, never
+    // update in a live process).
+    getAccessToken: () => {
+      const token = heartbeatAuth.accessToken?.trim()
+      if (!token) {
+        throw new Error('runtime access token is unavailable for the stateless heartbeat')
+      }
+      return token
+    },
+    // M3 self-heal: on a 401/403 heartbeat response, refresh the shared runtime
+    // token once and retry — the same recovery path UsageReporter and
+    // BudgetClient use. Mutates heartbeatAuth.accessToken in place, so the
+    // retry (and every later tick) presents the refreshed token.
+    refreshOnUnauthorized: () => refreshWithRecovery(heartbeatAuth),
+    // D8 conditions. Sessions in Processing / AwaitingApproval are pinned in
+    // the store's RAM cache (reconcilePinning), so the in-RAM scan cannot
+    // miss an active or awaiting session.
+    getConditions: () => {
+      let activeTask = false
+      let awaitingApproval = false
+      for (const { conversation } of handle.store.listByPrefix('')) {
+        if (
+          conversation.state === ConversationState.Processing ||
+          conversation.activeTaskId !== undefined
+        ) {
+          activeTask = true
+        }
+        if (conversation.state === ConversationState.AwaitingApproval) {
+          awaitingApproval = true
+        }
+      }
+      return {
+        activeTask,
+        awaitingApproval,
+        // pendingResults counts only GENUINELY-pending work — results nobody
+        // has consumed yet. C3 inline-delivered sync results (deliveredInline)
+        // were already returned on the caller's socket and live in
+        // pendingTaskResults only for socket-death poll recovery; they must be
+        // excluded here or every sync turn would pin the gauge and block
+        // drain/suspend. The same principle extends to delivered-on-read
+        // entries (deliveredAt): a result the owner already FETCHED via
+        // GET /v1/runtime/tasks/:id/result or GET /cron/results is
+        // recoverability cache, not pending work (runtime/resultDelivery.ts).
+        // Genuinely UNDELIVERED async/cron results still pin the gauge until
+        // TTL — the spec's hard block for results that would be LOST on
+        // suspend is unchanged.
+        pendingResults:
+          pendingTaskResults.countWhere(isUndeliveredResult) > 0 ||
+          pendingCronResults.countWhere(isUndeliveredResult) > 0 ||
+          // Cron×stateless race fix: a fired-but-not-yet-stored one-shot cron
+          // result pins the gauge for the window between the activeTaskId flip
+          // and pendingCronResults.set (see cronResultsInFlight declaration).
+          cronResultsInFlight.size > 0,
+        // Cron×stateless: an ENABLED schedule pins the idle gauge — a
+        // suspended pod cannot fire cron. Cheapest fresh introspection of the
+        // scheduler store per tick (in-RAM jobs-map scan); no scheduler wired
+        // means no schedules exist on this host.
+        activeCronSchedules: cronScheduler !== null && cronScheduler.hasEnabledJobs(),
+      }
+    },
+    flushFinalCheckpoint: () => persistQueue.drain(),
+  })
+  rpcServer.setLifecycleGate(heartbeat)
+  heartbeat.start()
+  statelessHeartbeat = heartbeat
+  console.log(
+    `[Main] Stateless heartbeat started (interval=${config.statelessHeartbeatIntervalMs}ms, ` +
+      `target=${config.mcpHostGatewayUrl})`
+  )
+}
+
+/**
  * Graceful shutdown handler.
  */
 async function shutdown(signal: string): Promise<void> {
@@ -1721,6 +1911,7 @@ async function shutdown(signal: string): Promise<void> {
   configStore?.stop()
   stopContextMapperPolling()
   stopMcpStatusHeartbeat()
+  statelessHeartbeat?.stop()
 
   if (agent) {
     await agent.stop()
@@ -1834,6 +2025,9 @@ async function startDevMode(): Promise<void> {
   // Start RPC server
   await startRPCServer()
 
+  // Stage 3 — stateless lifecycle heartbeat + reversible DRAINING fence.
+  startStatelessHeartbeat()
+
   console.log(`[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'}`)
   console.log('\n[Main] MCP Host running in dev mode. Press Ctrl+C to exit.')
   console.log('[Main] Waiting for messages from channel-reader...\n')
@@ -1865,23 +2059,35 @@ async function startProductionMode(): Promise<void> {
   const keys = apiKeysFromConfigStore(configStore!)
 
   await initializeProvider(host, keys)
-  await initializeMcpServers(host.spec.contextRef)
 
-  // Initialize agent (after provider and MCP manager are ready)
+  // §3.14 (stateless agents) — Ready never waits for MCP. The agent and the
+  // RPC server (readiness route /v1/runtime/health) come up FIRST; MCP
+  // discovery/connections run in the background below. initializeAgent()
+  // tolerates a null mcpManager, and initializeMcpServers() wires the manager
+  // into the agent when it lands (agent.setMcpManager).
   await initializeAgent()
 
   // Start watching for Host changes
   hostWatcher = new HostWatcher(config.hostName)
   await hostWatcher.start(onHostChange, onHostDelete)
 
-  // Start polling context-mapper for McpServer changes
-  startContextMapperPolling(host.spec.contextRef)
-
-  // Start MCP status heartbeat (keeps observedAt fresh for the desktop poll)
+  // Start MCP status heartbeat (keeps observedAt fresh for the desktop poll;
+  // each tick no-ops until the MCP manager exists)
   startMcpStatusHeartbeat()
 
-  // Start RPC server
+  // Start RPC server — readiness answers from here on
   await startRPCServer()
+
+  // Stage 3 — stateless lifecycle heartbeat + reversible DRAINING fence.
+  startStatelessHeartbeat()
+
+  // MCP discovery/connections — in the background, AFTER readiness (§3.14).
+  // A failed initial attempt is logged loudly; the context-mapper poll then
+  // reconciles the catalog (the platform tolerates the 'connecting' sweep).
+  startMcpInitializationInBackground({
+    initialize: () => initializeMcpServers(host.spec.contextRef),
+    afterInitialAttempt: () => startContextMapperPolling(host.spec.contextRef),
+  })
 
   console.log(`[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'}`)
   console.log('[Main] MCP Host running. Press Ctrl+C to exit.')
@@ -1912,6 +2118,51 @@ async function main(): Promise<void> {
   if (config.enableAuth && config.workflowEnabled && !config.wrcPublicKey) {
     console.error(
       '[Main] FATAL: enableAuth=true in workflow mode but WRC_PUBLIC_KEY_PEM is not set — refusing to start'
+    )
+    process.exit(1)
+  }
+
+  // D3 §1.3 — stateless lifecycle boot guard. A stateless Host whose session
+  // db configuration cannot guarantee durability must not start: it would
+  // silently lose every session on the next suspend.
+  try {
+    assertStatelessBootConfig({
+      statelessLifecycle: config.statelessLifecycle,
+      sessionStoreModeRaw: config.sessionStoreModeRaw,
+      sessionDbDir: config.sessionDbDir,
+      sessionDbPath: config.sessionDbPath,
+      workspaceMemoryEnabled: config.memory.enabled,
+      workspacePath: config.memory.workspacePath ?? '',
+    })
+  } catch (err) {
+    if (err instanceof StatelessBootError) {
+      console.error(`[Main] FATAL: ${err.message}`)
+      process.exit(1)
+    }
+    throw err
+  }
+
+  try {
+    assertStatelessCronPolicyConfig({
+      statelessLifecycle: config.statelessLifecycle,
+      enableApproval: config.enableApproval,
+    })
+  } catch (err) {
+    if (err instanceof StatelessCronPolicyError) {
+      console.error(`[Main] FATAL: ${err.message}`)
+      process.exit(1)
+    }
+    throw err
+  }
+
+  // Stateless heartbeat target — same fail-loud posture as the boot guard
+  // above. The emitter authenticates toward control-api's /mcp-host facade
+  // through the workflow-approval gateway; without the gateway URL a
+  // stateless Host could never report activity and would poison HCC's
+  // suspend decisions.
+  if (config.statelessLifecycle && !config.mcpHostGatewayUrl) {
+    console.error(
+      '[Main] FATAL: CLERUM_STATELESS_LIFECYCLE=true but MCP_HOST_GATEWAY_URL is not set — refusing to start'
     )
     process.exit(1)
   }

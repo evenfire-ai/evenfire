@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ResolvedResource, ResolveStore } from '../src/gfs/resolve.js'
+import { ResolveStore, ResolvedResource } from '../src/gfs/resolve.js'
 import { byPathToHttp, resolveUriToHttp, toResolveView } from '../src/routes/gfs/resolve.js'
 
 const RID = '8f3c2e1a4b5d4c6a9e7f1a2b3c4d5e6f'
@@ -67,7 +67,10 @@ describe('byPathToHttp', () => {
 
   it('200 + view when the path resolves', async () => {
     const store = new FakeStore()
-    store.byPath.set('/org/eng', res({ resourceId: UUID, drive: 'main', name: 'eng', pathCache: '/org/eng' }))
+    store.byPath.set(
+      '/org/eng',
+      res({ resourceId: UUID, drive: 'main', name: 'eng', pathCache: '/org/eng' })
+    )
     const out = await byPathToHttp(store, 'main', '/org/eng')
     expect(out.status).toBe(200)
     expect(out.body).toMatchObject({ name: 'eng', gfsUri: `gfs://main/${RID}` })

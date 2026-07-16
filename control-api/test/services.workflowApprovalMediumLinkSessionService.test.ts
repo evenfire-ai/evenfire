@@ -65,6 +65,7 @@ describe('workflowApprovalMediumLinkSessionService', () => {
       null,
       expect.stringMatching(/^reader-link-sha256:/),
       120,
+      null,
     ])
   })
 
@@ -93,7 +94,47 @@ describe('workflowApprovalMediumLinkSessionService', () => {
       null,
       expect.stringMatching(/^reader-link-sha256:/),
       120,
+      null,
     ])
+  })
+
+  it('creates Teams link sessions without overwriting the channel thread preference by default', async () => {
+    mockedPoolQuery.mockResolvedValueOnce({
+      rows: [{ id: 'session-1', expiresAt: '2026-06-16T12:00:00.000Z' }],
+    })
+
+    await createMediumLinkSession({
+      userId: 'user-1',
+      medium: 'teams',
+    })
+
+    expect(mockedPoolQuery).toHaveBeenCalledWith(expect.any(String), [
+      'user-1',
+      'teams',
+      '__reader_link__',
+      null,
+      null,
+      expect.stringMatching(/^reader-link-sha256:/),
+      120,
+      null,
+    ])
+  })
+
+  it('stores an explicit Teams thread reply opt-out', async () => {
+    mockedPoolQuery.mockResolvedValueOnce({
+      rows: [{ id: 'session-1', expiresAt: '2026-06-16T12:00:00.000Z' }],
+    })
+
+    await createMediumLinkSession({
+      userId: 'user-1',
+      medium: 'teams',
+      replyInThreads: false,
+    })
+
+    expect(mockedPoolQuery).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.arrayContaining(['user-1', 'teams', false])
+    )
   })
 
   it('rejects Telegram link-session confirmations before reading the nonce', async () => {

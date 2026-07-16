@@ -24,19 +24,40 @@ export async function replaceWithConflictRetry<
   description: string
   logPrefix: string
   body: T
+  /** Rebuild mutable desired state immediately before each replace attempt. */
+  resolveBody?: () => T | Promise<T>
   read: () => Promise<T>
   replace: (body: T) => Promise<unknown>
   mergeExisting?: (body: T, existing: T) => T
+  /**
+   * Called after the desired object has been merged with server-owned fields.
+   * Returning true avoids a no-op replace (and therefore avoids a needless
+   * resourceVersion/generation bump) while retaining the conflict-retry path
+   * when a meaningful change is still required.
+   */
+  isUpToDate?: (body: T, existing: T) => boolean
   maxAttempts?: number
 }): Promise<void> {
-  const { description, logPrefix, body, read, replace, mergeExisting, maxAttempts = 3 } = opts
+  const {
+    description,
+    logPrefix,
+    body,
+    resolveBody,
+    read,
+    replace,
+    mergeExisting,
+    isUpToDate,
+    maxAttempts = 3,
+  } = opts
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const existing = await read()
+    const desired = resolveBody ? await resolveBody() : body
     const base: T = {
-      ...body,
-      metadata: { ...body.metadata, resourceVersion: existing.metadata?.resourceVersion },
+      ...desired,
+      metadata: { ...desired.metadata, resourceVersion: existing.metadata?.resourceVersion },
     }
     const next = mergeExisting ? mergeExisting(base, existing) : base
+    if (isUpToDate?.(next, existing)) return
     try {
       await replace(next)
       const suffix = attempt > 1 ? ` (after ${attempt} attempts)` : ''

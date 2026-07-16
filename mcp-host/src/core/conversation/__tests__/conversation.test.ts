@@ -32,13 +32,13 @@ describe('ConversationManager — state machine', () => {
     const conv = await manager.getOrCreate('user-1')
 
     // Start turn: Idle → Processing
-    const turn = manager.startTurn(conv, 'Hello world', 'test-task')
+    const turn = await manager.startTurn(conv, 'Hello world', 'test-task')
     expect(conv.state).toBe(ConversationState.Processing)
     expect(turn.number).toBe(1)
     expect(turn.user_input).toBe('Hello world')
 
     // Complete turn: Processing → Idle
-    manager.completeTurn(conv, 'Hello! How can I help?')
+    await manager.completeTurn(conv, 'Hello! How can I help?')
     expect(conv.state).toBe(ConversationState.Idle)
     expect(conv.turns[0].response).toBe('Hello! How can I help?')
     expect(conv.turns[0].completed_at).toBeDefined()
@@ -55,17 +55,19 @@ describe('ConversationManager — state machine', () => {
 
   it('should throw on startTurn when not Idle (Risk 5.2)', async () => {
     const conv = await manager.getOrCreate('user-1')
-    manager.startTurn(conv, 'First message', 'test-task')
+    await manager.startTurn(conv, 'First message', 'test-task')
 
     // Already Processing — cannot start another turn
-    expect(() => manager.startTurn(conv, 'Second message', 'test-task')).toThrow(ConversationError)
+    await expect(manager.startTurn(conv, 'Second message', 'test-task')).rejects.toThrow(
+      ConversationError
+    )
   })
 
   it('should throw on completeTurn when not Processing', async () => {
     const conv = await manager.getOrCreate('user-1')
 
     // Idle — cannot complete a turn that hasn't started
-    expect(() => manager.completeTurn(conv, 'response')).toThrow(ConversationError)
+    await expect(manager.completeTurn(conv, 'response')).rejects.toThrow(ConversationError)
   })
 
   it('recordSessionUsage mirrors token totals in RAM and OR-accumulates cacheTokensReported', async () => {
@@ -111,7 +113,7 @@ describe('ConversationManager — state machine', () => {
 
   it('recordSessionUsage attributes to the in-flight turn while Processing', async () => {
     const conv = await manager.getOrCreate('user-1')
-    manager.startTurn(conv, 'hi', 'task-1') // → Processing, turn 1
+    await manager.startTurn(conv, 'hi', 'task-1') // → Processing, turn 1
     manager.recordSessionUsage(conv, { input_tokens: 100, output_tokens: 40, cache_read_tokens: 5 })
     manager.recordSessionUsage(conv, { input_tokens: 50, output_tokens: 20 })
     const turn = conv.turns[conv.turns.length - 1]
@@ -124,7 +126,7 @@ describe('ConversationManager — state machine', () => {
 
   it('recordSessionUsage leaves per-turn cache undefined when the provider omits it', async () => {
     const conv = await manager.getOrCreate('user-1')
-    manager.startTurn(conv, 'hi', 'task-1')
+    await manager.startTurn(conv, 'hi', 'task-1')
     // OpenAI-style: no cache fields reported
     manager.recordSessionUsage(conv, { input_tokens: 20, output_tokens: 8 })
     const turn = conv.turns[conv.turns.length - 1]
@@ -135,9 +137,9 @@ describe('ConversationManager — state machine', () => {
 
   it('recordSessionUsage does NOT attribute to a turn when idle (e.g. operator /compact)', async () => {
     const conv = await manager.getOrCreate('user-1')
-    manager.startTurn(conv, 'hi', 'task-1')
+    await manager.startTurn(conv, 'hi', 'task-1')
     manager.recordSessionUsage(conv, { input_tokens: 10, output_tokens: 4 }) // Processing → turn
-    manager.completeTurn(conv, 'done') // → Idle
+    await manager.completeTurn(conv, 'done') // → Idle
     manager.recordSessionUsage(conv, { input_tokens: 99, output_tokens: 9 }) // Idle → not the turn
     const turn = conv.turns[conv.turns.length - 1]
     expect(turn.input_tokens).toBe(10) // unchanged by the idle call
@@ -146,7 +148,7 @@ describe('ConversationManager — state machine', () => {
 
   it('recordContextBreakdown stores buckets with provisional Σbuckets total + capturedAtTurn (F1.3)', async () => {
     const conv = await manager.getOrCreate('user-1')
-    manager.startTurn(conv, 'hi', 'task-1') // turns.length = 1
+    await manager.startTurn(conv, 'hi', 'task-1') // turns.length = 1
     manager.recordContextBreakdown(conv, {
       buckets: { messages: 100, systemTools: 30, metaContext: 10, systemPrompt: 5 },
       maxTokens: 100000,
@@ -166,7 +168,7 @@ describe('ConversationManager — state machine', () => {
   it('the usage sink finalizes the provisional total with the authoritative input_tokens (F1.3b / #8)', async () => {
     // Mirror the taskExecutor sink: recordSessionUsage + finalize breakdown.
     const conv = await manager.getOrCreate('user-1')
-    manager.startTurn(conv, 'hi', 'task-1')
+    await manager.startTurn(conv, 'hi', 'task-1')
     manager.recordContextBreakdown(conv, {
       buckets: { messages: 100, systemTools: 30, metaContext: 10, systemPrompt: 5 },
       maxTokens: 100000,
@@ -195,7 +197,7 @@ describe('ConversationManager — approval transitions', () => {
 
   it('should transition Processing → AwaitingApproval → Processing on approve', async () => {
     const conv = await manager.getOrCreate('user-1')
-    manager.startTurn(conv, 'Delete files', 'test-task')
+    await manager.startTurn(conv, 'Delete files', 'test-task')
 
     const approval: PendingApproval = {
       request_id: 'req-1',
@@ -218,7 +220,7 @@ describe('ConversationManager — approval transitions', () => {
 
   it('should add MCP server prefix to auto_approved_tools on any approval', async () => {
     const conv = await manager.getOrCreate('user-1')
-    manager.startTurn(conv, 'Insert data', 'test-task')
+    await manager.startTurn(conv, 'Insert data', 'test-task')
 
     await manager.suspendForApproval(conv, {
       request_id: 'req-1',
@@ -238,7 +240,7 @@ describe('ConversationManager — approval transitions', () => {
 
   it('should add both server prefix and tool name on alwaysApprove for MCP tool', async () => {
     const conv = await manager.getOrCreate('user-2')
-    manager.startTurn(conv, 'List tables', 'test-task')
+    await manager.startTurn(conv, 'List tables', 'test-task')
 
     await manager.suspendForApproval(conv, {
       request_id: 'req-2',
@@ -256,7 +258,7 @@ describe('ConversationManager — approval transitions', () => {
 
   it('should NOT add server prefix for non-MCP tools (no __ separator)', async () => {
     const conv = await manager.getOrCreate('user-3')
-    manager.startTurn(conv, 'Run shell', 'test-task')
+    await manager.startTurn(conv, 'Run shell', 'test-task')
 
     await manager.suspendForApproval(conv, {
       request_id: 'req-3',
@@ -275,7 +277,7 @@ describe('ConversationManager — approval transitions', () => {
 
   it('should transition AwaitingApproval → Idle on deny, clearing pending approval', async () => {
     const conv = await manager.getOrCreate('user-1')
-    manager.startTurn(conv, 'Delete files', 'test-task')
+    await manager.startTurn(conv, 'Delete files', 'test-task')
 
     await manager.suspendForApproval(conv, {
       request_id: 'req-1',
@@ -359,7 +361,7 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
 
   it("approve() adds wildcard '*' to auto_approved_tools", async () => {
     const conv = await manager.getOrCreate('user-wc-1')
-    manager.startTurn(conv, 'Do something', 'test-task')
+    await manager.startTurn(conv, 'Do something', 'test-task')
 
     await manager.suspendForApproval(conv, {
       request_id: 'req-wc-1',
@@ -378,7 +380,7 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
     const conv = await manager.getOrCreate('user-wc-2')
 
     // Turn 1: approve to get wildcard
-    manager.startTurn(conv, 'First message', 'test-task')
+    await manager.startTurn(conv, 'First message', 'test-task')
     await manager.suspendForApproval(conv, {
       request_id: 'req-wc-2',
       tool_name: 'shell_exec',
@@ -391,8 +393,8 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
     expect(conv.auto_approved_tools.has('*')).toBe(true)
 
     // Complete turn 1, then start turn 2
-    manager.completeTurn(conv, 'Done')
-    manager.startTurn(conv, 'Second message', 'test-task')
+    await manager.completeTurn(conv, 'Done')
+    await manager.startTurn(conv, 'Second message', 'test-task')
 
     // Wildcard should be cleared
     expect(conv.auto_approved_tools.has('*')).toBe(false)
@@ -402,7 +404,7 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
     const conv = await manager.getOrCreate('user-wc-3')
 
     // Turn 1: approve an MCP tool
-    manager.startTurn(conv, 'Use database', 'test-task')
+    await manager.startTurn(conv, 'Use database', 'test-task')
     await manager.suspendForApproval(conv, {
       request_id: 'req-wc-3',
       tool_name: 'mongodb-server__find',
@@ -418,8 +420,8 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
     expect(conv.auto_approved_tools.has('mongodb-server')).toBe(true)
 
     // Complete turn 1, start turn 2
-    manager.completeTurn(conv, 'Found results')
-    manager.startTurn(conv, 'Another query', 'test-task')
+    await manager.completeTurn(conv, 'Found results')
+    await manager.startTurn(conv, 'Another query', 'test-task')
 
     // Wildcard gone, but server-prefix persists across turns
     expect(conv.auto_approved_tools.has('*')).toBe(false)
@@ -432,9 +434,9 @@ describe('cancelTurn (BUG-9)', () => {
     const cm = new ConversationManager()
     const conv = await cm.getOrCreate('user-1')
 
-    cm.startTurn(conv, 'give me a 3000-word essay', 'test-task')
+    await cm.startTurn(conv, 'give me a 3000-word essay', 'test-task')
     cm.cancelTurn(conv)
-    cm.startTurn(conv, 'how much is 12 - 32', 'test-task')
+    await cm.startTurn(conv, 'how much is 12 - 32', 'test-task')
 
     const history = cm.buildMessageHistory(conv)
 
@@ -449,7 +451,7 @@ describe('cancelTurn (BUG-9)', () => {
   it('resets state to Idle (parity with failTurn for state)', async () => {
     const cm = new ConversationManager()
     const conv = await cm.getOrCreate('user-1')
-    cm.startTurn(conv, 'anything', 'test-task')
+    await cm.startTurn(conv, 'anything', 'test-task')
     cm.cancelTurn(conv)
 
     expect(conv.state).toBe(ConversationState.Idle)
@@ -459,7 +461,7 @@ describe('cancelTurn (BUG-9)', () => {
   it('works from AwaitingApproval state', async () => {
     const cm = new ConversationManager()
     const conv = await cm.getOrCreate('user-1')
-    cm.startTurn(conv, 'use a tool', 'test-task')
+    await cm.startTurn(conv, 'use a tool', 'test-task')
     await cm.suspendForApproval(conv, {
       request_id: 'r1',
       tool_name: 't',
@@ -485,7 +487,7 @@ describe('cancelTurn (BUG-9)', () => {
   it('cancelTurnBySessionKey resolves to cancelTurn for known key', async () => {
     const cm = new ConversationManager()
     const conv = await cm.getOrCreate('sess-1')
-    cm.startTurn(conv, 'hi', 'test-task')
+    await cm.startTurn(conv, 'hi', 'test-task')
     cm.cancelTurnBySessionKey('sess-1')
     expect(conv.state).toBe(ConversationState.Idle)
     const last = conv.turns[conv.turns.length - 1]
@@ -498,7 +500,7 @@ describe('ConversationManager.clearPendingApproval', () => {
     const cm = new ConversationManager()
     const conv = await cm.getOrCreate('session-clear-1')
 
-    cm.startTurn(conv, 'Do something requiring approval', 'test-task')
+    await cm.startTurn(conv, 'Do something requiring approval', 'test-task')
     await cm.suspendForApproval(conv, {
       request_id: 'r1',
       tool_name: 'shell_exec',

@@ -26,8 +26,26 @@ export type SlackTargetVerificationResult =
     }
   | { ok: false; status?: number; error: string }
 
+export type TeamsTargetResolveResult =
+  | {
+      ok: true
+      hostRef: string
+      communicationChannelRef: string
+      providerWorkspaceId: string
+      appId: string
+      appName?: string
+      tenantId: string
+      replyOnlyWhenMentioned?: boolean
+      channelName: string
+      channelNamespace: string
+    }
+  | { ok: false; status?: number; error: string }
+
 export type SlackTargetMessageResult =
   | { ok: true; ts?: string | null }
+  | { ok: false; status?: number; error: string }
+export type TeamsTargetMessageResult =
+  | { ok: true; id?: string | null }
   | { ok: false; status?: number; error: string }
 
 type SlackBlock = Record<string, unknown>
@@ -232,11 +250,78 @@ export async function verifySlackTargetSignature(
   }
 }
 
-async function postSlackTargetProxy(
+export async function resolveTeamsTarget(
   cfg: ReaderConfig,
+  params: {
+    targetId: string
+  }
+): Promise<TeamsTargetResolveResult> {
+  if (!cfg.controlApiBaseUrl || !cfg.controlApiToken) {
+    return { ok: false, status: 503, error: 'control_api_not_configured' }
+  }
+  const base = cfg.controlApiBaseUrl.replace(/\/+$/, '')
+  const url = new URL(
+    `/api/v1/internal/workflow-approval-reader/teams-targets/${encodeURIComponent(params.targetId)}/resolve`,
+    base
+  )
+
+  let response: Response
+  try {
+    response = await fetchWithTimeout(
+      url.toString(),
+      {
+        method: 'GET',
+        headers: {
+          'x-service-token': 'workflow-approval-reader',
+          Authorization: `Bearer ${cfg.controlApiToken}`,
+        },
+      },
+      cfg.controlApiTimeoutMs
+    )
+  } catch (err) {
+    log.error('control-api teams target resolve error', {
+      error: timeoutErrorName(err),
+      targetId: params.targetId,
+    })
+    return { ok: false, status: 504, error: 'teams_target_resolve_error' }
+  }
+
+  const body = (await response.json().catch(() => ({}))) as Partial<
+    Extract<TeamsTargetResolveResult, { ok: true }>
+  > & { error?: string }
+  if (!response.ok || body.ok !== true) {
+    log.warn('control-api teams target resolve non-2xx', {
+      status: response.status,
+      targetId: params.targetId,
+      error: body.error,
+    })
+    return {
+      ok: false,
+      status: response.status,
+      error: body.error ?? 'teams_target_resolve_failed',
+    }
+  }
+
+  return {
+    ok: true,
+    hostRef: String(body.hostRef || ''),
+    communicationChannelRef: String(body.communicationChannelRef || ''),
+    providerWorkspaceId: String(body.providerWorkspaceId || body.tenantId || ''),
+    appId: String(body.appId || ''),
+    appName: String(body.appName || ''),
+    tenantId: String(body.tenantId || body.providerWorkspaceId || ''),
+    replyOnlyWhenMentioned: body.replyOnlyWhenMentioned === true,
+    channelName: String(body.channelName || ''),
+    channelNamespace: String(body.channelNamespace || ''),
+  }
+}
+
+async function postProviderTargetProxy(
+  cfg: ReaderConfig,
+  provider: 'slack' | 'teams',
   path: string,
   body: Record<string, unknown>
-): Promise<SlackTargetMessageResult> {
+): Promise<SlackTargetMessageResult | TeamsTargetMessageResult> {
   if (!cfg.controlApiBaseUrl || !cfg.controlApiToken) {
     return { ok: false, status: 503, error: 'control_api_not_configured' }
   }
@@ -259,20 +344,21 @@ async function postSlackTargetProxy(
       cfg.controlApiTimeoutMs
     )
   } catch (err) {
-    log.warn('control-api slack target proxy error', {
+    log.warn(`control-api ${provider} target proxy error`, {
       error: timeoutErrorName(err),
       path,
     })
-    return { ok: false, status: 504, error: 'slack_target_proxy_error' }
+    return { ok: false, status: 504, error: `${provider}_target_proxy_error` }
   }
 
   const responseBody = (await response.json().catch(() => ({}))) as {
     ok?: boolean
     ts?: string | null
+    id?: string | null
     error?: string
   }
   if (!response.ok || responseBody.ok === false) {
-    log.warn('control-api slack target proxy non-2xx', {
+    log.warn(`control-api ${provider} target proxy non-2xx`, {
       status: response.status,
       path,
       error: responseBody.error,
@@ -280,10 +366,10 @@ async function postSlackTargetProxy(
     return {
       ok: false,
       status: response.status,
-      error: responseBody.error ?? 'slack_target_proxy_failed',
+      error: responseBody.error ?? `${provider}_target_proxy_failed`,
     }
   }
-  return { ok: true, ts: responseBody.ts ?? null }
+  return { ok: true, ts: responseBody.ts ?? null, id: responseBody.id ?? null }
 }
 
 export function sendSlackTargetMessage(
@@ -295,8 +381,9 @@ export function sendSlackTargetMessage(
     threadTs?: string | null
   }
 ): Promise<SlackTargetMessageResult> {
-  return postSlackTargetProxy(
+  return postProviderTargetProxy(
     cfg,
+    'slack',
     `/api/v1/internal/workflow-approval-reader/slack-targets/${encodeURIComponent(
       params.targetId
     )}/send-message`,
@@ -305,7 +392,7 @@ export function sendSlackTargetMessage(
       text: params.text,
       ...(params.threadTs ? { threadTs: params.threadTs } : {}),
     }
-  )
+  ) as Promise<SlackTargetMessageResult>
 }
 
 export function updateSlackTargetMessage(
@@ -318,8 +405,9 @@ export function updateSlackTargetMessage(
     blocks?: SlackBlock[]
   }
 ): Promise<SlackTargetMessageResult> {
-  return postSlackTargetProxy(
+  return postProviderTargetProxy(
     cfg,
+    'slack',
     `/api/v1/internal/workflow-approval-reader/slack-targets/${encodeURIComponent(
       params.targetId
     )}/update-message`,
@@ -329,5 +417,30 @@ export function updateSlackTargetMessage(
       text: params.text,
       ...(params.blocks ? { blocks: params.blocks } : {}),
     }
-  )
+  ) as Promise<SlackTargetMessageResult>
+}
+
+export function updateTeamsTargetMessage(
+  cfg: ReaderConfig,
+  params: {
+    targetId: string
+    conversationId: string
+    messageId: string
+    serviceUrl: string
+    text: string
+  }
+): Promise<TeamsTargetMessageResult> {
+  return postProviderTargetProxy(
+    cfg,
+    'teams',
+    `/api/v1/internal/workflow-approval-reader/teams-targets/${encodeURIComponent(
+      params.targetId
+    )}/update-message`,
+    {
+      conversationId: params.conversationId,
+      messageId: params.messageId,
+      serviceUrl: params.serviceUrl,
+      text: params.text,
+    }
+  ) as Promise<TeamsTargetMessageResult>
 }

@@ -10,6 +10,7 @@
  */
 import { expect, test } from '../helpers/auth-fixture'
 import { CUI_DASHBOARD } from '../helpers/selectors'
+import { adminSessionCookieHeader } from '../helpers/session-cookie'
 
 const CONTROL_API_URL = process.env.CONTROL_API_URL ?? 'http://127.0.0.1:8090'
 
@@ -18,7 +19,13 @@ test.describe('Control UI — External Channels', () => {
     await expect(authedPage.locator(CUI_DASHBOARD.HEADING)).toBeVisible()
     await authedPage.click(CUI_DASHBOARD.TAB_CHANNELS)
     await expect(
-      authedPage.locator('.cu-channel-row').first().or(authedPage.getByText('No resources found.'))
+      // Channel rows are plain <tr>s now; the per-row name button
+      // (.cu-channel-table__name in CommunicationChannelsTable.tsx) is the
+      // stable row marker. '.cu-channel-row' no longer exists.
+      authedPage
+        .locator('.cu-channel-table__name')
+        .first()
+        .or(authedPage.getByText('No resources found.'))
     ).toBeVisible({
       timeout: 15_000,
     })
@@ -40,7 +47,7 @@ test.describe('Control UI — External Channels', () => {
 
   test('shows the CommunicationChannel CRDs returned by the API', async ({ authedPage }) => {
     const res = await fetch(`${CONTROL_API_URL}/api/v1/admin/communication-channels`, {
-      headers: { Authorization: `Bearer ${process.env.PLAYWRIGHT_ADMIN_TOKEN ?? ''}` },
+      headers: adminSessionCookieHeader(),
     })
     const body = (await res.json()) as {
       items?: Array<{ metadata?: { name?: string } }>
@@ -63,11 +70,11 @@ test.describe('Control UI — External Channels', () => {
 
   test('channel count matches CRD count from API', async ({ authedPage }) => {
     const res = await fetch(`${CONTROL_API_URL}/api/v1/admin/communication-channels`, {
-      headers: { Authorization: `Bearer ${process.env.PLAYWRIGHT_ADMIN_TOKEN ?? ''}` },
+      headers: adminSessionCookieHeader(),
     })
     const body = (await res.json()) as { items?: unknown[] }
     const apiCount = body.items?.length ?? 0
-    const rows = authedPage.locator('.cu-channel-row')
+    const rows = authedPage.locator('.cu-channel-table__name')
 
     await expect.poll(async () => rows.count()).toBe(apiCount)
   })

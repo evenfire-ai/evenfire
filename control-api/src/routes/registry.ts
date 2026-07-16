@@ -5,35 +5,16 @@ import { findAdminById } from '../services/adminAuthService.js'
 import { VoucherUnavailableError, mintIdentityVoucher } from '../services/registryVoucher.js'
 
 /**
- * Issues short-lived identity vouchers that the Control UI can exchange with
- * evenfire-registry for a bearer access token (npm-style auth, spec §B).
+ * Issues short-lived identity vouchers the Control UI exchanges with
+ * evenfire-registry for a bearer token (POST /api/v1/user/exchange).
  *
- * The voucher is a 60-second RS256 JWT signed with — in preference order —
- * `config.registryVoucherPrivateKey` (a dedicated keypair, recommended for
- * production) or `config.adminJwtPrivateKey` (fallback so existing
- * deployments keep working without a new Secret). The registry verifies it
- * with the matching public key configured via `CONTROL_API_PUBLIC_KEY`.
- *
- * Why a dedicated voucher key matters: the admin JWT key also signs admin
- * session tokens (aud=control-ui, 1h TTL). If those tokens were signed by
- * the SAME key as a voucher (aud=registry-api, 60s TTL), a captured admin
- * session token would become a usable voucher the moment the registry
- * loosens its `aud` check. Provisioning a separate keypair eliminates that
- * confused-deputy class entirely.
- *
- * Claim shape mirrors the spec:
- *   iss: "control-api"
- *   aud: "registry-api"
- *   sub: control-ui admin user id
- *   email / username: derived from `control_admin_users`
- *   jti: random UUID (one-time-use; the registry stores it for replay
- *        protection within the 60s window)
- *   exp: now + 60s
- *
- * Admin users in `control_admin_users` have only `username` (no email
- * column), so we synthesize a deterministic admin-only email of the form
- * `<username>@control-api.local`. The registry treats this as the linking
- * identity for the per-tenant Clerum control plane.
+ * VOUCHER V2 (spec §6.4/§14.6): a 60s RS256 JWT whose header carries `kid`
+ * (the registry-assigned key_id) and whose payload is EXACTLY
+ * {iss:'control-api', aud:'registry-api', sub, jti, exp} — no email, no
+ * username, no iat. The kid + signing key are resolved mode-aware
+ * (managed = env Secret; self-hosted = the registry_connection DB row); the
+ * registry resolves kid → deployment key and derives identity from
+ * (deployment_id, sub). See services/registryVoucher.ts.
  */
 export function createRegistryRouter(): Router {
   const router = Router()
@@ -68,7 +49,7 @@ export function createRegistryRouter(): Router {
 
         let voucher: string
         try {
-          voucher = mintIdentityVoucher(admin)
+          voucher = await mintIdentityVoucher(admin)
         } catch (err) {
           if (err instanceof VoucherUnavailableError) {
             res.status(500).json({ error: 'registry_voucher_unavailable' })

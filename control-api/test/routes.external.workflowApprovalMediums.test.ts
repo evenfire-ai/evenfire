@@ -11,6 +11,7 @@ const identityServiceMock = vi.hoisted(() => ({
 const preferenceServiceMock = vi.hoisted(() => ({
   listVerifiedMediumAccountsWithPreference: vi.fn(),
   preferVerifiedMediumAccount: vi.fn(),
+  updateVerifiedMediumAccountDisplayName: vi.fn(),
 }))
 
 const providerEventMock = vi.hoisted(() => ({
@@ -28,6 +29,12 @@ const slackTargetMock = vi.hoisted(() => ({
   attachSlackTargetsToAccounts: vi.fn(),
   listSlackApprovalTargets: vi.fn(),
   resolveSlackProviderEventTarget: vi.fn(),
+}))
+
+const teamsTargetMock = vi.hoisted(() => ({
+  attachTeamsTargetsToAccounts: vi.fn(),
+  listTeamsApprovalTargets: vi.fn(),
+  resolveTeamsProviderEventTarget: vi.fn(),
 }))
 
 const linkSessionMock = vi.hoisted(() => ({
@@ -64,6 +71,7 @@ vi.mock(
   () => telegramTargetMock
 )
 vi.mock('../src/services/workflowApprovalMediumSlackVerificationService.js', () => slackTargetMock)
+vi.mock('../src/services/workflowApprovalMediumTeamsVerificationService.js', () => teamsTargetMock)
 vi.mock('../src/services/workflowApprovalMediumLinkSessionService.js', () => linkSessionMock)
 
 function makeApp() {
@@ -83,6 +91,9 @@ describe('external workflow approval medium routes', () => {
     vi.clearAllMocks()
     linkSessionMock.createMediumLinkSession.mockReset()
     slackTargetMock.attachSlackTargetsToAccounts.mockImplementation(
+      async (_gateway: unknown, _userId: string, accounts: unknown[]) => accounts
+    )
+    teamsTargetMock.attachTeamsTargetsToAccounts.mockImplementation(
       async (_gateway: unknown, _userId: string, accounts: unknown[]) => accounts
     )
   })
@@ -216,6 +227,35 @@ describe('external workflow approval medium routes', () => {
       .expect(400, { error: 'slack_workspace_id_required' })
   })
 
+  it('creates Teams link sessions with the selected thread reply preference', async () => {
+    teamsTargetMock.resolveTeamsProviderEventTarget.mockResolvedValueOnce({
+      id: 'teams:target',
+      medium: 'teams',
+      providerWorkspaceId: 'tenant-1',
+      channelNamespace: 'channels',
+      channelName: 'teams-a',
+    })
+    linkSessionMock.createMediumLinkSession.mockResolvedValueOnce({
+      id: 'link-session-1',
+      nonce: '123456',
+      expiresAt: '2026-06-16T12:00:00.000Z',
+      deepLinkUrl: null,
+    })
+
+    await request(makeApp())
+      .post('/external/workflow-approval-mediums/link-sessions')
+      .send({ medium: 'teams', targetId: 'teams:target', replyInThreads: false })
+      .expect(202)
+
+    expect(linkSessionMock.createMediumLinkSession).toHaveBeenCalledWith({
+      userId: 'user-1',
+      medium: 'teams',
+      providerWorkspaceId: 'tenant-1',
+      communicationChannelRef: 'channels/teams-a',
+      replyInThreads: false,
+    })
+  })
+
   it('lists disabled medium accounts only when requested', async () => {
     preferenceServiceMock.listVerifiedMediumAccountsWithPreference.mockResolvedValueOnce([
       {
@@ -255,6 +295,11 @@ describe('external workflow approval medium routes', () => {
       'user-1',
       expect.arrayContaining([expect.objectContaining({ id: 'account-1' })])
     )
+    expect(teamsTargetMock.attachTeamsTargetsToAccounts).toHaveBeenCalledWith(
+      {},
+      'user-1',
+      expect.arrayContaining([expect.objectContaining({ id: 'account-1' })])
+    )
   })
 
   it('deletes workflow approval medium records through the Telegram association service', async () => {
@@ -273,5 +318,49 @@ describe('external workflow approval medium routes', () => {
       userId: 'user-1',
       accountId: '99999999-8888-7777-6666-555555555555',
     })
+  })
+
+  it('updates workflow approval medium display names for the authenticated user', async () => {
+    preferenceServiceMock.updateVerifiedMediumAccountDisplayName.mockResolvedValueOnce({
+      id: '99999999-8888-7777-6666-555555555555',
+      displayName: 'Leadership',
+    })
+
+    await request(makeApp())
+      .patch(
+        '/external/workflow-approval-mediums/99999999-8888-7777-6666-555555555555/display-name'
+      )
+      .send({ displayName: '  Leadership  ' })
+      .expect(200, {
+        ok: true,
+        account: {
+          id: '99999999-8888-7777-6666-555555555555',
+          displayName: 'Leadership',
+        },
+      })
+
+    expect(preferenceServiceMock.updateVerifiedMediumAccountDisplayName).toHaveBeenCalledWith({
+      userId: 'user-1',
+      accountId: '99999999-8888-7777-6666-555555555555',
+      displayName: 'Leadership',
+    })
+  })
+
+  it('rejects invalid workflow approval medium display names', async () => {
+    await request(makeApp())
+      .patch(
+        '/external/workflow-approval-mediums/99999999-8888-7777-6666-555555555555/display-name'
+      )
+      .send({})
+      .expect(400, { error: 'display_name_required' })
+
+    await request(makeApp())
+      .patch(
+        '/external/workflow-approval-mediums/99999999-8888-7777-6666-555555555555/display-name'
+      )
+      .send({ displayName: 123 })
+      .expect(400, { error: 'display_name_must_be_string' })
+
+    expect(preferenceServiceMock.updateVerifiedMediumAccountDisplayName).not.toHaveBeenCalled()
   })
 })

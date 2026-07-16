@@ -1,7 +1,7 @@
 import type { Router } from 'express'
+import { GFS_READ_SCOPE, GFS_SCOPES, type GfsScope, signGfsToken } from '../../auth/gfsToken.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { type UiAuthedRequest, requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
-import { GFS_READ_SCOPE, GFS_SCOPES, type GfsScope, signGfsToken } from '../../auth/gfsToken.js'
 
 /** The open-core drive is a cluster singleton; the spec names it "main". */
 export const GFS_DEFAULT_DRIVE = 'main'

@@ -22,14 +22,27 @@ test.describe('Control UI — Auth', () => {
     await expect(page.locator(CUI_AUTH.SIGN_IN_BUTTON)).toBeVisible()
   })
 
-  test("shows 'Account creation' toggle tab", async ({ page }) => {
-    await expect(page.locator(CUI_AUTH.ACCOUNT_CREATION_TAB)).toBeVisible()
-    await page.click(CUI_AUTH.ACCOUNT_CREATION_TAB)
-    // Account creation form shows different fields
-    await expect(page.locator(CUI_AUTH.SETUP_USERNAME_INPUT)).toBeVisible()
-    await expect(page.locator(CUI_AUTH.SETUP_PASSWORD_INPUT)).toBeVisible()
+  test('unauthenticated deep-link to a host detail page shows the login form, not host data', async ({
+    page,
+  }) => {
+    // Negative route-guard: a direct visit to a protected entity route without
+    // a session must land on the login form and must NOT leak host content.
+    await page.goto('/hosts/chatllm')
+    await expect(page.locator(CUI_AUTH.USERNAME_INPUT)).toBeVisible()
+    await expect(page.locator(CUI_AUTH.SIGN_IN_BUTTON)).toBeVisible()
+    await expect(page.getByText('Agent: chatllm')).toHaveCount(0)
+  })
+
+  test("shows 'Forgot my password' flow and returns to sign in", async ({ page }) => {
+    // The login page toggles between 'login' and 'forgot-password' modes
+    // (control-ui/app/page.tsx); the old "Account creation" tab is gone.
+    await expect(page.locator(CUI_AUTH.FORGOT_PASSWORD_LINK)).toBeVisible()
+    await page.click(CUI_AUTH.FORGOT_PASSWORD_LINK)
+    // Password-reset form shows different fields
+    await expect(page.locator(CUI_AUTH.RESET_USERNAME_INPUT)).toBeVisible()
+    await expect(page.locator(CUI_AUTH.SEND_RESET_BUTTON)).toBeVisible()
     // Back to sign in
-    await page.click(CUI_AUTH.SIGN_IN_TAB)
+    await page.click(CUI_AUTH.BACK_TO_SIGN_IN_LINK)
     await expect(page.locator(CUI_AUTH.USERNAME_INPUT)).toBeVisible()
   })
 
@@ -68,7 +81,7 @@ test.describe('Control UI — Auth', () => {
     // Wait for the auth page to fully render (React hydration)
     await page.locator(CUI_AUTH.USERNAME_INPUT).waitFor({ state: 'visible' })
     const pageText = await page.locator('main').textContent()
-    expect(pageText).toContain('configured operator account credentials')
+    expect(pageText).toContain('Sign in with your configured operator account')
     // Should NOT expose a hardcoded password like 'changeme123!' in the UI
     expect(pageText).not.toContain('changeme123!')
     expect(pageText).not.toContain('clerum-admin-2026')

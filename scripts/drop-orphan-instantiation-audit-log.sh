@@ -17,11 +17,11 @@
 #
 # Usage:
 #   # dev cluster
-#   CONTEXT=gke_${GCP_PROJECT}_us-central1-a_example-dev \
+#   CONTEXT=gke_your-gcp-project_us-central1-a_example-dev \
 #     ./scripts/drop-orphan-instantiation-audit-log.sh
 #
 #   # prod cluster (requires CONFIRM=yes)
-#   CONFIRM=yes CONTEXT=gke_${GCP_PROJECT}_us-central1-a_clerum \
+#   CONFIRM=yes CONTEXT=gke_your-gcp-project_us-central1-a_clerum \
 #     ./scripts/drop-orphan-instantiation-audit-log.sh
 #
 #   # dry-run

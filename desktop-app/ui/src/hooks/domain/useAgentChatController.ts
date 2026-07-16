@@ -767,6 +767,23 @@ export function useAgentChatController({
         return
       }
       const { merged } = result
+      const visibleChatId = activeChatVisibilityRef.current.activeChatId
+      const visibleAgent = activeChatVisibilityRef.current.selectedAgent
+      const staleSpecificSelection =
+        requestedSelection?.mode === 'specific' && visibleChatId !== requestedSelection.chatId
+      const staleLatestSelection = requestedSelection?.mode === 'latest' && Boolean(visibleChatId)
+      const staleImplicitLoad = !requestedSelection
+      if (
+        visibleAgent === selectedAgent &&
+        visibleChatId &&
+        (staleSpecificSelection || staleLatestSelection || staleImplicitLoad)
+      ) {
+        if (requestedSelection) {
+          clearPendingSelection(selectedAgent)
+        }
+        setChatMessagesLoading(false)
+        return
+      }
 
       if (requestedSelection?.mode === 'specific' && requestedSelection.title) {
         applyEntryTitle(requestedSelection.chatId, requestedSelection.title)
@@ -2046,11 +2063,13 @@ export function useAgentChatController({
           : errorRecoveryHint(kind)
         const friendlyMessage = isRequestEntityTooLarge
           ? 'Image payload is larger than the currently deployed runtime limit.'
-          : kind === 'network'
-            ? 'Temporary connection issue while sending to the agent.'
-            : kind === 'auth'
-              ? 'Access issue while sending to this agent.'
-              : 'Unable to send message to this agent.'
+          : kind === 'waking'
+            ? 'Agent is waking up.'
+            : kind === 'network'
+              ? 'Temporary connection issue while sending to the agent.'
+              : kind === 'auth'
+                ? 'Access issue while sending to this agent.'
+                : 'Unable to send message to this agent.'
         setAgentError(`${friendlyMessage} ${fallback}`)
         setFailedAgentSend({
           content: trimmedContent,
@@ -2065,7 +2084,12 @@ export function useAgentChatController({
           status: 'error',
           errorMessage: fallback,
         }))
-        pushToast(`Message failed (${kind}).`, 'error')
+        pushToast(
+          kind === 'waking'
+            ? 'Agent is waking up — message not sent yet.'
+            : `Message failed (${kind}).`,
+          'error'
+        )
         // Durability: the POST threw before either success branch persisted the
         // user message (post-D.3 persists once, after the taskId is known). Write
         // it now so a transient send failure doesn't silently drop the user's

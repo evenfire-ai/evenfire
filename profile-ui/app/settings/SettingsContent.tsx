@@ -106,6 +106,7 @@ export function SettingsContent({
     [targets]
   )
   const slackTargets = useMemo(() => targets.filter(target => target.medium === 'slack'), [targets])
+  const teamsTargets = useMemo(() => targets.filter(target => target.medium === 'teams'), [targets])
   const telegramAccounts = useMemo(() => {
     const targetIds = new Set(telegramTargets.map(target => target.id))
     return accounts.filter(
@@ -122,6 +123,14 @@ export function SettingsContent({
         (account.targets || []).some(target => targetIds.has(target.id))
     )
   }, [accounts, slackTargets])
+  const teamsAccounts = useMemo(() => {
+    const targetIds = new Set(teamsTargets.map(target => target.id))
+    return accounts.filter(
+      account =>
+        account.medium === 'teams' &&
+        (account.targets || []).some(target => targetIds.has(target.id))
+    )
+  }, [accounts, teamsTargets])
   const visibleSocialTabs = useMemo(
     () =>
       PROFILE_SOCIAL_CHANNEL_TABS.filter(tab => targets.some(target => target.medium === tab.key)),
@@ -240,7 +249,12 @@ export function SettingsContent({
 
   async function removeApprovalMediumAccount(accountId: string, isDisconnected: boolean) {
     const account = accounts.find(item => item.id === accountId)
-    const providerLabel = account?.medium === 'slack' ? 'Slack' : 'Telegram'
+    const providerLabel =
+      account?.medium === 'slack'
+        ? 'Slack'
+        : account?.medium === 'teams'
+          ? 'Microsoft Teams'
+          : 'Telegram'
     const shouldRemove = await confirm({
       title: isDisconnected
         ? `Remove ${providerLabel} record?`
@@ -454,6 +468,16 @@ export function SettingsContent({
                 medium="slack"
                 targets={slackTargets}
                 accounts={slackAccounts}
+                disabled={formDisabled}
+                onAccountsRefresh={refreshApprovalAccounts}
+                onRemoveAccount={removeApprovalMediumAccount}
+              />
+            ) : null}
+            {currentSocialTab.key === 'teams' ? (
+              <TelegramVerificationPanel
+                medium="teams"
+                targets={teamsTargets}
+                accounts={teamsAccounts}
                 disabled={formDisabled}
                 onAccountsRefresh={refreshApprovalAccounts}
                 onRemoveAccount={removeApprovalMediumAccount}

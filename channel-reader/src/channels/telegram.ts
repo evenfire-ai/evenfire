@@ -287,9 +287,11 @@ export class TelegramAdapter implements ChannelAdapter {
         ].join('/')
       : 'unknown-target'
     const actionKey =
-      action.kind === 'workflowApprovalDecision'
-        ? `approval:${action.approvalRequestId}`
-        : `result:${action.workflowName ?? 'latest'}`
+      action.kind === 'toolApprovalDecision'
+        ? `tool:${action.actionToken}`
+        : action.kind === 'workflowApprovalDecision'
+          ? `approval:${action.approvalRequestId}`
+          : `result:${action.workflowRunId ?? action.workflowName ?? 'missing'}`
     return [message.sender, message.channelId, targetKey, actionKey].join('|')
   }
 
@@ -340,12 +342,18 @@ export class TelegramAdapter implements ChannelAdapter {
     }
 
     let content: string
-    if (action.kind === 'workflowApprovalDecision') {
+    if (action.kind === 'toolApprovalDecision') {
+      const decision =
+        action.decision === 'approve' ? 'a' : action.decision === 'approveAlways' ? 'l' : 'd'
+      content = `tool:${decision}:${action.actionToken}`
+      rawMessage.telegramToolApprovalActionToken = action.actionToken
+      rawMessage.telegramToolApprovalDecision = action.decision
+    } else if (action.kind === 'workflowApprovalDecision') {
       content = `/${action.decision} ${action.approvalRequestId}`
       rawMessage.telegramCallbackApprovalRequestId = action.approvalRequestId
       rawMessage.telegramCallbackDecision = action.decision
     } else {
-      content = `download result ${action.workflowName ?? ''}`.trim()
+      content = 'Download the completed workflow result'
     }
 
     const message = buildTelegramOperationalMessage({
@@ -390,7 +398,7 @@ export class TelegramAdapter implements ChannelAdapter {
 
     if (action.kind === 'workflowResult') {
       await this.answerCallbackQuery(callbackCtx, 'Fetching result...')
-      await this.deliverWorkflowResultCallback(message, action.workflowName)
+      await this.deliverWorkflowResultCallback(message, action.workflowRunId, action.workflowName)
       return
     }
 
@@ -400,17 +408,20 @@ export class TelegramAdapter implements ChannelAdapter {
 
   private async deliverWorkflowResultCallback(
     message: Message,
+    workflowRunId: string | undefined,
     workflowName: string | undefined
   ): Promise<void> {
-    if (!workflowName) {
+    if (!workflowRunId && !workflowName) {
       await this.sendMessage(
         message.channelId,
-        'This result button is missing its workflow name. Reply with "download result" to use the chat flow.',
+        'This result button is missing its workflow run. Trigger the workflow again.',
         message.messageId
       )
       return
     }
-    const result = await this.verificationClient?.downloadWorkflowResult?.(message, workflowName)
+    const result = workflowRunId
+      ? await this.verificationClient?.downloadWorkflowResultByRun?.(message, workflowRunId)
+      : await this.verificationClient?.downloadWorkflowResult?.(message, workflowName!)
     if (!result) {
       await this.sendMessage(
         message.channelId,
@@ -571,14 +582,28 @@ export class TelegramAdapter implements ChannelAdapter {
     }
   }
 
-  async editMessage(channelId: string, messageId: string, content: string): Promise<void> {
+  async editMessage(
+    channelId: string,
+    messageId: string,
+    content: string,
+    options?: SendMessageOptions
+  ): Promise<void> {
     if (!this.bot) return
     try {
       const text =
         content.length > TELEGRAM_MAX_LENGTH
           ? content.substring(0, TELEGRAM_MAX_LENGTH - 3) + '...'
           : content
-      await this.bot.api.editMessageText(channelId, Number(messageId), text)
+      const inlineKeyboard = options?.telegramInlineKeyboard
+        ?.map(row =>
+          row
+            .filter(button => button.text.trim() && button.callbackData.trim())
+            .map(button => ({ text: button.text, callback_data: button.callbackData }))
+        )
+        .filter(row => row.length > 0)
+      await this.bot.api.editMessageText(channelId, Number(messageId), text, {
+        reply_markup: { inline_keyboard: inlineKeyboard ?? [] },
+      })
     } catch (err) {
       // Ignore "message is not modified" errors (Telegram returns 400 if text unchanged)
       const msg = err instanceof Error ? err.message : String(err)

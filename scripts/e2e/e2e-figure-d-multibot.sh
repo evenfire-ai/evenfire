@@ -51,7 +51,7 @@ skp()  { echo -e "  ${YELLOW}SKIP${NC} $*"; skip=$((skip+1)); total=$((total+1))
 
 # ── Allowed-context guard (CLAUDE.md): never touch a non-Clerum cluster ──
 case "$KCTX" in
-  clerum-test|clerum-codex-*|clerum-detached-*|clerum-feat-*|clerum-fix-*|gke_${GCP_PROJECT}_us-central1-a_example-dev|gke_${GCP_PROJECT}_us-central1-a_clerum) ;;
+  clerum-test|clerum-codex-*|clerum-detached-*|clerum-feat-*|clerum-fix-*|gke_your-gcp-project_us-central1-a_example-dev|gke_your-gcp-project_us-central1-a_clerum) ;;
   *) echo -e "${RED}Refusing to run against non-Clerum context: $KCTX${NC}"; exit 2 ;;
 esac
 

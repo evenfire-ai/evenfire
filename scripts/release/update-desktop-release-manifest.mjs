@@ -87,8 +87,11 @@ export const releaseManifest: ReleaseManifest = ${JSON.stringify(manifest, null,
 `
 }
 
-function validate(manifest, versions) {
-  for (const field of Object.keys(PACKAGE_PATHS)) {
+function validate(manifest, versions, options = {}) {
+  const fields = options.deferDesktopRelease
+    ? ['externalRestApiVersion', 'rpcProxyVersion']
+    : Object.keys(PACKAGE_PATHS)
+  for (const field of fields) {
     if (manifest[field] !== versions[field]) {
       throw new Error(`${field}=${manifest[field]} does not match package.json ${versions[field]}`)
     }
@@ -101,8 +104,19 @@ function validate(manifest, versions) {
 const previousRef = argValue('--previous')
 const releaseId = argValue('--release-id') || 'local'
 const validateOnly = process.argv.includes('--validate-only')
+const deferDesktopRelease = process.argv.includes('--defer-desktop-release')
 
 const versions = currentVersions()
+const manifestAtHead = currentManifest()
+if (validateOnly) {
+  if (!manifestAtHead) {
+    throw new Error(`${MANIFEST_PATH} does not contain a releaseManifest export`)
+  }
+  validate(manifestAtHead, versions, { deferDesktopRelease })
+  console.log(JSON.stringify(manifestAtHead, null, 2))
+  process.exit(0)
+}
+
 const previous = previousManifest(previousRef) || {
   releaseId,
   externalRestApiVersion: versions.externalRestApiVersion,
@@ -127,20 +141,21 @@ for (const field of ['externalRestApiVersion', 'rpcProxyVersion']) {
 }
 
 if (
-  !prevVersions.desktopVersion ||
-  prevVersions.desktopVersion !== versions.desktopVersion ||
-  next.desktopVersion !== versions.desktopVersion
+  !deferDesktopRelease &&
+  (!prevVersions.desktopVersion ||
+    prevVersions.desktopVersion !== versions.desktopVersion ||
+    next.desktopVersion !== versions.desktopVersion)
 ) {
   next.desktopVersion = versions.desktopVersion
   next.minimumDesktopVersion = versions.desktopVersion
   changed = true
 }
 
-if (!changed && currentManifest()) {
-  next.releaseId = currentManifest().releaseId
+if (!changed && manifestAtHead) {
+  Object.assign(next, manifestAtHead)
 }
 
-validate(next, versions)
+validate(next, versions, { deferDesktopRelease })
 
 if (!validateOnly) {
   fs.writeFileSync(path.join(ROOT, MANIFEST_PATH), renderManifest(next))

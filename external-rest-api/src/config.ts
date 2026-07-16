@@ -124,7 +124,7 @@ export const config: Config = {
   desktopAppName: process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME || 'Evenfire',
   desktopReleaseBaseUrl: (
     process.env.EXTERNAL_REST_API_DESKTOP_RELEASE_BASE_URL ||
-    'https://github.com/evenfire-ai/evenfire/releases'
+    'https://github.com/your-org/evenfire/releases'
   ).replace(/\/+$/, ''),
 }
 

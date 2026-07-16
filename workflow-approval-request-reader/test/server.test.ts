@@ -11,11 +11,24 @@ vi.mock('../src/mcpHostClient.js', () => ({
 vi.mock('../src/channelReaderClient.js', () => ({
   handoffSlackEnrollmentToChannelReader: vi.fn().mockResolvedValue({ ok: true }),
   handoffSlackMessageToChannelReader: vi.fn().mockResolvedValue({ ok: true }),
+  handoffTeamsEnrollmentToChannelReader: vi.fn().mockResolvedValue({ ok: true }),
+  handoffTeamsFileConsentToChannelReader: vi.fn().mockResolvedValue({ ok: true }),
+  handoffTeamsMessageToChannelReader: vi.fn().mockResolvedValue({ ok: true }),
 }))
 
 vi.mock('../src/controlApiClient.js', () => ({
+  resolveTeamsTarget: vi.fn().mockResolvedValue({
+    ok: true,
+    hostRef: 'sandbox-recipes/figure-d-recipe',
+    communicationChannelRef: 'channels/teams-bot',
+    providerWorkspaceId: 'tenant-1',
+    replyOnlyWhenMentioned: true,
+    appId: 'teams-app-1',
+    appName: 'evenfire',
+  }),
   sendSlackTargetMessage: vi.fn().mockResolvedValue({ ok: true }),
   updateSlackTargetMessage: vi.fn().mockResolvedValue({ ok: true }),
+  updateTeamsTargetMessage: vi.fn().mockResolvedValue({ ok: true }),
   verifySlackTargetSignature: vi.fn().mockResolvedValue({
     ok: true,
     hostRef: 'sandbox-recipes/figure-d-recipe',
@@ -26,15 +39,26 @@ vi.mock('../src/controlApiClient.js', () => ({
   }),
 }))
 
+vi.mock('../src/teamsAuth.js', () => ({
+  verifyTeamsAuthorization: vi.fn().mockResolvedValue({ ok: true }),
+}))
+
 const APPROVAL_ID = '99999999-8888-7777-6666-555555555555'
 const SLACK_TARGET_ID = 'slack:test-target'
+const TEAMS_TARGET_ID = 'teams:test-target'
+const WORKFLOW_RUN_ID = '11111111-2222-3333-4444-555555555555'
 
 let createServer: (cfg: ReaderConfig) => http.Server
 let handoffSlackMessageToChannelReader: ReturnType<typeof vi.fn>
+let handoffTeamsMessageToChannelReader: ReturnType<typeof vi.fn>
+let handoffTeamsFileConsentToChannelReader: ReturnType<typeof vi.fn>
+let resolveTeamsTarget: ReturnType<typeof vi.fn>
 let sendSlackTargetMessage: ReturnType<typeof vi.fn>
 let submitMcpHostDecision: ReturnType<typeof vi.fn>
 let updateSlackTargetMessage: ReturnType<typeof vi.fn>
+let updateTeamsTargetMessage: ReturnType<typeof vi.fn>
 let verifySlackTargetSignature: ReturnType<typeof vi.fn>
+let verifyTeamsAuthorization: ReturnType<typeof vi.fn>
 
 const baseConfig: ReaderConfig = {
   port: 0,
@@ -100,16 +124,38 @@ describe('workflow approval request reader server', () => {
   beforeAll(async () => {
     ;({ createServer } = await import('../src/server.js'))
     ;({ submitMcpHostDecision } = await import('../src/mcpHostClient.js'))
-    ;({ handoffSlackMessageToChannelReader } = await import('../src/channelReaderClient.js'))
-    ;({ sendSlackTargetMessage, updateSlackTargetMessage, verifySlackTargetSignature } =
-      await import('../src/controlApiClient.js'))
+    ;({
+      handoffSlackMessageToChannelReader,
+      handoffTeamsFileConsentToChannelReader,
+      handoffTeamsMessageToChannelReader,
+    } = await import('../src/channelReaderClient.js'))
+    ;({
+      resolveTeamsTarget,
+      sendSlackTargetMessage,
+      updateSlackTargetMessage,
+      updateTeamsTargetMessage,
+      verifySlackTargetSignature,
+    } = await import('../src/controlApiClient.js'))
+    ;({ verifyTeamsAuthorization } = await import('../src/teamsAuth.js'))
   })
 
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(handoffSlackMessageToChannelReader).mockResolvedValue({ ok: true })
+    vi.mocked(handoffTeamsMessageToChannelReader).mockResolvedValue({ ok: true })
+    vi.mocked(handoffTeamsFileConsentToChannelReader).mockResolvedValue({ ok: true })
+    vi.mocked(resolveTeamsTarget).mockResolvedValue({
+      ok: true,
+      hostRef: 'sandbox-recipes/figure-d-recipe',
+      communicationChannelRef: 'channels/teams-bot',
+      providerWorkspaceId: 'tenant-1',
+      replyOnlyWhenMentioned: true,
+      appId: 'teams-app-1',
+      appName: 'evenfire',
+    })
     vi.mocked(sendSlackTargetMessage).mockResolvedValue({ ok: true })
     vi.mocked(updateSlackTargetMessage).mockResolvedValue({ ok: true })
+    vi.mocked(updateTeamsTargetMessage).mockResolvedValue({ ok: true })
     vi.mocked(verifySlackTargetSignature).mockResolvedValue({
       ok: true,
       hostRef: 'sandbox-recipes/figure-d-recipe',
@@ -118,6 +164,7 @@ describe('workflow approval request reader server', () => {
       channelName: 'slack-app',
       channelNamespace: 'channels',
     })
+    vi.mocked(verifyTeamsAuthorization).mockResolvedValue({ ok: true })
   })
 
   afterEach(() => {
@@ -216,7 +263,9 @@ describe('workflow approval request reader server', () => {
   })
 
   it('returns generic 500 errors without leaking internal exception messages', async () => {
-    vi.mocked(submitMcpHostDecision).mockRejectedValueOnce(new Error('database password leaked in stack'))
+    vi.mocked(submitMcpHostDecision).mockRejectedValueOnce(
+      new Error('database password leaked in stack')
+    )
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const body = JSON.stringify({
       callback_query: {
@@ -420,16 +469,164 @@ describe('workflow approval request reader server', () => {
     )
     resolveDecision?.({ ok: true })
     await waitForMockCall(updateSlackTargetMessage)
-    expect(updateSlackTargetMessage).toHaveBeenCalledWith(
-      expect.any(Object),
-      {
-        targetId: SLACK_TARGET_ID,
-        channelId: 'C123',
-        messageTs: '1710000000.000001',
-        text: 'Approved. Workflow approval recorded.',
-        blocks: [],
-      }
+    expect(updateSlackTargetMessage).toHaveBeenCalledWith(expect.any(Object), {
+      targetId: SLACK_TARGET_ID,
+      channelId: 'C123',
+      messageTs: '1710000000.000001',
+      text: 'Approved. Workflow approval recorded.',
+      blocks: [],
+    })
+  })
+
+  it('acknowledges Teams approval actions before the mcp-host decision completes', async () => {
+    let resolveDecision: ((value: { ok: true }) => void) | undefined
+    vi.mocked(submitMcpHostDecision).mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          resolveDecision = resolve
+        })
     )
+    const channelAlias = '0123456789abcdef'
+    const conversationId = '19:channel-1@thread.tacv2;messageid=root-post-1'
+    const body = JSON.stringify({
+      type: 'message',
+      id: 'teams-approval-action-1',
+      text: 'Approve',
+      value: {
+        action: `approve:${APPROVAL_ID}:sandbox-recipes/research-summary-workflow:` + channelAlias,
+      },
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      from: { id: 'teams-user-1' },
+      conversation: {
+        id: conversationId,
+        conversationType: 'channel',
+        tenantId: 'tenant-1',
+      },
+      channelData: {
+        tenant: { id: 'tenant-1' },
+        channel: { id: '19:channel-1@thread.tacv2' },
+      },
+    })
+    const timeout = Symbol('timeout')
+
+    const response = await Promise.race([
+      postWebhook(
+        { ...baseConfig, enabledMedia: new Set(['teams']) },
+        'teams',
+        body,
+        { authorization: 'Bearer teams-token' },
+        TEAMS_TARGET_ID
+      ),
+      new Promise<typeof timeout>(resolve => setTimeout(() => resolve(timeout), 250)),
+    ])
+
+    if (response === timeout) {
+      resolveDecision?.({ ok: true })
+      throw new Error('Teams approval action response waited for mcp-host decision completion')
+    }
+    expect(response).toEqual({ status: 200, body: { ok: true } })
+    expect(submitMcpHostDecision).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        medium: 'teams',
+        approvalRequestId: APPROVAL_ID,
+        mcpHostRef: 'sandbox-recipes/figure-d-recipe',
+        providerUserId: 'teams-user-1',
+        providerWorkspaceId: 'tenant-1',
+        providerChannelId: '19:channel-1@thread.tacv2',
+        decision: 'approve',
+      })
+    )
+    resolveDecision?.({ ok: true })
+    await waitForMockCall(updateTeamsTargetMessage)
+    expect(updateTeamsTargetMessage).toHaveBeenCalledWith(expect.any(Object), {
+      targetId: TEAMS_TARGET_ID,
+      conversationId: '19:channel-1@thread.tacv2',
+      messageId: 'root-post-1',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      text: 'Approved. Workflow approval recorded.',
+    })
+    expect(handoffTeamsMessageToChannelReader).not.toHaveBeenCalled()
+  })
+
+  it('marks stale Teams approval messages after a fast acknowledgement', async () => {
+    vi.mocked(submitMcpHostDecision).mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      error: 'approval_not_pending',
+    })
+    const body = JSON.stringify({
+      type: 'message',
+      id: 'teams-stale-action-1',
+      text: 'Deny',
+      value: {
+        action: `deny:${APPROVAL_ID}`,
+      },
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      from: { id: 'teams-user-1' },
+      conversation: {
+        id: '19:channel-1@thread.tacv2',
+        conversationType: 'channel',
+        tenantId: 'tenant-1',
+      },
+      replyToId: 'approval-card-1',
+      channelData: {
+        tenant: { id: 'tenant-1' },
+        channel: { id: '19:channel-1@thread.tacv2' },
+      },
+    })
+
+    const response = await postWebhook(
+      { ...baseConfig, enabledMedia: new Set(['teams']) },
+      'teams',
+      body,
+      { authorization: 'Bearer teams-token' },
+      TEAMS_TARGET_ID
+    )
+
+    expect(response).toEqual({ status: 200, body: { ok: true } })
+    await waitForMockCall(updateTeamsTargetMessage)
+    expect(updateTeamsTargetMessage).toHaveBeenCalledWith(expect.any(Object), {
+      targetId: TEAMS_TARGET_ID,
+      conversationId: '19:channel-1@thread.tacv2',
+      messageId: 'approval-card-1',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      text: 'This workflow approval is no longer pending. Trigger the workflow again to request approval.',
+    })
+  })
+
+  it('does not treat malformed Teams approval-like values as mention bypasses', async () => {
+    const body = JSON.stringify({
+      type: 'message',
+      id: 'teams-malformed-action-1',
+      text: 'Approve',
+      value: {
+        action: `approve:${APPROVAL_ID}:unexpected-extra`,
+      },
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      from: { id: 'teams-user-1' },
+      conversation: {
+        id: '19:channel-1@thread.tacv2',
+        conversationType: 'channel',
+        tenantId: 'tenant-1',
+      },
+      channelData: {
+        tenant: { id: 'tenant-1' },
+        channel: { id: '19:channel-1@thread.tacv2' },
+      },
+    })
+
+    const response = await postWebhook(
+      { ...baseConfig, enabledMedia: new Set(['teams']) },
+      'teams',
+      body,
+      { authorization: 'Bearer teams-token' },
+      TEAMS_TARGET_ID
+    )
+
+    expect(response).toEqual({ status: 200, body: { ok: true, ignored: true } })
+    expect(submitMcpHostDecision).not.toHaveBeenCalled()
+    expect(handoffTeamsMessageToChannelReader).not.toHaveBeenCalled()
   })
 
   it('marks stale Slack approval messages after a fast acknowledgement', async () => {
@@ -462,16 +659,13 @@ describe('workflow approval request reader server', () => {
 
     expect(response).toEqual({ status: 200, body: { ok: true } })
     await waitForMockCall(updateSlackTargetMessage)
-    expect(updateSlackTargetMessage).toHaveBeenCalledWith(
-      expect.any(Object),
-      {
-        targetId: SLACK_TARGET_ID,
-        channelId: 'C123',
-        messageTs: '1710000000.000003',
-        text: 'This workflow approval is no longer pending. Trigger the workflow again to request approval.',
-        blocks: [],
-      }
-    )
+    expect(updateSlackTargetMessage).toHaveBeenCalledWith(expect.any(Object), {
+      targetId: SLACK_TARGET_ID,
+      channelId: 'C123',
+      messageTs: '1710000000.000003',
+      text: 'This workflow approval is no longer pending. Trigger the workflow again to request approval.',
+      blocks: [],
+    })
     expect(sendSlackTargetMessage).not.toHaveBeenCalled()
   })
 
@@ -665,6 +859,225 @@ describe('workflow approval request reader server', () => {
           providerChannelId: 'C123',
           providerEventId: 'slack:T123:C123:1710000000.000001',
           providerMessageTs: '1710000000.000001',
+        })
+      )
+    })
+  })
+
+  it('hands Teams workflow result button actions to channel-reader without a mention', async () => {
+    const body = JSON.stringify({
+      type: 'message',
+      id: 'button-activity-1',
+      text: `workflow_result_run:${WORKFLOW_RUN_ID}`,
+      value: {
+        action: `workflow_result_run:${WORKFLOW_RUN_ID}`,
+      },
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      from: { id: 'teams-user-1' },
+      conversation: {
+        id: '19:channel-1@thread.tacv2;messageid=root-post-1',
+        conversationType: 'channel',
+        tenantId: 'tenant-1',
+      },
+      channelData: {
+        tenant: { id: 'tenant-1' },
+        channel: { id: '19:channel-1@thread.tacv2' },
+      },
+    })
+
+    const response = await postWebhook(
+      { ...baseConfig, enabledMedia: new Set(['teams']) },
+      'teams',
+      body,
+      { authorization: 'Bearer teams-token' },
+      TEAMS_TARGET_ID
+    )
+
+    expect(response.status).toBe(200)
+    await vi.waitFor(() => {
+      expect(handoffTeamsMessageToChannelReader).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.objectContaining({
+          hostRef: 'sandbox-recipes/figure-d-recipe',
+          communicationChannelRef: 'channels/teams-bot',
+          providerWorkspaceId: 'tenant-1',
+          replyOnlyWhenMentioned: true,
+        }),
+        expect.objectContaining({
+          content: 'Download the completed workflow result',
+          workflowRunId: WORKFLOW_RUN_ID,
+          providerUserId: 'teams-user-1',
+          providerWorkspaceId: 'tenant-1',
+          providerChannelId: '19:channel-1@thread.tacv2',
+          providerConversationId: '19:channel-1@thread.tacv2;messageid=root-post-1',
+          providerReplyToMessageId: 'root-post-1',
+          providerMessageTs: 'button-activity-1',
+        })
+      )
+    })
+  })
+
+  it('hands accepted Teams file consent invokes to channel-reader', async () => {
+    const body = JSON.stringify({
+      type: 'invoke',
+      name: 'fileConsent/invoke',
+      id: 'consent-activity-1',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      from: { id: 'teams-user-1' },
+      conversation: {
+        id: 'personal-conversation-1',
+        conversationType: 'personal',
+        tenantId: 'tenant-1',
+      },
+      channelData: { tenant: { id: 'tenant-1' } },
+      value: {
+        action: 'accept',
+        context: { workflowRunId: WORKFLOW_RUN_ID, artifactName: 'result.pdf' },
+        uploadInfo: {
+          contentUrl: 'https://tenant.sharepoint.com/result.pdf',
+          uploadUrl: 'https://tenant.sharepoint.com/upload-session',
+          uniqueId: 'file-1',
+          name: 'result.pdf',
+          fileType: 'pdf',
+        },
+      },
+    })
+
+    const response = await postWebhook(
+      { ...baseConfig, enabledMedia: new Set(['teams']) },
+      'teams',
+      body,
+      { authorization: 'Bearer teams-token' },
+      TEAMS_TARGET_ID
+    )
+
+    expect(response.status).toBe(200)
+    await vi.waitFor(() => {
+      expect(handoffTeamsFileConsentToChannelReader).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.objectContaining({ hostRef: 'sandbox-recipes/figure-d-recipe' }),
+        expect.objectContaining({
+          action: 'accept',
+          workflowRunId: WORKFLOW_RUN_ID,
+          artifactName: 'result.pdf',
+          providerConversationId: 'personal-conversation-1',
+        })
+      )
+    })
+  })
+
+  it.each([
+    {
+      conversationType: 'channel',
+      conversationId: '19:channel-1@thread.tacv2',
+      providerChannelId: '19:channel-1@thread.tacv2',
+      channel: { id: '19:channel-1@thread.tacv2' },
+    },
+    {
+      conversationType: 'groupChat',
+      conversationId: '19:group-chat-1@thread.v2',
+      providerChannelId: '19:group-chat-1@thread.v2',
+      channel: undefined,
+    },
+    {
+      conversationType: 'personal',
+      conversationId: 'personal-conversation-1',
+      providerChannelId: 'personal-conversation-1',
+      channel: undefined,
+    },
+  ])(
+    'hands Teams tool actions from $conversationType chats through without a mention',
+    async ({ conversationType, conversationId, providerChannelId, channel }) => {
+      const body = JSON.stringify({
+        type: 'message',
+        id: 'button-activity-tool-1',
+        text: 'Approve',
+        value: { action: 'tool:a:abcdefghijklmnop' },
+        serviceUrl: 'https://smba.trafficmanager.net/amer/',
+        from: { id: 'teams-user-1' },
+        conversation: {
+          id: conversationId,
+          conversationType,
+          tenantId: 'tenant-1',
+        },
+        replyToId: 'root-post-1',
+        channelData: {
+          tenant: { id: 'tenant-1' },
+          ...(channel ? { channel } : {}),
+        },
+      })
+
+      const response = await postWebhook(
+        { ...baseConfig, enabledMedia: new Set(['teams']) },
+        'teams',
+        body,
+        { authorization: 'Bearer teams-token' },
+        TEAMS_TARGET_ID
+      )
+
+      expect(response.status).toBe(200)
+      await vi.waitFor(() => {
+        expect(handoffTeamsMessageToChannelReader).toHaveBeenCalledWith(
+          expect.any(Object),
+          expect.objectContaining({ replyOnlyWhenMentioned: true }),
+          expect.objectContaining({
+            content: 'tool:a:abcdefghijklmnop',
+            providerUserId: 'teams-user-1',
+            providerChannelId,
+            providerConversationId: conversationId,
+            providerReplyToMessageId: 'root-post-1',
+          })
+        )
+      })
+    }
+  )
+
+  it('hands Slack tool approval actions to channel-reader without a required mention', async () => {
+    vi.mocked(verifySlackTargetSignature).mockResolvedValueOnce({
+      ok: true,
+      hostRef: 'sandbox-recipes/figure-d-recipe',
+      communicationChannelRef: 'channels/slack-app',
+      providerWorkspaceId: 'T123',
+      replyInThreads: true,
+      replyOnlyWhenMentioned: true,
+      channelName: 'slack-app',
+      channelNamespace: 'channels',
+    })
+    const payload = {
+      type: 'block_actions',
+      trigger_id: 'trigger-tool-1',
+      user: { id: 'U123' },
+      team: { id: 'T123' },
+      channel: { id: 'C123' },
+      message: { ts: '1710000000.000002', thread_ts: '1710000000.000001' },
+      actions: [{ value: 'tool:d:abcdefghijklmnop' }],
+    }
+    const body = new URLSearchParams({ payload: JSON.stringify(payload) }).toString()
+    const timestamp = `${Math.floor(Date.now() / 1000)}`
+
+    const response = await postWebhook(
+      baseConfig,
+      'slack',
+      body,
+      {
+        'content-type': 'application/x-www-form-urlencoded',
+        'x-slack-request-timestamp': timestamp,
+        'x-slack-signature': 'v0=signature',
+      },
+      SLACK_TARGET_ID
+    )
+
+    expect(response.status).toBe(200)
+    await vi.waitFor(() => {
+      expect(handoffSlackMessageToChannelReader).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.objectContaining({ replyOnlyWhenMentioned: true }),
+        expect.objectContaining({
+          content: 'tool:d:abcdefghijklmnop',
+          providerUserId: 'U123',
+          providerChannelId: 'C123',
+          providerMessageTs: '1710000000.000002',
+          threadTs: '1710000000.000001',
         })
       )
     })

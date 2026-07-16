@@ -922,6 +922,48 @@ describe('TelegramAdapter — fetchMessages()', () => {
     })
   })
 
+  it('accepts tool approval button callbacks even when mentions are required', async () => {
+    const adapter = new TelegramAdapter()
+    await adapter.connect({ telegramBotToken: TEST_TOKEN })
+
+    const bot = grammy.instances[0]!
+    const handler = getCallbackHandler(bot)
+    await adapter.fetchMessages(
+      '111222',
+      new Set(['123456']),
+      telegramOptions('supergroup', { replyOnlyWhenMentioned: true })
+    )
+
+    const ctx = makeCallbackCtx({
+      senderId: '123456',
+      data: 'tool:a:abcdefghijklmnop',
+      chatId: '111222',
+      chatType: 'supergroup',
+      callbackId: 'callback-tool-approve-1',
+      messageId: 77,
+    })
+    await handler(ctx)
+
+    const messages = await adapter.fetchMessages(
+      '111222',
+      new Set(['123456']),
+      telegramOptions('supergroup', { replyOnlyWhenMentioned: true })
+    )
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      content: 'tool:a:abcdefghijklmnop',
+      messageId: '77',
+      rawData: {
+        telegramToolApprovalActionToken: 'abcdefghijklmnop',
+        telegramToolApprovalDecision: 'approve',
+      },
+    })
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+      text: 'Recording decision...',
+      show_alert: false,
+    })
+  })
+
   it('ignores repeated approval button callbacks from the same user for two seconds', async () => {
     const adapter = new TelegramAdapter()
     await adapter.connect({ telegramBotToken: TEST_TOKEN })
@@ -1020,14 +1062,15 @@ describe('TelegramAdapter — fetchMessages()', () => {
   })
 
   it('ignores repeated workflow result button callbacks from the same user for two seconds', async () => {
-    const downloadWorkflowResult = vi.fn(async () => ({
+    const workflowRunId = '11111111-2222-3333-4444-555555555555'
+    const downloadWorkflowResultByRun = vi.fn(async () => ({
       success: true,
       status: 'completed' as const,
       response: 'Workflow result is ready.',
     }))
     const adapter = new TelegramAdapter({
       confirmTelegramChallenge: vi.fn(),
-      downloadWorkflowResult,
+      downloadWorkflowResultByRun,
     })
     await adapter.connect({ telegramBotToken: TEST_TOKEN })
 
@@ -1037,7 +1080,7 @@ describe('TelegramAdapter — fetchMessages()', () => {
 
     const firstCtx = makeCallbackCtx({
       senderId: '123456',
-      data: telegramWorkflowResultCallbackData('due-diligence')!,
+      data: telegramWorkflowResultCallbackData(workflowRunId)!,
       chatId: '111222',
       chatType: 'group',
       callbackId: 'callback-result-1',
@@ -1047,7 +1090,7 @@ describe('TelegramAdapter — fetchMessages()', () => {
 
     const secondCtx = makeCallbackCtx({
       senderId: '123456',
-      data: telegramWorkflowResultCallbackData('due-diligence')!,
+      data: telegramWorkflowResultCallbackData(workflowRunId)!,
       chatId: '111222',
       chatType: 'group',
       callbackId: 'callback-result-2',
@@ -1056,7 +1099,7 @@ describe('TelegramAdapter — fetchMessages()', () => {
     await handler(secondCtx)
     await Promise.resolve()
 
-    expect(downloadWorkflowResult).toHaveBeenCalledTimes(1)
+    expect(downloadWorkflowResultByRun).toHaveBeenCalledTimes(1)
     expect(firstCtx.answerCallbackQuery).toHaveBeenCalledWith({
       text: 'Fetching result...',
       show_alert: false,
@@ -1068,7 +1111,8 @@ describe('TelegramAdapter — fetchMessages()', () => {
   })
 
   it('downloads workflow result button callbacks directly without enqueuing chat prompts', async () => {
-    const downloadWorkflowResult = vi.fn(async () => ({
+    const workflowRunId = '11111111-2222-3333-4444-555555555555'
+    const downloadWorkflowResultByRun = vi.fn(async () => ({
       success: true,
       status: 'completed' as const,
       response: 'Workflow result is ready.',
@@ -1087,7 +1131,7 @@ describe('TelegramAdapter — fetchMessages()', () => {
     }))
     const adapter = new TelegramAdapter({
       confirmTelegramChallenge: vi.fn(),
-      downloadWorkflowResult,
+      downloadWorkflowResultByRun,
     })
     await adapter.connect({ telegramBotToken: TEST_TOKEN })
 
@@ -1101,7 +1145,7 @@ describe('TelegramAdapter — fetchMessages()', () => {
 
     const ctx = makeCallbackCtx({
       senderId: '123456',
-      data: telegramWorkflowResultCallbackData('due-diligence')!,
+      data: telegramWorkflowResultCallbackData(workflowRunId)!,
       chatId: '111222',
       chatType: 'group',
       callbackId: 'callback-result-1',
@@ -1115,12 +1159,12 @@ describe('TelegramAdapter — fetchMessages()', () => {
       telegramOptions('group', { replyOnlyWhenMentioned: true })
     )
     expect(messages).toHaveLength(0)
-    expect(downloadWorkflowResult).toHaveBeenCalledWith(
+    expect(downloadWorkflowResultByRun).toHaveBeenCalledWith(
       expect.objectContaining({
         channelType: 'telegram',
         channelId: '111222',
         sender: '123456',
-        content: 'download result due-diligence',
+        content: 'Download the completed workflow result',
         messageId: '78',
         providerIdentity: expect.objectContaining({
           providerUserId: '123456',
@@ -1128,7 +1172,7 @@ describe('TelegramAdapter — fetchMessages()', () => {
           providerEventId: 'telegram:111222:callback:callback-result-1',
         }),
       }),
-      'due-diligence'
+      workflowRunId
     )
     expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
       text: 'Fetching result...',
@@ -1136,11 +1180,11 @@ describe('TelegramAdapter — fetchMessages()', () => {
     })
   })
 
-  it('does not enqueue legacy workflow result callbacks without a workflow name', async () => {
-    const downloadWorkflowResult = vi.fn()
+  it('does not enqueue legacy workflow result callbacks without a workflow run', async () => {
+    const downloadWorkflowResultByRun = vi.fn()
     const adapter = new TelegramAdapter({
       confirmTelegramChallenge: vi.fn(),
-      downloadWorkflowResult,
+      downloadWorkflowResultByRun,
     })
     await adapter.connect({ telegramBotToken: TEST_TOKEN })
 
@@ -1168,10 +1212,10 @@ describe('TelegramAdapter — fetchMessages()', () => {
       telegramOptions('group', { replyOnlyWhenMentioned: true })
     )
     expect(messages).toHaveLength(0)
-    expect(downloadWorkflowResult).not.toHaveBeenCalled()
+    expect(downloadWorkflowResultByRun).not.toHaveBeenCalled()
     expect(bot.api.sendMessage).toHaveBeenCalledWith(
       '111222',
-      'This result button is missing its workflow name. Reply with "download result" to use the chat flow.',
+      'This result button is missing its workflow run. Trigger the workflow again.',
       expect.objectContaining({ reply_to_message_id: 79 })
     )
     expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
@@ -1263,6 +1307,39 @@ describe('TelegramAdapter — sendMessage()', () => {
         },
       })
     )
+  })
+
+  it('updates tool approval keyboards and clears them from progress messages', async () => {
+    const adapter = new TelegramAdapter()
+    await adapter.connect({ telegramBotToken: TEST_TOKEN })
+    const bot = grammy.instances[0]!
+    const editMessageText = vi.fn().mockResolvedValue({ message_id: 1 })
+    ;(bot.api as typeof bot.api & { editMessageText: typeof editMessageText }).editMessageText =
+      editMessageText
+
+    await adapter.editMessage('111222', '77', 'Approval needed', {
+      telegramInlineKeyboard: [
+        [
+          { text: 'Approve', callbackData: 'tool:a:abcdefghijklmnop' },
+          { text: 'Deny', callbackData: 'tool:d:abcdefghijklmnop' },
+        ],
+      ],
+    })
+    await adapter.editMessage('111222', '77', 'Approved. Processing...')
+
+    expect(editMessageText).toHaveBeenNthCalledWith(1, '111222', 77, 'Approval needed', {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: 'Approve', callback_data: 'tool:a:abcdefghijklmnop' },
+            { text: 'Deny', callback_data: 'tool:d:abcdefghijklmnop' },
+          ],
+        ],
+      },
+    })
+    expect(editMessageText).toHaveBeenNthCalledWith(2, '111222', 77, 'Approved. Processing...', {
+      reply_markup: { inline_keyboard: [] },
+    })
   })
 
   it('does nothing when bot is not connected (no prior connect())', async () => {

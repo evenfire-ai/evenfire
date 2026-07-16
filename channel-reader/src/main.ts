@@ -1,6 +1,7 @@
+import { randomBytes } from 'node:crypto'
 import http from 'node:http'
 import { validateCommunicationChannelConfig } from './channelConfigValidation'
-import { EmailAdapter, SlackAdapter, TelegramAdapter } from './channels'
+import { EmailAdapter, SlackAdapter, TeamsAdapter, TelegramAdapter } from './channels'
 import { config } from './config'
 import { CredentialsResolver, DevCredentialsResolver, ResolvedCredentials } from './credentials'
 import {
@@ -8,6 +9,10 @@ import {
   type SlackHandoffRequest,
   type SlackHandoffResponse,
   type SlackMessageHandoff,
+  type TeamsEnrollmentHandoff,
+  type TeamsFileConsentHandoff,
+  type TeamsHandoffRequest,
+  type TeamsMessageHandoff,
   createChannelReaderHandoffServer,
 } from './handoffServer'
 import type { NotificationDeliveryClient } from './notificationDeliveryClient'
@@ -22,6 +27,7 @@ import {
   Message,
   ProgressStep,
   ProviderTargetIdentity,
+  SendMessageOptions,
   TelegramProviderChatType,
 } from './types'
 import { WorkflowApprovalCoordinator } from './workflowApprovalCoordinator'
@@ -71,11 +77,13 @@ interface PendingApprovalState {
   taskId: string
   requestId: string
   userId: string
-  channelType: 'telegram' | 'email' | 'slack'
+  channelType: 'telegram' | 'email' | 'slack' | 'teams'
   channelId: string
   originalMessage: Message
   createdAt: Date
+  actionToken: string
   startResultPollingFallback?: () => void
+  updateStatusAfterDecision?: (content: string) => Promise<void>
 }
 
 /** Stale approval entries are cleaned up after this interval. */
@@ -85,12 +93,103 @@ const RESULT_POLL_FALLBACK_TIMEOUT_MS = 30 * 60 * 1000
 /** Telegram and Slack can redeliver the same provider event while poll offsets settle. */
 const PROVIDER_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 const SLACK_VERIFICATION_SCAN_INTERVAL_MS = 60 * 1000
+const TOOL_APPROVAL_ACTION_RE = /^tool:([ald]):([A-Za-z0-9_-]{16})$/
 /**
  * Periodic CommunicationChannel resync interval (production mode only).
  * Even when no watch event fires, a re-list every 60 s self-heals missed
  * events from earlier reconnect gaps.
  */
 export const CHANNEL_RESYNC_INTERVAL_MS = 60_000 // 60 seconds
+
+type ToolApprovalDecision = '/approve' | '/approve always' | '/deny'
+
+function newToolApprovalActionToken(): string {
+  return randomBytes(12).toString('base64url')
+}
+
+function toolApprovalActionValue(
+  decision: 'approve' | 'approveAlways' | 'deny',
+  actionToken: string
+): string {
+  const code = decision === 'approve' ? 'a' : decision === 'approveAlways' ? 'l' : 'd'
+  return `tool:${code}:${actionToken}`
+}
+
+function parseToolApprovalAction(content: string): {
+  command: ToolApprovalDecision
+  actionToken: string
+} | null {
+  const match = TOOL_APPROVAL_ACTION_RE.exec(content.trim())
+  if (!match) return null
+  return {
+    command: match[1] === 'a' ? '/approve' : match[1] === 'l' ? '/approve always' : '/deny',
+    actionToken: match[2],
+  }
+}
+
+function toolApprovalMessageOptions(
+  channelType: Message['channelType'],
+  notification: string,
+  actionToken: string
+): SendMessageOptions | undefined {
+  const approve = toolApprovalActionValue('approve', actionToken)
+  const approveAlways = toolApprovalActionValue('approveAlways', actionToken)
+  const deny = toolApprovalActionValue('deny', actionToken)
+  if (channelType === 'telegram') {
+    return {
+      telegramInlineKeyboard: [
+        [
+          { text: 'Approve', callbackData: approve },
+          { text: 'Deny', callbackData: deny },
+        ],
+        [{ text: 'Always approve', callbackData: approveAlways }],
+      ],
+    }
+  }
+  if (channelType === 'slack') {
+    return {
+      slackBlocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: notification } },
+        {
+          type: 'actions',
+          block_id: `tool_approval_${actionToken}`,
+          elements: [
+            {
+              type: 'button',
+              action_id: 'tool_approval_approve',
+              text: { type: 'plain_text', text: 'Approve' },
+              value: approve,
+              style: 'primary',
+            },
+            {
+              type: 'button',
+              action_id: 'tool_approval_always',
+              text: { type: 'plain_text', text: 'Always approve' },
+              value: approveAlways,
+            },
+            {
+              type: 'button',
+              action_id: 'tool_approval_deny',
+              text: { type: 'plain_text', text: 'Deny' },
+              value: deny,
+              style: 'danger',
+            },
+          ],
+        },
+      ],
+    }
+  }
+  if (channelType === 'teams') {
+    return {
+      teamsActions: [
+        { title: 'Approve', value: approve, style: 'positive' },
+        { title: 'Always approve', value: approveAlways },
+        { title: 'Deny', value: deny, style: 'destructive' },
+      ],
+    }
+  }
+  return undefined
+}
 
 function supportedTelegramOperationalChatType(value: unknown): TelegramProviderChatType | null {
   return value === 'private' || value === 'group' || value === 'supergroup' ? value : null
@@ -112,6 +211,17 @@ function hasSlackChannelConfig(spec: CommunicationChannelSpec): boolean {
   return !!(settings?.workspaceId?.trim() || settings?.botHandle?.trim())
 }
 
+function hasTeamsChannelConfig(spec: CommunicationChannelSpec): boolean {
+  if (spec.teams && spec.teams.length > 0) return true
+  const settings = spec.teamsSettings
+  return !!(
+    settings?.tenantId?.trim() ||
+    settings?.appId?.trim() ||
+    settings?.appName?.trim() ||
+    settings?.replyOnlyWhenMentioned !== undefined
+  )
+}
+
 type ChannelReaderRpcClient = Pick<
   RPCClient,
   | 'healthCheck'
@@ -130,7 +240,9 @@ type ChannelReaderRpcClient = Pick<
   | 'acknowledgeCronResult'
 > & {
   authorizeProviderMessage?: RPCClient['authorizeProviderMessage']
+  downloadWorkflowResultByRun?: RPCClient['downloadWorkflowResultByRun']
   confirmSlackLinkSession?: RPCClient['confirmSlackLinkSession']
+  confirmTeamsLinkSession?: RPCClient['confirmTeamsLinkSession']
 }
 
 type ChannelType = ChannelAdapter['channelType']
@@ -160,7 +272,7 @@ export class ChannelReader {
   private credentialsResolver: {
     resolve(cc: CommunicationChannelCRD): Promise<ResolvedCredentials>
   } | null
-  /** Pending approvals keyed by "channelType:channelId:sender". */
+  /** Pending approvals keyed by provider conversation/thread and sender. */
   private pendingApprovals: Map<string, PendingApprovalState> = new Map()
   /** Recently processed provider events keyed by stable provider or channel message identity. */
   private processedProviderEvents: Map<string, number> = new Map()
@@ -282,12 +394,19 @@ export class ChannelReader {
     )
     const ccsWithEmail = this.channels.filter(c => c.spec.email && c.spec.email.length > 0)
     const ccsWithSlack = this.channels.filter(c => hasSlackChannelConfig(c.spec))
+    const ccsWithTeams = this.channels.filter(c => hasTeamsChannelConfig(c.spec))
 
     console.log(`[Main] needsTelegram: ${ccsWithTelegram.length > 0}`)
     console.log(`[Main] needsEmail: ${ccsWithEmail.length > 0}`)
     console.log(`[Main] needsSlack: ${ccsWithSlack.length > 0}`)
+    console.log(`[Main] needsTeams: ${ccsWithTeams.length > 0}`)
 
-    if (ccsWithTelegram.length === 0 && ccsWithEmail.length === 0 && ccsWithSlack.length === 0) {
+    if (
+      ccsWithTelegram.length === 0 &&
+      ccsWithEmail.length === 0 &&
+      ccsWithSlack.length === 0 &&
+      ccsWithTeams.length === 0
+    ) {
       console.warn(
         '[Main] No channel adapters to initialize yet. Waiting for CommunicationChannel CRDs to be created.'
       )
@@ -444,6 +563,74 @@ export class ChannelReader {
       }
     }
 
+    if (ccsWithTeams.length > 0) {
+      const withTeamsCreds = ccsWithTeams
+        .map(cc => ({
+          cc,
+          appId: cc.spec.teamsSettings?.appId?.trim(),
+          tenantId: cc.spec.teamsSettings?.tenantId?.trim(),
+          password: resolved.get(cc.name)?.teamsAppPassword,
+        }))
+        .filter(
+          (
+            entry
+          ): entry is {
+            cc: CommunicationChannelCRD
+            appId: string
+            tenantId: string
+            password: string
+          } => Boolean(entry.appId && entry.tenantId && entry.password)
+        )
+        .sort((a, b) => a.cc.name.localeCompare(b.cc.name, 'en'))
+      const groupsByCredential = new Map<string, typeof withTeamsCreds>()
+      for (const entry of withTeamsCreds) {
+        const key = `${entry.tenantId}\0${entry.appId}\0${entry.password}`
+        const current = groupsByCredential.get(key) ?? []
+        current.push(entry)
+        groupsByCredential.set(key, current)
+      }
+      const teamsCredentialGroups = [...groupsByCredential.values()]
+      if (teamsCredentialGroups.length > 1) {
+        console.log(
+          `[Main] Initializing ${teamsCredentialGroups.length} Teams adapters from CommunicationChannel credentials`
+        )
+      }
+      for (const entries of teamsCredentialGroups) {
+        const source = entries[0]!
+        const ccs = entries.map(entry => entry.cc)
+        const sourceChannel = source.cc
+        const providerTargets = ccs
+          .map(cc => providerTargetFromChannel(cc))
+          .filter((target): target is ProviderTargetIdentity => target !== null)
+        const serviceUrls = new Map<string, string>()
+        for (const cc of ccs) {
+          for (const group of cc.spec.teams ?? []) {
+            const conversationId = group.channelId?.trim()
+            const serviceUrl = group.serviceUrl?.trim()
+            if (conversationId && serviceUrl) serviceUrls.set(conversationId, serviceUrl)
+          }
+        }
+        const adapterKey = `teams:${sourceChannel.namespace}/${sourceChannel.name}`
+        for (const cc of ccs) {
+          this.bindAdapterToCommunicationChannel('teams', cc, adapterKey)
+        }
+        this.defaultAdapterKeyByChannelType.set(
+          'teams',
+          this.defaultAdapterKeyByChannelType.get('teams') ?? adapterKey
+        )
+        const adapter = this.adapters.get(adapterKey) ?? new TeamsAdapter()
+        await adapter.connect({
+          teamsAppId: source.appId,
+          teamsTenantId: source.tenantId,
+          teamsAppPassword: source.password,
+          teamsServiceUrlsByConversationId: serviceUrls,
+          providerTarget: providerTargetFromChannel(sourceChannel) ?? undefined,
+          providerTargets,
+        })
+        this.adapters.set(adapterKey, adapter)
+      }
+    }
+
     if (this.adapters.size === 0) {
       console.warn(
         '[Main] No channel adapters connected — credentials may be missing. Set them via Control UI on the relevant CommunicationChannel.'
@@ -493,7 +680,9 @@ export class ChannelReader {
         ? channel.spec.telegram
         : channelType === 'slack'
           ? channel.spec.slack
-          : channel.spec.email
+          : channelType === 'teams'
+            ? channel.spec.teams
+            : channel.spec.email
     return (groups ?? []).map(group => String(group.channelId || '').trim()).filter(Boolean)
   }
 
@@ -618,11 +807,129 @@ export class ChannelReader {
     }
   }
 
+  private teamsMessageFromHandoff(handoff: TeamsMessageHandoff): Message | null {
+    const providerTarget = handoff.providerTarget
+    if (
+      !handoff.content?.trim() ||
+      !handoff.providerUserId?.trim() ||
+      !handoff.providerWorkspaceId?.trim() ||
+      !handoff.providerChannelId?.trim() ||
+      !handoff.providerConversationId?.trim() ||
+      !handoff.providerReplyToMessageId?.trim() ||
+      !handoff.providerEventId?.trim() ||
+      !handoff.providerMessageId?.trim() ||
+      !handoff.serviceUrl?.trim() ||
+      !providerTarget?.hostRef ||
+      !providerTarget.communicationChannelNamespace ||
+      !providerTarget.communicationChannelName
+    ) {
+      return null
+    }
+
+    return {
+      channelType: 'teams',
+      channelId: handoff.providerConversationId,
+      sender: handoff.providerUserId,
+      content: handoff.content,
+      timestamp: new Date(),
+      messageId: handoff.providerMessageId,
+      threadId: handoff.providerReplyToMessageId,
+      providerIdentity: {
+        medium: 'teams',
+        providerUserId: handoff.providerUserId,
+        providerWorkspaceId: handoff.providerWorkspaceId,
+        providerChannelId: handoff.providerChannelId,
+        providerChannelType: handoff.providerChannelType ?? null,
+        providerEventId: handoff.providerEventId,
+        providerTarget,
+      },
+      rawData: {
+        ...(handoff.rawData ?? {}),
+        serviceUrl: handoff.serviceUrl,
+      },
+    }
+  }
+
+  private rememberTeamsConversation(
+    providerTarget: ProviderTargetIdentity,
+    channelId: string,
+    serviceUrl: string
+  ): void {
+    const adapter = this.adapterForCommunicationChannelRef('teams', {
+      namespace: providerTarget.communicationChannelNamespace,
+      name: providerTarget.communicationChannelName,
+    })
+    if (adapter instanceof TeamsAdapter) {
+      adapter.rememberConversation(channelId, serviceUrl)
+    }
+  }
+
+  private async deliverProviderWorkflowResult(
+    message: Message,
+    workflowRunId: string
+  ): Promise<void> {
+    const adapter = this.adapterForMessage(message)
+    if (!adapter) return
+    if (!this.rpcClient.downloadWorkflowResultByRun) {
+      await adapter.sendMessage(
+        message.channelId,
+        'Workflow result download is not available from this channel.',
+        message.threadId
+      )
+      return
+    }
+    const result = await this.rpcClient.downloadWorkflowResultByRun(message, workflowRunId)
+    if (!result.success) {
+      await adapter.sendMessage(
+        message.channelId,
+        result.error?.message || 'Workflow result could not be downloaded.',
+        message.threadId
+      )
+      return
+    }
+
+    const attachments = result.attachments ?? []
+    if (adapter instanceof TeamsAdapter && attachments.length > 0) {
+      const attachment = attachments[0]!
+      if (message.providerIdentity?.providerChannelType === 'personal') {
+        await adapter.sendFileConsent(
+          message.channelId,
+          attachment,
+          {
+            workflowRunId,
+            artifactName: attachment.artifactName || attachment.filename || attachment.id,
+          },
+          message.threadId
+        )
+        return
+      }
+      if (attachment.mimeType.split(';', 1)[0]?.toLowerCase() !== 'text/plain') {
+        await adapter.sendMessage(
+          message.channelId,
+          'Open a direct chat with this bot to download the workflow result file.',
+          message.threadId
+        )
+        return
+      }
+    }
+
+    await adapter.sendMessage(
+      message.channelId,
+      attachments.length > 0 ? '' : result.response || 'No workflow result file is available.',
+      message.threadId,
+      attachments
+    )
+  }
+
   async handleSlackHandoff(request: SlackHandoffRequest): Promise<SlackHandoffResponse> {
     if (request.kind === 'slack.message') {
       const message = this.slackMessageFromHandoff(request)
       if (!message) return { ok: false, status: 400, error: 'invalid_slack_message_handoff' }
-      await this.handleMessages([message])
+      if (request.workflowRunId) {
+        await this.deliverProviderWorkflowResult(message, request.workflowRunId)
+      } else {
+        await this.handleMessages([message])
+      }
       return { ok: true }
     }
 
@@ -631,6 +938,133 @@ export class ChannelReader {
     }
 
     return { ok: false, status: 400, error: 'unsupported_handoff_kind' }
+  }
+
+  async handleTeamsHandoff(request: TeamsHandoffRequest): Promise<SlackHandoffResponse> {
+    if (request.kind === 'teams.message') {
+      const message = this.teamsMessageFromHandoff(request)
+      if (!message) return { ok: false, status: 400, error: 'invalid_teams_message_handoff' }
+      this.rememberTeamsConversation(
+        request.providerTarget,
+        request.providerConversationId,
+        request.serviceUrl
+      )
+      if (request.workflowRunId) {
+        await this.deliverProviderWorkflowResult(message, request.workflowRunId)
+      } else {
+        await this.handleMessages([message])
+      }
+      return { ok: true }
+    }
+
+    if (request.kind === 'teams.file-consent') {
+      return this.handleTeamsFileConsentHandoff(request)
+    }
+
+    if (request.kind === 'teams.enrollment') {
+      return this.handleTeamsEnrollmentHandoff(request)
+    }
+
+    return { ok: false, status: 400, error: 'unsupported_handoff_kind' }
+  }
+
+  private async handleTeamsFileConsentHandoff(
+    handoff: TeamsFileConsentHandoff
+  ): Promise<SlackHandoffResponse> {
+    const providerTarget = handoff.providerTarget
+    if (
+      !handoff.workflowRunId?.trim() ||
+      !handoff.artifactName?.trim() ||
+      !handoff.providerUserId?.trim() ||
+      !handoff.providerWorkspaceId?.trim() ||
+      !handoff.providerChannelId?.trim() ||
+      !handoff.providerConversationId?.trim() ||
+      !handoff.providerEventId?.trim() ||
+      !handoff.providerMessageId?.trim() ||
+      !handoff.serviceUrl?.trim() ||
+      !providerTarget?.hostRef ||
+      !providerTarget.communicationChannelNamespace ||
+      !providerTarget.communicationChannelName
+    ) {
+      return { ok: false, status: 400, error: 'invalid_teams_file_consent_handoff' }
+    }
+
+    const adapter = this.adapterForCommunicationChannelRef('teams', {
+      namespace: providerTarget.communicationChannelNamespace,
+      name: providerTarget.communicationChannelName,
+    })
+    if (!(adapter instanceof TeamsAdapter)) {
+      return { ok: false, status: 503, error: 'teams_adapter_unavailable' }
+    }
+    adapter.rememberConversation(handoff.providerConversationId, handoff.serviceUrl)
+    if (handoff.action === 'decline') {
+      await adapter.sendMessage(
+        handoff.providerConversationId,
+        'Workflow result download canceled.',
+        handoff.providerReplyToMessageId || undefined
+      )
+      return { ok: true }
+    }
+    if (!handoff.uploadInfo) {
+      return { ok: false, status: 400, error: 'teams_file_upload_info_missing' }
+    }
+
+    const message: Message = {
+      channelType: 'teams',
+      channelId: handoff.providerConversationId,
+      sender: handoff.providerUserId,
+      content: 'Download the completed workflow result',
+      timestamp: new Date(),
+      messageId: handoff.providerMessageId,
+      threadId: handoff.providerReplyToMessageId,
+      providerIdentity: {
+        medium: 'teams',
+        providerUserId: handoff.providerUserId,
+        providerWorkspaceId: handoff.providerWorkspaceId,
+        providerChannelId: handoff.providerChannelId,
+        providerChannelType: handoff.providerChannelType ?? null,
+        providerEventId: handoff.providerEventId,
+        providerTarget,
+      },
+      rawData: { serviceUrl: handoff.serviceUrl },
+    }
+    if (!this.rpcClient.downloadWorkflowResultByRun) {
+      return { ok: false, status: 503, error: 'workflow_result_download_unavailable' }
+    }
+    const result = await this.rpcClient.downloadWorkflowResultByRun(
+      message,
+      handoff.workflowRunId,
+      handoff.artifactName
+    )
+    const attachment = result.attachments?.[0]
+    if (!result.success || !attachment) {
+      await adapter.sendMessage(
+        handoff.providerConversationId,
+        result.error?.message || 'Workflow result could not be downloaded.',
+        handoff.providerReplyToMessageId || undefined
+      )
+      return { ok: true }
+    }
+
+    try {
+      await adapter.uploadConsentedFile(
+        handoff.providerConversationId,
+        attachment,
+        handoff.uploadInfo,
+        handoff.providerReplyToMessageId || undefined
+      )
+    } catch (error) {
+      console.error(
+        '[Teams] Workflow result upload failed:',
+        error instanceof Error ? error.message : error
+      )
+      await adapter.sendMessage(
+        handoff.providerConversationId,
+        'Teams could not upload the workflow result file. Try the download again.',
+        handoff.providerReplyToMessageId || undefined
+      )
+    }
+    return { ok: true }
   }
 
   private async handleSlackEnrollmentHandoff(
@@ -660,12 +1094,20 @@ export class ChannelReader {
     if (!adapter) {
       return { ok: false, status: 503, error: 'slack_adapter_unavailable' }
     }
+    const conversationMetadata =
+      adapter instanceof SlackAdapter
+        ? await adapter.getConversationMetadata(handoff.providerChannelId, handoff.providerUserId)
+        : {}
 
     const result = await this.rpcClient.confirmSlackLinkSession({
       nonce: handoff.nonce,
       providerUserId: handoff.providerUserId,
       providerWorkspaceId: handoff.providerWorkspaceId,
       providerChannelId: handoff.providerChannelId,
+      providerChannelType:
+        handoff.providerChannelType ?? conversationMetadata.providerChannelType ?? null,
+      providerChannelTitle:
+        handoff.providerChannelTitle ?? conversationMetadata.providerChannelTitle ?? null,
       providerTarget,
     })
     await adapter.sendMessage(
@@ -674,6 +1116,77 @@ export class ChannelReader {
         ? 'Slack identity confirmed.'
         : 'Slack verification failed. Check that the code is active and try again.',
       handoff.responseThreadTs || undefined
+    )
+    return { ok: true }
+  }
+
+  private async handleTeamsEnrollmentHandoff(
+    handoff: TeamsEnrollmentHandoff
+  ): Promise<SlackHandoffResponse> {
+    const providerTarget = handoff.providerTarget
+    if (
+      !handoff.nonce?.trim() ||
+      !handoff.providerUserId?.trim() ||
+      !handoff.providerWorkspaceId?.trim() ||
+      !handoff.providerChannelId?.trim() ||
+      !handoff.providerConversationId?.trim() ||
+      !handoff.providerReplyToMessageId?.trim() ||
+      !handoff.serviceUrl?.trim() ||
+      !providerTarget?.hostRef ||
+      !providerTarget.communicationChannelNamespace ||
+      !providerTarget.communicationChannelName
+    ) {
+      return { ok: false, status: 400, error: 'invalid_teams_enrollment_handoff' }
+    }
+
+    if (!this.rpcClient.confirmTeamsLinkSession) {
+      return { ok: false, status: 503, error: 'teams_verification_unavailable' }
+    }
+
+    const adapter = this.adapterForCommunicationChannelRef('teams', {
+      namespace: providerTarget.communicationChannelNamespace,
+      name: providerTarget.communicationChannelName,
+    })
+    if (!adapter) {
+      return { ok: false, status: 503, error: 'teams_adapter_unavailable' }
+    }
+    this.rememberTeamsConversation(
+      providerTarget,
+      handoff.providerConversationId,
+      handoff.serviceUrl
+    )
+    if (adapter instanceof TeamsAdapter) {
+      await adapter.verifyCredentials()
+    }
+
+    const result = await this.rpcClient.confirmTeamsLinkSession({
+      nonce: handoff.nonce,
+      providerUserId: handoff.providerUserId,
+      providerWorkspaceId: handoff.providerWorkspaceId,
+      providerChannelId: handoff.providerChannelId,
+      providerChannelType: handoff.providerChannelType ?? null,
+      providerChannelTitle: handoff.providerChannelTitle ?? null,
+      providerTeamId: handoff.providerTeamId ?? null,
+      providerTeamsChannelId: handoff.providerTeamsChannelId ?? null,
+      serviceUrl: handoff.serviceUrl,
+      providerTarget,
+    })
+    const replyAdapter =
+      this.adapterForCommunicationChannelRef('teams', {
+        namespace: providerTarget.communicationChannelNamespace,
+        name: providerTarget.communicationChannelName,
+      }) ?? adapter
+    if (replyAdapter instanceof TeamsAdapter) {
+      replyAdapter.rememberConversation(handoff.providerConversationId, handoff.serviceUrl)
+    }
+    await replyAdapter.sendMessage(
+      handoff.providerConversationId,
+      result.ok
+        ? 'Teams identity confirmed.'
+        : 'Teams verification failed. Check that the code is active and try again.',
+      result.ok && result.replyInThreads === false
+        ? undefined
+        : handoff.providerReplyToMessageId || handoff.providerMessageId || undefined
     )
     return { ok: true }
   }
@@ -808,6 +1321,14 @@ export class ChannelReader {
           )}; Slack app messages are handled by workflow-approval-request-reader webhooks`
         )
       }
+
+      if (hasTeamsChannelConfig(spec)) {
+        console.log(
+          `[Main] Skipping Teams polling for CommunicationChannel ${this.communicationChannelKey(
+            channelCRD
+          )}; Teams app messages are handled by workflow-approval-request-reader webhooks`
+        )
+      }
     }
 
     if (allMessages.length > 0) {
@@ -872,6 +1393,15 @@ export class ChannelReader {
       const runtimeContent = contentWithoutAddressedBotMention(msg)
       const runtimeMsg = runtimeContent === msg.content ? msg : { ...msg, content: runtimeContent }
       const trimmed = runtimeContent.trim().toLowerCase()
+      const toolApprovalAction = parseToolApprovalAction(runtimeContent)
+      if (toolApprovalAction) {
+        await this.handleApprovalCommand(
+          msg,
+          toolApprovalAction.command,
+          toolApprovalAction.actionToken
+        )
+        continue
+      }
       const workflowApprovalCallback = parseWorkflowApprovalDecisionCallback(msg)
       if (workflowApprovalCallback) {
         await this.workflowApprovalCoordinator.handleDecisionCallback(msg, workflowApprovalCallback)
@@ -890,7 +1420,7 @@ export class ChannelReader {
         trimmed === '\\approve always' ||
         trimmed === '\\deny'
       ) {
-        await this.handleApprovalCommand(msg, trimmed.replace(/^\\/, '/'))
+        await this.handleApprovalCommand(msg, trimmed.replace(/^\\/, '/') as ToolApprovalDecision)
         continue
       }
 
@@ -899,7 +1429,7 @@ export class ChannelReader {
 
       const adapter = this.adapterForMessage(msg)
       if (adapter && msg.channelType !== 'email') {
-        // Telegram and Slack: use async progress flow with edit-in-place
+        // Telegram, Slack, and Teams: use async progress flow with edit-in-place
         try {
           await this.handleMessageWithProgress(runtimeMsg, adapter)
         } catch (err) {
@@ -909,7 +1439,8 @@ export class ChannelReader {
           if (response.success && response.status === 'waiting_approval' && response.approval) {
             const { taskId, requestId, userId, notification } = response.approval
             console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
-            const approvalKey = `${msg.channelType}:${msg.channelId}:${msg.sender}`
+            const approvalKey = this.pendingApprovalKey(msg)
+            const actionToken = newToolApprovalActionToken()
             this.pendingApprovals.set(approvalKey, {
               taskId,
               requestId,
@@ -918,8 +1449,14 @@ export class ChannelReader {
               channelId: msg.channelId,
               originalMessage: msg,
               createdAt: new Date(),
+              actionToken,
             })
-            await this.sendReply(msg, notification)
+            await this.sendReply(
+              msg,
+              notification,
+              undefined,
+              toolApprovalMessageOptions(msg.channelType, notification, actionToken)
+            )
           } else if (response.success && response.response) {
             console.log('[Main] mcp-host response:')
             console.log(`[Main]   Model: ${response.model}`)
@@ -943,7 +1480,8 @@ export class ChannelReader {
         if (response.success && response.status === 'waiting_approval' && response.approval) {
           const { taskId, requestId, userId, notification } = response.approval
           console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
-          const approvalKey = `${msg.channelType}:${msg.channelId}:${msg.sender}`
+          const approvalKey = this.pendingApprovalKey(msg)
+          const actionToken = newToolApprovalActionToken()
           this.pendingApprovals.set(approvalKey, {
             taskId,
             requestId,
@@ -952,8 +1490,14 @@ export class ChannelReader {
             channelId: msg.channelId,
             originalMessage: msg,
             createdAt: new Date(),
+            actionToken,
           })
-          await this.sendReply(msg, notification)
+          await this.sendReply(
+            msg,
+            notification,
+            undefined,
+            toolApprovalMessageOptions(msg.channelType, notification, actionToken)
+          )
         } else if (response.success && response.response) {
           console.log('[Main] mcp-host response:')
           console.log(`[Main]   Model: ${response.model}`)
@@ -987,9 +1531,81 @@ export class ChannelReader {
     return ['message', msg.channelType, msg.channelId, msg.sender, messageId].join(':')
   }
 
+  private pendingApprovalChannelScope(msg: Message): string {
+    return `${msg.channelType}:${msg.providerIdentity?.providerChannelId || msg.channelId}`
+  }
+
+  private pendingApprovalKey(msg: Message): string {
+    let threadId = ''
+    if (msg.channelType === 'telegram' || msg.channelType === 'slack') {
+      threadId = msg.threadId || ''
+    } else if (
+      msg.channelType === 'teams' &&
+      msg.providerIdentity?.providerChannelType === 'channel'
+    ) {
+      threadId = msg.threadId || ''
+    }
+    return [this.pendingApprovalChannelScope(msg), threadId, msg.sender].join(':')
+  }
+
+  private pendingApprovalByActionToken(
+    msg: Message,
+    actionToken: string
+  ): [string, PendingApprovalState] | null {
+    const channelScope = this.pendingApprovalChannelScope(msg)
+    for (const [key, pending] of this.pendingApprovals) {
+      if (
+        pending.actionToken === actionToken &&
+        pending.originalMessage.sender === msg.sender &&
+        this.pendingApprovalChannelScope(pending.originalMessage) === channelScope
+      ) {
+        return [key, pending]
+      }
+    }
+    return null
+  }
+
+  private clearPendingApprovalForTask(msg: Message, taskId: string): void {
+    const channelScope = this.pendingApprovalChannelScope(msg)
+    for (const [key, pending] of this.pendingApprovals) {
+      if (
+        pending.taskId === taskId &&
+        this.pendingApprovalChannelScope(pending.originalMessage) === channelScope
+      ) {
+        this.pendingApprovals.delete(key)
+      }
+    }
+  }
+
   private replyTargetMessageId(msg: Message): string | undefined {
     if (msg.channelType === 'slack') return msg.threadId
+    if (msg.channelType === 'teams') {
+      return this.teamsReplyInThreads(msg) ? msg.threadId || msg.messageId : undefined
+    }
     return msg.messageId
+  }
+
+  private teamsReplyInThreads(msg: Message): boolean {
+    if (msg.channelType !== 'teams') return false
+    const target = msg.providerIdentity?.providerTarget
+    const workspaceId = msg.providerIdentity?.providerWorkspaceId
+    const providerChannelId = msg.providerIdentity?.providerChannelId
+    const channel = this.channels.find(
+      item =>
+        item.namespace === target?.communicationChannelNamespace &&
+        item.name === target?.communicationChannelName
+    )
+    const group = channel?.spec.teams?.find(
+      item => item.channelId === providerChannelId && item.tenantId === workspaceId
+    )
+    return group?.replyInThreads !== false
+  }
+
+  private replyChannelId(msg: Message): string {
+    if (msg.channelType === 'teams' && !this.teamsReplyInThreads(msg)) {
+      return msg.providerIdentity?.providerChannelId || msg.channelId
+    }
+    return msg.channelId
   }
 
   /**
@@ -1026,7 +1642,8 @@ export class ChannelReader {
       if (response.success && response.status === 'waiting_approval' && response.approval) {
         const { taskId, requestId, userId, notification } = response.approval
         console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
-        const approvalKey = `${msg.channelType}:${msg.channelId}:${msg.sender}`
+        const approvalKey = this.pendingApprovalKey(msg)
+        const actionToken = newToolApprovalActionToken()
         this.pendingApprovals.set(approvalKey, {
           taskId,
           requestId,
@@ -1035,8 +1652,14 @@ export class ChannelReader {
           channelId: msg.channelId,
           originalMessage: msg,
           createdAt: new Date(),
+          actionToken,
         })
-        await this.sendReply(msg, notification)
+        await this.sendReply(
+          msg,
+          notification,
+          undefined,
+          toolApprovalMessageOptions(msg.channelType, notification, actionToken)
+        )
       } else if (response.success && response.response) {
         await this.sendReply(msg, response.response, response.attachments)
       } else if (response.error) {
@@ -1049,10 +1672,11 @@ export class ChannelReader {
 
     const taskId = response.taskId
     console.log(`[Main] Async task created: ${taskId}`)
+    const responseChannelId = this.replyChannelId(msg)
 
     // 2. Send initial processing message and capture messageId for editing.
     const statusMessageId = await adapter.sendMessage(
-      msg.channelId,
+      responseChannelId,
       '\u23f3 Processing your request...',
       this.replyTargetMessageId(msg)
     )
@@ -1081,43 +1705,148 @@ export class ChannelReader {
         }
       }
 
-      const editStatus = async (content: string) => {
-        try {
-          await adapter.editMessage(msg.channelId, statusMessageId, content)
-        } catch (err) {
-          console.error(`[Main] Failed to edit status message:`, err)
-        }
+      let statusEditQueue: Promise<void> = Promise.resolve()
+      let acceptProgressUpdates = true
+
+      const editStatus = (
+        content: string,
+        mustSucceed = false,
+        options?: SendMessageOptions
+      ): Promise<void> => {
+        const operation = statusEditQueue.then(async () => {
+          try {
+            await adapter.editMessage(responseChannelId, statusMessageId, content, options)
+          } catch (err) {
+            console.error(`[Main] Failed to edit status message for task ${taskId}:`, err)
+            if (mustSucceed) throw err
+          }
+        })
+        statusEditQueue = operation.catch(() => undefined)
+        return operation
       }
 
       let finalDelivered = false
+      let finalDeliveryInFlight: Promise<boolean> | null = null
       let resultPollingFallbackStarted = false
+      let approvalPromptDelivered = false
+
+      const deliverApprovalPrompt = async (params: {
+        requestId: string
+        userId: string
+        notification: string
+      }): Promise<void> => {
+        const approvalKey = this.pendingApprovalKey(msg)
+        const existing = this.pendingApprovals.get(approvalKey)
+        if (approvalPromptDelivered && existing?.requestId === params.requestId) return
+
+        approvalPromptDelivered = true
+        acceptProgressUpdates = false
+        const actionToken =
+          existing?.requestId === params.requestId
+            ? existing.actionToken
+            : newToolApprovalActionToken()
+
+        console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${params.requestId})`)
+        this.pendingApprovals.set(approvalKey, {
+          taskId,
+          requestId: params.requestId,
+          userId: params.userId,
+          channelType: msg.channelType,
+          channelId: msg.channelId,
+          originalMessage: msg,
+          createdAt: new Date(),
+          actionToken,
+          startResultPollingFallback,
+          updateStatusAfterDecision: content => {
+            acceptProgressUpdates = true
+            return editStatus(content)
+          },
+        })
+        await editStatus(
+          params.notification,
+          false,
+          toolApprovalMessageOptions(msg.channelType, params.notification, actionToken)
+        )
+      }
 
       const deliverFinalResult = async (): Promise<boolean> => {
         if (finalDelivered) return true
+        if (finalDeliveryInFlight) return finalDeliveryInFlight
 
-        const result = await this.rpcClient.getTaskResult(taskId, msg)
-        if (result.status === 'pending' || result.status === 'waiting_approval') {
-          return false
-        }
-
-        finalDelivered = true
-        if (result.success && result.response) {
-          const finalText = formatFinalMessage(stream.steps, result.response)
-          await editStatus(finalText)
-          if (result.attachments && result.attachments.length > 0) {
-            await adapter.sendMessage(
-              msg.channelId,
-              '',
-              this.replyTargetMessageId(msg),
-              result.attachments
-            )
+        finalDeliveryInFlight = (async () => {
+          const result = await this.rpcClient.getTaskResult(taskId, msg)
+          if (result.status === 'waiting_approval' && result.approval) {
+            await deliverApprovalPrompt({
+              requestId: result.approval.requestId,
+              userId: result.approval.userId,
+              notification: result.approval.notification,
+            })
+            return false
           }
-        } else if (result.error) {
-          await editStatus(`Error: ${result.error.message ?? 'Unknown error'}`)
-        } else {
-          await editStatus(formatFinalMessage(stream.steps, 'Done.'))
+          if (result.status === 'pending' || result.status === 'waiting_approval') {
+            return false
+          }
+          acceptProgressUpdates = false
+
+          if (result.success && result.response) {
+            const finalText = formatFinalMessage(stream.steps, result.response)
+            try {
+              await editStatus(finalText, true)
+            } catch {
+              await adapter.sendMessage(
+                responseChannelId,
+                finalText,
+                this.replyTargetMessageId(msg)
+              )
+            }
+            finalDelivered = true
+            this.clearPendingApprovalForTask(msg, taskId)
+            console.log(`[Main] Final result delivered for task ${taskId} via ${msg.channelType}`)
+            if (result.attachments && result.attachments.length > 0) {
+              await adapter.sendMessage(
+                responseChannelId,
+                '',
+                this.replyTargetMessageId(msg),
+                result.attachments
+              )
+            }
+          } else if (result.error) {
+            const errorText = `Error: ${result.error.message ?? 'Unknown error'}`
+            try {
+              await editStatus(errorText, true)
+            } catch {
+              await adapter.sendMessage(
+                responseChannelId,
+                errorText,
+                this.replyTargetMessageId(msg)
+              )
+            }
+            finalDelivered = true
+            this.clearPendingApprovalForTask(msg, taskId)
+            console.log(`[Main] Final error delivered for task ${taskId} via ${msg.channelType}`)
+          } else {
+            const finalText = formatFinalMessage(stream.steps, 'Done.')
+            try {
+              await editStatus(finalText, true)
+            } catch {
+              await adapter.sendMessage(
+                responseChannelId,
+                finalText,
+                this.replyTargetMessageId(msg)
+              )
+            }
+            finalDelivered = true
+            this.clearPendingApprovalForTask(msg, taskId)
+            console.log(`[Main] Final result delivered for task ${taskId} via ${msg.channelType}`)
+          }
+          return true
+        })()
+
+        try {
+          return await finalDeliveryInFlight
+        } finally {
+          finalDeliveryInFlight = null
         }
-        return true
       }
 
       const startResultPollingFallback = () => {
@@ -1151,18 +1880,20 @@ export class ChannelReader {
         taskId,
         source: msg,
         onProgress: (steps: ProgressStep[]) => {
+          if (!acceptProgressUpdates) return
           void editStatus(formatProgressUpdate(steps))
         },
         onSuspended: async suspended => {
           // Approval needed. Fetch the server-formatted notification (which
           // includes tool parameters) once. If the cache hasn't been written
           // yet (sub-ms micro-race), fall back to a generic notification.
-          const approvalKey = `${msg.channelType}:${msg.channelId}:${msg.sender}`
           let notification =
             `Tool \`${suspended.toolName}\` requires approval. ` +
             (msg.channelType === 'slack'
               ? `Reply \\approve or \\deny to this message.`
-              : `Reply /approve or /deny to this message.`)
+              : msg.channelType === 'teams'
+                ? `Reply approve or deny to this message.`
+                : `Reply /approve or /deny to this message.`)
           try {
             const result = await this.rpcClient.getTaskResult(taskId, msg)
             if (
@@ -1175,20 +1906,11 @@ export class ChannelReader {
           } catch (err) {
             console.error(`[Main] Failed to fetch approval notification for task ${taskId}:`, err)
           }
-          console.log(
-            `[Main] Tool approval needed (task: ${taskId}, request: ${suspended.requestId})`
-          )
-          this.pendingApprovals.set(approvalKey, {
-            taskId,
+          await deliverApprovalPrompt({
             requestId: suspended.requestId,
             userId: msg.sender,
-            channelType: msg.channelType,
-            channelId: msg.channelId,
-            originalMessage: msg,
-            createdAt: new Date(),
-            startResultPollingFallback,
+            notification,
           })
-          await editStatus(notification)
           // Release handleMessages's for loop. The stream stays open; the next
           // tool_start/tool_complete/suspended/terminal events keep firing.
           resolveOnce()
@@ -1200,11 +1922,15 @@ export class ChannelReader {
             return
           }
           if (terminal.status === 'cancelled') {
+            acceptProgressUpdates = false
             finalDelivered = true
             await editStatus('Request cancelled.')
+            this.clearPendingApprovalForTask(msg, taskId)
           } else if (terminal.status === 'failed' && terminal.error) {
+            acceptProgressUpdates = false
             finalDelivered = true
             await editStatus(`Error: ${terminal.error.message}`)
+            this.clearPendingApprovalForTask(msg, taskId)
           } else {
             // status === 'completed' (or unknown — treat as completed)
             try {
@@ -1246,6 +1972,10 @@ export class ChannelReader {
                 resolveOnce()
                 return
               }
+              if (approvalPromptDelivered) {
+                resolveOnce()
+                return
+              }
             } catch (err) {
               console.error(
                 `[Main] reconcile after task_not_found_or_expired failed for task ${taskId}:`,
@@ -1264,10 +1994,10 @@ export class ChannelReader {
           resolveOnce()
         },
       })
-      // Webhook-origin Slack requests can lose the terminal SSE while still
-      // receiving normal tool progress. Keep Slack backed up by polling;
+      // Webhook-origin Slack/Teams requests can lose the terminal SSE while still
+      // receiving normal tool progress. Keep webhook-origin chats backed up by polling;
       // Telegram keeps the narrower existing fallbacks below.
-      if (msg.channelType === 'slack') {
+      if (msg.channelType === 'slack' || msg.channelType === 'teams') {
         startResultPollingFallback()
       }
     })
@@ -1285,9 +2015,22 @@ export class ChannelReader {
    * For cron tasks: results continue to arrive via pollCronResults on the next
    * poll cycle (cron has no message-thread SSE).
    */
-  private async handleApprovalCommand(msg: Message, command: string): Promise<void> {
-    const approvalKey = `${msg.channelType}:${msg.channelId}:${msg.sender}`
-    const pending = this.pendingApprovals.get(approvalKey)
+  private async handleApprovalCommand(
+    msg: Message,
+    command: ToolApprovalDecision,
+    actionToken?: string
+  ): Promise<void> {
+    const contextualKey = this.pendingApprovalKey(msg)
+    const matched = actionToken
+      ? this.pendingApprovalByActionToken(msg, actionToken)
+      : this.pendingApprovals.has(contextualKey)
+        ? ([contextualKey, this.pendingApprovals.get(contextualKey)!] as [
+            string,
+            PendingApprovalState,
+          ])
+        : null
+    const approvalKey = matched?.[0] ?? contextualKey
+    const pending = matched?.[1]
 
     if (!pending) {
       console.log(`[Main] No pending approval for ${approvalKey}`)
@@ -1299,17 +2042,18 @@ export class ChannelReader {
     }
 
     const { requestId, userId } = pending
-    this.pendingApprovals.delete(approvalKey)
 
     if (command === '/deny') {
       console.log(`[Main] User denied approval (request: ${requestId})`)
       const result = await this.rpcClient.sendDenial(
         userId,
         requestId,
-        msg.channelType,
-        msg.channelId
+        pending.channelType,
+        pending.channelId
       )
       if (result.success) {
+        this.pendingApprovals.delete(approvalKey)
+        await pending.updateStatusAfterDecision?.('Denied. The tool will not be executed.')
         await this.sendReply(msg, 'Denied. The tool will not be executed.')
       } else {
         await this.sendReply(msg, `Failed to send denial: ${result.error ?? 'unknown error'}`)
@@ -1325,18 +2069,20 @@ export class ChannelReader {
       userId,
       requestId,
       alwaysApprove,
-      msg.channelType,
-      msg.channelId
+      pending.channelType,
+      pending.channelId
     )
     if (!result.success) {
       await this.sendReply(msg, `Failed to send approval: ${result.error ?? 'unknown error'}`)
       return
     }
 
-    await this.sendReply(
-      msg,
-      alwaysApprove ? 'Approved (always for this tool). Processing...' : 'Approved. Processing...'
-    )
+    this.pendingApprovals.delete(approvalKey)
+    const acknowledgement = alwaysApprove
+      ? 'Approved (always for this tool). Processing...'
+      : 'Approved. Processing...'
+    await pending.updateStatusAfterDecision?.(acknowledgement)
+    await this.sendReply(msg, acknowledgement)
 
     // The SSE stream opened by handleMessageWithProgress remains the primary
     // delivery path. The fallback starts only after approval, so a stream that
@@ -1404,7 +2150,8 @@ export class ChannelReader {
   async sendReply(
     originalMessage: Message,
     replyContent: string,
-    attachments?: Attachment[]
+    attachments?: Attachment[],
+    options?: SendMessageOptions
   ): Promise<void> {
     const adapter = this.adapterForMessage(originalMessage)
     if (!adapter) {
@@ -1415,10 +2162,11 @@ export class ChannelReader {
     try {
       console.log(`[Main] Sending reply to ${originalMessage.channelType}...`)
       await adapter.sendMessage(
-        originalMessage.channelId,
+        this.replyChannelId(originalMessage),
         replyContent,
         this.replyTargetMessageId(originalMessage),
-        attachments
+        attachments,
+        options
       )
       console.log(`[Main] Reply sent successfully`)
     } catch (err) {

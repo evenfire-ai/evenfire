@@ -10,6 +10,7 @@ import * as path from 'path'
 import { register } from 'prom-client'
 import { readOpenedArtifactBuffer, redactArtifactForDelivery } from './artifacts/artifactBytes'
 import type { ArtifactSecretEntry } from './artifacts/artifactRedaction'
+import type { RuntimeLifecycleGate } from './lifecycle/statelessHeartbeat'
 import { requireScope } from './server/authMiddleware'
 import { getRuntimeCallerContext, runtimeEdgeGuard } from './server/edgeRuntimeAuth'
 import { getAllowedOrigins, json } from './server/httpUtils'
@@ -152,6 +153,7 @@ export class RPCServer {
   private compactionHandler: CompactionHandler | null = null
   private workflowRouter: ReturnType<typeof createWorkflowRouter> | null = null
   private artifactSecretEntriesProvider: (() => ArtifactSecretEntry[]) | null = null
+  private lifecycleGate: RuntimeLifecycleGate | null = null
 
   constructor(port: number = 8080) {
     this.port = port
@@ -225,6 +227,21 @@ export class RPCServer {
       '/v1/runtime/messages',
       runtimeEdgeGuard(['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader']),
       async (req, res) => {
+        // Stage 3 (stateless-agents) — reversible DRAINING fence. While the
+        // host is draining/drained, new intake is rejected with the exact
+        // code rpc-proxy keys on; the in-flight turn keeps running. The
+        // fence lifts immediately on drain-cancel (no restart). Body stays
+        // minimal on purpose: no activity details leak to callers.
+        if (this.lifecycleGate?.isIntakeFenced()) {
+          // H2 self-heal: record that new work arrived while fenced so the next
+          // heartbeat surfaces pendingIntake=true and HCC/control-api can cancel
+          // the drain deterministically. The 503 still goes back to rpc-proxy,
+          // which holds and redrives the message once the fence lifts.
+          this.lifecycleGate.noteFencedIntake()
+          json(res, 503, { code: 'host_draining' })
+          return
+        }
+        this.lifecycleGate?.noteIntakeActivity()
         await handleMessageRoute(req, res, this.routeDeps())
       }
     )
@@ -657,6 +674,12 @@ export class RPCServer {
 
   setArtifactSecretEntriesProvider(provider: () => ArtifactSecretEntry[]): void {
     this.artifactSecretEntriesProvider = provider
+  }
+
+  /** Stage 3 (stateless-agents) — wire the DRAINING fence + activity tracker
+   *  consulted by the POST /v1/runtime/messages route. */
+  setLifecycleGate(gate: RuntimeLifecycleGate): void {
+    this.lifecycleGate = gate
   }
 
   private routeDeps() {

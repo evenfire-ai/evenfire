@@ -420,6 +420,52 @@ describe('NativeToolRegistry', () => {
     expect(registry.get('workflow_trigger')?.requiresApproval()).toBe(false)
   })
 
+  it('exposes Teams workflow tools with resolved caller context', () => {
+    setWorkflowProcessEnv({
+      MCP_HOST_GATEWAY_URL: 'http://gateway:8092',
+      MCP_HOST_WORKFLOW_CONTROL_TOKEN: 'workflow-token',
+      MCP_HOST_RUNTIME_ACCESS_TOKEN: 'runtime-access',
+      MCP_HOST_RUNTIME_REFRESH_TOKEN: 'runtime-refresh',
+    })
+
+    const registry = new NativeToolRegistry(
+      config,
+      'test-conv',
+      undefined,
+      {
+        content: 'Run research-summary-workflow',
+        channelType: 'teams',
+        channelId: 'teams-conversation',
+        sender: 'teams-user-1',
+        timestamp: '2026-05-28T12:00:00.000Z',
+        messageId: 'teams:tenant-1:teams-conversation:activity-1',
+        hostRef: 'chatllm',
+        providerIdentity: {
+          medium: 'teams',
+          providerUserId: 'teams-user-1',
+          providerWorkspaceId: 'tenant-1',
+          providerChannelId: 'teams-conversation',
+          providerEventId: 'teams:tenant-1:teams-conversation:activity-1',
+        },
+      },
+      undefined,
+      undefined,
+      {
+        targetUserId: '00000000-0000-4000-8000-000000000001',
+        conversationId: 'teams-conversation',
+        originChannelType: 'teams',
+        providerUserId: 'teams-user-1',
+        providerWorkspaceId: 'tenant-1',
+        providerChannelId: 'teams-conversation',
+      }
+    )
+
+    const names = registry.listDefinitions().map(def => def.name)
+    expect(names).toContain('workflow_list')
+    expect(names).toContain('workflow_trigger')
+    expect(registry.get('workflow_trigger')?.requiresApproval()).toBe(false)
+  })
+
   it('ignores dynamic ConfigStore overrides for workflow broker URL and token', async () => {
     setWorkflowProcessEnv({
       MCP_HOST_GATEWAY_URL: 'http://gateway:8092',

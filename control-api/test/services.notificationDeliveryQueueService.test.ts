@@ -77,7 +77,7 @@ describe('notificationDeliveryQueueService', () => {
       "war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}'"
     )
     expect(claimSql).toContain(
-      "war.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' = 'telegram'"
+      "war.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' = $1"
     )
     expect(claimSql).toContain('wama.provider_channel_id = ANY($2::text[])')
     expect(txQuery).toHaveBeenCalledWith(expect.any(String), [
@@ -125,6 +125,18 @@ describe('notificationDeliveryQueueService', () => {
 
     const claimSql = String(txQuery.mock.calls[0]![0])
     expect(claimSql).toContain('wama.provider_workspace_id = $5')
+    expect(claimSql).toContain(
+      "war.payload #>> '{metadata,workflowTrigger,providerBinding,medium}' = $1"
+    )
+    expect(claimSql).toContain(
+      "war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}' = ANY($2::text[])"
+    )
+    expect(claimSql).toContain(
+      "war.payload #>> '{metadata,workflowTrigger,providerBinding,providerWorkspaceId}' = $5"
+    )
+    expect(claimSql).toContain(
+      "wama.provider_channel_id = war.payload #>> '{metadata,workflowTrigger,providerBinding,providerChannelId}'"
+    )
     expect(txQuery).toHaveBeenCalledWith(expect.any(String), [
       'slack',
       ['C123'],

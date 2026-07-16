@@ -7,11 +7,13 @@ metadata:
     app.kubernetes.io/name: gfs-controller
     app.kubernetes.io/part-of: clerum
 type: Opaque
-stringData:
-  # Postgres connection string for the LEAST-PRIVILEGE gfs_controller role
-  # (migration 0043 creates it NOLOGIN; deploy provisioning grants LOGIN +
-  # password and writes the real DSN here). The role has SELECT on
-  # resource/grant/share and INSERT-only on gfs_audit — never write on grants.
-  # Placeholder so a fresh checkout ships no credential; gfsc /readyz fails
-  # closed (cannot SELECT 1) until deploy populates it.
-  connection-string: ""
+# The connection-string key is intentionally NOT declared in this manifest. It
+# is OWNED by deploy/scripts/provision-gfs-db.sh, which grants LOGIN + password
+# to the least-privilege gfs_controller role (created NOLOGIN by control-api
+# migration 0048; SELECT on resource/grant/share, INSERT-only on gfs_audit —
+# never write on grants) and patches the real DSN into this Secret. Because the
+# key is absent here, `kubectl apply` of the overlay can never clobber a
+# provisioned DSN: the three-way merge only prunes keys present in
+# last-applied-configuration, and the provisioning patch never lands there
+# (issue #775). Fresh clusters fail loud instead: gfsc pods sit in
+# CreateContainerConfigError (missing Secret key) until provisioning runs.

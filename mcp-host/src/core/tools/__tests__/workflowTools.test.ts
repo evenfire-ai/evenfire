@@ -592,6 +592,44 @@ describe('workflow native tools', () => {
     })
   })
 
+  it('workflow_result downloads an exact authorized provider workflow run', async () => {
+    const workflowRunId = '11111111-2222-4333-8444-555555555555'
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          workflowRunId,
+          workflowName: 'source-recipe',
+          artifacts: [{ name: 'research-summary.pdf', format: 'pdf', sizeBytes: 21 }],
+        }),
+      } as Response)
+      .mockResolvedValueOnce(
+        workflowResultDownloadResponse('%PDF-1.7 fake binary', {
+          artifactName: 'research-summary.pdf',
+          filename: 'research-summary.pdf',
+          contentType: 'application/pdf',
+        })
+      )
+
+    const result = await new WorkflowResultTool({
+      getEnv: env(),
+      workflowCallerContext: {
+        targetUserId: '00000000-0000-4000-8000-000000000001',
+        conversationId: 'thread-1',
+      },
+    }).executeForRun(workflowRunId, 'research-summary.pdf')
+
+    expect(result.is_error).toBe(false)
+    expect(result.attachments?.[0]).toMatchObject({
+      filename: 'research-summary.pdf',
+      sourceTool: 'workflow_result',
+    })
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual([
+      `http://gateway:8092/api/v1/workflows/runs/${workflowRunId}/artifacts?targetUserId=00000000-0000-4000-8000-000000000001&workflowConversationId=thread-1`,
+      `http://gateway:8092/api/v1/workflows/runs/${workflowRunId}/artifacts/research-summary.pdf/download?targetUserId=00000000-0000-4000-8000-000000000001&workflowConversationId=thread-1`,
+    ])
+  })
+
   it('workflow_result refreshes workflow-control auth once when artifact download returns 401', async () => {
     const provider = {
       getWorkflowControlToken: vi.fn().mockResolvedValue('expired-control'),
@@ -787,6 +825,63 @@ describe('workflow native tools', () => {
 
     expect(result.is_error).toBe(false)
     expect(result.content).toContain('artifact-output-delayed')
+    expect(fetchMock.mock.calls.map(call => String(call[0]))).toEqual([
+      'http://gateway:8092/api/v1/workflows/effective-targets/resolve',
+      'http://gateway:8092/api/v1/workflows/sandbox-recipes/source-recipe/runs/latest/artifacts?targetUserId=00000000-0000-4000-8000-000000000001&workflowConversationId=thread-1',
+      'http://gateway:8092/api/v1/workflows/sandbox-recipes/source-recipe/runs/latest/artifacts?targetUserId=00000000-0000-4000-8000-000000000001&workflowConversationId=thread-1',
+      'http://gateway:8092/api/v1/workflows/sandbox-recipes/source-recipe/runs/latest/artifacts/seed-result.json/download?targetUserId=00000000-0000-4000-8000-000000000001&workflowConversationId=thread-1',
+    ])
+  })
+
+  it('workflow_result retries transient artifact lookup failures while a run is preparing outputs', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          status: 'unique',
+          target: {
+            kind: 'user',
+            label: 'Personal',
+            userId: '00000000-0000-4000-8000-000000000001',
+          },
+        }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 410,
+        text: async () => JSON.stringify({ error: 'Run artifact metadata has been pruned' }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          artifacts: [
+            {
+              name: 'seed-result.json',
+              format: 'json',
+              sizeBytes: 83,
+              createdAt: '2026-05-29T12:02:00.000Z',
+            },
+          ],
+        }),
+      } as Response)
+      .mockResolvedValueOnce(
+        workflowResultDownloadResponse({
+          artifactProof: 'artifact-output-after-transient-error',
+        })
+      )
+
+    const result = await new WorkflowResultTool({
+      getEnv: env({
+        CLERUM_WORKFLOW_RESULT_ARTIFACT_POLL_INTERVAL_MS: '1',
+      }),
+      workflowCallerContext: {
+        targetUserId: '00000000-0000-4000-8000-000000000001',
+        conversationId: 'thread-1',
+      },
+    }).execute({ name: 'source-recipe' })
+
+    expect(result.is_error).toBe(false)
+    expect(result.content).toContain('artifact-output-after-transient-error')
     expect(fetchMock.mock.calls.map(call => String(call[0]))).toEqual([
       'http://gateway:8092/api/v1/workflows/effective-targets/resolve',
       'http://gateway:8092/api/v1/workflows/sandbox-recipes/source-recipe/runs/latest/artifacts?targetUserId=00000000-0000-4000-8000-000000000001&workflowConversationId=thread-1',
@@ -1289,6 +1384,11 @@ describe('workflow native tools', () => {
       workflowCallerContext: {
         targetUserId: '00000000-0000-4000-8000-000000000001',
         conversationId: 'thread-1',
+        originChannelType: 'teams',
+        providerUserId: 'teams-user-1',
+        providerWorkspaceId: 'teams-tenant-1',
+        providerChannelId: 'teams-conversation-1',
+        sourceThreadId: 'teams-thread-1',
       },
     })
     const result = await tool.execute({
@@ -1324,6 +1424,12 @@ describe('workflow native tools', () => {
             caller: 'sandbox-recipes/source-recipe',
             requesterUserId: '00000000-0000-4000-8000-000000000001',
             conversationId: 'thread-1',
+            providerBinding: {
+              medium: 'teams',
+              providerChannelId: 'teams-conversation-1',
+              providerWorkspaceId: 'teams-tenant-1',
+              providerThreadId: 'teams-thread-1',
+            },
           },
         },
       }),

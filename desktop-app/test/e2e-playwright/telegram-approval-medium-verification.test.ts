@@ -66,21 +66,21 @@ const VERIFIED_TELEGRAM_IDENTITY: TelegramClientIdentity = {
   providerUserId: TELEGRAM_PRIVATE_ID,
   providerChannelId: TELEGRAM_PRIVATE_ID,
   providerChannelType: 'private',
-  conversationLabel: 'Alfredo Lopez - verified Telegram private chat',
+  conversationLabel: 'Test User - verified Telegram private chat',
 }
 
 const VERIFIED_TELEGRAM_GROUP_IDENTITY: TelegramClientIdentity = {
   providerUserId: TELEGRAM_PRIVATE_ID,
   providerChannelId: TELEGRAM_GROUP_ID,
   providerChannelType: 'group',
-  conversationLabel: 'Alfredo Lopez - verified Telegram group',
+  conversationLabel: 'Test User - verified Telegram group',
 }
 
 const WRONG_CHANNEL_IDENTITY: TelegramClientIdentity = {
   providerUserId: TELEGRAM_PRIVATE_ID,
   providerChannelId: '424243',
   providerChannelType: 'private',
-  conversationLabel: 'Alfredo Lopez - mismatched Telegram private chat',
+  conversationLabel: 'Test User - mismatched Telegram private chat',
 }
 
 function telegramBinding(identity: TelegramClientIdentity): TelegramMediumBinding {

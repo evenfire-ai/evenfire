@@ -1,6 +1,6 @@
 .PHONY: install build dev docker-build docker-push
 
-REGISTRY ?= us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum
+REGISTRY ?= us-central1-docker.pkg.dev/your-gcp-project/clerum
 IMAGE_NAME ?= external-rest-api
 TAG      ?= $(shell git describe --tags --always 2>/dev/null || echo "latest")
 

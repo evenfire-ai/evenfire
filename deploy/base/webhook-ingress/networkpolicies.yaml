@@ -121,7 +121,7 @@ spec:
         - { port: 8090, protocol: TCP }
 ---
 # Egress to workflow-approval-request-reader for provider approval/chat callbacks
-# (`/webhooks/telegram`, `/webhooks/slack/<targetId>`).
+# (`/webhooks/telegram`, `/webhooks/slack/<targetId>`, `/webhooks/teams/<targetId>`).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

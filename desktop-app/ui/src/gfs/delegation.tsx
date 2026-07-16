@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Button, Field, SelectInput, SelectableOption, StatusBanner } from '@components/Common'
+import { Button, DropdownSelect, Field, SelectableOption, StatusBanner } from '@components/Common'
+import type { GfsDelegationPanelProps, GfsDelegationSubjectType } from './delegation.types'
 
 /**
  * P4-S07 — Desktop gfs delegation panel (renderer). A folder owner delegates
@@ -8,35 +9,9 @@ import { Button, Field, SelectInput, SelectableOption, StatusBanner } from '@com
  * in the main process and passed in). Enforcement is ALWAYS server-side
  * (control-api/gfsc) — hiding a control is usability, never the security boundary.
  *
- * Composes the shared Common primitives (Field/TextInput/SelectableOption/Button/
- * StatusBanner) per the desktop-app/ui frontend rules — no raw inputs/buttons.
+ * Composes the shared Common primitives (Field/DropdownSelect/SelectableOption/
+ * Button/StatusBanner) per the desktop-app/ui frontend rules — no raw inputs/buttons.
  */
-
-export interface DelegationAffordances {
-  canDelegate: boolean
-  grantableBits: string[]
-  canCreateShare: boolean
-}
-
-export type GfsDelegationSubjectType = 'user' | 'team'
-
-export interface GfsDelegationSubjectOption {
-  type: GfsDelegationSubjectType
-  id: string
-  label: string
-  description?: string
-}
-
-export interface GfsDelegationPanelProps {
-  affordances: DelegationAffordances
-  subjectOptions: GfsDelegationSubjectOption[]
-  subjectOptionsLoading?: boolean
-  subjectOptionsError?: string | null
-  /** Grant the selected bits to a user/team subject within the caller's subtree. */
-  onGrant: (subjectKey: string, bits: string[]) => Promise<void>
-  /** Create a URI share for a user/team subject (shown only when canCreateShare). */
-  onCreateShare?: (subjectKey: string) => Promise<void>
-}
 
 export function GfsDelegationPanel({
   affordances,
@@ -90,44 +65,49 @@ export function GfsDelegationPanel({
         <strong>Grantable permissions</strong>
         <span>{affordances.grantableBits.join(', ')}</span>
       </div>
-      <Field label="Subject type" htmlFor="gfs-delegation-subject-type">
-        <SelectInput
-          id="gfs-delegation-subject-type"
-          value={subjectType}
-          onChange={event => {
-            setSubjectType(event.target.value as GfsDelegationSubjectType)
-            setSubjectId('')
-          }}
-          disabled={busy}
+      <div className="da-gfs-delegation__subject-grid">
+        <Field label="Subject type" htmlFor="gfs-delegation-subject-type">
+          <DropdownSelect
+            ariaLabel="Subject type"
+            id="gfs-delegation-subject-type"
+            value={subjectType}
+            onChange={value => {
+              setSubjectType(value as GfsDelegationSubjectType)
+              setSubjectId('')
+            }}
+            disabled={busy}
+            options={[
+              { value: 'user', label: 'User' },
+              { value: 'team', label: 'Team' },
+            ]}
+            placeholder="Choose a subject type"
+          />
+        </Field>
+        <Field
+          label={subjectType === 'user' ? 'User' : 'Team'}
+          htmlFor="gfs-delegation-subject"
+          hint={`Choose the ${subjectType} that will receive access.`}
         >
-          <option value="user">User</option>
-          <option value="team">Team</option>
-        </SelectInput>
-      </Field>
-      <Field
-        label={subjectType === 'user' ? 'User' : 'Team'}
-        htmlFor="gfs-delegation-subject"
-        hint={`Choose the ${subjectType} that will receive access.`}
-      >
-        <SelectInput
-          id="gfs-delegation-subject"
-          aria-label="subject"
-          value={subjectId}
-          onChange={event => setSubjectId(event.target.value)}
-          disabled={busy || subjectOptionsLoading || visibleSubjects.length === 0}
-        >
-          <option value="">
-            {subjectOptionsLoading
-              ? `Loading ${subjectType === 'user' ? 'users' : 'teams'}...`
-              : `Choose a ${subjectType}`}
-          </option>
-          {visibleSubjects.map(subject => (
-            <option key={`${subject.type}:${subject.id}`} value={subject.id}>
-              {subject.description ? `${subject.label} (${subject.description})` : subject.label}
-            </option>
-          ))}
-        </SelectInput>
-      </Field>
+          <DropdownSelect
+            ariaLabel="subject"
+            id="gfs-delegation-subject"
+            value={subjectId}
+            onChange={setSubjectId}
+            disabled={busy || subjectOptionsLoading || visibleSubjects.length === 0}
+            options={visibleSubjects.map(subject => ({
+              value: subject.id,
+              label: subject.description
+                ? `${subject.label} (${subject.description})`
+                : subject.label,
+            }))}
+            placeholder={
+              subjectOptionsLoading
+                ? `Loading ${subjectType === 'user' ? 'users' : 'teams'}...`
+                : `Choose a ${subjectType}`
+            }
+          />
+        </Field>
+      </div>
       {subjectOptionsError ? <StatusBanner tone="error" text={subjectOptionsError} /> : null}
       <Field label="Permissions">
         {/* Only bits the caller itself holds are offered (no escalation). */}
@@ -170,3 +150,10 @@ export function GfsDelegationPanel({
     </div>
   )
 }
+
+export type {
+  DelegationAffordances,
+  GfsDelegationPanelProps,
+  GfsDelegationSubjectOption,
+  GfsDelegationSubjectType,
+} from './delegation.types'

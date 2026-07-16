@@ -107,6 +107,25 @@ function ruleBlock(doc: string, resourceLine: string): string {
   return lines.slice(start, start + 2).join('\n')
 }
 
+function roleRuleForResource(doc: string, resource: string): string {
+  const lines = doc.split('\n')
+  const resourceLine = `  - ${resource}`
+  const resourceIndex = lines.findIndex(line => line === resourceLine)
+  if (resourceIndex === -1) {
+    throw new Error(`No RBAC rule containing resource: ${resource}`)
+  }
+
+  let start = resourceIndex
+  while (start >= 0 && lines[start] !== '- apiGroups:') start -= 1
+  if (start < 0) {
+    throw new Error(`No RBAC rule boundary for resource: ${resource}`)
+  }
+
+  let end = start + 1
+  while (end < lines.length && lines[end] !== '- apiGroups:') end += 1
+  return lines.slice(start, end).join('\n')
+}
+
 function fromPeerBlock(doc: string, marker: string): string {
   const lines = doc.split('\n')
   const markerIndex = lines.findIndex(line => line.includes(marker))
@@ -293,10 +312,24 @@ describe('network/gateway intent (manifest-level)', () => {
     const gatewayConf = docContaining(yamlDocs(configmaps), 'name: control-api-rpc-gateway')
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-servers$')
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+$')
+    expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/hosts/[^/]+/wake$')
     expect(gatewayConf).toContain('limit_except GET')
+    expect(gatewayConf).toMatch(
+      /location ~ \^\/api\/v1\/rpc\/hosts\/\[\^\/\]\+\/wake\$ \{[\s\S]*?limit_except POST/
+    )
     expect(gatewayConf).toContain('location / {')
     expect(gatewayConf).toContain('return 403;')
     expect(gatewayConf).not.toContain('/api/v1/external/')
+  })
+
+  it('keeps the stateless heartbeat route POST-only through the mcp-host gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+
+    expect(gatewayConf).toContain('location = /api/v1/mcp-host/hosts/heartbeat')
+    expect(gatewayConf).toMatch(
+      /location = \/api\/v1\/mcp-host\/hosts\/heartbeat \{[\s\S]*?limit_except POST/
+    )
   })
 
   it('forces mcp-host to use host-context-controller API gateway path', () => {
@@ -445,7 +478,7 @@ describe('network/gateway intent (manifest-level)', () => {
       expect(kustomization).toContain('patches/k8s-api-ip-mcp-host.yaml')
       expect(patch).toContain('name: allow-k8s-api-egress-mcp-host')
       expect(patch).toContain('namespace: mcp-host')
-      expect(patch).toContain('cidr: 203.0.113.10/32')
+      expect(patch).toContain('cidr: 203.0.113.1/32')
       expect(patch).toContain('port: 443')
       expect(patch).toContain('port: 8443')
     }
@@ -489,6 +522,10 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(workflowGatewayConf).toContain('location = /api/v1/workflows')
     expect(workflowGatewayConf).toContain('location ~ ^/api/v1/workflows/[^/]+/[^/]+$')
     expect(workflowGatewayConf).toContain('location ~ ^/api/v1/workflows/[^/]+/[^/]+/health$')
+    expect(workflowGatewayConf).toContain('location ~ ^/api/v1/workflows/runs/[^/]+/artifacts$')
+    expect(workflowGatewayConf).toContain(
+      'location ~ ^/api/v1/workflows/runs/[^/]+/artifacts/[^/]+/download$'
+    )
     expect(workflowGatewayConf).toContain(
       'location ~ ^/api/v1/workflows/[^/]+/[^/]+/runs/latest/artifacts$'
     )
@@ -722,6 +759,16 @@ describe('network/gateway intent (manifest-level)', () => {
 
     expect(controlApiClusterRole).not.toContain('\n  - workflowrecipes')
     expect(wrcMutator).not.toContain('workflowrecipes')
+  })
+
+  it('limits control-api patch to Host CRDs', () => {
+    const clusterRoles = read(`${BASE}/cluster-wide/clusterroles.yaml`)
+    const controlApiRole = docContaining(yamlDocs(clusterRoles), 'name: control-api')
+
+    expect(roleRuleForResource(controlApiRole, 'hosts')).toContain('  - patch')
+    for (const resource of ['contexts', 'communicationchannels', 'mcpservers']) {
+      expect(roleRuleForResource(controlApiRole, resource)).not.toContain('  - patch')
+    }
   })
 
   it('routes every rpc-proxy internal-service endpoint through the control-api-rpc-gateway allowlist', () => {

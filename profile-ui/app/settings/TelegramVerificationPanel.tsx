@@ -2,10 +2,12 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { Button } from '@components/Button'
+import { CheckboxField } from '@components/CheckboxField'
 import { FormField } from '@components/FormField'
 import { SelectionDropdown } from '@components/SelectionDropdown'
+import { TextInput } from '@components/TextInput'
 import { useToast } from '@components/Toast'
-import { IconCopy } from '@components/icons'
+import { IconCopy, IconPencil, IconTrash } from '@components/icons'
 import {
   approvalAccountDetailLabels,
   approvalAccountDisplayName,
@@ -18,14 +20,18 @@ import {
   slackVerificationCommand,
   targetDetailLabels,
   targetDisplayName,
+  teamsVerificationCommand,
   telegramBotHandle,
   telegramVerificationCommand,
+  updateWorkflowApprovalMediumDisplayName,
 } from '@lib/approvalChannels'
 import type {
+  WorkflowApprovalMediumAccount,
   WorkflowApprovalMediumChallenge,
   WorkflowApprovalMediumLinkSession,
 } from '@/app/types/approvalChannels'
 import type { TelegramVerificationPanelProps } from './TelegramVerificationPanel.types'
+import { APPROVAL_ACCOUNT_DISPLAY_NAME_MAX_LENGTH } from './constants'
 
 async function copyText(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
@@ -50,6 +56,12 @@ export function TelegramVerificationPanel({
   const [nowMs, setNowMs] = useState(Date.now())
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [editingAccount, setEditingAccount] = useState<WorkflowApprovalMediumAccount | null>(null)
+  const [displayNameDraft, setDisplayNameDraft] = useState('')
+  const [displayNameBusy, setDisplayNameBusy] = useState(false)
+  const [displayNameError, setDisplayNameError] = useState('')
+  const [teamsReplyInThreads, setTeamsReplyInThreads] = useState(true)
+  const [teamsReplyInThreadsTouched, setTeamsReplyInThreadsTouched] = useState(false)
   const selectedTarget = useMemo(
     () => targets.find(target => target.id === selectedTargetId) ?? null,
     [selectedTargetId, targets]
@@ -64,8 +76,10 @@ export function TelegramVerificationPanel({
     [targets]
   )
   const pendingCommand = pending
-    ? medium === 'slack' && 'nonce' in pending
-      ? slackVerificationCommand(pending)
+    ? medium !== 'telegram' && 'nonce' in pending
+      ? medium === 'teams'
+        ? teamsVerificationCommand(pending)
+        : slackVerificationCommand(pending)
       : 'code' in pending
         ? telegramVerificationCommand(pending)
         : null
@@ -73,7 +87,8 @@ export function TelegramVerificationPanel({
   const activeTarget = pending?.target || selectedTarget
   const botHandle = providerBotHandle(activeTarget)
   const remainingSeconds = pending ? challengeRemainingSeconds(pending.expiresAt, nowMs) : 0
-  const providerLabel = medium === 'slack' ? 'Slack' : 'Telegram'
+  const providerLabel =
+    medium === 'slack' ? 'Slack' : medium === 'teams' ? 'Microsoft Teams' : 'Telegram'
   const providerLower = providerLabel.toLowerCase()
 
   useEffect(() => {
@@ -92,6 +107,8 @@ export function TelegramVerificationPanel({
     setError('')
     setPending(null)
     setSelectedTargetId(targets.length === 1 ? targets[0]!.id : '')
+    setTeamsReplyInThreads(true)
+    setTeamsReplyInThreadsTouched(false)
     setModalOpen(true)
   }
 
@@ -106,17 +123,60 @@ export function TelegramVerificationPanel({
     showToast(`${label} copied.`, { tone: 'success' })
   }
 
+  function openDisplayNameModal(account: WorkflowApprovalMediumAccount) {
+    setEditingAccount(account)
+    setDisplayNameDraft(account.displayName?.trim() || approvalAccountDisplayName(account))
+    setDisplayNameError('')
+  }
+
+  function closeDisplayNameModal() {
+    if (displayNameBusy) return
+    setEditingAccount(null)
+    setDisplayNameDraft('')
+    setDisplayNameError('')
+  }
+
+  async function saveDisplayName() {
+    if (!editingAccount) return
+    const nextDisplayName = displayNameDraft.trim()
+    if (nextDisplayName.length > APPROVAL_ACCOUNT_DISPLAY_NAME_MAX_LENGTH) {
+      setDisplayNameError(
+        `Display name must be ${APPROVAL_ACCOUNT_DISPLAY_NAME_MAX_LENGTH} characters or fewer.`
+      )
+      return
+    }
+    setDisplayNameBusy(true)
+    setDisplayNameError('')
+    try {
+      await updateWorkflowApprovalMediumDisplayName(editingAccount.id, nextDisplayName)
+      await onAccountsRefresh()
+      setEditingAccount(null)
+      setDisplayNameDraft('')
+      setDisplayNameError('')
+      showToast('Conversation display name saved.', { tone: 'success' })
+    } catch (err) {
+      setDisplayNameError(
+        err instanceof Error ? err.message : 'Failed to save conversation display name'
+      )
+    } finally {
+      setDisplayNameBusy(false)
+    }
+  }
+
   async function startConnection() {
     if (!selectedTargetId) return
     setBusy(true)
     setError('')
     try {
-      if (medium === 'slack') {
+      if (medium === 'slack' || medium === 'teams') {
         const target = targets.find(item => item.id === selectedTargetId)
         const session = await createWorkflowApprovalMediumLinkSession({
-          medium: 'slack',
+          medium,
           targetId: selectedTargetId,
           providerWorkspaceId: target?.providerWorkspaceId ?? null,
+          ...(medium === 'teams' && teamsReplyInThreadsTouched
+            ? { replyInThreads: teamsReplyInThreads }
+            : {}),
         })
         setNowMs(Date.now())
         setPending(session)
@@ -163,13 +223,32 @@ export function TelegramVerificationPanel({
                   ))}
                 </div>
               </div>
-              <Button
-                variant="danger"
-                onClick={() => onRemoveAccount(account.id, Boolean(account.disabledAt))}
-                disabled={disabled}
-              >
-                {account.disabledAt ? 'Remove record' : 'Delete'}
-              </Button>
+              <div className="settings-target-actions">
+                <Button
+                  variant="secondary"
+                  className="cu-btn--icon cu-btn--toolbar"
+                  onClick={() => openDisplayNameModal(account)}
+                  disabled={disabled}
+                  aria-label={`Edit ${approvalAccountDisplayName(account)} display name`}
+                  title={`Edit ${approvalAccountDisplayName(account)} display name`}
+                >
+                  <IconPencil />
+                </Button>
+                <Button
+                  variant="secondary"
+                  className="cu-btn--icon cu-btn--danger-icon"
+                  onClick={() => onRemoveAccount(account.id, Boolean(account.disabledAt))}
+                  disabled={disabled}
+                  aria-label={
+                    account.disabledAt
+                      ? `Remove ${approvalAccountDisplayName(account)} record`
+                      : `Delete ${approvalAccountDisplayName(account)} connection`
+                  }
+                  title={account.disabledAt ? 'Remove record' : 'Delete connection'}
+                >
+                  <IconTrash />
+                </Button>
+              </div>
             </div>
           ))}
         </div>
@@ -223,6 +302,18 @@ export function TelegramVerificationPanel({
                       disabled={disabled || busy}
                     />
                   </FormField>
+                  {medium === 'teams' ? (
+                    <CheckboxField
+                      checked={teamsReplyInThreads}
+                      onChange={event => {
+                        setTeamsReplyInThreadsTouched(true)
+                        setTeamsReplyInThreads(event.target.checked)
+                      }}
+                      disabled={disabled || busy}
+                      label="Reply in thread"
+                      description="Keep bot replies, workflow approvals, and results in the Teams thread where the request started."
+                    />
+                  ) : null}
                 </div>
               ) : (
                 <div className="stack">
@@ -238,6 +329,16 @@ export function TelegramVerificationPanel({
                       </div>
                     </div>
                   ) : null}
+                  {medium === 'teams' ? (
+                    <div className="settings-verification-step">
+                      <div className="settings-target-title">Verification scope</div>
+                      <div className="small muted">
+                        Verify once in any post to connect the entire Teams channel. The bot will
+                        recognize you in every current and future post and thread in that channel.
+                        Personal chats are connected separately.
+                      </div>
+                    </div>
+                  ) : null}
                   <div className="settings-verification-step">
                     <div className="settings-target-title">Step 1</div>
                     {medium === 'telegram' ? (
@@ -246,7 +347,17 @@ export function TelegramVerificationPanel({
                           botHandle || 'the selected bot'
                         } directly, or add it to a group, make it an administrator, and use that group.`}
                       </div>
-                    ) : null}
+                    ) : medium === 'teams' ? (
+                      <div className="small muted">
+                        Message {botHandle || 'the selected Microsoft Teams bot'} directly, or
+                        mention it in any post in the Teams channel you want to connect.
+                      </div>
+                    ) : (
+                      <div className="small muted">
+                        Message {botHandle || `the selected ${providerLabel} App`} in the
+                        conversation you want to connect.
+                      </div>
+                    )}
                     {botHandle ? (
                       <div className="settings-verification-token-row">
                         <div className="token-box" data-testid={`${medium}-bot-handle`}>
@@ -258,38 +369,58 @@ export function TelegramVerificationPanel({
                           onClick={() =>
                             void handleCopy(
                               botHandle,
-                              medium === 'slack' ? 'Slack App name' : 'Bot handle'
+                              medium === 'telegram'
+                                ? 'Bot handle'
+                                : medium === 'teams'
+                                  ? 'Microsoft Teams bot name'
+                                  : 'Slack App name'
                             )
                           }
                           aria-label={
-                            medium === 'slack' ? 'Copy Slack App name' : 'Copy bot handle'
+                            medium === 'telegram'
+                              ? 'Copy bot handle'
+                              : medium === 'teams'
+                                ? 'Copy Microsoft Teams bot name'
+                                : 'Copy Slack App name'
                           }
-                          title={medium === 'slack' ? 'Copy Slack App name' : 'Copy bot handle'}
+                          title={
+                            medium === 'telegram'
+                              ? 'Copy bot handle'
+                              : medium === 'teams'
+                                ? 'Copy Microsoft Teams bot name'
+                                : 'Copy Slack App name'
+                          }
                         >
                           <IconCopy />
                         </Button>
                       </div>
                     ) : (
                       <div className="message message--warning message--plain">
-                        {medium === 'slack'
-                          ? 'Slack App name is unavailable. Ask an administrator to update the communication channel.'
-                          : `${providerLabel} bot handle is unavailable. Ask an administrator to update the communication channel.`}
+                        {medium === 'teams'
+                          ? 'Microsoft Teams bot name is unavailable. Ask an administrator to update the communication channel.'
+                          : medium === 'slack'
+                            ? 'Slack App name is unavailable. Ask an administrator to update the communication channel.'
+                            : 'Telegram bot handle is unavailable. Ask an administrator to update the communication channel.'}
                       </div>
                     )}
                     {activeTarget?.replyOnlyWhenMentioned ? (
                       <div className="small muted">
-                        {medium === 'slack'
-                          ? 'When using a channel, mention the Slack App in each message so it responds.'
-                          : 'When adding the bot to a group, mention it in each message so it responds.'}
+                        {medium === 'teams'
+                          ? 'Mention the Microsoft Teams bot in each channel message so it responds.'
+                          : medium === 'slack'
+                            ? 'When using a channel, mention the Slack App in each message so it responds.'
+                            : 'When adding the bot to a group, mention it in each message so it responds.'}
                       </div>
                     ) : null}
                   </div>
                   <div className="settings-verification-step">
                     <div className="settings-target-title">Step 2</div>
                     <div className="small muted">
-                      {medium === 'slack'
-                        ? 'Send this one-time code in that Slack conversation. If you are using a channel, mention the Slack App before the code.'
-                        : `Send this verification code in ${providerLabel}.`}
+                      {medium === 'teams'
+                        ? 'Send this one-time code in any post in that Teams channel and mention the bot. You will not need to verify each post or thread.'
+                        : medium !== 'telegram'
+                          ? `Send this one-time code in that ${providerLabel} conversation. If you are using a channel, mention the app before the code.`
+                          : `Send this verification code in ${providerLabel}.`}
                     </div>
                     {pendingCommand ? (
                       <div className="settings-verification-token-row">
@@ -319,9 +450,11 @@ export function TelegramVerificationPanel({
                       : 'Code expired'}
                   </div>
                   <div className="small muted">
-                    {medium === 'slack'
-                      ? 'The Slack app replies when confirmation succeeds. Click Confirm when you are done.'
-                      : `The bot replies in ${providerLower} when confirmation succeeds. Click Confirm when you are done.`}
+                    {medium === 'teams'
+                      ? 'The Microsoft Teams bot replies when confirmation succeeds. Click Confirm when you are done.'
+                      : medium !== 'telegram'
+                        ? `The ${providerLabel} app replies when confirmation succeeds. Click Confirm when you are done.`
+                        : `The bot replies in ${providerLower} when confirmation succeeds. Click Confirm when you are done.`}
                   </div>
                 </div>
               )}
@@ -359,6 +492,64 @@ export function TelegramVerificationPanel({
                   </Button>
                 </>
               )}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {editingAccount ? (
+        <div
+          className="cu-modal-backdrop"
+          role="presentation"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) closeDisplayNameModal()
+          }}
+        >
+          <section
+            className="cu-modal-panel cu-modal-panel--narrow"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={`${medium}-display-name-title`}
+            onMouseDown={event => event.stopPropagation()}
+          >
+            <div className="cu-modal-panel__head">
+              <h3 id={`${medium}-display-name-title`} className="cu-modal-panel__title">
+                Edit conversation name
+              </h3>
+              <button
+                type="button"
+                className="cu-btn cu-btn--ghost"
+                onClick={closeDisplayNameModal}
+                disabled={displayNameBusy}
+              >
+                Close
+              </button>
+            </div>
+            <div className="cu-modal-panel__body">
+              <FormField label="Display name">
+                <TextInput
+                  value={displayNameDraft}
+                  onChange={event => setDisplayNameDraft(event.target.value)}
+                  placeholder={approvalAccountDisplayName(editingAccount)}
+                  maxLength={APPROVAL_ACCOUNT_DISPLAY_NAME_MAX_LENGTH}
+                  disabled={displayNameBusy}
+                />
+              </FormField>
+              {displayNameError ? (
+                <div className="message message--error">{displayNameError}</div>
+              ) : null}
+            </div>
+            <div className="cu-modal-panel__foot">
+              <Button
+                variant="secondary"
+                onClick={closeDisplayNameModal}
+                disabled={displayNameBusy}
+              >
+                Cancel
+              </Button>
+              <Button onClick={() => void saveDisplayName()} disabled={displayNameBusy}>
+                {displayNameBusy ? 'Saving...' : 'Save'}
+              </Button>
             </div>
           </section>
         </div>

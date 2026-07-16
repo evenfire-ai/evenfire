@@ -135,6 +135,20 @@ data:
           proxy_set_header X-Forwarded-Proto $scheme;
         }
 
+        # Stateless Agents — wake trigger for a suspended/draining host.
+        # rpc-proxy forwards the caller's rpc access token; control-api
+        # authorizes via requireRpcTokenHostMatch before any mutation.
+        location ~ ^/api/v1/rpc/hosts/[^/]+/wake$ {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
         # Spec §9.2 — sandbox-ui app picker (rpc-proxy fans out per-user
         # ACL lookup). control-api authenticates the call via
         # requireInternalService('rpc-proxy').
@@ -501,6 +515,23 @@ data:
           proxy_set_header Authorization $http_authorization;
         }
 
+        # ── Stateless lifecycle heartbeat ──
+        # mcp-host pods POST D8 activity snapshots here. Same RS256 runtime
+        # access JWT that the workflow-approvals endpoints accept; control-api
+        # binds identity to the token's hostRefs[0] claim (never the path) and
+        # answers {drain} from Host.status.lifecycle.
+        location = /api/v1/mcp-host/hosts/heartbeat {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
         # ── Workflow broker runtime endpoints ──
 
         location = /api/v1/workflows {
@@ -540,6 +571,30 @@ data:
         }
 
         location ~ ^/api/v1/workflows/[^/]+/[^/]+/health$ {
+          limit_except GET {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
+        location ~ ^/api/v1/workflows/runs/[^/]+/artifacts$ {
+          limit_except GET {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
+        location ~ ^/api/v1/workflows/runs/[^/]+/artifacts/[^/]+/download$ {
           limit_except GET {
             deny all;
           }

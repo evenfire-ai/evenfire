@@ -57,6 +57,7 @@ export interface Attachment {
   sourceTool?: string
   lane?: 'workflow_result' | 'internal_generated_artifact' | 'tool_image'
   artifactFormat?: string
+  artifactName?: string
   sizeBytes?: number
   redactionState?: 'applied' | 'scanned' | 'skipped:binary'
   producer?: string
@@ -450,6 +451,7 @@ export type AgentEventType =
   | 'tool:approval_denied'
   | 'loop:iteration'
   | 'loop:completed'
+  | 'llm:completed'
   | 'safety:input_blocked'
   | 'safety:output_sanitized'
   | 'context:compacted'

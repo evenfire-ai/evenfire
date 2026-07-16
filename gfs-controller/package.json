@@ -20,7 +20,7 @@
     "global-file-system",
     "broker"
   ],
-  "license": "MPL-2.0",
+  "license": "MIT",
   "dependencies": {
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.13.1"

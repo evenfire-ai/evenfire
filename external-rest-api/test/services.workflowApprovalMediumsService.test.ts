@@ -8,6 +8,7 @@ import {
   listApprovalChannelTargets,
   listWorkflowApprovalMediums,
   preferWorkflowApprovalMedium,
+  updateWorkflowApprovalMediumDisplayName,
 } from '../src/services/workflowApprovalMediumsService.js'
 
 vi.mock('../src/controlApiClient.js', () => ({
@@ -136,11 +137,15 @@ describe('workflowApprovalMediumsService', () => {
     )
   })
 
-  it('lists, prefers, and disables verified mediums through user session auth', async () => {
+  it('lists, prefers, renames, and disables verified mediums through user session auth', async () => {
     vi.mocked(controlApiRequest).mockResolvedValueOnce({ items: [] })
     vi.mocked(controlApiRequest).mockResolvedValueOnce({
       ok: true,
       account: { id: 'account/1', isPreferred: true },
+    })
+    vi.mocked(controlApiRequest).mockResolvedValueOnce({
+      ok: true,
+      account: { id: 'account/1', displayName: 'Leadership' },
     })
     vi.mocked(controlApiRequestWithStatus).mockResolvedValueOnce({ data: null, status: 204 })
 
@@ -150,6 +155,12 @@ describe('workflowApprovalMediumsService', () => {
     await expect(preferWorkflowApprovalMedium('session-token', 'account/1')).resolves.toEqual({
       ok: true,
       account: { id: 'account/1', isPreferred: true },
+    })
+    await expect(
+      updateWorkflowApprovalMediumDisplayName('session-token', 'account/1', 'Leadership')
+    ).resolves.toEqual({
+      ok: true,
+      account: { id: 'account/1', displayName: 'Leadership' },
     })
     await expect(
       disableWorkflowApprovalMedium('session-token', 'account/1')
@@ -164,6 +175,14 @@ describe('workflowApprovalMediumsService', () => {
       '/external/workflow-approval-mediums/account%2F1/preference',
       {
         userSessionToken: 'session-token',
+      }
+    )
+    expect(controlApiRequest).toHaveBeenCalledWith(
+      'PATCH',
+      '/external/workflow-approval-mediums/account%2F1/display-name',
+      {
+        userSessionToken: 'session-token',
+        body: { displayName: 'Leadership' },
       }
     )
     expect(controlApiRequestWithStatus).toHaveBeenCalledWith(

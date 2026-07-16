@@ -43,6 +43,14 @@ const chatMeta = (id: string, title = id) => ({
   messageCount: 1,
 })
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(res => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
 describe('pendingChatSelection effect', () => {
   it('latest → switches to the most recent chat', async () => {
     clerum.chat.getIndex.mockResolvedValue({
@@ -64,6 +72,86 @@ describe('pendingChatSelection effect', () => {
 
     await waitFor(() => expect(result.current.activeChatId).toBe('c-latest'))
     expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-latest')
+  })
+
+  it('latest → overrides an older visible chat when explicitly requested', async () => {
+    clerum.chat.getIndex.mockResolvedValue({
+      version: 1,
+      lastActiveChatId: null,
+      onboardingDismissed: false,
+      chats: [chatMeta('c-older')],
+    })
+    const { result, rerender } = renderController({ navItem: 'chat' })
+
+    await waitFor(() => expect(result.current.activeChatId).toBe('c-older'))
+
+    clerum.chat.getIndex.mockResolvedValue({
+      version: 2,
+      lastActiveChatId: null,
+      onboardingDismissed: false,
+      chats: [chatMeta('c-newest'), chatMeta('c-older')],
+    })
+    await act(async () => {
+      result.current.setPendingChatSelection('agent-x', null, { selectLatest: true })
+    })
+    await act(async () => {
+      rerender({ navItem: 'agents' })
+    })
+
+    await waitFor(() => expect(result.current.activeChatId).toBe('c-newest'))
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-newest')
+  })
+
+  it('latest → does not override a chat auto-created while the list load is in flight', async () => {
+    clerum.chat.getIndex.mockResolvedValue({
+      version: 1,
+      lastActiveChatId: null,
+      onboardingDismissed: false,
+      chats: [],
+    })
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-latest-race' })
+    const { result, rerender } = renderController({ navItem: 'agents' })
+    await settleMount()
+
+    const index = deferred<{
+      version: number
+      lastActiveChatId: string | null
+      onboardingDismissed: boolean
+      chats: ReturnType<typeof chatMeta>[]
+    }>()
+    clerum.chat.getIndex.mockReturnValue(index.promise)
+
+    await act(async () => {
+      result.current.setPendingChatSelection('agent-x', null, { selectLatest: true })
+    })
+    await act(async () => {
+      rerender({ navItem: 'chat' })
+    })
+    await waitFor(() => expect(clerum.chat.getIndex.mock.calls.length).toBeGreaterThan(1))
+
+    const sendPromise = act(async () => {
+      await result.current.handleSendAgentMessage('keep latest from stealing this chat')
+    })
+    await waitFor(() => expect(clerum.hasProgressHandler('task-latest-race')).toBe(true))
+    const createdChatId = result.current.activeChatId
+    expect(createdChatId).toBeTruthy()
+
+    await act(async () => {
+      index.resolve({
+        version: 2,
+        lastActiveChatId: null,
+        onboardingDismissed: false,
+        chats: [chatMeta('older-chat')],
+      })
+    })
+
+    await sendPromise
+    expect(result.current.activeChatId).toBe(createdChatId)
+    expect(clerum.rpc.loadSessionMessages).not.toHaveBeenCalledWith(
+      'agent-x',
+      'agent-x',
+      'older-chat'
+    )
   })
 
   it('none → selects nothing and clears the spinner', async () => {
@@ -140,6 +228,44 @@ describe('pendingChatSelection effect', () => {
       'agent-x',
       'agent-x',
       'c-missing'
+    )
+  })
+
+  it('does not let a late chat-list load clear a chat auto-created by send', async () => {
+    const index = deferred<{
+      version: number
+      lastActiveChatId: string | null
+      onboardingDismissed: boolean
+      chats: ReturnType<typeof chatMeta>[]
+    }>()
+    clerum.chat.getIndex.mockReturnValue(index.promise)
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-race' })
+    const { result } = renderController({ navItem: 'chat' })
+
+    await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+
+    const sendPromise = act(async () => {
+      await result.current.handleSendAgentMessage('keep this visible')
+    })
+    await waitFor(() => expect(clerum.hasProgressHandler('task-race')).toBe(true))
+    const createdChatId = result.current.activeChatId
+    expect(createdChatId).toBeTruthy()
+
+    await act(async () => {
+      index.resolve({
+        version: 1,
+        lastActiveChatId: null,
+        onboardingDismissed: false,
+        chats: [chatMeta('older-chat')],
+      })
+    })
+
+    await sendPromise
+    expect(result.current.activeChatId).toBe(createdChatId)
+    expect(clerum.rpc.loadSessionMessages).not.toHaveBeenCalledWith(
+      'agent-x',
+      'agent-x',
+      'older-chat'
     )
   })
 })

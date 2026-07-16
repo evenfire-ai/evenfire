@@ -1621,6 +1621,33 @@ code {
   background: rgba(var(--cu-panel-rgb), 0.36);
 }
 
+.cu-checkbox-field {
+  display: flex;
+  gap: var(--cu-space-2);
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.cu-checkbox-field--disabled {
+  cursor: not-allowed;
+}
+
+.cu-checkbox-field__content {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.cu-checkbox-field__label {
+  color: var(--cu-text);
+  font-size: 0.875rem;
+}
+
+.cu-checkbox-field__description {
+  color: var(--cu-text-soft);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
 .settings-verification-token-row .token-box {
   min-width: 0;
 }

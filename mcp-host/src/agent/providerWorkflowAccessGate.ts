@@ -1,6 +1,6 @@
 import type { IncomingMessage } from '../server/types'
 
-export type ProviderWorkflowChannel = 'telegram' | 'slack'
+export type ProviderWorkflowChannel = 'telegram' | 'slack' | 'teams'
 
 export type ProviderWorkflowAccessDenialReason =
   | 'missing_provider_identity'
@@ -9,12 +9,15 @@ export type ProviderWorkflowAccessDenialReason =
 export function isProviderWorkflowChannel(
   channelType: string | undefined
 ): channelType is ProviderWorkflowChannel {
-  return channelType === 'telegram' || channelType === 'slack'
+  return channelType === 'telegram' || channelType === 'slack' || channelType === 'teams'
 }
 
 export function workflowAccessDeniedResponse(channelType: ProviderWorkflowChannel): string {
   if (channelType === 'slack') {
     return 'Could not verify this Slack workspace conversation for workflow access. Use the verified Slack workspace conversation connected to your Clerum account, then list workflows again.'
+  }
+  if (channelType === 'teams') {
+    return 'Could not verify this Microsoft Teams conversation for workflow access. Use the verified Teams conversation connected to your Clerum account, then list workflows again.'
   }
   return 'Could not verify this Telegram conversation for workflow access. Use the verified Telegram conversation connected to your Clerum account, then list workflows again.'
 }

@@ -20,7 +20,7 @@
     "bridge",
     "sidecar"
   ],
-  "license": "MPL-2.0",
+  "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
   },

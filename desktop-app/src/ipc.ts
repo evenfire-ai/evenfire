@@ -629,6 +629,18 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
   ipcMain.handle(
+    'rpc:prewarmHost',
+    async (event, payload: { hostRef: string; hostRefs?: string[] }) => {
+      assertTrustedSender(event)
+      const hostRef = sanitizeString(payload?.hostRef)
+      if (!hostRef) throw new Error('hostRef is required')
+      const hostRefs = Array.isArray(payload?.hostRefs)
+        ? payload.hostRefs.map(v => String(v).trim()).filter(Boolean)
+        : undefined
+      return service.prewarmHost(hostRef, hostRefs)
+    }
+  )
+  ipcMain.handle(
     'rpc:getHostActivity',
     async (
       event,

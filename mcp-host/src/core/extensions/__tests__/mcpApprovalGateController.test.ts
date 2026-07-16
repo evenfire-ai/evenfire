@@ -6,6 +6,7 @@ import type { Conversation } from '../../types'
 import { ApprovalController } from '../approvalController'
 import {
   McpApprovalGateController,
+  STATELESS_CRON_APPROVAL_PROMPT,
   UnifiedApprovalGateController,
   isMcpToolName,
 } from '../mcpApprovalGateController'
@@ -385,5 +386,157 @@ describe('ApprovalController + UnifiedApprovalGateController chain', () => {
     const result = controller.beforeTool('airtable-server__list_records', {})
     expect(typeof result).toBe('object')
     expect((result as any).type).toBe('suspend')
+  })
+})
+
+// ─── Cron×stateless forced-approval gate ─────────────────────────────────────
+
+describe('UnifiedApprovalGateController — cron×stateless forced gate', () => {
+  const waivingConfig = {
+    defaultPolicy: 'channel_users' as const,
+    channels: {},
+    tools: { cron_manage: false },
+  }
+
+  it('suspends cron_manage create/enable with the exact stateless prompt even when the CRD override disables approval', () => {
+    const controller = new UnifiedApprovalGateController(
+      makeMockRegistry({ cron_manage: { requiresApproval: true } }),
+      waivingConfig,
+      undefined,
+      { statelessLifecycle: true }
+    )
+
+    for (const action of ['create', 'enable']) {
+      const result = controller.beforeTool('cron_manage', { action })
+      expect((result as any).type).toBe('suspend')
+      expect((result as any).approval.tool_name).toBe('cron_manage')
+      expect((result as any).approval.parameters).toEqual({ action })
+      expect((result as any).approval.description).toBe(STATELESS_CRON_APPROVAL_PROMPT)
+    }
+  })
+
+  it('pins the exact user-facing consequence prompt', () => {
+    expect(STATELESS_CRON_APPROVAL_PROMPT).toBe(
+      'Approve scheduled task on a stateless agent? While any schedule is active, this agent ' +
+        'stays running continuously and will NOT suspend when idle (higher cost). Remove or ' +
+        'disable the schedule to restore suspension.'
+    )
+  })
+
+  it('does NOT force-gate reads and blocker-removing actions: list/get/delete/disable/trigger fall through to the override', () => {
+    const controller = new UnifiedApprovalGateController(
+      makeMockRegistry({ cron_manage: { requiresApproval: true } }),
+      waivingConfig,
+      undefined,
+      { statelessLifecycle: true }
+    )
+
+    for (const action of ['list', 'get', 'delete', 'disable', 'trigger']) {
+      expect(controller.beforeTool('cron_manage', { action })).toBe('proceed')
+    }
+  })
+
+  it('does not fire on a non-stateless host: create/enable follow the normal decision (override wins)', () => {
+    const controller = new UnifiedApprovalGateController(
+      makeMockRegistry({ cron_manage: { requiresApproval: true } }),
+      waivingConfig,
+      undefined,
+      { statelessLifecycle: false }
+    )
+
+    expect(controller.beforeTool('cron_manage', { action: 'create' })).toBe('proceed')
+    expect(controller.beforeTool('cron_manage', { action: 'enable' })).toBe('proceed')
+  })
+
+  it('without the stateless option, cron_manage keeps its code default (generic suspension, not the stateless prompt)', () => {
+    const controller = new UnifiedApprovalGateController(
+      makeMockRegistry({ cron_manage: { requiresApproval: true } })
+    )
+    const result = controller.beforeTool('cron_manage', { action: 'create' })
+    expect((result as any).type).toBe('suspend')
+    expect((result as any).approval.description).not.toBe(STATELESS_CRON_APPROVAL_PROMPT)
+  })
+
+  it('a missing or non-string action is not force-gated (falls through to the normal decision; execute() errors on it anyway)', () => {
+    const controller = new UnifiedApprovalGateController(
+      makeMockRegistry({ cron_manage: { requiresApproval: true } }),
+      waivingConfig,
+      undefined,
+      { statelessLifecycle: true }
+    )
+    expect(controller.beforeTool('cron_manage', {})).toBe('proceed')
+    expect(controller.beforeTool('cron_manage', { action: 42 })).toBe('proceed')
+  })
+})
+
+describe('UnifiedApprovalGateController — cronManageGateOnly (cron-sourced narrow gate)', () => {
+  // cron-sourced tasks on a stateless host run in this mode: ONLY cron_manage
+  // create/enable can suspend (self-propagation containment); every other tool
+  // call keeps issue #529 autonomy and proceeds without a gate.
+  it('suspends cron_manage create/enable with the stateless prompt', () => {
+    const controller = new UnifiedApprovalGateController(
+      makeMockRegistry({ cron_manage: { requiresApproval: true } }),
+      undefined,
+      undefined,
+      { statelessLifecycle: true, cronManageGateOnly: true }
+    )
+
+    for (const action of ['create', 'enable']) {
+      const result = controller.beforeTool('cron_manage', { action })
+      expect((result as any).type).toBe('suspend')
+      expect((result as any).approval.tool_name).toBe('cron_manage')
+      expect((result as any).approval.description).toBe(STATELESS_CRON_APPROVAL_PROMPT)
+    }
+  })
+
+  it('does NOT gate cron_manage list/get/delete/disable/trigger (autonomy for blocker-removing + read actions)', () => {
+    const controller = new UnifiedApprovalGateController(
+      makeMockRegistry({ cron_manage: { requiresApproval: true } }),
+      undefined,
+      undefined,
+      { statelessLifecycle: true, cronManageGateOnly: true }
+    )
+
+    for (const action of ['list', 'get', 'delete', 'disable', 'trigger']) {
+      expect(controller.beforeTool('cron_manage', { action })).toBe('proceed')
+    }
+  })
+
+  it('does NOT gate a non-cron_manage native tool that requiresApproval (preserves #529 autonomy)', () => {
+    // Reverting FIX 1 (dropping cronManageGateOnly, falling back to
+    // DefaultLoopController for cron tasks means this controller would never be
+    // constructed; but if it WERE the normal gate, shell_exec would suspend).
+    // In gate-only mode it must proceed.
+    const controller = new UnifiedApprovalGateController(
+      makeMockRegistry({ shell_exec: { requiresApproval: true } }),
+      undefined,
+      undefined,
+      { statelessLifecycle: true, cronManageGateOnly: true }
+    )
+
+    expect(controller.beforeTool('shell_exec', { command: 'rm -rf /tmp/x' })).toBe('proceed')
+  })
+
+  it('does NOT gate an MCP tool (preserves #529 autonomy)', () => {
+    // An MCP tool (serverName__toolName) would ALWAYS suspend under the normal
+    // gate; in cronManageGateOnly mode it proceeds.
+    const controller = new UnifiedApprovalGateController(makeMockRegistry(), undefined, undefined, {
+      statelessLifecycle: true,
+      cronManageGateOnly: true,
+    })
+
+    expect(controller.beforeTool('mongodb-server__find', { collection: 'users' })).toBe('proceed')
+  })
+
+  it('with cronManageGateOnly but statelessLifecycle false, even create/enable proceed (gate not armed)', () => {
+    const controller = new UnifiedApprovalGateController(
+      makeMockRegistry({ cron_manage: { requiresApproval: true } }),
+      undefined,
+      undefined,
+      { statelessLifecycle: false, cronManageGateOnly: true }
+    )
+
+    expect(controller.beforeTool('cron_manage', { action: 'create' })).toBe('proceed')
+    expect(controller.beforeTool('cron_manage', { action: 'enable' })).toBe('proceed')
   })
 })

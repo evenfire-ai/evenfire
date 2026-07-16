@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Issue #637 back-fill CLI — stamps `clerum.io/owner-recipe=<recipe>` on
 // pre-existing recipe Secrets that predate the ownership-label model and would be
-// fail-closed-denied by the WRC reconciler (prod incident 2026-06-26: leadforge +
-// agentic-task-board plugins broke because leadforge-mcp-credentials / atb-secrets
-// were unlabeled). The decision logic lives in the unit-tested
-// `planSecretOwnershipBackfill`; this file only does cluster I/O via kubectl.
+// fail-closed-denied by the WRC reconciler (e.g. a recipe's envSecret created
+// before ownership labelling existed). The decision logic lives in the
+// unit-tested `planSecretOwnershipBackfill`; this file only does cluster I/O
+// via kubectl.
 //
 // DRY-RUN by default — prints the plan and exits without mutating. Pass `--apply`
 // to label. Against a prod context `--apply` additionally requires CONFIRM=yes.

@@ -16,29 +16,33 @@ export const CUI_AUTH = {
   USERNAME_INPUT: '#cu-login-user',
   PASSWORD_INPUT: '#cu-login-pass',
   SIGN_IN_BUTTON: 'button[type="submit"]:has-text("Sign in")',
-  ACCOUNT_CREATION_TAB: 'button[role="tab"]:has-text("Account creation")',
-  SIGN_IN_TAB: 'button[role="tab"]:has-text("Sign in")',
-  SETUP_USERNAME_INPUT: '#cu-setup-user',
-  SETUP_PASSWORD_INPUT: '#cu-setup-pass',
-  CREATE_ACCESS_BUTTON: 'button:has-text("Create access")',
+  // Login page auth modes are 'login' | 'forgot-password' (control-ui/app/page.tsx).
+  // The old first-run "Account creation" tab no longer exists on this page.
+  FORGOT_PASSWORD_LINK: 'button.cu-auth-secondary-link:has-text("Forgot my password")',
+  RESET_USERNAME_INPUT: '#cu-reset-user',
+  SEND_RESET_BUTTON: 'button[type="submit"]:has-text("Send reset link")',
+  BACK_TO_SIGN_IN_LINK: 'button.cu-auth-secondary-link:has-text("Back to sign in")',
   ERROR_MESSAGE: '.cu-banner--error',
-  PAGE_HEADING: 'h1.cu-title',
+  // The auth screen has no <h1>; the hint paragraph is its stable anchor.
+  PAGE_HEADING: '.cu-card--auth .cu-code-hint',
 } as const
 
 // ── Control UI — Dashboard ────────────────────────────────────────────────────
 export const CUI_DASHBOARD = {
-  HEADING: 'h1.cu-sidebar__title',
+  // The dashboard has no h1.cu-sidebar__title anymore; the sidebar <aside>
+  // (control-ui/components/Sidebar/index.tsx) is the authenticated anchor.
+  HEADING: 'aside.cu-sidebar[aria-label="Main navigation"]',
   LOGOUT_BUTTON: '.cu-sidebar__item--utility:has-text("Log out")',
   REFRESH_BUTTON: 'button[aria-label="Reload agents"]',
 
   TAB_AGENTS: '.cu-sidebar__item:has-text("Agents")',
   TAB_HOSTS: '.cu-sidebar__item:has-text("Agents")',
   TAB_CONTEXTS: '.cu-sidebar__item:has-text("Contexts")',
-  TAB_MCP_SERVERS: '.cu-sidebar__item:has-text("MCP Servers")',
+  TAB_MCP_SERVERS: '.cu-sidebar__item:has-text("Connectors")',
   TAB_CHANNELS: '.cu-sidebar__item:has-text("External Channels")',
-  TAB_MEMBERS_TEAMS: '.cu-sidebar__item:has-text("Members & Teams")',
-  TAB_USERS_TEAMS: '.cu-sidebar__item:has-text("Members & Teams")',
-  TAB_WORKFLOW_RECIPES: '.cu-sidebar__item:has-text("Workflow Recipes")',
+  TAB_MEMBERS_TEAMS: '.cu-sidebar__item:has-text("Users & Teams")',
+  TAB_USERS_TEAMS: '.cu-sidebar__item:has-text("Users & Teams")',
+  TAB_WORKFLOW_RECIPES: '.cu-sidebar__item:has-text("Plugins")',
 
   CREATE_HOST_BUTTON: 'button:has-text("Create agent")',
   CREATE_CONTEXT_BUTTON: 'button:has-text("Create context")',

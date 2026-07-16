@@ -1,6 +1,6 @@
 .PHONY: build dev dev-example clean docker-build docker-push docker-push-cross install
 
-REGISTRY ?= us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum
+REGISTRY ?= us-central1-docker.pkg.dev/your-gcp-project/clerum
 IMAGE_NAME ?= host-context-controller
 TAG      ?= $(shell git describe --tags --always 2>/dev/null || echo "latest")
 

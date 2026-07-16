@@ -1,4 +1,4 @@
-export type NotificationDeliveryMedium = 'telegram' | 'slack'
+export type NotificationDeliveryMedium = 'telegram' | 'slack' | 'teams'
 
 type NotificationDeliveryBase = {
   id: string
@@ -43,6 +43,9 @@ export type WorkflowRunCompletedNotificationDelivery = NotificationDeliveryBase 
     providerMedium: NotificationDeliveryMedium
     providerChannelId: string
     providerWorkspaceId?: string | null
+    providerConversationId?: string | null
+    providerThreadId?: string | null
+    hasDownloadableItems?: boolean
     completedAt?: string
     message?: string
   }

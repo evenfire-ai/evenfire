@@ -1,7 +1,6 @@
 {
   "name": "clerum-e2e-tests",
   "version": "0.1.40",
-  "license": "MPL-2.0",
   "private": true,
   "type": "module",
   "scripts": {

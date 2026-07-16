@@ -10,11 +10,13 @@ import { telegramWorkflowResultCallbackData } from '../telegramCallbackData'
 import type { ChannelAdapter, CommunicationChannelCRD } from '../types'
 import { WorkflowApprovalCoordinator } from '../workflowApprovalCoordinator'
 
+const WORKFLOW_RUN_ID = '11111111-2222-3333-4444-555555555555'
+
 vi.hoisted(() => {
   process.env.CLERUM_HOST_REF = process.env.CLERUM_HOST_REF ?? 'test-host'
 })
 
-function adapter(channelType: 'telegram' | 'slack') {
+function adapter(channelType: 'telegram' | 'slack' | 'teams') {
   const sendMessage = vi.fn(
     async (
       _channelId: string,
@@ -36,8 +38,9 @@ function adapter(channelType: 'telegram' | 'slack') {
 
 function coordinatorFor(params: {
   delivery: NotificationDelivery
-  medium: 'telegram' | 'slack'
+  medium: 'telegram' | 'slack' | 'teams'
   adapter: ChannelAdapter
+  teamsReplyInThreads?: boolean
 }) {
   const notificationDeliveryClient = {
     fetchDeliveries: vi.fn(async () => [params.delivery]),
@@ -60,6 +63,18 @@ function coordinatorFor(params: {
                 {
                   channelId: params.delivery.providerChannelId,
                   workspaceId: params.delivery.providerWorkspaceId || 'T123',
+                },
+              ]
+            : [],
+        teams:
+          params.medium === 'teams'
+            ? [
+                {
+                  channelId: params.delivery.providerChannelId,
+                  tenantId: params.delivery.providerWorkspaceId || 'tenant-1',
+                  ...(params.teamsReplyInThreads === undefined
+                    ? {}
+                    : { replyInThreads: params.teamsReplyInThreads }),
                 },
               ]
             : [],
@@ -89,13 +104,14 @@ function completedDelivery(
     attempts: 0,
     eventType: 'workflow.run.completed',
     payload: {
-      workflowRunId: 'run-1',
+      workflowRunId: WORKFLOW_RUN_ID,
       approvalRequestId: 'approval-1',
       recipeNamespace: 'sandbox-recipes',
       recipeName: 'due-diligence-package',
       phase: 'Succeeded',
       providerMedium: 'telegram',
       providerChannelId: '-100987',
+      hasDownloadableItems: true,
       message: 'legacy artifact copy should not win',
     },
   }
@@ -239,7 +255,7 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
     const sendOptions = slack.sendMessage.mock.calls[0]?.[4]
     expect(slack.sendMessage).toHaveBeenCalledWith(
       'C123',
-      expect.stringContaining('Reply \\approve due-diligence-package'),
+      'Approve workflow due-diligence-package?',
       undefined,
       undefined,
       expect.any(Object)
@@ -249,10 +265,7 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text:
-            'Approve workflow trigger for due-diligence-package\n' +
-            'Approval requested for workflow due-diligence-package.\n\n' +
-            'Reply \\approve due-diligence-package to approve or \\deny due-diligence-package to deny.',
+          text: 'Approve workflow due-diligence-package?',
         },
       },
       {
@@ -279,6 +292,131 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
         ],
       },
     ])
+  })
+
+  it('renders Teams approve and deny buttons with workflow route and channel alias', async () => {
+    const teams = adapter('teams')
+    const { coordinator } = coordinatorFor({
+      delivery: approvalDelivery({
+        medium: 'teams',
+        providerUserId: 'teams-user-1',
+        providerWorkspaceId: 'tenant-1',
+        providerChannelId: '19:channel-1@thread.tacv2',
+        payload: {
+          ...approvalDelivery().payload,
+        },
+      }),
+      medium: 'teams',
+      adapter: teams,
+    })
+    const channelAlias = createHash('sha256')
+      .update('channels/test-channel')
+      .digest('hex')
+      .slice(0, 16)
+
+    await coordinator.pollNotifications()
+
+    const sendOptions = teams.sendMessage.mock.calls[0]?.[4]
+    expect(teams.sendMessage).toHaveBeenCalledWith(
+      '19:channel-1@thread.tacv2',
+      'Approve workflow due-diligence-package?',
+      undefined,
+      undefined,
+      expect.any(Object)
+    )
+    expect(sendOptions?.teamsActions).toEqual([
+      {
+        title: 'Approve',
+        value:
+          'approve:99999999-8888-7777-6666-555555555555:' +
+          `sandbox-recipes/due-diligence-package:${channelAlias}`,
+        style: 'positive',
+      },
+      {
+        title: 'Deny',
+        value:
+          'deny:99999999-8888-7777-6666-555555555555:' +
+          `sandbox-recipes/due-diligence-package:${channelAlias}`,
+        style: 'destructive',
+      },
+    ])
+  })
+
+  it('delivers Teams workflow approvals in the source thread by default', async () => {
+    const teams = adapter('teams')
+    const conversationId = '19:channel-1@thread.tacv2;messageid=root-post-1'
+    const { coordinator } = coordinatorFor({
+      delivery: approvalDelivery({
+        medium: 'teams',
+        providerUserId: 'teams-user-1',
+        providerWorkspaceId: 'tenant-1',
+        providerChannelId: '19:channel-1@thread.tacv2',
+        payload: {
+          metadata: {
+            workflowTrigger: {
+              conversationId,
+              providerBinding: {
+                medium: 'teams',
+                providerChannelId: '19:channel-1@thread.tacv2',
+                providerWorkspaceId: 'tenant-1',
+                providerThreadId: 'root-post-1',
+              },
+            },
+          },
+        },
+      }),
+      medium: 'teams',
+      adapter: teams,
+    })
+
+    await coordinator.pollNotifications()
+
+    expect(teams.sendMessage).toHaveBeenCalledWith(
+      conversationId,
+      expect.any(String),
+      'root-post-1',
+      undefined,
+      expect.any(Object)
+    )
+  })
+
+  it('posts Teams workflow approvals at the root when thread replies are disabled', async () => {
+    const teams = adapter('teams')
+    const providerChannelId = '19:channel-1@thread.tacv2'
+    const { coordinator } = coordinatorFor({
+      delivery: approvalDelivery({
+        medium: 'teams',
+        providerUserId: 'teams-user-1',
+        providerWorkspaceId: 'tenant-1',
+        providerChannelId,
+        payload: {
+          metadata: {
+            workflowTrigger: {
+              conversationId: `${providerChannelId};messageid=root-post-1`,
+              providerBinding: {
+                medium: 'teams',
+                providerChannelId,
+                providerWorkspaceId: 'tenant-1',
+                providerThreadId: 'root-post-1',
+              },
+            },
+          },
+        },
+      }),
+      medium: 'teams',
+      adapter: teams,
+      teamsReplyInThreads: false,
+    })
+
+    await coordinator.pollNotifications()
+
+    expect(teams.sendMessage).toHaveBeenCalledWith(
+      providerChannelId,
+      expect.any(String),
+      undefined,
+      undefined,
+      expect.any(Object)
+    )
   })
 
   it('routes notifications through the adapter for the owning CommunicationChannel', async () => {
@@ -350,7 +488,7 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
 
     expect(telegram.sendMessage).toHaveBeenCalledWith(
       '-100987',
-      '<a href="tg://user?id=123456">User</a> Workflow due-diligence-package completed. Results are ready. Reply: download result from your verified account.',
+      '<a href="tg://user?id=123456">User</a> Workflow due-diligence-package completed. Results are ready for the verified user.',
       undefined,
       undefined,
       {
@@ -359,7 +497,7 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
           [
             {
               text: 'Download result',
-              callbackData: telegramWorkflowResultCallbackData('due-diligence-package'),
+              callbackData: telegramWorkflowResultCallbackData(WORKFLOW_RUN_ID),
             },
           ],
         ],
@@ -399,7 +537,7 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
 
     expect(telegram.sendMessage).toHaveBeenCalledWith(
       '123456',
-      'Workflow due-diligence-package completed. Results are ready. Reply: download result',
+      'Workflow due-diligence-package completed. Results are ready.',
       undefined,
       undefined,
       {
@@ -407,7 +545,7 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
           [
             {
               text: 'Download result',
-              callbackData: telegramWorkflowResultCallbackData('due-diligence-package'),
+              callbackData: telegramWorkflowResultCallbackData(WORKFLOW_RUN_ID),
             },
           ],
         ],
@@ -415,7 +553,7 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
     )
   })
 
-  it('omits Telegram result buttons when the recipe name cannot fit callback data', async () => {
+  it('keeps Telegram result buttons independent of recipe-name length', async () => {
     const telegram = adapter('telegram')
     const longRecipeName = 'due-diligence-' + 'x'.repeat(60)
     const { coordinator } = coordinatorFor({
@@ -435,10 +573,20 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
       '-100987',
       '<a href="tg://user?id=123456">User</a> Workflow ' +
         longRecipeName +
-        ' completed. Results are ready. Reply: download result from your verified account.',
+        ' completed. Results are ready for the verified user.',
       undefined,
       undefined,
-      { parseMode: 'telegram-html' }
+      {
+        parseMode: 'telegram-html',
+        telegramInlineKeyboard: [
+          [
+            {
+              text: 'Download result',
+              callbackData: telegramWorkflowResultCallbackData(WORKFLOW_RUN_ID),
+            },
+          ],
+        ],
+      }
     )
   })
 
@@ -465,7 +613,7 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
 
     expect(slack.sendMessage).toHaveBeenCalledWith(
       'C123',
-      '<@U123> Workflow due-diligence-package completed. Results are ready. Reply: download result from your verified account.',
+      '<@U123> Workflow due-diligence-package completed. Results are ready for the verified user.',
       undefined,
       undefined,
       {
@@ -474,7 +622,7 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: '<@U123> Workflow due-diligence-package completed. Results are ready. Reply: download result from your verified account.',
+              text: '<@U123> Workflow due-diligence-package completed. Results are ready for the verified user.',
             },
           },
           {
@@ -484,12 +632,83 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
                 type: 'button',
                 action_id: 'workflow_result_download',
                 text: { type: 'plain_text', text: 'Download result' },
-                value: 'workflow_result:due-diligence-package',
+                value: `workflow_result_run:${WORKFLOW_RUN_ID}`,
               },
             ],
           },
         ],
       }
+    )
+  })
+
+  it('renders Teams workflow result download buttons', async () => {
+    const teams = adapter('teams')
+    const conversationId = '19:channel-1@thread.tacv2;messageid=root-post-1'
+    const { coordinator } = coordinatorFor({
+      delivery: completedDelivery({
+        medium: 'teams',
+        providerUserId: 'teams-user-1',
+        providerWorkspaceId: 'tenant-1',
+        providerChannelId: '19:channel-1@thread.tacv2',
+        payload: {
+          ...completedDelivery().payload,
+          providerMedium: 'teams',
+          providerWorkspaceId: 'tenant-1',
+          providerChannelId: '19:channel-1@thread.tacv2',
+          providerConversationId: conversationId,
+          providerThreadId: 'root-post-1',
+        },
+      }),
+      medium: 'teams',
+      adapter: teams,
+    })
+
+    await coordinator.pollNotifications()
+
+    expect(teams.sendMessage).toHaveBeenCalledWith(
+      conversationId,
+      'Verified user Workflow due-diligence-package completed. Results are ready for the verified user.',
+      'root-post-1',
+      undefined,
+      {
+        teamsActions: [
+          { title: 'Download result', value: `workflow_result_run:${WORKFLOW_RUN_ID}` },
+        ],
+      }
+    )
+  })
+
+  it('omits Teams workflow result download buttons when completion has no downloadable items', async () => {
+    const teams = adapter('teams')
+    const conversationId = '19:channel-1@thread.tacv2;messageid=root-post-1'
+    const { coordinator } = coordinatorFor({
+      delivery: completedDelivery({
+        medium: 'teams',
+        providerUserId: 'teams-user-1',
+        providerWorkspaceId: 'tenant-1',
+        providerChannelId: '19:channel-1@thread.tacv2',
+        payload: {
+          ...completedDelivery().payload,
+          providerMedium: 'teams',
+          providerWorkspaceId: 'tenant-1',
+          providerChannelId: '19:channel-1@thread.tacv2',
+          providerConversationId: conversationId,
+          providerThreadId: 'root-post-1',
+          hasDownloadableItems: false,
+        },
+      }),
+      medium: 'teams',
+      adapter: teams,
+    })
+
+    await coordinator.pollNotifications()
+
+    expect(teams.sendMessage).toHaveBeenCalledWith(
+      conversationId,
+      'Verified user Workflow due-diligence-package completed.',
+      'root-post-1',
+      undefined,
+      undefined
     )
   })
 
@@ -516,7 +735,7 @@ describe('WorkflowApprovalCoordinator notification delivery', () => {
 
     const content = String(slack.sendMessage.mock.calls[0]?.[1] || '')
     expect(content).toContain(
-      'Verified user Workflow due-diligence-package completed. Results are ready.'
+      'Verified user Workflow due-diligence-package completed. Results are ready for the verified user.'
     )
     expect(content).not.toContain('<!channel>')
     expect(content).not.toContain('<@')

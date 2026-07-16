@@ -54,7 +54,7 @@ export interface CreateOrgApiKeyInput {
 }
 
 async function exchangeVoucher(admin: AdminUserRecord): Promise<string> {
-  const voucher = mintIdentityVoucher(admin)
+  const voucher = await mintIdentityVoucher(admin)
   const res = await fetch(`${API_BASE}/user/exchange`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

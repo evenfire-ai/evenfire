@@ -11,6 +11,7 @@ import { apiGet, apiSend } from './api'
 export function providerLabel(medium: string): string {
   if (medium === 'telegram') return 'Telegram'
   if (medium === 'slack') return 'Slack'
+  if (medium === 'teams') return 'Microsoft Teams'
   return medium.charAt(0).toUpperCase() + medium.slice(1)
 }
 
@@ -35,6 +36,8 @@ export function targetDetailLabels(target: ApprovalChannelTarget): string[] {
 }
 
 export function approvalAccountChannelName(account: WorkflowApprovalMediumAccount): string {
+  const displayName = account.displayName?.trim()
+  if (displayName) return displayName
   const targetName = account.targets?.find(target => target.channelName)?.channelName
   if (targetName) return targetName
   const refName = communicationChannelNameFromRef(account.communicationChannelRef)
@@ -53,7 +56,7 @@ function providerChannelTitle(account: WorkflowApprovalMediumAccount): string {
 function approvalAccountDisplayFallbackName(account: WorkflowApprovalMediumAccount): string {
   const channelTitle = providerChannelTitle(account)
   if (channelTitle) return channelTitle
-  if (account.medium === 'slack') {
+  if (account.medium === 'slack' || account.medium === 'teams') {
     const channel = account.providerChannelId?.trim()
     if (channel) return channel
   }
@@ -71,14 +74,20 @@ export function approvalAccountConversationTypeLabel(
   if (type === 'supergroup') return 'Supergroup'
   if (type === 'group') return 'Group'
   if (type === 'private') return account.medium === 'slack' ? 'Direct message' : 'Private chat'
+  if (type === 'personal') return 'Personal chat'
+  if (type === 'groupchat') return 'Group chat'
   if (type === 'channel') return 'Channel'
-  return account.medium === 'slack' ? 'Slack conversation' : 'Telegram chat'
+  if (account.medium === 'slack') return 'Slack conversation'
+  if (account.medium === 'teams') return 'Teams conversation'
+  return 'Telegram chat'
 }
 
 export function approvalAccountBotLabel(account: WorkflowApprovalMediumAccount): string {
   const bot = account.targets?.map(providerBotHandle).find(Boolean)
   if (bot) return bot
-  return account.medium === 'slack' ? 'Slack App unavailable' : 'Bot handle unavailable'
+  if (account.medium === 'slack') return 'Slack App unavailable'
+  if (account.medium === 'teams') return 'Teams bot unavailable'
+  return 'Bot handle unavailable'
 }
 
 export function approvalAccountDetailLabels(account: WorkflowApprovalMediumAccount): string[] {
@@ -128,6 +137,12 @@ export function telegramVerificationCommand(
 }
 
 export function slackVerificationCommand(
+  session: Pick<WorkflowApprovalMediumLinkSession, 'nonce'>
+): string | null {
+  return session.nonce ? `verify ${session.nonce}` : null
+}
+
+export function teamsVerificationCommand(
   session: Pick<WorkflowApprovalMediumLinkSession, 'nonce'>
 ): string | null {
   return session.nonce ? `verify ${session.nonce}` : null
@@ -203,4 +218,17 @@ export async function listWorkflowApprovalMediums(
 
 export async function disconnectWorkflowApprovalMedium(accountId: string): Promise<void> {
   await apiSend('DELETE', `/api/v1/workflow-approval-mediums/${encodeURIComponent(accountId)}`)
+}
+
+export async function updateWorkflowApprovalMediumDisplayName(
+  accountId: string,
+  displayName: string
+): Promise<WorkflowApprovalMediumAccount> {
+  const response = (await apiSend(
+    'PATCH',
+    `/api/v1/workflow-approval-mediums/${encodeURIComponent(accountId)}/display-name`,
+    { displayName }
+  )) as { account?: WorkflowApprovalMediumAccount }
+  if (!response.account) throw new Error('Updated workflow approval medium was not returned')
+  return response.account
 }

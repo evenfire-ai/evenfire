@@ -638,9 +638,7 @@ spec:
                       type: string
                       maxLength: 100
                       description: >-
-                        Standard cron expression (five fields), numeric only. E.g. "0 9 * * 1"
-                        for 09:00 every Monday. Named day/month values such as "MON" are
-                        REJECTED at admission: each field must be "*" or match [0-9,-*/].
+                        Standard cron expression (five fields). E.g. "0 9 * * MON".
                     timezone:
                       type: string
                       maxLength: 63

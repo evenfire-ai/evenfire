@@ -7,12 +7,12 @@ import { createExternalGfsRouter } from './gfs.js'
 import { createExternalInvitationsRouter } from './invitations.js'
 import { createExternalMembersRouter } from './members.js'
 import { createExternalNotificationsRouter } from './notifications.routes.js'
+import { createExternalOauthGrantsRouter } from './oauthGrants.js'
 import { createExternalSharedFilesystemsRouter } from './sharedFilesystems.js'
 import { createExternalTeamsRouter } from './teams.js'
 import { createExternalUsersRouter } from './users.js'
 import { createExternalWorkflowApprovalMediumsRouter } from './workflow-approval-mediums.routes.js'
 import { createExternalWorkflowsRouter } from './workflows/index.js'
-import { createExternalOauthGrantsRouter } from './oauthGrants.js'
 
 export function createExternalRouter(gateway: K8sGateway): Router {
   const router = Router()

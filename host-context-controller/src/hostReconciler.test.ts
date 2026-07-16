@@ -10,7 +10,8 @@ import {
   createMockNetworkingApi,
   createMockRbacApi,
 } from '../test/__fixtures__/testMocks'
-import { HostReconciler } from './hostReconciler'
+import { HostFleetReconcileError, HostReconciler } from './hostReconciler'
+import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
 import { HostCRD } from './types'
 
 vi.mock('./config', () => ({
@@ -29,6 +30,7 @@ vi.mock('./config', () => ({
     desktopPort: 3000,
     rpcProxyNamespace: 'rpc-proxy',
     channelsNamespace: 'channels',
+    hostK8sRequestTimeoutMs: 30_000,
     mcpHostGatewayUrl: 'http://mcp-host-gateway',
     hostResources: {
       requests: { memory: '128Mi', cpu: '50m' },
@@ -167,5 +169,362 @@ describe('HostReconciler secret fail-closed cleanup', () => {
     expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
     expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
     expect(coreApi.deleteNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
+  })
+})
+
+describe('HostReconciler Kubernetes request deadline wiring', () => {
+  it('wraps every default finite Kubernetes client, including lazy CustomObjects', async () => {
+    const rawClients = Array.from({ length: 5 }, () => ({
+      probe: vi.fn(async (_request: unknown, _options?: unknown) => ({})),
+    }))
+    const pendingClients = [...rawClients]
+    const kubeConfig = {
+      makeApiClient: vi.fn(() => pendingClients.shift()),
+    } as unknown as k8s.KubeConfig
+    const reconciler = new HostReconciler(kubeConfig)
+    const internals = reconciler as unknown as {
+      appsApi: { probe(request: unknown): Promise<unknown> }
+      coreApi: { probe(request: unknown): Promise<unknown> }
+      networkingApi: { probe(request: unknown): Promise<unknown> }
+      rbacApi: { probe(request: unknown): Promise<unknown> }
+      customApi: { probe(request: unknown): Promise<unknown> }
+    }
+
+    for (const client of [
+      internals.appsApi,
+      internals.coreApi,
+      internals.networkingApi,
+      internals.rbacApi,
+      internals.customApi,
+    ]) {
+      await client.probe({})
+    }
+
+    expect(kubeConfig.makeApiClient).toHaveBeenCalledTimes(5)
+    for (const rawClient of rawClients) {
+      expect(rawClient.probe).toHaveBeenCalledWith(
+        {},
+        expect.objectContaining({
+          middleware: [expect.objectContaining({ pre: expect.any(Function) })],
+          middlewareMergeStrategy: 'append',
+        })
+      )
+    }
+  })
+})
+
+describe('HostReconciler fleet failure isolation', () => {
+  it('continues reconciling later Hosts and runs orphan sweeps after one Host fails', async () => {
+    const reconciler = new HostReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(createMockAppsApi()),
+      coreApi: asCoreApi(createMockCoreApi()),
+      networkingApi: asNetworkingApi(createMockNetworkingApi()),
+      rbacApi: asRbacApi(createMockRbacApi()),
+    })
+    const internals = reconciler as unknown as {
+      listManagedHostDeployments(): Promise<k8s.V1Deployment[]>
+      sweepOrphanChannelReaderResources(hosts: string[]): Promise<void>
+      sweepOrphanHostNetworkPolicies(hosts: string[]): Promise<void>
+    }
+    const firstFailure = new Error('first Host failed')
+    const reconcile = vi.spyOn(reconciler, 'reconcile').mockImplementation(async host => {
+      if (host.name === 'host-a') throw firstFailure
+    })
+    vi.spyOn(internals, 'listManagedHostDeployments').mockResolvedValue([])
+    const channelSweep = vi
+      .spyOn(internals, 'sweepOrphanChannelReaderResources')
+      .mockResolvedValue()
+    const networkPolicySweep = vi
+      .spyOn(internals, 'sweepOrphanHostNetworkPolicies')
+      .mockResolvedValue()
+
+    let thrown: unknown
+    try {
+      await reconciler.fullReconcile([makeHost({ name: 'host-a' }), makeHost({ name: 'host-b' })])
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(reconcile.mock.calls.map(([host]) => host.name)).toEqual(['host-a', 'host-b'])
+    expect(channelSweep).toHaveBeenCalledWith(['host-a', 'host-b'])
+    expect(networkPolicySweep).toHaveBeenCalledWith(['host-a', 'host-b'])
+    expect(thrown).toBeInstanceOf(AggregateError)
+    expect(thrown).toBeInstanceOf(HostFleetReconcileError)
+    expect((thrown as HostFleetReconcileError).hostFailures).toEqual([firstFailure])
+    expect((thrown as HostFleetReconcileError).cleanupFailures).toEqual([])
+    expect((thrown as AggregateError).errors).toContain(firstFailure)
+  })
+
+  it('continues with Host B when Host A reaches its Kubernetes request deadline', async () => {
+    const reconciler = new HostReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(createMockAppsApi()),
+      coreApi: asCoreApi(createMockCoreApi()),
+      networkingApi: asNetworkingApi(createMockNetworkingApi()),
+      rbacApi: asRbacApi(createMockRbacApi()),
+    })
+    const internals = reconciler as unknown as {
+      listManagedHostDeployments(): Promise<k8s.V1Deployment[]>
+      sweepOrphanChannelReaderResources(hosts: string[]): Promise<void>
+      sweepOrphanHostNetworkPolicies(hosts: string[]): Promise<void>
+    }
+    const timeout = new HostK8sRequestTimeoutError('AppsV1Api.readNamespacedDeployment', 30_000)
+    const reconcile = vi.spyOn(reconciler, 'reconcile').mockImplementation(async host => {
+      if (host.name === 'host-a') throw timeout
+    })
+    vi.spyOn(internals, 'listManagedHostDeployments').mockResolvedValue([])
+    vi.spyOn(internals, 'sweepOrphanChannelReaderResources').mockResolvedValue()
+    vi.spyOn(internals, 'sweepOrphanHostNetworkPolicies').mockResolvedValue()
+
+    let thrown: unknown
+    try {
+      await reconciler.fullReconcile([makeHost({ name: 'host-a' }), makeHost({ name: 'host-b' })])
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(reconcile.mock.calls.map(([host]) => host.name)).toEqual(['host-a', 'host-b'])
+    expect(thrown).toBeInstanceOf(HostFleetReconcileError)
+    expect((thrown as HostFleetReconcileError).hostFailures).toEqual([timeout])
+  })
+
+  it('reports inventory and both sweep failures after every phase has run', async () => {
+    const reconciler = new HostReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(createMockAppsApi()),
+      coreApi: asCoreApi(createMockCoreApi()),
+      networkingApi: asNetworkingApi(createMockNetworkingApi()),
+      rbacApi: asRbacApi(createMockRbacApi()),
+    })
+    const internals = reconciler as unknown as {
+      listManagedHostDeployments(): Promise<k8s.V1Deployment[]>
+      sweepOrphanChannelReaderResources(hosts: string[]): Promise<void>
+      sweepOrphanHostNetworkPolicies(hosts: string[]): Promise<void>
+    }
+    const inventoryFailure = new Error('Host Deployment inventory failed')
+    const channelSweepFailure = new Error('channel-reader sweep failed')
+    const networkPolicySweepFailure = new Error('NetworkPolicy sweep failed')
+    vi.spyOn(reconciler, 'reconcile').mockResolvedValue()
+    vi.spyOn(internals, 'listManagedHostDeployments').mockRejectedValue(inventoryFailure)
+    const channelSweep = vi
+      .spyOn(internals, 'sweepOrphanChannelReaderResources')
+      .mockRejectedValue(channelSweepFailure)
+    const networkPolicySweep = vi
+      .spyOn(internals, 'sweepOrphanHostNetworkPolicies')
+      .mockRejectedValue(networkPolicySweepFailure)
+
+    let thrown: unknown
+    try {
+      await reconciler.fullReconcile([makeHost({ name: 'host-a' })])
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(channelSweep).toHaveBeenCalledWith(['host-a'])
+    expect(networkPolicySweep).toHaveBeenCalledWith(['host-a'])
+    expect(thrown).toBeInstanceOf(AggregateError)
+    expect((thrown as HostFleetReconcileError).hostFailures).toEqual([])
+    expect((thrown as HostFleetReconcileError).cleanupFailures).toEqual([
+      inventoryFailure,
+      channelSweepFailure,
+      networkPolicySweepFailure,
+    ])
+    expect((thrown as AggregateError).errors).toEqual([
+      inventoryFailure,
+      channelSweepFailure,
+      networkPolicySweepFailure,
+    ])
+  })
+
+  it('preserves simultaneous Host and cleanup failures after every phase has run', async () => {
+    const reconciler = new HostReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(createMockAppsApi()),
+      coreApi: asCoreApi(createMockCoreApi()),
+      networkingApi: asNetworkingApi(createMockNetworkingApi()),
+      rbacApi: asRbacApi(createMockRbacApi()),
+    })
+    const internals = reconciler as unknown as {
+      listManagedHostDeployments(): Promise<k8s.V1Deployment[]>
+      sweepOrphanChannelReaderResources(hosts: string[]): Promise<void>
+      sweepOrphanHostNetworkPolicies(hosts: string[]): Promise<void>
+    }
+    const hostFailure = new Error('Host deployment failed')
+    const cleanupFailure = new Error('Host inventory failed')
+    const reconcile = vi.spyOn(reconciler, 'reconcile').mockImplementation(async host => {
+      if (host.name === 'host-a') throw hostFailure
+    })
+    vi.spyOn(internals, 'listManagedHostDeployments').mockRejectedValue(cleanupFailure)
+    const channelSweep = vi
+      .spyOn(internals, 'sweepOrphanChannelReaderResources')
+      .mockResolvedValue()
+    const networkPolicySweep = vi
+      .spyOn(internals, 'sweepOrphanHostNetworkPolicies')
+      .mockResolvedValue()
+
+    let thrown: unknown
+    try {
+      await reconciler.fullReconcile([makeHost({ name: 'host-a' }), makeHost({ name: 'host-b' })])
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(reconcile.mock.calls.map(([host]) => host.name)).toEqual(['host-a', 'host-b'])
+    expect(channelSweep).toHaveBeenCalledWith(['host-a', 'host-b'])
+    expect(networkPolicySweep).toHaveBeenCalledWith(['host-a', 'host-b'])
+    expect(thrown).toBeInstanceOf(HostFleetReconcileError)
+    expect((thrown as HostFleetReconcileError).hostFailures).toEqual([hostFailure])
+    expect((thrown as HostFleetReconcileError).cleanupFailures).toEqual([cleanupFailure])
+    expect((thrown as AggregateError).errors).toEqual([hostFailure, cleanupFailure])
+  })
+
+  it('continues orphan cleanup and preserves nested sweep failures in the fleet error', async () => {
+    const reconciler = new HostReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(createMockAppsApi()),
+      coreApi: asCoreApi(createMockCoreApi()),
+      networkingApi: asNetworkingApi(createMockNetworkingApi()),
+      rbacApi: asRbacApi(createMockRbacApi()),
+    })
+    const internals = reconciler as unknown as {
+      listManagedHostDeployments(): Promise<k8s.V1Deployment[]>
+      deleteHostRuntimeResources(name: string, namespace: string): Promise<void>
+      sweepOrphanChannelReaderResources(hosts: string[]): Promise<void>
+      sweepOrphanHostNetworkPolicies(hosts: string[]): Promise<void>
+    }
+    const firstOrphanFailure = new Error('first orphan cleanup failed')
+    const channelListFailure = new Error('channel-reader list failed')
+    const channelDeleteFailure = new Error('channel-reader delete failed')
+    const networkListFailure = new Error('NetworkPolicy list failed')
+    const channelSweepFailure = new AggregateError(
+      [channelListFailure, channelDeleteFailure],
+      'channel-reader sweep failed'
+    )
+    const networkSweepFailure = new AggregateError(
+      [networkListFailure],
+      'NetworkPolicy sweep failed'
+    )
+    vi.spyOn(internals, 'listManagedHostDeployments').mockResolvedValue([
+      { metadata: { name: 'orphan-a', namespace: 'mcp-host' } } as k8s.V1Deployment,
+      { metadata: { name: 'orphan-b', namespace: 'mcp-host' } } as k8s.V1Deployment,
+    ])
+    const deleteRuntime = vi
+      .spyOn(internals, 'deleteHostRuntimeResources')
+      .mockRejectedValueOnce(firstOrphanFailure)
+      .mockResolvedValueOnce()
+    const channelSweep = vi
+      .spyOn(internals, 'sweepOrphanChannelReaderResources')
+      .mockRejectedValue(channelSweepFailure)
+    const networkPolicySweep = vi
+      .spyOn(internals, 'sweepOrphanHostNetworkPolicies')
+      .mockRejectedValue(networkSweepFailure)
+
+    let thrown: unknown
+    try {
+      await reconciler.fullReconcile([])
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(deleteRuntime.mock.calls.map(([name]) => name)).toEqual(['orphan-a', 'orphan-b'])
+    expect(channelSweep).toHaveBeenCalledWith([])
+    expect(networkPolicySweep).toHaveBeenCalledWith([])
+    expect(thrown).toBeInstanceOf(AggregateError)
+    expect((thrown as AggregateError).errors).toEqual([
+      firstOrphanFailure,
+      channelSweepFailure,
+      networkSweepFailure,
+    ])
+    expect(channelSweepFailure.errors).toEqual([channelListFailure, channelDeleteFailure])
+    expect(networkSweepFailure.errors).toEqual([networkListFailure])
+  })
+
+  it('continues every channel-reader resource sweep and aggregates non-404 failures', async () => {
+    const deploymentListFailure = new Error('Deployment list failed')
+    const serviceDeleteFailure = new Error('Service delete failed')
+    const secretListFailure = new Error('Secret list failed')
+    const appsApi = createMockAppsApi()
+    appsApi.listNamespacedDeployment.mockRejectedValue(deploymentListFailure)
+    const coreApi = Object.assign(createMockCoreApi(), {
+      listNamespacedService: vi.fn().mockResolvedValue({
+        items: [
+          {
+            metadata: {
+              name: 'channel-reader-orphan',
+              labels: {
+                app: 'channel-reader',
+                'clerum.io/managed-by': 'host-context-controller',
+                'clerum.io/host': 'orphan',
+              },
+            },
+          },
+        ],
+      }),
+    })
+    coreApi.deleteNamespacedService.mockRejectedValue(serviceDeleteFailure)
+    coreApi.listNamespacedSecret.mockRejectedValue(secretListFailure)
+    const reconciler = new HostReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(appsApi),
+      coreApi: asCoreApi(coreApi),
+      networkingApi: asNetworkingApi(createMockNetworkingApi()),
+      rbacApi: asRbacApi(createMockRbacApi()),
+    })
+    const internals = reconciler as unknown as {
+      sweepOrphanChannelReaderResources(hosts: string[]): Promise<void>
+    }
+
+    let thrown: unknown
+    try {
+      await internals.sweepOrphanChannelReaderResources([])
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(coreApi.listNamespacedService).toHaveBeenCalled()
+    expect(coreApi.deleteNamespacedService).toHaveBeenCalled()
+    expect(coreApi.listNamespacedSecret).toHaveBeenCalled()
+    expect(thrown).toBeInstanceOf(AggregateError)
+    expect((thrown as AggregateError).errors).toEqual([
+      deploymentListFailure,
+      serviceDeleteFailure,
+      secretListFailure,
+    ])
+  })
+
+  it('continues NetworkPolicy namespaces and aggregates list and delete failures', async () => {
+    const listFailure = new Error('channels NetworkPolicy list failed')
+    const deleteFailure = new Error('mcp-host NetworkPolicy delete failed')
+    const networkingApi = createMockNetworkingApi()
+    networkingApi.listNamespacedNetworkPolicy
+      .mockRejectedValueOnce(listFailure)
+      .mockResolvedValueOnce({
+        items: [
+          {
+            metadata: {
+              name: 'mcp-host-orphan-egress',
+              labels: { 'clerum.io/host': 'orphan' },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ items: [] })
+    networkingApi.deleteNamespacedNetworkPolicy.mockRejectedValue(deleteFailure)
+    const reconciler = new HostReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(createMockAppsApi()),
+      coreApi: asCoreApi(createMockCoreApi()),
+      networkingApi: asNetworkingApi(networkingApi),
+      rbacApi: asRbacApi(createMockRbacApi()),
+    })
+    const internals = reconciler as unknown as {
+      sweepOrphanHostNetworkPolicies(hosts: string[]): Promise<void>
+    }
+
+    let thrown: unknown
+    try {
+      await internals.sweepOrphanHostNetworkPolicies([])
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(networkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(3)
+    expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(thrown).toBeInstanceOf(AggregateError)
+    expect((thrown as AggregateError).errors).toEqual([listFailure, deleteFailure])
   })
 })

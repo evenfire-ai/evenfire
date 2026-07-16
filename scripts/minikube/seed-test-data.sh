@@ -30,4 +30,10 @@ esac
 
 export ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT ALLOWED_CONTEXTS
 
-exec bash "${REPO_ROOT}/scripts/e2e/seed-e2e-data.sh" "$@"
+bash "${REPO_ROOT}/scripts/e2e/seed-e2e-data.sh" "$@"
+
+# Stateless-agents lane: seed the dedicated stateless Host (chatllm-stateless)
+# and associate it to the E2E user. Runs AFTER the base seed because the base
+# seed's PUT /admin/users/:id/agents is a full-set replace; the stateless seed
+# re-adds itself as a union. Idempotent. Never touches the chatllm seeding.
+bash "${REPO_ROOT}/scripts/e2e/seed-stateless-host.sh"

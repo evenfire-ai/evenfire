@@ -9,7 +9,7 @@ spec:
   workloads:
     - id: file-browser
       type: deployment
-      image: us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/file-browser-mcp:latest
+      image: us-central1-docker.pkg.dev/your-gcp-project/clerum/file-browser-mcp:latest
       port: 3000
       transport:
         type: streamableHttp

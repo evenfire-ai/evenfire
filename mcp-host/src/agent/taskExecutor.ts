@@ -97,6 +97,7 @@ import {
   looksLikeWorkflowTriggerSuccess,
   workflowAccessDeniedResponseForMessage,
 } from './providerWorkflowAccessGate'
+import { TurnTimingRecorder } from './turnTiming'
 import type { AgentConfig } from './types'
 
 export type ExecutorState = 'processing' | 'waiting_approval' | 'completed' | 'failed'
@@ -202,6 +203,12 @@ export class TaskExecutor {
   private workflowAccessDeniedResponse: string | null = null
   private workflowAccessDeniedReason: ProviderWorkflowAccessDenialReason | null = null
   private currentTurnToolNames = new Set<string>()
+  /**
+   * Latency attribution (stateless-agents): per-turn phase timing. Created at
+   * run() start; emits one [TurnTiming] info line when the task completes.
+   * Purely observational — never affects control flow (fail-safe recorder).
+   */
+  private turnTiming: TurnTimingRecorder | null = null
 
   // Completion tracking for graceful shutdown
   private resolveCompletion: (() => void) | null = null
@@ -278,6 +285,7 @@ export class TaskExecutor {
 
     try {
       this.state = 'processing'
+      this.turnTiming = new TurnTimingRecorder(this.task.createdAt)
 
       // 1. Resolve session key, get/create conversation
       // INVARIANT: for source==='cron' this MUST produce the same session key that
@@ -296,6 +304,7 @@ export class TaskExecutor {
       )
       console.log(`[TaskExecutor:${this.taskId}] Session key: ${sessionKey}`)
 
+      const sessionLoadStart = Date.now()
       this.conversation = await this.deps.conversationManager.getOrCreate(sessionKey, {
         userId: cronSession?.userId ?? msg?.sender,
         channelType: cronSession?.channelType ?? msg?.channelType,
@@ -304,7 +313,12 @@ export class TaskExecutor {
         source: cronSession?.channelType ?? msg?.channelType,
       })
       const userInput = msg?.content || this.task.conversationHistory[0]?.content || ''
-      this.deps.conversationManager.startTurn(this.conversation, userInput, this.taskId)
+      // D3 — awaited durability barrier: the user message must be durable
+      // before the LLM loop runs (it is the replay anchor after a crash). A
+      // rejected write rolls back the turn inside startTurn and lands in
+      // run()'s catch as a clean task failure.
+      await this.deps.conversationManager.startTurn(this.conversation, userInput, this.taskId)
+      this.turnTiming?.addSessionLoadMs(Date.now() - sessionLoadStart)
 
       // P2 token budgets (§5.2) — capture the per-task brake baseline NOW, before
       // this task consumes anything. The conversation's lifetime counters are
@@ -334,6 +348,7 @@ export class TaskExecutor {
       ) {
         this.state = 'completed'
         console.log(`[TaskExecutor:${this.taskId}] Completed`)
+        this.turnTiming?.emit(this.taskId)
         this.deps.onComplete(this.task)
         this.resolveCompletion?.()
       } else if (this.abortController.signal.aborted) {
@@ -436,7 +451,7 @@ export class TaskExecutor {
             `[TaskExecutor:${this.taskId}] approval_expired before tool execution:`,
             error.payload
           )
-          this.deps.conversationManager.failTurn(this.conversation!)
+          await this.deps.conversationManager.failTurn(this.conversation!)
           this.state = 'failed'
           this.deps.onFail(this.task, {
             code: 'approval_expired',
@@ -553,6 +568,7 @@ export class TaskExecutor {
         !this.abortController.signal.aborted
       ) {
         this.state = 'completed'
+        this.turnTiming?.emit(this.taskId)
         this.deps.onComplete(this.task)
         this.resolveCompletion?.()
       } else if (this.abortController.signal.aborted) {
@@ -673,6 +689,7 @@ export class TaskExecutor {
   }
 
   private async runAgentLoop(): Promise<LoopResult> {
+    const historyStart = Date.now()
     let messages = this.deps.conversationManager.buildMessageHistory(this.conversation!)
     messages = compactConversation(messages, undefined, undefined, this.getOrCreateTokenCounter(), {
       enabled: appConfig.compactionPrePruneEnabled,
@@ -686,6 +703,9 @@ export class TaskExecutor {
         stripMediaEnabled: appConfig.compactionPrePruneStripMedia,
       },
     })
+    // History rehydration + pre-prune compaction are part of the session-load
+    // cost the user pays before the first model byte.
+    this.turnTiming?.addSessionLoadMs(Date.now() - historyStart)
     const sourceMessageAttachments = this.buildSourceMessageContentParts()
     if (sourceMessageAttachments.length > 0) {
       const lastMessage = messages[messages.length - 1]
@@ -704,7 +724,18 @@ export class TaskExecutor {
     if (appConfig.promptCacheEnabled) {
       this.prependTurnContextBlock(messages)
     }
+    const promptAssemblyStart = Date.now()
     const loopConfig = await this.buildLoopConfig()
+    if (this.turnTiming) {
+      // buildLoopConfig assembles the tool registry (MCP schemas) and the
+      // system identity (workspace files / tiered prompt parts).
+      this.turnTiming.addPromptAssemblyMs(Date.now() - promptAssemblyStart)
+      let inputChars = 0
+      for (const m of messages) {
+        if (typeof m.content === 'string') inputChars += m.content.length
+      }
+      this.turnTiming.setInputCharsApprox(inputChars)
+    }
     return runToolUseLoop(loopConfig, messages)
   }
 
@@ -765,7 +796,17 @@ export class TaskExecutor {
             timestamp: new Date(),
           })
         }
-        this.deps.conversationManager.completeTurn(this.conversation!, content)
+        // D3 — awaited durability barrier: the turn must be durable BEFORE the
+        // client ACK (responseCallback). On a rejected write, follow the
+        // need_approval pattern below: fail the turn and rethrow so run()'s
+        // catch surfaces a clean failure — the client never gets an ACK for a
+        // turn that was not persisted.
+        try {
+          await this.deps.conversationManager.completeTurn(this.conversation!, content)
+        } catch (err) {
+          await this.deps.conversationManager.failTurn(this.conversation!)
+          throw err
+        }
         if (this.task.responseCallback) {
           await this.task.responseCallback({
             response: content,
@@ -790,7 +831,7 @@ export class TaskExecutor {
             result.approval
           )
         } catch (err) {
-          this.deps.conversationManager.failTurn(this.conversation!)
+          await this.deps.conversationManager.failTurn(this.conversation!)
           throw err
         }
         const reporter = progressReporterRegistry.get(this.taskId)
@@ -821,7 +862,7 @@ export class TaskExecutor {
       }
 
       case 'error': {
-        this.deps.conversationManager.failTurn(this.conversation!)
+        await this.deps.conversationManager.failTurn(this.conversation!)
         throw result.error
       }
 
@@ -848,7 +889,13 @@ export class TaskExecutor {
         timestamp: new Date(),
       })
     }
-    this.deps.conversationManager.completeTurn(this.conversation!, content)
+    // D3 — same barrier-before-ACK contract as handleLoopResult 'response'.
+    try {
+      await this.deps.conversationManager.completeTurn(this.conversation!, content)
+    } catch (err) {
+      await this.deps.conversationManager.failTurn(this.conversation!)
+      throw err
+    }
     this.task.result = {
       response: content,
       model: this.deps.modelName,
@@ -1034,6 +1081,7 @@ export class TaskExecutor {
           const toolName = typeof event.data.toolName === 'string' ? event.data.toolName.trim() : ''
           if (toolName) this.currentTurnToolNames.add(toolName)
         }
+        this.turnTiming?.recordEvent(event.type, event.data)
         this.deps.coreEvents.emit(event)
       },
       on: this.deps.coreEvents.on.bind(this.deps.coreEvents),
@@ -1057,7 +1105,9 @@ export class TaskExecutor {
     if (
       !context ||
       !context.targetUserId ||
-      (context.originChannelType !== 'telegram' && context.originChannelType !== 'slack')
+      (context.originChannelType !== 'telegram' &&
+        context.originChannelType !== 'slack' &&
+        context.originChannelType !== 'teams')
     ) {
       if (
         this.workflowAccessDeniedResponse &&
@@ -1333,7 +1383,10 @@ export class TaskExecutor {
       this.deps.mcpManager ?? undefined,
       // F3/F4 (dynamic-tool-loading): static feature flag. Gates registration of
       // the 3 bridge tools so a default-OFF host stays byte-identical to today.
-      appConfig.dynamicToolsEnabled
+      appConfig.dynamicToolsEnabled,
+      // §13 (stateless agents): the active provider's credential slot is the
+      // only one that survives into shell_exec's child env.
+      this.deps.llmProvider.getProviderType()
     )
     await registerDesktopTools(nativeRegistry)
     const mcpRegistry = this.deps.mcpManager
@@ -1344,16 +1397,40 @@ export class TaskExecutor {
       : nativeRegistry
 
     // Cron tasks run autonomously by design: the human trust decision happens at
-    // job-creation time (cron_manage itself is approval-gated in interactive tasks).
-    // At fire time there is no user to approve, so the runtime approval gate does
-    // not apply. Containment is infrastructural (Context allowlist, NetworkPolicy,
-    // tool-call and duration limits). See issue #529.
-    const approvalApplies = appConfig.enableApproval && this.task.source !== 'cron'
+    // job-creation time, so the runtime approval gate does NOT apply per-tool at
+    // fire time (there is no user to approve). Containment is infrastructural
+    // (Context allowlist, NetworkPolicy, tool-call and duration limits). See
+    // issue #529.
+    //
+    // NARROW EXCEPTION (cron×stateless self-propagation containment): a
+    // cron-sourced task may still call cron_manage. On a stateless host,
+    // cron_manage create/enable each pin the pod awake (activeCronSchedules) and
+    // let an already-approved schedule autonomously spawn/enable MORE schedules
+    // — a prompt-injection self-propagation + cost lever. So on a stateless host
+    // we DO wrap a cron-sourced task with the approval chain, but in
+    // `cronManageGateOnly` mode: ONLY cron_manage create/enable can suspend;
+    // every other tool call (incl. cron_manage list/get/delete/disable/trigger
+    // and all non-cron_manage work) keeps #529's autonomy and proceeds. The
+    // resulting suspension has no human to answer it in an autonomous run — that
+    // is the desired containment: the suspicious create/enable is BLOCKED, not
+    // auto-approved.
+    const interactiveApprovalApplies = appConfig.enableApproval && this.task.source !== 'cron'
+    const cronManageGateApplies =
+      appConfig.enableApproval && this.task.source === 'cron' && appConfig.statelessLifecycle
+    const approvalApplies = interactiveApprovalApplies || cronManageGateApplies
     const baseController = approvalApplies
       ? new UnifiedApprovalGateController(
           compositeRegistry,
           this.deps.approvalConfig,
-          nativeRegistry
+          nativeRegistry,
+          // Cron×stateless: forces HITL approval for cron_manage create/enable on
+          // stateless hosts regardless of the per-tool approval override.
+          // `cronManageGateOnly` narrows that to be the ONLY gate for a
+          // cron-sourced task, preserving #529 autonomy for every other tool.
+          {
+            statelessLifecycle: appConfig.statelessLifecycle,
+            cronManageGateOnly: cronManageGateApplies,
+          }
         )
       : new DefaultLoopController()
     const innerController = approvalApplies
@@ -1433,7 +1510,11 @@ export class TaskExecutor {
       this.workflowCallerContextOverride = undefined
       return undefined
     }
-    if (message.channelType !== 'telegram' && message.channelType !== 'slack') {
+    if (
+      message.channelType !== 'telegram' &&
+      message.channelType !== 'slack' &&
+      message.channelType !== 'teams'
+    ) {
       this.workflowAccessDeniedResponse = null
       this.workflowAccessDeniedReason = null
       this.workflowCallerContextOverride = null

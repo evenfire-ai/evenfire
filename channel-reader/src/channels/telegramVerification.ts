@@ -28,6 +28,10 @@ export type TelegramVerificationClient = {
       providerBotUsername?: string | null
     }>
   }): Promise<{ ok: true; accountId: string; userEmail?: string } | { ok: false; error: string }>
+  downloadWorkflowResultByRun?: (
+    message: import('../types').Message,
+    workflowRunId: string
+  ) => Promise<import('../rpcClient').MessageResponse>
   downloadWorkflowResult?: (
     message: import('../types').Message,
     workflowName: string

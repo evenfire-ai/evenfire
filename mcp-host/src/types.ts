@@ -32,7 +32,7 @@ export interface HeartbeatConfig {
   enabled: boolean
   interval?: string // cron expression, e.g. "*/30 * * * *"
   maxFailures?: number
-  notifyChannel?: 'telegram' | 'email' | 'slack'
+  notifyChannel?: 'telegram' | 'email' | 'slack' | 'teams'
   notifyChannelId?: string
   notifyUserId?: string
 }

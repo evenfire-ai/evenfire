@@ -22,13 +22,14 @@ export type CredentialField = {
  * Free-form draft buffer. Keys match the Secret data keys accepted by the
  * per-CC credentials rotation route. Any subset of keys is valid — empty /
  * unset fields are filtered out before the PUT body is built so a partial
- * update (e.g. rotating just the Telegram token) does not clobber Slack
- * credentials.
+ * update (e.g. rotating just the Telegram token) does not clobber Slack or
+ * Teams credentials.
  */
 export type CredentialDraft = {
   'telegram-bot-token'?: string
   'slack-signing-secret'?: string
   'slack-bot-token'?: string
+  'teams-app-password'?: string
   'email-username'?: string
   'email-password'?: string
 }

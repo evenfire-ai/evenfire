@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Provision the least-privilege gfs_controller Postgres login for gfsc.
 #
-# Migration 0043 creates the `gfs_controller` role NOLOGIN (SELECT on
+# Migration 0048 (gfs permission store) creates the `gfs_controller` role NOLOGIN (SELECT on
 # resource/grant/share, INSERT-only on gfs_audit). This script completes the
 # deliberate two-step security model: it grants LOGIN + a password and writes
 # the real DSN into the `gfs-controller-db` Secret (shipped empty), then rolls
@@ -29,25 +29,34 @@ GFS_DEPLOY_SELECTOR="${GFS_DEPLOY_SELECTOR:-clerum.io/managed-by=host-context-co
 
 kc() { kubectl --context="$CONTEXT" "$@"; }
 log() { printf '[provision-gfs-db] %s\n' "$*"; }
+# One ATOMIC merge-patch carrying the DSN and the human-readable rotation
+# annotation together — no partial state where the credential rotated but the
+# breadcrumb (or vice versa) did not. verify-gfs.sh proves pod freshness from
+# the Secret's server-side managedFields timestamps, not from this annotation.
 write_secret_patch() {
-  python3 -c 'import json, sys; print(json.dumps({"stringData": {"connection-string": sys.stdin.read()}}))'
+  python3 -c 'import json, sys, datetime
+stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+print(json.dumps({
+    "stringData": {"connection-string": sys.stdin.read()},
+    "metadata": {"annotations": {"clerum.io/gfs-dsn-rotated-at": stamp}},
+}))'
 }
 
 # A URL-safe password (hex — no characters that need DSN escaping).
 ROLE_SECRET="$(openssl rand -hex 24)"
 
 log "Granting LOGIN to gfs_controller (rotating password) in ${PG_NS}/${PG_DEPLOY} db=${PG_DB}"
-# ALTER ROLE is idempotent; the role must already exist (migration 0043). If it
+# ALTER ROLE is idempotent; the role must already exist (migration 0048). If it
 # does not, fail loud — gfsc cannot work without the permission store role.
 kc -n "$PG_NS" exec -i "$PG_DEPLOY" -- psql -v ON_ERROR_STOP=1 -U "$PG_SUPERUSER" -d "$PG_DB" -f - <<SQL
-DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='gfs_controller') THEN RAISE EXCEPTION 'gfs_controller role missing — run control-api migrations (0043) first'; END IF; END \$\$;
+DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='gfs_controller') THEN RAISE EXCEPTION 'gfs_controller role missing — run control-api migrations (0048) first'; END IF; END \$\$;
 \set gfs_role_secret $ROLE_SECRET
 SELECT format('ALTER ROLE gfs_controller LOGIN %s %L', 'PASS' || 'WORD', :'gfs_role_secret') \gexec
 SQL
 
 DSN="postgresql://gfs_controller:${ROLE_SECRET}@${PG_HOST}:${PG_PORT}/${PG_DB}"
 
-log "Writing DSN into ${GFS_NS}/${GFS_DB_SECRET}.connection-string"
+log "Writing DSN into ${GFS_NS}/${GFS_DB_SECRET}.connection-string (with rotation annotation, atomically)"
 printf '%s' "$DSN" | write_secret_patch | kc -n "$GFS_NS" patch secret "$GFS_DB_SECRET" --type=merge --patch-file=/dev/stdin >/dev/null
 
 if kc -n "$GFS_NS" get deployment -l "$GFS_DEPLOY_SELECTOR" -o name 2>/dev/null | grep -q .; then

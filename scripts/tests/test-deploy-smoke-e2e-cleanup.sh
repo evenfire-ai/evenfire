@@ -164,8 +164,8 @@ assert_deploy_dev_explicitly_allows_dev_context_only_for_smoke() {
     in_block { print }
   ')"
 
-  if [[ "$smoke_block" == *"KUBECONTEXT: gke_${GCP_PROJECT}_us-central1-a_example-dev"* ]] &&
-     [[ "$smoke_block" == *"E2E_ALLOWED_CONTEXTS: minikube,clerum-test,gke_${GCP_PROJECT}_us-central1-a_example-dev"* ]] &&
+  if [[ "$smoke_block" == *"KUBECONTEXT: gke_your-gcp-project_us-central1-a_example-dev"* ]] &&
+     [[ "$smoke_block" == *"E2E_ALLOWED_CONTEXTS: minikube,clerum-test,gke_your-gcp-project_us-central1-a_example-dev"* ]] &&
      [[ "$smoke_block" == *"bash scripts/e2e/e2e-snippet-runtime-smoke.sh"* ]] &&
      [[ "$workflow" != *"E2E_ALLOWED_CONTEXTS: *"* ]]; then
     pass "deploy-dev explicitly scopes smoke E2E cleanup to the example-dev context and includes Layer 3A snippet smoke"

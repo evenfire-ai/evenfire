@@ -157,7 +157,7 @@ describe('BUG-8: cancel releases conversation lock', () => {
     expect(conv.pending_approval).toBeUndefined()
 
     // Subsequent startTurn must NOT throw — proves the lock is released
-    expect(() => cm.startTurn(conv, 'post-cancel message', 'test-task')).not.toThrow()
+    await expect(cm.startTurn(conv, 'post-cancel message', 'test-task')).resolves.toBeDefined()
   })
 
   // ── Test 2: waiting_approval branch ────────────────────────────────────────
@@ -180,7 +180,7 @@ describe('BUG-8: cancel releases conversation lock', () => {
     const conv = await cm.getOrCreate(sessionKey)
 
     // Drive to AwaitingApproval (executor suspended for approval)
-    cm.startTurn(conv, 'initial message', 'test-task')
+    await cm.startTurn(conv, 'initial message', 'test-task')
     await cm.suspendForApproval(conv, {
       request_id: 'r-bug8',
       tool_name: 'some__tool',
@@ -200,7 +200,7 @@ describe('BUG-8: cancel releases conversation lock', () => {
     expect(conv.state).toBe(ConversationState.Idle)
 
     // Subsequent startTurn must NOT throw — proves the lock is released
-    expect(() => cm.startTurn(conv, 'post-cancel message', 'test-task')).not.toThrow()
+    await expect(cm.startTurn(conv, 'post-cancel message', 'test-task')).resolves.toBeDefined()
     expect(conv.state).toBe(ConversationState.Processing)
   })
 
@@ -221,10 +221,10 @@ describe('BUG-9 integration: buildMessageHistory clean after cancel + next turn'
 
     const sessionKey = 'bug9-session-processing'
     const conv = await cm.getOrCreate(sessionKey)
-    cm.startTurn(conv, 'essay please', 'test-task')
+    await cm.startTurn(conv, 'essay please', 'test-task')
     // Simulate the fix: cancelled case calls cancelTurn (not failTurn)
     cm.cancelTurn(conv)
-    cm.startTurn(conv, '12 - 32', 'test-task')
+    await cm.startTurn(conv, '12 - 32', 'test-task')
 
     const history = cm.buildMessageHistory(conv)
     expect(history.map(m => m.role)).toEqual(['user', 'assistant', 'user'])

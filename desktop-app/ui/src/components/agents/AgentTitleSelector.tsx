@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button, MenuItem } from '@components/Common'
-import { IconAgents } from '@components/SidebarNav/icons'
 import { useClickOutside } from '@hooks/useClickOutside'
 import type { AgentWorkspaceRoute } from '../../uiTypes'
 import { AGENT_ROUTE_LABELS, AGENT_ROUTE_OPTIONS } from './agentRoutes'
@@ -76,9 +75,6 @@ export function AgentTitleSelector({
           setOpenAgent(null)
         }}
       >
-        <span className="agent-title-selector-trigger-icon" aria-hidden="true">
-          <IconAgents />
-        </span>
         <span className="agent-title-selector-trigger-label">{selectedLabel}</span>
         <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
           <path d={open ? 'm4.5 10 3.5-3.5L11.5 10' : 'm4.5 6 3.5 3.5L11.5 6'} />

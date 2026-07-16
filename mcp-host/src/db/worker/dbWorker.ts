@@ -26,6 +26,8 @@ interface WorkerData {
   dbPath: string
   checkpointEveryWrites?: number
   heartbeatMs?: number
+  /** D3 — durability barrier: apply `PRAGMA synchronous = FULL` (see pragmas.ts). */
+  barrierMode?: boolean
 }
 
 function fileSize(p: string): number {
@@ -50,7 +52,7 @@ async function main(): Promise<void> {
   fs.mkdirSync(dir, { recursive: true })
 
   const db = new Database(data.dbPath)
-  const pragmaResult = applyPragmas(db)
+  const pragmaResult = applyPragmas(db, { barrierMode: data.barrierMode === true })
   if (!pragmaResult.walAvailable) {
     parentPort.postMessage({
       id: '__warn__',

@@ -11,7 +11,7 @@ Prefer, in order:
 
 1. **GitHub Private Vulnerability Reporting** on this repository (Security →
    Advisories / “Report a vulnerability”), if enabled for the repo.
-2. **Email:** `security@evenfire.ai`  
+2. **Email:** `security@example.com`  
    Include a clear description, impact, affected components/versions, and
    reproduction steps when possible. Encrypt sensitive attachments if you can.
 
@@ -19,7 +19,7 @@ We aim to **acknowledge within 3 business days** and to keep you informed of
 the fix timeline. Please give us a reasonable window before any public
 disclosure.
 
-If `security@evenfire.ai` is unreachable, reach the core maintainers / GitHub
+If `security@example.com` is unreachable, reach the core maintainers / GitHub
 org owners via a private channel (see [GOVERNANCE.md](GOVERNANCE.md)).
 
 ## Supported versions

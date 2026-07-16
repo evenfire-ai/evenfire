@@ -1,6 +1,17 @@
 import { spawn } from 'child_process'
+import { ALL_PROVIDERS, LlmProvider, PROVIDERS } from '../../llm/registryCore'
 import { ExecutionContext, Tool } from '../interfaces'
 import { ToolOutput } from '../types'
+
+// D3 (stateless-agents) §1.2 — lexical defense-in-depth: reject commands that
+// reference the session state database (state.db + WAL laterals) or the
+// reserved `.clerum-state/` runtime directory BEFORE spawning. Word-boundary
+// on the left so "mystate.db" doesn't trip; the right side is anchored by the
+// literal suffixes. Case-sensitive, matching the exact on-disk names (same
+// stance as the identity-file guard). This is a loud tool-level gate, not a
+// sandbox: POSIX permissions / a read-only mount remain the OS backstop.
+const STATE_DB_COMMAND_PATTERN =
+  /(^|[^A-Za-z0-9_.-])state\.db(-wal|-shm)?([^A-Za-z0-9_]|$)|\.clerum-state(\/|[^A-Za-z0-9_.-]|$)/
 
 /**
  * ShellTool — runs an arbitrary shell command in the agent's workspace.
@@ -30,7 +41,12 @@ export class ShellTool implements Tool {
     private readonly workspacePath: string,
     private readonly timeout: number,
     private readonly envAllowlist: string[],
-    private readonly dynamicEnvProvider: () => Record<string, string> = () => ({})
+    private readonly dynamicEnvProvider: () => Record<string, string> = () => ({}),
+    // §13 (stateless agents) — the ACTIVE LLM provider. Steers credential-slot
+    // stripping: only this provider's credential env var survives into the
+    // child env; every other provider slot is deleted. Undefined (tool-name
+    // listing registry, legacy tests) strips ALL slots — the secure default.
+    private readonly activeLlmProvider?: LlmProvider
   ) {}
 
   name() {
@@ -76,6 +92,17 @@ export class ShellTool implements Tool {
     const startTime = Date.now()
     const command = params.command as string
 
+    if (STATE_DB_COMMAND_PATTERN.test(command)) {
+      return {
+        content:
+          'Command rejected: it references the session state database ' +
+          '(state.db / state.db-wal / state.db-shm / .clerum-state), which is ' +
+          'platform-managed state the agent cannot access.',
+        duration_ms: Date.now() - startTime,
+        is_error: true,
+      }
+    }
+
     const safeEnv: Record<string, string> = {
       HOME: this.workspacePath, // Sandbox HOME to prevent leaking host config (~/.gitconfig, etc.)
     }
@@ -91,6 +118,19 @@ export class ShellTool implements Tool {
     const dynamicEnv = this.dynamicEnvProvider()
     for (const [k, v] of Object.entries(dynamicEnv)) {
       if (typeof v === 'string') safeEnv[k] = v
+    }
+
+    // §13 (stateless agents) — credential-slot stripping. The child env
+    // carries ONLY the ACTIVE provider's credential slot; the other N−1
+    // provider env vars are explicitly deleted, even when present in
+    // process.env (via the allowlist) or in the ConfigStore layer above.
+    // The slot set is DERIVED from the provider registry (registryCore
+    // PROVIDERS), so a future 5th provider is stripped automatically.
+    const activeCredentialEnvName =
+      this.activeLlmProvider !== undefined ? PROVIDERS[this.activeLlmProvider].envName : undefined
+    for (const provider of ALL_PROVIDERS) {
+      const { envName } = PROVIDERS[provider]
+      if (envName !== activeCredentialEnvName) delete safeEnv[envName]
     }
 
     return new Promise<ToolOutput>(resolve => {

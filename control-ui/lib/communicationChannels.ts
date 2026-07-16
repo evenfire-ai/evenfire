@@ -5,6 +5,11 @@ export type CommunicationChannelGroup = {
   confirmedAt?: string
   confirmedByUserId?: string
   handle?: string
+  serviceUrl?: string
+  tenantId?: string
+  conversationType?: string
+  teamId?: string
+  teamsChannelId?: string
   userIds?: string[]
   emails?: string[]
   userNames?: string[]
@@ -35,6 +40,13 @@ export type CommunicationChannelItem = {
       botHandle?: string
       replyOnlyWhenMentioned?: boolean
       replyInThreads?: boolean
+    }
+    teams?: CommunicationChannelGroup[]
+    teamsSettings?: {
+      appName?: string
+      appId?: string
+      tenantId?: string
+      replyOnlyWhenMentioned?: boolean
     }
   }
 }
@@ -77,4 +89,49 @@ export function slackWebhookUrlForChannel(item: CommunicationChannelItem): strin
     return `${window.location.protocol}//webhook.${rootDomain}${path}`
   }
   return path
+}
+
+export function teamsWebhookTargetIdForChannel(item: CommunicationChannelItem): string | null {
+  const namespace = item.metadata?.namespace?.trim() || 'channels'
+  const name = item.metadata?.name?.trim()
+  if (!name) return null
+  return `teams:${base64UrlEncode(JSON.stringify({ namespace, name }))}`
+}
+
+export function teamsWebhookPathForChannel(item: CommunicationChannelItem): string | null {
+  const targetId = teamsWebhookTargetIdForChannel(item)
+  return targetId ? `/webhooks/teams/${encodeURIComponent(targetId)}` : null
+}
+
+export function teamsWebhookPathForChannelName(
+  name: string,
+  namespace = 'channels'
+): string | null {
+  return teamsWebhookPathForChannel({
+    metadata: {
+      name,
+      namespace,
+    },
+  })
+}
+
+export function teamsWebhookUrlForChannel(item: CommunicationChannelItem): string | null {
+  const path = teamsWebhookPathForChannel(item)
+  if (!path) return null
+  const base = process.env.NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL?.replace(/\/+$/, '')
+  if (base) return `${base}${path}`
+  if (typeof window !== 'undefined' && window.location.hostname.startsWith('app.')) {
+    const rootDomain = window.location.hostname.slice('app.'.length)
+    return `${window.location.protocol}//webhook.${rootDomain}${path}`
+  }
+  return path
+}
+
+export function teamsWebhookUrlForChannelName(name: string, namespace = 'channels'): string | null {
+  return teamsWebhookUrlForChannel({
+    metadata: {
+      name,
+      namespace,
+    },
+  })
 }

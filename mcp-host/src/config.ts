@@ -118,7 +118,29 @@ export interface Config {
 
   // T2.1 — Conversation store backend selector and tuning knobs.
   sessionStoreMode: 'memory' | 'sqlite' | 'dual'
+  /** Raw (lowercased) CLERUM_SESSION_STORE value, BEFORE the recognized-value
+   *  check. The stateless-lifecycle boot guard aborts on an unrecognized raw
+   *  value instead of accepting the silent 'memory' fallback (D3 §1.3b). */
+  sessionStoreModeRaw: string
   sessionDbPath: string
+  /** D3 §1.2 — PVC-backed directory for state.db (CLERUM_SESSION_DB_DIR).
+   *  When set, state.db lives at `${sessionDbDir}/state.db` and takes
+   *  precedence over the workspace-derived path. */
+  sessionDbDir: string
+  /** D3 §1.1 — stateless agent lifecycle (CLERUM_STATELESS_LIFECYCLE).
+   *  Activates the durability barrier and the fail-loud boot guard. */
+  statelessLifecycle: boolean
+  /** Stage 3 — push heartbeat cadence in ms
+   *  (CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS, default 30000). An explicitly
+   *  set non-positive-integer value fails config load loudly. */
+  statelessHeartbeatIntervalMs: number
+  /** Stage 3 — pod UID from the Kubernetes downward API (CLERUM_POD_UID).
+   *  HCC injects it via `fieldRef: metadata.uid` on stateless Hosts; empty
+   *  when not injected (StatelessHeartbeat fails loud at construction). */
+  podUid: string
+  /** D3 §1.1 — explicit durability-barrier opt-in for always-on Hosts
+   *  (CLERUM_DB_BARRIER_MODE=full). */
+  dbBarrierModeFull: boolean
   conversationCacheSize: number
   sessionTtlDays: number
   dbWorkerHeartbeatMs: number
@@ -227,6 +249,25 @@ function getEnvNumber(key: string, defaultValue: number): number {
 }
 
 /**
+ * Stage 3 (stateless-agents) — parse CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS.
+ *
+ * Fail loud: an explicitly-set but non-positive-integer value THROWS at
+ * config load time (same posture as CLERUM_DB_BARRIER_MODE). A silent
+ * getEnvNumber-style fallback would let a typo'd cadence drive HCC's
+ * suspend decisions. Unset / empty returns the 30s default.
+ */
+export function parseStatelessHeartbeatIntervalMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 30_000
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `[Config] CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS='${raw}' is not a positive integer`
+    )
+  }
+  return parsed
+}
+
+/**
  * Parse CLERUM_HOST_CONFIG JSON for dev mode.
  */
 function parseDevHostConfig(): HostSpec | undefined {
@@ -325,8 +366,7 @@ function getDevHostConfig(): HostSpec | undefined {
 
 /**
  * Parse CLERUM_MCP_SERVERS JSON for dev mode.
- * Format (top-level fields, see McpServerInfo): [{"name": "...", "contextRef": "...",
- * "transport": {...}, "enabled": true, "status": {"deployed": true, "ready": true}}]
+ * Format: [{"name": "...", "spec": {"contextRef": "...", "transport": {...}}}]
  */
 function parseDevMcpServers(): McpServerInfo[] | undefined {
   const serversJson = process.env.CLERUM_MCP_SERVERS
@@ -558,7 +598,29 @@ export const config: Config = {
     )
     return 'memory' as const
   })(),
+  sessionStoreModeRaw: (getEnv('CLERUM_SESSION_STORE', 'memory') || 'memory').toLowerCase(),
   sessionDbPath: getEnv('CLERUM_SESSION_DB_PATH', '') || '',
+  sessionDbDir: getEnv('CLERUM_SESSION_DB_DIR', '') || '',
+  statelessLifecycle: getEnvBool('CLERUM_STATELESS_LIFECYCLE', false),
+  statelessHeartbeatIntervalMs: parseStatelessHeartbeatIntervalMs(
+    getEnv('CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS')
+  ),
+  // Stage 3 — Kubernetes downward API pod UID. Empty when the operator has
+  // not injected it; StatelessHeartbeat fails loud at construction when the
+  // stateless lifecycle needs it.
+  podUid: getEnv('CLERUM_POD_UID', '') || '',
+  // D3 §1.1 — explicit env opt-in for the fsync barrier on always-on Hosts.
+  // Accepted values: '' (unset), 'normal', 'full'. Anything else is a config
+  // error and fails loud at load time — a typo must not silently disable the
+  // durability the operator asked for.
+  dbBarrierModeFull: (() => {
+    const raw = (getEnv('CLERUM_DB_BARRIER_MODE', '') || '').toLowerCase()
+    if (raw === '' || raw === 'normal') return false
+    if (raw === 'full') return true
+    throw new Error(
+      `[Config] CLERUM_DB_BARRIER_MODE='${raw}' is not recognized (expected 'full' or 'normal')`
+    )
+  })(),
   conversationCacheSize: parseInt(getEnv('CLERUM_CONVERSATION_CACHE_SIZE', '200')!, 10),
   sessionTtlDays: parseInt(getEnv('CLERUM_SESSION_TTL_DAYS', '90')!, 10),
   dbWorkerHeartbeatMs: parseInt(getEnv('CLERUM_DB_WORKER_HEARTBEAT_MS', '5000')!, 10),
@@ -600,6 +662,10 @@ export const config: Config = {
       .split(',')
       .map(s => s.trim()),
     memoryMaxSize: parseInt(getEnv('CLERUM_MEMORY_MAX_SIZE', '1048576')!, 10),
+    // Cron×stateless: mirrors the top-level statelessLifecycle flag so the
+    // native tool registry (which only receives NativeToolConfig) can steer
+    // the cron_manage stateless notice.
+    statelessLifecycle: getEnvBool('CLERUM_STATELESS_LIFECYCLE', false),
   },
 
   // Attachment delivery

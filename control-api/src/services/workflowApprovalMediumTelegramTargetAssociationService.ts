@@ -3,6 +3,7 @@ import type { K8sGateway } from '../k8s.js'
 import { getUserAgents } from './directory/index.js'
 import type { VerifiedMediumAccount } from './workflowApprovalMediumIdentityService.js'
 import { removeSlackAssociations } from './workflowApprovalMediumSlackVerificationService.js'
+import { removeTeamsAssociations } from './workflowApprovalMediumTeamsVerificationService.js'
 import {
   type TelegramApprovalTarget,
   listTelegramApprovalTargets,
@@ -348,6 +349,15 @@ export async function disableVerifiedMediumAccountWithTelegramAssociations(param
   }
   if (row.medium === 'slack' && row.providerChannelId) {
     await removeSlackAssociations({
+      gateway: params.gateway,
+      userId: params.userId,
+      providerUserId: row.providerUserId,
+      providerWorkspaceId: row.providerWorkspaceId,
+      providerChannelId: row.providerChannelId,
+    })
+  }
+  if (row.medium === 'teams' && row.providerChannelId) {
+    await removeTeamsAssociations({
       gateway: params.gateway,
       userId: params.userId,
       providerUserId: row.providerUserId,

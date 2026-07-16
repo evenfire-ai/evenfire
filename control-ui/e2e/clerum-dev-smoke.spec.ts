@@ -32,7 +32,7 @@ const BASE_UI = process.env.CONTROL_UI_URL || 'http://localhost:3000'
 const ADMIN_USER = process.env.ADMIN_USER || 'admin'
 const ADMIN_PASS = process.env.ADMIN_PASS || 'changeme123!'
 const K8S_CONTEXT =
-  process.env.KUBECONTEXT || process.env.CONTEXT || 'gke_${GCP_PROJECT}_us-central1-a_example-dev'
+  process.env.KUBECONTEXT || process.env.CONTEXT || 'gke_your-gcp-project_us-central1-a_example-dev'
 const EXPECTED_GFS_STORAGE_CLASS = process.env.GFS_STORAGE_CLASS || 'standard-rwo'
 
 // Minimum entries we expect the registry to serve. The registry base seed is

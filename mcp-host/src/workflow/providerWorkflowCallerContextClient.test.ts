@@ -221,6 +221,47 @@ describe('resolveProviderWorkflowCallerContext', () => {
     })
   })
 
+  it('keeps Teams conversation and reply targets separate for approval routing', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ userId: '00000000-0000-4000-8000-000000000003' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await resolveProviderWorkflowCallerContext(
+      {
+        ...telegramMessage(),
+        channelType: 'teams',
+        channelId: '19:channel-1@thread.tacv2',
+        sender: 'teams-user-1',
+        messageId: 'activity-1',
+        threadId: 'root-message-1',
+        providerIdentity: {
+          medium: 'teams',
+          providerUserId: 'teams-user-1',
+          providerWorkspaceId: 'tenant-1',
+          providerChannelId: '19:channel-1@thread.tacv2',
+          providerChannelType: 'channel',
+          providerEventId: 'teams:tenant-1:19:channel-1@thread.tacv2:activity-1',
+        },
+      },
+      getEnv
+    )
+
+    expect(result).toMatchObject({
+      targetUserId: '00000000-0000-4000-8000-000000000003',
+      conversationId: '19:channel-1@thread.tacv2',
+      originChannelType: 'teams',
+      providerUserId: 'teams-user-1',
+      providerWorkspaceId: 'tenant-1',
+      providerChannelId: '19:channel-1@thread.tacv2',
+      providerEventId: 'teams:tenant-1:19:channel-1@thread.tacv2:activity-1',
+      sourceThreadId: 'root-message-1',
+      sourceMessageId: 'activity-1',
+    })
+  })
+
   it('requires stable provider channel identity before resolving', async () => {
     vi.stubGlobal('fetch', fetchMock)
 

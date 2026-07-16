@@ -167,15 +167,15 @@ const providerClientHtml = String.raw`<!doctype html>
         <input id="provider-user-id" name="providerUserId" data-testid="telegram-provider-user-id" type="hidden" value="${TELEGRAM_PROVIDER_USER_ID}" />
         <input id="provider-channel-id" name="providerChannelId" data-testid="telegram-provider-channel-id" type="hidden" value="${TELEGRAM_CHAT_ID}" />
         <input id="provider-channel-type" name="providerChannelType" data-testid="telegram-provider-channel-type" type="hidden" value="private" />
-        <input id="conversation-label" name="conversationLabel" data-testid="telegram-conversation-label" type="hidden" value="Alfredo Lopez - Telegram private chat" />
+        <input id="conversation-label" name="conversationLabel" data-testid="telegram-conversation-label" type="hidden" value="Test User - Telegram private chat" />
         <section class="identity-card" data-testid="telegram-conversation-card" aria-label="Telegram conversation">
           <span>Telegram conversation</span>
-          <strong data-testid="telegram-conversation-name">Alfredo Lopez - Telegram private chat</strong>
+          <strong data-testid="telegram-conversation-name">Test User - Telegram private chat</strong>
           <span>Fake provider route for channel-reader</span>
         </section>
         <label for="conversation-select">Conversation</label>
         <select id="conversation-select" name="conversationSelect" data-testid="telegram-conversation-select">
-          <option value="Alfredo Lopez - Telegram private chat" data-user-id="${TELEGRAM_PROVIDER_USER_ID}" data-channel-id="${TELEGRAM_CHAT_ID}" data-channel-type="private">Alfredo Lopez - Telegram private chat</option>
+          <option value="Test User - Telegram private chat" data-user-id="${TELEGRAM_PROVIDER_USER_ID}" data-channel-id="${TELEGRAM_CHAT_ID}" data-channel-type="private">Test User - Telegram private chat</option>
         </select>
         <label for="message-text">Message</label>
         <textarea id="message-text" name="messageText" data-testid="telegram-message-text"></textarea>

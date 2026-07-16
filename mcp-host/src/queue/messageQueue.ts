@@ -23,6 +23,7 @@ import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { TransitionEvent } from '../lifecycle/types'
 import { IncomingMessage } from '../server'
 import {
+  AdmissionOutcome,
   QueueEvent,
   QueueEventType,
   QueueStats,
@@ -53,6 +54,17 @@ export class MessageQueue extends EventEmitter {
 
   /** Task-object index: provides getTask() without requiring TaskRecord to hold the full Task. */
   private taskInstanceIndex = new Map<string, Task>()
+
+  /**
+   * Delivery-identity index for cross-delivery duplicate suppression:
+   * deliveryKey (channelType:channelId:sender:messageId) → admitted task id.
+   * Entries live exactly as long as the lifecycle record: purged eagerly on
+   * 'record:evicted' and lazily when admit() hits a stale mapping.
+   */
+  private deliveryIndex = new Map<string, string>()
+
+  /** Reverse mapping (task id → deliveryKey) so eviction can purge deliveryIndex. */
+  private deliveryKeyByTaskId = new Map<string, string>()
 
   private lifecycle: TaskLifecycle | null = null
 
@@ -178,22 +190,96 @@ export class MessageQueue extends EventEmitter {
   }
 
   // ---------------------------------------------------------------------------
-  // Enqueue shim — registers lifecycle and maintains pendingQueue ordering.
-  // Production callers: messageHandler (channel), cronScheduler.executeJob.
+  // Admission sink — single registration point + duplicate suppression.
+  // Production callers: messageHandler (channel, via admit) and
+  // cronScheduler.executeJob (via the enqueue facade).
   // SessionProcessor is the sole execution engine; dequeue() is test-only.
   // ---------------------------------------------------------------------------
 
   /**
-   * Register a task as pending. Adds to the ordering queue for legacy dispatch.
-   * Lifecycle registration (lifecycle.register) MUST have been called before
-   * this — Invariant I12 in messageHandler.ts ensures that for channel tasks.
-   * For cron tasks, this method calls lifecycle.register internally.
+   * Delivery identity for cross-delivery duplicate suppression. Only tasks
+   * carrying a non-empty client-supplied messageId participate — tasks
+   * without a sourceMessage (internal) or with an empty messageId never dedupe.
    */
-  enqueue(task: Task): boolean {
+  private static deliveryKeyOf(task: Task): string | null {
+    const msg = task.sourceMessage
+    if (!msg) return null
+    const messageId = msg.messageId?.trim()
+    if (!messageId) return null
+    return `${msg.channelType}:${msg.channelId}:${msg.sender}:${messageId}`
+  }
+
+  /**
+   * Single admission sink for task execution.
+   *
+   * Rejects duplicates BEFORE any registration or queueing:
+   *   1. duplicate_task_id — the id already has a lifecycle record.
+   *   2. duplicate_delivery — the same delivery identity
+   *      (channelType:channelId:sender:messageId) was already admitted under a
+   *      different task id whose lifecycle record is still live.
+   * Then applies the legacy queue-full bound, and finally admits: mirrors
+   * task.status, pushes to the ordering queue, registers the lifecycle record
+   * (Invariant I12: registration precedes the caller's SessionProcessor
+   * dispatch), and records the delivery identity.
+   *
+   * Fail-loud: every suppression is logged with the task id, delivery key and
+   * prior state — duplicates are never silently swallowed and never re-run.
+   */
+  admit(task: Task): AdmissionOutcome {
+    const deliveryKey = MessageQueue.deliveryKeyOf(task)
+
+    if (this.lifecycle) {
+      const priorStatus = this.lifecycle.getStatus(task.id)
+      if (priorStatus !== null) {
+        console.warn(
+          `[Queue] duplicate delivery suppressed — task ${task.id} is already registered (status=${priorStatus}); admission rejected, no new execution`
+        )
+        return { admitted: false, reason: 'duplicate_task_id', priorTaskId: task.id, priorStatus }
+      }
+
+      if (deliveryKey) {
+        const priorTaskId = this.deliveryIndex.get(deliveryKey)
+        if (priorTaskId && priorTaskId !== task.id) {
+          const priorDeliveryStatus = this.lifecycle.getStatus(priorTaskId)
+          if (priorDeliveryStatus !== null) {
+            console.warn(
+              `[Queue] duplicate delivery suppressed — ${deliveryKey} already admitted as task ${priorTaskId} (status=${priorDeliveryStatus}); rejected duplicate task ${task.id}, no new execution`
+            )
+            // The duplicate Task object will never run — drop its instance-index
+            // entry (it has no lifecycle record, so eviction would never reap it).
+            this.taskInstanceIndex.delete(task.id)
+            return {
+              admitted: false,
+              reason: 'duplicate_delivery',
+              priorTaskId,
+              priorStatus: priorDeliveryStatus,
+            }
+          }
+          // The prior record was TTL-evicted — the mapping is stale. Purge it
+          // and admit this delivery as new work.
+          this.deliveryIndex.delete(deliveryKey)
+          this.deliveryKeyByTaskId.delete(priorTaskId)
+        }
+      }
+    }
+
     if (this.pendingQueue.length >= this.maxQueueSize) {
       console.warn(`[Queue] Task ${task.id} rejected: queue full (${this.maxQueueSize})`)
       this.emitEvent('queue:full', task)
-      return false
+      // C1: queue_full is NOT a no-op — the caller (messageHandler) still
+      // registers this task's lifecycle record and dispatches it via
+      // SessionProcessor (legacy contract). So it DOES execute, and its
+      // delivery identity must be recorded here; otherwise a same-messageId
+      // wake-retry would find no deliveryIndex entry, admit as new work, and
+      // run a SECOND execution (incl. MCP tool side-effects). Recording it now
+      // makes the retry dedup deterministically (duplicate_delivery), matching
+      // the admitted-path behavior. The mapping resolves against the record the
+      // caller registers immediately after this returns.
+      if (this.lifecycle && deliveryKey && !this.deliveryIndex.has(deliveryKey)) {
+        this.deliveryIndex.set(deliveryKey, task.id)
+        this.deliveryKeyByTaskId.set(task.id, deliveryKey)
+      }
+      return { admitted: false, reason: 'queue_full' }
     }
 
     // eslint-disable-next-line no-restricted-syntax -- Phase C shim: TaskLifecycle is the authoritative writer; this mirrors task.status for legacy consumers (spec §4.2)
@@ -204,9 +290,14 @@ export class MessageQueue extends EventEmitter {
       return diff !== 0 ? diff : a.createdAt.getTime() - b.createdAt.getTime()
     })
 
-    // For cron tasks, lifecycle.register hasn't been called yet (no messageHandler).
-    // Idempotent: TaskLifecycle.register() is a no-op if already registered.
+    // Single registration point (Invariant I12): admission is the only place a
+    // production task acquires its lifecycle record. A register() that lands on
+    // an existing id can only be a duplicate — admit() rejected those above.
     this.lifecycle?.register(task)
+    if (this.lifecycle && deliveryKey) {
+      this.deliveryIndex.set(deliveryKey, task.id)
+      this.deliveryKeyByTaskId.set(task.id, deliveryKey)
+    }
 
     console.log(
       `[Queue] Task ${task.id} added (source: ${task.source}, priority: ${task.priority})`
@@ -216,7 +307,16 @@ export class MessageQueue extends EventEmitter {
     if (!this.lifecycle) {
       this.emitEvent('task:added', task)
     }
-    return true
+    return { admitted: true }
+  }
+
+  /**
+   * Legacy boolean facade over admit(). Production caller: cronScheduler.executeJob
+   * (cron messageIds are unique per fire, so cron never trips delivery dedupe).
+   * messageHandler uses admit() directly so it can suppress duplicates loudly.
+   */
+  enqueue(task: Task): boolean {
+    return this.admit(task).admitted
   }
 
   /**
@@ -345,6 +445,13 @@ export class MessageQueue extends EventEmitter {
   /** Bound handler for TaskLifecycle 'record:evicted' — named so .off() can remove it (PR-193 review #4). */
   private handleRecordEvicted = (ev: { taskId: string }): void => {
     this.taskInstanceIndex.delete(ev.taskId)
+    const deliveryKey = this.deliveryKeyByTaskId.get(ev.taskId)
+    if (deliveryKey !== undefined) {
+      this.deliveryKeyByTaskId.delete(ev.taskId)
+      if (this.deliveryIndex.get(deliveryKey) === ev.taskId) {
+        this.deliveryIndex.delete(deliveryKey)
+      }
+    }
   }
 
   private handleLifecycleTransition = (ev: TransitionEvent): void => {

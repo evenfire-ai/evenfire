@@ -41,7 +41,7 @@ describe('imageRefHost', () => {
   })
   it('parses a GCP Artifact Registry host', () => {
     expect(
-      imageRefHost('us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/airtable-mcp:latest')
+      imageRefHost('us-central1-docker.pkg.dev/your-gcp-project/clerum/airtable-mcp:latest')
     ).toBe('us-central1-docker.pkg.dev')
   })
   it('parses a host that carries an explicit port', () => {

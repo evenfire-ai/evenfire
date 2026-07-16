@@ -78,11 +78,14 @@ export async function isOperatorId(db: SubjectsDb, adminId: string): Promise<boo
  * `context` are not user-valued in v1. Note the operator branch returns ids from
  * the control-admin pool, not the users pool.
  */
-export async function resolveSubjectMembers(db: SubjectsDb, subject: GfsSubject): Promise<string[]> {
+export async function resolveSubjectMembers(
+  db: SubjectsDb,
+  subject: GfsSubject
+): Promise<string[]> {
   switch (subject.type) {
     case 'operator': {
       const res = await db.query(`SELECT id FROM control_admin_users WHERE status = 'active'`)
-      return (res.rows as { id: unknown }[]).map((r) => String(r.id))
+      return (res.rows as { id: unknown }[]).map(r => String(r.id))
     }
     case 'team': {
       if (!subject.id) return []
@@ -90,7 +93,7 @@ export async function resolveSubjectMembers(db: SubjectsDb, subject: GfsSubject)
         `SELECT user_id FROM team_members WHERE team_id = $1 AND status = 'active'`,
         [subject.id]
       )
-      return (res.rows as { user_id: unknown }[]).map((r) => String(r.user_id))
+      return (res.rows as { user_id: unknown }[]).map(r => String(r.user_id))
     }
     case 'user':
       return subject.id ? [subject.id] : []
