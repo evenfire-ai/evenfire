@@ -66,6 +66,20 @@ describe('routes/members', () => {
     )
   })
 
+  it('passes through inviteAcceptUrl from the managed invitation service', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.inviteManagedMember.mockResolvedValueOnce({
+      id: 'inv-1',
+      inviteAcceptUrl: 'https://profile.example/invitations/tok-xyz',
+    })
+
+    await request(makeApp())
+      .post('/members/invite')
+      .set('authorization', 'Bearer good-token')
+      .send({ email: 'x@example.com', name: 'X', teams: [{ teamId: 'team-1', role: 'member' }] })
+      .expect(201, { id: 'inv-1', inviteAcceptUrl: 'https://profile.example/invitations/tok-xyz' })
+  })
+
   it('rejects overlong invitee names', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
 
