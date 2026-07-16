@@ -207,6 +207,7 @@ export function createExternalInvitationsRouter(): Router {
         try {
           await storeDesktopAuthorizationToken(email, authorizationToken)
         } catch (error) {
+          if (memberRegistrationErrorResponse(error)) throw error
           const message = error instanceof Error ? error.message : ''
           if (message.includes('(404)')) {
             return res.status(404).json({ error: 'not_found' })

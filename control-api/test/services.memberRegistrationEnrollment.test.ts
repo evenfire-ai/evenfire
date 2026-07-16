@@ -243,6 +243,47 @@ describe('memberRegistrationEnrollment', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
+  it('negative-caches a 200 response with an unparseable body (proxy/WAF page) instead of re-minting every request', async () => {
+    // response.json() throws SyntaxError on a non-JSON 200 body. Before the
+    // fix this escaped enroll() untyped and unguarded — no negative-cache
+    // entry, so every subsequent request re-minted (the exact amplifier the
+    // cache exists to prevent).
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response('<html>proxy error</html>', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(ensureEnrollment('profile.acme.com')).rejects.toBeInstanceOf(
+      MemberRegistrationUnavailableError
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // Second immediate call must be served from the negative cache, not re-fetch.
+    await expect(ensureEnrollment('profile.acme.com')).rejects.toBeInstanceOf(
+      MemberRegistrationUnavailableError
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // Log hygiene: the parse error must never echo the raw body.
+    expect(logSink.lines.join('\n')).not.toContain('<html>')
+    expect(logSink.lines.join('\n')).not.toContain('proxy error')
+  })
+
+  it('negative-caches a persistence failure after a successful mint instead of re-minting a fresh hub credential every request', async () => {
+    // insertMemberRegistrationCredential throwing (e.g. Postgres unreachable)
+    // after a successful mint was unguarded before the fix — every subsequent
+    // request would mint a brand-new hub credential (an orphan mint storm).
+    const fetchMock = vi.fn().mockResolvedValue(mintResponse())
+    vi.stubGlobal('fetch', fetchMock)
+    store.insertMemberRegistrationCredential.mockRejectedValue(new Error('pg down'))
+    await expect(ensureEnrollment('profile.acme.com')).rejects.toBeInstanceOf(
+      MemberRegistrationUnavailableError
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // Second immediate call must be served from the negative cache, not re-mint.
+    await expect(ensureEnrollment('profile.acme.com')).rejects.toBeInstanceOf(
+      MemberRegistrationUnavailableError
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('rejects localhost / IP-literal / dotless hosts with the misconfiguration error, never fetching', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)

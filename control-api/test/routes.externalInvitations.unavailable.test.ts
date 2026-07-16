@@ -89,4 +89,35 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('invalid_invitation')
   })
+
+  it('POST desktop-authorization returns 503, NOT 404, when the hub-rejection message shape collides with the "(404)" not_found string match', async () => {
+    // enroll() builds messages like `...rejected enrollment for '<domain>'
+    // (${response.status})`. A hub 404 during boot/on-demand enrollment
+    // therefore produces a MemberRegistrationUnavailableError whose message
+    // contains the literal substring "(404)" — the same substring this
+    // route's catch used to key off of to detect an invitation 404. Without
+    // the memberRegistrationErrorResponse guard, this typed 503 gets
+    // misclassified as a 404 invitation lookup failure.
+    directory.verifyUserPassword.mockResolvedValue(true)
+    flow.storeDesktopAuthorizationToken.mockRejectedValue(
+      new MemberRegistrationUnavailableError(
+        "member-registration hub rejected enrollment for 'x.acme.com' (404)"
+      )
+    )
+    const res = await request(app())
+      .post('/external/invitations/desktop-authorization')
+      .send({ userId: 'u1', email: 'a@b.c', password: 'pw' })
+    expect(res.status).toBe(503)
+    expect(res.body.error).toBe('member_registration_unavailable')
+  })
+
+  it('REGRESSION: POST desktop-authorization still maps a generic upstream 404 message to 404 not_found', async () => {
+    directory.verifyUserPassword.mockResolvedValue(true)
+    flow.storeDesktopAuthorizationToken.mockRejectedValue(new Error('upstream responded (404)'))
+    const res = await request(app())
+      .post('/external/invitations/desktop-authorization')
+      .send({ userId: 'u1', email: 'a@b.c', password: 'pw' })
+    expect(res.status).toBe(404)
+    expect(res.body.error).toBe('not_found')
+  })
 })
