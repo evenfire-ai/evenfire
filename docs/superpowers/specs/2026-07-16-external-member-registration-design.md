@@ -166,6 +166,13 @@ now resolve to `external` credentials with a `bound_domain`.
 > (3) admin flows are covered by **one credential per destination host**, minted at
 > boot; (4) hub-unreachable **degrades** (boot proceeds, enrollment retries on demand);
 > rotation is schema-supported, no API.
+>
+> Amended the same day after the adversarial deep review (18 confirmed findings, all
+> folded in): the fail-fast is scoped to the deliberately-set identity vars, hosted
+> mode reads its own dedicated hub var, the mint is lock-free with bounded timeouts
+> and a negative cache, secrets are envelope-encrypted with the existing key, the
+> error surface enumerates the real interception sites, and the test list was
+> sharpened to be direction- and regression-proof.
 
 ### 8.1 Mode switch and config
 
@@ -176,18 +183,35 @@ now resolve to `external` credentials with a `bound_domain`.
     required in production, static env credential signs every call. Covers MCC-managed
     tenants (which never set the var) and self-hosters running their own
     member-registration-service.
-  - `hosted` — self-enrollment against the shared hub. `memberRegistrationServiceBaseUrl`
-    defaults to `https://registration.evenfire.ai/api/v1` (env override allowed, e.g. a
-    staging hub). The `CONTROL_API_MEMBER_REGISTRATION_{HMAC_SECRET,HMAC_KID,TENANT_ID}`
+  - `hosted` — self-enrollment against the shared hub. The hub address is read from a
+    **dedicated var** `CONTROL_API_MEMBER_REGISTRATION_EXTERNAL_HUB_BASE_URL`
+    (default `https://registration.evenfire.ai/api/v1`; override = staging/test hub
+    only). The legacy `CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL` is **ignored
+    in hosted mode** — it is a remote-mode concept, and the shipped base configmap
+    (`deploy/base/control-plane/configmaps.yaml:37`) always sets it to the
+    cluster-local URL, so reusing it would silently point enrollment at a nonexistent
+    in-cluster service (permanent 503, no startup signal). In hosted mode this URL is
+    also the **enrollment authority** — mint origin, credential issuer, and receiver
+    of invitation tokens and recipient emails — a trust decision that deserves its own
+    deliberate setting. The `CONTROL_API_MEMBER_REGISTRATION_{HMAC_SECRET,HMAC_KID,TENANT_ID}`
     requirements are dropped — credentials come from the DB (§8.2).
   - Any other value → **hard startup error** listing valid values (nothing in the wild
     sets this var yet; strictness catches e.g. a stale `offline` from the abandoned
     overlay).
-- **Fail fast on ambiguity:** `hosted` + any of
-  `CONTROL_API_MEMBER_REGISTRATION_{HMAC_SECRET,HMAC_KID,TENANT_ID}` present in raw
-  `process.env` (not resolved dev defaults) → startup error: injected credentials and
-  hosted mode are mutually exclusive. Managed tenants are structurally safe — MCC
-  injects credentials and leaves the mode unset (`remote`).
+- **Fail fast on ambiguity — scoped to the deliberately-set identity vars:** `hosted`
+  + either of `CONTROL_API_MEMBER_REGISTRATION_{HMAC_KID,TENANT_ID}` **non-empty
+  (after trim) in raw `process.env`** → startup error: an injected remote identity and
+  hosted mode are mutually exclusive. Those two vars are only ever set deliberately
+  (MCC injection or a BYO remote setup) and live in removable ConfigMaps.
+  `CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET` is **excluded from the check**: the
+  shipped deploy unconditionally injects it
+  (`deploy/scripts/apply-inter-service-tokens.sh` writes it into the
+  `control-api-internal-tokens` Secret, projected via `envFrom` in
+  `deploy/base/control-plane/control-api.yaml` — today's config cannot boot without
+  it, and the script re-adds it on every run), so including it would brick hosted mode
+  on every existing install. A lone secret in hosted mode is ignored with a loud
+  startup warning. Empty-string values never count as present. Managed tenants remain
+  structurally safe — MCC injects credentials and leaves the mode unset (`remote`).
 - **No `NODE_ENV=production` interlock** (unlike offline's): hosted is the intended
   production posture for self-hosters; default-off already keeps throwaway/dev/CI
   deploys from silently provisioning a sender against our Postmark.
@@ -199,12 +223,12 @@ New migration in `control-api/src/db.ts` `CONTROL_API_MIGRATIONS` (next version 
 ```sql
 CREATE TABLE IF NOT EXISTS member_registration_credentials (
   id            BIGSERIAL PRIMARY KEY,
-  bound_domain  TEXT NOT NULL,          -- normalized: lowercase hostname, port stripped (mirrors hub)
-  tenant_id     TEXT NOT NULL,          -- "ext-<hex>" from the hub
-  kid           TEXT NOT NULL,
-  secret        TEXT NOT NULL,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  revoked_at    TIMESTAMPTZ
+  bound_domain     TEXT NOT NULL,       -- normalized: lowercase hostname, port stripped (mirrors hub)
+  tenant_id        TEXT NOT NULL,       -- "ext-<hex>" from the hub
+  kid              TEXT NOT NULL,
+  secret_encrypted TEXT NOT NULL,       -- envelope-encrypted, never plaintext (see below)
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  revoked_at       TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX member_registration_credentials_active_domain_idx
   ON member_registration_credentials (bound_domain)
@@ -213,41 +237,83 @@ CREATE UNIQUE INDEX member_registration_credentials_active_domain_idx
 
 - **Persistence is mandatory**, not a nicety: re-minting per boot leaks credentials and
   resets per-credential quota.
+- `secret_encrypted` holds the hub secret **envelope-encrypted with the existing
+  mandatory key** (`encryptOAuthSecret`/`decryptOAuthSecret` over
+  `config.oauthEncryptionKey`) — the same posture as every comparable credential in
+  this DB (`registry_connection`, OAuth grants; see
+  `src/services/registryConnectionSchema.ts`). A Postgres dump leak yields nothing
+  usable, and there is **no new operator key handling**: the envelope key is already
+  provisioned by the standard deploy. If the envelope key is ever lost or rotated,
+  decryption failure is treated as "no credential" and the normal re-mint path
+  recovers — fails soft.
 - **Rotation posture:** schema-supported, no API. Deliberate rotation is an ops action
-  (`UPDATE … SET revoked_at = now()`); the next send/boot re-mints. Old rows remain as
-  audit trail.
-- Secret is stored **plaintext** in control-api's own Postgres — proportionate (this DB
-  already holds far more sensitive material), and an env-key envelope scheme would
-  reintroduce exactly the operator credential handling hosted mode exists to remove.
+  (`UPDATE … SET revoked_at = now(), secret_encrypted = ''`); the next send/boot
+  re-mints. Rows are kept — minus the secret, blanked on revoke — as audit trail.
+  **Local rotation is not compromise remediation:** the hub keeps accepting the old
+  secret's JWTs until it is revoked hub-side (`tenant_credentials.revoked_at`, §9) —
+  an operator who suspects a leak must contact Evenfire. An operator-facing
+  self-revoke endpoint is future work (§13).
 
 ### 8.3 Enrollment service
 
 New `control-api/src/services/memberRegistrationEnrollment.ts`:
 
 - `ensureEnrollment(domain)` — return the active credential row if present; otherwise
-  mint `POST <hub-origin>/public/tenants { domain }` and persist. The mint endpoint is
-  **unauthenticated** and hangs off the hub **origin**, not the `/api/v1` base — derive
-  the origin from the configured base URL; do not route the mint through the signing
-  client.
-- **Concurrency guard, both layers:** an in-process in-flight promise map per domain
-  (no double-mint within a replica), plus `pg_advisory_xact_lock(hash(domain))` around
-  check-mint-insert (no cross-replica mint storm; the advisory-lock pattern exists in
-  `initDb`). The partial unique index is the backstop: if a race still loses, adopt the
-  winner's row and log the orphan. A rare orphan is acceptable; a mint storm is not.
+  mint and persist, **entirely outside any transaction or lock**:
+  1. `SELECT` the active row (`revoked_at IS NULL`); hit → return it.
+  2. Miss → host guard (below), then mint `POST <hub-origin>/public/tenants
+     { domain }` with a **bounded timeout** (`AbortSignal.timeout(~10s)`). The mint
+     endpoint is **unauthenticated** and hangs off the hub **origin**, not the
+     `/api/v1` base — derive the origin from
+     `CONTROL_API_MEMBER_REGISTRATION_EXTERNAL_HUB_BASE_URL`; never route the mint
+     through the signing client.
+  3. `INSERT … ON CONFLICT DO NOTHING` (backed by the partial unique index), then
+     re-`SELECT` (filtered `revoked_at IS NULL`) and adopt the winner. A losing race
+     logs the orphan **without secret material** and moves on. A rare orphan is
+     acceptable; a mint storm is not.
+- **Concurrency and repetition guards:** an in-process in-flight promise map per
+  domain collapses concurrent attempts within a replica; the partial unique index +
+  adopt-winner handles cross-replica races. There is **no advisory lock** — holding a
+  pooled connection idle-in-transaction across a network call is a failure mode, not a
+  guard (managed Postgres kills it via `idle_in_transaction_session_timeout`; the
+  `initDb` advisory lock is a boot-only session lock, not a request-path precedent).
+  Repetition is bounded by a **negative cache**: a hub **4xx** mint response is
+  terminal for that domain — cache `{reason, until}` for a TTL (~10 min) and fail
+  sends fast with the typed error instead of re-minting per request; network errors
+  and 5xx retry under **exponential backoff** (capped ~5 min). Without this, an
+  unenrolled instance turns its public unauthenticated routes (invite-token lookup,
+  password-reset) into a per-request mint amplifier against the hub.
+- **Host guard:** refuse to enroll hosts that are `localhost`, IP literals, or dotless
+  names — a typed misconfiguration error (distinct from unavailability; surfaces as
+  `member_registration_misconfigured`, §8.6) and a loud boot log. The hub factually
+  accepts `127.0.0.1` as a domain, and the shipped UI base-URL defaults are exactly
+  that (`config.ts:451-454`) — without this guard, a default-config instance in hosted
+  mode sends real branded emails whose links dead-end, all sharing one global
+  `127.0.0.1` quota bucket on the hub. Hosted mode requires real domains (§8.9).
+- **Log hygiene:** enrollment, orphan-adoption, and failure logs carry only
+  `bound_domain`, `tenant_id`, `kid`, and timestamps — never the secret and never a
+  raw mint response body (the mint response contains the secret; the house pattern of
+  stringifying response bodies into thrown errors must not be applied to it).
 - Domain normalization: `new URL(base).hostname.toLowerCase()` — hostname excludes the
   port, mirroring the hub's normalization.
 
 ### 8.4 Boot integration (degrade, never block)
 
-In `main.ts` after `initDb()` (next to `assertRegistryConnectionReady`): when `hosted`,
-run `ensureEnrollment` for each **unique** normalized host of `desktopProfileUiBaseUrl`
-and `controlUiBaseUrl` (deduped — two UIs on one hostname mint once; subdomain deploys
-like `profile.acme.com` / `control.acme.com` mint two). Hosted mode presumes real,
-publicly meaningful domains; whether the hub accepts IP/localhost hosts is the hub's
-validation call, not something this design relies on. Enrollment failure **logs loudly
-and does not block boot** — the control plane is never hostage to an auxiliary email
-feature. Every later send re-attempts enrollment on demand (§8.5), so the system
-self-heals without a restart. Once enrolled, later boots never need the hub.
+Boot integration is an **exported, unit-testable hook** — `runBootEnrollment(hosts)`
+in the enrollment module, whose contract is **"never rejects: catches, logs,
+returns"** — and `main.ts` (after `initDb()`, next to `assertRegistryConnectionReady`)
+only calls it. Do not inline the try/catch in `main.ts`: no test imports `main.ts`, so
+an inlined swallow is unverifiable, and a dropped `catch` would ship green while
+crash-looping every hub-down boot.
+
+When `hosted`, the hook runs `ensureEnrollment` for each **unique** normalized host of
+`desktopProfileUiBaseUrl` and `controlUiBaseUrl` (deduped — two UIs on one hostname
+mint once; subdomain deploys like `profile.acme.com` / `control.acme.com` mint two).
+Enrollment failure **logs loudly and does not block boot** — the control plane is
+never hostage to an auxiliary email feature — and boot delay is bounded by the mint
+timeout (§8.3), worst case roughly 2 × ~10s before the listener comes up. Every later
+send re-attempts enrollment on demand (§8.5, subject to the negative cache), so the
+system self-heals without a restart. Once enrolled, later boots never need the hub.
 
 ### 8.5 Send-path credential resolution (per-host credentials)
 
@@ -275,10 +341,32 @@ credential).
 
 ### 8.6 Error surface
 
-When enrollment is impossible (hub unreachable, still unenrolled), the wrappers throw a
-typed `MemberRegistrationUnavailableError`, mapped in the calling routes to a clean
-**503 `member_registration_unavailable`** — replacing today's opaque 500. Nothing else
-in the platform blocks or degrades.
+When enrollment is impossible (hub unreachable, still unenrolled), the wrappers throw
+a typed `MemberRegistrationUnavailableError` → **503
+`member_registration_unavailable`**; the host guard throws its own typed error → **503
+`member_registration_misconfigured`** (§8.3). Today's behavior being replaced is **500
+on the send paths and a misleading 400 on the validate paths** — the validate routes
+wrap the wrappers in bare catch-alls that would otherwise convert a hub outage into
+`400 invalid_invitation`, telling an invitee with a perfectly valid link that it is
+invalid, permanently.
+
+A route-level mapper alone therefore does **not** work — the inner catches intercept
+first. The typed errors must be **rethrown (checked via `instanceof`) ahead of each
+existing catch-all**, with a global error-middleware mapping in `app.ts` as the
+backstop. Interception sites (verified):
+
+- `routes/external/invitations.ts` — bare `catch → 400 invalid_invitation` at :52,
+  :88, :250, plus the desktop-authorization string-matching catch (~:204-213).
+- `routes/admin/auth.ts` — `catch → 400 invalid_password_reset`-style at :278, :312,
+  :353, :483, :528 (the completion flow around :420 already forwards via
+  `next(error)` and is covered by the middleware backstop alone).
+- `routes/admin/controlAdmins.ts` — the two send sites; their compensating cleanup
+  (revoke, ~:169-177) must still run before the error surfaces.
+- Sends reached via `services/directory/membership.ts` (from `routes/admin/teams.ts`
+  and `routes/external/members.ts`) — confirm membership does not catch, so the typed
+  error propagates to the route/middleware layer.
+
+Nothing else in the platform blocks or degrades.
 
 ### 8.7 What does not change
 
@@ -290,24 +378,60 @@ in the platform blocks or degrades.
 ### 8.8 Testing (control-api, existing repo patterns)
 
 - config: mode parsing (default `remote`; `hosted`; unknown → error); hosted +
-  explicit env credentials → startup error; hosted relaxes the base-URL/secret
-  requirements under `NODE_ENV=production` **non-vacuously** (mirror
-  `config.prod.test.ts`); remote unchanged.
-- enrollment (mocked `fetch` + mocked `db.js` pool): mints when absent (correct
-  origin-derived URL), persists, reuses without minting; concurrent calls yield one
-  mint; insert conflict adopts the winner; hub failure → typed error and boot
-  continues.
-- resolution: hosted signs member vs admin calls with **different kids** (per-host);
-  remote signs with the env credential and never calls `/public/tenants`.
+  non-empty `HMAC_KID`/`TENANT_ID` → startup error, and **empty-string values do not
+  trip it**; a lone `HMAC_SECRET` in hosted → boots with a warning; hosted relaxes the
+  base-URL/secret requirements under `NODE_ENV=production` **non-vacuously** (mirror
+  `config.prod.test.ts`). **Negative companions — load-bearing for "remote
+  unchanged":** under `applyProdEnv` with the mode unset (and again with
+  `MODE=remote` explicit), deleting `CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET`
+  (and separately `_SERVICE_BASE_URL`) must make the config import **reject, naming
+  the variable** — without these, an implementer who relaxes the requirements
+  unconditionally instead of gating on mode ships green while breaking the
+  managed-tenant fail-fast. (`KID`/`TENANT_ID` are never prod-required today —
+  `config.ts:444-446` — so the relaxation claim is scoped to base URL + secret.)
+- migration DDL (mirror `db.registryConnectionMigration.test.ts`): the emitted SQL
+  contains `CREATE TABLE member_registration_credentials` **and the literal
+  `WHERE revoked_at IS NULL`** on the unique index — the rotation re-mint path
+  depends on that clause, and a mocked-conflict test cannot detect its absence.
+- enrollment (mocked `fetch` + mocked `db.js` pool): mints when absent with the
+  correct origin-derived URL **and a bounded timeout on the request**; persists the
+  secret **encrypted** (the INSERTed value is not the plaintext); reuses without
+  minting; concurrent calls yield one mint (in-flight map); insert conflict adopts
+  the winner via a re-`SELECT` that **filters `revoked_at IS NULL`**; hub 4xx →
+  negative-cached (no re-mint within the TTL, typed error immediately); network/5xx →
+  typed error with backoff; the host guard rejects `localhost`/IP-literal/dotless
+  hosts with the misconfiguration error; **captured log output never contains the
+  secret string**.
+- boot hook: `runBootEnrollment` with `ensureEnrollment` mocked to reject →
+  **resolves** (never rejects) and logs; the enrollment-level rejection is asserted
+  separately. (Asserting this inside `main.ts` is impossible — no test imports it;
+  that is why the hook is exported, §8.4.)
+- resolution — **directional, not just distinct**: the fetch mock mints distinct
+  `{kid, secret, tenantId}` per domain; for each wrapper call capture the
+  `Authorization` header and decode the JWT header; assert member **send and
+  validate** carry the kid minted for the profile-ui host, admin **send and
+  validate** carry the control-ui host's kid, and verify each signature with that
+  host's secret. (A bare "kids differ" assertion stays green when the wrapper→host
+  mapping is transposed — which in production 403s every member send.) Remote mode
+  signs with the env credential and never calls `/public/tenants`.
+- error surface: a validate route (e.g. `GET /external/invitations/token/:token`)
+  whose wrapper throws `MemberRegistrationUnavailableError` returns **503
+  `member_registration_unavailable`, not 400 `invalid_invitation`**.
 - signer: pure-credential signing preserves the existing token shape.
-- Live e2e against the real hub happens in the /verify step, not CI.
+- Live e2e against the real hub happens in the /verify step, not CI — it must
+  provision its **own** throwaway tenant via `/public/tenants` (never borrow a
+  managed credential) and tear down via hub-side revoke.
 
 ### 8.9 Docs (OSS)
 
 Rewrite `docs/how-to/member-invitations-self-hosted.md`: hosted mode as the
-zero-config recommended path (`CONTROL_API_MEMBER_REGISTRATION_MODE=hosted` + real
-domains in the two UI base URLs), BYO member-registration-service (`remote`) kept as
-the advanced path. Touch the member-registration paragraph in
+zero-config recommended path — set `CONTROL_API_MEMBER_REGISTRATION_MODE=hosted` plus
+**real, publicly resolvable domains** in the two UI base URLs (the host guard refuses
+localhost/IP literals, §8.3). **No configmap surgery is needed**: the legacy
+`_SERVICE_BASE_URL` value and the deploy-injected `HMAC_SECRET` are ignored in hosted
+mode by design. BYO member-registration-service (`remote`) stays as the advanced
+path; a BYO operator switching to hosted must remove their `HMAC_KID`/`TENANT_ID` env
+(the §8.1 fail-fast names them). Touch the member-registration paragraph in
 `docs/concepts/open-core-and-hosted.md`.
 
 ## 9. Abuse controls
@@ -383,6 +507,9 @@ Integration (testcontainers Postgres, existing pattern):
   disturbing the rest of the design. Requires the SSRF guard and NetworkPolicy egress
   carve-out noted in §11. Not in this iteration.
 - Orphan-credential GC: TTL-sweep `external` credentials with no sends.
+- Operator-facing self-revoke: a hub endpoint (authenticated by the credential being
+  revoked) so a self-hoster can invalidate a leaked secret without contacting
+  Evenfire. Until it exists, hub-side revocation is an Evenfire ops action (§8.2).
 
 ## 14. Rollout ordering
 
