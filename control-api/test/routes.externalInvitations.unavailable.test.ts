@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
+import {
+  MemberRegistrationUnavailableError,
+  memberRegistrationErrorResponse,
+} from '../src/services/memberRegistrationErrors.js'
 
 const flow = vi.hoisted(() => ({
   validateInvitationFlowToken: vi.fn(),
@@ -19,24 +24,25 @@ const directory = vi.hoisted(() => ({
 vi.mock('../src/services/directory/index.js', () => directory)
 
 vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
-  rateLimitMiddleware: () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
-    next(),
+  rateLimitMiddleware:
+    () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
+      next(),
 }))
 vi.mock('../src/middleware/externalSessionAuth.js', () => ({
-  rejectBodyUserTeamMismatch: (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
-    next(),
-  requireValidExternalSessionToken: (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
-    next(),
+  rejectBodyUserTeamMismatch: (
+    _req: express.Request,
+    _res: express.Response,
+    next: express.NextFunction
+  ) => next(),
+  requireValidExternalSessionToken: (
+    _req: express.Request,
+    _res: express.Response,
+    next: express.NextFunction
+  ) => next(),
 }))
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   signExternalSessionToken: vi.fn(() => 'session-token'),
 }))
-
-import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
-import {
-  MemberRegistrationUnavailableError,
-  memberRegistrationErrorResponse,
-} from '../src/services/memberRegistrationErrors.js'
 
 // Router-level harness: proves the ROUTE GUARDS rethrow instead of swallowing.
 // The real app.ts middleware is covered separately in

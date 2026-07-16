@@ -16,9 +16,10 @@ export class MemberRegistrationMisconfiguredError extends Error {
   }
 }
 
-export function memberRegistrationErrorResponse(
-  err: unknown
-): { status: 503; error: 'member_registration_unavailable' | 'member_registration_misconfigured' } | null {
+export function memberRegistrationErrorResponse(err: unknown): {
+  status: 503
+  error: 'member_registration_unavailable' | 'member_registration_misconfigured'
+} | null {
   if (
     err instanceof MemberRegistrationUnavailableError ||
     err instanceof MemberRegistrationMisconfiguredError

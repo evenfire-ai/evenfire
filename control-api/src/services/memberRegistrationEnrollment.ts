@@ -1,14 +1,14 @@
 import { config } from '../config.js'
 import { rootLogger } from '../observability/logger.js'
 import {
+  type MemberRegistrationCredential,
+  getActiveMemberRegistrationCredential,
+  insertMemberRegistrationCredential,
+} from './memberRegistrationCredentialsDb.js'
+import {
   MemberRegistrationMisconfiguredError,
   MemberRegistrationUnavailableError,
 } from './memberRegistrationErrors.js'
-import {
-  getActiveMemberRegistrationCredential,
-  insertMemberRegistrationCredential,
-  type MemberRegistrationCredential,
-} from './memberRegistrationCredentialsDb.js'
 
 // Hosted-mode self-enrollment against the shared hub (spec §8.3/§8.4).
 // Lock-free: in-flight promise map (per-replica) + the partial unique index

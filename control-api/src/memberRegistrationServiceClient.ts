@@ -1,12 +1,12 @@
 import { config } from './config.js'
 import {
-  signMemberRegistrationJwt,
-  type MemberRegistrationSigningCredential,
-} from './utils/auth/memberRegistrationSigner.js'
-import {
   ensureEnrollment,
   normalizeEnrollmentHost,
 } from './services/memberRegistrationEnrollment.js'
+import {
+  type MemberRegistrationSigningCredential,
+  signMemberRegistrationJwt,
+} from './utils/auth/memberRegistrationSigner.js'
 
 type RequestMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 

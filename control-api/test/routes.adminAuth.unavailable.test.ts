@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { createAdminAuthRouter } from '../src/routes/admin/auth.js'
+import {
+  MemberRegistrationUnavailableError,
+  memberRegistrationErrorResponse,
+} from '../src/services/memberRegistrationErrors.js'
 
 const adminReg = vi.hoisted(() => ({
   registerAndSendControlAdminInvitation: vi.fn(),
@@ -12,15 +17,10 @@ const adminReg = vi.hoisted(() => ({
 }))
 vi.mock('../src/services/controlAdminInvitationRegistrationService.js', () => adminReg)
 vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
-  rateLimitMiddleware: () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
-    next(),
+  rateLimitMiddleware:
+    () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
+      next(),
 }))
-
-import { createAdminAuthRouter } from '../src/routes/admin/auth.js'
-import {
-  MemberRegistrationUnavailableError,
-  memberRegistrationErrorResponse,
-} from '../src/services/memberRegistrationErrors.js'
 
 function app(): express.Express {
   const a = express()
