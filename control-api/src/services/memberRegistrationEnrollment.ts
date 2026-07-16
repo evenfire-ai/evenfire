@@ -110,7 +110,15 @@ async function enroll(domain: string): Promise<MemberRegistrationCredential> {
     throw transientFailure(domain, `member-registration hub error (${response.status})`)
   }
 
-  const minted = (await response.json()) as { tenantId?: unknown; kid?: unknown; secret?: unknown }
+  let minted: { tenantId?: unknown; kid?: unknown; secret?: unknown }
+  try {
+    minted = (await response.json()) as { tenantId?: unknown; kid?: unknown; secret?: unknown }
+  } catch {
+    // Log hygiene: fixed message only — never fold the caught parse error's
+    // text in here, since a JSON.parse SyntaxError can echo body content and
+    // the mint body carries the secret.
+    throw transientFailure(domain, 'member-registration hub returned an unparseable mint response')
+  }
   if (
     typeof minted.tenantId !== 'string' ||
     typeof minted.kid !== 'string' ||
@@ -124,13 +132,22 @@ async function enroll(domain: string): Promise<MemberRegistrationCredential> {
   // forever instead of escalating toward BACKOFF_CAP_MS.
   consecutiveTransientFailures.delete(domain)
 
-  const { inserted } = await insertMemberRegistrationCredential({
-    boundDomain: domain,
-    tenantId: minted.tenantId,
-    kid: minted.kid,
-    secret: minted.secret,
-  })
-  const winner = await getActiveMemberRegistrationCredential(domain)
+  let inserted: boolean
+  let winner: MemberRegistrationCredential | null
+  try {
+    ;({ inserted } = await insertMemberRegistrationCredential({
+      boundDomain: domain,
+      tenantId: minted.tenantId,
+      kid: minted.kid,
+      secret: minted.secret,
+    }))
+    winner = await getActiveMemberRegistrationCredential(domain)
+  } catch {
+    // Same bypass risk as the parse failure above: a persistence throw here
+    // (e.g. Postgres unreachable) must not escape untyped, or every
+    // subsequent request re-mints a fresh hub credential (an orphan storm).
+    throw transientFailure(domain, 'failed to persist the minted credential')
+  }
   if (!winner) {
     throw transientFailure(domain, 'credential row missing after insert')
   }
