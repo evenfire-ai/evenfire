@@ -61,9 +61,9 @@ It seeds for you:
 
 - an agent: Host `chatllm` + an empty Context `context1` (no MCP servers —
   install connectors from the registry) + a CommunicationChannel
-- one login, using the `ADMIN_PASSWORD` you set in `.env`:
-  **`owner@evenfire.local`** for the Desktop App and **`admin`** for the
-  Control UI
+- one account, using the `ADMIN_PASSWORD` you set in `.env`: username
+  **`admin`** for the Control UI and email **`admin@evenfire.local`** for the
+  Desktop App — the same account, and the sole Desktop App member
 
 Verify:
 
@@ -84,7 +84,7 @@ make install-all && npm --prefix control-ui install
 npm run ui     # runs Control UI (:3000), Profile UI (:3001), and the Desktop App
 ```
 
-Log into the **Desktop App** as `owner@evenfire.local` using the
+Log into the **Desktop App** as `admin@evenfire.local` using the
 `ADMIN_PASSWORD` you set in `.env`, and message the `chatllm` agent. Ask it to
 do something real — _"run `uname -a`"_ or
 _"generate a one-page PDF about Kubernetes NetworkPolicies"_ — and approve the

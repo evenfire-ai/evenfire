@@ -1016,8 +1016,19 @@ if [ "$SEED_PROFILE" = "e2e" ]; then
   # e2e password.
   ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-changeme123!}"
 else
-  SEED_USER_DEFAULT_EMAIL="owner@evenfire.local"
-  SEED_USER_DEFAULT_NAME="Owner"
+  # Minimal: the Control-UI admin IS the sole Desktop App member — no separate
+  # seeded user. Point both the admin-bootstrap email and the seeded desktop
+  # user at the same evenfire-branded address so the seeder's (idempotent)
+  # user+team step converges on the admin identity that /admin/auth/setup
+  # already provisioned (users row + "<username> team" + chatllm/context1
+  # grants), instead of minting a second member/team. `admin@clerum.io` would
+  # leak the internal code name onto a product surface (the Desktop member
+  # list) — evenfire branding belongs here (docs/concepts/code-names.md). If
+  # the best-effort admin desktop provisioning ever fails, the seeder still
+  # creates this one identity, so the minimal install is never member-less.
+  SEED_USER_DEFAULT_EMAIL="admin@evenfire.local"
+  SEED_USER_DEFAULT_NAME="admin"
+  : "${ADMIN_EMAIL:=admin@evenfire.local}"
 fi
 SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
 SEED_USER_NAME="${E2E_DEV_LOGIN_NAME:-${SEED_USER_DEFAULT_NAME}}"
@@ -1025,6 +1036,7 @@ log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
 SEED_USER_OK=true
 if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
    SEED_PROFILE="${SEED_PROFILE}" \
+   ADMIN_EMAIL="${ADMIN_EMAIL:-}" \
    E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
    E2E_DEV_LOGIN_NAME="${SEED_USER_NAME}" \
    bash "${SCRIPT_DIR}/seed-test-data.sh" 2>&1 | tail -15; then
