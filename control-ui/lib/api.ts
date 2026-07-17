@@ -101,7 +101,11 @@ function formatApiError(res: Response, text: string): Error {
             ? 'Desktop App password must be between 8 and 256 characters.'
             : detail === 'password must be between 8 and 256 characters'
               ? 'Password must be between 8 and 256 characters.'
-              : detail
+              : detail === 'member_registration_unavailable'
+                ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
+                : detail === 'member_registration_misconfigured'
+                  ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
+                  : detail
   const error = new Error(`${res.status} ${res.statusText} - ${friendlyDetail}`)
   ;(error as Error & { status?: number }).status = res.status
   // Preserve the machine-readable error code and full JSON body so callers can
