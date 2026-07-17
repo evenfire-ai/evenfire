@@ -8,6 +8,8 @@ spec:
   contextRef: context1
   secretRef: chatllm-api-keys
   model:
+    # Overwritten by full-setup.sh step 6f, which auto-detects the provider
+    # from .env. This literal is only the apply-time placeholder.
     provider: zai
     name: glm-5.1
   workflowControl:

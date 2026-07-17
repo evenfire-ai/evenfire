@@ -569,8 +569,56 @@ log "Applying CRD instances..."
 $KC apply -f "${PROJECT_DIR}/deploy/overlays/minikube/instances/"
 ok "CRD instances applied (Host, Context, CommunicationChannel)"
 
+# Resolve the model provider from whichever key the user actually supplied.
+# Priority order matches docs/architecture/overview.md:724 and
+# .env.quickstart.example. An explicit CLERUM_MODEL_PROVIDER always wins.
+# Without this, the Host pins zai while zai-api-key is a placeholder, so the
+# agent never replies for anyone who set a different provider's key.
+resolve_model_provider() {
+  if [ -n "${CLERUM_MODEL_PROVIDER:-}" ]; then
+    printf '%s' "${CLERUM_MODEL_PROVIDER}"
+    return 0
+  fi
+  if [ -n "${OPENAI_API_KEY:-}" ];  then printf 'openai';  return 0; fi
+  if [ -n "${CLAUDE_API_KEY:-}" ];  then printf 'claude';  return 0; fi
+  if [ -n "${ZAI_API_KEY:-}" ];     then printf 'zai';     return 0; fi
+  if [ -n "${BAILIAN_API_KEY:-}" ]; then printf 'bailian'; return 0; fi
+  printf ''
+}
+
+# These MUST stay in sync with the canonical registry at
+# mcp-host/src/llm/registryCore.ts:50,57,64,72 — that is the single source of
+# truth (config.ts:301 reads it via descriptorFor(provider).defaultModel).
+# Verify against that file before committing; a drifted model id fails at the
+# first message, which is the exact bug this task fixes.
+default_model_for_provider() {
+  case "$1" in
+    openai)  printf 'gpt-5.4-mini' ;;
+    claude)  printf 'claude-sonnet-4-6' ;;
+    zai)     printf 'glm-5.1' ;;
+    bailian) printf 'qwen3-coder-plus' ;;
+    *)       printf '' ;;
+  esac
+}
+
+RESOLVED_PROVIDER="$(resolve_model_provider)"
+if [ -z "$RESOLVED_PROVIDER" ]; then
+  # No key at all. Warn, do not abort — the platform still comes up fully and
+  # quickstart.md:39 already documents that the agent will not reply. This is
+  # deliberately softer than the ADMIN_PASSWORD precondition (Task 4).
+  warn "No LLM API key found in .env (OPENAI_API_KEY / CLAUDE_API_KEY / ZAI_API_KEY / BAILIAN_API_KEY)."
+  warn "Defaulting Host to zai with a placeholder key — the chatllm agent will NOT reply."
+  warn "Set a key in .env and re-run to fix."
+  RESOLVED_PROVIDER="zai"
+fi
+RESOLVED_MODEL="${CLERUM_MODEL_NAME:-$(default_model_for_provider "$RESOLVED_PROVIDER")}"
+if [ -z "$RESOLVED_MODEL" ]; then
+  err "Unknown provider '${RESOLVED_PROVIDER}' — set CLERUM_MODEL_NAME explicitly in .env."
+  exit 1
+fi
+
 # 6f. Apply Host model from .env/default E2E model
-log "Applying Host model from .env/default E2E model (${CLERUM_MODEL_PROVIDER:-zai}/${CLERUM_MODEL_NAME:-glm-5.1})..."
+log "Applying Host model ${RESOLVED_PROVIDER}/${RESOLVED_MODEL} (source: ${CLERUM_MODEL_PROVIDER:+CLERUM_MODEL_PROVIDER}${CLERUM_MODEL_PROVIDER:-auto-detected from .env})..."
 cat <<HOSTEOF | $KC apply -f -
 apiVersion: clerum.io/v1alpha1
 kind: Host
@@ -582,8 +630,8 @@ spec:
   contextRef: context1
   secretRef: chatllm-api-keys
   model:
-    provider: ${CLERUM_MODEL_PROVIDER:-zai}
-    name: ${CLERUM_MODEL_NAME:-glm-5.1}
+    provider: ${RESOLVED_PROVIDER}
+    name: ${RESOLVED_MODEL}
   workflowControl:
     scopes:
       - workflow:list
