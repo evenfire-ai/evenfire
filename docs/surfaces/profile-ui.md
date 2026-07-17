@@ -15,18 +15,28 @@ Surfaces](README.md) for how the three consoles divide the platform.
    UI](control-ui.md) (through `control-api`), or by an authenticated
    Profile UI member at `/members/invite`, which posts to `external-rest-api
    POST /api/v1/members/invite`.
-2. **The invited person opens `/invitations/[token]`** — no Profile UI login
+2. **The invitation email reaches the invitee** — sent by evenfire's shared
+   registration hub in [hosted
+   mode](../how-to/member-invitations-self-hosted.md), or by your own
+   `member-registration-service` in remote mode. In hosted mode the emailed
+   link is not a direct link to Profile UI: it goes to a
+   `registration.evenfire.ai/i/<token>` interstitial that names the
+   destination domain and requires one click to continue — see [what your
+   invitees
+   see](../how-to/member-invitations-self-hosted.md#what-your-invitees-see) —
+   before landing on the route below.
+3. **The invited person opens `/invitations/[token]`** — no Profile UI login
    required. The page loads the invitation preview from `external-rest-api
    GET /api/v1/invitations/token/:token` before it renders.
-3. **They accept it**, then **set a password** on the same screen: the
+4. **They accept it**, then **set a password** on the same screen: the
    invitation token, email, invitation id, and new password all go to
    `external-rest-api POST /api/v1/invitations/password`; the invitation
    session token is never returned in the response body or exposed to page
    JavaScript — external-rest-api sets it as an HttpOnly cookie.
-4. **Profile UI offers a Download Evenfire link** — not an automatic
+5. **Profile UI offers a Download Evenfire link** — not an automatic
    handoff. The member installs the [Desktop App](desktop-app.md)
    themselves.
-5. **The Desktop App completes the handoff later**, from its own sign-in
+6. **The Desktop App completes the handoff later**, from its own sign-in
    screen: entering the invited email there makes the Desktop App look up
    the invitation profile and open Profile UI's `/desktop-setup?email=...`
    in the system browser. The member enters their password once more;
@@ -35,11 +45,11 @@ Surfaces](README.md) for how the three consoles divide the platform.
    hands it back to the installed app through the `evenfire://desktop-setup`
    deep link.
 
-Steps 1–3 above don't need a deployed sibling service for this: self-hosted
+Steps 1–4 above don't need a deployed sibling service for this: self-hosted
 control-api can send the invitation email and validate the token itself via
 evenfire's shared registration hub — see [Member invitations on
 self-hosted](../how-to/member-invitations-self-hosted.md) (hosted mode). Step
-5's lookup and completion still depend on `member-registration-service`,
+6's lookup and completion still depend on `member-registration-service`,
 which is **not in this repository** — see the Desktop App page's
 [`member-registration-service` gap](desktop-app.md#the-member-registration-service-gap)
 for what breaks without it.
