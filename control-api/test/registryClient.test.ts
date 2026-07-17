@@ -358,7 +358,9 @@ describe('registryClient — GET retry-once (transient resilience)', () => {
     vi.stubGlobal('fetch', fetchMock)
     Object.assign(process.env, ENV_OVERRIDE)
 
-    const err = (await publishEntry({ name: '@clerum/x', version: '0.0.1' }).catch(e => e)) as Error & {
+    const err = (await publishEntry({ name: '@clerum/x', version: '0.0.1' }).catch(
+      e => e
+    )) as Error & {
       status?: number
       code?: string
     }
@@ -417,7 +419,8 @@ describe('registryClient — registry-unavailable remap (Fix 2)', () => {
     // misconfig) — a status-less, non-network Error. It must surface unchanged,
     // NOT collapsed into the "unavailable" message.
     const fetchMock = vi.fn().mockImplementation((url: string) => {
-      if (url.endsWith('/oauth/token')) return Promise.resolve(new Response('bad creds', { status: 401 }))
+      if (url.endsWith('/oauth/token'))
+        return Promise.resolve(new Response('bad creds', { status: 401 }))
       return Promise.resolve(
         new Response(JSON.stringify({ data: [], meta: { total: 0, limit: 0, offset: 0 } }), {
           status: 200,

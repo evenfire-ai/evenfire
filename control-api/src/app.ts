@@ -29,7 +29,10 @@ import { memberRegistrationErrorResponse } from './services/memberRegistrationEr
 // Only errors we construct with these codes are ever forwarded verbatim by the
 // global handler (see below). Keeps the blast radius tight: every other
 // status-less or non-allowlisted error still collapses to a 500.
-const FORWARDABLE_INTEGRATION_CODES = new Set(['registry_unavailable', 'registry_integration_error'])
+const FORWARDABLE_INTEGRATION_CODES = new Set([
+  'registry_unavailable',
+  'registry_integration_error',
+])
 
 export function createApp(gateway: K8sGateway) {
   const app = express()

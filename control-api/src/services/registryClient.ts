@@ -258,7 +258,9 @@ async function authedFetch(
 export class RegistryUnavailableError extends Error {
   readonly status = 503
   readonly code = 'registry_unavailable'
-  constructor(message = 'The registry is currently unavailable. Check the connection and try again.') {
+  constructor(
+    message = 'The registry is currently unavailable. Check the connection and try again.'
+  ) {
     super(message)
     this.name = 'RegistryUnavailableError'
   }
