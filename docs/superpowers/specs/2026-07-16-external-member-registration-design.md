@@ -4,9 +4,15 @@
 **Status:** Approved design, pre-implementation
 **Repos affected:** `evenfire-member-registration` (hub, primary) and the OSS control-api (this repo, companion)
 
-> **STATUS NOTE (added on copy into evenfire-open-source, 2026-07-16).**
+> **STATUS NOTE — BOTH HALVES SHIPPED (updated 2026-07-17).**
 > - **Hub half = DONE.** The `evenfire-member-registration` changes in this spec (open `POST /public/tenants` mint, per-credential domain binding, hub-owned `GET /i/:token` redirect + interstitial, per-domain quota/blocklist kill switch, hashed send log, XFF fix, profile-lookup shadowing fix) shipped in hub PR #11 (merged, auto-deployed to `registration.evenfire.ai`).
-> - **This repo implements §8 (control-api self-enrollment)** — the "hosted mode" companion. It is greenfield: control-api is currently a pure client that reads injected env and never self-mints.
+> - **Control-api half (§8) = DONE.** Shipped in **PR #91** (merged to `main` 2026-07-17 as `a3159b0`): mode switch, encrypted credential store (migration `0055`), lock-free enrollment with host guard + negative cache, fire-and-forget boot hook, per-destination credential resolution, and the 503 error surface. `remote` remains the default and is byte-for-byte unchanged.
+> - **Live contract verified 2026-07-17** (what the mocked suite could not prove): a self-minted throwaway tenant returned `201 {tenantId:"ext-…", kid, secret}` — camelCase, exactly as the client expects — and the live hub **accepted a token from this repo's signer** (`/invitations-flow/validate` with a bogus token → `400 invalid_invitation`, not 401/403).
+> - **Deviations from §8 as written, decided during implementation:**
+>   - §8.1's fail-fast is scoped to `HMAC_KID`/`TENANT_ID` only. `HMAC_SECRET` is **excluded** (warn-and-ignore): the shipped deploy always injects it via `apply-inter-service-tokens.sh`, so including it would brick hosted mode on every existing install.
+>   - §8.1 gained a dedicated `CONTROL_API_MEMBER_REGISTRATION_EXTERNAL_HUB_BASE_URL`; the legacy `_SERVICE_BASE_URL` is ignored in hosted mode (the base configmap always sets it to the cluster-local URL).
+>   - §8.4's "await after `initDb`, ~2×10s before the listener comes up" was **replaced by fire-and-forget after `server.start()`**. Control-api's liveness probe (`initialDelay 8` + `period 12` × 3, no `startupProbe`) kills the pod at ~32s of not listening, so the specced delay risked a permanent CrashLoop — the opposite of the degrade guarantee.
+> - **Still outstanding (not code):** §14 step 2 — confirm Postmark DKIM for `evenfire.ai` and that the hub's `MEMBER_REGISTRATION_SERVICE_SMTP_FROM_EMAIL` is actually `no-reply@evenfire.ai`. The OSS docs shipped in PR #91 state that sender address; if the hub still sends as `no-reply@hypersig.xyz`, those docs are wrong and a full e2e will reveal it.
 > - **Reconciliation resolved (2026-07-16 brainstorm): hosted replaces offline.** The
 >   offline-mode work (`2026-07-16-offline-member-registration-mode-design.md` + plan,
 >   implemented on `impl/offline-member-registration`, PR #88) was closed unmerged and is
