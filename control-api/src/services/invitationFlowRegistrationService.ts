@@ -16,6 +16,7 @@ export async function registerAndSendInvitation(
     'POST',
     '/invitations-flow/invitations',
     {
+      destinationBaseUrl: config.desktopProfileUiBaseUrl,
       body: {
         email,
         invitationUuid,
@@ -42,6 +43,7 @@ export async function validateInvitationFlowToken(
     email: string
     invitationUuid: string
   }>('POST', '/invitations-flow/validate', {
+    destinationBaseUrl: config.desktopProfileUiBaseUrl,
     body: {
       token,
       email,
@@ -61,6 +63,7 @@ export async function storeDesktopAuthorizationToken(
     'POST',
     '/invitations-flow/desktop-authorizations',
     {
+      destinationBaseUrl: config.desktopProfileUiBaseUrl,
       body: {
         email,
         authorizationToken,

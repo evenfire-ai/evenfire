@@ -50,6 +50,7 @@ Use this index for long-form docs.
 | [Configure approvals](how-to/configure-approvals.md)           | Human-in-the-loop tool gates        |
 | [Add an MCP server](how-to/add-mcp-server.md)                  | Dev-mode JSON or CRD allowlist path |
 | [Desktop setup & updates](how-to/desktop-setup-and-updates.md) | Environments, invitation setup, updates |
+| [Member invitations on self-hosted](how-to/member-invitations-self-hosted.md) | Hosted mode zero-config emails vs running your own service |
 | [Track usage & set budgets](how-to/token-budgets-and-usage.md) | Enable budgets, scope, block vs warn |
 | [Minikube full stack](deploy/minikube.md)                      | Local Kubernetes platform           |
 | [Production notes](deploy/production.md)                       | Checklist and in-repo deploy assets |

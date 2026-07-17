@@ -41,11 +41,13 @@ backend:
   control plane that runs the shared service is not.
 - **Member registration** — the invitation-signup backend
   (`member-registration-service`) is an extracted sibling service, not in this
-  repo. It is needed to complete invitation-based signup in *any* deployment,
-  single-tenant included — you can still log in and drive agents without it, and
-  a self-hoster can point `MEMBER_REGISTRATION_SERVICE_BASE_URL` at their own
-  instance. See the
-  [member-registration gap](../surfaces/desktop-app.md#the-member-registration-service-gap).
+  repo. Self-hosted deployments don't need to run it: set
+  `CONTROL_API_MEMBER_REGISTRATION_MODE=hosted` and the platform enrolls itself
+  with evenfire's shared registration hub, which sends invitation emails on
+  your behalf — see
+  [member invitations on self-hosted](../how-to/member-invitations-self-hosted.md).
+  Operators who want full control can still run their own instance and point
+  `CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL` at it.
 
 These gaps are named, not hidden.
 
