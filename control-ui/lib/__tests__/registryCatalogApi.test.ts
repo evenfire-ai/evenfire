@@ -77,3 +77,23 @@ describe('registry catalog api — tags coercion', () => {
     expect(res.tags).toEqual([])
   })
 })
+
+describe('registry catalog api — registry-unavailable error surface', () => {
+  it('getRegistryCatalog surfaces the server message on a 503 registry_unavailable', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeRes(503, {
+        error: 'registry_unavailable',
+        message: 'The registry is currently unavailable. Check the connection and try again.',
+      })
+    )
+    const err = (await getRegistryCatalog().catch(e => e)) as Error & {
+      status?: number
+      code?: string
+    }
+    expect(err.message).toBe(
+      'The registry is currently unavailable. Check the connection and try again.'
+    )
+    expect(err.status).toBe(503)
+    expect(err.code).toBe('registry_unavailable')
+  })
+})

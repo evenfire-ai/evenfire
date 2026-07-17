@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
 import type { RegistryEntry, RegistryInstalledState } from '../../lib/api'
@@ -9,6 +9,7 @@ import { ToastProvider } from '../Toast'
 // vi.mock is hoisted before imports, factory runs lazily
 vi.mock('../../lib/api', () => ({
   getRegistryCatalog: vi.fn(),
+  getRegistryConnection: vi.fn(),
   deleteRegistryEntry: vi.fn(),
   installRecipeFromRegistry: vi.fn(),
 }))
@@ -99,6 +100,15 @@ function mockApiSuccess(
     },
   })
 }
+
+beforeEach(() => {
+  // Default: managed deployment (no self-hosted connect surface) so the large
+  // pre-existing catalog suite is undisturbed. Connect-discoverability tests
+  // below override this per case.
+  vi.mocked(api.getRegistryConnection).mockRejectedValue(
+    Object.assign(new Error('409 not_self_hosted'), { code: 'not_self_hosted' })
+  )
+})
 
 afterEach(() => {
   cleanup()
@@ -361,6 +371,23 @@ describe('RegistryCatalog - loading and error states', () => {
     await waitFor(() => {
       expect(screen.getByText('Error: 500 Internal Server Error')).toBeInTheDocument()
     })
+  })
+
+  it('test_registryCatalog_unavailable_showsFriendlyServerMessage', async () => {
+    vi.mocked(api.getRegistryCatalog).mockRejectedValue(
+      new Error('The registry is currently unavailable. Check the connection and try again.')
+    )
+
+    render(<RegistryCatalog />)
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          'Error: The registry is currently unavailable. Check the connection and try again.'
+        )
+      ).toBeInTheDocument()
+    })
+    expect(screen.queryByText('Error: 500 Internal Server Error')).not.toBeInTheDocument()
   })
 })
 
@@ -881,5 +908,89 @@ describe('RegistryCatalog - developer row actions (Edit, Remove)', () => {
     })
     // Modal stays open on error so the user can retry or cancel.
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+})
+
+describe('RegistryCatalog - connect discoverability (Fix 1)', () => {
+  it('self-hosted + disconnected → shows connect banner and header Connect button; both route to connect', async () => {
+    mockApiSuccess()
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'disconnected' })
+    render(<RegistryCatalog />)
+    await waitFor(() => expect(screen.getByText('brave-search')).toBeInTheDocument())
+
+    expect(screen.getByText(/This deployment isn't connected to a registry/i)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect to registry' }))
+    expect(mockPush).toHaveBeenCalledWith('/registry/connect')
+
+    mockPush.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    expect(mockPush).toHaveBeenCalledWith('/registry/connect')
+  })
+
+  it('self-hosted + rejected → shows connect banner and header Connect button', async () => {
+    mockApiSuccess()
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'rejected' })
+    render(<RegistryCatalog />)
+    await waitFor(() => expect(screen.getByText('brave-search')).toBeInTheDocument())
+
+    expect(screen.getByText(/This deployment isn't connected to a registry/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeInTheDocument()
+  })
+
+  it('self-hosted + connected → no banner, header Connect button present', async () => {
+    mockApiSuccess()
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'connected' })
+    render(<RegistryCatalog />)
+    await waitFor(() => expect(screen.getByText('brave-search')).toBeInTheDocument())
+
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeInTheDocument()
+    expect(screen.queryByText(/This deployment isn't connected/i)).not.toBeInTheDocument()
+  })
+
+  it('managed deployment (not_self_hosted) → no banner and no header Connect button', async () => {
+    mockApiSuccess()
+    vi.mocked(api.getRegistryConnection).mockRejectedValue(
+      Object.assign(new Error('409 not_self_hosted'), { code: 'not_self_hosted' })
+    )
+    render(<RegistryCatalog />)
+    await waitFor(() => expect(screen.getByText('brave-search')).toBeInTheDocument())
+
+    // The connection fetch resolves mode → managed, hiding the button.
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Connect' })).not.toBeInTheDocument()
+    )
+    expect(screen.queryByText(/This deployment isn't connected/i)).not.toBeInTheDocument()
+  })
+
+  it('unknown connection error → header Connect button present (fail-open), no banner', async () => {
+    mockApiSuccess()
+    vi.mocked(api.getRegistryConnection).mockRejectedValue(new Error('500 Internal Server Error'))
+    render(<RegistryCatalog />)
+    await waitFor(() => expect(screen.getByText('brave-search')).toBeInTheDocument())
+
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeInTheDocument()
+    expect(screen.queryByText(/This deployment isn't connected/i)).not.toBeInTheDocument()
+  })
+
+  it('catalog load error + self-hosted disconnected → connect banner rendered alongside the error banner', async () => {
+    vi.mocked(api.getRegistryCatalog).mockRejectedValue(
+      new Error('The registry is currently unavailable. Check the connection and try again.')
+    )
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'disconnected' })
+    render(<RegistryCatalog />)
+
+    await waitFor(() =>
+      expect(screen.getByText(/This deployment isn't connected to a registry/i)).toBeInTheDocument()
+    )
+    expect(
+      screen.getByText(
+        'Error: The registry is currently unavailable. Check the connection and try again.'
+      )
+    ).toBeInTheDocument()
+
+    // The banner CTA still routes to the connect flow even inside the error branch.
+    fireEvent.click(screen.getByRole('button', { name: 'Connect to registry' }))
+    expect(mockPush).toHaveBeenCalledWith('/registry/connect')
   })
 })

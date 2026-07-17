@@ -250,28 +250,60 @@ async function authedFetch(
   return attempt(isGet)
 }
 
+/**
+ * Registry origin/gateway is unreachable (network refusal, timeout, or an
+ * upstream HTTP 5xx). A clean, user-safe error the global handler forwards as a
+ * 503 so the marketplace shows a clear message instead of a raw 500.
+ */
+export class RegistryUnavailableError extends Error {
+  readonly status = 503
+  readonly code = 'registry_unavailable'
+  constructor(
+    message = 'The registry is currently unavailable. Check the connection and try again.'
+  ) {
+    super(message)
+    this.name = 'RegistryUnavailableError'
+  }
+}
+
 async function registryFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await authedFetch(path, init)
+  let res: Response
+  try {
+    res = await authedFetch(path, init)
+  } catch (err) {
+    // Remap ONLY genuine network/timeout signals to a clean "unavailable":
+    // undici's "fetch failed" (ECONNREFUSED / DNS) surfaces as a TypeError, and
+    // an Abort/Timeout that survives the single GET retry surfaces via
+    // isTransientFetchError. Everything else is rethrown unchanged — critically,
+    // mintToken's status-less "registry credential rejected" (a wrong-secret
+    // misconfig) must keep its own signal rather than be mislabeled "unavailable".
+    if (err instanceof TypeError || isTransientFetchError(err)) {
+      throw new RegistryUnavailableError()
+    }
+    throw err
+  }
   if (!res.ok) {
     const body = await res.text()
     // A persistent 401 (authedFetch already evict-retried once) is a registry
     // machine-token / integration fault — NOT the admin's control-ui session.
-    // Remap to 502 so control-ui's global 401 handler doesn't force-logout the
-    // admin when the registry rejects control-api (e.g. auth off, or a
-    // half-configured/failing connection). Mirrors orgRegistryFetch, which
-    // already does this. Every other status is forwarded verbatim so a
-    // registry 404 stays a 404 (see the e2e-registry-publish-update-remove
-    // failure class below).
+    // Remap to 502 (so control-ui's global 401 handler never force-logs-out the
+    // admin) and carry a machine code + a user-safe message.
     if (res.status === 401) {
-      throw Object.assign(new Error('Registry 401: registry_integration_error'), {
+      throw Object.assign(new Error('The registry could not be reached.'), {
         status: 502,
+        code: 'registry_integration_error',
       })
     }
-    // Attach the upstream status so the global error handler (app.ts) can
-    // forward 4xx responses to the API client. Without `.status`, a registry
-    // 404 surfaces as a 500 Internal Server Error from control-api — the
-    // exact failure class scripts/e2e/e2e-registry-publish-update-remove.sh
-    // is designed to catch.
+    // Registry origin/gateway down — an HTTP 5xx (500/502/503/504 and Cloudflare
+    // 520–524) is the dominant real-world "registry unavailable" signal (edge up,
+    // origin down). Map to a clean 503. Retriable GET statuses already retried
+    // once via RETRIABLE_GET_STATUSES in authedFetch before landing here.
+    if (res.status >= 500) {
+      throw new RegistryUnavailableError()
+    }
+    // Attach the upstream status so the global error handler (app.ts) forwards
+    // 4xx verbatim to the API client (a registry 404 stays a 404 — the
+    // e2e-registry-publish-update-remove failure class).
     throw Object.assign(new Error(`Registry ${res.status}: ${body}`), {
       status: res.status,
     })

@@ -296,7 +296,7 @@ describe('registryClient — GET retry-once (transient resilience)', () => {
     expect(entryAttempts).toBe(2)
   })
 
-  it('only retries ONCE — a second transient surfaces as an error', async () => {
+  it('only retries ONCE — a second transient surfaces as registry_unavailable', async () => {
     const fetchMock = entriesQueue([
       () => new Response('gw', { status: 503 }),
       () => new Response('gw', { status: 503 }),
@@ -304,7 +304,12 @@ describe('registryClient — GET retry-once (transient resilience)', () => {
     vi.stubGlobal('fetch', fetchMock)
     Object.assign(process.env, ENV_OVERRIDE)
 
-    await expect(searchEntries({ q: 'thing' })).rejects.toThrow(/Registry 503/)
+    const err = (await searchEntries({ q: 'thing' }).catch(e => e)) as Error & {
+      status?: number
+      code?: string
+    }
+    expect(err.status).toBe(503)
+    expect(err.code).toBe('registry_unavailable')
 
     const entryCalls = fetchMock.mock.calls.filter(
       (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('/entries')
@@ -323,11 +328,14 @@ describe('registryClient — GET retry-once (transient resilience)', () => {
     vi.stubGlobal('fetch', fetchMock)
     Object.assign(process.env, ENV_OVERRIDE)
 
-    const err = (await searchEntries({ q: 'thing' }).catch(e => e)) as Error & { status?: number }
+    const err = (await searchEntries({ q: 'thing' }).catch(e => e)) as Error & {
+      status?: number
+      code?: string
+    }
     // Load-bearing: status MUST be 502, NOT 401.
     expect(err.status).toBe(502)
     expect(err.status).not.toBe(401)
-    expect(err.message).toMatch(/registry_integration_error/)
+    expect(err.code).toBe('registry_integration_error')
   })
 
   it('still forwards a registry 404 verbatim (not remapped)', async () => {
@@ -342,7 +350,7 @@ describe('registryClient — GET retry-once (transient resilience)', () => {
     expect(err.message).toMatch(/Registry 404/)
   })
 
-  it('does NOT retry a non-GET (POST publish) on 503', async () => {
+  it('does NOT retry a non-GET (POST publish) on 503, and surfaces registry_unavailable', async () => {
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (url.endsWith('/oauth/token')) return Promise.resolve(fakeTokenResponse('tok', 600))
       return Promise.resolve(new Response('gw', { status: 503 }))
@@ -350,9 +358,14 @@ describe('registryClient — GET retry-once (transient resilience)', () => {
     vi.stubGlobal('fetch', fetchMock)
     Object.assign(process.env, ENV_OVERRIDE)
 
-    await expect(publishEntry({ name: '@clerum/x', version: '0.0.1' })).rejects.toThrow(
-      /Registry 503/
-    )
+    const err = (await publishEntry({ name: '@clerum/x', version: '0.0.1' }).catch(
+      e => e
+    )) as Error & {
+      status?: number
+      code?: string
+    }
+    expect(err.status).toBe(503)
+    expect(err.code).toBe('registry_unavailable')
 
     const publishCalls = fetchMock.mock.calls.filter(
       (c: unknown[]) =>
@@ -361,6 +374,69 @@ describe('registryClient — GET retry-once (transient resilience)', () => {
         (c[1] as RequestInit | undefined)?.method === 'POST'
     )
     expect(publishCalls.length).toBe(1)
+  })
+})
+
+describe('registryClient — registry-unavailable remap (Fix 2)', () => {
+  it('remaps a TypeError ("fetch failed" = ECONNREFUSED / DNS) to 503 registry_unavailable', async () => {
+    // A TypeError is NOT transient (isTransientFetchError is false for it), so
+    // authedFetch does not retry it — it rethrows, and registryFetch remaps it.
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/oauth/token')) return Promise.resolve(fakeTokenResponse('tok', 600))
+      return Promise.reject(new TypeError('fetch failed'))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    const err = (await searchEntries({ q: 'thing' }).catch(e => e)) as Error & {
+      status?: number
+      code?: string
+    }
+    expect(err.status).toBe(503)
+    expect(err.code).toBe('registry_unavailable')
+  })
+
+  it('remaps an upstream HTTP 5xx (origin/gateway down) to 503 registry_unavailable', async () => {
+    // The dominant real-world path: the edge is reachable but the origin returns
+    // a 5xx. A GET retries once (RETRIABLE_GET_STATUSES) then maps to unavailable.
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/oauth/token')) return Promise.resolve(fakeTokenResponse('tok', 600))
+      return Promise.resolve(new Response('origin down', { status: 503 }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    const err = (await searchEntries({ q: 'thing' }).catch(e => e)) as Error & {
+      status?: number
+      code?: string
+    }
+    expect(err.status).toBe(503)
+    expect(err.code).toBe('registry_unavailable')
+  })
+
+  it('does NOT relabel a status-less credential-rejected error as registry_unavailable', async () => {
+    // mintToken throws "registry credential rejected: 401 …" (a wrong-secret
+    // misconfig) — a status-less, non-network Error. It must surface unchanged,
+    // NOT collapsed into the "unavailable" message.
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/oauth/token'))
+        return Promise.resolve(new Response('bad creds', { status: 401 }))
+      return Promise.resolve(
+        new Response(JSON.stringify({ data: [], meta: { total: 0, limit: 0, offset: 0 } }), {
+          status: 200,
+        })
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    const err = (await searchEntries({ q: 'thing' }).catch(e => e)) as Error & {
+      status?: number
+      code?: string
+    }
+    expect(err.message).toMatch(/registry credential rejected: 401/)
+    expect(err.code).not.toBe('registry_unavailable')
+    expect(err.status).toBeUndefined()
   })
 })
 
@@ -482,7 +558,7 @@ describe('registryClient — stale-while-error cache', () => {
     expect(second).toEqual({ data: ['ai', 'devtools'] })
   })
 
-  it('throws when the registry errors and there is NO cached value', async () => {
+  it('throws registry_unavailable when the registry errors and there is NO cached value', async () => {
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (url.endsWith('/oauth/token')) return Promise.resolve(fakeTokenResponse('tok', 600))
       return Promise.resolve(new Response('down', { status: 503 }))
@@ -490,7 +566,9 @@ describe('registryClient — stale-while-error cache', () => {
     vi.stubGlobal('fetch', fetchMock)
     Object.assign(process.env, ENV_OVERRIDE)
 
-    await expect(getCategories()).rejects.toThrow(/Registry 503/)
+    const err = (await getCategories().catch(e => e)) as Error & { status?: number; code?: string }
+    expect(err.status).toBe(503)
+    expect(err.code).toBe('registry_unavailable')
   })
 
   it('serves last-good default catalog search (limit:200) on error', async () => {
