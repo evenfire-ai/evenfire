@@ -12,14 +12,17 @@ import {
 
 type RequestMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
-// This bounds a stalled hub, but does not guarantee the send didn't happen:
-// if the hub's synchronous send exceeds it, we abort and return 503 while the
-// hub may already have sent the mail — leaving the invitation in `draft`
-// (which cleanupStaleDraftInvitations later deletes) and the invitee holding
-// a dead link. 30s is chosen over the enrollment path's MINT_TIMEOUT_MS
-// (10_000, memberRegistrationEnrollment.ts) to give a loaded SMTP send room
-// to finish.
-const SEND_TIMEOUT_MS = 30_000
+// Bounds a stalled hub (otherwise the request hangs indefinitely). Must stay
+// below control-ui's API_REQUEST_TIMEOUT_MS (30000), otherwise the browser
+// aborts first and shows "Request timed out. Check that Control API is
+// reachable" (blaming the wrong component) instead of
+// member_registration_unavailable. Leaving headroom lets the 503 reach the
+// browser. Also larger than enrollment path's MINT_TIMEOUT_MS (10_000,
+// memberRegistrationEnrollment.ts) to give a loaded SMTP send room. Tradeoff:
+// if the hub's send exceeds this timeout, we abort and return 503 while the
+// hub may have already sent the mail, leaving the invitation in draft
+// (cleanupStaleDraftInvitations later deletes it).
+const SEND_TIMEOUT_MS = 20_000
 
 function buildUrl(baseUrl: string, path: string): string {
   const base = baseUrl.replace(/\/+$/, '')
@@ -109,8 +112,8 @@ export async function memberRegistrationServiceRequest<T>(
   if (response.status >= 500) {
     // NOTE: this message must NOT contain the exact string "Member registration
     // service" (capital M) — that exact string is reserved for the untyped 4xx
-    // path below, which routes/external/invitations.ts:212 and the
-    // sendInvitationServiceError helpers match on.
+    // path below, which the sendInvitationServiceError helpers
+    // (routes/admin/teams.ts:42, routes/external/teams.ts:36) match on.
     throw unavailable(
       { ...context, upstreamStatus: response.status },
       `member-registration service ${method} ${path} failed (${response.status})`
