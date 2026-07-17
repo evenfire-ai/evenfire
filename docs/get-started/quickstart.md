@@ -25,7 +25,15 @@ git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
 cp .env.example .env
 ```
 
-Edit `.env` and set **one** key (setup infers the matching provider):
+Edit `.env` and set the platform password — one value for both the Control UI
+`admin` login and the seeded Desktop App user. No default ships; setup aborts
+in Step 1 without it:
+
+```bash
+ADMIN_PASSWORD=<choose-a-password>
+```
+
+Then set **one** LLM key (setup infers the matching provider):
 
 ```bash
 OPENAI_API_KEY=sk-...
@@ -51,11 +59,11 @@ minikube's Docker → deploy → readiness wait with auto-recovery → seed → 
 
 It seeds for you:
 
-> Seeded credentials below are for local minikube only — change them before any shared or production-like environment.
-
-- an agent: Host `chatllm` + Context `context1` + a CommunicationChannel
-- a desktop/API login: **`test@clerum.io` / `changeme123!`**
-- a Control UI admin: **`admin` / `changeme123!`**
+- an agent: Host `chatllm` + an empty Context `context1` (no MCP servers —
+  install connectors from the registry) + a CommunicationChannel
+- one login, using the `ADMIN_PASSWORD` you set in `.env`:
+  **`owner@evenfire.local`** for the Desktop App and **`admin`** for the
+  Control UI
 
 Verify:
 
@@ -65,7 +73,9 @@ make minikube-status    # every deployment should show READY
 
 Useful re-runs: `make minikube-setup ARGS="--skip-build"` (redeploy in ~1 min) ·
 `ARGS="--reset-db"` (fix postgres after a cold-start crash) ·
-`ARGS="--force-keys"` (regenerate the JWT chain).
+`ARGS="--force-keys"` (regenerate the JWT chain) ·
+`ARGS="--seed-profile=e2e"` or `make minikube-setup-e2e` (adds the E2E fixture
+set: test user, `e2e-*` recipes, demo MCP servers).
 
 ## 3. Say hello — desktop app
 
@@ -74,8 +84,9 @@ make install-all && npm --prefix control-ui install
 npm run ui     # runs Control UI (:3000), Profile UI (:3001), and the Desktop App
 ```
 
-Log into the **Desktop App** as `test@clerum.io` / `changeme123!` and message
-the `chatllm` agent. Ask it to do something real — _"run `uname -a`"_ or
+Log into the **Desktop App** as `owner@evenfire.local` using the
+`ADMIN_PASSWORD` you set in `.env`, and message the `chatllm` agent. Ask it to
+do something real — _"run `uname -a`"_ or
 _"generate a one-page PDF about Kubernetes NetworkPolicies"_ — and approve the
 tool call right in the chat when the approval gate fires. For what else is on
 screen — live activity, artifacts, sandbox UIs — see
@@ -93,7 +104,7 @@ EXT=http://localhost:8091  RPC=http://localhost:8094  HOST=chatllm
 # 1. password login → session token
 SESSION=$(curl -s -X POST "$EXT/api/v1/auth/password-login" \
   -H 'Content-Type: application/json' \
-  -d '{"email":"test@clerum.io","password":"changeme123!"}' | jq -r .token)
+  -d '{"email":"<seeded-email>","password":"<your ADMIN_PASSWORD>"}' | jq -r .token)
 
 # 2. exchange for a short-lived RPC token scoped to this host
 RPC_TOKEN=$(curl -s -X POST "$EXT/api/v1/rpc/token" \

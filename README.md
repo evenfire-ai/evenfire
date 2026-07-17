@@ -166,7 +166,9 @@ in-chat gate; pending approvals survive pod restarts.
 
 `make minikube-setup` stands up the whole platform on a local cluster — every
 service, deny-all NetworkPolicies, the JWT chain, and a seeded agent named
-`chatllm`.
+`chatllm`. It starts with an empty connector context — mcp-host's native tools
+(shell, file read/write, HTTP, memory) need no MCP server; install connectors
+from the registry when you want more.
 
 **Prerequisites:** Docker Desktop with **≥10 GB RAM / 6 CPUs** · `minikube`
 v1.30+ · `kubectl` · `python3` · Node.js 24+.
@@ -174,7 +176,8 @@ v1.30+ · `kubectl` · `python3` · Node.js 24+.
 ```bash
 git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
 cp .env.example .env
-# edit .env: set ONE LLM key (setup infers the matching provider)
+# edit .env: set ADMIN_PASSWORD (required — no default ships) and ONE LLM key
+# (setup infers the matching provider)
 make minikube-setup     # first run ~5–10 min (image builds dominate); re-run safe
 make minikube-status    # wait for every deployment READY
 ```
@@ -187,11 +190,11 @@ make install-all && npm --prefix control-ui install
 npm run ui              # Control UI + Profile UI + Desktop App
 ```
 
-Log in as `test@clerum.io` / `changeme123!`, message the `chatllm` agent, and
-ask it to run a command or generate a PDF — then approve the tool call from the
-chat. These are seeded local-minikube credentials — change them before any
-shared or production-like environment. The Desktop App is the client you just
-used; Control UI is the admin console for the same fleet — both are toured in
+Log in as `owner@evenfire.local` using the `ADMIN_PASSWORD` you set in `.env`,
+message the `chatllm` agent, and ask it to run a command or generate a PDF —
+then approve the tool call from the chat. The same password logs into the
+Control UI as `admin`. The Desktop App is the client you just used; Control UI
+is the admin console for the same fleet — both are toured in
 [docs/surfaces/](docs/surfaces/README.md).
 
 Prefer the API path? The full curl walkthrough exercises the real session →

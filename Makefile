@@ -138,8 +138,13 @@ minikube-stop: ## Stop minikube cluster
 	minikube stop -p $(MINIKUBE_PROFILE)
 
 .PHONY: minikube-setup
-minikube-setup: ## Full setup from scratch. Use SKIP_UIS=true to omit Control/Profile UI.
-	@MINIKUBE_SKIP_UIS="$(SKIP_UIS)" scripts/minikube/full-setup.sh $(ARGS)
+minikube-setup: ## Clean install from scratch. SKIP_UIS=true omits Control/Profile UI. Needs ADMIN_PASSWORD in .env.
+	@MINIKUBE_SKIP_UIS="$(SKIP_UIS)" MINIKUBE_SEED_PROFILE="$(SEED_PROFILE)" \
+		scripts/minikube/full-setup.sh $(ARGS)
+
+.PHONY: minikube-setup-e2e
+minikube-setup-e2e: ## Full setup + E2E fixtures (test user, e2e-* recipes, demo MCP servers).
+	@$(MAKE) --no-print-directory minikube-setup SEED_PROFILE=e2e
 
 .PHONY: minikube-teardown
 minikube-teardown: ## Remove deployments (keep namespaces/CRDs)
@@ -912,7 +917,7 @@ sync-check: ## Diff prod vs minikube manifests, alert divergences
 
 # ── Full Pipeline ────────────────────────────────────────────────────
 .PHONY: validate-all
-validate-all: install-all test-unit-all build-preflight minikube-setup test-integration test-e2e-all ## Full validation pipeline
+validate-all: install-all test-unit-all build-preflight minikube-setup-e2e test-integration test-e2e-all ## Full validation pipeline
 
 .PHONY: collect-cluster-evidence
 collect-cluster-evidence: ## Collect cluster evidence bundle (use OUT_DIR=/path if needed)

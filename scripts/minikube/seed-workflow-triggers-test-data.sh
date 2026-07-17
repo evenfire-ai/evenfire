@@ -9,16 +9,13 @@
 # Recipes created:
 #   1. e2e-ondemand-simple     -- basic onDemand trigger, no approval
 #   2. e2e-ondemand-approval   -- onDemand with approval (policy: triggerer)
-#   3. e2e-role-approval       -- onDemand with role-based approval
-#   4. e2e-quorum-approval     -- onDemand with quorum (2 of 2 specific users)
-#   5. e2e-scheduled-recipe    -- onDemand fixture; schedule flows live in dedicated E2E
-#   6. e2e-retention-recipe    -- onDemand with runRetention limits
+#   3. e2e-scheduled-recipe    -- onDemand fixture; schedule flows live in dedicated E2E
+#   4. e2e-retention-recipe    -- onDemand with runRetention limits
 #
 # Users seeded (ON CONFLICT DO NOTHING):
 #   - test@clerum.io              (trigger owner / default approver)
 #   - trigger-outsider-e2e@clerum.io (outsider, no access)
-#   - placeholder-cfo@clerum.io   (quorum approver #1)
-#   - placeholder-cto@clerum.io   (quorum approver #2)
+#   - placeholder-cfo@clerum.io   (approval user for workflow-snippet-runtime-happy-path.test.ts)
 #
 # Prerequisites:
 #   - Minikube cluster running with all services deployed
@@ -190,13 +187,6 @@ if [[ -z "$CFO_USER_ID" || "$CFO_USER_ID" == *ERROR* ]]; then
   exit 1
 fi
 ok "placeholder-cfo@clerum.io (id=${CFO_USER_ID:0:8}...)"
-
-CTO_USER_ID=$(psql_scalar "INSERT INTO users (email, name) VALUES ('placeholder-cto@clerum.io', 'E2E CTO') ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name RETURNING id;")
-if [[ -z "$CTO_USER_ID" || "$CTO_USER_ID" == *ERROR* ]]; then
-  err "Failed to seed CTO user: $CTO_USER_ID"
-  exit 1
-fi
-ok "placeholder-cto@clerum.io (id=${CTO_USER_ID:0:8}...)"
 echo ""
 
 # ── Step 3: Seed workflow trigger grants + approval team allowlists ──
@@ -205,8 +195,6 @@ log "Granting workflow trigger access..."
 RECIPES_FOR_USER_A=(
   "e2e-ondemand-simple"
   "e2e-ondemand-approval"
-  "e2e-role-approval"
-  "e2e-quorum-approval"
   "e2e-scheduled-recipe"
   "e2e-retention-recipe"
 )
@@ -220,14 +208,6 @@ for recipe in "${RECIPES_FOR_USER_A[@]}"; do
              ON CONFLICT DO NOTHING;" || true
 done
 ok "Trigger owner granted + team approval allowlisted on ${#RECIPES_FOR_USER_A[@]} recipes"
-
-# Grant CFO and CTO access to the quorum recipe
-for uid in "$CFO_USER_ID" "$CTO_USER_ID"; do
-  psql_exec "INSERT INTO user_workflow_triggers (user_id, recipe_namespace, recipe_name) \
-             VALUES ('${uid}', '${RECIPE_NS}', 'e2e-quorum-approval') \
-             ON CONFLICT DO NOTHING;" || true
-done
-ok "CFO + CTO granted direct approval access on e2e-quorum-approval"
 echo ""
 
 # ── Step 4: Apply WorkflowRecipe CRDs ────────────────────────────────
@@ -294,75 +274,7 @@ spec:
         timeoutSeconds: 300
 YAML
 
-# 3. e2e-role-approval: onDemand with role-based approval, no self-approval
-cat > "$TMPDIR/e2e-role-approval.yaml" <<YAML
-apiVersion: clerum.io/v1alpha1
-kind: WorkflowRecipe
-metadata:
-  name: e2e-role-approval
-  namespace: ${RECIPE_NS}
-  labels:
-    clerum.io/e2e: "true"
-    clerum.io/trigger-suite: "true"
-    clerum.io/e2e-negative-fixture: "true"
-  annotations:
-    clerum.io/e2e-expected-phase: "failed"
-    clerum.io/e2e-expected-failure-reason: "approval-timeout-no-decision"
-spec:
-  agent:
-    provider: ${E2E_WORKFLOW_MODEL_PROVIDER}
-    model: ${E2E_WORKFLOW_MODEL_NAME}
-  triggers:
-    onDemand:
-      requiresApproval: true
-      allowedActors:
-        - user
-  steps:
-    - id: admin-gated
-      instruction: "Execute after admin approval. E2E test."
-      timeoutSeconds: 120
-      requiresApproval:
-        target:
-          userId: "${TRIGGER_USER_ID}"
-        message: "E2E role-approval: admin must approve"
-        timeoutSeconds: 300
-YAML
-
-# 4. e2e-quorum-approval: onDemand with quorum (2 specific users)
-cat > "$TMPDIR/e2e-quorum-approval.yaml" <<YAML
-apiVersion: clerum.io/v1alpha1
-kind: WorkflowRecipe
-metadata:
-  name: e2e-quorum-approval
-  namespace: ${RECIPE_NS}
-  labels:
-    clerum.io/e2e: "true"
-    clerum.io/trigger-suite: "true"
-    clerum.io/e2e-negative-fixture: "true"
-  annotations:
-    clerum.io/e2e-expected-phase: "failed"
-    clerum.io/e2e-expected-failure-reason: "approval-timeout-no-decision"
-spec:
-  agent:
-    provider: ${E2E_WORKFLOW_MODEL_PROVIDER}
-    model: ${E2E_WORKFLOW_MODEL_NAME}
-  triggers:
-    onDemand:
-      requiresApproval: true
-      allowedActors:
-        - user
-  steps:
-    - id: quorum-gated
-      instruction: "Execute after quorum approval. E2E test."
-      timeoutSeconds: 120
-      requiresApproval:
-        target:
-          userId: "${CFO_USER_ID}"
-        message: "E2E quorum-approval: CFO + CTO must both approve"
-        timeoutSeconds: 300
-YAML
-
-# 5. e2e-scheduled-recipe: manual fixture for usage/UI checks.
+# 3. e2e-scheduled-recipe: manual fixture for usage/UI checks.
 # Dedicated schedule coverage lives in scripts/e2e/e2e-workflow-triggers.sh and
 # scripts/e2e/e2e-workflow-schedules.sh so the base seed does not create
 # background schedule state during unrelated tests.
@@ -408,7 +320,7 @@ spec:
     storageSize: 64Mi
 YAML
 
-# 6. e2e-retention-recipe: onDemand with runRetention limits
+# 4. e2e-retention-recipe: onDemand with runRetention limits
 cat > "$TMPDIR/e2e-retention-recipe.yaml" <<YAML
 apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
@@ -536,7 +448,7 @@ ok "Trigger grants seeded: $TRIGGER_GRANT_COUNT"
 ok "Team approval allowlist rows seeded: $TEAM_ALLOWLIST_COUNT"
 ok "Expected negative fixtures: $NEGATIVE_FIXTURE_COUNT"
 
-USER_COUNT=$(psql_scalar "SELECT COUNT(*) FROM users WHERE email IN ('${TRIGGER_USER_EMAIL}', 'trigger-outsider-e2e@clerum.io', 'placeholder-cfo@clerum.io', 'placeholder-cto@clerum.io');")
+USER_COUNT=$(psql_scalar "SELECT COUNT(*) FROM users WHERE email IN ('${TRIGGER_USER_EMAIL}', 'trigger-outsider-e2e@clerum.io', 'placeholder-cfo@clerum.io');")
 ok "E2E users in DB: $USER_COUNT"
 echo ""
 
@@ -546,7 +458,7 @@ echo -e "${BOLD}  Seed Summary${NC}"
 echo -e "${BOLD}=================================================================${NC}"
 echo -e "  Recipes applied:  ${GREEN}${APPLIED}${NC}"
 echo -e "  Recipes failed:   ${RED}${FAILED}${NC}"
-echo -e "  Users seeded:     4 (trigger-e2e, outsider, CFO, CTO)"
+echo -e "  Users seeded:     3 (trigger-e2e, outsider, CFO)"
 echo -e "  Trigger grants:   ${TRIGGER_GRANT_COUNT}"
 echo -e "  Team allowlists:  ${TEAM_ALLOWLIST_COUNT}"
 echo -e "  Negative fixtures:${YELLOW} ${NEGATIVE_FIXTURE_COUNT}${NC}"

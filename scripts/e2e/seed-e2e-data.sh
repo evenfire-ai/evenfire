@@ -55,6 +55,30 @@ DEV_EMAIL="${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}"
 DEV_NAME="${E2E_DEV_LOGIN_NAME:-Test User}"
 DEV_EMAIL_2="${E2E_DEV_LOGIN_EMAIL_2:-test2@clerum.io}"
 DEV_NAME_2="${E2E_DEV_LOGIN_NAME_2:-Test User 2}"
+
+# The second E2E fixture user (test2@clerum.io) backs the e2e lane's
+# multi-user/cross-device suites — desktop-app/test/e2e-playwright/
+# crossDeviceSessions.helpers.ts, gfs-user-journey.test.ts,
+# third-party-authn-third-party-mcphost.figure-d.test.ts, and
+# sdk-client-notification/evenfireSandboxUiCrossUserDelivery.test.ts all
+# depend on it. But the minimal profile must not seed anything named test*
+# (see scripts/minikube/full-setup.sh Step 10), so every consumer of this
+# user below (team, bindings, desktop login, SDK grants, summary line) is
+# gated on this flag instead.
+#
+# Default is e2e (opposite of full-setup.sh's `minimal` default): this
+# script is invoked directly by `make e2e-desktop-app` and ~9
+# scripts/e2e/*.sh callers that never set SEED_PROFILE — defaulting to
+# `minimal` here would silently break all of them.
+SEED_SECOND_E2E_USER="false"
+if [ "${SEED_PROFILE:-e2e}" = "e2e" ]; then
+  SEED_SECOND_E2E_USER="true"
+fi
+# Populated in Step 5 only when SEED_SECOND_E2E_USER=true. Initialized here
+# so later reads are safe under `set -u` even when Step 5 is skipped.
+USER_ID_2=""
+TEAM_ID_2=""
+
 AGENT_NAME="${E2E_HOST_REF:-chatllm}"
 CONTEXT_ID="${E2E_CONTEXT_ID:-context1}"
 
@@ -175,10 +199,17 @@ seed_desktop_login_if_enabled() {
     die "ADMIN_PASSWORD is required when seeding desktop login credentials"
   fi
 
-  log "Seeding desktop login credentials for $DEV_EMAIL and $DEV_EMAIL_2 (context=$CONTEXT)"
-  seed_desktop_login_for_user "$DEV_EMAIL" "$USER_ID" "$DESKTOP_LOGIN_CREDENTIAL"
-  seed_desktop_login_for_user "$DEV_EMAIL_2" "$USER_ID_2" "$DESKTOP_LOGIN_CREDENTIAL"
-  ok "Desktop login enabled for seeded users"
+  if [ "$SEED_SECOND_E2E_USER" = "true" ]; then
+    log "Seeding desktop login credentials for $DEV_EMAIL and $DEV_EMAIL_2 (context=$CONTEXT)"
+    seed_desktop_login_for_user "$DEV_EMAIL" "$USER_ID" "$DESKTOP_LOGIN_CREDENTIAL"
+    seed_desktop_login_for_user "$DEV_EMAIL_2" "$USER_ID_2" "$DESKTOP_LOGIN_CREDENTIAL"
+    ok "Desktop login enabled for seeded users"
+  else
+    log "Seeding desktop login credentials for $DEV_EMAIL (context=$CONTEXT)"
+    seed_desktop_login_for_user "$DEV_EMAIL" "$USER_ID" "$DESKTOP_LOGIN_CREDENTIAL"
+    log "Skipping desktop login for $DEV_EMAIL_2 (SEED_PROFILE=minimal)"
+    ok "Desktop login enabled for seeded user"
+  fi
 }
 
 seed_plugin_sdk_demo_grants_if_enabled() {
@@ -266,7 +297,10 @@ if [ "$CONTEXT_OK" -ne 1 ]; then
 fi
 ok "Context '$CONTEXT' is in the non-prod allowlist"
 
-if [ -z "$ADMIN_PASSWORD" ] && is_minikube_context; then
+# Only the e2e seed profile gets a known default. The minimal profile requires
+# the user to supply ADMIN_PASSWORD (full-setup.sh Step 1), so no default
+# password ships. :274 below still hard-fails when neither applies.
+if [ -z "$ADMIN_PASSWORD" ] && is_minikube_context && [ "${SEED_PROFILE:-e2e}" = "e2e" ]; then
   ADMIN_PASSWORD="$(printf '%s%s' 'changeme123' '!')"
   DESKTOP_LOGIN_CREDENTIAL="$ADMIN_PASSWORD"
 fi
@@ -484,34 +518,53 @@ if [ -n "$TEAM_ID" ]; then
 fi
 
 # ─── Step 5: Persist second user + team through admin control-api ──────
-ensure_seed_user_and_team "$DEV_EMAIL_2" "$DEV_NAME_2"
-USER_ID_2="$ENSURE_USER_ID"
-TEAM_ID_2="$ENSURE_TEAM_ID"
+# Gated on SEED_SECOND_E2E_USER (see definition near the top of this file):
+# the minimal profile must not seed test2@clerum.io at all.
+if [ "$SEED_SECOND_E2E_USER" = "true" ]; then
+  ensure_seed_user_and_team "$DEV_EMAIL_2" "$DEV_NAME_2"
+  USER_ID_2="$ENSURE_USER_ID"
+  TEAM_ID_2="$ENSURE_TEAM_ID"
 
-# ─── Step 6: Idempotent user2↔agent and user2↔context bindings ─────────
-log "Binding user $DEV_EMAIL_2 ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-put_json "$CAPI_BASE/admin/users/$USER_ID_2/agents" \
-  "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
-  "PUT /admin/users/:userId2/agents"
-
-put_json "$CAPI_BASE/admin/users/$USER_ID_2/contexts" \
-  "$(jq -cn --arg c "$CONTEXT_ID" '{contextIds: [$c]}')" \
-  "PUT /admin/users/:userId2/contexts"
-
-# ─── Step 7: Team-level bindings for second user (if the user has a team)
-if [ -n "$TEAM_ID_2" ]; then
-  log "Binding team ${TEAM_ID_2:0:8}… ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
-  put_json "$CAPI_BASE/admin/teams/$TEAM_ID_2/agents" \
+  # ─── Step 6: Idempotent user2↔agent and user2↔context bindings ───────
+  log "Binding user $DEV_EMAIL_2 ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
+  put_json "$CAPI_BASE/admin/users/$USER_ID_2/agents" \
     "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
-    "PUT /admin/teams/:teamId2/agents"
-  put_json "$CAPI_BASE/admin/teams/$TEAM_ID_2/contexts" \
+    "PUT /admin/users/:userId2/agents"
+
+  put_json "$CAPI_BASE/admin/users/$USER_ID_2/contexts" \
     "$(jq -cn --arg c "$CONTEXT_ID" '{contextIds: [$c]}')" \
-    "PUT /admin/teams/:teamId2/contexts"
+    "PUT /admin/users/:userId2/contexts"
+
+  # ─── Step 7: Team-level bindings for second user (if the user has a team)
+  if [ -n "$TEAM_ID_2" ]; then
+    log "Binding team ${TEAM_ID_2:0:8}… ↔ agent=$AGENT_NAME, context=$CONTEXT_ID"
+    put_json "$CAPI_BASE/admin/teams/$TEAM_ID_2/agents" \
+      "$(jq -cn --arg a "$AGENT_NAME" '{agentNames: [$a]}')" \
+      "PUT /admin/teams/:teamId2/agents"
+    put_json "$CAPI_BASE/admin/teams/$TEAM_ID_2/contexts" \
+      "$(jq -cn --arg c "$CONTEXT_ID" '{contextIds: [$c]}')" \
+      "PUT /admin/teams/:teamId2/contexts"
+  fi
+else
+  log "Skipping second E2E user $DEV_EMAIL_2 (SEED_PROFILE=minimal) — minimal profile seeds nothing named test*"
 fi
 
 seed_desktop_login_if_enabled
-seed_plugin_sdk_demo_grants_if_enabled
+
+# Plugin Workload SDK demo grants exist for the grant-driven sandbox-ui
+# notification recipe, which the "clientNotifications" grant wires to BOTH
+# seeded users (see seed_plugin_sdk_demo_grants_if_enabled above). Gate the
+# whole call on SEED_SECOND_E2E_USER: under minimal there is no second user
+# to grant, and the demo recipe itself isn't deployed either (full-setup.sh
+# only applies deploy/overlays/minikube/instances-e2e/ under SEED_PROFILE=e2e).
+if [ "$SEED_SECOND_E2E_USER" = "true" ]; then
+  seed_plugin_sdk_demo_grants_if_enabled
+else
+  log "Skipping Plugin Workload SDK demo grants (SEED_PROFILE=minimal) — the grant-driven sandbox-ui notification recipe is e2e-only and needs both seeded users"
+fi
 
 echo ""
 echo -e "${GREEN}[seed] Done.${NC} $DEV_EMAIL → agent=$AGENT_NAME, context=$CONTEXT_ID (cluster=$CONTEXT)"
-echo -e "${GREEN}[seed] Done.${NC} $DEV_EMAIL_2 → agent=$AGENT_NAME, context=$CONTEXT_ID (cluster=$CONTEXT)"
+if [ "$SEED_SECOND_E2E_USER" = "true" ]; then
+  echo -e "${GREEN}[seed] Done.${NC} $DEV_EMAIL_2 → agent=$AGENT_NAME, context=$CONTEXT_ID (cluster=$CONTEXT)"
+fi

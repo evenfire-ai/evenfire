@@ -9,7 +9,7 @@ fail() { echo "FAIL: $1"; FAIL=1; }
 make_stub_repo() {
   local tmp="$1"
   mkdir -p "$tmp/scripts/e2e" "$tmp/mcp-servers/airtable" \
-    "$tmp/deploy/overlays/minikube/instances"
+    "$tmp/deploy/overlays/minikube/instances-e2e"
   cp scripts/e2e/playwright-preflight-dev.sh "$tmp/scripts/e2e/playwright-preflight-dev.sh"
   cat > "$tmp/mcp-servers/airtable/mcpserver.yaml" <<'YAML'
 apiVersion: clerum.io/v1
@@ -21,7 +21,7 @@ spec:
   transport:
     type: streamableHttp
 YAML
-  cat > "$tmp/deploy/overlays/minikube/instances/airtable-server.yaml" <<'YAML'
+  cat > "$tmp/deploy/overlays/minikube/instances-e2e/airtable-server.yaml" <<'YAML'
 apiVersion: clerum.io/v1
 kind: McpServer
 metadata:
@@ -210,7 +210,7 @@ assert_branch_scoped_clerum_profile_uses_minikube_manifest() {
   AIRTABLE_API_KEY="real-key" \
   bash "$tmp/repo/scripts/e2e/playwright-preflight-dev.sh" >/dev/null 2>&1
 
-  if grep -q "deploy/overlays/minikube/instances/airtable-server.yaml" "$log_file"; then
+  if grep -q "deploy/overlays/minikube/instances-e2e/airtable-server.yaml" "$log_file"; then
     pass "preflight uses the minikube Airtable manifest for branch-scoped clerum profiles"
   else
     fail "preflight did not use the minikube Airtable manifest for branch-scoped clerum profiles"

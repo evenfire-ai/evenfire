@@ -119,6 +119,17 @@ case "${SKIP_UIS}" in
   *) SKIP_UIS=false ;;
 esac
 
+SEED_PROFILE="${MINIKUBE_SEED_PROFILE:-minimal}"
+
+# Unlike the SKIP_UIS boolean normalizer, an unrecognized profile is a hard
+# error — silently falling back to `minimal` would skip the E2E fixtures a
+# caller explicitly asked for, and the failure would surface much later as a
+# confusing test failure.
+case "${SEED_PROFILE}" in
+  minimal|e2e) ;;
+  *) err "Unknown SEED_PROFILE: '${SEED_PROFILE}' (expected: minimal | e2e)"; exit 1 ;;
+esac
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -129,6 +140,11 @@ Options:
   --skip-build   Skip Docker image builds (use pre-loaded images)
   --skip-uis     Skip Control UI, Profile UI, and Desktop App image builds.
                  Control/Profile UI cluster deployments are also skipped.
+  --seed-profile=<minimal|e2e>
+                         minimal (default): a clean install — one agent, no
+                         test fixtures. e2e: adds the E2E fixtures (test user,
+                         e2e-* recipes, demo MCP servers). Requires ADMIN_PASSWORD
+                         unless --seed-profile=e2e.
   --reset-db     Reset postgres database for MINIKUBE_PROFILE (deletes PVC, re-deploys)
   --force-keys   Force JWT key regeneration (invalidates existing tokens)
   -h, --help     Show this help message
@@ -138,6 +154,8 @@ Environment:
   MINIKUBE_MULTI_NODE    Set true to opt into a two-node local cluster
   MINIKUBE_NODES         Explicit node count; values >1 imply multi-node
   MINIKUBE_SKIP_UIS      Set true to skip Control UI, Profile UI, and Desktop App
+  MINIKUBE_SEED_PROFILE, ADMIN_PASSWORD
+                         See --seed-profile above
   MINIKUBE_RECREATE_PROFILE
                          Set true to allow destructive broken-profile recreation
   CONFIRM_PROFILE        Must match MINIKUBE_PROFILE before any profile deletion
@@ -155,6 +173,7 @@ Examples:
   $(basename "$0")                       # Full setup from scratch
   $(basename "$0") --skip-build          # Re-deploy without rebuilding images
   $(basename "$0") --skip-uis            # Deploy backend services without UIs
+  $(basename "$0") --seed-profile=e2e     # Full E2E fixture set
   $(basename "$0") --reset-db            # Fix postgres WAL corruption
   $(basename "$0") --force-keys          # Regenerate all JWT keys
 EOF
@@ -165,12 +184,21 @@ for arg in "$@"; do
   case "$arg" in
     --skip-build) SKIP_BUILD=true ;;
     --skip-uis)   SKIP_UIS=true ;;
+    --seed-profile=*) SEED_PROFILE="${arg#*=}" ;;
     --reset-db)   RESET_DB=true ;;
     --force-keys) FORCE_KEYS=true ;;
     -h|--help)    usage ;;
     *) err "Unknown flag: $arg"; usage ;;
   esac
 done
+
+# Re-validate: --seed-profile= above can override the env-derived value, so
+# the same check that guards MINIKUBE_SEED_PROFILE must run again here or
+# `--seed-profile=bogus` slips through unvalidated.
+case "${SEED_PROFILE}" in
+  minimal|e2e) ;;
+  *) err "Unknown --seed-profile: '${SEED_PROFILE}' (expected: minimal | e2e)"; exit 1 ;;
+esac
 
 # ── Load .env ──────────────────────────────────────────────────────────
 # When running from a git worktree (.claude/worktrees/*/), PROJECT_DIR points
@@ -308,6 +336,22 @@ if ! command -v python3 &>/dev/null; then
 fi
 ok "python3 is available"
 
+# Fail here, not at Step 10. Image builds dominate a 5-10 min first run
+# (README.md:178); aborting after them for a missing .env line is hostile.
+if [ "$SEED_PROFILE" = "minimal" ] && [ -z "${ADMIN_PASSWORD:-}" ]; then
+  err "ADMIN_PASSWORD is not set."
+  err ""
+  err "  This is your Control UI admin password AND your Desktop App login."
+  err "  Set it in .env at the project root:"
+  err ""
+  err "      ADMIN_PASSWORD=<choose-a-password>"
+  err ""
+  err "  No default password ships with Evenfire. For the E2E fixture profile"
+  err "  (which pins a known test password), run: make minikube-setup-e2e"
+  exit 1
+fi
+ok "ADMIN_PASSWORD is set"
+
 # ======================================================================
 # Step 2: Cluster
 # ======================================================================
@@ -433,29 +477,39 @@ fi
 # CRDs (envSecret references must resolve or the Deployment is never created).
 # Real credentials can be injected later via AIRTABLE_API_KEY / MONGODB_CONNECTION_STRING
 # in .env and re-running setup, or via scripts/create-k8s-secrets.sh.
+#
+# Gated with SEED_PROFILE=e2e together with the McpServer instances themselves
+# (deploy/overlays/minikube/instances-e2e/, Step 6e below). They MUST move as
+# a pair: validate_mcpserver_secrets (below) aborts the whole setup if any
+# McpServer.envSecret is unresolvable, so a server applied without its secret
+# is a hard failure — a secret applied without its server is merely unused.
 log "Applying MCP server secrets..."
 $KC create namespace mcp-server --dry-run=client -o yaml | $KC apply -f - >/dev/null
 
-if [ -f "${PROJECT_DIR}/mcp-servers/airtable/secret.yaml" ]; then
-  $KC apply -f "${PROJECT_DIR}/mcp-servers/airtable/secret.yaml"
-  ok "mcp-airtable-credentials from mcp-servers/airtable/secret.yaml"
-else
-  $KC create secret generic mcp-airtable-credentials \
-    --namespace=mcp-server \
-    --from-literal=api-key="${AIRTABLE_API_KEY:-placeholder-airtable-api-key-for-e2e}" \
-    --dry-run=client -o yaml | $KC apply -f - >/dev/null
-  ok "mcp-airtable-credentials (dev placeholder; override via AIRTABLE_API_KEY or secret.yaml)"
-fi
+if [ "$SEED_PROFILE" = "e2e" ]; then
+  if [ -f "${PROJECT_DIR}/mcp-servers/airtable/secret.yaml" ]; then
+    $KC apply -f "${PROJECT_DIR}/mcp-servers/airtable/secret.yaml"
+    ok "mcp-airtable-credentials from mcp-servers/airtable/secret.yaml"
+  else
+    $KC create secret generic mcp-airtable-credentials \
+      --namespace=mcp-server \
+      --from-literal=api-key="${AIRTABLE_API_KEY:-placeholder-airtable-api-key-for-e2e}" \
+      --dry-run=client -o yaml | $KC apply -f - >/dev/null
+    ok "mcp-airtable-credentials (dev placeholder; override via AIRTABLE_API_KEY or secret.yaml)"
+  fi
 
-if [ -f "${PROJECT_DIR}/mcp-servers/mongodb/secret.yaml" ]; then
-  $KC apply -f "${PROJECT_DIR}/mcp-servers/mongodb/secret.yaml"
-  ok "mcp-mongodb-credentials from mcp-servers/mongodb/secret.yaml"
+  if [ -f "${PROJECT_DIR}/mcp-servers/mongodb/secret.yaml" ]; then
+    $KC apply -f "${PROJECT_DIR}/mcp-servers/mongodb/secret.yaml"
+    ok "mcp-mongodb-credentials from mcp-servers/mongodb/secret.yaml"
+  else
+    $KC create secret generic mcp-mongodb-credentials \
+      --namespace=mcp-server \
+      --from-literal=connection-string="${MONGODB_CONNECTION_STRING:-mongodb://placeholder:placeholder@localhost:27017/placeholder}" \
+      --dry-run=client -o yaml | $KC apply -f - >/dev/null
+    ok "mcp-mongodb-credentials (dev placeholder; override via MONGODB_CONNECTION_STRING or secret.yaml)"
+  fi
 else
-  $KC create secret generic mcp-mongodb-credentials \
-    --namespace=mcp-server \
-    --from-literal=connection-string="${MONGODB_CONNECTION_STRING:-mongodb://placeholder:placeholder@localhost:27017/placeholder}" \
-    --dry-run=client -o yaml | $KC apply -f - >/dev/null
-  ok "mcp-mongodb-credentials (dev placeholder; override via MONGODB_CONNECTION_STRING or secret.yaml)"
+  log "Skipping MCP server secrets (SEED_PROFILE=minimal) — no demo McpServers to back."
 fi
 
 # 4g. JWT sync — copy RPC public key to mcp-host-config
@@ -567,10 +621,68 @@ ok "Inter-service tokens re-applied after kustomize deploy"
 # 6e. Deploy CRD instances
 log "Applying CRD instances..."
 $KC apply -f "${PROJECT_DIR}/deploy/overlays/minikube/instances/"
-ok "CRD instances applied (Host, Context, CommunicationChannel)"
+ok "CRD instances applied (Host, Context, CommunicationChannel, GFS, policy)"
+
+# instances-e2e/context-mcpservers.yaml must apply AFTER instances/context.yaml
+# so its non-empty mcpServers list wins over the empty default.
+if [ "$SEED_PROFILE" = "e2e" ]; then
+  log "Applying E2E demo MCP server instances..."
+  $KC apply -f "${PROJECT_DIR}/deploy/overlays/minikube/instances-e2e/"
+  ok "E2E instances applied (airtable, mongodb, mongodb-mcp-stack + context1 servers)"
+else
+  log "Skipping demo MCP servers (SEED_PROFILE=minimal) — context1 starts empty."
+fi
+
+# Resolve the model provider from whichever key the user actually supplied.
+# Priority order matches docs/architecture/overview.md:724 and
+# .env.quickstart.example. An explicit CLERUM_MODEL_PROVIDER always wins.
+# Without this, the Host pins zai while zai-api-key is a placeholder, so the
+# agent never replies for anyone who set a different provider's key.
+resolve_model_provider() {
+  if [ -n "${CLERUM_MODEL_PROVIDER:-}" ]; then
+    printf '%s' "${CLERUM_MODEL_PROVIDER}"
+    return 0
+  fi
+  if [ -n "${OPENAI_API_KEY:-}" ];  then printf 'openai';  return 0; fi
+  if [ -n "${CLAUDE_API_KEY:-}" ];  then printf 'claude';  return 0; fi
+  if [ -n "${ZAI_API_KEY:-}" ];     then printf 'zai';     return 0; fi
+  if [ -n "${BAILIAN_API_KEY:-}" ]; then printf 'bailian'; return 0; fi
+  printf ''
+}
+
+# These MUST stay in sync with the canonical registry at
+# mcp-host/src/llm/registryCore.ts:50,57,64,72 — that is the single source of
+# truth (config.ts:301 reads it via descriptorFor(provider).defaultModel).
+# Verify against that file before committing; a drifted model id fails at the
+# first message, which is the exact bug this task fixes.
+default_model_for_provider() {
+  case "$1" in
+    openai)  printf 'gpt-5.4-mini' ;;
+    claude)  printf 'claude-sonnet-4-6' ;;
+    zai)     printf 'glm-5.1' ;;
+    bailian) printf 'qwen3-coder-plus' ;;
+    *)       printf '' ;;
+  esac
+}
+
+RESOLVED_PROVIDER="$(resolve_model_provider)"
+if [ -z "$RESOLVED_PROVIDER" ]; then
+  # No key at all. Warn, do not abort — the platform still comes up fully and
+  # quickstart.md:39 already documents that the agent will not reply. This is
+  # deliberately softer than the ADMIN_PASSWORD precondition (Task 4).
+  warn "No LLM API key found in .env (OPENAI_API_KEY / CLAUDE_API_KEY / ZAI_API_KEY / BAILIAN_API_KEY)."
+  warn "Defaulting Host to zai with a placeholder key — the chatllm agent will NOT reply."
+  warn "Set a key in .env and re-run to fix."
+  RESOLVED_PROVIDER="zai"
+fi
+RESOLVED_MODEL="${CLERUM_MODEL_NAME:-$(default_model_for_provider "$RESOLVED_PROVIDER")}"
+if [ -z "$RESOLVED_MODEL" ]; then
+  err "Unknown provider '${RESOLVED_PROVIDER}' — set CLERUM_MODEL_NAME explicitly in .env."
+  exit 1
+fi
 
 # 6f. Apply Host model from .env/default E2E model
-log "Applying Host model from .env/default E2E model (${CLERUM_MODEL_PROVIDER:-zai}/${CLERUM_MODEL_NAME:-glm-5.1})..."
+log "Applying Host model ${RESOLVED_PROVIDER}/${RESOLVED_MODEL} (source: ${CLERUM_MODEL_PROVIDER:+CLERUM_MODEL_PROVIDER}${CLERUM_MODEL_PROVIDER:-auto-detected from .env})..."
 cat <<HOSTEOF | $KC apply -f -
 apiVersion: clerum.io/v1alpha1
 kind: Host
@@ -582,8 +694,8 @@ spec:
   contextRef: context1
   secretRef: chatllm-api-keys
   model:
-    provider: ${CLERUM_MODEL_PROVIDER:-zai}
-    name: ${CLERUM_MODEL_NAME:-glm-5.1}
+    provider: ${RESOLVED_PROVIDER}
+    name: ${RESOLVED_MODEL}
   workflowControl:
     scopes:
       - workflow:list
@@ -887,9 +999,19 @@ fi
 # ======================================================================
 step_header 10 $TOTAL_STEPS "Seed Test User"
 
-SEED_USER_EMAIL="${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}}"
+# The e2e profile reproduces today's inputs exactly: tests/e2e/testUser.ts pins
+# test@clerum.io, and ~26 control-ui/e2e specs log in as admin/changeme123!.
+# The minimal profile must not seed anything named test*.
+if [ "$SEED_PROFILE" = "e2e" ]; then
+  SEED_USER_DEFAULT_EMAIL="test@clerum.io"
+  : "${ADMIN_PASSWORD:=changeme123!}"
+else
+  SEED_USER_DEFAULT_EMAIL="owner@evenfire.local"
+fi
+SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
 log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
-if CONTEXT="${PROFILE}" ADMIN_PASSWORD="changeme123!" \
+if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+   SEED_PROFILE="${SEED_PROFILE}" \
    E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
    bash "${SCRIPT_DIR}/seed-test-data.sh" 2>&1 | tail -15; then
   ok "Test user seeded"
@@ -902,23 +1024,27 @@ fi
 # ======================================================================
 step_header 11 $TOTAL_STEPS "Seed Workflow Trigger Test Data"
 
-log "Seeding workflow-trigger fixtures for local E2E recipes..."
-if CONTEXT="${PROFILE}" E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
-   bash "${SCRIPT_DIR}/seed-workflow-triggers-test-data.sh" 2>&1 | tail -20; then
-  ok "Workflow-trigger E2E recipes seeded"
+if [ "$SEED_PROFILE" != "e2e" ]; then
+  log "Skipping workflow-trigger + sandbox-ui fixtures (SEED_PROFILE=minimal)."
 else
-  warn "Workflow-trigger E2E seed encountered errors — desktop/control-ui workflow E2E may fail until fixed"
-fi
-
-if [ "$SKIP_UIS" = true ]; then
-  warn "Skipping sandbox-ui Desktop Apps validation seed (--skip-uis)."
-else
-  log "Seeding sandbox-ui local test app for Desktop Apps validation..."
+  log "Seeding workflow-trigger fixtures for local E2E recipes..."
   if CONTEXT="${PROFILE}" E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
-     bash "${SCRIPT_DIR}/seed-sandbox-ui-test-data.sh" 2>&1 | tail -25; then
-    ok "Sandbox-ui local test app seeded"
+     bash "${SCRIPT_DIR}/seed-workflow-triggers-test-data.sh" 2>&1 | tail -20; then
+    ok "Workflow-trigger E2E recipes seeded"
   else
-    warn "Sandbox-ui test app seed encountered errors — Desktop Apps may not list local sandbox-ui fixtures"
+    warn "Workflow-trigger E2E seed encountered errors — desktop/control-ui workflow E2E may fail until fixed"
+  fi
+
+  if [ "$SKIP_UIS" = true ]; then
+    warn "Skipping sandbox-ui Desktop Apps validation seed (--skip-uis)."
+  else
+    log "Seeding sandbox-ui local test app for Desktop Apps validation..."
+    if CONTEXT="${PROFILE}" E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
+       bash "${SCRIPT_DIR}/seed-sandbox-ui-test-data.sh" 2>&1 | tail -25; then
+      ok "Sandbox-ui local test app seeded"
+    else
+      warn "Sandbox-ui test app seed encountered errors — Desktop Apps may not list local sandbox-ui fixtures"
+    fi
   fi
 fi
 
@@ -966,8 +1092,16 @@ else
 fi
 echo ""
 echo -e "  ${BOLD}Already done by setup:${NC}"
-echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / changeme123!)"
-echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
-echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
+if [ "${SEED_PROFILE:-}" = "e2e" ]; then
+  echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / changeme123!)"
+else
+  echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / your ADMIN_PASSWORD from .env)"
+fi
+if [ "${SEED_PROFILE:-}" = "e2e" ]; then
+  echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
+  echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
+else
+  echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1, password = your ADMIN_PASSWORD)"
+fi
 echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
 echo ""
