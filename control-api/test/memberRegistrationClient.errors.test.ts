@@ -112,4 +112,30 @@ describe('member-registration client failure classification', () => {
     expect(error.message).toContain('Member registration service')
     expect(error.message).toContain('(403)')
   })
+
+  it('a body read failure (stalled body / mid-body reset) becomes Unavailable, not a raw AbortError', async () => {
+    const response = new Response('{"ok":true}', { status: 200 })
+    vi.spyOn(response, 'text').mockRejectedValue(
+      new DOMException('The user aborted a request.', 'AbortError')
+    )
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+    await expect(send()).rejects.toBeInstanceOf(MemberRegistrationUnavailableError)
+  })
+
+  it('REGRESSION: a non-JSON 404 keeps the legacy plain Error but does not leak the raw body', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('<html><body>upstream-internal-host.local error</body></html>', {
+          status: 404,
+          headers: { 'content-type': 'text/html' },
+        })
+      )
+    )
+    const error = await caught()
+    expect(error).not.toBeInstanceOf(MemberRegistrationUnavailableError)
+    expect(error.message).toContain('Member registration service')
+    expect(error.message).toContain('(404)')
+    expect(error.message).not.toContain('upstream-internal-host.local')
+  })
 })

@@ -100,14 +100,37 @@ export async function memberRegistrationServiceRequest<T>(
   // by routes/external/invitations.ts:212, routes/admin/teams.ts:42 and
   // routes/external/teams.ts:36 (spec §4.1).
   if (response.status >= 500) {
+    // NOTE: this message must NOT contain the exact string "Member registration
+    // service" (capital M) — routes/admin/teams.ts:97,157 and
+    // routes/external/teams.ts:55 call sendInvitationServiceError(res, error)
+    // before next(error), which matches via message.includes('Member
+    // registration service'). If this 5xx message matched that string, a typed
+    // MemberRegistrationUnavailableError would be silently swallowed into a
+    // 502 invitation_service_unavailable instead of the intended 503.
     throw unavailable(
       { ...context, upstreamStatus: response.status },
       `member-registration service ${method} ${path} failed (${response.status})`
     )
   }
 
-  const raw = await response.text()
+  // A stalled body (headers sent, body never completes) or a mid-body reset
+  // throws here (raw AbortError / TypeError: terminated) even though the
+  // fetch() above already resolved. Without this try/catch that throw escapes
+  // untyped and collapses to a generic 500 — the exact failure this file
+  // exists to prevent.
+  let raw: string
+  try {
+    raw = await response.text()
+  } catch (cause) {
+    throw unavailable(
+      { ...context, upstreamStatus: response.status },
+      'member-registration service response could not be read',
+      cause
+    )
+  }
+
   let parsed: unknown = null
+  let nonJsonBody = false
   if (raw) {
     try {
       parsed = JSON.parse(raw) as unknown
@@ -119,13 +142,18 @@ export async function memberRegistrationServiceRequest<T>(
           cause
         )
       }
+      nonJsonBody = true
       parsed = null
     }
   }
 
   if (!response.ok) {
-    let errorMessage =
-      parsed && typeof parsed === 'object' && 'error' in parsed
+    // A non-JSON 4xx body must never be interpolated verbatim: it's echoed to
+    // callers by routes/admin/teams.ts:44, so an intermediary's HTML error
+    // page (possibly containing internal hostnames) must not leak through.
+    let errorMessage = nonJsonBody
+      ? '<non-JSON response>'
+      : parsed && typeof parsed === 'object' && 'error' in parsed
         ? String((parsed as { error: unknown }).error)
         : raw
     if (parsed && typeof parsed === 'object' && 'message' in parsed) {
