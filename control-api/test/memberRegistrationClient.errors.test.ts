@@ -96,6 +96,12 @@ describe('member-registration client failure classification', () => {
     expect(error).toBeInstanceOf(MemberRegistrationUnavailableError)
     expect(error.message).not.toContain('SECRET_BODY')
     expect(error.message).toContain('500')
+    // Pins the invariant the comment above the 5xx throw documents: this
+    // message must never collide with the untyped 4xx prefix, or a typed
+    // MemberRegistrationUnavailableError would be matched by
+    // sendInvitationServiceError's message.includes('Member registration
+    // service') check.
+    expect(error.message).not.toContain('Member registration service')
   })
 
   it('REGRESSION: an upstream 404 keeps the legacy plain Error and message so routes still match (spec §4.1)', async () => {
@@ -147,10 +153,14 @@ describe('member-registration client failure classification', () => {
   })
 
   it('REGRESSION: a non-JSON 2xx does not leak body snippet from SyntaxError.message into logs', async () => {
+    // V8 embeds only the first ~10 characters of the offending input in
+    // SyntaxError.message (e.g. JSON.parse('<html>...') -> "...\"<html>SECR\"...
+    // is not valid JSON"). The marker must sit inside that window, or this
+    // assertion passes regardless of whether the bug is present.
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(
-        new Response('<html>SECRET_BODY_MARKER</html>', {
+        new Response('SECRETMARKER-not-json', {
           status: 200,
           headers: { 'content-type': 'text/html' },
         })
@@ -162,6 +172,9 @@ describe('member-registration client failure classification', () => {
     expect(logger.rootLogger.error).toHaveBeenCalled()
     // Verify the logged object does not contain the body snippet
     const [loggedObject] = logger.rootLogger.error.mock.calls[0]
-    expect(JSON.stringify(loggedObject)).not.toContain('SECRET_BODY_MARKER')
+    expect(JSON.stringify(loggedObject)).not.toContain('SECRETMARK')
+    // Verify directly that no cause was threaded through at all on this path
+    // -- the parse SyntaxError must never be passed to unavailable() here.
+    expect(loggedObject.cause).toBeUndefined()
   })
 })

@@ -12,7 +12,14 @@ import {
 
 type RequestMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
-const SEND_TIMEOUT_MS = 10_000
+// This bounds a stalled hub, but does not guarantee the send didn't happen:
+// if the hub's synchronous send exceeds it, we abort and return 503 while the
+// hub may already have sent the mail — leaving the invitation in `draft`
+// (which cleanupStaleDraftInvitations later deletes) and the invitee holding
+// a dead link. 30s is chosen over the enrollment path's MINT_TIMEOUT_MS
+// (10_000, memberRegistrationEnrollment.ts) to give a loaded SMTP send room
+// to finish.
+const SEND_TIMEOUT_MS = 30_000
 
 function buildUrl(baseUrl: string, path: string): string {
   const base = baseUrl.replace(/\/+$/, '')
@@ -101,12 +108,9 @@ export async function memberRegistrationServiceRequest<T>(
   // routes/external/teams.ts:36 (spec §4.1).
   if (response.status >= 500) {
     // NOTE: this message must NOT contain the exact string "Member registration
-    // service" (capital M) — routes/admin/teams.ts:97,157 and
-    // routes/external/teams.ts:55 call sendInvitationServiceError(res, error)
-    // before next(error), which matches via message.includes('Member
-    // registration service'). If this 5xx message matched that string, a typed
-    // MemberRegistrationUnavailableError would be silently swallowed into a
-    // 502 invitation_service_unavailable instead of the intended 503.
+    // service" (capital M) — that exact string is reserved for the untyped 4xx
+    // path below, which routes/external/invitations.ts:212 and the
+    // sendInvitationServiceError helpers match on.
     throw unavailable(
       { ...context, upstreamStatus: response.status },
       `member-registration service ${method} ${path} failed (${response.status})`
