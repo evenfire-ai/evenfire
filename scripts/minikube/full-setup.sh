@@ -1068,7 +1068,11 @@ else
 fi
 echo ""
 echo -e "  ${BOLD}Already done by setup:${NC}"
-echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / changeme123!)"
+if [ "${SEED_PROFILE:-}" = "e2e" ]; then
+  echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / changeme123!)"
+else
+  echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / your ADMIN_PASSWORD from .env)"
+fi
 echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
 echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
 echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
