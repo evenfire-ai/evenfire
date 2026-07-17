@@ -48,10 +48,21 @@ kubectl apply -f ./charts/clerum-crds/crds/
    see [surfaces/desktop-app.md](../surfaces/desktop-app.md#ship-it-to-your-users).
 8. **First Host + Context + channel** — smallest viable declarative config.
 9. **Connectors** — McpServers on an allowlisted Context.
-10. **Observability** — metrics + log stack; alert on approval backlog and 5xx.
+10. **Member invitations** — decide how invitation email is sent before you invite
+    anyone; see [member invitations on self-hosted](../how-to/member-invitations-self-hosted.md).
+    Production is where the zero-config path applies: set
+    `CONTROL_API_MEMBER_REGISTRATION_MODE=hosted` and control-api enrolls itself
+    with evenfire's registration hub, which sends the mail. It requires your
+    Profile UI and Control UI base URLs to be **real, publicly resolvable
+    domains** (the host guard refuses `localhost`, IP literals, and dotless
+    hostnames) plus egress to `registration.evenfire.ai`. Run your own
+    `member-registration-service` instead and leave the mode `remote`.
+11. **Observability** — metrics + log stack; alert on approval backlog and 5xx.
 
 Use [minikube.md](minikube.md) as the **order-of-operations reference** even when
-the target is not minikube: the dependency graph is the same.
+the target is not minikube: the dependency graph is the same. One exception:
+minikube's `127.0.0.1` UI defaults cannot use hosted member-registration mode,
+so that step is production-only.
 
 ## Security non-negotiables
 
@@ -71,5 +82,6 @@ modified MPL-licensed files. See [LICENSE](../../LICENSE).
 ## Related
 
 - [WorkflowRecipes operations](workflow-recipes-guide.md)
+- [Member invitations on self-hosted](../how-to/member-invitations-self-hosted.md)
 - [Architecture / topology](../architecture/platform-topology.md)
 - [FAQ](../faq.md)
