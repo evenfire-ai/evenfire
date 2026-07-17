@@ -254,6 +254,19 @@ async function registryFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await authedFetch(path, init)
   if (!res.ok) {
     const body = await res.text()
+    // A persistent 401 (authedFetch already evict-retried once) is a registry
+    // machine-token / integration fault — NOT the admin's control-ui session.
+    // Remap to 502 so control-ui's global 401 handler doesn't force-logout the
+    // admin when the registry rejects control-api (e.g. auth off, or a
+    // half-configured/failing connection). Mirrors orgRegistryFetch, which
+    // already does this. Every other status is forwarded verbatim so a
+    // registry 404 stays a 404 (see the e2e-registry-publish-update-remove
+    // failure class below).
+    if (res.status === 401) {
+      throw Object.assign(new Error('Registry 401: registry_integration_error'), {
+        status: 502,
+      })
+    }
     // Attach the upstream status so the global error handler (app.ts) can
     // forward 4xx responses to the API client. Without `.status`, a registry
     // 404 surfaces as a 500 Internal Server Error from control-api — the

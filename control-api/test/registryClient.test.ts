@@ -312,6 +312,36 @@ describe('registryClient — GET retry-once (transient resilience)', () => {
     expect(entryCalls.length).toBe(2)
   })
 
+  it('remaps a persistent registry 401 to 502 (so control-ui does not force-logout)', async () => {
+    // authedFetch evict-retries a 401 once; both attempts 401 → registryFetch
+    // remaps to 502. A bare 401 here would trip control-ui's global 401 handler
+    // and force-logout a valid admin session — the "session expires quickly" bug.
+    const fetchMock = entriesQueue([
+      () => new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 }),
+      () => new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 }),
+    ])
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    const err = (await searchEntries({ q: 'thing' }).catch(e => e)) as Error & { status?: number }
+    // Load-bearing: status MUST be 502, NOT 401.
+    expect(err.status).toBe(502)
+    expect(err.status).not.toBe(401)
+    expect(err.message).toMatch(/registry_integration_error/)
+  })
+
+  it('still forwards a registry 404 verbatim (not remapped)', async () => {
+    // Guards the 401 remap against over-reach: non-401 statuses must pass through
+    // so a registry 404 stays a 404 (the e2e-registry-publish-update-remove class).
+    const fetchMock = entriesQueue([() => new Response('missing', { status: 404 })])
+    vi.stubGlobal('fetch', fetchMock)
+    Object.assign(process.env, ENV_OVERRIDE)
+
+    const err = (await searchEntries({ q: 'thing' }).catch(e => e)) as Error & { status?: number }
+    expect(err.status).toBe(404)
+    expect(err.message).toMatch(/Registry 404/)
+  })
+
   it('does NOT retry a non-GET (POST publish) on 503', async () => {
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (url.endsWith('/oauth/token')) return Promise.resolve(fakeTokenResponse('tok', 600))
