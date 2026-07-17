@@ -136,10 +136,13 @@ export async function memberRegistrationServiceRequest<T>(
       parsed = JSON.parse(raw) as unknown
     } catch (cause) {
       if (response.ok) {
+        // The parse error is NOT passed as cause here: V8 embeds ~10 chars of
+        // the offending input in SyntaxError.message, so passing cause would
+        // leak the upstream body into the log — contradicting this file's
+        // status-only rule (line 53). The message + upstreamStatus is sufficient.
         throw unavailable(
           { ...context, upstreamStatus: response.status },
-          'member-registration service returned a non-JSON response',
-          cause
+          'member-registration service returned a non-JSON response'
         )
       }
       nonJsonBody = true

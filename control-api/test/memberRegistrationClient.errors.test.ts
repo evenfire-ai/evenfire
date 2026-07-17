@@ -26,6 +26,13 @@ const enrollment = vi.hoisted(() => ({
 }))
 vi.mock('../src/services/memberRegistrationEnrollment.js', () => enrollment)
 
+const logger = vi.hoisted(() => ({
+  rootLogger: {
+    error: vi.fn(),
+  },
+}))
+vi.mock('../src/observability/logger.js', () => logger)
+
 function send(): Promise<void> {
   return registerAndSendInvitation('a@b.c', 'uuid-1', 'team', '2026-01-01', '2026-02-01')
 }
@@ -137,5 +144,24 @@ describe('member-registration client failure classification', () => {
     expect(error.message).toContain('Member registration service')
     expect(error.message).toContain('(404)')
     expect(error.message).not.toContain('upstream-internal-host.local')
+  })
+
+  it('REGRESSION: a non-JSON 2xx does not leak body snippet from SyntaxError.message into logs', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('<html>SECRET_BODY_MARKER</html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        })
+      )
+    )
+    const error = await caught()
+    expect(error).toBeInstanceOf(MemberRegistrationUnavailableError)
+    // Verify the logger.error was called
+    expect(logger.rootLogger.error).toHaveBeenCalled()
+    // Verify the logged object does not contain the body snippet
+    const [loggedObject] = logger.rootLogger.error.mock.calls[0]
+    expect(JSON.stringify(loggedObject)).not.toContain('SECRET_BODY_MARKER')
   })
 })
