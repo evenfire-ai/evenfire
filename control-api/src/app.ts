@@ -26,6 +26,11 @@ import { createRegistryRouter } from './routes/registry.js'
 import { createRpcAccessRouter } from './routes/rpc-access/index.js'
 import { memberRegistrationErrorResponse } from './services/memberRegistrationErrors.js'
 
+// Only errors we construct with these codes are ever forwarded verbatim by the
+// global handler (see below). Keeps the blast radius tight: every other
+// status-less or non-allowlisted error still collapses to a 500.
+const FORWARDABLE_INTEGRATION_CODES = new Set(['registry_unavailable', 'registry_integration_error'])
+
 export function createApp(gateway: K8sGateway) {
   const app = express()
   app.set('trust proxy', 1)
@@ -180,6 +185,36 @@ export function createApp(gateway: K8sGateway) {
       )
       res.status(errStatus as number).json({
         error: err instanceof Error ? err.message : 'Bad Request',
+        correlationId,
+      })
+      return
+    }
+
+    // Allowlisted registry-integration errors carry a safe code + message we set
+    // ourselves (RegistryUnavailableError → 503; the 401 remap → 502). Forward
+    // them so the marketplace shows a clear message instead of a raw 500. The
+    // message is safe because only our own constructors set these codes.
+    const integrationCode = (err as { code?: unknown }).code
+    const integrationStatus = (err as { status?: unknown }).status
+    if (
+      typeof integrationStatus === 'number' &&
+      (integrationStatus === 502 || integrationStatus === 503) &&
+      typeof integrationCode === 'string' &&
+      FORWARDABLE_INTEGRATION_CODES.has(integrationCode)
+    ) {
+      log.warn(
+        {
+          event: 'forwarded_registry_integration_error',
+          correlationId,
+          status: integrationStatus,
+          code: integrationCode,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'forwarded registry integration error'
+      )
+      res.status(integrationStatus).json({
+        error: integrationCode,
+        message: err instanceof Error ? err.message : 'Registry integration error',
         correlationId,
       })
       return
