@@ -69,3 +69,34 @@ describe('config: REGISTRY_CONNECTION_MODE discriminator', () => {
     expect(lines.some(l => /Registry connection mode: managed/.test(l))).toBe(true)
   })
 })
+
+describe('config: registry URL allowlist', () => {
+  function enableSelfHostedRegistryEnv(): void {
+    process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'true'
+    process.env.REGISTRY_CONNECTION_MODE = 'self-hosted'
+  }
+
+  it('accepts the shared registry.evenfire.ai by default (self-hoster path)', async () => {
+    enableSelfHostedRegistryEnv()
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
+    const { config } = await import('../src/config.js')
+    expect(config.registryUrl).toBe('https://registry.evenfire.ai')
+  })
+
+  it('still rejects a URL outside the allowlist', async () => {
+    enableSelfHostedRegistryEnv()
+    process.env.CLERUM_REGISTRY_URL = 'https://evil.example.org'
+    await expect(import('../src/config.js')).rejects.toThrow(/not in the registry URL allowlist/)
+  })
+
+  it('accepts a URL added via CLERUM_REGISTRY_URL_ALLOWLIST (BYO registry), verbatim/case-sensitive', async () => {
+    enableSelfHostedRegistryEnv()
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.MyCorp.example'
+    process.env.CLERUM_REGISTRY_URL_ALLOWLIST =
+      'https://other.example, https://registry.MyCorp.example'
+    const { config } = await import('../src/config.js')
+    // Non-vacuous: parseCsvList would have lowercased this to a mismatch; the
+    // trim-only split preserves case so the verbatim compare passes.
+    expect(config.registryUrl).toBe('https://registry.MyCorp.example')
+  })
+})

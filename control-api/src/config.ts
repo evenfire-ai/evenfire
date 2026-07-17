@@ -493,7 +493,8 @@ export const config: Config = {
   })(),
   memberRegistrationServiceHmacKid:
     process.env.CONTROL_API_MEMBER_REGISTRATION_HMAC_KID || 'example-dev',
-  memberRegistrationTenantId: process.env.CONTROL_API_MEMBER_REGISTRATION_TENANT_ID || 'example-dev',
+  memberRegistrationTenantId:
+    process.env.CONTROL_API_MEMBER_REGISTRATION_TENANT_ID || 'example-dev',
   desktopExternalRestApiBaseUrl:
     process.env.CONTROL_API_DESKTOP_EXTERNAL_REST_API_BASE_URL || 'http://127.0.0.1:8091',
   desktopRpcProxyBaseUrl:
@@ -797,11 +798,23 @@ if (config.registryAuthEnabled) {
   }
   console.log(`[ControlAPI] Registry connection mode: ${config.registryConnectionMode}`)
 
-  // URL allowlist applies in BOTH modes: self-hosted clerum still points at the
-  // central example.com (spec §14.3 — per-deployment URLs out of scope).
+  // URL allowlist applies in BOTH modes. The shared registry
+  // `registry.evenfire.ai` is the default a self-hoster connects to (see
+  // docs/how-to/connect-to-registry.md); the in-cluster URL covers a
+  // self-hosted registry-api. A deployment that runs its own registry adds its
+  // URL via CLERUM_REGISTRY_URL_ALLOWLIST (comma-separated) rather than editing
+  // this list. `example.com` is the reserved-domain fixture used across the
+  // test suite — inert (no real registry) and kept so tests need no churn.
   const allowed = [
-    'https://example.com',
+    'https://registry.evenfire.ai',
     'http://registry-api.registry.svc.cluster.local:8085',
+    'https://example.com',
+    // Trim-only (NOT parseCsvList, which lowercases) — the entries are compared
+    // verbatim against config.registryUrl, which is not lowercased.
+    ...(process.env.CLERUM_REGISTRY_URL_ALLOWLIST || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean),
   ]
   if (process.env.CLERUM_DEV_MODE === 'true') {
     allowed.push('http://localhost:8085')
