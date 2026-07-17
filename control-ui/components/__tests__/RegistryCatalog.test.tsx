@@ -362,6 +362,23 @@ describe('RegistryCatalog - loading and error states', () => {
       expect(screen.getByText('Error: 500 Internal Server Error')).toBeInTheDocument()
     })
   })
+
+  it('test_registryCatalog_unavailable_showsFriendlyServerMessage', async () => {
+    vi.mocked(api.getRegistryCatalog).mockRejectedValue(
+      new Error('The registry is currently unavailable. Check the connection and try again.')
+    )
+
+    render(<RegistryCatalog />)
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          'Error: The registry is currently unavailable. Check the connection and try again.'
+        )
+      ).toBeInTheDocument()
+    })
+    expect(screen.queryByText('Error: 500 Internal Server Error')).not.toBeInTheDocument()
+  })
 })
 
 describe('RegistryCatalog - entry details', () => {

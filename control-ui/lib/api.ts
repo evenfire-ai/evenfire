@@ -193,8 +193,28 @@ export async function apiGet(
         }
         handleUnauthorized()
       }
-      const error = new Error(`${res.status} ${res.statusText}`)
-      ;(error as Error & { status?: number }).status = res.status
+      // Prefer a server-provided human-safe `message` (e.g. the 503
+      // registry_unavailable body) so callers surface the clear text instead of
+      // a bare "<status> <statusText>". Bodies carrying only a machine `error`
+      // code (or no JSON) keep the existing status-text message. Also attach the
+      // machine code, mirroring how registryCodedRequest surfaces `.code`.
+      const text = await res.text().catch(() => '')
+      let message = `${res.status} ${res.statusText}`
+      let code: string | undefined
+      try {
+        const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
+        if (parsed && typeof parsed === 'object') {
+          if (typeof parsed.message === 'string' && parsed.message.trim()) {
+            message = parsed.message
+          }
+          if (typeof parsed.error === 'string') code = parsed.error
+        }
+      } catch {
+        /* non-JSON error body: keep the status-text message */
+      }
+      const error = new Error(message) as Error & { status?: number; code?: string }
+      error.status = res.status
+      if (code) error.code = code
       throw error
     }
     return parseJsonResponse(res)
