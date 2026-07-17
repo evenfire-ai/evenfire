@@ -62,14 +62,39 @@ beforeEach(() => {
     status: 'active',
   })
   cfg.registryConnectionMode = 'self-hosted'
+  cfg.registryAuthEnabled = true
 })
 afterEach(() => vi.restoreAllMocks())
 
 describe('registry connect flow', () => {
   it('GET → disconnected when no row', async () => {
+    cfg.registryAuthEnabled = true
     connDb.getRegistryConnection.mockResolvedValue(null)
     const res = await request(app()).get('/admin/registry/connect').expect(200)
     expect(res.body.state).toBe('disconnected')
+    expect(res.body.authEnabled).toBe(true)
+  })
+
+  it('GET connected → includes authEnabled reflecting config (true)', async () => {
+    cfg.registryAuthEnabled = true
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'connected',
+      deploymentId: 'dep-9',
+      orgName: 'acme',
+    })
+    const res = await request(app()).get('/admin/registry/connect').expect(200)
+    expect(res.body).toMatchObject({ state: 'connected', org: 'acme', authEnabled: true })
+  })
+
+  it('GET connected → includes authEnabled reflecting config (false)', async () => {
+    cfg.registryAuthEnabled = false
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'connected',
+      deploymentId: 'dep-9',
+      orgName: 'acme',
+    })
+    const res = await request(app()).get('/admin/registry/connect').expect(200)
+    expect(res.body).toMatchObject({ state: 'connected', org: 'acme', authEnabled: false })
   })
 
   it('409 not_self_hosted in managed mode', async () => {
@@ -92,7 +117,7 @@ describe('registry connect flow', () => {
       })
     )
     const res = await request(app()).get('/admin/registry/connect').expect(200)
-    expect(res.body).toMatchObject({ state: 'approved', deploymentId: 'dep-9' })
+    expect(res.body).toMatchObject({ state: 'approved', deploymentId: 'dep-9', authEnabled: true })
     // it actually polled the registry status endpoint with a DPoP header
     const [url, init] = fetchSpy.mock.calls[0]
     expect(String(url)).toContain('/api/v1/deployments/dep-9/status')
