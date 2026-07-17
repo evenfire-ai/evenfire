@@ -18,6 +18,8 @@ type Config = {
   internalControlJwtWrcHmacSecret: string
   internalControlJwtHccHmacSecret: string
   allowedIssuanceNamespaces: string[]
+  memberRegistrationMode: 'remote' | 'hosted'
+  memberRegistrationExternalHubBaseUrl: string
   memberRegistrationServiceBaseUrl: string
   memberRegistrationServiceHmacSecret: string
   memberRegistrationServiceHmacKid: string
@@ -396,6 +398,43 @@ const RPC_JWT_PUBLIC_KEY = normalizePem(
   process.env.CONTROL_API_RPC_JWT_PUBLIC_KEY || publicKeyFromPrivateKey(RPC_JWT_PRIVATE_KEY)
 )
 
+const memberRegistrationMode: 'remote' | 'hosted' = (() => {
+  const raw = (process.env.CONTROL_API_MEMBER_REGISTRATION_MODE || 'remote').trim()
+  if (raw !== 'remote' && raw !== 'hosted') {
+    throw new Error(
+      `CONTROL_API_MEMBER_REGISTRATION_MODE must be 'remote' or 'hosted' (got '${raw}')`
+    )
+  }
+  return raw
+})()
+
+// "Present" = non-empty after trim: blanking a value in the deploy Secret must
+// count as absent (spec §8.1 — apply-inter-service-tokens.sh re-adds the key).
+function memberRegistrationEnvPresent(name: string): boolean {
+  const value = process.env[name]
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+if (memberRegistrationMode === 'hosted') {
+  // Fail fast on ambiguity — scoped to the DELIBERATELY-set identity vars only.
+  // HMAC_SECRET is excluded: the shipped deploy unconditionally injects it via
+  // the control-api-internal-tokens Secret (spec §8.1), so it is ignorable legacy.
+  const injectedIdentity = [
+    'CONTROL_API_MEMBER_REGISTRATION_HMAC_KID',
+    'CONTROL_API_MEMBER_REGISTRATION_TENANT_ID',
+  ].filter(memberRegistrationEnvPresent)
+  if (injectedIdentity.length > 0) {
+    throw new Error(
+      `[SECURITY] CONTROL_API_MEMBER_REGISTRATION_MODE=hosted is mutually exclusive with an injected remote member-registration identity. Unset: ${injectedIdentity.join(', ')}`
+    )
+  }
+  if (memberRegistrationEnvPresent('CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET')) {
+    console.warn(
+      '[ControlAPI] CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET is set but IGNORED in hosted member-registration mode (deploy-injected legacy value; credentials are self-enrolled and stored in Postgres)'
+    )
+  }
+}
+
 export const config: Config = {
   port: Number(process.env.CONTROL_API_PORT || 8090),
   jsonBodyLimit: process.env.CONTROL_API_JSON_BODY_LIMIT || '150mb',
@@ -429,11 +468,22 @@ export const config: Config = {
   allowedIssuanceNamespaces: parseCsvList(
     process.env.CONTROL_API_ALLOWED_ISSUANCE_NAMESPACES || `${HOSTS_NAMESPACE},${SANDBOX_NAMESPACE}`
   ),
-  memberRegistrationServiceBaseUrl: requiredOrDevDefault(
-    'CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL',
-    'http://member-registration-service.profiles.svc.cluster.local:8092/api/v1'
-  ),
+  memberRegistrationMode,
+  memberRegistrationExternalHubBaseUrl:
+    process.env.CONTROL_API_MEMBER_REGISTRATION_EXTERNAL_HUB_BASE_URL ||
+    'https://registration.evenfire.ai/api/v1',
+  memberRegistrationServiceBaseUrl:
+    memberRegistrationMode === 'hosted'
+      ? process.env.CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL || ''
+      : requiredOrDevDefault(
+          'CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL',
+          'http://member-registration-service.profiles.svc.cluster.local:8092/api/v1'
+        ),
   memberRegistrationServiceHmacSecret: (() => {
+    if (memberRegistrationMode === 'hosted') {
+      // Hosted mode never signs with the env secret; see the module-scope warning.
+      return ''
+    }
     const value = requiredOrDevDefault(
       'CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET',
       'dev-member-registration-hmac-secret'

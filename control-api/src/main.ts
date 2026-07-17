@@ -11,6 +11,7 @@ import {
   startBudgetReservationSweepCron,
   stopBudgetReservationSweepCron,
 } from './services/budgetReservationSweepCron.js'
+import { runBootEnrollment } from './services/memberRegistrationEnrollment.js'
 import {
   startPluginWorkloadSdkMaintenanceCron,
   stopPluginWorkloadSdkMaintenanceCron,
@@ -123,6 +124,16 @@ async function main(): Promise<void> {
 
   await server.start()
   console.log('[ControlAPI] Running')
+
+  // Hosted member-registration self-enrollment (spec §8.4): degrade, never
+  // block. Fire-and-forget, and only AFTER the listener is up — the liveness
+  // probe has no startupProbe grace (control-api.yaml: initialDelaySeconds=8,
+  // periodSeconds=12, failureThreshold=3 ≈ 32s), and a silently dropped hub
+  // (egress firewall / default-deny NetworkPolicy) can burn up to 20s of that
+  // budget on its own. Nothing is gained by awaiting it here: the hook never
+  // rejects, every send re-attempts enrollment on demand via ensureEnrollment,
+  // and the in-flight map dedupes any request that races this boot call.
+  void runBootEnrollment()
 }
 
 main().catch(error => {

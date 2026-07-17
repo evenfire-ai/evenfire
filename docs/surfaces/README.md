@@ -15,8 +15,12 @@ agents, and the Profile UI is the invited member's front door.
 | Invited member                      | [Profile UI](profile-ui.md)             | `external-rest-api`                                                  | `control-api`, `rpc-proxy`  |
 | Channel user (Telegram/Slack/Email) | no UI — the chat app they already have | `channel-reader`                                                     | everything else             |
 
-Invitation signup depends on `member-registration-service`, which is not in
-this repo — see the
+Invitation signup no longer requires deploying anything extra: self-hosted
+control-api can send the invitation email via evenfire's shared registration
+hub in **hosted mode** — see [Member invitations on
+self-hosted](../how-to/member-invitations-self-hosted.md). The Desktop App's
+own handoff step still calls `member-registration-service` directly, which is
+not in this repo — see the
 [`member-registration-service` gap](desktop-app.md#the-member-registration-service-gap)
 for what still works without it.
 

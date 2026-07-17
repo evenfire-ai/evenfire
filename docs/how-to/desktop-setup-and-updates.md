@@ -55,8 +55,11 @@ detection. Completing the [Profile UI](../surfaces/profile-ui.md) invitation
 flow hands the app a setup token (an `evenfire://desktop-setup` deep link); the
 app then saves the tenant environment by name and discovers its RPC proxy.
 
-> **Gap:** invitation signup depends on `member-registration-service`, which is
-> not in this repo. See the
+> **Gap:** the invitation email and the Profile UI signup flow above can now
+> run with nothing extra to deploy, via control-api's **hosted mode** — see
+> [Member invitations on self-hosted](member-invitations-self-hosted.md).
+> Completing the handoff into the Desktop App itself still depends on
+> `member-registration-service`, which is not in this repo. See the
 > [member-registration gap](../surfaces/desktop-app.md#the-member-registration-service-gap)
 > for what still works without it.
 

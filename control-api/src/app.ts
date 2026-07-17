@@ -24,6 +24,7 @@ import { createMetricsRouter } from './routes/metrics.js'
 import { createRecipeOauthRouter } from './routes/recipeOauth.js'
 import { createRegistryRouter } from './routes/registry.js'
 import { createRpcAccessRouter } from './routes/rpc-access/index.js'
+import { memberRegistrationErrorResponse } from './services/memberRegistrationErrors.js'
 
 export function createApp(gateway: K8sGateway) {
   const app = express()
@@ -139,6 +140,22 @@ export function createApp(gateway: K8sGateway) {
     // synthesize a short tag for legacy paths.
     const correlationId = req.correlationId ?? Math.random().toString(36).slice(2, 10)
     const log = req.log ?? rootLogger
+
+    // Typed member-registration failures map to 503 (spec §8.6) — scoped
+    // instanceof check; the generic 5xx-collapse below stays intact.
+    const memberRegistration = memberRegistrationErrorResponse(err)
+    if (memberRegistration) {
+      log.warn(
+        {
+          event: memberRegistration.error,
+          correlationId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'member registration unavailable'
+      )
+      res.status(memberRegistration.status).json({ error: memberRegistration.error, correlationId })
+      return
+    }
 
     // Errors thrown by service-layer code may carry a `.status` field to
     // signal that the upstream response (e.g., registry 404) should be

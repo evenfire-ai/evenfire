@@ -18,6 +18,7 @@ import {
   storeDesktopAuthorizationToken,
   validateInvitationFlowToken,
 } from '../../services/invitationFlowRegistrationService.js'
+import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
 import { signExternalSessionToken } from '../../utils/auth/externalSessionAuthToken.js'
 
 function invitationLookupIpKey(req: {
@@ -49,7 +50,8 @@ export function createExternalInvitationsRouter(): Router {
         let validation: { email: string; invitationUuid: string }
         try {
           validation = await validateInvitationFlowToken(token)
-        } catch {
+        } catch (error) {
+          if (memberRegistrationErrorResponse(error)) throw error
           return res.status(400).json({ error: 'invalid_invitation' })
         }
         const invitation = await getInvitationByToken(validation.invitationUuid)
@@ -85,7 +87,8 @@ export function createExternalInvitationsRouter(): Router {
         let validation: { email: string; invitationUuid: string }
         try {
           validation = await validateInvitationFlowToken(token, email)
-        } catch {
+        } catch (error) {
+          if (memberRegistrationErrorResponse(error)) throw error
           return res.status(400).json({ error: 'invalid_invitation' })
         }
         if (validation.invitationUuid !== invitationId) {
@@ -204,6 +207,7 @@ export function createExternalInvitationsRouter(): Router {
         try {
           await storeDesktopAuthorizationToken(email, authorizationToken)
         } catch (error) {
+          if (memberRegistrationErrorResponse(error)) throw error
           const message = error instanceof Error ? error.message : ''
           if (message.includes('(404)')) {
             return res.status(404).json({ error: 'not_found' })
@@ -247,7 +251,8 @@ export function createExternalInvitationsRouter(): Router {
       let validation: { email: string; invitationUuid: string }
       try {
         validation = await validateInvitationFlowToken(token, email)
-      } catch {
+      } catch (error) {
+        if (memberRegistrationErrorResponse(error)) throw error
         return res.status(400).json({ error: 'invalid_invitation' })
       }
       const result = await acceptInvitationForEmail(validation.email, validation.invitationUuid)
