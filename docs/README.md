@@ -54,6 +54,7 @@ Use this index for long-form docs.
 | [Track usage & set budgets](how-to/token-budgets-and-usage.md) | Enable budgets, scope, block vs warn |
 | [Connect to the registry](how-to/connect-to-registry.md)       | Self-hosted registry connect flow   |
 | [Publish a plugin](how-to/publish-plugin-to-registry.md)       | Publish under your org with an `efrk_` key |
+| [Shared & global files](how-to/shared-and-global-files.md)     | Team workspaces (SFS) and the brokered drive (GFS) |
 | [Minikube full stack](deploy/minikube.md)                      | Local Kubernetes platform           |
 | [Production notes](deploy/production.md)                       | Checklist and in-repo deploy assets |
 | [WorkflowRecipes operations](deploy/workflow-recipes-guide.md) | Recipe ops, RBAC, debugging         |

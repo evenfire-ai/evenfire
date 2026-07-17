@@ -41,4 +41,5 @@ Working sample:
 ## Related
 
 - [CRD index](README.md)
+- [Shared & global files how-to](../how-to/shared-and-global-files.md) — create an SFS, attach it to a Context, upload
 - [workspace-files-controller](../../workspace-files-controller/) (service tree)

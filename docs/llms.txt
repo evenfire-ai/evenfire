@@ -37,6 +37,7 @@
 - Track usage & set token budgets: how-to/token-budgets-and-usage.md
 - Connect a self-hosted deployment to the registry: how-to/connect-to-registry.md
 - Publish a plugin to the registry (efrk_ org key): how-to/publish-plugin-to-registry.md
+- Shared & global files (SFS team workspace + brokered GFS drive): how-to/shared-and-global-files.md
 - Minikube full stack: deploy/minikube.md
 - Production checklist: deploy/production.md
 - WorkflowRecipes ops: deploy/workflow-recipes-guide.md

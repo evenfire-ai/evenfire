@@ -36,6 +36,7 @@ NetworkPolicies matter.
 4. [Track usage & set budgets](../how-to/token-budgets-and-usage.md) — meter and cap what agents spend
 5. [WorkflowRecipe CRD reference](../crds/workflowrecipe.md) if you need multi-workload recipes
 6. Self-host the registry: [connect](../how-to/connect-to-registry.md), then [publish a plugin](../how-to/publish-plugin-to-registry.md)
+7. Give agents files: [shared & global files](../how-to/shared-and-global-files.md)
 
 **Success looks like:** Control UI up, a Host responding, an approval or
 connector path exercised.
