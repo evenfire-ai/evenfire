@@ -336,6 +336,22 @@ if ! command -v python3 &>/dev/null; then
 fi
 ok "python3 is available"
 
+# Fail here, not at Step 10. Image builds dominate a 5-10 min first run
+# (README.md:178); aborting after them for a missing .env line is hostile.
+if [ "$SEED_PROFILE" = "minimal" ] && [ -z "${ADMIN_PASSWORD:-}" ]; then
+  err "ADMIN_PASSWORD is not set."
+  err ""
+  err "  This is your Control UI admin password AND your Desktop App login."
+  err "  Set it in .env at the project root:"
+  err ""
+  err "      ADMIN_PASSWORD=<choose-a-password>"
+  err ""
+  err "  No default password ships with Evenfire. For the E2E fixture profile"
+  err "  (which pins a known test password), run: make minikube-setup-e2e"
+  exit 1
+fi
+ok "ADMIN_PASSWORD is set"
+
 # ======================================================================
 # Step 2: Cluster
 # ======================================================================
@@ -974,7 +990,8 @@ else
 fi
 SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
 log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
-if CONTEXT="${PROFILE}" ADMIN_PASSWORD="changeme123!" \
+if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+   SEED_PROFILE="${SEED_PROFILE}" \
    E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
    bash "${SCRIPT_DIR}/seed-test-data.sh" 2>&1 | tail -15; then
   ok "Test user seeded"

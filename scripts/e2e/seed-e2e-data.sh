@@ -266,7 +266,10 @@ if [ "$CONTEXT_OK" -ne 1 ]; then
 fi
 ok "Context '$CONTEXT' is in the non-prod allowlist"
 
-if [ -z "$ADMIN_PASSWORD" ] && is_minikube_context; then
+# Only the e2e seed profile gets a known default. The minimal profile requires
+# the user to supply ADMIN_PASSWORD (full-setup.sh Step 1), so no default
+# password ships. :274 below still hard-fails when neither applies.
+if [ -z "$ADMIN_PASSWORD" ] && is_minikube_context && [ "${SEED_PROFILE:-e2e}" = "e2e" ]; then
   ADMIN_PASSWORD="$(printf '%s%s' 'changeme123' '!')"
   DESKTOP_LOGIN_CREDENTIAL="$ADMIN_PASSWORD"
 fi
