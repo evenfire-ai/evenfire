@@ -18,7 +18,7 @@ type View =
   | { kind: 'pending'; deploymentId?: string; requestedOrgName?: string }
   | { kind: 'approved'; deploymentId?: string; requestedOrgName?: string }
   | { kind: 'rejected'; requestedOrgName?: string }
-  | { kind: 'connected'; org?: string }
+  | { kind: 'connected'; org?: string; authEnabled?: boolean }
   | { kind: 'not-self-hosted' }
   | { kind: 'error' }
 
@@ -41,7 +41,8 @@ export default function RegistryConnectPanel() {
   const load = useCallback(async () => {
     try {
       const s = await getRegistryConnection()
-      if (s.state === 'connected') setView({ kind: 'connected', org: s.org })
+      if (s.state === 'connected')
+        setView({ kind: 'connected', org: s.org, authEnabled: s.authEnabled })
       else if (s.state === 'approved')
         setView({
           kind: 'approved',
@@ -306,6 +307,14 @@ export default function RegistryConnectPanel() {
             <p className="cu-banner cu-banner--ok">
               Connected to the Evenfire Registry{view.org ? ` as @${view.org}` : ''}. This
               deployment can now publish entries and push/pull images.
+            </p>
+          ) : null}
+
+          {view.kind === 'connected' && view.authEnabled === false ? (
+            <p className="cu-banner cu-banner--info" role="status">
+              To create and manage API keys for programmatic publishing, enable registry
+              authentication: set <code>CLERUM_REGISTRY_AUTH_ENABLED=true</code> and restart
+              control-api. See the &quot;connect to registry&quot; guide for details.
             </p>
           ) : null}
         </div>

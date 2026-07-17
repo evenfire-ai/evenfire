@@ -146,4 +146,32 @@ describe('RegistryConnectPanel', () => {
     render(<RegistryConnectPanel />)
     await waitFor(() => expect(screen.getByText('Disconnect')).toBeInTheDocument())
   })
+
+  it('connected + authEnabled:false → shows guidance to enable registry auth for API keys', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'connected',
+      deploymentId: 'd',
+      org: 'acme',
+      authEnabled: false,
+    })
+    render(<RegistryConnectPanel />)
+    await waitFor(() =>
+      expect(screen.getByText(/enable registry authentication/i)).toBeInTheDocument()
+    )
+    expect(screen.getByText('CLERUM_REGISTRY_AUTH_ENABLED=true')).toBeInTheDocument()
+  })
+
+  it('connected + authEnabled:true → does not show the enable-auth guidance', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'connected',
+      deploymentId: 'd',
+      org: 'acme',
+      authEnabled: true,
+    })
+    render(<RegistryConnectPanel />)
+    await waitFor(() =>
+      expect(screen.getByText(/Connected to the Evenfire Registry/)).toBeInTheDocument()
+    )
+    expect(screen.queryByText(/enable registry authentication/i)).toBeNull()
+  })
 })

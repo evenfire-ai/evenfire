@@ -3079,6 +3079,7 @@ export type RegistryConnectionStatus = {
   deploymentId?: string
   requestedOrgName?: string
   org?: string
+  authEnabled?: boolean
 }
 
 export async function getRegistryConnection(): Promise<RegistryConnectionStatus> {

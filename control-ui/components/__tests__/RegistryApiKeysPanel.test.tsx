@@ -68,12 +68,14 @@ describe('RegistryApiKeysPanel', () => {
     expect(await screen.findByText(/not bound to a registry org/i)).toBeInTheDocument()
   })
 
-  it('shows the dev-mode notice on 409 registry_auth_disabled', async () => {
+  it('shows actionable guidance to enable registry auth on 409 registry_auth_disabled', async () => {
     vi.mocked(api.listRegistryApiKeys).mockRejectedValue(
       Object.assign(new Error('x'), { status: 409, code: 'registry_auth_disabled' })
     )
     render(<RegistryApiKeysPanel />)
     expect(await screen.findByText(/registry authentication is disabled/i)).toBeInTheDocument()
+    expect(screen.getByText('CLERUM_REGISTRY_AUTH_ENABLED=true')).toBeInTheDocument()
+    expect(screen.getByText(/restart/i)).toBeInTheDocument()
   })
 
   it('on create success, shows the reveal modal then refetches', async () => {
@@ -81,7 +83,11 @@ describe('RegistryApiKeysPanel', () => {
       .mockResolvedValueOnce({ org: 'acme', keys: [] })
       .mockResolvedValueOnce({ org: 'acme', keys: [key] })
     vi.mocked(api.createRegistryApiKey).mockResolvedValue({
-      id: 'k1', key: 'efrk_secret', key_prefix: 'efrk_abc', scopes: [], expires_at: null,
+      id: 'k1',
+      key: 'efrk_secret',
+      key_prefix: 'efrk_abc',
+      scopes: [],
+      expires_at: null,
     })
     render(<RegistryApiKeysPanel />)
     fireEvent.click(await screen.findByRole('button', { name: /create key/i }))
@@ -163,8 +169,18 @@ describe('RegistryApiKeysPanel', () => {
   })
 
   it('default sort: two keys with different created_at render newest-first', async () => {
-    const olderKey = { ...key, id: 'k-old', key_prefix: 'efrk_old', created_at: '2026-01-01T00:00:00Z' }
-    const newerKey = { ...key, id: 'k-new', key_prefix: 'efrk_new', created_at: '2026-06-01T00:00:00Z' }
+    const olderKey = {
+      ...key,
+      id: 'k-old',
+      key_prefix: 'efrk_old',
+      created_at: '2026-01-01T00:00:00Z',
+    }
+    const newerKey = {
+      ...key,
+      id: 'k-new',
+      key_prefix: 'efrk_new',
+      created_at: '2026-06-01T00:00:00Z',
+    }
     vi.mocked(api.listRegistryApiKeys).mockResolvedValue({
       org: 'acme',
       keys: [olderKey, newerKey],

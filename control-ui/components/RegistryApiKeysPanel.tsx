@@ -1,20 +1,21 @@
 // control-ui/components/RegistryApiKeysPanel.tsx
 'use client'
+
 import { useCallback, useEffect, useState } from 'react'
 import {
+  type CreateRegistryApiKeyInput,
+  type CreatedRegistryApiKey,
+  type RegistryApiKey,
   createRegistryApiKey,
   listRegistryApiKeys,
   revokeRegistryApiKey,
-  type CreatedRegistryApiKey,
-  type CreateRegistryApiKeyInput,
-  type RegistryApiKey,
 } from '../lib/api'
-import { TableHeaderRow } from './TableHeaderRow'
-import type { TableHeaderColumn } from './TableHeaderRow/types'
-import { TablePanelHeader } from './TablePanelHeader'
 import { useConfirmDialog } from './ConfirmDialog'
 import CreateApiKeyModal from './CreateApiKeyModal'
 import RevealApiKeyModal from './RevealApiKeyModal'
+import { TableHeaderRow } from './TableHeaderRow'
+import type { TableHeaderColumn } from './TableHeaderRow/types'
+import { TablePanelHeader } from './TablePanelHeader'
 import { useToast } from './Toast'
 import { Button } from './ui'
 
@@ -114,12 +115,7 @@ export default function RegistryApiKeysPanel() {
           title={`API keys${isReady ? ` for @${(view as { org: string }).org}` : ''}`}
           actions={
             isReady ? (
-              <Button
-                type="button"
-                variant="primary"
-                size="sm"
-                onClick={() => setCreating(true)}
-              >
+              <Button type="button" variant="primary" size="sm" onClick={() => setCreating(true)}>
                 + Create key
               </Button>
             ) : null
@@ -141,17 +137,16 @@ export default function RegistryApiKeysPanel() {
             </p>
           ) : null}
           {view.kind === 'auth-disabled' ? (
-            <p className="cu-banner">Registry authentication is disabled in this environment.</p>
+            <p className="cu-banner cu-banner--info">
+              Registry authentication is disabled, so API keys can&apos;t be created here. To enable
+              it, set <code>CLERUM_REGISTRY_AUTH_ENABLED=true</code> and restart control-api, then
+              reload this page.
+            </p>
           ) : null}
           {view.kind === 'error' ? (
             <p className="cu-banner cu-banner--warn">
               Could not load API keys.{' '}
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => void load()}
-              >
+              <Button type="button" variant="ghost" size="sm" onClick={() => void load()}>
                 Retry
               </Button>
             </p>
@@ -201,9 +196,7 @@ export default function RegistryApiKeysPanel() {
       {creating ? (
         <CreateApiKeyModal onCreate={handleCreate} onCancel={() => setCreating(false)} />
       ) : null}
-      {revealed ? (
-        <RevealApiKeyModal apiKey={revealed} onClose={() => setRevealed(null)} />
-      ) : null}
+      {revealed ? <RevealApiKeyModal apiKey={revealed} onClose={() => setRevealed(null)} /> : null}
       {confirmDialog}
     </section>
   )
