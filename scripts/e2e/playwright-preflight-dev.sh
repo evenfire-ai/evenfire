@@ -59,7 +59,7 @@ fi
 # Desktop E2E exercises the same image/build path as the local cluster.
 case "$KCTX" in
   clerum-test|clerum-*|minikube*|docker-desktop*)
-    MCP_YAML="$REPO_ROOT/deploy/overlays/minikube/instances/airtable-server.yaml"
+    MCP_YAML="$REPO_ROOT/deploy/overlays/minikube/instances-e2e/airtable-server.yaml"
     ;;
   *)
     MCP_YAML="$REPO_ROOT/mcp-servers/airtable/mcpserver.yaml"
