@@ -41,6 +41,26 @@ small state machine — `disconnected → pending → approved → connected`:
   [Publish a plugin to the registry](publish-plugin-to-registry.md).
 - **SSO** to registry API keys from your own Control UI.
 
+## Enable registry authentication (to manage API keys)
+
+Once connected, browsing the public catalog, publishing, and image push/pull all
+work using the credential stored when you claimed the connection — no further
+setup is needed for those.
+
+**Creating and managing API keys** (`efrk_` org keys, used for CI and other
+programmatic publishing) is a separate surface that requires **registry
+authentication** to be enabled. If you see a banner saying registry
+authentication is disabled, or you want to issue org API keys, enable it:
+
+1. Set `CLERUM_REGISTRY_AUTH_ENABLED=true` in the control-api config (e.g. the
+   `control-api-config` ConfigMap, or your env file).
+2. Restart control-api. The flag is read at boot only — there is no hot-reload.
+
+Note the boot guard this enables: with auth on and `REGISTRY_CONNECTION_MODE=self-hosted`,
+control-api requires a completed connection (which you already have once
+claimed) and the registry URL must be in the allowlist — `registry.evenfire.ai`
+is allowed by default; add others via `CLERUM_REGISTRY_URL_ALLOWLIST`.
+
 ## If something goes wrong
 
 - **Already connected** — a deployment has one connection; there is nothing more

@@ -88,13 +88,16 @@ export function createRegistryConnectRouter(): Router {
       if (!ctx) return
       const row = await getRegistryConnection()
       if (!row) {
-        res.status(200).json({ state: 'disconnected' })
+        res.status(200).json({ state: 'disconnected', authEnabled: config.registryAuthEnabled })
         return
       }
       if (row.status === 'connected') {
-        res
-          .status(200)
-          .json({ state: 'connected', deploymentId: row.deploymentId, org: row.orgName })
+        res.status(200).json({
+          state: 'connected',
+          deploymentId: row.deploymentId,
+          org: row.orgName,
+          authEnabled: config.registryAuthEnabled,
+        })
         return
       }
       // Not yet connected — poll the registry so an operator approval (or
@@ -115,6 +118,7 @@ export function createRegistryConnectRouter(): Router {
         state,
         deploymentId: row.deploymentId,
         requestedOrgName: row.requestedOrgName,
+        authEnabled: config.registryAuthEnabled,
       })
     } catch (err) {
       next(err)
