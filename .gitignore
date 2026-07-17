@@ -131,3 +131,7 @@ v8-compile-cache-*/
 playwright_chromiumdev_profile-*/
 .codex
 dist-public/
+
+# Rendered from patches/k8s-api-ip.yaml.template at setup time — the IP is
+# machine-specific, so the rendered file must never be tracked.
+deploy/overlays/minikube/patches/k8s-api-ip.yaml

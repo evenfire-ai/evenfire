@@ -90,9 +90,11 @@ patchesStrategicMerge:
   # "unable to parse SM or JSON patch from [...]".
   - patches/storage-class.yaml
   # CIDR-based egress to kube-apiserver — required under Calico CNI.
-  # The `cidr:` values are auto-patched by
-  # `deploy/scripts/minikube-detect-k8s-api-ip.sh` on every
-  # `make minikube-deploy-all` / `make minikube-setup`.
+  # RENDERED FILE (gitignored): generated from patches/k8s-api-ip.yaml.template
+  # by deploy/scripts/minikube-detect-k8s-api-ip.sh on every
+  # `make minikube-deploy-all` / `make minikube-setup`. A bare
+  # `kubectl apply -k` without that script will fail on the missing file —
+  # run the script (or make target) first.
   - patches/k8s-api-ip.yaml
 
 patches:

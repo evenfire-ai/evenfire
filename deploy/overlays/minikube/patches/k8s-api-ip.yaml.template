@@ -1,10 +1,16 @@
+# TEMPLATE — do not edit the rendered patches/k8s-api-ip.yaml (gitignored).
+# deploy/scripts/minikube-detect-k8s-api-ip.sh renders this file, replacing
+# __K8S_API_IP__ with the live kube-apiserver endpoint IP. Committing a real
+# IP here would dirty every contributor's tree on the first setup run.
+#
 # Patch K8s API server IP for minikube cluster (clerum-test profile).
 #
-# AUTO-MANAGED: The `cidr:` values below are overwritten on every
+# AUTO-MANAGED: The `cidr:` values below are rendered on every
 # `make minikube-deploy-all` (and `make minikube-setup`) by
 # `deploy/scripts/minikube-detect-k8s-api-ip.sh`, which reads the current
-# `kubernetes` endpoint IP. Do not rely on the committed value — it reflects
-# whatever node IP minikube had the last time someone ran the detector.
+# `kubernetes` endpoint IP into the sentinel `__K8S_API_IP__` above. The
+# rendered `patches/k8s-api-ip.yaml` is gitignored; only this template is
+# tracked.
 #
 # Why not `namespaceSelector`/`podSelector` instead of `ipBlock`?
 # Stock K8s NetworkPolicy cannot reference Services or their endpoints; the
@@ -36,7 +42,7 @@ spec:
   egress:
     - to:
         - ipBlock:
-            cidr: 172.17.0.4/32
+            cidr: __K8S_API_IP__/32
       ports:
         - port: 443
           protocol: TCP
@@ -52,7 +58,7 @@ spec:
   egress:
     - to:
         - ipBlock:
-            cidr: 172.17.0.4/32
+            cidr: __K8S_API_IP__/32
       ports:
         - port: 443
           protocol: TCP
@@ -80,7 +86,7 @@ spec:
   egress:
     - to:
         - ipBlock:
-            cidr: 172.17.0.4/32
+            cidr: __K8S_API_IP__/32
       ports:
         - port: 443
           protocol: TCP
