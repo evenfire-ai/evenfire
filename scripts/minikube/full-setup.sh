@@ -119,6 +119,17 @@ case "${SKIP_UIS}" in
   *) SKIP_UIS=false ;;
 esac
 
+SEED_PROFILE="${MINIKUBE_SEED_PROFILE:-minimal}"
+
+# Unlike the SKIP_UIS boolean normalizer, an unrecognized profile is a hard
+# error — silently falling back to `minimal` would skip the E2E fixtures a
+# caller explicitly asked for, and the failure would surface much later as a
+# confusing test failure.
+case "${SEED_PROFILE}" in
+  minimal|e2e) ;;
+  *) err "Unknown SEED_PROFILE: '${SEED_PROFILE}' (expected: minimal | e2e)"; exit 1 ;;
+esac
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -129,6 +140,11 @@ Options:
   --skip-build   Skip Docker image builds (use pre-loaded images)
   --skip-uis     Skip Control UI, Profile UI, and Desktop App image builds.
                  Control/Profile UI cluster deployments are also skipped.
+  --seed-profile=<minimal|e2e>
+                         minimal (default): a clean install — one agent, no
+                         test fixtures. e2e: adds the E2E fixtures (test user,
+                         e2e-* recipes, demo MCP servers). Requires ADMIN_PASSWORD
+                         unless --seed-profile=e2e.
   --reset-db     Reset postgres database for MINIKUBE_PROFILE (deletes PVC, re-deploys)
   --force-keys   Force JWT key regeneration (invalidates existing tokens)
   -h, --help     Show this help message
@@ -138,6 +154,8 @@ Environment:
   MINIKUBE_MULTI_NODE    Set true to opt into a two-node local cluster
   MINIKUBE_NODES         Explicit node count; values >1 imply multi-node
   MINIKUBE_SKIP_UIS      Set true to skip Control UI, Profile UI, and Desktop App
+  MINIKUBE_SEED_PROFILE, ADMIN_PASSWORD
+                         See --seed-profile above
   MINIKUBE_RECREATE_PROFILE
                          Set true to allow destructive broken-profile recreation
   CONFIRM_PROFILE        Must match MINIKUBE_PROFILE before any profile deletion
@@ -155,6 +173,7 @@ Examples:
   $(basename "$0")                       # Full setup from scratch
   $(basename "$0") --skip-build          # Re-deploy without rebuilding images
   $(basename "$0") --skip-uis            # Deploy backend services without UIs
+  $(basename "$0") --seed-profile=e2e     # Full E2E fixture set
   $(basename "$0") --reset-db            # Fix postgres WAL corruption
   $(basename "$0") --force-keys          # Regenerate all JWT keys
 EOF
@@ -165,12 +184,21 @@ for arg in "$@"; do
   case "$arg" in
     --skip-build) SKIP_BUILD=true ;;
     --skip-uis)   SKIP_UIS=true ;;
+    --seed-profile=*) SEED_PROFILE="${arg#*=}" ;;
     --reset-db)   RESET_DB=true ;;
     --force-keys) FORCE_KEYS=true ;;
     -h|--help)    usage ;;
     *) err "Unknown flag: $arg"; usage ;;
   esac
 done
+
+# Re-validate: --seed-profile= above can override the env-derived value, so
+# the same check that guards MINIKUBE_SEED_PROFILE must run again here or
+# `--seed-profile=bogus` slips through unvalidated.
+case "${SEED_PROFILE}" in
+  minimal|e2e) ;;
+  *) err "Unknown --seed-profile: '${SEED_PROFILE}' (expected: minimal | e2e)"; exit 1 ;;
+esac
 
 # ── Load .env ──────────────────────────────────────────────────────────
 # When running from a git worktree (.claude/worktrees/*/), PROJECT_DIR points
@@ -935,7 +963,16 @@ fi
 # ======================================================================
 step_header 10 $TOTAL_STEPS "Seed Test User"
 
-SEED_USER_EMAIL="${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}}"
+# The e2e profile reproduces today's inputs exactly: tests/e2e/testUser.ts pins
+# test@clerum.io, and ~26 control-ui/e2e specs log in as admin/changeme123!.
+# The minimal profile must not seed anything named test*.
+if [ "$SEED_PROFILE" = "e2e" ]; then
+  SEED_USER_DEFAULT_EMAIL="test@clerum.io"
+  : "${ADMIN_PASSWORD:=changeme123!}"
+else
+  SEED_USER_DEFAULT_EMAIL="owner@evenfire.local"
+fi
+SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
 log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
 if CONTEXT="${PROFILE}" ADMIN_PASSWORD="changeme123!" \
    E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
