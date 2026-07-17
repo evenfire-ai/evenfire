@@ -129,6 +129,16 @@ export async function apiSend(
     } catch {
       detail = text
     }
+    if (detail === 'member_registration_unavailable') {
+      throw new Error(
+        "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
+      )
+    }
+    if (detail === 'member_registration_misconfigured') {
+      throw new Error(
+        'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
+      )
+    }
     throw new Error(`${res.status} ${res.statusText} - ${detail}`)
   }
   if (res.status === 204) {
