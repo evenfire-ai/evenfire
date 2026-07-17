@@ -6,6 +6,36 @@ on:
   pull_request:
 
 jobs:
+  repo-hygiene:
+    name: Repo hygiene (no internal working artifacts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No superpowers docs may be tracked
+        # docs/superpowers/ holds per-developer working artifacts (brainstorm
+        # specs, implementation plans) that are gitignored by convention. The
+        # gitignore cannot stop a `git add -f`, so this gate can: any tracked
+        # file under a superpowers directory fails CI. If you hit this, the
+        # file belongs in the brain or your local tree, not the distribution.
+        run: |
+          tracked=$(git ls-files | grep -E '(^|/)(docs/(archive/)?superpowers|superpowers)/' || true)
+          if [ -n "$tracked" ]; then
+            echo "::error::Tracked superpowers working artifacts found:"
+            echo "$tracked"
+            exit 1
+          fi
+      - name: Shipped shell scripts must be executable
+        # The sync-to-OSS pipeline has stripped exec bits before (every .sh at
+        # mode 100644), which breaks `make minikube-setup` with Permission
+        # denied on a fresh clone. Regression gate for the PR #93 fix.
+        run: |
+          bad=$(git ls-files -s '*.sh' | awk '$1 != "100755" {print $4}' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::Non-executable shell scripts (mode must be 100755):"
+            echo "$bad"
+            exit 1
+          fi
+
   test:
     name: Build / test / typecheck (${{ matrix.service }})
     runs-on: ubuntu-latest

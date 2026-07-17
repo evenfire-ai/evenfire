@@ -111,6 +111,9 @@ docs/diagrams/
 docs/security/
 docs/superpowers/
 docs/archive/superpowers/
+# Belt-and-braces: a superpowers working-artifact directory is local no matter
+# where it appears (CI also fails the build if one is ever force-added).
+**/superpowers/
 
 # Git worktrees — isolated feature workspaces, never tracked.
 .worktrees/
