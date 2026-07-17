@@ -1,14 +1,18 @@
 import { config } from './config.js'
+import { rootLogger } from './observability/logger.js'
 import {
   ensureEnrollment,
   normalizeEnrollmentHost,
 } from './services/memberRegistrationEnrollment.js'
+import { MemberRegistrationUnavailableError } from './services/memberRegistrationErrors.js'
 import {
   type MemberRegistrationSigningCredential,
   signMemberRegistrationJwt,
 } from './utils/auth/memberRegistrationSigner.js'
 
 type RequestMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+
+const SEND_TIMEOUT_MS = 10_000
 
 function buildUrl(baseUrl: string, path: string): string {
   const base = baseUrl.replace(/\/+$/, '')
@@ -46,6 +50,24 @@ async function resolveTarget(destinationBaseUrl: string): Promise<{
   }
 }
 
+// Log hygiene (mirrors memberRegistrationEnrollment.ts:100): status only —
+// never stringify the upstream response body into the log or the error.
+function unavailable(
+  context: { baseUrl: string; method: string; path: string; upstreamStatus?: number },
+  message: string,
+  cause?: unknown
+): MemberRegistrationUnavailableError {
+  rootLogger.error(
+    {
+      event: 'member_registration_request_failed',
+      ...context,
+      cause: cause instanceof Error ? cause.message : undefined,
+    },
+    message
+  )
+  return new MemberRegistrationUnavailableError(message)
+}
+
 export async function memberRegistrationServiceRequest<T>(
   method: RequestMethod,
   path: string,
@@ -55,17 +77,51 @@ export async function memberRegistrationServiceRequest<T>(
   }
 ): Promise<T> {
   const { baseUrl, credential } = await resolveTarget(options.destinationBaseUrl)
-  const response = await fetch(buildUrl(baseUrl, path), {
-    method,
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${signMemberRegistrationJwt(credential)}`,
-    },
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-  })
+  const context = { baseUrl, method, path }
+
+  let response: Response
+  try {
+    response = await fetch(buildUrl(baseUrl, path), {
+      method,
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${signMemberRegistrationJwt(credential)}`,
+      },
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+    })
+  } catch (cause) {
+    throw unavailable(context, 'member-registration service is unreachable', cause)
+  }
+
+  // Upstream 5xx is an availability problem: typed, so the app.ts middleware
+  // returns 503. 4xx is a domain answer from the hub and keeps the legacy
+  // message verbatim — `Member registration service` and `(status)` are matched
+  // by routes/external/invitations.ts:212, routes/admin/teams.ts:42 and
+  // routes/external/teams.ts:36 (spec §4.1).
+  if (response.status >= 500) {
+    throw unavailable(
+      { ...context, upstreamStatus: response.status },
+      `member-registration service ${method} ${path} failed (${response.status})`
+    )
+  }
 
   const raw = await response.text()
-  const parsed = raw ? (JSON.parse(raw) as unknown) : null
+  let parsed: unknown = null
+  if (raw) {
+    try {
+      parsed = JSON.parse(raw) as unknown
+    } catch (cause) {
+      if (response.ok) {
+        throw unavailable(
+          { ...context, upstreamStatus: response.status },
+          'member-registration service returned a non-JSON response',
+          cause
+        )
+      }
+      parsed = null
+    }
+  }
 
   if (!response.ok) {
     let errorMessage =
