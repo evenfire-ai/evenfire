@@ -930,6 +930,18 @@ describe('RegistryCatalog - connect discoverability (Fix 1)', () => {
     expect(mockPush).toHaveBeenCalledWith('/registry/connect')
   })
 
+  it('self-hosted + rejected → shows connect banner and header Connect button', async () => {
+    mockApiSuccess()
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'rejected' })
+    render(<RegistryCatalog />)
+    await waitFor(() => expect(screen.getByText('brave-search')).toBeInTheDocument())
+
+    expect(
+      screen.getByText(/This deployment isn't connected to a registry/i)
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeInTheDocument()
+  })
+
   it('self-hosted + connected → no banner, header Connect button present', async () => {
     mockApiSuccess()
     vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'connected' })
