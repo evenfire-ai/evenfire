@@ -50,6 +50,16 @@ data:
   WORKFLOW_APPROVAL_DEFAULT_TTL_SEC: '86400'
   WORKFLOW_APPROVAL_MAX_TTL_SEC: '172800'
   WORKFLOW_APPROVAL_EXPIRY_INTERVAL_MS: '60000'
-  CLERUM_REGISTRY_URL: 'http://registry-api.registry.svc.cluster.local:8085'
+  # OSS default: point at the shared registry so a self-hoster browses the
+  # public catalog out of the box and can run the connect flow (register →
+  # approve → claim) against it. self-hosted is the only mode that fits an OSS
+  # deployment (managed = MCC-provisioned, not in this repo). Auth stays OFF
+  # until a connection is claimed — the boot guard (assertRegistryConnectionReady)
+  # only requires a connection row when auth is enabled, so this is crashloop-safe.
+  # To run your OWN in-cluster registry instead, set CLERUM_REGISTRY_URL to
+  # http://registry-api.registry.svc.cluster.local:8085 and add it via
+  # CLERUM_REGISTRY_URL_ALLOWLIST if you later enable auth.
+  CLERUM_REGISTRY_URL: 'https://registry.evenfire.ai'
+  REGISTRY_CONNECTION_MODE: 'self-hosted'
   CLERUM_REGISTRY_AUTH_ENABLED: 'false'
   CLERUM_ATTACHMENT_MAX_BYTES: '52428800'
