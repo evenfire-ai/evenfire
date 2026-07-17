@@ -84,7 +84,8 @@ each pillar links to its depth.
 - **Files** — `SharedFileSystem` team workspaces (read-only to agents) and a
   brokered, audited `GlobalFileSystem` drive. →
   [gfs-controller/README.md](gfs-controller/README.md),
-  [docs/crds/sharedfilesystem.md](docs/crds/sharedfilesystem.md)
+  [docs/crds/sharedfilesystem.md](docs/crds/sharedfilesystem.md),
+  [shared & global files how-to](docs/how-to/shared-and-global-files.md)
 - **Cost & governance** — token budgets per scope with block/warn decisions
   (opt-in via `CLERUM_BUDGETS_ENABLED`), usage and LLM-price accounting,
   `WorkflowRecipePolicy`, and a connector-image allowlist. →

@@ -33,4 +33,5 @@ declares intent, not full pod specs.
 ## Related
 
 - [CRD index](README.md)
+- [Shared & global files how-to](../how-to/shared-and-global-files.md) — SFS vs GFS, and when to use each
 - [gfs-controller](../../gfs-controller/) (service tree)
