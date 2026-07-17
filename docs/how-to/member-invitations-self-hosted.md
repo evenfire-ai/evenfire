@@ -24,8 +24,9 @@ Requirements:
 What happens: on boot, control-api registers itself with the hub once per UI
 domain, stores the returned credential encrypted in its own Postgres, and
 reuses it forever after. Invitation, admin-invitation, email-confirmation, and
-admin password-reset emails are then sent from `no-reply@evenfire.ai` through
-evenfire's infrastructure. Emailed links pass through a short
+admin password-reset emails are then sent **from evenfire's own sending
+address**, through evenfire's infrastructure — you configure no SMTP provider
+and no email DNS (SPF/DKIM) of your own. Emailed links pass through a short
 `registration.evenfire.ai/i/…` interstitial that names your domain before
 continuing.
 
