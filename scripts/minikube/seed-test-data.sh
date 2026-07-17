@@ -28,7 +28,10 @@ case "$CONTEXT" in
     ;;
 esac
 
-export ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT ALLOWED_CONTEXTS
+# ADMIN_EMAIL passes through when the caller sets it (minikube minimal profile
+# points it at admin@evenfire.local); unset/empty lets seed-e2e-data.sh keep
+# its own admin@clerum.io default for the e2e lane and direct callers.
+export ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT ALLOWED_CONTEXTS ADMIN_EMAIL
 
 bash "${REPO_ROOT}/scripts/e2e/seed-e2e-data.sh" "$@"
 

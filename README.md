@@ -190,7 +190,7 @@ make install-all && npm --prefix control-ui install
 npm run ui              # Control UI + Profile UI + Desktop App
 ```
 
-Log in as `owner@evenfire.local` using the `ADMIN_PASSWORD` you set in `.env`,
+Log in as `admin@evenfire.local` using the `ADMIN_PASSWORD` you set in `.env`,
 message the `chatllm` agent, and ask it to run a command or generate a PDF —
 then approve the tool call from the chat. The same password logs into the
 Control UI as `admin`. The Desktop App is the client you just used; Control UI
