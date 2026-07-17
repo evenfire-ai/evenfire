@@ -35,6 +35,8 @@
 - Desktop setup & updates (environments, invitation, updates): how-to/desktop-setup-and-updates.md
 - Member invitations on self-hosted (hosted mode vs your own service): how-to/member-invitations-self-hosted.md
 - Track usage & set token budgets: how-to/token-budgets-and-usage.md
+- Connect a self-hosted deployment to the registry: how-to/connect-to-registry.md
+- Publish a plugin to the registry (efrk_ org key): how-to/publish-plugin-to-registry.md
 - Minikube full stack: deploy/minikube.md
 - Production checklist: deploy/production.md
 - WorkflowRecipes ops: deploy/workflow-recipes-guide.md
