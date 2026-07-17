@@ -1004,19 +1004,49 @@ step_header 10 $TOTAL_STEPS "Seed Test User"
 # The minimal profile must not seed anything named test*.
 if [ "$SEED_PROFILE" = "e2e" ]; then
   SEED_USER_DEFAULT_EMAIL="test@clerum.io"
-  : "${ADMIN_PASSWORD:=changeme123!}"
+  SEED_USER_DEFAULT_NAME="Test User"
+  # Force-assign, do NOT defer to .env via `: "${ADMIN_PASSWORD:=...}"`.
+  # .env is sourced with `set -a` above, and this branch requires users to
+  # set a real ADMIN_PASSWORD there — under the `:=` form that real password
+  # would win and override the e2e pin. The E2E specs never read .env: they
+  # hardcode changeme123! (or read ADMIN_PASS), so a leaked .env password
+  # would seed admin/<real password> while the specs still send
+  # admin/changeme123!, turning the whole E2E lane red. E2E_ADMIN_PASSWORD
+  # remains the deliberate escape hatch for callers that need a non-default
+  # e2e password.
+  ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-changeme123!}"
 else
   SEED_USER_DEFAULT_EMAIL="owner@evenfire.local"
+  SEED_USER_DEFAULT_NAME="Owner"
 fi
 SEED_USER_EMAIL="${CLERUM_SEED_USER_EMAIL:-${CLERUM_TEST_USER_EMAIL:-${E2E_DEV_LOGIN_EMAIL:-${SEED_USER_DEFAULT_EMAIL}}}}"
+SEED_USER_NAME="${E2E_DEV_LOGIN_NAME:-${SEED_USER_DEFAULT_NAME}}"
 log "Seeding test user ${SEED_USER_EMAIL} → agent=chatllm, context=context1"
+SEED_USER_OK=true
 if CONTEXT="${PROFILE}" ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
    SEED_PROFILE="${SEED_PROFILE}" \
    E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
+   E2E_DEV_LOGIN_NAME="${SEED_USER_NAME}" \
    bash "${SCRIPT_DIR}/seed-test-data.sh" 2>&1 | tail -15; then
   ok "Test user seeded"
 else
-  warn "Test user seed encountered errors — check output above"
+  SEED_USER_OK=false
+  if [ "$SEED_PROFILE" = "minimal" ]; then
+    # This step is the only place that both creates the owner user AND
+    # rotates the bootstrap admin credential (POST /admin/auth/setup, called
+    # from seed-test-data.sh → scripts/e2e/seed-e2e-data.sh). generate-keys.sh
+    # bakes a hardcoded bcrypt hash of changeme123! into the admin Secret,
+    # and control-api/src/db.ts auto-inserts a live `admin` row from it on
+    # every fresh DB. If this step fails under the default (minimal)
+    # profile, that publicly-known credential is still live — a green
+    # summary would ship an install that is both unusable and insecure.
+    # Abort instead; setup is idempotent, so re-running after the underlying
+    # issue is fixed recovers cleanly.
+    err "Test user seed failed under SEED_PROFILE=minimal — aborting. The bootstrap admin password may still be the publicly-known default (see generate-keys.sh) until this step succeeds. Fix the error above and re-run setup."
+    exit 1
+  else
+    warn "Test user seed encountered errors — check output above"
+  fi
 fi
 
 # ======================================================================
@@ -1092,16 +1122,37 @@ else
 fi
 echo ""
 echo -e "  ${BOLD}Already done by setup:${NC}"
+# Step 10 (Seed Test User) is what actually rotates the bootstrap admin
+# credential and creates the seed user. If it failed, SEED_USER_OK=false and
+# these lines must say so instead of printing a false ✓ (a failed Step 10
+# under minimal already aborts before reaching here — see Step 10 above —
+# so this else branch is reachable only via the e2e soft-fail path).
 if [ "${SEED_PROFILE:-}" = "e2e" ]; then
-  echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / changeme123!)"
+  if [ "${SEED_USER_OK:-true}" = "true" ]; then
+    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / changeme123!)"
+  else
+    echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed; admin/changeme123! may not be live"
+  fi
 else
-  echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / your ADMIN_PASSWORD from .env)"
+  if [ "${SEED_USER_OK:-true}" = "true" ]; then
+    echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / your ADMIN_PASSWORD from .env)"
+  else
+    echo -e "    ${RED}✗${NC} Admin bootstrap NOT confirmed — Step 10 (Seed Test User) failed"
+  fi
 fi
 if [ "${SEED_PROFILE:-}" = "e2e" ]; then
-  echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
+  if [ "${SEED_USER_OK:-true}" = "true" ]; then
+    echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
+  else
+    echo -e "    ${RED}✗${NC} Test user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
+  fi
   echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
 else
-  echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1, password = your ADMIN_PASSWORD)"
+  if [ "${SEED_USER_OK:-true}" = "true" ]; then
+    echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1, password = your ADMIN_PASSWORD)"
+  else
+    echo -e "    ${RED}✗${NC} Owner user seed FAILED (${SEED_USER_EMAIL}) — check Step 10 output above"
+  fi
 fi
 echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
 echo ""
