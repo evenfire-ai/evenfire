@@ -477,29 +477,39 @@ fi
 # CRDs (envSecret references must resolve or the Deployment is never created).
 # Real credentials can be injected later via AIRTABLE_API_KEY / MONGODB_CONNECTION_STRING
 # in .env and re-running setup, or via scripts/create-k8s-secrets.sh.
+#
+# Gated with SEED_PROFILE=e2e together with the McpServer instances themselves
+# (deploy/overlays/minikube/instances-e2e/, Step 6e below). They MUST move as
+# a pair: validate_mcpserver_secrets (below) aborts the whole setup if any
+# McpServer.envSecret is unresolvable, so a server applied without its secret
+# is a hard failure — a secret applied without its server is merely unused.
 log "Applying MCP server secrets..."
 $KC create namespace mcp-server --dry-run=client -o yaml | $KC apply -f - >/dev/null
 
-if [ -f "${PROJECT_DIR}/mcp-servers/airtable/secret.yaml" ]; then
-  $KC apply -f "${PROJECT_DIR}/mcp-servers/airtable/secret.yaml"
-  ok "mcp-airtable-credentials from mcp-servers/airtable/secret.yaml"
-else
-  $KC create secret generic mcp-airtable-credentials \
-    --namespace=mcp-server \
-    --from-literal=api-key="${AIRTABLE_API_KEY:-placeholder-airtable-api-key-for-e2e}" \
-    --dry-run=client -o yaml | $KC apply -f - >/dev/null
-  ok "mcp-airtable-credentials (dev placeholder; override via AIRTABLE_API_KEY or secret.yaml)"
-fi
+if [ "$SEED_PROFILE" = "e2e" ]; then
+  if [ -f "${PROJECT_DIR}/mcp-servers/airtable/secret.yaml" ]; then
+    $KC apply -f "${PROJECT_DIR}/mcp-servers/airtable/secret.yaml"
+    ok "mcp-airtable-credentials from mcp-servers/airtable/secret.yaml"
+  else
+    $KC create secret generic mcp-airtable-credentials \
+      --namespace=mcp-server \
+      --from-literal=api-key="${AIRTABLE_API_KEY:-placeholder-airtable-api-key-for-e2e}" \
+      --dry-run=client -o yaml | $KC apply -f - >/dev/null
+    ok "mcp-airtable-credentials (dev placeholder; override via AIRTABLE_API_KEY or secret.yaml)"
+  fi
 
-if [ -f "${PROJECT_DIR}/mcp-servers/mongodb/secret.yaml" ]; then
-  $KC apply -f "${PROJECT_DIR}/mcp-servers/mongodb/secret.yaml"
-  ok "mcp-mongodb-credentials from mcp-servers/mongodb/secret.yaml"
+  if [ -f "${PROJECT_DIR}/mcp-servers/mongodb/secret.yaml" ]; then
+    $KC apply -f "${PROJECT_DIR}/mcp-servers/mongodb/secret.yaml"
+    ok "mcp-mongodb-credentials from mcp-servers/mongodb/secret.yaml"
+  else
+    $KC create secret generic mcp-mongodb-credentials \
+      --namespace=mcp-server \
+      --from-literal=connection-string="${MONGODB_CONNECTION_STRING:-mongodb://placeholder:placeholder@localhost:27017/placeholder}" \
+      --dry-run=client -o yaml | $KC apply -f - >/dev/null
+    ok "mcp-mongodb-credentials (dev placeholder; override via MONGODB_CONNECTION_STRING or secret.yaml)"
+  fi
 else
-  $KC create secret generic mcp-mongodb-credentials \
-    --namespace=mcp-server \
-    --from-literal=connection-string="${MONGODB_CONNECTION_STRING:-mongodb://placeholder:placeholder@localhost:27017/placeholder}" \
-    --dry-run=client -o yaml | $KC apply -f - >/dev/null
-  ok "mcp-mongodb-credentials (dev placeholder; override via MONGODB_CONNECTION_STRING or secret.yaml)"
+  log "Skipping MCP server secrets (SEED_PROFILE=minimal) — no demo McpServers to back."
 fi
 
 # 4g. JWT sync — copy RPC public key to mcp-host-config
@@ -611,7 +621,17 @@ ok "Inter-service tokens re-applied after kustomize deploy"
 # 6e. Deploy CRD instances
 log "Applying CRD instances..."
 $KC apply -f "${PROJECT_DIR}/deploy/overlays/minikube/instances/"
-ok "CRD instances applied (Host, Context, CommunicationChannel)"
+ok "CRD instances applied (Host, Context, CommunicationChannel, GFS, policy)"
+
+# instances-e2e/context-mcpservers.yaml must apply AFTER instances/context.yaml
+# so its non-empty mcpServers list wins over the empty default.
+if [ "$SEED_PROFILE" = "e2e" ]; then
+  log "Applying E2E demo MCP server instances..."
+  $KC apply -f "${PROJECT_DIR}/deploy/overlays/minikube/instances-e2e/"
+  ok "E2E instances applied (airtable, mongodb, mongodb-mcp-stack + context1 servers)"
+else
+  log "Skipping demo MCP servers (SEED_PROFILE=minimal) — context1 starts empty."
+fi
 
 # Resolve the model provider from whichever key the user actually supplied.
 # Priority order matches docs/architecture/overview.md:724 and
@@ -1004,23 +1024,27 @@ fi
 # ======================================================================
 step_header 11 $TOTAL_STEPS "Seed Workflow Trigger Test Data"
 
-log "Seeding workflow-trigger fixtures for local E2E recipes..."
-if CONTEXT="${PROFILE}" E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
-   bash "${SCRIPT_DIR}/seed-workflow-triggers-test-data.sh" 2>&1 | tail -20; then
-  ok "Workflow-trigger E2E recipes seeded"
+if [ "$SEED_PROFILE" != "e2e" ]; then
+  log "Skipping workflow-trigger + sandbox-ui fixtures (SEED_PROFILE=minimal)."
 else
-  warn "Workflow-trigger E2E seed encountered errors — desktop/control-ui workflow E2E may fail until fixed"
-fi
-
-if [ "$SKIP_UIS" = true ]; then
-  warn "Skipping sandbox-ui Desktop Apps validation seed (--skip-uis)."
-else
-  log "Seeding sandbox-ui local test app for Desktop Apps validation..."
+  log "Seeding workflow-trigger fixtures for local E2E recipes..."
   if CONTEXT="${PROFILE}" E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
-     bash "${SCRIPT_DIR}/seed-sandbox-ui-test-data.sh" 2>&1 | tail -25; then
-    ok "Sandbox-ui local test app seeded"
+     bash "${SCRIPT_DIR}/seed-workflow-triggers-test-data.sh" 2>&1 | tail -20; then
+    ok "Workflow-trigger E2E recipes seeded"
   else
-    warn "Sandbox-ui test app seed encountered errors — Desktop Apps may not list local sandbox-ui fixtures"
+    warn "Workflow-trigger E2E seed encountered errors — desktop/control-ui workflow E2E may fail until fixed"
+  fi
+
+  if [ "$SKIP_UIS" = true ]; then
+    warn "Skipping sandbox-ui Desktop Apps validation seed (--skip-uis)."
+  else
+    log "Seeding sandbox-ui local test app for Desktop Apps validation..."
+    if CONTEXT="${PROFILE}" E2E_DEV_LOGIN_EMAIL="${SEED_USER_EMAIL}" \
+       bash "${SCRIPT_DIR}/seed-sandbox-ui-test-data.sh" 2>&1 | tail -25; then
+      ok "Sandbox-ui local test app seeded"
+    else
+      warn "Sandbox-ui test app seed encountered errors — Desktop Apps may not list local sandbox-ui fixtures"
+    fi
   fi
 fi
 
@@ -1073,7 +1097,11 @@ if [ "${SEED_PROFILE:-}" = "e2e" ]; then
 else
   echo -e "    ${GREEN}✓${NC} JWT keys + admin bootstrap (admin / your ADMIN_PASSWORD from .env)"
 fi
-echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
-echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
+if [ "${SEED_PROFILE:-}" = "e2e" ]; then
+  echo -e "    ${GREEN}✓${NC} Test user seeded (${SEED_USER_EMAIL} → chatllm + context1)"
+  echo -e "    ${GREEN}✓${NC} Workflow-trigger E2E recipes seeded"
+else
+  echo -e "    ${GREEN}✓${NC} Owner user seeded (${SEED_USER_EMAIL} → chatllm + context1, password = your ADMIN_PASSWORD)"
+fi
 echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
 echo ""

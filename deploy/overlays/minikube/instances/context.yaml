@@ -6,7 +6,8 @@ metadata:
 spec:
   contextId: context1
   description: Default minikube context — defines which MCP servers the host can access.
-  mcpServers:
-    - airtable-server
-    - mongodb-server
-    - mongodb-mcp-stack-mongodb-mcp-server
+  # Intentionally empty on a clean install. mcp-host's native tools (shell,
+  # fileRead/fileWrite, httpRequest, memory) work without any MCP server, so
+  # chatllm is fully usable out of the box. Install servers from the registry,
+  # or use `make minikube-setup-e2e` for the demo set.
+  mcpServers: []

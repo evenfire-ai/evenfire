@@ -36,4 +36,14 @@ bash "${REPO_ROOT}/scripts/e2e/seed-e2e-data.sh" "$@"
 # and associate it to the E2E user. Runs AFTER the base seed because the base
 # seed's PUT /admin/users/:id/agents is a full-set replace; the stateless seed
 # re-adds itself as a union. Idempotent. Never touches the chatllm seeding.
-bash "${REPO_ROOT}/scripts/e2e/seed-stateless-host.sh"
+#
+# chatllm-stateless backs the 6-script stateless E2E lane (Makefile:819-844).
+# It is fixture surface, not part of a clean install.
+#
+# Default is e2e (opposite of full-setup.sh's `minimal` default): this script
+# is invoked directly by `make e2e-desktop-app` and several scripts/e2e/*.sh
+# callers that never set SEED_PROFILE — defaulting to `minimal` here would
+# silently break all of them.
+if [ "${SEED_PROFILE:-e2e}" = "e2e" ]; then
+  bash "${REPO_ROOT}/scripts/e2e/seed-stateless-host.sh"
+fi
