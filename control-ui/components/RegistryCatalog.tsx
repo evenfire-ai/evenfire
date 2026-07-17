@@ -11,9 +11,11 @@ import { TablePanelHeader } from '@components/TablePanelHeader'
 import { useToast } from '@components/Toast'
 import { IconPencil, IconX } from '@components/icons'
 import {
+  type RegistryConnectionState,
   type RegistryEntry,
   deleteRegistryEntry,
   getRegistryCatalog,
+  getRegistryConnection,
   installRecipeFromRegistry,
 } from '../lib/api'
 import { trustBgColor, trustColor } from '../lib/trustLevel'
@@ -55,6 +57,17 @@ export default function RegistryCatalog() {
   const [error, setError] = useState<string | null>(null)
   const [installingRecipeKey, setInstallingRecipeKey] = useState('')
   const [installError, setInstallError] = useState('')
+
+  // Registry-connect discoverability: an independent, best-effort fetch that
+  // derives whether this deployment is self-hosted and (if so) its connection
+  // state, so the Marketplace can surface a "Connect" entry point. Initial
+  // mode is 'unknown' (fail-open) so the header button isn't hidden while the
+  // request is in flight or if it errors for a reason other than the
+  // deployment being managed.
+  const [connectionMode, setConnectionMode] = useState<'self-hosted' | 'managed' | 'unknown'>(
+    'unknown'
+  )
+  const [connectionState, setConnectionState] = useState<RegistryConnectionState | null>(null)
 
   // Filters
   const [search, setSearch] = useState('')
@@ -108,7 +121,24 @@ export default function RegistryCatalog() {
 
   useEffect(() => {
     loadData()
+    loadConnectionMode()
   }, [])
+
+  async function loadConnectionMode() {
+    // Independent of the catalog browse: a browse failure must not hide the
+    // connect entry point (see the error early-return below). Fail-open — any
+    // non-managed outcome keeps the entry point available.
+    try {
+      const status = await getRegistryConnection()
+      setConnectionMode('self-hosted')
+      setConnectionState(status.state)
+    } catch (err) {
+      setConnectionMode(
+        (err as { code?: unknown }).code === 'not_self_hosted' ? 'managed' : 'unknown'
+      )
+      setConnectionState(null)
+    }
+  }
 
   async function loadData() {
     setLoading(true)
@@ -165,11 +195,35 @@ export default function RegistryCatalog() {
     return false
   }
 
+  const showConnectBanner =
+    connectionMode === 'self-hosted' &&
+    (connectionState === 'disconnected' || connectionState === 'rejected')
+  // Computed once, rendered in BOTH the error early-return and the normal branch
+  // so the connect prompt survives a catalog browse failure (DRY).
+  const connectBanner = showConnectBanner ? (
+    <div className="cu-banner cu-banner--info" role="status">
+      <span>
+        This deployment isn&apos;t connected to a registry. Connect it to publish and install
+        connectors and plugins.
+      </span>
+      <button
+        type="button"
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        onClick={() => router.push('/registry/connect')}
+      >
+        Connect to registry
+      </button>
+    </div>
+  ) : null
+
   if (error) {
     return (
-      <div className="cu-card cu-card--viewport-fill" style={{ marginBottom: '1.25rem' }}>
-        <div className="cu-card__body">
-          <div className="cu-banner cu-banner--error">Error: {error}</div>
+      <div className="cu-registry-layout">
+        {connectBanner}
+        <div className="cu-card cu-card--viewport-fill" style={{ marginBottom: '1.25rem' }}>
+          <div className="cu-card__body">
+            <div className="cu-banner cu-banner--error">Error: {error}</div>
+          </div>
         </div>
       </div>
     )
@@ -190,6 +244,7 @@ export default function RegistryCatalog() {
           </button>
         </div>
       ) : null}
+      {connectBanner}
       <div className="cu-card cu-card--viewport-fill" style={{ marginBottom: '1.25rem' }}>
         <TablePanelHeader
           title={
@@ -240,6 +295,16 @@ export default function RegistryCatalog() {
                 <span className="cu-registry-count">
                   {filtered.length} of {entries.length} entries
                 </span>
+              ) : null}
+              {connectionMode !== 'managed' ? (
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--ghost cu-btn--sm"
+                  onClick={() => router.push('/registry/connect')}
+                  disabled={isInitialLoad}
+                >
+                  Connect
+                </button>
               ) : null}
               <button
                 type="button"
