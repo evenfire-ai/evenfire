@@ -62,4 +62,10 @@ data:
   CLERUM_REGISTRY_URL: 'https://registry.evenfire.ai'
   REGISTRY_CONNECTION_MODE: 'self-hosted'
   CLERUM_REGISTRY_AUTH_ENABLED: 'false'
+  # The Publisher UI (Sidebar entry + /publisher route) defaults OFF for
+  # self-hosted deployments (mode-based default, derived from
+  # REGISTRY_CONNECTION_MODE above; ON for managed) — publishing into the
+  # curated registry isn't part of the self-hosted flow. Force it on by
+  # uncommenting the line below.
+  # CONTROL_API_PUBLISHER_UI_ENABLED: 'true'
   CLERUM_ATTACHMENT_MAX_BYTES: '52428800'
