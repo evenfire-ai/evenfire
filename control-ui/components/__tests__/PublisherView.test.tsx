@@ -38,6 +38,16 @@ describe('PublisherView', () => {
     expect(screen.getByText(/not available on this deployment/i)).toBeInTheDocument()
   })
 
+  it('renders unavailable when publisherUiEnabled is false (self-hosted default), even for an org-bound non-curator deploy (fails closed)', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue({
+      scope: { scope: 'acme', curator: false, orgName: 'Acme', publisherUiEnabled: false },
+      loading: false,
+      error: false,
+    })
+    render(<PublisherView activeTab="entries" />)
+    expect(screen.getByText(/not available on this deployment/i)).toBeInTheDocument()
+  })
+
   it('renders the owned-entries panel for an org-bound deploy on the entries tab', async () => {
     vi.mocked(hook.usePublishScope).mockReturnValue({
       scope: { scope: 'acme', curator: false, orgName: 'Acme' },

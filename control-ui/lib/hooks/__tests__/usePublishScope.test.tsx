@@ -34,6 +34,32 @@ describe('usePublishScope / isPublisherEnabled', () => {
     expect(isPublisherEnabled(null)).toBe(false)
   })
 
+  it('isPublisherEnabled: org-bound non-curator, publisherUiEnabled explicitly false → false', () => {
+    expect(
+      isPublisherEnabled({
+        scope: 'acme',
+        curator: false,
+        orgName: 'Acme',
+        publisherUiEnabled: false,
+      })
+    ).toBe(false)
+  })
+
+  it('isPublisherEnabled: org-bound non-curator, publisherUiEnabled explicitly true → true', () => {
+    expect(
+      isPublisherEnabled({
+        scope: 'acme',
+        curator: false,
+        orgName: 'Acme',
+        publisherUiEnabled: true,
+      })
+    ).toBe(true)
+  })
+
+  it('isPublisherEnabled: org-bound non-curator, publisherUiEnabled absent (backward compat) → true', () => {
+    expect(isPublisherEnabled({ scope: 'acme', curator: false, orgName: 'Acme' })).toBe(true)
+  })
+
   it('resolves to enabled for an org-bound scope', async () => {
     vi.mocked(api.getPublishScope).mockResolvedValue({
       scope: 'acme',

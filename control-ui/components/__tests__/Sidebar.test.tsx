@@ -23,6 +23,16 @@ describe('Sidebar publisher gating', () => {
     expect(link).toHaveAttribute('href', '/publisher')
   })
 
+  it('hides the Publisher entry when publisherUiEnabled is false (self-hosted default), even for an org-bound non-curator deploy', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue({
+      scope: { scope: 'acme', curator: false, orgName: 'Acme', publisherUiEnabled: false },
+      loading: false,
+      error: false,
+    })
+    render(<Sidebar currentTab="hosts" />)
+    expect(screen.queryByRole('link', { name: /publisher/i })).toBeNull()
+  })
+
   it('hides the Publisher entry on a curator deploy', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue({
       scope: { scope: null, curator: true, orgName: null },
