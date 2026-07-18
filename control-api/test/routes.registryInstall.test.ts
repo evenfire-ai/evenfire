@@ -320,24 +320,27 @@ describe('GET /admin/registry/categories', () => {
 
 // ── GET /admin/registry/publish-scope ─────────────────────────────────────────
 describe('GET /admin/registry/publish-scope', () => {
-  it('returns the resolved org-bound publish scope', async () => {
+  it('returns the resolved org-bound publish scope, plus the static publisherUiEnabled flag', async () => {
     const scope: PublishScope = { curator: false, orgName: 'newtenantwf', scope: '@newtenantwf' }
     vi.mocked(resolvePublishScope).mockResolvedValueOnce(scope)
     const app = makeApp()
 
     const res = await request(app).get('/admin/registry/publish-scope').expect(200)
 
-    expect(res.body).toEqual(scope)
+    // publisherUiEnabled is merged in from config at the route boundary, not
+    // part of resolvePublishScope() itself — see config.publisherUiEnabled.test.ts
+    // for the default/override matrix.
+    expect(res.body).toEqual({ ...scope, publisherUiEnabled: config.publisherUiEnabled })
   })
 
-  it('returns the resolved curator publish scope', async () => {
+  it('returns the resolved curator publish scope, plus the static publisherUiEnabled flag', async () => {
     const scope: PublishScope = { curator: true, orgName: 'clerum', scope: null }
     vi.mocked(resolvePublishScope).mockResolvedValueOnce(scope)
     const app = makeApp()
 
     const res = await request(app).get('/admin/registry/publish-scope').expect(200)
 
-    expect(res.body).toEqual(scope)
+    expect(res.body).toEqual({ ...scope, publisherUiEnabled: config.publisherUiEnabled })
   })
 
   it('returns 500 when resolvePublishScope throws', async () => {

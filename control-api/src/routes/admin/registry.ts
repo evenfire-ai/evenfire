@@ -840,9 +840,12 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
   // GET /admin/registry/publish-scope — Where this control-api's publishes land.
   // The publish UI reads this to show the target ({ curator, orgName, scope }):
   // org-bound clients publish into their own org; curator clients into @clerum.
+  // publisherUiEnabled is merged in from static config (not part of
+  // resolvePublishScope()/its cache) — it gates the Publisher sidebar entry
+  // and /publisher route on control-ui.
   router.get('/admin/registry/publish-scope', async (_req, res, next) => {
     try {
-      res.json(await resolvePublishScope())
+      res.json({ ...(await resolvePublishScope()), publisherUiEnabled: config.publisherUiEnabled })
     } catch (err) {
       next(err)
     }
