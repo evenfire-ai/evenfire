@@ -2521,6 +2521,9 @@ export type PublishScope = {
   scope: string | null
   curator: boolean
   orgName: string | null
+  // Static config value (not registry-derived); absent/undefined is treated as
+  // enabled for backward compat with a control-api that doesn't send it yet.
+  publisherUiEnabled?: boolean
 }
 
 export async function getPublishScope(): Promise<PublishScope> {

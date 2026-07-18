@@ -75,6 +75,12 @@ type Config = {
   // absence-based: managed = env/Secret, self-hosted = the registry_connection
   // DB row. Required when registryAuthEnabled; logged at boot.
   registryConnectionMode: 'managed' | 'self-hosted'
+  // Publisher UI surface (Sidebar entry + /publisher route) toggle, surfaced
+  // to control-ui on the publish-scope response. Static config value — not
+  // part of resolvePublishScope()'s cached registry-derived fields. Default
+  // OFF for self-hosted deploys, ON for managed; CONTROL_API_PUBLISHER_UI_ENABLED
+  // overrides the default either way.
+  publisherUiEnabled: boolean
   adminAuthMaxFailures: number
   adminAuthLockMinutes: number
   adminBootstrapUsername: string
@@ -435,6 +441,11 @@ if (memberRegistrationMode === 'hosted') {
   }
 }
 
+// Computed once so registryConnectionMode and publisherUiEnabled's mode-based
+// default read the exact same resolved value below (rather than re-parsing
+// REGISTRY_CONNECTION_MODE a second time).
+const registryConnectionMode: 'managed' | 'self-hosted' = parseRegistryConnectionMode()
+
 export const config: Config = {
   port: Number(process.env.CONTROL_API_PORT || 8090),
   jsonBodyLimit: process.env.CONTROL_API_JSON_BODY_LIMIT || '150mb',
@@ -534,7 +545,16 @@ export const config: Config = {
   registryClientId: process.env.CLERUM_REGISTRY_CLIENT_ID ?? '',
   registryClientSecret: process.env.CLERUM_REGISTRY_CLIENT_SECRET ?? '',
   registryAuthEnabled: process.env.CLERUM_REGISTRY_AUTH_ENABLED === 'true',
-  registryConnectionMode: parseRegistryConnectionMode(),
+  registryConnectionMode,
+  // 'true'/'false' wins explicitly; otherwise default OFF for self-hosted,
+  // ON for managed — reuses the registryConnectionMode value above rather
+  // than re-parsing REGISTRY_CONNECTION_MODE.
+  publisherUiEnabled:
+    process.env.CONTROL_API_PUBLISHER_UI_ENABLED === 'true'
+      ? true
+      : process.env.CONTROL_API_PUBLISHER_UI_ENABLED === 'false'
+        ? false
+        : registryConnectionMode !== 'self-hosted',
   adminAuthMaxFailures: Number(process.env.CONTROL_API_ADMIN_AUTH_MAX_FAILURES || 5),
   adminAuthLockMinutes: Number(process.env.CONTROL_API_ADMIN_AUTH_LOCK_MINUTES || 15),
   adminBootstrapUsername: requiredOrDevDefault('CONTROL_API_ADMIN_BOOTSTRAP_USERNAME', 'admin'),

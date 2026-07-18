@@ -40,9 +40,15 @@ export function usePublishScope(): PublishScopeState {
   return state
 }
 
-/** Publisher is available only for an org-bound, non-curator deploy. */
+/**
+ * Publisher is available only for an org-bound, non-curator deploy, and only
+ * when the control-api hasn't explicitly disabled the Publisher UI surface
+ * (self-hosted deployments default this off). `publisherUiEnabled` absent —
+ * an older control-api that doesn't send the field — is treated as enabled,
+ * preserving today's behavior.
+ */
 export function isPublisherEnabled(
   scope: PublishScope | null
 ): scope is PublishScope & { scope: string } {
-  return !!scope && !scope.curator && scope.scope !== null
+  return !!scope && !scope.curator && scope.scope !== null && scope.publisherUiEnabled !== false
 }
