@@ -1128,3 +1128,82 @@ describe('routes/resources', () => {
     }
   })
 })
+
+// Topic 1b Task 3 — anti-spoofing guard on Host spec.secretRef. A Host may only
+// point at an LLM host Secret (host-secret label OR a name in LLM_SECRET_NAMES),
+// never an arbitrary in-namespace Secret. Soft/non-regressing: a not-yet-created
+// secretRef is allowed (secretMode:'new' provisions it out of band).
+describe('routes/resources — Host secretRef anti-spoofing', () => {
+  function makeApp(gateway: MockGateway) {
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+    return app
+  }
+
+  it('rejects a Host whose secretRef points at a non-LLM in-namespace Secret (422)', async () => {
+    const gateway = new MockGateway('mcp-host')
+    // e.g. an mcp-host runtime-auth Secret sharing the namespace — no host label.
+    gateway.seedSecret('mcp-host-runtime-auth', config.secretsNamespace, { labels: {} })
+    const res = await request(makeApp(gateway))
+      .post('/admin/hosts')
+      .send({
+        metadata: { name: 'host-a' },
+        spec: { contextRef: 'ctx-a', secretRef: 'mcp-host-runtime-auth' },
+      })
+      .expect(422)
+    expect(res.body.errors[0].field).toBe('spec.secretRef')
+    expect(res.body.errors[0].message).toMatch(/does not reference an LLM host Secret/)
+  })
+
+  it('accepts a Host whose secretRef points at a labeled per-host LLM Secret (201)', async () => {
+    const gateway = new MockGateway('mcp-host')
+    gateway.seedSecret('host-a-llm', config.secretsNamespace, {
+      labels: { [config.hostSecretLabelKey]: config.hostSecretLabelValue },
+    })
+    await request(makeApp(gateway))
+      .post('/admin/hosts')
+      .send({
+        metadata: { name: 'host-a' },
+        spec: { contextRef: 'ctx-a', secretRef: 'host-a-llm' },
+      })
+      .expect(201)
+  })
+
+  it("accepts secretMode:'existing' pointing at the shared chatllm-api-keys by name (201)", async () => {
+    const gateway = new MockGateway('mcp-host')
+    // The shared WRC Secret carries no host-secret label — matched by NAME.
+    gateway.seedSecret('chatllm-api-keys', config.secretsNamespace, { labels: {} })
+    await request(makeApp(gateway))
+      .post('/admin/hosts')
+      .send({
+        metadata: { name: 'host-a' },
+        spec: { contextRef: 'ctx-a', secretRef: 'chatllm-api-keys' },
+      })
+      .expect(201)
+  })
+
+  it("accepts a Host whose secretRef does not exist yet (secretMode:'new', soft) (201)", async () => {
+    const gateway = new MockGateway('mcp-host')
+    await request(makeApp(gateway))
+      .post('/admin/hosts')
+      .send({
+        metadata: { name: 'host-a' },
+        spec: { contextRef: 'ctx-a', secretRef: 'not-yet-provisioned' },
+      })
+      .expect(201)
+  })
+
+  it('rejects a non-LLM secretRef on Host UPDATE too (422)', async () => {
+    const gateway = new MockGateway('mcp-host')
+    gateway.seedSecret('coordinator-token', config.secretsNamespace, { labels: {} })
+    const res = await request(makeApp(gateway))
+      .put('/admin/hosts/host-a')
+      .send({
+        metadata: { name: 'host-a' },
+        spec: { contextRef: 'ctx-a', secretRef: 'coordinator-token' },
+      })
+      .expect(422)
+    expect(res.body.errors[0].field).toBe('spec.secretRef')
+  })
+})

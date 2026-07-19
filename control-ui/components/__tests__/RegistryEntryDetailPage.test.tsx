@@ -118,7 +118,7 @@ describe('RegistryEntryDetailPage', () => {
       recipeManifest: RECIPE_ENTRY.recipe_meta?.recipeYaml,
     })
     expect(navigationState.push).toHaveBeenCalledWith(
-      '/workflow-recipes/sandbox-recipes/market-report'
+      '/plugins/sandbox-recipes/market-report/workloads'
     )
   })
 })

@@ -69,16 +69,36 @@ function Probe() {
       <div data-testid="current">{ctrl.current?.resourceId ?? 'none'}</div>
       <div data-testid="current-name">{ctrl.current?.name ?? 'none'}</div>
       <div data-testid="current-version">{ctrl.current?.version ?? 'none'}</div>
+      <div data-testid="crumbs">{ctrl.crumbs.map(crumb => crumb.name).join(' / ')}</div>
       <div data-testid="accessible-count">{ctrl.accessibleResources.length}</div>
       <div data-testid="accessible-error">{ctrl.accessibleError ?? 'none'}</div>
       <div data-testid="accessible-notice">{ctrl.accessibleNotice ?? 'none'}</div>
+      <div data-testid="held-permissions">{ctrl.affordances?.held.join(',') ?? 'none'}</div>
       {ctrl.accessibleResources.map(resource => (
         <button key={resource.resourceId} type="button" onClick={() => ctrl.openResource(resource)}>
           open {resource.name}
         </button>
       ))}
+      {ctrl.crumbs.map((crumb, index) => (
+        <button key={crumb.resourceId} type="button" onClick={() => ctrl.goToCrumb(index)}>
+          crumb {crumb.name}
+        </button>
+      ))}
       <button type="button" onClick={() => void ctrl.openUri('gfs://main/root')}>
         open
+      </button>
+      <button type="button" onClick={() => void ctrl.refreshAffordances()}>
+        refresh permissions
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          ctrl.current
+            ? void ctrl.createFile(ctrl.current.resourceId, 'notes.md', 'IyBOb3Rlcw==')
+            : undefined
+        }
+      >
+        upload current
       </button>
       <button
         type="button"
@@ -171,6 +191,95 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
   })
 
+  it('refreshes cached affordances after permissions change outside Desktop', async () => {
+    let held = ['read']
+    const affordances = vi.fn(async () => ({
+      held,
+      canDelegate: held.includes('manage_acl'),
+      grantableBits: held,
+      canCreateShare: false,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances,
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('held-permissions').textContent).toBe('read'))
+
+    held = ['read', 'write', 'delete', 'manage_acl', 'share']
+    await act(async () => {
+      screen.getByRole('button', { name: 'refresh permissions' }).click()
+    })
+
+    await waitFor(() =>
+      expect(screen.getByTestId('held-permissions').textContent).toBe(
+        'read,write,delete,manage_acl,share'
+      )
+    )
+    expect(affordances).toHaveBeenCalledTimes(2)
+  })
+
+  it('refreshes folder content after upload without invalidating permission affordances', async () => {
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const affordances = vi.fn(async () => ({
+      held: ['read', 'write'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    const createFile = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren,
+          affordances,
+          createFile,
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(1))
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'upload current' }).click()
+    })
+
+    await waitFor(() =>
+      expect(createFile).toHaveBeenCalledWith('root', 'notes.md', 'IyBOb3Rlcw==', 'main')
+    )
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+    expect(affordances).toHaveBeenCalledTimes(1)
+  })
+
   it('loads accessible GFS resources and opens one without a pasted link', async () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -232,6 +341,100 @@ describe('useGfsBrowserController', () => {
     })
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('team-folder'))
+  })
+
+  it('hydrates readable parent folders for a directly opened file', async () => {
+    const rootId = '00000000-0000-0000-0000-000000000001'
+    const projectsId = '00000000-0000-0000-0000-000000000002'
+    const assetsId = '00000000-0000-0000-0000-000000000003'
+    const fileId = '00000000-0000-0000-0000-000000000004'
+    const byUri = new Map([
+      [
+        'gfs://main/root',
+        {
+          resourceId: fileId,
+          parentResourceId: assetsId,
+          gfsUri: `gfs://main/${fileId.replace(/-/g, '')}`,
+          drive: 'main',
+          name: 'avatar.png',
+          kind: 'file',
+          version: 4,
+        },
+      ],
+      [
+        `gfs://main/${assetsId.replace(/-/g, '')}`,
+        {
+          resourceId: assetsId,
+          parentResourceId: projectsId,
+          gfsUri: `gfs://main/${assetsId.replace(/-/g, '')}`,
+          drive: 'main',
+          name: 'Assets',
+          kind: 'directory',
+          version: 3,
+        },
+      ],
+      [
+        `gfs://main/${projectsId.replace(/-/g, '')}`,
+        {
+          resourceId: projectsId,
+          parentResourceId: rootId,
+          gfsUri: `gfs://main/${projectsId.replace(/-/g, '')}`,
+          drive: 'main',
+          name: 'Projects',
+          kind: 'directory',
+          version: 2,
+        },
+      ],
+      [
+        `gfs://main/${rootId.replace(/-/g, '')}`,
+        {
+          resourceId: rootId,
+          parentResourceId: null,
+          gfsUri: `gfs://main/${rootId.replace(/-/g, '')}`,
+          drive: 'main',
+          name: '',
+          kind: 'directory',
+          version: 1,
+        },
+      ],
+    ])
+    const resolve = vi.fn(async (uri: string) => {
+      const resource = byUri.get(uri)
+      if (!resource) throw new Error(`Unexpected URI: ${uri}`)
+      return resource
+    })
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('crumbs').textContent).toBe('Projects / Assets / avatar.png')
+    )
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'crumb Assets' }).click()
+    })
+    expect(screen.getByTestId('current-name').textContent).toBe('Assets')
+    await waitFor(() => expect(listChildren).toHaveBeenCalledWith(assetsId, 'main', undefined))
   })
 
   it('keeps the visible current resource in sync after rename and replace mutations', async () => {

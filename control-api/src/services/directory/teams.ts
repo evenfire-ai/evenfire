@@ -1,4 +1,5 @@
 import { pool, withTransaction } from '../../db.js'
+import type { DbClient } from '../../db.js'
 import type { AdminDeleteTeamResult, TeamRole } from './types.js'
 
 export async function listTeams(userId: string, currentTeamId: string) {
@@ -47,8 +48,12 @@ export async function getTeamById(teamId: string) {
   return (result.rows[0] as { id: string; name: string } | undefined) || null
 }
 
-export async function getCurrentTeam(userId: string, teamId: string) {
-  const result = await pool.query(
+export async function getCurrentTeam(
+  userId: string,
+  teamId: string,
+  db: Pick<DbClient, 'query'> = pool
+) {
+  const result = await db.query(
     `SELECT t.id, t.name, tm.role
        FROM teams t
        JOIN team_members tm ON tm.team_id = t.id

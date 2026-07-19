@@ -43,7 +43,7 @@ REGISTRY_NS="${REGISTRY_NS:-registry}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-changeme123!}"
 
-# When the registry is reached off-cluster (e.g. example.com on GKE),
+# When the registry is reached off-cluster (e.g. registry.evenfire.ai on GKE),
 # in-pod probes against the in-cluster URL fail and the registry-side ingress
 # NP (registry-api-np) doesn't exist. Skip those checks in external mode.
 is_external_registry() {
@@ -295,7 +295,7 @@ section_networkpolicy() {
 
   if is_external_registry; then
     log "Skipping in-cluster probes — REGISTRY_API='${REGISTRY_API}' is off-cluster (no registry-api-np to check)."
-    # In external mode (example.com on GKE) consumers reach the registry
+    # In external mode (registry.evenfire.ai on GKE) consumers reach the registry
     # over HTTPS:443 via their *-external-egress NPs — NOT an in-cluster :8085
     # egress NP. The legacy `*-to-in-cluster-registry` NPs were retired in the
     # decoupling (deploy/scripts/cleanup-legacy-in-cluster-registry.sh), so a check

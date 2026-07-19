@@ -25,6 +25,7 @@ export type FakeTelegramBinding = {
   providerChannelId: string
   providerUserId: string
   providerChannelType?: 'private' | 'group' | 'supergroup'
+  confirmedByUserId?: string
 }
 
 const DEFAULT_TELEGRAM_BINDINGS: FakeTelegramBinding[] = [
@@ -492,12 +493,16 @@ function telegramOk(result) {
 
 function workflowApprovalFromBotText(text) {
   const recipeMatch = String(text || '').match(/sandbox-recipes\/([a-z0-9-]+)/i)
+  const directApprovalMatch = String(text || '').match(
+    /\bApprove workflow\s+([a-z0-9][a-z0-9-]*)\??/i
+  )
   const approvalTargetMatch = String(text || '').match(/\/approve\s+([a-z0-9][a-z0-9-]*)/i)
   const requestedForMatch = String(text || '').match(/Approval requested for workflow\s+([a-z0-9][a-z0-9-]*)/i)
   const genericApprovalTargets = new Set(['always', 'cancel', 'continue', 'to'])
   const approvalTarget = approvalTargetMatch ? approvalTargetMatch[1] : ''
   if (
     !recipeMatch &&
+    !directApprovalMatch &&
     !requestedForMatch &&
     (!approvalTarget || genericApprovalTargets.has(approvalTarget.toLowerCase()))
   ) {
@@ -506,6 +511,8 @@ function workflowApprovalFromBotText(text) {
   const [title = 'Approve workflow trigger', ...bodyLines] = String(text || '').split('\n')
   const recipeName = recipeMatch
     ? recipeMatch[1]
+    : directApprovalMatch
+      ? directApprovalMatch[1]
     : requestedForMatch
       ? requestedForMatch[1]
       : approvalTarget
@@ -568,6 +575,7 @@ const server = http.createServer(async (req, res) => {
       return
     }
     receivedMessageKeys.add(messageKey)
+    const leadingMention = /^@[A-Za-z0-9_]+/.exec(text)
     const update = {
       update_id: nextUpdateId++,
       message: {
@@ -581,6 +589,9 @@ const server = http.createServer(async (req, res) => {
           username: 'e2e_provider_user',
         },
         text,
+        ...(leadingMention
+          ? { entities: [{ type: 'mention', offset: 0, length: leadingMention[0].length }] }
+          : {}),
       },
     }
     updates.push(update)
@@ -956,16 +967,28 @@ export function restoreChannelReaderTelegramApiRoot(hostName = 'chatllm'): void 
 
 export function applyTelegramCommunicationChannel(
   hostName = 'chatllm',
-  bindings: FakeTelegramBinding[] = DEFAULT_TELEGRAM_BINDINGS
+  bindings: FakeTelegramBinding[] = DEFAULT_TELEGRAM_BINDINGS,
+  accessUserIds: string[] = []
 ): void {
   const telegramGroups = bindings
     .map(
       binding => `    - channelId: "${binding.providerChannelId}"
       chatType: "${binding.providerChannelType || 'private'}"
       userIds:
-        - "${binding.providerUserId}"`
+        - "${binding.providerUserId}"${
+          binding.confirmedByUserId
+            ? `
+      confirmedByUserId: ${JSON.stringify(binding.confirmedByUserId)}`
+            : ''
+        }`
     )
     .join('\n')
+  const access = accessUserIds.length
+    ? `  access:
+    users:
+${[...new Set(accessUserIds)].map(userId => `      - ${JSON.stringify(userId)}`).join('\n')}
+`
+    : ''
   const yaml = `
 apiVersion: v1
 kind: Secret
@@ -989,7 +1012,7 @@ metadata:
     clerum.io/third-party-authn-first-party-mcphost: "true"
 spec:
   hostRef: ${hostName}
-  credentialsSecretRef:
+${access}  credentialsSecretRef:
     name: ${TELEGRAM_CREDENTIALS_SECRET}
   telegram:
 ${telegramGroups}
@@ -1076,22 +1099,75 @@ export function expectChannelReaderLoadedTelegram(hostName = 'chatllm'): void {
   expect(loaded, 'channel-reader must load the real Telegram adapter before human input').toBe(true)
 }
 
-export function expectChannelReaderHasNoProviderHttpIngress(hostName = 'chatllm'): void {
-  const services = kubectl(
-    [
-      '-n',
-      CHANNELS_NS,
-      'get',
-      'svc',
-      '-l',
-      'app=channel-reader',
-      '-o',
-      'jsonpath={.items[*].metadata.name}',
-    ],
+export function channelReaderProviderMessageAuthorizationSignal(params: {
+  hostName: string
+  providerUserId: string
+  providerChannelId: string
+  messageId: number
+}): string {
+  const logs = kubectl(
+    ['-n', CHANNELS_NS, 'logs', `deployment/channel-reader-${params.hostName}`, '--tail=1000'],
     undefined,
-    10_000
-  ).trim()
-  expect(services, 'channel-reader exposes no HTTP/provider ingress service').toBe('')
+    15_000
+  )
+  const providerEventId = `telegram:${params.providerChannelId}:${params.messageId}`
+  const providerEventMarker = `[Main]   Provider Event: ${providerEventId}`
+  const providerEventOffset = logs.lastIndexOf(providerEventMarker)
+  if (providerEventOffset >= 0) {
+    const controlPlaneDenial =
+      `[Main] Ignoring unauthorized telegram message from ${params.providerUserId} ` +
+      `in ${params.providerChannelId}`
+    return logs.slice(providerEventOffset).includes(controlPlaneDenial)
+      ? `control-plane-denied:${providerEventId}`
+      : `control-plane-pending:${providerEventId}`
+  }
+
+  const adapterDenial = logs
+    .split('\n')
+    .find(
+      line =>
+        line.includes('[Telegram] Ignoring message') &&
+        line.includes(params.providerChannelId) &&
+        (line.includes(params.providerUserId) || !line.includes('unauthorized user'))
+    )
+  return adapterDenial
+    ? `adapter-denied:${params.providerChannelId}:${params.providerUserId}`
+    : 'pending'
+}
+
+export function expectChannelReaderHasNoProviderHttpIngress(hostName = 'chatllm'): void {
+  const service = JSON.parse(
+    kubectl(
+      ['-n', CHANNELS_NS, 'get', 'svc', `channel-reader-${hostName}`, '-o', 'json'],
+      undefined,
+      10_000
+    )
+  ) as {
+    spec?: {
+      type?: string
+      externalIPs?: string[]
+      loadBalancerIP?: string
+      ports?: Array<{
+        name?: string
+        port?: number
+        targetPort?: string | number
+        protocol?: string
+        nodePort?: number
+      }>
+    }
+  }
+  expect(service.spec?.type).toBe('ClusterIP')
+  expect(service.spec?.externalIPs ?? []).toEqual([])
+  expect(service.spec?.loadBalancerIP).toBeUndefined()
+  expect(service.spec?.ports).toEqual([
+    expect.objectContaining({
+      name: 'handoff',
+      port: 8099,
+      targetPort: 'handoff',
+      protocol: 'TCP',
+    }),
+  ])
+  expect(service.spec?.ports?.[0]?.nodePort).toBeUndefined()
 
   const ports = kubectl(
     [
@@ -1101,12 +1177,14 @@ export function expectChannelReaderHasNoProviderHttpIngress(hostName = 'chatllm'
       'deploy',
       `channel-reader-${hostName}`,
       '-o',
-      'jsonpath={.spec.template.spec.containers[0].ports[*].containerPort}',
+      'jsonpath={range .spec.template.spec.containers[0].ports[*]}{.name}:{.containerPort}{"\\n"}{end}',
     ],
     undefined,
     10_000
   ).trim()
-  expect(ports, 'channel-reader deployment has no HTTP provider port').toBe('')
+  expect(ports, 'channel-reader exposes only the authenticated internal handoff port').toBe(
+    'handoff:8099'
+  )
 }
 
 export function expectChannelReaderCanReachMcpHost(hostName = 'chatllm'): void {

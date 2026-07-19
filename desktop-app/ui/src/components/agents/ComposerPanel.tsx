@@ -27,6 +27,7 @@ import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../..
 import { AnnotationCanvas } from './AnnotationCanvas'
 import { ComposerAgentFilesModal } from './ComposerAgentFilesModal'
 import { ComposerGlobalFilesModal } from './ComposerGlobalFilesModal'
+import { ModelSelector } from './ModelSelector'
 
 type ComposerPanelProps = {
   inline?: boolean
@@ -796,6 +797,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             ) : null}
           </span>
           <span className="composer-actions-right">
+            {selectedAgent && (
+              // Rendered even before a chat exists (new-chat composer): with an
+              // empty chatId the selector shows the host default and holds the pick
+              // locally, and the first send piggybacks it onto message 1 (R2).
+              <ModelSelector agentRef={selectedAgent} chatId={activeChatId ?? ''} placement="up" />
+            )}
             <IconButton
               data-testid="send-button"
               className="composer-send-button composer-send-button-compact composer-send-icon-btn"

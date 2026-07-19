@@ -3,8 +3,8 @@ import { buildControlUiLoginPath, sanitizeControlUiReturnPath } from '../authRed
 
 describe('control-ui auth redirects', () => {
   it('builds a login route with a safe same-origin return path', () => {
-    expect(buildControlUiLoginPath('/hosts/chatllm/env#runtime')).toBe(
-      '/?next=%2Fhosts%2Fchatllm%2Fenv%23runtime'
+    expect(buildControlUiLoginPath('/agents/chatllm/env#runtime')).toBe(
+      '/?next=%2Fagents%2Fchatllm%2Fenv%23runtime'
     )
   })
 

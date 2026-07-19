@@ -8,6 +8,7 @@
 import { snapshotTaskTokenBaseline } from '../budget/taskBrake'
 import type { TaskTokenBaseline } from '../budget/taskBrake'
 import { config as appConfig } from '../config'
+import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../core/adapters/toolRegistryAdapter'
 import { compactConversation } from '../core/conversation/compaction'
@@ -17,7 +18,7 @@ import { ApprovalController } from '../core/extensions/approvalController'
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
 import { UnifiedApprovalGateController } from '../core/extensions/mcpApprovalGateController'
-import type { AgentEventEmitter, LoopController, ToolRegistry } from '../core/interfaces'
+import type { AgentEventEmitter, LlmPort, LoopController, ToolRegistry } from '../core/interfaces'
 import { DeferrableToolController } from '../core/orchestration/deferrableToolController'
 import type { SimpleEventEmitter } from '../core/orchestration/eventEmitter'
 import { buildLoopConfig } from '../core/orchestration/loopConfig'
@@ -85,7 +86,7 @@ import {
 } from '../progress/sseProgressReporter.js'
 import type { Task, TaskError } from '../queue/types'
 import { resolveCronTaskSessionKey, serializeSessionKey } from '../session'
-import { UsageReporter } from '../usage/usageReporter.js'
+import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import type { Workspace } from '../workspace/service'
 import type { CronScheduler } from './cronScheduler'
@@ -98,9 +99,28 @@ import {
   workflowAccessDeniedResponseForMessage,
 } from './providerWorkflowAccessGate'
 import { TurnTimingRecorder } from './turnTiming'
-import type { AgentConfig } from './types'
+import type { AgentConfig, ExecutorFailoverSupport } from './types'
 
 export type ExecutorState = 'processing' | 'waiting_approval' | 'completed' | 'failed'
+
+/**
+ * R2 — the serialized session key a task runs under. Extracted so the agent's
+ * per-task model resolver (`executeTask`) reads the SAME key the executor's
+ * `run()` uses for `getOrCreate`. INVARIANT: for `source==='cron'` this MUST
+ * agree with the key `cronDispatch.ts` enqueued under.
+ */
+export function resolveTaskSessionKey(task: Task): string {
+  const msg = task.sourceMessage
+  const cronSession = task.source === 'cron' ? resolveCronTaskSessionKey(task) : undefined
+  return serializeSessionKey(
+    cronSession ?? {
+      userId: msg?.sender || 'anonymous',
+      channelType: msg?.channelType || 'internal',
+      channelId: msg?.channelId || 'default',
+      threadId: msg?.threadId,
+    }
+  )
+}
 
 export interface TaskExecutorDeps {
   conversationManager: ConversationManager
@@ -109,6 +129,13 @@ export interface TaskExecutorDeps {
   workspaceService: Workspace | undefined
   config: AgentConfig
   modelName: string
+  /**
+   * R2 — context-window override for the effective model, read from the
+   * allowlist entry by the per-task resolver. Feeds the reasoning-factory
+   * breakdown denominator and the PressureContextManager budget. Undefined →
+   * fall back to `CLERUM_CONTEXT_MAX_TOKENS` (today's behaviour).
+   */
+  contextWindowTokens?: number
   approvalConfig: ApprovalConfig | undefined
   coreEvents: SimpleEventEmitter
   cronScheduler: CronScheduler | null
@@ -131,6 +158,7 @@ export interface TaskExecutorDeps {
    */
   usageReporter?: UsageReporter
   usageStaticContext?: AdapterStaticContext
+  governedRunReporter?: GovernedRunReporter
 
   /**
    * IronClaw invariant #2 (P.3 + T1.5): resolver for spillover refs in the
@@ -164,6 +192,14 @@ export interface TaskExecutorDeps {
    * flag `CLERUM_SESSION_SEARCH_ENABLED` is OFF.
    */
   sessionSearchService?: SessionSearchService
+
+  /**
+   * R5 — provider-fallback support for THIS task. When present with a non-empty
+   * `policy.fallbacks`, `buildLoopConfig` wraps the primary `LlmPort` so an
+   * eligible provider error switches to the next fallback (adapter-per-attempt
+   * so `usage_events` records the pair really served). Absent → no failover.
+   */
+  failover?: ExecutorFailoverSupport
 
   // Callbacks to coordinator
   onApprovalNeeded: (requestId: string, taskId: string, approval: PendingApproval) => void
@@ -240,6 +276,8 @@ export class TaskExecutor {
     return this.conversation?.pending_approval
   }
 
+  private approvedToolCorrelation: { toolCallId: string; approvalRequestId: string } | undefined
+
   /**
    * The serialized session key this executor owns (the store's LRU/evict key,
    * `<userId>:<channelType>:<channelId>[:<threadId>]`). Exposed so callers
@@ -265,6 +303,25 @@ export class TaskExecutor {
   /** The AbortSignal for this executor's loop. Used by Task 3 tests. */
   get signal(): AbortSignal {
     return this.abortController.signal
+  }
+
+  async rehydrateWaitingApproval(sessionKey: string, approval: PendingApproval): Promise<void> {
+    const message = this.task.sourceMessage
+    this.conversation = await this.deps.conversationManager.getOrCreate(sessionKey, {
+      userId: message?.sender,
+      channelType: message?.channelType,
+      channelId: message?.channelId,
+      threadId: message?.threadId,
+      source: message?.channelType,
+    })
+    if (
+      this.conversation.pending_approval?.request_id !== approval.request_id ||
+      this.conversation.activeTaskId !== this.taskId
+    ) {
+      throw new Error('persisted approval does not match its active conversation task')
+    }
+    this.task.traceContext = approval.traceContext ?? this.conversation.traceContext ?? null
+    this.state = 'waiting_approval'
   }
 
   /**
@@ -294,14 +351,7 @@ export class TaskExecutor {
       const msg = this.task.sourceMessage
       const cronSession =
         this.task.source === 'cron' ? resolveCronTaskSessionKey(this.task) : undefined
-      const sessionKey = serializeSessionKey(
-        cronSession ?? {
-          userId: msg?.sender || 'anonymous',
-          channelType: msg?.channelType || 'internal',
-          channelId: msg?.channelId || 'default',
-          threadId: msg?.threadId,
-        }
-      )
+      const sessionKey = resolveTaskSessionKey(this.task)
       console.log(`[TaskExecutor:${this.taskId}] Session key: ${sessionKey}`)
 
       const sessionLoadStart = Date.now()
@@ -311,13 +361,28 @@ export class TaskExecutor {
         channelId: cronSession?.channelId ?? msg?.channelId,
         threadId: cronSession?.threadId ?? msg?.threadId,
         source: cronSession?.channelType ?? msg?.channelType,
+        // R2 — record the effective model served (resolved by the agent from the
+        // session's saved selection before this executor was built) in the
+        // `sessions.model` telemetry column at INSERT time.
+        model: this.deps.modelName,
       })
+      if (this.task.traceContext?.origin === 'channel_event' && !this.task.traceContext.sessionId) {
+        this.task.traceContext = {
+          ...this.task.traceContext,
+          sessionId: this.conversation.id,
+        }
+      }
       const userInput = msg?.content || this.task.conversationHistory[0]?.content || ''
       // D3 — awaited durability barrier: the user message must be durable
       // before the LLM loop runs (it is the replay anchor after a crash). A
       // rejected write rolls back the turn inside startTurn and lands in
       // run()'s catch as a clean task failure.
-      await this.deps.conversationManager.startTurn(this.conversation, userInput, this.taskId)
+      await this.deps.conversationManager.startTurn(
+        this.conversation,
+        userInput,
+        this.taskId,
+        this.task.traceContext ?? null
+      )
       this.turnTiming?.addSessionLoadMs(Date.now() - sessionLoadStart)
 
       // P2 token budgets (§5.2) — capture the per-task brake baseline NOW, before
@@ -329,6 +394,7 @@ export class TaskExecutor {
       this.captureTaskTokenBaseline()
 
       await this.prepareChannelWorkflowCallerContext()
+      this.enqueueGovernedRunEvent('run_start', `task:${this.taskId}:start`)
       if (this.workflowAccessDeniedResponse && looksLikeWorkflowAccessRequest(userInput)) {
         this.logProviderWorkflowAccessDenied('request')
         await this.completeWithStaticResponse(this.workflowAccessDeniedResponse)
@@ -389,7 +455,14 @@ export class TaskExecutor {
         return
       }
 
+      const approvalBeforeResolution = this.conversation.pending_approval
       await this.deps.conversationManager.approve(this.conversation, alwaysApprove)
+      if (approvalBeforeResolution?.tool_call_id) {
+        this.approvedToolCorrelation = {
+          toolCallId: approvalBeforeResolution.tool_call_id,
+          approvalRequestId: approvalBeforeResolution.request_id,
+        }
+      }
       this.currentTurnToolNames.clear()
 
       const approval = this.conversation.pending_approval
@@ -675,6 +748,15 @@ export class TaskExecutor {
     return !!v && (v.maxTaskTokens != null || v.maxTaskCost != null)
   }
 
+  /**
+   * R2.6 — model-aware context window. The allowlist entry for the effective
+   * model wins; falls back to the fixed `CLERUM_CONTEXT_MAX_TOKENS` env when the
+   * allowlist carries no `contextWindowTokens` (or is unavailable/degraded).
+   */
+  private contextMaxTokens(): number {
+    return this.deps.contextWindowTokens ?? appConfig.contextMaxTokens
+  }
+
   private getOrCreateTokenCounter(): TokenCounter {
     if (!this.tokenCounter) {
       this.tokenCounter = createTokenCounter(this.deps.llmProvider, this.deps.modelName, {
@@ -858,6 +940,9 @@ export class TaskExecutor {
         // Calling lifecycle.transition again would return AlreadyTerminal — redundant and
         // misleading.
         console.log(`[TaskExecutor:${this.taskId}] Cancelled: ${result.reason ?? 'no reason'}`)
+        this.enqueueGovernedRunEvent('run_end', `task:${this.taskId}:end`, {
+          status: 'cancelled',
+        })
         break
       }
 
@@ -922,6 +1007,53 @@ export class TaskExecutor {
     )
   }
 
+  /**
+   * R5 — wrap the primary `LlmPort` with provider-failover when a policy is
+   * wired for this task. Fallback entries are served by their OWN adapters,
+   * built with the SAME per-task usage sink as the primary (so session token
+   * accounting + `usage_events` stay correct) and a per-pair token counter.
+   * Returns the primary unchanged when no policy / no fallbacks (byte-identical).
+   */
+  private wrapFailoverPort(primaryPort: LlmPortAdapter, conversation: Conversation): LlmPort {
+    const support = this.deps.failover
+    if (!support || support.policy.fallbacks.length === 0) return primaryPort
+    const primaryProvider = this.deps.llmProvider.getProviderType()
+    const primaryModel = this.deps.modelName
+    return maybeWrapFailover({
+      primaryPort,
+      primaryPair: { provider: primaryProvider, model: primaryModel },
+      engine: support.engine,
+      policy: support.policy,
+      buildFallbackPort: index => {
+        const entry = support.policy.fallbacks[index]
+        const provider = support.buildProvider(entry)
+        if (!provider) return null
+        // R5.7 — a SAME-provider fallback (other key) respects the session's
+        // model; a CROSS-provider fallback serves its fixed entry model
+        // (ignoring the session selection). Drives usage_events + the tokenizer.
+        const servedModel = entry.provider === primaryProvider ? primaryModel : entry.model
+        const counter = createTokenCounter(provider, servedModel, {
+          offline: appConfig.tokenizerOffline,
+        })
+        return new LlmPortAdapter(
+          provider,
+          servedModel,
+          provider.getProviderType(),
+          this.deps.usageReporter,
+          this.deps.usageStaticContext,
+          this.buildDefaultUsageContext(),
+          counter,
+          usage => {
+            this.deps.conversationManager.recordSessionUsage(conversation, usage)
+            if (conversation.contextBreakdown && usage.input_tokens > 0) {
+              conversation.contextBreakdown.totalInputTokens = usage.input_tokens
+            }
+          }
+        )
+      },
+    })
+  }
+
   private async buildLoopConfig(opts?: {
     /**
      * IronClaw invariant #1 (P.3): when `true`, the loop will skip
@@ -962,6 +1094,12 @@ export class TaskExecutor {
       }
     )
 
+    // R5 — wrap the primary port with provider-failover when a policy is wired.
+    // Each fallback entry gets its OWN adapter (built with the SAME per-task
+    // usage sink + a per-pair token counter) so `usage_events` records the pair
+    // really served. No policy → returns `llmPort` unchanged (byte-identical).
+    const effectiveLlmPort = this.wrapFailoverPort(llmPort, conversation)
+
     const metadata: Record<string, unknown> = {}
     if (this.task.sourceMessage) {
       if (this.task.sourceMessage.channelType === 'rpc') {
@@ -980,7 +1118,7 @@ export class TaskExecutor {
     // out-of-band through `ReasoningPort`. Otherwise fall back to the legacy
     // single-string identity built by `buildSystemIdentity`.
     const reasoningFactory = new DefaultReasoningFactory(
-      llmPort,
+      effectiveLlmPort,
       undefined,
       metadata,
       // F1.4 — wire the send-time context-window-breakdown capture. The sink is
@@ -988,7 +1126,7 @@ export class TaskExecutor {
       // a later reassignment can't re-point it at a different session.
       tokenCounter,
       raw => this.deps.conversationManager.recordContextBreakdown(conversation, raw),
-      appConfig.contextMaxTokens
+      this.contextMaxTokens()
     )
     const parts = await this.maybeGetOrBuildParts(registry.listDefinitions())
     const reasoning = parts
@@ -996,9 +1134,9 @@ export class TaskExecutor {
       : reasoningFactory.create(await this.buildSystemIdentity(llmPort))
 
     const contextManager = new PressureContextManager(
-      appConfig.contextMaxTokens,
+      this.contextMaxTokens(),
       this.deps.workspaceService,
-      llmPort,
+      effectiveLlmPort,
       tokenCounter,
       {
         dryRun: appConfig.tokenizerDryrun,
@@ -1081,12 +1219,104 @@ export class TaskExecutor {
           const toolName = typeof event.data.toolName === 'string' ? event.data.toolName.trim() : ''
           if (toolName) this.currentTurnToolNames.add(toolName)
         }
+        if (event.type === 'llm:completed') {
+          const iteration = typeof event.data.iteration === 'number' ? event.data.iteration : 0
+          // Each approval resume starts a fresh loop at iteration zero.
+          const occurrence = `${event.timestamp.getTime()}-${iteration}`
+          this.enqueueGovernedRunEvent(
+            'llm_call',
+            `task:${this.taskId}:llm:${occurrence}`,
+            {
+              status: 'succeeded',
+              model: this.deps.modelName,
+              attempt: iteration + 1,
+            },
+            event.timestamp
+          )
+        }
+        if (event.type === 'tool:completed') {
+          const callId =
+            typeof event.data.toolCallId === 'string'
+              ? event.data.toolCallId
+              : `${event.data.toolName ?? 'tool'}:${event.timestamp.getTime()}`
+          this.enqueueGovernedToolCompletion(
+            callId,
+            typeof event.data.toolName === 'string' ? event.data.toolName : 'tool',
+            event.data.toolKind === 'mcp_server_tool' || event.data.toolKind === 'workflow'
+              ? event.data.toolKind
+              : 'internal_tool',
+            typeof event.data.toolSourceRef === 'string'
+              ? event.data.toolSourceRef.trim() || null
+              : null,
+            Boolean(event.data.is_error),
+            event.timestamp
+          )
+        }
         this.turnTiming?.recordEvent(event.type, event.data)
         this.deps.coreEvents.emit(event)
       },
       on: this.deps.coreEvents.on.bind(this.deps.coreEvents),
       off: this.deps.coreEvents.off.bind(this.deps.coreEvents),
     }
+  }
+
+  private enqueueGovernedToolCompletion(
+    toolCallId: string,
+    toolName: string,
+    toolKind: 'internal_tool' | 'mcp_server_tool' | 'workflow',
+    toolSourceRef: string | null,
+    isError: boolean,
+    occurredAt: Date
+  ): void {
+    const approvalRequestId =
+      this.approvedToolCorrelation?.toolCallId === toolCallId
+        ? this.approvedToolCorrelation.approvalRequestId
+        : undefined
+    this.enqueueGovernedRunEvent(
+      'tool_call',
+      `task:${this.taskId}:tool:${toolCallId}`,
+      {
+        status: isError ? 'failed' : 'succeeded',
+        tool_name: toolName,
+        tool_kind: toolKind,
+        ...(toolSourceRef ? { tool_source_ref: toolSourceRef } : {}),
+      },
+      occurredAt,
+      approvalRequestId
+    )
+    if (approvalRequestId) this.approvedToolCorrelation = undefined
+  }
+
+  private enqueueGovernedRunEvent(
+    eventType: 'run_start' | 'llm_call' | 'tool_call' | 'approval' | 'token_usage' | 'run_end',
+    sourceEventId: string,
+    payload?: {
+      status?: string
+      error_class?: string
+      tool_name?: string
+      tool_kind?: 'internal_tool' | 'mcp_server_tool' | 'workflow'
+      tool_source_ref?: string
+      model?: string
+      attempt?: number
+      count?: number
+    },
+    occurredAt = new Date(),
+    approvalRequestId?: string
+  ): void {
+    const trace = this.task.traceContext
+    const hostRef = this.deps.usageStaticContext?.host_ref
+    if (!trace || !hostRef) return
+    this.deps.governedRunReporter?.enqueue({
+      sourceEventId,
+      occurredAt: occurredAt.toISOString(),
+      eventType,
+      runId: trace.runId,
+      approvalRequestId,
+      hostRef,
+      sessionId: trace.sessionId ?? null,
+      origin: trace.origin,
+      ...(payload ? { payload } : {}),
+    })
   }
 
   private async guardProviderWorkflowTriggerClaim(rawContent: string): Promise<string> {
@@ -1213,6 +1443,7 @@ export class TaskExecutor {
             : ''
         return {
           source_kind: 'desktop',
+          traceContext: t.traceContext ?? null,
           team_id: teamId || null,
           user_id: t.sourceMessage.sender ?? null,
           task_id: t.id,
@@ -1220,6 +1451,7 @@ export class TaskExecutor {
       }
       return {
         source_kind: 'channel',
+        traceContext: t.traceContext ?? null,
         sender: t.sourceMessage?.sender ?? null,
         channel_type: t.sourceMessage?.channelType ?? null,
         task_id: t.id,
@@ -1228,6 +1460,7 @@ export class TaskExecutor {
     if (t.source === 'cron') {
       return {
         source_kind: 'cron',
+        traceContext: t.traceContext ?? null,
         cron_job_id: t.cronJobId ?? null,
         task_id: t.id,
       }
@@ -1235,10 +1468,11 @@ export class TaskExecutor {
     if (t.source === 'internal') {
       return {
         source_kind: 'desktop',
+        traceContext: t.traceContext ?? null,
         task_id: t.id,
       }
     }
-    return { source_kind: 'unknown', task_id: t.id }
+    return { source_kind: 'unknown', traceContext: t.traceContext ?? null, task_id: t.id }
   }
 
   /**
@@ -1262,7 +1496,10 @@ export class TaskExecutor {
     if (!sessionKey) return undefined
 
     const cached = this.deps.promptCache.get(sessionKey)
-    if (cached?.parts) return cached.parts
+    // R2 — the system prompt embeds the model name, so a cache entry built for a
+    // different (e.g. just-swapped) model is a miss: rebuild, but keep the frozen
+    // dailyLogSnapshot so the daily-freeze invariant holds.
+    if (cached?.parts && cached.model === this.deps.modelName) return cached.parts
 
     const dailyLogSnapshot =
       cached?.dailyLogSnapshot ?? (await this.deps.workspaceService.snapshotDailyLogs(2))
@@ -1311,7 +1548,7 @@ export class TaskExecutor {
       toolDiscoveryGuidance: hasToolDiscovery ? TOOL_DISCOVERY_TEXT : '',
       memoryGuidance: hasMemoryTools ? MEMORY_GUIDANCE_TEXT : '',
     })
-    this.deps.promptCache.set(sessionKey, { parts, dailyLogSnapshot })
+    this.deps.promptCache.set(sessionKey, { parts, dailyLogSnapshot, model: this.deps.modelName })
     // P1-005: persist the stable_hash for auditability and so post-eviction
     // rebuilds in the same session can verify identity-files didn't drift.
     if (this.conversation) {
@@ -1526,7 +1763,11 @@ export class TaskExecutor {
     }
 
     try {
-      const context = await resolveProviderWorkflowCallerContext(message, key => process.env[key])
+      const context = await resolveProviderWorkflowCallerContext(
+        message,
+        key => process.env[key],
+        this.task.traceContext
+      )
       if (context) {
         this.workflowAccessDeniedResponse = null
         this.workflowAccessDeniedReason = null

@@ -8,12 +8,28 @@ import {
 
 // ─── Mock Factories ─────────────────────────────────────────────────────
 
+// The allowlist ConfigMap is read via `readConfigMapWithPresence`; the
+// secret-mapping ConfigMap via `readConfigMap` (dispatched by name). `allowlist`
+// defaults to null → `{ exists: false }` (absent → degraded mode, which proceeds
+// when no `validateDegraded` hook is passed to `handle`). A non-null object →
+// `{ exists: true, data }`, so an empty object models an existing-but-empty CM
+// (deny-all), preserving the exists-vs-empty distinction the gate depends on.
+// Fixture allowlist values mirror control-api buildConfigMapData
+// (llmAllowedModelsConfigMap.ts) — keep in sync.
 function mockK8s(
   configMap: Record<string, string> | null = null,
-  secret: Record<string, string> | null = null
+  secret: Record<string, string> | null = null,
+  allowlist: Record<string, string> | null = null
 ): K8sSecretReader {
   return {
-    readConfigMap: vi.fn().mockResolvedValue(configMap),
+    readConfigMap: vi.fn(async (_namespace: string, name: string) =>
+      name === 'clerum-llm-allowed-models' ? allowlist : configMap
+    ),
+    readConfigMapWithPresence: vi.fn(async () =>
+      allowlist === null
+        ? ({ exists: false } as const)
+        : ({ exists: true, data: allowlist } as const)
+    ),
     readSecret: vi.fn().mockResolvedValue(secret),
   }
 }
@@ -33,7 +49,8 @@ function mockObjectStorage(content: string | null = 'SOUL content'): ObjectStora
   }
 }
 
-const DEFAULT_CONFIGMAP = { 'openai__gpt-4': 'openai-secret/apiKey' }
+// New format (R1): the mapping key is the provider, not `provider__model`.
+const DEFAULT_CONFIGMAP = { openai: 'openai-secret/apiKey' }
 const DEFAULT_SECRET = { apiKey: 'sk-test-123' }
 
 describe('POST /configure-model — ConfigMap resolution', () => {
@@ -62,7 +79,7 @@ describe('POST /configure-model — ConfigMap resolution', () => {
   })
 
   it('returns 500 when mapping is malformed (missing / separator)', async () => {
-    const k8s = mockK8s({ 'openai__gpt-4': 'openai-secret' }, DEFAULT_SECRET)
+    const k8s = mockK8s({ openai: 'openai-secret' }, DEFAULT_SECRET)
     const handler = new ModelConfigHandler(k8s, mockMcpHost())
 
     const result = await handler.handle(
@@ -77,7 +94,7 @@ describe('POST /configure-model — ConfigMap resolution', () => {
   })
 
   it('returns 500 when mapping has leading / (empty secretName)', async () => {
-    const k8s = mockK8s({ 'openai__gpt-4': '/apiKey' }, DEFAULT_SECRET)
+    const k8s = mockK8s({ openai: '/apiKey' }, DEFAULT_SECRET)
     const handler = new ModelConfigHandler(k8s, mockMcpHost())
 
     const result = await handler.handle(
@@ -90,7 +107,7 @@ describe('POST /configure-model — ConfigMap resolution', () => {
   })
 
   it('returns 500 when mapping has trailing / (empty keyName)', async () => {
-    const k8s = mockK8s({ 'openai__gpt-4': 'openai-secret/' }, DEFAULT_SECRET)
+    const k8s = mockK8s({ openai: 'openai-secret/' }, DEFAULT_SECRET)
     const handler = new ModelConfigHandler(k8s, mockMcpHost())
 
     const result = await handler.handle(
@@ -104,7 +121,7 @@ describe('POST /configure-model — ConfigMap resolution', () => {
 
   it("resolves non-canonical keyName (not 'apiKey') from Secret", async () => {
     const k8s = mockK8s(
-      { 'zai__glm-4.7': 'chatllm-api-keys/zai-api-key' },
+      { zai: 'chatllm-api-keys/zai-api-key' },
       { 'zai-api-key': 'sk-zai-real', 'openai-api-key': 'sk-openai-other' }
     )
     const mcpHost = mockMcpHost()
@@ -130,6 +147,69 @@ describe('POST /configure-model — ConfigMap resolution', () => {
       { stepId: 's1', provider: 'claude', model: 'opus' },
       'http://mcp:8080',
       'token'
+    )
+    expect(result.status).toBe(404)
+    expect(result.body.error).toContain('No secret mapping')
+  })
+})
+
+describe('POST /configure-model — provider mapping dual-read (R1)', () => {
+  it('resolves the new per-provider key', async () => {
+    const k8s = mockK8s({ zai: 'chatllm-api-keys/zai-api-key' }, { 'zai-api-key': 'sk-zai' })
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'zai', model: 'glm-4.7' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(result.status).toBe(202)
+    expect(k8s.readSecret).toHaveBeenCalledWith('mcp-host', 'chatllm-api-keys')
+  })
+
+  it('falls back to the legacy provider__model key when the provider key is absent', async () => {
+    const k8s = mockK8s(
+      { 'zai__glm-4.7': 'chatllm-api-keys/zai-api-key' },
+      { 'zai-api-key': 'sk-zai' }
+    )
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'zai', model: 'glm-4.7' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(result.status).toBe(202)
+    expect(k8s.readSecret).toHaveBeenCalledWith('mcp-host', 'chatllm-api-keys')
+  })
+
+  it('prefers the new per-provider key over the legacy key when both are present', async () => {
+    const k8s = mockK8s(
+      {
+        zai: 'chatllm-api-keys/zai-api-key',
+        'zai__glm-4.7': 'legacy-secret/legacy-key',
+      },
+      { 'zai-api-key': 'sk-zai' }
+    )
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'zai', model: 'glm-4.7' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(result.status).toBe(202)
+    expect(k8s.readSecret).toHaveBeenCalledWith('mcp-host', 'chatllm-api-keys')
+  })
+
+  it('returns 404 when neither the provider key nor the legacy key is present', async () => {
+    const k8s = mockK8s({ openai: 'openai-secret/apiKey' }, DEFAULT_SECRET)
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'zai', model: 'glm-4.7' },
+      'http://mcp:8080',
+      'tok'
     )
     expect(result.status).toBe(404)
     expect(result.body.error).toContain('No secret mapping')
@@ -341,6 +421,215 @@ describe('POST /configure-model — mcp_host delegation', () => {
     )
     expect(result.body).not.toHaveProperty('apiKey')
     expect(JSON.stringify(result.body)).not.toContain('sk-test')
+  })
+})
+
+describe('POST /configure-model — R3 allowlist gate', () => {
+  it('allows a model listed in the allowlist ConfigMap → 202', async () => {
+    const allowlist = { openai: JSON.stringify([{ model: 'gpt-4' }, { model: 'gpt-4o' }]) }
+    const k8s = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET, allowlist)
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'openai', model: 'gpt-4' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(result.status).toBe(202)
+  })
+
+  it('rejects a model absent from the allowlist → 403 model_not_allowed', async () => {
+    const allowlist = { openai: JSON.stringify([{ model: 'gpt-4' }]) }
+    const k8s = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET, allowlist)
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'openai', model: 'gpt-3.5-turbo' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(result.status).toBe(403)
+    expect(result.body.code).toBe('model_not_allowed')
+    // Fail-closed BEFORE secret resolution — no Secret read on a denied model.
+    expect(k8s.readSecret).not.toHaveBeenCalled()
+    // Must not leak any secret/mapping material.
+    expect(JSON.stringify(result.body)).not.toContain('openai-secret')
+    expect(JSON.stringify(result.body)).not.toContain('sk-test')
+  })
+
+  it('rejects when the provider has no allowlist entry at all → 403', async () => {
+    const allowlist = { claude: JSON.stringify([{ model: 'claude-opus-4' }]) }
+    const k8s = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET, allowlist)
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'openai', model: 'gpt-4' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(result.status).toBe(403)
+    expect(result.body.code).toBe('model_not_allowed')
+  })
+
+  it('keeps 400 (invalid provider), 403 (not allowed) and 404 (no mapping) distinct', async () => {
+    // 400 — invalid provider, rejected before any ConfigMap read.
+    const k8s400 = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET, {
+      openai: JSON.stringify([{ model: 'gpt-4' }]),
+    })
+    const r400 = await new ModelConfigHandler(k8s400, mockMcpHost()).handle(
+      { stepId: 's1', provider: 'bogus', model: 'gpt-4' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(r400.status).toBe(400)
+
+    // 403 — valid provider, model not in allowlist.
+    const r403 = await new ModelConfigHandler(k8s400, mockMcpHost()).handle(
+      { stepId: 's1', provider: 'openai', model: 'gpt-4o' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(r403.status).toBe(403)
+
+    // 404 — model IS allowed but no secret mapping exists for the provider.
+    const k8s404 = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET, {
+      claude: JSON.stringify([{ model: 'claude-opus-4' }]),
+    })
+    const r404 = await new ModelConfigHandler(k8s404, mockMcpHost()).handle(
+      { stepId: 's1', provider: 'claude', model: 'claude-opus-4' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(r404.status).toBe(404)
+    expect(r404.body.error).toContain('No secret mapping')
+  })
+
+  it('existing-but-empty allowlist CM denies ALL models → 403 (not degraded)', async () => {
+    // control-api materializes an allowlist with zero enabled rows as `data: {}`
+    // (which kube-apiserver then omits). readConfigMapWithPresence reports it as
+    // { exists: true, data: {} }, so the gate must deny every model — NOT fall
+    // open into degraded mode. Regression guard for the fail-open High finding.
+    const k8s = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET, {})
+    // Even with a validateDegraded hook that would allow, the gate never reaches
+    // degraded mode because the CM exists.
+    const result = await new ModelConfigHandler(k8s, mockMcpHost()).handle(
+      { stepId: 's1', provider: 'openai', model: 'gpt-4' },
+      'http://mcp:8080',
+      'tok',
+      { validateDegraded: async () => null }
+    )
+    expect(result.status).toBe(403)
+    expect(result.body.code).toBe('model_not_allowed')
+    // Fail-closed before secret resolution.
+    expect(k8s.readSecret).not.toHaveBeenCalled()
+  })
+
+  it('absent allowlist CM (404) drops into degraded mode, not deny-all', async () => {
+    // The mock returns { exists: false } when allowlist is null (real 404). With
+    // no validateDegraded hook the broker proceeds — the exists-vs-empty
+    // distinction is what separates this from the deny-all case above.
+    const k8s = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET, null)
+    const result = await new ModelConfigHandler(k8s, mockMcpHost()).handle(
+      { stepId: 's1', provider: 'openai', model: 'gpt-4' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(result.status).toBe(202)
+  })
+
+  it('isolates a corrupt allowlist entry to its own provider', async () => {
+    // openai entry is corrupt JSON → openai treated as having no allowed models;
+    // claude entry is valid and still resolves normally.
+    const allowlist = {
+      openai: 'this is not json {{',
+      claude: JSON.stringify([{ model: 'claude-opus-4' }]),
+    }
+    const k8s = mockK8s(
+      { claude: 'chatllm-api-keys/claude-api-key' },
+      { 'claude-api-key': 'sk-claude' },
+      allowlist
+    )
+
+    const denied = await new ModelConfigHandler(k8s, mockMcpHost()).handle(
+      { stepId: 's1', provider: 'openai', model: 'gpt-4' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(denied.status).toBe(403)
+    expect(denied.body.code).toBe('model_not_allowed')
+
+    const allowed = await new ModelConfigHandler(k8s, mockMcpHost()).handle(
+      { stepId: 's1', provider: 'claude', model: 'claude-opus-4' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(allowed.status).toBe(202)
+  })
+})
+
+describe('POST /configure-model — R3.5 degraded mode (allowlist ConfigMap absent)', () => {
+  it('proceeds when the declared-model validator passes (returns null) → 202', async () => {
+    const k8s = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET, null)
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'openai', model: 'gpt-4' },
+      'http://mcp:8080',
+      'tok',
+      { validateDegraded: async () => null }
+    )
+    expect(result.status).toBe(202)
+  })
+
+  it('rejects when the declared-model validator returns an error', async () => {
+    const k8s = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET, null)
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'openai', model: 'gpt-4' },
+      'http://mcp:8080',
+      'tok',
+      {
+        validateDegraded: async () => ({
+          status: 422,
+          body: { error: 'Requested provider/model does not match the declared step agent' },
+        }),
+      }
+    )
+    expect(result.status).toBe(422)
+    // Rejected before secret resolution.
+    expect(k8s.readSecret).not.toHaveBeenCalled()
+  })
+
+  it('proceeds without any validator (broker used by an already-validated caller)', async () => {
+    const k8s = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET, null)
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'openai', model: 'gpt-4' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(result.status).toBe(202)
+  })
+})
+
+describe('POST /configure-model — allowlist composes with R1 dual-read', () => {
+  it('allowlisted model resolves via the legacy provider__model mapping key', async () => {
+    const k8s = mockK8s(
+      { 'zai__glm-4.7': 'chatllm-api-keys/zai-api-key' },
+      { 'zai-api-key': 'sk-zai' },
+      { zai: JSON.stringify([{ model: 'glm-4.7' }]) }
+    )
+    const handler = new ModelConfigHandler(k8s, mockMcpHost())
+
+    const result = await handler.handle(
+      { stepId: 's1', provider: 'zai', model: 'glm-4.7' },
+      'http://mcp:8080',
+      'tok'
+    )
+    expect(result.status).toBe(202)
+    expect(k8s.readSecret).toHaveBeenCalledWith('mcp-host', 'chatllm-api-keys')
   })
 })
 

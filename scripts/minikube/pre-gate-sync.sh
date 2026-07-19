@@ -251,15 +251,9 @@ gate_needs_registry() {
   esac
 }
 
-registry_ready() {
-  ${KC} -n registry get deployment registry-api >/dev/null 2>&1 &&
-    [[ "$(${KC} -n registry get deployment registry-api -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)" == "1" ]] &&
-    ${KC} -n control-plane get networkpolicy control-api-to-registry >/dev/null 2>&1 &&
-    ${KC} -n control-plane get networkpolicy workflow-recipes-to-registry >/dev/null 2>&1
-}
-
 ensure_evenfire_registry() {
-  if ! gate_needs_registry && registry_ready; then
+  if ! gate_needs_registry; then
+    log "Skipping evenfire-registry before ${GATE_NAME}; this gate does not require the sibling service"
     return 0
   fi
 
@@ -348,6 +342,11 @@ if [[ "${cluster_changed}" == "true" ]]; then
   )
 
   rollout_if_present control-plane control-postgres
+  CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+    bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
+    --overlay "${PROJECT_DIR}/deploy/overlays/minikube"
+  CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+    bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
   rollout_if_present control-plane control-api
   # The base manifest no longer declares connection-string (provisioning-owned
   # key), so deploy-all cannot clobber it. Provisioning must still run AFTER
@@ -366,7 +365,9 @@ if [[ "${cluster_changed}" == "true" ]]; then
   rollout_namespace_deployments mcp-host
   rollout_if_present channels clerum-channel-reader
   rollout_if_present channels clerum-workflow-approval-request-reader
-  rollout_if_present registry registry-api
+  if gate_needs_registry; then
+    rollout_if_present registry registry-api
+  fi
 
   # gfsc health is part of a clean baseline for GFS-backed gates: prove the
   # permission-store wiring (Secret populated, pods postdate the rotation,

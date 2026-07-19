@@ -113,6 +113,188 @@ export function IconSharedFiles() {
   )
 }
 
+export function IconLlmPrices() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M7.5 3h6.6a2 2 0 0 1 1.42.59l5.9 5.9a2 2 0 0 1 0 2.82l-6.6 6.6a2 2 0 0 1-2.82 0l-5.9-5.9A2 2 0 0 1 5.5 11.6V5a2 2 0 0 1 2-2Z" />
+      <circle cx="10" cy="8" r="1.25" />
+      <path d="M13.5 11.5h3M15 10v3" />
+    </svg>
+  )
+}
+
+export function IconTokenBudgets() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 21a9 9 0 1 1 9-9" />
+      <path d="M12 12l5-3" />
+      <circle cx="12" cy="12" r="1" />
+      <path d="M12 6v1" />
+    </svg>
+  )
+}
+
+export function IconUsageHistory() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M4 4v16h16" />
+      <path d="m7 15 3-4 3 2 4-6" />
+      <path d="M17 7h-3M17 7v3" />
+    </svg>
+  )
+}
+
+export function IconModelCatalog() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="4" y="4" width="6" height="6" rx="1" />
+      <rect x="14" y="4" width="6" height="6" rx="1" />
+      <rect x="4" y="14" width="6" height="6" rx="1" />
+      <rect x="14" y="14" width="6" height="6" rx="1" />
+    </svg>
+  )
+}
+
+export function IconModelDiscovery() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <path d="m15.5 15.5 4.5 4.5" />
+      <path d="m8.5 12 1.25-3.25L13 7.5l-1.25 3.25L8.5 12Z" />
+    </svg>
+  )
+}
+
+export function IconTraceDashboard() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="4" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <rect x="14" y="11" width="7" height="10" rx="1" />
+    </svg>
+  )
+}
+
+export function IconRunReplay() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M4 12a8 8 0 1 0 2.34-5.66L4 8.67" />
+      <path d="M4 4v4.67h4.67" />
+      <path d="m10 9 5 3-5 3V9Z" />
+    </svg>
+  )
+}
+
+export function IconAdministrativeTrace() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6l-7-3Z" />
+      <path d="M9 12h6M12 9v6" />
+    </svg>
+  )
+}
+
+export function IconInfrastructureTrace() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="4" width="18" height="6" rx="1.5" />
+      <rect x="3" y="14" width="18" height="6" rx="1.5" />
+      <path d="M7 7h.01M7 17h.01M11 7h7M11 17h7" />
+    </svg>
+  )
+}
+
 export function IconCable() {
   return (
     <svg
@@ -262,6 +444,26 @@ export function IconPrice() {
     >
       <path d="M7.5 3h6.6a2 2 0 0 1 1.42.59l5.9 5.9a2 2 0 0 1 0 2.82l-6.6 6.6a2 2 0 0 1-2.82 0l-5.9-5.9A2 2 0 0 1 5.5 11.6V5a2 2 0 0 1 2-2Z" />
       <circle cx="10" cy="8" r="1.4" />
+    </svg>
+  )
+}
+
+export function IconModels() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 2 3 7l9 5 9-5-9-5Z" />
+      <path d="m3 12 9 5 9-5" />
+      <path d="m3 17 9 5 9-5" />
     </svg>
   )
 }

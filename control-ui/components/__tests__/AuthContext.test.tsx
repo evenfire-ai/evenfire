@@ -62,7 +62,7 @@ describe('AuthProvider session expiry handling', () => {
   })
 
   it('shows one session-expired toast and redirects to login for repeated 401s', async () => {
-    window.history.pushState({}, '', '/hosts/chatllm/env#runtime')
+    window.history.pushState({}, '', '/agents/chatllm/env#runtime')
     window.localStorage.setItem('controlUiAdminToken', 'expired-token')
     const fetchMock = vi
       .fn()
@@ -84,7 +84,7 @@ describe('AuthProvider session expiry handling', () => {
     await waitFor(() => {
       expect(screen.getAllByText('Session expired. Please sign in again.')).toHaveLength(1)
     })
-    expect(replaceMock).toHaveBeenCalledWith('/?next=%2Fhosts%2Fchatllm%2Fenv%23runtime')
+    expect(replaceMock).toHaveBeenCalledWith('/?next=%2Fagents%2Fchatllm%2Fenv%23runtime')
     expect(window.localStorage.getItem('controlUiAdminToken')).toBeNull()
   })
 

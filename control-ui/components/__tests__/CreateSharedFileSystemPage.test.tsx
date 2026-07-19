@@ -78,6 +78,6 @@ describe('CreateSharedFileSystemPage', () => {
         retainOnDelete: true,
       })
     })
-    expect(mockPush).toHaveBeenCalledWith('/shared-filesystems')
+    expect(mockPush).toHaveBeenCalledWith('/shared-files')
   })
 })

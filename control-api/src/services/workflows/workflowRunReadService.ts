@@ -252,6 +252,7 @@ export function mapDbRun(row: WorkflowRunRow): CanonicalRunDto {
   return {
     id: row.run_id,
     source: 'live',
+    approvalRequestId: row.approval_request_id ?? null,
     phase: row.phase,
     triggeredAt: toIso(row.created_at),
     startedAt: toIso(row.started_at),
@@ -280,6 +281,7 @@ function mapAuditRun(row: Record<string, unknown>): CanonicalRunDto {
   return {
     id: String(row.run_id),
     source: 'audit',
+    approvalRequestId: null,
     phase: String(row.final_phase || 'Failed'),
     triggeredAt: row.triggered_at ? String(row.triggered_at) : null,
     startedAt: row.started_at ? String(row.started_at) : null,

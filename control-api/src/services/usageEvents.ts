@@ -6,6 +6,7 @@ export type UsageSourceKind = 'channel' | 'desktop' | 'workflow' | 'cron' | 'unk
 export type LlmUsageEvent = {
   request_id: string
   ts: string
+  run_id: string | null
   host_ref: string
   context_ref: string | null
   team_id: string | null
@@ -24,12 +25,18 @@ export type LlmUsageEvent = {
   output_tokens: number
   cache_read_tokens: number
   cache_write_tokens: number
+  cache_tokens_reported: boolean
 }
 
 export type UsageIngestResult = {
   accepted: number
   duplicates: number
   rejected: number
+}
+
+export type UsageIngestTransactionResult = {
+  result: UsageIngestResult
+  acceptedEvents: LlmUsageEvent[]
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -99,7 +106,10 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
   if (input_tokens < 0 || output_tokens < 0) return null
 
   // Cache token counts are optional in the body (older producers omit them) but
-  // when present must be non-negative integers; default to 0 when absent.
+  // when present must be non-negative integers. Preserve whether the producer
+  // reported either field before normalizing absent counts to zero.
+  const cache_tokens_reported =
+    r.cache_read_tokens !== undefined || r.cache_write_tokens !== undefined
   const cache_read_raw = r.cache_read_tokens === undefined ? 0 : intOrNull(r.cache_read_tokens)
   const cache_write_raw = r.cache_write_tokens === undefined ? 0 : intOrNull(r.cache_write_tokens)
   if (cache_read_raw === null || cache_write_raw === null) return null
@@ -108,13 +118,18 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
   const recipe_name = trimOrNull(r.recipe_name)
   const llm_secret_name = trimOrNull(r.llm_secret_name)
   const task_id = trimOrNull(r.task_id)
+  const run_id = trimOrNull(r.run_id)
+  if (run_id && !UUID_REGEX.test(run_id)) return null
   if (source_kind_raw === 'workflow') {
-    if (!recipe_name || !llm_secret_name || !workflowRunIdFromTaskId(task_id)) return null
+    const taskRunId = workflowRunIdFromTaskId(task_id)
+    if (!recipe_name || !llm_secret_name || !run_id || !taskRunId) return null
+    if (taskRunId.toLowerCase() !== run_id.toLowerCase()) return null
   }
 
   return {
     request_id,
     ts: tsParsed.toISOString(),
+    run_id: run_id?.toLowerCase() ?? null,
     host_ref,
     context_ref: trimOrNull(r.context_ref),
     team_id,
@@ -133,10 +148,11 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
     output_tokens,
     cache_read_tokens: cache_read_raw,
     cache_write_tokens: cache_write_raw,
+    cache_tokens_reported,
   }
 }
 
-const COLUMNS_PER_EVENT = 20
+const COLUMNS_PER_EVENT = 22
 
 function buildInsertSql(rowCount: number): string {
   const placeholders: string[] = []
@@ -148,12 +164,14 @@ function buildInsertSql(rowCount: number): string {
   }
   return `
     INSERT INTO usage_events (
-      request_id, ts, host_ref, context_ref, team_id, provider, model, llm_secret_name,
+      request_id, ts, run_id, host_ref, context_ref, team_id, provider, model, llm_secret_name,
       source_kind, user_id, sender, channel_type, recipe_name, cron_job_id,
-      task_id, iteration, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+      task_id, iteration, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+      cache_tokens_reported
     )
     VALUES ${placeholders.join(',')}
     ON CONFLICT (request_id) DO NOTHING
+    RETURNING request_id
   `
 }
 
@@ -163,6 +181,7 @@ function buildInsertParams(events: LlmUsageEvent[]): unknown[] {
     params.push(
       e.request_id,
       e.ts,
+      e.run_id,
       e.host_ref,
       e.context_ref,
       e.team_id,
@@ -180,7 +199,8 @@ function buildInsertParams(events: LlmUsageEvent[]): unknown[] {
       e.input_tokens,
       e.output_tokens,
       e.cache_read_tokens,
-      e.cache_write_tokens
+      e.cache_write_tokens,
+      e.cache_tokens_reported
     )
   }
   return params
@@ -190,6 +210,13 @@ export async function ingestUsageEvents(
   rawEvents: unknown[],
   db: DbClient = pool
 ): Promise<UsageIngestResult> {
+  return (await ingestUsageEventsInTransaction(rawEvents, db)).result
+}
+
+export async function ingestUsageEventsInTransaction(
+  rawEvents: unknown[],
+  db: DbClient
+): Promise<UsageIngestTransactionResult> {
   const total = rawEvents.length
   const validated: LlmUsageEvent[] = []
   for (const raw of rawEvents) {
@@ -198,13 +225,32 @@ export async function ingestUsageEvents(
   }
   const rejected = total - validated.length
   if (validated.length === 0) {
-    return { accepted: 0, duplicates: 0, rejected }
+    return {
+      result: { accepted: 0, duplicates: 0, rejected },
+      acceptedEvents: [],
+    }
   }
 
   const sql = buildInsertSql(validated.length)
   const params = buildInsertParams(validated)
   const result = await db.query(sql, params)
-  const accepted = result.rowCount ?? 0
+  const acceptedRequestIds = new Set(
+    (result.rows as Array<{ request_id?: unknown }>)
+      .filter((row): row is { request_id: string } => typeof row.request_id === 'string')
+      .map(row => row.request_id.toLowerCase())
+  )
+  const acceptedByRequestId = new Map<string, LlmUsageEvent>()
+  for (const event of validated) {
+    const requestId = event.request_id.toLowerCase()
+    if (acceptedRequestIds.has(requestId) && !acceptedByRequestId.has(requestId)) {
+      acceptedByRequestId.set(requestId, event)
+    }
+  }
+  const acceptedEvents = Array.from(acceptedByRequestId.values())
+  const accepted = acceptedEvents.length
   const duplicates = validated.length - accepted
-  return { accepted, duplicates, rejected }
+  return {
+    result: { accepted, duplicates, rejected },
+    acceptedEvents,
+  }
 }

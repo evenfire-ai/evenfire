@@ -2,6 +2,7 @@
 
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type AdminLoginResponse,
   getControlUIAuthMe,
@@ -102,7 +103,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       sessionExpiredToastShownRef.current = false
       setAuthState({ id: '', isLoggedIn: false, isLoading: false, username: '', email: '' })
-      router.replace('/')
+      router.replace(CONTROL_ROUTES.login)
     }
   }, [router])
 

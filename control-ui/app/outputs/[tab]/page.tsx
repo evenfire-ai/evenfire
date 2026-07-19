@@ -7,7 +7,7 @@ interface OutputsTabPageProps {
 
 export default async function OutputsTabPage({ params }: OutputsTabPageProps) {
   const { tab } = await params
-  if (tab !== 'desktop') notFound()
+  if (tab !== 'recipe-artifacts' && tab !== 'desktop-app-artifacts') notFound()
 
   return <OutputsPage />
 }

@@ -1,117 +1,34 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
-import type { ConnectorAccessSummary } from './McpServerTable.types'
+import React, { Fragment, useMemo, useState } from 'react'
+import type {
+  ConnectorAccessSummary,
+  McpServerStatus,
+  McpServerTableProps,
+} from './McpServerTable.types'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconCable } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconPencil, IconRefresh, IconX } from './icons'
-
-type McpServerSpec = {
-  image?: string
-  contextRef?: string
-  description?: string
-  enabled?: boolean
-  managed?: boolean
-  transport?: {
-    type?: 'sse' | 'streamableHttp' | 'stdio'
-    url?: string
-    port?: number
-  }
-  auth?: {
-    type?: 'none' | 'bearer' | 'basic' | 'apiKey'
-  }
-}
-
-type McpServerCondition = {
-  type: string
-  status: 'True' | 'False' | 'Unknown'
-  reason?: string
-  message?: string
-  lastTransitionTime?: string
-}
-
-type McpServerStatus = {
-  conditions?: McpServerCondition[]
-  resolvedEgressIPs?: unknown
-}
-
-type McpServerItem = {
-  metadata?: { name?: string; namespace?: string }
-  spec?: McpServerSpec
-  status?: McpServerStatus
-}
-
-type ServerRef = { name: string; namespace: string }
+import { IconChevronRight, IconPencil, IconRefresh, IconX } from './icons'
 
 const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to contexts and agents.'
 
-const MANAGED_TOOLTIP =
-  'Managed means Clerum reconciles this server lifecycle. Disabled means it is externally managed.'
-
-const MCP_SERVER_COLUMNS: TableHeaderColumn[] = [
+const CONNECTOR_COLUMNS: TableHeaderColumn[] = [
+  { key: 'expand', ariaLabel: 'Expand connector' },
   { key: 'name', label: 'Name' },
-  { key: 'image', label: 'Image', width: '16%' },
-  { key: 'transport', label: 'Transport', width: '10%' },
-  { key: 'context', label: 'Context', width: '12%' },
-  {
-    key: 'access',
-    label: 'Access',
-    width: '10%',
-    title: 'Agents, users, and teams with access through this connector context.',
-  },
-  { key: 'enabled', label: 'Enabled', width: '8%', title: ENABLED_TOOLTIP },
-  { key: 'managed', label: 'Managed', width: '8%', title: MANAGED_TOOLTIP },
-  { key: 'status', label: 'Status', width: '8%' },
-  { key: 'url', label: 'URL', width: '12%' },
+  { key: 'enabled', label: 'Enabled', title: ENABLED_TOOLTIP },
+  { key: 'status', label: 'Status' },
+  { key: 'actions', align: 'right', ariaLabel: 'Actions' },
 ]
 
-const TRANSPORT_BADGE_STYLES: Record<
-  string,
-  { background: string; color: string; border: string }
-> = {
-  sse: {
-    background: 'rgba(var(--cu-edge-rgb), 0.2)',
-    color: 'var(--cu-text)',
-    border: '1px solid rgba(var(--cu-edge-rgb), 0.36)',
-  },
-  streamableHttp: {
-    background: 'rgba(var(--cu-success-rgb), 0.14)',
-    color: 'var(--cu-text)',
-    border: '1px solid rgba(var(--cu-success-rgb), 0.34)',
-  },
-  stdio: {
-    background: 'rgba(var(--cu-edge-rgb), 0.2)',
-    color: 'var(--cu-text)',
-    border: '1px solid rgba(var(--cu-edge-rgb), 0.36)',
-  },
-}
-
 function TransportBadge({ type }: { type?: string }) {
-  if (!type) return <span style={{ color: 'var(--cu-text-muted)' }}>-</span>
-  const badgeStyle = TRANSPORT_BADGE_STYLES[type] ?? {
-    background: 'rgba(var(--cu-edge-rgb), 0.2)',
-    color: 'var(--cu-text)',
-    border: '1px solid rgba(var(--cu-edge-rgb), 0.35)',
-  }
-  return (
-    <span
-      style={{
-        display: 'inline-block',
-        padding: '2px 8px',
-        borderRadius: 4,
-        fontSize: 11,
-        fontWeight: 600,
-        background: badgeStyle.background,
-        color: badgeStyle.color,
-        border: badgeStyle.border,
-      }}
-    >
-      {type}
-    </span>
+  return type ? (
+    <span className={`cu-connector-badge cu-connector-badge--transport-${type}`}>{type}</span>
+  ) : (
+    <span className="cu-muted">—</span>
   )
 }
 
@@ -126,22 +43,7 @@ function BoolBadge({
 }) {
   const isTrue = value !== false
   return (
-    <span
-      style={{
-        display: 'inline-block',
-        padding: '2px 6px',
-        borderRadius: 4,
-        fontSize: 11,
-        fontWeight: 500,
-        background: isTrue
-          ? 'rgba(var(--cu-success-rgb), 0.16)'
-          : 'rgba(var(--cu-danger-rgb), 0.16)',
-        color: isTrue ? 'var(--cu-success)' : 'var(--cu-danger)',
-        border: isTrue
-          ? '1px solid rgba(var(--cu-success-rgb), 0.36)'
-          : '1px solid rgba(var(--cu-danger-rgb), 0.36)',
-      }}
-    >
+    <span className={`cu-connector-badge cu-connector-badge--${isTrue ? 'yes' : 'no'}`}>
       {isTrue ? trueLabel : falseLabel}
     </span>
   )
@@ -149,90 +51,57 @@ function BoolBadge({
 
 function StatusBadge({ status }: { status?: McpServerStatus }) {
   const conditions = status?.conditions
-  let label = 'Unknown'
-  let background = 'rgba(148,163,184,0.15)'
-  let color = '#94a3b8'
-  let tooltip: string | undefined
-
   const missingSecret = conditions?.find(c => c.type === 'SecretResolved' && c.status === 'False')
   const ready = conditions?.find(c => c.type === 'Ready' && c.status === 'True')
-
-  if (missingSecret) {
-    label = 'Missing Secret'
-    background = 'rgba(239,68,68,0.15)'
-    color = '#ef4444'
-    tooltip = missingSecret.message
-  } else if (ready) {
-    label = 'Ready'
-    background = 'rgba(34,197,94,0.15)'
-    color = '#22c55e'
-  } else if (conditions && conditions.length > 0) {
-    label = 'Pending'
-    background = 'rgba(234,179,8,0.15)'
-    color = '#eab308'
-  }
-
+  const state = missingSecret
+    ? 'error'
+    : ready
+      ? 'ready'
+      : conditions?.length
+        ? 'pending'
+        : 'unknown'
+  const label =
+    state === 'error'
+      ? 'Missing Secret'
+      : state === 'ready'
+        ? 'Ready'
+        : state === 'pending'
+          ? 'Pending'
+          : 'Unknown'
   return (
     <span
-      title={tooltip}
-      style={{
-        display: 'inline-block',
-        padding: '2px 8px',
-        borderRadius: 4,
-        fontSize: 11,
-        fontWeight: 600,
-        background,
-        color,
-      }}
+      className={`cu-connector-badge cu-connector-badge--status-${state}`}
+      title={missingSecret?.message}
     >
       {label}
     </span>
   )
 }
 
-function agentInitial(label: string): string {
-  const trimmed = label.trim()
-  return trimmed ? trimmed[0].toUpperCase() : '?'
-}
-
-function AccessSummaryCell({ summary }: { summary?: ConnectorAccessSummary }) {
-  const agents = summary?.agents ?? []
-  const users = summary?.users ?? []
-  const teams = summary?.teams ?? []
-  const visibleAgents = agents.slice(0, 5)
-  const hiddenAgentCount = Math.max(agents.length - visibleAgents.length, 0)
-  const tooltipParts = [
-    agents.length ? `Agents: ${agents.map(agent => agent.label).join(', ')}` : 'Agents: none',
-    users.length ? `Users: ${users.map(user => user.label).join(', ')}` : 'Users: none',
-    teams.length ? `Teams: ${teams.map(team => team.label).join(', ')}` : 'Teams: none',
+function AccessSummary({ summary }: { summary?: ConnectorAccessSummary }) {
+  const groups = [
+    { label: 'Agent', items: summary?.agents ?? [] },
+    { label: 'User', items: summary?.users ?? [] },
+    { label: 'Team', items: summary?.teams ?? [] },
   ]
-  const tooltip = tooltipParts.join('\n')
+  const hasAccess = groups.some(group => group.items.length > 0)
 
-  if (agents.length === 0) {
-    return (
-      <span className="cu-connector-access-empty" data-tooltip={tooltip}>
-        No agents
-      </span>
-    )
-  }
+  if (!hasAccess) return <span className="cu-muted">No access assigned</span>
 
   return (
-    <span
-      className="cu-connector-access"
-      data-tooltip={tooltip}
-      aria-label={`${agents.length} agents with access`}
-    >
-      <span className="cu-connector-access__avatars" aria-hidden="true">
-        {visibleAgents.map(agent => (
-          <span key={agent.id} className="cu-connector-access__avatar">
-            {agentInitial(agent.label)}
+    <div className="cu-expandable-tags">
+      {groups.flatMap(group =>
+        group.items.map(principal => (
+          <span
+            key={`${group.label}-${principal.id}`}
+            className="cu-registry-tag"
+            title={`${group.label}: ${principal.label}`}
+          >
+            {principal.label}
           </span>
-        ))}
-        {hiddenAgentCount > 0 ? (
-          <span className="cu-connector-access__more">+{hiddenAgentCount}</span>
-        ) : null}
-      </span>
-    </span>
+        ))
+      )}
+    </div>
   )
 }
 
@@ -249,54 +118,44 @@ export function McpServerTable({
   detailContent,
   refreshing,
   loading,
-}: {
-  items: McpServerItem[]
-  accessByConnectorKey?: Record<string, ConnectorAccessSummary>
-  onOpenContext?: (contextName: string) => void
-  onDelete?: (server: ServerRef) => Promise<void>
-  onEdit?: (server: ServerRef) => void
-  deletingKey?: string | null
-  onRefresh?: () => void
-  onCreate?: () => void
-  onInstallFromRegistry?: () => void
-  detailContent?: React.ReactNode
-  refreshing?: boolean
-  loading?: boolean
-}) {
+}: McpServerTableProps) {
   const [searchQuery, setSearchQuery] = useState('')
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
   const rows = useMemo(
     () =>
-      items.map(i => {
-        const namespace = i.metadata?.namespace || 'default'
-        const name = i.metadata?.name || 'unknown'
-        const key = `${namespace}/${name}`
-        return { key, namespace, name, item: i }
+      items.map(item => {
+        const namespace = item.metadata?.namespace || 'default'
+        const name = item.metadata?.name || 'unknown'
+        return { key: `${namespace}/${name}`, namespace, name, item }
       }),
     [items]
   )
   const normalizedSearch = searchQuery.trim().toLowerCase()
   const filteredRows = useMemo(() => {
     if (!normalizedSearch) return rows
-    return rows.filter(({ namespace, name, item }) => {
+    return rows.filter(({ namespace, name, item, key }) => {
       const spec = item.spec || {}
-      const key = `${namespace}/${name}`
       const access = accessByConnectorKey?.[key]
       const accessText = [
-        ...(access?.agents ?? []).flatMap(agent => [agent.id, agent.label]),
-        ...(access?.users ?? []).flatMap(user => [user.id, user.label]),
-        ...(access?.teams ?? []).flatMap(team => [team.id, team.label]),
-      ].join(' ')
+        ...(access?.agents ?? []),
+        ...(access?.users ?? []),
+        ...(access?.teams ?? []),
+      ]
+        .flatMap(principal => [principal.id, principal.label])
+        .join(' ')
       const conditionText = (item.status?.conditions || [])
-        .map(c => `${c.type} ${c.status} ${c.reason ?? ''} ${c.message ?? ''}`)
+        .map(condition =>
+          [condition.type, condition.status, condition.reason, condition.message].join(' ')
+        )
         .join(' ')
       return [
         namespace,
         name,
-        spec.image || '',
-        spec.contextRef || '',
-        spec.description || '',
-        spec.transport?.type || '',
-        spec.transport?.url || '',
+        spec.image,
+        spec.contextRef,
+        spec.description,
+        spec.transport?.type,
+        spec.transport?.url,
         accessText,
         conditionText,
       ]
@@ -312,18 +171,19 @@ export function McpServerTable({
     return () => clearInterval(id)
   }, [onRefresh])
 
+  function toggleExpanded(key: string) {
+    setExpandedKeys(current => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
   const isInitialLoad = loading && items.length === 0
-  const hasActions = Boolean(onDelete || onEdit)
-  const totalColumns = 9 + (hasActions ? 1 : 0)
-  const tableColumns: TableHeaderColumn[] = hasActions
-    ? [
-        ...MCP_SERVER_COLUMNS,
-        { key: 'actions', width: '5rem', align: 'right', ariaLabel: 'Actions' },
-      ]
-    : MCP_SERVER_COLUMNS
 
   return (
-    <div className="cu-card cu-card--viewport-fill" style={{ marginBottom: '1.25rem' }}>
+    <div className="cu-card cu-card--viewport-fill cu-section-card">
       <TablePanelHeader
         title={
           <>
@@ -342,7 +202,7 @@ export function McpServerTable({
               ariaLabel="Search connectors"
               disabled={isInitialLoad}
             />
-            {onRefresh && (
+            {onRefresh ? (
               <button
                 type="button"
                 className="cu-btn cu-btn--icon cu-btn--toolbar"
@@ -356,8 +216,8 @@ export function McpServerTable({
                   height={18}
                 />
               </button>
-            )}
-            {onInstallFromRegistry && (
+            ) : null}
+            {onInstallFromRegistry ? (
               <button
                 type="button"
                 className="cu-btn cu-btn--secondary cu-btn--sm cu-btn--mcp-install"
@@ -366,8 +226,8 @@ export function McpServerTable({
               >
                 Install from Marketplace
               </button>
-            )}
-            {onCreate && (
+            ) : null}
+            {onCreate ? (
               <button
                 type="button"
                 className="cu-btn cu-btn--primary cu-btn--sm"
@@ -376,19 +236,19 @@ export function McpServerTable({
               >
                 Create Connector
               </button>
-            )}
+            ) : null}
           </>
         }
       />
       {detailContent ? <div className="cu-card__body">{detailContent}</div> : null}
       {isInitialLoad ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="cu-table-wrap cu-connectors-table-wrap">
+          <table className="cu-table cu-table--header-band cu-expandable-table cu-connectors-table">
             <thead>
-              <TableHeaderRow columns={tableColumns} />
+              <TableHeaderRow columns={CONNECTOR_COLUMNS} />
             </thead>
             <tbody>
-              <SkeletonTableRows columns={totalColumns} rows={5} />
+              <SkeletonTableRows columns={CONNECTOR_COLUMNS.length} rows={5} />
             </tbody>
           </table>
         </div>
@@ -397,99 +257,54 @@ export function McpServerTable({
           {normalizedSearch ? 'No connectors match this search.' : 'No connectors found.'}
         </div>
       ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+        <div className="cu-table-wrap cu-connectors-table-wrap">
+          <table className="cu-table cu-table--header-band cu-expandable-table cu-connectors-table">
             <thead>
-              <TableHeaderRow columns={tableColumns} />
+              <TableHeaderRow columns={CONNECTOR_COLUMNS} />
             </thead>
             <tbody>
               {filteredRows.map(({ key, namespace, name, item }) => {
                 const spec = item.spec || {}
-                const transportType = spec.transport?.type
-                const transportUrl = spec.transport?.url || '-'
+                const expanded = expandedKeys.has(key)
                 const contextRef = spec.contextRef || ''
-                const contextClickable = Boolean(contextRef && onOpenContext)
-                const image = spec.image || '-'
-                // Shorten long image names for display
-                const imageShort = image.length > 40 ? '...' + image.slice(-37) : image
-
                 return (
-                  <tr key={key}>
-                    <td>
-                      <span style={{ fontWeight: 500 }}>{name}</span>
-                      {spec.description ? (
-                        <span
-                          style={{
-                            display: 'block',
-                            color: 'var(--cu-text-muted)',
-                            fontSize: '0.75rem',
-                            lineHeight: 1.3,
-                            marginTop: 2,
-                            maxWidth: '16rem',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                          title={spec.description}
-                        >
-                          {spec.description}
-                        </span>
-                      ) : null}
-                    </td>
-                    <td
-                      style={{
-                        color: 'var(--cu-text-soft)',
-                        fontSize: '0.8125rem',
-                        fontFamily: 'monospace',
-                        wordBreak: 'break-all',
+                  <Fragment key={key}>
+                    <tr
+                      className="cu-table__row cu-table__row--clickable cu-expandable-row"
+                      role="button"
+                      onClick={() => toggleExpanded(key)}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          toggleExpanded(key)
+                        }
                       }}
-                      title={image}
+                      tabIndex={0}
+                      aria-expanded={expanded}
+                      aria-controls={`connector-details-${key}`}
+                      aria-label={`${expanded ? 'Collapse' : 'Expand'} connector ${name}`}
                     >
-                      {imageShort}
-                    </td>
-                    <td>
-                      <TransportBadge type={transportType} />
-                    </td>
-                    <td>
-                      {contextClickable ? (
-                        <button
-                          type="button"
-                          className="cu-link"
-                          onClick={() => onOpenContext!(contextRef)}
-                        >
-                          {contextRef}
-                        </button>
-                      ) : (
-                        <span style={{ color: contextRef ? undefined : 'var(--cu-text-muted)' }}>
-                          {contextRef || '-'}
-                        </span>
-                      )}
-                    </td>
-                    <td>
-                      <AccessSummaryCell summary={accessByConnectorKey?.[key]} />
-                    </td>
-                    <td>
-                      <BoolBadge value={spec.enabled} trueLabel="Yes" falseLabel="No" />
-                    </td>
-                    <td>
-                      <BoolBadge value={spec.managed} trueLabel="Yes" falseLabel="No" />
-                    </td>
-                    <td>
-                      <StatusBadge status={item.status} />
-                    </td>
-                    <td
-                      style={{
-                        color: 'var(--cu-text-soft)',
-                        fontSize: '0.75rem',
-                        fontFamily: 'monospace',
-                        wordBreak: 'break-all',
-                      }}
-                      title={transportUrl !== '-' ? transportUrl : undefined}
-                    >
-                      {transportUrl}
-                    </td>
-                    {hasActions && (
-                      <td className="cu-table__cell-actions">
+                      <td className="cu-expandable-row__chevron" aria-hidden="true">
+                        <IconChevronRight
+                          className={expanded ? 'is-expanded' : undefined}
+                          width={18}
+                          height={18}
+                        />
+                      </td>
+                      <td>
+                        <span className="cu-expandable-row__name">{name}</span>
+                      </td>
+                      <td>
+                        <BoolBadge value={spec.enabled} trueLabel="Yes" falseLabel="No" />
+                      </td>
+                      <td>
+                        <StatusBadge status={item.status} />
+                      </td>
+                      <td
+                        className="cu-table__cell-actions"
+                        onClick={event => event.stopPropagation()}
+                        onKeyDown={event => event.stopPropagation()}
+                      >
                         <div className="cu-table-actions">
                           {onEdit ? (
                             <button
@@ -520,8 +335,68 @@ export function McpServerTable({
                           ) : null}
                         </div>
                       </td>
-                    )}
-                  </tr>
+                    </tr>
+                    {expanded ? (
+                      <tr id={`connector-details-${key}`} className="cu-expandable-detail-row">
+                        <td colSpan={CONNECTOR_COLUMNS.length}>
+                          <div className="cu-expandable-detail cu-connector-detail">
+                            <div className="cu-expandable-detail__fields">
+                              <p className="cu-expandable-detail__description">
+                                {spec.description || 'No description provided.'}
+                              </p>
+                              <div className="cu-expandable-field">
+                                <span className="cu-expandable-field__label">Image</span>
+                                <span className="cu-expandable-field__code">
+                                  {spec.image || '—'}
+                                </span>
+                              </div>
+                              <div className="cu-expandable-field">
+                                <span className="cu-expandable-field__label">Transport</span>
+                                <TransportBadge type={spec.transport?.type} />
+                              </div>
+                              <div className="cu-expandable-field">
+                                <span className="cu-expandable-field__label">Context</span>
+                                {contextRef && onOpenContext ? (
+                                  <button
+                                    type="button"
+                                    className="cu-link"
+                                    onClick={() => onOpenContext(contextRef)}
+                                  >
+                                    {contextRef}
+                                  </button>
+                                ) : (
+                                  <span className="cu-muted">{contextRef || '—'}</span>
+                                )}
+                              </div>
+                              <div className="cu-expandable-field cu-expandable-field--wide">
+                                <span className="cu-expandable-field__label">Access</span>
+                                <AccessSummary summary={accessByConnectorKey?.[key]} />
+                              </div>
+                              <div className="cu-expandable-field">
+                                <span className="cu-expandable-field__label">Managed</span>
+                                <BoolBadge value={spec.managed} trueLabel="Yes" falseLabel="No" />
+                              </div>
+                              <div className="cu-expandable-field cu-expandable-field--wide">
+                                <span className="cu-expandable-field__label">URL</span>
+                                {spec.transport?.url ? (
+                                  <a
+                                    className="cu-link cu-expandable-field__code"
+                                    href={spec.transport.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    {spec.transport.url}
+                                  </a>
+                                ) : (
+                                  <span className="cu-muted">—</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
                 )
               })}
             </tbody>

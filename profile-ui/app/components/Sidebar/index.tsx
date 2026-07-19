@@ -63,7 +63,7 @@ function writeCachedApprovalChannelAccess(userId: string, allowed: boolean): voi
   writeCachedBoolean(approvalChannelAccessCacheKey(userId), allowed)
 }
 
-export function Sidebar({ currentRoute, onLogout }: SidebarProps) {
+export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: SidebarProps) {
   const { authState } = useAuth()
   const userId = authState.me?.id || ''
   const activeRoleCanManage = authState.me?.role === 'admin' || authState.me?.role === 'inviter'
@@ -143,8 +143,23 @@ export function Sidebar({ currentRoute, onLogout }: SidebarProps) {
     }
   }, [authState.isLoggedIn, userId])
 
+  const navigationItems = (
+    Object.entries(PROFILE_SIDEBAR_ITEMS) as Array<[ProfileRouteKey, ProfileSidebarItem]>
+  )
+    .filter(
+      ([routeKey]) =>
+        routeKey !== 'settings' &&
+        (routeKey !== 'members' || canManageMembers) &&
+        (routeKey !== 'approvalChannels' || hasExternalChannelAccess)
+    )
+    .sort(([, first], [, second]) => first.label.localeCompare(second.label))
+  const settings = PROFILE_SIDEBAR_ITEMS.settings
+
   return (
-    <aside className="cu-sidebar" aria-label="Main navigation">
+    <aside
+      className={`cu-sidebar${isOpen ? ' cu-sidebar--open' : ''}`}
+      aria-label="Main navigation"
+    >
       <div className="cu-sidebar__brand" title={`Version ${packageJson.version}`}>
         <Image
           className="cu-sidebar__brand-mark"
@@ -160,26 +175,31 @@ export function Sidebar({ currentRoute, onLogout }: SidebarProps) {
         </div>
       </div>
       <nav className="cu-sidebar__nav" aria-label="Main sections">
-        {(Object.entries(PROFILE_SIDEBAR_ITEMS) as Array<[ProfileRouteKey, ProfileSidebarItem]>)
-          .filter(
-            ([routeKey]) =>
-              (routeKey !== 'members' || canManageMembers) &&
-              (routeKey !== 'approvalChannels' || hasExternalChannelAccess)
-          )
-          .map(([routeKey, item]) => (
-            <Link
-              key={routeKey}
-              href={item.href}
-              className="cu-sidebar__item"
-              data-active={currentRoute === routeKey ? 'true' : 'false'}
-              aria-current={currentRoute === routeKey ? 'page' : undefined}
-            >
-              <span className="cu-sidebar__icon">{item.icon}</span>
-              <span className="cu-sidebar__label">{item.label}</span>
-            </Link>
-          ))}
+        {navigationItems.map(([routeKey, item]) => (
+          <Link
+            key={routeKey}
+            href={item.href}
+            className="cu-sidebar__item"
+            data-active={currentRoute === routeKey ? 'true' : 'false'}
+            aria-current={currentRoute === routeKey ? 'page' : undefined}
+            onClick={onNavigate}
+          >
+            <span className="cu-sidebar__icon">{item.icon}</span>
+            <span className="cu-sidebar__label">{item.label}</span>
+          </Link>
+        ))}
       </nav>
       <div className="cu-sidebar__footer">
+        <Link
+          href={settings.href}
+          className="cu-sidebar__item cu-sidebar__item--utility"
+          data-active={currentRoute === 'settings' ? 'true' : 'false'}
+          aria-current={currentRoute === 'settings' ? 'page' : undefined}
+          onClick={onNavigate}
+        >
+          <span className="cu-sidebar__icon">{settings.icon}</span>
+          <span className="cu-sidebar__label">Settings</span>
+        </Link>
         <button
           type="button"
           className="cu-sidebar__item cu-sidebar__item--utility"

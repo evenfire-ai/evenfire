@@ -46,6 +46,8 @@ vi.mock('../../lib/api', async () => {
     getLlmPrice: vi.fn(),
     createTokenBudget: vi.fn(),
     updateLlmPrice: vi.fn(),
+    // The budget/price forms load the model allowlist via useLlmAllowedModels.
+    getLlmModels: vi.fn().mockResolvedValue({ rows: [] }),
   }
 })
 

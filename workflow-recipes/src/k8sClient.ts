@@ -15,6 +15,11 @@ import * as k8s from '@kubernetes/client-node'
 import type { Pool } from 'pg'
 import { loadConfig } from './config'
 import { getPool, initDb } from './db'
+import {
+  type GovernedTraceReporter,
+  type WorkflowInfrastructureTelemetryProjection,
+  createGovernedTraceReporter,
+} from './governedTraceReporter'
 import { K8sSecretWatchLoop } from './k8sSecretWatchLoop'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './reconciler/crdConstants'
 import {
@@ -46,6 +51,7 @@ const PLURAL = 'workflowrecipes'
 const MIN_RUNTIME_CREDENTIAL_REFRESH_INTERVAL_MS = 5_000
 const MAX_RUNTIME_CREDENTIAL_REFRESH_INTERVAL_MS = 30_000
 const WORKLOAD_STATUS_REFRESH_INTERVAL_MS = 30_000
+const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
 
 export interface WorkflowRecipeWatchObject {
   metadata: {
@@ -110,6 +116,68 @@ export function shouldPatchRecipeStatus(
   if (result.clearWorkflowExecution && recipe.status?.workflowExecution) return true
 
   return false
+}
+
+function workflowRunIdForTelemetry(recipe: WorkflowRecipeCRD): string | undefined {
+  const runId = recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim()
+  return runId || undefined
+}
+
+export function reconcileOutcomeTelemetryProjection(
+  recipe: WorkflowRecipeCRD,
+  result: ReconcileResult,
+  occurredAt = new Date().toISOString()
+): WorkflowInfrastructureTelemetryProjection | undefined {
+  const runId = workflowRunIdForTelemetry(recipe)
+  if (!runId) return undefined
+  return {
+    sourceEventId: `workflow-reconcile:${recipe.metadata.namespace}:${recipe.metadata.name}:generation:${recipe.metadata.generation ?? 'unknown'}:${result.phase}`,
+    occurredAt,
+    telemetryType: 'reconcile_outcome',
+    runId,
+    payload: {
+      phase: result.phase,
+      status: result.skipStatusPatch ? 'skipped' : 'patched',
+    },
+  }
+}
+
+export function controllerErrorTelemetryProjection(
+  recipe: WorkflowRecipeCRD,
+  error: unknown,
+  occurredAt = new Date().toISOString()
+): WorkflowInfrastructureTelemetryProjection | undefined {
+  const runId = workflowRunIdForTelemetry(recipe)
+  if (!runId) return undefined
+  const errorClass =
+    error instanceof Error && error.name.trim()
+      ? error.name
+      : typeof error === 'object' && error !== null
+        ? error.constructor?.name || 'unknown'
+        : 'unknown'
+  return {
+    sourceEventId: `workflow-controller-error:${recipe.metadata.namespace}:${recipe.metadata.name}:generation:${recipe.metadata.generation ?? 'unknown'}:${errorClass}`,
+    occurredAt,
+    telemetryType: 'controller_error',
+    runId,
+    payload: {
+      phase: recipe.status?.phase,
+      status: 'error',
+      error_class: errorClass,
+    },
+  }
+}
+
+function enqueueInfrastructureTelemetryBestEffort(
+  traceReporter: GovernedTraceReporter | null,
+  projection: WorkflowInfrastructureTelemetryProjection | undefined
+): void {
+  if (!traceReporter || !projection) return
+  try {
+    traceReporter.enqueueInfrastructureTelemetry(projection)
+  } catch (error) {
+    console.error('[WR-K8s] Infrastructure telemetry enqueue failed:', error)
+  }
 }
 
 function workloadStatusesChanged(recipe: WorkflowRecipeCRD, result: ReconcileResult): boolean {
@@ -282,6 +350,8 @@ export interface WorkflowRecipeProvider {
   stop(): Promise<void>
   /** JWT signer initialized at startup (null if signing-key Secret is absent). */
   getTokenFactory(): JwtTokenFactory | null
+  /** Best-effort governed trace reporter shared by WRC status paths. */
+  getTraceReporter(): GovernedTraceReporter | null
   /** DB-first run processor — null in dev mode or when pool is unavailable. */
   getDbRunProcessor(): DbRunProcessor | null
 }
@@ -331,6 +401,9 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   private secretReverseIndex = new SecretReverseIndex()
   private secretWatchLoops: K8sSecretWatchLoop[] = []
   private brokerRotationTimer: NodeJS.Timeout | null = null
+  private traceReporter: GovernedTraceReporter | null = createGovernedTraceReporter(
+    this.config.governedTracingEnabled
+  )
   // Per-recipe deterministic retry for transient (skipStatusPatch) reconcile
   // results: no status patch ⇒ no MODIFIED event, so we must schedule the retry
   // ourselves with bounded exponential backoff. Cleared on any non-transient
@@ -356,6 +429,24 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         runPollMs: this.config.db.runPollMs,
         createChildRecipe: this.makeChildRecipeCreator(),
         childRecipeExists: this.makeChildRecipeExists(),
+        onRunStarted: runId => {
+          this.traceReporter?.enqueueWorkflowLifecycle({
+            sourceEventId: `workflow-run:${runId}:start`,
+            occurredAt: new Date().toISOString(),
+            runId,
+            eventType: 'run_start',
+            payload: { phase: 'Running' },
+          })
+        },
+        onRunTerminal: (runId, phase) => {
+          this.traceReporter?.enqueueWorkflowLifecycle({
+            sourceEventId: `workflow-run:${runId}:terminal`,
+            occurredAt: new Date().toISOString(),
+            runId,
+            eventType: 'run_end',
+            payload: { phase },
+          })
+        },
       })
     }
   }
@@ -368,6 +459,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     // Exposed by the reconciler once initializeWorkflow() has run.
     // Will be null until the signing-key Secret has been read successfully.
     return this.reconciler.tokenFactory
+  }
+
+  getTraceReporter(): GovernedTraceReporter | null {
+    return this.traceReporter
   }
 
   getDbRunProcessor(): DbRunProcessor | null {
@@ -651,6 +746,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         // while still allowing active parent recipes to clear stale execution state.
         if (shouldPatchRecipeStatus(recipe, result)) {
           await this.reconciler.patchStatus(recipe, result)
+          enqueueInfrastructureTelemetryBestEffort(
+            this.traceReporter,
+            reconcileOutcomeTelemetryProjection(recipe, result)
+          )
         }
         // Transient (skipStatusPatch) results write no status ⇒ emit no MODIFIED
         // event, so schedule a deterministic backoff retry ourselves. Any other
@@ -673,6 +772,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           return
         }
         console.error(`[WR-K8s] Reconciliation failed for "${recipe.metadata.name}":`, error)
+        enqueueInfrastructureTelemetryBestEffort(
+          this.traceReporter,
+          controllerErrorTelemetryProjection(recipe, error)
+        )
       }
     } else if (type === 'DELETED') {
       // Resource is gone (finalizer already removed) — just clean cache.
@@ -826,6 +929,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     const result = await this.reconciler.observeCurrentWorkloadStatus(recipe)
     if (shouldPatchRecipeStatus(recipe, result)) {
       await this.reconciler.patchStatus(recipe, result)
+      enqueueInfrastructureTelemetryBestEffort(
+        this.traceReporter,
+        reconcileOutcomeTelemetryProjection(recipe, result)
+      )
     }
     // Issue #637 — periodically force a full reconcile for recipes that project a
     // name-based Secret, so the ownership gate re-classifies and a Secret re-labeled
@@ -892,6 +999,14 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     if (this.dbRunProcessor) {
       await this.dbRunProcessor.stop()
     }
+    if (this.traceReporter) {
+      const result = await this.traceReporter.stopAndDrain()
+      if (!result.drained) {
+        console.warn('[WR-K8s] Governed trace reporter shutdown timed out', {
+          dropped: result.dropped,
+        })
+      }
+    }
   }
 }
 
@@ -906,6 +1021,10 @@ export class DevWorkflowRecipeProvider implements WorkflowRecipeProvider {
   }
 
   getTokenFactory(): JwtTokenFactory | null {
+    return null
+  }
+
+  getTraceReporter(): GovernedTraceReporter | null {
     return null
   }
 

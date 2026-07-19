@@ -2,6 +2,7 @@ import { config } from '../../config.js'
 import { withTransaction } from '../../db.js'
 import { approvalsCreatedTotal } from '../../observability/metrics.js'
 import { emitNotification } from '../notificationEmitter.js'
+import { ApprovalPromptHistoryService } from '../tracing/approvalPromptHistoryService.js'
 import {
   type ApprovalPayload,
   type ApprovalStatus,
@@ -176,6 +177,13 @@ export async function createWorkflowTriggerApprovalRequest(params: {
     }
 
     const row = inserted.rows[0] as { id: string; expires_at: string; status: ApprovalStatus }
+    await new ApprovalPromptHistoryService(db).capture({
+      approvalRequestId: row.id,
+      approvalKind: 'workflow',
+      prompt: params.payload.message,
+      sourceKind: 'control_api_local',
+      origin: 'workflow_runtime',
+    })
     const idempotencyPayloadHash = computeWorkflowRunPayloadHash({
       recipeNamespace: params.recipeNamespace,
       recipeName: params.recipeName,

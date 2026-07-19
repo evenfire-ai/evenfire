@@ -1,8 +1,10 @@
 'use client'
 
-import React, { useMemo } from 'react'
+import React, { useMemo, useState } from 'react'
 import { usePathname } from 'next/navigation'
+import { CONTROL_ROUTES, isControlRouteSection } from '@constants/routes'
 import { useAuth } from './AuthContext'
+import { MobileHeader } from './MobileHeader'
 import { Sidebar } from './Sidebar'
 import type { SidebarTab } from './Sidebar/types'
 
@@ -14,56 +16,55 @@ interface DashboardLayoutProps {
 export function DashboardLayout({ children, isDetailPage = false }: DashboardLayoutProps) {
   const pathname = usePathname()
   const { logout } = useAuth()
+  const [menuOpen, setMenuOpen] = useState(false)
 
   const currentTab = useMemo<SidebarTab>(() => {
-    if (pathname === '/hosts' || pathname.startsWith('/hosts/')) {
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.agents.root)) {
       return 'hosts'
     }
-    if (pathname === '/contexts' || pathname.startsWith('/contexts/')) {
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.contexts.root)) {
       return 'contexts'
     }
-    if (pathname === '/profile-admin' || pathname.startsWith('/profile-admin/')) {
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.usersAndTeams.base)) {
       return 'profile-admin'
     }
-    if (
-      pathname === '/workflow-recipes' ||
-      pathname.startsWith('/workflow-recipes/') ||
-      pathname === '/plugin-workload-sdk' ||
-      pathname.startsWith('/plugin-workload-sdk/')
-    ) {
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.plugins.root)) {
       return 'workflow-recipes'
     }
-    if (pathname === '/outputs' || pathname.startsWith('/outputs/')) {
-      return 'outputs'
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.outputs.base)) {
+      return 'files'
     }
-    if (pathname === '/mcp-servers' || pathname.startsWith('/mcp-servers/')) {
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.connectors.root)) {
       return 'mcp-servers'
     }
-    if (pathname === '/shared-filesystems' || pathname.startsWith('/shared-filesystems/')) {
-      return 'shared-filesystems'
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.sharedFiles.root)) {
+      return 'files'
     }
-    if (pathname === '/gfs' || pathname.startsWith('/gfs/')) {
-      return 'gfs'
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.globalFiles)) {
+      return 'files'
     }
-    if (pathname === '/communication-channels' || pathname.startsWith('/communication-channels/')) {
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.externalChannels.root)) {
       return 'communication-channels'
     }
-    if (pathname === '/secrets' || pathname.startsWith('/secrets/')) {
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.secrets.root)) {
       return 'llm-secrets'
     }
-    if (pathname === '/registry' || pathname.startsWith('/registry/')) {
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.marketplace.root)) {
       return 'registry-catalog'
     }
-    if (pathname === '/publisher' || pathname.startsWith('/publisher/')) {
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.publisher.root)) {
       return 'publisher'
     }
-    if (pathname === '/cost' || pathname.startsWith('/cost/')) {
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.llmModels.root)) {
+      return 'llm-models'
+    }
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.costAndUsage.base)) {
       return 'cost'
     }
-    if (pathname.startsWith('/control-admins/')) {
-      return 'profile-admin'
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.traces.root)) {
+      return 'traces'
     }
-    if (pathname === '/settings' || pathname.startsWith('/settings/')) {
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.settings.root)) {
       return 'settings'
     }
     return 'hosts'
@@ -75,7 +76,17 @@ export function DashboardLayout({ children, isDetailPage = false }: DashboardLay
 
   return (
     <div className="cu-app-layout">
-      <Sidebar currentTab={currentTab} onLogout={handleLogout} />
+      <MobileHeader
+        menuOpen={menuOpen}
+        onMenuToggle={() => setMenuOpen(open => !open)}
+        onLogout={handleLogout}
+      />
+      <Sidebar
+        currentTab={currentTab}
+        isOpen={menuOpen}
+        onNavigate={() => setMenuOpen(false)}
+        onLogout={handleLogout}
+      />
       <main className={isDetailPage ? 'cu-main cu-detail-layout' : 'cu-main'}>{children}</main>
     </div>
   )

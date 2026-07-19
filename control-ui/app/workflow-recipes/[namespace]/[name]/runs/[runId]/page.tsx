@@ -8,6 +8,7 @@ import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { RecipeStatusContent } from '@components/RecipeStatusContent'
 import { IconWorkflow } from '@components/Sidebar/icons'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 
 export const dynamic = 'force-dynamic'
@@ -38,7 +39,7 @@ function WorkflowRunDetailContent() {
   const runId = decodeURIComponent(params?.runId ?? '')
 
   function backToRecipe() {
-    router.push(`/workflow-recipes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`)
+    router.push(CONTROL_ROUTES.plugins.detail(namespace, name))
   }
 
   return (
@@ -50,14 +51,14 @@ function WorkflowRunDetailContent() {
           subtitle={
             <>
               <Link
-                href="/workflow-recipes"
+                href={CONTROL_ROUTES.plugins.root}
                 style={{ color: 'var(--cu-text-soft)', textDecoration: 'underline' }}
               >
                 Plugins
               </Link>
               {' / '}
               <Link
-                href={`/workflow-recipes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`}
+                href={CONTROL_ROUTES.plugins.detail(namespace, name)}
                 style={{ color: 'var(--cu-text-soft)', textDecoration: 'underline' }}
               >
                 {name}
@@ -69,6 +70,11 @@ function WorkflowRunDetailContent() {
           backLabel="Back to plugin"
           onBack={backToRecipe}
         />
+        <div className="cu-workflow-run-trace-link">
+          <Link href={CONTROL_ROUTES.traces.workflowRun(namespace, name, runId)}>
+            Open governed trace replay
+          </Link>
+        </div>
         <RecipeStatusContent name={name} namespace={namespace} runId={runId} />
       </DashboardLayout>
     </AuthGate>

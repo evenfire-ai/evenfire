@@ -44,6 +44,7 @@ function mockDb(opts: {
   grants?: MockGrant[]
   shares?: MockShare[]
   audit?: AuditRow[]
+  auditSql?: string[]
 }): GrantsDb {
   return {
     async query(text: string, values?: unknown[]) {
@@ -75,6 +76,7 @@ function mockDb(opts: {
         }
       }
       if (text.includes('INSERT INTO gfs_audit')) {
+        opts.auditSql?.push(text)
         const v = values ?? []
         opts.audit?.push({
           subject: String(v[0]),
@@ -425,7 +427,8 @@ describe('assertMayGrant — share authority bit', () => {
 describe('auditMutation', () => {
   it('writes one audit row with a content hash and the spec fields', async () => {
     const audit: AuditRow[] = []
-    const db = mockDb({ audit })
+    const auditSql: string[] = []
+    const db = mockDb({ audit, auditSql })
     await auditMutation(db, {
       actorKey: 'operator:',
       targetKey: subjectKey({ type: 'user', id: 'u1' }),
@@ -444,5 +447,6 @@ describe('auditMutation', () => {
       outcome: 'allowed',
     })
     expect(audit[0].rowHash).toMatch(/^[0-9a-f]{64}$/)
+    expect(auditSql[0]).toContain('RETURNING sequence_no::text AS id')
   })
 })

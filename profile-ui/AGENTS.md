@@ -11,6 +11,7 @@ Read those rules before generating, refactoring, or styling any code in this dir
 - **Components folder:** `app/components/` (folder-based, with `index.tsx` + `types.ts`).
 - **Primitives:** `app/components/` — use the existing primitives (`Button`, `TextInput`, `SelectControl`, `FormField`, `EditableList`) instead of recreating equivalents.
 - **Routing:** Sidebar destinations and shareable tab-like sections must use canonical Next App Router paths and child route segments. Do not use `?tab=...`, `profileTab`, `localStorage`, or component-only state as section routing.
+- **Route source:** Import internal destinations and dynamic/query builders from `app/constants/routes.ts`. Never inline Profile UI paths in links, redirects, router actions, sidebar items, or tabs; callers pass raw dynamic identifiers to the builder.
 - **Stack alignment:** profile-ui shares the `cu-` prefix and Next.js conventions with control-ui, but components are colocated under `app/components/` (not `components/ui/`). Keep this layout — do not migrate to control-ui's structure.
 
 ## Outside this directory

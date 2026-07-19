@@ -11,6 +11,7 @@ import { RegistryEntryDetailSkeleton } from '@components/RegistryEntryDetailSkel
 import { IconStore } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconMoreHorizontal } from '@components/icons'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import {
   type RegistryEntry,
@@ -167,14 +168,16 @@ function RegistryEntryDetailContent() {
   }, [name, version, load])
 
   function backToCatalog() {
-    router.push('/registry')
+    router.push(
+      entry?.entry_type === 'recipe'
+        ? CONTROL_ROUTES.marketplace.plugins
+        : CONTROL_ROUTES.marketplace.connectors
+    )
   }
 
   function editEntry() {
     if (!entry) return
-    router.push(
-      `/registry/entries/${encodeURIComponent(entry.name)}/${encodeURIComponent(entry.version)}/edit`
-    )
+    router.push(CONTROL_ROUTES.marketplace.editEntry(entry.name, entry.version))
   }
 
   async function handleInstall() {
@@ -190,7 +193,11 @@ function RegistryEntryDetailContent() {
         })
         showToast(`Installed ${entry.name} v${entry.version}.`, { tone: 'success' })
         router.push(
-          `/workflow-recipes/${encodeURIComponent(DEFAULT_WORKFLOW_RECIPE_NAMESPACE)}/${encodeURIComponent(result.recipeName)}`
+          CONTROL_ROUTES.plugins.tab(
+            DEFAULT_WORKFLOW_RECIPE_NAMESPACE,
+            result.recipeName,
+            'workloads'
+          )
         )
       } catch (err) {
         setActionError(err instanceof Error ? err.message : 'Failed to install plugin')
@@ -200,7 +207,7 @@ function RegistryEntryDetailContent() {
     }
     if (entry.entry_type === 'mcp-server') {
       const params = new URLSearchParams({ entry: entry.name, version: entry.version })
-      router.push(`/registry/install?${params.toString()}`)
+      router.push(CONTROL_ROUTES.marketplace.install(Object.fromEntries(params)))
       return
     }
   }
@@ -300,42 +307,68 @@ function RegistryEntryDetailContent() {
         ) : entry ? (
           <div className="cu-card">
             <div className="cu-card__body cu-marketplace-detail">
-              <div className="cu-marketplace-detail__summary">
-                <div className="cu-chip-row">
-                  <span
-                    className="cu-chip"
-                    style={{
-                      color: trustColor(entry.trust_level),
-                      backgroundColor: trustBgColor(entry.trust_level),
-                      borderColor: trustColor(entry.trust_level),
-                    }}
-                  >
-                    Trust: {entry.trust_level}
-                  </span>
-                  <span className="cu-chip">Quality: {entry.quality_tier}</span>
-                  {entry.category ? (
-                    <span className="cu-chip">Category: {entry.category}</span>
-                  ) : null}
-                  <span className="cu-chip">Downloads: {entry.downloads}</span>
-                  <span className="cu-chip">Installs: {entry.installs}</span>
-                  {entry.tags.length > 0
-                    ? entry.tags.map(t => (
-                        <span key={t} className="cu-chip">
-                          {t}
+              <div className="cu-expandable-detail cu-marketplace-detail__overview">
+                <div className="cu-expandable-detail__fields">
+                  <div className="cu-expandable-field">
+                    <span className="cu-expandable-field__label">Version</span>
+                    <span className="cu-code-text">{entry.version}</span>
+                  </div>
+                  <div className="cu-expandable-field">
+                    <span className="cu-expandable-field__label">Visibility</span>
+                    {entry.visibility ? (
+                      <span
+                        className={`cu-registry-chip cu-registry-chip--visibility-${entry.visibility}`}
+                      >
+                        {entry.visibility === 'public' ? 'Public' : 'Private'}
+                      </span>
+                    ) : (
+                      <span className="cu-muted">—</span>
+                    )}
+                  </div>
+                  <div className="cu-expandable-field">
+                    <span className="cu-expandable-field__label">Downloads</span>
+                    <span>{entry.downloads}</span>
+                  </div>
+                  <div className="cu-expandable-field">
+                    <span>{entry.category || 'Uncategorized'}</span>
+                  </div>
+                  <div className="cu-expandable-field">
+                    <span className="cu-expandable-field__label">Type</span>
+                    <span className="cu-registry-type-meta">
+                      {entry.server_mode
+                        ? `${entry.server_mode}${entry.transport ? ` / ${entry.transport}` : ''}`
+                        : entry.recipe_type || '—'}
+                    </span>
+                  </div>
+                  <div className="cu-expandable-field cu-expandable-field--wide">
+                    <div className="cu-expandable-tags">
+                      <span
+                        className="cu-registry-chip"
+                        style={{
+                          color: trustColor(entry.trust_level),
+                          backgroundColor: trustBgColor(entry.trust_level),
+                          borderColor: trustColor(entry.trust_level),
+                        }}
+                      >
+                        {entry.trust_level.toUpperCase()}
+                      </span>
+                      <span
+                        className={`cu-registry-chip cu-registry-chip--quality-${entry.quality_tier}`}
+                      >
+                        {entry.quality_tier}
+                      </span>
+                      {entry.tags.map(tag => (
+                        <span key={tag} className="cu-registry-tag">
+                          {tag}
                         </span>
-                      ))
-                    : null}
+                      ))}
+                    </div>
+                  </div>
                 </div>
+                <p className="cu-expandable-detail__description">
+                  {entry.description || 'No description provided.'}
+                </p>
               </div>
-
-              <section className="cu-marketplace-detail__section">
-                <h3 className="cu-marketplace-detail__section-title">Description</h3>
-                {entry.description ? (
-                  <pre className="cu-marketplace-detail__description">{entry.description}</pre>
-                ) : (
-                  <span className="cu-muted">No description provided.</span>
-                )}
-              </section>
 
               {images.length > 0 ? (
                 <section className="cu-marketplace-detail__section">

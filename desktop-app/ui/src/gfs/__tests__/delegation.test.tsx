@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { GfsSubjectBatchError } from '@lib/gfsSubjectBatch'
 import { GfsDelegationPanel } from '../delegation'
 
 /**
@@ -40,18 +41,18 @@ describe('GfsDelegationPanel', () => {
         onGrant={onGrant}
       />
     )
+    fireEvent.click(screen.getByRole('button', { name: 'Read' }))
     // Only held bits are rendered as toggles — write/delete are NOT offered.
-    expect(screen.getByRole('button', { name: 'read' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'manage_acl' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'write' })).toBeNull()
+    expect(screen.getByRole('menuitemcheckbox', { name: 'Read' })).toBeTruthy()
+    expect(screen.getByRole('menuitemcheckbox', { name: 'Manage access' })).toBeTruthy()
+    expect(screen.queryByRole('menuitemcheckbox', { name: 'Edit' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Create share' })).toBeNull()
 
-    fireEvent.click(screen.getByLabelText('subject'))
+    fireEvent.focus(screen.getByRole('combobox', { name: 'Add people or teams' }))
     fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'read' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Grant' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
 
-    await waitFor(() => expect(onGrant).toHaveBeenCalledWith('user:u2', ['read']))
+    await waitFor(() => expect(onGrant).toHaveBeenCalledWith(['user:u2'], ['read']))
   })
 
   it('shows Create share only when the caller holds the share bit', () => {
@@ -78,10 +79,9 @@ describe('GfsDelegationPanel', () => {
         onGrant={onGrant}
       />
     )
-    fireEvent.click(screen.getByLabelText('subject'))
+    fireEvent.focus(screen.getByRole('combobox', { name: 'Add people or teams' }))
     fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'read' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Grant' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
 
     const alert = await screen.findByText(/escalation_rejected/)
     expect(alert).toBeTruthy()
@@ -96,12 +96,15 @@ describe('GfsDelegationPanel', () => {
       />
     )
 
-    expect(screen.getByLabelText('subject')).toHaveProperty('tagName', 'BUTTON')
-    expect(screen.getByRole('button', { name: 'Grant' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('combobox', { name: 'Add people or teams' })).toHaveProperty(
+      'tagName',
+      'INPUT'
+    )
+    expect(screen.getByRole('button', { name: 'Grant access' })).toHaveProperty('disabled', true)
     expect(screen.queryByPlaceholderText(/uuid/i)).toBeNull()
   })
 
-  it('exposes only user/team subject types from the Desktop user plane', () => {
+  it('exposes user and team options together without privileged subject types', () => {
     render(
       <GfsDelegationPanel
         affordances={{ canDelegate: true, grantableBits: ['read'], canCreateShare: false }}
@@ -113,17 +116,43 @@ describe('GfsDelegationPanel', () => {
       />
     )
 
-    const subjectType = screen.getByLabelText('Subject type')
-    fireEvent.click(subjectType)
-    expect(screen.getByRole('option', { name: 'User' })).toBeTruthy()
-    expect(screen.getByRole('option', { name: 'Team' })).toBeTruthy()
-    expect(screen.queryByRole('option', { name: 'Operator' })).toBeNull()
-    expect(screen.queryByRole('option', { name: 'Host' })).toBeNull()
-    expect(screen.queryByRole('option', { name: 'Context' })).toBeNull()
+    fireEvent.focus(screen.getByRole('combobox', { name: 'Add people or teams' }))
+    expect(screen.getByRole('option', { name: /Delegate User/ })).toBeTruthy()
+    expect(screen.getByRole('option', { name: /Core Team/ })).toBeTruthy()
+    expect(screen.queryByText('Operator')).toBeNull()
+    expect(screen.queryByText('Host')).toBeNull()
+    expect(screen.queryByText('Context')).toBeNull()
+  })
 
-    fireEvent.click(screen.getByRole('option', { name: 'Team' }))
-    fireEvent.click(screen.getByLabelText('subject'))
-    expect(screen.getByRole('option', { name: 'Core Team' })).toBeTruthy()
-    expect(screen.queryByRole('option', { name: 'Delegate User' })).toBeNull()
+  it('retains only failed subjects when a batch partially succeeds', async () => {
+    const onGrant = vi
+      .fn()
+      .mockRejectedValue(
+        new GfsSubjectBatchError(
+          'Grant access',
+          ['user:successful'],
+          [{ subjectKey: 'team:blocked', message: 'escalation_rejected' }]
+        )
+      )
+    render(
+      <GfsDelegationPanel
+        affordances={{ canDelegate: true, grantableBits: ['read'], canCreateShare: false }}
+        subjectOptions={[
+          { type: 'user', id: 'successful', label: 'Successful User' },
+          { type: 'team', id: 'blocked', label: 'Blocked Team' },
+        ]}
+        onGrant={onGrant}
+      />
+    )
+
+    const picker = screen.getByRole('combobox', { name: 'Add people or teams' })
+    fireEvent.focus(picker)
+    fireEvent.click(screen.getByRole('option', { name: /Successful User/ }))
+    fireEvent.click(screen.getByRole('option', { name: /Blocked Team/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
+
+    await screen.findByText(/team:blocked \(escalation_rejected\)/)
+    expect(screen.queryByRole('button', { name: 'Remove Successful User' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Remove Blocked Team' })).toBeTruthy()
   })
 })

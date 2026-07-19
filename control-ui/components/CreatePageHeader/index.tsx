@@ -7,6 +7,7 @@ export function CreatePageHeader({
   actions,
   backDisabled = false,
   backLabel,
+  eyebrow,
   icon,
   onBack,
   subtitle,
@@ -25,6 +26,7 @@ export function CreatePageHeader({
           </h2>
           {titleActions ? <div className="cu-create-top__title-actions">{titleActions}</div> : null}
         </div>
+        {eyebrow ? <div className="cu-create-top__eyebrow">{eyebrow}</div> : null}
         {subtitle ? <p className="cu-subtitle">{subtitle}</p> : null}
       </div>
       <div className="cu-create-top__controls">

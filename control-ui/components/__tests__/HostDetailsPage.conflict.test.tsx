@@ -12,7 +12,7 @@ let mockParams: { name: string; tab?: string } = { name: 'foo' }
 
 vi.mock('next/navigation', () => ({
   useParams: () => mockParams,
-  usePathname: () => '/hosts/foo',
+  usePathname: () => '/agents/foo',
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
   useSearchParams: () => new URLSearchParams(),
 }))
@@ -40,6 +40,8 @@ vi.mock('../../lib/api', () => ({
   getAgentUsers: vi.fn(),
   getHost: vi.fn(),
   getHostDetailBundle: vi.fn(),
+  getLlmModels: vi.fn().mockResolvedValue({ rows: [] }),
+  isSilentApiError: vi.fn().mockReturnValue(false),
   updateAdminTeamAgents: vi.fn(),
   updateAdminUserAgents: vi.fn(),
 }))
@@ -93,6 +95,7 @@ function render(children: ReactNode) {
 
 async function openOverviewEdit() {
   const [overviewEditButton] = await screen.findAllByRole('button', { name: 'Edit' })
+  await waitFor(() => expect(overviewEditButton).toBeEnabled())
   fireEvent.click(overviewEditButton)
 }
 

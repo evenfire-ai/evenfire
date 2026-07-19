@@ -43,6 +43,26 @@ export abstract class WorkflowTool implements Tool {
     return false
   }
 
+  traceDescriptor(params: Record<string, unknown>, output?: ToolOutput) {
+    const metadata = output?.metadata
+    const scope =
+      metadata && typeof metadata.workflowArtifactScope === 'object'
+        ? (metadata.workflowArtifactScope as Record<string, unknown>)
+        : null
+    const namespace =
+      (typeof scope?.namespace === 'string' && scope.namespace.trim()) ||
+      (typeof params.namespace === 'string' && params.namespace.trim()) ||
+      ''
+    const name =
+      (typeof scope?.name === 'string' && scope.name.trim()) ||
+      (typeof params.name === 'string' && params.name.trim()) ||
+      ''
+    return {
+      kind: 'workflow' as const,
+      sourceRef: namespace && name ? `${namespace}/${name}` : name || 'workflow-control',
+    }
+  }
+
   async execute(params: Record<string, unknown>): Promise<ToolOutput> {
     const start = Date.now()
     try {

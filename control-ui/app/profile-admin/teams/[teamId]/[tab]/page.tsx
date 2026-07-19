@@ -5,7 +5,7 @@ interface TeamTabPageProps {
   params: Promise<{ tab: string }>
 }
 
-const TEAM_DETAIL_TABS = ['contexts', 'agents']
+const TEAM_DETAIL_TABS = ['members', 'contexts', 'agents']
 
 export default async function TeamTabPage({ params }: TeamTabPageProps) {
   const { tab } = await params

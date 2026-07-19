@@ -1,4 +1,5 @@
 import Image from 'next/image'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { createControlAdminPasswordResetCsrfToken } from '@lib/controlAdminCsrf'
 import { validateControlAdminPasswordResetServer } from '@lib/controlAdminPublicServerApi'
 
@@ -59,10 +60,7 @@ export default async function ControlAdminPasswordResetPage({
 
           {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
           {!error && email ? (
-            <form
-              method="post"
-              action={`/admin-password-resets/${encodeURIComponent(token)}/complete`}
-            >
+            <form method="post" action={CONTROL_ROUTES.adminPasswordResets.formAction(token)}>
               <input type="hidden" name="email" value={email} />
               <input type="hidden" name="csrfToken" value={csrfToken} />
               <div className="cu-admin-invite-email">

@@ -69,6 +69,7 @@ export class TaskLifecycle extends EventEmitter {
       submittedBy: task.sourceMessage?.sender ?? null,
       submittedChannelType: task.sourceMessage?.channelType ?? null,
       submittedChannelId: task.sourceMessage?.channelId ?? null,
+      traceContext: task.traceContext ?? null,
       createdAt: now,
     }
     this.records.set(task.id, record)

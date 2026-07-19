@@ -75,6 +75,6 @@ describe('CreateControlAdminInvitationPage', () => {
         teams: [],
       })
     })
-    expect(mockPush).toHaveBeenCalledWith('/profile-admin/admins')
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/admins')
   })
 })

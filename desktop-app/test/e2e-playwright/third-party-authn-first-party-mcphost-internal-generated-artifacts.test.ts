@@ -25,8 +25,9 @@ import {
   telegramReplyItems,
   waitForTelegramFinalReplyTextAfter,
 } from './third-party-authn-first-party-mcphost/telegramE2eClient'
+import { verifyTelegramMediumWithFakeProvider } from './third-party-authn-first-party-mcphost/telegramMediumChallengeSetup'
 import { cleanupTelegramMediumBinding } from './third-party-authn-first-party-mcphost/workflowApprovalJourney'
-import { K8S_CONTEXT } from './workflowUi'
+import { E2E_EMAIL, K8S_CONTEXT, clearSession, loginAs } from './workflowUi'
 
 function kubectlOutput(args: string[], timeout = 30_000): string {
   return execFileSync('kubectl', ['--context', K8S_CONTEXT, ...args], {
@@ -113,9 +114,10 @@ test.describe('fake Telegram internal generated artifacts through first-party mc
     const marker = `telegram-internal-artifact-${uniqueId}`
     const filename = `${marker}.md`
     const telegramMessageBase = uniqueId
+    const telegramPrivateChatId = String(4_000_000_000_000 + uniqueId)
     const telegramIdentity = {
-      providerChannelId: String(4_000_000_000_000 + uniqueId),
-      providerUserId: String(1_000_000_000_000 + uniqueId),
+      providerChannelId: telegramPrivateChatId,
+      providerUserId: telegramPrivateChatId,
       conversationLabel: `Telegram artifact ${marker}`,
     }
     let telegramPage: Page | null = null
@@ -123,10 +125,12 @@ test.describe('fake Telegram internal generated artifacts through first-party mc
 
     try {
       await test.step('prepare fake Telegram and channel-reader transport', async () => {
-        cleanupTelegramMediumBinding()
+        await clearSession()
+        cleanupTelegramMediumBinding(telegramIdentity)
+        const { userId, userToken } = await loginAs(E2E_EMAIL)
         installFakeTelegramProvider()
         configureChannelReaderTelegramApiRoot()
-        applyTelegramCommunicationChannel(HOST_REF, [telegramIdentity])
+        applyTelegramCommunicationChannel(HOST_REF, [telegramIdentity], [userId])
         waitForChannelReader(HOST_REF)
         waitForStableFakeTelegramReader(HOST_REF)
         expectChannelReaderHasNoProviderHttpIngress(HOST_REF)
@@ -138,12 +142,20 @@ test.describe('fake Telegram internal generated artifacts through first-party mc
             message: 'channel-reader should poll fake Telegram before user messages are pushed',
           })
           .toBeGreaterThan(0)
-      })
 
-      await test.step('open the visible fake Telegram client', async () => {
         const telegram = await openTelegramClient(browser)
         telegramPage = telegram.page
         telegramPortForward = telegram.portForward
+        await verifyTelegramMediumWithFakeProvider(
+          telegramPage,
+          userToken,
+          telegramMessageBase,
+          telegramIdentity
+        )
+      })
+
+      await test.step('open the visible fake Telegram client', async () => {
+        if (!telegramPage) throw new Error('Telegram user client was not initialized')
         await setTelegramClientIdentity(telegramPage, telegramIdentity)
         await expect(telegramPage.getByTestId('telegram-form')).toBeVisible()
         await expect(telegramPage.getByTestId('telegram-message-text')).toBeVisible()
@@ -193,7 +205,7 @@ test.describe('fake Telegram internal generated artifacts through first-party mc
       removeTelegramCommunicationChannel()
       restoreChannelReaderTelegramApiRoot()
       removeFakeTelegramProvider()
-      cleanupTelegramMediumBinding()
+      cleanupTelegramMediumBinding(telegramIdentity)
     }
   })
 })

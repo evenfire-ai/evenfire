@@ -1,0 +1,12 @@
+# governed trace function signature<TAB>trace_maintenance_runtime access profile
+governed_trace_assert_cost_component_conservation()	none
+governed_trace_assert_stream_integrity()	none
+governed_trace_enforce_append_only()	none
+governed_trace_enforce_rollup_finality()	none
+governed_trace_prune_expired_costs(integer)	execute
+governed_trace_prune_expired_events(text,integer)	execute
+governed_trace_prune_expired_prompts(integer)	execute
+governed_trace_reject_truncate()	none
+governed_trace_safe_agent_run_metadata(text,jsonb)	none
+governed_trace_safe_metadata(jsonb)	execute
+governed_trace_sorted_unique_text_array(text[])	none

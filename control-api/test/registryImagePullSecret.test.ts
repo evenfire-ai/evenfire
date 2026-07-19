@@ -14,7 +14,7 @@ describe('EVENFIRE_REGISTRY_PULL_SECRET_NAME', () => {
 
 describe('registryHostFromUrl', () => {
   it('returns the host (no port) for a plain https registry URL', () => {
-    expect(registryHostFromUrl('https://example.com')).toBe('example.com')
+    expect(registryHostFromUrl('https://registry.evenfire.ai')).toBe('registry.evenfire.ai')
   })
   it('keeps the :port for an in-cluster registry URL', () => {
     expect(registryHostFromUrl('http://registry-api.registry.svc.cluster.local:8085')).toBe(
@@ -32,11 +32,11 @@ describe('registryHostFromUrl', () => {
 
 describe('imageRefHost', () => {
   it('parses the evenfire host from a tagged bare ref', () => {
-    expect(imageRefHost('example.com/acme/forecast:1.2.3')).toBe('example.com')
+    expect(imageRefHost('registry.evenfire.ai/acme/forecast:1.2.3')).toBe('registry.evenfire.ai')
   })
   it('parses the evenfire host from a digest-pinned bare ref', () => {
-    expect(imageRefHost('example.com/acme/forecast@sha256:abc123')).toBe(
-      'example.com'
+    expect(imageRefHost('registry.evenfire.ai/acme/forecast@sha256:abc123')).toBe(
+      'registry.evenfire.ai'
     )
   })
   it('parses a GCP Artifact Registry host', () => {
@@ -71,12 +71,12 @@ describe('imageRefHost', () => {
 })
 
 describe('shouldAttachEvenfirePullSecret', () => {
-  const EVENFIRE = 'https://example.com'
+  const EVENFIRE = 'https://registry.evenfire.ai'
   it('is true for a local evenfire-hosted image', () => {
     expect(
       shouldAttachEvenfirePullSecret({
         isLocal: true,
-        image: 'example.com/acme/forecast:1.2.3',
+        image: 'registry.evenfire.ai/acme/forecast:1.2.3',
         registryUrl: EVENFIRE,
       })
     ).toBe(true)
@@ -103,7 +103,7 @@ describe('shouldAttachEvenfirePullSecret', () => {
     expect(
       shouldAttachEvenfirePullSecret({
         isLocal: false,
-        image: 'example.com/acme/forecast:1.2.3',
+        image: 'registry.evenfire.ai/acme/forecast:1.2.3',
         registryUrl: EVENFIRE,
       })
     ).toBe(false)
@@ -112,7 +112,7 @@ describe('shouldAttachEvenfirePullSecret', () => {
     expect(
       shouldAttachEvenfirePullSecret({
         isLocal: true,
-        image: 'example.com/acme/forecast:1.2.3',
+        image: 'registry.evenfire.ai/acme/forecast:1.2.3',
         registryUrl: '',
       })
     ).toBe(false)

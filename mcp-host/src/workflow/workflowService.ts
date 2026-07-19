@@ -13,8 +13,15 @@ import { createGetCapabilitiesTool } from '../capabilities/getCapabilitiesTool'
 import { config } from '../config'
 import { FinishReason, type ToolDefinition } from '../core/types'
 import { SingleTurnProvider, createLLMProvider } from '../llm'
-import { isLlmProvider } from '../llm/registryCore'
+import { type LlmProvider, descriptorFor, isLlmProvider, primarySlot } from '../llm/registryCore'
+import type { ApiKeys } from '../types'
 import { type LlmUsageEvent, type UsageReporter, newRequestId } from '../usage/usageReporter'
+import {
+  FailoverSingleTurnProvider,
+  type ResolvedFallbackEntry,
+  isFailoverProvider,
+  parseWorkflowLlmPolicy,
+} from './failoverProvider'
 import { getOutputDir, resolveInternalTools } from './internalTools'
 import { createMcpHostRuntimeAuth } from './runtimeAuthFactory'
 import { McpClientFactory, StepMcpRouter } from './stepRouter'
@@ -26,6 +33,20 @@ import {
   ToolCallRecord,
 } from './types'
 import { type McpHostRuntimeAuth, gateStep, refreshWithRecovery } from './userApprovalRequester'
+
+/**
+ * Build a single-slot credential bag for the workflow `configure` transport.
+ *
+ * LIMITATION (spec §3-R4.4): the WRC `configure` path is mono-value
+ * (`ConfigureRequest.apiKey` is a single string), so it can only carry
+ * single-slot providers (the four originals + Vertex's JSON). Bedrock, which
+ * needs two slots, is NOT usable via workflow steps in this phase — the
+ * multi-slot transport for the WRC `configure`/secret-broker is deferred to a
+ * later phase. `provider` is validated by the caller via `isLlmProvider`.
+ */
+function monoCredentialBag(provider: LlmProvider, apiKey: string): ApiKeys {
+  return { [provider]: { [primarySlot(descriptorFor(provider)).dataKey]: apiKey } }
+}
 
 const MAX_SOUL_BYTES = 64 * 1024 // 64KB
 const DEFAULT_TIMEOUT_SECONDS = 300
@@ -135,7 +156,7 @@ function defaultLlmFactory(
 ): SingleTurnProvider | null {
   // The provider id IS the ApiKeys record key; validate before indexing.
   if (!isLlmProvider(provider)) return null
-  const keys: import('../types').ApiKeys = { [provider]: apiKey }
+  const keys = monoCredentialBag(provider, apiKey)
   const modelConfig: import('../types').ModelConfig = {
     provider: provider as import('../types').ModelConfig['provider'],
     name: model,
@@ -206,6 +227,9 @@ export class WorkflowService {
   private currentModel: string | null = null
   private currentApiKey: string | null = null
   private currentLlmSecretName: string | null = null
+  // R5 F6 — resolved fallback entries of the active policy (keyed lookup for
+  // per-call usage attribution when a fallback is serving). Null = no failover.
+  private currentFallbacks: ResolvedFallbackEntry[] | null = null
   private globalSoulContent: string | null = null
   private stepSoulContent: string | null = null
   private soulOverrideActive = false
@@ -299,7 +323,7 @@ export class WorkflowService {
     // The provider id IS the ApiKeys record key; validate before indexing.
     if (!isLlmProvider(provider)) return
     this.onLlmConfigured({
-      keys: { [provider]: apiKey },
+      keys: monoCredentialBag(provider, apiKey),
       provider: provider as import('../types').ModelConfig['provider'],
       defaultModel: model,
     })
@@ -411,6 +435,30 @@ export class WorkflowService {
    * dashboards can join recipe events to their issuance binding without
    * surprises.
    */
+  /**
+   * The `(provider, model)` pair that served the most recent LLM call. When a
+   * failover provider is active this is whatever it fell over to; otherwise the
+   * configured primary. Callers guard `currentProviderName`/`currentModel`
+   * non-null before use, so the fallback branch here is always populated.
+   */
+  private currentServedPair(): { provider: string; model: string } {
+    const p = this.currentProvider
+    if (p && isFailoverProvider(p)) return p.servedBy()
+    return { provider: this.currentProviderName ?? '', model: this.currentModel ?? '' }
+  }
+
+  /** The Secret name backing the served pair (for usage attribution). */
+  private servedSecretName(served?: { provider: string; model: string }): string | null {
+    if (!served) return this.currentLlmSecretName
+    if (served.provider === this.currentProviderName && served.model === this.currentModel) {
+      return this.currentLlmSecretName
+    }
+    const entry = this.currentFallbacks?.find(
+      f => f.provider === served.provider && f.model === served.model
+    )
+    return entry?.llmSecretName ?? null
+  }
+
   private reportLlmUsage(
     usage: { input_tokens?: number; output_tokens?: number } | undefined,
     iteration: number | null,
@@ -422,15 +470,21 @@ export class WorkflowService {
     if (!this.currentProviderName || !this.currentModel) return
     const auth = this.runtimeAuth
     if (!auth) return
+    const runId = WorkflowService.getWorkflowRunId(executionId)
+    if (!runId) return
+    // R5 F6 (spec §3-R5.9): attribute usage to the pair REALLY served, which is
+    // the primary unless a fallback is currently serving.
+    const served = this.currentServedPair()
     const event: LlmUsageEvent = {
       request_id: newRequestId(),
       ts: new Date().toISOString(),
+      run_id: runId,
       host_ref: auth.hostRef,
       context_ref: null,
       team_id: teamId,
-      provider: this.currentProviderName,
-      model: this.currentModel,
-      llm_secret_name: this.currentLlmSecretName,
+      provider: served.provider,
+      model: served.model,
+      llm_secret_name: this.servedSecretName(served),
       source_kind: 'workflow',
       user_id: userId,
       sender: null,
@@ -448,6 +502,13 @@ export class WorkflowService {
   private static getWorkflowExecutionId(contextVars?: Record<string, string>): string | undefined {
     if (!contextVars) return undefined
     return contextVars.workflowExecutionId ?? contextVars['workflow.executionId']
+  }
+
+  private static getWorkflowRunId(executionId: string | undefined): string | null {
+    const candidate = executionId?.split(':', 1)[0]?.trim() ?? ''
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate)
+      ? candidate.toLowerCase()
+      : null
   }
 
   private static getWorkflowTeamId(contextVars?: Record<string, string>): string | null {
@@ -516,8 +577,13 @@ export class WorkflowService {
       return { configured: false, message: `Failed to create provider: ${req.provider}` }
     }
 
+    // Provider-fallback (R5 F6): wrap the primary with the failover engine when
+    // the WRC broker forwarded a policy carrying resolved fallback credentials.
+    // Absent / empty policy → the plain primary (byte-identical to before).
+    const effectiveProvider = this.maybeWrapFailover(provider, req.provider, model, req.llmPolicy)
+
     // Atomic swap
-    this.currentProvider = provider
+    this.currentProvider = effectiveProvider
     this.currentProviderName = req.provider
     this.currentModel = model
     this.currentApiKey = req.apiKey
@@ -526,6 +592,37 @@ export class WorkflowService {
     this.notifyLlmConfigured(req.provider, model, req.apiKey)
 
     return { configured: true, provider: req.provider, model }
+  }
+
+  /**
+   * Wrap `primary` with {@link FailoverSingleTurnProvider} when `rawPolicy`
+   * parses to at least one usable, resolved fallback; otherwise return `primary`
+   * unchanged. Fallback providers are built lazily via the same `llmFactory`
+   * (one per entry, cached), so an unconstructible entry is simply skipped by
+   * the engine.
+   */
+  private maybeWrapFailover(
+    primary: SingleTurnProvider,
+    provider: string,
+    model: string,
+    rawPolicy: ConfigureRequest['llmPolicy']
+  ): SingleTurnProvider {
+    const policy = parseWorkflowLlmPolicy(rawPolicy)
+    this.currentFallbacks = policy?.fallbacks ?? null
+    if (!policy) return primary
+    return new FailoverSingleTurnProvider({
+      primary,
+      primaryPair: { provider, model },
+      policy,
+      buildFallback: (entry: ResolvedFallbackEntry) =>
+        this.llmFactory(entry.provider, entry.model, entry.apiKey),
+      onSwitch: event => {
+        console.warn(
+          `[WorkflowService] LLM failover: ${event.from.provider}/${event.from.model} → ` +
+            `${event.to.provider}/${event.to.model} (reason=${event.reason})`
+        )
+      },
+    })
   }
 
   private static normalizeLlmSecretName(value: unknown): string | null {
@@ -741,6 +838,7 @@ export class WorkflowService {
             {
               stepId: req.stepId,
               executionId: workflowExecutionId,
+              runBindingProof: req.approvalBindingProof,
               ...workflowRuntimeRouteHint(),
               ...req.requiresApproval,
             },

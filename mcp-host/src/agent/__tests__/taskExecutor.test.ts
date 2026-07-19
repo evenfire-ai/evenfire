@@ -8,7 +8,7 @@ import {
   requestEffectiveWorkflowList,
   resolveEffectiveWorkflowTarget,
 } from '../../core/tools/workflowEffectiveTargets'
-import type { Attachment, ChatMessage, MessageContentPart } from '../../core/types'
+import type { Attachment, ChatMessage, MessageContentPart, TraceContextV1 } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { Task, TaskError } from '../../queue/types'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
@@ -211,6 +211,37 @@ describe('TaskExecutor', () => {
     expect(registerDesktopTools).toHaveBeenCalledTimes(1)
     expect(deps.onComplete).toHaveBeenCalledWith(task)
     expect(task.responseCallback).toHaveBeenCalled()
+  })
+
+  it('enriches channel trace context with the persisted conversation id', async () => {
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      type: 'response',
+      content: 'Hello!',
+    })
+    const traceContext = {
+      version: 1,
+      runId: 'run-task-executor',
+      origin: 'channel_event',
+      correlationRefs: ['message:msg-1'],
+    } satisfies TraceContextV1
+    const conversationManager = new ConversationManager()
+    const startTurn = vi.spyOn(conversationManager, 'startTurn')
+    const deps = createDeps({ conversationManager })
+    const task = createTask('Hello')
+    task.traceContext = traceContext
+
+    await new TaskExecutor(task, deps).run()
+
+    expect(startTurn).toHaveBeenCalledWith(
+      expect.any(Object),
+      'Hello',
+      task.id,
+      expect.objectContaining({
+        ...traceContext,
+        sessionId: expect.stringMatching(/^conv-user-1:telegram:test-channel:default-/),
+      })
+    )
+    expect(task.traceContext?.sessionId).toMatch(/^conv-user-1:telegram:test-channel:default-/)
   })
 
   it('should call onFail when execution throws', async () => {
@@ -951,40 +982,85 @@ describe('TaskExecutor', () => {
     expect(userMessage.contentParts).toBeUndefined()
   })
 
-  it('emits tool_start and tool_complete SSE events around the approved tool on resume', async () => {
+  it('keeps LLM trace identities distinct and emits tool SSE events on approval resume', async () => {
+    const approvalRequestId = '00000000-0000-4000-8000-000000000123'
     // Arrange: first loop returns need_approval, second loop returns a response.
     vi.mocked(runToolUseLoop)
-      .mockResolvedValueOnce({
-        type: 'need_approval',
-        approval: {
-          request_id: 'req-1',
-          tool_name: 'shell_exec',
-          parameters: { command: 'echo hi' },
-          description: 'Shell command',
-          tool_call_id: 'tc_approved',
-          context_snapshot: [
-            { role: 'user', content: 'Run something' },
-            {
-              role: 'assistant',
-              content: '',
-              tool_calls: [
-                { id: 'tc_approved', name: 'shell_exec', arguments: { command: 'echo hi' } },
-              ],
-            },
-          ],
+      .mockImplementationOnce(async config => {
+        config.events.emit({
+          type: 'llm:completed',
+          data: { iteration: 0, durationMs: 100 },
+          timestamp: new Date('2026-07-14T14:59:59.000Z'),
+        })
+        return {
+          type: 'need_approval',
+          approval: {
+            request_id: approvalRequestId,
+            tool_name: 'shell_exec',
+            tool_kind: 'internal_tool',
+            tool_source_ref: 'mcp-host',
+            parameters: { command: 'echo hi' },
+            description: 'Shell command',
+            tool_call_id: 'tc_approved',
+            context_snapshot: [
+              { role: 'user', content: 'Run something' },
+              {
+                role: 'assistant',
+                content: '',
+                tool_calls: [
+                  { id: 'tc_approved', name: 'shell_exec', arguments: { command: 'echo hi' } },
+                ],
+              },
+            ],
+          },
+        } as any
+      })
+      .mockImplementationOnce(async config => {
+        config.events.emit({
+          type: 'llm:completed',
+          data: { iteration: 0, durationMs: 100 },
+          timestamp: new Date('2026-07-14T15:00:01.000Z'),
+        })
+        return { type: 'response', content: 'Done' } as any
+      })
+    vi.mocked(executeSingleTool).mockImplementationOnce(async (call, config) => {
+      config.events.emit({
+        type: 'tool:completed',
+        data: {
+          toolName: call.name,
+          toolCallId: call.id,
+          is_error: false,
+          toolKind: 'internal_tool',
+          toolSourceRef: 'mcp-host',
         },
-      } as any)
-      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
-    vi.mocked(executeSingleTool).mockResolvedValueOnce({
-      tool_call_id: 'tc_approved',
-      name: 'shell_exec',
-      content: 'stdout:\nhi',
-      rawContent: 'stdout:\nhi',
-      is_error: false,
+        timestamp: new Date('2026-07-14T15:00:00.000Z'),
+      })
+      return {
+        tool_call_id: 'tc_approved',
+        name: 'shell_exec',
+        content: 'stdout:\nhi',
+        rawContent: 'stdout:\nhi',
+        is_error: false,
+      }
     })
 
-    const deps = createDeps()
+    const enqueue = vi.fn()
+    const deps = createDeps({
+      governedRunReporter: { enqueue } as any,
+      usageStaticContext: {
+        host_ref: 'test-host',
+        context_ref: null,
+        llm_secret_name: null,
+      },
+    })
     const task = createTask('Run something')
+    task.traceContext = {
+      version: 1,
+      runId: '00000000-0000-4000-8000-000000000456',
+      sessionId: 'session-1',
+      origin: 'direct_chat',
+      correlationRefs: [],
+    }
     const executor = new TaskExecutor(task, deps)
 
     await executor.run()
@@ -1024,6 +1100,31 @@ describe('TaskExecutor', () => {
     expect(toolCompletes[0].data.durationMs).toBeGreaterThanOrEqual(0)
     // outputPreview is built from rawContent; verify it was populated.
     expect(toolCompletes[0].data.outputPreview).toBeDefined()
+    const toolTraceEvents = enqueue.mock.calls
+      .map(([event]) => event)
+      .filter(event => event.eventType === 'tool_call')
+    expect(toolTraceEvents).toEqual([
+      expect.objectContaining({
+        eventType: 'tool_call',
+        approvalRequestId,
+        sourceEventId: expect.stringMatching(/:tool:tc_approved$/),
+        payload: {
+          status: 'succeeded',
+          tool_name: 'shell_exec',
+          tool_kind: 'internal_tool',
+          tool_source_ref: 'mcp-host',
+        },
+      }),
+    ])
+    const llmTraceEvents = enqueue.mock.calls
+      .map(([event]) => event)
+      .filter(event => event.eventType === 'llm_call')
+    expect(llmTraceEvents).toHaveLength(2)
+    expect(new Set(llmTraceEvents.map(event => event.sourceEventId)).size).toBe(2)
+    expect(llmTraceEvents.map(event => event.sourceEventId)).toEqual([
+      expect.stringMatching(/:llm:1784041199000-0$/),
+      expect.stringMatching(/:llm:1784041201000-0$/),
+    ])
   })
 })
 

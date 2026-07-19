@@ -67,18 +67,24 @@ ok "All CRDs installed"
 echo -e "\n${BOLD}═══ Step 4: Build & Load Docker Images ═══${NC}"
 
 build_and_load() {
-  local name=$1 dir=$2 tag=$3
+  local name=$1 dir=$2 tag=$3 dockerfile=${4:-}
   log "Building ${tag}..."
-  docker build -t "$tag" "$dir" 2>&1 | tail -2
+  if [ -n "$dockerfile" ]; then
+    docker build -f "$dockerfile" -t "$tag" "$dir" 2>&1 | tail -2
+  else
+    docker build -t "$tag" "$dir" 2>&1 | tail -2
+  fi
   log "Loading ${tag} into minikube..."
   docker save "$tag" | minikube -p "$PROFILE" image load --daemon=false - 2>/dev/null
   ok "$tag loaded"
 }
 
-# Core services
-build_and_load "hcc" "${PROJECT_DIR}/host-context-controller" "clerum/host-context-controller:test"
-build_and_load "wrc" "${PROJECT_DIR}/workflow-recipes" "clerum/workflow-recipes:test"
-build_and_load "mcp-host" "${PROJECT_DIR}/mcp-host" "your-registry.example.com/evenfire/mcp-host:0.4.3"
+# Core services. hcc/wrc/mcp-host consume shared @clerum/* packages via
+# file:../packages/..., so they build from the REPO ROOT context with an
+# explicit -f (their Dockerfiles COPY packages/ alongside the service).
+build_and_load "hcc" "${PROJECT_DIR}" "clerum/host-context-controller:test" "${PROJECT_DIR}/host-context-controller/Dockerfile"
+build_and_load "wrc" "${PROJECT_DIR}" "clerum/workflow-recipes:test" "${PROJECT_DIR}/workflow-recipes/Dockerfile"
+build_and_load "mcp-host" "${PROJECT_DIR}" "your-registry.example.com/evenfire/mcp-host:0.4.3" "${PROJECT_DIR}/mcp-host/Dockerfile"
 build_and_load "mcp-proxy" "${PROJECT_DIR}/mcp-proxy" "your-registry.example.com/evenfire/mcp-proxy:0.1.0"
 
 # Mock MCP server for E2E tests (HTTP)

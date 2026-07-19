@@ -14,6 +14,7 @@ import { IconMembers } from '@components/Sidebar/icons'
 import { TextInput } from '@components/TextInput'
 import { useToast } from '@components/Toast'
 import { IconTrash } from '@components/icons'
+import { PROFILE_ROUTES } from '@constants/routes'
 import { getManageableTeams, inviteManagedMember, isSilentApiError } from '@lib/api'
 import {
   formatTeamRole,
@@ -135,7 +136,7 @@ export default function InviteMemberPage() {
         }))
       )
       showToast('Invitation sent.', { tone: 'success' })
-      router.push('/members')
+      router.push(PROFILE_ROUTES.members.root)
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Failed to send invitation')
     } finally {
@@ -154,7 +155,7 @@ export default function InviteMemberPage() {
                 title="Invite member"
                 subtitle="Send an invitation and assign team permissions."
                 backLabel="Back to members"
-                onBack={() => router.push('/members')}
+                onBack={() => router.push(PROFILE_ROUTES.members.root)}
                 backDisabled={saving}
               />
             }
@@ -248,7 +249,9 @@ export default function InviteMemberPage() {
               <div className="cu-create-actions">
                 <Button
                   variant="ghost"
-                  onClick={() => (step === 0 ? router.push('/members') : setStep(step - 1))}
+                  onClick={() =>
+                    step === 0 ? router.push(PROFILE_ROUTES.members.root) : setStep(step - 1)
+                  }
                   disabled={saving}
                 >
                   {step === 0 ? 'Cancel' : 'Back'}

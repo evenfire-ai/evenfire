@@ -3,8 +3,8 @@ export interface GfsResourceMenuProps {
   onCopyLink: () => void
   onDelete: () => void
   onDownload?: () => void
-  onManage: () => void
-  onOpen?: () => void
+  onManage?: () => void
+  onPreview?: () => void
   onRename: () => void
   onReplace?: (file: File) => void
   resourceName: string

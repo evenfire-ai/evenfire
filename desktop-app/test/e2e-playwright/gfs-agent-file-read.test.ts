@@ -90,7 +90,9 @@ async function sendGfsTask(
       throw new Error('Timed out waiting for approval prompt or agent response')
     }
     const firstVisible = await Promise.race([
-      nextApproval.waitFor({ state: 'visible', timeout: remaining }).then(() => 'approval' as const),
+      nextApproval
+        .waitFor({ state: 'visible', timeout: remaining })
+        .then(() => 'approval' as const),
       newResponse.waitFor({ state: 'visible', timeout: remaining }).then(() => 'response' as const),
     ]).catch(() => {
       throw new Error('Timed out waiting for approval prompt or agent response')
@@ -145,7 +147,7 @@ test.describe('GFS agent file read (issue #775)', () => {
           timeout: 20_000,
         })
         await expect(
-          page.getByRole('region', { name: 'GFS resources shared with you' })
+          page.getByRole('region', { name: 'Global File System browser' })
         ).toContainText(fixtures.granted.fileName, { timeout: 20_000 })
       })
 

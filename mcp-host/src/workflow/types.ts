@@ -41,6 +41,7 @@ export interface ExecuteStepRequest {
   maxIterations?: number
   timeoutSeconds?: number
   contextVars?: Record<string, string>
+  approvalBindingProof?: string
   requiresApproval?: ApprovalRequest
 }
 
@@ -81,6 +82,23 @@ export interface ConfigureRequest {
   /** Kubernetes Secret name only, never the secret key or value. */
   llmSecretName?: string
   soulContent?: string
+  /**
+   * Provider-fallback (R5 F6). Ordered failover policy for the step. The WRC
+   * secret broker resolves each fallback's credential slot and forwards it here
+   * (RESOLVED `apiKey` per entry) — the mono-value `apiKey` above can only carry
+   * the primary (spec §3-R4.4). Absent = no failover = today's behaviour.
+   * Parsed defensively by `parseWorkflowLlmPolicy` (payload is `unknown`).
+   */
+  llmPolicy?: {
+    cooldownSeconds?: number
+    triggerOn?: string[]
+    fallbacks?: Array<{
+      provider: string
+      model: string
+      apiKey: string
+      llmSecretName?: string
+    }>
+  }
 }
 
 export interface ConfigureResponse {

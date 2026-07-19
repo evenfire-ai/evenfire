@@ -4,6 +4,13 @@ import { AppService } from './appService.js'
 import { config } from './config.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 
+const EVENFIRE_APP_NAME = 'Evenfire'
+const EVENFIRE_APP_ID = 'ai.evenfire.desktop'
+
+process.title = EVENFIRE_APP_NAME
+app.setName(EVENFIRE_APP_NAME)
+app.setAppUserModelId(EVENFIRE_APP_ID)
+
 // Prevent crash on EPIPE when stdout/stderr pipe is broken (e.g., parent terminal closed)
 process.stdout?.on?.('error', () => {})
 process.stderr?.on?.('error', () => {})
@@ -196,13 +203,17 @@ app.on('open-url', (event, rawUrl) => {
 
 async function createWindow(): Promise<void> {
   await appService.initialize()
-  const devUrl = String(process.env.ELECTRON_RENDERER_URL || '').trim()
+  const devUrl = String(process.env.EVENFIRE_RENDERER_URL || '').trim()
 
   mainWindow = new BrowserWindow({
     width: 1240,
     height: 860,
     show: false,
-    title: config.appName,
+    title:
+      config.appName === EVENFIRE_APP_NAME
+        ? EVENFIRE_APP_NAME
+        : `${EVENFIRE_APP_NAME} — ${config.appName}`,
+    icon: path.join(__dirname, '../assets/icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

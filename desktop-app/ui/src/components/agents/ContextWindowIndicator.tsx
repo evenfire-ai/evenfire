@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { useClickOutside } from '@hooks/useClickOutside'
 import type { ContextBreakdownLite } from '../../hooks/useChatStore'
 import { useContextBreakdown } from '../../hooks/useContextBreakdown'
@@ -8,6 +9,14 @@ import { Pill } from '../Common'
 export interface ContextWindowIndicatorProps {
   agentRef: string
   chatId: string
+  /**
+   * A monotonically-advancing turn signal for the active chat (the lifetime
+   * input-token count from the session poll). Each time it advances we force a
+   * re-probe of the breakdown, so the chip appears as soon as a turn completes
+   * without the user having to leave and re-enter the chat. Undefined until the
+   * first poll lands.
+   */
+  turnSignal?: number
 }
 
 /** Human-readable labels + stable order for the four breakdown buckets. */
@@ -63,7 +72,11 @@ function computeBuckets(breakdown: ContextBreakdownLite): ComputedBucket[] {
  * `null` (cold session / no snapshot) the chip is hidden entirely — no bare "—".
  * As soon as a snapshot arrives the full `N/M (P%)` chip appears.
  */
-export function ContextWindowIndicator({ agentRef, chatId }: ContextWindowIndicatorProps) {
+export function ContextWindowIndicator({
+  agentRef,
+  chatId,
+  turnSignal,
+}: ContextWindowIndicatorProps) {
   const { getBreakdown, isLoading, fetchContextBreakdown } = useContextBreakdown()
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -79,6 +92,23 @@ export function ContextWindowIndicator({ agentRef, chatId }: ContextWindowIndica
   useEffect(() => {
     void fetchContextBreakdown(agentRef, chatId)
   }, [agentRef, chatId, fetchContextBreakdown])
+
+  // A new session's mount probe runs before the task registers its snapshot
+  // server-side, so it resolves to `null` and the chip stays hidden. When the
+  // turn completes the poll's input-token count advances; re-probe (forced, to
+  // skip the fresh/TTL short-circuit that would otherwise honour the cached
+  // `null`) so the chip surfaces without a leave/re-enter. Skip the first
+  // observation for a chat — the mount probe above already covers it — and no-op
+  // when the signal hasn't actually advanced.
+  const lastTurnSignalRef = useRef<{ key: string; signal: number | undefined } | null>(null)
+  useEffect(() => {
+    const key = makeTaskKey(agentRef, chatId)
+    const prev = lastTurnSignalRef.current
+    lastTurnSignalRef.current = { key, signal: turnSignal }
+    if (!prev || prev.key !== key) return
+    if (prev.signal === turnSignal) return
+    void fetchContextBreakdown(agentRef, chatId, { force: true })
+  }, [agentRef, chatId, turnSignal, fetchContextBreakdown])
 
   const handleToggle = useCallback(() => {
     setOpen(prev => {

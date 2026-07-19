@@ -8,6 +8,7 @@ import { SelectionDropdown } from '@components/SelectionDropdown'
 import { TabBar } from '@components/TabBar'
 import { TeamRolePermissionEditor } from '@components/TeamRolePermissionEditor'
 import { useToast } from '@components/Toast'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import { InviteMemberDialog } from '../../../../components/InviteMemberDialog'
@@ -285,7 +286,7 @@ export default function TeamDetailsPage() {
     try {
       const created = await createAdminTeam(teamName.trim())
       showToast('Team created.', { tone: 'success' })
-      router.replace(`/profile-admin/teams/${encodeURIComponent(created.id)}`)
+      router.replace(CONTROL_ROUTES.usersAndTeams.team(created.id))
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to create team')
     } finally {
@@ -535,7 +536,7 @@ export default function TeamDetailsPage() {
       await deleteAdminTeam(teamId)
       setShowDeleteTeamConfirm(false)
       showToast('Team deleted.', { tone: 'success' })
-      router.push('/profile-admin/teams')
+      router.push(CONTROL_ROUTES.usersAndTeams.teams)
     } catch (e) {
       setDeleteTeamDialogError(e instanceof Error ? e.message : 'Failed to delete team')
     } finally {
@@ -579,8 +580,7 @@ export default function TeamDetailsPage() {
   }, [params.tab])
 
   function teamTabHref(tab: TeamTab): string {
-    const base = `/profile-admin/teams/${encodeURIComponent(teamId)}`
-    return tab === 'members' ? base : `${base}/${tab}`
+    return CONTROL_ROUTES.usersAndTeams.teamTab(teamId, tab)
   }
 
   function selectTab(tab: TeamTab) {
@@ -639,7 +639,7 @@ export default function TeamDetailsPage() {
       backLabel="Back to teams"
       error={error}
       icon={<IconUsers />}
-      onBack={() => router.push('/profile-admin/teams')}
+      onBack={() => router.push(CONTROL_ROUTES.usersAndTeams.teams)}
       onTabChange={selectTab}
       subtitle={
         isNew
@@ -885,9 +885,7 @@ export default function TeamDetailsPage() {
                                         type="button"
                                         className="cu-link"
                                         onClick={() =>
-                                          router.push(
-                                            `/profile-admin/users/${encodeURIComponent(member.id)}`
-                                          )
+                                          router.push(CONTROL_ROUTES.usersAndTeams.user(member.id))
                                         }
                                       >
                                         {member.name || '-'}
@@ -1011,9 +1009,7 @@ export default function TeamDetailsPage() {
                           <button
                             type="button"
                             className="cu-link"
-                            onClick={() =>
-                              router.push(`/contexts/${encodeURIComponent(contextId)}`)
-                            }
+                            onClick={() => router.push(CONTROL_ROUTES.contexts.detail(contextId))}
                           >
                             {contextId}
                           </button>
@@ -1097,7 +1093,7 @@ export default function TeamDetailsPage() {
                           <button
                             type="button"
                             className="cu-link"
-                            onClick={() => router.push(`/hosts/${encodeURIComponent(agentName)}`)}
+                            onClick={() => router.push(CONTROL_ROUTES.agents.detail(agentName))}
                           >
                             {agentName}
                           </button>

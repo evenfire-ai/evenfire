@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
@@ -29,6 +29,7 @@ import {
   upsertPluginWorkloadSdkGrant,
 } from '@lib/api'
 import { buildControlUiLoginPath, getCurrentControlUiPath } from '@lib/authRedirect'
+import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
 import {
   LLM_PROVIDER_OPTIONS,
   type LlmProvider,
@@ -417,9 +418,23 @@ function GrantFormModal({
   const [family, setFamily] = useState<PluginWorkloadSdkFamily>(
     grant?.capabilityFamily ?? 'promptBridge'
   )
+  const { models: allowedCatalog } = useLlmAllowedModels()
+  // Prefer the grant's explicit provider (R1), then the recipe spec's provider.
+  const providerExplicit = Boolean(grant?.provider) || Boolean(initialRecipeInfo?.provider)
   const [modelProvider, setModelProvider] = useState<LlmProvider>(
-    initialRecipeInfo?.provider ?? inferProviderFromModels(grant?.allowedModels ?? [])
+    (grant?.provider ? normalizeProvider(grant.provider) : undefined) ??
+      initialRecipeInfo?.provider ??
+      LLM_PROVIDER_OPTIONS[0].value
   )
+  // Legacy grants have neither an explicit nor a recipe provider — infer it from
+  // the allowed models once the allowlist loads, so the picklist filters to the
+  // right provider. One-shot, and never overrides an explicit source.
+  const didInferProviderRef = useRef(false)
+  useEffect(() => {
+    if (providerExplicit || didInferProviderRef.current || allowedCatalog.length === 0) return
+    didInferProviderRef.current = true
+    setModelProvider(inferProviderFromModels(grant?.allowedModels ?? [], allowedCatalog))
+  }, [providerExplicit, allowedCatalog, grant?.allowedModels])
   const [allowedModels, setAllowedModels] = useState<string[]>(grant?.allowedModels ?? [])
   const [customModel, setCustomModel] = useState('')
   const [allowedEventTypes, setAllowedEventTypes] = useState(
@@ -512,16 +527,21 @@ function GrantFormModal({
     hasWildcard(parseList(allowedTargetRefs)) ||
     hasWildcard(callersList)
 
-  const providerModelOptions = useMemo(() => getModelOptions(modelProvider), [modelProvider])
+  const providerModelOptions = useMemo(
+    () => getModelOptions(allowedCatalog, modelProvider),
+    [allowedCatalog, modelProvider]
+  )
   const modelOptions = useMemo(
     () =>
-      buildPluginWorkloadSdkModelOptions(modelProvider, allowedModels).map(model => ({
-        value: model,
-        label: model,
-        description: providerModelOptions.includes(model) ? undefined : 'Configured custom model',
-        badge: getProviderLabel(modelProvider),
-      })),
-    [allowedModels, modelProvider, providerModelOptions]
+      buildPluginWorkloadSdkModelOptions(allowedCatalog, modelProvider, allowedModels).map(
+        model => ({
+          value: model,
+          label: model,
+          description: providerModelOptions.includes(model) ? undefined : 'Configured custom model',
+          badge: getProviderLabel(modelProvider),
+        })
+      ),
+    [allowedCatalog, allowedModels, modelProvider, providerModelOptions]
   )
   const customModelValidation = validateCustomPluginWorkloadSdkModel(customModel, allowedModels)
   const customModelError = getCustomPluginWorkloadSdkModelError(customModel, allowedModels)
@@ -572,6 +592,9 @@ function GrantFormModal({
       recipeNamespace: recipeNamespace.trim(),
       recipeName: recipeName.trim(),
       capabilityFamily: family,
+      // R1: persist the explicit provider (control-api requires it for
+      // promptBridge). Omitted for clientNotifications, which has no model.
+      provider: family === 'promptBridge' ? modelProvider : undefined,
       allowedModels: family === 'promptBridge' ? modelsList : [],
       allowedEventTypes: family === 'clientNotifications' ? eventTypesList : [],
       allowedTargetRefs: family === 'clientNotifications' ? parseList(allowedTargetRefs) : [],
@@ -703,7 +726,7 @@ function GrantFormModal({
                       // if the provider changes, the operator must re-add the
                       // exact configured model for the new provider.
                       setAllowedModels(prev =>
-                        prev.filter(model => getModelOptions(next).includes(model))
+                        prev.filter(model => getModelOptions(allowedCatalog, next).includes(model))
                       )
                       setCustomModel('')
                     }}

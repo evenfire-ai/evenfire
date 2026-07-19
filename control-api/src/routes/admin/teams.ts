@@ -1,6 +1,7 @@
 import { type Response, Router } from 'express'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
+import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import {
   filterAccessValues,
   mergeActiveUpdateWithDeletedHistory,
@@ -321,7 +322,16 @@ export function createAdminTeamsRouter(gateway: K8sGateway): Router {
         res.status(400).json({ error: 'invalid payload' })
         return
       }
-      res.status(200).json(await addMemberToTeam(req.params.teamId, userId, role))
+      res
+        .status(200)
+        .json(
+          await addMemberToTeam(
+            req.params.teamId,
+            userId,
+            (req as UiAuthedRequest).adminAuth!.sub,
+            role
+          )
+        )
     } catch (error) {
       next(error)
     }
@@ -334,7 +344,16 @@ export function createAdminTeamsRouter(gateway: K8sGateway): Router {
         res.status(400).json({ error: 'invalid role' })
         return
       }
-      res.status(200).json(await updateMemberRole(req.params.teamId, req.params.userId, role))
+      res
+        .status(200)
+        .json(
+          await updateMemberRole(
+            req.params.teamId,
+            req.params.userId,
+            role,
+            (req as UiAuthedRequest).adminAuth!.sub
+          )
+        )
     } catch (error) {
       next(error)
     }
@@ -403,7 +422,11 @@ export function createAdminTeamsRouter(gateway: K8sGateway): Router {
 
   router.delete('/admin/teams/:teamId/members/:userId', async (req, res, next) => {
     try {
-      const deleted = await softDeleteMember(req.params.teamId, req.params.userId)
+      const deleted = await softDeleteMember(
+        req.params.teamId,
+        req.params.userId,
+        (req as UiAuthedRequest).adminAuth!.sub
+      )
       if (!deleted) {
         res.status(404).json({ error: 'not_found' })
         return
@@ -442,7 +465,12 @@ export function createAdminTeamsRouter(gateway: K8sGateway): Router {
       const existingPartition = partitionAccessValues(existing.contextIds, activeContextIds)
       const updated = await setTeamContexts(
         req.params.teamId,
-        mergeActiveUpdateWithDeletedHistory(contextIds, activeContextIds, existingPartition.deleted)
+        mergeActiveUpdateWithDeletedHistory(
+          contextIds,
+          activeContextIds,
+          existingPartition.deleted
+        ),
+        (req as UiAuthedRequest).adminAuth!.sub
       )
       const updatedPartition = partitionAccessValues(updated.contextIds, activeContextIds)
       res.status(200).json({
@@ -479,7 +507,8 @@ export function createAdminTeamsRouter(gateway: K8sGateway): Router {
       const activeAgentNames = await loadAdminActiveAgentNames(gateway)
       const updated = await setTeamAgents(
         req.params.teamId,
-        filterAccessValues(agentNames, new Set(activeAgentNames))
+        filterAccessValues(agentNames, new Set(activeAgentNames)),
+        (req as UiAuthedRequest).adminAuth!.sub
       )
       const updatedPartition = partitionAccessValues(updated.agentNames, activeAgentNames)
       res.status(200).json({

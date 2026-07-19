@@ -1,0 +1,2 @@
+export const GFS_FILE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024
+export const GFS_FILE_UPLOAD_MAX_MEGABYTES = 10

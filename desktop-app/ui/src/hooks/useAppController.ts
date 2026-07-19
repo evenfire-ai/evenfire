@@ -8,6 +8,7 @@ import type {
   WorkflowRecipeResource,
   WorkflowRunsResult,
 } from '../../../src/types'
+import { DESKTOP_ROUTES } from '../constants/navigation'
 import { pickLatestAgent } from '../lib/agents'
 import { toPrettyJson } from '../lib/format'
 import { summarizeWorkflowResource } from '../lib/workflows'
@@ -388,23 +389,27 @@ export function useAppController() {
 
       const refreshers = [
         {
-          route: 'agents',
+          route: DESKTOP_ROUTES.agents,
           refresh: () => agentsData.refreshWithCatalog(getCycleCatalogPromise()),
         },
         {
-          route: 'contexts',
+          route: DESKTOP_ROUTES.contexts,
           refresh: () => contextsData.refreshWithCatalog(getCycleCatalogPromise()),
         },
         {
-          route: 'mcp-servers',
+          route: DESKTOP_ROUTES.connectors,
           refresh: () => mcpServersData.refreshWithCatalog(getCycleCatalogPromise()),
         },
-        { route: 'teams', refresh: teamsData.refresh },
-        { route: 'workflows', refresh: refreshWorkflowsData },
+        { route: DESKTOP_ROUTES.teams, refresh: teamsData.refresh },
+        { route: DESKTOP_ROUTES.plugins, refresh: refreshWorkflowsData },
       ] as const
 
       const activeRoute =
-        route === 'context-details' ? 'contexts' : route === 'team-details' ? 'teams' : route
+        route === DESKTOP_ROUTES.contextDetails
+          ? DESKTOP_ROUTES.contexts
+          : route === DESKTOP_ROUTES.teamDetails
+            ? DESKTOP_ROUTES.teams
+            : route
       const current = refreshers.find(entry => entry.route === activeRoute)
       const remaining = refreshers.filter(entry => entry.route !== activeRoute)
 
@@ -583,7 +588,7 @@ export function useAppController() {
           chat.resetChat()
           notif.resetNotifications()
           authenticatedSessionIdentityRef.current = null
-          if (!preserveNav) nav.handleNavSelect('chat')
+          if (!preserveNav) nav.handleNavSelect(DESKTOP_ROUTES.chat)
           return
         }
 
@@ -596,7 +601,7 @@ export function useAppController() {
           await refreshAuthenticatedData({ initialLoad: true })
         }
         if (!preserveNav) {
-          nav.handleNavSelect('chat')
+          nav.handleNavSelect(DESKTOP_ROUTES.chat)
         }
       } finally {
         auth.refreshRuntimeConfigState().catch(() => undefined)
@@ -679,7 +684,7 @@ export function useAppController() {
       chat.clearActiveChat()
       nav.setSelectedAgentRoute(route)
       nav.setSelectedAgent(agentName)
-      nav.setNavItem('agents')
+      nav.setNavItem(DESKTOP_ROUTES.agents)
     },
     [
       chat.clearActiveChat,
@@ -703,7 +708,7 @@ export function useAppController() {
         // server is the source of truth and hydrates server-only chats itself.
         void chat.switchToChat(agentName, targetChatId)
         nav.setSelectedAgentRoute('details')
-        nav.setNavItem('chat')
+        nav.setNavItem(DESKTOP_ROUTES.chat)
         return
       }
       const shouldSelectLatest = targetChatId ? false : options.selectLatest !== false
@@ -724,7 +729,7 @@ export function useAppController() {
       }
       nav.setSelectedAgentRoute('details')
       nav.setSelectedAgent(agentName)
-      nav.setNavItem('chat')
+      nav.setNavItem(DESKTOP_ROUTES.chat)
     },
     [
       chat.clearActiveChat,
@@ -741,7 +746,7 @@ export function useAppController() {
   const handleNavSelect = useCallback(
     (item: NavItem) => {
       nav.handleNavSelect(item)
-      if (item === 'chat') {
+      if (item === DESKTOP_ROUTES.chat) {
         const latestAgent = pickLatestAgent(agentsData.agentNames, activity.agentLastActiveByAgent)
         if (latestAgent) {
           handleSelectChatAgent(latestAgent, { selectLatest: false })
@@ -773,7 +778,7 @@ export function useAppController() {
         if (targetChatId && !requiresTeamSwitch && nav.selectedAgent === targetAgent) {
           try {
             await chat.switchToChat(targetAgent, targetChatId)
-            nav.setNavItem('chat')
+            nav.setNavItem(DESKTOP_ROUTES.chat)
             return
           } catch {
             // Fall through to pending selection so the normal agent load path can retry.
@@ -782,7 +787,7 @@ export function useAppController() {
 
         chat.setPendingChatSelection(targetAgent, targetChatId || null)
         nav.setSelectedAgent(targetAgent)
-        nav.setNavItem('chat')
+        nav.setNavItem(DESKTOP_ROUTES.chat)
       } catch (error) {
         fullSetStatus(
           `Could not open notification: ${error instanceof Error ? error.message : String(error)}`,
@@ -809,7 +814,7 @@ export function useAppController() {
       if (!target) return
       try {
         await ensureNotificationTeamContext({ teamId: notification.teamId })
-        nav.setNavItem('workflows')
+        nav.setNavItem(DESKTOP_ROUTES.plugins)
 
         const fallbackWorkflow = {
           namespace: target.namespace,
@@ -881,7 +886,7 @@ export function useAppController() {
         // SDK notifications are user-addressed and do not carry one canonical
         // team. Recipe reads use the current user session and its effective
         // direct access instead of inventing a team switch.
-        nav.setNavItem('workflows')
+        nav.setNavItem(DESKTOP_ROUTES.plugins)
 
         const fallbackWorkflow = {
           namespace: target.recipeNamespace,

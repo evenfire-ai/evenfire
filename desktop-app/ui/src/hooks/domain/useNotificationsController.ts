@@ -430,36 +430,47 @@ export function useNotificationsController({
       if (isSdkNotificationStreamEvent(event)) {
         const { notification } = event
         const text = notification.body.trim() || notification.title.trim()
-        pushNotification({
-          kind: 'sdk_notification',
-          agentName: notification.recipeName,
-          text,
-          timestamp: Date.now(),
-          dedupeKey: `plugin_workload_sdk.notification:${notification.notificationId}`,
-          sdk: {
-            deliveryId: event.id,
-            notificationId: notification.notificationId,
-            recipeNamespace: notification.recipeNamespace,
-            recipeName: notification.recipeName,
-            callerRef: notification.callerRef,
-            eventType: notification.eventType,
-            title: notification.title,
-            body: notification.body,
-          },
-        })
+        const deliveryContext = { activeChatVisible: false }
+        const deliverInApp = canDeliverChatResponseNotification('inApp', deliveryContext)
+        const deliverOnDesktop = canDeliverChatResponseNotification('desktop', deliveryContext)
+        if (deliverInApp) {
+          pushNotification({
+            kind: 'sdk_notification',
+            agentName: notification.recipeName,
+            text,
+            timestamp: Date.now(),
+            dedupeKey: `plugin_workload_sdk.notification:${notification.notificationId}`,
+            sdk: {
+              deliveryId: event.id,
+              notificationId: notification.notificationId,
+              recipeNamespace: notification.recipeNamespace,
+              recipeName: notification.recipeName,
+              callerRef: notification.callerRef,
+              eventType: notification.eventType,
+              title: notification.title,
+              body: notification.body,
+            },
+          })
+        }
         // Confirm desktop receipt to the server first, independent of the local
         // OS-notification decision below: the delivery is acknowledged because
-        // the desktop received it and surfaced it in the bell. Keeping the ack
-        // ahead of (and decoupled from) showDesktopNotification ensures a display
-        // gate or native-notification failure can never suppress the ack.
+        // the desktop received it. In-app and native channel preferences only
+        // control local presentation. Keeping the ack ahead of (and decoupled
+        // from) showDesktopNotification ensures a display gate or native failure
+        // can never suppress the receipt acknowledgement.
         void window.clerum.notifications.ack(event.id).catch(error => {
           console.warn('[useNotificationsController] sdk notification ack failed', error)
         })
-        if (canDeliverChatResponseNotification('desktop', { activeChatVisible: false })) {
+        if (deliverOnDesktop) {
           void showDesktopNotification({
             title: notification.title || notification.recipeName,
             body: notification.body || text,
             tag: `sdk-notification:${notification.notificationId}`,
+            silent: true,
+          }).then(permission => {
+            if (!deliverInApp && permission === 'granted') {
+              playNotificationSound()
+            }
           })
         }
         lastNotificationStreamErrorRef.current = null
@@ -534,6 +545,7 @@ export function useNotificationsController({
   }, [
     canDeliverChatResponseNotification,
     isAuthenticated,
+    playNotificationSound,
     pushNotification,
     setStatus,
     showDesktopNotification,

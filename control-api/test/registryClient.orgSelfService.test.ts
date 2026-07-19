@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // Auth-off so authedFetch's mintToken() short-circuits to '' (no /oauth/token
 // round trip) and every fetch call the stub sees is the org endpoint itself.
 const ENV = {
-  CLERUM_REGISTRY_URL: 'https://example.com',
+  CLERUM_REGISTRY_URL: 'https://registry.evenfire.ai',
   CLERUM_REGISTRY_AUTH_ENABLED: 'false',
 }
 function json(body: unknown, status = 200) {
@@ -57,7 +57,7 @@ describe('createOrgGrant', () => {
     })
     expect(out).toEqual({ id: 'g1' })
     const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('https://example.com/api/v1/org/acme/grants')
+    expect(url).toBe('https://registry.evenfire.ai/api/v1/org/acme/grants')
     expect(init.method).toBe('POST')
     expect(JSON.parse(init.body)).toEqual({
       pluginName: '@acme/p',
@@ -88,7 +88,7 @@ describe('revokeOrgGrant', () => {
     vi.stubGlobal('fetch', fetchMock)
     await expect(revokeOrgGrant('acme', 'g1', 'admin-1')).resolves.toBeUndefined()
     const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('https://example.com/api/v1/org/acme/grants/g1?actingUserId=admin-1')
+    expect(url).toBe('https://registry.evenfire.ai/api/v1/org/acme/grants/g1?actingUserId=admin-1')
     expect(init.method).toBe('DELETE')
   })
 
@@ -113,7 +113,7 @@ describe('listOrgGrants / listGrantedToMe / listOrgEntries', () => {
     const fetchMock = vi.fn().mockResolvedValue(json({ grants: [] }))
     vi.stubGlobal('fetch', fetchMock)
     await expect(listOrgGrants('acme')).resolves.toEqual({ grants: [] })
-    expect(fetchMock.mock.calls[0][0]).toBe('https://example.com/api/v1/org/acme/grants')
+    expect(fetchMock.mock.calls[0][0]).toBe('https://registry.evenfire.ai/api/v1/org/acme/grants')
   })
 
   it('GETs /org/:org/granted-to-me', async () => {
@@ -122,7 +122,7 @@ describe('listOrgGrants / listGrantedToMe / listOrgEntries', () => {
     vi.stubGlobal('fetch', fetchMock)
     await expect(listGrantedToMe('acme')).resolves.toEqual({ grants: [] })
     expect(fetchMock.mock.calls[0][0]).toBe(
-      'https://example.com/api/v1/org/acme/granted-to-me'
+      'https://registry.evenfire.ai/api/v1/org/acme/granted-to-me'
     )
   })
 
@@ -135,7 +135,7 @@ describe('listOrgGrants / listGrantedToMe / listOrgEntries', () => {
       meta: { total: 0 },
     })
     expect(fetchMock.mock.calls[0][0]).toBe(
-      'https://example.com/api/v1/org/acme/entries?limit=50&offset=10'
+      'https://registry.evenfire.ai/api/v1/org/acme/entries?limit=50&offset=10'
     )
   })
 

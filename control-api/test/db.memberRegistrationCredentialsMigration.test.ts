@@ -8,7 +8,7 @@ const mockPoolCtor = vi.fn(function MockPool() {
 })
 vi.mock('pg', () => ({ Pool: mockPoolCtor }))
 
-describe('0055_member_registration_credentials migration', () => {
+describe('0068_member_registration_credentials migration', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
@@ -38,6 +38,6 @@ describe('0055_member_registration_credentials migration', () => {
     const recordedVersions = clientQuery.mock.calls
       .filter(([sql]) => String(sql).includes('INSERT INTO schema_migrations'))
       .map(([, params]) => (Array.isArray(params) ? params[0] : undefined))
-    expect(recordedVersions).toContain('0055_member_registration_credentials')
+    expect(recordedVersions).toContain('0068_member_registration_credentials')
   })
 })

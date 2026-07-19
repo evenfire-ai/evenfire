@@ -68,6 +68,9 @@ class InternalToolAdapter implements Tool {
   requiresApproval(): boolean {
     return false
   }
+  traceDescriptor() {
+    return { kind: 'internal_tool' as const, sourceRef: 'mcp-host' }
+  }
   async execute(params: Record<string, unknown>): Promise<ToolOutput> {
     const start = Date.now()
     try {

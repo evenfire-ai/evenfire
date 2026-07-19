@@ -60,7 +60,7 @@ export async function executeSingleTool(
 
   events.emit({
     type: 'tool:called',
-    data: { toolName: call.name },
+    data: { toolName: call.name, toolCallId: call.id },
     timestamp: new Date(),
   })
 
@@ -146,12 +146,19 @@ export async function executeSingleTool(
       wrappedContent = output.content
     }
 
+    const traceDescriptor = tool.traceDescriptor?.(call.arguments, output) ?? {
+      kind: 'internal_tool' as const,
+      sourceRef: 'mcp-host',
+    }
     events.emit({
       type: 'tool:completed',
       data: {
         toolName: call.name,
+        toolCallId: call.id,
         duration_ms: output.duration_ms,
         is_error: output.is_error,
+        toolKind: traceDescriptor.kind,
+        toolSourceRef: traceDescriptor.sourceRef,
       },
       timestamp: new Date(),
     })

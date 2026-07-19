@@ -10,9 +10,44 @@ import { createLLMProvider } from '../index'
 import { ALL_PROVIDERS, descriptorFor, isLlmProvider } from '../registryCore'
 
 describe('provider registry — auto-detection order (§5.9)', () => {
-  it('preserves the dev priority order openai > claude > zai > bailian', () => {
-    // A registry reordering must not silently change dev provider priority.
-    expect(ALL_PROVIDERS).toEqual(['openai', 'claude', 'zai', 'bailian'])
+  it('preserves the dev priority prefix openai > claude > zai > bailian > vertex > bedrock', () => {
+    // A registry reordering must not silently change dev provider priority. The
+    // four originals keep positions 0-3, the own-SDK newcomers (vertex, bedrock,
+    // R4) hold 4-5; the R6 OpenAI-compatible additions (openrouter…novita) and
+    // the light-driver azure append AFTER, so the historical priority is
+    // preserved. Lock the prefix rather than the full list so pure-data
+    // additions do not churn this assertion.
+    expect(ALL_PROVIDERS.slice(0, 6)).toEqual([
+      'openai',
+      'claude',
+      'zai',
+      'bailian',
+      'vertex',
+      'bedrock',
+    ])
+  })
+
+  it('registers all 21 canonical providers and every R6 addition', () => {
+    expect(ALL_PROVIDERS).toHaveLength(21)
+    for (const p of [
+      'openrouter',
+      'gemini',
+      'deepseek',
+      'groq',
+      'together',
+      'fireworks',
+      'mistral',
+      'xai',
+      'cerebras',
+      'deepinfra',
+      'perplexity',
+      'moonshot',
+      'nebius',
+      'novita',
+      'azure',
+    ] as const) {
+      expect(ALL_PROVIDERS).toContain(p)
+    }
   })
 
   it('openai is first (the dev default when multiple keys are present)', () => {
@@ -60,12 +95,20 @@ describe('isLlmProvider — prototype-pollution guard (§1)', () => {
     expect(isLlmProvider('gpt')).toBe(false)
     expect(isLlmProvider('')).toBe(false)
   })
+
+  // The taskExecutor image-gate keeps a task's image attachments iff
+  // `isLlmProvider(providerType)` (taskExecutor.ts). Recognizing vertex/bedrock
+  // here is what stops the gate from silently dropping their images (R4).
+  it('recognizes the own-SDK newcomers (image-gate: vertex/bedrock keep images)', () => {
+    expect(isLlmProvider('vertex')).toBe(true)
+    expect(isLlmProvider('bedrock')).toBe(true)
+  })
 })
 
 describe('createLLMProvider — fail-safe (§5.7)', () => {
   it('returns null for an unknown provider', () => {
     const result = createLLMProvider(
-      { openai: 'sk-test' },
+      { openai: { 'openai-api-key': 'sk-test' } },
       {
         provider: 'mystery' as 'openai',
         name: 'whatever',
@@ -76,7 +119,7 @@ describe('createLLMProvider — fail-safe (§5.7)', () => {
 
   it('returns null when the matching key is missing', () => {
     const result = createLLMProvider(
-      { claude: 'sk-claude' },
+      { claude: { 'claude-api-key': 'sk-claude' } },
       {
         provider: 'openai',
         name: 'gpt-5.4-mini',
@@ -87,7 +130,7 @@ describe('createLLMProvider — fail-safe (§5.7)', () => {
 
   it('returns null when the matching key is empty', () => {
     const result = createLLMProvider(
-      { openai: '' },
+      { openai: { 'openai-api-key': '' } },
       {
         provider: 'openai',
         name: 'gpt-5.4-mini',
@@ -98,7 +141,7 @@ describe('createLLMProvider — fail-safe (§5.7)', () => {
 
   it('constructs a provider when the matching key is present', () => {
     const result = createLLMProvider(
-      { openai: 'sk-test' },
+      { openai: { 'openai-api-key': 'sk-test' } },
       {
         provider: 'openai',
         name: 'gpt-5.4-mini',
@@ -113,7 +156,10 @@ describe('createLLMProvider — fail-safe (§5.7)', () => {
   // provider-specific tests build OpenAICompatibleProvider directly, so this is
   // the only path exercising makeProvider's OpenAI-compatible (baseURL) branch.
   it('constructs an OpenAI-compatible provider (zai) through the registry', () => {
-    const result = createLLMProvider({ zai: 'sk-zai' }, { provider: 'zai', name: 'glm-5.1' })
+    const result = createLLMProvider(
+      { zai: { 'zai-api-key': 'sk-zai' } },
+      { provider: 'zai', name: 'glm-5.1' }
+    )
     expect(result).not.toBeNull()
     expect(result?.getProviderType()).toBe('zai')
   })
@@ -124,7 +170,7 @@ describe('createLLMProvider — fail-safe (§5.7)', () => {
   // fields the same way the bailian provider test exercises construction.
   it('constructs an OpenAI-compatible provider (bailian) through the registry', () => {
     const result = createLLMProvider(
-      { bailian: 'sk-x' },
+      { bailian: { 'bailian-api-key': 'sk-x' } },
       { provider: 'bailian', name: 'qwen3-coder-plus' }
     )
     expect(result).not.toBeNull()

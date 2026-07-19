@@ -28,9 +28,13 @@ data:
   CONTROL_API_ADMIN_AUTH_MAX_FAILURES: '5'
   CONTROL_API_ADMIN_AUTH_LOCK_MINUTES: '15'
   CONTROL_API_POLICY_AUTH_AUDIENCE: control-api
+  TRACING_APPROVAL_PROMPT_HISTORY_ENABLED: 'false'
+  TRACING_APPROVAL_PROMPT_HISTORY_MAX_BYTES: '16384'
+  TRACING_APPROVAL_PROMPT_HISTORY_RETENTION_DAYS: '30'
+  TRACING_APPROVAL_PROMPT_HISTORY_KEY_VERSION: 'v1'
   CONTROL_API_GOOGLE_CLIENT_ID: replace-with-google-client-id.apps.googleusercontent.com
   # member-registration-service runs as an extracted sibling in the `registration`
-  # namespace locally (and centrally at https://example.com — the
+  # namespace locally (and centrally at https://registration.evenfire.ai — the
   # gcp overlays override this BASE_URL to the hub). control-api authenticates
   # with a per-tenant HMAC JWT (HMAC secret + kid + tenant id), so there is no
   # static SERVICE_TOKEN/SERVICE_NAME for this hop anymore.
@@ -125,7 +129,7 @@ data:
         }
 
         location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+$ {
-          limit_except GET {
+          limit_except GET POST {
             deny all;
           }
           proxy_pass http://control_api_upstream;
@@ -420,6 +424,36 @@ data:
         # mcp-host pods POST batched LLM usage events here. Same RS256
         # access JWT that the workflow-approvals endpoints accept.
         location = /api/v1/internal/usage/llm/events {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
+        # ── Governed agent-run tracing ingest ──
+        # Shared and workflow mcp-host pods POST bounded event batches here
+        # using the same RS256 runtime access JWT as usage and approvals.
+        location = /api/v1/internal/tracing/agent-run-events {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
+        # ── Protected approval prompt-history capture ──
+        # mcp-host pods POST one bounded prompt capture for an existing
+        # approval using the same RS256 runtime access JWT as tracing ingest.
+        location = /api/v1/internal/tracing/approval-prompt-history {
           limit_except POST {
             deny all;
           }

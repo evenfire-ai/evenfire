@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { useAuth } from '../../components/AuthContext'
 import { useConfirmDialog } from '../../components/ConfirmDialog'
 import { DashboardLayout } from '../../components/DashboardLayout'
@@ -186,7 +187,7 @@ export default function McpServersPage() {
   function handleOpenContext(contextName: string) {
     const trimmed = contextName.trim()
     if (!trimmed) return
-    router.push(`/contexts/${encodeURIComponent(trimmed)}`)
+    router.push(CONTROL_ROUTES.contexts.connectors(trimmed))
   }
 
   useEffect(() => {
@@ -230,11 +231,11 @@ export default function McpServersPage() {
         accessByConnectorKey={accessByConnectorKey}
         onOpenContext={handleOpenContext}
         onDelete={handleDelete}
-        onEdit={server => router.push(`/mcp-servers/${encodeURIComponent(server.name)}/edit`)}
+        onEdit={server => router.push(CONTROL_ROUTES.connectors.edit(server.name))}
         deletingKey={deletingKey}
         onRefresh={loadAll}
-        onCreate={() => router.push('/mcp-servers/new')}
-        onInstallFromRegistry={() => router.push('/registry')}
+        onCreate={() => router.push(CONTROL_ROUTES.connectors.new)}
+        onInstallFromRegistry={() => router.push(CONTROL_ROUTES.marketplace.root)}
         refreshing={loading}
         loading={loading && mcpServers.length === 0}
       />

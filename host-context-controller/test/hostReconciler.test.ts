@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcomeReporter'
 import {
   DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES,
   HostReconciler,
   resolveWorkflowControlScopes,
 } from '../src/hostReconciler'
+import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
 import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClient'
 import { HostCRD, type HostWorkflowControlScope } from '../src/types'
 import {
@@ -125,7 +127,21 @@ function makeDesktopHost(
   })
 }
 
-function createReconciler() {
+function createTelemetryReporterMock(): InfrastructureTelemetryReporter {
+  return {
+    enqueue: vi.fn(),
+    enqueueHealthTransition: vi.fn(),
+    stop: vi.fn(async () => undefined),
+  }
+}
+
+function createReconciler(
+  options: {
+    infrastructureTelemetryReporter?: InfrastructureTelemetryReporter
+    administrativeOutcomeReporter?: AdministrativeOutcomeReporter
+    newTelemetryOccurrenceId?: () => string
+  } = {}
+) {
   const appsApi = createMockAppsApi()
   const coreApi = createMockCoreApi()
   const networkingApi = createMockNetworkingApi()
@@ -136,6 +152,9 @@ function createReconciler() {
     coreApi: asCoreApi(coreApi),
     networkingApi: asNetworkingApi(networkingApi),
     rbacApi: asRbacApi(rbacApi),
+    infrastructureTelemetryReporter: options.infrastructureTelemetryReporter,
+    administrativeOutcomeReporter: options.administrativeOutcomeReporter,
+    newTelemetryOccurrenceId: options.newTelemetryOccurrenceId,
   })
 
   return { reconciler, appsApi, coreApi, networkingApi, rbacApi }
@@ -185,6 +204,100 @@ describe('HostReconciler', () => {
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalledWith(
       'alpha-host',
       DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES
+    )
+  })
+
+  it('emits Host-backed reconcile telemetry without inventing a legacy lifecycle transition', async () => {
+    const reporter = createTelemetryReporterMock()
+    const { reconciler } = createReconciler({ infrastructureTelemetryReporter: reporter })
+
+    await reconciler.reconcile(makeHost({ generation: 7 }))
+
+    expect(reporter.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetryType: 'reconcile_outcome',
+        hostLookupReference: { name: 'alpha-host', namespace: 'mcp-host', generation: 7 },
+        payload: expect.objectContaining({
+          resource_class: 'Host',
+          reason_code: 'ready',
+          status: 'succeeded',
+          phase: 'deployed',
+          state: 'ready',
+        }),
+      })
+    )
+    expect(vi.mocked(reporter.enqueue).mock.calls[0]![0]).not.toHaveProperty('sourceEventId')
+    expect(reporter.enqueue).not.toHaveBeenCalledWith(
+      expect.objectContaining({ telemetryType: 'lifecycle_transition' })
+    )
+  })
+
+  it('enqueues the linked administrative outcome only for a protected operation annotation', async () => {
+    const administrativeOutcomeReporter = {
+      enqueueHostOutcome: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    }
+    const { reconciler } = createReconciler({ administrativeOutcomeReporter })
+    await reconciler.reconcile(
+      makeHost({
+        generation: 7,
+        annotations: {
+          'clerum.io/administrative-intent-id': '11111111-1111-4111-8111-111111111111',
+        },
+      })
+    )
+    expect(administrativeOutcomeReporter.enqueueHostOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceEventId: 'hcc-admin-outcome:11111111-1111-4111-8111-111111111111:7:succeeded',
+        outcome: 'succeeded',
+        hostRef: { name: 'alpha-host', namespace: 'mcp-host', generation: 7 },
+      })
+    )
+  })
+
+  it('emits Host-backed controller_error and failed reconcile_outcome on reconcile failure', async () => {
+    const reporter = createTelemetryReporterMock()
+    const { reconciler, coreApi } = createReconciler({ infrastructureTelemetryReporter: reporter })
+    coreApi.readNamespacedSecret.mockImplementation(({ name }: { name?: string } = {}) => {
+      if (name === 'host-secret') {
+        return Promise.reject({ code: 404 })
+      }
+      return Promise.resolve({
+        metadata: {
+          labels: {
+            'clerum.io/managed-by': 'host-context-controller',
+            'clerum.io/host': 'alpha-host',
+          },
+        },
+      })
+    })
+
+    await reconciler.reconcile(makeHost({ generation: 8 }))
+
+    expect(reporter.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetryType: 'controller_error',
+        hostLookupReference: { name: 'alpha-host', namespace: 'mcp-host', generation: 8 },
+        payload: expect.objectContaining({
+          resource_class: 'Host',
+          reason_code: 'SecretNotFound',
+          status: 'failed',
+          error_class: 'Error',
+        }),
+      })
+    )
+    expect(reporter.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetryType: 'reconcile_outcome',
+        hostLookupReference: { name: 'alpha-host', namespace: 'mcp-host', generation: 8 },
+        payload: expect.objectContaining({
+          resource_class: 'Host',
+          reason_code: 'not_ready',
+          status: 'failed',
+          phase: 'not_deployed',
+          state: 'not_ready',
+        }),
+      })
     )
   })
 
@@ -736,7 +849,7 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
       {
         apiGroups: [''],
         resources: ['configmaps'],
-        resourceNames: ['host-alpha-host-env'],
+        resourceNames: ['host-alpha-host-env', 'clerum-llm-allowed-models'],
         verbs: ['get', 'watch', 'list'],
       },
       {

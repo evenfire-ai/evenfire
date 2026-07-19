@@ -12,6 +12,7 @@ import {
 import { Button } from '@components/Button'
 import { FormField } from '@components/FormField'
 import { TextInput } from '@components/TextInput'
+import { PROFILE_ROUTES } from '@constants/routes'
 import {
   acceptInvitation,
   getEvenfireDownloadUrl,
@@ -119,9 +120,9 @@ export function InvitationClient({
         ? [invitation.teamName]
         : []
   const hasMultipleTeams = teamNames.length > 1
-  const profileLoginHref = invitation?.email
-    ? `/?email=${encodeURIComponent(invitation.email.trim().toLowerCase())}`
-    : '/'
+  const profileLoginHref = PROFILE_ROUTES.login({
+    email: invitation?.email.trim().toLowerCase(),
+  })
   const busy = submitting !== null
 
   function friendlyInvitationError(value: unknown): string {

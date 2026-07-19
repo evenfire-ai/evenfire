@@ -38,7 +38,7 @@ vi.mock('../config', () => ({
     devMcpServers: [],
     devContexts: [],
     devAuthTokens: new Map(),
-    allowedPluginImagePrefixes: ['example.com/', 'clerum/'],
+    allowedPluginImagePrefixes: ['registry.evenfire.ai/', 'clerum/'],
     enforcePluginImageAllowlist: false,
   },
 }))
@@ -1342,7 +1342,7 @@ describe('plugin image-host allowlist (2.3)', () => {
     const coreApi = createMockCoreApi()
     const customApi = createMockCustomApi()
     const reconciler = buildReconciler(appsApi, coreApi, customApi)
-    const server = cloneServer(LOCAL_SERVER, { image: 'example.com/acme/x:1' })
+    const server = cloneServer(LOCAL_SERVER, { image: 'registry.evenfire.ai/acme/x:1' })
 
     await reconciler.reconcile(server)
     expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
@@ -1360,7 +1360,7 @@ describe('plugin image-host allowlist (2.3)', () => {
     const cfg = (await import('../config')).config as { enforcePluginImageAllowlist: boolean }
     cfg.enforcePluginImageAllowlist = true
     try {
-      const server = cloneServer(LOCAL_SERVER, { image: 'example.com/acme/x:1' })
+      const server = cloneServer(LOCAL_SERVER, { image: 'registry.evenfire.ai/acme/x:1' })
       await reconciler.reconcile(server)
 
       expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()

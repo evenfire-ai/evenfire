@@ -240,10 +240,27 @@ assert_branch_scoped_minikube_context_is_supported() {
   fi
 }
 
+assert_gfs_provisioning_follows_migrations_and_core_readiness() {
+  local migration_line provision_line readiness_line core_block
+  migration_line="$(grep -n 'deploy/scripts/run-control-api-db-migration.sh' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+  provision_line="$(grep -n 'deploy/scripts/provision-gfs-db.sh' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+  readiness_line="$(grep -n '^CORE_DEPLOYS=(' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+  core_block="$(sed -n '/^CORE_DEPLOYS=(/,/^)/p' scripts/minikube/full-setup.sh)"
+
+  if [[ -n "$migration_line" && -n "$provision_line" && -n "$readiness_line" ]] && \
+     [[ "$migration_line" -lt "$readiness_line" && "$readiness_line" -lt "$provision_line" ]] && \
+     [[ "$core_block" != *"gfs-controller"* ]]; then
+    pass "full-setup provisions GFS after migrations and the non-GFS core readiness gate"
+  else
+    fail "full-setup GFS provisioning order can run before migrations or deadlock on GFS readiness"
+  fi
+}
+
 assert_broken_profile_is_recreated
 assert_healthy_profile_skips_recreate
 assert_branch_profile_deploy_dir_is_used
 assert_member_registration_hmac_is_patched
 assert_branch_scoped_minikube_context_is_supported
+assert_gfs_provisioning_follows_migrations_and_core_readiness
 
 exit $FAIL

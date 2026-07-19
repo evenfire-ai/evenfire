@@ -28,6 +28,7 @@ function makeProvider(recipes: WorkflowRecipeCRD[] = []): WorkflowRecipeProvider
     start: async () => {},
     stop: async () => {},
     getTokenFactory: () => null,
+    getTraceReporter: () => null,
     getDbRunProcessor: () => null,
   }
 }

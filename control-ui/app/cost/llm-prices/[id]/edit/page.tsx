@@ -9,6 +9,7 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { LlmPriceForm } from '@components/LlmPriceForm'
 import { IconPrice } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type BudgetRef,
   type CreateLlmPriceInput,
@@ -32,7 +33,7 @@ export default function EditLlmPricePage() {
   const [budgetsUsingPrice, setBudgetsUsingPrice] = useState<BudgetRef[] | null>(null)
 
   function backToList() {
-    router.push('/cost/llm-prices')
+    router.push(CONTROL_ROUTES.costAndUsage.llmPrices)
   }
 
   useEffect(() => {

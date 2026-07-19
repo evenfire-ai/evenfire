@@ -178,7 +178,7 @@ async function launchAndPasswordLogin(email: string): Promise<{
       args: [`--user-data-dir=${userDataDir}`, path.resolve(__dirname, '../../dist/main.js')],
       env: {
         ...process.env,
-        ELECTRON_RENDERER_URL: '',
+        EVENFIRE_RENDERER_URL: '',
         EXTERNAL_REST_API_BASE_URL: EXT_API,
         RPC_PROXY_BASE_URL: process.env.RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094',
       },
@@ -268,14 +268,14 @@ function buildTargetRecipeManifest(name: string): Record<string, unknown> {
 async function controlUiLogin(page: Page): Promise<void> {
   const password = requireAdminPassword()
   await page.goto(CONTROL_UI)
-  const workflowNav = page.getByRole('button', { name: /Workflow Recipes/i })
+  const pluginsNav = page.getByRole('link', { name: 'Plugins', exact: true })
   const usernameField = page.getByLabel('Username')
   const passwordField = page.getByLabel('Password')
   const signInButton = page.getByRole('button', { name: /^Sign in$/ })
   await expect
     .poll(
       async () => {
-        if (await workflowNav.isVisible().catch(() => false)) return 'authenticated'
+        if (await pluginsNav.isVisible().catch(() => false)) return 'authenticated'
         if (await usernameField.isVisible().catch(() => false)) return 'login'
         return 'pending'
       },
@@ -286,13 +286,13 @@ async function controlUiLogin(page: Page): Promise<void> {
       }
     )
     .toMatch(/^(authenticated|login)$/)
-  if (await workflowNav.isVisible().catch(() => false)) return
+  if (await pluginsNav.isVisible().catch(() => false)) return
 
   await usernameField.fill(ADMIN_USERNAME)
   await passwordField.fill(password)
   await expect(signInButton).toBeEnabled()
   await signInButton.click()
-  await expect(workflowNav).toBeVisible({ timeout: 25_000 })
+  await expect(pluginsNav).toBeVisible({ timeout: 25_000 })
 }
 
 async function installRecipeFromControlUi(
@@ -302,7 +302,8 @@ async function installRecipeFromControlUi(
   userEmail: string
 ): Promise<void> {
   await controlUiLogin(page)
-  await page.goto(`${CONTROL_UI}/workflow-recipes`)
+  await page.getByRole('link', { name: 'Plugins', exact: true }).click()
+  await expect(page).toHaveURL(new RegExp(`${CONTROL_UI}/workflow-recipes$`))
   await page.getByRole('button', { name: 'Install Recipe' }).click()
 
   const editor = page.locator('textarea').first()

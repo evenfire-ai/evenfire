@@ -1,6 +1,7 @@
 /**
  * Workflow-specific TypeScript interfaces for Clerum Runtime.
  */
+import type { LlmProviderId } from '@clerum/llm-providers'
 
 // ─── Workflow Phases (7 values) ─────────────────────────────────────────
 
@@ -29,7 +30,7 @@ export function isTerminalStepPhase(phase: StepPhase): boolean {
 
 export interface AgentSpec {
   model: string
-  provider: 'openai' | 'claude' | 'zai' | 'bailian'
+  provider: LlmProviderId
   secretRef?: {
     name: string
     namespace?: string // default: control-plane
@@ -50,7 +51,7 @@ export interface StepSpec {
   timeoutSeconds?: number // default: 300
   backoffSeconds?: number // default: 30
   maxRetries?: number // default: 2, max: 5
-  agent?: { model?: string; provider?: 'openai' | 'claude' | 'zai' | 'bailian'; soul?: string }
+  agent?: { model?: string; provider?: LlmProviderId; soul?: string }
   mcpServers?: string[]
   toolChoice?: 'auto' | 'none' | 'required'
   run?: SnippetRunSpec
@@ -166,6 +167,7 @@ export interface StepStatus {
   outputPreviewMaxChars?: number
   error?: string
   executor?: 'agentic' | 'snippet' | 'custom'
+  approvalBindingSha256?: string
   // Tool call tracing metadata.
   toolsCalled?: ToolCallRecord[]
   toolsCalledTruncated?: boolean

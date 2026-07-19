@@ -96,6 +96,13 @@ class McpToolAdapter implements Tool {
   requiresApproval() {
     return false
   }
+  traceDescriptor() {
+    const separator = this.fullName.indexOf('__')
+    return {
+      kind: 'mcp_server_tool' as const,
+      sourceRef: separator > 0 ? this.fullName.slice(0, separator) : null,
+    }
+  }
 
   async execute(params: Record<string, unknown>): Promise<ToolOutput> {
     const startTime = Date.now()

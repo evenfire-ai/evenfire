@@ -7,7 +7,7 @@
 #   1. Password Login   → session JWT
 #   2. RPC Token        → scoped RPC JWT (all scopes)
 #   3. Send Message     → async task (taskId)
-#   4. Poll Approval    → awaiting_approval (requestId)
+#   4. Poll Approval    → waiting_approval (requestId)
 #   5. Approve          → { success: true }
 #   6. Poll Completion  → completed + response text
 #   7. Re-poll          → still completed (idempotent)
@@ -38,12 +38,12 @@
 #   E2E_RPC_TOKEN               (for --skip-login: pre-existing RPC token)
 #   E2E_POLL_INTERVAL           (default: 3)
 #   E2E_POLL_TIMEOUT            (default: 120)
+#   E2E_SESSION_ID              (default: generated UUID; persisted as the replay grouping key)
+#   E2E_APPROVAL_DECISION       (default: approve; accepted: approve, deny)
+#   E2E_REQUIRE_APPROVAL        (default: true; set false only for a non-approval smoke)
 # ═══════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # ─── Colors ──────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -84,6 +84,24 @@ EXT_URL="${E2E_EXTERNAL_REST_API_URL:-http://localhost:8091}"
 RPC_URL="${E2E_RPC_PROXY_URL:-http://localhost:8094}"
 POLL_INTERVAL="${E2E_POLL_INTERVAL:-3}"
 POLL_TIMEOUT="${E2E_POLL_TIMEOUT:-120}"
+SESSION_ID="${E2E_SESSION_ID:-$(node --no-warnings -e "process.stdout.write(require('node:crypto').randomUUID())")}"
+APPROVAL_DECISION="${E2E_APPROVAL_DECISION:-approve}"
+REQUIRE_APPROVAL="${E2E_REQUIRE_APPROVAL:-true}"
+
+if [[ ! "$SESSION_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+  fail "Config: E2E_SESSION_ID must be a UUID"
+fi
+if [[ "$APPROVAL_DECISION" != "approve" && "$APPROVAL_DECISION" != "deny" ]]; then
+  fail "Config: E2E_APPROVAL_DECISION must be approve or deny"
+fi
+if [[ "$APPROVAL_DECISION" == "approve" ]]; then
+  DECISION_OUTCOME="approved"
+else
+  DECISION_OUTCOME="denied"
+fi
+if [[ "$REQUIRE_APPROVAL" != "true" && "$REQUIRE_APPROVAL" != "false" ]]; then
+  fail "Config: E2E_REQUIRE_APPROVAL must be true or false"
+fi
 
 SESSION_TOKEN="${E2E_SESSION_TOKEN:-}"
 RPC_TOKEN="${E2E_RPC_TOKEN:-}"
@@ -96,6 +114,7 @@ log "Config: email=$TEST_EMAIL host=$HOST_REF"
 log "Config: external-rest-api=$EXT_URL"
 log "Config: rpc-proxy=$RPC_URL"
 log "Config: poll_interval=${POLL_INTERVAL}s poll_timeout=${POLL_TIMEOUT}s"
+log "Config: session_id=$SESSION_ID approval_decision=$APPROVAL_DECISION"
 log "Config: skip_login=$SKIP_LOGIN"
 echo ""
 
@@ -247,7 +266,7 @@ AUTH_HEADER="Authorization: Bearer $RPC_TOKEN"
 # ═════════════════════════════════════════════════════════════════════
 log "Phase 3: Send async message"
 
-MSG_BODY=$(printf '{"content":"usa http_request para hacer GET a https://httpbin.org/get y muestra el resultado"}')
+MSG_BODY=$(printf '{"content":"usa http_request para hacer GET a https://httpbin.org/get y muestra el resultado","threadId":"%s"}' "$SESSION_ID")
 http_request POST "${RPC_URL}/api/v1/rpc/hosts/${HOST_REF}/messages?async=true" "$MSG_BODY" \
   "$AUTH_HEADER"
 
@@ -266,9 +285,9 @@ detail "Response: $HTTP_BODY"
 echo ""
 
 # ═════════════════════════════════════════════════════════════════════
-# Phase 4: Poll for awaiting_approval
+# Phase 4: Poll for waiting_approval
 # ═════════════════════════════════════════════════════════════════════
-log "Phase 4: Polling for awaiting_approval (timeout: ${POLL_TIMEOUT}s)"
+log "Phase 4: Polling for waiting_approval (timeout: ${POLL_TIMEOUT}s)"
 
 ELAPSED=0
 REQUEST_ID=""
@@ -281,15 +300,17 @@ while [[ $ELAPSED -lt $POLL_TIMEOUT ]]; do
   POLL_STATUS=$(json_field "$HTTP_BODY" "o.status")
   detail "Poll ($ELAPSED s): status=$POLL_STATUS"
 
-  if [[ "$POLL_STATUS" == "awaiting_approval" ]]; then
+  if [[ "$POLL_STATUS" == "waiting_approval" ]]; then
     REQUEST_ID=$(json_field "$HTTP_BODY" "o.approval.requestId")
     break
   fi
 
   if [[ "$POLL_STATUS" == "completed" ]]; then
-    warn "Phase 4: Task completed without entering awaiting_approval (approval may be disabled)"
-    pass "Phase 4: Task completed directly (skipping approval steps)"
-    # Skip to Phase 7
+    if [[ "$REQUIRE_APPROVAL" == "true" ]]; then
+      fail "Phase 4: Task completed without entering waiting_approval"
+    fi
+    warn "Phase 4: Task completed without entering waiting_approval (explicitly allowed)"
+    pass "Phase 4: Task completed directly"
     REQUEST_ID=""
     break
   fi
@@ -298,45 +319,45 @@ while [[ $ELAPSED -lt $POLL_TIMEOUT ]]; do
   ELAPSED=$((ELAPSED + POLL_INTERVAL))
 done
 
-if [[ "$POLL_STATUS" == "awaiting_approval" ]]; then
+if [[ "$POLL_STATUS" == "waiting_approval" ]]; then
   if [[ -z "$REQUEST_ID" ]]; then
-    fail "Phase 4: awaiting_approval but no requestId found"
+    fail "Phase 4: waiting_approval but no requestId found"
   fi
-  pass "Phase 4: Task is awaiting_approval (requestId=$REQUEST_ID)"
+  pass "Phase 4: Task is waiting_approval (requestId=$REQUEST_ID)"
   detail "Response: $HTTP_BODY"
 elif [[ "$POLL_STATUS" != "completed" ]]; then
-  fail "Phase 4: Timed out waiting for awaiting_approval (last status=$POLL_STATUS)"
+  fail "Phase 4: Timed out waiting for waiting_approval (last status=$POLL_STATUS)"
 fi
 echo ""
 
 # ═════════════════════════════════════════════════════════════════════
-# Phase 5: Approve tool call
+# Phase 5: Decide tool call
 # ═════════════════════════════════════════════════════════════════════
 
 if [[ -n "$REQUEST_ID" ]]; then
-  log "Phase 5: Approve tool call"
+  log "Phase 5: ${APPROVAL_DECISION^} tool call"
 
-  APPROVE_BODY=$(printf '{"toolCallId":"%s"}' "$REQUEST_ID")
-  http_request POST "${RPC_URL}/api/v1/rpc/hosts/${HOST_REF}/approvals/approve" "$APPROVE_BODY" \
+  DECISION_BODY=$(printf '{"toolCallId":"%s"}' "$REQUEST_ID")
+  http_request POST "${RPC_URL}/api/v1/rpc/hosts/${HOST_REF}/approvals/${APPROVAL_DECISION}" "$DECISION_BODY" \
     "$AUTH_HEADER"
 
   if [[ "$HTTP_STATUS" != "200" ]]; then
-    fail "Phase 5: Approve failed (HTTP $HTTP_STATUS): $HTTP_BODY"
+    fail "Phase 5: ${APPROVAL_DECISION} failed (HTTP $HTTP_STATUS): $HTTP_BODY"
   fi
 
-  APPROVE_SUCCESS=$(json_field "$HTTP_BODY" "o.success")
-  if [[ "$APPROVE_SUCCESS" != "true" ]]; then
-    fail "Phase 5: Approve response success != true: $HTTP_BODY"
+  DECISION_SUCCESS=$(json_field "$HTTP_BODY" "o.success")
+  if [[ "$DECISION_SUCCESS" != "true" ]]; then
+    fail "Phase 5: ${APPROVAL_DECISION} response success != true: $HTTP_BODY"
   fi
 
-  pass "Phase 5: Tool call approved (success=true)"
+  pass "Phase 5: Tool call $DECISION_OUTCOME (success=true)"
   detail "Response: $HTTP_BODY"
   echo ""
 
   # ═══════════════════════════════════════════════════════════════════
-  # Phase 6: Poll for completion after approval
+  # Phase 6: Poll for completion after the decision
   # ═══════════════════════════════════════════════════════════════════
-  log "Phase 6: Polling for completion after approval (timeout: ${POLL_TIMEOUT}s)"
+  log "Phase 6: Polling for completion after ${APPROVAL_DECISION} (timeout: ${POLL_TIMEOUT}s)"
 
   ELAPSED=0
   COMPLETION_STATUS=""
@@ -359,7 +380,7 @@ if [[ -n "$REQUEST_ID" ]]; then
   done
 
   if [[ "$COMPLETION_STATUS" != "completed" ]]; then
-    fail "Phase 6: Timed out waiting for completion after approval (last status=$COMPLETION_STATUS)"
+    fail "Phase 6: Timed out waiting for completion after ${APPROVAL_DECISION} (last status=$COMPLETION_STATUS)"
   fi
 
   if [[ -z "$RESPONSE_TEXT" ]]; then
@@ -367,7 +388,10 @@ if [[ -n "$REQUEST_ID" ]]; then
   fi
 
   RESPONSE_PREVIEW=$(echo "$RESPONSE_TEXT" | head -c 120 | tr '\n' ' ')
-  pass "Phase 6: Task completed after approval (response: \"${RESPONSE_PREVIEW}...\")"
+  if [[ "$APPROVAL_DECISION" == "deny" && "$RESPONSE_TEXT" != *"denied"* ]]; then
+    fail "Phase 6: Denied task completed without a denial response"
+  fi
+  pass "Phase 6: Task completed after ${APPROVAL_DECISION} (response: \"${RESPONSE_PREVIEW}...\")"
   detail "Full response: $HTTP_BODY"
   echo ""
 else
@@ -455,6 +479,9 @@ echo ""
 echo -e "${BOLD}=================================================================${NC}"
 if [[ $FAIL -eq 0 ]]; then
   echo -e "${GREEN}${BOLD}  ALL PASSED: $PASS/$TOTAL tests passed${NC}"
+  echo "E2E_SESSION_ID=$SESSION_ID"
+  echo "E2E_APPROVAL_REQUEST_ID=$REQUEST_ID"
+  echo "E2E_APPROVAL_DECISION=$APPROVAL_DECISION"
 else
   echo -e "${RED}${BOLD}  FAILURES: $FAIL/$TOTAL tests failed ($PASS passed)${NC}"
 fi

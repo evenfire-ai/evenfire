@@ -37,6 +37,7 @@ import {
   HostActivityStreamEvent,
   HostMessageRequest,
   HostMessageResponse,
+  HostModelsResult,
   HostRuntimeStatus,
   HostStatusStreamEvent,
   PasswordLoginResult,
@@ -51,6 +52,7 @@ import {
   SessionMessagesResult,
   SessionState,
   SessionTokensLite,
+  SetHostModelResult,
   TaskProgressStreamEvent,
   TeamDirectoryResult,
   TeamMember,
@@ -71,6 +73,11 @@ const HOST_WAKEABLE_OPERATION_SCOPES: RpcScope[] = [
 const HOST_STATUS_SCOPES: RpcScope[] = ['host:status:read']
 const HOST_ACTIVITY_SCOPES: RpcScope[] = ['host:activity:read']
 const HOST_SESSION_SCOPES: RpcScope[] = ['host:session:read']
+// R2 model selector: reading the model list reuses the session-read scope (GET
+// /models); writing the per-session selection (POST /model) is gated by the
+// dedicated write scope only — the swap's blast radius is the caller's own
+// session, so no broader grant is needed.
+const HOST_MODEL_SCOPES: RpcScope[] = ['host:model:write']
 const HOST_ARTIFACT_SCOPES: RpcScope[] = ['host:activity:read', 'host:task:read']
 const HOST_APPROVAL_SCOPES: RpcScope[] = ['host:approval:write']
 const MCP_SERVERS_LIST_SCOPES: RpcScope[] = ['mcp:servers:list']
@@ -145,10 +152,10 @@ function readDesktopPackageVersion(): string | null {
   return null
 }
 
-function resolveDesktopAppVersion(electronApp: { isPackaged: boolean; getVersion: () => string }) {
-  return electronApp.isPackaged
-    ? electronApp.getVersion()
-    : readDesktopPackageVersion() || electronApp.getVersion()
+function resolveDesktopAppVersion(desktopApp: { isPackaged: boolean; getVersion: () => string }) {
+  return desktopApp.isPackaged
+    ? desktopApp.getVersion()
+    : readDesktopPackageVersion() || desktopApp.getVersion()
 }
 
 /** Known progress event types forwarded from host SSE to desktop consumers. */
@@ -1507,6 +1514,12 @@ export class AppService {
       metadata: this.me?.teamId ? { teamId: this.me.teamId } : {},
       threadId: typeof request.threadId === 'string' ? request.threadId : undefined,
       attachments: Array.isArray(request.attachments) ? request.attachments : undefined,
+      // Forward the optional piggybacked per-session model (R2 "Option A"). This
+      // build is a field allow-list, so an unlisted field would be dropped —
+      // thread `model` through explicitly. NOTE: rpc-proxy ALSO rebuilds the body
+      // as its own allow-list (routes/rpc.ts `forwardedBody`), so `model` must be
+      // forwarded there too — it does not pass the body through unchanged.
+      ...(typeof request.model === 'string' && request.model ? { model: request.model } : {}),
     }
     try {
       return await this.rpcClient.invokeHostMessage(
@@ -2505,6 +2518,64 @@ export class AppService {
     }
   }
 
+  /**
+   * Lists the models selectable for a host's active provider plus the current
+   * per-session selection (R2). Uses the same `host:session:read` scope and
+   * token issuance as {@link getContextBreakdown}. Returns `null` when the host
+   * predates the endpoint (404/501) so the UI hides the selector (R2.6 compat).
+   */
+  async getHostModels(
+    hostRef: string,
+    chatId: string,
+    hostRefs?: string[]
+  ): Promise<HostModelsResult | null> {
+    const targetHostRef = String(hostRef || '').trim()
+    // `chatId` is OPTIONAL here: the model list is host-level (allowlist), and a
+    // brand-new chat has no id yet. When absent, the server returns the list with
+    // `sessionModel: null` (R2 new-chat composer selector). Only the host is
+    // required to resolve the token/route.
+    const targetChatId = String(chatId || '').trim()
+    if (!targetHostRef) {
+      throw new Error('hostRef is required')
+    }
+    const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
+    try {
+      return await this.rpcClient.getHostModels(rpc.token, targetHostRef, targetChatId)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (message.includes('401') && message.toLowerCase().includes('missing token')) {
+        console.warn(
+          '[AppService] Host models unavailable because the runtime rejected the session token.'
+        )
+        return null
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Sets the per-session model for a host (R2.3). Applies to the next task only.
+   * Issues a token carrying the dedicated `host:model:write` scope. A model
+   * outside the allowlist throws with the `model_not_allowed` token in the
+   * message, which the renderer detects to show a targeted error.
+   */
+  async setHostModel(
+    hostRef: string,
+    chatId: string,
+    model: string,
+    hostRefs?: string[]
+  ): Promise<SetHostModelResult> {
+    const targetHostRef = String(hostRef || '').trim()
+    const targetModel = String(model || '').trim()
+    if (!targetHostRef || !chatId || !targetModel) {
+      throw new Error('hostRef, chatId, and model are required')
+    }
+    const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    const rpc = await this.issueRpcTokenForHostRefs(HOST_MODEL_SCOPES, effectiveHostRefs)
+    return this.rpcClient.setHostModel(rpc.token, targetHostRef, chatId, targetModel)
+  }
+
   getTokenMetadata(): TokenMetadata {
     const meta = this.rpcTokenManager.getMetadata()
     return {
@@ -2768,6 +2839,11 @@ export class AppService {
   async setSandboxUiBounds(bounds: import('./sandboxUiDriver.js').SandboxUiBounds): Promise<void> {
     const { setSandboxUiBounds } = await import('./sandboxUiDriver.js')
     setSandboxUiBounds(bounds)
+  }
+
+  async setSandboxUiVisible(visible: boolean): Promise<void> {
+    const { setSandboxUiVisible } = await import('./sandboxUiDriver.js')
+    setSandboxUiVisible(visible)
   }
 
   async captureSandboxUiPreview(): Promise<string | null> {

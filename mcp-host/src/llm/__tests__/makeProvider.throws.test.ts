@@ -19,13 +19,20 @@ vi.mock('../registryCore', async importOriginal => {
     ...actual,
     descriptorFor: (p: string) =>
       p === 'phantom'
-        ? { id: 'phantom', dataKey: 'x', envName: 'X', defaultModel: 'm', tokenizer: 'fallback' }
+        ? {
+            id: 'phantom',
+            credentialSlots: [{ dataKey: 'x', envName: 'X', required: true }],
+            defaultModel: 'm',
+            tokenizer: 'fallback',
+          }
         : actual.descriptorFor(p as never),
   }
 })
 
 describe('makeProvider — divergent provider without a factory', () => {
   it('throws "no factory registered" for a non-native provider with no baseURL', () => {
-    expect(() => makeProvider('phantom' as LlmProvider, 'sk-x')).toThrow(/no factory registered/)
+    expect(() => makeProvider('phantom' as LlmProvider, { x: 'sk-x' })).toThrow(
+      /no factory registered/
+    )
   })
 })

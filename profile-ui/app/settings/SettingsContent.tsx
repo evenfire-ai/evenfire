@@ -12,6 +12,7 @@ import { ProfileShell } from '@components/ProfileShell'
 import { TextInput } from '@components/TextInput'
 import { useToast } from '@components/Toast'
 import { IconCopy, IconRefresh } from '@components/icons'
+import { PROFILE_ROUTES } from '@constants/routes'
 import {
   getConfiguredExternalRestApiBaseUrl,
   getDesktopEnvironment,
@@ -311,7 +312,7 @@ export function SettingsContent({
       showToast('Password updated. Sign in again.', { tone: 'success' })
       const nextEmail = me?.email || ''
       logout()
-      router.replace(nextEmail ? `/?email=${encodeURIComponent(nextEmail)}` : '/')
+      router.replace(PROFILE_ROUTES.login({ email: nextEmail }))
     } catch (err) {
       setPasswordError(err instanceof Error ? err.message : 'Failed to update password')
     } finally {
@@ -384,7 +385,7 @@ export function SettingsContent({
 
         <div className="tabs" role="tablist" aria-label="Settings sections">
           <Link
-            href="/settings/profile"
+            href={PROFILE_ROUTES.settings.profile}
             className={`tab-button${activeSettingsTab === 'profile' ? ' is-active' : ''}`}
             role="tab"
             aria-selected={activeSettingsTab === 'profile'}
@@ -393,7 +394,9 @@ export function SettingsContent({
           </Link>
           {hasSocialAccess ? (
             <Link
-              href={`/settings/social/${currentSocialTab?.key || visibleSocialTabs[0]?.key || 'telegram'}`}
+              href={PROFILE_ROUTES.settings.social(
+                currentSocialTab?.key || visibleSocialTabs[0]?.key || 'telegram'
+              )}
               className={`tab-button${activeSettingsTab === 'social' ? ' is-active' : ''}`}
               role="tab"
               aria-selected={activeSettingsTab === 'social'}
@@ -445,7 +448,7 @@ export function SettingsContent({
               {visibleSocialTabs.map(tab => (
                 <Link
                   key={tab.key}
-                  href={`/settings/social/${tab.key}`}
+                  href={PROFILE_ROUTES.settings.social(tab.key)}
                   className={`tab-button${tab.key === activeSocialTab ? ' is-active' : ''}`}
                   role="tab"
                   aria-selected={tab.key === activeSocialTab}

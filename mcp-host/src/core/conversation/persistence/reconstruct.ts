@@ -10,8 +10,25 @@
  */
 import type { MessageRow, PendingApprovalRow, PersistedSession } from '../../../db/worker/protocol'
 import { deserializeCompletedResults } from '../../../db/worker/protocol'
-import type { ChatMessage, Conversation, PendingApproval, Turn, TurnToolCall } from '../../types'
-import { ConversationState } from '../../types'
+import type {
+  ChatMessage,
+  Conversation,
+  PendingApproval,
+  TraceContextV1,
+  Turn,
+  TurnToolCall,
+} from '../../types'
+import { ConversationState, isTraceContextV1 } from '../../types'
+
+function parseTraceContext(raw: string | null | undefined): TraceContextV1 | null {
+  if (!raw) return null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return isTraceContextV1(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
 
 export interface ReconstructResult {
   conversation: Conversation
@@ -55,6 +72,8 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     // restart this may point at a task whose reporter is gone (ghost); the D.2
     // processing reaper reconciles that at boot.
     activeTaskId: persisted.session.active_task_id ?? undefined,
+    traceContext:
+      parseTraceContext(persisted.session.active_trace_context) ?? pending?.traceContext ?? null,
     // Lifetime token totals — rehydrate the RAM mirror from the durable columns.
     input_tokens: persisted.session.input_tokens,
     output_tokens: persisted.session.output_tokens,
@@ -65,9 +84,35 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     // dropped to "no cache" after a restart for sessions whose lifetime cache
     // totals stayed 0 (e.g. prompt-cache disabled → Anthropic returns 0/0).
     cacheTokensReported: persisted.session.cache_tokens_reported === 1,
+    // R2 (migration 007) — rehydrate the per-session model selection map so the
+    // per-task resolver honours a saved choice after a pod restart. Read-plumbing
+    // previously died at this store→Conversation frontier; parse it here.
+    modelSelections: parseModelSelections(persisted.session.model_selections),
   }
 
   return { conversation, highestOrdinal, highestTurnNumber }
+}
+
+/**
+ * Parse the persisted `model_selections` JSON into a `{ provider → model }`
+ * map. Tolerant: NULL / malformed / non-object JSON → undefined (no selection),
+ * which the resolver reads as "fall back to the Host-configured model". Only
+ * string values survive, so a corrupted row can never inject a non-string model
+ * into the resolver.
+ */
+function parseModelSelections(raw: string | null): Record<string, string> | undefined {
+  if (!raw) return undefined
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const out: Record<string, string> = {}
+    for (const [provider, model] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof model === 'string' && model.length > 0) out[provider] = model
+    }
+    return Object.keys(out).length > 0 ? out : undefined
+  } catch {
+    return undefined
+  }
 }
 
 export function reconstructPendingApproval(row: PendingApprovalRow): PendingApproval {
@@ -81,6 +126,7 @@ export function reconstructPendingApproval(row: PendingApprovalRow): PendingAppr
     context_snapshot: snapshot,
     completed_results: deserializeCompletedResults(row.completed_results),
     intent_summary: row.intent_summary ?? undefined,
+    traceContext: parseTraceContext(row.trace_context),
   }
 }
 

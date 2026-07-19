@@ -1,0 +1,32 @@
+# Root build-context ignore file.
+#
+# Several images build from the REPO ROOT context (`docker build -f <svc>/Dockerfile .`)
+# because they COPY shared packages/ alongside the service: workflow-recipes,
+# control-api, control-ui, host-context-controller, packages/workflow-sdk and
+# (since R4/B2) mcp-host. Docker only honors the .dockerignore at the CONTEXT
+# root, so the per-service .dockerignore files are inert for those builds —
+# this file restores their exclusions globally. Keep it in sync with the
+# per-service files (which still apply to any image built from its own dir).
+#
+# SECURITY: without this file the entire monorepo — including real .env files
+# and .git history — is shipped to the Docker daemon as build context on every
+# root-context build (shared BuildKit runners, CI context tarballs, exported
+# caches). None of it is COPY'd into images (all COPYs are narrow), but the
+# context itself must not carry secrets.
+.git
+.specs
+.claude
+**/.env
+**/.env.*
+# Credential material that must never enter the build context (no image COPYs
+# any of these — verified no tracked *.pem/*.key/kubeconfig* exists in-tree).
+**/*.pem
+**/*.key
+kubeconfig*
+**/node_modules
+**/dist
+**/.next
+**/coverage
+**/*.log
+.DS_Store
+**/.DS_Store

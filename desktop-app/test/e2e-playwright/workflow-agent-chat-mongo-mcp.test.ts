@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { grantUserThroughAdminRoute } from './workflow-approval-quadrants/recipes'
+import { grantWorkflowRecipeToUsers } from './third-party-authn-first-party-mcphost/workflowApprovalJourney'
 import {
   ARTIFACT_NAME,
   COLLECTION_NAME,
@@ -58,6 +58,22 @@ function mongoEvalLiteral(value: string): string {
   return JSON.stringify(value)
 }
 
+function mongoPodName(): string {
+  const name = kubectl([
+    '-n',
+    RECIPE_NS,
+    'get',
+    'pods',
+    '-l',
+    'clerum.io/recipe=mongodb-mcp-stack,clerum.io/workload=mongodb',
+    '--field-selector=status.phase=Running',
+    '-o',
+    'jsonpath={.items[0].metadata.name}',
+  ]).trim()
+  expect(name, 'MongoDB fixture pod must be running').toBeTruthy()
+  return name
+}
+
 function cleanupMongoSeedDocuments(): void {
   try {
     kubectl(
@@ -65,7 +81,7 @@ function cleanupMongoSeedDocuments(): void {
         '-n',
         RECIPE_NS,
         'exec',
-        'mongodb-0',
+        mongoPodName(),
         '--',
         'mongosh',
         '--quiet',
@@ -95,7 +111,7 @@ function readMongoSeedRecords(): MongoSeedRecord[] {
       '-n',
       RECIPE_NS,
       'exec',
-      'mongodb-0',
+      mongoPodName(),
       '--',
       'mongosh',
       '--quiet',
@@ -142,7 +158,7 @@ test.describe.serial('Agent Chat workflow recipe with MongoDB MCP', () => {
     await waitForMcpServerReady(MONGO_MCP_SERVER_NAME)
     cleanupMongoSeedDocuments()
     const { userId, userToken } = await loginAs(E2E_EMAIL)
-    await grantUserThroughAdminRoute(RECIPE_NS, RECIPE_NAME, userId)
+    await grantWorkflowRecipeToUsers(RECIPE_NAME, [userId])
 
     const { app, page } = await launchAndLogin(E2E_EMAIL)
     try {

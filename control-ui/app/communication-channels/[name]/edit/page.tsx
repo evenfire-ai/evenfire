@@ -15,6 +15,7 @@ import { SegmentedControl } from '@components/SegmentedControl'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconBroadcast } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { apiGet, apiSend, isSilentApiError } from '@lib/api'
 import type { ChannelType } from '@lib/channelTypes'
 import { copyTextToClipboard } from '@lib/clipboard'
@@ -91,7 +92,7 @@ export default function EditCommunicationChannelPage() {
   const [saveError, setSaveError] = useState('')
 
   function backToChannels() {
-    router.push('/communication-channels')
+    router.push(CONTROL_ROUTES.externalChannels.root)
   }
 
   useEffect(() => {

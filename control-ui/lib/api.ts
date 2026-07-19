@@ -59,6 +59,7 @@ const inFlightGetRequests = new Map<string, Promise<unknown>>()
 let sessionEpoch = 0
 type ApiRequestOptions = {
   silentUnauthorized?: boolean
+  signal?: AbortSignal
 }
 
 function qs(params: Record<string, string | undefined>) {
@@ -101,7 +102,12 @@ function formatApiError(res: Response, text: string): Error {
             ? 'Desktop App password must be between 8 and 256 characters.'
             : detail === 'password must be between 8 and 256 characters'
               ? 'Password must be between 8 and 256 characters.'
-              : detail === 'member_registration_unavailable'
+              : // Exact match is correct HERE: control-ui calls control-api directly,
+                // so a member-registration 503 arrives as the bare { error: '<code>' }
+                // body. profile-ui reaches these same codes through external-rest-api,
+                // whose error middleware wraps any 5xx into { message: '...: <code>' },
+                // so it must use .includes() instead — the two matchers differ on purpose.
+                detail === 'member_registration_unavailable'
                 ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
                 : detail === 'member_registration_misconfigured'
                   ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
@@ -153,14 +159,16 @@ async function fetchWithTimeout(
 ): Promise<Response> {
   const controller = new AbortController()
   const timeoutId = window.setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS)
+  const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal
   try {
     return await fetch(input, {
       ...init,
       credentials: init.credentials || 'include',
-      signal: init.signal || controller.signal,
+      signal,
     })
   } catch (error) {
     if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+      if (init.signal?.aborted) throw error
       throw new Error('Request timed out. Check that Control API is reachable.')
     }
     throw error
@@ -177,13 +185,14 @@ export async function apiGet(
   const url = `${API_BASE}${path}${qs(query)}`
   const headers = { ...authHeaders() }
   const cacheKey = `${url}|${sessionEpoch}`
-  const existing = inFlightGetRequests.get(cacheKey)
+  const existing = options.signal ? undefined : inFlightGetRequests.get(cacheKey)
   if (existing) return existing
 
   const request = (async () => {
     const res = await fetchWithTimeout(url, {
       cache: 'no-store',
       headers,
+      signal: options.signal,
     })
     if (!res.ok) {
       if (res.status === 401) {
@@ -219,11 +228,13 @@ export async function apiGet(
     }
     return parseJsonResponse(res)
   })()
-  inFlightGetRequests.set(cacheKey, request)
-  request.then(
-    () => inFlightGetRequests.delete(cacheKey),
-    () => inFlightGetRequests.delete(cacheKey)
-  )
+  if (!options.signal) {
+    inFlightGetRequests.set(cacheKey, request)
+    request.then(
+      () => inFlightGetRequests.delete(cacheKey),
+      () => inFlightGetRequests.delete(cacheKey)
+    )
+  }
   return request
 }
 
@@ -746,7 +757,9 @@ export type AdminUser = {
   teams?: Array<{ id: string; name: string; role: TeamRole }>
   passwordPendingFromAcceptedInvitation?: boolean
 }
-export type HostSecretResource = { name: string }
+// `keys` are the Secret's data-key NAMES only (never values); the detail bundle
+// populates them via listHostSecrets. Optional for compat with older payloads.
+export type HostSecretResource = { name: string; keys?: string[] }
 export type HostDetailBundle = {
   host: HostResource
   contexts: ContextResource[]
@@ -1113,7 +1126,7 @@ export function gfsDownloadUrl(rid: string): string {
   return `${base}/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(rid)}/content`
 }
 
-async function gfsFetchFileBlob(rid: string): Promise<Blob> {
+export async function gfsFetchFileBlob(rid: string): Promise<Blob> {
   return fetchAuthenticatedFileBlob(gfsDownloadUrl(rid))
 }
 
@@ -1380,6 +1393,165 @@ export async function updateLlmPrice(id: string, input: UpdateLlmPriceInput) {
 
 export async function deleteLlmPrice(id: string) {
   return apiSend('DELETE', `/api/v1/admin/llm-prices/${encodeURIComponent(id)}`)
+}
+
+// ── LLM allowed models (allowlist, spec §3-R3) ────────────────────────────
+// Operator-declared allowlist of usable models per provider. Source of truth
+// is the control-api `llm_allowed_models` table; a mutation also materializes
+// the `clerum-llm-allowed-models` ConfigMap consumed by mcp-host/WRC at runtime.
+// This replaces the former static `LLM_MODELS_BY_PROVIDER` catalog in lib/llm.ts.
+// See control-api/src/routes/admin/llmModels.ts.
+
+export type LlmAllowedModel = {
+  id: string
+  provider: string
+  model: string
+  vendor: string | null
+  display_name: string | null
+  context_window_tokens: number | null
+  enabled: boolean
+  // Catalog-lifecycle metadata (spec 09 §7, F1). `source` distinguishes an
+  // operator-added row ('manual') from one seeded by discovery ('discovery').
+  // `stale` marks a discovery row that vanished from the provider's list but is
+  // kept (never auto-removed). Older / not-yet-migrated APIs omit these — the
+  // fetch layer normalizes them to 'manual' / false so callers never see undefined.
+  source: 'manual' | 'discovery'
+  stale: boolean
+  discovered_at?: string | null
+  last_seen_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * Normalizes a raw allowlist row so the catalog-lifecycle fields are always
+ * present (spec 09 §7 F1). Tolerates a pre-migration API that omits `source` /
+ * `stale`: defaults to `source:'manual', stale:false` so the table renders the
+ * same before and after the backend change. Defensive on the wire value too —
+ * any non-'discovery' source collapses to 'manual'.
+ */
+function normalizeLlmAllowedModel(row: LlmAllowedModel): LlmAllowedModel {
+  return {
+    ...row,
+    source: row.source === 'discovery' ? 'discovery' : 'manual',
+    stale: row.stale === true,
+    discovered_at: row.discovered_at ?? null,
+    last_seen_at: row.last_seen_at ?? null,
+  }
+}
+
+export type CreateLlmModelInput = {
+  provider: string
+  model: string
+  // `null` explicitly clears the optional column; `undefined` omits it.
+  vendor?: string | null
+  display_name?: string | null
+  context_window_tokens?: number | null
+  enabled?: boolean
+}
+
+export type UpdateLlmModelInput = Partial<CreateLlmModelInput>
+
+/**
+ * True when a create/update/delete was rejected with 503 `configmap_write_failed`.
+ * The row was persisted (spec §3-R3.4): only the ConfigMap propagation to the
+ * cluster is delayed — surface this as a warning, not a save failure.
+ *
+ * Matches ONLY the machine-readable code. A bare infra 503 (gateway/pod
+ * unavailable, no JSON body → no `code`) means the request may never have
+ * reached control-api and the row was NOT saved — that must stay a failure.
+ */
+export function isLlmModelConfigMapDeferred(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return (err as Error & { code?: string }).code === 'configmap_write_failed'
+}
+
+export async function getLlmModels() {
+  const res = (await apiGet('/api/v1/admin/llm-models')) as { rows: LlmAllowedModel[] }
+  return { rows: (res.rows ?? []).map(normalizeLlmAllowedModel) }
+}
+
+export async function getLlmModel(id: string) {
+  const row = (await apiGet(
+    `/api/v1/admin/llm-models/${encodeURIComponent(id)}`
+  )) as LlmAllowedModel
+  return normalizeLlmAllowedModel(row)
+}
+
+export async function createLlmModel(input: CreateLlmModelInput) {
+  return apiSend('POST', '/api/v1/admin/llm-models', input) as Promise<LlmAllowedModel>
+}
+
+export async function updateLlmModel(id: string, input: UpdateLlmModelInput) {
+  return apiSend(
+    'PUT',
+    `/api/v1/admin/llm-models/${encodeURIComponent(id)}`,
+    input
+  ) as Promise<LlmAllowedModel>
+}
+
+export async function deleteLlmModel(id: string) {
+  return apiSend('DELETE', `/api/v1/admin/llm-models/${encodeURIComponent(id)}`)
+}
+
+// ── Catalog discovery (spec 09 §7, F2) ────────────────────────────────────
+// Discovery pulls the public models.dev catalog into `llm_allowed_models` as
+// `source='discovery', enabled=false`. The operator reviews and enables from a
+// fresh catalog. These wrappers drive the /llm-models/discovery review surface;
+// enable/disable/delete of the discovered rows reuse the existing update/delete
+// routes above (no dedicated discovery mutation endpoint).
+
+// `live` = fetched from the upstream catalog; `vendored` = served from the
+// bundled snapshot fallback (upstream unreachable).
+export type LlmDiscoverySource = 'live' | 'vendored'
+
+// Result of a sync run: what the reconciliation did to `llm_allowed_models`.
+export type LlmDiscoverySyncResult = {
+  source: LlmDiscoverySource
+  // Catalog acquisition time (when models.dev was fetched/loaded).
+  fetchedAt: string
+  // DB commit time of this run — matches the status endpoint's `ranAt`, so the
+  // "last synced" label is stable across a reload.
+  ranAt: string
+  added: number
+  updated: number
+  staled: number
+}
+
+// Last-run summary from the optional status endpoint. `null` when discovery has
+// never run or the endpoint is not deployed.
+export type LlmDiscoveryStatus = {
+  ranAt: string
+  source: LlmDiscoverySource
+  added: number
+  updated: number
+  staled: number
+}
+
+// Runs the catalog sync. Rows are inserted disabled — this never changes what
+// the runtime serves; it only refreshes the review queue.
+export async function syncDiscovery() {
+  return apiSend(
+    'POST',
+    '/api/v1/admin/llm-models/discovery/sync'
+  ) as Promise<LlmDiscoverySyncResult>
+}
+
+// Reads the last sync run. The endpoint is optional (spec 09 §7 F2): a missing
+// route (404) or an empty body means "never run" — surfaced as `null` rather
+// than an error so the page renders without a prior run.
+export async function getDiscoveryStatus(): Promise<LlmDiscoveryStatus | null> {
+  try {
+    // control-api wraps the run in `{ lastRun }` (null when never run).
+    const res = (await apiGet('/api/v1/admin/llm-models/discovery/status')) as {
+      lastRun: LlmDiscoveryStatus | null
+    } | null
+    return res?.lastRun ?? null
+  } catch (e) {
+    if (isSilentApiError(e)) throw e
+    if ((e as { status?: number })?.status === 404) return null
+    throw e
+  }
 }
 
 // ── Token budgets (token-budgets P0c) ─────────────────────────────────────
@@ -2049,12 +2221,13 @@ export async function getWorkflowRunArtifacts(
 export type WorkflowRunSummary = {
   id: string
   source: 'live' | 'audit' | 'status' | string
+  approvalRequestId?: string | null
   phase: string
   triggeredAt: string | null
   startedAt: string | null
   completedAt: string | null
   message: string | null
-  actor: { type?: string; userId?: string; hostRef?: string } | null
+  actor: { type?: string; userId?: string; adminUserId?: string; hostRef?: string } | null
   executionRef: { namespace: string; name: string } | null
 
   // Legacy/older UI callers tolerated these fields before Control API moved
@@ -2076,6 +2249,19 @@ export async function getWorkflowRuns(
   return apiGet(
     `/api/v1/admin/workflows/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/runs?limit=${limit}`
   ) as Promise<{ items: WorkflowRunSummary[]; count: number }>
+}
+
+export async function getWorkflowRun(
+  namespace: string,
+  name: string,
+  runId: string,
+  signal?: AbortSignal
+): Promise<WorkflowRunSummary> {
+  return apiGet(
+    `/api/v1/admin/workflows/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}`,
+    {},
+    { signal }
+  ) as Promise<WorkflowRunSummary>
 }
 
 // ── Workflow grants (admin-only) ───────────────────────────────────────────
@@ -2850,6 +3036,10 @@ export type PluginWorkloadSdkGrant = {
   recipeNamespace: string
   recipeName: string
   capabilityFamily: PluginWorkloadSdkFamily
+  // Explicit provider bound to a promptBridge grant (R1). `null` for older
+  // grants written before the column existed (and for clientNotifications) —
+  // the form falls back to inferProviderFromModels when reading a null provider.
+  provider: string | null
   allowedModels: string[]
   allowedEventTypes: string[]
   allowedTargetRefs: string[]
@@ -2865,6 +3055,8 @@ export type PluginWorkloadSdkGrantInput = {
   recipeNamespace: string
   recipeName: string
   capabilityFamily: PluginWorkloadSdkFamily
+  // Required for promptBridge grants; omitted for clientNotifications.
+  provider?: string
   allowedModels?: string[]
   allowedEventTypes?: string[]
   allowedTargetRefs?: string[]

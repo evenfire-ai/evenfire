@@ -13,7 +13,8 @@ export DISPLAY=:1
 # CLERUM_WORKSPACE_PATH is set by the K8s Deployment env; no need to export here.
 
 # Start mcp-host in background as abc user
-s6-setuidgid abc nohup node /app/dist/main.js \
+# (app lives under /app/mcp-host so the file: dep on ../packages/* resolves)
+s6-setuidgid abc nohup node /app/mcp-host/dist/main.js \
   > /config/.mcp-host.log 2>&1 &
 
 echo "[s6-init] mcp-host started (PID: $!)"

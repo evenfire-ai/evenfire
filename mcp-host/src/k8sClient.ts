@@ -5,14 +5,12 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import { config } from './config'
-import { ALL_PROVIDERS, descriptorFor } from './llm/registryCore'
-import { ApiKeys, HostCRD, HostSpec } from './types'
+import { HostCRD, HostSpec } from './types'
 
 const kc = new k8s.KubeConfig()
 kc.loadFromDefault()
 
 const customObjectsApi = kc.makeApiClient(k8s.CustomObjectsApi)
-const coreApi = kc.makeApiClient(k8s.CoreV1Api)
 
 const GROUP = 'clerum.io'
 const VERSION = 'v1alpha1'
@@ -47,61 +45,6 @@ export async function getHost(name: string): Promise<HostCRD | null> {
     if ((error as { response?: { statusCode?: number } }).response?.statusCode === 404) {
       console.log(`[K8s] Host CRD not found: ${name}`)
       return null
-    }
-    throw error
-  }
-}
-
-/**
- * Get API keys from the secret referenced by the Host.
- */
-export async function getApiKeys(secretName: string): Promise<ApiKeys> {
-  try {
-    console.log(`[K8s] Getting Secret: ${secretName} in namespace ${config.namespace}`)
-
-    const response = await coreApi.readNamespacedSecret({
-      name: secretName,
-      namespace: config.namespace,
-    })
-
-    const secret = response
-    const keys: ApiKeys = {}
-
-    // K8s API returns secret.data values as base64-encoded strings.
-    // We decode them to get the plain-text API keys.
-    const data = secret.data || {}
-
-    function decodeSecretValue(raw: string): string {
-      // If the value looks base64-encoded (re-encoding the decoded value matches),
-      // decode it. Otherwise return as-is (already plain text).
-      try {
-        const decoded = Buffer.from(raw, 'base64').toString('utf-8')
-        const reEncoded = Buffer.from(decoded).toString('base64')
-        if (reEncoded === raw && decoded !== raw) {
-          console.log('[K8s]   (decoded from base64)')
-          return decoded
-        }
-      } catch {
-        // Not valid base64, return as-is
-      }
-      return raw
-    }
-
-    // Registry-driven: read each provider's key by its Secret dataKey. Log only
-    // the dataKey NAME (never the value, never keys[id]) to preserve redaction.
-    for (const provider of ALL_PROVIDERS) {
-      const { dataKey } = descriptorFor(provider)
-      if (data[dataKey]) {
-        console.log(`[K8s] Found ${dataKey} in secret`)
-        keys[provider] = decodeSecretValue(data[dataKey])
-      }
-    }
-
-    return keys
-  } catch (error) {
-    if ((error as { response?: { statusCode?: number } }).response?.statusCode === 404) {
-      console.error(`[K8s] Secret not found: ${secretName}`)
-      return {}
     }
     throw error
   }

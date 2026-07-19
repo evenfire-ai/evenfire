@@ -2,6 +2,7 @@ import { type Request, type Response, Router } from 'express'
 import { asyncHandler } from '../../../http/asyncHandler.js'
 import type { K8sGateway } from '../../../k8s.js'
 import { rootLogger } from '../../../observability/logger.js'
+import { runWithAdministrativeRequestContext } from '../../../services/tracing/adminOperationContext.js'
 import {
   WorkflowGrantHttpError,
   allowWorkflowRecipeApprovalTeam,
@@ -20,6 +21,13 @@ import {
 
 const BASE = '/admin/workflows'
 const logger = rootLogger.child({ module: 'admin-workflow-grants' })
+
+function withAdministrativeTraceContext<T>(req: Request, operatorSub: string, work: () => T): T {
+  return runWithAdministrativeRequestContext(
+    { operatorSub, requestId: req.correlationId ?? null },
+    work
+  )
+}
 
 // This router owns two related admin surfaces:
 // - /admin/workflows/... manages trigger grants for recipe execution.
@@ -57,13 +65,15 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
       if (!caller) return
 
       try {
-        const result = await replaceWorkflowRecipeGrants({
-          gateway,
-          recipeNamespace: req.params.ns,
-          recipeName: req.params.name,
-          operatorUserId: caller.userId,
-          rawUserIds: (req.body as { userIds?: unknown } | undefined)?.userIds,
-        })
+        const result = await withAdministrativeTraceContext(req, caller.userId, () =>
+          replaceWorkflowRecipeGrants({
+            gateway,
+            recipeNamespace: req.params.ns,
+            recipeName: req.params.name,
+            operatorUserId: caller.userId,
+            rawUserIds: (req.body as { userIds?: unknown } | undefined)?.userIds,
+          })
+        )
 
         logger.info(
           {
@@ -120,13 +130,15 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
       if (!caller) return
 
       try {
-        const result = await replaceWorkflowRecipeTeamGrants({
-          gateway,
-          recipeNamespace: req.params.ns,
-          recipeName: req.params.name,
-          operatorUserId: caller.userId,
-          rawTeamIds: (req.body as { teamIds?: unknown } | undefined)?.teamIds,
-        })
+        const result = await withAdministrativeTraceContext(req, caller.userId, () =>
+          replaceWorkflowRecipeTeamGrants({
+            gateway,
+            recipeNamespace: req.params.ns,
+            recipeName: req.params.name,
+            operatorUserId: caller.userId,
+            rawTeamIds: (req.body as { teamIds?: unknown } | undefined)?.teamIds,
+          })
+        )
 
         logger.info(
           {
@@ -187,13 +199,15 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
       if (!caller) return
 
       try {
-        const result = await allowWorkflowRecipeApprovalTeam({
-          gateway,
-          recipeNamespace: req.params.ns,
-          recipeName: req.params.name,
-          actorUserId: caller.userId,
-          teamId: req.params.teamId,
-        })
+        const result = await withAdministrativeTraceContext(req, caller.userId, () =>
+          allowWorkflowRecipeApprovalTeam({
+            gateway,
+            recipeNamespace: req.params.ns,
+            recipeName: req.params.name,
+            actorUserId: caller.userId,
+            teamId: req.params.teamId,
+          })
+        )
 
         logger.info(
           {
@@ -224,13 +238,15 @@ export function createAdminWorkflowGrantRoutes(gateway: K8sGateway): Router {
       if (!caller) return
 
       try {
-        const result = await revokeWorkflowRecipeApprovalTeam({
-          gateway,
-          recipeNamespace: req.params.ns,
-          recipeName: req.params.name,
-          actorUserId: caller.userId,
-          teamId: req.params.teamId,
-        })
+        const result = await withAdministrativeTraceContext(req, caller.userId, () =>
+          revokeWorkflowRecipeApprovalTeam({
+            gateway,
+            recipeNamespace: req.params.ns,
+            recipeName: req.params.name,
+            actorUserId: caller.userId,
+            teamId: req.params.teamId,
+          })
+        )
 
         logger.info(
           {

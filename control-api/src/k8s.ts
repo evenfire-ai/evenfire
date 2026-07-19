@@ -2,6 +2,10 @@ import * as k8s from '@kubernetes/client-node'
 import { config } from './config.js'
 import { HostEnvService } from './services/hostEnvService.js'
 import { HostOverviewService } from './services/hostOverviewService.js'
+import {
+  type AllowedModelsConfigMapMaterializer,
+  LlmAllowedModelsConfigMapWriter,
+} from './services/llmAllowedModelsConfigMap.js'
 import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
 import { SecretService } from './services/secretService.js'
 import { ClerumResourceType, HostOverview, SecretUpsertRequest } from './types.js'
@@ -154,6 +158,7 @@ export class K8sGateway {
   private readonly secrets: SecretService
   private readonly hostOverviews: HostOverviewService
   private readonly hostEnvSvc: HostEnvService
+  private readonly llmAllowedModelsCmWriter: LlmAllowedModelsConfigMapWriter
   private readonly secretsNamespace: string
   private readonly kc: k8s.KubeConfig
   private readonly coreApi: k8s.CoreV1Api
@@ -188,10 +193,20 @@ export class K8sGateway {
     this.hostOverviews = new HostOverviewService(this.resources, this.namespace)
     // Per-Host env CM/Secret CRUD lives in the same namespace as the Host pods.
     this.hostEnvSvc = new HostEnvService(coreApi, config.hostsNamespace)
+    // The LLM allowlist ConfigMap is materialized alongside the Host pods that
+    // consume it (mcp-host namespace).
+    this.llmAllowedModelsCmWriter = new LlmAllowedModelsConfigMapWriter(
+      coreApi,
+      config.hostsNamespace
+    )
   }
 
   hostEnv(): HostEnvService {
     return this.hostEnvSvc
+  }
+
+  llmAllowedModelsConfigMap(): AllowedModelsConfigMapMaterializer {
+    return this.llmAllowedModelsCmWriter
   }
 
   getNamespace(): string {

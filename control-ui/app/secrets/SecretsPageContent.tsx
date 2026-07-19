@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { SecretsTable } from '@components/SecretsTable'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { apiGet, isSilentApiError } from '@lib/api'
 
 export type SecretScope = 'llm' | 'mcp' | 'recipe'
@@ -12,6 +13,7 @@ export type SecretScope = 'llm' | 'mcp' | 'recipe'
 type SecretItem = {
   name?: string
   metadata?: { name?: string }
+  keys?: string[]
 }
 
 export function SecretsPageContent({ activeScope }: { activeScope: SecretScope }) {
@@ -49,15 +51,15 @@ export function SecretsPageContent({ activeScope }: { activeScope: SecretScope }
           onRefresh={loadAll}
           refreshing={loading}
           loading={loading}
-          onCreateLlmSecret={() => router.push('/secrets/new?scope=llm')}
-          onCreateMcpSecret={() => router.push('/secrets/new?scope=mcp')}
-          onCreateRecipeSecret={() => router.push('/secrets/new?scope=recipe')}
+          onCreateLlmSecret={() => router.push(CONTROL_ROUTES.secrets.new({ scope: 'llm' }))}
+          onCreateMcpSecret={() => router.push(CONTROL_ROUTES.secrets.new({ scope: 'mcp' }))}
+          onCreateRecipeSecret={() => router.push(CONTROL_ROUTES.secrets.new({ scope: 'recipe' }))}
           onCreateRecipeSecretFor={(name, keys, ownerRecipe, namespace) => {
             const params = new URLSearchParams({ scope: 'recipe', name })
             if (keys.length > 0) params.set('keys', keys.join(','))
             if (ownerRecipe) params.set('ownerRecipe', ownerRecipe)
             if (namespace) params.set('namespace', namespace)
-            router.push(`/secrets/new?${params.toString()}`)
+            router.push(CONTROL_ROUTES.secrets.new(Object.fromEntries(params)))
           }}
         />
       </DashboardLayout>

@@ -3,6 +3,7 @@ import test from 'node:test'
 import { buildInvitationHeading, formatRemaining, resolveInvitationToken } from '../lib/invitations'
 import './approvalChannels.test'
 import './profileSettings.test'
+import './routes.test'
 
 test('formatRemaining returns a human-readable duration', () => {
   const now = Date.parse('2026-04-20T12:00:00.000Z')

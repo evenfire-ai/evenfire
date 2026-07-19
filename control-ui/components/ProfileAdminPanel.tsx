@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   AdminUser,
   AdminUserChannels,
@@ -829,7 +830,7 @@ export function ProfileAdminPanel({
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button
                     type="button"
-                    onClick={() => router.push(`/contexts/${encodeURIComponent(contextId)}`)}
+                    onClick={() => router.push(CONTROL_ROUTES.contexts.detail(contextId))}
                     disabled={busy}
                   >
                     Open Context

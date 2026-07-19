@@ -453,23 +453,27 @@ build_image "workflow-custom-sdk-e2e" \
   "clerum/workflow-custom-sdk-e2e:test" \
   "${PROJECT_DIR}/tests/e2e/fixtures/custom-workflow-coordinator/Dockerfile"
 
+# mcp-host builds from the repo root context (PROJECT_DIR): it consumes the
+# shared @clerum/llm-providers package via file:../packages/llm-providers, so
+# packages/ must be inside the build context (mirrors wrc/control-api above).
 build_image "mcp-host" \
-  "${PROJECT_DIR}/mcp-host" \
-  "clerum/mcp-host:test"
+  "${PROJECT_DIR}" \
+  "clerum/mcp-host:test" \
+  "${PROJECT_DIR}/mcp-host/Dockerfile"
 
 build_image "mcp-host-slim" \
-  "${PROJECT_DIR}/mcp-host" \
+  "${PROJECT_DIR}" \
   "clerum/mcp-host-slim:test" \
   "${PROJECT_DIR}/mcp-host/Dockerfile.slim"
 
 build_image "mcp-host-full" \
-  "${PROJECT_DIR}/mcp-host" \
+  "${PROJECT_DIR}" \
   "clerum/mcp-host-full:test" \
   "${PROJECT_DIR}/mcp-host/Dockerfile.full"
 
 if [ "$MINIKUBE_BUILD_DESKTOP_IMAGE" = "true" ]; then
   build_image "mcp-host-desktop" \
-    "${PROJECT_DIR}/mcp-host" \
+    "${PROJECT_DIR}" \
     "clerum/mcp-host-desktop:test" \
     "${PROJECT_DIR}/mcp-host/Dockerfile.desktop"
 elif [ "$SKIP_UIS" = true ]; then

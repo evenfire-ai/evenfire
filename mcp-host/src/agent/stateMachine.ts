@@ -12,6 +12,7 @@ import { EventEmitter } from 'events'
 import { BudgetClient, deriveBudgetAttribution } from '../budget/budgetClient'
 import type { BudgetVerdict } from '../budget/types'
 import { config as appConfig } from '../config'
+import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import { ConversationManager } from '../core/conversation/conversation'
 import type { ConversationStore } from '../core/conversation/conversationStore'
@@ -19,6 +20,7 @@ import type { ConversationStore } from '../core/conversation/conversationStore'
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
 import { STATELESS_CRON_APPROVAL_PROMPT } from '../core/extensions/mcpApprovalGateController'
+import type { LlmPort } from '../core/interfaces'
 // Core architecture imports
 import { SimpleEventEmitter } from '../core/orchestration/eventEmitter'
 import { BasicSafety } from '../core/safety/safety'
@@ -26,7 +28,11 @@ import { BasicSafety } from '../core/safety/safety'
 import type { SessionSearchService } from '../core/sessionSearch'
 import type { SpilloverStorage } from '../core/spillover'
 import { createTokenCounter } from '../core/tokenizer'
-import type { AgentEventType as CoreAgentEventType, PendingApproval } from '../core/types'
+import type {
+  Conversation,
+  AgentEventType as CoreAgentEventType,
+  PendingApproval,
+} from '../core/types'
 import type { ReapedSession } from '../db/worker/protocol'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import { isTerminal } from '../lifecycle/types'
@@ -37,10 +43,12 @@ import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
 import type { TaskError } from '../queue/types'
 import { SessionProcessor, serializeSessionKey } from '../session'
-import { UsageReporter } from '../usage/usageReporter.js'
+import { parseSessionKey } from '../session/types'
+import { ApprovalPromptHistoryClient } from '../usage/approvalPromptHistoryClient.js'
+import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import type { ScopedWorkspaceProvider } from '../workspace/scopedWorkspace'
 import { CronScheduler } from './cronScheduler'
-import { TaskExecutor } from './taskExecutor'
+import { TaskExecutor, resolveTaskSessionKey } from './taskExecutor'
 import {
   AgentConfig,
   AgentEvent,
@@ -48,6 +56,8 @@ import {
   AgentState,
   AgentStats,
   DEFAULT_AGENT_CONFIG,
+  type FailoverSupportProvider,
+  type TaskModelResolver,
 } from './types'
 
 /**
@@ -92,11 +102,8 @@ export interface ColdStartLoader {
    */
   reapExpiredAwaitingApprovalSessions?(now: number): Promise<ReapedSession[]>
   /**
-   * S1 — boot-time reap of EVERY 'awaiting_approval' session (live or expired).
-   * No such session is resumable after a restart (executor rehydration was never
-   * implemented), so the boot path reaps them all to 'idle' with a synthetic
-   * APPROVAL_INTERRUPTED_BY_RESTART message (spec decision #4). Optional, same
-   * contract as reapProcessingSessions; runs before approval rehydration.
+   * Legacy explicit recovery hook that reaps every awaiting approval. The normal
+   * boot path does not call it now that live executors are reconstructed.
    */
   reapAwaitingApprovalSessions?(now: number): Promise<ReapedSession[]>
 }
@@ -104,7 +111,9 @@ export interface ColdStartLoader {
 export interface RehydratedApproval {
   request_id: string
   task_id: string
+  session_key?: string
   approval: PendingApproval
+  expiresAt?: number
   /**
    * Optional snapshot of the originating message — used by T2.1 to re-route
    * notifications when the cold-start sweep marks an approval as expired.
@@ -122,6 +131,13 @@ export class NoOpColdStartLoader implements ColdStartLoader {
   async loadPendingApprovals(): Promise<RehydratedApproval[]> {
     return []
   }
+}
+
+type ApprovalDecisionBinding = {
+  userId?: string
+  channelType?: string
+  channelId?: string
+  sessionKey?: string
 }
 
 /**
@@ -143,7 +159,13 @@ export class AgentStateMachine extends EventEmitter {
   private activeExecutors = new Map<string, TaskExecutor>()
   private approvalMap = new Map<
     string,
-    { taskId: string; timerId?: ReturnType<typeof setTimeout>; registeredAt: Date }
+    {
+      taskId: string
+      timerId?: ReturnType<typeof setTimeout>
+      registeredAt: Date
+      expiresAt?: number
+      binding: ApprovalDecisionBinding
+    }
   >()
   // T1.1 — sessionKeys with an in-flight operator-triggered compaction.
   // Serializes overlapping `compactSession()` calls for the same session so
@@ -164,6 +186,14 @@ export class AgentStateMachine extends EventEmitter {
   // Core infrastructure
   private conversationManager = new ConversationManager()
   private modelName: string = 'unknown'
+  // R2 — per-task effective-model resolver (provider instance + model + context
+  // window) from the session's saved selection. Null in dev/tests → default.
+  private taskModelResolver: TaskModelResolver | null = null
+
+  // R5 — provider-fallback support provider. Returns the current failover
+  // engine + policy + provider factory, or null when no policy is configured.
+  // Null in dev/tests → no failover (byte-identical to today).
+  private failoverSupportProvider: FailoverSupportProvider | null = null
 
   // Persistent core event emitter (Gap 3 resolution: bridges agent-level events to SimpleEventEmitter)
   private coreEvents = new SimpleEventEmitter()
@@ -195,6 +225,8 @@ export class AgentStateMachine extends EventEmitter {
 
   // LLM usage tracking — see docs/plans/llm-token-usage-tracking-*.md
   private usageReporter: UsageReporter | undefined
+  private governedRunReporter: GovernedRunReporter | undefined
+  private approvalPromptHistoryClient: ApprovalPromptHistoryClient | undefined
   private usageStaticContext: AdapterStaticContext | undefined
 
   // P1 token budgets — pre-task budget check. Both undefined unless
@@ -248,6 +280,73 @@ export class AgentStateMachine extends EventEmitter {
       this.modelName = modelName
     }
     console.log('[Agent] LLM provider set')
+  }
+
+  /**
+   * R2 — inject the per-task model resolver (built in `main.ts` over the live
+   * ConfigStore keys + allowlist). When set, each task resolves its effective
+   * provider+model from the session's saved selection instead of using the
+   * process-wide default. Absent in dev/tests → the default provider is used.
+   */
+  setTaskModelResolver(resolver: TaskModelResolver): void {
+    this.taskModelResolver = resolver
+    console.log('[Agent] Task model resolver set')
+  }
+
+  /**
+   * R5 — inject the provider-fallback support provider (built in `main.ts`).
+   * When set and it returns a non-null support with fallbacks, each task's
+   * `LlmPort` (and the manual `/compact` port) is wrapped so an eligible
+   * provider error switches to a configured fallback below the loop. Absent in
+   * dev/tests → no failover.
+   */
+  setFailoverSupport(provider: FailoverSupportProvider): void {
+    this.failoverSupportProvider = provider
+    console.log('[Agent] Failover support provider set')
+  }
+
+  /**
+   * R5 — wrap the manual `/compact` port with provider-failover, mirroring
+   * `TaskExecutor.wrapFailoverPort`. Fallback entries get their own adapter with
+   * the compact usage sink (session lifetime counters) + a per-pair counter.
+   * Returns the primary unchanged when no policy / no fallbacks.
+   */
+  private wrapCompactFailover(
+    primaryPort: LlmPortAdapter,
+    primaryProvider: SingleTurnProvider,
+    primaryModel: string,
+    conv: Conversation
+  ): LlmPort {
+    const support = this.failoverSupportProvider?.()
+    if (!support || support.policy.fallbacks.length === 0) return primaryPort
+    const primaryProviderType = primaryProvider.getProviderType()
+    return maybeWrapFailover({
+      primaryPort,
+      primaryPair: { provider: primaryProviderType, model: primaryModel },
+      engine: support.engine,
+      policy: support.policy,
+      buildFallbackPort: index => {
+        const entry = support.policy.fallbacks[index]
+        const provider = support.buildProvider(entry)
+        if (!provider) return null
+        // R5.7 — same-provider fallback respects the session model; cross-provider
+        // serves the fixed entry model.
+        const servedModel = entry.provider === primaryProviderType ? primaryModel : entry.model
+        const counter = createTokenCounter(provider, servedModel, {
+          offline: appConfig.tokenizerOffline,
+        })
+        return new LlmPortAdapter(
+          provider,
+          servedModel,
+          provider.getProviderType(),
+          this.usageReporter,
+          this.usageStaticContext,
+          undefined,
+          counter,
+          usage => this.conversationManager.recordSessionUsage(conv, usage)
+        )
+      },
+    })
   }
 
   /**
@@ -340,6 +439,14 @@ export class AgentStateMachine extends EventEmitter {
     this.usageReporter = reporter
     this.usageStaticContext = staticContext
     console.log('[Agent] Usage reporter set')
+  }
+
+  setGovernedRunReporter(reporter: GovernedRunReporter): void {
+    this.governedRunReporter = reporter
+  }
+
+  setApprovalPromptHistoryClient(client: ApprovalPromptHistoryClient): void {
+    this.approvalPromptHistoryClient = client
   }
 
   /**
@@ -481,6 +588,64 @@ export class AgentStateMachine extends EventEmitter {
     console.log('[Agent] Cold-start loader set')
   }
 
+  private buildApprovalBinding(
+    sourceMessage: Task['sourceMessage'] | undefined,
+    sessionKey?: string
+  ): ApprovalDecisionBinding {
+    const parsed = sessionKey ? parseSessionKey(sessionKey) : null
+    return {
+      userId: sourceMessage?.sender ?? parsed?.userId,
+      channelType: sourceMessage?.channelType ?? parsed?.channelType,
+      channelId: sourceMessage?.channelId ?? parsed?.channelId,
+      sessionKey,
+    }
+  }
+
+  private validateApprovalDecisionBinding(
+    binding: ApprovalDecisionBinding,
+    userId: string,
+    channelType?: string,
+    channelId?: string
+  ): string | null {
+    if (binding.userId && binding.userId !== userId) {
+      return 'Approval decision does not match the originating user'
+    }
+    // CLI approval routes historically carry the user/request ids only. Keep
+    // them valid for the original owner, while channel-aware routes must match
+    // the originating session channel below.
+    if (channelType === undefined && channelId === undefined) {
+      return null
+    }
+    if (binding.channelType && binding.channelType !== channelType) {
+      return 'Approval decision does not match the originating channel type'
+    }
+    if (binding.channelId && binding.channelId !== channelId) {
+      return 'Approval decision does not match the originating channel'
+    }
+    return null
+  }
+
+  private makeApprovalTimeout(
+    requestId: string,
+    expiresAt: number | undefined,
+    now: number
+  ): ReturnType<typeof setTimeout> | undefined {
+    if (typeof expiresAt === 'number' && Number.isFinite(expiresAt)) {
+      return setTimeout(
+        () => {
+          this.handleApprovalTimeout(requestId)
+        },
+        Math.max(0, expiresAt - now)
+      )
+    }
+    if (this.config.approvalTimeout > 0) {
+      return setTimeout(() => {
+        this.handleApprovalTimeout(requestId)
+      }, this.config.approvalTimeout)
+    }
+    return undefined
+  }
+
   /**
    * T2.1: inject a custom `ConversationStore` (typically the SQLite-backed
    * implementation built by `createConversationStore`). Must be called BEFORE
@@ -522,44 +687,41 @@ export class AgentStateMachine extends EventEmitter {
       }
     }
 
-    // S1 PHASE 1b — reap ALL sessions stuck in 'awaiting_approval' (live or
-    // expired). Until executor resume exists, a restart-interrupted approval is
-    // un-resumable: handleApproval finds an empty activeExecutors post-restart and
-    // returns "Task is no longer awaiting approval" WITHOUT transitioning the
-    // session, leaving the chat stuck on "Connecting" indefinitely. So per spec
-    // decision #4 ("pod restart = reap, not auto-resume") we reap every
-    // awaiting_approval session to 'idle' + a synthetic interruption message,
-    // making the chat immediately usable (the desktop offers Resend). MUST run
-    // before PHASE 2: the reaper deletes the stale pending_approvals rows in the
-    // same transaction as the state flip, so loadPendingApprovals below has
-    // nothing left to stamp.
-    if (typeof this.coldStartLoader.reapAwaitingApprovalSessions === 'function') {
-      try {
-        const reaped = await this.coldStartLoader.reapAwaitingApprovalSessions(now)
-        if (reaped.length > 0) {
-          console.log(
-            `[Agent] Reaped ${reaped.length} awaiting-approval session(s) on boot (restart-interrupted)`
-          )
-        }
-      } catch (err) {
-        // Non-blocking, same as PHASE 1: a reap failure must not stall boot.
-        console.error('[Agent] Awaiting-approval reaper failed on boot:', err)
+    if (typeof this.coldStartLoader.reapExpiredAwaitingApprovalSessions === 'function') {
+      const reaped = await this.coldStartLoader.reapExpiredAwaitingApprovalSessions(now)
+      if (reaped.length > 0) {
+        console.log(`[Agent] Reaped ${reaped.length} expired approval session(s) on boot`)
       }
     }
 
-    // PHASE 2 / P.3 — load pending approvals. After the PHASE 1b reap there should
-    // be nothing left to rehydrate (every awaiting_approval row was deleted with
-    // its session's state flip). We still call it to surface any TTL/spillover
-    // notifications the loader emits and to keep the contract stable for when
-    // executor resume eventually lands. We do NOT stamp approvalMap: a stamped
-    // entry with no executor is exactly the S1 bug (handleApproval would hit an
-    // empty activeExecutors and dead-end), and the session is already reaped.
+    // PHASE 2 — reconstruct live executors before SessionProcessor accepts work.
     const rehydrated = await this.coldStartLoader.loadPendingApprovals(now)
-    if (rehydrated.length > 0) {
-      console.warn(
-        `[Agent] loadPendingApprovals returned ${rehydrated.length} approval(s) after the awaiting-approval reap; not stamping (un-resumable until executor resume exists)`
-      )
+    for (const entry of rehydrated) {
+      if (!entry.session_key) throw new Error('rehydrated approval is missing its session key')
+      const sourceMessage = entry.source_message as Task['sourceMessage']
+      const task: Task = {
+        id: entry.task_id,
+        source: 'channel',
+        sourceMessage,
+        traceContext: entry.approval.traceContext ?? null,
+        priority: 'normal',
+        status: 'waiting_approval',
+        conversationHistory: [],
+        createdAt: new Date(now),
+      }
+      const executor = this.createTaskExecutor(task)
+      await executor.rehydrateWaitingApproval(entry.session_key, entry.approval)
+      this.activeExecutors.set(task.id, executor)
+      this.approvalMap.set(entry.request_id, {
+        taskId: task.id,
+        registeredAt: new Date(now),
+        expiresAt: entry.expiresAt,
+        timerId: this.makeApprovalTimeout(entry.request_id, entry.expiresAt, now),
+        binding: this.buildApprovalBinding(sourceMessage, entry.session_key),
+      })
     }
+    if (rehydrated.length > 0)
+      console.log(`[Agent] Rehydrated ${rehydrated.length} pending approval executor(s)`)
   }
 
   /**
@@ -639,13 +801,27 @@ export class AgentStateMachine extends EventEmitter {
 
     this.compactionsInFlight.add(opts.sessionKey)
     try {
-      const tokenCounter = createTokenCounter(this.llmProvider, this.modelName, {
+      // R2 — resolve the effective provider+model (and context window) for THIS
+      // session so the manual /compact adapter spends tokens under, and reports
+      // usage for, the session's selected model — not the process-wide default.
+      let compactProvider = this.llmProvider
+      let compactModel = this.modelName
+      let compactContextWindow: number | undefined
+      if (this.taskModelResolver) {
+        const resolved = this.taskModelResolver(conv.modelSelections)
+        if (resolved) {
+          compactProvider = resolved.provider
+          compactModel = resolved.model
+          compactContextWindow = resolved.contextWindowTokens
+        }
+      }
+      const tokenCounter = createTokenCounter(compactProvider, compactModel, {
         offline: appConfig.tokenizerOffline,
       })
       const llmPort = new LlmPortAdapter(
-        this.llmProvider,
-        this.modelName,
-        this.llmProvider.getProviderType(),
+        compactProvider,
+        compactModel,
+        compactProvider.getProviderType(),
         this.usageReporter,
         this.usageStaticContext,
         undefined,
@@ -654,10 +830,14 @@ export class AgentStateMachine extends EventEmitter {
         // count them toward the session's lifetime totals (crit #2).
         usage => this.conversationManager.recordSessionUsage(conv, usage)
       )
+      // R5 — apply provider-failover to the manual /compact port too, so an
+      // eligible provider error during compaction switches to a fallback and the
+      // summary call meters the pair really served (adapter-per-attempt).
+      const compactPort = this.wrapCompactFailover(llmPort, compactProvider, compactModel, conv)
       const manager = new PressureContextManager(
-        appConfig.contextMaxTokens,
+        compactContextWindow ?? appConfig.contextMaxTokens,
         this.workspaceProvider?.forSessionKey(opts.sessionKey),
-        llmPort,
+        compactPort,
         tokenCounter,
         {
           dryRun: appConfig.tokenizerDryrun,
@@ -737,25 +917,51 @@ export class AgentStateMachine extends EventEmitter {
     task: Task,
     approval: PendingApproval
   ): void {
-    // Start timeout timer
-    let timerId: ReturnType<typeof setTimeout> | undefined
-    if (this.config.approvalTimeout > 0) {
-      timerId = setTimeout(() => {
-        this.handleApprovalTimeout(requestId)
-      }, this.config.approvalTimeout)
-    }
+    const now = Date.now()
+    const expiresAt =
+      this.config.approvalTimeout > 0 ? now + this.config.approvalTimeout : undefined
+    const timerId = this.makeApprovalTimeout(requestId, expiresAt, now)
 
     this.approvalMap.set(requestId, {
       taskId,
       timerId,
-      registeredAt: new Date(),
+      registeredAt: new Date(now),
+      expiresAt,
+      binding: this.buildApprovalBinding(task.sourceMessage),
     })
+    this.enqueueTaskTrace(
+      task,
+      'approval',
+      `task:${taskId}:approval:${requestId}:requested`,
+      {
+        status: 'requested',
+        tool_name: approval.tool_name,
+        ...(approval.tool_kind ? { tool_kind: approval.tool_kind } : {}),
+        ...(approval.tool_source_ref ? { tool_source_ref: approval.tool_source_ref } : {}),
+      },
+      requestId
+    )
+    const trace = task.traceContext
+    const hostRef = this.usageStaticContext?.host_ref
+    if (trace?.sessionId && hostRef) {
+      void this.approvalPromptHistoryClient?.capture(
+        {
+          approvalRequestId: requestId,
+          runId: trace.runId,
+          hostRef,
+          sessionId: trace.sessionId,
+          origin: trace.origin,
+          prompt: approval.description,
+        },
+        this.secretEntriesProvider?.().map(entry => entry.value) ?? []
+      )
+    }
 
     // Build notification and emit event
     const msg = task.sourceMessage
     const userId = msg?.sender || 'anonymous'
     const notificationMsg = this.buildApprovalNotification(approval, userId, msg?.channelType)
-    console.log(`[Agent] Tool ${approval.tool_name} needs approval. ${notificationMsg}`)
+    console.log(`[Agent] Tool ${approval.tool_name} needs approval`)
     this.emitEvent('tool:approval_needed', {
       taskId,
       toolName: approval.tool_name,
@@ -828,6 +1034,19 @@ export class AgentStateMachine extends EventEmitter {
       this.approvalMap.delete(requestId)
       return { success: false, error: 'Task is no longer awaiting approval' }
     }
+    if (entry.expiresAt !== undefined && entry.expiresAt <= Date.now()) {
+      this.handleApprovalTimeout(requestId)
+      return { success: false, error: 'Approval request has expired' }
+    }
+    const bindingError = this.validateApprovalDecisionBinding(
+      entry.binding,
+      userId,
+      channelType,
+      channelId
+    )
+    if (bindingError) {
+      return { success: false, error: bindingError }
+    }
 
     // Clear timeout
     if (entry.timerId) clearTimeout(entry.timerId)
@@ -838,7 +1057,22 @@ export class AgentStateMachine extends EventEmitter {
     // clear pendingTaskResults) AND coreEvents (where eventWiring subscribes
     // to publish activity). Direct coreEvents.emit bypassed the Node EE, so
     // PR #291's cache-clear listener never fired in production.
-    const toolName = executor.pendingApproval?.tool_name || 'unknown'
+    const pendingApproval = executor.pendingApproval
+    const toolName = pendingApproval?.tool_name || 'unknown'
+    this.enqueueTaskTrace(
+      executor.sourceTask,
+      'approval',
+      `task:${entry.taskId}:approval:${requestId}:approved`,
+      {
+        status: 'approved',
+        tool_name: toolName,
+        ...(pendingApproval?.tool_kind ? { tool_kind: pendingApproval.tool_kind } : {}),
+        ...(pendingApproval?.tool_source_ref
+          ? { tool_source_ref: pendingApproval.tool_source_ref }
+          : {}),
+      },
+      requestId
+    )
     this.emitEvent('tool:approval_granted', {
       toolName,
       requestId,
@@ -876,12 +1110,40 @@ export class AgentStateMachine extends EventEmitter {
       this.approvalMap.delete(requestId)
       return { success: false, error: 'Task is no longer awaiting approval' }
     }
+    if (entry.expiresAt !== undefined && entry.expiresAt <= Date.now()) {
+      this.handleApprovalTimeout(requestId)
+      return { success: false, error: 'Approval request has expired' }
+    }
+    const bindingError = this.validateApprovalDecisionBinding(
+      entry.binding,
+      userId,
+      channelType,
+      channelId
+    )
+    if (bindingError) {
+      return { success: false, error: bindingError }
+    }
 
     // Clear timeout
     if (entry.timerId) clearTimeout(entry.timerId)
     this.approvalMap.delete(requestId)
 
-    const toolName = executor.pendingApproval?.tool_name || 'unknown'
+    const pendingApproval = executor.pendingApproval
+    const toolName = pendingApproval?.tool_name || 'unknown'
+    this.enqueueTaskTrace(
+      executor.sourceTask,
+      'approval',
+      `task:${entry.taskId}:approval:${requestId}:denied`,
+      {
+        status: 'denied',
+        tool_name: toolName,
+        ...(pendingApproval?.tool_kind ? { tool_kind: pendingApproval.tool_kind } : {}),
+        ...(pendingApproval?.tool_source_ref
+          ? { tool_source_ref: pendingApproval.tool_source_ref }
+          : {}),
+      },
+      requestId
+    )
     this.emitEvent('tool:approval_denied', {
       toolName,
       requestId,
@@ -1039,38 +1301,28 @@ export class AgentStateMachine extends EventEmitter {
       return false
     }
 
-    const executor = new TaskExecutor(task, {
-      conversationManager: this.conversationManager,
-      llmProvider: this.llmProvider,
-      mcpManager: this.mcpManager,
-      workspaceService: this.workspaceProvider?.forSource(task.sourceMessage),
-      config: this.config,
-      modelName: this.modelName,
-      approvalConfig: this.approvalConfig,
-      coreEvents: this.coreEvents,
-      cronScheduler: this.cronScheduler,
-      taskLifecycle: this.lifecycle,
-      dynamicEnvProvider: this.dynamicEnvProvider,
-      secretEntriesProvider: this.secretEntriesProvider,
-      usageReporter: this.usageReporter,
-      usageStaticContext: this.usageStaticContext,
-      spilloverStorage: this.spilloverStorage,
-      promptCache: this.promptCache,
-      sessionSearchService: this.sessionSearchService,
-      onApprovalNeeded: (requestId, taskId, approval) => {
-        this.registerApproval(requestId, taskId, task, approval)
-      },
-      onComplete: t => {
-        this.activeExecutors.delete(t.id)
-        this.releaseSessionForTask(t)
-        this.queue.completeTask(t)
-        this.emitEvent('task:completed', { task: t })
-      },
-      onFail: (t: Task, error: TaskError) => {
-        this.activeExecutors.delete(t.id)
-        this.releaseSessionForTask(t)
-        this.handleTaskFailure(t, error)
-      },
+    let effectiveProvider = this.llmProvider
+    let effectiveModel = this.modelName
+    let effectiveContextWindow: number | undefined
+    if (this.taskModelResolver) {
+      try {
+        const sessionKey = resolveTaskSessionKey(task)
+        const existing = await this.conversationManager.getSessionByKeyAsync(sessionKey)
+        const resolved = this.taskModelResolver(existing?.modelSelections)
+        if (resolved) {
+          effectiveProvider = resolved.provider
+          effectiveModel = resolved.model
+          effectiveContextWindow = resolved.contextWindowTokens
+        }
+      } catch (err) {
+        console.warn('[Agent] per-task model resolution failed; using Host default:', err)
+      }
+    }
+
+    const executor = this.createTaskExecutor(task, {
+      provider: effectiveProvider,
+      model: effectiveModel,
+      contextWindowTokens: effectiveContextWindow,
     })
 
     this.activeExecutors.set(task.id, executor)
@@ -1085,6 +1337,90 @@ export class AgentStateMachine extends EventEmitter {
     }
 
     return executor.executorState === 'waiting_approval'
+  }
+
+  private createTaskExecutor(
+    task: Task,
+    effective?: {
+      provider: SingleTurnProvider
+      model: string
+      contextWindowTokens?: number
+    }
+  ): TaskExecutor {
+    if (!this.llmProvider) throw new Error('LLM provider not initialized')
+
+    return new TaskExecutor(task, {
+      conversationManager: this.conversationManager,
+      llmProvider: effective?.provider ?? this.llmProvider,
+      mcpManager: this.mcpManager,
+      workspaceService: this.workspaceProvider?.forSource(task.sourceMessage),
+      config: this.config,
+      modelName: effective?.model ?? this.modelName,
+      contextWindowTokens: effective?.contextWindowTokens,
+      approvalConfig: this.approvalConfig,
+      coreEvents: this.coreEvents,
+      cronScheduler: this.cronScheduler,
+      taskLifecycle: this.lifecycle,
+      dynamicEnvProvider: this.dynamicEnvProvider,
+      secretEntriesProvider: this.secretEntriesProvider,
+      usageReporter: this.usageReporter,
+      usageStaticContext: this.usageStaticContext,
+      governedRunReporter: this.governedRunReporter,
+      spilloverStorage: this.spilloverStorage,
+      promptCache: this.promptCache,
+      sessionSearchService: this.sessionSearchService,
+      // R5 — resolved per task (reads live policy/engine from main.ts). Absent →
+      // no failover.
+      failover: this.failoverSupportProvider?.() ?? undefined,
+      onApprovalNeeded: (requestId, taskId, approval) => {
+        this.registerApproval(requestId, taskId, task, approval)
+      },
+      onComplete: t => {
+        this.enqueueTaskTrace(t, 'run_end', `task:${t.id}:end`, { status: 'succeeded' })
+        this.activeExecutors.delete(t.id)
+        this.releaseSessionForTask(t)
+        this.queue.completeTask(t)
+        this.emitEvent('task:completed', { task: t })
+      },
+      onFail: (t: Task, error: TaskError) => {
+        this.enqueueTaskTrace(t, 'run_end', `task:${t.id}:end`, {
+          status: 'failed',
+          error_class: error.code,
+        })
+        this.activeExecutors.delete(t.id)
+        this.releaseSessionForTask(t)
+        this.handleTaskFailure(t, error)
+      },
+    })
+  }
+
+  private enqueueTaskTrace(
+    task: Task,
+    eventType: 'approval' | 'run_end',
+    sourceEventId: string,
+    payload: {
+      status: string
+      tool_name?: string
+      tool_kind?: 'internal_tool' | 'mcp_server_tool' | 'workflow'
+      tool_source_ref?: string
+      error_class?: string
+    },
+    approvalRequestId?: string
+  ): void {
+    const trace = task.traceContext
+    const hostRef = this.usageStaticContext?.host_ref
+    if (!trace || !hostRef) return
+    this.governedRunReporter?.enqueue({
+      sourceEventId,
+      occurredAt: new Date().toISOString(),
+      eventType,
+      runId: trace.runId,
+      approvalRequestId,
+      hostRef,
+      sessionId: trace.sessionId ?? null,
+      origin: trace.origin,
+      payload,
+    })
   }
 
   /**

@@ -7,6 +7,7 @@ import { CreateMcpServerForm } from '@components/CreateMcpServerForm'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { IconCable } from '@components/Sidebar/icons'
+import { CONTROL_ROUTES } from '@constants/routes'
 
 export default function CreateMcpServerPage() {
   const router = useRouter()
@@ -16,15 +17,15 @@ export default function CreateMcpServerPage() {
       <DashboardLayout isDetailPage>
         <CreateMcpServerForm
           mode="page"
-          onCreated={() => router.push('/mcp-servers')}
-          onCancel={() => router.push('/mcp-servers')}
+          onCreated={() => router.push(CONTROL_ROUTES.connectors.root)}
+          onCancel={() => router.push(CONTROL_ROUTES.connectors.root)}
           pageHeader={
             <CreatePageHeader
               icon={<IconCable />}
               title="Create connector"
               subtitle="Register a new connector and optionally create its managed deployment metadata."
               backLabel="Back to connectors"
-              onBack={() => router.push('/mcp-servers')}
+              onBack={() => router.push(CONTROL_ROUTES.connectors.root)}
             />
           }
         />

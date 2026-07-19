@@ -78,6 +78,7 @@ describe('userApprovalRequester — gateStep', () => {
       stepId: 'step-1',
       target: { userId: 'user-1' },
       message: 'Approve this step?',
+      runBindingProof: '00000000-0000-4000-8000-000000000123',
     }
 
     const promise = gateStep(params, auth)
@@ -108,6 +109,7 @@ describe('userApprovalRequester — gateStep', () => {
       recipeName: 'standalone',
       target: { userId: 'user-1' },
       payload: { message: 'Approve this step?' },
+      workflowRunBindingProof: '00000000-0000-4000-8000-000000000123',
     })
   })
 
@@ -627,6 +629,43 @@ describe('userApprovalRequester — gateStep', () => {
         }),
       })
     )
+  })
+
+  it('retries a run binding conflict while WRC persists the exact step hash', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        json: async () => ({ error: 'workflow_approval_run_binding_invalid' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ approvalRequestId: 'approval-bound', status: 'pending' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'approved' }),
+      })
+
+    const pending = gateStep(
+      {
+        stepId: 'approval-gated-step',
+        executionId: '22222222-2222-4222-8222-222222222222:risk-review:started',
+        runBindingProof: '33333333-3333-4333-8333-333333333333',
+        target: { userId: 'user-1' },
+        message: 'approve the bound step',
+      },
+      auth
+    )
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    await expect(pending).resolves.toMatchObject({ status: 'approved' })
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+    expect(mockFetch.mock.calls[0]?.[0]).toContain('/workflow-approvals/request')
+    expect(mockFetch.mock.calls[1]?.[0]).toContain('/workflow-approvals/request')
+    expect(mockFetch.mock.calls[2]?.[0]).toContain('/workflow-approvals/approval-bound/status')
   })
 
   it('uses a stable idempotency key within one execution and a different key across executions', async () => {

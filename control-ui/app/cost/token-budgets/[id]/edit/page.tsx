@@ -9,6 +9,7 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { IconBudget } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { TokenBudgetForm } from '@components/TokenBudgetForm'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateTokenBudgetInput,
   type TokenBudget,
@@ -32,7 +33,7 @@ export default function EditTokenBudgetPage() {
   const [unpricedModelsError, setUnpricedModelsError] = useState<UnpricedModel[] | null>(null)
 
   function backToList() {
-    router.push('/cost/token-budgets')
+    router.push(CONTROL_ROUTES.costAndUsage.tokenBudgets)
   }
 
   useEffect(() => {

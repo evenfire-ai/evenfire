@@ -385,6 +385,16 @@ export function setSandboxUiBounds(bounds: SandboxUiBounds): void {
   active.view.setBounds(toViewBounds(bounds, active.parentWindow))
 }
 
+/**
+ * Hide the native WebContentsView while renderer-owned overlays are open.
+ * WebContentsView always paints above the renderer DOM regardless of CSS
+ * z-index, so visibility is the reliable way to let menus and toasts win.
+ */
+export function setSandboxUiVisible(visible: boolean): void {
+  if (!active) return
+  active.view.setVisible(visible)
+}
+
 export async function captureSandboxUiPreview(): Promise<string | null> {
   if (!active) return null
   if (active.view.webContents.isDestroyed()) return null

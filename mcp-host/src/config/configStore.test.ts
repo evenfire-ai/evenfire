@@ -1,6 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ALL_PROVIDERS } from '../llm/registryCore'
+import { register } from 'prom-client'
+import { ALL_PROVIDERS, descriptorFor } from '../llm/registryCore'
 import { ConfigStore, PROVIDER_ENV_NAMES } from './configStore'
+
+const ALLOWLIST_CM = 'clerum-llm-allowed-models'
+const ALLOWLIST_WATCH_KEY = `/api/v1/namespaces/mcp-host/configmaps|metadata.name=${ALLOWLIST_CM}`
+
+async function counterValue(name: string): Promise<number> {
+  const metric = register.getSingleMetric(name)
+  if (!metric) return 0
+  const data = await metric.get()
+  return data.values.reduce((sum, v) => sum + v.value, 0)
+}
 
 // ─── Test doubles ─────────────────────────────────────────────────────
 
@@ -88,6 +99,7 @@ function build(opts: {
   provider?: 'openai' | 'claude' | 'zai' | 'bailian' | null
   secrets?: Record<string, Record<string, string>>
   configMaps?: Record<string, Record<string, string>>
+  allowlistConfigMapName?: string | null
 }): { store: ConfigStore; watch: FakeWatch; api: FakeCoreApi } {
   const watch = makeFakeWatch()
   const api = makeFakeCoreApi({ secrets: opts.secrets, configMaps: opts.configMaps })
@@ -96,6 +108,7 @@ function build(opts: {
     hostRef: 'trader',
     llmSecretRef: opts.llmSecretRef ?? 'chatllm-api-keys',
     provider: opts.provider ?? 'openai',
+    allowlistConfigMapName: opts.allowlistConfigMapName,
     coreApi: api as unknown as ConstructorParameters<typeof ConfigStore>[0]['coreApi'],
     watch: watch as unknown as ConstructorParameters<typeof ConfigStore>[0]['watch'],
   })
@@ -288,7 +301,11 @@ describe('ConfigStore', () => {
     })
 
     expect(store.get('OPENAI_API_KEY')).toBe('sk-new')
-    expect(handler).toHaveBeenCalledWith({ llmKeyChanged: true, envChanged: false })
+    expect(handler).toHaveBeenCalledWith({
+      llmKeyChanged: true,
+      envChanged: false,
+      allowlistChanged: false,
+    })
   })
 
   it('fires onChange with envChanged=true when per-Host Secret changes', async () => {
@@ -314,7 +331,11 @@ describe('ConfigStore', () => {
 
     expect(store.get('GITHUB_TOKEN')).toBe('new-token')
     expect(store.get('NEW_KEY')).toBe('added')
-    expect(handler).toHaveBeenCalledWith({ llmKeyChanged: false, envChanged: true })
+    expect(handler).toHaveBeenCalledWith({
+      llmKeyChanged: false,
+      envChanged: true,
+      allowlistChanged: false,
+    })
   })
 
   it('does not fire onChange when nothing actually changed', async () => {
@@ -382,12 +403,21 @@ describe('ConfigStore', () => {
     }
   })
 
-  it('exports the four reserved provider env names', () => {
+  it('exports every provider credential slot env name (all slots, all providers)', () => {
     expect(PROVIDER_ENV_NAMES.has('OPENAI_API_KEY')).toBe(true)
     expect(PROVIDER_ENV_NAMES.has('CLAUDE_API_KEY')).toBe(true)
     expect(PROVIDER_ENV_NAMES.has('ZAI_API_KEY')).toBe(true)
     expect(PROVIDER_ENV_NAMES.has('BAILIAN_API_KEY')).toBe(true)
-    expect(PROVIDER_ENV_NAMES.size).toBe(ALL_PROVIDERS.length)
+    // Multi-slot (R4): Vertex's JSON slot and Bedrock's TWO AWS key slots.
+    expect(PROVIDER_ENV_NAMES.has('VERTEX_SERVICE_ACCOUNT_JSON')).toBe(true)
+    expect(PROVIDER_ENV_NAMES.has('AWS_ACCESS_KEY_ID')).toBe(true)
+    expect(PROVIDER_ENV_NAMES.has('AWS_SECRET_ACCESS_KEY')).toBe(true)
+    // One entry per credential slot across every provider (Bedrock = 2).
+    const totalSlots = ALL_PROVIDERS.reduce(
+      (n, p) => n + descriptorFor(p).credentialSlots.length,
+      0
+    )
+    expect(PROVIDER_ENV_NAMES.size).toBe(totalSlots)
   })
 
   it('snapshot exposes effective merged env vars', async () => {
@@ -450,5 +480,250 @@ describe('ConfigStore', () => {
       expect(userEnv, `provider=${provider}`).not.toHaveProperty(envName)
       s.stop()
     }
+  })
+})
+
+// ─── Allowlist tier (R3) ──────────────────────────────────────────────
+// The allowlist CM `data` fixtures below mirror control-api buildConfigMapData
+// (control-api/src/services/llmAllowedModelsConfigMap.ts) — keep in sync.
+
+describe('ConfigStore — allowlist tier (R3)', () => {
+  let store: ConfigStore | null = null
+
+  afterEach(() => {
+    store?.stop()
+    store = null
+  })
+
+  it('is disabled (no 4th watch, unavailable) when no CM name is configured', async () => {
+    const built = build({
+      provider: 'openai',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      // allowlistConfigMapName omitted → tier disabled
+    })
+    store = built.store
+    await store.start()
+
+    // Only the 3 existing tiers watch.
+    expect(built.watch.watch).toHaveBeenCalledTimes(3)
+    expect(store.allowlistAvailable()).toBe(false)
+    expect(store.allowedModels().size).toBe(0)
+  })
+
+  it('bootstraps the allowlist and exposes per-provider entries', async () => {
+    const built = build({
+      provider: 'openai',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          openai: JSON.stringify([
+            {
+              model: 'gpt-5.4',
+              displayName: 'GPT 5.4',
+              contextWindowTokens: 400000,
+              vendor: 'OpenAI',
+            },
+          ]),
+          claude: JSON.stringify([{ model: 'claude-opus-4-8' }]),
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+
+    // 4th watch is now active.
+    expect(built.watch.watch).toHaveBeenCalledTimes(4)
+    expect(store.allowlistAvailable()).toBe(true)
+    expect(store.allowedModels().get('openai')).toEqual([
+      { model: 'gpt-5.4', displayName: 'GPT 5.4', contextWindowTokens: 400000, vendor: 'OpenAI' },
+    ])
+    expect(store.allowedModels().get('claude')).toEqual([{ model: 'claude-opus-4-8' }])
+  })
+
+  it('hot-reloads: a MODIFIED event makes the new allowlist visible + fires allowlistChanged', async () => {
+    const built = build({
+      provider: 'openai',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: { openai: JSON.stringify([{ model: 'gpt-5.4' }]) },
+      },
+    })
+    store = built.store
+    const handler = vi.fn()
+    store.onChange(handler)
+    await store.start()
+
+    expect(store.allowedModels().get('openai')).toEqual([{ model: 'gpt-5.4' }])
+
+    const handle = built.watch.active.get(ALLOWLIST_WATCH_KEY)
+    expect(handle).toBeDefined()
+    handle!.emit('MODIFIED', {
+      metadata: { name: ALLOWLIST_CM },
+      data: { openai: JSON.stringify([{ model: 'gpt-5.4' }, { model: 'gpt-6' }]) },
+    })
+
+    expect(store.allowedModels().get('openai')).toEqual([{ model: 'gpt-5.4' }, { model: 'gpt-6' }])
+    expect(handler).toHaveBeenCalledWith({
+      llmKeyChanged: false,
+      envChanged: false,
+      allowlistChanged: true,
+    })
+  })
+
+  it('does NOT re-fire allowlistChanged when a byte-identical CM is re-delivered', async () => {
+    const payload = { openai: JSON.stringify([{ model: 'gpt-5.4', displayName: 'GPT 5.4' }]) }
+    const built = build({
+      provider: 'openai',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: { [ALLOWLIST_CM]: { ...payload } },
+    })
+    store = built.store
+    await store.start()
+    const handler = vi.fn()
+    store.onChange(handler)
+
+    const handle = built.watch.active.get(ALLOWLIST_WATCH_KEY)
+    // Re-deliver the exact same content (routine watch churn / reconnect replay).
+    handle!.emit('MODIFIED', { metadata: { name: ALLOWLIST_CM }, data: { ...payload } })
+    handle!.emit('ADDED', { metadata: { name: ALLOWLIST_CM }, data: { ...payload } })
+
+    expect(handler).not.toHaveBeenCalled()
+
+    // A real content change still fires.
+    handle!.emit('MODIFIED', {
+      metadata: { name: ALLOWLIST_CM },
+      data: { openai: JSON.stringify([{ model: 'gpt-5.4' }, { model: 'gpt-6' }]) },
+    })
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledWith({
+      llmKeyChanged: false,
+      envChanged: false,
+      allowlistChanged: true,
+    })
+  })
+
+  it('CM absent (404) → allowlistAvailable false + increments the missing metric', async () => {
+    const before = await counterValue('clerum_llm_allowlist_missing_total')
+    const built = build({
+      provider: 'openai',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {}, // CM does not exist
+    })
+    store = built.store
+    await store.start()
+
+    expect(store.allowlistAvailable()).toBe(false)
+    expect(store.allowedModels().size).toBe(0)
+    const after = await counterValue('clerum_llm_allowlist_missing_total')
+    expect(after).toBe(before + 1)
+  })
+
+  it('DELETED event flips back to unavailable and fires allowlistChanged', async () => {
+    const built = build({
+      provider: 'openai',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: { [ALLOWLIST_CM]: { openai: JSON.stringify([{ model: 'gpt-5.4' }]) } },
+    })
+    store = built.store
+    await store.start()
+    expect(store.allowlistAvailable()).toBe(true)
+
+    const handler = vi.fn()
+    store.onChange(handler)
+    const handle = built.watch.active.get(ALLOWLIST_WATCH_KEY)
+    handle!.emit('DELETED', { metadata: { name: ALLOWLIST_CM } })
+
+    expect(store.allowlistAvailable()).toBe(false)
+    expect(store.allowedModels().size).toBe(0)
+    expect(handler).toHaveBeenCalledWith({
+      llmKeyChanged: false,
+      envChanged: false,
+      allowlistChanged: true,
+    })
+  })
+
+  it('isolates a provider key with invalid JSON — other keys still parse', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    // A distinctive raw value that must NOT surface in the log (a V8 SyntaxError
+    // can embed a snippet of the offending value — see the no-log-value policy).
+    const badValue = '{ not valid json SECRETish-snippet'
+    const built = build({
+      provider: 'openai',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          openai: badValue,
+          claude: JSON.stringify([{ model: 'claude-opus-4-8' }]),
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+
+    // The CM is delivered (available), but the bad key is dropped.
+    expect(store.allowlistAvailable()).toBe(true)
+    expect(store.allowedModels().has('openai')).toBe(false)
+    expect(store.allowedModels().get('claude')).toEqual([{ model: 'claude-opus-4-8' }])
+
+    // The corrupt-key event logs the key at ERROR but never the raw value.
+    const logged = errorSpy.mock.calls.flat().join(' ')
+    expect(logged).toContain("allowlist key 'openai'")
+    expect(logged).not.toContain('SECRETish-snippet')
+    errorSpy.mockRestore()
+  })
+
+  it('drops malformed entries (non-object / missing model) but keeps valid ones', async () => {
+    const built = build({
+      provider: 'openai',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          openai: JSON.stringify(['not-an-object', { noModel: true }, { model: 'gpt-5.4' }]),
+          zai: JSON.stringify({ not: 'an-array' }),
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+
+    expect(store.allowedModels().get('openai')).toEqual([{ model: 'gpt-5.4' }])
+    // Non-array value for a key is skipped entirely.
+    expect(store.allowedModels().has('zai')).toBe(false)
+  })
+
+  it('re-warns/re-increments the missing metric only on transitions', async () => {
+    const built = build({
+      provider: 'openai',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: { [ALLOWLIST_CM]: { openai: JSON.stringify([{ model: 'gpt-5.4' }]) } },
+    })
+    store = built.store
+    await store.start()
+
+    const handle = built.watch.active.get(ALLOWLIST_WATCH_KEY)
+    const before = await counterValue('clerum_llm_allowlist_missing_total')
+
+    // First DELETE → one increment.
+    handle!.emit('DELETED', { metadata: { name: ALLOWLIST_CM } })
+    // A second DELETE without an intervening ADD must NOT re-increment.
+    handle!.emit('DELETED', { metadata: { name: ALLOWLIST_CM } })
+    expect(await counterValue('clerum_llm_allowlist_missing_total')).toBe(before + 1)
+
+    // Re-add, then delete again → a fresh transition re-increments.
+    handle!.emit('MODIFIED', {
+      metadata: { name: ALLOWLIST_CM },
+      data: { openai: JSON.stringify([{ model: 'gpt-5.4' }]) },
+    })
+    expect(store.allowlistAvailable()).toBe(true)
+    handle!.emit('DELETED', { metadata: { name: ALLOWLIST_CM } })
+    expect(await counterValue('clerum_llm_allowlist_missing_total')).toBe(before + 2)
   })
 })

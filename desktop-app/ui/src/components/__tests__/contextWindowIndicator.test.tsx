@@ -117,6 +117,54 @@ describe('ContextWindowIndicator', () => {
     expect(container.querySelector('.context-window-row')).toBeNull()
   })
 
+  it('re-probes (forced) when the turn signal advances: null on mount → snapshot after the turn', async () => {
+    // Mount probe lands before the task registers its snapshot (null); the next
+    // probe, triggered by the turn-signal advance, sees the real breakdown.
+    let call = 0
+    const getContextBreakdown = vi.fn(async () =>
+      call++ === 0 ? { breakdown: null } : { breakdown }
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      writable: true,
+      value: { rpc: { getContextBreakdown } },
+    })
+
+    const { rerender } = render(
+      <ContextWindowIndicator agentRef="trader" chatId="c1" turnSignal={0} />
+    )
+
+    // Mount probe resolves to null → chip stays hidden (no leave/re-enter).
+    await waitFor(() => expect(getContextBreakdown).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Context window/ })).toBeNull())
+
+    // Turn completes: the poll's input-token count advances → forced re-probe
+    // bypasses the fresh/TTL short-circuit that cached the `null`.
+    await act(async () => {
+      rerender(<ContextWindowIndicator agentRef="trader" chatId="c1" turnSignal={1234} />)
+    })
+
+    await waitFor(() => expect(getContextBreakdown).toHaveBeenCalledTimes(2))
+    const chip = await screen.findByRole('button', { name: /Context window — / })
+    expect(chip.textContent).toContain('32.9k/100k (33%)')
+  })
+
+  it('does not re-probe when the turn signal is unchanged (only identity churn)', async () => {
+    const getContextBreakdown = installClerum({ breakdown })
+    const { rerender } = render(
+      <ContextWindowIndicator agentRef="trader" chatId="c1" turnSignal={5} />
+    )
+
+    await screen.findByRole('button', { name: /Context window — / })
+    const callsAfterMount = getContextBreakdown.mock.calls.length
+
+    // Re-render with the SAME signal — no forced re-probe should fire.
+    await act(async () => {
+      rerender(<ContextWindowIndicator agentRef="trader" chatId="c1" turnSignal={5} />)
+    })
+    expect(getContextBreakdown.mock.calls.length).toBe(callsAfterMount)
+  })
+
   it('hides the chip entirely when the probe resolves to no snapshot (cold session)', async () => {
     const getContextBreakdown = installClerum({ breakdown: null })
     const { container } = render(<ContextWindowIndicator agentRef="trader" chatId="c1" />)

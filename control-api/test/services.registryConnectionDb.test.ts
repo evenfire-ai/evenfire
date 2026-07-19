@@ -27,7 +27,7 @@ const { cfg } = vi.hoisted(() => ({
     registryVoucherKid: '',
     registryClientId: '',
     registryClientSecret: '',
-    registryUrl: 'https://example.com',
+    registryUrl: 'https://registry.evenfire.ai',
     oauthEncryptionKey: '',
   } as Record<string, string>,
 }))
@@ -74,7 +74,7 @@ function makeRawRow(encKeyHex: string, overrides: Partial<RawRowShape> = {}): Ra
     requested_org_name: 'acme',
     contact_email: 'a@x.io',
     status: 'pending',
-    registry_url: 'https://example.com',
+    registry_url: 'https://registry.evenfire.ai',
     ...overrides,
   }
 }
@@ -87,7 +87,7 @@ afterEach(() => {
   cfg.registryVoucherKid = ''
   cfg.registryClientId = ''
   cfg.registryClientSecret = ''
-  cfg.registryUrl = 'https://example.com'
+  cfg.registryUrl = 'https://registry.evenfire.ai'
   cfg.oauthEncryptionKey = ''
 })
 
@@ -192,7 +192,7 @@ describe('upsertPendingConnection — writes ciphertext, never plaintext (C-I3a)
       privateKeyPem: privateKey,
       requestedOrgName: 'acme',
       contactEmail: 'a@x.io',
-      registryUrl: 'https://example.com',
+      registryUrl: 'https://registry.evenfire.ai',
     })
 
     // A DELETE precedes the INSERT (singleton replace).

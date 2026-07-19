@@ -7,6 +7,9 @@ metadata:
     app: control-api
 data:
   CONTROL_API_PORT: '8090'
+  TRACING_ENVIRONMENT: 'local'
+  TRACING_CLUSTER_NAME: 'minikube'
+  TRACING_CLUSTER_LOCATION: 'local'
   # minikube-only: point the Figure D delivery worker at the fake-telegram-server
   # (tests/e2e/fixtures/fake-telegram-server). Prod default stays https://api.telegram.org.
   WORKFLOW_APPROVAL_TELEGRAM_API_ROOT: 'http://fake-telegram-server.channels.svc.cluster.local:8080'

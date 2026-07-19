@@ -79,6 +79,7 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
     const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1] as {
       messageId?: unknown
+      traceContext?: unknown
     }
     // D1: messageId is now a PER-REQUEST unique idempotency id (random nonce),
     // NOT derived from content — a content-hash key would suppress legitimate
@@ -95,6 +96,11 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
       metadata: { accessScope: 'team', teamId: 'team-1' },
       threadId: 'chat-1',
       attachments: undefined,
+    })
+    expect(forwardedBody.traceContext).toMatchObject({
+      version: 1,
+      origin: 'direct_chat',
+      sessionId: 'chat-1',
     })
   })
 

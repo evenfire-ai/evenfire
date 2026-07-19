@@ -5,7 +5,7 @@ import { __resetTokenCacheForTests, mintToken } from '../src/services/registryCl
 const { cfg } = vi.hoisted(() => ({
   cfg: {
     registryConnectionMode: 'self-hosted',
-    registryUrl: 'https://example.com',
+    registryUrl: 'https://registry.evenfire.ai',
     registryClientId: '',
     registryClientSecret: '',
     registryAuthEnabled: true,

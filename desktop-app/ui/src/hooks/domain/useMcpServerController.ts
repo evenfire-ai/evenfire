@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { HostRuntimeStatus } from '../../../../src/types'
+import { DESKTOP_ROUTES } from '../../constants/navigation'
 import type { NavItem } from '../../uiTypes'
 
 interface UseMcpServerControllerParams {
@@ -23,7 +24,7 @@ export function useMcpServerController({
   const [mcpHealthRefreshing, setMcpHealthRefreshing] = useState(false)
 
   useEffect(() => {
-    if (navItem !== 'agents' || !selectedAgent || !isAuthenticated) {
+    if (navItem !== DESKTOP_ROUTES.agents || !selectedAgent || !isAuthenticated) {
       setHostRuntimeLoading(false)
       setHostRuntimeError(null)
       return

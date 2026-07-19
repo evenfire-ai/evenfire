@@ -1,0 +1,16 @@
+{
+  "name": "@clerum/llm-providers",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared canonical LLM provider ids, credential slots and display metadata",
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.cjs",
+      "default": "./index.cjs"
+    }
+  },
+  "license": "MIT"
+}

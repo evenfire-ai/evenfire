@@ -452,7 +452,10 @@ export function buildCoordinatorPod(
             { name: 'RECIPE_NAME', value: recipeName },
             { name: 'CLERUM_WORKFLOW_NAME', value: recipeName },
             ...(options.workflowRunId
-              ? [{ name: 'CLERUM_WORKFLOW_RUN_ID', value: options.workflowRunId }]
+              ? [
+                  { name: 'CLERUM_WORKFLOW_RUN_ID', value: options.workflowRunId },
+                  { name: 'CLERUM_CORRELATION_ID', value: options.workflowRunId },
+                ]
               : []),
             ...(options.workflowTeamId
               ? [{ name: 'CLERUM_WORKFLOW_TEAM_ID', value: options.workflowTeamId }]

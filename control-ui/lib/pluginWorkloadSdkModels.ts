@@ -1,14 +1,15 @@
-import { type LlmProvider, getModelOptions } from './llm'
+import { type LlmModelCatalogEntry, getModelOptions } from './llm'
 
 export type CustomPluginWorkloadSdkModelValidation =
   | { ok: true; model: string }
   | { ok: false; reason: 'empty' | 'wildcard' | 'duplicate' }
 
 export function buildPluginWorkloadSdkModelOptions(
-  provider: LlmProvider,
+  catalog: LlmModelCatalogEntry[],
+  provider: string,
   selectedModels: string[]
 ): string[] {
-  const knownModels = getModelOptions(provider)
+  const knownModels = getModelOptions(catalog, provider)
   const seen = new Set(knownModels)
   const customModels = selectedModels.filter(model => {
     if (!model || seen.has(model)) return false

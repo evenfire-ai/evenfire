@@ -1,9 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
 import { pool } from '../src/db.js'
+import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
+import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 import { MockGateway } from './mockGateway.js'
+
+function signHccInternalControl(): string {
+  return jwt.sign(
+    { iss: 'hcc', aud: 'control-api', sub: 'hcc-provisioner' },
+    config.internalControlJwtHccHmacSecret,
+    { algorithm: 'HS256', expiresIn: 60, jwtid: 'hcc-health-transition-test' }
+  )
+}
 
 describe('app router wiring', () => {
   afterEach(() => {
@@ -45,6 +56,107 @@ describe('app router wiring', () => {
     }
   })
 
+  it('uses the dedicated 512 KiB parser for internal tracing submissions', async () => {
+    const previousLimit = config.jsonBodyLimit
+    config.jsonBodyLimit = '1kb'
+    try {
+      const app = createApp(new MockGateway('mcp-server') as never)
+      const { token } = issueMcpHostAccessJwt('sandbox-recipes', 'trace-parser-test', [
+        'trace-parser-host',
+      ])
+      const validSizedBody = {
+        events: [
+          {
+            eventType: 'run_start',
+            sourceEventId: 'start-1',
+            occurredAt: '2026-07-11T00:00:00.000Z',
+          },
+        ],
+        padding: 'x'.repeat(2 * 1024),
+      }
+
+      // This reaches tracing auth instead of being rejected by the unrelated
+      // global 1 KiB parser. The missing credential is the expected boundary.
+      await request(app)
+        .post('/api/v1/internal/tracing/agent-run-events')
+        .send(validSizedBody)
+        .expect(403)
+
+      await request(app)
+        .post('/api/v1/internal/tracing/agent-run-events')
+        .auth(token, { type: 'bearer' })
+        .send({ events: [{ payload: 'x'.repeat(512 * 1024) }] })
+        .expect(413)
+
+      await request(app)
+        .post('/api/v1/internal/tracing/agent-run-events/')
+        .auth(token, { type: 'bearer' })
+        .send({ events: [{ payload: 'x'.repeat(512 * 1024) }] })
+        .expect(413)
+    } finally {
+      config.jsonBodyLimit = previousLimit
+    }
+  })
+
+  it('uses the dedicated 2 KiB parser for canonical Host resolve-and-bind requests', async () => {
+    const app = createApp(new MockGateway('mcp-server') as never)
+    const rpcToken = signRpcAccessToken({
+      sub: 'user-1',
+      typ: 'user',
+      teamId: 'team-1',
+      role: 'member',
+      scopes: ['host:message:invoke'],
+      hostRefs: ['host-a'],
+      jti: 'app-host-binding-body-limit',
+    })
+
+    await request(app)
+      .post('/api/v1/rpc/access/users/user-1/mcp-hosts/host-a')
+      .set('authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .set('x-rpc-access-token', rpcToken)
+      .send({
+        runId: '00000000-0000-4000-8000-000000000123',
+        sessionId: 'x'.repeat(3_000),
+        origin: 'direct_chat',
+      })
+      .expect(413)
+
+    await request(app)
+      .post('/API/V1/RPC/ACCESS/USERS/user-1/MCP-HOSTS/host-a')
+      .set('authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .set('x-rpc-access-token', rpcToken)
+      .send({
+        runId: '00000000-0000-4000-8000-000000000123',
+        sessionId: 'x'.repeat(3_000),
+        origin: 'direct_chat',
+      })
+      .expect(413)
+  })
+
+  it('rejects an HCC health transition when no server-verifiable Host binding source exists', async () => {
+    const app = createApp(new MockGateway('mcp-server') as never)
+
+    const response = await request(app)
+      .post('/api/v1/internal/tracing/infrastructure-telemetry-events')
+      .set('Authorization', `Bearer ${signHccInternalControl()}`)
+      .send({
+        events: [
+          {
+            sourceEventId: 'health-transition-1',
+            occurredAt: '2026-07-11T10:00:00.000Z',
+            telemetryType: 'health_transition',
+          },
+        ],
+      })
+      .expect(403)
+
+    expect(response.body.error).toBe(
+      'HCC telemetry rejected: no server-verifiable Host reference exists.'
+    )
+  })
+
   it('enforces internal auth for internal routes', async () => {
     const app = createApp(new MockGateway('mcp-server') as never)
     await request(app).get('/api/v1/external/users/u1/teams').expect(401)
@@ -81,5 +193,6 @@ describe('app router wiring', () => {
     const app = createApp(new MockGateway('mcp-server') as never)
     await request(app).get('/api/v1/admin/hosts').expect(401)
     await request(app).get('/api/v1/admin/users').expect(401)
+    await request(app).get('/api/v1/admin/tracing/operations').expect(401)
   })
 })

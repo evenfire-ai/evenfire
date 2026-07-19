@@ -11,7 +11,7 @@ export function GfsResourceMenu({
   onDelete,
   onDownload,
   onManage,
-  onOpen,
+  onPreview,
   onRename,
   onReplace,
   resourceName,
@@ -64,11 +64,7 @@ export function GfsResourceMenu({
   }
 
   return (
-    <div
-      className="cu-kebab cu-gfs-resource-menu"
-      ref={rootRef}
-      onKeyDown={handleMenuKeyDown}
-    >
+    <div className="cu-kebab cu-gfs-resource-menu" ref={rootRef} onKeyDown={handleMenuKeyDown}>
       <button
         type="button"
         aria-label={`Actions for ${resourceName}`}
@@ -82,22 +78,24 @@ export function GfsResourceMenu({
       </button>
       {open ? (
         <div className="cu-kebab__menu cu-kebab__menu--nowrap" role="menu">
-          <button
-            type="button"
-            role="menuitem"
-            className="cu-kebab__item"
-            onClick={() => run(onManage)}
-          >
-            Manage access
-          </button>
-          {onOpen ? (
+          {onManage ? (
             <button
               type="button"
               role="menuitem"
               className="cu-kebab__item"
-              onClick={() => run(onOpen)}
+              onClick={() => run(onManage)}
             >
-              Open folder
+              Manage access
+            </button>
+          ) : null}
+          {onPreview ? (
+            <button
+              type="button"
+              role="menuitem"
+              className="cu-kebab__item"
+              onClick={() => run(onPreview)}
+            >
+              Preview
             </button>
           ) : null}
           {onDownload ? (

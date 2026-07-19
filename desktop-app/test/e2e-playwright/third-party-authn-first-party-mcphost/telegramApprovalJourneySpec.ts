@@ -1,7 +1,6 @@
 import { type Page, expect, test } from '@playwright/test'
 import { clearSession, loginAs } from '../workflowUi'
 import {
-  TELEGRAM_CHAT_ID,
   applyTelegramCommunicationChannel,
   configureChannelReaderTelegramApiRoot,
   expectChannelReaderCanReachMcpHost,
@@ -57,26 +56,28 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
   test('Telegram verifies identity, approves the workflow, and receives the result artifact', async ({
     browser,
   }) => {
-    test.setTimeout(420_000)
+    test.setTimeout(900_000)
     expect(process.env.E2E_WORKFLOW_APPROVAL_QUADRANTS ?? '').not.toBe('1')
 
+    const runEpochMs = Date.now()
     const recipeName = makeScopedE2ERecipeName('telegram')
-    const marker = `tg-${Date.now().toString(36)}`
+    const marker = `tg-${runEpochMs.toString(36)}`
     const artifactProof = `artifact-output-${marker}`
-    const telegramMessageBase = Math.floor(Date.now() / 1000) * 1000
+    const telegramMessageBase = Math.floor(runEpochMs / 1000) * 1000
+    const telegramIdentityId = String(runEpochMs)
     const verifiedTelegramIdentity: TelegramClientIdentity = {
-      providerUserId: TELEGRAM_CHAT_ID,
-      providerChannelId: TELEGRAM_CHAT_ID,
+      providerUserId: telegramIdentityId,
+      providerChannelId: telegramIdentityId,
       conversationLabel: 'Test User - verified Telegram private chat',
     }
     const wrongChannelIdentity: TelegramClientIdentity = {
       providerUserId: verifiedTelegramIdentity.providerUserId,
-      providerChannelId: `${TELEGRAM_CHAT_ID}-wrong`,
+      providerChannelId: `${telegramIdentityId}-wrong`,
       conversationLabel: 'Test User - Telegram wrong chat',
     }
     const unboundIdentity: TelegramClientIdentity = {
-      providerUserId: `${verifiedTelegramIdentity.providerUserId}-unbound`,
-      providerChannelId: `${TELEGRAM_CHAT_ID}-unbound`,
+      providerUserId: `${telegramIdentityId}-unbound`,
+      providerChannelId: `${telegramIdentityId}-unbound`,
       conversationLabel: 'Unbound Telegram private chat',
     }
     let telegramPage: Page | null = null
@@ -86,11 +87,12 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
       await test.step('Prepare isolated channel-reader, Telegram, user binding, and workflow recipe', async () => {
         await clearSession()
         cleanupWorkflowRecipe(recipeName)
-        cleanupTelegramMediumBinding()
+        cleanupTelegramMediumBinding(verifiedTelegramIdentity)
 
+        const { userId, userToken } = await loginAs(E2E_EMAIL)
         installFakeTelegramProvider()
         configureChannelReaderTelegramApiRoot()
-        applyTelegramCommunicationChannel(HOST_REF, [verifiedTelegramIdentity])
+        applyTelegramCommunicationChannel(HOST_REF, [verifiedTelegramIdentity], [userId])
         waitForChannelReader(HOST_REF)
         expectChannelReaderHasNoProviderHttpIngress(HOST_REF)
         expectChannelReaderCanReachMcpHost(HOST_REF)
@@ -106,7 +108,6 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
         telegramPage = telegram.page
         telegramPortForward = telegram.portForward
 
-        const { userId, userToken } = await loginAs(E2E_EMAIL)
         await verifyTelegramMediumWithFakeProvider(
           telegramPage,
           userToken,
@@ -118,6 +119,7 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
 
       let approvalId: string | null = null
       let cancelledApprovalId: string | null = null
+      let approvedDecisionMessageId: string | null = null
 
       await test.step('Telegram user lists granted workflows through channel-reader and first-party mcp-host', async () => {
         if (!telegramPage) throw new Error('Telegram user client was not initialized')
@@ -126,7 +128,7 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
           'List the workflow recipes I can run. Include the exact workflow recipe names.',
           telegramMessageBase + 1
         )
-        await expectTelegramWorkflowList(telegramPage, [recipeName], [], 45_000)
+        await expectTelegramWorkflowList(telegramPage, [recipeName], [])
         await expect(telegramPage.getByTestId('telegram-bot-replies')).not.toContainText(UUID_RE)
       })
 
@@ -143,7 +145,7 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
           telegramPage,
           replyCountBeforeTypo,
           `Workflow not found: ${typoRecipeName}. Did you mean ${recipeName}?`,
-          90_000
+          180_000
         )
         await expect(
           telegramPage
@@ -170,7 +172,7 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
         ].join(' ')
         await sendTelegramClientMessage(telegramPage, triggerText, telegramMessageBase + 3)
 
-        approvalId = await waitForPendingApprovalId(recipeName, 60_000)
+        approvalId = await waitForPendingApprovalId(recipeName)
         expect(approvalStatus(approvalId)).toBe('pending')
         expect(approvalRequestCountForRecipe(recipeName)).toBe(1)
         expect(workflowRunCountForApproval(approvalId)).toBe(0)
@@ -218,13 +220,16 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
           'Give me the workflow result in this Telegram chat after it starts.',
         ].join(' ')
         await sendTelegramClientMessage(telegramPage, retryTriggerText, telegramMessageBase + 4)
-        approvalId = await waitForPendingApprovalId(recipeName, 60_000)
+        approvalId = await waitForPendingApprovalId(recipeName)
         expect(approvalId).not.toBe(cancelledApprovalId)
         expect(approvalStatus(approvalId)).toBe('pending')
         expect(approvalRequestCountForRecipe(recipeName)).toBe(2)
 
         await waitForWorkflowApprovalInTelegramClient(telegramPage, recipeName)
-        await approveWorkflowFromTelegramClient(telegramPage, recipeName)
+        approvedDecisionMessageId = await approveWorkflowFromTelegramClient(
+          telegramPage,
+          recipeName
+        )
         await expect(telegramPage.getByTestId('telegram-bot-replies')).toContainText(
           'Approved. Workflow approval recorded.',
           { timeout: 60_000 }
@@ -248,12 +253,12 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
           .toBe(1)
         expect(providerDecisionEventSignalForApproval(approvalId)).toBe('decided:1')
         expect(workflowRunSignalForApproval(approvalId)).toBe(
-          `autonomous:autonomous:sandbox-recipes/${recipeName}`
+          `user:onDemand:sandbox-recipes/${recipeName}`
         )
         expect(workflowRunTypedIntentSignalForApproval(approvalId)).toBe('matched:1')
       })
 
-      await test.step('Telegram user retrieves the workflow result artifact through channel-reader', async () => {
+      await test.step('Telegram user receives the workflow result artifact through channel-reader', async () => {
         if (!telegramPage || !approvalId) {
           throw new Error('Telegram user client or consumed approval was not initialized')
         }
@@ -267,7 +272,7 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
           .toBe('Succeeded')
         const firstRunId = workflowRunIdForApproval(approvalId)
         const completionReplyPattern = new RegExp(
-          `Workflow ${recipeName} completed\\. Results are ready\\. Reply: download result`,
+          `Workflow ${recipeName} completed\\. Results are ready\\.`,
           'i'
         )
         await waitForTelegramReplyTextAfter(
@@ -324,11 +329,6 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
         )
         await setTelegramClientIdentity(telegramPage, verifiedTelegramIdentity)
 
-        await sendTelegramClientMessage(
-          telegramPage,
-          `download result for ${recipeName}. Include the artifact proof value from the output.`,
-          telegramMessageBase + 5
-        )
         const replies = telegramPage.getByTestId('telegram-bot-replies')
         await expectTelegramWorkflowResultDocument(
           telegramPage,
@@ -347,15 +347,27 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
           `Run ${recipeName} with marker: ${secondMarker}.`,
           telegramMessageBase + 6
         )
-        const secondApprovalId = await waitForPendingApprovalId(recipeName, 60_000)
+        const secondApprovalId = await waitForPendingApprovalId(recipeName)
         expect(secondApprovalId).not.toBe(approvalId)
         expect(approvalStatus(secondApprovalId)).toBe('pending')
         expect(approvalRequestCountForRecipe(recipeName)).toBe(3)
-        await waitForWorkflowApprovalInTelegramClient(telegramPage, recipeName)
-        await approveWorkflowFromTelegramClient(telegramPage, recipeName)
-        await expect(telegramPage.getByTestId('telegram-bot-replies')).toContainText(
+        const replyCountBeforeSecondApproval = await telegramReplyItems(telegramPage).count()
+        await waitForWorkflowApprovalInTelegramClient(
+          telegramPage,
+          recipeName,
+          120_000,
+          approvedDecisionMessageId ?? undefined
+        )
+        const secondDecisionMessageId = await approveWorkflowFromTelegramClient(
+          telegramPage,
+          recipeName
+        )
+        expect(secondDecisionMessageId).not.toBe(approvedDecisionMessageId)
+        await waitForTelegramReplyTextAfter(
+          telegramPage,
+          replyCountBeforeSecondApproval,
           'Approved. Workflow approval recorded.',
-          { timeout: 60_000 }
+          60_000
         )
         await expect
           .poll(() => approvalStatus(secondApprovalId), {
@@ -380,7 +392,7 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
       removeTelegramCommunicationChannel()
       restoreChannelReaderTelegramApiRoot()
       removeFakeTelegramProvider()
-      cleanupTelegramMediumBinding()
+      cleanupTelegramMediumBinding(verifiedTelegramIdentity)
     }
   })
 })

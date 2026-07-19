@@ -10,7 +10,7 @@ import {
   IconVolume,
   IconVolumeOff,
 } from '@components/SidebarNav/icons'
-import { CHAT_NOTIFICATION_PREFERENCE_OPTIONS } from '@constants/notificationSettings'
+import { NOTIFICATION_PREFERENCE_OPTIONS } from '@constants/notificationSettings'
 import {
   LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
   createLocalhostRuntimeConfigOption,
@@ -97,7 +97,7 @@ function NotificationPreferenceField({
   return (
     <div className="settings-field">
       <div className="settings-radio-list">
-        {CHAT_NOTIFICATION_PREFERENCE_OPTIONS.map(option => (
+        {NOTIFICATION_PREFERENCE_OPTIONS.map(option => (
           <label
             key={option.value}
             className={`settings-radio-option${option.value === value ? ' is-selected' : ''}`}
@@ -652,7 +652,7 @@ export function SettingsPage({
                   <div>
                     <h3 id="settings-in-app-heading">In App Notifications</h3>
                     <p className="muted">
-                      Choose when agent replies appear in the notification bell.
+                      Choose when agent replies and app updates appear in the notification bell.
                     </p>
                   </div>
                 </div>

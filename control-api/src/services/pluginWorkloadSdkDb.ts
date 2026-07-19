@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto'
-import { pool } from '../db.js'
+import { pool, withTransaction } from '../db.js'
 import { stableStringify } from '../utils/stableStringify.js'
+import {
+  type ControlApiPermissionChange,
+  appendControlApiPermissionEventsInTransaction,
+} from './tracing/controlApiPermissionEvents.js'
 
 // ─── Plugin Workload SDK — DB layer ──────────────────────────────────────
 // Extracted from db.ts (per plan: avoid growing the migration monolith).
@@ -92,6 +96,13 @@ export interface PluginWorkloadSdkGrant {
   recipeNamespace: string
   recipeName: string
   capabilityFamily: PluginWorkloadSdkFamily
+  /**
+   * Explicit provider bound to a promptBridge grant (R1). NULL for grants
+   * written before the provider column existed and for clientNotifications
+   * grants — the control-ui read path falls back to inferring it from the
+   * model list when NULL.
+   */
+  provider: string | null
   allowedModels: string[]
   allowedEventTypes: string[]
   allowedTargetRefs: string[]
@@ -169,6 +180,7 @@ function mapGrantRow(row: Record<string, unknown>): PluginWorkloadSdkGrant {
     recipeNamespace: String(row.recipe_namespace),
     recipeName: String(row.recipe_name),
     capabilityFamily: family as PluginWorkloadSdkFamily,
+    provider: row.provider == null ? null : String(row.provider),
     allowedModels: stringArray(row.allowed_models),
     allowedEventTypes: stringArray(row.allowed_event_types),
     allowedTargetRefs: stringArray(row.allowed_target_refs),
@@ -222,6 +234,13 @@ export interface UpsertGrantParams {
   recipeNamespace: string
   recipeName: string
   capabilityFamily: PluginWorkloadSdkFamily
+  /**
+   * Explicit provider for promptBridge grants (R1). The route requires it for
+   * promptBridge and omits it for clientNotifications. Because the upsert is a
+   * full-column overwrite, a promptBridge update MUST always carry the provider
+   * or it would be wiped to NULL.
+   */
+  provider?: string
   allowedModels?: string[]
   allowedEventTypes?: string[]
   allowedTargetRefs?: string[]
@@ -231,37 +250,102 @@ export interface UpsertGrantParams {
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
 }
 
-export async function upsertGrant(params: UpsertGrantParams): Promise<PluginWorkloadSdkGrant> {
-  const result = await pool.query(
-    `INSERT INTO plugin_workload_sdk_grants
-       (recipe_namespace, recipe_name, capability_family, allowed_models, allowed_event_types,
-        allowed_target_refs, allowed_user_refs, allowed_callers, quota_limits, model_policies)
-     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb)
-     ON CONFLICT (recipe_namespace, recipe_name, capability_family)
-     DO UPDATE SET
-       allowed_models = EXCLUDED.allowed_models,
-       allowed_event_types = EXCLUDED.allowed_event_types,
-       allowed_target_refs = EXCLUDED.allowed_target_refs,
-       allowed_user_refs = EXCLUDED.allowed_user_refs,
-       allowed_callers = EXCLUDED.allowed_callers,
-       quota_limits = EXCLUDED.quota_limits,
-       model_policies = EXCLUDED.model_policies,
-       updated_at = now()
-     RETURNING *`,
-    [
-      params.recipeNamespace,
-      params.recipeName,
-      params.capabilityFamily,
-      JSON.stringify(params.allowedModels ?? []),
-      JSON.stringify(params.allowedEventTypes ?? []),
-      JSON.stringify(params.allowedTargetRefs ?? []),
-      JSON.stringify(params.allowedUserRefs ?? []),
-      JSON.stringify(params.allowedCallers ?? []),
-      JSON.stringify(params.quotaLimits ?? {}),
-      JSON.stringify(params.modelPolicies ?? {}),
+export async function upsertGrant(
+  params: UpsertGrantParams,
+  operatorSub: string
+): Promise<PluginWorkloadSdkGrant> {
+  return withTransaction(async db => {
+    const resourceRef = `plugin_workload_sdk:${params.recipeNamespace}/${params.recipeName}:${params.capabilityFamily}`
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [resourceRef])
+    const previous = await db.query(
+      `SELECT allowed_user_refs
+         FROM plugin_workload_sdk_grants
+        WHERE recipe_namespace = $1 AND recipe_name = $2 AND capability_family = $3
+        FOR UPDATE`,
+      [params.recipeNamespace, params.recipeName, params.capabilityFamily]
+    )
+    const previousRow = previous.rows[0] as { allowed_user_refs?: unknown } | undefined
+    const previousUserRefs = Array.isArray(previousRow?.allowed_user_refs)
+      ? previousRow.allowed_user_refs.map(String)
+      : []
+    const result = await db.query(
+      `INSERT INTO plugin_workload_sdk_grants
+         (recipe_namespace, recipe_name, capability_family, provider, allowed_models,
+          allowed_event_types, allowed_target_refs, allowed_user_refs, allowed_callers,
+          quota_limits, model_policies)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb)
+       ON CONFLICT (recipe_namespace, recipe_name, capability_family)
+       DO UPDATE SET
+         provider = EXCLUDED.provider,
+         allowed_models = EXCLUDED.allowed_models,
+         allowed_event_types = EXCLUDED.allowed_event_types,
+         allowed_target_refs = EXCLUDED.allowed_target_refs,
+         allowed_user_refs = EXCLUDED.allowed_user_refs,
+         allowed_callers = EXCLUDED.allowed_callers,
+         quota_limits = EXCLUDED.quota_limits,
+         model_policies = EXCLUDED.model_policies,
+         updated_at = now()
+       RETURNING *`,
+      [
+        params.recipeNamespace,
+        params.recipeName,
+        params.capabilityFamily,
+        params.provider ?? null,
+        JSON.stringify(params.allowedModels ?? []),
+        JSON.stringify(params.allowedEventTypes ?? []),
+        JSON.stringify(params.allowedTargetRefs ?? []),
+        JSON.stringify(params.allowedUserRefs ?? []),
+        JSON.stringify(params.allowedCallers ?? []),
+        JSON.stringify(params.quotaLimits ?? {}),
+        JSON.stringify(params.modelPolicies ?? {}),
+      ]
+    )
+    const grant = mapGrantRow(result.rows[0] as Record<string, unknown>)
+    const currentUserRefs = grant.allowedUserRefs
+    const addedUserRefs = currentUserRefs.filter(ref => !previousUserRefs.includes(ref))
+    const removedUserRefs = previousUserRefs.filter(ref => !currentUserRefs.includes(ref))
+    const referencedUsers = [...new Set([...addedUserRefs, ...removedUserRefs])]
+    const resolvedUsers = new Set<string>()
+    if (referencedUsers.length > 0) {
+      const users = await db.query(`SELECT id::text AS id FROM users WHERE id = ANY($1::uuid[])`, [
+        referencedUsers,
+      ])
+      for (const row of users.rows) resolvedUsers.add(String((row as { id: string }).id))
+    }
+    const changes: ControlApiPermissionChange[] = [
+      {
+        action: 'grant' as const,
+        resourceClass: 'plugin_workload_sdk_access',
+        resourceRef,
+        subject: { kind: 'service' as const, id: params.capabilityFamily },
+        namespace: params.recipeNamespace,
+        sourceAuditRef: `plugin_workload_sdk_grants:${grant.id}`,
+        status: 'configured',
+      },
+      ...addedUserRefs
+        .filter(userRef => resolvedUsers.has(userRef))
+        .map(userRef => ({
+          action: 'grant' as const,
+          resourceClass: 'plugin_workload_sdk_access',
+          resourceRef,
+          subject: { kind: 'user' as const, id: userRef },
+          namespace: params.recipeNamespace,
+          sourceAuditRef: `plugin_workload_sdk_grants:${grant.id}`,
+        })),
+      ...removedUserRefs
+        .filter(userRef => resolvedUsers.has(userRef))
+        .map(userRef => ({
+          action: 'revoke' as const,
+          resourceClass: 'plugin_workload_sdk_access',
+          resourceRef,
+          subject: { kind: 'user' as const, id: userRef },
+          namespace: params.recipeNamespace,
+          sourceAuditRef: `plugin_workload_sdk_grants:${grant.id}`,
+        })),
     ]
-  )
-  return mapGrantRow(result.rows[0] as Record<string, unknown>)
+    await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+    return grant
+  })
 }
 
 export async function listGrants(filter?: {
@@ -296,14 +380,52 @@ export async function listGrants(filter?: {
 export async function deleteGrant(
   id: string,
   recipeNamespace: string,
-  recipeName: string
+  recipeName: string,
+  operatorSub: string
 ): Promise<boolean> {
-  const result = await pool.query(
-    `DELETE FROM plugin_workload_sdk_grants
-     WHERE id = $1 AND recipe_namespace = $2 AND recipe_name = $3`,
-    [id, recipeNamespace, recipeName]
-  )
-  return (result.rowCount ?? 0) > 0
+  return withTransaction(async db => {
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
+      `plugin_workload_sdk:${recipeNamespace}/${recipeName}`,
+    ])
+    const result = await db.query(
+      `DELETE FROM plugin_workload_sdk_grants
+       WHERE id = $1 AND recipe_namespace = $2 AND recipe_name = $3
+       RETURNING *`,
+      [id, recipeNamespace, recipeName]
+    )
+    if ((result.rowCount ?? 0) === 0) return false
+    const grant = mapGrantRow(result.rows[0] as Record<string, unknown>)
+    const resolvedUsers = new Set<string>()
+    if (grant.allowedUserRefs.length > 0) {
+      const users = await db.query(`SELECT id::text AS id FROM users WHERE id = ANY($1::uuid[])`, [
+        grant.allowedUserRefs,
+      ])
+      for (const row of users.rows) resolvedUsers.add(String((row as { id: string }).id))
+    }
+    const resourceRef = `plugin_workload_sdk:${grant.recipeNamespace}/${grant.recipeName}:${grant.capabilityFamily}`
+    const changes: ControlApiPermissionChange[] = [
+      {
+        action: 'revoke',
+        resourceClass: 'plugin_workload_sdk_access',
+        resourceRef,
+        subject: { kind: 'service', id: grant.capabilityFamily },
+        namespace: grant.recipeNamespace,
+        sourceAuditRef: `plugin_workload_sdk_grants:${grant.id}`,
+      },
+      ...grant.allowedUserRefs
+        .filter(userRef => resolvedUsers.has(userRef))
+        .map(userRef => ({
+          action: 'revoke' as const,
+          resourceClass: 'plugin_workload_sdk_access',
+          resourceRef,
+          subject: { kind: 'user' as const, id: userRef },
+          namespace: grant.recipeNamespace,
+          sourceAuditRef: `plugin_workload_sdk_grants:${grant.id}`,
+        })),
+    ]
+    await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+    return true
+  })
 }
 
 // ─── Recipients (clientNotifications picker) ─────────────────────────────

@@ -1,7 +1,52 @@
 /**
  * Types for the agent system.
  */
+import type { SingleTurnProvider } from '../llm'
+import type { FailoverEngine } from '../llm/failover/engine'
+import type { FallbackEntry, LlmPolicy } from '../llm/failover/types'
 import { Task } from '../queue/types'
+
+/**
+ * R5 — per-task provider-fallback support injected into the agent (built in
+ * `main.ts` over the live ConfigStore keys). When present with a non-empty
+ * `policy.fallbacks`, each task's `LlmPort` is wrapped so an eligible provider
+ * error switches to the next fallback below the loop. Absent = no failover =
+ * byte-identical to today.
+ */
+export interface ExecutorFailoverSupport {
+  /** Host-wide sticky failover state (cooldown + served pair). */
+  engine: FailoverEngine
+  /** Normalized policy for THIS task (fallbacks may be pre-sliced at boot). */
+  policy: LlmPolicy
+  /**
+   * Build a fresh provider instance for a fallback entry from the LIVE
+   * ConfigStore keys; `null` when the entry's provider/credentials are absent.
+   */
+  buildProvider: (entry: FallbackEntry) => SingleTurnProvider | null
+}
+
+/** Returns the current {@link ExecutorFailoverSupport}, or null when no policy. */
+export type FailoverSupportProvider = () => ExecutorFailoverSupport | null
+
+/**
+ * R2 — per-task model resolution. `resolveTaskModel` (built in `main.ts`,
+ * injected into the agent) turns a session's saved `{ provider → model }`
+ * selection map into the concrete provider instance + effective model to run
+ * the task with. Built PER TASK from the live ConfigStore keys so a key
+ * rotation never reverts a session's selection (the next task rebuilds with the
+ * new key). Returns `null` when no Host model is configured or the provider
+ * cannot be built (dev/tests fall back to the agent's default provider).
+ */
+export interface ResolvedTaskModel {
+  provider: SingleTurnProvider
+  model: string
+  /** Context-window override from the allowlist entry for `model` (R2.6). */
+  contextWindowTokens?: number
+}
+
+export type TaskModelResolver = (
+  selections: Record<string, string> | undefined
+) => ResolvedTaskModel | null
 
 /**
  * Agent state.

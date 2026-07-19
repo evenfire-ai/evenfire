@@ -4,6 +4,7 @@ import { type FormEvent, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { IconInfoCircle } from '@components/icons'
 import { CheckboxField } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { completeControlAdminInvitation } from '@lib/api'
 import { deriveUsernameFromEmail } from '@lib/string'
 
@@ -162,7 +163,7 @@ export function AdminInvitationForm({
         memberPassword: hasDesktopAccess && !useSameMemberPassword ? memberPassword : undefined,
       })
       const searchParams = new URLSearchParams({ login: response.login.username })
-      router.push(`/admin-invitations/setup-complete?${searchParams.toString()}`)
+      router.push(CONTROL_ROUTES.adminInvitations.setupComplete(Object.fromEntries(searchParams)))
     } catch (submitError) {
       setSubmitError(friendlyError(submitError))
     } finally {
@@ -173,7 +174,7 @@ export function AdminInvitationForm({
   return (
     <form
       method="post"
-      action={`/admin-invitations/${encodeURIComponent(token)}/complete`}
+      action={CONTROL_ROUTES.adminInvitations.complete(token)}
       onSubmit={event => void handleSubmit(event)}
       noValidate
     >

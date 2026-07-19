@@ -23,7 +23,7 @@ class FakeProvider implements McpServerProvider {
 
   async start() {}
 
-  stop() {}
+  async stop() {}
 }
 
 class MockResponse {

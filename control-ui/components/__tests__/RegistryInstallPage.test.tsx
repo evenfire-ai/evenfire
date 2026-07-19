@@ -133,7 +133,7 @@ describe('RegistryInstallPage — WorkflowRecipe preview egress editor', () => {
     expect(payload.registryEntryVersion).toBe('1.0.0')
     expect(payload.recipeManifest).toContain('"egressBindings"')
     expect(payload.recipeManifest).toContain('"duckduckgo.com"')
-    expect(mockPush).toHaveBeenCalledWith('/workflow-recipes/sandbox-recipes/recipe-market-report')
+    expect(mockPush).toHaveBeenCalledWith('/plugins/sandbox-recipes/recipe-market-report')
   })
 
   it('blocks registry recipe install when edited egress exceeds CRD cardinality', async () => {

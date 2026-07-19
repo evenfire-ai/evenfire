@@ -1,5 +1,4 @@
 import { notFound } from 'next/navigation'
-import { HOST_DEFAULT_TAB, HOST_TABS, type HostTab } from '@constants/hostDetails'
 import HostDetailsPage from '../page'
 
 interface HostTabPageProps {
@@ -8,7 +7,8 @@ interface HostTabPageProps {
 
 export default async function HostTabPage({ params }: HostTabPageProps) {
   const { tab } = await params
-  if (tab === HOST_DEFAULT_TAB || !HOST_TABS.includes(tab as HostTab)) notFound()
+  const tabs = ['overview', 'identity', 'contexts', 'env-vars', 'member-access', 'team-access']
+  if (!tabs.includes(tab)) notFound()
 
   return <HostDetailsPage />
 }

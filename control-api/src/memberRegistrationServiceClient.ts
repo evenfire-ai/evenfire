@@ -40,6 +40,11 @@ async function resolveTarget(destinationBaseUrl: string): Promise<{
   credential: MemberRegistrationSigningCredential
 }> {
   if (config.memberRegistrationMode === 'hosted') {
+    // Hosted mode deliberately ignores config.memberRegistrationServiceBaseUrl /
+    // *HmacSecret / *HmacKid / *TenantId (the `remote` branch below). Those fields
+    // still exist because they serve a self-hosted operator pointing control-api at
+    // their OWN member-registration-service; hosted instead enrolls a per-destination
+    // credential against the shared external hub and signs with that.
     const credential = await ensureEnrollment(normalizeEnrollmentHost(destinationBaseUrl))
     return {
       baseUrl: config.memberRegistrationExternalHubBaseUrl,

@@ -8,6 +8,7 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { IconKey } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconX } from '@components/icons'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RecipeSecretOwnership,
   getRecipeSecrets,
@@ -129,7 +130,7 @@ function EditRecipeSecretContent() {
   }, [secretName, targetNamespace])
 
   function backToList() {
-    router.push('/secrets/recipe')
+    router.push(CONTROL_ROUTES.secrets.recipe)
   }
 
   function updateRow(index: number, field: keyof RecipeDraftRow, value: string) {

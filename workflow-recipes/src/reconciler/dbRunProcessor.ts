@@ -73,6 +73,8 @@ export interface DbRunProcessorOptions {
   createChildRecipe: ChildRecipeCreator
   /** Checks whether a previously created child WorkflowRecipe still exists. */
   childRecipeExists?: ChildRecipeExistenceChecker
+  /** Called after the DB commit that claims a run as Running. */
+  onRunStarted?: (runId: string) => void
   /** Called once the child recipe's status sync lands a terminal phase. */
   onRunTerminal?: (runId: string, phase: WorkflowRunPhase) => void
   /** Injection seams for tests. */
@@ -133,15 +135,20 @@ const UPDATE_RUN_PROGRESS = `
      AND phase IN ('Pending', 'Running')`
 
 const UPSERT_STEP = `
-  INSERT INTO workflow_run_steps (run_id, step_id, phase, started_at, completed_at, output, tools_called, error)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+  INSERT INTO workflow_run_steps
+    (run_id, step_id, phase, started_at, completed_at, output, tools_called, error, approval_binding_sha256)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
   ON CONFLICT (run_id, step_id) DO UPDATE
     SET phase = EXCLUDED.phase,
         started_at = COALESCE(workflow_run_steps.started_at, EXCLUDED.started_at),
         completed_at = COALESCE(EXCLUDED.completed_at, workflow_run_steps.completed_at),
         output = COALESCE(EXCLUDED.output, workflow_run_steps.output),
         tools_called = COALESCE(EXCLUDED.tools_called, workflow_run_steps.tools_called),
-        error = COALESCE(EXCLUDED.error, workflow_run_steps.error)`
+        error = COALESCE(EXCLUDED.error, workflow_run_steps.error),
+        approval_binding_sha256 = COALESCE(
+          workflow_run_steps.approval_binding_sha256,
+          EXCLUDED.approval_binding_sha256
+        )`
 
 const FIND_STUCK_RUNS = `
   SELECT run_id, started_at, max_duration_seconds
@@ -281,7 +288,7 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
           run_id: runId,
           owner_instance_id: opts.instanceId,
         })
-        opts.onRunTerminal?.(runId, 'Failed')
+        notifyRunTerminal(runId, 'Failed')
       }
       return
     }
@@ -312,7 +319,30 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         child_namespace: childRecipeNamespace,
         owner_instance_id: opts.instanceId,
       })
-      opts.onRunTerminal?.(runId, 'Failed')
+      notifyRunTerminal(runId, 'Failed')
+    }
+  }
+
+  function notifyRunStarted(runId: string): void {
+    try {
+      opts.onRunStarted?.(runId)
+    } catch (err) {
+      log.warn('run-start lifecycle callback failed after committed transition', {
+        run_id: runId,
+        err: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  function notifyRunTerminal(runId: string, phase: WorkflowRunPhase): void {
+    try {
+      opts.onRunTerminal?.(runId, phase)
+    } catch (err) {
+      log.warn('run-terminal lifecycle callback failed after committed transition', {
+        run_id: runId,
+        phase,
+        err: err instanceof Error ? err.message : String(err),
+      })
     }
   }
 
@@ -333,6 +363,9 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
           run_id: runId,
           owner_instance_id: opts.instanceId,
         })
+        // The row was committed before this notification. Re-emitting the
+        // stable run_start source occurrence lets reporter recovery converge.
+        notifyRunStarted(runId)
         const claimed = claimRes.rows[0]
         await verifyReclaimedChild(
           runId,
@@ -432,6 +465,8 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         child_name: child.name,
         child_namespace: child.namespace,
       })
+      // Business state is durable before any best-effort tracing notification.
+      notifyRunStarted(run.run_id)
     } catch (err) {
       if (!committed) {
         try {
@@ -472,6 +507,7 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
       mappedPhase = null
     }
     const client = await opts.pool.connect()
+    let terminalNotification: { runId: string; phase: WorkflowRunPhase } | null = null
     try {
       await client.query('BEGIN')
       for (const step of recipe.status?.steps ?? []) {
@@ -487,6 +523,7 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
             ? JSON.stringify((step as { toolsCalled?: unknown[] }).toolsCalled)
             : null,
           (step as { error?: string }).error ?? null,
+          (step as { approvalBindingSha256?: string }).approvalBindingSha256 ?? null,
         ])
       }
 
@@ -497,7 +534,7 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
           runId,
         ])
         if (res.rowCount && res.rowCount > 0) {
-          opts.onRunTerminal?.(runId, mappedPhase)
+          terminalNotification = { runId, phase: mappedPhase }
         }
       } else {
         // Non-terminal sync — just bump heartbeat. Do NOT overwrite `phase`
@@ -506,6 +543,9 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         await client.query(UPDATE_RUN_PROGRESS, [runId])
       }
       await client.query('COMMIT')
+      if (terminalNotification) {
+        notifyRunTerminal(terminalNotification.runId, terminalNotification.phase)
+      }
     } catch (err) {
       try {
         await client.query('ROLLBACK')
@@ -526,6 +566,7 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
   async function checkStuckRuns(): Promise<number> {
     const client = await opts.pool.connect()
     let failed = 0
+    const terminalNotifications: Array<{ runId: string; phase: WorkflowRunPhase }> = []
     try {
       await client.query('BEGIN')
       const res = await client.query<{ run_id: string }>(FIND_STUCK_RUNS, [opts.instanceId])
@@ -534,10 +575,13 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         if (upd.rowCount && upd.rowCount > 0) {
           failed += 1
           log.warn('run force-failed (max duration exceeded)', { run_id: row.run_id })
-          opts.onRunTerminal?.(row.run_id, 'Failed')
+          terminalNotifications.push({ runId: row.run_id, phase: 'Failed' })
         }
       }
       await client.query('COMMIT')
+      for (const notification of terminalNotifications) {
+        notifyRunTerminal(notification.runId, notification.phase)
+      }
     } catch (err) {
       try {
         await client.query('ROLLBACK')

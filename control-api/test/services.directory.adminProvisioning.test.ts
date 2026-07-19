@@ -4,10 +4,14 @@ import type { DbClient } from '../src/db.js'
 import { ensureDefaultTeamAndGrants } from '../src/services/directory/adminProvisioning.js'
 
 const dbMocks = vi.hoisted(() => ({ txQuery: vi.fn() }))
+const traceMocks = vi.hoisted(() => ({ appendPermissionEvents: vi.fn() }))
 vi.mock('../src/db.js', () => ({
   pool: { query: vi.fn() },
   withTransaction: async (work: (db: { query: typeof dbMocks.txQuery }) => Promise<unknown>) =>
     work({ query: dbMocks.txQuery }),
+}))
+vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
+  appendControlApiPermissionEventsInTransaction: traceMocks.appendPermissionEvents,
 }))
 
 describe('ensureDefaultTeamAndGrants', () => {
@@ -180,7 +184,11 @@ describe('provisionAdminDesktopWorkspace', () => {
 })
 
 describe('provisionMemberFromAdmin', () => {
-  beforeEach(() => dbMocks.txQuery.mockReset())
+  beforeEach(() => {
+    dbMocks.txQuery.mockReset()
+    traceMocks.appendPermissionEvents.mockReset()
+    traceMocks.appendPermissionEvents.mockResolvedValue(null)
+  })
 
   it('creates a password-seeded member without creating a team when no teams are selected', async () => {
     dbMocks.txQuery
@@ -206,6 +214,7 @@ describe('provisionMemberFromAdmin', () => {
     const mod = await import('../src/services/directory/adminProvisioning.js')
     const result = await mod.provisionMemberFromAdmin({
       adminId: 'admin-1',
+      operatorSub: 'operator-admin-1',
       teamAssignments: [],
       seedPassword: true,
     })
@@ -222,5 +231,75 @@ describe('provisionMemberFromAdmin', () => {
       expect.stringContaining('INSERT INTO team_members'),
       expect.anything()
     )
+    expect(traceMocks.appendPermissionEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        operatorSub: 'operator-admin-1',
+        operatorKind: 'control_admin',
+        changes: [
+          expect.objectContaining({
+            action: 'grant',
+            resourceClass: 'platform_user_access',
+            subject: { kind: 'user', id: 'user-1' },
+          }),
+        ],
+      })
+    )
+  })
+
+  it('records the exact revoke and grant when an operator changes a member role', async () => {
+    dbMocks.txQuery
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'admin-1',
+            username: 'ada',
+            email: 'ada@example.com',
+            password_hash: 'HASH',
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'user-1', email: 'ada@example.com', name: 'ada' }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ team_id: 'team-1', role: 'member', status: 'active' }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+
+    const mod = await import('../src/services/directory/adminProvisioning.js')
+    await mod.provisionMemberFromAdmin({
+      adminId: 'admin-1',
+      operatorSub: 'operator-admin-1',
+      teamAssignments: [{ teamId: 'team-1', role: 'admin' }],
+      seedPassword: false,
+    })
+
+    expect(traceMocks.appendPermissionEvents).toHaveBeenCalledWith(expect.anything(), {
+      operatorSub: 'operator-admin-1',
+      operatorKind: 'control_admin',
+      changes: [
+        {
+          action: 'revoke',
+          resourceClass: 'team_membership',
+          resourceRef: 'team_membership:team-1:role:member',
+          subject: { kind: 'user', id: 'user-1' },
+          teamId: 'team-1',
+          status: 'role_replaced',
+        },
+        {
+          action: 'grant',
+          resourceClass: 'team_membership',
+          resourceRef: 'team_membership:team-1:role:admin',
+          subject: { kind: 'user', id: 'user-1' },
+          teamId: 'team-1',
+          status: 'role_assigned',
+        },
+      ],
+    })
   })
 })

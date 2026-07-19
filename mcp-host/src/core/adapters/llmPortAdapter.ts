@@ -267,6 +267,7 @@ export class LlmPortAdapter implements LlmPort {
     const event: LlmUsageEvent = {
       request_id: requestId,
       ts: new Date().toISOString(),
+      run_id: usageContext.traceContext?.runId ?? null,
       host_ref: this.staticContext.host_ref,
       context_ref: this.staticContext.context_ref,
       team_id: usageContext.team_id ?? null,

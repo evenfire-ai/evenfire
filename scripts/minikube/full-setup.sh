@@ -336,6 +336,14 @@ if ! command -v python3 &>/dev/null; then
 fi
 ok "python3 is available"
 
+# Check ruby is available (run-control-api-db-migration.sh renders the kustomize
+# overlay with `ruby -ryaml -rjson`; ruby ships with macOS but not every Linux).
+if ! command -v ruby &>/dev/null; then
+  err "ruby is not installed (required to render the control-api DB migration overlay). Install with: brew install ruby  (macOS) / apt-get install ruby  (Debian/Ubuntu)."
+  exit 1
+fi
+ok "ruby is available"
+
 # Fail here, not at Step 10. Image builds dominate a 5-10 min first run
 # (README.md:178); aborting after them for a missing .env line is hostile.
 if [ "$SEED_PROFILE" = "minimal" ] && [ -z "${ADMIN_PASSWORD:-}" ]; then
@@ -610,6 +618,25 @@ ok "Minikube K8s API CIDRs refreshed"
 log "Applying kustomize overlay (${ACTIVE_MINIKUBE_RENDER_DIR})..."
 kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
 ok "Kustomize overlay applied"
+
+# 6b-2. Control-api database migrations + runtime DB roles.
+# control-api, workflow-recipes, and trace-maintenance-worker mount
+# least-privilege runtime DB credentials from the *-postgres-runtime Secrets,
+# which ship empty. The governed-trace runtime-roles migration creates the fixed
+# roles; the provision script writes each role's connection-string into its
+# Secret. Until then those pods sit
+# in CreateContainerConfigError and recover automatically once the Secrets are
+# populated (Step 8 waits them out). Running the migration here (against the
+# control-postgres superuser) breaks the bootstrap cycle so the roles exist
+# before control-api needs its own runtime credential to start.
+log "Applying control-api database migrations and runtime roles..."
+$KC rollout status deployment/control-postgres -n control-plane --timeout=180s >/dev/null
+CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+  bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
+  --overlay "$ACTIVE_MINIKUBE_RENDER_DIR"
+CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+  bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
+ok "Control-api database migrations and runtime roles applied"
 
 # 6c. Re-apply generated service tokens after kustomize.
 # Re-patch the generated inter-service tokens after every overlay apply so the

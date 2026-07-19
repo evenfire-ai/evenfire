@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => {
   const sfsFullReconcile = vi.fn().mockResolvedValue(undefined)
   const watch = vi.fn().mockResolvedValue({ abort: vi.fn() })
   const hostListCallOptions = vi.fn()
+  const createAdministrativeOutcomeReporter = vi.fn().mockReturnValue(undefined)
   return {
     listNamespacedCustomObject,
     ensureDefaultPolicies,
@@ -37,6 +38,7 @@ const mocks = vi.hoisted(() => {
     sfsFullReconcile,
     watch,
     hostListCallOptions,
+    createAdministrativeOutcomeReporter,
   }
 })
 
@@ -52,7 +54,13 @@ vi.mock('./config', () => ({
     hostK8sRequestTimeoutMs: 30_000,
     hostResyncIntervalSec: 0,
     externalEgressResyncIntervalSec: 0,
+    controlApiBaseUrl: 'http://control-api.test:8090',
+    governedTracingEnabled: false,
   },
+}))
+
+vi.mock('./administrativeOutcomeReporter', () => ({
+  createAdministrativeOutcomeReporter: mocks.createAdministrativeOutcomeReporter,
 }))
 
 vi.mock('@kubernetes/client-node', () => {
@@ -209,6 +217,14 @@ describe('McpServerWatcher startup', () => {
     mocks.serverFullReconcile.mockReset().mockResolvedValue(undefined)
     mocks.hostFullReconcile.mockReset().mockResolvedValue(undefined)
     mocks.sfsFullReconcile.mockReset().mockResolvedValue(undefined)
+  })
+
+  it('passes the governed tracing switch to the administrative reporter factory', () => {
+    new McpServerWatcher()
+
+    expect(mocks.createAdministrativeOutcomeReporter).toHaveBeenCalledWith(false, {
+      baseUrl: 'http://control-api.test:8090',
+    })
   })
 
   it('ensures default policies even when initial Context discovery fails', async () => {

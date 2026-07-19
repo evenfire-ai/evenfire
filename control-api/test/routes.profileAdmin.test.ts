@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import type { K8sGateway } from '../src/k8s.js'
-import { createAdminRouter } from '../src/routes/admin/index.js'
+import { createAdminRouter as createAuthenticatedAdminRouter } from '../src/routes/admin/index.js'
 
 const svc = vi.hoisted(() => ({
   adminDeleteTeam: vi.fn(),
@@ -38,6 +38,18 @@ const svc = vi.hoisted(() => ({
 }))
 
 vi.mock('../src/services/directory/index.js', () => svc)
+
+const TEST_ADMIN_SUB = '11111111-1111-4111-8111-111111111111'
+
+function createAdminRouter(gateway: K8sGateway) {
+  const router = express.Router()
+  router.use((req, _res, next) => {
+    ;(req as unknown as { adminAuth: { sub: string } }).adminAuth = { sub: TEST_ADMIN_SUB }
+    next()
+  })
+  router.use(createAuthenticatedAdminRouter(gateway))
+  return router
+}
 
 describe('routes/profileAdmin', () => {
   const gatewayStub = {
@@ -255,21 +267,21 @@ describe('routes/profileAdmin', () => {
       .send({ contextIds: ['ctx-live', 'ctx-stale-submit'] })
       .expect(200)
       .expect({ userId: 'u1', contextIds: ['ctx-live'], deletedContextIds: ['ctx-old'] })
-    expect(svc.setUserContexts).toHaveBeenCalledWith('u1', ['ctx-live', 'ctx-old'])
+    expect(svc.setUserContexts).toHaveBeenCalledWith('u1', ['ctx-live', 'ctx-old'], TEST_ADMIN_SUB)
 
     await request(app)
       .put('/admin/users/u1/agents')
       .send({ agentNames: ['agent-live', 'agent-stale-submit'] })
       .expect(200)
       .expect({ userId: 'u1', agentNames: ['agent-live'] })
-    expect(svc.setUserAgents).toHaveBeenCalledWith('u1', ['agent-live'])
+    expect(svc.setUserAgents).toHaveBeenCalledWith('u1', ['agent-live'], TEST_ADMIN_SUB)
 
     await request(app)
       .put('/admin/teams/t1/agents')
       .send({ agentNames: ['agent-live', 'agent-stale-submit'] })
       .expect(200)
       .expect({ teamId: 't1', agentNames: ['agent-live'] })
-    expect(svc.setTeamAgents).toHaveBeenCalledWith('t1', ['agent-live'])
+    expect(svc.setTeamAgents).toHaveBeenCalledWith('t1', ['agent-live'], TEST_ADMIN_SUB)
   })
 
   it('returns structured 503s when admin access reconciliation is unavailable', async () => {

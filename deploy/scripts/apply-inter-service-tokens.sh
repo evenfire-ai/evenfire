@@ -128,8 +128,18 @@ resolve_member_registration_hmac() {
   if is_minikube_context; then
     local minikube_hmac
     minikube_hmac="$(read_minikube_member_registration_hmac || true)"
-    [ -n "$minikube_hmac" ] || die "could not resolve minikube member-registration HMAC"
-    printf '%s' "$minikube_hmac"; return
+    if [ -n "$minikube_hmac" ]; then
+      printf '%s' "$minikube_hmac"; return
+    fi
+    # The evenfire-member-registration sibling checkout is optional in the OSS
+    # single-tenant tree (it lives in a separate repo). When it is absent,
+    # generate a local dev HMAC so `make minikube-setup` continues instead of
+    # aborting — member invitation / registration flows stay non-functional
+    # until the sibling is deployed, per docs/deploy/minikube.md ("setup simply
+    # prints a warning and continues"). The value is preserved across re-runs by
+    # the existing-Secret read above.
+    printf '[inter-service-tokens] WARN: evenfire-member-registration sibling not found; generating a local dev member-registration HMAC (invitation/registration flows will fail until it is deployed)\n' >&2
+    openssl rand -hex 32; return
   fi
 
   die "CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET is required when no existing control-api Secret value is present"

@@ -16,6 +16,9 @@ function extensionOf(name: string): string {
 
 export async function normalizeGfsResourceName(name: string): Promise<string> {
   const normalized = name.normalize('NFC')
+  if (normalized === '.' || normalized === '..' || /[\/\\\u0000-\u001f\u007f]/.test(normalized)) {
+    throw new Error('File and folder names cannot contain path separators or control characters.')
+  }
   if (normalized.length <= GFS_RESOURCE_NAME_MAX_LENGTH) return normalized
 
   const extension = extensionOf(normalized)

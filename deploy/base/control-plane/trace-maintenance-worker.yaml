@@ -1,0 +1,154 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trace-maintenance-worker
+  namespace: control-plane
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trace-maintenance-worker-inventory
+  namespace: control-plane
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trace-maintenance-worker-inventory
+  namespace: control-plane
+subjects:
+- kind: ServiceAccount
+  name: trace-maintenance-worker
+  namespace: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: trace-maintenance-worker-inventory
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trace-maintenance-worker-inventory
+  namespace: mcp-server
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trace-maintenance-worker-inventory
+  namespace: mcp-server
+subjects:
+- kind: ServiceAccount
+  name: trace-maintenance-worker
+  namespace: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: trace-maintenance-worker-inventory
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trace-maintenance-worker-inventory
+  namespace: sandbox-recipes
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trace-maintenance-worker-inventory
+  namespace: sandbox-recipes
+subjects:
+- kind: ServiceAccount
+  name: trace-maintenance-worker
+  namespace: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: trace-maintenance-worker-inventory
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trace-maintenance-worker
+  namespace: control-plane
+  labels:
+    app: trace-maintenance-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trace-maintenance-worker
+  template:
+    metadata:
+      labels:
+        app: trace-maintenance-worker
+    spec:
+      serviceAccountName: trace-maintenance-worker
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: trace-maintenance-worker
+        image: clerum/control-api:0.9.5
+        imagePullPolicy: Always
+        command: ["node", "dist/traceMaintenance.js"]
+        env:
+        - name: TRACING_MAINTENANCE_PG_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: trace-maintenance-postgres-runtime
+              key: connection-string
+        - name: TRACING_ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-config
+              key: TRACING_ENVIRONMENT
+        - name: TRACING_CLUSTER_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-config
+              key: TRACING_CLUSTER_NAME
+        - name: TRACING_CLUSTER_LOCATION
+          valueFrom:
+            configMapKeyRef:
+              name: control-api-config
+              key: TRACING_CLUSTER_LOCATION
+        - name: TRACING_INFRASTRUCTURE_COST_ENABLED
+          value: "false"
+        - name: TRACING_INFRASTRUCTURE_COST_ROLLUP_INTERVAL_MS
+          value: "3600000"
+        - name: TRACING_INFRASTRUCTURE_COST_LOOKBACK_DAYS
+          value: "7"
+        - name: TRACING_INFRASTRUCTURE_COST_FINALIZATION_DELAY_HOURS
+          value: "24"
+        - name: TRACING_GCP_BILLING_ENABLED
+          value: "false"
+        - name: TRACING_GCP_BILLING_LOOKBACK_DAYS
+          value: "7"
+        - name: TRACING_GCP_BILLING_FINALIZATION_DELAY_HOURS
+          value: "96"
+        - name: TRACING_GCP_PRICING_ENABLED
+          value: "false"
+        - name: TRACING_GCP_PRICING_MAX_LAG_HOURS
+          value: "72"
+        resources:
+          requests: { cpu: 10m, memory: 32Mi }
+          limits: { cpu: 100m, memory: 128Mi }
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: ["ALL"] }
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001

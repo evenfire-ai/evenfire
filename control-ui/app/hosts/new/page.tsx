@@ -9,6 +9,7 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { HostWizard } from '@components/HostWizard'
 import { IconRobot } from '@components/Sidebar/icons'
 import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { apiGet } from '@lib/api'
 
 type ApiList = {
@@ -45,7 +46,7 @@ export default function CreateHostPage() {
     void loadFormData()
   }, [])
 
-  const backToAgents = () => router.push('/hosts')
+  const backToAgents = () => router.push(CONTROL_ROUTES.agents.root)
 
   return (
     <AuthGate>

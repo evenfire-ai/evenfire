@@ -189,6 +189,7 @@ export function useNotificationSettingsController() {
             title: payload.title,
             body: payload.body,
             tag: payload.tag,
+            silent: payload.silent,
             actions: payload.actions,
           })
           if (result.supported) return permission
@@ -205,6 +206,7 @@ export function useNotificationSettingsController() {
         body: payload.body,
         icon: './logo.svg',
         tag: payload.tag,
+        silent: payload.silent,
       }
       if (payload.actions?.length) {
         options.actions = payload.actions

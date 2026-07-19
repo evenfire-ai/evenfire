@@ -20,7 +20,7 @@ required_empty = [
 ]
 
 # The gcp-dev/gcp-prod overlays patch CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES to
-# the real Artifact Registry + example.com prefixes (see
+# the real Artifact Registry + registry.evenfire.ai prefixes (see
 # deploy/overlays/gcp-{dev,prod}/patches/hcc-allowed-image-prefixes.yaml).
 # deploy/base only ships a vendor-neutral default — this asserts the overlay
 # override actually lands in the rendered Deployment for BOTH clusters, so a
@@ -28,7 +28,7 @@ required_empty = [
 # to the neutral placeholder.
 required_values = {
   "CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES" =>
-    "us-central1-docker.pkg.dev/your-gcp-project/clerum/,example.com/,mongodb/,mcr.microsoft.com/,clerum/",
+    "us-central1-docker.pkg.dev/your-gcp-project/clerum/,registry.evenfire.ai/,mongodb/,mcr.microsoft.com/,clerum/",
 }
 
 def fail!(overlay, message)

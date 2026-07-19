@@ -28,6 +28,7 @@ import {
   E2E_EMAIL,
   HOST_REF,
   type TelegramClientIdentity,
+  expectTelegramWorkflowList,
   openTelegramClient,
   sendTelegramClientMessage,
   setTelegramClientIdentity,
@@ -158,25 +159,25 @@ async function openApprovalChannels(page: Page, baseUrl: string): Promise<void> 
   await expect(
     page.locator('header').getByRole('heading', { name: 'Approval Channels' })
   ).toBeVisible()
+  const manageButton = page.getByRole('button', { name: 'Manage' })
+  await expect(manageButton).toBeVisible({ timeout: 30_000 })
+  await manageButton.click()
+  await expect(page).toHaveURL(`${baseUrl}/settings/social/telegram`)
+  await expect(page.getByRole('tab', { name: 'Social channels' })).toHaveAttribute(
+    'aria-selected',
+    'true'
+  )
+  await expect(page.getByRole('tab', { name: 'Telegram' })).toHaveAttribute('aria-selected', 'true')
 }
 
-async function selectTelegramTarget(page: Page): Promise<void> {
-  const targetSelect = page.getByLabel('Agent Telegram target')
-  if (await targetSelect.isVisible().catch(() => false)) {
-    const optionTexts = await targetSelect.locator('option').allTextContents()
-    const targetIndex = optionTexts.findIndex(
-      text => text.includes(HOST_REF) && text.includes(TELEGRAM_CHANNEL_NAME)
-    )
-    const fallbackIndex = optionTexts.findIndex(text => text.trim() && !/^select/i.test(text))
-    const optionIndex = targetIndex >= 0 ? targetIndex : fallbackIndex
-    expect(optionIndex, 'a Telegram approval target should be selectable').toBeGreaterThanOrEqual(0)
-    const value = await targetSelect.locator('option').nth(optionIndex).getAttribute('value')
-    expect(value, 'selected Telegram target option should have a value').toBeTruthy()
-    await targetSelect.selectOption(value!)
-  } else {
-    await expect(page.getByText('Target:')).toBeVisible({ timeout: 30_000 })
-    await expect(page.getByText(HOST_REF)).toBeVisible({ timeout: 30_000 })
-  }
+async function startTelegramConnection(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Connect Telegram' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('heading', { name: 'Connect Telegram' })).toBeVisible()
+  const continueButton = dialog.getByRole('button', { name: 'Continue' })
+  await expect(continueButton).toBeEnabled()
+  await continueButton.click()
+  await expect(dialog.getByRole('heading', { name: 'Verify Telegram' })).toBeVisible()
 }
 
 async function visibleVerificationCode(page: Page): Promise<string> {
@@ -192,10 +193,11 @@ test.describe('Profile UI Telegram approval medium verification', () => {
   test('connects by Telegram /verify and enables workflow approval for the selected agent', async ({
     browser,
   }) => {
-    test.setTimeout(240_000)
+    test.setTimeout(420_000)
 
     const profileUiBaseUrl = requireProfileUiBaseUrl()
     const verifiedBinding = telegramBinding(VERIFIED_TELEGRAM_IDENTITY)
+    const groupBinding = telegramBinding(VERIFIED_TELEGRAM_GROUP_IDENTITY)
     const wrongBinding = telegramBinding(WRONG_CHANNEL_IDENTITY)
     const recipeName = makeScopedE2ERecipeName('profile-verify-telegram')
     const marker = `profile-verify-telegram-${Date.now()}`
@@ -204,6 +206,7 @@ test.describe('Profile UI Telegram approval medium verification', () => {
     let controlPage: Page | null = null
     let telegramPage: Page | null = null
     let telegramPortForward: { stop: () => void } | null = null
+    let verifiedUserId = ''
 
     try {
       await watchdogStep(
@@ -219,6 +222,7 @@ test.describe('Profile UI Telegram approval medium verification', () => {
         removeTelegramCommunicationChannel()
         cleanupWorkflowRecipe(recipeName)
         cleanupTelegramVerificationState(verifiedBinding)
+        cleanupTelegramVerificationState(groupBinding)
         cleanupTelegramVerificationState(wrongBinding)
       })
 
@@ -227,15 +231,18 @@ test.describe('Profile UI Telegram approval medium verification', () => {
         configureChannelReaderTelegramApiRoot()
       })
 
+      await watchdogStep('grant test user access to the selected agent', 30_000, async () => {
+        const login = await loginAs(E2E_EMAIL)
+        verifiedUserId = login.userId
+        ensureUserCanAccessAgent(login.userId, HOST_REF)
+      })
+
       await watchdogStep(
         'create Telegram communication channel through Control UI',
         75_000,
         async () => {
           controlPage = await browser.newPage()
-          await createTelegramCommunicationChannelFromControlUi(controlPage, HOST_REF, [
-            { channelId: 'verification-bootstrap', chatType: 'private' },
-            { channelId: TELEGRAM_GROUP_ID, chatType: 'group' },
-          ])
+          await createTelegramCommunicationChannelFromControlUi(controlPage, HOST_REF, E2E_EMAIL)
           await controlPage.close()
           controlPage = null
         }
@@ -261,10 +268,12 @@ test.describe('Profile UI Telegram approval medium verification', () => {
           .toBeGreaterThan(0)
       })
 
-      await watchdogStep('seed user access and workflow recipe', 45_000, async () => {
-        const login = await loginAs(E2E_EMAIL)
-        ensureUserCanAccessAgent(login.userId, HOST_REF)
-        await installWorkflowRecipeForUser({ recipeName, marker, userId: login.userId })
+      await watchdogStep('seed workflow recipe', 45_000, async () => {
+        await installWorkflowRecipeForUser({
+          recipeName,
+          marker,
+          userId: verifiedUserId,
+        })
       })
 
       await watchdogStep(
@@ -279,7 +288,6 @@ test.describe('Profile UI Telegram approval medium verification', () => {
           profilePage = await browser.newPage()
           await loginProfileUi(profilePage, profileUiBaseUrl)
           await openApprovalChannels(profilePage, profileUiBaseUrl)
-          await selectTelegramTarget(profilePage)
         }
       )
       if (!telegramPage || !profilePage) {
@@ -296,7 +304,7 @@ test.describe('Profile UI Telegram approval medium verification', () => {
           const unverifiedPollCount = fakeTelegramPollingCount()
           await sendTelegramClientMessage(
             telegramPage,
-            `Trigger the workflow recipe named ${recipeName} with marker: ${marker}.`,
+            `Run ${recipeName} with marker: ${marker}. Give me the workflow result in this Telegram chat after it starts.`,
             telegramMessageBase + 1,
             VERIFIED_TELEGRAM_IDENTITY
           )
@@ -322,10 +330,7 @@ test.describe('Profile UI Telegram approval medium verification', () => {
         'verify Telegram identity through channel-scoped target',
         75_000,
         async () => {
-          await profilePage.getByRole('button', { name: 'Connect Telegram' }).click()
-          await expect(
-            profilePage.getByRole('heading', { name: 'Waiting for Telegram' })
-          ).toBeVisible()
+          await startTelegramConnection(profilePage)
           const code = await visibleVerificationCode(profilePage)
 
           const wrongReplyCount = await telegramReplyItems(telegramPage).count()
@@ -356,12 +361,16 @@ test.describe('Profile UI Telegram approval medium verification', () => {
           await waitForTelegramReplyTextAfter(
             telegramPage,
             verifyReplyCount,
-            /Telegram identity connected/,
+            /Telegram identity confirmed/,
             FAIL_FAST_TIMEOUT_MS
           )
-          await expect(profilePage.getByText('Telegram chat ending in 4242')).toBeVisible({
-            timeout: 30_000,
-          })
+          await profilePage.getByRole('dialog').getByRole('button', { name: 'Confirm' }).click()
+          const privateAccountRow = profilePage
+            .locator('.settings-target-row')
+            .filter({ hasText: TELEGRAM_CHANNEL_NAME })
+            .filter({ hasText: 'Private chat' })
+          await expect(privateAccountRow).toBeVisible({ timeout: 30_000 })
+          await expect(privateAccountRow).toContainText('Verified')
           await expect
             .poll(() => workflowApprovalMediumAccountCount(verifiedBinding), {
               timeout: 30_000,
@@ -375,7 +384,21 @@ test.describe('Profile UI Telegram approval medium verification', () => {
               intervals: [500, 1_000, 2_000],
               message: 'selected CommunicationChannel should receive only the verified identity',
             })
-            .toContain(verifiedBinding.providerUserId)
+            .toContain(verifiedUserId)
+        }
+      )
+
+      await watchdogStep(
+        'verified Telegram identity lists the granted workflow through mcp-host',
+        60_000,
+        async () => {
+          await sendTelegramClientMessage(
+            telegramPage,
+            'List the workflow recipes I can run. Include the exact workflow recipe names.',
+            telegramMessageBase + 4,
+            VERIFIED_TELEGRAM_IDENTITY
+          )
+          await expectTelegramWorkflowList(telegramPage, [recipeName], [], 45_000)
         }
       )
 
@@ -385,8 +408,8 @@ test.describe('Profile UI Telegram approval medium verification', () => {
         async () => {
           await sendTelegramClientMessage(
             telegramPage,
-            `Trigger the workflow recipe named ${recipeName} with marker: ${marker}.`,
-            telegramMessageBase + 4,
+            `Run ${recipeName} with marker: ${marker}. Give me the workflow result in this Telegram chat after it starts.`,
+            telegramMessageBase + 5,
             VERIFIED_TELEGRAM_IDENTITY
           )
           const approvalId = await waitForPendingApprovalId(recipeName, FAIL_FAST_TIMEOUT_MS)
@@ -411,14 +434,52 @@ test.describe('Profile UI Telegram approval medium verification', () => {
       )
 
       await watchdogStep(
+        'verify Telegram group through the provider event flow',
+        75_000,
+        async () => {
+          await startTelegramConnection(profilePage)
+          const code = await visibleVerificationCode(profilePage)
+          await setTelegramClientIdentity(telegramPage, VERIFIED_TELEGRAM_GROUP_IDENTITY)
+          const replyCount = await telegramReplyItems(telegramPage).count()
+          await sendTelegramClientMessage(
+            telegramPage,
+            `/verify ${code}`,
+            telegramMessageBase + 6,
+            VERIFIED_TELEGRAM_GROUP_IDENTITY
+          )
+          await waitForTelegramReplyTextAfter(
+            telegramPage,
+            replyCount,
+            /Telegram identity confirmed/,
+            FAIL_FAST_TIMEOUT_MS
+          )
+          await profilePage.getByRole('dialog').getByRole('button', { name: 'Confirm' }).click()
+          await expect
+            .poll(() => workflowApprovalMediumAccountCount(groupBinding), {
+              timeout: 30_000,
+              intervals: [500, 1_000, 2_000],
+              message: 'provider-event confirmation should create the verified group account',
+            })
+            .toBe(1)
+          await expect
+            .poll(() => telegramAssociationUserIds(groupBinding.providerChannelId), {
+              timeout: 30_000,
+              intervals: [500, 1_000, 2_000],
+              message: 'the selected CommunicationChannel should record the verified group',
+            })
+            .toContain(verifiedUserId)
+        }
+      )
+
+      await watchdogStep(
         'verified group Telegram trigger creates and consumes approval',
         150_000,
         async () => {
           await setTelegramClientIdentity(telegramPage, VERIFIED_TELEGRAM_GROUP_IDENTITY)
           await sendTelegramClientMessage(
             telegramPage,
-            `Trigger the workflow recipe named ${recipeName} with marker: ${marker}.`,
-            telegramMessageBase + 5,
+            `@clerum_e2e_bot Run ${recipeName} with marker: ${marker}-group. Give me the workflow result in this Telegram group after it starts.`,
+            telegramMessageBase + 7,
             VERIFIED_TELEGRAM_GROUP_IDENTITY
           )
           const groupApprovalId = await waitForPendingApprovalId(recipeName, FAIL_FAST_TIMEOUT_MS)
@@ -444,11 +505,12 @@ test.describe('Profile UI Telegram approval medium verification', () => {
 
       await watchdogStep('disconnect verified Telegram identity', 45_000, async () => {
         const verifiedAccountRow = profilePage
-          .locator('.member-row')
-          .filter({ hasText: `Telegram user ID ${verifiedBinding.providerUserId}` })
-          .filter({ hasText: `Private chat ID ${verifiedBinding.providerChannelId}` })
+          .locator('.settings-target-row')
+          .filter({ hasText: TELEGRAM_CHANNEL_NAME })
+          .filter({ hasText: 'Private chat' })
         await expect(verifiedAccountRow).toBeVisible({ timeout: 30_000 })
-        await verifiedAccountRow.getByRole('button', { name: 'Disconnect' }).click()
+        await verifiedAccountRow.getByRole('button', { name: 'Delete' }).click()
+        await profilePage.getByRole('button', { name: 'Delete connection' }).click()
         await expect(profilePage.getByText('Telegram identity disconnected.')).toBeVisible({
           timeout: 30_000,
         })
@@ -465,7 +527,7 @@ test.describe('Profile UI Telegram approval medium verification', () => {
             intervals: [500, 1_000, 2_000],
             message: 'disconnect should remove the selected target association',
           })
-          .not.toContain(verifiedBinding.providerUserId)
+          .not.toContain(verifiedUserId)
       })
     } finally {
       if (profilePage) await profilePage.close().catch(() => undefined)
@@ -474,6 +536,7 @@ test.describe('Profile UI Telegram approval medium verification', () => {
       telegramPortForward?.stop()
       cleanupWorkflowRecipe(recipeName)
       cleanupTelegramVerificationState(verifiedBinding)
+      cleanupTelegramVerificationState(groupBinding)
       cleanupTelegramVerificationState(wrongBinding)
       removeTelegramCommunicationChannel()
       restoreChannelReaderTelegramApiRoot()

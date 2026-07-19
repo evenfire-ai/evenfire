@@ -31,6 +31,14 @@ export interface PromptCacheEntry {
    * re-snapshots; everything else preserves the freeze.
    */
   dailyLogSnapshot: string
+  /**
+   * R2 — the effective model the cached `parts` were built for. The system
+   * prompt embeds the model name (`buildParts({ model })`), so a per-task model
+   * swap must NOT serve parts built for the previous model. The consumer treats
+   * a `model` mismatch as a miss and rebuilds; part of the cache key without
+   * changing the sessionKey-indexed map (eviction/invalidation stay intact).
+   */
+  model?: string
 }
 
 export interface PromptCacheObserver {

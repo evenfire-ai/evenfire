@@ -12,11 +12,12 @@ import { IconSettings } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconTrash } from '@components/icons'
 import { Button, CheckboxField, Field, TextInput } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { getAdminTeams, inviteControlAdmin } from '@lib/api'
 import type { TeamRole } from '@lib/api'
 import { permissionsForTeamRole, setDeletePermission, setInvitePermission } from '@lib/teamRoles'
 
-const ADMINS_TAB_HREF = '/profile-admin/admins'
+const ADMINS_TAB_HREF = CONTROL_ROUTES.usersAndTeams.admins()
 
 export default function CreateControlAdminInvitationPage() {
   const router = useRouter()

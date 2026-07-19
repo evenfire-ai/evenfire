@@ -1,13 +1,38 @@
+import type { DbClient } from '../../db.js'
 import { pool } from '../../db.js'
 import { bulkSetLinkedItems } from '../../shared/generics.js'
+import {
+  type ControlApiPermissionSubject,
+  appendControlApiPermissionEventsInTransaction,
+} from '../tracing/controlApiPermissionEvents.js'
 
-export async function setUserAgents(userId: string, agentNames: string[]) {
+async function appendAgentAccessChanges(
+  db: DbClient,
+  operatorSub: string,
+  subject: ControlApiPermissionSubject,
+  change: { added: string[]; removed: string[] }
+): Promise<void> {
+  const mapChanges = (action: 'grant' | 'revoke', values: string[]) =>
+    values.map(value => ({
+      action,
+      resourceClass: 'agent_access',
+      resourceRef: `agent:${value}`,
+      subject,
+    }))
+  await appendControlApiPermissionEventsInTransaction(db, {
+    operatorSub,
+    changes: [...mapChanges('grant', change.added), ...mapChanges('revoke', change.removed)],
+  })
+}
+
+export async function setUserAgents(userId: string, agentNames: string[], operatorSub: string) {
   const result = await bulkSetLinkedItems(
     'user_agents',
     'user_id',
     userId,
     'agent_name',
-    agentNames
+    agentNames,
+    (db, change) => appendAgentAccessChanges(db, operatorSub, { kind: 'user', id: userId }, change)
   )
   return { userId, agentNames: result.items }
 }
@@ -17,19 +42,38 @@ export async function setUserAgents(userId: string, agentNames: string[]) {
  * Inverse of setUserAgents — manages user_agents from the agent's perspective.
  * Used when creating or editing a Host CRD and selecting its authorized users.
  */
-export async function setAgentUsers(agentName: string, userIds: string[]) {
+export async function setAgentUsers(agentName: string, userIds: string[], operatorSub: string) {
   const result = await bulkSetLinkedItems(
     'user_agents',
     'agent_name',
     agentName,
     'user_id',
-    userIds
+    userIds,
+    async (db, change) => {
+      await appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub,
+        changes: [
+          ...change.added.map(userId => ({
+            action: 'grant' as const,
+            resourceClass: 'agent_access',
+            resourceRef: `agent:${agentName}`,
+            subject: { kind: 'user' as const, id: userId },
+          })),
+          ...change.removed.map(userId => ({
+            action: 'revoke' as const,
+            resourceClass: 'agent_access',
+            resourceRef: `agent:${agentName}`,
+            subject: { kind: 'user' as const, id: userId },
+          })),
+        ],
+      })
+    }
   )
   return { agentName, userIds: result.items }
 }
 
-export async function getUserAgents(userId: string) {
-  const result = await pool.query(
+export async function getUserAgents(userId: string, db: Pick<DbClient, 'query'> = pool) {
+  const result = await db.query(
     `SELECT agent_name
        FROM user_agents
       WHERE user_id = $1
@@ -64,13 +108,14 @@ export async function listUsersByAgent(agentName: string) {
   }))
 }
 
-export async function setTeamAgents(teamId: string, agentNames: string[]) {
+export async function setTeamAgents(teamId: string, agentNames: string[], operatorSub: string) {
   const result = await bulkSetLinkedItems(
     'team_agents',
     'team_id',
     teamId,
     'agent_name',
-    agentNames
+    agentNames,
+    (db, change) => appendAgentAccessChanges(db, operatorSub, { kind: 'team', id: teamId }, change)
   )
   return { teamId, agentNames: result.items }
 }
@@ -80,19 +125,38 @@ export async function setTeamAgents(teamId: string, agentNames: string[]) {
  * Inverse of setTeamAgents — manages team_agents from the agent's perspective.
  * Used when creating or editing a Host CRD and selecting its authorized teams.
  */
-export async function setAgentTeams(agentName: string, teamIds: string[]) {
+export async function setAgentTeams(agentName: string, teamIds: string[], operatorSub: string) {
   const result = await bulkSetLinkedItems(
     'team_agents',
     'agent_name',
     agentName,
     'team_id',
-    teamIds
+    teamIds,
+    async (db, change) => {
+      await appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub,
+        changes: [
+          ...change.added.map(teamId => ({
+            action: 'grant' as const,
+            resourceClass: 'agent_access',
+            resourceRef: `agent:${agentName}`,
+            subject: { kind: 'team' as const, id: teamId },
+          })),
+          ...change.removed.map(teamId => ({
+            action: 'revoke' as const,
+            resourceClass: 'agent_access',
+            resourceRef: `agent:${agentName}`,
+            subject: { kind: 'team' as const, id: teamId },
+          })),
+        ],
+      })
+    }
   )
   return { agentName, teamIds: result.items }
 }
 
-export async function getTeamAgents(teamId: string) {
-  const result = await pool.query(
+export async function getTeamAgents(teamId: string, db: Pick<DbClient, 'query'> = pool) {
+  const result = await db.query(
     `SELECT agent_name
        FROM team_agents
       WHERE team_id = $1

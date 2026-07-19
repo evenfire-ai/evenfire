@@ -1,4 +1,37 @@
 import { z } from 'zod'
+import {
+  type LlmProviderId,
+  PROVIDER_CREDENTIAL_SLOTS,
+  isLlmProviderId,
+} from '@clerum/llm-providers'
+import { isModelAllowed as isModelAllowedDefault } from '../../services/llmAllowedModels.js'
+import { isPlainObject } from '../../utils/isPlainObject.js'
+
+// A Kubernetes Secret/ConfigMap data key: `[-._a-zA-Z0-9]`, max 253 chars.
+// A fallback `credentialSlot` names a key inside the chatllm-api-keys Secret, so
+// it must satisfy that format. We validate the FORMAT only — the key's existence
+// in the Secret is resolved by mcp-host at runtime (a cheap DB-free write gate
+// cannot see the Secret's contents; spec §3-R5.3). Same pattern as recipes.ts.
+const SECRET_KEY_RE = /^[-._a-zA-Z0-9]+$/
+
+/**
+ * Whether a provider may carry a per-fallback `credentialSlot` (an extra
+ * single-line Secret key that overrides its one API key). Only providers whose
+ * SOLE credential slot is a single-line API key qualify. A multi-slot provider
+ * (Bedrock: access-key-id + secret-access-key) or a single-slot provider whose
+ * key is the multiline service-account JSON (Vertex: `vertex-service-account-json`
+ * → `VERTEX_SERVICE_ACCOUNT_JSON`) cannot be expressed by one extra key, so those
+ * fallbacks must reuse the primary's credentials. Derived entirely from the
+ * shared registry so adding a provider needs no change here.
+ */
+function providerSupportsFallbackCredentialSlot(provider: LlmProviderId): boolean {
+  const slots = PROVIDER_CREDENTIAL_SLOTS[provider]
+  // A per-fallback credentialSlot is ONE single-line API key. A multi-slot
+  // provider (Bedrock's pair) or a multi-line slot (Vertex's service-account
+  // JSON) can't be expressed as one extra key. `multiline` is the explicit
+  // registry flag (replaces the old `-json`/`_JSON` name heuristic).
+  return slots.length === 1 && !slots[0].multiline
+}
 
 const HostApprovalSchema = z
   .object({
@@ -8,6 +41,10 @@ const HostApprovalSchema = z
   })
   .passthrough()
   .optional()
+
+export interface HostSpecValidationDeps {
+  isModelAllowed: (provider: string, model: string) => Promise<boolean>
+}
 
 // spec.lifecycle follows the facade's contract for optional spec objects,
 // exactly like spec.desktop: the admin facade forwards body.spec to the K8s
@@ -33,15 +70,41 @@ const HostLifecycleSchema = z
   .passthrough()
   .optional()
 
-export function validateHostSpec(
-  spec: Record<string, unknown>
-): { errors: Array<{ field: string; message: string }> } | null {
-  const errors: Array<{ field: string; message: string }> = []
+/**
+ * Validate a Host spec before it reaches the K8s API.
+ *
+ * - `spec.approval`: defensive zod shape check (unchanged behavior).
+ * - `spec.lifecycle` (stateless agents): optional object carrying a boolean
+ *   `stateless`; absent means disabled (the admin facade full-replaces the CR,
+ *   so Control UI must echo the full spec it read).
+ * - `spec.model` (R3): when a model name is present it must exist AND be enabled
+ *   in the operator allowlist under its declared provider — fail-closed for new
+ *   selections. A spec without `spec.model.name` is left untouched (deployed
+ *   Hosts are never disrupted; enforcement applies to create/edit via this API).
+ * - `spec.llmPolicy` (R5): opt-in provider-fallback policy; every fallback entry
+ *   must reference a known provider and an allowlisted model.
+ * - `spec.allowedModels` (Topic 3a): optional/additive per-host SUBSET of the
+ *   global allowlist this host offers. Absent/empty = the host offers the FULL
+ *   global allowlist (back-compat). When present, every entry must be a global
+ *   allowlist pair, and the primary (`spec.model.name`) plus every fallback must
+ *   fall WITHIN the offered subset (coherence — a host cannot serve what it does
+ *   not offer).
+ *
+ * `isModelAllowed` is injectable so this stays unit-testable without a DB.
+ */
+export async function validateHostSpec(
+  spec: Record<string, unknown>,
+  deps: HostSpecValidationDeps = { isModelAllowed: isModelAllowedDefault }
+): Promise<{ errors: Array<{ field: string; message: string }> } | null> {
+  // Structural (sync, zod) checks first: accumulate approval + lifecycle shape
+  // errors so a payload bad in both surfaces both — dev's stateless contract
+  // pinned by test/routes.resources.test.ts.
+  const structuralErrors: Array<{ field: string; message: string }> = []
   if (spec.approval !== undefined) {
     const result = HostApprovalSchema.safeParse(spec.approval)
     if (!result.success) {
       for (const issue of result.error.issues) {
-        errors.push({
+        structuralErrors.push({
           field: ['spec', 'approval', ...issue.path].join('.'),
           message: issue.message,
         })
@@ -52,13 +115,309 @@ export function validateHostSpec(
     const result = HostLifecycleSchema.safeParse(spec.lifecycle)
     if (!result.success) {
       for (const issue of result.error.issues) {
-        errors.push({
+        structuralErrors.push({
           field: ['spec', 'lifecycle', ...issue.path].join('.'),
           message: issue.message,
         })
       }
     }
   }
-  if (errors.length === 0) return null
-  return { errors }
+  if (structuralErrors.length > 0) return { errors: structuralErrors }
+
+  // R3 model allowlist. Enforcement is keyed on the PRESENCE of `spec.model.name`
+  // (not just a truthy string) so a non-string/garbage name cannot slip past the
+  // gate — that is strictly fail-closed. A spec with no `name` key at all is left
+  // untouched (deployed Hosts are never disrupted).
+  const model = spec.model
+  if (isPlainObject(model) && model.name !== undefined) {
+    const name = typeof model.name === 'string' ? model.name.trim() : ''
+    if (!name) {
+      return {
+        errors: [
+          { field: 'spec.model.name', message: 'spec.model.name must be a non-empty string' },
+        ],
+      }
+    }
+    const provider = typeof model.provider === 'string' ? model.provider.trim() : ''
+    if (!provider) {
+      // The allowlist is keyed by (provider, model); a bare model name cannot be
+      // validated. Ask for the provider explicitly instead of routing an empty
+      // provider through the lookup (which would reject with a confusing message).
+      return {
+        errors: [
+          {
+            field: 'spec.model.provider',
+            message: 'spec.model.provider is required when spec.model.name is set',
+          },
+        ],
+      }
+    }
+    const allowed = await deps.isModelAllowed(provider, name)
+    if (!allowed) {
+      return {
+        errors: [
+          {
+            field: 'spec.model.name',
+            message: `model_not_allowed: "${name}" is not enabled in the allowlist for provider "${provider}"`,
+          },
+        ],
+      }
+    }
+  }
+
+  // R5 provider-fallback policy. Opt-in and additive: a spec with no `llmPolicy`
+  // is untouched. When present, EVERY fallback entry must reference a real
+  // provider and a model enabled in the operator allowlist under that provider
+  // (same fail-closed gate as spec.model.name), so a broken fallback is caught
+  // on write instead of surfacing only during the incident it was meant to
+  // absorb (spec V16). `credentialSlot`, when present, is format-checked only.
+  const policyErrors = await validateLlmPolicy(spec.llmPolicy, deps)
+  if (policyErrors) return policyErrors
+
+  // Topic 3a per-host allowlist. Runs AFTER the global-allowlist gates above, so
+  // by the time coherence is checked the primary + fallbacks are already known
+  // to be valid GLOBAL pairs; this narrows them to the host's offered subset.
+  const allowedModelsErrors = await validateAllowedModels(spec, deps)
+  if (allowedModelsErrors) return allowedModelsErrors
+
+  return null
+}
+
+// Separator for the offered-pair set key. A NUL byte can appear in neither a
+// provider id nor a model id (both are validated at the global-allowlist DB
+// layer against space/NUL-free patterns), so distinct `(provider, model)` pairs
+// can never collide onto the same key — even though a model id may itself carry
+// spaces (Azure deployment names).
+const OFFERED_KEY_SEP = '\u0000'
+
+/** Stable key for an offered `(provider, model)` pair. */
+function offeredKey(provider: string, model: string): string {
+  return `${provider}${OFFERED_KEY_SEP}${model}`
+}
+
+/**
+ * Validate `spec.allowedModels[]` on write (Topic 3a). OPTIONAL/ADDITIVE: absent
+ * returns null (host offers the full global allowlist). When present it is the
+ * per-host SUBSET of the global allowlist this host offers:
+ *
+ *  1. every entry `(provider, model)` must be a known provider AND a pair enabled
+ *     in the GLOBAL allowlist (same fail-closed gate as spec.model / R5); an
+ *     offending entry answers 422 with a `spec.allowedModels[i]` field path;
+ *  2. COHERENCE (only when the offered subset is non-empty): the primary
+ *     `spec.model.name` and every `spec.llmPolicy.fallbacks[i].model` must fall
+ *     WITHIN that offered subset - a host cannot serve a model it does not offer.
+ *
+ * An EMPTY array is treated exactly like absent (full global allowlist, coherence
+ * skipped) so existing hosts are never disrupted.
+ */
+async function validateAllowedModels(
+  spec: Record<string, unknown>,
+  deps: HostSpecValidationDeps
+): Promise<{ errors: Array<{ field: string; message: string }> } | null> {
+  const allowedModels = spec.allowedModels
+  if (allowedModels === undefined) return null
+  if (!Array.isArray(allowedModels)) {
+    return {
+      errors: [{ field: 'spec.allowedModels', message: 'spec.allowedModels must be an array' }],
+    }
+  }
+
+  const offered = new Set<string>()
+  for (let i = 0; i < allowedModels.length; i++) {
+    const entry = allowedModels[i]
+    const base = `spec.allowedModels[${i}]`
+    if (!isPlainObject(entry)) {
+      return { errors: [{ field: base, message: `${base} must be an object` }] }
+    }
+
+    const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
+    if (!provider) {
+      return { errors: [{ field: `${base}.provider`, message: `${base}.provider is required` }] }
+    }
+    if (!isLlmProviderId(provider)) {
+      return {
+        errors: [
+          {
+            field: `${base}.provider`,
+            message: `${base}.provider "${provider}" is not a known provider`,
+          },
+        ],
+      }
+    }
+
+    const model = typeof entry.model === 'string' ? entry.model.trim() : ''
+    if (!model) {
+      return { errors: [{ field: `${base}.model`, message: `${base}.model is required` }] }
+    }
+
+    // Global-allowlist gate LAST (only async/DB check): a pair not in the global
+    // catalog can never be offered by a host.
+    const allowed = await deps.isModelAllowed(provider, model)
+    if (!allowed) {
+      return {
+        errors: [
+          {
+            field: `${base}.model`,
+            message: `model_not_allowed: "${model}" is not enabled in the allowlist for provider "${provider}"`,
+          },
+        ],
+      }
+    }
+
+    offered.add(offeredKey(provider, model))
+  }
+
+  // Empty offered set (a literal `[]`) -> additive back-compat: full global
+  // allowlist, no subset to violate, so the coherence gate is skipped.
+  if (offered.size === 0) return null
+
+  // COHERENCE - primary. Only enforced when `spec.model.name` is actually present
+  // (a Host without a declared primary is left untouched, mirroring the R3 gate).
+  // The `provider` truthiness guard is defensive only: the R3 gate above already
+  // 422s a present `spec.model.name` that lacks a provider, so by here a present
+  // name guarantees a present provider.
+  const model = spec.model
+  if (isPlainObject(model) && typeof model.name === 'string') {
+    const name = model.name.trim()
+    const provider = typeof model.provider === 'string' ? model.provider.trim() : ''
+    if (name && provider && !offered.has(offeredKey(provider, name))) {
+      return {
+        errors: [
+          {
+            field: 'spec.model.name',
+            message: `model_not_offered: primary model "${name}" (provider "${provider}") is not in spec.allowedModels`,
+          },
+        ],
+      }
+    }
+  }
+
+  // COHERENCE - fallbacks. Entries here are already known-good GLOBAL pairs
+  // (validateLlmPolicy ran first); this narrows them to the offered subset.
+  const llmPolicy = spec.llmPolicy
+  if (isPlainObject(llmPolicy) && Array.isArray(llmPolicy.fallbacks)) {
+    const { fallbacks } = llmPolicy
+    for (let i = 0; i < fallbacks.length; i++) {
+      const entry = fallbacks[i]
+      if (!isPlainObject(entry)) continue
+      const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
+      const fbModel = typeof entry.model === 'string' ? entry.model.trim() : ''
+      if (provider && fbModel && !offered.has(offeredKey(provider, fbModel))) {
+        return {
+          errors: [
+            {
+              field: `spec.llmPolicy.fallbacks[${i}].model`,
+              message: `model_not_offered: fallback "${fbModel}" (provider "${provider}") is not in spec.allowedModels`,
+            },
+          ],
+        }
+      }
+    }
+  }
+
+  return null
+}
+
+/**
+ * Validate `spec.llmPolicy.fallbacks[]` on write (spec §3-R5.3). Returns the
+ * FIRST offending entry's error (mirroring the short-circuit style above) so the
+ * caller can answer 422 with a field path like `spec.llmPolicy.fallbacks[1].model`.
+ * Absent `llmPolicy` returns null (no failover configured). The CRD schema is the
+ * structural authority; this is the semantic gate (allowlist + slot format) that
+ * the apiserver cannot perform.
+ */
+async function validateLlmPolicy(
+  llmPolicy: unknown,
+  deps: HostSpecValidationDeps
+): Promise<{ errors: Array<{ field: string; message: string }> } | null> {
+  if (llmPolicy === undefined) return null
+  if (!isPlainObject(llmPolicy)) {
+    return { errors: [{ field: 'spec.llmPolicy', message: 'spec.llmPolicy must be an object' }] }
+  }
+
+  const { fallbacks } = llmPolicy
+  // `fallbacks` absent is left to the CRD schema (it is required there). We only
+  // validate its entries when it is actually an array with content.
+  if (fallbacks === undefined) return null
+  if (!Array.isArray(fallbacks)) {
+    return {
+      errors: [
+        { field: 'spec.llmPolicy.fallbacks', message: 'spec.llmPolicy.fallbacks must be an array' },
+      ],
+    }
+  }
+
+  for (let i = 0; i < fallbacks.length; i++) {
+    const entry = fallbacks[i]
+    const base = `spec.llmPolicy.fallbacks[${i}]`
+    if (!isPlainObject(entry)) {
+      return { errors: [{ field: base, message: `${base} must be an object` }] }
+    }
+
+    const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
+    if (!provider) {
+      return { errors: [{ field: `${base}.provider`, message: `${base}.provider is required` }] }
+    }
+    if (!isLlmProviderId(provider)) {
+      return {
+        errors: [
+          {
+            field: `${base}.provider`,
+            message: `${base}.provider "${provider}" is not a known provider`,
+          },
+        ],
+      }
+    }
+
+    const model = typeof entry.model === 'string' ? entry.model.trim() : ''
+    if (!model) {
+      return { errors: [{ field: `${base}.model`, message: `${base}.model is required` }] }
+    }
+
+    if (entry.credentialSlot !== undefined) {
+      const slot = typeof entry.credentialSlot === 'string' ? entry.credentialSlot : ''
+      if (!slot || slot.length > 253 || !SECRET_KEY_RE.test(slot)) {
+        return {
+          errors: [
+            {
+              field: `${base}.credentialSlot`,
+              message: `${base}.credentialSlot must be a valid Secret data key (matching ${SECRET_KEY_RE}, max 253 chars)`,
+            },
+          ],
+        }
+      }
+      // Capability gate (residual 1b, decision 3): a fallback `credentialSlot`
+      // names ONE single-line Secret key that overrides the provider's single API
+      // key. It cannot express a multi-credential provider (Bedrock = access-key +
+      // secret pair) or a multiline service-account JSON (Vertex) — those MUST
+      // reuse the primary's credentials. `provider` is already narrowed to a known
+      // LlmProviderId above, so the registry lookup is total.
+      if (!providerSupportsFallbackCredentialSlot(provider)) {
+        return {
+          errors: [
+            {
+              field: `${base}.credentialSlot`,
+              message: `${base}.credentialSlot is not supported for provider "${provider}": it uses multiple or JSON credentials and must reuse the primary's credentials (drop credentialSlot)`,
+            },
+          ],
+        }
+      }
+    }
+
+    // Allowlist gate LAST: it is the only async (DB) check, so cheap structural
+    // rejections above avoid a needless query.
+    const allowed = await deps.isModelAllowed(provider, model)
+    if (!allowed) {
+      return {
+        errors: [
+          {
+            field: `${base}.model`,
+            message: `model_not_allowed: "${model}" is not enabled in the allowlist for provider "${provider}"`,
+          },
+        ],
+      }
+    }
+  }
+
+  return null
 }

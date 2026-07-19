@@ -1,5 +1,6 @@
 import Image from 'next/image'
 import Link from 'next/link'
+import { CONTROL_ROUTES } from '@constants/routes'
 
 export default function NotFound() {
   return (
@@ -22,7 +23,7 @@ export default function NotFound() {
           <p className="cu-not-found__copy">
             This Control UI route is not available. Return home to choose a known section.
           </p>
-          <Link className="cu-btn cu-btn--primary cu-not-found__button" href="/">
+          <Link className="cu-btn cu-btn--primary cu-not-found__button" href={CONTROL_ROUTES.login}>
             Back to Control UI
           </Link>
         </div>

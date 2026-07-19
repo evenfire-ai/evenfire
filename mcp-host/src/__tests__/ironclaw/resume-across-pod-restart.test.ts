@@ -14,8 +14,10 @@ import {
   type ColdStartLoader,
   type RehydratedApproval,
 } from '../../agent/stateMachine'
+import type { PendingApproval } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { MessageQueue } from '../../queue/messageQueue'
+import { serializeSessionKey } from '../../session'
 
 vi.mock('../../config', () => ({
   config: {
@@ -39,31 +41,54 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
 
   beforeEach(() => {
     agent = new AgentStateMachine(new MessageQueue(), new TaskLifecycle(), { autoStart: false })
+    agent.setLLMProvider({
+      completeSingleTurn: vi.fn(),
+      completeSingleTurnWithTools: vi.fn(),
+      getProviderType: () => 'openai' as const,
+    } as any)
+    agent.setMcpManager({ getAllTools: () => [], callTool: vi.fn() } as any)
   })
 
-  it('S1 — bootstrap does NOT stamp restart-interrupted approvals into approvalMap', async () => {
-    // The S1 fix (spec decision #4 "pod restart = reap, not auto-resume"): the
-    // PHASE 1b reaper deletes every awaiting_approval row, so by the time
-    // loadPendingApprovals runs there is nothing left to rehydrate. Even if the
-    // loader returned a stale entry, bootstrap must NOT stamp the approvalMap — a
-    // stamped entry with no executor is exactly the S1 bug (handleApproval hits an
-    // empty activeExecutors and dead-ends with "Task is no longer awaiting
-    // approval" without ever transitioning the session). So the approval must be
-    // treated as gone, not re-armed.
+  async function seedRehydratedApproval(opts: {
+    requestId: string
+    taskId: string
+    sessionKey: string
+    sourceMessage: Record<string, unknown>
+    expiresAt?: number
+  }): Promise<PendingApproval> {
+    const approval: PendingApproval = {
+      request_id: opts.requestId,
+      tool_name: 'shell_exec',
+      parameters: { command: 'ls' },
+      description: 'queued before restart',
+      tool_call_id: `tc_${opts.requestId}`,
+      context_snapshot: [],
+    }
+    const manager = agent.getConversationManager()
+    const conv = await manager.getOrCreate(opts.sessionKey)
+    await manager.startTurn(conv, 'run a gated command', opts.taskId)
+    await manager.suspendForApproval(conv, approval)
     const loader: ColdStartLoader = {
-      reapAwaitingApprovalSessions: vi.fn(async () => [
-        {
-          sessionId: 's-r1',
-          sessionKey: 'u:rpc:agent:chat',
-          userId: 'alice',
-          channelType: 'telegram',
-          channelId: 'c-1',
-          threadId: null,
-          activeTaskId: 'task-r1',
-          reapedAt: Date.now(),
-        },
-      ]),
-      // Defensive: even if a stray approval survives the reap, it must not be stamped.
+      loadPendingApprovals: vi.fn(
+        async (): Promise<RehydratedApproval[]> => [
+          {
+            request_id: opts.requestId,
+            task_id: opts.taskId,
+            session_key: opts.sessionKey,
+            approval,
+            source_message: opts.sourceMessage,
+            expiresAt: opts.expiresAt,
+          },
+        ]
+      ),
+    }
+    agent.setColdStartLoader(loader)
+    await agent.bootstrap()
+    return approval
+  }
+
+  it('fails closed when durable approval metadata lacks its session key', async () => {
+    const loader: ColdStartLoader = {
       loadPendingApprovals: vi.fn(
         async (): Promise<RehydratedApproval[]> => [
           {
@@ -88,14 +113,7 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
     }
 
     agent.setColdStartLoader(loader)
-    await agent.bootstrap()
-
-    expect(loader.reapAwaitingApprovalSessions).toHaveBeenCalledTimes(1)
-    expect(agent.getPendingApprovals()).toEqual([])
-    // The map was NOT stamped: handleApproval reports the approval is unknown,
-    // not the (now-impossible) "Task is no longer awaiting approval" half-state.
-    const result = await agent.handleApproval('alice', 'req-r1', false)
-    expect(result.error).toContain('No pending approval')
+    await expect(agent.bootstrap()).rejects.toThrow('missing its session key')
   })
 
   it('cold-start with empty loader is a no-op (P.3 default)', async () => {
@@ -137,15 +155,15 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
     expect(loader.loadPendingApprovals).toHaveBeenCalledTimes(1) // still ran
   })
 
-  it('S1 — bootstrap reaps ALL awaiting-approval (PHASE 1b) BEFORE loading approvals', async () => {
+  it('reaps only expired awaiting approvals before loading live approvals', async () => {
     const order: string[] = []
     const loader: ColdStartLoader = {
       reapProcessingSessions: vi.fn(async () => {
         order.push('reap-processing')
         return []
       }),
-      reapAwaitingApprovalSessions: vi.fn(async () => {
-        order.push('reap-awaiting')
+      reapExpiredAwaitingApprovalSessions: vi.fn(async () => {
+        order.push('reap-expired')
         return []
       }),
       loadPendingApprovals: vi.fn(async (): Promise<RehydratedApproval[]> => {
@@ -156,23 +174,90 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
     agent.setColdStartLoader(loader)
     await agent.bootstrap()
 
-    expect(loader.reapAwaitingApprovalSessions).toHaveBeenCalledTimes(1)
-    // PHASE 1 → PHASE 1b → PHASE 2: the awaiting-approval reap MUST precede the
-    // load so a just-deleted approval row isn't observed afterward.
-    expect(order).toEqual(['reap-processing', 'reap-awaiting', 'load'])
+    expect(loader.reapExpiredAwaitingApprovalSessions).toHaveBeenCalledTimes(1)
+    expect(order).toEqual(['reap-processing', 'reap-expired', 'load'])
   })
 
-  it('S1 — an awaiting-approval reaper failure does NOT block boot', async () => {
+  it('fails closed when the expired-approval sweep fails', async () => {
     const loader: ColdStartLoader = {
       reapProcessingSessions: vi.fn(async () => []),
-      reapAwaitingApprovalSessions: vi.fn(async () => {
+      reapExpiredAwaitingApprovalSessions: vi.fn(async () => {
         throw new Error('awaiting reap boom')
       }),
       loadPendingApprovals: vi.fn(async (): Promise<RehydratedApproval[]> => []),
     }
     agent.setColdStartLoader(loader)
-    await expect(agent.bootstrap()).resolves.toBeUndefined()
-    expect(loader.loadPendingApprovals).toHaveBeenCalledTimes(1) // still ran
+    await expect(agent.bootstrap()).rejects.toThrow('awaiting reap boom')
+    expect(loader.loadPendingApprovals).not.toHaveBeenCalled()
+  })
+
+  it('rehydrated approvals reject decisions from a different owner channel before a legitimate approval succeeds', async () => {
+    const sessionKey = serializeSessionKey({
+      userId: 'alice',
+      channelType: 'telegram',
+      channelId: 'chat-1',
+    })
+    await seedRehydratedApproval({
+      requestId: 'req-bound',
+      taskId: 'task-bound',
+      sessionKey,
+      sourceMessage: {
+        sender: 'alice',
+        channelType: 'telegram',
+        channelId: 'chat-1',
+      },
+    })
+
+    await expect(agent.handleApproval('mallory', 'req-bound', false)).resolves.toMatchObject({
+      success: false,
+      error: 'Approval decision does not match the originating user',
+    })
+
+    await expect(
+      agent.handleApproval('alice', 'req-bound', false, 'telegram', 'chat-2')
+    ).resolves.toMatchObject({
+      success: false,
+      error: 'Approval decision does not match the originating channel',
+    })
+
+    await expect(
+      agent.handleApproval('alice', 'req-bound', false, 'telegram', 'chat-1')
+    ).resolves.toMatchObject({ success: true })
+  })
+
+  it('rehydrated approvals keep expiresAt active after bootstrap', async () => {
+    vi.useFakeTimers()
+    try {
+      const now = new Date('2026-07-12T12:00:00.000Z')
+      vi.setSystemTime(now)
+      const sessionKey = serializeSessionKey({
+        userId: 'alice',
+        channelType: 'telegram',
+        channelId: 'chat-1',
+      })
+      await seedRehydratedApproval({
+        requestId: 'req-expiring',
+        taskId: 'task-expiring',
+        sessionKey,
+        sourceMessage: {
+          sender: 'alice',
+          channelType: 'telegram',
+          channelId: 'chat-1',
+        },
+        expiresAt: now.getTime() + 1_000,
+      })
+
+      vi.setSystemTime(now.getTime() + 1_001)
+
+      await expect(
+        agent.handleApproval('alice', 'req-expiring', false, 'telegram', 'chat-1')
+      ).resolves.toMatchObject({
+        success: false,
+        error: 'Approval request has expired',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it.todo(

@@ -16,7 +16,31 @@ const KEY_BYTES = 32
 const IV_BYTES = 12
 const AUTH_TAG_BYTES = 16
 
-export function deriveOAuthEncryptionKey(hexKey: string): Buffer {
+export type Aes256GcmEnvelope = { nonce: Buffer; ciphertext: Buffer }
+
+export function encryptAes256Gcm(key: Buffer, plaintext: Buffer, aad?: Buffer): Aes256GcmEnvelope {
+  if (key.length !== KEY_BYTES) throw new Error(`AES-256-GCM key must be ${KEY_BYTES} bytes`)
+  const nonce = randomBytes(IV_BYTES)
+  const cipher = createCipheriv('aes-256-gcm', key, nonce)
+  if (aad) cipher.setAAD(aad)
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()])
+  return { nonce, ciphertext: encrypted }
+}
+
+export function decryptAes256Gcm(key: Buffer, envelope: Aes256GcmEnvelope, aad?: Buffer): Buffer {
+  if (key.length !== KEY_BYTES) throw new Error(`AES-256-GCM key must be ${KEY_BYTES} bytes`)
+  if (envelope.nonce.length !== IV_BYTES || envelope.ciphertext.length < AUTH_TAG_BYTES + 1) {
+    throw new Error('Malformed AES-256-GCM envelope')
+  }
+  const authTag = envelope.ciphertext.subarray(envelope.ciphertext.length - AUTH_TAG_BYTES)
+  const ciphertext = envelope.ciphertext.subarray(0, -AUTH_TAG_BYTES)
+  const decipher = createDecipheriv('aes-256-gcm', key, envelope.nonce)
+  if (aad) decipher.setAAD(aad)
+  decipher.setAuthTag(authTag)
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()])
+}
+
+export function deriveAes256GcmKey(hexKey: string): Buffer {
   if (typeof hexKey !== 'string') {
     throw new Error('OAuth encryption key must be a hex string')
   }
@@ -29,17 +53,15 @@ export function deriveOAuthEncryptionKey(hexKey: string): Buffer {
   return Buffer.from(hexKey, 'hex')
 }
 
+export const deriveOAuthEncryptionKey = deriveAes256GcmKey
+
 export function encryptOAuthSecret(key: Buffer, plaintext: string): string {
   if (key.length !== KEY_BYTES) {
     throw new Error(`encryptOAuthSecret: key must be ${KEY_BYTES} bytes`)
   }
-  const iv = randomBytes(IV_BYTES)
-  const cipher = createCipheriv('aes-256-gcm', key, iv)
-  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
-  const authTag = cipher.getAuthTag()
-  if (authTag.length !== AUTH_TAG_BYTES) {
-    throw new Error('encryptOAuthSecret: unexpected auth tag length')
-  }
+  const { nonce: iv, ciphertext: sealed } = encryptAes256Gcm(key, Buffer.from(plaintext, 'utf8'))
+  const ciphertext = sealed.subarray(0, -AUTH_TAG_BYTES)
+  const authTag = sealed.subarray(-AUTH_TAG_BYTES)
   return [
     ENCRYPTION_VERSION,
     iv.toString('base64url'),
@@ -69,8 +91,9 @@ export function decryptOAuthSecret(key: Buffer, payload: string): string {
   if (authTag.length !== AUTH_TAG_BYTES) {
     throw new Error('decryptOAuthSecret: invalid auth tag length')
   }
-  const decipher = createDecipheriv('aes-256-gcm', key, iv)
-  decipher.setAuthTag(authTag)
-  const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()])
+  const plaintext = decryptAes256Gcm(key, {
+    nonce: iv,
+    ciphertext: Buffer.concat([ciphertext, authTag]),
+  })
   return plaintext.toString('utf8')
 }

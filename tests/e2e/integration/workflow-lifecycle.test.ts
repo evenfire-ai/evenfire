@@ -13,7 +13,7 @@
  *   - control-api port-forwarded on :8090  (make minikube-pf-control-ui)
  *   - WRC running with CLERUM_COORDINATOR_IMAGE=clerum/workflow-coordinator:test
  *   - CLERUM_MCP_HOST_IMAGE=clerum/mcp-host:test
- *   - clerum-model-secret-mapping ConfigMap in mcp-host ns with zai__glm-4.7 and zai__glm-5-turbo keys
+ *   - clerum-model-secret-mapping ConfigMap in mcp-host ns with a `zai` key (R1: keyed by provider)
  *   - chatllm-api-keys Secret in mcp-host ns with zai-api-key populated (single source of truth post-refactor)
  *
  * Model: zai / glm-4.7 (default for all steps)

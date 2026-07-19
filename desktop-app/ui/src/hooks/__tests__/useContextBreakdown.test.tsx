@@ -108,6 +108,30 @@ describe('useContextBreakdown', () => {
     expect(getContextBreakdown).toHaveBeenCalledTimes(2)
   })
 
+  it('force bypasses the fresh/TTL short-circuit and re-probes immediately', async () => {
+    const getContextBreakdown = vi.fn(async () => ({ breakdown: sampleBreakdown }))
+    installClerum(getContextBreakdown)
+
+    const { result } = renderHook(() => useContextBreakdown())
+
+    await act(async () => {
+      await result.current.fetchContextBreakdown('trader', 'c1')
+    })
+    expect(getContextBreakdown).toHaveBeenCalledTimes(1)
+
+    // A normal call within the TTL is de-duped by the fresh short-circuit...
+    await act(async () => {
+      await result.current.fetchContextBreakdown('trader', 'c1')
+    })
+    expect(getContextBreakdown).toHaveBeenCalledTimes(1)
+
+    // ...but a forced call re-probes even though the cached entry is still fresh.
+    await act(async () => {
+      await result.current.fetchContextBreakdown('trader', 'c1', { force: true })
+    })
+    expect(getContextBreakdown).toHaveBeenCalledTimes(2)
+  })
+
   it('never throws on a failed fetch — leaves the prior value in place', async () => {
     const getContextBreakdown = vi.fn(async () => {
       throw new Error('network unreachable')

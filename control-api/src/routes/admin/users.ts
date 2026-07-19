@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import type { K8sGateway } from '../../k8s.js'
+import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import {
   filterAccessValues,
   mergeActiveUpdateWithDeletedHistory,
@@ -283,7 +284,12 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
       const existingPartition = partitionAccessValues(existing.contextIds, activeContextIds)
       const updated = await setUserContexts(
         req.params.userId,
-        mergeActiveUpdateWithDeletedHistory(contextIds, activeContextIds, existingPartition.deleted)
+        mergeActiveUpdateWithDeletedHistory(
+          contextIds,
+          activeContextIds,
+          existingPartition.deleted
+        ),
+        (req as UiAuthedRequest).adminAuth!.sub
       )
       const updatedPartition = partitionAccessValues(updated.contextIds, activeContextIds)
       res.status(200).json({
@@ -320,7 +326,8 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
       const activeAgentNames = await loadAdminActiveAgentNames(gateway)
       const updated = await setUserAgents(
         req.params.userId,
-        filterAccessValues(agentNames, new Set(activeAgentNames))
+        filterAccessValues(agentNames, new Set(activeAgentNames)),
+        (req as UiAuthedRequest).adminAuth!.sub
       )
       const updatedPartition = partitionAccessValues(updated.agentNames, activeAgentNames)
       res.status(200).json({

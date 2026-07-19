@@ -64,10 +64,21 @@ spec:
             secretKeyRef:
               name: control-api-secrets
               key: CONTROL_API_OAUTH_ENCRYPTION_KEY
+        - name: TRACING_APPROVAL_PROMPT_HISTORY_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: control-api-secrets
+              key: TRACING_APPROVAL_PROMPT_HISTORY_ENCRYPTION_KEY
+              optional: true
         - name: CONTROL_API_ALLOWED_ISSUANCE_NAMESPACES
           value: "mcp-host,sandbox-recipes"
         - name: CONTROL_API_REMOTE_MCP_EGRESS_PROXY_IMAGE
           value: clerum/nginx-egress-proxy:0.1.0
+        - name: CONTROL_API_PG_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: control-api-postgres-runtime
+              key: connection-string
         envFrom:
         - configMapRef:
             name: control-api-config

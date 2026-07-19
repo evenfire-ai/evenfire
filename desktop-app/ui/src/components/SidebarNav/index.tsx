@@ -7,7 +7,7 @@ import { useNavigationContext } from '@contexts/NavigationContext'
 import { Button, IconButton, MenuItem, NavItem as NavItemControl } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { ChatStateBadge } from '@components/agents/ChatStateBadge'
-import { SIDEBAR_SESSION_PREVIEW_LIMIT } from '@constants/navigation'
+import { DESKTOP_ROUTES, SIDEBAR_SESSION_PREVIEW_LIMIT } from '@constants/navigation'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
 import type { NavItem } from '@/uiTypes'
@@ -124,13 +124,13 @@ export function SidebarNav({
     useMemo(
       () => [
         {
-          id: 'chat',
+          id: DESKTOP_ROUTES.chat,
           label: 'Chat',
           testId: 'nav-chat',
           icon: <IconChat />,
         },
         {
-          id: 'sandbox-ui',
+          id: DESKTOP_ROUTES.apps,
           label: 'Apps',
           testId: 'nav-sandbox-ui',
           icon: <IconSandboxUi />,
@@ -147,37 +147,37 @@ export function SidebarNav({
   }> = useMemo(
     () => [
       {
-        id: 'workflows',
+        id: DESKTOP_ROUTES.plugins,
         label: 'Plugins',
         testId: 'nav-workflows',
         icon: <IconWorkflows />,
       },
       {
-        id: 'agents',
+        id: DESKTOP_ROUTES.agents,
         label: 'Agents',
         testId: 'nav-agents',
         icon: <IconAgents />,
       },
       {
-        id: 'contexts',
+        id: DESKTOP_ROUTES.contexts,
         label: 'Contexts',
         testId: 'nav-contexts',
         icon: <IconContexts />,
       },
       {
-        id: 'teams',
+        id: DESKTOP_ROUTES.teams,
         label: 'Teams',
         testId: 'nav-teams',
         icon: <IconTeams />,
       },
       {
-        id: 'mcp-servers',
+        id: DESKTOP_ROUTES.connectors,
         label: 'Connectors',
         testId: 'nav-mcp-servers',
         icon: <IconConnectors />,
       },
       {
-        id: 'files',
+        id: DESKTOP_ROUTES.files,
         label: 'Files',
         testId: 'nav-files',
         icon: <IconAttachFile />,
@@ -188,9 +188,9 @@ export function SidebarNav({
 
   const dataMenuActive =
     dataRouteItems.some(item => item.id === navItem) ||
-    navItem === 'context-details' ||
-    navItem === 'team-details'
-  const settingsMenuActive = navItem === 'settings' || dataMenuActive
+    navItem === DESKTOP_ROUTES.contextDetails ||
+    navItem === DESKTOP_ROUTES.teamDetails
+  const settingsMenuActive = navItem === DESKTOP_ROUTES.settings || dataMenuActive
   const visibleLatestChatSessions = useMemo(
     () => latestChatSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT),
     [latestChatSessions]
@@ -241,7 +241,7 @@ export function SidebarNav({
       setDataSubmenuOpen(false)
       return
     }
-    handleSelect('chat')
+    handleSelect(DESKTOP_ROUTES.chat)
   }
 
   const closeSettingsMenuWithFocus = () => {
@@ -326,7 +326,7 @@ export function SidebarNav({
               <React.Fragment key={item.id}>
                 <div
                   className={`nav-link nav-link--with-toggle${
-                    item.id === 'chat' ? ' nav-link--with-new-chat' : ''
+                    item.id === DESKTOP_ROUTES.chat ? ' nav-link--with-new-chat' : ''
                   } ${navItem === item.id ? 'active' : ''}`}
                   title={collapsed ? item.label : undefined}
                   data-tooltip={item.label}
@@ -345,7 +345,7 @@ export function SidebarNav({
                   >
                     {item.label}
                   </NavItemControl>
-                  {item.id === 'chat' && (
+                  {item.id === DESKTOP_ROUTES.chat && (
                     <IconButton
                       className="nav-link-new-chat"
                       label="New chat"
@@ -353,7 +353,7 @@ export function SidebarNav({
                       data-testid="nav-new-chat"
                       onClick={event => {
                         event.stopPropagation()
-                        handleSelect('chat')
+                        handleSelect(DESKTOP_ROUTES.chat)
                       }}
                       variant="ghost"
                     >
@@ -363,7 +363,7 @@ export function SidebarNav({
                   <IconButton
                     className="nav-link-session-toggle"
                     label={
-                      item.id === 'chat'
+                      item.id === DESKTOP_ROUTES.chat
                         ? chatSessionsOpen
                           ? 'Collapse chat sessions'
                           : 'Expand chat sessions'
@@ -371,10 +371,10 @@ export function SidebarNav({
                           ? 'Collapse apps'
                           : 'Expand apps'
                     }
-                    aria-expanded={item.id === 'chat' ? chatSessionsOpen : appsOpen}
+                    aria-expanded={item.id === DESKTOP_ROUTES.chat ? chatSessionsOpen : appsOpen}
                     onClick={event => {
                       event.stopPropagation()
-                      if (item.id === 'chat') {
+                      if (item.id === DESKTOP_ROUTES.chat) {
                         setChatSessionsOpen(open => !open)
                         setSessionMenuId(null)
                       } else {
@@ -385,13 +385,15 @@ export function SidebarNav({
                   >
                     <IconChevronRight
                       className={
-                        (item.id === 'chat' ? chatSessionsOpen : appsOpen) ? 'expanded' : ''
+                        (item.id === DESKTOP_ROUTES.chat ? chatSessionsOpen : appsOpen)
+                          ? 'expanded'
+                          : ''
                       }
                     />
                   </IconButton>
                 </div>
 
-                {item.id === 'chat' && chatSessionsOpen && (
+                {item.id === DESKTOP_ROUTES.chat && chatSessionsOpen && (
                   <div className="nav-latest-sessions" ref={sessionsRef}>
                     {latestChatSessionsLoading && !latestChatSessions.length ? (
                       <span className="nav-latest-sessions__empty">Loading sessions...</span>
@@ -401,7 +403,7 @@ export function SidebarNav({
                           {visibleLatestChatSessions.map(session => {
                             const sessionKey = `${session.agentRef}${SESSION_KEY_SEPARATOR}${session.id}`
                             const isActive =
-                              navItem === 'chat' &&
+                              navItem === DESKTOP_ROUTES.chat &&
                               selectedAgent === session.agentRef &&
                               activeChatId === session.id
                             const isMenuOpen = sessionMenuId === sessionKey
@@ -520,7 +522,7 @@ export function SidebarNav({
                         {latestSessionsToggleVisible && (
                           <Button
                             className="nav-latest-sessions__toggle"
-                            onClick={() => handleSelect('chat')}
+                            onClick={() => handleSelect(DESKTOP_ROUTES.chat)}
                             color="neutral"
                             size="xs"
                             variant="text"
@@ -533,7 +535,7 @@ export function SidebarNav({
                   </div>
                 )}
 
-                {item.id === 'sandbox-ui' &&
+                {item.id === DESKTOP_ROUTES.apps &&
                   !collapsed &&
                   appsOpen &&
                   availableSandboxUiApps.length > 0 && (
@@ -642,8 +644,10 @@ export function SidebarNav({
                           data-testid={item.testId}
                           active={
                             navItem === item.id ||
-                            (item.id === 'contexts' && navItem === 'context-details') ||
-                            (item.id === 'teams' && navItem === 'team-details')
+                            (item.id === DESKTOP_ROUTES.contexts &&
+                              navItem === DESKTOP_ROUTES.contextDetails) ||
+                            (item.id === DESKTOP_ROUTES.teams &&
+                              navItem === DESKTOP_ROUTES.teamDetails)
                           }
                           className="sidebar-settings-menu-item sidebar-settings-route"
                           onClick={() => handleSelect(item.id)}
@@ -658,9 +662,9 @@ export function SidebarNav({
 
                   <MenuItem
                     data-testid="nav-settings"
-                    active={navItem === 'settings'}
+                    active={navItem === DESKTOP_ROUTES.settings}
                     className="sidebar-settings-menu-item sidebar-settings-route"
-                    onClick={() => handleSelect('settings')}
+                    onClick={() => handleSelect(DESKTOP_ROUTES.settings)}
                     role="menuitem"
                     leadingIcon={<IconSettings />}
                   >

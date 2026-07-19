@@ -328,7 +328,7 @@ describe('wire shape (real wrappers, stubbed registry fetch)', () => {
   // while the wrapper's mintToken reads process.env (set below) = auth off.
 
   it('POST self_grant → 400 with {error:"self_grant"} verbatim', async () => {
-    process.env.CLERUM_REGISTRY_URL = 'https://example.com'
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
     process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'false'
     // Use the REAL wrapper for exactly this one request; mockImplementationOnce
     // ensures it does not leak into any later test in this file.
@@ -349,7 +349,7 @@ describe('wire shape (real wrappers, stubbed registry fetch)', () => {
   })
 
   it('DELETE 204 → 204 (no 500 from res.json on empty body)', async () => {
-    process.env.CLERUM_REGISTRY_URL = 'https://example.com'
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
     process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'false'
     const real = await vi.importActual<typeof import('../src/services/registryClient.js')>(
       '../src/services/registryClient.js'

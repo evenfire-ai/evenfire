@@ -1,5 +1,11 @@
+/**
+ * R2 — one selectable model in the `GET /v1/runtime/models` projection. Mirrors
+ * the enabled allowlist entry for the Host's provider; `models` is `[hostDefault]`
+ * (name only) when the allowlist is unavailable (`degraded`).
+ */
+import type { ModelWireEntry } from '../config/modelResolution.js'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
-import type { Attachment } from '../core/types'
+import type { Attachment, TraceContextV1 } from '../core/types'
 import type { McpServerStatusEntry } from '../mcp/serverStatus'
 import type { TaskError } from '../queue/types'
 
@@ -35,6 +41,15 @@ export interface IncomingMessage {
   attachments?: Attachment[]
   metadata?: Record<string, unknown>
   providerIdentity?: ProviderIdentity
+  traceContext?: TraceContextV1 | null
+  /**
+   * R2 — optional per-session model that rides WITH the message. Because a
+   * suspended Host (replicas=0) cannot serve `POST /v1/runtime/model`, the
+   * desktop piggybacks the user's pick here so it is applied to THIS task when
+   * the message wakes the Host. Only honoured for the `rpc` channel; a
+   * non-allowlisted value is ignored (fail-open on the message).
+   */
+  model?: string
 }
 
 export type RuntimeCallerKind = 'rpc-proxy' | 'channel-reader' | 'workflow-approval-request-reader'
@@ -111,6 +126,33 @@ export interface StatusResponse {
     reason: 'llm_key_missing'
     message: string
   } | null
+  /**
+   * R2 — the Host's configured (default) provider + model. Optional for
+   * forward/backward compat (older builds omit it; consumers treat absence as
+   * "unknown"). This is the Host DEFAULT, not a per-session selection — the
+   * per-session model is served by `GET /v1/runtime/models`.
+   */
+  model?: {
+    provider: string
+    name: string
+  }
+  /**
+   * R5 — the provider/model pair currently SERVING the Host. Present only when a
+   * failover policy is configured; `fallback: true` means a configured fallback
+   * entry is serving (the desktop shows an "operating with fallback" badge). On
+   * lazy recovery the engine flips `fallback` back to false. Optional for
+   * forward/backward compat (older builds / no-policy Hosts omit it).
+   *
+   * `name` is a DELIBERATE alias of the served model (it mirrors the field name
+   * of `StatusResponse.model.name`, not the engine's `ModelPair.model`), so the
+   * desktop reads the same `.name` shape for the default model and the served
+   * pair.
+   */
+  servedBy?: {
+    provider: string
+    name: string
+    fallback: boolean
+  }
 }
 
 export type HostActivitySeverity = 'info' | 'warn' | 'error'
@@ -532,3 +574,42 @@ export type ContextBreakdownHandler = (
   agent: string,
   chatId: string
 ) => ContextBreakdownResult | null | Promise<ContextBreakdownResult | null>
+
+export type RuntimeModelEntry = ModelWireEntry
+
+/**
+ * Result of `GET /v1/runtime/models?chatId=…`. `sessionModel` is the session's
+ * saved-and-still-allowed selection (null when unset or when it fell back);
+ * `sessionModelBlocked` carries the stale saved model when it is no longer
+ * allowed. `degraded` → allowlist unavailable, `models` collapses to the Host
+ * default. `hostDefault` is the Host-configured default model.
+ */
+export interface ModelsListResult {
+  provider: string
+  hostDefault: string
+  sessionModel: string | null
+  sessionModelBlocked?: string
+  degraded: boolean
+  models: RuntimeModelEntry[]
+}
+
+export type ModelsListHandler = (
+  userSub: string,
+  hostRef: string,
+  chatId: string | undefined
+) => ModelsListResult | Promise<ModelsListResult>
+
+/**
+ * Result of `POST /v1/runtime/model`. `ok` → 200 `{ effective:'next-task', … }`;
+ * `model_not_allowed` → 403. The route owns the 400 (missing chatId/model).
+ */
+export type SetModelResult =
+  | { ok: true; provider: string; model: string }
+  | { ok: false; reason: 'model_not_allowed'; provider: string; model: string }
+
+export type SetModelHandler = (
+  userSub: string,
+  hostRef: string,
+  chatId: string,
+  model: string
+) => SetModelResult | Promise<SetModelResult>

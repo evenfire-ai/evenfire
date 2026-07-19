@@ -7,6 +7,7 @@ import { createAdminControlAdminsRouter } from './controlAdmins.js'
 import { createAdminHostArtifactsRouter } from './hostArtifacts.js'
 import { createAdminHostEnvRouter } from './hostEnv.js'
 import { createAdminHostsOverviewRouter } from './hostsOverview.js'
+import { createAdminLlmModelsRouter } from './llmModels.js'
 import { createAdminLlmPricesRouter } from './llmPrices.js'
 import { createAdminOutputsRouter } from './outputs.js'
 import { createAdminPersonalizationRouter } from './personalization.js'
@@ -19,6 +20,7 @@ import { createAdminResourcesRouter } from './resources.js'
 import { createAdminSecretsRouter } from './secrets.js'
 import { createAdminSharedFilesystemsRouter } from './sharedFilesystems.js'
 import { createAdminTeamsRouter } from './teams.js'
+import { createAdminTracingRouter } from './tracing/index.js'
 import { createAdminUsageRouter } from './usage.js'
 import { createAdminUsersRouter } from './users.js'
 
@@ -44,6 +46,8 @@ export function createAdminRouter(gateway: K8sGateway): Router {
   router.use(createAdminPluginWorkloadSdkRouter())
   router.use(createAdminUsageRouter())
   router.use(createAdminLlmPricesRouter())
+  router.use(createAdminLlmModelsRouter(gateway))
   router.use(createAdminBudgetsRouter())
+  router.use(createAdminTracingRouter())
   return router
 }

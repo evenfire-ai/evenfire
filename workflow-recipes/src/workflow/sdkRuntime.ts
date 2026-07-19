@@ -1,3 +1,5 @@
+import { createHash, randomUUID } from 'node:crypto'
+import { type LlmProviderId, isLlmProviderId } from '@clerum/llm-providers'
 import {
   type AgentStepResult,
   ConfigLoader,
@@ -24,7 +26,11 @@ import { SNIPPET_RUN_KEYS } from './snippetRunSchema'
 import { SnippetRunnerClient } from './snippetRunnerClient'
 import type { SnippetExecuteResponse } from './snippetTypes'
 
-type AgentProvider = 'openai' | 'claude' | 'zai' | 'bailian'
+// NOTE: this type accepts every LlmProviderId (incl. `bedrock`), but the
+// WorkflowRecipe CRD admission excludes `bedrock` from spec.agent.provider —
+// the WRC configure transport is mono-credential and cannot deliver Bedrock's
+// key pair (mirror of the enum comment in charts/.../workflowrecipe.yaml).
+type AgentProvider = LlmProviderId
 
 const DEFAULT_STEP_TIMEOUT_SECONDS = 300
 const PROVIDER_OUTPUT_LENGTH_EXCEEDED = 'provider_output_length_exceeded'
@@ -222,9 +228,17 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
       const startedAt = new Date().toISOString()
       const startedMs = Date.now()
       const executorKind = resolveExecutorKind(runtimeStep)
+      const approvalBindingProof = runtimeStep.requiresApproval ? randomUUID() : undefined
       await status.reportStepStatus(runtimeStep.id, 'running', {
         executor: executorKind,
         startedAt,
+        ...(approvalBindingProof
+          ? {
+              approvalBindingSha256: createHash('sha256')
+                .update(approvalBindingProof)
+                .digest('hex'),
+            }
+          : {}),
       })
 
       try {
@@ -271,11 +285,17 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
           previousOutputs: context.previousOutputs,
           workflowName: config.workflowName,
         })
-        const result = await executeAgenticStepWithRetry(mcpHost!, runtimeStep, instruction, {
-          workflowExecutionId,
-          ...(workflowTeamId ? { workflowTeamId } : {}),
-          ...(workflowUserId ? { workflowUserId } : {}),
-        })
+        const result = await executeAgenticStepWithRetry(
+          mcpHost!,
+          runtimeStep,
+          instruction,
+          {
+            workflowExecutionId,
+            ...(workflowTeamId ? { workflowTeamId } : {}),
+            ...(workflowUserId ? { workflowUserId } : {}),
+          },
+          approvalBindingProof
+        )
 
         await status.reportStepStatus(runtimeStep.id, 'completed', {
           output: result.output,
@@ -442,7 +462,8 @@ async function executeAgenticStepWithRetry(
   mcpHost: McpHostClient,
   step: RuntimeStepSpec,
   instruction: string,
-  contextVars: Record<string, string>
+  contextVars: Record<string, string>,
+  approvalBindingProof?: string
 ): Promise<AgentStepResult> {
   const maxAttempts = step.maxRetries ?? step.retries ?? 2
   const backoffSeconds = step.backoffSeconds ?? 30
@@ -462,6 +483,7 @@ async function executeAgenticStepWithRetry(
         maxIterations: step.maxIterations,
         timeoutSeconds: step.timeoutSeconds,
         contextVars,
+        ...(approvalBindingProof ? { approvalBindingProof } : {}),
         ...(step.requiresApproval && { requiresApproval: step.requiresApproval }),
       })
       if (result.status === 'failed') {
@@ -521,7 +543,7 @@ function stringifyOutput(output: unknown): string {
 }
 
 function isAgentProvider(value: string): value is AgentProvider {
-  return value === 'openai' || value === 'claude' || value === 'zai' || value === 'bailian'
+  return isLlmProviderId(value)
 }
 
 function parseRuntimeWorkflowSpec(spec: WorkflowRecipeSpec): RuntimeWorkflowSpec {

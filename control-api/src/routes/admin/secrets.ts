@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { PROVIDER_CREDENTIAL_SLOTS } from '@clerum/llm-providers'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
@@ -12,6 +13,83 @@ import {
 } from '../../secretOwnership.js'
 import { SecretUpsertRequest } from '../../types.js'
 import { listHostSecrets } from './hostSecrets.js'
+import { isLlmHostSecret } from './llmSecretIdentity.js'
+
+// The bedrock credential-slot keys and the vertex service-account key, derived
+// from the shared provider package (never hardcoded here) so the write-side
+// gate cannot drift from the UI's client-side gate (spec R4.5.3).
+const BEDROCK_CREDENTIAL_KEYS: readonly string[] = PROVIDER_CREDENTIAL_SLOTS.bedrock.map(
+  slot => slot.dataKey
+)
+const VERTEX_SERVICE_ACCOUNT_KEY: string = PROVIDER_CREDENTIAL_SLOTS.vertex[0].dataKey
+
+// The plaintext data being written, merging base64 `data` and plaintext
+// `stringData` (stringData wins, matching Kubernetes Secret semantics).
+function effectiveSecretData(body: unknown): Record<string, string> {
+  const out: Record<string, string> = {}
+  const data = (body as { data?: unknown }).data
+  if (data && typeof data === 'object') {
+    for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+      if (typeof value === 'string') {
+        out[key] = Buffer.from(value, 'base64').toString('utf8')
+      }
+    }
+  }
+  const stringData = (body as { stringData?: unknown }).stringData
+  if (stringData && typeof stringData === 'object') {
+    for (const [key, value] of Object.entries(stringData as Record<string, unknown>)) {
+      if (typeof value === 'string') out[key] = value
+    }
+  }
+  return out
+}
+
+// Slot-aware validation for the LLM credential slots, mirroring the client-side
+// `validateLlmSecretData` in control-ui (spec R4.5.3). Only enforced when the
+// write payload targets an LLM host Secret — everything else passes through the
+// generic contract untouched. Returns an error message or null.
+export function validateLlmSecretSlots(body: unknown): string | null {
+  // Scope: the slot-aware contract fires for an LLM host Secret identified by
+  // EITHER the host-secret label (per-host Secrets minted by the wizard) OR a
+  // name in LLM_SECRET_NAMES (the shared `chatllm-api-keys` Secret WRC uses).
+  // A per-host-NAMED Secret can no longer bypass the bedrock/vertex gate, and a
+  // generic Secret with a stray `aws-access-key-id` is still not our concern.
+  const b = body as { name?: unknown; labels?: Record<string, string> | null }
+  if (!isLlmHostSecret({ name: b.name, labels: b.labels })) return null
+  const data = effectiveSecretData(body)
+  const has = (key: string): boolean => typeof data[key] === 'string' && data[key].trim().length > 0
+
+  // Bedrock: the access-key pair must be written together (no half state).
+  const bedrockPresent = BEDROCK_CREDENTIAL_KEYS.filter(has)
+  if (bedrockPresent.length > 0 && bedrockPresent.length < BEDROCK_CREDENTIAL_KEYS.length) {
+    const missing = BEDROCK_CREDENTIAL_KEYS.filter(key => !has(key))
+    return `Amazon Bedrock requires both credentials in a single write; missing: ${missing.join(', ')}.`
+  }
+
+  // Vertex: the service-account JSON must parse and carry client_email +
+  // private_key before it is stored.
+  if (has(VERTEX_SERVICE_ACCOUNT_KEY)) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(data[VERTEX_SERVICE_ACCOUNT_KEY])
+    } catch {
+      return `${VERTEX_SERVICE_ACCOUNT_KEY} must be valid JSON.`
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return `${VERTEX_SERVICE_ACCOUNT_KEY} must be a service account JSON object.`
+    }
+    const record = parsed as Record<string, unknown>
+    const missing = ['client_email', 'private_key'].filter(field => {
+      const value = record[field]
+      return typeof value !== 'string' || value.trim().length === 0
+    })
+    if (missing.length > 0) {
+      return `${VERTEX_SERVICE_ACCOUNT_KEY} must contain ${missing.join(' and ')}.`
+    }
+  }
+
+  return null
+}
 
 export function createAdminSecretsRouter(gateway: K8sGateway): Router {
   const router = Router()
@@ -28,6 +106,11 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
     '/admin/secrets',
     enforceNamespace(config.secretsNamespace),
     asyncHandler(async (req, res) => {
+      const llmSlotError = validateLlmSecretSlots(req.body)
+      if (llmSlotError) {
+        res.status(400).json({ error: llmSlotError })
+        return
+      }
       const body = {
         ...(req.body as SecretUpsertRequest),
         namespace: config.secretsNamespace,
@@ -41,6 +124,142 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
     '/admin/secrets',
     enforceNamespace(config.secretsNamespace),
     asyncHandler(async (req, res) => {
+      // Opt-in merge semantics (spec R4 FIX 2b): with `merge: true` the update is
+      // a server-side read-then-replace that OVERLAYS the sent keys onto the
+      // existing Secret's keys (preserving keys the caller didn't send — e.g.
+      // other providers' credentials on the shared LLM Secret). Without the flag
+      // the default stays FULL-REPLACE so existing callers are unaffected.
+      // `removeKeys` (merge-only) is the delete-a-slot half of partial edit:
+      // an operator retiring a provider from the fallback chain drops that
+      // provider's credential slot without resending — or wiping — the others.
+      const merge = (req.body as { merge?: unknown }).merge === true
+      const name = (req.body as { name?: unknown }).name
+
+      if (merge) {
+        if (typeof name !== 'string' || !name.trim()) {
+          res.status(400).json({ error: 'name is required' })
+          return
+        }
+        const existing = (await gateway
+          .getSecret(name.trim(), config.secretsNamespace)
+          .catch(() => null)) as {
+          data?: Record<string, string>
+          metadata?: { labels?: Record<string, string> }
+        } | null
+        if (!existing) {
+          res.status(404).json({ error: 'Secret not found' })
+          return
+        }
+        // Label authority for LLM-host identity is the EXISTING Secret, never the
+        // caller's body — so a caller cannot flip validation on/off by (not)
+        // echoing the label. Both the slot gate and the bedrock atomic-retirement
+        // below key off this.
+        const existingLabels = existing.metadata?.labels
+        const llmHost = isLlmHostSecret({ name: name.trim(), labels: existingLabels })
+
+        // Overlay incoming keys (base64-encoded) onto the existing base64 data.
+        // Empty values are skipped: blanking is not deletion (removeKeys is the
+        // deletion path), so a stray empty field can never wipe a stored value.
+        //
+        // NOTE: read-then-replace is used instead of `SecretService.mergeSecret`
+        // (RFC 7396 merge-patch, race-free) because that needs the
+        // `secrets: patch` RBAC verb, which is not granted on this namespace's
+        // Role. If it ever is, prefer mergeSecret here — it removes the
+        // read/replace race window.
+        const mergedData: Record<string, string> = { ...(existing.data || {}) }
+        for (const [k, v] of Object.entries(effectiveSecretData(req.body))) {
+          if (v.trim().length === 0) continue
+          mergedData[k] = Buffer.from(v, 'utf8').toString('base64')
+        }
+
+        // removeKeys: retire named data keys. Only the named keys are dropped;
+        // every other key is left untouched (write-safe partial delete).
+        const rawRemove = (req.body as { removeKeys?: unknown }).removeKeys
+        const removeList = Array.isArray(rawRemove)
+          ? rawRemove.filter((k): k is string => typeof k === 'string' && k.length > 0)
+          : []
+        for (const k of removeList) {
+          delete mergedData[k]
+        }
+
+        // Atomic Bedrock retirement (contract): the access-key pair is atomic on
+        // the way OUT as well as in. If a removal drops one half of the pair, the
+        // lone sibling is dead weight that would otherwise trip the paired-slot
+        // gate below — so we retire the WHOLE pair. This keeps the Secret in a
+        // valid slot state and matches the "retire a provider's slot" intent; the
+        // names-only response makes the extra removal visible to the operator.
+        // NOTE: a single request that both re-adds one Bedrock key (via data) AND
+        // lists its sibling in removeKeys is contradictory — retirement wins and
+        // BOTH keys are dropped. Callers rotating the pair should send both keys
+        // in `data` (and not in removeKeys).
+        if (llmHost && removeList.some(k => BEDROCK_CREDENTIAL_KEYS.includes(k))) {
+          for (const k of BEDROCK_CREDENTIAL_KEYS) delete mergedData[k]
+        }
+
+        // A partial edit must never leave an empty Secret behind (mirror the
+        // recipe-secrets removeKeys guard). Deleting the Secret is DELETE's job.
+        if (Object.keys(mergedData).length === 0) {
+          res.status(400).json({ error: 'secret must retain at least one key' })
+          return
+        }
+
+        // Validate slot-aware rules over the EFFECTIVE merged+pruned result, so a
+        // bedrock pair completed across existing+sent keys passes, and an
+        // incomplete pair after the merge still 400s. Pass the existing labels so
+        // a per-host labeled Secret is validated even when the body omits them.
+        const llmSlotError = validateLlmSecretSlots({
+          name: name.trim(),
+          data: mergedData,
+          labels: existingLabels,
+        })
+        if (llmSlotError) {
+          res.status(400).json({ error: llmSlotError })
+          return
+        }
+        await gateway.updateSecret({
+          name: name.trim(),
+          namespace: config.secretsNamespace,
+          type: (req.body as { type?: string }).type,
+          data: mergedData,
+        } as SecretUpsertRequest)
+        // Never echo the k8s Secret object here: the merged Secret carries the
+        // base64 VALUES of every stored key — including keys the caller did NOT
+        // send (other providers' credentials). The R4 contract is names-only
+        // everywhere, so the response returns only the resulting key names.
+        res.status(200).json({
+          name: name.trim(),
+          namespace: config.secretsNamespace,
+          keys: Object.keys(mergedData).sort((a, b) => a.localeCompare(b)),
+        })
+        return
+      }
+
+      // Full-replace path. secretService.updateSecret re-attaches the EXISTING
+      // Secret's labels when the body omits them, so a label-less full-replace of
+      // a per-host labeled LLM Secret would otherwise skip the slot gate yet still
+      // be stored as an LLM host Secret (landing e.g. a half-Bedrock pair). Mirror
+      // the merge path: derive LLM-host identity from the existing labels too.
+      // This read is validation-only — the write body is unchanged, and NO data
+      // is merged (full-replace stays a passthrough). `chatllm-api-keys` is
+      // matched by name, so this only affects per-host labeled Secrets.
+      const replaceName = (req.body as { name?: unknown }).name
+      const existingReplaceLabels =
+        typeof replaceName === 'string' && replaceName.trim()
+          ? (
+              (await gateway
+                .getSecret(replaceName.trim(), config.secretsNamespace)
+                .catch(() => null)) as { metadata?: { labels?: Record<string, string> } } | null
+            )?.metadata?.labels
+          : undefined
+      const bodyLabels = (req.body as { labels?: Record<string, string> }).labels
+      const llmSlotError = validateLlmSecretSlots({
+        ...(req.body as Record<string, unknown>),
+        labels: bodyLabels || existingReplaceLabels,
+      })
+      if (llmSlotError) {
+        res.status(400).json({ error: llmSlotError })
+        return
+      }
       const body = {
         ...(req.body as SecretUpsertRequest),
         namespace: config.secretsNamespace,

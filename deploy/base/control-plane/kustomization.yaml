@@ -9,6 +9,8 @@ resources:
   - host-context-controller.yaml
   - host-context-controller-api-gateway.yaml
   - workflow-recipes.yaml
+  - trace-maintenance-worker.yaml
+  - trace-postgres-runtime-secrets.yaml
   - configmaps.yaml
   # Empty-by-design Secrets. Populated out-of-band by
   # `deploy/scripts/apply-inter-service-tokens.sh` (kubectl patch) BEFORE

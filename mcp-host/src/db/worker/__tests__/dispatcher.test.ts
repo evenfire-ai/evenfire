@@ -3,7 +3,7 @@ import Database from 'better-sqlite3'
 import { runMigrations } from '../../migrate'
 import { applyPragmas } from '../../pragmas'
 import { createDispatcher, dispatch } from '../dispatcher'
-import type { PersistedSession, SessionRow } from '../protocol'
+import type { PersistedSession, ReapedSession, SessionRow } from '../protocol'
 
 describe('dbWorker dispatcher', () => {
   let db: Database.Database
@@ -42,6 +42,7 @@ describe('dbWorker dispatcher', () => {
       channel_id: 'agent',
       thread_id: null,
       model: null,
+      model_selections: null,
       system_prompt_stable_hash: null,
       parent_session_id: null,
       started_at: Date.now() / 1000,
@@ -57,6 +58,7 @@ describe('dbWorker dispatcher', () => {
       title: null,
       state: 'idle',
       active_task_id: null,
+      active_trace_context: null,
     }
     await dispatch({ kind: 'insert_session', payload: row }, deps)
     const loaded = (await dispatch(
@@ -321,7 +323,11 @@ describe('dbWorker dispatcher', () => {
 
   it('load_all_pending_approvals returns rows joined with session_key', async () => {
     const deps = createDispatcher(db)
-    const sessionRow = makeSession('conv-3', 'u-3:rpc:agent:default')
+    const sessionRow = {
+      ...makeSession('conv-3', 'u-3:rpc:agent:default'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-1',
+    }
     await dispatch({ kind: 'insert_session', payload: sessionRow }, deps)
     const approvalRow = {
       request_id: 'req-1',
@@ -337,6 +343,7 @@ describe('dbWorker dispatcher', () => {
       source_message: null,
       registered_at: Date.now() / 1000,
       expires_at: Date.now() / 1000 + 3600,
+      trace_context: null,
     }
     await dispatch({ kind: 'insert_pending_approval', payload: approvalRow }, deps)
     const rows = (await dispatch({ kind: 'load_all_pending_approvals' }, deps)) as Array<{
@@ -346,6 +353,76 @@ describe('dbWorker dispatcher', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0].approval.request_id).toBe('req-1')
     expect(rows[0].session_key).toBe('u-3:rpc:agent:default')
+  })
+
+  it('reaps only pending approvals whose session cannot rehydrate the same task', async () => {
+    const deps = createDispatcher(db)
+    const now = Date.now()
+    const sessions = [
+      {
+        ...makeSession('conv-valid', 'u:rpc:agent:valid'),
+        state: 'awaiting_approval',
+        active_task_id: 'task-valid',
+      },
+      makeSession('conv-idle', 'u:rpc:agent:idle'),
+      {
+        ...makeSession('conv-mismatch', 'u:rpc:agent:mismatch'),
+        state: 'awaiting_approval',
+        active_task_id: 'task-current',
+      },
+    ]
+    for (const session of sessions) {
+      await dispatch({ kind: 'insert_session', payload: session }, deps)
+    }
+
+    const insertApproval = async (requestId: string, sessionId: string, taskId: string) => {
+      await dispatch(
+        {
+          kind: 'insert_pending_approval',
+          payload: {
+            request_id: requestId,
+            session_id: sessionId,
+            task_id: taskId,
+            tool_name: 'shell_exec',
+            tool_call_id: `tc-${requestId}`,
+            parameters: '{}',
+            description: 'test',
+            context_snapshot: '[]',
+            completed_results: null,
+            intent_summary: null,
+            source_message: null,
+            registered_at: now / 1000,
+            expires_at: now / 1000 + 3600,
+            trace_context: null,
+          },
+        },
+        deps
+      )
+    }
+    await insertApproval('req-valid', 'conv-valid', 'task-valid')
+    await insertApproval('req-idle', 'conv-idle', 'task-idle')
+    await insertApproval('req-mismatch', 'conv-mismatch', 'task-stale')
+
+    const reaped = (await dispatch(
+      { kind: 'reap_awaiting_approval_sessions', nowEpoch: now },
+      deps
+    )) as ReapedSession[]
+    expect(reaped.map(row => row.sessionId)).toEqual(['conv-mismatch'])
+
+    const approvals = db
+      .prepare('SELECT request_id FROM pending_approvals ORDER BY request_id')
+      .all() as Array<{ request_id: string }>
+    expect(approvals.map(row => row.request_id)).toEqual(['req-valid'])
+
+    const validRows = (await dispatch({ kind: 'load_all_pending_approvals' }, deps)) as Array<{
+      approval: { request_id: string }
+    }>
+    expect(validRows.map(row => row.approval.request_id)).toEqual(['req-valid'])
+
+    const mismatch = db
+      .prepare('SELECT state, active_task_id FROM sessions WHERE id = ?')
+      .get('conv-mismatch') as { state: string; active_task_id: string | null }
+    expect(mismatch).toEqual({ state: 'idle', active_task_id: null })
   })
 
   it('integrity_check returns ok', async () => {
@@ -407,6 +484,7 @@ function makeSession(id: string, sessionKey: string): SessionRow {
     channel_id: 'agent',
     thread_id: null,
     model: null,
+    model_selections: null,
     system_prompt_stable_hash: null,
     parent_session_id: null,
     started_at: Date.now() / 1000,
@@ -422,5 +500,6 @@ function makeSession(id: string, sessionKey: string): SessionRow {
     title: null,
     state: 'idle',
     active_task_id: null,
+    active_trace_context: null,
   }
 }

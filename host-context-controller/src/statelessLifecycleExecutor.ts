@@ -72,6 +72,7 @@ export interface StatelessLifecycleExecutorDeps {
    * self-deadlock.
    */
   reconcileCore: (host: HostCRD) => Promise<void>
+  onLifecycleStatusCommitted?: (host: HostCRD, lifecycle: HostLifecycleStatus) => void
 }
 
 export class StatelessLifecycleExecutor {
@@ -82,6 +83,10 @@ export class StatelessLifecycleExecutor {
   private readonly countCommunicationChannels: (hostName: string) => number
   private readonly isCommunicationChannelCacheSynced: () => boolean
   private readonly reconcileCore: (host: HostCRD) => Promise<void>
+  private readonly onLifecycleStatusCommitted: (
+    host: HostCRD,
+    lifecycle: HostLifecycleStatus
+  ) => void
   /**
    * Serialized lifecycle status last written to the Host /status subresource,
    * keyed by host name. Mirrors sharedFileSystemReconciler's dirty check: a
@@ -127,6 +132,7 @@ export class StatelessLifecycleExecutor {
     this.countCommunicationChannels = deps.countCommunicationChannels
     this.isCommunicationChannelCacheSynced = deps.isCommunicationChannelCacheSynced
     this.reconcileCore = deps.reconcileCore
+    this.onLifecycleStatusCommitted = deps.onLifecycleStatusCommitted ?? (() => {})
     StatelessLifecycleExecutor.warnSingleReplicaInvariantOnce()
   }
 
@@ -404,9 +410,9 @@ export class StatelessLifecycleExecutor {
   async writeLifecycleStatusToCluster(
     host: HostCRD,
     assessment: HostLifecycleAssessment
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (host.spec.lifecycle === undefined && host.status?.lifecycle === undefined) {
-      return
+      return false
     }
 
     const desired = JSON.stringify({
@@ -415,7 +421,7 @@ export class StatelessLifecycleExecutor {
       pullPolicyCondition: assessment.pullPolicyCondition,
     })
     if (this.lastWrittenLifecycleStatus.get(host.name) === desired) {
-      return
+      return false
     }
 
     const observedLifecycle = host.status?.lifecycle
@@ -440,7 +446,7 @@ export class StatelessLifecycleExecutor {
       observedPullPolicyCondition.message === assessment.pullPolicyCondition.message
     if (observedMatches) {
       this.lastWrittenLifecycleStatus.set(host.name, desired)
-      return
+      return false
     }
 
     // Kubernetes convention: lastTransitionTime tracks a STATUS change, not
@@ -509,6 +515,7 @@ export class StatelessLifecycleExecutor {
       // (rejection message, or cleared) wins with its intended state.
       // `wakeHandledGeneration` is an ECHO in EVERY branch, never an intended
       // override, so it is kept monotonic against fresh and never regressed.
+      let committedLifecycle: HostLifecycleStatus | undefined
       const result = await this.patchStatusWithPrecondition(host, fresh => {
         const freshStatus = fresh.status ?? {}
         const freshRejected = freshStatus.conditions?.find(
@@ -588,12 +595,14 @@ export class StatelessLifecycleExecutor {
           // A fresh Host has no /status yet: `add /status/lifecycle` would
           // fail on a missing parent, so seed the whole subresource once. All
           // subsequent writes take the targeted-op path below.
+          committedLifecycle = lifecycle
           return this.fullStatusOps({ ...freshStatus, lifecycle, conditions })
         }
         // Targeted ops: never touch /status members this method did not
         // compute. The lifecycle written here is re-sourced from fresh for the
         // echoed fields (AP-1), so a heartbeat suspend/wake that landed under a
         // conditions-transition write is preserved instead of clobbered.
+        committedLifecycle = lifecycle
         return [
           { op: 'add', path: '/status/lifecycle', value: lifecycle },
           { op: 'add', path: '/status/conditions', value: conditions },
@@ -601,7 +610,10 @@ export class StatelessLifecycleExecutor {
       })
       if (!('skipped' in result)) {
         this.lastWrittenLifecycleStatus.set(host.name, desired)
+        this.onLifecycleStatusCommitted(host, committedLifecycle ?? assessment.lifecycle)
+        return true
       }
+      return false
     } catch (err) {
       // Best-effort: a status-write failure (including 409-retry exhaustion)
       // is logged, not thrown — status writes must not block reconciliation.
@@ -609,6 +621,7 @@ export class StatelessLifecycleExecutor {
         `[HostReconciler] Failed to write lifecycle status for "${host.name}" (${getErrorCode(err) ?? 'no code'}):`,
         err
       )
+      return false
     }
   }
 

@@ -10,6 +10,7 @@
 #   4. Admin JWT (control-ui admin authentication)
 #   5. OAuth state HMAC and encryption secrets used by control-api
 #   6. Control UI public token CSRF secret
+#   7. Approval prompt-history encryption key used by governed tracing
 #
 # Writes generated keys into deploy/minikube/secrets/jwt-signing-keys.yaml
 # and applies them to the cluster.
@@ -51,6 +52,29 @@ ensure_control_ui_secret() {
   ok "control-ui-secrets created"
 }
 
+ensure_prompt_history_encryption_key() {
+  local present key encoded patch_file
+  present=$($KC get secret control-api-secrets -n control-plane \
+    -o go-template='{{if index .data "TRACING_APPROVAL_PROMPT_HISTORY_ENCRYPTION_KEY"}}present{{end}}' \
+    2>/dev/null || true)
+  if [ "$present" = "present" ]; then
+    ok "tracing approval prompt-history encryption key already exists"
+    return
+  fi
+
+  log "Adding missing tracing approval prompt-history encryption key..."
+  key=$(openssl rand -hex 32)
+  encoded=$(printf '%s' "$key" | base64 | tr -d '\n')
+  patch_file="$TMPDIR/control-api-prompt-history-key-patch.json"
+  (umask 077; printf '{"data":{"TRACING_APPROVAL_PROMPT_HISTORY_ENCRYPTION_KEY":"%s"}}' \
+    "$encoded" > "$patch_file")
+  $KC patch secret control-api-secrets -n control-plane \
+    --type=merge --patch-file="$patch_file" >/dev/null
+  rm -f "$patch_file"
+  unset key encoded
+  ok "tracing approval prompt-history encryption key added"
+}
+
 # ── ANTI-PATTERN GUARD ──────────────────────────────────────────────────
 # Generating NEW keys invalidates ALL existing JWT tokens and breaks
 # admin login (password hash was signed with old key). Only generate
@@ -60,6 +84,7 @@ EXISTING_SECRET=$($KC get secret control-api-secrets -n control-plane -o name 2>
 if [ -n "$EXISTING_SECRET" ] && [ "${FORCE_REGEN:-}" != "true" ]; then
   log "JWT signing keys already exist in cluster (control-api-secrets)."
   log "Skipping key generation to preserve existing tokens and sessions."
+  ensure_prompt_history_encryption_key
   ensure_control_ui_secret
   log "To force regeneration: FORCE_REGEN=true ./scripts/minikube/generate-keys.sh"
   # Extract existing keys from cluster for the yaml manifest
@@ -87,6 +112,8 @@ ADMIN_HASH='$2b$12$9QdfGGp5KYg8osGa1n0.DuwQiB1RopCWIDJhmsuK4ygjTmIT8pvgy'
 log "Generating OAuth state HMAC and encryption keys..."
 OAUTH_STATE_HMAC_SECRET=$(openssl rand -hex 32)
 OAUTH_ENCRYPTION_KEY=$(openssl rand -hex 32)
+log "Generating tracing approval prompt-history encryption key..."
+TRACING_APPROVAL_PROMPT_HISTORY_ENCRYPTION_KEY=$(openssl rand -hex 32)
 log "Generating Control UI public token CSRF secret..."
 CONTROL_UI_PUBLIC_TOKEN_CSRF_SECRET=$(openssl rand -hex 32)
 
@@ -163,6 +190,7 @@ $(echo "$ADMIN_PRIVATE" | sed 's/^/    /')
   CONTROL_API_ADMIN_BOOTSTRAP_PASSWORD_HASH: "${ADMIN_HASH}"
   CONTROL_API_OAUTH_STATE_HMAC_SECRET: "${OAUTH_STATE_HMAC_SECRET}"
   CONTROL_API_OAUTH_ENCRYPTION_KEY: "${OAUTH_ENCRYPTION_KEY}"
+  TRACING_APPROVAL_PROMPT_HISTORY_ENCRYPTION_KEY: "${TRACING_APPROVAL_PROMPT_HISTORY_ENCRYPTION_KEY}"
 ---
 apiVersion: v1
 kind: Secret

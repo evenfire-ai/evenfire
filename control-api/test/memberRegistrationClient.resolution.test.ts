@@ -130,7 +130,7 @@ describe('member-registration client per-host resolution', () => {
     cfg.memberRegistrationServiceBaseUrl = 'http://member-registration-service.local:8092/api/v1'
     cfg.memberRegistrationServiceHmacSecret = 'env-secret'
     cfg.memberRegistrationServiceHmacKid = 'env-kid'
-    cfg.memberRegistrationTenantId = 'clerum-dev'
+    cfg.memberRegistrationTenantId = 'example-dev'
     const fetchMock = vi.fn().mockResolvedValue(okJson({ sent: true, registered: true }))
     vi.stubGlobal('fetch', fetchMock)
 

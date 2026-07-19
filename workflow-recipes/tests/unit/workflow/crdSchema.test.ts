@@ -138,6 +138,7 @@ describe('WorkflowRecipe CRD snippet step schema', () => {
     expect(statusSteps).toContain('outputPreviewMaxChars:')
     expect(statusSteps).toContain('modelUsed:')
     expect(statusSteps).toContain('toolsCalled:')
+    expect(statusSteps).toContain('approvalBindingSha256:')
   })
 
   it('defines TypeScript snippet run capabilities with CRD-safe guards', () => {

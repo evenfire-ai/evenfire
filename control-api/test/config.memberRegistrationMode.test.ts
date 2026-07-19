@@ -96,7 +96,7 @@ describe('config: member-registration mode', () => {
 
   it('fail-fasts hosted + injected HMAC_KID', async () => {
     process.env.CONTROL_API_MEMBER_REGISTRATION_MODE = 'hosted'
-    process.env.CONTROL_API_MEMBER_REGISTRATION_HMAC_KID = 'clerum-dev-e6f79032'
+    process.env.CONTROL_API_MEMBER_REGISTRATION_HMAC_KID = 'example-dev-e6f79032'
     await expect(() => import('../src/config.js')).rejects.toThrow(
       /CONTROL_API_MEMBER_REGISTRATION_HMAC_KID/
     )
@@ -104,7 +104,7 @@ describe('config: member-registration mode', () => {
 
   it('fail-fasts hosted + injected TENANT_ID', async () => {
     process.env.CONTROL_API_MEMBER_REGISTRATION_MODE = 'hosted'
-    process.env.CONTROL_API_MEMBER_REGISTRATION_TENANT_ID = 'clerum-dev'
+    process.env.CONTROL_API_MEMBER_REGISTRATION_TENANT_ID = 'example-dev'
     await expect(() => import('../src/config.js')).rejects.toThrow(
       /CONTROL_API_MEMBER_REGISTRATION_TENANT_ID/
     )

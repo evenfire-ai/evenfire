@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import type { K8sGateway } from '../src/k8s.js'
-import { createAdminRouter } from '../src/routes/admin/index.js'
+import { createAdminRouter as createAuthenticatedAdminRouter } from '../src/routes/admin/index.js'
 
 /**
  * HTTP-level tests for the admin agents router.
@@ -64,6 +64,18 @@ const svc = vi.hoisted(() => ({
 }))
 
 vi.mock('../src/services/directory/index.js', () => svc)
+
+const TEST_ADMIN_SUB = '11111111-1111-4111-8111-111111111111'
+
+function createAdminRouter(gateway: K8sGateway) {
+  const router = express.Router()
+  router.use((req, _res, next) => {
+    ;(req as unknown as { adminAuth: { sub: string } }).adminAuth = { sub: TEST_ADMIN_SUB }
+    next()
+  })
+  router.use(createAuthenticatedAdminRouter(gateway))
+  return router
+}
 
 function buildApp() {
   const app = express()
@@ -141,7 +153,11 @@ describe('routes/admin/agents — PUT /admin/agents/:agentName/users', () => {
       .send({ userIds: ['u1', 'u2', 'u3'] })
       .expect(200)
 
-    expect(svc.setAgentUsers).toHaveBeenCalledExactlyOnceWith('chatllm', ['u1', 'u2', 'u3'])
+    expect(svc.setAgentUsers).toHaveBeenCalledExactlyOnceWith(
+      'chatllm',
+      ['u1', 'u2', 'u3'],
+      TEST_ADMIN_SUB
+    )
     expect(res.body).toEqual({
       agentName: 'chatllm',
       userIds: ['u1', 'u2', 'u3'],
@@ -157,21 +173,21 @@ describe('routes/admin/agents — PUT /admin/agents/:agentName/users', () => {
       .send({ userIds: [42, null, true] })
       .expect(200)
 
-    expect(svc.setAgentUsers).toHaveBeenCalledWith('x', ['42', 'null', 'true'])
+    expect(svc.setAgentUsers).toHaveBeenCalledWith('x', ['42', 'null', 'true'], TEST_ADMIN_SUB)
   })
 
   it('sends empty array to setAgentUsers when userIds is missing from body', async () => {
     svc.setAgentUsers.mockResolvedValue({ agentName: 'x', userIds: [] })
     const app = buildApp()
     await request(app).put('/admin/agents/x/users').send({}).expect(200)
-    expect(svc.setAgentUsers).toHaveBeenCalledWith('x', [])
+    expect(svc.setAgentUsers).toHaveBeenCalledWith('x', [], TEST_ADMIN_SUB)
   })
 
   it('sends empty array to setAgentUsers when userIds is not an array', async () => {
     svc.setAgentUsers.mockResolvedValue({ agentName: 'x', userIds: [] })
     const app = buildApp()
     await request(app).put('/admin/agents/x/users').send({ userIds: 'not-an-array' }).expect(200)
-    expect(svc.setAgentUsers).toHaveBeenCalledWith('x', [])
+    expect(svc.setAgentUsers).toHaveBeenCalledWith('x', [], TEST_ADMIN_SUB)
   })
 
   it('propagates service errors as 500 via next(error)', async () => {
@@ -191,14 +207,14 @@ describe('routes/admin/agents — PUT /admin/agents/:agentName/users', () => {
       .put('/admin/agents/multi-word-agent/users')
       .send({ userIds: ['u1'] })
       .expect(200)
-    expect(svc.setAgentUsers).toHaveBeenCalledWith('multi-word-agent', ['u1'])
+    expect(svc.setAgentUsers).toHaveBeenCalledWith('multi-word-agent', ['u1'], TEST_ADMIN_SUB)
   })
 
   it('accepts an empty userIds array explicitly (reset-all intent)', async () => {
     svc.setAgentUsers.mockResolvedValue({ agentName: 'x', userIds: [] })
     const app = buildApp()
     await request(app).put('/admin/agents/x/users').send({ userIds: [] }).expect(200)
-    expect(svc.setAgentUsers).toHaveBeenCalledWith('x', [])
+    expect(svc.setAgentUsers).toHaveBeenCalledWith('x', [], TEST_ADMIN_SUB)
   })
 })
 
@@ -222,7 +238,11 @@ describe('routes/admin/agents — PUT /admin/agents/:agentName/teams', () => {
       .send({ teamIds: ['t1', 't2'] })
       .expect(200)
 
-    expect(svc.setAgentTeams).toHaveBeenCalledExactlyOnceWith('chatllm', ['t1', 't2'])
+    expect(svc.setAgentTeams).toHaveBeenCalledExactlyOnceWith(
+      'chatllm',
+      ['t1', 't2'],
+      TEST_ADMIN_SUB
+    )
     expect(res.body).toEqual({ agentName: 'chatllm', teamIds: ['t1', 't2'] })
   })
 
@@ -250,7 +270,7 @@ describe('routes/admin/agents — PUT /admin/agents/:agentName/teams', () => {
     svc.setAgentTeams.mockResolvedValue({ agentName: 'x', teamIds: [] })
     const app = buildApp()
     await request(app).put('/admin/agents/x/teams').send({}).expect(200)
-    expect(svc.setAgentTeams).toHaveBeenCalledWith('x', [])
+    expect(svc.setAgentTeams).toHaveBeenCalledWith('x', [], TEST_ADMIN_SUB)
   })
 })
 
@@ -294,7 +314,7 @@ describe('routes/admin/agents — Integration invariants', () => {
       .put('/admin/agents/x/teams')
       .send({ teamIds: ['t1'] })
       .expect(200)
-    expect(svc.setAgentUsers).toHaveBeenCalledExactlyOnceWith('x', ['u1'])
-    expect(svc.setAgentTeams).toHaveBeenCalledExactlyOnceWith('x', ['t1'])
+    expect(svc.setAgentUsers).toHaveBeenCalledExactlyOnceWith('x', ['u1'], TEST_ADMIN_SUB)
+    expect(svc.setAgentTeams).toHaveBeenCalledExactlyOnceWith('x', ['t1'], TEST_ADMIN_SUB)
   })
 })

@@ -1,4 +1,6 @@
-import { pool, withTransaction } from '../../db.js'
+import { randomUUID } from 'node:crypto'
+import { type DbClient, pool, withTransaction } from '../../db.js'
+import { appendControlApiPermissionEventsInTransaction } from '../tracing/controlApiPermissionEvents.js'
 
 /**
  * Who is currently authorized to trigger a given workflow recipe.
@@ -130,7 +132,12 @@ export async function setWorkflowGrants(
     const afterSet = new Set(after)
     const added = after.filter(uid => !beforeSet.has(uid))
     const removed = before.filter(uid => !afterSet.has(uid))
-    const sharedPayload = JSON.stringify({ before, after })
+    const operationId = added.length > 0 || removed.length > 0 ? randomUUID() : null
+    const sharedPayload = JSON.stringify({
+      before,
+      after,
+      administrative_operation_id: operationId,
+    })
 
     // Bulk INSERT via `unnest` instead of per-user loop. With the 500-user
     // cap, a full replace could otherwise produce up to 500 sequential
@@ -146,6 +153,18 @@ export async function setWorkflowGrants(
          SELECT $1::uuid, unnest($2::uuid[]), $3, $4, 'grant', $5::jsonb`,
         [operatorUserId, added, ns, name, sharedPayload]
       )
+      await appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub: operatorUserId,
+        operationId: operationId!,
+        changes: added.map(userId => ({
+          action: 'grant',
+          resourceClass: 'workflow_trigger_access',
+          resourceRef: `workflow_recipe:${ns}/${name}`,
+          subject: { kind: 'user', id: userId },
+          namespace: ns,
+          sourceAuditRef: `trigger_grants_audit:operation:${operationId}:action:grant`,
+        })),
+      })
     }
     if (removed.length > 0) {
       await db.query(
@@ -157,6 +176,18 @@ export async function setWorkflowGrants(
          SELECT $1::uuid, unnest($2::uuid[]), $3, $4, 'revoke', $5::jsonb`,
         [operatorUserId, removed, ns, name, sharedPayload]
       )
+      await appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub: operatorUserId,
+        operationId: operationId!,
+        changes: removed.map(userId => ({
+          action: 'revoke',
+          resourceClass: 'workflow_trigger_access',
+          resourceRef: `workflow_recipe:${ns}/${name}`,
+          subject: { kind: 'user', id: userId },
+          namespace: ns,
+          sourceAuditRef: `trigger_grants_audit:operation:${operationId}:action:revoke`,
+        })),
+      })
     }
 
     return { userIds: after, added, removed }
@@ -228,7 +259,12 @@ export async function setTeamWorkflowGrants(
     const afterSet = new Set(after)
     const added = after.filter(id => !beforeSet.has(id))
     const removed = before.filter(id => !afterSet.has(id))
-    const sharedPayload = JSON.stringify({ before, after })
+    const operationId = added.length > 0 || removed.length > 0 ? randomUUID() : null
+    const sharedPayload = JSON.stringify({
+      before,
+      after,
+      administrative_operation_id: operationId,
+    })
 
     if (added.length > 0) {
       await db.query(
@@ -240,6 +276,18 @@ export async function setTeamWorkflowGrants(
          SELECT $1::uuid, unnest($2::uuid[]), $3, $4, 'grant', $5::jsonb`,
         [actorUserId, added, ns, name, sharedPayload]
       )
+      await appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub: actorUserId,
+        operationId: operationId!,
+        changes: added.map(teamId => ({
+          action: 'grant',
+          resourceClass: 'workflow_trigger_access',
+          resourceRef: `workflow_recipe:${ns}/${name}`,
+          subject: { kind: 'team', id: teamId },
+          namespace: ns,
+          sourceAuditRef: `team_workflow_grants_audit:operation:${operationId}:action:grant`,
+        })),
+      })
     }
     if (removed.length > 0) {
       await db.query(
@@ -251,6 +299,18 @@ export async function setTeamWorkflowGrants(
          SELECT $1::uuid, unnest($2::uuid[]), $3, $4, 'revoke', $5::jsonb`,
         [actorUserId, removed, ns, name, sharedPayload]
       )
+      await appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub: actorUserId,
+        operationId: operationId!,
+        changes: removed.map(teamId => ({
+          action: 'revoke',
+          resourceClass: 'workflow_trigger_access',
+          resourceRef: `workflow_recipe:${ns}/${name}`,
+          subject: { kind: 'team', id: teamId },
+          namespace: ns,
+          sourceAuditRef: `team_workflow_grants_audit:operation:${operationId}:action:revoke`,
+        })),
+      })
     }
 
     return { teamIds: after, added, removed }

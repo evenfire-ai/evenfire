@@ -72,7 +72,9 @@ describe('UnifiedApprovalGateController', () => {
     expect((result as any).type).toBe('suspend')
     expect((result as any).approval.tool_name).toBe('mongodb-server__find')
     expect((result as any).approval.parameters).toEqual(params)
-    expect((result as any).approval.request_id).toMatch(/^approval-/)
+    expect((result as any).approval.request_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    )
     expect((result as any).approval.description).toContain('mongodb-server__find')
   })
 

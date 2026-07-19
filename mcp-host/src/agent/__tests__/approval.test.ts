@@ -163,6 +163,74 @@ describe('AgentStateMachine -- approval handling', () => {
     expect(result.success).toBe(true)
   })
 
+  it('emits governed approval evidence only after the bound legacy gate accepts the actor', async () => {
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-traced',
+          tool_name: 'shell_exec',
+          parameters: { command: 'ls' },
+          description: 'Shell command',
+          tool_call_id: 'tc_traced',
+          context_snapshot: [],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'response',
+        content: 'Done',
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      })
+    const enqueue = vi.fn()
+    const capture = vi.fn().mockResolvedValue('captured')
+    agent.setUsageReporter({ enqueue: vi.fn() } as any, {
+      host_ref: 'test-host',
+      context_ref: null,
+      llm_secret_name: null,
+    })
+    agent.setGovernedRunReporter({ enqueue } as any)
+    agent.setApprovalPromptHistoryClient({ capture } as any)
+    const task = createTestTask('user-1')
+    task.traceContext = {
+      version: 1,
+      runId: '11111111-1111-4111-8111-111111111111',
+      sessionId: 'session-traced',
+      origin: 'channel_event',
+      correlationRefs: [],
+    }
+
+    await agent.executeTask(task)
+    expect(capture).toHaveBeenCalledWith(
+      {
+        approvalRequestId: 'req-traced',
+        runId: '11111111-1111-4111-8111-111111111111',
+        hostRef: 'test-host',
+        sessionId: 'session-traced',
+        origin: 'channel_event',
+        prompt: 'Shell command',
+      },
+      []
+    )
+    enqueue.mockClear()
+
+    await expect(
+      agent.handleApproval('other-user', 'req-traced', false, 'telegram', 'test-channel')
+    ).resolves.toMatchObject({ success: false })
+    expect(enqueue).not.toHaveBeenCalled()
+
+    await expect(
+      agent.handleApproval('user-1', 'req-traced', false, 'telegram', 'test-channel')
+    ).resolves.toEqual({ success: true })
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'approval',
+        approvalRequestId: 'req-traced',
+        sourceEventId: expect.stringMatching(/:req-traced:approved$/),
+        payload: { status: 'approved', tool_name: 'shell_exec' },
+      })
+    )
+  })
+
   it('should add tool to auto_approved_tools when alwaysApprove=true (6.auto)', async () => {
     ;(runToolUseLoop as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({

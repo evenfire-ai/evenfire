@@ -7,6 +7,7 @@ import Link from 'next/link'
 import { useAuth } from '@components/AuthContext'
 import { Button } from '@components/Button'
 import { TextInput } from '@components/TextInput'
+import { PROFILE_ROUTES } from '@constants/routes'
 import type { LoginPanelProps } from './types'
 
 export function LoginPanel({
@@ -17,9 +18,9 @@ export function LoginPanel({
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const forgotPasswordHref = email.trim()
-    ? `/forgot-password?email=${encodeURIComponent(email.trim().toLowerCase())}`
-    : '/forgot-password'
+  const forgotPasswordHref = PROFILE_ROUTES.forgotPassword({
+    email: email.trim().toLowerCase(),
+  })
 
   useEffect(() => {
     const queryEmail = new URLSearchParams(window.location.search).get('email')

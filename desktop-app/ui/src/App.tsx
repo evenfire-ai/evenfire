@@ -13,7 +13,7 @@ import { AppHeader } from '@components/AppHeader'
 import { Button, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { SidebarNav } from '@components/SidebarNav'
-import { SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
+import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
@@ -142,14 +142,18 @@ export function App() {
   )
   const [sidebarSettingsMenuOpen, setSidebarSettingsMenuOpen] = React.useState(false)
   const [headerShellOverlayOpen, setHeaderShellOverlayOpen] = React.useState(false)
+  const [headerNotificationTrayOpen, setHeaderNotificationTrayOpen] = React.useState(false)
+  const [notificationDrawerReady, setNotificationDrawerReady] = React.useState(false)
   const [availableSandboxUiApps, setAvailableSandboxUiApps] = React.useState<ActiveSandboxUiApp[]>(
     []
   )
   const [sandboxUiShortcutOpenRequestId, setSandboxUiShortcutOpenRequestId] = React.useState(0)
   const contentPanelRef = React.useRef<HTMLElement | null>(null)
   const isAgentChatView =
-    (vm.navItem === 'agents' && Boolean(vm.selectedAgent)) ||
-    (vm.navItem === 'chat' && Boolean(vm.selectedAgent))
+    (vm.navItem === DESKTOP_ROUTES.agents && Boolean(vm.selectedAgent)) ||
+    (vm.navItem === DESKTOP_ROUTES.chat && Boolean(vm.selectedAgent))
+  const notificationTrayUsesDrawer = Boolean(activeSandboxUiApp)
+  const appNotificationDrawerOpen = notificationTrayUsesDrawer && headerNotificationTrayOpen
 
   React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', themeMode)
@@ -216,10 +220,18 @@ export function App() {
     setSidebarSettingsMenuOpen(false)
   }, [])
 
+  React.useEffect(() => {
+    setNotificationDrawerReady(false)
+  }, [activeSandboxUiApp?.appRef, headerNotificationTrayOpen])
+
+  const handleSandboxUiBoundsApplied = React.useCallback(() => {
+    if (appNotificationDrawerOpen) setNotificationDrawerReady(true)
+  }, [appNotificationDrawerOpen])
+
   const handleOpenSandboxUiApp = React.useCallback(
     (app: ActiveSandboxUiApp) => {
       setActiveSandboxUiApp(app)
-      vm.handleNavSelect('sandbox-ui')
+      vm.handleNavSelect(DESKTOP_ROUTES.apps)
       setSidebarCollapsed(true)
       setSandboxUiShortcutOpenRequestId(value => value + 1)
     },
@@ -249,14 +261,16 @@ export function App() {
         return
       }
 
-      vm.handleNavSelect('chat')
+      vm.handleNavSelect(DESKTOP_ROUTES.chat)
     }
 
     window.addEventListener('keydown', handleNewChatShortcut)
     return () => window.removeEventListener('keydown', handleNewChatShortcut)
   }, [activeSandboxUiApp, vm.handleNavSelect, vm.handleSelectChatAgent, vm.selectedAgent])
 
-  const sandboxUiBoundsRefreshKey = sidebarCollapsed ? 'collapsed' : 'expanded'
+  const sandboxUiBoundsRefreshKey = `${sidebarCollapsed ? 'collapsed' : 'expanded'}:${
+    appNotificationDrawerOpen ? 'notification-drawer-open' : 'notification-drawer-closed'
+  }`
 
   const authValue = React.useMemo(
     () => ({
@@ -638,10 +652,10 @@ export function App() {
                     <main className="app-shell">
                       <SidebarNav
                         navItem={
-                          vm.navItem === 'team-details'
-                            ? 'teams'
-                            : vm.navItem === 'context-details'
-                              ? 'contexts'
+                          vm.navItem === DESKTOP_ROUTES.teamDetails
+                            ? DESKTOP_ROUTES.teams
+                            : vm.navItem === DESKTOP_ROUTES.contextDetails
+                              ? DESKTOP_ROUTES.contexts
                               : vm.navItem
                         }
                         activeSandboxUiApp={activeSandboxUiApp}
@@ -657,38 +671,47 @@ export function App() {
                           ref={contentPanelRef}
                           className={`content-panel glass-card${
                             isAgentChatView ? ' content-panel--agent-chat' : ''
-                          }${vm.navItem === 'settings' ? ' content-panel--settings' : ''}`}
+                          }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''}${
+                            appNotificationDrawerOpen
+                              ? ' content-panel--app-notification-drawer-open'
+                              : ''
+                          }`}
                         >
-                          <AppHeader onShellOverlayOpenChange={setHeaderShellOverlayOpen} />
+                          <AppHeader
+                            notificationTrayMode={notificationTrayUsesDrawer ? 'drawer' : 'overlay'}
+                            notificationTrayReady={notificationDrawerReady}
+                            onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
+                            onShellOverlayOpenChange={setHeaderShellOverlayOpen}
+                          />
                           <ToastStack items={vm.toasts} />
-                          {vm.navItem === 'chat' && (
+                          {vm.navItem === DESKTOP_ROUTES.chat && (
                             <ChatPage scrollContainerRef={contentPanelRef} />
                           )}
-                          {vm.navItem === 'agents' && (
+                          {vm.navItem === DESKTOP_ROUTES.agents && (
                             <AgentsPage scrollContainerRef={contentPanelRef} />
                           )}
-                          {vm.navItem === 'contexts' && <ContextsPage />}
-                          {vm.navItem === 'files' && <FilesPage pushToast={vm.pushToast} />}
-                          {vm.navItem === 'mcp-servers' && <McpServersPage />}
-                          {vm.navItem === 'context-details' && <ContextDetailsPage />}
-                          {vm.navItem === 'workflows' && <WorkflowsPage />}
-                          {vm.navItem === 'sandbox-ui' && (
+                          {vm.navItem === DESKTOP_ROUTES.contexts && <ContextsPage />}
+                          {vm.navItem === DESKTOP_ROUTES.files && (
+                            <FilesPage pushToast={vm.pushToast} />
+                          )}
+                          {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
+                          {vm.navItem === DESKTOP_ROUTES.contextDetails && <ContextDetailsPage />}
+                          {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
+                          {vm.navItem === DESKTOP_ROUTES.apps && (
                             <SandboxUiPage
                               boundsRefreshKey={sandboxUiBoundsRefreshKey}
-                              headerShellOverlayOpen={Boolean(
-                                activeSandboxUiApp && headerShellOverlayOpen
-                              )}
-                              sidebarShellOverlayOpen={Boolean(
-                                activeSandboxUiApp && sidebarSettingsMenuOpen
-                              )}
+                              headerShellOverlayOpen={headerShellOverlayOpen}
+                              sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
+                              toastShellOverlayOpen={vm.toasts.length > 0}
                               shortcutApp={activeSandboxUiApp}
                               shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
                               onEmbeddedAppOpening={handleSandboxUiOpening}
                               onEmbeddedAppBack={handleSandboxUiClosed}
                               onEmbeddedAppRemoved={handleSandboxUiRemoved}
+                              onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
                             />
                           )}
-                          {vm.navItem === 'settings' && (
+                          {vm.navItem === DESKTOP_ROUTES.settings && (
                             <SettingsPage
                               notificationSettings={vm.notificationSettings}
                               desktopNotificationPermission={vm.desktopNotificationPermission}
@@ -710,8 +733,8 @@ export function App() {
                               }
                             />
                           )}
-                          {vm.navItem === 'teams' && <TeamsPage />}
-                          {vm.navItem === 'team-details' && <TeamDetailsPage />}
+                          {vm.navItem === DESKTOP_ROUTES.teams && <TeamsPage />}
+                          {vm.navItem === DESKTOP_ROUTES.teamDetails && <TeamDetailsPage />}
                         </section>
                       </section>
                     </main>

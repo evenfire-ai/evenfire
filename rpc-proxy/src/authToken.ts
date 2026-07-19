@@ -13,6 +13,7 @@ const ALLOWED_SCOPES = new Set<RpcScope>([
   'host:task:read',
   'host:approval:write',
   'host:session:read',
+  'host:model:write',
   'desktop:view',
   'sandbox:ui:view',
 ])

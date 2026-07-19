@@ -2,12 +2,13 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { FileUploadModal } from '@components/FileUploadModal'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { useAuth } from '../../../components/AuthContext'
 import { useConfirmDialog } from '../../../components/ConfirmDialog'
 import { CreateFlowPanel } from '../../../components/CreateFlowPanel'
 import { CreatePageHeader } from '../../../components/CreatePageHeader'
 import { DashboardLayout } from '../../../components/DashboardLayout'
-import { FileUploadModal } from '@components/FileUploadModal'
 import { IconFolder, IconServer } from '../../../components/Sidebar/icons'
 import { SkeletonTableRows } from '../../../components/SkeletonTableRows'
 import { TableHeaderRow } from '../../../components/TableHeaderRow'
@@ -338,7 +339,7 @@ export default function SharedFileSystemDetailsPage() {
               icon={<IconFolder />}
               title={sfsName || 'Shared Files'}
               backLabel="Back to Shared Files"
-              onBack={() => router.push('/shared-filesystems')}
+              onBack={() => router.push(CONTROL_ROUTES.sharedFiles.root)}
             />
           }
         >
@@ -402,7 +403,7 @@ export default function SharedFileSystemDetailsPage() {
             icon={<IconFolder />}
             title={sfsName}
             backLabel="Back to Shared Files"
-            onBack={() => router.push('/shared-filesystems')}
+            onBack={() => router.push(CONTROL_ROUTES.sharedFiles.root)}
           />
         }
       >
@@ -681,9 +682,7 @@ export default function SharedFileSystemDetailsPage() {
       {showUpload && (
         <FileUploadModal
           busy={busy}
-          destination={
-            joinPath(path, uploadFile?.name || '<selected-file>') || '<selected-file>'
-          }
+          destination={joinPath(path, uploadFile?.name || '<selected-file>') || '<selected-file>'}
           file={uploadFile}
           fileSummary={uploadFile ? `${formatBytes(uploadFile.size)} selected` : undefined}
           onClose={resetUploadDialog}

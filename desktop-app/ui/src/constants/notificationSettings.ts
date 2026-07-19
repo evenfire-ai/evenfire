@@ -8,24 +8,25 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   soundVolume: 50,
 }
 
-export const CHAT_NOTIFICATION_PREFERENCE_OPTIONS: ReadonlyArray<{
+export const NOTIFICATION_PREFERENCE_OPTIONS: ReadonlyArray<{
   value: ChatNotificationPreference
   label: string
   description: string
 }> = [
   {
     value: 'always',
-    label: 'Always show chat responses',
-    description: 'Every agent response creates a notification, including the chat you are viewing.',
+    label: 'Always show notifications',
+    description:
+      'Agent replies and app updates create notifications, including while you view related content.',
   },
   {
     value: 'when_app_focused_away_from_chat',
-    label: "Show only when I'm away from the chat but still focused on the app",
-    description: 'Responses notify you while you are working elsewhere in Evenfire.',
+    label: "Show while I'm elsewhere in Evenfire",
+    description: 'Agent replies and app updates notify you while you work elsewhere in Evenfire.',
   },
   {
     value: 'when_app_unfocused',
-    label: "Show only when I'm away from the app",
-    description: 'Responses notify you only after the Evenfire window loses focus.',
+    label: "Show only when I'm away from Evenfire",
+    description: 'Notifications appear only after the Evenfire window loses focus.',
   },
 ]

@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto'
 import type { Config } from '../../config'
-import { ALL_PROVIDERS, descriptorFor, isLlmProvider } from '../../llm/registryCore'
+import { apiKeysFromEnv } from '../../llm'
+import { isLlmProvider } from '../../llm/registryCore'
 import type { ApiKeys, ModelConfig } from '../../types'
-import type { UsageReporter } from '../../usage/usageReporter'
+import type { LlmUsageEvent, UsageReporter } from '../../usage/usageReporter'
 import { getJwtRuntimeBinding } from '../../workflow/mcpHostRuntimeJwt'
 import { type McpHostRuntimeAuth, refreshWithRecovery } from '../../workflow/userApprovalRequester'
 import { ClientNotificationsHandler } from '../clientNotifications/handler'
@@ -18,6 +19,98 @@ import {
 } from './workloadTokenRegistry'
 
 export { shouldStartPluginWorkloadSdk } from './sdkServer'
+
+const WORKFLOW_RECIPE_NAMESPACE = 'sandbox-recipes'
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function nonEmptyMetadataString(
+  metadata: Record<string, unknown> | undefined,
+  keys: string[]
+): string | null {
+  for (const key of keys) {
+    const value = metadata?.[key]
+    if (typeof value !== 'string') continue
+    const trimmed = value.trim()
+    if (trimmed) return trimmed
+  }
+  return null
+}
+
+function workflowRunIdFromExecutionId(value: string | null): string | null {
+  const runId = value?.split(':', 1)[0]?.trim() ?? ''
+  return UUID_RE.test(runId) ? runId.toLowerCase() : null
+}
+
+export function buildPromptBridgeUsageEvent(input: {
+  binding: { hostRef: string; recipeNamespace: string; recipeName: string }
+  provider: string
+  model: string
+  inputTokens: number
+  outputTokens: number
+  callerRef: string
+  metadata?: Record<string, unknown>
+}): LlmUsageEvent | null {
+  const isWorkflowRecipe = input.binding.recipeNamespace === WORKFLOW_RECIPE_NAMESPACE
+  if (!isWorkflowRecipe) {
+    return {
+      request_id: randomUUID(),
+      ts: new Date().toISOString(),
+      run_id: null,
+      host_ref: input.binding.hostRef,
+      context_ref: null,
+      team_id: null,
+      provider: input.provider,
+      model: input.model,
+      llm_secret_name: null,
+      source_kind: 'desktop',
+      user_id: null,
+      sender: input.callerRef,
+      channel_type: 'plugin_workload_sdk',
+      recipe_name: null,
+      cron_job_id: null,
+      task_id: null,
+      iteration: null,
+      input_tokens: input.inputTokens,
+      output_tokens: input.outputTokens,
+    }
+  }
+
+  const executionId = nonEmptyMetadataString(input.metadata, [
+    'workflowExecutionId',
+    'workflow.executionId',
+    'taskId',
+  ])
+  const explicitRunId = nonEmptyMetadataString(input.metadata, ['workflowRunId', 'workflow.runId'])
+  const runId =
+    (explicitRunId && UUID_RE.test(explicitRunId) ? explicitRunId.toLowerCase() : null) ??
+    workflowRunIdFromExecutionId(executionId)
+  const llmSecretName = nonEmptyMetadataString(input.metadata, ['llmSecretName', 'llm_secret_name'])
+  if (!runId || !executionId || !executionId.toLowerCase().startsWith(runId) || !llmSecretName) {
+    return null
+  }
+
+  return {
+    request_id: randomUUID(),
+    ts: new Date().toISOString(),
+    run_id: runId,
+    host_ref: input.binding.hostRef,
+    context_ref: null,
+    team_id: nonEmptyMetadataString(input.metadata, ['workflowTeamId', 'workflow.teamId']),
+    provider: input.provider,
+    model: input.model,
+    llm_secret_name: llmSecretName,
+    source_kind: 'workflow',
+    user_id: nonEmptyMetadataString(input.metadata, ['workflowUserId', 'workflow.userId']),
+    sender: input.callerRef,
+    channel_type: 'plugin_workload_sdk',
+    recipe_name: input.binding.recipeName,
+    cron_job_id: null,
+    task_id: executionId,
+    iteration: null,
+    input_tokens: input.inputTokens,
+    output_tokens: input.outputTokens,
+  }
+}
 
 /**
  * Composition root (plan §3.5): evaluates the namespace-bound activation
@@ -130,12 +223,10 @@ export function maybeCreatePluginWorkloadSdkServer(
       )
       provider = 'openai'
     }
-    // Registry-driven: collect each provider's dev key by its env var name.
-    const keys: ApiKeys = {}
-    for (const p of ALL_PROVIDERS) {
-      const value = process.env[descriptorFor(p).envName]
-      if (value) keys[p] = value
-    }
+    // Registry-driven & multi-slot (R4): collect each provider's dev
+    // credential slots from the env (a provider is included only when all its
+    // required slots are present).
+    const keys: ApiKeys = apiKeysFromEnv()
     const defaultModel = config.devModelName ?? ''
     if (!defaultModel) return null
     return { keys, provider, defaultModel }
@@ -161,26 +252,20 @@ export function maybeCreatePluginWorkloadSdkServer(
     onUsage: usage => {
       if (!usageReporter) return
       const provider = getLlmContext()?.provider ?? 'unknown'
-      usageReporter.enqueue({
-        request_id: randomUUID(),
-        ts: new Date().toISOString(),
-        host_ref: runtimeAuth?.hostRef ?? binding.hostRef,
-        context_ref: null,
-        team_id: null,
+      const event = buildPromptBridgeUsageEvent({
+        binding: {
+          hostRef: runtimeAuth?.hostRef ?? binding.hostRef,
+          recipeNamespace: binding.recipeNamespace,
+          recipeName: binding.recipeName,
+        },
         provider,
         model: usage.model,
-        llm_secret_name: null,
-        source_kind: 'workflow',
-        user_id: null,
-        sender: usage.callerRef,
-        channel_type: null,
-        recipe_name: binding.recipeName,
-        cron_job_id: null,
-        task_id: null,
-        iteration: null,
-        input_tokens: usage.inputTokens,
-        output_tokens: usage.outputTokens,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        callerRef: usage.callerRef,
+        metadata: usage.metadata,
       })
+      if (event) usageReporter.enqueue(event)
     },
   })
 

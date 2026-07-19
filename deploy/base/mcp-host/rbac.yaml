@@ -163,7 +163,8 @@ subjects:
 # --- Role: workflow-recipes-model-config-reader ---
 # Tight, get-only cross-namespace access for WRC (control-plane/workflow-recipes SA)
 # to resolve per-step LLM API keys from mcp-host's single source of truth.
-# Scoped to 2 named resources: chatllm-api-keys Secret + clerum-model-secret-mapping ConfigMap.
+# Scoped to named resources: chatllm-api-keys Secret + clerum-model-secret-mapping
+# and clerum-llm-allowed-models ConfigMaps (the latter is the R3 operator allowlist).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -177,7 +178,7 @@ rules:
   - apiGroups: ['']
     resources: ['configmaps']
     verbs: ['get']
-    resourceNames: ['clerum-model-secret-mapping']
+    resourceNames: ['clerum-model-secret-mapping', 'clerum-llm-allowed-models']
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

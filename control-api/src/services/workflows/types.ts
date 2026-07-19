@@ -30,6 +30,7 @@ export type WorkflowRunArtifactDto = {
 export type CanonicalRunDto = {
   id: string
   source: 'live' | 'audit'
+  approvalRequestId: string | null
   phase: string
   triggeredAt: string | null
   startedAt: string | null

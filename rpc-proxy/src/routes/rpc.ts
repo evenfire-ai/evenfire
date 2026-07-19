@@ -28,6 +28,7 @@ import {
   validateRpcRequest,
 } from '../services/mcpProxyService.js'
 import { isWakeEligibleHostError, respondWithWakeAndHold } from '../services/wakeAndHold.js'
+import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 
@@ -38,6 +39,26 @@ function respondUpstreamUnavailable(res: ExpressResponse, error: unknown): void 
     return
   }
   res.status(502).json({ error: 'Upstream host unavailable' })
+}
+
+function controlApiHostAccessRejectionStatus(error: unknown): 401 | 403 | 409 | null {
+  if (!(error instanceof Error) || error.name !== 'ControlApiHostAccessRejectedError') {
+    return null
+  }
+  const status = (error as Error & { status?: unknown }).status
+  return status === 401 || status === 403 || status === 409 ? status : null
+}
+
+function respondControlApiHostAccessRejection(res: ExpressResponse, status: 401 | 403 | 409): void {
+  if (status === 401) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return
+  }
+  if (status === 403) {
+    res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+    return
+  }
+  res.status(409).json({ error: 'Direct run attribution conflict' })
 }
 
 class ProxyArtifactTooLargeError extends Error {
@@ -170,14 +191,6 @@ export function createRpcRouter(): Router {
           return
         }
 
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
-
         const body = req.body as HostRuntimeMessageRequest
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
           res.status(400).json({ error: 'Invalid host message request payload' })
@@ -214,6 +227,19 @@ export function createRpcRouter(): Router {
             ? req.headers['idempotency-key'].trim()
             : ''
         const deliveryMessageId = clientIdempotencyKey || randomUUID()
+        const requestId =
+          typeof req.headers['x-request-id'] === 'string'
+            ? req.headers['x-request-id'].trim()
+            : undefined
+        const desktopSessionId =
+          typeof body.threadId === 'string' ? body.threadId.trim() || undefined : undefined
+        const traceContext = mintOrReuseDirectTraceContext({
+          authorityScope: `${auth.sub}:${hostRef}`,
+          deliveryId: deliveryMessageId,
+          sessionId: desktopSessionId,
+          requestId,
+          origin: 'direct_chat',
+        })
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
@@ -222,8 +248,41 @@ export function createRpcRouter(): Router {
           sender: auth.sub,
           messageId: deliveryMessageId,
           metadata: rpcInvocationContext(auth),
-          threadId: typeof body.threadId === 'string' ? body.threadId : undefined,
+          threadId: desktopSessionId,
           attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
+          traceContext,
+          // R2 "Option A": thread the optional piggybacked per-session model.
+          // This body is an explicit field allow-list, so an unlisted field is
+          // dropped. Trimmed/empty values are omitted.
+          ...(typeof body.model === 'string' && body.model.trim()
+            ? { model: body.model.trim() }
+            : {}),
+        }
+
+        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
+          teamId: auth.teamId,
+          ...(traceContext.sessionId
+            ? {
+                directRunBinding: {
+                  runId: traceContext.runId,
+                  sessionId: traceContext.sessionId,
+                  origin: traceContext.origin,
+                },
+              }
+            : {}),
+        })
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
+        if (host.attributionBindingStatus === 'unavailable') {
+          console.warn(
+            JSON.stringify({
+              event: 'governed_trace_operational_error',
+              scope: 'agent_run',
+              reason: 'attribution_binding_unavailable',
+            })
+          )
         }
 
         const isAsync = req.query.async === 'true'
@@ -273,6 +332,11 @@ export function createRpcRouter(): Router {
         // the wake path (which would re-forward an already-delivered message).
         res.status(200).json(upstreamResponse)
       } catch (error) {
+        const rejectedStatus = controlApiHostAccessRejectionStatus(error)
+        if (rejectedStatus) {
+          respondControlApiHostAccessRejection(res, rejectedStatus)
+          return
+        }
         console.warn(
           `[RPC_PROXY] host message forward failed host=${String(req.params.hostRef || '').trim()} error=${
             error instanceof Error ? error.message : String(error)
@@ -578,6 +642,97 @@ export function createRpcRouter(): Router {
           .status(response.status)
           .type(response.headers.get('content-type') || 'application/json')
           .send(body)
+      } catch (error) {
+        next(error)
+      }
+    }
+  )
+
+  // List selectable models for the session — passthrough to mcp-host.
+  // Read-only projection of the in-memory allowlist; scoped to host:session:read
+  // (same as the other session reads). Passes the optional chatId query through
+  // so mcp-host can include the per-session selection.
+  router.get(
+    '/rpc/hosts/:hostRef/models',
+    requireRpcAuth,
+    requireScope('host:session:read'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const auth = req.auth!
+        const rpcAccessToken = extractAuthToken(req)
+        const hostRef = String(req.params.hostRef || '').trim()
+        if (!hostRef) {
+          res.status(400).json({ error: 'hostRef is required' })
+          return
+        }
+        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
+          teamId: auth.teamId,
+        })
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
+        const baseUrl = host.url.replace(/\/+$/, '')
+        const chatId = typeof req.query.chatId === 'string' ? req.query.chatId.trim() : ''
+        const upstreamUrl = chatId
+          ? `${baseUrl}/v1/runtime/models?chatId=${encodeURIComponent(chatId)}`
+          : `${baseUrl}/v1/runtime/models`
+        console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=list-models`)
+        const response = await fetch(upstreamUrl, {
+          method: 'GET',
+          headers: { ...host.headers },
+        })
+        const body = await response.text()
+        res
+          .status(response.status)
+          .type(response.headers.get('content-type') || 'application/json')
+          .send(body)
+      } catch (error) {
+        next(error)
+      }
+    }
+  )
+
+  // Set the per-session model — write path, scoped to host:model:write.
+  // Body {chatId, model} is passed through verbatim; mcp-host owns validation
+  // (model_not_allowed) and per-user authorization, so its 400/403 pass through.
+  router.post(
+    '/rpc/hosts/:hostRef/model',
+    requireRpcAuth,
+    requireScope('host:model:write'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const auth = req.auth!
+        const rpcAccessToken = extractAuthToken(req)
+        const hostRef = String(req.params.hostRef || '').trim()
+        if (!hostRef) {
+          res.status(400).json({ error: 'hostRef is required' })
+          return
+        }
+        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
+          teamId: auth.teamId,
+        })
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
+        const body = req.body as Record<string, unknown>
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          res.status(400).json({ error: 'Invalid set-model request payload' })
+          return
+        }
+        const baseUrl = host.url.replace(/\/+$/, '')
+        console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=set-model`)
+        const response = await fetch(`${baseUrl}/v1/runtime/model`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...host.headers },
+          body: JSON.stringify(body),
+        })
+        const upstreamBody = await response.text()
+        res
+          .status(response.status)
+          .type(response.headers.get('content-type') || 'application/json')
+          .send(upstreamBody)
       } catch (error) {
         next(error)
       }

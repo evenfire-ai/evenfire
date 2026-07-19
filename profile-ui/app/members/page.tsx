@@ -9,6 +9,7 @@ import { useConfirmDialog } from '@components/ConfirmDialog'
 import { ProfileShell } from '@components/ProfileShell'
 import { useToast } from '@components/Toast'
 import { IconAlertTriangle, IconRefresh, IconTrash } from '@components/icons'
+import { PROFILE_ROUTES } from '@constants/routes'
 import {
   cancelManagedInvitation,
   deleteManagedUser,
@@ -136,7 +137,7 @@ export default function MembersPage() {
                 <IconRefresh className={state === 'loading' ? 'cu-spin' : undefined} />
               </Button>
               <Button
-                onClick={() => router.push('/members/invite')}
+                onClick={() => router.push(PROFILE_ROUTES.members.invite)}
                 disabled={busy || manageableTeams.length === 0}
               >
                 Invite member
@@ -234,7 +235,7 @@ export default function MembersPage() {
                           <button
                             type="button"
                             className="table-link"
-                            onClick={() => router.push(`/members/${encodeURIComponent(member.id)}`)}
+                            onClick={() => router.push(PROFILE_ROUTES.members.detail(member.id))}
                           >
                             {displayMemberName(member)}
                           </button>

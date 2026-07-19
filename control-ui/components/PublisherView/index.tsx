@@ -1,5 +1,6 @@
 'use client'
 
+import { CONTROL_ROUTES } from '@constants/routes'
 import { isPublisherEnabled, usePublishScope } from '../../lib/hooks/usePublishScope'
 import { TabBar } from '../TabBar'
 import { TablePanelHeader } from '../TablePanelHeader'
@@ -9,9 +10,9 @@ import { OwnedEntries } from './OwnedEntries'
 import type { PublisherTab } from './types'
 
 const TABS: { value: PublisherTab; href: string; label: string }[] = [
-  { value: 'entries', href: '/publisher/entries', label: 'Published entries' },
-  { value: 'shared', href: '/publisher/shared-with-me', label: 'Shared with me' },
-  { value: 'credentials', href: '/publisher/credentials', label: 'Docker credentials' },
+  { value: 'entries', href: CONTROL_ROUTES.publisher.entries, label: 'Published entries' },
+  { value: 'shared', href: CONTROL_ROUTES.publisher.sharedWithMe, label: 'Shared with me' },
+  { value: 'credentials', href: CONTROL_ROUTES.publisher.credentials, label: 'Docker credentials' },
 ]
 
 export function PublisherView({ activeTab }: { activeTab: PublisherTab }) {

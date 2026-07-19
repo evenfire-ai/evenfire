@@ -95,6 +95,7 @@ export class StatusReporter {
       failureReason?: string
       startedAt?: string
       completedAt?: string
+      approvalBindingSha256?: string
     }
   ): Promise<void> {
     await this.report('/status', { stepId, phase, ...meta }, 'step status')

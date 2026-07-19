@@ -129,7 +129,7 @@ export function DockerCredentialsPanel({ orgScope }: { orgScope: string }) {
     <div className="cu-card__body">
       <p className="cu-field__hint">
         Generate a durable credential to <code>docker push</code> images to{' '}
-        <code>example.com/{orgScope}/…</code>. Keys are listable and revocable for CI
+        <code>registry.evenfire.ai/{orgScope}/…</code>. Keys are listable and revocable for CI
         hygiene.
       </p>
 

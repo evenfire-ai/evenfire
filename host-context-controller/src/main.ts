@@ -49,7 +49,7 @@ async function shutdown(signal: string): Promise<void> {
   channelSecretInformer?.stop()
   heartbeatPoller?.stop()
   lifecycleTracker?.stop()
-  provider?.stop()
+  await provider?.stop()
   await server?.stop()
 
   process.exit(0)

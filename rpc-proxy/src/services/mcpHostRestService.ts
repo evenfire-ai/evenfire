@@ -1,4 +1,5 @@
 import { config } from '../config.js'
+import type { TraceContextV1 } from '../traceContext.js'
 import { ResolvedServerConnection } from '../types.js'
 
 /**
@@ -120,6 +121,7 @@ export type HostRuntimeMessageRequest = {
   // across the first forward and the wake-and-hold retry so a re-forwarded turn
   // is deduped (replayed) instead of re-executed.
   messageId?: string
+  traceContext?: TraceContextV1
   [key: string]: unknown
 }
 

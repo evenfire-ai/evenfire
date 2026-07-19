@@ -12,7 +12,7 @@ let mockParams: { name: string; tab?: string } = { name: 'foo' }
 
 vi.mock('next/navigation', () => ({
   useParams: () => mockParams,
-  usePathname: () => '/hosts/foo',
+  usePathname: () => '/agents/foo',
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
   useSearchParams: () => new URLSearchParams(),
 }))
@@ -42,6 +42,9 @@ vi.mock('../../lib/api', () => ({
   getHostDetailBundle: vi.fn(),
   updateAdminTeamAgents: vi.fn(),
   updateAdminUserAgents: vi.fn(),
+  // The model picker loads the operator allowlist via useLlmAllowedModels.
+  getLlmModels: vi.fn().mockResolvedValue({ rows: [] }),
+  isSilentApiError: vi.fn().mockReturnValue(false),
 }))
 
 const host = {
@@ -117,6 +120,7 @@ describe('HostDetailsPage identity integration', () => {
   it('preserves personalization when saving overview changes', async () => {
     render(<HostDetailsPage />)
     const [overviewEditButton] = await screen.findAllByRole('button', { name: 'Edit' })
+    await waitFor(() => expect(overviewEditButton).toBeEnabled())
     fireEvent.click(overviewEditButton)
     fireEvent.change(screen.getByLabelText('Display ID'), { target: { value: 'foo-updated' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))

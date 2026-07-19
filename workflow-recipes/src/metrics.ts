@@ -7,48 +7,108 @@
  */
 import { Counter, Gauge, Histogram, Registry } from 'prom-client'
 
-export const registry = new Registry()
+const REGISTRY_KEY = Symbol.for('clerum.wrc.prometheus.registry')
+type MetricsGlobal = typeof globalThis & { [REGISTRY_KEY]?: Registry }
+const metricsGlobal = globalThis as MetricsGlobal
+const newRegistry = !metricsGlobal[REGISTRY_KEY]
+export const registry = (metricsGlobal[REGISTRY_KEY] ??= new Registry())
 
-registry.setDefaultLabels({ service: 'workflow-recipes' })
+if (newRegistry) registry.setDefaultLabels({ service: 'workflow-recipes' })
 
-export const recipesTotal = new Gauge({
+type MetricOptions = { name: string; help: string; labelNames?: readonly string[] }
+
+function counter(options: MetricOptions): Counter<string> {
+  const existing = registry.getSingleMetric(options.name)
+  if (existing) return existing as Counter<string>
+  return new Counter({
+    ...options,
+    labelNames: [...(options.labelNames ?? [])],
+    registers: [registry],
+  })
+}
+
+function gauge(options: MetricOptions): Gauge<string> {
+  const existing = registry.getSingleMetric(options.name)
+  if (existing) return existing as Gauge<string>
+  return new Gauge({
+    ...options,
+    labelNames: [...(options.labelNames ?? [])],
+    registers: [registry],
+  })
+}
+
+function histogram(options: MetricOptions & { buckets: number[] }): Histogram<string> {
+  const existing = registry.getSingleMetric(options.name)
+  if (existing) return existing as Histogram<string>
+  return new Histogram({
+    ...options,
+    labelNames: [...(options.labelNames ?? [])],
+    registers: [registry],
+  })
+}
+
+export const recipesTotal = gauge({
   name: 'clerum_wrc_recipes_total',
   help: 'Total number of WorkflowRecipes by phase',
   labelNames: ['phase'] as const,
-  registers: [registry],
 })
 
-export const reconciliationsTotal = new Counter({
+export const reconciliationsTotal = counter({
   name: 'clerum_wrc_reconciliations_total',
   help: 'Total WorkflowRecipe reconciliations',
   labelNames: ['result'] as const,
-  registers: [registry],
 })
 
-export const mcpSessionsActive = new Gauge({
+export const mcpSessionsActive = gauge({
   name: 'clerum_wrc_mcp_sessions_active',
   help: 'Number of active MCP sessions',
-  registers: [registry],
 })
 
-export const policyViolationsTotal = new Counter({
+export const policyViolationsTotal = counter({
   name: 'clerum_wrc_policy_violations_total',
   help: 'Total policy violations detected',
   labelNames: ['policy', 'rule'] as const,
-  registers: [registry],
 })
 
-export const workflowStepDurationSeconds = new Histogram({
+export const workflowStepDurationSeconds = histogram({
   name: 'workflow_step_duration_seconds',
   help: 'Workflow step execution duration by executor type and step kind',
   labelNames: ['executor', 'stepKind', 'status'] as const,
   buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300],
-  registers: [registry],
 })
 
-export const workflowStepTotal = new Counter({
+export const workflowStepTotal = counter({
   name: 'workflow_step_total',
   help: 'Workflow steps completed by executor type and final status',
   labelNames: ['executor', 'stepKind', 'status'] as const,
-  registers: [registry],
+})
+
+export const governedTraceEnqueuedTotal = counter({
+  name: 'clerum_wrc_governed_trace_enqueued_total',
+  help: 'Best-effort governed trace events accepted by the WRC local buffer',
+  labelNames: ['family', 'type'] as const,
+})
+
+export const governedTraceDroppedTotal = counter({
+  name: 'clerum_wrc_governed_trace_dropped_total',
+  help: 'Best-effort governed trace events dropped by the WRC local buffer',
+  labelNames: ['family', 'type', 'reason'] as const,
+})
+
+export const governedTraceFlushesTotal = counter({
+  name: 'clerum_wrc_governed_trace_flushes_total',
+  help: 'WRC governed trace flush outcomes',
+  labelNames: ['family', 'result'] as const,
+})
+
+export const governedTraceRetriesTotal = counter({
+  name: 'clerum_wrc_governed_trace_retries_total',
+  help: 'WRC governed trace retries scheduled after a failed flush',
+  labelNames: ['family', 'type'] as const,
+})
+
+export const governedTraceGapsTotal = counter({
+  name: 'clerum_wrc_governed_trace_gaps_total',
+  help: 'WRC governed trace evidence gaps that block complete trace or cost coverage',
+  labelNames: ['family', 'type', 'reason'] as const,
 })

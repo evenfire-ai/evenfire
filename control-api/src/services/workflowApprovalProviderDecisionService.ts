@@ -2,6 +2,7 @@ import { config } from '../config.js'
 import { type DbClient, withTransaction } from '../db.js'
 import type { K8sGateway } from '../k8s.js'
 import { type McpHostControlClaims, getMcpHostCallerKey } from '../utils/auth/mcpHostJwtToken.js'
+import { enqueueWorkflowApprovalTraceProjection } from './tracing/workflowApprovalTraceProjector.js'
 import {
   ApprovalConsumeError,
   ApprovalTriggerRunIdempotencyConflictError,
@@ -294,7 +295,7 @@ export async function recordProviderApprovalDecision(
     }
   }
 
-  return withTransaction(async db => {
+  const result = await withTransaction<ProviderApprovalDecisionResult>(async db => {
     const eventState = await reserveProviderEvent({
       db,
       medium: identity.medium,
@@ -403,4 +404,6 @@ export async function recordProviderApprovalDecision(
       ...(result.workflowRun ? { run: mapDbRun(result.workflowRun.row) } : {}),
     }
   })
+  if (result.ok) enqueueWorkflowApprovalTraceProjection(input.approvalRequestId)
+  return result
 }

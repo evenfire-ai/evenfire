@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { CommunicationChannelsTable } from '@components/CommunicationChannelsTable'
 import { DashboardLayout } from '@components/DashboardLayout'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { apiGet, isSilentApiError } from '@lib/api'
 import type { CommunicationChannelProvider } from '@lib/communicationChannelProviders'
 import type { CommunicationChannelItem } from '@lib/communicationChannels'
@@ -42,7 +43,7 @@ export default function CommunicationChannelsPage() {
       copyFrom: name,
       provider,
     })
-    router.push(`/communication-channels/new?${params.toString()}`)
+    router.push(CONTROL_ROUTES.externalChannels.new(Object.fromEntries(params)))
   }
 
   return (
@@ -55,14 +56,10 @@ export default function CommunicationChannelsPage() {
           loading={loading}
           onRefresh={loadAll}
           refreshing={loading}
-          onCreateChannel={() => router.push('/communication-channels/new')}
+          onCreateChannel={() => router.push(CONTROL_ROUTES.externalChannels.new())}
           onCopyChannel={copyChannel}
-          onOpenChannel={name =>
-            router.push(`/communication-channels/${encodeURIComponent(name)}/edit`)
-          }
-          onEditChannel={name =>
-            router.push(`/communication-channels/${encodeURIComponent(name)}/edit`)
-          }
+          onOpenChannel={name => router.push(CONTROL_ROUTES.externalChannels.edit(name))}
+          onEditChannel={name => router.push(CONTROL_ROUTES.externalChannels.edit(name))}
         />
       </DashboardLayout>
     </AuthGate>

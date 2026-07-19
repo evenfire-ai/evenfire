@@ -44,9 +44,11 @@ describe('LlmPriceTable', () => {
   })
 
   it('shows an unrecognized provider verbatim instead of mislabeling it', () => {
-    const unknown: LlmModelPrice = { ...prices[0], id: 'price-2', provider: 'mistral' }
+    // A provider id NOT in the canonical registry (R6 expanded it to 21, so use
+    // a clearly-fictitious id) must render verbatim, never mislabeled.
+    const unknown: LlmModelPrice = { ...prices[0], id: 'price-2', provider: 'acme-labs' }
     renderTable({ items: [unknown] })
-    expect(screen.getByText('mistral')).toBeInTheDocument()
+    expect(screen.getByText('acme-labs')).toBeInTheDocument()
     expect(screen.queryByText('OpenAI')).not.toBeInTheDocument()
   })
 

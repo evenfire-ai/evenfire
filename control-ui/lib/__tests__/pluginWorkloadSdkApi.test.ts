@@ -48,6 +48,7 @@ describe('Plugin Workload SDK admin api — URL shape', () => {
       recipeNamespace: 'sandbox-recipes',
       recipeName: 'r1',
       capabilityFamily: 'promptBridge',
+      provider: 'zai',
       allowedModels: ['glm-4.7'],
     })
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
@@ -56,6 +57,7 @@ describe('Plugin Workload SDK admin api — URL shape', () => {
     expect(JSON.parse(init.body as string)).toMatchObject({
       recipeName: 'r1',
       capabilityFamily: 'promptBridge',
+      provider: 'zai',
       allowedModels: ['glm-4.7'],
     })
   })

@@ -10,6 +10,9 @@ function createGateway() {
       { metadata: { name: 's2', namespace: 'ns1', labels: {} } },
       { metadata: { name: 's3', namespace: 'ns1', labels: { 'clerum.io/host-secret': 'false' } } },
     ]),
+    getSecret: vi.fn(async (_name: string, _namespace?: string): Promise<unknown> => {
+      throw new Error('not found')
+    }),
     createSecret: vi.fn(async (body: unknown) => body),
     updateSecret: vi.fn(async (body: unknown) => body),
     deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
@@ -565,5 +568,397 @@ describe('routes/secrets', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"vector":"query-param"'))
 
     warnSpy.mockRestore()
+  })
+})
+
+// Slot-aware LLM credential validation (spec R4.5.3 / §6 control-api row).
+describe('routes/secrets — LLM slot-aware validation', () => {
+  function makeApp() {
+    const gateway = createGateway()
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminSecretsRouter(gateway as never))
+    return { app, gateway }
+  }
+
+  const validVertexJson = JSON.stringify({
+    type: 'service_account',
+    client_email: 'sa@project.iam.gserviceaccount.com',
+    private_key: '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n',
+  })
+
+  it('rejects a partial Bedrock pair (only access-key-id) with 400', async () => {
+    const { app, gateway } = makeApp()
+    const res = await request(app)
+      .post('/admin/secrets')
+      .send({ name: 'chatllm-api-keys', stringData: { 'aws-access-key-id': 'AKIA...' } })
+      .expect(400)
+    expect(res.body.error).toMatch(/Bedrock/i)
+    expect(res.body.error).toMatch(/aws-secret-access-key/)
+    expect(gateway.createSecret).not.toHaveBeenCalled()
+  })
+
+  it('rejects a partial Bedrock pair on update (PUT) with 400', async () => {
+    const { app, gateway } = makeApp()
+    await request(app)
+      .put('/admin/secrets')
+      .send({ name: 'chatllm-api-keys', stringData: { 'aws-secret-access-key': 'secret' } })
+      .expect(400)
+    expect(gateway.updateSecret).not.toHaveBeenCalled()
+  })
+
+  it('accepts the complete Bedrock pair written together', async () => {
+    const { app, gateway } = makeApp()
+    await request(app)
+      .post('/admin/secrets')
+      .send({
+        name: 'chatllm-api-keys',
+        stringData: { 'aws-access-key-id': 'AKIA...', 'aws-secret-access-key': 'secret' },
+      })
+      .expect(201)
+    expect(gateway.createSecret).toHaveBeenCalled()
+  })
+
+  it('rejects a malformed Vertex service-account JSON with 400', async () => {
+    const { app, gateway } = makeApp()
+    const res = await request(app)
+      .post('/admin/secrets')
+      .send({ name: 'chatllm-api-keys', stringData: { 'vertex-service-account-json': 'not-json' } })
+      .expect(400)
+    expect(res.body.error).toMatch(/vertex-service-account-json/)
+    expect(gateway.createSecret).not.toHaveBeenCalled()
+  })
+
+  it('rejects a Vertex JSON missing client_email / private_key with 400', async () => {
+    const { app, gateway } = makeApp()
+    const res = await request(app)
+      .post('/admin/secrets')
+      .send({
+        name: 'chatllm-api-keys',
+        stringData: { 'vertex-service-account-json': JSON.stringify({ type: 'service_account' }) },
+      })
+      .expect(400)
+    expect(res.body.error).toMatch(/client_email/)
+    expect(gateway.createSecret).not.toHaveBeenCalled()
+  })
+
+  it('accepts a well-formed Vertex service-account JSON', async () => {
+    const { app, gateway } = makeApp()
+    await request(app)
+      .post('/admin/secrets')
+      .send({
+        name: 'chatllm-api-keys',
+        stringData: { 'vertex-service-account-json': validVertexJson },
+      })
+      .expect(201)
+    expect(gateway.createSecret).toHaveBeenCalled()
+  })
+
+  it('also validates base64 `data` payloads (Vertex JSON)', async () => {
+    const { app, gateway } = makeApp()
+    await request(app)
+      .post('/admin/secrets')
+      .send({
+        name: 'chatllm-api-keys',
+        data: { 'vertex-service-account-json': Buffer.from('not-json').toString('base64') },
+      })
+      .expect(400)
+    expect(gateway.createSecret).not.toHaveBeenCalled()
+  })
+
+  it('leaves the generic (non-LLM) secret contract untouched', async () => {
+    const { app, gateway } = makeApp()
+    await request(app)
+      .post('/admin/secrets')
+      .send({ name: 'generic', stringData: { token: 'abc', 'some-key': 'v' } })
+      .expect(201)
+    expect(gateway.createSecret).toHaveBeenCalled()
+  })
+
+  it('accepts a single-key provider (openai) unchanged', async () => {
+    const { app, gateway } = makeApp()
+    await request(app)
+      .post('/admin/secrets')
+      .send({ name: 'chatllm-api-keys', stringData: { 'openai-api-key': 'sk-...' } })
+      .expect(201)
+    expect(gateway.createSecret).toHaveBeenCalled()
+  })
+
+  // FIX 3: the slot-aware rule is scoped to the known LLM Secret name(s). A
+  // generic Secret carrying a lone `aws-access-key-id` (e.g. a plain AWS
+  // credential Secret) must NOT trip the bedrock paired-slot rule.
+  it('does not apply the bedrock pair rule to a non-LLM secret with a lone aws-access-key-id', async () => {
+    const { app, gateway } = makeApp()
+    await request(app)
+      .post('/admin/secrets')
+      .send({ name: 'my-aws-creds', stringData: { 'aws-access-key-id': 'AKIA...' } })
+      .expect(201)
+    expect(gateway.createSecret).toHaveBeenCalled()
+  })
+
+  // Topic 1b: the gate now also fires on the host-secret LABEL, so a per-host
+  // NAMED Secret (not `chatllm-api-keys`) is validated too — it can no longer
+  // bypass the bedrock/vertex contract just by having a different name.
+  it('validates a per-host-NAMED labeled secret: half Bedrock pair → 400', async () => {
+    const { app, gateway } = makeApp()
+    const res = await request(app)
+      .post('/admin/secrets')
+      .send({
+        name: 'host-abc-llm',
+        labels: { 'clerum.io/host-secret': 'true' },
+        stringData: { 'aws-access-key-id': 'AKIA...' },
+      })
+      .expect(400)
+    expect(res.body.error).toMatch(/Bedrock/i)
+    expect(res.body.error).toMatch(/aws-secret-access-key/)
+    expect(gateway.createSecret).not.toHaveBeenCalled()
+  })
+
+  it('accepts a valid per-host labeled secret (complete Bedrock pair)', async () => {
+    const { app, gateway } = makeApp()
+    await request(app)
+      .post('/admin/secrets')
+      .send({
+        name: 'host-abc-llm',
+        labels: { 'clerum.io/host-secret': 'true' },
+        stringData: { 'aws-access-key-id': 'AKIA...', 'aws-secret-access-key': 'secret' },
+      })
+      .expect(201)
+    expect(gateway.createSecret).toHaveBeenCalled()
+  })
+
+  // The label is what arms the gate — a per-host NAME without the label is still
+  // a generic Secret (no slot contract), matching the FIX-3 scoping above.
+  it('does NOT validate a per-host-named secret that lacks the host-secret label', async () => {
+    const { app, gateway } = makeApp()
+    await request(app)
+      .post('/admin/secrets')
+      .send({ name: 'host-abc-llm', stringData: { 'aws-access-key-id': 'AKIA...' } })
+      .expect(201)
+    expect(gateway.createSecret).toHaveBeenCalled()
+  })
+})
+
+// FIX 2b: opt-in server-side merge (read-then-replace) for PUT /admin/secrets.
+describe('routes/secrets — PUT merge semantics', () => {
+  function makeMergeApp(
+    existing: { data?: Record<string, string>; labels?: Record<string, string> } | null
+  ) {
+    const gateway = createGateway()
+    gateway.getSecret.mockImplementation(async () => {
+      if (existing === null) throw new Error('not found')
+      return {
+        metadata: {
+          name: 'chatllm-api-keys',
+          namespace: 'mcp-host',
+          labels: existing.labels || {},
+        },
+        data: existing.data || {},
+      }
+    })
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminSecretsRouter(gateway as never))
+    return { app, gateway }
+  }
+
+  const b64 = (s: string): string => Buffer.from(s, 'utf8').toString('base64')
+
+  it('merge:true preserves keys the caller did not send (other providers survive)', async () => {
+    const { app, gateway } = makeMergeApp({
+      data: { 'openai-api-key': b64('sk-existing'), 'claude-api-key': b64('claude-existing') },
+    })
+    const res = await request(app)
+      .put('/admin/secrets')
+      .send({ name: 'chatllm-api-keys', merge: true, stringData: { 'openai-api-key': 'sk-new' } })
+      .expect(200)
+
+    const call = (gateway.updateSecret as any).mock.calls[0][0]
+    // openai overwritten, claude preserved untouched.
+    expect(call.data['openai-api-key']).toBe(b64('sk-new'))
+    expect(call.data['claude-api-key']).toBe(b64('claude-existing'))
+    expect(call.stringData).toBeUndefined()
+
+    // The response must NEVER echo secret values (names-only R4 contract) —
+    // especially not the preserved values of keys the caller did not send.
+    expect(res.body).toEqual({
+      name: 'chatllm-api-keys',
+      namespace: 'mcp-host',
+      keys: ['claude-api-key', 'openai-api-key'],
+    })
+    const serialized = JSON.stringify(res.body)
+    expect(serialized).not.toContain(b64('claude-existing'))
+    expect(serialized).not.toContain(b64('sk-new'))
+  })
+
+  it('merge:true validates the EFFECTIVE merge (bedrock pair completed across existing+sent)', async () => {
+    const { app, gateway } = makeMergeApp({
+      data: { 'aws-access-key-id': b64('AKIA-existing') },
+    })
+    await request(app)
+      .put('/admin/secrets')
+      .send({
+        name: 'chatllm-api-keys',
+        merge: true,
+        stringData: { 'aws-secret-access-key': 'secret-new' },
+      })
+      .expect(200)
+    const call = (gateway.updateSecret as any).mock.calls[0][0]
+    expect(call.data['aws-access-key-id']).toBe(b64('AKIA-existing'))
+    expect(call.data['aws-secret-access-key']).toBe(b64('secret-new'))
+  })
+
+  it('merge:true still 400s when the pair is incomplete AFTER the merge', async () => {
+    const { app, gateway } = makeMergeApp({ data: { 'openai-api-key': b64('sk') } })
+    const res = await request(app)
+      .put('/admin/secrets')
+      .send({
+        name: 'chatllm-api-keys',
+        merge: true,
+        stringData: { 'aws-access-key-id': 'AKIA...' },
+      })
+      .expect(400)
+    expect(res.body.error).toMatch(/Bedrock/i)
+    expect(gateway.updateSecret).not.toHaveBeenCalled()
+  })
+
+  it('merge:true skips empty values (blanking is not deletion)', async () => {
+    const { app, gateway } = makeMergeApp({
+      data: { 'openai-api-key': b64('sk-existing'), 'claude-api-key': b64('claude-existing') },
+    })
+    await request(app)
+      .put('/admin/secrets')
+      .send({
+        name: 'chatllm-api-keys',
+        merge: true,
+        stringData: { 'openai-api-key': '', 'claude-api-key': 'claude-new' },
+      })
+      .expect(200)
+    const call = (gateway.updateSecret as any).mock.calls[0][0]
+    // The empty value did not wipe the stored openai key; claude was updated.
+    expect(call.data['openai-api-key']).toBe(b64('sk-existing'))
+    expect(call.data['claude-api-key']).toBe(b64('claude-new'))
+  })
+
+  it('merge:true on a missing secret returns 404', async () => {
+    const { app, gateway } = makeMergeApp(null)
+    await request(app)
+      .put('/admin/secrets')
+      .send({ name: 'chatllm-api-keys', merge: true, stringData: { 'openai-api-key': 'sk' } })
+      .expect(404)
+    expect(gateway.updateSecret).not.toHaveBeenCalled()
+  })
+
+  it('without the flag the update stays full-replace (data passed through, not merged)', async () => {
+    const { app, gateway } = makeMergeApp({ data: { 'openai-api-key': b64('sk-existing') } })
+    await request(app)
+      .put('/admin/secrets')
+      .send({ name: 'chatllm-api-keys', stringData: { 'claude-api-key': 'claude-new' } })
+      .expect(200)
+    // Full-replace passes the body through verbatim — it does NOT merge the
+    // existing data. (It may do a validation-only label read to arm the slot
+    // gate, but the write body carries only the caller's keys.)
+    const call = (gateway.updateSecret as any).mock.calls[0][0]
+    expect(call.stringData).toEqual({ 'claude-api-key': 'claude-new' })
+    expect(call.data).toBeUndefined()
+  })
+
+  // Closes the full-replace bypass: a per-host labeled LLM Secret written via
+  // full-replace WITHOUT echoing labels must still be slot-validated, because
+  // updateSecret re-attaches the existing host-secret label. Identity is armed
+  // from the EXISTING labels, not the (omitted) body labels.
+  it('full-replace of a labeled per-host secret is slot-validated even when body omits labels', async () => {
+    const { app, gateway } = makeMergeApp({
+      data: { 'openai-api-key': b64('sk-existing') },
+      labels: { 'clerum.io/host-secret': 'true' },
+    })
+    const res = await request(app)
+      .put('/admin/secrets')
+      // per-host NAME (not chatllm-api-keys), no labels in body, half Bedrock pair
+      .send({ name: 'host-x-llm', stringData: { 'aws-access-key-id': 'AKIA...' } })
+      .expect(400)
+    expect(res.body.error).toMatch(/Bedrock/i)
+    expect(gateway.updateSecret).not.toHaveBeenCalled()
+  })
+
+  // Topic 1b Task 2 — removeKeys: the delete-a-slot half of partial edit, so an
+  // operator retiring a provider from the fallback chain can drop that slot.
+  it('merge:true removeKeys retires a named slot, preserving the rest (label-armed host secret)', async () => {
+    const { app, gateway } = makeMergeApp({
+      data: { 'openai-api-key': b64('sk'), 'claude-api-key': b64('cl') },
+      labels: { 'clerum.io/host-secret': 'true' },
+    })
+    const res = await request(app)
+      .put('/admin/secrets')
+      // A per-host NAME (not chatllm-api-keys): identity comes from the label.
+      .send({ name: 'host-x-llm', merge: true, removeKeys: ['openai-api-key'] })
+      .expect(200)
+
+    const call = (gateway.updateSecret as any).mock.calls[0][0]
+    expect(Object.keys(call.data)).toEqual(['claude-api-key'])
+    expect(call.data['claude-api-key']).toBe(b64('cl'))
+    // Names-only response — never echoes values.
+    expect(res.body.keys).toEqual(['claude-api-key'])
+    expect(JSON.stringify(res.body)).not.toContain(b64('cl'))
+  })
+
+  it('merge:true removeKeys touches only the named keys (does not wipe others)', async () => {
+    const { app, gateway } = makeMergeApp({
+      data: {
+        'openai-api-key': b64('sk'),
+        'claude-api-key': b64('cl'),
+        'gemini-api-key': b64('g'),
+      },
+      labels: { 'clerum.io/host-secret': 'true' },
+    })
+    await request(app)
+      .put('/admin/secrets')
+      .send({ name: 'host-x-llm', merge: true, removeKeys: ['gemini-api-key'] })
+      .expect(200)
+    const call = (gateway.updateSecret as any).mock.calls[0][0]
+    expect(Object.keys(call.data).sort()).toEqual(['claude-api-key', 'openai-api-key'])
+  })
+
+  // Contract: the Bedrock pair is atomic on the way OUT too — removing one half
+  // retires the whole pair so the Secret never lands in a half-pair state.
+  it('merge:true removeKeys of one Bedrock key retires the whole pair', async () => {
+    const { app, gateway } = makeMergeApp({
+      data: {
+        'aws-access-key-id': b64('AKIA'),
+        'aws-secret-access-key': b64('sec'),
+        'openai-api-key': b64('sk'),
+      },
+      labels: { 'clerum.io/host-secret': 'true' },
+    })
+    await request(app)
+      .put('/admin/secrets')
+      .send({ name: 'host-x-llm', merge: true, removeKeys: ['aws-access-key-id'] })
+      .expect(200)
+    const call = (gateway.updateSecret as any).mock.calls[0][0]
+    // Both Bedrock keys gone; openai untouched.
+    expect(Object.keys(call.data)).toEqual(['openai-api-key'])
+  })
+
+  it('merge:true removeKeys that would empty the secret → 400 (must retain one key)', async () => {
+    const { app, gateway } = makeMergeApp({
+      data: { 'openai-api-key': b64('sk') },
+      labels: { 'clerum.io/host-secret': 'true' },
+    })
+    const res = await request(app)
+      .put('/admin/secrets')
+      .send({ name: 'host-x-llm', merge: true, removeKeys: ['openai-api-key'] })
+      .expect(400)
+    expect(res.body.error).toMatch(/at least one key/)
+    expect(gateway.updateSecret).not.toHaveBeenCalled()
+  })
+
+  it('merge:true removeKeys works on a generic (non-LLM) secret without slot logic', async () => {
+    const { app, gateway } = makeMergeApp({ data: { a: b64('1'), b: b64('2') } })
+    await request(app)
+      .put('/admin/secrets')
+      .send({ name: 'generic', merge: true, removeKeys: ['a'] })
+      .expect(200)
+    const call = (gateway.updateSecret as any).mock.calls[0][0]
+    expect(Object.keys(call.data)).toEqual(['b'])
   })
 })

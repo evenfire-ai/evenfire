@@ -87,7 +87,7 @@ describe('OutputsPage', () => {
   })
 
   it('shows desktop artifact skeleton rows while the desktop tab is loading', () => {
-    navigationState.params = { tab: 'desktop' }
+    navigationState.params = { tab: 'desktop-app-artifacts' }
     mockGetAdminOutputsOverview.mockReturnValue(new Promise<never>(() => {}))
 
     const { container } = render(<OutputsPage />)

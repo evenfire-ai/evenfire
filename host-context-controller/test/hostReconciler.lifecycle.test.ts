@@ -7,6 +7,7 @@ import {
   HostReconciler,
   type ResolvedSfsMount,
 } from '../src/hostReconciler'
+import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
 import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClient'
 import { HostCRD, HostCrdStatus } from '../src/types'
 import {
@@ -131,6 +132,14 @@ function suspendedStatus(wakeHandledGeneration = 0): HostCrdStatus {
   return { lifecycle: { state: 'suspended', wakeHandledGeneration } }
 }
 
+function createTelemetryReporterMock(): InfrastructureTelemetryReporter {
+  return {
+    enqueue: vi.fn(),
+    enqueueHealthTransition: vi.fn(),
+    stop: vi.fn(async () => undefined),
+  }
+}
+
 function hostApiObject(host: HostCRD) {
   return {
     metadata: {
@@ -148,6 +157,7 @@ function createReconciler(deps?: {
   countCommunicationChannels?: (hostName: string) => number
   isCommunicationChannelCacheSynced?: () => boolean
   resolveContextMounts?: (host: HostCRD) => Promise<ResolvedSfsMount[]>
+  infrastructureTelemetryReporter?: InfrastructureTelemetryReporter
 }) {
   const appsApi = createMockAppsApi()
   const coreApi = createMockCoreApi()
@@ -1343,16 +1353,24 @@ describe('HostReconciler stateless lifecycle — kill-switches', () => {
 
 describe('HostReconciler stateless lifecycle — status write idempotence', () => {
   it('writes status once for an unchanged assessment across reconciles', async () => {
-    const { reconciler, customApi } = createReconciler()
+    const infrastructureTelemetryReporter = createTelemetryReporterMock()
+    const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
     const host = makeStatelessHost()
     await reconciler.reconcile(host)
     expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
     await reconciler.reconcile(host)
     expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    expect(infrastructureTelemetryReporter.enqueue).toHaveBeenCalledTimes(3)
+    expect(
+      vi
+        .mocked(infrastructureTelemetryReporter.enqueue)
+        .mock.calls.filter(([event]) => event.telemetryType === 'lifecycle_transition')
+    ).toHaveLength(1)
   })
 
   it('skips the write when the observed status already matches', async () => {
-    const { reconciler, customApi } = createReconciler()
+    const infrastructureTelemetryReporter = createTelemetryReporterMock()
+    const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
     const host = makeStatelessHost({
       status: {
         lifecycle: { state: 'active', wakeHandledGeneration: 0 },
@@ -1388,12 +1406,31 @@ describe('HostReconciler stateless lifecycle — status write idempotence', () =
     })
     await reconciler.reconcile(host)
     expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+    expect(infrastructureTelemetryReporter.enqueue).not.toHaveBeenCalledWith(
+      expect.objectContaining({ telemetryType: 'lifecycle_transition' })
+    )
   })
 
   it('never writes status for a host that has not opted into the lifecycle', async () => {
-    const { reconciler, customApi } = createReconciler()
+    const infrastructureTelemetryReporter = createTelemetryReporterMock()
+    const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
     await reconciler.reconcile(makeHost())
     expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+    expect(infrastructureTelemetryReporter.enqueue).not.toHaveBeenCalledWith(
+      expect.objectContaining({ telemetryType: 'lifecycle_transition' })
+    )
+  })
+
+  it('does not report a lifecycle transition when the status write fails', async () => {
+    const infrastructureTelemetryReporter = createTelemetryReporterMock()
+    const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
+    customApi.patchNamespacedCustomObjectStatus.mockRejectedValue(new Error('write failed'))
+
+    await reconciler.reconcile(makeStatelessHost())
+
+    expect(infrastructureTelemetryReporter.enqueue).not.toHaveBeenCalledWith(
+      expect.objectContaining({ telemetryType: 'lifecycle_transition' })
+    )
   })
 })
 

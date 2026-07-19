@@ -4,6 +4,8 @@ import * as sessionsStateIndex from './003-sessions-state-index'
 import * as awaitingApprovalIndex from './004-sessions-awaiting-approval-index'
 import * as messagesTokenUsage from './005-messages-token-usage'
 import * as sessionsCacheReported from './006-sessions-cache-reported'
+import * as sessionsModelSelections from './007-sessions-model-selections'
+import * as activeTraceContext from './008-active-trace-context'
 
 /**
  * Ordered list of migrations. New migrations append; never reorder or rename.
@@ -21,4 +23,6 @@ export const migrations: Array<{
   awaitingApprovalIndex,
   messagesTokenUsage,
   sessionsCacheReported,
+  sessionsModelSelections,
+  activeTraceContext,
 ]

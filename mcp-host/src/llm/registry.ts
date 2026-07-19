@@ -16,50 +16,77 @@
  * `./registry` keep working, but `registryCore` remains the single source of
  * truth for the data.
  */
+import type { ProviderCredentials } from '../types'
+import { AzureOpenAIProvider } from './azure'
 import { ClaudeProvider } from './claude'
+import { buildBedrockConverseDriver } from './drivers/bedrockConverse'
+import { buildGoogleGenerativeDriver } from './drivers/googleGenerative'
 import { OpenAIProvider } from './openai'
 import { OpenAICompatibleProvider } from './openaiCompatible'
-import { type LlmProvider, descriptorFor } from './registryCore'
+import { type LlmProvider, descriptorFor, primarySlot } from './registryCore'
 import type { SingleTurnProvider } from './types'
 
 export {
   ALL_PROVIDERS,
   type CoreProviderDescriptor,
+  type CredentialSlot,
   descriptorFor,
   isLlmProvider,
   type LlmProvider,
+  primarySlot,
   PROVIDERS,
 } from './registryCore'
 
 /**
- * Construct the concrete provider for `provider` from an apiKey (+ optional
- * model). Direct-SDK providers (e.g. openai, claude) get their own class via an
- * explicit case below; every OpenAI-compatible provider is data-driven —
- * discriminated by the presence of `descriptor.baseURL`, so adding one is a pure
- * data entry in `PROVIDERS` with no edit here.
+ * Construct the concrete provider for `provider` from its credential bag (+
+ * optional model). Direct-SDK providers (openai, claude), the own-SDK newcomers
+ * (vertex, bedrock) and the light-driver `azure` (OpenAI shape but per-resource
+ * host + `api-key` header) get their own explicit case; every other
+ * OpenAI-compatible provider is data-driven — discriminated by the presence of
+ * `descriptor.baseURL`, so adding one is a pure data entry in `PROVIDERS`.
+ *
+ * The own-SDK arms (vertex/bedrock) `require()` their SDK LAZILY inside the case
+ * (mcp-host is CommonJS): the heavy GCP/AWS clients are loaded and parsed only
+ * when that provider is actually used, isolating dependency faults and keeping
+ * boot/memory of the common path unchanged. NEVER route them through the
+ * `baseURL`/OpenAI-compatible arm.
+ *
+ * `credentials` is keyed by registry slot `dataKey`. Single-key arms read the
+ * primary slot via {@link primarySlot} (confined here — the exclusion boundary
+ * uses the full slot set instead).
  */
 export function makeProvider(
   provider: LlmProvider,
-  apiKey: string,
+  credentials: ProviderCredentials,
   model?: string
 ): SingleTurnProvider {
-  // Only direct-SDK providers need an explicit case; OpenAI-compatible ones
-  // (with a baseURL) fall through to the data-driven arm below.
+  const d = descriptorFor(provider)
   switch (provider) {
     case 'openai':
-      return new OpenAIProvider(apiKey, model)
+      return new OpenAIProvider(credentials[primarySlot(d).dataKey], model)
     case 'claude':
-      return new ClaudeProvider(apiKey, model)
+      return new ClaudeProvider(credentials[primarySlot(d).dataKey], model)
+    case 'vertex':
+      // Own-SDK arm — lazy require lives inside the driver builder.
+      return buildGoogleGenerativeDriver(credentials, model ?? d.defaultModel)
+    case 'bedrock':
+      // Own-SDK arm — lazy require lives inside the driver builder.
+      return buildBedrockConverseDriver(credentials, model ?? d.defaultModel)
+    case 'azure':
+      // Light-driver arm: OpenAI wire shape but per-resource host
+      // (AZURE_OPENAI_ENDPOINT) + `api-key` header + deployment-name-as-model, so
+      // it deliberately has NO static baseURL and must not hit the data arm
+      // below. Fails closed (throws) if the operator omitted the endpoint.
+      return new AzureOpenAIProvider(credentials[primarySlot(d).dataKey], model ?? d.defaultModel)
   }
 
   // Data-driven arm: anything carrying a baseURL is OpenAI-compatible and is
   // built straight from its descriptor — no per-id branch. A new divergent
   // (own-SDK) provider must instead add its own case above.
-  const d = descriptorFor(provider)
   if (d.baseURL) {
     return new OpenAICompatibleProvider(
       { id: d.id, baseURL: d.baseURL, defaultModel: d.defaultModel },
-      apiKey,
+      credentials[primarySlot(d).dataKey],
       model
     )
   }

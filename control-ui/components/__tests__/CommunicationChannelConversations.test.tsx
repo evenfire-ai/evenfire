@@ -53,7 +53,7 @@ describe('CommunicationChannelConversationsTable', () => {
 
     expect(screen.getByRole('link', { name: 'Admin User' })).toHaveAttribute(
       'href',
-      '/profile-admin/users/user-1'
+      '/users-and-teams/users/user-1'
     )
     expect(screen.queryByText('user-1')).not.toBeInTheDocument()
     expect(screen.queryByText('2026-06-19T14:22:00.000Z')).not.toBeInTheDocument()

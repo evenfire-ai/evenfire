@@ -9,8 +9,12 @@ export function GfsResourceMenu({
   resourceName,
   onManage,
   onCopyLink,
+  onCreateFolder,
+  onDelete,
   onOpen,
+  onPreview,
   onDownload,
+  onRename,
 }: GfsResourceMenuProps) {
   const [open, setOpen] = useState(false)
   const menuRef = useRef<HTMLSpanElement | null>(null)
@@ -76,12 +80,29 @@ export function GfsResourceMenu({
       </IconButton>
       {open ? (
         <span className="da-gfs-resource-menu__panel" role="menu">
-          <MenuItem role="menuitem" onClick={() => runAction(onManage)}>
-            Manage
-          </MenuItem>
+          {onManage ? (
+            <MenuItem role="menuitem" onClick={() => runAction(onManage)}>
+              Manage
+            </MenuItem>
+          ) : null}
           {onOpen ? (
             <MenuItem role="menuitem" onClick={() => runAction(onOpen)}>
               Open folder
+            </MenuItem>
+          ) : null}
+          {onPreview ? (
+            <MenuItem role="menuitem" onClick={() => runAction(onPreview)}>
+              Preview
+            </MenuItem>
+          ) : null}
+          {onCreateFolder ? (
+            <MenuItem role="menuitem" onClick={() => runAction(onCreateFolder)}>
+              New folder
+            </MenuItem>
+          ) : null}
+          {onRename ? (
+            <MenuItem role="menuitem" onClick={() => runAction(onRename)}>
+              Rename
             </MenuItem>
           ) : null}
           {onDownload ? (
@@ -92,6 +113,11 @@ export function GfsResourceMenu({
           <MenuItem role="menuitem" onClick={() => runAction(onCopyLink)}>
             Copy GFS link
           </MenuItem>
+          {onDelete ? (
+            <MenuItem color="danger" role="menuitem" onClick={() => runAction(onDelete)}>
+              Delete
+            </MenuItem>
+          ) : null}
         </span>
       ) : null}
     </span>

@@ -54,13 +54,6 @@ type LaunchState =
   | { kind: 'mounted'; appRef: string }
   | { kind: 'error'; appRef: string; message: string }
 
-const PARKED_EMBED_BOUNDS = {
-  x: -10_000,
-  y: -10_000,
-  width: 1,
-  height: 1,
-}
-
 function statusFromError(err: unknown): { status: number | null; message: string } {
   const message = err instanceof Error ? err.message : String(err)
   // SandboxUiSessionError surfaces "(404):" / "(403):" etc., while bridge
@@ -116,7 +109,8 @@ function useEmbedBounds(
   ref: React.RefObject<HTMLDivElement | null>,
   enabled: boolean,
   parked: boolean,
-  refreshKey: string | number
+  refreshKey: string | number,
+  onBoundsApplied?: () => void
 ): void {
   useLayoutEffect(() => {
     if (!enabled) return
@@ -128,7 +122,10 @@ function useEmbedBounds(
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
         const rect = target.getBoundingClientRect()
-        void window.clerum.sandboxUi.setBounds(boundsFromRect(rect))
+        void window.clerum.sandboxUi
+          .setBounds(boundsFromRect(rect))
+          .then(() => onBoundsApplied?.())
+          .catch(() => undefined)
       })
     }
     push()
@@ -142,7 +139,7 @@ function useEmbedBounds(
       window.removeEventListener('resize', push)
       window.removeEventListener('scroll', push, true)
     }
-  }, [parked, ref, enabled, refreshKey])
+  }, [parked, ref, enabled, onBoundsApplied, refreshKey])
 }
 
 const APP_PAGE_SIZE = 6
@@ -151,11 +148,13 @@ export function SandboxUiPage({
   boundsRefreshKey = 0,
   headerShellOverlayOpen = false,
   sidebarShellOverlayOpen = false,
+  toastShellOverlayOpen = false,
   shortcutApp = null,
   shortcutOpenRequestId = 0,
   onEmbeddedAppOpening,
   onEmbeddedAppBack,
   onEmbeddedAppRemoved,
+  onEmbedBoundsApplied,
 }: SandboxUiPageProps = {}) {
   const [apps, setApps] = useState<App[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -165,7 +164,8 @@ export function SandboxUiPage({
   const [embedPreviewDataUrl, setEmbedPreviewDataUrl] = useState<string | null>(null)
   const embedSlotRef = useRef<HTMLDivElement>(null)
   const lastShortcutOpenRequestIdRef = useRef(0)
-  const shellOverlayOpen = headerShellOverlayOpen || sidebarShellOverlayOpen
+  const shellOverlayOpen =
+    headerShellOverlayOpen || sidebarShellOverlayOpen || toastShellOverlayOpen
 
   const reload = useCallback(async () => {
     setError(null)
@@ -322,40 +322,57 @@ export function SandboxUiPage({
     embedSlotRef,
     launch.kind === 'mounted' || launch.kind === 'minting',
     shellOverlayOpen,
-    boundsRefreshKey
+    boundsRefreshKey,
+    onEmbedBoundsApplied
   )
 
+  // Native WebContentsView content always paints above renderer DOM. Capture
+  // and mount its preview before hiding it so the overlay transition reveals
+  // an identical frame instead of briefly flashing the empty embed slot.
   useLayoutEffect(() => {
-    if (launch.kind !== 'mounted' && launch.kind !== 'minting') return
-    if (shellOverlayOpen) return
-    const rect = embedSlotRef.current?.getBoundingClientRect()
-    if (rect) {
-      void window.clerum.sandboxUi.setBounds(boundsFromRect(rect))
-    }
-    setEmbedPreviewDataUrl(null)
-  }, [launch.kind, shellOverlayOpen])
-
-  useEffect(() => {
-    if (launch.kind !== 'mounted' && launch.kind !== 'minting') return
-    if (!shellOverlayOpen) return
-
     let cancelled = false
-    const parkAfterPreview = async (): Promise<void> => {
-      try {
-        const dataUrl = await window.clerum.sandboxUi.capturePreview()
-        if (!cancelled && dataUrl) setEmbedPreviewDataUrl(dataUrl)
-      } catch {
-        // Keep the last successful preview until the live view is restored.
+    const updateVisibility = async (): Promise<void> => {
+      if (shellOverlayOpen) {
+        let dataUrl: string | null = null
+        try {
+          dataUrl = await window.clerum.sandboxUi.capturePreview()
+        } catch {
+          // A missing preview must not prevent the shell overlay from opening.
+        }
+        if (cancelled) return
+        if (dataUrl) {
+          setEmbedPreviewDataUrl(dataUrl)
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+          if (cancelled) return
+        }
+        try {
+          await window.clerum.sandboxUi.setVisible(false)
+        } catch {
+          // The native view may already have been torn down while opening.
+        }
+        return
+      }
+
+      if (launch.kind === 'mounted' || launch.kind === 'minting') {
+        const rect = embedSlotRef.current?.getBoundingClientRect()
+        if (rect) {
+          try {
+            await window.clerum.sandboxUi.setBounds(boundsFromRect(rect))
+          } catch {
+            // The native view may already have been torn down while closing.
+          }
+        }
       }
       if (cancelled) return
-      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
-      void window.clerum.sandboxUi.setBounds({
-        ...PARKED_EMBED_BOUNDS,
-        dpr: window.devicePixelRatio,
-      })
+      try {
+        await window.clerum.sandboxUi.setVisible(true)
+      } catch {
+        // The native view may already have been torn down while closing.
+      }
+      if (!cancelled) setEmbedPreviewDataUrl(null)
     }
 
-    void parkAfterPreview()
+    void updateVisibility()
     return () => {
       cancelled = true
     }
@@ -403,7 +420,7 @@ export function SandboxUiPage({
         {/* The slot div is the rectangle the WebContentsView floats above
             after the selected app completes its initial load. */}
         <div ref={embedSlotRef} className="sandbox-ui-embed-slot">
-          {embedPreviewDataUrl && shellOverlayOpen && (
+          {embedPreviewDataUrl && (
             <img
               className="sandbox-ui-embed-preview"
               src={embedPreviewDataUrl}

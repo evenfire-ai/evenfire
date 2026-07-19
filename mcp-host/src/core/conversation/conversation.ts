@@ -6,6 +6,7 @@ import {
   Conversation,
   ConversationState,
   PendingApproval,
+  TraceContextV1,
   Turn,
   TurnToolCall,
 } from '../types'
@@ -173,7 +174,12 @@ export class ConversationManager {
    * (same rationale as `suspendForApproval`) and the error propagates so the
    * caller fails the task loudly.
    */
-  async startTurn(conversation: Conversation, userInput: string, taskId: string): Promise<Turn> {
+  async startTurn(
+    conversation: Conversation,
+    userInput: string,
+    taskId: string,
+    traceContext: TraceContextV1 | null = null
+  ): Promise<Turn> {
     if (conversation.state !== ConversationState.Idle) {
       throw new ConversationError(
         `Cannot start turn: conversation is ${conversation.state}`,
@@ -181,10 +187,12 @@ export class ConversationManager {
       )
     }
 
+    const previousTraceContext = conversation.traceContext
     conversation.state = ConversationState.Processing
     // D.1 — record the in-flight task so it can be exposed via /sessions and
     // mirrored to sessions.active_task_id by persistTurnStart.
     conversation.activeTaskId = taskId
+    conversation.traceContext = traceContext
     conversation.updated_at = new Date()
 
     // Clear per-turn wildcard approval — each new message requires fresh approval
@@ -208,6 +216,7 @@ export class ConversationManager {
       conversation.turns.pop()
       conversation.state = ConversationState.Idle
       conversation.activeTaskId = undefined
+      conversation.traceContext = previousTraceContext
       conversation.updated_at = new Date()
       throw err
     }
@@ -242,6 +251,7 @@ export class ConversationManager {
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — turn done, no task in flight
+    conversation.traceContext = null
     conversation.updated_at = new Date()
     await Promise.resolve(this.store.persistTurnComplete(conversation, response))
   }
@@ -352,6 +362,7 @@ export class ConversationManager {
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — turn done, no task in flight
+    conversation.traceContext = null
     conversation.updated_at = new Date()
 
     const currentTurn = conversation.turns[conversation.turns.length - 1]
@@ -379,6 +390,7 @@ export class ConversationManager {
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — turn done, no task in flight
+    conversation.traceContext = null
     conversation.updated_at = new Date()
     const currentTurn = conversation.turns[conversation.turns.length - 1]
     if (currentTurn) {
@@ -420,6 +432,8 @@ export class ConversationManager {
 
     const prevState = conversation.state
     const prevApproval = conversation.pending_approval
+    const prevApprovalTraceContext = approval.traceContext
+    approval.traceContext = conversation.traceContext ?? null
     conversation.state = ConversationState.AwaitingApproval
     conversation.pending_approval = approval
     conversation.updated_at = new Date()
@@ -433,6 +447,7 @@ export class ConversationManager {
       // (TaskExecutor.handleLoopResult) surfaces the failure as a failed turn.
       conversation.state = prevState
       conversation.pending_approval = prevApproval
+      approval.traceContext = prevApprovalTraceContext
       conversation.updated_at = new Date()
       throw err
     }
@@ -503,6 +518,7 @@ export class ConversationManager {
     conversation.state = ConversationState.Idle
     conversation.pending_approval = undefined
     conversation.activeTaskId = undefined // D.1 — deny is terminal (→ Idle), no task in flight
+    conversation.traceContext = null
     conversation.updated_at = new Date()
     if (requestId) {
       await this.store.persistApprovalResolved(conversation, requestId, 'deny')
@@ -529,6 +545,8 @@ export class ConversationManager {
     const requestId = conv.pending_approval?.request_id
     conv.pending_approval = undefined
     conv.state = ConversationState.Idle // release the turn lock (BUG-8)
+    conv.activeTaskId = undefined
+    conv.traceContext = null
     conv.updated_at = new Date()
     if (requestId) {
       await this.store.persistApprovalResolved(conv, requestId, 'cancel')
@@ -554,6 +572,17 @@ export class ConversationManager {
    */
   recordSystemPromptStableHash(conversation: Conversation, stableHash: string): void {
     void Promise.resolve(this.store.persistSystemPromptStableHash(conversation, stableHash))
+  }
+
+  /**
+   * R2 — upsert the session's model selection for a provider and write it
+   * through to the durable `model_selections` column. Full-overwrite of the
+   * in-RAM map (this manager owns it); the store re-serializes on persist. The
+   * per-task resolver reads this map after a cold-load to honour the choice.
+   */
+  setModelSelection(conversation: Conversation, provider: string, model: string): void {
+    conversation.modelSelections = { ...(conversation.modelSelections ?? {}), [provider]: model }
+    void Promise.resolve(this.store.persistModelSelections?.(conversation))
   }
 
   /**

@@ -3,7 +3,7 @@
 const baseArg = process.argv.indexOf('--url')
 const limitArg = process.argv.indexOf('--limit')
 const typeArg = process.argv.indexOf('--entry-type')
-const base = String(baseArg >= 0 ? process.argv[baseArg + 1] : 'https://example.com').replace(/\/+$/, '')
+const base = String(baseArg >= 0 ? process.argv[baseArg + 1] : 'https://registry.evenfire.ai').replace(/\/+$/, '')
 const limit = Number(limitArg >= 0 ? process.argv[limitArg + 1] : '200')
 const entryType = typeArg >= 0 ? process.argv[typeArg + 1] : 'all'
 const asJson = process.argv.includes('--json')

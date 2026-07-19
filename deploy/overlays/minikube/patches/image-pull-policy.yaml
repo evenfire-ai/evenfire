@@ -71,6 +71,18 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: trace-maintenance-worker
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: trace-maintenance-worker
+          imagePullPolicy: IfNotPresent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
   name: mcp-proxy
   namespace: mcp-server
 spec:

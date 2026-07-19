@@ -1,9 +1,14 @@
 import express, { NextFunction, Request, Response } from 'express'
 import { config } from './config.js'
+import type { DbClient } from './db.js'
 import { K8sGateway } from './k8s.js'
-import { requireAuthForControlUI } from './middleware/controlUIAuth.js'
+import { type UiAuthedRequest, requireAuthForControlUI } from './middleware/controlUIAuth.js'
 import { correlationIdMiddleware } from './middleware/correlationId.js'
 import { requireInternalService, requireInternalToken } from './middleware/internalServiceAuth.js'
+import {
+  createTracingInFlightLimiter,
+  getTracingMaxInFlight,
+} from './middleware/tracingSubmitterAuth.js'
 import { rootLogger } from './observability/logger.js'
 import { createAdminAuthRouter } from './routes/admin/auth.js'
 import { createAdminRouter } from './routes/admin/index.js'
@@ -13,9 +18,13 @@ import { createExternalRouter } from './routes/external/index.js'
 import { createOAuthCallbackRouter } from './routes/external/oauthCallback.js'
 import { createGfsRouter } from './routes/gfs/index.js'
 import { createHealthRouter } from './routes/health.js'
+import { createInternalAdministrativeEventsRouter } from './routes/internal/administrativeEvents.js'
+import { createInternalAgentRunEventsRouter } from './routes/internal/agentRunEvents.js'
 import { createInternalBudgetsCheckRouter } from './routes/internal/budgetsCheck.js'
+import { createInternalInfrastructureTelemetryEventsRouter } from './routes/internal/infrastructureTelemetryEvents.js'
 import { createInternalOAuthRouter } from './routes/internal/oauth.js'
 import { createInternalSandboxUiRouter } from './routes/internal/sandboxUi.js'
+import { createInternalApprovalPromptHistoryRouter } from './routes/internal/tracing/approvalPromptHistory.routes.js'
 import { createInternalUsageEventsRouter } from './routes/internal/usageEvents.js'
 import { createInternalWebhooksRouter } from './routes/internal/webhooks.js'
 import { createInternalWorkflowApprovalReaderRouter } from './routes/internal/workflowApprovalReader.js'
@@ -25,6 +34,31 @@ import { createRecipeOauthRouter } from './routes/recipeOauth.js'
 import { createRegistryRouter } from './routes/registry.js'
 import { createRpcAccessRouter } from './routes/rpc-access/index.js'
 import { memberRegistrationErrorResponse } from './services/memberRegistrationErrors.js'
+import { setAdministrativeOperationService } from './services/resourceService.js'
+import { HccAdministrativeOutcomeBindingResolver } from './services/tracing/adminOperationBindingResolver.js'
+import { runWithAdministrativeRequestContext } from './services/tracing/adminOperationContext.js'
+import {
+  ControlApiAdministrativeOperationService,
+  PostgresAdministrativeIntentLookup,
+} from './services/tracing/adminOperationService.js'
+import { ApprovalPromptHistoryService } from './services/tracing/approvalPromptHistoryService.js'
+import { DirectRunAttributionBindingService } from './services/tracing/directRunAttributionBindingService.js'
+import { HccHealthTransitionBindingResolver } from './services/tracing/hccHealthTransitionBindingResolver.js'
+import { getTracingPools, withTraceIngestTransaction } from './services/tracing/pools.js'
+import { meterTracingDbClient } from './services/tracing/queryMeter.js'
+import { RouteTracingSubmissionService } from './services/tracing/routeSubmissionService.js'
+import {
+  AgentRunBindingResolverChain,
+  HostReferencedRunBindingResolver,
+  WorkflowRunBindingResolver,
+} from './services/tracing/workflowRunBindingResolver.js'
+import {
+  InfrastructureBindingResolverChain,
+  WrcInfrastructureBindingResolver,
+} from './services/tracing/wrcInfrastructureBindingResolver.js'
+
+const TRACING_INTERNAL_PATH_PREFIX = '/api/v1/internal/tracing/'
+const RPC_HOST_ACCESS_PATH = /^\/api\/v1\/rpc\/access\/users\/[^/]+\/mcp-hosts\/[^/]+\/?$/i
 
 // Only errors we construct with these codes are ever forwarded verbatim by the
 // global handler (see below). Keeps the blast radius tight: every other
@@ -35,9 +69,24 @@ const FORWARDABLE_INTEGRATION_CODES = new Set([
 ])
 
 export function createApp(gateway: K8sGateway) {
+  const traceIngestDb: DbClient = meterTracingDbClient({
+    query: (text, params) => getTracingPools().traceIngestPool.query(text, params),
+  })
   const app = express()
   app.set('trust proxy', 1)
-  app.use(express.json({ limit: config.jsonBodyLimit }))
+  const jsonBodyParser = express.json({ limit: config.jsonBodyLimit })
+  const tracingInFlightLimiter = createTracingInFlightLimiter(getTracingMaxInFlight())
+  app.use((req, res, next) => {
+    if (req.method === 'POST' && req.path.startsWith(TRACING_INTERNAL_PATH_PREFIX)) {
+      tracingInFlightLimiter(req, res, next)
+      return
+    }
+    if (req.method === 'POST' && RPC_HOST_ACCESS_PATH.test(req.path)) {
+      next()
+      return
+    }
+    jsonBodyParser(req, res, next)
+  })
 
   // Correlation ID must be the very first middleware so every downstream log
   // line (including JSON parse errors) carries the id.
@@ -50,6 +99,29 @@ export function createApp(gateway: K8sGateway) {
   app.use(createHealthRouter(gateway))
 
   const api = express.Router()
+  const tracingSubmissionService = new RouteTracingSubmissionService({
+    transaction: withTraceIngestTransaction,
+    agentRunBindingResolver: new AgentRunBindingResolverChain([
+      new WorkflowRunBindingResolver(traceIngestDb),
+      new HostReferencedRunBindingResolver(gateway, traceIngestDb),
+    ]),
+    administrativeOperationBindingResolver: new HccAdministrativeOutcomeBindingResolver(
+      gateway,
+      new PostgresAdministrativeIntentLookup(traceIngestDb)
+    ),
+    infrastructureWorkloadBindingResolver: new InfrastructureBindingResolverChain([
+      new HccHealthTransitionBindingResolver(gateway),
+      new WrcInfrastructureBindingResolver(traceIngestDb),
+    ]),
+  })
+  const directRunAttributionBindingService = new DirectRunAttributionBindingService(
+    withTraceIngestTransaction
+  )
+  setAdministrativeOperationService(
+    new ControlApiAdministrativeOperationService({
+      transaction: withTraceIngestTransaction,
+    })
+  )
 
   // Allows admin users in the control-ui to authenticate
   api.use(createAdminAuthRouter())
@@ -67,6 +139,15 @@ export function createApp(gateway: K8sGateway) {
     void requireAuthForControlUI(req, res, next)
   })
 
+  api.use('/admin', (req, _res, next) => {
+    const operatorSub = (req as UiAuthedRequest).adminAuth?.sub
+    if (!operatorSub) {
+      next()
+      return
+    }
+    runWithAdministrativeRequestContext({ operatorSub, requestId: req.correlationId ?? null }, next)
+  })
+
   // All admin/control-ui routes are mounted through a single admin router:
   // overview + resources/secrets + admin profile operations.
   api.use(createAdminRouter(gateway))
@@ -79,7 +160,28 @@ export function createApp(gateway: K8sGateway) {
 
   // mcp-host runtime routes use mcpHostJwt; provisioner issuance routes use InternalControl JWT.
   // Must be mounted BEFORE requireInternalToken which would block them.
-  api.use(createMcpHostRoutes(gateway))
+  api.use(createMcpHostRoutes(gateway, directRunAttributionBindingService))
+  api.use(
+    createInternalAgentRunEventsRouter({
+      submit: input => tracingSubmissionService.submit(input),
+    })
+  )
+  api.use(
+    createInternalApprovalPromptHistoryRouter({
+      capture: input =>
+        withTraceIngestTransaction(db => new ApprovalPromptHistoryService(db).capture(input)),
+    })
+  )
+  api.use(
+    createInternalAdministrativeEventsRouter({
+      submit: input => tracingSubmissionService.submit(input),
+    })
+  )
+  api.use(
+    createInternalInfrastructureTelemetryEventsRouter({
+      submit: input => tracingSubmissionService.submit(input),
+    })
+  )
   api.use(createInternalUsageEventsRouter())
   api.use(createInternalBudgetsCheckRouter())
   api.use(createInternalWebhooksRouter(gateway))
@@ -127,7 +229,7 @@ export function createApp(gateway: K8sGateway) {
   api.use('/external', requireInternalService('external-rest-api'))
   api.use('/rpc', requireInternalService('rpc-proxy'))
   api.use(createExternalRouter(gateway))
-  api.use(createRpcAccessRouter(gateway))
+  api.use(createRpcAccessRouter(gateway, directRunAttributionBindingService))
   // Sandbox UI registry: rpc-proxy resolves (recipeNs, recipeName) → upstream
   // Service. requireInternalService('rpc-proxy') is applied per-route inside
   // the router so the `/internal/sandbox-ui/...` path does not collide with

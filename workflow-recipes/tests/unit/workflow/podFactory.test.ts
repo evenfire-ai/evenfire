@@ -273,7 +273,7 @@ describe('Pod Factory', () => {
       expect(envNames).toContain('CLERUM_WRC_URL')
     })
 
-    it('passes the workflow run id to the coordinator when available', () => {
+    it('binds the workflow run id and correlation id to the same coordinator value', () => {
       const runId = '00000000-0000-4000-8000-000000000001'
       const teamId = '11111111-1111-4111-8111-111111111111'
       const userId = '22222222-2222-4222-8222-222222222222'
@@ -282,7 +282,9 @@ describe('Pod Factory', () => {
         workflowTeamId: teamId,
         workflowUserId: userId,
       })
-      const env = runPod.spec!.containers![0].env!.find(e => e.name === 'CLERUM_WORKFLOW_RUN_ID')
+      const env = runPod.spec!.containers![0].env!
+      const runIdEnv = env.find(e => e.name === 'CLERUM_WORKFLOW_RUN_ID')
+      const correlationIdEnv = env.find(e => e.name === 'CLERUM_CORRELATION_ID')
       const teamEnv = runPod.spec!.containers![0].env!.find(
         e => e.name === 'CLERUM_WORKFLOW_TEAM_ID'
       )
@@ -290,7 +292,8 @@ describe('Pod Factory', () => {
         e => e.name === 'CLERUM_WORKFLOW_USER_ID'
       )
 
-      expect(env!.value).toBe(runId)
+      expect(runIdEnv!.value).toBe(runId)
+      expect(correlationIdEnv!.value).toBe(runId)
       expect(teamEnv!.value).toBe(teamId)
       expect(userEnv!.value).toBe(userId)
     })

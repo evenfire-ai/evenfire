@@ -18,6 +18,6 @@ export interface GfsDelegationPanelProps {
   subjectOptions: GfsDelegationSubjectOption[]
   subjectOptionsLoading?: boolean
   subjectOptionsError?: string | null
-  onGrant: (subjectKey: string, bits: string[]) => Promise<void>
-  onCreateShare?: (subjectKey: string) => Promise<void>
+  onGrant: (subjectKeys: string[], bits: string[]) => Promise<void>
+  onCreateShare?: (subjectKeys: string[]) => Promise<void>
 }

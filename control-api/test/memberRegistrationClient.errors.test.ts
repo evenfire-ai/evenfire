@@ -9,7 +9,7 @@ const { cfg } = vi.hoisted(() => ({
     memberRegistrationServiceBaseUrl: 'http://member-registration-service.local:8092/api/v1',
     memberRegistrationServiceHmacSecret: 'env-secret',
     memberRegistrationServiceHmacKid: 'env-kid',
-    memberRegistrationTenantId: 'clerum-dev',
+    memberRegistrationTenantId: 'example-dev',
     desktopProfileUiBaseUrl: 'https://profile.acme.com',
     controlUiBaseUrl: 'https://control.acme.com',
     desktopExternalRestApiBaseUrl: 'http://127.0.0.1:8091',

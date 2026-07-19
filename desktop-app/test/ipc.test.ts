@@ -87,6 +87,7 @@ describe('ipc host status stream handlers', () => {
     gfsAffordances: vi.fn(),
     grantGfs: vi.fn(),
     createGfsShare: vi.fn(),
+    setSandboxUiVisible: vi.fn(),
   }
 
   beforeEach(async () => {
@@ -112,6 +113,15 @@ describe('ipc host status stream handlers', () => {
         )
       )
     ).rejects.toThrow('Untrusted IPC sender')
+  })
+
+  it('forwards sandbox UI visibility changes from the trusted renderer', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('sandboxUi:setVisible')
+
+    await Promise.resolve(handler?.(event, { visible: false }))
+
+    expect(service.setSandboxUiVisible).toHaveBeenCalledWith(false)
   })
 
   it('starts stream and forwards emitted events to sender', async () => {

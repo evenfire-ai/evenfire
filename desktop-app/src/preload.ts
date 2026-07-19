@@ -107,6 +107,7 @@ const clerum = Object.freeze({
       title: string
       body: string
       tag?: string
+      silent?: boolean
       actions?: Array<{ action: string; title: string }>
     }) => ipcRenderer.invoke('notifications:show', payload),
     onClick: (callback: (payload: { id: string }) => void) => {
@@ -313,6 +314,10 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('rpc:loadSessionMessages', { hostRef, agent, chatId, hostRefs }),
     getContextBreakdown: (hostRef: string, agent: string, chatId: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:getContextBreakdown', { hostRef, agent, chatId, hostRefs }),
+    getHostModels: (hostRef: string, chatId: string, hostRefs?: string[]) =>
+      ipcRenderer.invoke('rpc:getHostModels', { hostRef, chatId, hostRefs }),
+    setHostModel: (hostRef: string, chatId: string, model: string, hostRefs?: string[]) =>
+      ipcRenderer.invoke('rpc:setHostModel', { hostRef, chatId, model, hostRefs }),
     getTokenMetadata: () => ipcRenderer.invoke('rpc:getTokenMetadata'),
   },
   workflows: {
@@ -403,6 +408,7 @@ const clerum = Object.freeze({
     reload: () => ipcRenderer.invoke('sandboxUi:reload'),
     setBounds: (bounds: { x: number; y: number; width: number; height: number; dpr?: number }) =>
       ipcRenderer.invoke('sandboxUi:setBounds', { bounds }),
+    setVisible: (visible: boolean) => ipcRenderer.invoke('sandboxUi:setVisible', { visible }),
     capturePreview: () => ipcRenderer.invoke('sandboxUi:capturePreview'),
     onClosed: (callback: (args: { appRef: string }) => void) => {
       const listener = (_event: unknown, args: { appRef: string }) => callback(args)

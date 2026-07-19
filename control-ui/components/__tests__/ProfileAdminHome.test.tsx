@@ -129,7 +129,7 @@ describe('ProfileAdminHome — members invitations', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Create member' }))
 
-    expect(mockPush).toHaveBeenCalledWith('/profile-admin/users/new')
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/users/new')
   })
 
   it('opens a member detail page from the whole member row', async () => {
@@ -138,11 +138,15 @@ describe('ProfileAdminHome — members invitations', () => {
     const memberRow = await screen.findByLabelText('Open member Accepted Invitee')
 
     fireEvent.click(memberRow)
-    expect(mockPush).toHaveBeenCalledWith('/profile-admin/users/accepted-password-pending-user')
+    expect(mockPush).toHaveBeenCalledWith(
+      '/users-and-teams/users/accepted-password-pending-user/contact'
+    )
 
     mockPush.mockClear()
     fireEvent.keyDown(memberRow, { key: 'Enter' })
-    expect(mockPush).toHaveBeenCalledWith('/profile-admin/users/accepted-password-pending-user')
+    expect(mockPush).toHaveBeenCalledWith(
+      '/users-and-teams/users/accepted-password-pending-user/contact'
+    )
   })
 
   it('does not open a member detail page from row action buttons', async () => {
@@ -165,7 +169,7 @@ describe('ProfileAdminHome — members invitations', () => {
     )
 
     expect(mockPush).toHaveBeenCalledWith(
-      '/control-admins/new?email=accepted%40example.com&name=Accepted+Invitee&step=review&source=member'
+      '/users-and-teams/admins/new?email=accepted%40example.com&name=Accepted+Invitee&step=review&source=member'
     )
   })
 
@@ -175,11 +179,11 @@ describe('ProfileAdminHome — members invitations', () => {
     const teamRow = await screen.findByLabelText('Open team Marketing')
 
     fireEvent.click(teamRow)
-    expect(mockPush).toHaveBeenCalledWith('/profile-admin/teams/team-1')
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/teams/team-1/members')
 
     mockPush.mockClear()
     fireEvent.keyDown(teamRow, { key: ' ' })
-    expect(mockPush).toHaveBeenCalledWith('/profile-admin/teams/team-1')
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/teams/team-1/members')
   })
 
   it('does not open a team detail page from row action buttons', async () => {
@@ -235,7 +239,7 @@ describe('ProfileAdminHome — members invitations', () => {
 
     const adminsTab = screen.getByRole('tab', { name: /^Admins/ })
 
-    expect(adminsTab).toHaveAttribute('href', '/profile-admin/admins')
+    expect(adminsTab).toHaveAttribute('href', '/users-and-teams/admins')
   })
 
   it('shows admin search and invite actions in the Users & Teams title bar', async () => {
@@ -255,7 +259,7 @@ describe('ProfileAdminHome — members invitations', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Invite admin' }))
 
-    expect(mockPush).toHaveBeenCalledWith('/control-admins/new')
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/admins/new')
   })
 
   it('opens a confirmation modal before cancelling a pending invitation', async () => {

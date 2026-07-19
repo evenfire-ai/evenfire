@@ -78,6 +78,37 @@ describe('resolveProviderWorkflowCallerContext', () => {
     })
   })
 
+  it('adds the server-bindable channel trace facts when a session is available', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ userId: '00000000-0000-4000-8000-000000000001' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await resolveProviderWorkflowCallerContext(telegramMessage(), getEnv, {
+      version: 1,
+      runId: '00000000-0000-4000-8000-000000000123',
+      sessionId: 'conv-telegram-session-1',
+      origin: 'channel_event',
+      correlationRefs: [],
+    })
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({
+      providerIdentity: {
+        medium: 'telegram',
+        providerUserId: '123456',
+        providerChannelId: 'tg-chat-1',
+      },
+      traceBinding: {
+        runId: '00000000-0000-4000-8000-000000000123',
+        sessionId: 'conv-telegram-session-1',
+        origin: 'channel_event',
+      },
+    })
+  })
+
   it('does not derive team context from provider channel identity', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,

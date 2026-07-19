@@ -26,6 +26,7 @@
 # Environment:
 #   E2E_TEST_EMAIL          (default: playwright@clerum.io)
 #   E2E_HOST_REF            (default: chatllm)
+#   E2E_THREAD_ID           (default: unique per invocation)
 #   E2E_EXTERNAL_REST_API_URL (default: http://localhost:8091)
 #   E2E_RPC_PROXY_URL       (default: http://localhost:8094)
 #   ADMIN_PASSWORD          (default: changeme123!; the seeded user's password)
@@ -59,6 +60,7 @@ detail(){ [[ "$VERBOSE" == "--verbose" ]] && echo -e "       $*"; }
 # ── Configuration ────────────────────────────────────────────────────
 TEST_EMAIL="${E2E_TEST_EMAIL:-playwright@clerum.io}"
 TEST_HOST_REF="${E2E_HOST_REF:-chatllm}"
+TEST_THREAD_ID="${E2E_THREAD_ID:-e2e-user-session-$(date +%s)-$$}"
 EXTERNAL_REST_API_URL="${E2E_EXTERNAL_REST_API_URL:-http://localhost:8091}"
 RPC_PROXY_URL="${E2E_RPC_PROXY_URL:-http://localhost:8094}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-changeme123!}"
@@ -67,7 +69,7 @@ echo -e "${BOLD}═════════════════════�
 echo -e "${BOLD}  Clerum GKE User Session E2E${NC}"
 echo -e "${BOLD}═══════════════════════════════════════════════════════════════${NC}"
 echo ""
-log "Config: email=$TEST_EMAIL host=$TEST_HOST_REF"
+log "Config: email=$TEST_EMAIL host=$TEST_HOST_REF thread=$TEST_THREAD_ID"
 log "Config: external-rest-api=$EXTERNAL_REST_API_URL"
 log "Config: rpc-proxy=$RPC_PROXY_URL"
 echo ""
@@ -199,6 +201,7 @@ const EXT_URL = "__EXT_URL__";
 const RPC_URL = "__RPC_URL__";
 const TEST_EMAIL = "__TEST_EMAIL__";
 const TEST_HOST_REF = "__TEST_HOST__";
+const TEST_THREAD_ID = "__TEST_THREAD__";
 
 (async () => {
   let sessionToken = '';
@@ -365,7 +368,10 @@ const TEST_HOST_REF = "__TEST_HOST__";
     const res = await request(RPC_URL + '/api/v1/rpc/hosts/' + encodeURIComponent(TEST_HOST_REF) + '/messages', {
       method: 'POST',
       headers: authHeader,
-      body: { content: 'What is 2+2? Reply with just the number.' },
+      body: {
+        content: 'What is 2+2? Reply with just the number.',
+        threadId: TEST_THREAD_ID,
+      },
     });
 
     if (res.status !== 200) {
@@ -466,8 +472,8 @@ const TEST_HOST_REF = "__TEST_HOST__";
 NODESCRIPT
 
 # Inject config variables into the Node.js script
-sed -i.bak "s|__EXT_URL__|${EXTERNAL_REST_API_URL}|g; s|__RPC_URL__|${RPC_PROXY_URL}|g; s|__TEST_EMAIL__|${TEST_EMAIL}|g; s|__TEST_HOST__|${TEST_HOST_REF}|g" "$NODE_SCRIPT" 2>/dev/null || \
-sed -i '' "s|__EXT_URL__|${EXTERNAL_REST_API_URL}|g; s|__RPC_URL__|${RPC_PROXY_URL}|g; s|__TEST_EMAIL__|${TEST_EMAIL}|g; s|__TEST_HOST__|${TEST_HOST_REF}|g" "$NODE_SCRIPT"
+sed -i.bak "s|__EXT_URL__|${EXTERNAL_REST_API_URL}|g; s|__RPC_URL__|${RPC_PROXY_URL}|g; s|__TEST_EMAIL__|${TEST_EMAIL}|g; s|__TEST_HOST__|${TEST_HOST_REF}|g; s|__TEST_THREAD__|${TEST_THREAD_ID}|g" "$NODE_SCRIPT" 2>/dev/null || \
+sed -i '' "s|__EXT_URL__|${EXTERNAL_REST_API_URL}|g; s|__RPC_URL__|${RPC_PROXY_URL}|g; s|__TEST_EMAIL__|${TEST_EMAIL}|g; s|__TEST_HOST__|${TEST_HOST_REF}|g; s|__TEST_THREAD__|${TEST_THREAD_ID}|g" "$NODE_SCRIPT"
 rm -f "${NODE_SCRIPT}.bak"
 
 ADMIN_PASSWORD="$ADMIN_PASSWORD" node --no-warnings "$NODE_SCRIPT" > "$NODE_OUTPUT_FILE" 2>&1

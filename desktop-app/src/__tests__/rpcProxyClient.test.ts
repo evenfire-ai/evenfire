@@ -100,7 +100,13 @@ describe('RpcProxyClient.requestSandboxUiOauthAuthorizeUrl', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    await client.requestSandboxUiOauthAuthorizeUrl('rpc-token', 'sandbox-recipes', 'crm', 'salesforce', true)
+    await client.requestSandboxUiOauthAuthorizeUrl(
+      'rpc-token',
+      'sandbox-recipes',
+      'crm',
+      'salesforce',
+      true
+    )
 
     expect(fetchMock).toHaveBeenCalledWith(
       'http://proxy/api/v1/sandbox-ui/sandbox-recipes/crm/oauth/authorize-url',
@@ -206,5 +212,179 @@ describe('RpcProxyClient.listSandboxUiApps', () => {
         }),
       })
     )
+  })
+})
+
+describe('RpcProxyClient.getHostModels', () => {
+  let client: RpcProxyClient
+
+  beforeEach(() => {
+    client = new RpcProxyClient()
+    vi.restoreAllMocks()
+  })
+
+  it('GETs /hosts/:hostRef/models with chatId query and bearer auth', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        provider: 'claude',
+        hostDefault: 'claude-opus-4-8',
+        sessionModel: 'claude-haiku-4-5',
+        degraded: false,
+        models: [
+          { name: 'claude-opus-4-8', displayName: 'Opus 4.8' },
+          { name: 'claude-haiku-4-5', displayName: 'Haiku 4.5', contextWindowTokens: 200000 },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await client.getHostModels('rpc-token', 'my host', 'chat-1')
+
+    expect(result).not.toBeNull()
+    expect(result?.sessionModel).toBe('claude-haiku-4-5')
+    expect(result?.models).toHaveLength(2)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://proxy/api/v1/rpc/hosts/my%20host/models?chatId=chat-1',
+      expect.objectContaining({
+        headers: expect.objectContaining({ authorization: 'Bearer rpc-token' }),
+      })
+    )
+  })
+
+  it('omits the chatId query entirely when no chatId is given (new-chat composer)', async () => {
+    // The model LIST is host-level; a brand-new chat has no id, so the request
+    // carries no `?chatId=` and the server projects `sessionModel: null`.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        provider: 'claude',
+        hostDefault: 'claude-opus-4-8',
+        sessionModel: null,
+        degraded: false,
+        models: [{ name: 'claude-opus-4-8', displayName: 'Opus 4.8' }],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await client.getHostModels('rpc-token', 'my host', '')
+
+    expect(result?.sessionModel).toBeNull()
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://proxy/api/v1/rpc/hosts/my%20host/models',
+      expect.objectContaining({
+        headers: expect.objectContaining({ authorization: 'Bearer rpc-token' }),
+      })
+    )
+  })
+
+  it('returns null when the host predates the endpoint (404)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 404, text: async () => 'not found' })
+    )
+    await expect(client.getHostModels('t', 'h', 'c')).resolves.toBeNull()
+  })
+
+  it('returns null when the route is not implemented (501)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 501, text: async () => 'not implemented' })
+    )
+    await expect(client.getHostModels('t', 'h', 'c')).resolves.toBeNull()
+  })
+
+  it('throws on a genuine server error (500)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 500, text: async () => 'boom' })
+    )
+    await expect(client.getHostModels('t', 'h', 'c')).rejects.toThrow()
+  })
+})
+
+describe('RpcProxyClient.setHostModel', () => {
+  let client: RpcProxyClient
+
+  beforeEach(() => {
+    client = new RpcProxyClient()
+    vi.restoreAllMocks()
+  })
+
+  it('POSTs /hosts/:hostRef/model with the chatId+model body and bearer auth', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ effective: 'next-task', provider: 'claude', model: 'claude-haiku-4-5' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await client.setHostModel('rpc-token', 'my host', 'chat-1', 'claude-haiku-4-5')
+
+    expect(result).toEqual({
+      effective: 'next-task',
+      provider: 'claude',
+      model: 'claude-haiku-4-5',
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://proxy/api/v1/rpc/hosts/my%20host/model',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          authorization: 'Bearer rpc-token',
+          'content-type': 'application/json',
+        }),
+        body: JSON.stringify({ chatId: 'chat-1', model: 'claude-haiku-4-5' }),
+      })
+    )
+  })
+
+  it('re-throws a 403 with the model_not_allowed token in the message', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        text: async () => JSON.stringify({ error: 'model_not_allowed' }),
+      })
+    )
+    await expect(client.setHostModel('t', 'h', 'c', 'banned')).rejects.toThrow('model_not_allowed')
+  })
+
+  it('also detects model_not_allowed when mcp-host answers 400 (fail-closed)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({ error: 'model_not_allowed' }),
+      })
+    )
+    await expect(client.setHostModel('t', 'h', 'c', 'banned')).rejects.toThrow('model_not_allowed')
+  })
+
+  it('does NOT map a host-access 403 to model_not_allowed (B3 regression guard)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        text: async () => JSON.stringify({ error: 'Forbidden: user cannot access this host' }),
+      })
+    )
+    // An access denial must surface as a generic failure, not a policy rejection:
+    // the message must not carry the model_not_allowed token the renderer keys on.
+    await expect(client.setHostModel('t', 'h', 'c', 'm')).rejects.toThrow(/Set host model failed/)
+    await expect(client.setHostModel('t', 'h', 'c', 'm')).rejects.not.toThrow('model_not_allowed')
+  })
+
+  it('throws on a generic non-2xx response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 500, text: async () => 'boom' })
+    )
+    await expect(client.setHostModel('t', 'h', 'c', 'm')).rejects.toThrow()
   })
 })

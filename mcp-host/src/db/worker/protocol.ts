@@ -20,7 +20,13 @@ export interface SessionRow {
   channel_type: string | null
   channel_id: string | null
   thread_id: string | null
+  /** Effective model of the FIRST task that created the row (INSERT-time
+   *  telemetry, migration 007); NOT updated on a later mid-session swap —
+   *  do not read it as "current model". Was always NULL before R2. */
   model: string | null
+  /** R2 (migration 007) — JSON map `{ provider → model }` of the user's saved
+   *  per-provider model selection. NULL until the first `set-model`. */
+  model_selections: string | null
   system_prompt_stable_hash: string | null
   parent_session_id: string | null
   started_at: number
@@ -39,6 +45,8 @@ export interface SessionRow {
   state: string
   /** D.1 — task currently in flight for this session, or null when idle. */
   active_task_id: string | null
+  /** Trace context for the active task only; null for idle and legacy sessions. */
+  active_trace_context: string | null
 }
 
 export interface MessageRow {
@@ -82,6 +90,7 @@ export interface PendingApprovalRow {
   source_message: string | null
   registered_at: number
   expires_at: number
+  trace_context: string | null
 }
 
 export interface SessionCountersUpdate {
@@ -147,6 +156,8 @@ export type WorkerOp =
        * a string = set it, null = clear it (dedicated statement).
        */
       activeTaskId?: string | null
+      /** undefined = keep, string = set, null = clear. */
+      activeTraceContext?: string | null
     }
   | { kind: 'reap_processing_sessions'; nowEpoch: number; chunkSize?: number }
   | {
@@ -164,6 +175,13 @@ export type WorkerOp =
     }
   | { kind: 'update_session_counters'; sessionId: string; counters: SessionCountersUpdate }
   | { kind: 'update_session_prompt_stable_hash'; sessionId: string; stableHash: string }
+  | {
+      /** R2 — persist the per-session `{ provider → model }` selection map.
+       *  `modelSelections` is the already-serialized JSON string. */
+      kind: 'update_session_model_selections'
+      sessionId: string
+      modelSelections: string
+    }
   | { kind: 'insert_message'; payload: MessageRow }
   | {
       /**
@@ -183,6 +201,8 @@ export type WorkerOp =
        * undefined = keep current, a string = set it, null = clear it.
        */
       activeTaskId?: string | null
+      /** Same keep/set/clear semantics as update_session_state. */
+      activeTraceContext?: string | null
     }
   | { kind: 'replace_messages'; sessionId: string; messages: MessageRow[] }
   | { kind: 'insert_pending_approval'; payload: PendingApprovalRow }
@@ -250,6 +270,7 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'update_session_state':
     case 'update_session_counters':
     case 'update_session_prompt_stable_hash':
+    case 'update_session_model_selections':
     case 'insert_message':
     case 'persist_turn_boundary':
     case 'replace_messages':

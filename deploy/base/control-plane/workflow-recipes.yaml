@@ -51,14 +51,16 @@ spec:
         - containerPort: 8082
           name: http
           protocol: TCP
-        envFrom:
         # WRC opens a sticky Postgres session for leader election,
         # workflow_run_update notifications, schedule workers, archive
-        # maintenance, and run processing. Credentials live in the
-        # control-postgres Secret shared with control-api.
-        - secretRef:
-            name: control-postgres
+        # maintenance, and run processing. Its dedicated runtime role has no
+        # access to governed tracing relations.
         env:
+        - name: POSTGRES_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: workflow-recipes-postgres-runtime
+              key: connection-string
         # WRC signs InternalControl JWTs with its issuer-specific HS256 secret.
         - name: INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET
           valueFrom:

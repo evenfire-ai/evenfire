@@ -18,9 +18,11 @@ export interface PreparedStatements {
   selectSessionMaxOrdinalTurn: Statement
   selectExpiredAwaitingApprovalSessions: Statement
   selectAwaitingApprovalSessions: Statement
+  deleteUnrehydratablePendingApprovals: Statement
   deletePendingApprovalsBySession: Statement
   updateSessionCounters: Statement
   updateSessionPromptStableHash: Statement
+  updateSessionModelSelections: Statement
   selectSessionBySessionKey: Statement
   selectSessionsByPrefix: Statement
 
@@ -52,21 +54,21 @@ export function prepareStatements(db: Database): PreparedStatements {
       INSERT INTO sessions (
         id, session_key, source, user_id, team_id,
         channel_type, channel_id, thread_id,
-        model, system_prompt_stable_hash, parent_session_id,
+        model, model_selections, system_prompt_stable_hash, parent_session_id,
         started_at, ended_at, end_reason,
         message_count, tool_call_count,
         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
         cache_tokens_reported,
-        title, state, active_task_id
+        title, state, active_task_id, active_trace_context
       ) VALUES (
         @id, @session_key, @source, @user_id, @team_id,
         @channel_type, @channel_id, @thread_id,
-        @model, @system_prompt_stable_hash, @parent_session_id,
+        @model, @model_selections, @system_prompt_stable_hash, @parent_session_id,
         @started_at, @ended_at, @end_reason,
         @message_count, @tool_call_count,
         @input_tokens, @output_tokens, @cache_read_tokens, @cache_write_tokens,
         @cache_tokens_reported,
-        @title, @state, @active_task_id
+        @title, @state, @active_task_id, @active_trace_context
       )
       ON CONFLICT(id) DO UPDATE SET
         state = excluded.state,
@@ -78,7 +80,11 @@ export function prepareStatements(db: Database): PreparedStatements {
          SET state = @state,
              ended_at = COALESCE(@ended_at, ended_at),
              end_reason = COALESCE(@end_reason, end_reason),
-             active_task_id = COALESCE(@active_task_id, active_task_id)
+             active_task_id = COALESCE(@active_task_id, active_task_id),
+             active_trace_context = CASE
+               WHEN @clear_active_trace_context = 1 THEN NULL
+               ELSE COALESCE(@active_trace_context, active_trace_context)
+             END
        WHERE id = @id
     `),
     // D.1 — COALESCE above can SET or KEEP active_task_id but never CLEAR it
@@ -86,7 +92,10 @@ export function prepareStatements(db: Database): PreparedStatements {
     // statement, inside the same transaction, when a caller explicitly passes
     // activeTaskId: null (turn complete/fail/cancel).
     clearSessionActiveTask: db.prepare(`
-      UPDATE sessions SET active_task_id = NULL WHERE id = @id
+      UPDATE sessions
+         SET active_task_id = NULL,
+             active_trace_context = NULL
+       WHERE id = @id
     `),
     // D.2 — processing reaper. Chunked so a DoS spam of processing sessions
     // can't block boot in one giant transaction (security P0-3).
@@ -118,18 +127,28 @@ export function prepareStatements(db: Database): PreparedStatements {
          )
        LIMIT @limit
     `),
-    // S1 — sessions stuck in 'awaiting_approval' regardless of whether their
-    // approval is still LIVE. After a pod restart NO awaiting_approval session is
-    // resumable (no executor rehydration exists — the T2.1 it.todo), so a live
-    // approval is just as un-resolvable as an expired one. The boot reaper uses
-    // this form (no NOT EXISTS predicate) so every restart-interrupted approval
-    // is reaped to idle, not only the expired ones (spec decision #4 — "pod
-    // restart = reap, not auto-resume").
+    // Legacy explicit recovery query for operators that intentionally abandon
+    // every awaiting approval. Normal boot reconstructs live executors and uses
+    // the expired-only query above.
     selectAwaitingApprovalSessions: db.prepare(`
       SELECT id, session_key, active_task_id, user_id, channel_type, channel_id, thread_id
         FROM sessions s
        WHERE s.state = 'awaiting_approval'
        LIMIT @limit
+    `),
+    // A pending approval is rehydratable only while its parent session is still
+    // awaiting that exact task. Cancellation persistence can fail after the
+    // session has already returned to idle; keeping that inverse orphan would
+    // make cold-start executor reconstruction fail for up to the approval TTL.
+    deleteUnrehydratablePendingApprovals: db.prepare(`
+      DELETE FROM pending_approvals
+       WHERE NOT EXISTS (
+         SELECT 1
+           FROM sessions s
+          WHERE s.id = pending_approvals.session_id
+            AND s.state = 'awaiting_approval'
+            AND s.active_task_id = pending_approvals.task_id
+       )
     `),
     deletePendingApprovalsBySession: db.prepare(`
       DELETE FROM pending_approvals WHERE session_id = @session_id
@@ -137,6 +156,15 @@ export function prepareStatements(db: Database): PreparedStatements {
     updateSessionPromptStableHash: db.prepare(`
       UPDATE sessions
          SET system_prompt_stable_hash = @system_prompt_stable_hash
+       WHERE id = @id
+    `),
+    // R2 — overwrite the per-session `{ provider → model }` selection map. The
+    // dispatcher passes the already-serialized JSON string; a full overwrite is
+    // correct because ConversationManager owns the in-RAM map and re-serializes
+    // it on every mutation.
+    updateSessionModelSelections: db.prepare(`
+      UPDATE sessions
+         SET model_selections = @model_selections
        WHERE id = @id
     `),
     updateSessionCounters: db.prepare(`
@@ -181,15 +209,17 @@ export function prepareStatements(db: Database): PreparedStatements {
       INSERT INTO pending_approvals (
         request_id, session_id, task_id, tool_name, tool_call_id,
         parameters, description, context_snapshot, completed_results,
-        intent_summary, source_message, registered_at, expires_at
+        intent_summary, source_message, registered_at, expires_at, trace_context
       ) VALUES (
         @request_id, @session_id, @task_id, @tool_name, @tool_call_id,
         @parameters, @description, @context_snapshot, @completed_results,
-        @intent_summary, @source_message, @registered_at, @expires_at
+        @intent_summary, @source_message, @registered_at, @expires_at, @trace_context
       )
       ON CONFLICT(request_id) DO UPDATE SET
+        task_id = excluded.task_id,
         context_snapshot = excluded.context_snapshot,
         completed_results = excluded.completed_results,
+        trace_context = excluded.trace_context,
         expires_at = excluded.expires_at
     `),
     deletePendingApproval: db.prepare(`
@@ -198,7 +228,10 @@ export function prepareStatements(db: Database): PreparedStatements {
     selectPendingApprovalsAll: db.prepare(`
       SELECT pa.*, s.session_key AS session_key
         FROM pending_approvals pa
-        JOIN sessions s ON s.id = pa.session_id
+        JOIN sessions s
+          ON s.id = pa.session_id
+         AND s.state = 'awaiting_approval'
+         AND s.active_task_id = pa.task_id
        ORDER BY pa.registered_at ASC
     `),
     selectPendingApprovalBySession: db.prepare(`

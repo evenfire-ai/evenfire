@@ -1,21 +1,23 @@
 {
   "name": "clerum-control-api",
-  "version": "0.1.320",
+  "version": "0.1.359",
   "description": "Internal Clerum control plane REST API + UI for managing CRDs and secrets",
   "main": "dist/main.js",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
-    "build": "tsc && node -e \"const fs=require('fs'); for (const file of ['dist/main.js','dist/migrate.js']) { if (!fs.existsSync(file)) { throw new Error('Missing build artifact: ' + file); } }\"",
+    "build": "tsc && node -e \"const fs=require('fs'); for (const file of ['dist/main.js','dist/migrate.js','dist/traceMaintenance.js']) { if (!fs.existsSync(file)) { throw new Error('Missing build artifact: ' + file); } }\"",
     "migrate": "node dist/migrate.js",
     "start": "node dist/main.js",
+    "start:trace-maintenance": "node dist/traceMaintenance.js",
     "dev": "ts-node src/main.ts",
     "test": "vitest run --no-file-parallelism",
     "test:run": "vitest run --no-file-parallelism"
   },
   "dependencies": {
     "@clerum/image-policy": "file:../packages/image-policy",
+    "@clerum/llm-providers": "file:../packages/llm-providers",
     "@clerum/workflow-recipe-capability-policy": "file:../packages/workflow-recipe-capability-policy",
     "@clerum/workflow-runtime-core": "file:../packages/workflow-runtime-core",
     "@kubernetes/client-node": "^1.3.0",

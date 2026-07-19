@@ -21,6 +21,7 @@ import { useToast } from '@components/Toast'
 import { WorkflowRunModal } from '@components/WorkflowRunModal'
 import type { InputContractProperties } from '@components/WorkflowRunModal/types'
 import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   WORKFLOW_RECIPE_DEFAULT_DETAIL_TAB,
   WORKFLOW_RECIPE_DETAIL_TABS,
@@ -327,8 +328,7 @@ function WorkflowRecipeDetailContent() {
       const url = new URLSearchParams(searchParams.toString())
       url.delete('tab')
       const qs = url.toString()
-      const base = `/workflow-recipes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`
-      const path = next === 'workloads' ? base : `${base}/${next}`
+      const path = CONTROL_ROUTES.plugins.tab(namespace, name, next)
       return qs ? `${path}?${qs}` : path
     },
     [name, namespace, searchParams]
@@ -495,7 +495,7 @@ function WorkflowRecipeDetailContent() {
   }, [name, shouldPoll, podsTabActive, loadRecipe, loadRuns, loadPods])
 
   function backToList() {
-    router.push('/workflow-recipes')
+    router.push(CONTROL_ROUTES.plugins.root)
   }
 
   async function handleUninstall() {
@@ -512,7 +512,7 @@ function WorkflowRecipeDetailContent() {
     try {
       await deleteRecipe(name)
       showToast(`Plugin ${name} uninstalled.`, { tone: 'success' })
-      router.push('/workflow-recipes')
+      router.push(CONTROL_ROUTES.plugins.root)
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Failed to uninstall plugin')
       setUninstalling(false)
@@ -541,9 +541,7 @@ function WorkflowRecipeDetailContent() {
 
   if (editMode) {
     const backToPlugin = () => {
-      router.replace(
-        `/workflow-recipes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`
-      )
+      router.replace(CONTROL_ROUTES.plugins.detail(namespace, name))
     }
     const loadFailedBeforeRecipeResolved = !recipe && Boolean(recipeError)
     const showEditorSkeleton = !recipe || !editorReady
@@ -621,10 +619,7 @@ function WorkflowRecipeDetailContent() {
           {
             label: 'Edit',
             disabled: !recipe,
-            onClick: () =>
-              router.push(
-                `/workflow-recipes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}?edit=1`
-              ),
+            onClick: () => router.push(CONTROL_ROUTES.plugins.edit(namespace, name)),
           },
           ...(String(recipeStatus?.phase ?? '') === 'failed'
             ? [
@@ -732,16 +727,13 @@ function WorkflowRecipeDetailContent() {
         activeTab={activeTab}
         backLabel="Back to plugins"
         contentMode="plain"
+        eyebrow={recipe?.metadata?.namespace ?? namespace}
         icon={<IconWorkflow />}
         notice={detailNotice}
         onBack={backToList}
         onTabChange={selectTab}
         overlays={detailOverlays}
-        subtitle={
-          recipe?.metadata?.namespace
-            ? `WorkflowRecipe in ${recipe.metadata.namespace}`
-            : 'WorkflowRecipe details and runtime status.'
-        }
+        subtitle="WorkflowRecipe details and runtime status."
         tabAriaLabel="Plugin detail sections"
         tabClassName="cu-tabs--compact"
         tabs={detailTabs}
@@ -829,10 +821,10 @@ function WorkflowRecipeDetailContent() {
                     <tbody>
                       {visibleRuns.map(run => {
                         const isCurrentExecutionRow = run.isCurrentExecution === true
-                        const recipeHref = `/workflow-recipes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`
+                        const recipeHref = CONTROL_ROUTES.plugins.detail(namespace, name)
                         const href = isCurrentExecutionRow
                           ? `${recipeHref}#live-status`
-                          : `${recipeHref}/runs/${encodeURIComponent(run.id)}`
+                          : CONTROL_ROUTES.plugins.run(namespace, name, run.id)
                         const shortId = run.id.slice(0, 8)
                         const canOpenRun = run.isClickable !== false
                         const openLabel = isCurrentExecutionRow

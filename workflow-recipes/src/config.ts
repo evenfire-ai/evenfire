@@ -4,6 +4,7 @@
  */
 
 export interface DbConfig {
+  connectionString?: string
   host: string
   port: number
   user: string
@@ -53,6 +54,8 @@ export interface OperatorConfig {
   allowedCoordinatorImagePrefixes: string[]
   requireCoordinatorImageDigest: boolean
   enableDeterministicMode: boolean
+  /** Best-effort governed tracing to control-api. Default ON to preserve behavior. */
+  governedTracingEnabled: boolean
   /** Image reference WRC injects into per-recipe webhook-gateway Deployments. */
   webhookGatewayImage: string
   /** Namespace label of webhook-proxy (used in per-recipe NetworkPolicies). */
@@ -259,6 +262,7 @@ export function loadConfig(): OperatorConfig {
     allowedCoordinatorImagePrefixes: getEnvList('WRC_ALLOWED_COORDINATOR_IMAGE_PREFIXES'),
     requireCoordinatorImageDigest: getEnvBool('WRC_REQUIRE_COORDINATOR_IMAGE_DIGEST', true),
     enableDeterministicMode: getEnvBool('WRC_ENABLE_DETERMINISTIC', true),
+    governedTracingEnabled: getEnvBool('GOVERNED_TRACING_ENABLED', true),
     webhookGatewayImage: getEnv('WRC_WEBHOOK_GATEWAY_IMAGE', 'clerum/webhook-gateway:latest'),
     webhookIngressNamespace: getEnv('WRC_WEBHOOK_INGRESS_NAMESPACE', 'webhook-ingress'),
     monitoringNamespace: getEnv('WRC_MONITORING_NAMESPACE', 'monitoring'),
@@ -292,6 +296,7 @@ export function loadConfig(): OperatorConfig {
       20
     ),
     db: {
+      connectionString: process.env.POSTGRES_CONNECTION_STRING?.trim() || undefined,
       host: getEnv('POSTGRES_HOST', 'control-postgres.control-plane.svc.cluster.local'),
       port: getEnvInt('POSTGRES_PORT', 5432),
       user: getEnv('POSTGRES_USER', 'clerum'),

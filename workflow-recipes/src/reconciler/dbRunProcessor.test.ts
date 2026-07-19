@@ -202,6 +202,44 @@ describe('createDbRunProcessor', () => {
     expect(claim?.params).toEqual(['wrc-1', 'child-run-1', 'sandbox-recipes', run.run_id])
   })
 
+  it('does not fail processPending when the post-commit run-start callback throws', async () => {
+    const run = baseRun({ run_id: 'run-callback-start' })
+    const client = makeClient(async sql => {
+      if (/^BEGIN$/i.test(sql)) return { rows: [], rowCount: 0 }
+      if (/pg_advisory_xact_lock/.test(sql)) return { rows: [], rowCount: 0 }
+      if (/FOR UPDATE/.test(sql)) return { rows: [run], rowCount: 1 }
+      if (/SET phase = 'Running'/.test(sql)) return { rows: [], rowCount: 1 }
+      if (/^COMMIT$/i.test(sql)) return { rows: [], rowCount: 0 }
+      if (/^ROLLBACK$/i.test(sql)) return { rows: [], rowCount: 0 }
+      return { rows: [], rowCount: 0 }
+    })
+    const pool = { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool
+    const logger = silentLogger()
+
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool,
+      runPollMs: 30_000,
+      createChildRecipe: vi.fn(async () => ({
+        name: 'child-callback-start',
+        namespace: 'sandbox-recipes',
+      })),
+      logger,
+      onRunStarted: vi.fn(() => {
+        throw new Error('trace callback failed')
+      }),
+    })
+
+    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
+
+    expect(client.calls.some(c => /^COMMIT$/i.test(c.sql))).toBe(true)
+    expect(client.calls.some(c => /^ROLLBACK$/i.test(c.sql))).toBe(false)
+    expect(logger.warn).toHaveBeenCalledWith(
+      'run-start lifecycle callback failed after committed transition',
+      expect.objectContaining({ run_id: run.run_id, err: 'trace callback failed' })
+    )
+  })
+
   // ─── 2) idempotency: if the row is already Running, skip child creation
   it('processPending is a no-op when the row is no longer Pending', async () => {
     const run = baseRun({ phase: 'Running', owner_instance_id: 'wrc-other' })
@@ -310,6 +348,7 @@ describe('createDbRunProcessor', () => {
             phase: 'completed',
             output: 'hello',
             toolsCalled: [{ serverName: 'clerum', toolName: 'generate_docx' }],
+            approvalBindingSha256: 'b'.repeat(64),
           },
           { id: 'step-2', phase: 'running' },
         ],
@@ -330,11 +369,68 @@ describe('createDbRunProcessor', () => {
     expect(upserts[0]?.params?.[6]).toBe(
       JSON.stringify([{ serverName: 'clerum', toolName: 'generate_docx' }])
     )
+    expect(upserts[0]?.params?.[8]).toBe('b'.repeat(64))
     expect(upserts[1]?.params?.[2]).toBe('Running')
     expect(upserts[1]?.params?.[6]).toBeNull()
+    expect(upserts[1]?.params?.[8]).toBeNull()
     expect(client.calls.indexOf(upserts[0]!)).toBeLessThan(client.calls.indexOf(terminalUpdate!))
 
     expect(onRunTerminal).toHaveBeenCalledWith('run-1', 'Succeeded')
+  })
+
+  it('does not fail syncFromRecipeExecution when the post-commit terminal callback throws', async () => {
+    const client = makeClient(async sql => {
+      if (/^BEGIN$/i.test(sql) || /^COMMIT$/i.test(sql)) return { rows: [], rowCount: 0 }
+      if (/UPDATE workflow_runs[\s\S]*completed_at/i.test(sql)) return { rows: [], rowCount: 1 }
+      if (/^ROLLBACK$/i.test(sql)) return { rows: [], rowCount: 0 }
+      return { rows: [], rowCount: 0 }
+    })
+    const pool = {
+      connect: vi.fn(async () => client as unknown as PoolClient),
+    } as unknown as Pool
+    const logger = silentLogger()
+
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool,
+      runPollMs: 30_000,
+      createChildRecipe: vi.fn(),
+      logger,
+      onRunTerminal: vi.fn(() => {
+        throw new Error('terminal trace callback failed')
+      }),
+    })
+
+    await expect(
+      proc.syncFromRecipeExecution({
+        apiVersion: 'clerum.io/v1alpha1',
+        kind: 'WorkflowRecipe',
+        metadata: {
+          name: 'child-callback-terminal',
+          namespace: 'sandbox-recipes',
+          labels: { 'clerum.io/workflow-run-id': 'run-callback-terminal' },
+        },
+        spec: {},
+        status: {
+          phase: 'active',
+          workflowExecution: {
+            phase: 'completed',
+            completedAt: '2026-04-20T12:05:00Z',
+          },
+        },
+      })
+    ).resolves.toBeUndefined()
+
+    expect(client.calls.some(c => /^COMMIT$/i.test(c.sql))).toBe(true)
+    expect(client.calls.some(c => /^ROLLBACK$/i.test(c.sql))).toBe(false)
+    expect(logger.warn).toHaveBeenCalledWith(
+      'run-terminal lifecycle callback failed after committed transition',
+      expect.objectContaining({
+        run_id: 'run-callback-terminal',
+        phase: 'Succeeded',
+        err: 'terminal trace callback failed',
+      })
+    )
   })
 
   it('syncFromRecipeExecution lets a recovered child recipe correct Failed → Succeeded', async () => {

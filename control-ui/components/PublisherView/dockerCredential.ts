@@ -1,6 +1,6 @@
 import type { CreatedRegistryApiKey } from '../../lib/api'
 
-export const DEFAULT_REGISTRY_HOST = 'example.com'
+export const DEFAULT_REGISTRY_HOST = 'registry.evenfire.ai'
 
 export function buildDockerLoginCommand(registry: string, key: string): string {
   return `docker login ${registry} -u _ -p ${key}`

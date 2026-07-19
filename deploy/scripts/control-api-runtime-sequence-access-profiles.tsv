@@ -1,0 +1,8 @@
+# public sequence<TAB>control_api_runtime access profile
+administrative_events_ingest_sequence_seq	consume
+agent_run_events_ingest_sequence_seq	consume
+gfs_audit_sequence_no_seq	legacy_rw
+governed_event_stream_stream_sequence_seq	consume
+infrastructure_telemetry_events_ingest_sequence_seq	consume
+member_registration_credentials_id_seq	consume
+oauth_grants_id_seq	legacy_rw

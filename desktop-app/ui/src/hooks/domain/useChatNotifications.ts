@@ -1,4 +1,5 @@
 import { type MutableRefObject, useCallback, useEffect, useMemo, useRef } from 'react'
+import { DESKTOP_ROUTES } from '../../constants/navigation'
 import type {
   AgentApprovalNotificationTarget,
   AgentChatMessage,
@@ -125,7 +126,8 @@ export function useChatNotifications({
       const activeTeamVisible = !teamId || currentChatView.currentTeamId === teamId
       const activeAgentVisible =
         activeTeamVisible &&
-        (currentChatView.navItem === 'agents' || currentChatView.navItem === 'chat') &&
+        (currentChatView.navItem === DESKTOP_ROUTES.agents ||
+          currentChatView.navItem === DESKTOP_ROUTES.chat) &&
         currentChatView.selectedAgent === agentName
       return activeAgentVisible && (!chatId || currentChatView.activeChatId === chatId)
     },

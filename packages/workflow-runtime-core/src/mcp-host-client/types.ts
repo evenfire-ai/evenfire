@@ -17,6 +17,7 @@ export interface AgentStepRequest {
   maxIterations?: number
   timeoutSeconds?: number
   contextVars?: Record<string, string>
+  approvalBindingProof?: string
   requiresApproval?: {
     target: { userId?: string; teamId?: string }
     message: string

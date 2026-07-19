@@ -77,9 +77,8 @@ export class SqliteColdStartLoader implements ColdStartLoader {
   }
 
   /**
-   * S1 — delegate the boot-time reap of ALL awaiting_approval sessions (live or
-   * expired) to the store. Guarded like the expired-only variant. The boot path
-   * uses this because no awaiting_approval session is resumable after a restart.
+   * Legacy explicit recovery operation. Normal boot reaps only expired rows and
+   * reconstructs live approval executors.
    */
   async reapAwaitingApprovalSessions(now: number): Promise<ReapedSession[]> {
     if (!this.store.reapAwaitingApprovalSessions) return []
@@ -94,8 +93,10 @@ export class SqliteColdStartLoader implements ColdStartLoader {
       const entry: RehydratedApproval = {
         request_id: listing.approval.request_id,
         task_id: listing.taskId,
+        session_key: listing.sessionKey,
         approval: listing.approval,
         source_message: listing.sourceMessage,
+        expiresAt: listing.expiresAt,
       }
 
       // B7 fix — TTL filter. The store surfaces `expiresAt` in epoch ms

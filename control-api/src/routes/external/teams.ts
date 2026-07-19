@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
+import type { ExternalAuthedRequest } from '../../middleware/externalSessionAuth.js'
 import {
   rejectBodyUserTeamMismatch,
   requireExternalRole,
@@ -189,7 +190,14 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
         if (!role) return res.status(400).json({ error: 'invalid role' })
         return res
           .status(200)
-          .json(await updateMemberRole(req.params.teamId, req.params.userId, role))
+          .json(
+            await updateMemberRole(
+              req.params.teamId,
+              req.params.userId,
+              role,
+              (req as ExternalAuthedRequest).externalAuth!.userId
+            )
+          )
       } catch (error) {
         return next(error)
       }
@@ -227,7 +235,11 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
     requireExternalRole(['admin']),
     async (req, res, next) => {
       try {
-        const deleted = await softDeleteMember(req.params.teamId, req.params.userId)
+        const deleted = await softDeleteMember(
+          req.params.teamId,
+          req.params.userId,
+          (req as ExternalAuthedRequest).externalAuth!.userId
+        )
         if (!deleted) return res.status(404).json({ error: 'not_found' })
         return res.status(200).json(deleted)
       } catch (error) {

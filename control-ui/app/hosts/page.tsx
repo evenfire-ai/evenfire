@@ -7,6 +7,7 @@ import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { HostTable } from '@components/HostTable'
 import { useToast } from '@components/Toast'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { apiSend, getHosts, isSilentApiError } from '@lib/api'
 import type { HostResource } from '@lib/api'
 
@@ -71,15 +72,15 @@ export default function HostsPage() {
         {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
         <HostTable
           items={hosts}
-          onOpen={host => router.push(`/hosts/${encodeURIComponent(host.name)}`)}
+          onOpen={host => router.push(CONTROL_ROUTES.agents.tab(host.name, 'overview'))}
           onOpenContext={contextName => {
             const trimmed = contextName.trim()
-            if (trimmed) router.push(`/contexts/${encodeURIComponent(trimmed)}`)
+            if (trimmed) router.push(CONTROL_ROUTES.contexts.connectors(trimmed))
           }}
           onDelete={handleDeleteHost}
           deletingKey={deletingKey}
           onRefresh={loadAll}
-          onCreateHost={() => router.push('/hosts/new')}
+          onCreateHost={() => router.push(CONTROL_ROUTES.agents.new)}
           refreshing={loading}
           loading={loading}
         />

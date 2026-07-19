@@ -9,6 +9,7 @@ export type RpcScope =
   | 'host:task:read'
   | 'host:approval:write'
   | 'host:session:read'
+  | 'host:model:write'
   | 'desktop:view'
   | 'sandbox:ui:view'
 export type RpcTokenType = 'service' | 'user'
@@ -89,4 +90,5 @@ export type ResolvedServerConnection = {
   name: string
   url: string
   headers: Record<string, string>
+  attributionBindingStatus?: 'recorded' | 'unavailable'
 }

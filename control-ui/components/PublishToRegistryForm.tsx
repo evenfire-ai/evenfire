@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { getPublishScope, publishToRegistry } from '../lib/api'
 import type { PublishScope } from '../lib/api'
 import { egressStatusToRegistrySummary } from '../lib/egressModel'
@@ -10,10 +11,12 @@ import { isValidK8sName } from '../lib/k8sValidation'
 import { CreateFlowPanel } from './CreateFlowPanel'
 import { CreateStepFlow } from './CreateStepFlow'
 import { EgressEditor } from './EgressEditor'
+import { SegmentedControl } from './SegmentedControl'
 import { TabBar } from './TabBar'
 import { useToast } from './Toast'
 
 interface Props {
+  initialEntryType?: EntryType
   onPublished: () => void
   onCancel: () => void
   pageHeader?: ReactNode
@@ -81,11 +84,16 @@ type EntryType = 'mcp-server' | 'recipe'
 type ServerMode = 'local' | 'remote'
 type CredKeyRow = { name: string; label: string; kind: string }
 
-export function PublishToRegistryForm({ onPublished, onCancel, pageHeader }: Props) {
+export function PublishToRegistryForm({
+  initialEntryType = 'mcp-server',
+  onPublished,
+  onCancel,
+  pageHeader,
+}: Props) {
   const { showToast } = useToast()
   const [step, setStep] = useState(0)
   // Common fields
-  const [entryType, setEntryType] = useState<EntryType>('mcp-server')
+  const [entryType, setEntryType] = useState<EntryType>(initialEntryType)
   const [name, setName] = useState('')
   const [version, setVersion] = useState('1.0.0')
   const [description, setDescription] = useState('')
@@ -266,10 +274,10 @@ export function PublishToRegistryForm({ onPublished, onCancel, pageHeader }: Pro
       >
         {step === 0 ? (
           <div className="cu-form-stack cu-agent-form-stack">
-            <TabBar<EntryType>
+            <SegmentedControl<EntryType>
               ariaLabel="Marketplace entry type"
-              activeValue={entryType}
-              className="cu-tabs--tight"
+              value={entryType}
+              className="cu-segmented-control--flush cu-segmented-control--full"
               onChange={setEntryType}
               options={[
                 { value: 'mcp-server', label: 'Connector' },
@@ -579,7 +587,7 @@ export function PublishToRegistryForm({ onPublished, onCancel, pageHeader }: Pro
                   </p>
                   <p className="cu-field__hint">
                     Need a key to publish from CI or a script?{' '}
-                    <a href="/registry/keys">Manage API keys →</a>
+                    <a href={CONTROL_ROUTES.marketplace.keys}>Manage API keys →</a>
                   </p>
                 </div>
               ))}

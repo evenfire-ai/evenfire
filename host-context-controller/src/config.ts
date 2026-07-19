@@ -137,6 +137,7 @@ export interface Config {
   // mcp-host pods it provisions. Provisioner issuance is direct;
   // runtime traffic from mcp-host pods still flows through the gateway.
   controlApiBaseUrl: string
+  governedTracingEnabled: boolean
 
   // HS256 secret used by HCC to sign per-request InternalControl JWTs
   // for control-api token issuance.
@@ -526,6 +527,7 @@ export const config: Config = {
     'CONTROL_API_BASE_URL',
     'http://control-api.control-plane.svc.cluster.local:8090'
   )!,
+  governedTracingEnabled: getEnvBool('GOVERNED_TRACING_ENABLED', true),
 
   // HCC signs InternalControl JWTs for direct control-api issuance calls.
   internalControlJwtHccHmacSecret: getEnv('INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET', '')!,
@@ -569,7 +571,7 @@ export const config: Config = {
   externalEgressResyncIntervalSec: getEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 300),
 
   // Plugin image-host allowlist (Phase 2.3). Permissive default = current
-  // fleet hosts + example.com; enforce defaults to false (audit mode).
+  // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit mode).
   allowedPluginImagePrefixes: getEnv(
     'CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES',
     [...DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES].join(',')

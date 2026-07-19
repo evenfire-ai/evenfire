@@ -11,6 +11,7 @@ import { IconFolder, IconSharedFiles } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconTrash } from '@components/icons'
 import { Button, Field, SelectInput, TextInput } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { type CreateSharedFileSystemInput, createSharedFileSystem } from '@lib/api'
 
 type AccessMode = 'ReadWriteMany' | 'ReadWriteOnce'
@@ -134,7 +135,7 @@ export default function CreateSharedFileSystemPage() {
     try {
       await createSharedFileSystem(input)
       showToast(`Shared filesystem "${normalizedName}" created.`, { tone: 'success' })
-      router.push('/shared-filesystems')
+      router.push(CONTROL_ROUTES.sharedFiles.root)
     } catch (createError) {
       setError(
         createError instanceof Error ? createError.message : 'Failed to create SharedFileSystem'
@@ -154,7 +155,7 @@ export default function CreateSharedFileSystemPage() {
               title="Create SharedFileSystem"
               subtitle="Provision workspace storage that Contexts can mount read-only into agent pods."
               backLabel="Back to shared files"
-              onBack={() => router.push('/shared-filesystems')}
+              onBack={() => router.push(CONTROL_ROUTES.sharedFiles.root)}
               backDisabled={saving}
             />
           }
@@ -338,7 +339,7 @@ export default function CreateSharedFileSystemPage() {
                 variant="ghost"
                 size="sm"
                 onClick={() =>
-                  step === 0 ? router.push('/shared-filesystems') : setStep(step - 1)
+                  step === 0 ? router.push(CONTROL_ROUTES.sharedFiles.root) : setStep(step - 1)
                 }
                 disabled={saving}
               >
