@@ -30,3 +30,8 @@ jobs:
           # protected"). A PERSONAL_ACCESS_TOKEN is only needed if signatures
           # live in another repo — not our case.
           branch: 'cla-signatures'
+          # Owners/maintainers and automation don't sign the CLA: the project
+          # owner holds copyright, `claude` is the AI Co-authored-by trailer
+          # account (a non-legal author that cannot sign), and bots are
+          # automation. External human contributors still hit the CLA.
+          allowlist: 'jozer-rami,claude,dependabot[bot],github-actions[bot]'
