@@ -2,6 +2,9 @@ FROM node:24-alpine AS sdk-builder
 
 WORKDIR /app
 
+# @clerum/workflow-runtime-core depends on @clerum/llm-providers (file:../llm-providers),
+# so the shared package must be present in the build context before npm ci resolves it.
+COPY packages/llm-providers ./packages/llm-providers
 COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/
 COPY packages/workflow-runtime-core/tsconfig.json ./packages/workflow-runtime-core/
 COPY packages/workflow-runtime-core/src ./packages/workflow-runtime-core/src

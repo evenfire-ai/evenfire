@@ -93,6 +93,8 @@ export interface TokenUsage {
  */
 export interface UsageContext {
   source_kind: 'channel' | 'desktop' | 'workflow' | 'cron' | 'unknown'
+  /** Immutable ingress trace identity. It is carried to usage ingestion, not treated as DB authority. */
+  traceContext?: TraceContextV1 | null
   team_id?: string | null
   user_id?: string | null
   sender?: string | null
@@ -214,6 +216,44 @@ export interface SanitizedOutput {
 
 // ─── Channel Types ──────────────────────────────────────────
 
+export const TRACE_CONTEXT_MAX_CORRELATION_REFS = 16
+export const TRACE_CONTEXT_MAX_CORRELATION_REF_LENGTH = 256
+
+export interface TraceContextV1 {
+  version: 1
+  runId: string
+  sessionId?: string | null
+  origin: 'channel_event' | 'direct_chat' | 'api'
+  correlationRefs: readonly string[]
+}
+
+export function isTraceContextV1(value: unknown): value is TraceContextV1 {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+
+  const context = value as Record<string, unknown>
+  const allowedKeys = new Set(['version', 'runId', 'sessionId', 'origin', 'correlationRefs'])
+  if (Object.keys(context).some(key => !allowedKeys.has(key))) return false
+  if (context.version !== 1) return false
+  if (typeof context.runId !== 'string' || context.runId.trim().length === 0) return false
+  if (
+    context.sessionId !== undefined &&
+    context.sessionId !== null &&
+    (typeof context.sessionId !== 'string' || context.sessionId.trim().length === 0)
+  ) {
+    return false
+  }
+  if (!['channel_event', 'direct_chat', 'api'].includes(context.origin as string)) return false
+  if (!Array.isArray(context.correlationRefs)) return false
+  if (context.correlationRefs.length > TRACE_CONTEXT_MAX_CORRELATION_REFS) return false
+
+  return context.correlationRefs.every(
+    ref =>
+      typeof ref === 'string' &&
+      ref.length > 0 &&
+      ref.length <= TRACE_CONTEXT_MAX_CORRELATION_REF_LENGTH
+  )
+}
+
 export interface IncomingMessage {
   id: string
   channel: string
@@ -221,6 +261,7 @@ export interface IncomingMessage {
   content: string
   metadata: Record<string, unknown>
   received_at: Date
+  traceContext?: TraceContextV1 | null
 }
 
 export interface OutgoingResponse {
@@ -272,6 +313,8 @@ export interface Conversation {
    * on the `Turn`, repopulated from SQLite on cold-load (see `reconstruct.ts`).
    */
   activeTaskId?: string
+  /** Correlation context for the active turn only. Cleared on every terminal transition. */
+  traceContext?: TraceContextV1 | null
   /**
    * T1.4 anti-thrash bookkeeping. Lives on `Conversation` (not in a per-process
    * map) so the lifetime is scoped to the task naturally: reset in
@@ -320,6 +363,19 @@ export interface Conversation {
    * "not yet latched".
    */
   dynamicToolsBridgeActive?: boolean
+  /**
+   * R2 — the user's saved per-provider model selection for this session, keyed
+   * by provider id (`{ provider → model }`). Durable: mirrored to the
+   * `sessions.model_selections` column and rehydrated on cold-load
+   * (`reconstruct.ts`). The per-task resolver reads the entry for the Host's
+   * active provider; if it is still permitted by the allowlist it becomes the
+   * effective model, otherwise the resolver falls back to the Host default and
+   * the GET /models projection surfaces it as `sessionModelBlocked`. A map (not
+   * a scalar) so it stays forward-compatible with the fallback model (R5.4) and
+   * a future cross-provider selector without another migration. Optional /
+   * `undefined` ⇔ no selection (today's behaviour).
+   */
+  modelSelections?: Record<string, string>
 }
 
 /**
@@ -414,6 +470,10 @@ export interface TurnToolCall {
 export interface PendingApproval {
   request_id: string
   tool_name: string
+  /** Producer-owned governed replay classification; never inferred by Control UI. */
+  tool_kind?: 'internal_tool' | 'mcp_server_tool' | 'workflow'
+  /** Safe source reference such as an MCP server name or workflow recipe ref. */
+  tool_source_ref?: string | null
   parameters: Record<string, unknown>
   description: string
   tool_call_id: string
@@ -428,6 +488,8 @@ export interface PendingApproval {
    *  captured at suspend time so resumeAfterApproval can preserve it on the
    *  re-emitted tool_start event. */
   intent_summary?: string
+  /** Exact active-turn context retained while this approval is pending. */
+  traceContext?: TraceContextV1 | null
 }
 
 // ─── Loop Types ─────────────────────────────────────────────

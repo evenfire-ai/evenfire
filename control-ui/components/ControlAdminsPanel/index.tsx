@@ -9,6 +9,7 @@ import { SkeletonTableRows } from '@components/SkeletonTableRows'
 import { useToast } from '@components/Toast'
 import { IconAlertTriangle, IconTrash } from '@components/icons'
 import { Button } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type ControlAdminInvitationItem,
   type ControlAdminListItem,
@@ -181,7 +182,7 @@ export function ControlAdminsPanel({
 
   function openMemberAccess(admin: ControlAdminListItem) {
     if (admin.memberId) {
-      router.push(`/profile-admin/users/${encodeURIComponent(admin.memberId)}`)
+      router.push(CONTROL_ROUTES.usersAndTeams.user(admin.memberId))
       return
     }
     if (!admin.email || admin.passwordPending) return
@@ -190,7 +191,7 @@ export function ControlAdminsPanel({
       email: admin.email,
       name: admin.username,
     })
-    router.push(`/profile-admin/users/new?${searchParams.toString()}`)
+    router.push(CONTROL_ROUTES.usersAndTeams.newUser(Object.fromEntries(searchParams)))
   }
 
   return (

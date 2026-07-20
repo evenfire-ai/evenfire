@@ -10,6 +10,7 @@ export type RpcScope =
   | 'host:task:read'
   | 'host:approval:write'
   | 'host:session:read'
+  | 'host:model:write'
   | 'desktop:view'
   | 'sandbox:ui:view'
 export type RpcAccessScope = 'team' | 'user'
@@ -455,6 +456,13 @@ export type HostMessageRequest = {
   hostRef?: string
   threadId?: string
   attachments?: HostMessageAttachment[]
+  /**
+   * Optional per-session model selection piggybacked onto the send (R2 "Option
+   * A"). Present only when the user changed the model while the host was
+   * suspended, so the `POST /model` write couldn't persist it — mcp-host
+   * validates + persists this session selection before running the task.
+   */
+  model?: string
   [key: string]: unknown
 }
 
@@ -605,6 +613,20 @@ export type HostRuntimeStatus = {
   degraded?: {
     reason: 'llm_key_missing'
     message: string
+  } | null
+  /**
+   * R5 — the provider/model pair currently SERVING this Host. Present only when
+   * a fallback policy (`spec.llmPolicy`) is configured on the Host; `fallback:
+   * true` means a configured fallback entry is serving (the chat shows a
+   * "Running on fallback" badge). On lazy recovery the engine flips `fallback`
+   * back to false. Optional for forward/backward compat: older mcp-host builds
+   * and Hosts with no policy omit it entirely, and the UI treats absence as "no
+   * fallback active" (renders nothing). Mirrors mcp-host StatusResponse.servedBy.
+   */
+  servedBy?: {
+    provider: string
+    name: string
+    fallback: boolean
   } | null
   observedAt: string
 }
@@ -895,6 +917,49 @@ export type ContextBreakdownWire = ContextBreakdownLite
  */
 export interface ContextBreakdownResult {
   breakdown: ContextBreakdownLite | null
+}
+
+/**
+ * One selectable model for a host's active provider (R2 model selector). The
+ * allowlist is operator-declared (R3); `displayName`/`contextWindowTokens` are
+ * optional operator metadata. Mirrors the rpc-proxy wire shape 1:1.
+ */
+export interface HostModelOption {
+  name: string
+  displayName?: string
+  contextWindowTokens?: number
+}
+
+/**
+ * Result of `GET …/hosts/:hostRef/models?chatId=…` (scope `host:session:read`).
+ * `sessionModel` is the per-session selection (null → use `hostDefault`).
+ * `sessionModelBlocked` names a previously-selected model that fell out of the
+ * allowlist (the runtime reverted it to the default, R2.2). `degraded` means the
+ * allowlist ConfigMap is unavailable, so only the default may be used (R3.5).
+ *
+ * The bridge returns `null` (not this shape) when the host predates the endpoint
+ * (404/501) — the selector then hides entirely (compat, like `mcpServers?`).
+ */
+export interface HostModelsResult {
+  provider: string
+  hostDefault: string
+  sessionModel: string | null
+  sessionModelBlocked?: string
+  degraded: boolean
+  models: HostModelOption[]
+}
+
+/**
+ * Result of `POST …/hosts/:hostRef/model` (scope `host:model:write`). The swap
+ * applies to the NEXT task only — in-flight tasks finish on their captured model
+ * (R2.5), which the UI surfaces as "applies to your next message". A rejected
+ * model (not in the allowlist) is a 403 `{error:'model_not_allowed'}`, surfaced
+ * as a thrown error the caller detects — never this shape.
+ */
+export interface SetHostModelResult {
+  effective: 'next-task'
+  provider: string
+  model: string
 }
 
 export interface ChatMessage {

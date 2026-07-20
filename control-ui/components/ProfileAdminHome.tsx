@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   AdminPendingInvitationListItem,
   AdminUser,
@@ -74,7 +75,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
   const deleteUserTeamCheckIdRef = useRef(0)
 
   function openUserTeams(user: AdminUser) {
-    router.push(`/profile-admin/users/${encodeURIComponent(user.id)}/teams`)
+    router.push(CONTROL_ROUTES.usersAndTeams.userTab(user.id, 'teams'))
   }
 
   function memberTeamsTooltip(user: AdminUser): string {
@@ -220,17 +221,17 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
       : 'Admins'
 
   function openTeam(team: TeamListItem) {
-    router.push(`/profile-admin/teams/${encodeURIComponent(team.id)}`)
+    router.push(CONTROL_ROUTES.usersAndTeams.teamTab(team.id, 'members'))
   }
 
   function openUser(user: AdminUser) {
-    router.push(`/profile-admin/users/${encodeURIComponent(user.id)}`)
+    router.push(CONTROL_ROUTES.usersAndTeams.userTab(user.id, 'contact'))
   }
 
   function openAdminAccessForUser(user: AdminUser) {
     if (user.controlAdminId) {
       const searchParams = new URLSearchParams({ highlightAdminId: user.controlAdminId })
-      router.push(`/profile-admin/admins?${searchParams.toString()}`)
+      router.push(CONTROL_ROUTES.usersAndTeams.admins(Object.fromEntries(searchParams)))
       return
     }
     const searchParams = new URLSearchParams({
@@ -239,7 +240,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
       step: 'review',
       source: 'member',
     })
-    router.push(`/control-admins/new?${searchParams.toString()}`)
+    router.push(CONTROL_ROUTES.usersAndTeams.newAdmin(Object.fromEntries(searchParams)))
   }
 
   function handleRowKeyDown(event: React.KeyboardEvent<HTMLTableRowElement>, open: () => void) {
@@ -502,7 +503,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                 <button
                   type="button"
                   className="cu-btn cu-btn--primary cu-btn--sm"
-                  onClick={() => router.push('/control-admins/new')}
+                  onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.newAdmin())}
                   disabled={adminLoading}
                 >
                   Invite admin
@@ -511,7 +512,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                 <button
                   type="button"
                   className="cu-btn cu-btn--primary cu-btn--sm"
-                  onClick={() => router.push('/profile-admin/teams/new')}
+                  onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.newTeam)}
                   disabled={busy && !loaded}
                 >
                   Create team
@@ -520,7 +521,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                 <button
                   type="button"
                   className="cu-btn cu-btn--primary cu-btn--sm"
-                  onClick={() => router.push('/profile-admin/users/new')}
+                  onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.newUser())}
                   disabled={busy && !loaded}
                 >
                   Create member
@@ -537,19 +538,19 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
             options={[
               {
                 value: 'users',
-                href: '/profile-admin/users',
+                href: CONTROL_ROUTES.usersAndTeams.users,
                 label: membersTabLabel,
                 disabled: busy && !loaded,
               },
               {
                 value: 'teams',
-                href: '/profile-admin/teams',
+                href: CONTROL_ROUTES.usersAndTeams.teams,
                 label: teamsTabLabel,
                 disabled: busy && !loaded,
               },
               {
                 value: 'admins',
-                href: '/profile-admin/admins',
+                href: CONTROL_ROUTES.usersAndTeams.admins(),
                 label: adminsTabLabel,
                 disabled: false,
               },
@@ -743,7 +744,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                                       className="cu-link"
                                       onClick={() =>
                                         router.push(
-                                          `/profile-admin/teams/${encodeURIComponent(invitation.team_id)}`
+                                          CONTROL_ROUTES.usersAndTeams.team(invitation.team_id)
                                         )
                                       }
                                     >

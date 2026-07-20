@@ -15,6 +15,7 @@ If those two docs disagree (they shouldn't), the cross-app doc wins for token/pr
 - **Common controls:** `src/components/Common/<Component>/index.tsx` with colocated `types.ts`, re-exported from `src/components/Common/index.ts` — `Button`, `IconButton`, `TabButton`, `MenuItem`, `NavItem`, `Pill`, `SelectableOption`, `TextInput`, `SelectInput`, `Field`, `Badge`, `StatusBanner`, `EmptyState`, `DetailRow`, `ToastStack`. Use them; don't recreate.
 - **Control behavior:** Follow the shared control rules from `../../docs/agents/frontend-style-rules.md`: compose the Common controls before adding native button/tab/menu/option markup, and never use hover `transform`, `translate`, `top`, `margin`, or `filter` effects for interactive controls. Hover states should use background, border, text color, or shadow.
 - **Pages:** `src/pages/` — top-level pages are flat `<Name>Page.tsx`; only auth/error pages use folder-based `<Name>Page/index.tsx`.
+- **Route source:** Import top-level and nested in-memory destinations from `src/constants/navigation.ts`. Never inline desktop route IDs in navigation handlers, comparisons, sidebar definitions, or view switches; keep `NavItem` derived from that centralized contract.
 
 ## Quick rules (the things that drift first)
 

@@ -8,7 +8,7 @@
  * shrinks to a factory-only shim (spec §4.2, §9.3). DO NOT import from
  * `../queue/types` for new code — always import from `./types`.
  */
-import type { Attachment } from '../core/types'
+import type { Attachment, TraceContextV1 } from '../core/types'
 import type { TaskError } from '../queue/types'
 
 export type TaskStatus =
@@ -72,6 +72,7 @@ export interface TaskRecord {
   submittedBy: string | null
   submittedChannelType: string | null
   submittedChannelId: string | null
+  traceContext: TraceContextV1 | null
   createdAt: Date
   dispatchedAt?: Date
   terminalAt?: Date

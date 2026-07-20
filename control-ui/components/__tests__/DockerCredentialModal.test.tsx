@@ -36,7 +36,7 @@ describe('DockerCredentialModal', () => {
     render(<DockerCredentialModal created={created} orgScope="acme" onClose={() => {}} />)
     fireEvent.click(screen.getByRole('button', { name: /copy login command/i }))
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
-      'docker login example.com -u _ -p efrk_secret'
+      'docker login registry.evenfire.ai -u _ -p efrk_secret'
     )
   })
 

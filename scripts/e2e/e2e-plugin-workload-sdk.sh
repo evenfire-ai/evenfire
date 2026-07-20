@@ -12,10 +12,8 @@
 #   - records both calls in the invocation audit trail.
 #
 # Token-dependent steps (grant creation, SDK call assertions, audit query)
-# run only when E2E_ADMIN_TOKEN is set. Without it, the gate still asserts the
-# infrastructure invariants (status, Secret, env, NetworkPolicies) that need
-# no admin credentials. Obtain a token from the seeded minikube admin
-# (scripts/minikube/seed-test-data.sh) and export E2E_ADMIN_TOKEN.
+# use E2E_ADMIN_TOKEN when supplied, otherwise the gate acquires an ephemeral
+# session from the seeded admin on an explicitly selected local minikube profile.
 #
 # Usage:
 #   KUBECONTEXT=clerum-test bash scripts/e2e/e2e-plugin-workload-sdk.sh
@@ -189,31 +187,119 @@ control_api_pod() {
     || ready_pod_name "$CONTROL_NS" "app.kubernetes.io/name=control-api" 2>/dev/null
 }
 
+is_local_default_operator_context() {
+  local context=${1:-}
+  if [[ -z "$context" ]]; then
+    context="$(current_e2e_context || true)"
+  fi
+  case "$context" in
+    clerum-test) return 0 ;;
+    clerum-codex-* | clerum-cursor-* | clerum-detached-*)
+      is_branch_scoped_e2e_context "$context"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+operator_admin_password() {
+  if [[ -n "${E2E_ADMIN_PASSWORD:-}" ]]; then printf '%s' "$E2E_ADMIN_PASSWORD"; return 0; fi
+  if [[ -n "${ADMIN_PASSWORD:-}" ]]; then printf '%s' "$ADMIN_PASSWORD"; return 0; fi
+  if [[ -n "${ADMIN_PASS:-}" ]]; then printf '%s' "$ADMIN_PASS"; return 0; fi
+  if [[ -n "${TEST_ADMIN_PASSWORD:-}" ]]; then printf '%s' "$TEST_ADMIN_PASSWORD"; return 0; fi
+  is_local_default_operator_context || return 1
+  printf '%s%s' 'changeme123' '!'
+  return 0
+}
+
+ensure_operator_session() {
+  if [[ -n "${E2E_ADMIN_TOKEN:-}" ]]; then
+    return 0
+  fi
+
+  local admin_password admin_username pod response status session_cookie
+  admin_password="$(operator_admin_password)" || return 1
+  admin_username="${E2E_ADMIN_USERNAME:-admin}"
+  pod="$(control_api_pod)" || return 1
+
+  # NUL-delimited stdin keeps both credentials out of local and remote argv.
+  response="$(
+    printf '%s\0%s' "$admin_username" "$admin_password" \
+      | kctl exec -i "$pod" -n "$CONTROL_NS" -- node -e '
+    const chunks = []
+    process.stdin.on("data", chunk => chunks.push(Buffer.from(chunk)))
+    process.stdin.on("end", async () => {
+      try {
+        const input = Buffer.concat(chunks)
+        const separator = input.indexOf(0)
+        if (separator < 0) throw new Error("invalid login input")
+        const username = input.subarray(0, separator).toString("utf8")
+        const password = input.subarray(separator + 1).toString("utf8")
+        const response = await fetch("http://localhost:8090/api/v1/admin/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+        })
+        const cookies = typeof response.headers.getSetCookie === "function"
+          ? response.headers.getSetCookie()
+          : [response.headers.get("set-cookie")].filter(Boolean)
+        const raw = cookies.map(String).find(cookie => cookie.startsWith("control_ui_admin_session=")) || ""
+        const value = raw ? raw.split(";")[0].split("=").slice(1).join("=") : ""
+        process.stdout.write(String(response.status) + "\t" + value)
+      } catch (error) {
+        process.stderr.write(error.message)
+        process.exit(1)
+      }
+    })
+  '
+  )" || return 1
+  status="$(printf '%s' "$response" | cut -f1)"
+  session_cookie="$(printf '%s' "$response" | cut -f2)"
+  [[ "$status" == "200" && -n "$session_cookie" ]] || return 1
+  E2E_ADMIN_TOKEN="$session_cookie"
+  return 0
+}
+
+operator_session_gate() {
+  ensure_operator_session
+}
+
 # admin_curl METHOD PATH [JSON_BODY]
 # Runs node fetch inside the control-api pod against localhost:8090 with the
-# E2E_ADMIN_TOKEN bearer. Sets ADMIN_CURL_HTTP_STATUS + ADMIN_CURL_BODY and
-# echoes the body for callers that only need the payload.
+# E2E_ADMIN_TOKEN control-ui session cookie. Sets ADMIN_CURL_HTTP_STATUS +
+# ADMIN_CURL_BODY and echoes the body for callers that only need the payload.
 admin_curl() {
   local method=$1 path=$2 body=${3:-} pod response
   pod="$(control_api_pod)" || return 1
-  response="$(kctl exec "$pod" -n "$CONTROL_NS" -- node -e '
-    const method = process.argv[1]
-    const url = "http://localhost:8090" + process.argv[2]
-    const token = process.argv[3]
-    const body = process.argv[4] || null
-    fetch(url, {
-      method,
-      headers: {
-        "Authorization": "Bearer " + token,
-        "Content-Type": "application/json",
-      },
-      body,
-    }).then(async r => {
-      const text = await r.text()
-      process.stdout.write(String(r.status) + "\t" + text)
-      process.exit(0)
-    }).catch(e => { process.stderr.write(e.message); process.exit(1) })
-  ' "$method" "$path" "$E2E_ADMIN_TOKEN" "$body")"
+  response="$(
+    printf '%s\0%s\0%s\0%s' "$method" "$path" "$E2E_ADMIN_TOKEN" "$body" \
+      | kctl exec -i "$pod" -n "$CONTROL_NS" -- node -e '
+    const chunks = []
+    process.stdin.on("data", chunk => chunks.push(Buffer.from(chunk)))
+    process.stdin.on("end", async () => {
+      try {
+        const fields = Buffer.concat(chunks).toString("utf8").split("\0")
+        if (fields.length < 4) throw new Error("invalid admin request input")
+        const method = fields.shift()
+        const path = fields.shift()
+        const token = fields.shift()
+        const body = fields.join("\0") || null
+        const response = await fetch("http://localhost:8090" + path, {
+          method,
+          headers: {
+            "Cookie": "control_ui_admin_session=" + token,
+            "Content-Type": "application/json",
+          },
+          body,
+        })
+        const text = await response.text()
+        process.stdout.write(String(response.status) + "\t" + text)
+      } catch (error) {
+        process.stderr.write(error.message)
+        process.exit(1)
+      }
+    })
+  '
+  )"
   ADMIN_CURL_HTTP_STATUS="$(printf '%s' "$response" | cut -f1)"
   ADMIN_CURL_BODY="$(printf '%s' "$response" | cut -f2-)"
   printf '%s' "$ADMIN_CURL_BODY"
@@ -288,11 +374,15 @@ obtain_desktop_session_token() {
     return 1
   fi
   ensure_external_rest_api_reachable
-  response="$(curl -sS -w '\n%{http_code}' -X POST \
-    "${E2E_EXTERNAL_REST_API_URL}/api/v1/auth/password-login" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg e "$email" --arg p "$password" '{email: $e, password: $p}')" \
-    2>/dev/null || true)"
+  response="$(
+    printf '%s\0%s' "$email" "$password" \
+      | jq -Rs 'split("\u0000") | {email: .[0], password: .[1]}' \
+      | curl -sS -w '\n%{http_code}' -X POST \
+        "${E2E_EXTERNAL_REST_API_URL}/api/v1/auth/password-login" \
+        -H 'Content-Type: application/json' \
+        --data-binary @- \
+        2>/dev/null || true
+  )"
   ADMIN_CURL_HTTP_STATUS="$(printf '%s' "$response" | tail -n1)"
   body="$(printf '%s' "$response" | sed '$d')"
   token="$(printf '%s' "$body" | jq -r '.token // empty' 2>/dev/null || true)"
@@ -306,7 +396,7 @@ obtain_desktop_session_token() {
 create_grant() {
   local family=$1 payload
   if [ "$family" = "promptBridge" ]; then
-    payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"promptBridge","allowedModels":["'"$E2E_WORKFLOW_MODEL_NAME"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxRequestsPerRun":3}}'
+    payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"promptBridge","provider":"'"$E2E_WORKFLOW_MODEL_PROVIDER"'","allowedModels":["'"$E2E_WORKFLOW_MODEL_NAME"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxRequestsPerRun":3}}'
   else
     payload='{"recipeNamespace":"sandbox-recipes","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"clientNotifications","allowedEventTypes":["'"$EVENT_TYPE"'"],"allowedUserRefs":["'"$USER_REF"'"],"allowedCallers":["'"$WORKLOAD_ID"'"],"quotaLimits":{"maxNotificationsPerRun":10}}'
   fi
@@ -470,11 +560,11 @@ fi
 
 # ─── authorized happy path (requires admin token) ────────────────────────
 
-if [ -z "$E2E_ADMIN_TOKEN" ]; then
-  warn "E2E_ADMIN_TOKEN not set — skipping grant creation, SDK call, and audit assertions."
-  warn "Export E2E_ADMIN_TOKEN (seeded minikube admin) to run the full happy path."
-  print_results
-  exit 0
+if operator_session_gate; then
+  ok "operator session available for authenticated Plugin Workload SDK checks"
+else
+  fail "operator session acquisition failed for required authenticated Plugin Workload SDK checks"
+  exit 1
 fi
 
 header "Admin grant guardrails"
@@ -564,7 +654,7 @@ else
   exit 1
 fi
 
-narrow_payload='{"recipeNamespace":"'"$RECIPE_NS"'","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"promptBridge","allowedModels":["'"$E2E_WORKFLOW_MODEL_NAME"'"],"allowedCallers":["e2e-unlisted-caller"],"quotaLimits":{"maxRequestsPerRun":3}}'
+narrow_payload='{"recipeNamespace":"'"$RECIPE_NS"'","recipeName":"'"$RECIPE_NAME"'","capabilityFamily":"promptBridge","provider":"'"$E2E_WORKFLOW_MODEL_PROVIDER"'","allowedModels":["'"$E2E_WORKFLOW_MODEL_NAME"'"],"allowedCallers":["e2e-unlisted-caller"],"quotaLimits":{"maxRequestsPerRun":3}}'
 admin_curl POST "/api/v1/admin/plugin-workload-sdk/grants" "$narrow_payload" >/dev/null || true
 if [ "$ADMIN_CURL_HTTP_STATUS" != "200" ]; then
   fail "failed to narrow promptBridge grant for caller_not_allowed probe (status=${ADMIN_CURL_HTTP_STATUS}, body=${ADMIN_CURL_BODY})"

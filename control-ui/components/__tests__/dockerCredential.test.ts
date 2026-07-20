@@ -8,21 +8,21 @@ import {
 
 describe('dockerCredential helpers', () => {
   it('builds a docker login command with -u _ and the key as -p', () => {
-    expect(buildDockerLoginCommand('example.com', 'efrk_secret')).toBe(
-      'docker login example.com -u _ -p efrk_secret'
+    expect(buildDockerLoginCommand('registry.evenfire.ai', 'efrk_secret')).toBe(
+      'docker login registry.evenfire.ai -u _ -p efrk_secret'
     )
   })
 
   it('builds the push coordinate template', () => {
-    expect(buildPushCoordinate('example.com', 'acme')).toBe(
-      'example.com/acme/<name>:<tag>'
+    expect(buildPushCoordinate('registry.evenfire.ai', 'acme')).toBe(
+      'registry.evenfire.ai/acme/<name>:<tag>'
     )
   })
 
   it('derives dockerconfigjson with username _, password key, and base64 auth', () => {
-    const json = deriveDockerconfigjson('example.com', 'efrk_secret')
+    const json = deriveDockerconfigjson('registry.evenfire.ai', 'efrk_secret')
     const parsed = JSON.parse(json)
-    const entry = parsed.auths['example.com']
+    const entry = parsed.auths['registry.evenfire.ai']
     expect(entry.username).toBe('_')
     expect(entry.password).toBe('efrk_secret')
     expect(entry.auth).toBe(btoa('_:efrk_secret'))
@@ -50,7 +50,7 @@ describe('dockerCredential helpers', () => {
       scopes: [],
       expires_at: null,
     })
-    expect(out.registry).toBe('example.com')
-    expect(JSON.parse(out.dockerconfigjson).auths['example.com'].password).toBe('efrk_x')
+    expect(out.registry).toBe('registry.evenfire.ai')
+    expect(JSON.parse(out.dockerconfigjson).auths['registry.evenfire.ai'].password).toBe('efrk_x')
   })
 })

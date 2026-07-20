@@ -71,7 +71,7 @@ spec:
         matchLabels:
           app: host-context-controller-api-gateway
   # mcp-host reaches control-api only through the workflow-approval-gateway on
-  # :8092 for runtime approval traffic.
+  # :8092 for runtime approval, usage, budget, and governed tracing traffic.
   # Direct mcp-host → control-api:8090 stays DENY by omission.
   - ports:
     - port: 8092

@@ -28,8 +28,19 @@ export interface UseContextBreakdownResult {
   getBreakdown: (agentRef: string, chatId: string) => ContextBreakdownLite | null | undefined
   /** True while a fetch for this chat is in flight. */
   isLoading: (agentRef: string, chatId: string) => boolean
-  /** Fetch (or refetch if stale) the breakdown for a chat. Call on popover open. */
-  fetchContextBreakdown: (agentRef: string, chatId: string) => Promise<void>
+  /**
+   * Fetch (or refetch if stale) the breakdown for a chat. Call on popover open.
+   *
+   * Pass `{ force: true }` to bypass the fresh/TTL short-circuit and re-probe
+   * immediately — used when a turn completes and a snapshot the mount probe
+   * missed may now exist (a cached `null` verdict must not suppress that
+   * re-probe). The in-flight de-dup is always honoured.
+   */
+  fetchContextBreakdown: (
+    agentRef: string,
+    chatId: string,
+    options?: { force?: boolean }
+  ) => Promise<void>
 }
 
 export function useContextBreakdown(): UseContextBreakdownResult {
@@ -51,14 +62,18 @@ export function useContextBreakdown(): UseContextBreakdownResult {
   )
 
   const fetchContextBreakdown = useCallback(
-    async (agentRef: string, chatId: string) => {
+    async (agentRef: string, chatId: string, options?: { force?: boolean }) => {
       if (!agentRef || !chatId) return
       const key = makeTaskKey(agentRef, chatId)
       if (inFlightRef.current.has(key)) return
 
-      // Skip the network call when we have a fresh-enough result.
-      const existing = breakdownByTaskKey[key]
-      if (existing && Date.now() - existing.fetchedAt < BREAKDOWN_TTL_MS) return
+      // Skip the network call when we have a fresh-enough result — unless the
+      // caller forces a re-probe (turn completed; a snapshot may now exist that
+      // the mount probe cached as `null`).
+      if (!options?.force) {
+        const existing = breakdownByTaskKey[key]
+        if (existing && Date.now() - existing.fetchedAt < BREAKDOWN_TTL_MS) return
+      }
 
       inFlightRef.current.add(key)
       setLoadingKeys(prev => ({ ...prev, [key]: true }))

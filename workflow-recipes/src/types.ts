@@ -1,3 +1,5 @@
+import type { LlmProviderId } from '@clerum/llm-providers'
+
 // ─── WorkflowRecipe Phase (13-state machine) ────────────────────────────
 
 /**
@@ -582,7 +584,7 @@ export interface WorkflowRecipeSpec {
   coordinatorImage?: string
   agent?: {
     model: string
-    provider: 'openai' | 'claude' | 'zai' | 'bailian'
+    provider: LlmProviderId
     secretRef?: { name: string; namespace?: string }
     soulRef?: {
       storageRef: {
@@ -604,7 +606,7 @@ export interface WorkflowRecipeSpec {
     maxRetries?: number
     agent?: {
       model?: string
-      provider?: 'openai' | 'claude' | 'zai' | 'bailian'
+      provider?: LlmProviderId
       soul?: string
     }
     mcpServers?: string[]
@@ -760,6 +762,7 @@ export interface WorkflowRecipeStatus {
     error?: string
     executor?: 'agentic' | 'snippet' | 'custom'
     modelUsed?: string
+    approvalBindingSha256?: string
     toolsCalled?: Array<{
       serverName: string
       toolName: string

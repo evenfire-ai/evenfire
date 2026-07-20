@@ -46,6 +46,7 @@ describe('parseGfsUri', () => {
 const RESOURCE: ResolvedGfsResource = {
   drive: 'main',
   resourceId: RID,
+  parentResourceId: null,
   rid: RID,
   gfsUri: `gfs://main/${RID}`,
   name: 'report.md',

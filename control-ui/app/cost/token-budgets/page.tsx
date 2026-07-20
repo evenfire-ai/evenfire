@@ -6,6 +6,7 @@ import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { TokenBudgetTable } from '@components/TokenBudgetTable'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type TokenBudget,
   deleteTokenBudget,
@@ -119,8 +120,8 @@ export default function TokenBudgetsPage() {
       <TokenBudgetTable
         items={budgets}
         lookups={lookups}
-        onCreate={() => router.push('/cost/token-budgets/new')}
-        onEdit={id => router.push(`/cost/token-budgets/${encodeURIComponent(id)}/edit`)}
+        onCreate={() => router.push(CONTROL_ROUTES.costAndUsage.newTokenBudget)}
+        onEdit={id => router.push(CONTROL_ROUTES.costAndUsage.editTokenBudget(id))}
         onDelete={handleDelete}
         onToggle={handleToggle}
         onRefresh={loadAll}

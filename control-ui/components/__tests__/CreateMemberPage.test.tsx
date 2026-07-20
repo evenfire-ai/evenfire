@@ -92,7 +92,7 @@ describe('CreateMemberPage', () => {
       })
     })
     expect(inviteAdminTeamMember).toHaveBeenCalledTimes(1)
-    expect(mockPush).toHaveBeenCalledWith('/profile-admin/users')
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/users')
   })
 
   it('sends an invitation without a team when there are no teams yet', async () => {
@@ -116,7 +116,7 @@ describe('CreateMemberPage', () => {
         teams: [],
       })
     })
-    expect(mockPush).toHaveBeenCalledWith('/profile-admin/users')
+    expect(mockPush).toHaveBeenCalledWith('/users-and-teams/users')
   })
 
   it('shows a friendly duplicate email message without leaving the form', async () => {

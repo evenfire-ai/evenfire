@@ -1,0 +1,9 @@
+# public relation<TAB>trace_maintenance_runtime access profile
+administrative_events	read
+agent_run_events	read
+governed_event_read_v1	read
+governed_event_stream	append
+infrastructure_cost_daily	append
+infrastructure_cost_daily_components	append
+infrastructure_price_snapshots	append
+infrastructure_telemetry_events	append

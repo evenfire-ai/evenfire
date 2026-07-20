@@ -24,6 +24,20 @@ describe('pluginWorkloadSdkSchema', () => {
     )
   })
 
+  it('declares the provider column on fresh grants and adds it on upgrade (R1)', () => {
+    const schemaPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../src/services/pluginWorkloadSdkSchema.ts'
+    )
+    const source = readFileSync(schemaPath, 'utf8')
+    const grantsCreate = source.slice(
+      source.indexOf('CREATE TABLE IF NOT EXISTS plugin_workload_sdk_grants'),
+      source.indexOf('CREATE TABLE IF NOT EXISTS plugin_workload_sdk_invocations')
+    )
+    expect(grantsCreate).toMatch(/\bprovider TEXT\b/)
+    expect(source).toMatch(/ADD COLUMN IF NOT EXISTS provider TEXT/)
+  })
+
   it('omits super_admin_approved from fresh grant schema and drops it on upgrade', () => {
     const schemaPath = join(
       dirname(fileURLToPath(import.meta.url)),

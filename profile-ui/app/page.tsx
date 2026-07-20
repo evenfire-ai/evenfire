@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
 import { AuthGate } from '@components/AuthGate'
 import { ProfileShell } from '@components/ProfileShell'
+import { PROFILE_ROUTES } from '@constants/routes'
 
 function InvitationRedirect() {
   const router = useRouter()
@@ -13,7 +14,7 @@ function InvitationRedirect() {
   useEffect(() => {
     const inviteToken = searchParams.get('inviteToken')
     if (!inviteToken) return
-    router.replace(`/invitations/${encodeURIComponent(inviteToken)}`)
+    router.replace(PROFILE_ROUTES.invitation(inviteToken))
   }, [router, searchParams])
 
   return null

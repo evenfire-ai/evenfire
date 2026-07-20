@@ -5,6 +5,8 @@ import request from 'supertest'
 import {
   approvalsCreatedTotal,
   approvalsDecidedTotal,
+  governedTraceAcceptedTotal,
+  governedTraceBatchSize,
   mcpHostJwtIssueTotal,
   rateLimitHitsTotal,
 } from '../src/observability/metrics.js'
@@ -104,5 +106,29 @@ describe('GET /metrics', () => {
     expect(body).toMatch(/process_cpu_seconds_total|process_cpu_user_seconds_total/)
     expect(body).toMatch(/nodejs_heap_size_total_bytes|nodejs_heap_size_used_bytes/)
     expect(body).toContain('process_start_time_seconds')
+  })
+
+  it('exposes governed tracing metrics through the existing scrape route', async () => {
+    governedTraceAcceptedTotal.inc(
+      { family: 'agent_run', source: 'mcp-host', type: 'run_start' },
+      1
+    )
+    governedTraceBatchSize.observe({ family: 'agent_run', source: 'mcp-host' }, 1)
+
+    const res = await api.get('/metrics')
+    const body = String(res.text)
+    for (const name of [
+      'governed_trace_accepted_total',
+      'governed_trace_batch_size',
+      'governed_trace_query_count',
+      'governed_trace_ingest_duration_seconds',
+      'governed_trace_read_duration_seconds',
+      'governed_trace_pool_acquisition_duration_seconds',
+      'governed_trace_pool_connections',
+      'governed_trace_pool_rejections_total',
+      'governed_trace_pool_statement_timeouts_total',
+    ]) {
+      expect(body).toContain(`# HELP ${name}`)
+    }
   })
 })

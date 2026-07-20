@@ -8,7 +8,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { ConversationState } from '../../../types'
+import { AgentStateMachine } from '../../../../agent/stateMachine'
+import { TaskLifecycle } from '../../../../lifecycle/taskLifecycle'
+import { MessageQueue } from '../../../../queue/messageQueue'
+import type { IncomingMessage } from '../../../../server'
+import { ConversationState, type TraceContextV1 } from '../../../types'
 import { ConversationManager } from '../../conversation'
 import { SqliteColdStartLoader } from '../sqliteColdStartLoader'
 import { makeSqliteStore } from './testHelpers'
@@ -29,14 +33,40 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
     }
   })
 
-  it('a pending_approval survives a Pod restart and rehydrates with the same task_id', async () => {
+  it('round-trips exact trace context and the active task id across approval rehydration', async () => {
     // Pod A — write a session with a pending_approval.
     const podA = makeSqliteStore({ dbPath, cacheSize: 4 })
     const managerA = new ConversationManager(podA.store)
     const sessionKey = 'user-1:rpc:agent:default'
+    const traceContext = {
+      version: 1,
+      runId: 'run-cross-pod',
+      sessionId: 'trace-session-1',
+      origin: 'direct_chat',
+      correlationRefs: ['edge-request:req-7', 'channel-message:msg-7'],
+    } satisfies TraceContextV1
+    const message: IncomingMessage = {
+      content: 'do dangerous thing',
+      channelType: 'rpc',
+      channelId: 'agent',
+      sender: 'user-1',
+      timestamp: new Date().toISOString(),
+      messageId: 'msg-7',
+      hostRef: 'chatllm',
+      traceContext,
+    }
+    const lifecycle = new TaskLifecycle()
+    const queue = new MessageQueue()
+    queue.setLifecycle(lifecycle)
+    const task = queue.createTaskFromMessage(message)
+
+    expect(task.traceContext).toEqual(traceContext)
+    expect(queue.admit(task)).toEqual({ admitted: true })
+    expect(lifecycle.get(task.id)?.traceContext).toEqual(traceContext)
 
     const convA = await managerA.getOrCreate(sessionKey)
-    await managerA.startTurn(convA, 'do dangerous thing', 'test-task')
+    await managerA.startTurn(convA, message.content, task.id, task.traceContext ?? null)
+    expect(convA.traceContext).toEqual(traceContext)
     await managerA.suspendForApproval(convA, {
       request_id: 'req-cross-pod',
       tool_name: 'shell_exec',
@@ -54,13 +84,42 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
       const rehydrated = await loader.loadPendingApprovals(Date.now())
       expect(rehydrated).toHaveLength(1)
       expect(rehydrated[0].request_id).toBe('req-cross-pod')
+      expect(rehydrated[0].task_id).toBe(task.id)
       expect(rehydrated[0].approval.tool_name).toBe('shell_exec')
+      expect(rehydrated[0].approval.traceContext).toEqual(traceContext)
 
       const conv = podB.store.get(sessionKey)
       expect(conv).toBeDefined()
       expect(conv!.state).toBe(ConversationState.AwaitingApproval)
       expect(conv!.turns).toHaveLength(1)
       expect(conv!.turns[0].user_input).toBe('do dangerous thing')
+      expect(conv!.activeTaskId).toBe(task.id)
+      expect(conv!.traceContext).toEqual(traceContext)
+
+      const podBAgent = new AgentStateMachine(new MessageQueue(), new TaskLifecycle(), {
+        autoStart: false,
+      })
+      podBAgent.setLLMProvider({
+        completeSingleTurn: async () => ({ content: 'done' }),
+        completeSingleTurnWithTools: async () => ({ type: 'response', content: 'done' }),
+        getProviderType: () => 'openai',
+      } as never)
+      podBAgent.setMcpManager({ getAllTools: () => [], callTool: async () => ({}) } as never)
+      podBAgent.setConversationStore(podB.store)
+      podBAgent.setColdStartLoader(loader)
+      await podBAgent.bootstrap()
+      expect(podBAgent.getPendingApprovals()).toEqual([
+        expect.objectContaining({ requestId: 'req-cross-pod', toolName: 'shell_exec' }),
+      ])
+      const rehydratedExecutor = (
+        podBAgent as unknown as {
+          activeExecutors: Map<string, { sourceTask: { traceContext?: unknown } }>
+        }
+      ).activeExecutors.get(task.id)
+      expect(rehydratedExecutor?.sourceTask.traceContext).toEqual(traceContext)
+      await expect(
+        podBAgent.handleDenial('user-1', 'req-cross-pod', 'rpc', 'agent')
+      ).resolves.toEqual({ success: true })
     } finally {
       await podB.shutdown()
     }

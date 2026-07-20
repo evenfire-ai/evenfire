@@ -14,6 +14,8 @@ import {
   enqueueApprovalRequestedNotification,
   enqueueApprovalUpdatedNotification,
 } from './notificationEmitter.js'
+import { ApprovalPromptHistoryService } from './tracing/approvalPromptHistoryService.js'
+import { enqueueWorkflowApprovalTraceProjection } from './tracing/workflowApprovalTraceProjector.js'
 import type { WorkflowRunActorType, WorkflowRunRow } from './workflowRunService.js'
 import {
   type WorkflowTriggerGrantResult,
@@ -65,6 +67,13 @@ export class InvalidWorkflowTriggerIntentError extends Error {
   }
 }
 
+export class InvalidWorkflowApprovalRunBindingError extends Error {
+  constructor(message = 'Workflow approval run binding is not authoritative') {
+    super(message)
+    this.name = 'InvalidWorkflowApprovalRunBindingError'
+  }
+}
+
 export class ApprovalTriggerRunIdempotencyConflictError extends Error {
   constructor(message = 'Approved workflow trigger intent conflicts with an existing run') {
     super(message)
@@ -73,6 +82,67 @@ export class ApprovalTriggerRunIdempotencyConflictError extends Error {
 }
 
 export type ApprovalPayload = { message: string; options?: string[]; metadata?: unknown }
+
+const WORKFLOW_RUN_ID_PREFIX =
+  /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=:)/i
+const WORKFLOW_BINDING_PROOF = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const WORKFLOW_CHILD_RECIPE_NAME = /^[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?$/
+
+export async function resolveWorkflowApprovalRunBinding(
+  db: DbClient,
+  params: {
+    recipeNamespace: string
+    recipeName: string
+    correlation?: { taskId?: string; stepId?: string }
+    runBindingProof?: string
+  }
+): Promise<{ runId: string; stepId: string } | null> {
+  const proof = params.runBindingProof?.trim()
+  const taskId = params.correlation?.taskId
+  if (typeof taskId !== 'string' || !WORKFLOW_RUN_ID_PREFIX.test(taskId)) {
+    if (proof) throw new InvalidWorkflowApprovalRunBindingError()
+    return null
+  }
+  const runId = WORKFLOW_RUN_ID_PREFIX.exec(taskId)?.[1]?.toLowerCase()
+  const childRecipeName = taskId.split(':', 3)[1]?.trim()
+  const stepId = params.correlation?.stepId?.trim()
+  if (
+    !runId ||
+    !childRecipeName ||
+    !WORKFLOW_CHILD_RECIPE_NAME.test(childRecipeName) ||
+    !stepId ||
+    !proof ||
+    !WORKFLOW_BINDING_PROOF.test(proof)
+  ) {
+    throw new InvalidWorkflowApprovalRunBindingError()
+  }
+  const proofSha256 = createHash('sha256').update(proof).digest('hex')
+  const result = await db.query(
+    `SELECT wr.run_id::text AS "runId", step.step_id AS "stepId"
+       FROM workflow_runs wr
+       JOIN workflow_run_steps step
+         ON step.run_id = wr.run_id
+        AND step.step_id = $4
+        AND step.phase = 'Running'
+        AND step.approval_binding_sha256 = $5
+       JOIN agent_run_events root
+         ON root.run_id = wr.run_id
+        AND root.event_type = 'run_start'
+        AND root.origin = 'workflow_runtime'
+        AND root.source_kind = 'wrc_internal_control'
+        AND root.source_service = 'workflow-recipes'
+      WHERE wr.run_id = $1::uuid
+        AND wr.recipe_namespace = $2
+        AND wr.recipe_name = $3
+        AND wr.child_recipe_namespace = $2
+        AND wr.child_recipe_name = $6
+        AND wr.phase = 'Running'
+      LIMIT 1`,
+    [runId, params.recipeNamespace, params.recipeName, stepId, proofSha256, childRecipeName]
+  )
+  if (!result.rows[0]) throw new InvalidWorkflowApprovalRunBindingError()
+  return { runId, stepId }
+}
 export type WorkflowTriggerIntent = {
   namespace: string
   name: string
@@ -228,6 +298,7 @@ export async function createApprovalRequest(params: {
   payload: { message: string; options?: string[]; metadata?: unknown }
   idempotencyKey: string
   correlation?: { taskId?: string; stepId?: string }
+  runBindingProof?: string
   ttlSeconds?: number
 }): Promise<
   | { id: string; status: 'pending'; expiresAt: string }
@@ -255,10 +326,14 @@ export async function createApprovalRequest(params: {
   }
 
   const result = await withTransaction(async db => {
+    const runBinding = await resolveWorkflowApprovalRunBinding(db, params)
     const inserted = await db.query(
       `INSERT INTO workflow_approval_requests
-         (recipe_namespace, recipe_name, expires_at, status, target_user_id, target_team_id, payload, idempotency_key, correlation, payload_hash)
-       VALUES ($1, $2, NOW() + interval '1 second' * $3, 'pending', $4, $5, $6::jsonb, $7, $8::jsonb, $9)
+         (recipe_namespace, recipe_name, expires_at, status, target_user_id, target_team_id,
+          payload, idempotency_key, correlation, payload_hash,
+          bound_workflow_run_id, bound_workflow_step_id)
+       VALUES ($1, $2, NOW() + interval '1 second' * $3, 'pending', $4, $5,
+               $6::jsonb, $7, $8::jsonb, $9, $10::uuid, $11)
        ON CONFLICT (recipe_namespace, recipe_name, idempotency_key) DO NOTHING
        RETURNING id, expires_at, status`,
       [
@@ -271,6 +346,8 @@ export async function createApprovalRequest(params: {
         params.idempotencyKey,
         params.correlation ? JSON.stringify(params.correlation) : null,
         payloadHash,
+        runBinding?.runId ?? null,
+        runBinding?.stepId ?? null,
       ]
     )
 
@@ -302,6 +379,14 @@ export async function createApprovalRequest(params: {
     }
 
     const row = inserted.rows[0] as { id: string; expires_at: string; status: ApprovalStatus }
+    await new ApprovalPromptHistoryService(db).capture({
+      approvalRequestId: row.id,
+      approvalKind: 'workflow',
+      prompt: params.payload.message,
+      sourceKind: 'control_api_local',
+      runId: runBinding?.runId ?? null,
+      origin: 'workflow_runtime',
+    })
     if (triggerIntent) {
       await db.query(
         `INSERT INTO workflow_approval_trigger_intents (
@@ -341,10 +426,12 @@ export async function createApprovalRequest(params: {
 
   if (result.kind === 'existing') {
     approvalsCreatedTotal.inc({ status: 'existing' }, 1)
+    enqueueWorkflowApprovalTraceProjection(result.id)
     return { id: result.id, status: result.status, existing: true }
   }
 
   approvalsCreatedTotal.inc({ status: 'pending' }, 1)
+  enqueueWorkflowApprovalTraceProjection(result.id)
 
   return { id: result.id, status: 'pending', expiresAt: result.expiresAt }
 }
@@ -811,7 +898,9 @@ export async function recordDecision(
     return workflowRun ? { ok: true, workflowRun } : { ok: true }
   }
 
-  return dbTx ? work(dbTx) : withTransaction(work)
+  const result = dbTx ? await work(dbTx) : await withTransaction(work)
+  if (!dbTx && result.ok) enqueueWorkflowApprovalTraceProjection(id)
+  return result
 }
 
 export type CancelRequestAudit = {

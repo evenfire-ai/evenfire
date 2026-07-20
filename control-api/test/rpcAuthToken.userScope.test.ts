@@ -132,6 +132,31 @@ describe('RPC access token scope binding', () => {
   })
 })
 
+describe('host:model:write default grant (spec §8.2)', () => {
+  // Per-session model selection is granted to every role: the blast radius is the
+  // caller's own session and the operator's control is the model allowlist.
+  it.each(['admin', 'inviter', 'member'] as const)(
+    'includes host:model:write in the default scopes for %s',
+    role => {
+      const issued = issueRpcAccessToken(
+        { userId: 'user-1', teamId: 'team-1', role },
+        [],
+        ['pro-agent']
+      )
+      expect(issued?.scopes).toContain('host:model:write')
+    }
+  )
+
+  it('grants host:model:write when explicitly requested by a member', () => {
+    const issued = issueRpcAccessToken(
+      { userId: 'user-1', teamId: 'team-1', role: 'member' },
+      ['host:model:write'],
+      ['pro-agent']
+    )
+    expect(issued?.scopes).toEqual(['host:model:write'])
+  })
+})
+
 describe('classifyRpcTokenDenial', () => {
   it('reports desktop_requires_team when a teamless caller is denied only team-only scopes', () => {
     // desktop:view is permitted by the member role but team-only, so a teamless

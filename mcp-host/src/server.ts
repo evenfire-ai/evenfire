@@ -23,6 +23,7 @@ import {
   handleCronResultAckRoute,
   handleCronResultsRoute,
   handleMessageRoute,
+  handleModelsListRoute,
   handleProgressStreamRoute,
   handleProviderMessageAuthorizationRoute,
   handleProviderWorkflowApprovalDecisionRoute,
@@ -31,6 +32,7 @@ import {
   handleSessionMessagesRoute,
   handleSessionSearchRoute,
   handleSessionsListRoute,
+  handleSetModelRoute,
   handleStatusRoute,
   handleTaskResultRoute,
   handleTelegramWorkflowApprovalVerificationRoute,
@@ -49,6 +51,7 @@ import type {
   CronResultAckHandler,
   CronResultsHandler,
   MessageHandler,
+  ModelsListHandler,
   ProgressStreamHandler,
   ProviderMessageAuthorizationHandler,
   ProviderWorkflowApprovalDecisionHandler,
@@ -57,6 +60,7 @@ import type {
   SessionMessagesHandler,
   SessionSearchHandler,
   SessionsListHandler,
+  SetModelHandler,
   StatusHandler,
   TaskResultHandler,
   TelegramWorkflowApprovalVerificationHandler,
@@ -116,6 +120,7 @@ export type {
   SessionSearchHandler,
   SessionSearchRequest,
   SessionSearchResponse,
+  SetModelResult,
 } from './server/types'
 
 export class RPCServer {
@@ -151,6 +156,8 @@ export class RPCServer {
   private contextBreakdownHandler: ContextBreakdownHandler | null = null
   private sessionSearchHandler: SessionSearchHandler | null = null
   private compactionHandler: CompactionHandler | null = null
+  private modelsListHandler: ModelsListHandler | null = null
+  private setModelHandler: SetModelHandler | null = null
   private workflowRouter: ReturnType<typeof createWorkflowRouter> | null = null
   private artifactSecretEntriesProvider: (() => ArtifactSecretEntry[]) | null = null
   private lifecycleGate: RuntimeLifecycleGate | null = null
@@ -418,6 +425,17 @@ export class RPCServer {
       }
     )
 
+    // R2 — per-session model selector. Read (list allowlist + selection) and
+    // write (set-model). Both behind the edge guard: rpc-proxy has already
+    // enforced host:session:read / host:model:write scopes, and it injects the
+    // verified edge user + hostRef the handlers scope the session lookup to.
+    this.app.get('/v1/runtime/models', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
+      await handleModelsListRoute(req, res, this.routeDeps())
+    })
+    this.app.post('/v1/runtime/model', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
+      await handleSetModelRoute(req, res, this.routeDeps())
+    })
+
     this.app.get('/v1/runtime/cron/results', runtimeEdgeGuard(['channel-reader']), (req, res) => {
       handleCronResultsRoute(req, res, this.routeDeps())
     })
@@ -667,6 +685,14 @@ export class RPCServer {
     this.compactionHandler = handler
   }
 
+  onModelsList(handler: ModelsListHandler): void {
+    this.modelsListHandler = handler
+  }
+
+  onSetModel(handler: SetModelHandler): void {
+    this.setModelHandler = handler
+  }
+
   /** Activate workflow mode — mounts /api/v1/workflow/* routes. */
   setWorkflowService(service: WorkflowService): void {
     this.workflowRouter = createWorkflowRouter(service)
@@ -706,6 +732,8 @@ export class RPCServer {
       contextBreakdownHandler: this.contextBreakdownHandler,
       sessionSearchHandler: this.sessionSearchHandler,
       compactionHandler: this.compactionHandler,
+      modelsListHandler: this.modelsListHandler,
+      setModelHandler: this.setModelHandler,
     }
   }
 

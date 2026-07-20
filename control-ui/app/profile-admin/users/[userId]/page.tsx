@@ -9,6 +9,7 @@ import { SelectionDropdown } from '@components/SelectionDropdown'
 import { TeamRolePermissionEditor } from '@components/TeamRolePermissionEditor'
 import { useToast } from '@components/Toast'
 import { CheckboxField } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import type { DeleteCandidateTeam } from '@lib/profileAdminDelete'
@@ -188,8 +189,7 @@ export default function UserDetailsPage() {
   }, [params.tab])
 
   function userTabHref(tab: UserTab): string {
-    const base = `/profile-admin/users/${encodeURIComponent(userId)}`
-    return tab === 'contact' ? base : `${base}/${tab}`
+    return CONTROL_ROUTES.usersAndTeams.userTab(userId, tab)
   }
 
   function selectTab(tab: UserTab) {
@@ -522,7 +522,7 @@ export default function UserDetailsPage() {
           { tone: 'success' }
         )
       }
-      router.push('/profile-admin/users')
+      router.push(CONTROL_ROUTES.usersAndTeams.users)
     } catch (e) {
       setDeleteUserDialogError(e instanceof Error ? e.message : 'Failed to delete member')
     } finally {
@@ -536,7 +536,7 @@ export default function UserDetailsPage() {
       backLabel="Back to members"
       error={error}
       icon={<IconUsers />}
-      onBack={() => router.push('/profile-admin/users')}
+      onBack={() => router.push(CONTROL_ROUTES.usersAndTeams.users)}
       onTabChange={selectTab}
       subtitle={
         initialLoading
@@ -889,7 +889,7 @@ export default function UserDetailsPage() {
                     <tr key={`${channelName}:${conversation.channelId || conversation.title}`}>
                       <td>
                         {channelName ? (
-                          <Link href={`/communication-channels/${encodeURIComponent(channelName)}`}>
+                          <Link href={CONTROL_ROUTES.externalChannels.edit(channelName)}>
                             {channelName}
                           </Link>
                         ) : (
@@ -982,7 +982,7 @@ export default function UserDetailsPage() {
                         <button
                           type="button"
                           className="cu-link"
-                          onClick={() => router.push(`/contexts/${encodeURIComponent(contextId)}`)}
+                          onClick={() => router.push(CONTROL_ROUTES.contexts.detail(contextId))}
                         >
                           {contextId}
                         </button>
@@ -1127,9 +1127,7 @@ export default function UserDetailsPage() {
                           <button
                             type="button"
                             className="cu-link"
-                            onClick={() =>
-                              router.push(`/profile-admin/teams/${encodeURIComponent(team.id)}`)
-                            }
+                            onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.team(team.id))}
                           >
                             {team.name}
                           </button>
@@ -1267,7 +1265,7 @@ export default function UserDetailsPage() {
                         <button
                           type="button"
                           className="cu-link"
-                          onClick={() => router.push(`/hosts/${encodeURIComponent(agentName)}`)}
+                          onClick={() => router.push(CONTROL_ROUTES.agents.detail(agentName))}
                         >
                           {agentName}
                         </button>

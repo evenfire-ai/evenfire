@@ -13,6 +13,7 @@ import request from 'supertest'
 const mockVerifyExternalSessionToken = vi.fn()
 const mockSignGfsToken = vi.hoisted(() => vi.fn())
 const mockQuery = vi.hoisted(() => vi.fn())
+const mockAppendPermissionEvents = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...a: unknown[]) => mockVerifyExternalSessionToken(...a),
@@ -30,7 +31,15 @@ vi.mock('../src/config.js', () => ({
     gfscWriteBaseUrl: 'http://gfsc-writer.gfs.svc:8087',
   },
 }))
-vi.mock('../src/db.js', () => ({ pool: { query: (...a: unknown[]) => mockQuery(...a) } }))
+vi.mock('../src/db.js', () => ({
+  pool: { query: (...a: unknown[]) => mockQuery(...a) },
+  withTransaction: async (work: (db: { query: typeof mockQuery }) => Promise<unknown>) =>
+    work({ query: mockQuery }),
+}))
+vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
+  appendControlApiPermissionEventsInTransaction: (...a: unknown[]) =>
+    mockAppendPermissionEvents(...a),
+}))
 // grants.ts/shares.ts/token.ts import requireAuthForControlUI, which at module
 // load derives the admin JWT key — irrelevant to the /external (Session-JWT)
 // surface and unused by these routes. Stub it so the import chain is key-free.
@@ -67,6 +76,8 @@ beforeEach(() => {
   mockVerifyExternalSessionToken.mockReset()
   mockSignGfsToken.mockReset()
   mockQuery.mockReset()
+  mockAppendPermissionEvents.mockReset()
+  mockAppendPermissionEvents.mockResolvedValue(null)
   mockSignGfsToken.mockReturnValue({ token: 'gfs-user-token', expiresInSeconds: 300 })
 })
 afterEach(() => vi.unstubAllGlobals())
@@ -91,7 +102,7 @@ function dbReturning(grants: Record<string, unknown>[]) {
     }
     if (text.includes('FROM gfs_shares')) return { rows: [] }
     if (text.includes('INSERT INTO gfs_grants')) return { rows: [] }
-    if (text.includes('INSERT INTO gfs_audit')) return { rows: [] }
+    if (text.includes('INSERT INTO gfs_audit')) return { rows: [{ id: 'audit-1' }] }
     return { rows: [] }
   })
 }
@@ -172,6 +183,20 @@ describe('PUT /external/gfs/grants (user delegation via existing engine)', () =>
     // The INSERT recorded the caller as the user (granted_by user:user-1).
     const insert = mockQuery.mock.calls.find(c => String(c[0]).includes('INSERT INTO gfs_grants'))
     expect(insert?.[1]?.[6]).toBe(`user:${U1}`)
+    expect(mockAppendPermissionEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        operatorSub: U1,
+        operatorKind: 'platform_user',
+        changes: [
+          expect.objectContaining({
+            action: 'grant',
+            resourceClass: 'gfs_folder_grant',
+            outcome: 'committed',
+          }),
+        ],
+      })
+    )
   })
 
   it('honors grants held through any active team, not only the session teamId', async () => {
@@ -197,7 +222,7 @@ describe('PUT /external/gfs/grants (user delegation via existing engine)', () =>
       }
       if (text.includes('FROM gfs_shares')) return { rows: [] }
       if (text.includes('INSERT INTO gfs_grants')) return { rows: [] }
-      if (text.includes('INSERT INTO gfs_audit')) return { rows: [] }
+      if (text.includes('INSERT INTO gfs_audit')) return { rows: [{ id: 'audit-2' }] }
       return { rows: [] }
     })
 
@@ -281,6 +306,55 @@ describe('PUT /external/gfs/grants (user delegation via existing engine)', () =>
       })
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('escalation_rejected')
+    expect(mockAppendPermissionEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        changes: [expect.objectContaining({ outcome: 'rejected', authorizationDecision: 'deny' })],
+      })
+    )
+  })
+})
+
+describe('POST /external/gfs/shares (user delegation via existing engine)', () => {
+  it('persists the typed audit and normalized administrative event in the same transaction', async () => {
+    auth()
+    dbReturning([
+      {
+        subject_type: 'user',
+        subject_id: U1,
+        resource_id: R,
+        permissions: ['share', 'read'],
+        inherit: false,
+      },
+    ])
+    const app = await buildApp()
+    const res = await request(app)
+      .post('/external/gfs/shares')
+      .set('x-user-session-token', 'sess')
+      .send({
+        resourceId: R,
+        subject: { type: 'user', id: U2 },
+        permissions: ['read'],
+        includeDescendants: false,
+      })
+
+    expect(res.status).toBe(200)
+    expect(
+      mockQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO gfs_shares'))
+    ).toBe(true)
+    expect(mockAppendPermissionEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        operatorSub: U1,
+        changes: [
+          expect.objectContaining({
+            resourceClass: 'gfs_share',
+            outcome: 'committed',
+            detailRef: 'gfs_permissions/read',
+          }),
+        ],
+      })
+    )
   })
 })
 

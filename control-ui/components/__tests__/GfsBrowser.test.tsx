@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { GFS_FILE_UPLOAD_MAX_BYTES } from '@constants/gfsFileUpload'
+import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
+import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import {
   apiGet,
   apiSend,
@@ -8,7 +11,7 @@ import {
   getHosts,
   getRecipes,
   gfsDownload,
-  postGfsShare,
+  gfsFetchFileBlob,
   putGfsGrant,
 } from '@lib/api'
 import { normalizeGfsResourceName } from '@lib/gfsResourceName'
@@ -23,9 +26,9 @@ vi.mock('@lib/api', () => ({
   getHosts: vi.fn(),
   getRecipes: vi.fn(),
   gfsDownload: vi.fn(),
+  gfsFetchFileBlob: vi.fn(),
   isSilentApiError: () => false,
   putGfsGrant: vi.fn(),
-  postGfsShare: vi.fn(),
 }))
 
 const mockApiGet = apiGet as unknown as ReturnType<typeof vi.fn>
@@ -35,8 +38,10 @@ const mockGetAdminTeams = vi.mocked(getAdminTeams)
 const mockGetHosts = vi.mocked(getHosts)
 const mockGetRecipes = vi.mocked(getRecipes)
 const mockPutGfsGrant = putGfsGrant as unknown as ReturnType<typeof vi.fn>
-const mockPostGfsShare = postGfsShare as unknown as ReturnType<typeof vi.fn>
 const mockGfsDownload = gfsDownload as unknown as ReturnType<typeof vi.fn>
+const mockGfsFetchFileBlob = gfsFetchFileBlob as unknown as ReturnType<typeof vi.fn>
+const mockCreateObjectUrl = vi.fn((_blob: Blob) => 'blob:gfs-image-preview')
+const mockRevokeObjectUrl = vi.fn()
 
 function renderBrowser() {
   return render(
@@ -46,16 +51,16 @@ function renderBrowser() {
   )
 }
 
-async function openUserDropdown() {
-  const subjectButton = await screen.findByRole('button', { name: 'User' })
-  await waitFor(() => expect(subjectButton).toHaveTextContent('Choose a user'))
-  fireEvent.click(subjectButton)
+async function openSubjectPicker() {
+  const subjectInput = await screen.findByRole('combobox', {
+    name: 'Add people, teams, agents, or workflows',
+  })
+  fireEvent.focus(subjectInput)
 }
 
-async function openTeamDropdown() {
-  const subjectButton = await screen.findByRole('button', { name: 'Team' })
-  await waitFor(() => expect(subjectButton).toHaveTextContent('Choose a team'))
-  fireEvent.click(subjectButton)
+function selectPermission(label: string) {
+  fireEvent.click(screen.getByRole('button', { name: 'Permissions' }))
+  fireEvent.click(screen.getByRole('menuitemcheckbox', { name: label }))
 }
 
 async function openResourceMenu(resourceName: string) {
@@ -89,8 +94,19 @@ describe('GfsBrowser', () => {
     mockGetHosts.mockReset()
     mockGetRecipes.mockReset()
     mockPutGfsGrant.mockReset()
-    mockPostGfsShare.mockReset()
     mockGfsDownload.mockReset()
+    mockGfsFetchFileBlob.mockReset()
+    mockCreateObjectUrl.mockReset()
+    mockCreateObjectUrl.mockReturnValue('blob:gfs-image-preview')
+    mockRevokeObjectUrl.mockReset()
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: mockCreateObjectUrl,
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: mockRevokeObjectUrl,
+    })
     mockGetAdminUsers.mockResolvedValue({
       items: [
         {
@@ -123,10 +139,48 @@ describe('GfsBrowser', () => {
     expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toBeTruthy()
     expect(screen.queryByText('Drive map')).toBeNull()
     await openResourceMenu('readme.md')
-    expect(
-      screen.getByRole('menuitem', { name: 'Copy GFS link' }).getAttribute('title')
-    ).toBe('gfs://main/r2')
+    expect(screen.getByRole('menuitem', { name: 'Copy GFS link' }).getAttribute('title')).toBe(
+      'gfs://main/r2'
+    )
     expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/tree', { drive: 'main' })
+  })
+
+  it('shows the subtle loader during initial load and folder navigation', async () => {
+    let resolveRoot: ((value: unknown) => void) | undefined
+    let resolveFolder: ((value: unknown) => void) | undefined
+    mockApiGet
+      .mockReturnValueOnce(
+        new Promise(resolve => {
+          resolveRoot = resolve
+        })
+      )
+      .mockReturnValueOnce(
+        new Promise(resolve => {
+          resolveFolder = resolve
+        })
+      )
+    renderBrowser()
+
+    const initialLoader = screen.getByRole('status', { name: 'Loading files' })
+    expect(initialLoader).toHaveClass('cu-gfs-loading')
+    expect(initialLoader.querySelectorAll('.cu-gfs-loading__dot')).toHaveLength(3)
+    expect(screen.queryByText('Loading resources...')).toBeNull()
+
+    await act(async () => {
+      resolveRoot?.({
+        items: [child('org', 'directory', 1)],
+        nextCursor: null,
+      })
+    })
+    fireEvent.click((await screen.findAllByRole('button', { name: 'org' }))[0])
+
+    expect(screen.getByRole('status', { name: 'Loading files' })).toHaveClass('cu-gfs-loading')
+    expect(screen.queryByRole('list', { name: 'Current folder resources' })).toBeNull()
+
+    await act(async () => {
+      resolveFolder?.({ items: [], nextCursor: null })
+    })
+    expect(await screen.findByText('No resources are visible in this folder.')).toBeTruthy()
   })
 
   it('shows operator CRUD controls and creates a folder in the current folder', async () => {
@@ -148,7 +202,7 @@ describe('GfsBrowser', () => {
 
     fireEvent.click(newFile)
     const uploadDialog = await screen.findByRole('dialog', { name: 'Upload file' })
-    expect(within(uploadDialog).getByText(/files around 110 MB/i)).toBeTruthy()
+    expect(within(uploadDialog).getByText(/limited to 10 MB per file/i)).toBeTruthy()
     expect(within(uploadDialog).getByText(/drag and drop, or click to browse/i)).toBeTruthy()
     fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Cancel' }))
 
@@ -216,6 +270,75 @@ describe('GfsBrowser', () => {
     )
   })
 
+  it('uploads dropped images and Markdown files into the current folder', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const rootRid = '11111111111111111111111111111111'
+    mockApiGet.mockResolvedValue({
+      rootResourceId: rootId,
+      items: [],
+      nextCursor: null,
+    })
+    mockApiSend.mockResolvedValue({ ok: true })
+    renderBrowser()
+    await screen.findByText('No resources are visible in this folder.')
+
+    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const image = new File(['operator image'], 'diagram.png', { type: 'image/png' })
+    const markdown = new File(['# Operator notes'], 'notes.md', { type: 'text/markdown' })
+    const dataTransfer = { dropEffect: 'none', files: [image, markdown], types: ['Files'] }
+
+    fireEvent.dragEnter(browser.querySelector('.cu-gfs-card')!, { dataTransfer })
+    const dropStatus = screen.getByRole('status')
+    expect(dropStatus).toHaveTextContent('Drop images or Markdown files to upload to main')
+    expect(dropStatus).toHaveClass('cu-gfs-drop-overlay')
+
+    fireEvent.drop(browser.querySelector('.cu-gfs-card')!, { dataTransfer })
+
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'POST',
+        `/api/v1/gfs/proxy/v1/resources/${rootRid}/children`,
+        {
+          name: 'diagram.png',
+          kind: 'file',
+          contentBase64: 'b3BlcmF0b3IgaW1hZ2U=',
+        }
+      )
+    )
+    expect(mockApiSend).toHaveBeenCalledWith(
+      'POST',
+      `/api/v1/gfs/proxy/v1/resources/${rootRid}/children`,
+      {
+        name: 'notes.md',
+        kind: 'file',
+        contentBase64: 'IyBPcGVyYXRvciBub3Rlcw==',
+      }
+    )
+  })
+
+  it('rejects oversized dropped files before reading or uploading them', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    mockApiGet.mockResolvedValue({
+      rootResourceId: rootId,
+      items: [],
+      nextCursor: null,
+    })
+    renderBrowser()
+    await screen.findByText('No resources are visible in this folder.')
+    const oversized = new File(['small fixture'], 'oversized.md', { type: 'text/markdown' })
+    Object.defineProperty(oversized, 'size', { value: GFS_FILE_UPLOAD_MAX_BYTES + 1 })
+    const arrayBuffer = vi.spyOn(oversized, 'arrayBuffer')
+
+    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    fireEvent.drop(browser.querySelector('.cu-gfs-card')!, {
+      dataTransfer: { dropEffect: 'none', files: [oversized], types: ['Files'] },
+    })
+
+    expect(await screen.findByText('GFS uploads are limited to 10 MB per file.')).toBeTruthy()
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(mockApiSend).not.toHaveBeenCalled()
+  })
+
   it('shortens oversized rename names before operator patches a resource', async () => {
     const rawRename = `operator-rename-${'very-long-'.repeat(32)}report.txt`
     const renamed = await normalizeGfsResourceName(rawRename)
@@ -277,7 +400,115 @@ describe('GfsBrowser', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('download unavailable')
   })
 
-  it('opens folders and replaces files from the resource menu', async () => {
+  it('previews supported image files from the file name and resource menu', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('avatar.PNG', 'file', 2), child('notes.txt', 'file', 3)],
+      nextCursor: null,
+    })
+    mockGfsFetchFileBlob.mockResolvedValue(new Blob(['image bytes']))
+    renderBrowser()
+
+    const previewTrigger = await screen.findByRole('button', { name: 'avatar.PNG' })
+    expect(screen.getByText('notes.txt').closest('button')).toBeNull()
+    fireEvent.click(previewTrigger)
+
+    const dialog = await screen.findByRole('dialog', { name: 'avatar.PNG' })
+    expect(
+      await within(dialog).findByRole('img', { name: 'Preview of avatar.PNG' })
+    ).toHaveAttribute('src', 'blob:gfs-image-preview')
+    expect(mockGfsFetchFileBlob).toHaveBeenCalledWith('r2')
+    expect((mockCreateObjectUrl.mock.calls[0]?.[0] as Blob).type).toBe('image/png')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close image preview' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'avatar.PNG' })).toBeNull())
+    expect(mockRevokeObjectUrl).toHaveBeenCalledWith('blob:gfs-image-preview')
+
+    await openResourceMenu('avatar.PNG')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Preview' }))
+    expect(await screen.findByRole('dialog', { name: 'avatar.PNG' })).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'avatar.PNG' })).toBeNull())
+
+    await openResourceMenu('notes.txt')
+    expect(screen.queryByRole('menuitem', { name: 'Preview' })).toBeNull()
+  })
+
+  it('surfaces image preview loading failures inside the modal', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('diagram.svg', 'file', 4)],
+      nextCursor: null,
+    })
+    mockGfsFetchFileBlob.mockRejectedValueOnce(new Error('preview unavailable'))
+    renderBrowser()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'diagram.svg' }))
+    const dialog = await screen.findByRole('dialog', { name: 'diagram.svg' })
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('preview unavailable')
+  })
+
+  it('rejects oversized image previews before downloading them', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [{ ...child('oversized.png', 'file', 4), bytes: GFS_IMAGE_PREVIEW_MAX_BYTES + 1 }],
+      nextCursor: null,
+    })
+    renderBrowser()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'oversized.png' }))
+    const dialog = await screen.findByRole('dialog', { name: 'oversized.png' })
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'Image previews are limited to 10 MB.'
+    )
+    expect(mockGfsFetchFileBlob).not.toHaveBeenCalled()
+  })
+
+  it('previews Markdown files with safe vanilla rendering', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('README.md', 'file', 5)],
+      nextCursor: null,
+    })
+    mockGfsFetchFileBlob.mockResolvedValueOnce(
+      new Blob([
+        '# Project guide\n\nUse **safe rendering**.\n\n- First\n- Second\n\n[Unsafe](javascript:alert)\n\n<script>alert("no")</script>',
+      ])
+    )
+    renderBrowser()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'README.md' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'README.md' })
+    expect(
+      await within(dialog).findByRole('heading', { name: 'Project guide', level: 1 })
+    ).toBeTruthy()
+    expect(within(dialog).getByText('safe rendering').tagName).toBe('STRONG')
+    expect(within(dialog).getAllByRole('listitem')).toHaveLength(2)
+    expect(within(dialog).getByText('Unsafe').closest('a')).toBeNull()
+    expect(dialog.querySelector('script')).toBeNull()
+    expect(mockGfsFetchFileBlob).toHaveBeenCalledWith('r5')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close Markdown preview' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'README.md' })).toBeNull())
+
+    await openResourceMenu('README.md')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Preview' }))
+    expect(await screen.findByRole('dialog', { name: 'README.md' })).toBeTruthy()
+  })
+
+  it('rejects oversized Markdown previews before downloading them', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [{ ...child('oversized.md', 'file', 5), bytes: GFS_MARKDOWN_PREVIEW_MAX_BYTES + 1 }],
+      nextCursor: null,
+    })
+    renderBrowser()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'oversized.md' }))
+    const dialog = await screen.findByRole('dialog', { name: 'oversized.md' })
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'Markdown previews are limited to 2 MB.'
+    )
+    expect(mockGfsFetchFileBlob).not.toHaveBeenCalled()
+  })
+
+  it('opens folders from their name and replaces files from the resource menu', async () => {
     mockApiGet
       .mockResolvedValueOnce({
         items: [child('org', 'directory', 1), child('report.md', 'file', 2)],
@@ -293,7 +524,8 @@ describe('GfsBrowser', () => {
     renderBrowser()
 
     await openResourceMenu('org')
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open folder' }))
+    expect(screen.queryByRole('menuitem', { name: 'Open folder' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'org' }))
     await waitFor(() =>
       expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resources/id-1/children', {
         drive: 'main',
@@ -310,11 +542,10 @@ describe('GfsBrowser', () => {
     })
 
     await waitFor(() =>
-      expect(mockApiSend).toHaveBeenCalledWith(
-        'PUT',
-        '/api/v1/gfs/proxy/v1/resources/r2/content',
-        { contentBase64: 'cmVwbGFjZW1lbnQ=', ifMatch: 0 }
-      )
+      expect(mockApiSend).toHaveBeenCalledWith('PUT', '/api/v1/gfs/proxy/v1/resources/r2/content', {
+        contentBase64: 'cmVwbGFjZW1lbnQ=',
+        ifMatch: 0,
+      })
     )
   })
 
@@ -329,7 +560,7 @@ describe('GfsBrowser', () => {
     const manageItem = screen.getByRole('menuitem', { name: 'Manage access' })
     await waitFor(() => expect(document.activeElement).toBe(manageItem))
     fireEvent.keyDown(manageItem, { key: 'ArrowDown' })
-    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Download' }))
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Preview' }))
     fireEvent.keyDown(document.activeElement!, { key: 'End' })
     expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Delete' }))
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
@@ -401,14 +632,29 @@ describe('GfsBrowser', () => {
     await openResourceMenu('obsolete.md')
     fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
     const confirmation = await screen.findByRole('alertdialog', { name: 'Delete resource' })
-    fireEvent.click(within(confirmation).getByRole('button', { name: 'Delete' }))
+    expect(within(confirmation).getByText('Delete obsolete.md?')).toBeTruthy()
+    expect(within(confirmation).getByText('This action cannot be undone.')).toBeTruthy()
+    expect(screen.queryByText('Access')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Replace file' })).toBeNull()
+    fireEvent.click(within(confirmation).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('alertdialog', { name: 'Delete resource' })).toBeNull()
+    )
+    expect(screen.queryByRole('dialog', { name: 'Manage file obsolete.md' })).toBeNull()
+
+    await openResourceMenu('obsolete.md')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    fireEvent.click(
+      within(await screen.findByRole('alertdialog', { name: 'Delete resource' })).getByRole(
+        'button',
+        { name: 'Delete' }
+      )
+    )
 
     await waitFor(() =>
-      expect(mockApiSend).toHaveBeenCalledWith(
-        'DELETE',
-        '/api/v1/gfs/proxy/v1/resources/r4',
-        { ifMatch: 0 }
-      )
+      expect(mockApiSend).toHaveBeenCalledWith('DELETE', '/api/v1/gfs/proxy/v1/resources/r4', {
+        ifMatch: 0,
+      })
     )
   })
 
@@ -427,14 +673,24 @@ describe('GfsBrowser', () => {
     await openManage('report.md')
     await waitFor(() => expect(mockGetAdminUsers).toHaveBeenCalledWith(''))
     await waitFor(() => expect(mockGetAdminTeams).toHaveBeenCalled())
-    expect(screen.getByLabelText('Subject type')).toHaveValue('user')
-    await openUserDropdown()
-    expect(
-      within(screen.getByRole('listbox')).queryByRole('option', { name: 'Operator' })
-    ).toBeNull()
+    const manageDialog = screen.getByRole('dialog', { name: 'Manage file report.md' })
+    const manageMenuTrigger = within(manageDialog).getByRole('button', {
+      name: 'Actions for report.md',
+    })
+    expect(within(manageDialog).getByRole('button', { name: 'Replace file' })).toBeTruthy()
+    expect(within(manageDialog).queryByText('Quick actions')).toBeNull()
+    fireEvent.click(manageMenuTrigger)
+    const manageMenu = within(manageDialog).getByRole('menu')
+    expect(within(manageMenu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
+    expect(within(manageMenu).getByRole('menuitem', { name: 'Copy GFS link' })).toBeTruthy()
+    expect(within(manageMenu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+    expect(within(manageMenu).getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
+    expect(within(manageMenu).queryByRole('menuitem', { name: 'Manage access' })).toBeNull()
+    fireEvent.click(manageMenuTrigger)
+    await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'read' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Grant' }))
+    selectPermission('Read')
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
 
     // Confirm in the dialog (its confirm button shares the "Grant" label).
     const dialog = await screen.findByRole('alertdialog')
@@ -459,29 +715,31 @@ describe('GfsBrowser', () => {
 
     await openManage('report.md')
     await screen.findByText('Some grant subjects could not be loaded: agents, workflows')
-    await openUserDropdown()
+    await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'read' }))
+    selectPermission('Read')
 
-    expect(screen.getByRole('button', { name: 'Grant' })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Grant access' })).not.toBeDisabled()
   })
 
-  it('includes descendants for directory grants and shares when requested', async () => {
+  it('includes descendants for directory grants while keeping share creation hidden', async () => {
     mockApiGet.mockResolvedValueOnce({
       items: [child('team-folder', 'directory', 2)],
       nextCursor: null,
     })
     mockPutGfsGrant.mockResolvedValueOnce({ ok: true })
-    mockPostGfsShare.mockResolvedValueOnce({ ok: true })
     renderBrowser()
 
     await openManage('team-folder')
+    expect(screen.queryByText('Manage folder')).toBeNull()
     await waitFor(() => expect(mockGetAdminUsers).toHaveBeenCalledWith(''))
     expect(await screen.findByRole('checkbox', { name: /Include descendants/ })).toBeChecked()
-    await openUserDropdown()
+    expect(screen.getByText('Apply this grant or share to the full folder tree.')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Create share' })).toBeNull()
+    await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'read' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Grant' }))
+    selectPermission('Read')
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
     fireEvent.click(
       within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Grant' })
     )
@@ -491,23 +749,6 @@ describe('GfsBrowser', () => {
         expect.objectContaining({
           resourceId: 'id-2',
           inherit: true,
-        })
-      )
-    )
-
-    await openUserDropdown()
-    fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'read' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Create share' }))
-    fireEvent.click(
-      within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Create share' })
-    )
-
-    await waitFor(() =>
-      expect(mockPostGfsShare).toHaveBeenCalledWith(
-        expect.objectContaining({
-          resourceId: 'id-2',
-          includeDescendants: true,
         })
       )
     )
@@ -521,20 +762,13 @@ describe('GfsBrowser', () => {
     await openManage('report.md')
     await waitFor(() => expect(mockGetAdminUsers).toHaveBeenCalledWith(''))
     await waitFor(() => expect(mockGetAdminTeams).toHaveBeenCalled())
-    expect(screen.getByLabelText('Subject type')).toHaveValue('user')
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'User' })).toHaveTextContent('Choose a user')
-    )
     expect(screen.queryByLabelText('Subject ID')).toBeNull()
 
-    fireEvent.change(screen.getByLabelText('Subject type'), { target: { value: 'team' } })
-    await openTeamDropdown()
-    expect(
-      within(screen.getByRole('listbox')).queryByRole('option', { name: 'Ada Lovelace' })
-    ).toBeNull()
+    await openSubjectPicker()
+    expect(within(screen.getByRole('listbox')).getByRole('option', { name: 'Ada Lovelace' }))
     fireEvent.click(await screen.findByRole('option', { name: 'Research' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'read' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Grant' }))
+    selectPermission('Read')
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
     fireEvent.click(
       within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Grant' })
     )
@@ -547,16 +781,10 @@ describe('GfsBrowser', () => {
       )
     )
 
-    await waitFor(() => expect(screen.getByLabelText('Subject type')).toHaveValue('user'))
-    fireEvent.change(screen.getByLabelText('Subject type'), { target: { value: 'operator' } })
-    expect(screen.queryByRole('button', { name: 'User' })).toBeNull()
-    expect(
-      screen.getByText(
-        'The intrinsic cluster operator subject will receive the selected permissions.'
-      )
-    ).toBeTruthy()
-    fireEvent.click(screen.getByRole('checkbox', { name: 'read' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Grant' }))
+    await openSubjectPicker()
+    fireEvent.click(await screen.findByRole('option', { name: 'Operator' }))
+    selectPermission('Read')
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
     fireEvent.click(
       within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Grant' })
     )
@@ -580,10 +808,10 @@ describe('GfsBrowser', () => {
     await openManage('report.md')
     await waitFor(() => expect(mockGetAdminUsers).toHaveBeenCalledWith(''))
     await waitFor(() => expect(mockGetAdminTeams).toHaveBeenCalled())
-    await openUserDropdown()
+    await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'write' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Grant' }))
+    selectPermission('Write')
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Grant' }))
 

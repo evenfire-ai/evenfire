@@ -139,7 +139,21 @@ describe('McpServerTable — search filter by condition text', () => {
 })
 
 describe('McpServerTable — connector access summaries', () => {
-  it('renders agent initials and overflow count for connector access', () => {
+  it('exposes expandable rows as named buttons with their current state', () => {
+    const items = [makeItem({ name: 'airtable-server' })]
+    render(<McpServerTable items={items} />)
+
+    const row = screen.getByRole('button', { name: 'Expand connector airtable-server' })
+    expect(row).toHaveAttribute('aria-expanded', 'false')
+
+    fireEvent.click(row)
+
+    expect(
+      screen.getByRole('button', { name: 'Collapse connector airtable-server' })
+    ).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('renders full principal names as chips in the expanded details', () => {
     const items = [makeItem({ name: 'airtable-server' })]
     render(
       <McpServerTable
@@ -161,20 +175,28 @@ describe('McpServerTable — connector access summaries', () => {
       />
     )
 
-    expect(screen.getByLabelText('6 agents with access')).toBeInTheDocument()
-    expect(screen.queryByText('6 agents')).not.toBeInTheDocument()
-    expect(screen.getByText('+1')).toBeInTheDocument()
-    expect(screen.getByLabelText('6 agents with access')).toHaveAttribute(
-      'data-tooltip',
-      'Agents: agent-alpha, bravo, charlie, delta, echo, foxtrot\nUsers: Ada Lovelace\nTeams: Research'
-    )
+    fireEvent.click(screen.getByText('airtable-server').closest('tr')!)
+
+    for (const label of [
+      'agent-alpha',
+      'bravo',
+      'charlie',
+      'delta',
+      'echo',
+      'foxtrot',
+      'Ada Lovelace',
+      'Research',
+    ]) {
+      expect(screen.getByText(label)).toBeInTheDocument()
+    }
   })
 
-  it('renders an empty access state when no agents are mapped', () => {
+  it('renders an empty access state when no principals are mapped', () => {
     const items = [makeItem({ name: 'unused-server' })]
     render(<McpServerTable items={items} />)
 
-    expect(screen.getByText('No agents')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('unused-server').closest('tr')!)
+    expect(screen.getByText('No access assigned')).toBeInTheDocument()
   })
 
   it('filters rows by agent, user, and team access labels', () => {

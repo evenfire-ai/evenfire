@@ -379,7 +379,7 @@ describe('validateMcpServerSpec', () => {
 
 describe('plugin image allowlist pre-check (2.3)', () => {
   const opts = {
-    allowedImagePrefixes: ['example.com/', 'clerum/'],
+    allowedImagePrefixes: ['registry.evenfire.ai/', 'clerum/'],
     enforceImageAllowlist: true,
   }
 
@@ -388,13 +388,13 @@ describe('plugin image allowlist pre-check (2.3)', () => {
     expect(errors.some(e => e.field === 'spec.image')).toBe(true)
   })
   it('enforce: local allowed image → no image error', () => {
-    const errors = validateMcpServerSpec({ image: 'example.com/a/x:1' }, opts)
+    const errors = validateMcpServerSpec({ image: 'registry.evenfire.ai/a/x:1' }, opts)
     expect(errors.some(e => e.field === 'spec.image')).toBe(false)
   })
   it('audit (enforce off): disallowed image → no image error', () => {
     const errors = validateMcpServerSpec(
       { image: 'docker.io/evil/x:1' },
-      { allowedImagePrefixes: ['example.com/'], enforceImageAllowlist: false }
+      { allowedImagePrefixes: ['registry.evenfire.ai/'], enforceImageAllowlist: false }
     )
     expect(errors.some(e => e.field === 'spec.image')).toBe(false)
   })

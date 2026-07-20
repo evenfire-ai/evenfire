@@ -36,6 +36,10 @@ function defaultScopesForRole(role: TeamRole): RpcScope[] {
       'host:task:read',
       'host:approval:write',
       'host:session:read',
+      // Per-session model selection (spec §8.2): granted to every role. The
+      // blast radius of a swap is the caller's own chat session; the operator's
+      // cost control is the model allowlist, not this scope.
+      'host:model:write',
       'desktop:view',
     ]
   }

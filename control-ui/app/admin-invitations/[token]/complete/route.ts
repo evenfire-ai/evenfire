@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { verifyControlAdminInvitationCsrfToken } from '@lib/controlAdminCsrf'
 import { completeControlAdminInvitationServer } from '@lib/controlAdminPublicServerApi'
 import { sameOriginRedirect } from '@lib/sameOriginRedirect'
@@ -31,12 +32,12 @@ function invitationPath(
   if (options.field) searchParams.set('field', options.field)
   if (options.username) searchParams.set('username', options.username)
   if (options.separateDesktopPassword) searchParams.set('separateDesktopPassword', 'true')
-  return `/admin-invitations/${encodeURIComponent(token)}?${searchParams}`
+  return CONTROL_ROUTES.adminInvitations.detail(token, Object.fromEntries(searchParams))
 }
 
 function setupCompletePath(login: string): string {
   const searchParams = new URLSearchParams({ login })
-  return `/admin-invitations/setup-complete?${searchParams}`
+  return CONTROL_ROUTES.adminInvitations.setupComplete(Object.fromEntries(searchParams))
 }
 
 export async function POST(req: NextRequest, context: { params: Promise<{ token?: string }> }) {

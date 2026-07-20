@@ -8,11 +8,14 @@ import {
   getTeamById,
   listAllTeams,
   listMembers,
+  softDeleteMember,
+  updateMemberRole,
 } from '../src/services/directory/index.js'
 
 const dbMocks = vi.hoisted(() => ({
   poolQuery: vi.fn(),
   txQuery: vi.fn(),
+  appendPermissionEvents: vi.fn(),
 }))
 
 vi.mock('../src/db.js', () => ({
@@ -23,10 +26,16 @@ vi.mock('../src/db.js', () => ({
     work({ query: dbMocks.txQuery }),
 }))
 
+vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
+  appendControlApiPermissionEventsInTransaction: dbMocks.appendPermissionEvents,
+}))
+
 describe('services/directory team management unit tests', () => {
   beforeEach(() => {
     dbMocks.poolQuery.mockReset()
     dbMocks.txQuery.mockReset()
+    dbMocks.appendPermissionEvents.mockReset()
+    dbMocks.appendPermissionEvents.mockResolvedValue('operation-1')
   })
 
   it('listAllTeams maps member counts to numbers', async () => {
@@ -102,12 +111,12 @@ describe('services/directory team management unit tests', () => {
   })
 
   it('addMemberToTeam upserts and returns membership row', async () => {
-    dbMocks.poolQuery.mockResolvedValue({
+    dbMocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }).mockResolvedValueOnce({
       rows: [{ team_id: 'team-1', user_id: 'user-1', role: 'member', status: 'active' }],
       rowCount: 1,
     })
 
-    const result = await addMemberToTeam('team-1', 'user-1', 'member')
+    const result = await addMemberToTeam('team-1', 'user-1', 'admin-1', 'member')
 
     expect(result).toEqual({
       team_id: 'team-1',
@@ -115,9 +124,77 @@ describe('services/directory team management unit tests', () => {
       role: 'member',
       status: 'active',
     })
-    expect(dbMocks.poolQuery).toHaveBeenCalledWith(
+    expect(dbMocks.txQuery).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO team_members'),
       ['team-1', 'user-1', 'member']
+    )
+    expect(dbMocks.appendPermissionEvents).toHaveBeenCalledWith(
+      expect.objectContaining({ query: dbMocks.txQuery }),
+      expect.objectContaining({
+        operatorSub: 'admin-1',
+        changes: [
+          expect.objectContaining({
+            action: 'grant',
+            resourceClass: 'team_membership',
+            subject: { kind: 'user', id: 'user-1' },
+          }),
+        ],
+      })
+    )
+  })
+
+  it('records role replacement as a revoke and grant for the same target user', async () => {
+    dbMocks.txQuery
+      .mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ team_id: 'team-1', user_id: 'user-1', role: 'admin', status: 'active' }],
+        rowCount: 1,
+      })
+
+    await updateMemberRole('team-1', 'user-1', 'admin', 'operator-1')
+
+    expect(dbMocks.appendPermissionEvents).toHaveBeenCalledWith(
+      expect.objectContaining({ query: dbMocks.txQuery }),
+      expect.objectContaining({
+        operatorSub: 'operator-1',
+        changes: [
+          expect.objectContaining({
+            action: 'revoke',
+            resourceRef: 'team_membership:team-1:role:member',
+            subject: { kind: 'user', id: 'user-1' },
+          }),
+          expect.objectContaining({
+            action: 'grant',
+            resourceRef: 'team_membership:team-1:role:admin',
+            subject: { kind: 'user', id: 'user-1' },
+          }),
+        ],
+      })
+    )
+  })
+
+  it('records membership removal only when an active membership was deleted', async () => {
+    dbMocks.txQuery.mockResolvedValueOnce({
+      rows: [{ team_id: 'team-1', user_id: 'user-1', role: 'member', status: 'deleted' }],
+      rowCount: 1,
+    })
+
+    await expect(softDeleteMember('team-1', 'user-1', 'operator-1')).resolves.toEqual(
+      expect.objectContaining({ status: 'deleted' })
+    )
+    expect(dbMocks.appendPermissionEvents).toHaveBeenCalledWith(
+      expect.objectContaining({ query: dbMocks.txQuery }),
+      expect.objectContaining({
+        operatorSub: 'operator-1',
+        changes: [
+          expect.objectContaining({
+            action: 'revoke',
+            resourceClass: 'team_membership',
+            subject: { kind: 'user', id: 'user-1' },
+            status: 'membership_removed',
+          }),
+        ],
+      })
     )
   })
 

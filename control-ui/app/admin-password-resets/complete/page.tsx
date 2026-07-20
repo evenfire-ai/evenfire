@@ -1,4 +1,5 @@
 import Image from 'next/image'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { ClearAdminToken } from './ClearAdminToken'
 
 interface AdminPasswordResetCompletePageProps {
@@ -10,7 +11,7 @@ export default async function AdminPasswordResetCompletePage({
 }: AdminPasswordResetCompletePageProps) {
   const params = await searchParams
   const login = String(params.login || '')
-  const loginHref = login ? `/?login=${encodeURIComponent(login)}` : '/'
+  const loginHref = CONTROL_ROUTES.loginWith({ login })
 
   return (
     <main className="cu-app cu-app--auth">

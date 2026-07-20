@@ -1,0 +1,3 @@
+# public sequence<TAB>trace_maintenance_runtime access profile
+governed_event_stream_stream_sequence_seq	consume
+infrastructure_telemetry_events_ingest_sequence_seq	consume

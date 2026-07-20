@@ -27,6 +27,7 @@ function clearEnv() {
   delete process.env.MCP_HOST_TOKEN_FILE
   delete process.env.CLERUM_SNIPPET_RUNNER_URL
   delete process.env.SNIPPET_RUNNER_TOKEN_FILE
+  delete process.env.CLERUM_WORKFLOW_RUN_ID
   delete process.env.CLERUM_CORRELATION_ID
   delete process.env.CLERUM_SIGNAL_POLL_INTERVAL_MS
   delete process.env.CLERUM_SDK_REST_PORT
@@ -93,17 +94,64 @@ describe('ConfigLoader', () => {
       expect(cfg.tokenProvider.getMcpHostToken).toBeUndefined()
     })
 
-    it('uses provided CLERUM_CORRELATION_ID', async () => {
+    it('uses provided CLERUM_CORRELATION_ID for legacy non-workflow callers', async () => {
       await setRequiredEnv()
       process.env.CLERUM_CORRELATION_ID = 'corr-123'
       const loader = new ConfigLoader()
       expect(loader.getConfig().correlationId).toBe('corr-123')
     })
 
-    it('generates UUID when CLERUM_CORRELATION_ID absent', async () => {
+    it('generates UUID when CLERUM_CORRELATION_ID is absent for legacy non-workflow callers', async () => {
       await setRequiredEnv()
       const loader = new ConfigLoader()
       expect(loader.getConfig().correlationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/)
+    })
+
+    it('uses the workflow run id as the workflow correlation id when both match', async () => {
+      await setRequiredEnv()
+      const runId = '00000000-0000-4000-8000-000000000001'
+      process.env.CLERUM_WORKFLOW_RUN_ID = runId
+      process.env.CLERUM_CORRELATION_ID = runId
+
+      expect(new ConfigLoader().getConfig().correlationId).toBe(runId)
+    })
+
+    it('reconstructs the immutable workflow trace context on a cold config load', async () => {
+      await setRequiredEnv()
+      const runId = '00000000-0000-4000-8000-000000000001'
+      process.env.CLERUM_WORKFLOW_RUN_ID = runId
+      process.env.CLERUM_CORRELATION_ID = runId
+
+      const first = new ConfigLoader().getConfig().traceContext
+      const coldLoaded = new ConfigLoader().getConfig().traceContext
+
+      expect(first).toEqual({ origin: 'workflow_runtime', runId, correlationId: runId })
+      expect(coldLoaded).toEqual(first)
+    })
+
+    it('fails closed when a workflow run id is missing', async () => {
+      await setRequiredEnv()
+      process.env.CLERUM_WORKFLOW_RUN_ID = ' '
+      process.env.CLERUM_CORRELATION_ID = '00000000-0000-4000-8000-000000000001'
+
+      expect(() => new ConfigLoader()).toThrow('CLERUM_WORKFLOW_RUN_ID')
+    })
+
+    it('fails closed when workflow correlation id is missing', async () => {
+      await setRequiredEnv()
+      process.env.CLERUM_WORKFLOW_RUN_ID = '00000000-0000-4000-8000-000000000001'
+
+      expect(() => new ConfigLoader()).toThrow('CLERUM_CORRELATION_ID')
+    })
+
+    it('fails closed when workflow run id and correlation id differ', async () => {
+      await setRequiredEnv()
+      process.env.CLERUM_WORKFLOW_RUN_ID = '00000000-0000-4000-8000-000000000001'
+      process.env.CLERUM_CORRELATION_ID = '00000000-0000-4000-8000-000000000002'
+
+      expect(() => new ConfigLoader()).toThrow(
+        'CLERUM_CORRELATION_ID must match CLERUM_WORKFLOW_RUN_ID for workflow execution'
+      )
     })
 
     it('defaults signalPollIntervalMs to 5000', async () => {

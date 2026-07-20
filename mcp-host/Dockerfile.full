@@ -1,21 +1,26 @@
 # MCP Host Dockerfile — Full variant
 # Base: node:24 (full Debian, glibc + apt + python3/gcc/make/curl/perl, ~400-500MB)
 # Use case: full dev workstation for agent shell execution
+#
+# BUILD CONTEXT = repo root (see Dockerfile). COPY packages/ alongside mcp-host/.
+#
 # Pinned to Node 24.16.0 by digest: 24.17.0's undici bump regresses node-fetch@2
 # (ERR_STREAM_PREMATURE_CLOSE). Keep the runtime frozen.
 FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a AS builder
 
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+# Shared prebuilt data-only package (no build step — ships index.cjs + .d.ts).
+COPY packages/llm-providers ./packages/llm-providers
 
-# Install dependencies
+# Install dependencies (file: dep resolves to ../packages/llm-providers)
+COPY mcp-host/package*.json ./mcp-host/
+WORKDIR /app/mcp-host
 RUN npm ci
 
 # Copy source code
-COPY tsconfig.json tsconfig.build.json ./
-COPY src ./src
+COPY mcp-host/tsconfig.json mcp-host/tsconfig.build.json ./
+COPY mcp-host/src ./src
 
 # Build TypeScript
 RUN npm run build
@@ -30,12 +35,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy package files and install production dependencies only
-COPY package*.json ./
+# Copy the shared package + package files, install production dependencies only
+COPY packages/llm-providers ./packages/llm-providers
+COPY mcp-host/package*.json ./mcp-host/
+WORKDIR /app/mcp-host
 RUN npm ci --only=production
 
 # Copy built code
-COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/mcp-host/dist ./dist
 
 # Run as non-root user
 RUN groupadd -g 1001 nodejs && useradd -u 1001 -g nodejs -m nodejs

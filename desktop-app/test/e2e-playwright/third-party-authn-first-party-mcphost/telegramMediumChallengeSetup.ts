@@ -61,5 +61,5 @@ export async function verifyTelegramMediumWithFakeProvider(
   const challenge = await createTelegramProviderEventChallenge(sessionToken)
   const replyCount = await telegramReplyItems(page).count()
   await sendTelegramClientMessage(page, `/verify ${challenge.code}`, messageId, identity)
-  await waitForTelegramReplyTextAfter(page, replyCount, /Telegram identity connected/)
+  await waitForTelegramReplyTextAfter(page, replyCount, /Telegram identity confirmed/)
 }

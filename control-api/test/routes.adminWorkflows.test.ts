@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { createWorkflowsAdminRouter } from '../src/routes/admin/workflows/index.js'
 import { createMcpHostWorkflowRoutes } from '../src/routes/mcp-host/workflows/index.js'
+import { currentAdministrativeRequestContext } from '../src/services/tracing/adminOperationContext.js'
 import { MockGateway } from './mockGateway.js'
 
 const RECIPE_NS = 'sandbox-recipes'
@@ -21,13 +22,20 @@ const mockListWorkflowGrants = vi.fn()
 const mockSetWorkflowGrants = vi.fn()
 const mockListTeamWorkflowGrants = vi.fn()
 const mockSetTeamWorkflowGrants = vi.fn()
+const mockAppendControlApiPermissionEvents = vi.fn()
 
 vi.mock('../src/db.js', () => ({
   pool: {
     query: (...args: unknown[]) => mockPoolQuery(...args),
     connect: (...args: unknown[]) => mockPoolConnect(...args),
   },
-  withTransaction: vi.fn(),
+  withTransaction: (work: (db: { query: typeof mockPoolQuery }) => unknown) =>
+    work({ query: mockPoolQuery }),
+}))
+
+vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
+  appendControlApiPermissionEventsInTransaction: (...args: unknown[]) =>
+    mockAppendControlApiPermissionEvents(...args),
 }))
 
 vi.mock('../src/utils/auth/mcpHostJwtToken.js', () => ({
@@ -193,6 +201,8 @@ describe('routes/admin/workflows', () => {
     mockSetWorkflowGrants.mockReset()
     mockListTeamWorkflowGrants.mockReset()
     mockSetTeamWorkflowGrants.mockReset()
+    mockAppendControlApiPermissionEvents.mockReset()
+    mockAppendControlApiPermissionEvents.mockResolvedValue('operation-id')
     vi.unstubAllGlobals()
     gateway = new MockGateway(RECIPE_NS)
 
@@ -986,7 +996,7 @@ describe('routes/admin/workflows', () => {
         type: 'admin-ui',
         adminUserId: ADMIN_CLAIMS.sub,
       })
-      expect(res.body.approvalRequestId).toBeUndefined()
+      expect(res.body.approvalRequestId).toBeNull()
     })
 
     it('rejects operator runs before transport MCP runtime endpoints are ready', async () => {
@@ -1211,6 +1221,7 @@ describe('routes/admin/workflows', () => {
       expect(res.body.lastRun).toEqual({
         id: 'archived-run-id',
         source: 'audit',
+        approvalRequestId: null,
         phase: 'Succeeded',
         triggeredAt: '2026-04-18T09:00:00.000Z',
         startedAt: '2026-04-18T09:00:05.000Z',
@@ -1370,6 +1381,7 @@ describe('routes/admin/workflows', () => {
       expect(res.body.items[0]).toEqual({
         id: 'live-run-id',
         source: 'live',
+        approvalRequestId: null,
         phase: 'Running',
         triggeredAt: '2026-04-18T10:00:00.000Z',
         startedAt: '2026-04-18T10:00:10.000Z',
@@ -1381,6 +1393,7 @@ describe('routes/admin/workflows', () => {
       expect(res.body.items[1]).toEqual({
         id: 'audit-run-id',
         source: 'audit',
+        approvalRequestId: null,
         phase: 'Succeeded',
         triggeredAt: '2026-04-18T09:00:00.000Z',
         startedAt: '2026-04-18T09:00:05.000Z',
@@ -1410,6 +1423,61 @@ describe('routes/admin/workflows', () => {
         .expect(200)
 
       expect(res.body).toEqual({ items: [], count: 0 })
+    })
+
+    it('returns a bounded canonical run detail with the approval history reference', async () => {
+      await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
+      mockPoolQuery.mockResolvedValueOnce({
+        rows: [
+          {
+            run_id: '00000000-0000-4000-8000-000000000456',
+            recipe_namespace: RECIPE_NS,
+            recipe_name: 'test-recipe',
+            phase: 'Succeeded',
+            actor_type: 'admin',
+            actor_id: ADMIN_CLAIMS.sub,
+            child_recipe_name: null,
+            child_recipe_namespace: null,
+            approval_request_id: '00000000-0000-4000-8000-000000000123',
+            created_at: '2026-04-18T10:00:00.000Z',
+            started_at: '2026-04-18T10:00:01.000Z',
+            completed_at: '2026-04-18T10:00:02.000Z',
+          },
+        ],
+        rowCount: 1,
+      })
+
+      const app = makeApp(gateway)
+      const res = await request(app)
+        .get(`/admin/workflows/${RECIPE_NS}/test-recipe/runs/00000000-0000-4000-8000-000000000456`)
+        .set('Cookie', 'control_ui_admin_session=admin-token')
+        .expect(200)
+
+      expect(res.body).toEqual({
+        id: '00000000-0000-4000-8000-000000000456',
+        source: 'live',
+        approvalRequestId: '00000000-0000-4000-8000-000000000123',
+        phase: 'Succeeded',
+        triggeredAt: '2026-04-18T10:00:00.000Z',
+        startedAt: '2026-04-18T10:00:01.000Z',
+        completedAt: '2026-04-18T10:00:02.000Z',
+        message: null,
+        actor: { type: 'admin-ui', adminUserId: ADMIN_CLAIMS.sub },
+        executionRef: null,
+      })
+      expect(JSON.stringify(res.body)).not.toContain('prompt')
+    })
+
+    it('rejects a malformed workflow run detail id without querying Postgres', async () => {
+      await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
+
+      const app = makeApp(gateway)
+      await request(app)
+        .get(`/admin/workflows/${RECIPE_NS}/test-recipe/runs/not-a-uuid`)
+        .set('Cookie', 'control_ui_admin_session=admin-token')
+        .expect(400)
+
+      expect(mockPoolQuery).not.toHaveBeenCalled()
     })
   })
 
@@ -1991,10 +2059,16 @@ describe('routes/admin/workflows', () => {
         rows: [{ id: VALID_UUID_A }, { id: VALID_UUID_B }],
         rowCount: 2,
       })
-      mockSetWorkflowGrants.mockResolvedValueOnce({
-        userIds: [VALID_UUID_A, VALID_UUID_B],
-        added: [VALID_UUID_B],
-        removed: [],
+      mockSetWorkflowGrants.mockImplementationOnce(async () => {
+        expect(currentAdministrativeRequestContext()).toEqual({
+          operatorSub: ADMIN_CLAIMS.sub,
+          requestId: null,
+        })
+        return {
+          userIds: [VALID_UUID_A, VALID_UUID_B],
+          added: [VALID_UUID_B],
+          removed: [],
+        }
       })
       const app = makeApp(gateway)
       const res = await request(app)
@@ -2261,12 +2335,25 @@ describe('routes/admin/workflows', () => {
       expect(String(mockPoolQuery.mock.calls[2]?.[0])).toContain(
         'INSERT INTO workflow_recipe_allowed_teams_audit'
       )
-      expect(mockPoolQuery.mock.calls[2]?.[1]).toEqual([
+      expect(mockPoolQuery.mock.calls[2]?.[1]?.slice(0, 4)).toEqual([
         RECIPE_NS,
         'test-recipe',
         VALID_TEAM_UUID,
         ADMIN_CLAIMS.sub,
       ])
+      expect(mockAppendControlApiPermissionEvents).toHaveBeenCalledWith(
+        expect.objectContaining({ query: mockPoolQuery }),
+        expect.objectContaining({
+          operatorSub: ADMIN_CLAIMS.sub,
+          changes: [
+            expect.objectContaining({
+              action: 'grant',
+              resourceClass: 'workflow_approval_target',
+              subject: { kind: 'team', id: VALID_TEAM_UUID },
+            }),
+          ],
+        })
+      )
     })
 
     it('validates team id format before revoking from the approval allowlist', async () => {
@@ -2298,12 +2385,25 @@ describe('routes/admin/workflows', () => {
       expect(String(mockPoolQuery.mock.calls[1]?.[0])).toContain(
         'INSERT INTO workflow_recipe_allowed_teams_audit'
       )
-      expect(mockPoolQuery.mock.calls[1]?.[1]).toEqual([
+      expect(mockPoolQuery.mock.calls[1]?.[1]?.slice(0, 4)).toEqual([
         RECIPE_NS,
         'test-recipe',
         VALID_TEAM_UUID,
         ADMIN_CLAIMS.sub,
       ])
+      expect(mockAppendControlApiPermissionEvents).toHaveBeenCalledWith(
+        expect.objectContaining({ query: mockPoolQuery }),
+        expect.objectContaining({
+          operatorSub: ADMIN_CLAIMS.sub,
+          changes: [
+            expect.objectContaining({
+              action: 'revoke',
+              resourceClass: 'workflow_approval_target',
+              subject: { kind: 'team', id: VALID_TEAM_UUID },
+            }),
+          ],
+        })
+      )
     })
 
     it('returns removed=false when revoking a team that is not allowlisted', async () => {

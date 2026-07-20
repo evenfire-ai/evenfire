@@ -1,6 +1,7 @@
 import { config } from './config.js'
-import { initDb, pool } from './db.js'
+import { assertDbReady, pool } from './db.js'
 import { K8sGateway } from './k8s.js'
+import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootReconcile.js'
 import { assertRegistryConnectionReady } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
 import {
@@ -17,6 +18,10 @@ import {
   stopPluginWorkloadSdkMaintenanceCron,
 } from './services/pluginWorkloadSdkMaintenanceCron.js'
 import { startRateLimiterCleanup, stopRateLimiterCleanup } from './services/rateLimiterService.js'
+import {
+  startWorkflowApprovalTraceProjector,
+  stopWorkflowApprovalTraceProjector,
+} from './services/tracing/workflowApprovalTraceProjector.js'
 import { startUsageRetentionCron, stopUsageRetentionCron } from './services/usageRetentionCron.js'
 import { startUsageRollupCron, stopUsageRollupCron } from './services/usageRollupCron.js'
 import { startArchiveCron, stopArchiveCron } from './services/userApprovalRequestArchiveCron.js'
@@ -44,12 +49,16 @@ async function main(): Promise<void> {
     `[ControlAPI] Allowed issuance namespaces: ${config.allowedIssuanceNamespaces.join(',')}`
   )
 
-  await initDb()
-  console.log('[ControlAPI] Database initialized')
+  await assertDbReady()
+  console.log('[ControlAPI] Database schema ready')
 
   // Self-hosted fail-fast (spec §8 / §14.3): refuse to boot a registry-enabled
   // self-hosted deployment that has no registry_connection identity row.
   await assertRegistryConnectionReady()
+
+  // Anti-drift (spec §3-R3.4 / V7): re-materialize the LLM allowlist ConfigMap
+  // from Postgres. Non-fatal — logs + metric on failure, never aborts boot.
+  await reconcileAllowedModelsConfigMapOnBoot()
 
   startExpiryCron(config.userApprovalRequestExpiryIntervalMs)
   startPluginWorkloadSdkMaintenanceCron()
@@ -62,6 +71,7 @@ async function main(): Promise<void> {
   })
   startUsageRetentionCron(config.usageRetentionIntervalMs)
   startBudgetReservationSweepCron(config.budgetReservationSweepIntervalMs)
+  startWorkflowApprovalTraceProjector()
 
   if (config.userApprovalRequestArchiveCronEnabled) {
     startArchiveCron({
@@ -149,6 +159,7 @@ main().catch(error => {
   stopUsageRollupCron()
   stopUsageRetentionCron()
   stopBudgetReservationSweepCron()
+  stopWorkflowApprovalTraceProjector()
   void pool.end()
   process.exit(1)
 })

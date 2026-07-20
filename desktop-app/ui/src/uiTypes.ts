@@ -4,19 +4,12 @@ import type {
   MessageToolStep,
   SessionTokensLite,
 } from '../../src/types'
+import type {
+  AgentWorkspaceRoute as AgentWorkspaceRouteValue,
+  DesktopRoute,
+} from './constants/navigation'
 
-export type NavItem =
-  | 'chat'
-  | 'agents'
-  | 'mcp-servers'
-  | 'contexts'
-  | 'context-details'
-  | 'teams'
-  | 'team-details'
-  | 'workflows'
-  | 'sandbox-ui'
-  | 'files'
-  | 'settings'
+export type NavItem = DesktopRoute
 export type ActiveSandboxUiApp = {
   appRef: string
   label: string
@@ -25,12 +18,7 @@ export type ActiveSandboxUiApp = {
 }
 export type Tone = 'info' | 'success' | 'error' | 'warn'
 export type ThemeMode = 'dark' | 'light'
-export type AgentWorkspaceRoute =
-  | 'details'
-  | 'mcp-servers'
-  | 'contexts'
-  | 'shared-files'
-  | 'activity'
+export type AgentWorkspaceRoute = AgentWorkspaceRouteValue
 export type AgentChatRole = 'user' | 'assistant' | 'system'
 export type ChatNotificationPreference =
   | 'always'
@@ -48,6 +36,7 @@ export type DesktopNotificationPayload = {
   title: string
   body: string
   tag?: string
+  silent?: boolean
   actions?: Array<{
     action: string
     title: string

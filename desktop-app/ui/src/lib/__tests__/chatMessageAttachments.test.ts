@@ -58,9 +58,7 @@ describe('chat message attachments', () => {
       ].join('\n')
     )
 
-    expect(parsed.attachments).toMatchObject([
-      { type: 'global_file', label: 'legacy-report.pdf' },
-    ])
+    expect(parsed.attachments).toMatchObject([{ type: 'global_file', label: 'legacy-report.pdf' }])
   })
 
   it('builds display attachments in composer insertion order', () => {

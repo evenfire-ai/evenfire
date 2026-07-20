@@ -5,6 +5,7 @@ WORKDIR /app
 COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/
 COPY packages/workflow-runtime-core/tsconfig.json ./packages/workflow-runtime-core/
 COPY packages/workflow-runtime-core/src ./packages/workflow-runtime-core/src
+COPY packages/llm-providers ./packages/llm-providers
 WORKDIR /app/packages/workflow-runtime-core
 RUN npm ci --ignore-scripts && npm run build
 

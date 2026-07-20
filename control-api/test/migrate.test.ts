@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const initDb = vi.fn()
 const poolEnd = vi.fn()
+const resolveMigrationConnectionString = vi.fn()
 
 vi.mock('../src/db.js', () => ({
   initDb,
@@ -10,8 +11,11 @@ vi.mock('../src/db.js', () => ({
   },
 }))
 
+vi.mock('../src/migrationConnection.js', () => ({ resolveMigrationConnectionString }))
+
 describe('migrate entrypoint', () => {
   const originalExitCode = process.exitCode
+  const originalConnectionString = process.env.CONTROL_API_PG_CONNECTION_STRING
 
   beforeEach(() => {
     vi.resetModules()
@@ -19,10 +23,16 @@ describe('migrate entrypoint', () => {
     process.exitCode = undefined
     initDb.mockResolvedValue(undefined)
     poolEnd.mockResolvedValue(undefined)
+    resolveMigrationConnectionString.mockReturnValue('postgresql://database.example/profiles')
   })
 
   afterEach(() => {
     process.exitCode = originalExitCode
+    if (originalConnectionString === undefined) {
+      delete process.env.CONTROL_API_PG_CONNECTION_STRING
+    } else {
+      process.env.CONTROL_API_PG_CONNECTION_STRING = originalConnectionString
+    }
   })
 
   it('runs initDb and closes the pool on success', async () => {
@@ -33,6 +43,7 @@ describe('migrate entrypoint', () => {
     await new Promise(resolve => setImmediate(resolve))
 
     expect(initDb).toHaveBeenCalledTimes(1)
+    expect(resolveMigrationConnectionString).toHaveBeenCalledWith(process.env)
     expect(poolEnd).toHaveBeenCalledTimes(1)
     expect(process.exitCode).toBeUndefined()
     expect(infoSpy).toHaveBeenCalledWith('[ControlAPI:Migrate] Starting DB migration')

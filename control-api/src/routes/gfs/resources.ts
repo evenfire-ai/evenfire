@@ -218,9 +218,9 @@ export async function handlePatch(req: Request, res: Response): Promise<void> {
     )
     const requestId = requestIdOf(req)
     const sourceIp = req.ip
-    const { version } = await applyResourcePatch(pool, caller, drive, id, body, params =>
-      auditMutation(pool, { ...params, requestId, sourceIp })
-    )
+    const { version } = await applyResourcePatch(pool, caller, drive, id, body, async params => {
+      await auditMutation(pool, { ...params, requestId, sourceIp })
+    })
     res.status(200).json({ ok: true, data: { resourceId: id, version } })
   } catch (err) {
     if (err instanceof ResourcePatchError) {

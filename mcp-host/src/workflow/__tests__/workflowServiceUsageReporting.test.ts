@@ -116,6 +116,7 @@ describe('WorkflowService — UsageReporter integration', () => {
     expect(enqueued).toHaveLength(1)
     expect(enqueued[0]).toMatchObject({
       source_kind: 'workflow',
+      run_id: '11111111-1111-4111-8111-111111111111',
       recipe_name: 'my-recipe',
       host_ref: 'sandbox-recipes/my-recipe',
       team_id: workflowTeamId,

@@ -54,10 +54,161 @@ spec:
                         - claude
                         - zai
                         - bailian
+                        - vertex
+                        - bedrock
+                        - openrouter
+                        - gemini
+                        - deepseek
+                        - groq
+                        - together
+                        - fireworks
+                        - mistral
+                        - xai
+                        - cerebras
+                        - deepinfra
+                        - perplexity
+                        - moonshot
+                        - nebius
+                        - novita
+                        - azure
                       description: LLM provider to use.
                     name:
                       type: string
                       description: Model name (e.g. gpt-5.4-mini, claude-opus-4-7, glm-5.1).
+                allowedModels:
+                  # Per-host model allowlist subset (spec v2 Topic 3a). OPTIONAL,
+                  # ADDITIVE: when absent or empty, the host offers the FULL global
+                  # operator allowlist for its provider(s) — existing hosts are
+                  # unaffected (back-compat). When set, it is the subset of the
+                  # global allowlist this host offers: the per-session model
+                  # selector (desktop-app, GET /v1/runtime/model[s]) and the
+                  # write-time validation both restrict to this subset ∩ the live
+                  # global allowlist. control-api validates every entry against the
+                  # global allowlist on write — each (provider, model) pair must
+                  # exist there. `provider` is a plain string (not enum'd here) so
+                  # the global allowlist stays the single source of truth for valid
+                  # pairs and adding a provider needn't touch a third enum.
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - provider
+                      - model
+                    properties:
+                      provider:
+                        type: string
+                        description: >-
+                          LLM provider id; validated against the global allowlist
+                          by control-api.
+                      model:
+                        type: string
+                        description: >-
+                          Model name; must exist in the global allowlist under
+                          `provider`.
+                llmPolicy:
+                  # Provider fallback (spec v2 R5). ADDITIVE, OPT-IN: a Host with
+                  # no llmPolicy behaves exactly as before (zero failover). When
+                  # the primary model fails with an eligible error, mcp-host
+                  # switches to the first available entry in `fallbacks`.
+                  #
+                  # ROLLOUT ORDER — CRD FIRST. apiextensions/v1 silently PRUNES
+                  # unknown fields: if the runtime writes a Host with `llmPolicy`
+                  # while the OLD CRD (without this schema) is still applied, the
+                  # apiserver drops `llmPolicy` on admission with no error. Always
+                  # apply this CRD before rolling out any component that reads or
+                  # writes `spec.llmPolicy` (mcp-host, control-api).
+                  type: object
+                  description: >-
+                    LLM provider fallback policy (opt-in). When the primary model
+                    (spec.model) fails with an eligible error, mcp-host switches to
+                    the first available entry in `fallbacks`, applies a cooldown to
+                    the primary, and lazily retries it once the cooldown expires.
+                    Every fallback model must be enabled in the operator allowlist
+                    (validated on write by control-api).
+                  required:
+                    - fallbacks
+                  properties:
+                    cooldownSeconds:
+                      type: integer
+                      minimum: 0
+                      default: 300
+                      description: >-
+                        Seconds the primary stays in cooldown after an eligible
+                        failure before mcp-host lazily retries it. Default 300.
+                    triggerOn:
+                      type: array
+                      description: >-
+                        Error classes that trigger a fallback. Omit for the default
+                        (all four classes). Restrict this list to avoid failing over
+                        on unrecognized/transport errors (folded into
+                        provider_unavailable).
+                      x-kubernetes-list-type: set
+                      items:
+                        type: string
+                        enum:
+                          - insufficient_quota
+                          - auth
+                          - provider_unavailable
+                          - rate_limited
+                    fallbacks:
+                      type: array
+                      minItems: 1
+                      description: >-
+                        Ordered fallback list, tried in order. The engine advances
+                        to the next entry when the current one also fails.
+                      items:
+                        type: object
+                        required:
+                          - provider
+                          - model
+                        properties:
+                          provider:
+                            type: string
+                            enum:
+                              - openai
+                              - claude
+                              - zai
+                              - bailian
+                              - vertex
+                              - bedrock
+                              - openrouter
+                              - gemini
+                              - deepseek
+                              - groq
+                              - together
+                              - fireworks
+                              - mistral
+                              - xai
+                              - cerebras
+                              - deepinfra
+                              - perplexity
+                              - moonshot
+                              - nebius
+                              - novita
+                              - azure
+                            description: >-
+                              Fallback LLM provider. Same enum as spec.model.provider.
+                          model:
+                            type: string
+                            description: >-
+                              Fallback model name. Must be enabled in the operator
+                              allowlist under `provider` (enforced on write).
+                          credentialSlot:
+                            type: string
+                            # Defense-in-depth: mirror control-api's write-side
+                            # format gate onto the CRD so a direct cluster apply
+                            # (bypassing control-api) still gets a valid K8s Secret
+                            # data key. Same pattern/length as SECRET_KEY_RE.
+                            maxLength: 253
+                            pattern: '^[-._a-zA-Z0-9]+$'
+                            description: >-
+                              Optional key of the Host's OWN `spec.secretRef` Secret
+                              that feeds this fallback's credential (e.g. claude-api-key-fb1
+                              for a same-provider-other-key fallback). mcp-host resolves
+                              fallback slots from the Host secret. Absent = the provider's
+                              normal slots. Existence of the key in the Secret is resolved
+                              by mcp-host at runtime; control-api validates only its format
+                              on write.
                 approval:
                   type: object
                   description: Tool approval configuration. Controls who can approve tool executions.

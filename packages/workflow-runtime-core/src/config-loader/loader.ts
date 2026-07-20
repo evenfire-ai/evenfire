@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import { WorkflowSDKInitError } from '../errors'
 import { createFileRuntimeTokenProvider } from '../runtime-token-provider/provider'
-import type { WorkflowConfig, WorkflowRecipeSpec } from './types'
+import type { WorkflowConfig, WorkflowRecipeSpec, WorkflowTraceContext } from './types'
 
 const DEFAULT_SPEC_VOLUME_PATH = '/etc/workflow/config.json'
 const STEP_RUN_KEYS = new Set(['type', 'language', 'code', 'capabilities'])
@@ -11,6 +11,28 @@ function requireEnv(name: string): string {
   const value = process.env[name]
   if (!value) throw new WorkflowSDKInitError(name)
   return value
+}
+
+function resolveTraceContext(): WorkflowTraceContext {
+  const workflowRunId = process.env.CLERUM_WORKFLOW_RUN_ID?.trim()
+  const correlationId = process.env.CLERUM_CORRELATION_ID?.trim()
+
+  // WRC marks workflow executions with CLERUM_WORKFLOW_RUN_ID. Preserve the
+  // legacy UUID fallback only for callers outside that run-scoped contract.
+  if (process.env.CLERUM_WORKFLOW_RUN_ID !== undefined) {
+    if (!workflowRunId) throw new WorkflowSDKInitError('CLERUM_WORKFLOW_RUN_ID')
+    if (!correlationId) throw new WorkflowSDKInitError('CLERUM_CORRELATION_ID')
+    if (correlationId !== workflowRunId) {
+      throw new Error('CLERUM_CORRELATION_ID must match CLERUM_WORKFLOW_RUN_ID for workflow execution')
+    }
+    return { origin: 'workflow_runtime', runId: workflowRunId, correlationId }
+  }
+
+  return {
+    origin: 'workflow_runtime',
+    runId: null,
+    correlationId: correlationId || randomUUID(),
+  }
 }
 
 export class ConfigLoader {
@@ -30,6 +52,7 @@ export class ConfigLoader {
     if (process.env.CLERUM_SNIPPET_RUNNER_URL && !snippetRunnerTokenFile) {
       throw new WorkflowSDKInitError('SNIPPET_RUNNER_TOKEN_FILE')
     }
+    const traceContext = resolveTraceContext()
     this.config = {
       workflowName,
       namespace,
@@ -44,7 +67,8 @@ export class ConfigLoader {
         mcpHostTokenFile,
         snippetRunnerTokenFile,
       }),
-      correlationId: process.env.CLERUM_CORRELATION_ID || randomUUID(),
+      correlationId: traceContext.correlationId,
+      traceContext,
       signalPollIntervalMs: ConfigLoader.parseInterval(process.env.CLERUM_SIGNAL_POLL_INTERVAL_MS),
       restPort: ConfigLoader.parsePort(process.env.CLERUM_SDK_REST_PORT),
       registryUrl: process.env.CLERUM_REGISTRY_URL,

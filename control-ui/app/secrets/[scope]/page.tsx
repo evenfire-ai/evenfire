@@ -7,7 +7,7 @@ interface SecretsScopePageProps {
 
 export default async function SecretsScopePage({ params }: SecretsScopePageProps) {
   const { scope } = await params
-  if (scope !== 'mcp' && scope !== 'recipe') notFound()
+  if (scope !== 'llm' && scope !== 'connector' && scope !== 'recipe') notFound()
 
-  return <SecretsPageContent activeScope={scope as SecretScope} />
+  return <SecretsPageContent activeScope={(scope === 'connector' ? 'mcp' : scope) as SecretScope} />
 }

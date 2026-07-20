@@ -92,10 +92,11 @@ async function adminLogin(): Promise<string> {
   })
   const body = await response.text()
   expect(response.status, body).toBe(200)
-  const parsed = JSON.parse(body) as { token?: string; o?: { token?: string } }
-  const token = parsed.token || parsed.o?.token
-  expect(token, 'admin login must return a token').toBeTruthy()
-  return token as string
+  const sessionCookie = (response.headers.get('set-cookie') ?? '').split(';', 1)[0]
+  expect(sessionCookie, 'admin login must set the HttpOnly session cookie').toMatch(
+    /^control_ui_admin_session=/
+  )
+  return sessionCookie
 }
 
 export function buildWorkflowRecipe(name: string, marker: string): string {
@@ -122,6 +123,7 @@ spec:
       requiresApproval: true
       allowedActors:
         - autonomous
+        - user
   runRetention:
     maxRunDurationSeconds: 600
     ttlSecondsAfterFinished: 7200
@@ -167,12 +169,12 @@ export async function grantWorkflowRecipeToUsers(
   recipeName: string,
   userIds: string[]
 ): Promise<void> {
-  const token = await adminLogin()
+  const sessionCookie = await adminLogin()
   const response = await fetch(
     `${CONTROL_API}/api/v1/admin/workflows/${encodeURIComponent(RECIPE_NS)}/${encodeURIComponent(recipeName)}/grants`,
     {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json', Cookie: sessionCookie },
       body: JSON.stringify({ userIds }),
     }
   )

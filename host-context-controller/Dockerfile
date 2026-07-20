@@ -5,6 +5,10 @@ WORKDIR /app
 # Copy package files
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
 COPY packages/image-policy ./packages/image-policy
+# Shared prebuilt data-only providers package (no build step). Copied before
+# host-context-controller's npm ci because it resolves the provider set from it
+# (R4).
+COPY packages/llm-providers ./packages/llm-providers
 COPY host-context-controller/package*.json ./host-context-controller/
 WORKDIR /app/host-context-controller
 
@@ -26,6 +30,9 @@ WORKDIR /app
 # Copy package files and install production deps only
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
 COPY packages/image-policy ./packages/image-policy
+# Shared prebuilt data-only providers package (no build step) — same file:
+# dependency the production npm ci below resolves against (R4).
+COPY packages/llm-providers ./packages/llm-providers
 COPY host-context-controller/package*.json ./host-context-controller/
 WORKDIR /app/host-context-controller
 RUN npm ci --omit=dev

@@ -2,13 +2,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import * as hook from '../../lib/hooks/usePublishScope'
 import { Sidebar } from '../Sidebar'
+import { activeSidebarChildHref } from '../Sidebar/activeChild'
+import { SIDEBAR_TABS } from '../Sidebar/constants'
+
+const navigationState = vi.hoisted(() => ({ pathname: '/agents' }))
+
+vi.mock('next/navigation', () => ({
+  usePathname: () => navigationState.pathname,
+}))
 
 vi.mock('../../lib/hooks/usePublishScope', async orig => {
   const actual = await orig<typeof import('../../lib/hooks/usePublishScope')>()
   return { ...actual, usePublishScope: vi.fn() }
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  navigationState.pathname = '/agents'
+})
 beforeEach(() => vi.clearAllMocks())
 
 describe('Sidebar publisher gating', () => {
@@ -43,15 +54,96 @@ describe('Sidebar publisher gating', () => {
     expect(screen.queryByRole('link', { name: /publisher/i })).toBeNull()
   })
 
-  it('hides the Publisher entry while publish-scope is loading (fail closed)', () => {
+  it('hides the Publisher entry while publish-scope is loading', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: true, error: false })
     render(<Sidebar currentTab="hosts" />)
     expect(screen.queryByRole('link', { name: /publisher/i })).toBeNull()
   })
 
-  it('still renders the other nav entries (e.g. Agents)', () => {
+  it('still renders the other navigation entries', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: true })
     render(<Sidebar currentTab="hosts" />)
     expect(screen.getByRole('link', { name: /agents/i })).toBeInTheDocument()
+  })
+
+  it('keeps Traces hidden and sorts visible navigation labels alphabetically', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    render(<Sidebar currentTab="traces" />)
+
+    expect(screen.queryByText('Traces')).not.toBeInTheDocument()
+    const nav = screen.getByRole('navigation', { name: 'Main sections' })
+    const labels = Array.from(nav.children).map(item =>
+      item.querySelector('.cu-sidebar__label')?.textContent?.trim()
+    )
+    expect(labels).toEqual(
+      [...labels].sort((first, second) => (first ?? '').localeCompare(second ?? ''))
+    )
+  })
+
+  it('keeps Settings in the footer on its canonical route', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    render(<Sidebar currentTab="settings" />)
+
+    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings/ui')
+  })
+
+  it.each([
+    ['/llm-models', 'Catalog'],
+    ['/llm-models/model-id/edit', 'Catalog'],
+    ['/llm-models/discovery', 'Discovery'],
+  ])('keeps the matching LLM Models child selected for %s', (pathname, label) => {
+    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    navigationState.pathname = pathname
+    render(<Sidebar currentTab="llm-models" />)
+
+    const child = screen.getByRole('link', { name: label })
+    expect(child).toHaveAttribute('data-active', 'true')
+    expect(child).toHaveAttribute('aria-current', 'page')
+  })
+
+  it.each([
+    ['/global-files', 'Global Files', '/global-files'],
+    ['/outputs/recipe-artifacts', 'Outputs', '/outputs/recipe-artifacts'],
+    ['/outputs/desktop-app-artifacts', 'Outputs', '/outputs/recipe-artifacts'],
+    ['/shared-files/example', 'Shared Files', '/shared-files'],
+  ])('selects the matching Files child for %s', (pathname, label, href) => {
+    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    navigationState.pathname = pathname
+    render(<Sidebar currentTab="files" />)
+
+    const group = screen.getByRole('button', { name: 'Files' })
+    expect(group).toHaveAttribute('aria-expanded', 'true')
+    expect(group).toHaveAttribute('data-active', 'true')
+    const child = screen.getByRole('link', { name: label })
+    expect(child).toHaveAttribute('href', href)
+    expect(child).toHaveAttribute('aria-current', 'page')
+  })
+
+  it('renders a thin icon for every visible child route', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    render(<Sidebar currentTab="files" />)
+
+    for (const label of ['Global Files', 'Outputs', 'Shared Files']) {
+      const child = screen.getByRole('link', { name: label })
+      expect(child.querySelector('.cu-sidebar__subitem-icon svg')).toBeInTheDocument()
+    }
+  })
+
+  it('defines an icon for every sidebar child route, including hidden groups', () => {
+    for (const item of Object.values(SIDEBAR_TABS)) {
+      expect(item.children?.every(child => Boolean(child.icon)) ?? true).toBe(true)
+    }
+  })
+
+  it('selects hidden Trace children by their nested routes', () => {
+    expect(
+      activeSidebarChildHref('/traces/infrastructure/event-id', SIDEBAR_TABS.traces.children ?? [])
+    ).toBe('/traces/infrastructure')
+    expect(
+      activeSidebarChildHref(
+        '/traces/sessions/host-id/session-id',
+        SIDEBAR_TABS.traces.children ?? []
+      )
+    ).toBe('/traces')
   })
 })

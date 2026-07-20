@@ -1,4 +1,10 @@
 # MCP Host Dockerfile
+#
+# BUILD CONTEXT = repo root (not mcp-host/). mcp-host consumes the shared
+# @clerum/llm-providers package via `file:../packages/llm-providers`, so the
+# build must COPY packages/ alongside mcp-host/. Mirrors control-api /
+# workflow-recipes. Build invocations pass `-f mcp-host/Dockerfile .`.
+#
 # Pinned to Node 24.16.0 by digest: Node 24.17.0 ships an undici bump that
 # regresses node-fetch@2 (ERR_STREAM_PREMATURE_CLOSE). Keep the runtime frozen
 # so a floating `node:24-alpine` tag can't move the patch out from under us.
@@ -6,15 +12,17 @@ FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd2
 
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+# Shared prebuilt data-only package (no build step — ships index.cjs + .d.ts).
+COPY packages/llm-providers ./packages/llm-providers
 
-# Install dependencies
+# Install dependencies (file: dep resolves to ../packages/llm-providers)
+COPY mcp-host/package*.json ./mcp-host/
+WORKDIR /app/mcp-host
 RUN npm ci
 
 # Copy source code
-COPY tsconfig.json tsconfig.build.json ./
-COPY src ./src
+COPY mcp-host/tsconfig.json mcp-host/tsconfig.build.json ./
+COPY mcp-host/src ./src
 
 # Build TypeScript
 RUN npm run build
@@ -24,12 +32,14 @@ FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd2
 
 WORKDIR /app
 
-# Copy package files and install production dependencies only
-COPY package*.json ./
+# Copy the shared package + package files, install production dependencies only
+COPY packages/llm-providers ./packages/llm-providers
+COPY mcp-host/package*.json ./mcp-host/
+WORKDIR /app/mcp-host
 RUN npm ci --only=production
 
 # Copy built code
-COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/mcp-host/dist ./dist
 
 # Run as non-root user
 RUN addgroup -g 1001 -S nodejs && \

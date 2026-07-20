@@ -1,8 +1,14 @@
 import { Router } from 'express'
 import { config } from '../../config.js'
-import { pool } from '../../db.js'
+import type { DbClient } from '../../db.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
-import { ingestUsageEvents } from '../../services/usageEvents.js'
+import { withTraceIngestTransaction } from '../../services/tracing/pools.js'
+import { projectAcceptedUsageEvents } from '../../services/tracing/usageProjection.js'
+import { ingestUsageEventsInTransaction } from '../../services/usageEvents.js'
+import {
+  type WorkflowRunBinding,
+  WorkflowRunBindingRepository,
+} from '../../services/workflowRunBindingRepository.js'
 import type { McpHostAccessClaims } from '../../utils/auth/mcpHostJwtToken.js'
 
 const MAX_EVENTS_PER_REQUEST = 1000
@@ -37,15 +43,6 @@ type WorkflowUsageCandidate = {
   recipeName: string
   teamId: string | null
   userId: string | null
-}
-
-type WorkflowRunUsageBinding = {
-  runId: string
-  recipeNamespace: string
-  recipeName: string
-  actorType: string
-  actorId: string | null
-  usageTeamId: string | null
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -166,10 +163,9 @@ function collectWorkflowUsageCandidates(events: unknown[]): WorkflowUsageCandida
     const sourceKind = (e as { source_kind?: unknown }).source_kind
     if (sourceKind !== 'workflow') continue
 
-    const taskId = nonEmptyString((e as { task_id?: unknown }).task_id)
-    const runId = workflowRunIdFromTaskId(taskId)
+    const runId = nonEmptyString((e as { run_id?: unknown }).run_id).toLowerCase()
     const recipeName = nonEmptyString((e as { recipe_name?: unknown }).recipe_name)
-    if (!runId || !recipeName) {
+    if (!UUID_REGEX.test(runId) || !recipeName) {
       // Shape and JWT-binding validation handle malformed workflow events.
       continue
     }
@@ -185,7 +181,10 @@ function collectWorkflowUsageCandidates(events: unknown[]): WorkflowUsageCandida
   return candidates
 }
 
-function expectedUsageUserId(binding: WorkflowRunUsageBinding): string | null {
+function expectedUsageUserId(binding: {
+  actorType: string
+  actorId: string | null
+}): string | null {
   if (binding.actorType === 'user') return binding.actorId
   if (binding.actorType === 'admin' && binding.actorId) {
     return `${CONTROL_PLANE_ADMIN_USAGE_USER_PREFIX}${binding.actorId}`
@@ -193,98 +192,49 @@ function expectedUsageUserId(binding: WorkflowRunUsageBinding): string | null {
   return null
 }
 
-async function loadWorkflowRunUsageBindings(
-  runIds: string[]
-): Promise<Map<string, WorkflowRunUsageBinding>> {
-  if (runIds.length === 0) return new Map()
-
-  const result = await pool.query(
-    `
-      WITH requested(run_id) AS (
-        SELECT unnest($1::uuid[]) AS run_id
-      ),
-      live AS (
-        SELECT
-          wr.run_id::text AS run_id,
-          wr.recipe_namespace,
-          wr.recipe_name,
-          wr.actor_type,
-          wr.actor_id::text AS actor_id,
-          wr.usage_team_id
-        FROM workflow_runs wr
-        INNER JOIN requested r ON r.run_id = wr.run_id
-      ),
-      audit AS (
-        SELECT
-          wra.run_id::text AS run_id,
-          wra.recipe_namespace,
-          wra.recipe_name,
-          wra.triggerer_actor_type AS actor_type,
-          CASE
-            WHEN wra.triggerer_actor_type = 'admin' THEN wra.triggerer_admin_user_id::text
-            ELSE wra.triggerer_user_id::text
-          END AS actor_id,
-          wra.usage_team_id
-        FROM workflow_runs_audit wra
-        INNER JOIN requested r ON r.run_id = wra.run_id
-      )
-      SELECT * FROM live
-      UNION ALL
-      SELECT audit.*
-      FROM audit
-      WHERE NOT EXISTS (
-        SELECT 1 FROM live WHERE live.run_id = audit.run_id
-      )
-    `,
-    [runIds]
-  )
-
-  const bindings = new Map<string, WorkflowRunUsageBinding>()
-  for (const row of result.rows) {
-    const record = row as Record<string, unknown>
-    const runId = nonEmptyString(record.run_id)
-    if (!runId) continue
-    bindings.set(runId, {
-      runId,
-      recipeNamespace: nonEmptyString(record.recipe_namespace),
-      recipeName: nonEmptyString(record.recipe_name),
-      actorType: nonEmptyString(record.actor_type),
-      actorId: nullableString(record.actor_id),
-      usageTeamId: nullableString(record.usage_team_id),
-    })
-  }
-  return bindings
-}
-
 async function checkWorkflowRunBinding(
   events: unknown[],
-  claims: McpHostAccessClaims
-): Promise<WorkflowRunBindingViolation | null> {
+  claims: McpHostAccessClaims,
+  db: DbClient
+): Promise<{
+  violation: WorkflowRunBindingViolation | null
+  bindings: Map<string, WorkflowRunBinding>
+}> {
   const candidates = collectWorkflowUsageCandidates(events)
-  if (candidates.length === 0) return null
+  if (candidates.length === 0) return { violation: null, bindings: new Map() }
 
   const runIds = Array.from(new Set(candidates.map(candidate => candidate.runId)))
-  const bindings = await loadWorkflowRunUsageBindings(runIds)
+  const workflowRunBindings = new WorkflowRunBindingRepository(db)
+  const bindings = await workflowRunBindings.resolveMany(runIds)
 
   for (const candidate of candidates) {
     const binding = bindings.get(candidate.runId)
     if (!binding) {
-      return { index: candidate.index, reason: 'workflow_run_not_found' }
+      return { violation: { index: candidate.index, reason: 'workflow_run_not_found' }, bindings }
     }
     if (
       binding.recipeNamespace !== claims.recipeNamespace ||
       binding.recipeName !== candidate.recipeName
     ) {
-      return { index: candidate.index, reason: 'workflow_run_recipe_mismatch' }
+      return {
+        violation: { index: candidate.index, reason: 'workflow_run_recipe_mismatch' },
+        bindings,
+      }
     }
     if (candidate.teamId !== binding.usageTeamId) {
-      return { index: candidate.index, reason: 'workflow_run_team_mismatch' }
+      return {
+        violation: { index: candidate.index, reason: 'workflow_run_team_mismatch' },
+        bindings,
+      }
     }
     if (candidate.userId !== expectedUsageUserId(binding)) {
-      return { index: candidate.index, reason: 'workflow_run_user_mismatch' }
+      return {
+        violation: { index: candidate.index, reason: 'workflow_run_user_mismatch' },
+        bindings,
+      }
     }
   }
-  return null
+  return { violation: null, bindings }
 }
 
 export function createInternalUsageEventsRouter(): Router {
@@ -311,15 +261,25 @@ export function createInternalUsageEventsRouter(): Router {
       if (violation) {
         return res.status(403).json({ error: 'claim_binding_mismatch', ...violation })
       }
-      const workflowRunViolation = await checkWorkflowRunBinding(events, req.mcpHostJwt!)
-      if (workflowRunViolation) {
+      const transactionResult = await withTraceIngestTransaction(async db => {
+        const workflowBinding = await checkWorkflowRunBinding(events, req.mcpHostJwt!, db)
+        if (workflowBinding.violation) return { violation: workflowBinding.violation }
+
+        const ingest = await ingestUsageEventsInTransaction(events, db)
+        await projectAcceptedUsageEvents(db, ingest.acceptedEvents, workflowBinding.bindings, {
+          recipeNamespace: req.mcpHostJwt!.recipeNamespace,
+          recipeName: req.mcpHostJwt!.recipeName,
+          hostRef: req.mcpHostJwt!.hostRefs[0],
+        })
+        return { result: ingest.result }
+      })
+      if ('violation' in transactionResult) {
         return res.status(403).json({
           error: 'workflow_usage_binding_mismatch',
-          ...workflowRunViolation,
+          ...transactionResult.violation,
         })
       }
-      const result = await ingestUsageEvents(events)
-      return res.status(200).json(result)
+      return res.status(200).json(transactionResult.result)
     } catch (error) {
       return next(error)
     }

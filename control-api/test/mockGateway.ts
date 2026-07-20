@@ -55,6 +55,11 @@ export class MockGateway {
 
   private readonly endpointsStore: Map<string, number>
 
+  // Stub for the LLM allowlist ConfigMap materializer. Defaults to a no-op so
+  // CRUD success paths are undisturbed; a test can inject a throwing impl to
+  // exercise the 503-on-write-failure path.
+  private llmAllowedModelsMaterialize: () => Promise<void> = async () => {}
+
   constructor(namespace = 'test-namespace') {
     this.ns = namespace
     this.store = {
@@ -111,6 +116,15 @@ export class MockGateway {
 
   getNamespace(): string {
     return this.ns
+  }
+
+  /** Test helper: make the allowlist ConfigMap materialize() reject. */
+  setLlmAllowedModelsConfigMapMaterialize(fn: () => Promise<void>): void {
+    this.llmAllowedModelsMaterialize = fn
+  }
+
+  llmAllowedModelsConfigMap(): { materialize: () => Promise<void> } {
+    return { materialize: () => this.llmAllowedModelsMaterialize() }
   }
 
   private key(name: string, namespace?: string): string {

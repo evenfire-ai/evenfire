@@ -2,7 +2,7 @@
  * Types for the message queue and task system.
  */
 import type { BudgetVerdict } from '../budget/types'
-import type { Attachment } from '../core/types'
+import type { Attachment, TraceContextV1 } from '../core/types'
 import { IncomingMessage } from '../server'
 
 /**
@@ -63,6 +63,7 @@ export interface Task {
   // Task source information
   source: TaskSource
   sourceMessage?: IncomingMessage
+  traceContext?: TraceContextV1 | null
 
   // Task metadata
   priority: TaskPriority

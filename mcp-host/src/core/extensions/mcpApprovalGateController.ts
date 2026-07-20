@@ -13,7 +13,8 @@
  * tool.requiresApproval() check inside toolUseLoop) has been removed.
  * All approval decisions go through this controller via LoopController.beforeTool().
  */
-import { LoopController, ToolRegistry } from '../interfaces'
+import { randomUUID } from 'node:crypto'
+import { LoopController, Tool, ToolRegistry } from '../interfaces'
 import { DefaultLoopController } from '../orchestration/loopConfig'
 import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
 import type { ApprovalConfig } from './approvalTypes'
@@ -114,7 +115,8 @@ export class UnifiedApprovalGateController implements LoopController {
       return this.createSuspension(
         toolName,
         params,
-        `MCP tool "${toolName}" requires approval before execution`
+        `MCP tool "${toolName}" requires approval before execution`,
+        tool
       )
     }
 
@@ -141,7 +143,8 @@ export class UnifiedApprovalGateController implements LoopController {
       return this.createSuspension(
         toolName,
         params,
-        `Tool "${toolName}" requires approval before execution`
+        `Tool "${toolName}" requires approval before execution`,
+        tool
       )
     }
 
@@ -179,7 +182,7 @@ export class UnifiedApprovalGateController implements LoopController {
 
       const action = typeof params.action === 'string' ? params.action : ''
       if (STATELESS_CRON_GATED_ACTIONS.has(action)) {
-        return this.createSuspension(toolName, params, STATELESS_CRON_APPROVAL_PROMPT)
+        return this.createSuspension(toolName, params, STATELESS_CRON_APPROVAL_PROMPT, tool)
       }
     }
     return null
@@ -188,11 +191,18 @@ export class UnifiedApprovalGateController implements LoopController {
   private createSuspension(
     toolName: string,
     params: Record<string, unknown>,
-    description: string
+    description: string,
+    tool: Tool | null
   ): { type: 'suspend'; approval: PendingApproval } {
+    const traceDescriptor = tool?.traceDescriptor?.(params) ?? {
+      kind: 'internal_tool' as const,
+      sourceRef: 'mcp-host',
+    }
     const approval: PendingApproval = {
-      request_id: `approval-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+      request_id: randomUUID(),
       tool_name: toolName,
+      tool_kind: traceDescriptor.kind,
+      tool_source_ref: traceDescriptor.sourceRef,
       parameters: params,
       description,
       tool_call_id: '', // Filled by toolUseLoop from call.id

@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { IconTrash } from '@components/icons'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { formatCommunicationChannelConfirmedAt } from '@lib/communicationChannels'
 import type {
   CommunicationChannelConversation,
@@ -88,7 +89,9 @@ export function CommunicationChannelConversationsTable({
                 {showUserColumn ? (
                   <td>
                     {conversation.confirmedByUserId ? (
-                      <Link href={`/profile-admin/users/${conversation.confirmedByUserId}`}>
+                      <Link
+                        href={CONTROL_ROUTES.usersAndTeams.user(conversation.confirmedByUserId)}
+                      >
                         {userLabelsById[conversation.confirmedByUserId] || 'Unknown user'}
                       </Link>
                     ) : (

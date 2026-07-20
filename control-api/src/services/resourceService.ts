@@ -12,6 +12,22 @@ import {
   kindFromPlural,
   parseProjectedGeneration,
 } from './resourceServiceHelpers.js'
+import { currentAdministrativeRequestContext } from './tracing/adminOperationContext.js'
+import {
+  ControlApiAdministrativeOperationService,
+  type HostAdministrativeAction,
+  type HostAdministrativeIntent,
+  stripAdministrativeIntentAnnotation,
+  withAdministrativeIntentAnnotation,
+} from './tracing/adminOperationService.js'
+
+let administrativeOperationService: ControlApiAdministrativeOperationService | null = null
+
+export function setAdministrativeOperationService(
+  service: ControlApiAdministrativeOperationService | null
+): void {
+  administrativeOperationService = service
+}
 
 export class K8sNotFoundError extends Error {
   readonly httpStatus = 404
@@ -40,6 +56,7 @@ type MutableResourceSnapshot = {
     annotations?: Record<string, string>
     labels?: Record<string, string>
     resourceVersion?: string
+    generation?: number
   }
   spec?: Record<string, unknown>
 }
@@ -51,6 +68,37 @@ type ResourceMutation = {
 
 /** Annotation keys under this prefix are platform-owned write-only projections. */
 const PLATFORM_ANNOTATION_PREFIX = 'clerum.io/'
+
+function isHostResource(plural: ClerumResourceType): boolean {
+  return plural === 'hosts'
+}
+
+async function persistHostIntent(input: {
+  plural: ClerumResourceType
+  action: HostAdministrativeAction
+  namespace: string
+  name: string
+}): Promise<HostAdministrativeIntent | null> {
+  if (!isHostResource(input.plural) || !administrativeOperationService) return null
+  const requestContext = currentAdministrativeRequestContext()
+  if (!requestContext) return null
+  return administrativeOperationService.persistHostIntent({
+    action: input.action,
+    namespace: input.namespace,
+    name: input.name,
+    operatorSub: requestContext.operatorSub,
+    requestId: requestContext.requestId,
+  })
+}
+
+async function persistHostFailure(intent: HostAdministrativeIntent | null): Promise<void> {
+  if (!intent || !administrativeOperationService) return
+  await administrativeOperationService.persistHostOutcome(
+    intent,
+    'failed',
+    'kubernetes_write_failed'
+  )
+}
 
 /**
  * Merge annotations for a full-replace write (updateResource/mutateResource).
@@ -198,25 +246,40 @@ export class ResourceService {
     // Namespaces are determined by the HTTP layer from server-side config; the
     // service intentionally ignores any namespace the body might carry.
     const ns = this.resolveNamespace(plural, namespace)
+    const intent = await persistHostIntent({
+      plural,
+      action: 'create',
+      namespace: ns,
+      name: body.metadata.name,
+    })
+    const sanitizedMetadata = stripAdministrativeIntentAnnotation(body.metadata) ?? body.metadata
+    const annotations = intent
+      ? withAdministrativeIntentAnnotation(sanitizedMetadata.annotations, intent, 1)
+      : sanitizedMetadata.annotations
     const resource: ClerumResource = {
       apiVersion: `${CLERUM_GROUP}/${CLERUM_VERSION}`,
       kind: kindFromPlural(plural),
       metadata: {
         name: body.metadata.name,
         namespace: ns,
-        ...(body.metadata.labels && { labels: body.metadata.labels }),
-        ...(body.metadata.annotations && { annotations: body.metadata.annotations }),
+        ...(sanitizedMetadata.labels && { labels: sanitizedMetadata.labels }),
+        ...(annotations && { annotations }),
       },
       spec: body.spec,
     }
 
-    return this.customApi.createNamespacedCustomObject({
-      group: CLERUM_GROUP,
-      version: CLERUM_VERSION,
-      namespace: ns,
-      plural,
-      body: resource,
-    })
+    try {
+      return await this.customApi.createNamespacedCustomObject({
+        group: CLERUM_GROUP,
+        version: CLERUM_VERSION,
+        namespace: ns,
+        plural,
+        body: resource,
+      })
+    } catch (err) {
+      await persistHostFailure(intent)
+      throw err
+    }
   }
 
   async updateResource(
@@ -244,6 +307,7 @@ export class ResourceService {
     namespace?: string
   ): Promise<unknown> {
     const ns = this.resolveNamespace(plural, namespace)
+    const intent = await persistHostIntent({ plural, action: 'update', namespace: ns, name })
     const readerResourceVersion = body.metadata?.resourceVersion || undefined
     // With a reader-supplied precondition a retry can never succeed with the
     // same payload, so the loop collapses to a single attempt.
@@ -254,13 +318,22 @@ export class ResourceService {
           annotations?: Record<string, string>
           labels?: Record<string, string>
           resourceVersion?: string
+          generation?: number
         }
       }
 
-      const annotations = mergeAnnotationsForReplace(
+      const sanitizedMetadata = stripAdministrativeIntentAnnotation(body.metadata)
+      const mergedAnnotations = mergeAnnotationsForReplace(
         current.metadata?.annotations,
-        body.metadata?.annotations
+        sanitizedMetadata?.annotations
       )
+      const annotations = intent
+        ? withAdministrativeIntentAnnotation(
+            mergedAnnotations,
+            intent,
+            Math.max(1, (current.metadata?.generation ?? 0) + 1)
+          )
+        : mergedAnnotations
       const resource: ClerumResource = {
         apiVersion: `${CLERUM_GROUP}/${CLERUM_VERSION}`,
         kind: kindFromPlural(plural),
@@ -268,7 +341,7 @@ export class ResourceService {
           name,
           namespace: ns,
           ...(current.metadata?.labels && { labels: current.metadata.labels }),
-          ...(body.metadata?.labels && { labels: body.metadata.labels }),
+          ...(sanitizedMetadata?.labels && { labels: sanitizedMetadata.labels }),
           ...(annotations && { annotations }),
         },
         spec: body.spec,
@@ -292,6 +365,7 @@ export class ResourceService {
       } catch (err) {
         if (extractK8sStatus(err) === 409) {
           if (readerResourceVersion) {
+            await persistHostFailure(intent)
             throw new K8sConflictError(
               `${plural}/${name} changed since it was read (stale resourceVersion ${readerResourceVersion})`
             )
@@ -300,6 +374,7 @@ export class ResourceService {
             continue
           }
         }
+        await persistHostFailure(intent)
         throw err
       }
     }
@@ -453,6 +528,7 @@ export class ResourceService {
     namespace?: string
   ): Promise<unknown> {
     const ns = this.resolveNamespace(plural, namespace)
+    let intent: HostAdministrativeIntent | null = null
     const maxAttempts = 3
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const current = (await this.getResource(plural, name, ns)) as MutableResourceSnapshot
@@ -460,13 +536,24 @@ export class ResourceService {
       if (!next) {
         return current
       }
+      if (!intent) {
+        intent = await persistHostIntent({ plural, action: 'config', namespace: ns, name })
+      }
 
+      const sanitizedMetadata = stripAdministrativeIntentAnnotation(next.metadata)
       // Same per-key merge as updateResource: platform-owned clerum.io/*
       // annotations survive unless the mutation explicitly sets that key.
-      const annotations = mergeAnnotationsForReplace(
+      const mergedAnnotations = mergeAnnotationsForReplace(
         current.metadata?.annotations,
-        next.metadata?.annotations
+        sanitizedMetadata?.annotations
       )
+      const annotations = intent
+        ? withAdministrativeIntentAnnotation(
+            mergedAnnotations,
+            intent,
+            Math.max(1, (current.metadata?.generation ?? 0) + 1)
+          )
+        : mergedAnnotations
       const resource: ClerumResource = {
         apiVersion: `${CLERUM_GROUP}/${CLERUM_VERSION}`,
         kind: kindFromPlural(plural),
@@ -474,7 +561,7 @@ export class ResourceService {
           name,
           namespace: ns,
           ...(current.metadata?.labels && { labels: current.metadata.labels }),
-          ...(next.metadata?.labels && { labels: next.metadata.labels }),
+          ...(sanitizedMetadata?.labels && { labels: sanitizedMetadata.labels }),
           ...(annotations && { annotations }),
         },
         spec: next.spec,
@@ -499,6 +586,7 @@ export class ResourceService {
         if (extractK8sStatus(err) === 409 && attempt < maxAttempts) {
           continue
         }
+        await persistHostFailure(intent)
         throw err
       }
     }
@@ -511,13 +599,23 @@ export class ResourceService {
     namespace?: string
   ): Promise<unknown> {
     const ns = this.resolveNamespace(plural, namespace)
-    return this.customApi.deleteNamespacedCustomObject({
-      group: CLERUM_GROUP,
-      version: CLERUM_VERSION,
-      namespace: ns,
-      plural,
-      name,
-    })
+    const intent = await persistHostIntent({ plural, action: 'delete', namespace: ns, name })
+    try {
+      const deleted = await this.customApi.deleteNamespacedCustomObject({
+        group: CLERUM_GROUP,
+        version: CLERUM_VERSION,
+        namespace: ns,
+        plural,
+        name,
+      })
+      if (intent && administrativeOperationService) {
+        await administrativeOperationService.persistHostOutcome(intent, 'succeeded', 'deleted')
+      }
+      return deleted
+    } catch (err) {
+      await persistHostFailure(intent)
+      throw err
+    }
   }
 
   // Merge-patches a CRD's /status subresource. Used by the recipe retry

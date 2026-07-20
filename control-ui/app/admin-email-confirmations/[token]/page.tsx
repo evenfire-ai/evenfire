@@ -1,4 +1,5 @@
 import Image from 'next/image'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { completeControlAdminEmailConfirmationServer } from '@lib/controlAdminPublicServerApi'
 
 interface AdminEmailConfirmationPageProps {
@@ -58,7 +59,10 @@ export default async function ConfirmControlAdminEmailPage({
             <div className="cu-banner cu-banner--info">Email already confirmed.</div>
           ) : null}
           {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
-          <a className="cu-btn cu-btn--primary cu-btn--block cu-login-submit" href="/settings">
+          <a
+            className="cu-btn cu-btn--primary cu-btn--block cu-login-submit"
+            href={CONTROL_ROUTES.settings.root}
+          >
             Return to settings
           </a>
         </div>

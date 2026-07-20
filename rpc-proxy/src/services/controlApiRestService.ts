@@ -11,6 +11,7 @@ type UserAllowedHost = {
   userId: string
   hostRef: string
   url: string
+  bindingStatus?: 'recorded' | 'unavailable'
 }
 
 function controlApiHeaders(rpcAccessToken: string): Record<string, string> {
@@ -23,6 +24,19 @@ function controlApiHeaders(rpcAccessToken: string): Record<string, string> {
 
 function controlApiBaseUrl(): string {
   return config.controlApiBaseUrl.replace(/\/+$/, '')
+}
+
+export type DirectRunBindingRequest = {
+  runId: string
+  sessionId: string
+  origin: 'direct_chat' | 'channel_event' | 'api'
+}
+
+export class ControlApiHostAccessRejectedError extends Error {
+  constructor(readonly status: number) {
+    super(`Control API rejected host access (${status})`)
+    this.name = 'ControlApiHostAccessRejectedError'
+  }
 }
 
 export async function fetchUserAllowedServersFromControlApi(
@@ -72,20 +86,34 @@ export async function fetchUserAllowedServersFromControlApi(
 export async function fetchHostConnectionFromControlApi(
   userId: string,
   hostRef: string,
-  rpcAccessToken: string
+  rpcAccessToken: string,
+  options: {
+    directRunBinding?: DirectRunBindingRequest
+    fetchImpl?: typeof fetch
+  } = {}
 ): Promise<ResolvedServerConnection | null> {
-  const response = await fetch(
+  const directRunBinding = options.directRunBinding
+  const response = await (options.fetchImpl ?? fetch)(
     `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`,
     {
-      method: 'GET',
-      headers: controlApiHeaders(rpcAccessToken),
+      method: directRunBinding ? 'POST' : 'GET',
+      headers: {
+        ...controlApiHeaders(rpcAccessToken),
+        ...(directRunBinding ? { 'content-type': 'application/json' } : {}),
+      },
+      ...(directRunBinding ? { body: JSON.stringify(directRunBinding) } : {}),
     }
   )
 
-  if (response.status === 403 || response.status === 404) {
+  if (!directRunBinding && (response.status === 403 || response.status === 404)) {
     return null
   }
+  if (response.status === 401 || response.status === 403 || response.status === 409) {
+    await drainBody(response)
+    throw new ControlApiHostAccessRejectedError(response.status)
+  }
   if (!response.ok) {
+    await drainBody(response)
     throw new Error(`Control API MCP host lookup failed (${response.status})`)
   }
 
@@ -98,11 +126,20 @@ export async function fetchHostConnectionFromControlApi(
   if (!url || !resolvedHostRef || resolvedHostRef !== hostRef) {
     return null
   }
+  const attributionBindingStatus = directRunBinding ? parsed.bindingStatus : undefined
+  if (
+    directRunBinding &&
+    attributionBindingStatus !== 'recorded' &&
+    attributionBindingStatus !== 'unavailable'
+  ) {
+    throw new Error('Control API MCP host binding response was invalid')
+  }
 
   return {
     name: resolvedHostRef,
     url,
     headers: {},
+    ...(attributionBindingStatus ? { attributionBindingStatus } : {}),
   }
 }
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   listTeamWorkflowGrants,
   listWorkflowGrants,
@@ -8,6 +8,7 @@ import {
 
 const mockPoolQuery = vi.fn()
 const mockDbQuery = vi.fn()
+const permissionEvents = vi.hoisted(() => ({ append: vi.fn() }))
 
 vi.mock('../src/db.js', () => ({
   pool: {
@@ -15,6 +16,10 @@ vi.mock('../src/db.js', () => ({
   },
   withTransaction: async <T>(cb: (db: { query: typeof mockDbQuery }) => Promise<T>): Promise<T> =>
     cb({ query: mockDbQuery }),
+}))
+
+vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
+  appendControlApiPermissionEventsInTransaction: permissionEvents.append,
 }))
 
 const NS = 'mcp-server'
@@ -29,10 +34,16 @@ const TEAM_B = '77777777-7777-4777-8777-777777777777'
 const TEAM_C = '88888888-8888-4888-8888-888888888888'
 const TEAM_D = '99999999-9999-4999-8999-999999999999'
 
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
+
 describe('services/directory/workflowGrants — setWorkflowGrants', () => {
   beforeEach(() => {
     mockDbQuery.mockReset()
     mockPoolQuery.mockReset()
+    permissionEvents.append.mockReset()
+    permissionEvents.append.mockResolvedValue('operation-1')
   })
 
   it('opens the SELECT with FOR UPDATE to serialize same-recipe PUTs', async () => {
@@ -131,7 +142,61 @@ describe('services/directory/workflowGrants — setWorkflowGrants', () => {
       c => typeof c[0] === 'string' && c[0].includes("'grant'")
     )!
     const payload = JSON.parse(String(grantCall[1][4]))
-    expect(payload).toEqual({ before: [USER_A], after: [USER_B] })
+    expect(payload).toEqual(
+      expect.objectContaining({
+        before: [USER_A],
+        after: [USER_B],
+        administrative_operation_id: expect.any(String),
+      })
+    )
+  })
+
+  it('records a bounded grant event with the caller transaction and server-derived operator', async () => {
+    vi.stubEnv('TRACING_ENVIRONMENT', 'local')
+    mockDbQuery.mockResolvedValueOnce({})
+    mockDbQuery.mockResolvedValueOnce({ rows: [] })
+    mockDbQuery.mockResolvedValueOnce({})
+    mockDbQuery.mockResolvedValueOnce({})
+    mockDbQuery.mockResolvedValueOnce({})
+
+    await setWorkflowGrants(NS, NAME, [USER_A], OPERATOR)
+
+    expect(permissionEvents.append).toHaveBeenCalledWith(
+      expect.objectContaining({ query: mockDbQuery }),
+      expect.objectContaining({
+        operatorSub: OPERATOR,
+        operationId: expect.any(String),
+        changes: [
+          expect.objectContaining({
+            action: 'grant',
+            resourceClass: 'workflow_trigger_access',
+            resourceRef: `workflow_recipe:${NS}/${NAME}`,
+            subject: { kind: 'user', id: USER_A },
+          }),
+        ],
+      })
+    )
+  })
+
+  it('emits one target-bound change per affected platform user', async () => {
+    mockDbQuery.mockResolvedValueOnce({})
+    mockDbQuery.mockResolvedValueOnce({ rows: [] })
+    mockDbQuery.mockResolvedValueOnce({})
+    mockDbQuery.mockResolvedValueOnce({})
+    mockDbQuery.mockResolvedValueOnce({})
+
+    await setWorkflowGrants(NS, NAME, [USER_A, USER_B], OPERATOR)
+
+    expect(permissionEvents.append).toHaveBeenCalledWith(
+      expect.objectContaining({ query: mockDbQuery }),
+      expect.objectContaining({
+        operatorSub: OPERATOR,
+        changes: [
+          expect.objectContaining({ subject: { kind: 'user', id: USER_A } }),
+          expect.objectContaining({ subject: { kind: 'user', id: USER_B } }),
+        ],
+      })
+    )
   })
 })
 
@@ -176,6 +241,8 @@ describe('services/directory/workflowGrants — setTeamWorkflowGrants', () => {
   beforeEach(() => {
     mockDbQuery.mockReset()
     mockPoolQuery.mockReset()
+    permissionEvents.append.mockReset()
+    permissionEvents.append.mockResolvedValue('operation-1')
   })
 
   it('opens the SELECT with FOR UPDATE to serialize same-recipe team PUTs', async () => {
@@ -260,7 +327,13 @@ describe('services/directory/workflowGrants — setTeamWorkflowGrants', () => {
       c => typeof c[0] === 'string' && c[0].includes("'grant'")
     )!
     const payload = JSON.parse(String(grantCall[1][4]))
-    expect(payload).toEqual({ before: [TEAM_A], after: [TEAM_B] })
+    expect(payload).toEqual(
+      expect.objectContaining({
+        before: [TEAM_A],
+        after: [TEAM_B],
+        administrative_operation_id: expect.any(String),
+      })
+    )
   })
 })
 

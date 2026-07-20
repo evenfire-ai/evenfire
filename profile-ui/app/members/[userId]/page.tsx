@@ -11,6 +11,7 @@ import { ProfileShell } from '@components/ProfileShell'
 import { TextInput } from '@components/TextInput'
 import { useToast } from '@components/Toast'
 import { IconAlertTriangle, IconRefresh, IconTrash } from '@components/icons'
+import { PROFILE_ROUTES } from '@constants/routes'
 import {
   deleteManagedMember,
   deleteManagedUser,
@@ -131,7 +132,7 @@ export default function MemberDetailsPage() {
     try {
       await deleteManagedUser(member.id)
       showToast('Member deleted.', { tone: 'success' })
-      router.push('/members')
+      router.push(PROFILE_ROUTES.members.root)
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Failed to delete member')
     } finally {
@@ -184,7 +185,11 @@ export default function MemberDetailsPage() {
                   Delete member
                 </Button>
               ) : null}
-              <Button variant="secondary" onClick={() => router.push('/members')} disabled={busy}>
+              <Button
+                variant="secondary"
+                onClick={() => router.push(PROFILE_ROUTES.members.root)}
+                disabled={busy}
+              >
                 Back to members
               </Button>
             </div>

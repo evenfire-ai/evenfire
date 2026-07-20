@@ -10,6 +10,7 @@ import { TabBar } from '@components/TabBar'
 import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { useToast } from '@components/Toast'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { getAgentDisplayName } from '@lib/agentName'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { IconFolder, IconGroupWork } from '../../../components/Sidebar/icons'
@@ -42,25 +43,19 @@ import {
   updateContext,
 } from '../../../lib/api'
 
-type ContextTab = 'mcp-servers' | 'shared-filesystems' | 'agents' | 'teams' | 'members'
-const CONTEXT_TABS: ContextTab[] = [
-  'mcp-servers',
-  'shared-filesystems',
-  'agents',
-  'teams',
-  'members',
-]
+type ContextTab = 'connectors' | 'shared-files' | 'agents' | 'teams' | 'members'
+const CONTEXT_TABS: ContextTab[] = ['connectors', 'shared-files', 'agents', 'teams', 'members']
 
 const TAB_LABELS: Record<ContextTab, string> = {
-  'mcp-servers': 'Connectors',
-  'shared-filesystems': 'Shared Files',
+  connectors: 'Connectors',
+  'shared-files': 'Shared Files',
   agents: 'Agents',
   teams: 'Teams',
   members: 'Members',
 }
 
 function parseContextTab(value: string | undefined): ContextTab {
-  return CONTEXT_TABS.includes(value as ContextTab) ? (value as ContextTab) : 'mcp-servers'
+  return CONTEXT_TABS.includes(value as ContextTab) ? (value as ContextTab) : 'connectors'
 }
 
 const CONNECTOR_COLUMNS: TableHeaderColumn[] = [
@@ -218,7 +213,7 @@ export default function ContextDetailsPage() {
 
   useEffect(() => {
     if (isNew) {
-      router.replace('/contexts/new')
+      router.replace(CONTROL_ROUTES.contexts.new)
     }
   }, [isNew, router])
 
@@ -227,8 +222,7 @@ export default function ContextDetailsPage() {
   }, [params.tab])
 
   function contextTabHref(tab: ContextTab): string {
-    const base = `/contexts/${encodeURIComponent(routeName)}`
-    return tab === 'mcp-servers' ? base : `${base}/${tab}`
+    return CONTROL_ROUTES.contexts.tab(routeName, tab)
   }
 
   function selectTab(tab: ContextTab) {
@@ -422,7 +416,7 @@ export default function ContextDetailsPage() {
           spec: payload.spec,
         })
         const nextName = encodeURIComponent(contextNameDraft.trim())
-        router.replace(`/contexts/${nextName}`)
+        router.replace(CONTROL_ROUTES.contexts.detail(nextName))
       } else {
         await updateContext(routeName, payload)
         setResolvedContextId(payload.spec.contextId)
@@ -663,7 +657,7 @@ export default function ContextDetailsPage() {
     try {
       await deleteContext(routeName)
       showToast(`Context ${routeName} deleted.`, { tone: 'success' })
-      router.push('/contexts')
+      router.push(CONTROL_ROUTES.contexts.root)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to delete context')
     } finally {
@@ -720,7 +714,7 @@ export default function ContextDetailsPage() {
               title={routeName || 'Context'}
               subtitle="Loading context details..."
               backLabel="Back to contexts"
-              onBack={() => router.push('/contexts')}
+              onBack={() => router.push(CONTROL_ROUTES.contexts.root)}
               backDisabled
               actions={
                 <div
@@ -797,7 +791,7 @@ export default function ContextDetailsPage() {
             title={routeName}
             subtitle="Review details, manage connectors, agents, teams, and members."
             backLabel="Back to contexts"
-            onBack={() => router.push('/contexts')}
+            onBack={() => router.push(CONTROL_ROUTES.contexts.root)}
             titleActions={
               <ContextActionsMenu
                 busy={busy}
@@ -825,7 +819,7 @@ export default function ContextDetailsPage() {
       {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
       <div className="cu-card">
         <div className="cu-card__body">
-          {activeTab === 'mcp-servers' && (
+          {activeTab === 'connectors' && (
             <>
               <div
                 style={{
@@ -887,7 +881,7 @@ export default function ContextDetailsPage() {
             </>
           )}
 
-          {activeTab === 'shared-filesystems' && (
+          {activeTab === 'shared-files' && (
             <>
               {sharedFileSystemsDraft.length === 0 ? (
                 <div className="cu-empty">No SharedFileSystems attached.</div>
@@ -903,7 +897,7 @@ export default function ContextDetailsPage() {
                           <td>
                             <a
                               className="cu-link"
-                              href={`/shared-filesystems/${encodeURIComponent(ref.name)}`}
+                              href={CONTROL_ROUTES.sharedFiles.detail(ref.name)}
                               style={{
                                 display: 'inline-flex',
                                 alignItems: 'center',
@@ -1053,7 +1047,7 @@ export default function ContextDetailsPage() {
                             <button
                               type="button"
                               className="cu-link"
-                              onClick={() => router.push(`/hosts/${encodeURIComponent(host.name)}`)}
+                              onClick={() => router.push(CONTROL_ROUTES.agents.detail(host.name))}
                             >
                               {host.name}
                             </button>
@@ -1110,7 +1104,7 @@ export default function ContextDetailsPage() {
                               type="button"
                               className="cu-link"
                               onClick={() =>
-                                router.push(`/profile-admin/teams/${encodeURIComponent(team.id)}`)
+                                router.push(CONTROL_ROUTES.usersAndTeams.team(team.id))
                               }
                             >
                               {team.name}
@@ -1182,7 +1176,7 @@ export default function ContextDetailsPage() {
                                 type="button"
                                 className="cu-link"
                                 onClick={() =>
-                                  router.push(`/profile-admin/users/${encodeURIComponent(user.id)}`)
+                                  router.push(CONTROL_ROUTES.usersAndTeams.user(user.id))
                                 }
                               >
                                 {memberLabel}

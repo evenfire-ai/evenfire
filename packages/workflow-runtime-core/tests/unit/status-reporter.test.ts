@@ -47,11 +47,17 @@ describe('StatusReporter', () => {
     await reporter.reportStepStatus('s1', 'completed', {
       executor: 'snippet',
       output: 'ok',
+      approvalBindingSha256: 'a'.repeat(64),
     })
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body)
     expect(body).toEqual(
-      expect.objectContaining({ stepId: 's1', phase: 'completed', executor: 'snippet' })
+      expect.objectContaining({
+        stepId: 's1',
+        phase: 'completed',
+        executor: 'snippet',
+        approvalBindingSha256: 'a'.repeat(64),
+      })
     )
   })
 

@@ -278,6 +278,9 @@ function boundedIntegerFromEnv(name: string, defaultValue: number, maxValue: num
   return value
 }
 
+// Also the target namespace for the allowlist ConfigMap (cross-service contract):
+// mcp-host + WRC read `clerum-llm-allowed-models` from here — see
+// services/llmAllowedModelsConfigMap.ts.
 const HOSTS_NAMESPACE = process.env.CONTROL_API_HOSTS_NAMESPACE || 'mcp-host'
 const MCP_SERVERS_NAMESPACE = process.env.CONTROL_API_MCP_SERVERS_NAMESPACE || 'mcp-server'
 const SANDBOX_NAMESPACE = process.env.CONTROL_API_SANDBOX_NAMESPACE || 'sandbox-recipes'
@@ -767,7 +770,7 @@ export const config: Config = {
     process.env.CONTROL_API_WFC_SERVICE_URL_TEMPLATE ||
     'http://wfc-{hash}.mcp-host.svc.cluster.local:8086',
   // Plugin image-host allowlist (Phase 2.3). Permissive default = current
-  // fleet hosts + example.com; enforce defaults to false (audit
+  // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit
   // mode). NOT parseCsvList — that lowercases, which would corrupt prefixes.
   allowedPluginImagePrefixes: (
     process.env.CONTROL_API_ALLOWED_IMAGE_PREFIXES ??

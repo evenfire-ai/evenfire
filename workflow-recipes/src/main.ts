@@ -30,7 +30,7 @@ async function shutdown(signal: string): Promise<void> {
   }
 
   if (provider) {
-    provider.stop()
+    await provider.stop()
   }
 
   console.log('[Clerum] Shutdown complete')

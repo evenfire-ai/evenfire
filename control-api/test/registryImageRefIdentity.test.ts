@@ -4,24 +4,24 @@ import {
   evenfireImageRefRepoPath,
 } from '../src/routes/admin/registryImageRefIdentity.js'
 
-const EVENFIRE = 'https://example.com'
+const EVENFIRE = 'https://registry.evenfire.ai'
 
 describe('evenfireImageRefRepoPath', () => {
   it('extracts org/name from a tagged evenfire ref', () => {
-    expect(evenfireImageRefRepoPath('example.com/acme/forecast:1.2.3', EVENFIRE)).toBe(
+    expect(evenfireImageRefRepoPath('registry.evenfire.ai/acme/forecast:1.2.3', EVENFIRE)).toBe(
       'acme/forecast'
     )
   })
   it('extracts org/name from a digest-pinned evenfire ref', () => {
     expect(
       evenfireImageRefRepoPath(
-        'example.com/acme/forecast@sha256:' + 'a'.repeat(64),
+        'registry.evenfire.ai/acme/forecast@sha256:' + 'a'.repeat(64),
         EVENFIRE
       )
     ).toBe('acme/forecast')
   })
   it('handles a nested repo path', () => {
-    expect(evenfireImageRefRepoPath('example.com/acme/team/forecast:1', EVENFIRE)).toBe(
+    expect(evenfireImageRefRepoPath('registry.evenfire.ai/acme/team/forecast:1', EVENFIRE)).toBe(
       'acme/team/forecast'
     )
   })
@@ -32,7 +32,7 @@ describe('evenfireImageRefRepoPath', () => {
   it('returns null for empty / non-string / unconfigured registry', () => {
     expect(evenfireImageRefRepoPath('', EVENFIRE)).toBeNull()
     expect(evenfireImageRefRepoPath(undefined as unknown as string, EVENFIRE)).toBeNull()
-    expect(evenfireImageRefRepoPath('example.com/acme/forecast:1', '')).toBeNull()
+    expect(evenfireImageRefRepoPath('registry.evenfire.ai/acme/forecast:1', '')).toBeNull()
   })
 })
 
@@ -42,7 +42,7 @@ describe('checkEvenfireImageRefMatchesEntry', () => {
       checkEvenfireImageRefMatchesEntry({
         isLocal: true,
         entryName: '@acme/forecast',
-        image: 'example.com/acme/forecast:1.2.3',
+        image: 'registry.evenfire.ai/acme/forecast:1.2.3',
         registryUrl: EVENFIRE,
       })
     ).toEqual({ ok: true })
@@ -52,7 +52,7 @@ describe('checkEvenfireImageRefMatchesEntry', () => {
       checkEvenfireImageRefMatchesEntry({
         isLocal: true,
         entryName: '@acme/forecast',
-        image: 'example.com/acme/wrongname:1.2.3',
+        image: 'registry.evenfire.ai/acme/wrongname:1.2.3',
         registryUrl: EVENFIRE,
       })
     ).toEqual({ ok: false, expected: 'acme/forecast', actual: 'acme/wrongname' })
@@ -62,7 +62,7 @@ describe('checkEvenfireImageRefMatchesEntry', () => {
       checkEvenfireImageRefMatchesEntry({
         isLocal: true,
         entryName: '@acme/forecast',
-        image: 'example.com/other/forecast:1',
+        image: 'registry.evenfire.ai/other/forecast:1',
         registryUrl: EVENFIRE,
       })
     ).toEqual({ ok: false, expected: 'acme/forecast', actual: 'other/forecast' })
@@ -72,7 +72,7 @@ describe('checkEvenfireImageRefMatchesEntry', () => {
       checkEvenfireImageRefMatchesEntry({
         isLocal: true,
         entryName: 'airtable-mcp',
-        image: 'example.com/acme/airtable-mcp:1',
+        image: 'registry.evenfire.ai/acme/airtable-mcp:1',
         registryUrl: EVENFIRE,
       })
     ).toEqual({ ok: true })
@@ -92,7 +92,7 @@ describe('checkEvenfireImageRefMatchesEntry', () => {
       checkEvenfireImageRefMatchesEntry({
         isLocal: false,
         entryName: '@acme/forecast',
-        image: 'example.com/acme/wrongname:1',
+        image: 'registry.evenfire.ai/acme/wrongname:1',
         registryUrl: EVENFIRE,
       })
     ).toEqual({ ok: true })

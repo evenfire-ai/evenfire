@@ -157,7 +157,7 @@ describe('POST /admin/registry/keys', () => {
       scopes: ['registry:read', 'registry:publish'],
       expires_at: null,
       dockerconfigjson: 'eyJhdXRocyI6e30=',
-      registry: 'example.com',
+      registry: 'registry.evenfire.ai',
       username: '_',
     } as never)
     const res = await request(makeApp())
@@ -165,7 +165,7 @@ describe('POST /admin/registry/keys', () => {
       .send({ description: 'ci-push' })
     expect(res.status).toBe(201)
     expect(res.body.dockerconfigjson).toBe('eyJhdXRocyI6e30=')
-    expect(res.body.registry).toBe('example.com')
+    expect(res.body.registry).toBe('registry.evenfire.ai')
     expect(res.body.username).toBe('_')
   })
 

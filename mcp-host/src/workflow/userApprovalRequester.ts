@@ -26,6 +26,7 @@ export interface WorkflowTriggerRunIntentPayload {
 export interface ApprovalGateParams {
   stepId: string
   executionId?: string
+  runBindingProof?: string
   idempotencyKeyOverride?: string
   runtimeMcpHostRef?: string
   approvalRecipe?: {
@@ -435,6 +436,7 @@ async function requestApproval(
         ...(params.executionId
           ? { correlation: { taskId: params.executionId, stepId: params.stepId } }
           : { correlation: { stepId: params.stepId } }),
+        ...(params.runBindingProof ? { workflowRunBindingProof: params.runBindingProof } : {}),
       }),
     })
 
@@ -448,9 +450,22 @@ async function requestApproval(
       const data = (await res.json().catch(() => ({}))) as {
         approvalRequestId?: string
         status?: string
+        error?: string
+      }
+      if (
+        params.runBindingProof &&
+        data.error === 'workflow_approval_run_binding_invalid' &&
+        attempt < REQUEST_MAX_ATTEMPTS
+      ) {
+        await sleep(retryDelayMs(attempt))
+        continue
       }
       if (!data.approvalRequestId) {
-        throw new Error('Approval request conflict response missing approvalRequestId')
+        throw new Error(
+          data.error === 'workflow_approval_run_binding_invalid'
+            ? 'Approval request failed (409)'
+            : 'Approval request conflict response missing approvalRequestId'
+        )
       }
       return { id: data.approvalRequestId }
     }

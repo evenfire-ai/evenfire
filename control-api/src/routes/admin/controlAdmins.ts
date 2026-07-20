@@ -405,6 +405,7 @@ export function createAdminControlAdminsRouter(): Router {
 
       const result = await provisionMemberFromAdmin({
         adminId,
+        operatorSub: currentAdminId,
         teamAssignments,
         seedPassword: req.body?.reusePassword === true,
       })

@@ -7,12 +7,18 @@ ENV CONTROL_API_INTERNAL_URL=${CONTROL_API_INTERNAL_URL}
 ENV NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_TEMPLATES=${NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_TEMPLATES}
 
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
+COPY packages/llm-providers ./packages/llm-providers
 COPY control-ui/package*.json ./control-ui/
 WORKDIR /app/control-ui
+# Next's bundler does not follow file: symlinks reliably, so materialize the
+# shared @clerum/* packages as real copies inside node_modules (same pattern as
+# workflow-recipe-capability-policy above).
 RUN npm ci \
   && rm -rf node_modules/@clerum/workflow-recipe-capability-policy \
   && mkdir -p node_modules/@clerum \
-  && cp -R ../packages/workflow-recipe-capability-policy node_modules/@clerum/workflow-recipe-capability-policy
+  && cp -R ../packages/workflow-recipe-capability-policy node_modules/@clerum/workflow-recipe-capability-policy \
+  && rm -rf node_modules/@clerum/llm-providers \
+  && cp -R ../packages/llm-providers node_modules/@clerum/llm-providers
 
 COPY control-ui ./
 RUN npm run build

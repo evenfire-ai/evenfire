@@ -1,3 +1,4 @@
+import type { LlmProviderId } from '@clerum/llm-providers'
 import type { RuntimeTokenProvider } from '../runtime-token-provider/provider'
 import { requireRuntimeToken } from '../runtime-token-provider/provider'
 import { sendWithAuthRetryOn401 } from '../status-reporter/authRetry'
@@ -5,7 +6,7 @@ import { emitLog } from '../status-reporter/logger'
 
 export interface ModelInjectionRequest {
   stepId: string
-  provider: 'openai' | 'claude' | 'zai' | 'bailian'
+  provider: LlmProviderId
   model: string
 }
 

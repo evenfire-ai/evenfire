@@ -8,12 +8,20 @@
  *  3. Triggers the reconciler to create/update/delete Deployments + Services
  */
 import * as k8s from '@kubernetes/client-node'
+import {
+  type AdministrativeOutcomeReporter,
+  createAdministrativeOutcomeReporter,
+} from './administrativeOutcomeReporter'
 import { BindingDef, BindingPolicyReconciler } from './bindingPolicyReconciler'
 import { config } from './config'
 import { gfsDefaultFactoryConfig } from './gfsConfig'
 import { GfsReconciler } from './gfsReconciler'
 import { ControlApiGfsSeedClient } from './gfsSeedClient'
 import { HostFleetReconcileError, HostReconciler, type ResolvedSfsMount } from './hostReconciler'
+import {
+  type InfrastructureTelemetryReporter,
+  createInfrastructureTelemetryReporter,
+} from './infrastructureTelemetryReporter'
 import { K8sGfsApi } from './k8s/gfsK8sApi'
 import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
 import { pvcName as sfsPvcName } from './k8s/sharedFileSystemFactory'
@@ -163,7 +171,7 @@ export interface McpServerProvider {
   /** Set callback for when servers change. */
   onChange(callback: () => void): void
   start(): Promise<void>
-  stop(): void
+  stop(): Promise<void>
 }
 
 /**
@@ -577,6 +585,8 @@ export class McpServerWatcher implements McpServerProvider {
   private bindingReconciler: BindingPolicyReconciler
   private sharedFileSystemReconciler: SharedFileSystemReconciler
   private gfsReconciler: GfsReconciler
+  private readonly infrastructureTelemetryReporter?: InfrastructureTelemetryReporter
+  private readonly administrativeOutcomeReporter?: AdministrativeOutcomeReporter
   private readonly externalEgressRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly externalEgressRetryAttempts = new Map<string, number>()
   private readonly externalEgressInFlight = new Map<string, Promise<void>>()
@@ -603,7 +613,22 @@ export class McpServerWatcher implements McpServerProvider {
     }
     this.watch = new k8s.Watch(kc)
     this.reconciler = new McpServerReconciler(kc)
-    this.hostReconciler = new HostReconciler(kc)
+    const infrastructureTelemetryReporter = config.controlApiBaseUrl
+      ? createInfrastructureTelemetryReporter(config.governedTracingEnabled, {
+          baseUrl: config.controlApiBaseUrl,
+        })
+      : undefined
+    const administrativeOutcomeReporter = config.controlApiBaseUrl
+      ? createAdministrativeOutcomeReporter(config.governedTracingEnabled, {
+          baseUrl: config.controlApiBaseUrl,
+        })
+      : undefined
+    this.infrastructureTelemetryReporter = infrastructureTelemetryReporter
+    this.administrativeOutcomeReporter = administrativeOutcomeReporter
+    this.hostReconciler = new HostReconciler(kc, {
+      infrastructureTelemetryReporter: this.infrastructureTelemetryReporter,
+      administrativeOutcomeReporter: this.administrativeOutcomeReporter,
+    })
     this.netPolReconciler = new NetworkPolicyReconciler(kc, this.servers)
     this.bindingReconciler = new BindingPolicyReconciler(kc, config.namespace)
     this.sharedFileSystemReconciler = new SharedFileSystemReconciler(kc)
@@ -2436,7 +2461,7 @@ export class McpServerWatcher implements McpServerProvider {
   /**
    * Stop all watches.
    */
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true
     this.ccCacheSynced = false
     this.hostCacheSynced = false
@@ -2510,6 +2535,10 @@ export class McpServerWatcher implements McpServerProvider {
       this.ccWatchRequest.abort()
       this.ccWatchRequest = null
     }
+    await Promise.allSettled([
+      this.infrastructureTelemetryReporter?.stop(),
+      this.administrativeOutcomeReporter?.stop(),
+    ])
   }
 }
 
@@ -2625,7 +2654,7 @@ export class DevMcpServerProvider implements McpServerProvider {
     }
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     console.log('[Dev] Stopping dev provider')
   }
 

@@ -6,6 +6,7 @@ import {
   HostActivitySnapshot,
   HostMessageRequest,
   HostMessageResponse,
+  HostModelsResult,
   HostRuntimeHealth,
   HostRuntimeStatus,
   PendingApprovalLite,
@@ -13,7 +14,17 @@ import {
   SessionLifecycleState,
   SessionMessagesResult,
   SessionTokensLite,
+  SetHostModelResult,
 } from './types.js'
+
+/**
+ * The runtime rejected a model that is not in the operator allowlist (R2/R3).
+ * The `model_not_allowed` token is preserved in the message so the renderer can
+ * distinguish it from a transport error after the value crosses the IPC bridge
+ * (Error objects serialize to their message string) — mirrors the `404` token
+ * convention used by {@link RpcProxyClient.loadSessionMessages}.
+ */
+const MODEL_NOT_ALLOWED = 'model_not_allowed'
 
 /**
  * mcp-host answers HTTP 200 with `{success:false, error}` when an approval was
@@ -78,6 +89,20 @@ async function readErrorBody(response: Response): Promise<string> {
     return error instanceof Error
       ? `Failed to read error body: ${error.message}`
       : 'Failed to read error body'
+  }
+}
+
+/**
+ * Extracts the `error` code from a JSON error body (e.g. `model_not_allowed`),
+ * used to disambiguate error sources that share an HTTP status. Returns null for
+ * non-JSON or code-less bodies.
+ */
+function errorCodeFromBody(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown }
+    return typeof parsed?.error === 'string' ? parsed.error : null
+  } catch {
+    return null
   }
 }
 
@@ -627,6 +652,93 @@ export class RpcProxyClient {
       )
     }
     return response.json() as Promise<ContextBreakdownResult>
+  }
+
+  /**
+   * Lists the models selectable for a host's active provider, plus the current
+   * per-session selection and degraded/blocked flags (R2 model selector). The
+   * server derives the owning user from the verified token; `chatId` scopes the
+   * `sessionModel`/`sessionModelBlocked` projection to that conversation.
+   *
+   * Returns `null` when the host predates the endpoint (404/501) so the caller
+   * hides the selector rather than surfacing a noisy error (compat, R2.6). A
+   * genuine failure (5xx, auth) still throws.
+   */
+  async getHostModels(
+    rpcToken: string,
+    hostRef: string,
+    chatId: string
+  ): Promise<HostModelsResult | null> {
+    // The model LIST is host-level (operator allowlist); `chatId` only scopes the
+    // per-session `sessionModel`/`sessionModelBlocked` projection. A brand-new chat
+    // has no id yet, so omit the query entirely — the server returns the host list
+    // with `sessionModel: null` (R2 new-chat composer selector).
+    const trimmedChatId = String(chatId || '').trim()
+    const modelsPath = trimmedChatId
+      ? `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/models?chatId=${encodeURIComponent(trimmedChatId)}`
+      : `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/models`
+    const response = await fetch(url(modelsPath), {
+      headers: { authorization: `Bearer ${rpcToken}` },
+      signal: withTimeout(),
+    })
+    // 404 (host without the route) / 501 (route not implemented on this runtime)
+    // → the feature is unavailable for this host; hide the selector silently.
+    if (response.status === 404 || response.status === 501) {
+      return null
+    }
+    if (!response.ok) {
+      const body = await readErrorBody(response)
+      throw new ApiError(
+        `Get host models failed (${response.status}): ${body}`,
+        response.status,
+        body
+      )
+    }
+    return response.json() as Promise<HostModelsResult>
+  }
+
+  /**
+   * Sets the per-session model for a host (R2.3). Applies to the next task only
+   * (`effective: 'next-task'`). A model outside the operator allowlist is a 403
+   * `{error:'model_not_allowed'}`, re-thrown with the {@link MODEL_NOT_ALLOWED}
+   * token in the message so the renderer can show a targeted error and leave the
+   * selection unchanged.
+   */
+  async setHostModel(
+    rpcToken: string,
+    hostRef: string,
+    chatId: string,
+    model: string
+  ): Promise<SetHostModelResult> {
+    const response = await fetch(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/model`), {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${rpcToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ chatId, model }),
+      signal: withTimeout(),
+    })
+    if (!response.ok) {
+      const body = await readErrorBody(response)
+      // Disambiguate the two failure sources by the body's `error` code — NOT
+      // by the 403 status alone. mcp-host rejects an off-allowlist model with
+      // `{error:'model_not_allowed'}` (a policy decision — surface a targeted
+      // message and leave the selection unchanged); rpc-proxy denies host access
+      // with a plain 403 carrying a different code (a genuine access error).
+      // mcp-host may answer 400 or 403 for the rejection, so key off the code,
+      // not the status. Only the allowlist rejection embeds the token the
+      // renderer detects.
+      if (errorCodeFromBody(body) === MODEL_NOT_ALLOWED) {
+        throw new ApiError(`Set host model rejected (${MODEL_NOT_ALLOWED})`, response.status, body)
+      }
+      throw new ApiError(
+        `Set host model failed (${response.status}): ${body}`,
+        response.status,
+        body
+      )
+    }
+    return response.json() as Promise<SetHostModelResult>
   }
 
   async getDesktopStatus(

@@ -20,6 +20,7 @@ import { AgentTitleSelector } from './AgentTitleSelector'
 import { ChatThread } from './ChatThread'
 import { ComposerPanel } from './ComposerPanel'
 import { ContextWindowIndicator } from './ContextWindowIndicator'
+import { FallbackBadge } from './FallbackBadge'
 import { SessionTokensIndicator } from './SessionTokensIndicator'
 import { AGENT_ROUTE_LABELS, AGENT_ROUTE_OPTIONS } from './agentRoutes'
 
@@ -309,8 +310,13 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
                       <SessionTokensIndicator tokens={activeSessionState.tokens} />
                     )}
                     {selectedAgent && (
-                      <ContextWindowIndicator agentRef={selectedAgent} chatId={activeChatId} />
+                      <ContextWindowIndicator
+                        agentRef={selectedAgent}
+                        chatId={activeChatId}
+                        turnSignal={activeSessionState?.tokens?.input}
+                      />
                     )}
+                    <FallbackBadge servedBy={hostRuntimeStatus?.servedBy} />
                   </div>
                 )}
               </div>

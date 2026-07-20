@@ -16,6 +16,7 @@ import {
   extractK8sStatusCode,
   preserveCommunicationChannelCredentialsSecretRef,
 } from './communicationChannelSpecHelpers.js'
+import { validateHostSecretRef } from './hostSecrets.js'
 import { validateHostSpec } from './hostSpecValidation.js'
 
 const PROVIDER_SETTINGS_FIELDS: Readonly<Record<string, readonly string[]>> = {
@@ -391,11 +392,18 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         return
       }
 
-      // Early validation for Host specs — defensive Zod check for spec.approval.tools.
+      // Early validation for Host specs — spec.approval.tools shape + R3 model
+      // allowlist enforcement (fail-closed for a declared spec.model.name).
       if (plural === 'hosts' && body.spec) {
-        const issue = validateHostSpec(body.spec)
+        const issue = await validateHostSpec(body.spec)
         if (issue) {
           res.status(422).json(issue)
+          return
+        }
+        // Anti-spoofing: an existing secretRef target must be an LLM host Secret.
+        const secretRefIssue = await validateHostSecretRef(gateway, body.spec)
+        if (secretRefIssue) {
+          res.status(422).json(secretRefIssue)
           return
         }
       }
@@ -473,9 +481,14 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       }
 
       if (plural === 'hosts' && body.spec) {
-        const issue = validateHostSpec(body.spec)
+        const issue = await validateHostSpec(body.spec)
         if (issue) {
           res.status(422).json(issue)
+          return
+        }
+        const secretRefIssue = await validateHostSecretRef(gateway, body.spec)
+        if (secretRefIssue) {
+          res.status(422).json(secretRefIssue)
           return
         }
       }

@@ -11,6 +11,7 @@ export type DetailPageShellProps<T extends string> = {
   contentClassName?: string
   contentMode?: 'card' | 'plain'
   error?: string
+  eyebrow?: ReactNode
   icon: ReactNode
   notice?: ReactNode
   onBack: () => void

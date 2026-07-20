@@ -3,6 +3,10 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import { loadConfig } from '../config'
+import type {
+  GovernedTraceReporter,
+  WorkflowInfrastructureTelemetryProjection,
+} from '../governedTraceReporter'
 import { createLogger } from '../observability/logger'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants'
 import { getErrorCode } from '../reconciler/k8sErrors'
@@ -31,6 +35,10 @@ const MAX_STATUS_TOOL_CALLS = 50
 const STATUS_TOOL_ARGS_PREVIEW_LIMIT = 1024
 const STATUS_TOOL_RESULT_PREVIEW_LIMIT = 1024
 const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
+
+type WorkflowEndpointHandlerOptions = {
+  traceReporter?: GovernedTraceReporter | null
+}
 
 type JsonPatchOperation = {
   op: 'add' | 'replace' | 'test'
@@ -93,6 +101,43 @@ function recipePhaseForWorkflowPhase(
   // recipe infrastructure active so watchers do not see active -> deploying -> active churn.
   if (currentPhase === 'active') return 'active'
   return 'deploying'
+}
+
+function lifecycleTransitionTelemetryProjection(
+  recipeName: string,
+  claims: AuthenticatedRequest['tokenClaims'],
+  transition: string,
+  phase: string,
+  recipe?: unknown,
+  occurredAt = new Date().toISOString()
+): WorkflowInfrastructureTelemetryProjection | undefined {
+  const runId = workflowRunIdFromRecipe(recipe) ?? claims.runId?.trim()
+  if (!runId) return undefined
+  return {
+    sourceEventId: `workflow-status:${claims.recipeNamespace}:${recipeName}:run:${runId}:${transition}:${phase}`,
+    occurredAt,
+    telemetryType: 'lifecycle_transition',
+    runId,
+    payload: {
+      phase,
+      status: 'patched',
+      transition,
+    },
+  }
+}
+
+function enqueueInfrastructureTelemetryBestEffort(
+  traceReporter: GovernedTraceReporter | null | undefined,
+  projection: WorkflowInfrastructureTelemetryProjection | undefined
+): void {
+  if (!traceReporter || !projection) return
+  try {
+    traceReporter.enqueueInfrastructureTelemetry(projection)
+  } catch (error) {
+    log.warn('Infrastructure telemetry enqueue failed', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
 }
 
 export {
@@ -467,6 +512,7 @@ interface StepStatusUpdate {
     durationMs?: number
   }>
   modelUsed?: string
+  approvalBindingSha256?: string
 }
 
 interface DeclaredStep {
@@ -577,9 +623,11 @@ export { enqueueSignal, drainSignals, type WorkflowSignal } from './signalStore'
 export function createWorkflowEndpointHandlers(
   customApi: k8s.CustomObjectsApi,
   sandboxNamespace: string,
-  tokenFactory?: JwtTokenFactory
+  tokenFactory?: JwtTokenFactory,
+  options: WorkflowEndpointHandlerOptions = {}
 ) {
   const statusOutputPreviewMaxChars = loadConfig().workflowStepOutputPreviewMaxChars
+  const traceReporter = options.traceReporter ?? null
 
   function validateWorkflowClaimBinding(
     recipeName: string,
@@ -598,7 +646,12 @@ export function createWorkflowEndpointHandlers(
     recipeName: string,
     recipeNamespaceClaim: string,
     body: ModelInjectionBody,
-    modelConfigHandler?: ModelConfigHandler
+    modelConfigHandler?: ModelConfigHandler,
+    // Enforced by the broker ONLY when the allowlist ConfigMap is absent
+    // (degraded mode, R3.5). The configure-model path passes a validator that
+    // requires the request to match the declared step model; the SDK injection
+    // path already validated that upstream and passes nothing.
+    validateDegraded?: () => Promise<{ status: number; body: Record<string, unknown> } | null>
   ): Promise<{ status: number; body: Record<string, unknown> }> {
     if (!modelConfigHandler) {
       return { status: 501, body: { error: 'Model config handler not configured' } }
@@ -617,10 +670,16 @@ export function createWorkflowEndpointHandlers(
     )
 
     const mcpHostEndpoint = buildMcpHostUrl(recipeName, sandboxNamespace)
+    // R5 F6 stop-point: `fallbacks`/`cooldownSeconds`/`triggerOn` are NOT
+    // forwarded yet — the broker request carries only the declared step tuple, so
+    // the mcp-host handler's fallback path is never reached from the coordinator.
+    // End-to-end wiring lands here: needs a workflowrecipe CRD field + coordinator
+    // plumbing to source and pass the policy.
     const result = await modelConfigHandler.handle(
       { stepId: body.stepId, provider: body.provider, model: body.model },
       mcpHostEndpoint,
-      wrcConfigureToken
+      wrcConfigureToken,
+      validateDegraded ? { validateDegraded } : undefined
     )
     return { status: result.status, body: result.body }
   }
@@ -727,6 +786,16 @@ export function createWorkflowEndpointHandlers(
             workflowPhase: requestedPhase,
           })
         }
+        enqueueInfrastructureTelemetryBestEffort(
+          traceReporter,
+          lifecycleTransitionTelemetryProjection(
+            recipeName,
+            claims,
+            `workflow:${existingPhase ?? 'unknown'}->${requestedPhase}`,
+            requestedPhase,
+            recipe
+          )
+        )
 
         return { status: 200, body: { accepted: true } }
       }
@@ -773,6 +842,12 @@ export function createWorkflowEndpointHandlers(
           body.output != null
             ? buildStatusOutputPreview(body.output, statusOutputPreviewMaxChars)
             : undefined
+        if (
+          body.approvalBindingSha256 !== undefined &&
+          !/^[0-9a-f]{64}$/.test(body.approvalBindingSha256)
+        ) {
+          return { status: 422, body: { error: 'approvalBindingSha256 must be sha256 hex' } }
+        }
 
         const stepEntry = {
           phase: body.phase,
@@ -786,6 +861,9 @@ export function createWorkflowEndpointHandlers(
             toolsCalled: normalizedToolsCalled.value,
           }),
           ...(body.modelUsed && { modelUsed: body.modelUsed }),
+          ...(body.approvalBindingSha256 && {
+            approvalBindingSha256: body.approvalBindingSha256,
+          }),
         }
 
         // Build local status projection for completion checks, then patch only
@@ -944,7 +1022,6 @@ export function createWorkflowEndpointHandlers(
             patchAttempt,
           })
         }
-
         return { status: 200, body: { accepted: true } }
       }
 
@@ -1046,11 +1123,27 @@ export function createWorkflowEndpointHandlers(
         return { status: 400, body: { error: 'stepId, provider, and model are required' } }
       }
 
+      // Degraded-mode guard (R3.5): when the allowlist ConfigMap is absent, the
+      // broker permits ONLY the declared step model. Unlike the SDK injection
+      // path, this endpoint does not otherwise load the recipe — so we resolve
+      // the declared model lazily and hand the check to the broker, which runs
+      // it only when the allowlist is missing (with the allowlist present, the
+      // allowlist rules and the declared model is not required).
+      const validateDegraded = async (): Promise<{
+        status: number
+        body: Record<string, unknown>
+      } | null> => {
+        const recipe = await this.getRecipe(recipeName, claims.recipeNamespace)
+        if (!recipe) return { status: 404, body: { error: `Recipe '${recipeName}' not found` } }
+        return validateDeclaredModelInjection(recipe, parsed)
+      }
+
       return forwardModelInjectionToMcpHost(
         recipeName,
         claims.recipeNamespace,
         parsed,
-        modelConfigHandler
+        modelConfigHandler,
+        validateDegraded
       )
     },
 

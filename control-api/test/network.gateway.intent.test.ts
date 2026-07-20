@@ -312,6 +312,10 @@ describe('network/gateway intent (manifest-level)', () => {
     const gatewayConf = docContaining(yamlDocs(configmaps), 'name: control-api-rpc-gateway')
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-servers$')
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/access/users/[^/]+/mcp-hosts/[^/]+$')
+    expect(gatewayConf).toMatch(
+      /location ~ \^\/api\/v1\/rpc\/access\/users\/\[\^\/\]\+\/mcp-hosts\/\[\^\/\]\+\$ \{[\s\S]*?limit_except GET POST/
+    )
+    expect(gatewayConf).not.toContain('/api/v1/internal/tracing/direct-run-bindings')
     expect(gatewayConf).toContain('location ~ ^/api/v1/rpc/hosts/[^/]+/wake$')
     expect(gatewayConf).toContain('limit_except GET')
     expect(gatewayConf).toMatch(
@@ -329,6 +333,32 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(gatewayConf).toContain('location = /api/v1/mcp-host/hosts/heartbeat')
     expect(gatewayConf).toMatch(
       /location = \/api\/v1\/mcp-host\/hosts\/heartbeat \{[\s\S]*?limit_except POST/
+    )
+  })
+
+  it('keeps governed agent-run ingest POST-only through the mcp-host gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+
+    expect(gatewayConf).toContain('location = /api/v1/internal/tracing/agent-run-events')
+    expect(gatewayConf).toMatch(
+      /location = \/api\/v1\/internal\/tracing\/agent-run-events \{[\s\S]*?limit_except POST/
+    )
+    expect(gatewayConf).toMatch(
+      /location = \/api\/v1\/internal\/tracing\/agent-run-events \{[\s\S]*?proxy_set_header Authorization \$http_authorization;/
+    )
+  })
+
+  it('keeps protected prompt-history capture POST-only through the mcp-host gateway', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+
+    expect(gatewayConf).toContain('location = /api/v1/internal/tracing/approval-prompt-history')
+    expect(gatewayConf).toMatch(
+      /location = \/api\/v1\/internal\/tracing\/approval-prompt-history \{[\s\S]*?limit_except POST/
+    )
+    expect(gatewayConf).toMatch(
+      /location = \/api\/v1\/internal\/tracing\/approval-prompt-history \{[\s\S]*?proxy_set_header Authorization \$http_authorization;/
     )
   })
 
@@ -467,22 +497,25 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(rpcProxyHccEgress).not.toMatch(/podSelector:\s*\{\}/)
   })
 
-  it.skipIf(!GKE_INFRA_PRESENT)('patches the mcp-host Kubernetes API egress CIDR in GKE overlays', () => {
-    const detectScript = read('../../deploy/scripts/gcp-detect-k8s-api-ip.sh')
-    expect(detectScript).toContain("-name 'k8s-api-ip*.yaml'")
+  it.skipIf(!GKE_INFRA_PRESENT)(
+    'patches the mcp-host Kubernetes API egress CIDR in GKE overlays',
+    () => {
+      const detectScript = read('../../deploy/scripts/gcp-detect-k8s-api-ip.sh')
+      expect(detectScript).toContain("-name 'k8s-api-ip*.yaml'")
 
-    for (const overlay of ['gcp-dev', 'gcp-prod']) {
-      const kustomization = read(`${OVERLAYS}/${overlay}/kustomization.yaml`)
-      const patch = read(`${OVERLAYS}/${overlay}/patches/k8s-api-ip-mcp-host.yaml`)
+      for (const overlay of ['gcp-dev', 'gcp-prod']) {
+        const kustomization = read(`${OVERLAYS}/${overlay}/kustomization.yaml`)
+        const patch = read(`${OVERLAYS}/${overlay}/patches/k8s-api-ip-mcp-host.yaml`)
 
-      expect(kustomization).toContain('patches/k8s-api-ip-mcp-host.yaml')
-      expect(patch).toContain('name: allow-k8s-api-egress-mcp-host')
-      expect(patch).toContain('namespace: mcp-host')
-      expect(patch).toContain('cidr: 203.0.113.1/32')
-      expect(patch).toContain('port: 443')
-      expect(patch).toContain('port: 8443')
+        expect(kustomization).toContain('patches/k8s-api-ip-mcp-host.yaml')
+        expect(patch).toContain('name: allow-k8s-api-egress-mcp-host')
+        expect(patch).toContain('namespace: mcp-host')
+        expect(patch).toContain('cidr: 203.0.113.1/32')
+        expect(patch).toContain('port: 443')
+        expect(patch).toContain('port: 8443')
+      }
     }
-  })
+  )
 
   it('blocks direct ingress to host-context-controller except from its gateway', () => {
     const controlPlaneNp = read(`${BASE}/control-plane/networkpolicies.yaml`)

@@ -30,7 +30,7 @@ afterEach(() => {
 describe('startup guard — registry consumer auth', () => {
   it('throws when AUTH_ENABLED=true and mode is unset', async () => {
     process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'true'
-    process.env.CLERUM_REGISTRY_URL = 'https://example.com'
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
     process.env.CLERUM_REGISTRY_CLIENT_ID = 'id'
     process.env.CLERUM_REGISTRY_CLIENT_SECRET = 's'
     // REGISTRY_CONNECTION_MODE intentionally unset — must fail fast (S10).
@@ -40,7 +40,7 @@ describe('startup guard — registry consumer auth', () => {
   it('throws when AUTH_ENABLED=true but CLIENT_ID is empty', async () => {
     process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'true'
     process.env.REGISTRY_CONNECTION_MODE = 'managed'
-    process.env.CLERUM_REGISTRY_URL = 'https://example.com'
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
     process.env.CLERUM_REGISTRY_CLIENT_SECRET = 's'
     // CLIENT_ID intentionally absent.
     await expect(import('../src/config.js')).rejects.toThrow(/CLERUM_REGISTRY_CLIENT_ID/)
@@ -50,7 +50,7 @@ describe('startup guard — registry consumer auth', () => {
     vi.resetModules()
     process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'true'
     process.env.REGISTRY_CONNECTION_MODE = 'managed'
-    process.env.CLERUM_REGISTRY_URL = 'https://example.com'
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
     process.env.CLERUM_REGISTRY_CLIENT_ID = 'id'
     // CLIENT_SECRET intentionally absent.
     await expect(import('../src/config.js')).rejects.toThrow(/CLERUM_REGISTRY_CLIENT_SECRET/)
@@ -85,7 +85,7 @@ describe('startup guard — registry consumer auth', () => {
   it('does not check creds when AUTH_ENABLED=false', async () => {
     vi.resetModules()
     process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'false'
-    process.env.CLERUM_REGISTRY_URL = 'https://example.com'
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
     // No client creds set.
     await expect(import('../src/config.js')).resolves.toBeDefined()
   })

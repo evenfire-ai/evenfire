@@ -1,20 +1,17 @@
 'use client'
 
-import React, { useCallback, useEffect, useState } from 'react'
-import { IconFolder, IconServer } from '@components/Sidebar/icons'
-import {
-  IconChevronRight,
-  IconCopy,
-  IconDownload,
-  IconPencil,
-  IconTrash,
-  IconUpload,
-  IconX,
-} from '@components/icons'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { FileUploadModal } from '@components/FileUploadModal'
+import { GfsImagePreview } from '@components/GfsImagePreview'
+import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
+import { IconFolder, IconServer } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
+import { IconChevronRight, IconDownload, IconPaperclip, IconUpload, IconX } from '@components/icons'
 import { Button, TextInput } from '@components/ui'
 import { apiGet, apiSend, gfsDownload, isSilentApiError } from '@lib/api'
+import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
+import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
+import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { normalizeGfsResourceName } from '@lib/gfsResourceName'
 import { GfsGrantPanel } from './GfsGrantPanel'
 import { GfsResourceMenu } from './GfsResourceMenu'
@@ -62,7 +59,9 @@ function formatBytes(bytes: number): string {
 }
 
 async function fileToEncodedData(file: File): Promise<string> {
+  assertGfsFileUploadSize(file.size)
   const bytes = new Uint8Array(await file.arrayBuffer())
+  assertGfsFileUploadSize(bytes.byteLength)
   let binary = ''
   const chunkSize = 0x8000
   for (let offset = 0; offset < bytes.length; offset += chunkSize) {
@@ -82,18 +81,37 @@ function ridOfResourceId(resourceId: string): string {
   return resourceId.replace(/-/g, '').toLowerCase()
 }
 
+function hasDraggedFiles(event: React.DragEvent<HTMLElement>): boolean {
+  return Array.from(event.dataTransfer.types || []).includes('Files')
+}
+
+function isDroppedPreviewFile(file: File): boolean {
+  return (
+    file.type.toLowerCase().startsWith('image/') ||
+    gfsImagePreviewMimeType(file.name) !== null ||
+    isGfsMarkdownPreviewFile(file.name)
+  )
+}
+
+function isGfsPreviewFile(fileName: string): boolean {
+  return gfsImagePreviewMimeType(fileName) !== null || isGfsMarkdownPreviewFile(fileName)
+}
+
 export function GfsBrowser(): React.JSX.Element {
   const { showToast } = useToast()
   const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: null, rid: null, name: '/' }])
   const [items, setItems] = useState<GfsChild[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState('')
   // Operator selects a resource to delegate access on (grant/share panel).
   const [selected, setSelected] = useState<GfsChild | null>(null)
   const [renameOpen, setRenameOpen] = useState(false)
   const [renameName, setRenameName] = useState('')
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const manageUploadInputRef = useRef<HTMLInputElement | null>(null)
+  const manageReplaceInputRef = useRef<HTMLInputElement | null>(null)
   // New-folder dialog (replaces the native window.prompt flow).
   const [newFolderOpen, setNewFolderOpen] = useState(false)
   const [creatingFolder, setCreatingFolder] = useState(false)
@@ -101,6 +119,19 @@ export function GfsBrowser(): React.JSX.Element {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [uploadCandidate, setUploadCandidate] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
+  const [droppedUploadCount, setDroppedUploadCount] = useState(0)
+  const [imagePreview, setImagePreview] = useState<{
+    byteLength: number
+    fileName: string
+    mimeType: string
+    rid: string
+  } | null>(null)
+  const [markdownPreview, setMarkdownPreview] = useState<{
+    byteLength: number
+    fileName: string
+    rid: string
+  } | null>(null)
   // Resource IDs currently streaming a download (disables that row's button).
   const [downloadingIds, setDownloadingIds] = useState<ReadonlySet<string>>(() => new Set())
 
@@ -108,7 +139,14 @@ export function GfsBrowser(): React.JSX.Element {
   const currentLabel = current?.name === '/' ? DRIVE : current?.name || DRIVE
 
   const load = useCallback(async (crumb: Crumb, cursor?: string): Promise<void> => {
-    setLoading(true)
+    const appending = Boolean(cursor)
+    if (appending) {
+      setLoadingMore(true)
+    } else {
+      setLoading(true)
+      setItems([])
+      setNextCursor(null)
+    }
     setError('')
     try {
       const path =
@@ -135,7 +173,8 @@ export function GfsBrowser(): React.JSX.Element {
         setError(err instanceof Error ? err.message : 'Failed to load the Global File System')
       }
     } finally {
-      setLoading(false)
+      if (appending) setLoadingMore(false)
+      else setLoading(false)
     }
   }, [])
 
@@ -145,20 +184,41 @@ export function GfsBrowser(): React.JSX.Element {
   }, [current, load])
 
   useEffect(() => {
-    if (!selected) return
+    if (!selected || imagePreview || markdownPreview) return
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') setSelected(null)
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selected])
+  }, [imagePreview, markdownPreview, selected])
 
   function openDirectory(child: GfsChild): void {
     if (child.kind !== 'directory') return
+    setLoading(true)
     setCrumbs(prev => [...prev, { id: child.resourceId, rid: child.rid, name: child.name }])
   }
 
+  function openFilePreview(child: GfsChild): boolean {
+    if (child.kind === 'directory') return false
+    const mimeType = gfsImagePreviewMimeType(child.name)
+    if (mimeType) {
+      setImagePreview({
+        byteLength: child.bytes,
+        fileName: child.name,
+        mimeType,
+        rid: child.rid,
+      })
+      return true
+    }
+    if (isGfsMarkdownPreviewFile(child.name)) {
+      setMarkdownPreview({ byteLength: child.bytes, fileName: child.name, rid: child.rid })
+      return true
+    }
+    return false
+  }
+
   function goToCrumb(index: number): void {
+    setLoading(true)
     setCrumbs(crumbs.slice(0, index + 1))
   }
 
@@ -226,6 +286,60 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }
 
+  function handleGfsDragEnter(event: React.DragEvent<HTMLElement>): void {
+    if (!hasDraggedFiles(event)) return
+    event.preventDefault()
+    setDragActive(true)
+  }
+
+  function handleGfsDragOver(event: React.DragEvent<HTMLElement>): void {
+    if (!hasDraggedFiles(event)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = current?.id ? 'copy' : 'none'
+    setDragActive(true)
+  }
+
+  function handleGfsDragLeave(event: React.DragEvent<HTMLElement>): void {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
+    setDragActive(false)
+  }
+
+  async function handleGfsDrop(event: React.DragEvent<HTMLElement>): Promise<void> {
+    if (!hasDraggedFiles(event)) return
+    event.preventDefault()
+    setDragActive(false)
+
+    if (!current?.id) {
+      showToast('Files cannot be uploaded until a destination folder is available.', {
+        tone: 'error',
+      })
+      return
+    }
+
+    const droppedFiles = Array.from(event.dataTransfer.files || [])
+    const previewFiles = droppedFiles.filter(isDroppedPreviewFile)
+    if (!previewFiles.length) {
+      showToast('Only image and Markdown files can be dropped here.', { tone: 'error' })
+      return
+    }
+
+    setDroppedUploadCount(previewFiles.length)
+    try {
+      for (const file of previewFiles) {
+        await uploadFile(file)
+      }
+      const skippedCount = droppedFiles.length - previewFiles.length
+      if (skippedCount > 0) {
+        showToast(
+          `${skippedCount} unsupported ${skippedCount === 1 ? 'file was' : 'files were'} skipped.`,
+          { tone: 'error' }
+        )
+      }
+    } finally {
+      setDroppedUploadCount(0)
+    }
+  }
+
   function closeUploadModal(): void {
     if (uploading) return
     setUploadOpen(false)
@@ -279,6 +393,29 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }
 
+  async function uploadFileToFolder(
+    folder: GfsChild,
+    file: File | null | undefined
+  ): Promise<void> {
+    if (!file || folder.kind !== 'directory') return
+    try {
+      const name = await normalizeGfsResourceName(file.name)
+      await apiSend(
+        'POST',
+        `/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(folder.rid)}/children`,
+        {
+          name,
+          kind: 'file',
+          contentBase64: await fileToEncodedData(file),
+        }
+      )
+      showToast('File uploaded.', { tone: 'success' })
+      await refreshCurrent()
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not upload file.', { tone: 'error' })
+    }
+  }
+
   async function downloadFile(child: GfsChild): Promise<void> {
     if (downloadingIds.has(child.resourceId)) return
     setDownloadingIds(prev => new Set(prev).add(child.resourceId))
@@ -312,8 +449,18 @@ export function GfsBrowser(): React.JSX.Element {
   }
 
   return (
-    <section className="cu-gfs" aria-label="Global File System browser">
-      <div className="cu-card cu-card--viewport-fill">
+    <section
+      className="cu-gfs"
+      aria-label="Global File System browser"
+      aria-busy={loading || droppedUploadCount > 0}
+    >
+      <div
+        className="cu-card cu-card--viewport-fill cu-gfs-card"
+        onDragEnter={handleGfsDragEnter}
+        onDragLeave={handleGfsDragLeave}
+        onDragOver={handleGfsDragOver}
+        onDrop={event => void handleGfsDrop(event)}
+      >
         <TablePanelHeader
           title={
             <>
@@ -322,6 +469,16 @@ export function GfsBrowser(): React.JSX.Element {
           }
           subtitle="Browse and manage drive resources and access grants from the admin plane."
         />
+
+        {dragActive || droppedUploadCount > 0 ? (
+          <div className="cu-gfs-drop-overlay" role="status">
+            {droppedUploadCount > 0
+              ? `Uploading ${droppedUploadCount} ${droppedUploadCount === 1 ? 'file' : 'files'}…`
+              : current?.id
+                ? `Drop images or Markdown files to upload to ${currentLabel}`
+                : 'Files cannot be uploaded until a destination folder is available.'}
+          </div>
+        ) : null}
 
         {error ? (
           <div className="cu-banner cu-banner--error" role="alert">
@@ -370,13 +527,20 @@ export function GfsBrowser(): React.JSX.Element {
             </div>
           </div>
 
-          <div className="cu-gfs-list__toolbar">
-            <span>{items.length} items</span>
-            <span>Use the three-dot menu to manage a resource.</span>
-          </div>
-
-          {loading && items.length === 0 ? (
-            <p className="cu-gfs__state">Loading resources...</p>
+          {loading ? (
+            <div
+              className="cu-gfs-loading"
+              role="status"
+              aria-label="Loading files"
+              aria-live="polite"
+            >
+              <span className="cu-gfs-loading__dots" aria-hidden="true">
+                <span className="cu-gfs-loading__dot" />
+                <span className="cu-gfs-loading__dot" />
+                <span className="cu-gfs-loading__dot" />
+              </span>
+              <span>Loading files…</span>
+            </div>
           ) : (
             <div className="cu-gfs-list-frame">
               <div className="cu-gfs-list__head" aria-hidden="true">
@@ -403,7 +567,19 @@ export function GfsBrowser(): React.JSX.Element {
                             {child.name}
                           </button>
                         ) : (
-                          <span>{child.name}</span>
+                          <>
+                            {isGfsPreviewFile(child.name) ? (
+                              <button
+                                className="cu-gfs-list__name-button"
+                                type="button"
+                                onClick={() => openFilePreview(child)}
+                              >
+                                {child.name}
+                              </button>
+                            ) : (
+                              <span>{child.name}</span>
+                            )}
+                          </>
                         )}
                       </span>
                       <span className="cu-gfs-list__meta">Version {child.version}</span>
@@ -433,7 +609,9 @@ export function GfsBrowser(): React.JSX.Element {
                         resourceUri={child.gfsUri}
                         downloading={downloadingIds.has(child.resourceId)}
                         onManage={() => openManage(child)}
-                        onOpen={child.kind === 'directory' ? () => openDirectory(child) : undefined}
+                        onPreview={
+                          isGfsPreviewFile(child.name) ? () => openFilePreview(child) : undefined
+                        }
                         onDownload={
                           child.kind !== 'directory' ? () => void downloadFile(child) : undefined
                         }
@@ -456,19 +634,21 @@ export function GfsBrowser(): React.JSX.Element {
             </div>
           )}
 
-          {nextCursor ? (
+          {nextCursor && !loading ? (
             <Button
               className="cu-gfs__load-more"
               size="sm"
+              disabled={loadingMore}
+              aria-busy={loadingMore}
               onClick={() => void load(current, nextCursor)}
             >
-              Load more
+              {loadingMore ? 'Loading…' : 'Load more'}
             </Button>
           ) : null}
         </div>
       </div>
 
-      {selected ? (
+      {selected && !deleteOpen ? (
         <div
           className="cu-modal-backdrop cu-gfs-manage-modal"
           role="presentation"
@@ -480,198 +660,124 @@ export function GfsBrowser(): React.JSX.Element {
             className="cu-gfs-manage-dialog"
             role="dialog"
             aria-modal="true"
-            aria-labelledby="cu-gfs-manage-title"
+            aria-label={`Manage ${selected.kind === 'directory' ? 'folder' : 'file'} ${selected.name}`}
           >
             <header className="cu-gfs-manage-dialog__header">
               <span
-                className={`cu-gfs-manage-dialog__icon${selected.kind === 'directory' ? ' cu-gfs-manage-dialog__icon--folder' : ''}`}
+                className={`cu-gfs-manage-dialog__icon${
+                  selected.kind === 'directory' ? ' cu-gfs-manage-dialog__icon--folder' : ''
+                }`}
                 aria-hidden="true"
               >
-                {selected.kind === 'directory' ? <IconFolder /> : <IconServer />}
+                {selected.kind === 'directory' ? <IconFolder /> : <IconPaperclip />}
               </span>
               <span className="cu-gfs-manage-dialog__heading">
-                <span className="cu-gfs__eyebrow">
-                  Manage {selected.kind === 'directory' ? 'folder' : 'file'}
-                </span>
-                <h3 id="cu-gfs-manage-title">{selected.name}</h3>
-                <span className="cu-gfs-manage-dialog__meta">
-                  <span className="cu-gfs-manage-dialog__badge">
-                    {selected.kind === 'directory' ? 'Folder' : 'File'}
-                  </span>
-                  <span>Version {selected.version}</span>
-                  {selected.kind !== 'directory' ? <span>{formatBytes(selected.bytes)}</span> : null}
-                </span>
-              </span>
-              <Button
-                className="cu-gfs-manage-dialog__close"
-                variant="ghost"
-                aria-label="Close manage dialog"
-                onClick={() => setSelected(null)}
-              >
-                <IconX width={18} height={18} />
-              </Button>
-            </header>
-
-            <div className="cu-gfs-manage-dialog__body">
-              <section className="cu-gfs-manage-section cu-gfs-manage-section--actions">
-                <div className="cu-gfs-manage-section__header">
-                  <span>Resource</span>
-                  <h4>Quick actions</h4>
-                  <p>Manage this resource without leaving the browser.</p>
-                </div>
-
-                <div className="cu-gfs-manage-resource-link">
-                  <span>
-                    <small>GFS location</small>
-                    <code title={selected.gfsUri}>{selected.gfsUri}</code>
-                  </span>
-                  <Button
-                    variant="ghost"
-                    aria-label={`Copy GFS link for ${selected.name}`}
-                    onClick={() => void copyGfsUri(selected.gfsUri)}
-                  >
-                    <IconCopy width={17} height={17} />
-                  </Button>
-                </div>
-
-                <div className="cu-gfs-manage-actions">
-                  {selected.kind === 'directory' ? (
-                    <Button
-                      className="cu-gfs-manage-action"
-                      variant="ghost"
-                      onClick={() => {
-                        setSelected(null)
-                        openDirectory(selected)
-                      }}
-                    >
-                      <span className="cu-gfs-manage-action__icon">
-                        <IconFolder />
-                      </span>
-                      <span>
-                        <strong>Open folder</strong>
-                        <small>Browse its contents</small>
-                      </span>
-                    </Button>
-                  ) : (
-                    <>
-                      <label className="cu-btn cu-btn--ghost cu-gfs-manage-action cu-gfs-file-action">
-                        <span className="cu-gfs-manage-action__icon">
-                          <IconUpload width={18} height={18} />
-                        </span>
-                        <span>
-                          <strong>Replace file</strong>
-                          <small>Upload a new version</small>
-                        </span>
-                        <input
-                          aria-label={`Replace ${selected.name}`}
-                          className="sr-only"
-                          type="file"
-                          onChange={event => {
-                            const file = event.currentTarget.files?.[0]
-                            event.currentTarget.value = ''
-                            void replaceFile(selected, file)
-                          }}
-                        />
-                      </label>
-                      <Button
-                        className="cu-gfs-manage-action"
-                        variant="ghost"
-                        disabled={downloadingIds.has(selected.resourceId)}
-                        onClick={() => void downloadFile(selected)}
-                      >
-                        <span className="cu-gfs-manage-action__icon">
-                          <IconDownload width={18} height={18} />
-                        </span>
-                        <span>
-                          <strong>Download</strong>
-                          <small>Save a local copy</small>
-                        </span>
-                      </Button>
-                    </>
-                  )}
-                  <Button
-                    className="cu-gfs-manage-action"
-                    variant="ghost"
-                    onClick={() => {
-                      setRenameName(selected.name)
-                      setRenameOpen(true)
-                      setDeleteOpen(false)
-                    }}
-                  >
-                    <span className="cu-gfs-manage-action__icon">
-                      <IconPencil width={18} height={18} />
-                    </span>
-                    <span>
-                      <strong>Rename</strong>
-                      <small>Change the display name</small>
-                    </span>
-                  </Button>
-                  <Button
-                    className="cu-gfs-manage-action cu-gfs-manage-action--danger"
-                    variant="ghost"
-                    onClick={() => {
-                      setDeleteOpen(true)
-                      setRenameOpen(false)
-                    }}
-                  >
-                    <span className="cu-gfs-manage-action__icon">
-                      <IconTrash width={18} height={18} />
-                    </span>
-                    <span>
-                      <strong>Delete</strong>
-                      <small>Remove this resource</small>
-                    </span>
-                  </Button>
-                </div>
-
                 {renameOpen ? (
                   <form
-                    className="cu-gfs-manage-inline-form"
+                    className="cu-gfs-manage-dialog__title-edit"
                     aria-label="Rename resource"
                     onSubmit={event => {
                       event.preventDefault()
                       void renameResource(selected, renameName)
                     }}
                   >
-                    <label>
-                      <span>New name</span>
-                      <TextInput
-                        autoFocus
-                        value={renameName}
-                        onChange={event => setRenameName(event.currentTarget.value)}
-                      />
-                    </label>
-                    <Button variant="primary" type="submit" disabled={!renameName.trim()}>
+                    <TextInput
+                      aria-label="New name"
+                      autoFocus
+                      value={renameName}
+                      onChange={event => setRenameName(event.currentTarget.value)}
+                    />
+                    <Button variant="primary" size="sm" type="submit" disabled={!renameName.trim()}>
                       Save
                     </Button>
-                    <Button variant="ghost" onClick={() => setRenameOpen(false)}>
+                    <Button size="sm" variant="ghost" onClick={() => setRenameOpen(false)}>
                       Cancel
                     </Button>
                   </form>
-                ) : null}
+                ) : (
+                  <span className="cu-gfs-manage-dialog__title-row">
+                    <h3>{selected.name}</h3>
+                    <GfsResourceMenu
+                      resourceName={selected.name}
+                      resourceUri={selected.gfsUri}
+                      downloading={downloadingIds.has(selected.resourceId)}
+                      onPreview={
+                        selected.kind !== 'directory' && isGfsPreviewFile(selected.name)
+                          ? () => openFilePreview(selected)
+                          : undefined
+                      }
+                      onDownload={
+                        selected.kind !== 'directory'
+                          ? () => void downloadFile(selected)
+                          : undefined
+                      }
+                      onCopyLink={() => void copyGfsUri(selected.gfsUri)}
+                      onRename={() => {
+                        setRenameName(selected.name)
+                        setRenameOpen(true)
+                        setDeleteOpen(false)
+                      }}
+                      onDelete={() => {
+                        setDeleteOpen(true)
+                        setRenameOpen(false)
+                      }}
+                    />
+                  </span>
+                )}
+              </span>
+              <span className="cu-gfs-manage-dialog__top-actions">
+                {selected.kind === 'directory' ? (
+                  <Button size="sm" onClick={() => manageUploadInputRef.current?.click()}>
+                    Upload file
+                  </Button>
+                ) : (
+                  <Button size="sm" onClick={() => manageReplaceInputRef.current?.click()}>
+                    Replace file
+                  </Button>
+                )}
+                <Button
+                  autoFocus
+                  className="cu-gfs-manage-dialog__close"
+                  variant="ghost"
+                  aria-label="Close manage dialog"
+                  onClick={() => setSelected(null)}
+                >
+                  <IconX width={18} height={18} />
+                </Button>
+              </span>
+            </header>
 
-                {deleteOpen ? (
-                  <div
-                    className="cu-gfs-manage-inline-form"
-                    role="alertdialog"
-                    aria-label="Delete resource"
-                  >
-                    <span>Delete {selected.name}?</span>
-                    <Button variant="danger" onClick={() => void deleteResource(selected)}>
-                      Delete
-                    </Button>
-                    <Button variant="ghost" onClick={() => setDeleteOpen(false)}>
-                      Cancel
-                    </Button>
-                  </div>
-                ) : null}
-              </section>
+            {selected.kind === 'directory' ? (
+              <input
+                aria-label="Upload file"
+                className="sr-only"
+                ref={manageUploadInputRef}
+                type="file"
+                onChange={event => {
+                  const file = event.currentTarget.files?.[0]
+                  event.currentTarget.value = ''
+                  void uploadFileToFolder(selected, file)
+                }}
+              />
+            ) : (
+              <input
+                aria-label={`Replace ${selected.name}`}
+                className="sr-only"
+                ref={manageReplaceInputRef}
+                type="file"
+                onChange={event => {
+                  const file = event.currentTarget.files?.[0]
+                  event.currentTarget.value = ''
+                  void replaceFile(selected, file)
+                }}
+              />
+            )}
 
+            <div className="cu-gfs-manage-dialog__body">
               <section className="cu-gfs-manage-section cu-gfs-manage-section--access">
                 <div className="cu-gfs-manage-section__header">
-                  <span>Sharing</span>
                   <h4>Access</h4>
-                  <p>Choose who can use this resource and what they can do.</p>
+                  <p>Control who can use this resource and what they can do.</p>
                 </div>
                 <GfsGrantPanel
                   resource={{
@@ -682,6 +788,43 @@ export function GfsBrowser(): React.JSX.Element {
                   }}
                 />
               </section>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {selected && deleteOpen ? (
+        <div
+          className="cu-modal-backdrop cu-gfs-manage-modal"
+          role="presentation"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) setSelected(null)
+          }}
+        >
+          <section
+            className="cu-gfs-delete-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="Delete resource"
+          >
+            <div className="cu-gfs-delete-dialog__copy">
+              <h3>Delete {selected.name}?</h3>
+              <p>This action cannot be undone.</p>
+            </div>
+            <div className="cu-gfs-delete-dialog__actions">
+              <Button
+                autoFocus
+                variant="ghost"
+                onClick={() => {
+                  setDeleteOpen(false)
+                  setSelected(null)
+                }}
+              >
+                Cancel
+              </Button>
+              <Button variant="danger" onClick={() => void deleteResource(selected)}>
+                Delete
+              </Button>
             </div>
           </section>
         </div>
@@ -701,11 +844,32 @@ export function GfsBrowser(): React.JSX.Element {
         <FileUploadModal
           busy={uploading}
           file={uploadCandidate}
-          fileSummary={uploadCandidate ? `${formatBytes(uploadCandidate.size)} selected` : undefined}
-          guidance="For reliable uploads, use files around 110 MB or smaller."
+          fileSummary={
+            uploadCandidate ? `${formatBytes(uploadCandidate.size)} selected` : undefined
+          }
+          guidance="GFS uploads are limited to 10 MB per file."
           onClose={closeUploadModal}
           onFileChange={setUploadCandidate}
           onUpload={() => void uploadFile(uploadCandidate)}
+        />
+      ) : null}
+
+      {imagePreview ? (
+        <GfsImagePreview
+          byteLength={imagePreview.byteLength}
+          fileName={imagePreview.fileName}
+          mimeType={imagePreview.mimeType}
+          rid={imagePreview.rid}
+          onClose={() => setImagePreview(null)}
+        />
+      ) : null}
+
+      {markdownPreview ? (
+        <GfsMarkdownPreview
+          byteLength={markdownPreview.byteLength}
+          fileName={markdownPreview.fileName}
+          rid={markdownPreview.rid}
+          onClose={() => setMarkdownPreview(null)}
         />
       ) : null}
     </section>

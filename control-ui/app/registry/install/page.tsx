@@ -14,6 +14,7 @@ import { RegistryInstallForm } from '@components/RegistryInstallForm'
 import { IconStore } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import { getRegistryEntryVersion, installRecipeFromRegistry } from '@lib/api'
 import type { RegistryEntry } from '@lib/api'
@@ -433,7 +434,7 @@ function RegistryInstallPageContent() {
         {loadingEntry ? (
           <CreateFlowSkeleton
             {...CREATE_FLOW_LOADING.installRegistryEntry}
-            onBack={() => router.push('/registry')}
+            onBack={() => router.push(CONTROL_ROUTES.marketplace.root)}
             backDisabled={false}
           />
         ) : (
@@ -444,7 +445,7 @@ function RegistryInstallPageContent() {
                 title="Install from Marketplace"
                 subtitle="Install a Marketplace entry into your cluster and bind it to a context."
                 backLabel="Back to Marketplace"
-                onBack={() => router.push('/registry')}
+                onBack={() => router.push(CONTROL_ROUTES.marketplace.root)}
               />
             }
           >
@@ -452,18 +453,18 @@ function RegistryInstallPageContent() {
             {entry?.entry_type === 'recipe' ? (
               <RegistryRecipeInstallPreview
                 entry={entry}
-                onCancel={() => router.push('/registry')}
+                onCancel={() => router.push(CONTROL_ROUTES.marketplace.root)}
                 onInstalled={recipeName =>
                   router.push(
-                    `/workflow-recipes/${encodeURIComponent(DEFAULT_WORKFLOW_RECIPE_NAMESPACE)}/${encodeURIComponent(recipeName)}`
+                    CONTROL_ROUTES.plugins.detail(DEFAULT_WORKFLOW_RECIPE_NAMESPACE, recipeName)
                   )
                 }
               />
             ) : entry ? (
               <RegistryInstallForm
                 entry={entry}
-                onCancel={() => router.push('/registry')}
-                onInstalled={() => router.push('/registry')}
+                onCancel={() => router.push(CONTROL_ROUTES.marketplace.root)}
+                onInstalled={() => router.push(CONTROL_ROUTES.marketplace.root)}
               />
             ) : null}
           </CreateFlowPanel>
@@ -482,7 +483,7 @@ export default function RegistryInstallPage() {
           <DashboardLayout isDetailPage>
             <CreateFlowSkeleton
               {...CREATE_FLOW_LOADING.installRegistryEntry}
-              onBack={() => router.push('/registry')}
+              onBack={() => router.push(CONTROL_ROUTES.marketplace.root)}
               backDisabled={false}
             />
           </DashboardLayout>

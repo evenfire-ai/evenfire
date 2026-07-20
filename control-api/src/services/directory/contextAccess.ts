@@ -1,13 +1,39 @@
+import type { DbClient } from '../../db.js'
 import { pool } from '../../db.js'
 import { bulkSetLinkedItems } from '../../shared/generics.js'
+import {
+  type ControlApiPermissionSubject,
+  appendControlApiPermissionEventsInTransaction,
+} from '../tracing/controlApiPermissionEvents.js'
 
-export async function setUserContexts(userId: string, contextIds: string[]) {
+async function appendContextAccessChanges(
+  db: DbClient,
+  operatorSub: string,
+  subject: ControlApiPermissionSubject,
+  change: { added: string[]; removed: string[] }
+): Promise<void> {
+  const mapChanges = (action: 'grant' | 'revoke', contextIds: string[]) =>
+    contextIds.map(contextId => ({
+      action,
+      resourceClass: 'context_access',
+      resourceRef: `context:${contextId}`,
+      subject,
+    }))
+  await appendControlApiPermissionEventsInTransaction(db, {
+    operatorSub,
+    changes: [...mapChanges('grant', change.added), ...mapChanges('revoke', change.removed)],
+  })
+}
+
+export async function setUserContexts(userId: string, contextIds: string[], operatorSub: string) {
   const result = await bulkSetLinkedItems(
     'user_contexts',
     'user_id',
     userId,
     'context_id',
-    contextIds
+    contextIds,
+    (db, change) =>
+      appendContextAccessChanges(db, operatorSub, { kind: 'user', id: userId }, change)
   )
   return { userId, contextIds: result.items }
 }
@@ -48,13 +74,15 @@ export async function listUsersByContext(contextId: string) {
   }))
 }
 
-export async function setTeamContexts(teamId: string, contextIds: string[]) {
+export async function setTeamContexts(teamId: string, contextIds: string[], operatorSub: string) {
   const result = await bulkSetLinkedItems(
     'team_contexts',
     'team_id',
     teamId,
     'context_id',
-    contextIds
+    contextIds,
+    (db, change) =>
+      appendContextAccessChanges(db, operatorSub, { kind: 'team', id: teamId }, change)
   )
   return { teamId, contextIds: result.items }
 }

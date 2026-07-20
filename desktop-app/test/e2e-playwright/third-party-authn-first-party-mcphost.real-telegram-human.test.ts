@@ -152,7 +152,7 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through real Telegram', () =
           .toBe(1)
         expect(providerDecisionEventSignalForApproval(approvalId)).toBe('decided:1')
         expect(workflowRunSignalForApproval(approvalId)).toBe(
-          `autonomous:autonomous:sandbox-recipes/${recipeName}`
+          `user:onDemand:sandbox-recipes/${recipeName}`
         )
       })
 

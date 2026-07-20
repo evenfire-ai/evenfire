@@ -148,4 +148,30 @@ describe('AppService.invokeHostMessage host-availability plumbing', () => {
 
     await expect(svc.invokeHostMessage('myhost', { content: 'hi' })).rejects.toBe(plain)
   })
+
+  it('forwards an optional piggybacked model through the field allow-list (R2 Option A)', async () => {
+    const svc = makeService()
+    mockInvokeHostMessage.mockResolvedValue({ taskId: 't1', status: 'pending' })
+
+    await svc.invokeHostMessage('myhost', { content: 'hi', model: 'claude-opus-4-8' })
+
+    // The contextualRequest is a field allow-list; `model` must be threaded
+    // through explicitly so the runtime can validate+persist the session model.
+    expect(mockInvokeHostMessage).toHaveBeenCalledWith(
+      'rpc-token',
+      'myhost',
+      expect.objectContaining({ content: 'hi', model: 'claude-opus-4-8' }),
+      undefined
+    )
+  })
+
+  it('omits model when no selection is piggybacked (additive/optional)', async () => {
+    const svc = makeService()
+    mockInvokeHostMessage.mockResolvedValue({ taskId: 't2', status: 'pending' })
+
+    await svc.invokeHostMessage('myhost', { content: 'hi' })
+
+    const forwarded = mockInvokeHostMessage.mock.calls[0]?.[2] as Record<string, unknown>
+    expect('model' in forwarded).toBe(false)
+  })
 })

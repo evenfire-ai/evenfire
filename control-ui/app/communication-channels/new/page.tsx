@@ -16,6 +16,7 @@ import { IconBroadcast } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconCopy } from '@components/icons'
 import { Button, Field, TextInput } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { apiGet, apiSend } from '@lib/api'
 import type { ChannelType } from '@lib/channelTypes'
 import { copyTextToClipboard } from '@lib/clipboard'
@@ -405,7 +406,7 @@ export default function CreateCommunicationChannelPage() {
         credentials: cleanedCredentials,
       })
       showToast('Communication channel created.', { tone: 'success' })
-      router.push('/communication-channels')
+      router.push(CONTROL_ROUTES.externalChannels.root)
     } catch (createError) {
       setError(
         createError instanceof Error
@@ -427,7 +428,7 @@ export default function CreateCommunicationChannelPage() {
               title="Create communication channel"
               subtitle="Define a bot channel and grant agent-scoped chat access."
               backLabel="Back to channels"
-              onBack={() => router.push('/communication-channels')}
+              onBack={() => router.push(CONTROL_ROUTES.externalChannels.root)}
               backDisabled={saving}
             />
           }
@@ -760,7 +761,9 @@ export default function CreateCommunicationChannelPage() {
                   type="button"
                   variant="ghost"
                   size="sm"
-                  onClick={() => (step === 0 ? router.push('/communication-channels') : setStep(0))}
+                  onClick={() =>
+                    step === 0 ? router.push(CONTROL_ROUTES.externalChannels.root) : setStep(0)
+                  }
                   disabled={saving}
                 >
                   {step === 0 ? 'Cancel' : 'Back'}

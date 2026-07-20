@@ -121,12 +121,8 @@ export interface ConversationStore {
    *  Optional, same rationale as reapProcessingSessions. */
   reapExpiredAwaitingApprovalSessions?(now: number): Promise<ReapedSession[]>
 
-  /** S1 — boot-time sweep: transition EVERY session left in 'awaiting_approval'
-   *  (live or expired) to 'idle', delete the stale approval row(s), clear
-   *  active_task_id, and append a synthetic APPROVAL_INTERRUPTED_BY_RESTART
-   *  message. Used by the boot reaper because no awaiting_approval session is
-   *  resumable after a restart (no executor rehydration). Optional, same
-   *  rationale as reapProcessingSessions. */
+  /** Legacy operator recovery sweep for every awaiting approval. Normal boot
+   *  uses the expired-only sweep and reconstructs live executors. */
   reapAwaitingApprovalSessions?(now: number): Promise<ReapedSession[]>
 
   // ─── Persist hooks invoked by `ConversationManager` ─────────────────
@@ -157,6 +153,14 @@ export interface ConversationStore {
    * the LLM call. In-memory stores no-op.
    */
   persistSystemPromptStableHash(conv: Conversation, stableHash: string): Promise<void> | void
+
+  /**
+   * R2 — persist the per-session `{ provider → model }` selection map after a
+   * `set-model`. Async (enqueued via the worker), keyed by sessionKey so it
+   * lands after the session's own `insert_session`. In-memory stores no-op.
+   * Optional so legacy/in-memory stores don't have to implement it.
+   */
+  persistModelSelections?(conv: Conversation): Promise<void> | void
 
   /**
    * Accumulate the token usage of ONE LLM call into the durable per-session
@@ -231,10 +235,13 @@ export class InMemoryConversationStore implements ConversationStore {
     const out: PersistedSessionListing[] = []
     for (const [sessionKey, conv] of this.map) {
       if (conv.pending_approval) {
+        if (!conv.activeTaskId) {
+          throw new Error(`Pending approval ${conv.pending_approval.request_id} has no active task`)
+        }
         out.push({
           sessionKey,
           approval: conv.pending_approval,
-          taskId: conv.pending_approval.request_id,
+          taskId: conv.activeTaskId,
         })
       }
     }
@@ -262,6 +269,10 @@ export class InMemoryConversationStore implements ConversationStore {
 
   persistSystemPromptStableHash(_conv: Conversation, _stableHash: string): void {
     /* no-op */
+  }
+
+  persistModelSelections(_conv: Conversation): void {
+    /* no-op — RAM-only store keeps the selection on the Conversation object */
   }
 
   persistSessionUsage(_conv: Conversation, _usage: SessionTokenUsage): void {

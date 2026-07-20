@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { ConversationState, type PendingApproval } from '../../../types'
+import { ConversationState, type PendingApproval, type TraceContextV1 } from '../../../types'
 import { ConversationManager } from '../../conversation'
 import { CacheOverflowError } from '../pinnedLruMap'
 import { type StoreHandle, makeSqliteStore } from './testHelpers'
@@ -619,12 +619,19 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
     }
   })
 
-  it('cold-load repopulates Conversation.activeTaskId from the column', async () => {
+  it('cold-load round-trips active Task.id and exact trace context from explicit columns', async () => {
     const handle = await freshStore({ cacheSize: 4 })
     try {
       const manager = new ConversationManager(handle.store)
       const conv = await manager.getOrCreate(SESSION_KEY)
-      await manager.startTurn(conv, 'hola', 'task-reload')
+      const traceContext = {
+        version: 1,
+        runId: 'run-reload',
+        sessionId: null,
+        origin: 'api',
+        correlationRefs: ['request:req-reload'],
+      } satisfies TraceContextV1
+      await manager.startTurn(conv, 'hola', 'task-reload', traceContext)
       await manager.suspendForApproval(conv, {
         request_id: 'req-reload',
         tool_name: 'shell_exec',
@@ -635,6 +642,17 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
       })
       await handle.persistQueue.drainSessionKey(SESSION_KEY)
 
+      const activeRow = handle.worker.db
+        .prepare('SELECT active_task_id, active_trace_context FROM sessions WHERE id = ?')
+        .get(conv.id) as { active_task_id: string; active_trace_context: string }
+      const approvalRow = handle.worker.db
+        .prepare('SELECT task_id, trace_context FROM pending_approvals WHERE request_id = ?')
+        .get('req-reload') as { task_id: string; trace_context: string }
+      expect(activeRow.active_task_id).toBe('task-reload')
+      expect(JSON.parse(activeRow.active_trace_context)).toEqual(traceContext)
+      expect(approvalRow.task_id).toBe('task-reload')
+      expect(JSON.parse(approvalRow.trace_context)).toEqual(traceContext)
+
       // Drop the cache entry to force a cold load (same pattern as the
       // cold-start rehydration test above).
       handle.store['cache'].delete(SESSION_KEY)
@@ -643,6 +661,8 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
 
       const reloaded = await handle.store.getOrLoad(SESSION_KEY)
       expect(reloaded?.activeTaskId).toBe('task-reload')
+      expect(reloaded?.traceContext).toEqual(traceContext)
+      expect(reloaded?.pending_approval?.traceContext).toEqual(traceContext)
     } finally {
       await handle.shutdown()
     }

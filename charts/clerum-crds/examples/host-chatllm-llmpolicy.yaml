@@ -1,0 +1,60 @@
+# Example: a Host with a provider-fallback policy (spec v2 R5).
+#
+# ROLLOUT ORDER — apply the hosts.clerum.io CRD BEFORE this resource. apiextensions/v1
+# silently prunes unknown fields, so a Host written against the OLD CRD would lose its
+# `spec.llmPolicy` on admission with no error. CRD first, then this.
+#
+# OPT-IN: a Host without `spec.llmPolicy` (see host-chatllm.yaml) keeps the exact
+# prior behavior — no failover. Every fallback model below must be enabled in the
+# operator allowlist under its provider, or control-api rejects the write (422).
+apiVersion: clerum.io/v1alpha1
+kind: Host
+metadata:
+  name: chatllm-failover
+spec:
+  host: chatLLM
+  contextRef: context1
+  secretRef: chatllm-api-keys
+  model:
+    provider: claude
+    name: claude-opus-4-7
+  llmPolicy:
+    # Seconds the primary stays in cooldown after an eligible failure before it is
+    # lazily retried. Optional; default 300.
+    cooldownSeconds: 300
+    # Error classes that trigger a fallback. Optional; default is all four.
+    triggerOn:
+      - insufficient_quota
+      - auth
+      - provider_unavailable
+      - rate_limited
+    fallbacks:
+      # 1) Same provider, a DIFFERENT key of the same chatllm-api-keys Secret.
+      #    Saves credit exhaustion / a banned key without changing vendor. The
+      #    session model selection (R2) is respected for same-provider fallbacks.
+      - provider: claude
+        model: claude-haiku-4-5
+        credentialSlot: claude-api-key-fb1
+      # 2) Cross-provider — a different vendor entirely. Saves a provider outage.
+      #    Uses the provider's normal credential slots (no credentialSlot override).
+      - provider: openai
+        model: gpt-5.4
+  channels:
+    - all-channels
+---
+# The referenced Secret. For the same-provider fallback above, add the extra key
+# (claude-api-key-fb1) alongside the primary keys in the SAME Secret — this reuses
+# the per-Host RBAC and the ConfigStore watch (spec §3-R5.5).
+#   kubectl create secret generic chatllm-api-keys \
+#     --from-literal=claude-api-key=sk-ant-xxx \
+#     --from-literal=claude-api-key-fb1=sk-ant-yyy \
+#     --from-literal=openai-api-key=sk-xxx
+apiVersion: v1
+kind: Secret
+metadata:
+  name: chatllm-api-keys
+type: Opaque
+stringData:
+  claude-api-key: "your-primary-claude-api-key-here"
+  claude-api-key-fb1: "your-fallback-claude-api-key-here"
+  openai-api-key: "your-openai-api-key-here"

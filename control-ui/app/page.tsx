@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import Image from 'next/image'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { requestControlAdminPasswordReset } from '@lib/api'
 import { sanitizeControlUiReturnPath } from '@lib/authRedirect'
 
@@ -26,7 +27,7 @@ function PageContent() {
 
   useEffect(() => {
     if (authState.isLoggedIn && !authState.isLoading) {
-      router.replace(nextPath || '/hosts')
+      router.replace(nextPath || CONTROL_ROUTES.agents.root)
     }
   }, [authState.isLoggedIn, authState.isLoading, nextPath, router])
 

@@ -13,12 +13,27 @@ import { HttpMcpHostClient } from '../../../src/workflow/httpMcpHostClient'
 import { K8sSecretReaderImpl } from '../../../src/workflow/k8sSecretReaderImpl'
 import { ModelConfigHandler } from '../../../src/workflow/modelConfigHandler'
 
+// Simulate a real 404 from the K8s API so readConfigMapWithPresence reports the
+// allowlist CM as absent (degraded mode). Returning `{ data: undefined }` would
+// instead mean "CM exists, empty data" → deny-all, so absence MUST throw 404.
+function notFound(): never {
+  const err = new Error('Not Found') as Error & { response: { statusCode: number } }
+  err.response = { statusCode: 404 }
+  throw err
+}
+
 describe('ModelConfigHandler DI Wiring (B3 regression)', () => {
   describe('K8sSecretReaderImpl satisfies K8sSecretReader interface', () => {
     it('has readConfigMap method', () => {
       const mockApi = { readNamespacedConfigMap: vi.fn(), readNamespacedSecret: vi.fn() }
       const reader = new K8sSecretReaderImpl(mockApi as never)
       expect(typeof reader.readConfigMap).toBe('function')
+    })
+
+    it('has readConfigMapWithPresence method', () => {
+      const mockApi = { readNamespacedConfigMap: vi.fn(), readNamespacedSecret: vi.fn() }
+      const reader = new K8sSecretReaderImpl(mockApi as never)
+      expect(typeof reader.readConfigMapWithPresence).toBe('function')
     })
 
     it('has readSecret method', () => {
@@ -59,11 +74,14 @@ describe('ModelConfigHandler DI Wiring (B3 regression)', () => {
 
   describe('End-to-end model hot-swap flow', () => {
     it('resolves apiKey from ConfigMap→Secret chain and forwards to mcp_host', async () => {
-      // 1. Mock K8s: ConfigMap maps "openai__gpt-4" → "openai-prod-secret/apiKey"
-      // Post-refactor format: "secretName/keyName" — keyName must be explicit.
+      // 1. Mock K8s: ConfigMap maps provider "openai" → "openai-prod-secret/apiKey"
+      // Post-R1 format: key = provider, value = "secretName/keyName".
       const mockApi = {
-        readNamespacedConfigMap: vi.fn().mockResolvedValue({
-          data: { 'openai__gpt-4': 'openai-prod-secret/apiKey' },
+        // The R3 allowlist ConfigMap is absent here (degraded mode); the broker
+        // proceeds since this direct-handler call passes no `validateDegraded`.
+        readNamespacedConfigMap: vi.fn(({ name }: { name: string }) => {
+          if (name === 'clerum-llm-allowed-models') notFound()
+          return Promise.resolve({ data: { openai: 'openai-prod-secret/apiKey' } })
         }),
         readNamespacedSecret: vi.fn().mockResolvedValue({
           data: {
@@ -118,8 +136,11 @@ describe('ModelConfigHandler DI Wiring (B3 regression)', () => {
 
     it('returns 500 when ConfigMap not found', async () => {
       const mockApi = {
-        readNamespacedConfigMap: vi.fn().mockResolvedValue({
-          data: undefined,
+        // Allowlist CM absent (404 → degraded); the secret-mapping CM exists but
+        // has no data (data: undefined → readConfigMap returns null → 500).
+        readNamespacedConfigMap: vi.fn(({ name }: { name: string }) => {
+          if (name === 'clerum-llm-allowed-models') notFound()
+          return Promise.resolve({ data: undefined })
         }),
         readNamespacedSecret: vi.fn(),
       }
@@ -137,10 +158,11 @@ describe('ModelConfigHandler DI Wiring (B3 regression)', () => {
       expect(result.body.error).toContain('ConfigMap not found')
     })
 
-    it('returns 404 when provider/model has no secret mapping', async () => {
+    it('returns 404 when provider has no secret mapping', async () => {
       const mockApi = {
-        readNamespacedConfigMap: vi.fn().mockResolvedValue({
-          data: { 'openai__gpt-4': 'openai-secret/apiKey' },
+        readNamespacedConfigMap: vi.fn(({ name }: { name: string }) => {
+          if (name === 'clerum-llm-allowed-models') notFound()
+          return Promise.resolve({ data: { openai: 'openai-secret/apiKey' } })
         }),
         readNamespacedSecret: vi.fn(),
       }
@@ -148,7 +170,8 @@ describe('ModelConfigHandler DI Wiring (B3 regression)', () => {
       const mcpClient = new HttpMcpHostClient()
 
       const handler = new ModelConfigHandler(reader, mcpClient)
-      // BUG-11/V9 fix: use a valid provider (claude) but a model that has no mapping
+      // BUG-11/V9 fix: use a valid provider (claude) that is absent from the
+      // ConfigMap — post-R1 the 404 is driven by the provider key, not the model.
       const result = await handler.handle(
         { stepId: 's1', provider: 'claude', model: 'claude-4-unknown' },
         'http://mcp:8080',
@@ -161,8 +184,9 @@ describe('ModelConfigHandler DI Wiring (B3 regression)', () => {
 
     it('returns 502 when mcp_host is unreachable', async () => {
       const mockApi = {
-        readNamespacedConfigMap: vi.fn().mockResolvedValue({
-          data: { 'openai__gpt-4': 'openai-secret/apiKey' },
+        readNamespacedConfigMap: vi.fn(({ name }: { name: string }) => {
+          if (name === 'clerum-llm-allowed-models') notFound()
+          return Promise.resolve({ data: { openai: 'openai-secret/apiKey' } })
         }),
         readNamespacedSecret: vi.fn().mockResolvedValue({
           data: { apiKey: Buffer.from('sk-test').toString('base64') },

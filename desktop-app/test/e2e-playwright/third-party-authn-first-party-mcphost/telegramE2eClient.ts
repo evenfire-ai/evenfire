@@ -4,6 +4,8 @@ import {
   type FakeTelegramClientPortForward,
   TELEGRAM_CHAT_ID,
   TELEGRAM_PROVIDER_USER_ID,
+  channelReaderProviderMessageAuthorizationSignal,
+  fakeTelegramSentMessages,
   openFakeTelegramClientPortForward,
 } from './fakeTelegramProvider'
 import { markProviderMessageSent, waitBeforeProviderMessage } from './providerMessagePacing'
@@ -154,12 +156,33 @@ export async function openTelegramClient(browser: Browser): Promise<{
 export async function waitForWorkflowApprovalInTelegramClient(
   page: Page,
   recipeName: string,
-  timeout = 120_000
-): Promise<void> {
+  timeout = 120_000,
+  previousDecisionMessageId?: string
+): Promise<string> {
   const card = page.getByTestId('telegram-approval-card')
   await expect(card).toBeVisible({ timeout })
   await expect(card).toContainText(`Approve workflow ${recipeName}`, { timeout })
   await expect(card).not.toContainText(UUID_RE)
+  const button = page.getByTestId('telegram-approve-workflow')
+  await expect
+    .poll(async () => (await button.getAttribute('data-decision-message-id'))?.trim() || '', {
+      timeout,
+      intervals: [500, 1_000, 2_000],
+      message: 'Telegram approval card should expose a fresh provider decision message id',
+    })
+    .toMatch(/^\d+$/)
+  if (previousDecisionMessageId) {
+    await expect
+      .poll(async () => (await button.getAttribute('data-decision-message-id'))?.trim() || '', {
+        timeout,
+        intervals: [500, 1_000, 2_000],
+        message: 'Telegram approval card should advance to the new workflow approval request',
+      })
+      .not.toBe(previousDecisionMessageId)
+  }
+  const decisionMessageId = (await button.getAttribute('data-decision-message-id'))?.trim() || ''
+  expect(decisionMessageId).toMatch(/^\d+$/)
+  return decisionMessageId
 }
 
 export async function sendTelegramClientMessage(
@@ -180,6 +203,36 @@ export async function sendTelegramClientMessage(
   })
   markProviderMessageSent(page)
   await expectCurrentTelegramTechnicalIdsHidden(page)
+}
+
+export async function sendTelegramClientMessageExpectRejected(
+  page: Page,
+  text: string,
+  messageId: number,
+  identity: TelegramClientIdentity
+): Promise<void> {
+  const outboundBefore = fakeTelegramSentMessages(identity.providerChannelId).length
+  await sendTelegramClientMessage(page, text, messageId, identity)
+
+  await expect
+    .poll(
+      () =>
+        channelReaderProviderMessageAuthorizationSignal({
+          hostName: HOST_REF,
+          providerUserId: identity.providerUserId,
+          providerChannelId: identity.providerChannelId,
+          messageId,
+        }),
+      {
+        timeout: 30_000,
+        intervals: [500, 1_000, 2_000],
+        message: 'channel-reader should fail closed for the rejected Telegram provider message',
+      }
+    )
+    .toMatch(/^(?:control-plane|adapter)-denied:/)
+
+  expect(fakeTelegramSentMessages(identity.providerChannelId)).toHaveLength(outboundBefore)
+  await expect(telegramReplyItems(page)).toHaveCount(outboundBefore)
 }
 
 export async function setTelegramClientIdentity(
@@ -312,11 +365,12 @@ export async function expectTelegramWorkflowList(
 export async function expectTelegramWorkflowResultDocument(
   page: Page,
   filename: string,
-  artifactProof: string
+  artifactProof: string,
+  timeout = 180_000
 ): Promise<void> {
   const documentReply = page.locator(`[data-document-filename="${filename}"]`)
-  await expect(documentReply).toHaveCount(1, { timeout: 60_000 })
-  await expect(documentReply).toBeVisible({ timeout: 60_000 })
+  await expect(documentReply).toHaveCount(1, { timeout })
+  await expect(documentReply).toBeVisible({ timeout })
   await expect(documentReply).toHaveAttribute('data-document-mime', 'application/octet-stream')
   await expect(documentReply).toContainText('bytes')
   await expect(documentReply).toContainText('Workflow artifact')

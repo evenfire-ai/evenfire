@@ -7,9 +7,11 @@ import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { HostApprovalSection } from '../../../components/HostApprovalSection'
 import { HostEnvTable } from '../../../components/HostEnvTable'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
+import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { IconRobot } from '../../../components/Sidebar/icons'
 import { IconCheck, IconPencil, IconX } from '../../../components/icons'
 import {
@@ -24,14 +26,25 @@ import {
   updateAdminTeamAgents,
   updateAdminUserAgents,
 } from '../../../lib/api'
+import { useLlmAllowedModels } from '../../../lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '../../../lib/hostWorkflowControl'
 import {
-  LLM_PROVIDER_OPTIONS,
+  type HostAllowedModel,
+  LLM_EMPTY_TRIGGER_ERROR,
+  type LlmPolicy,
   type LlmProvider,
-  getDefaultModel,
+  buildAllowedModelsSpec,
+  getActiveCredentialKeys,
   getModelOptions,
   getProviderLabel,
+  isProviderUsable,
+  normalizeAllowedModels,
+  normalizeLlmPolicy,
   normalizeProvider,
+  projectCredentialDraft,
+  resolveDefaultModel,
+  validateLlmPolicy,
+  validateLlmSecretData,
 } from '../../../lib/llm'
 import type { ChannelResource, HostTab } from './types'
 
@@ -44,8 +57,17 @@ const TAB_LABELS: Record<HostTab, string> = {
   identity: 'Identity',
 }
 
+const TAB_SLUGS: Record<HostTab, string> = {
+  details: 'overview',
+  contexts: 'contexts',
+  env: 'env-vars',
+  users: 'member-access',
+  teams: 'team-access',
+  identity: 'identity',
+}
+
 function parseHostTab(value: string | undefined): HostTab {
-  return HOST_TABS.includes(value as HostTab) ? (value as HostTab) : HOST_DEFAULT_TAB
+  return HOST_TABS.find(tab => TAB_SLUGS[tab] === value) ?? HOST_DEFAULT_TAB
 }
 
 // Cron×stateless: map the machine-readable suspend-blocked reason to
@@ -92,8 +114,32 @@ export default function HostDetailsPage() {
   const [hostDisplayDraft, setHostDisplayDraft] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
   const [providerDraft, setProviderDraft] = useState<LlmProvider>('openai')
-  const [modelNameDraft, setModelNameDraft] = useState(getDefaultModel('openai'))
+  // Model options are the operator allowlist (enabled only). The host's saved
+  // model is always kept selectable even if it fell out of the allowlist
+  // (preexisting resources are not interrupted — spec R3.7).
+  const {
+    models: allowedCatalog,
+    loading: modelsLoading,
+    error: modelsError,
+  } = useLlmAllowedModels()
+  const [modelNameDraft, setModelNameDraft] = useState('')
   const [secretRefDraft, setSecretRefDraft] = useState('')
+  // Fallback policy (spec §3-R5). `undefined` = the Host has no llmPolicy.
+  const [llmPolicyDraft, setLlmPolicyDraft] = useState<LlmPolicy | undefined>(undefined)
+  // Per-host model allowlist subset (spec.allowedModels, Topic 3a). Empty = the
+  // host offers the full global allowlist per provider (back-compat default).
+  const [allowedModelsDraft, setAllowedModelsDraft] = useState<HostAllowedModel[]>([])
+  // Write-only credential rotations for this Host's Secret (spec Topic 1b R5).
+  // A blank field leaves the stored key unchanged; a typed value rotates ONLY
+  // that dataKey via the merge PUT. Reset on every (re)load.
+  const [llmKeyDraft, setLlmKeyDraft] = useState<Record<string, string>>({})
+  // Extra fallback slots whose stored key can be retired after their fallback
+  // was removed (spec Topic 1b R5: offer to RETIRE via removeKeys). Applied on
+  // save unless the operator opts out.
+  const [retireCandidates, setRetireCandidates] = useState<string[]>([])
+  // Data keys present per LLM Secret name, so the fallback credentialSlot
+  // dropdown can offer extra keys (e.g. `claude-api-key-fb1`) — never free text.
+  const [secretKeysByName, setSecretKeysByName] = useState<Record<string, string[]>>({})
   const [channelsDraft, setChannelsDraft] = useState<string[]>([])
   const [approvalToolsData, setApprovalToolsData] = useState<Record<string, boolean> | undefined>(
     undefined
@@ -150,15 +196,55 @@ export default function HostDetailsPage() {
     [allTeams, teamIdsWithAccess]
   )
   const hasPendingRename = hostNameDraft.trim() && hostNameDraft.trim() !== routeName
-  const providerModelOptions = useMemo(() => getModelOptions(providerDraft), [providerDraft])
+  const providerModelOptions = useMemo(
+    () => getModelOptions(allowedCatalog, providerDraft),
+    [allowedCatalog, providerDraft]
+  )
+  // The EFFECTIVE per-host subset to persist (Topic 3a): the raw draft pruned to
+  // the providers actually in this host's domain (primary + fallbacks — so a
+  // stale subset for a provider that is no longer used is never emitted), then
+  // collapsed by `buildAllowedModelsSpec` (unrestricted/all-selected providers
+  // dropped). The single source of truth for BOTH the save payload and the
+  // read-only summary, so the displayed state always matches what is saved.
+  const effectiveAllowedModelsSpec = useMemo(() => {
+    const activeProviders = new Set<string>([
+      providerDraft,
+      ...(llmPolicyDraft?.fallbacks ?? []).map(fallback => fallback.provider),
+    ])
+    return buildAllowedModelsSpec(
+      allowedModelsDraft.filter(entry => activeProviders.has(entry.provider)),
+      allowedCatalog
+    )
+  }, [allowedModelsDraft, allowedCatalog, providerDraft, llmPolicyDraft])
+  // The effective subset grouped by provider, for the read-only Overview summary.
+  // Empty = the host is unrestricted (offers the full global allowlist).
+  const allowedModelsSummary = useMemo(() => {
+    const byProvider = new Map<string, string[]>()
+    for (const entry of effectiveAllowedModelsSpec) {
+      const list = byProvider.get(entry.provider) ?? []
+      if (!list.includes(entry.model)) list.push(entry.model)
+      byProvider.set(entry.provider, list)
+    }
+    return Array.from(byProvider.entries()).map(([provider, models]) => ({ provider, models }))
+  }, [effectiveAllowedModelsSpec])
+
+  // Mount race: if the host loaded before the allowlist and it had NO saved
+  // model, loadData resolved the draft to '' — seed the default once the
+  // catalog arrives. Never overrides a non-empty draft (a saved model that
+  // fell out of the allowlist stays selectable, spec R3.7). Cannot loop: it
+  // only fires on an empty draft and always sets a non-empty value.
+  useEffect(() => {
+    if (modelNameDraft === '' && providerModelOptions.length > 0) {
+      setModelNameDraft(resolveDefaultModel(providerDraft, providerModelOptions))
+    }
+  }, [modelNameDraft, providerDraft, providerModelOptions])
 
   useEffect(() => {
     setActiveTab(parseHostTab(params.tab))
   }, [params.tab])
 
   function hostTabHref(tab: HostTab): string {
-    const base = `/hosts/${encodeURIComponent(routeName)}`
-    return tab === 'details' ? base : `${base}/${tab}`
+    return CONTROL_ROUTES.agents.tab(routeName, TAB_SLUGS[tab])
   }
 
   function selectTab(tab: HostTab) {
@@ -200,12 +286,21 @@ export default function HostDetailsPage() {
         String((spec.model as { provider?: string } | undefined)?.provider || 'openai')
       )
       setProviderDraft(nextProvider)
-      const availableModels = getModelOptions(nextProvider)
+      // Keep the host's saved model verbatim (preexisting resources are not
+      // interrupted); only fall back to a default when the host has no model.
       const currentModel = String((spec.model as { name?: string } | undefined)?.name || '').trim()
       setModelNameDraft(
-        availableModels.includes(currentModel) ? currentModel : getDefaultModel(nextProvider)
+        currentModel ||
+          resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider))
       )
       setSecretRefDraft(String(spec.secretRef || ''))
+      setLlmPolicyDraft(normalizeLlmPolicy(spec.llmPolicy))
+      // Hydrate the per-host model subset from the saved spec (Topic 3a); absent
+      // → [] = unrestricted (offers the full global allowlist per provider).
+      setAllowedModelsDraft(normalizeAllowedModels(spec.allowedModels))
+      // Write-only surfaces reset on every load: never pre-fill stored keys.
+      setLlmKeyDraft({})
+      setRetireCandidates([])
       setChannelsDraft(
         Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : []
       )
@@ -235,6 +330,16 @@ export default function HostDetailsPage() {
       setAvailableContexts(Array.from(new Set(contextIds)).sort((a, b) => a.localeCompare(b)))
       const secretNames = (secretsList || []).map(item => item.name.trim()).filter(Boolean)
       setAvailableSecrets(Array.from(new Set(secretNames)).sort((a, b) => a.localeCompare(b)))
+
+      // Map each Secret to its data-key NAMES (never values), already carried by
+      // the detail bundle. Feeds the fallback credentialSlot dropdown's extra
+      // keys (e.g. `claude-api-key-fb1`, spec R4.5.6) without a second fetch.
+      const keysMap: Record<string, string[]> = {}
+      for (const item of secretsList || []) {
+        const name = item.name.trim()
+        if (name) keysMap[name] = Array.isArray(item.keys) ? item.keys : []
+      }
+      setSecretKeysByName(keysMap)
       setAllUsers(Array.isArray(users) ? users : [])
       setAllTeams(Array.isArray(teams) ? teams : [])
       setUsersWithAccess(Array.isArray(agentUsers) ? agentUsers : [])
@@ -254,9 +359,101 @@ export default function HostDetailsPage() {
     void loadData()
   }, [routeName])
 
+  const currentSecretKeys = useMemo(
+    () => secretKeysByName[secretRefDraft] ?? [],
+    [secretKeysByName, secretRefDraft]
+  )
+
+  // Track fallback removals: when a fallback with its OWN stored extra slot is
+  // dropped and no remaining entry references that key, offer to retire it
+  // (spec Topic 1b R5). Re-adding a fallback that reclaims the key un-offers it.
+  function handlePolicyChange(next: LlmPolicy | undefined) {
+    const stored = new Set(currentSecretKeys)
+    const stillInUse = getActiveCredentialKeys(providerDraft, next)
+    const removedExtraSlots = (llmPolicyDraft?.fallbacks ?? [])
+      .map(fallback => fallback.credentialSlot)
+      .filter((slot): slot is string => Boolean(slot))
+      .filter(slot => stored.has(slot) && !stillInUse.has(slot))
+    setRetireCandidates(current => {
+      const set = new Set(current)
+      for (const slot of removedExtraSlots) set.add(slot)
+      for (const slot of Array.from(set)) if (stillInUse.has(slot)) set.delete(slot)
+      return Array.from(set)
+    })
+    setLlmPolicyDraft(next)
+  }
+
   async function saveHost(): Promise<boolean> {
     const nextHostName = hostNameDraft.trim()
     if (!nextHostName) return false
+
+    // Client-side mirror of control-api's write gate (spec R5.3): block a save
+    // with an out-of-allowlist fallback model before the round-trip. Skip the
+    // check when the allowlist failed to load (`allowedCatalog` empty) — every
+    // model would falsely flag as "not enabled", blocking unrelated Overview
+    // edits on a Host that merely has an llmPolicy; the backend 422 stays the
+    // source of truth for that case (matching how spec.model has no client gate).
+    if (llmPolicyDraft && allowedCatalog.length > 0) {
+      const policyErrors = validateLlmPolicy(llmPolicyDraft, allowedCatalog)
+      if (policyErrors.length > 0) {
+        setError(policyErrors[0])
+        return false
+      }
+    }
+
+    // The full allowlist validation above is skipped when the catalog failed to
+    // load (`allowedCatalog` empty), which also skips the triggerOn check inside
+    // `validateLlmPolicy`. An explicitly-empty `triggerOn` on a policy that HAS
+    // fallbacks means "fail over on nothing" — the runtime silently disables
+    // failover. Guard it here regardless of the catalog (least-surprising: block
+    // rather than persist a policy that quietly no-ops), so the operator never
+    // saves a self-disabled policy just because the allowlist was unavailable.
+    if (
+      llmPolicyDraft &&
+      llmPolicyDraft.fallbacks.length > 0 &&
+      Array.isArray(llmPolicyDraft.triggerOn) &&
+      llmPolicyDraft.triggerOn.length === 0
+    ) {
+      setError(LLM_EMPTY_TRIGGER_ERROR)
+      return false
+    }
+
+    // Asymmetric usable gate (spec Topic 1b): block save when the PRIMARY
+    // provider isn't usable. "Usable" counts both a stored key (existingKeys)
+    // and a freshly typed rotation, so switching to a provider whose key is
+    // already stored stays allowed. Enforced only when we have real key signal —
+    // the Secret listed at least one key OR the operator typed a rotation. An
+    // empty/unlisted key set is treated as unknown (the backend stays the source
+    // of truth), so an unrelated Overview edit is never blocked by stale listing.
+    const primaryPresent = (dataKey: string): boolean =>
+      (llmKeyDraft[dataKey] ?? '').trim().length > 0 || currentSecretKeys.includes(dataKey)
+    const typedAnyCredential = Object.values(llmKeyDraft).some(value => value.trim().length > 0)
+    if (
+      secretRefDraft.trim() &&
+      (currentSecretKeys.length > 0 || typedAnyCredential) &&
+      !isProviderUsable(providerDraft, primaryPresent)
+    ) {
+      setError(`Add the ${getProviderLabel(providerDraft)} credential for the primary model.`)
+      return false
+    }
+
+    // Write-only credential rotations + slot retirement (merge PUT, never a
+    // full replace — a full replace of this shared Secret would drop fallback
+    // keys the operator didn't re-type). The draft is PROJECTED onto the active
+    // domain first, so a value typed for a since-unmounted provider (primary
+    // switched, or a fallback removed) is neither validated nor written — no
+    // stale block, no orphan key. Then validate cross-slot shape up front.
+    const activeCredentialKeys = getActiveCredentialKeys(providerDraft, llmPolicyDraft)
+    const rotatedData = projectCredentialDraft(llmKeyDraft, activeCredentialKeys)
+    const removeKeys = retireCandidates.filter(key => !(key in rotatedData))
+    // Cross-slot shape check on the rotated keys only. Note: rotating one half of
+    // the Bedrock pair fails this (both must be written together) — matching the
+    // server contract; the operator re-enters both to rotate either.
+    const credentialSlotErrors = validateLlmSecretData(rotatedData)
+    if (credentialSlotErrors.length > 0) {
+      setError(credentialSlotErrors[0])
+      return false
+    }
 
     setBusy(true)
     setError('')
@@ -266,7 +463,7 @@ export default function HostDetailsPage() {
       const currentHost = await getHost(routeName)
       const currentLifecycle = currentHost.spec?.lifecycle
       const currentWorkflowControl = currentHost.spec?.workflowControl
-      const nextSpec = {
+      const nextSpec: Record<string, unknown> = {
         ...currentHost.spec,
         host: hostDisplayDraft.trim() || nextHostName,
         contextRef: contextRefDraft.trim(),
@@ -284,6 +481,22 @@ export default function HostDetailsPage() {
         ...(channelsDraft.length > 0 && currentWorkflowControl === undefined
           ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
           : {}),
+      }
+      // Opt-in fallback policy: set it when configured, otherwise drop it so a
+      // Host with no policy stays exactly as today (full-replace semantics).
+      if (llmPolicyDraft && llmPolicyDraft.fallbacks.length > 0) {
+        nextSpec.llmPolicy = llmPolicyDraft
+      } else {
+        delete nextSpec.llmPolicy
+      }
+      // Per-host model allowlist subset (Topic 3a): emit only genuine subsets
+      // (providers the operator restricted); drop the field entirely when every
+      // provider is unrestricted so absent=all-global holds (full-replace
+      // semantics — a Host that restricts nothing saves exactly as today).
+      if (effectiveAllowedModelsSpec.length > 0) {
+        nextSpec.allowedModels = effectiveAllowedModelsSpec
+      } else {
+        delete nextSpec.allowedModels
       }
 
       if (nextHostName !== routeName) {
@@ -346,7 +559,7 @@ export default function HostDetailsPage() {
 
           await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`)
           showToast('Agent renamed and updated.', { tone: 'success' })
-          router.replace(`/hosts/${encodeURIComponent(nextHostName)}`)
+          router.replace(CONTROL_ROUTES.agents.detail(nextHostName))
           return true
         } catch (renameError) {
           const rollbackErrors: string[] = []
@@ -417,6 +630,17 @@ export default function HostDetailsPage() {
         ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
         spec: nextSpec,
       })
+      // Rotate/retire credentials on the Host's own Secret with merge:true so
+      // other providers' stored keys are preserved (spec Topic 1b R5). removeKeys
+      // retires the extra slots left behind by removed fallbacks.
+      if (secretRefDraft.trim() && (Object.keys(rotatedData).length > 0 || removeKeys.length > 0)) {
+        await apiSend('PUT', '/api/v1/admin/secrets', {
+          name: secretRefDraft.trim(),
+          merge: true,
+          ...(Object.keys(rotatedData).length > 0 ? { stringData: rotatedData } : {}),
+          ...(removeKeys.length > 0 ? { removeKeys } : {}),
+        })
+      }
       await loadData()
       showToast('Agent configuration saved.', { tone: 'success' })
       return true
@@ -599,7 +823,7 @@ export default function HostDetailsPage() {
       await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`)
       setShowDeleteAgentConfirm(false)
       showToast(`Agent ${routeName} deleted.`, { tone: 'success' })
-      router.push('/hosts')
+      router.push(CONTROL_ROUTES.agents.root)
     } catch (e) {
       setDeleteAgentDialogError(e instanceof Error ? e.message : 'Failed to delete agent')
     } finally {
@@ -620,7 +844,7 @@ export default function HostDetailsPage() {
           </div>
         ) : null
       }
-      onBack={() => router.push('/hosts')}
+      onBack={() => router.push(CONTROL_ROUTES.agents.root)}
       onTabChange={selectTab}
       subtitle="Configuration and access for this agent."
       tabAriaLabel="Agent sections"
@@ -700,48 +924,18 @@ export default function HostDetailsPage() {
                 <div className="cu-field__readonly">{hostDisplayDraft || '-'}</div>
               )}
             </div>
-            <div className="cu-field">
-              <label htmlFor="host-provider">Model provider</label>
-              {editingOverview ? (
-                <select
-                  id="host-provider"
-                  value={providerDraft}
-                  onChange={e => {
-                    const nextProvider = normalizeProvider(e.target.value)
-                    setProviderDraft(nextProvider)
-                    setModelNameDraft(getDefaultModel(nextProvider))
-                  }}
-                  disabled={busy}
-                >
-                  {LLM_PROVIDER_OPTIONS.map(option => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              ) : (
+            {!editingOverview && (
+              <div className="cu-field">
+                <label htmlFor="host-provider">Model provider</label>
                 <div className="cu-field__readonly">{getProviderLabel(providerDraft)}</div>
-              )}
-            </div>
-            <div className="cu-field">
-              <label htmlFor="host-model">Model name</label>
-              {editingOverview ? (
-                <select
-                  id="host-model"
-                  value={modelNameDraft}
-                  onChange={e => setModelNameDraft(e.target.value)}
-                  disabled={busy}
-                >
-                  {providerModelOptions.map(model => (
-                    <option key={model} value={model}>
-                      {model}
-                    </option>
-                  ))}
-                </select>
-              ) : (
+              </div>
+            )}
+            {!editingOverview && (
+              <div className="cu-field">
+                <label htmlFor="host-model">Model name</label>
                 <div className="cu-field__readonly">{modelNameDraft || '-'}</div>
-              )}
-            </div>
+              </div>
+            )}
             <div className="cu-field">
               <label htmlFor="host-agent-type">Agent type</label>
               {editingOverview ? (
@@ -791,6 +985,95 @@ export default function HostDetailsPage() {
               )}
             </div>
           </div>
+
+          <div
+            style={{
+              marginTop: '1.5rem',
+              paddingTop: '1.25rem',
+              borderTop: '1px solid var(--cu-border)',
+            }}
+          >
+            <p className="cu-section-title" style={{ marginBottom: '0.5rem' }}>
+              Model &amp; credentials
+            </p>
+            {editingOverview ? (
+              <>
+                {retireCandidates.length > 0 ? (
+                  <div className="cu-banner cu-banner--warning" style={{ marginBottom: '0.75rem' }}>
+                    <span>
+                      Removed fallback left stored key(s): {retireCandidates.join(', ')}. They will
+                      be deleted from the Secret when you save.
+                    </span>
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      onClick={() => setRetireCandidates([])}
+                      disabled={busy}
+                    >
+                      Keep them
+                    </button>
+                  </div>
+                ) : null}
+                <LlmProviderConfig
+                  provider={providerDraft}
+                  model={modelNameDraft}
+                  onPrimaryChange={next => {
+                    setProviderDraft(next.provider)
+                    setModelNameDraft(next.model)
+                  }}
+                  policy={llmPolicyDraft}
+                  onPolicyChange={handlePolicyChange}
+                  allowedModels={allowedModelsDraft}
+                  onAllowedModelsChange={setAllowedModelsDraft}
+                  catalog={allowedCatalog}
+                  catalogLoading={modelsLoading}
+                  catalogError={modelsError}
+                  credentials={{
+                    draft: llmKeyDraft,
+                    onChange: (dataKey, value) =>
+                      setLlmKeyDraft(prev => ({ ...prev, [dataKey]: value })),
+                    existingKeys: currentSecretKeys,
+                  }}
+                  secretKeys={currentSecretKeys}
+                  disabled={busy}
+                />
+              </>
+            ) : llmPolicyDraft && llmPolicyDraft.fallbacks.length > 0 ? (
+              <ol className="cu-llm-policy__summary">
+                {llmPolicyDraft.fallbacks.map((entry, index) => (
+                  <li key={index} className="cu-field__readonly">
+                    {getProviderLabel(entry.provider)} · {entry.model || '-'}
+                    {entry.credentialSlot ? ` · ${entry.credentialSlot}` : ''}
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="cu-muted" style={{ fontSize: '0.8125rem', margin: 0 }}>
+                No fallback configured.
+              </p>
+            )}
+            {!editingOverview ? (
+              <div style={{ marginTop: '0.75rem' }}>
+                <p className="cu-muted" style={{ fontSize: '0.75rem', margin: '0 0 0.35rem' }}>
+                  Allowed models
+                </p>
+                {allowedModelsSummary.length > 0 ? (
+                  <ul className="cu-llm-policy__summary">
+                    {allowedModelsSummary.map(entry => (
+                      <li key={entry.provider} className="cu-field__readonly">
+                        {getProviderLabel(entry.provider)} · {entry.models.join(', ')}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="cu-muted" style={{ fontSize: '0.8125rem', margin: 0 }}>
+                    All models — this agent offers every enabled model for its provider(s).
+                  </p>
+                )}
+              </div>
+            ) : null}
+          </div>
+
           {editingOverview && (
             <div className="cu-save-bar">
               <button
@@ -908,7 +1191,7 @@ export default function HostDetailsPage() {
                           type="button"
                           className="cu-link"
                           onClick={() =>
-                            router.push(`/contexts/${encodeURIComponent(contextRefDraft.trim())}`)
+                            router.push(CONTROL_ROUTES.contexts.detail(contextRefDraft.trim()))
                           }
                         >
                           {contextRefDraft}
@@ -1016,9 +1299,7 @@ export default function HostDetailsPage() {
                         <button
                           type="button"
                           className="cu-link"
-                          onClick={() =>
-                            router.push(`/profile-admin/users/${encodeURIComponent(user.id)}`)
-                          }
+                          onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.user(user.id))}
                         >
                           {user.displayName || user.name || user.email}
                         </button>
@@ -1104,9 +1385,7 @@ export default function HostDetailsPage() {
                         <button
                           type="button"
                           className="cu-link"
-                          onClick={() =>
-                            router.push(`/profile-admin/teams/${encodeURIComponent(team.id)}`)
-                          }
+                          onClick={() => router.push(CONTROL_ROUTES.usersAndTeams.team(team.id))}
                         >
                           {team.name}
                         </button>

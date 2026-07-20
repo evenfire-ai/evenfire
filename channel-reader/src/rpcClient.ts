@@ -7,6 +7,7 @@ import type {
   NotificationDelivery,
   NotificationDeliveryMedium,
 } from './notificationDeliveryClient'
+import type { TraceContextV1 } from './traceContext'
 import { Message, ProviderIdentity } from './types'
 import type { Attachment, ProviderTargetIdentity } from './types'
 
@@ -24,6 +25,7 @@ export interface OutgoingMessage {
   threadId?: string
   metadata?: Record<string, unknown>
   providerIdentity?: ProviderIdentity
+  traceContext?: TraceContextV1
 }
 
 /**
@@ -173,7 +175,10 @@ export class RPCClient {
   /**
    * Send a message to mcp-host for processing.
    */
-  async sendMessage(message: Message, options?: { async?: boolean }): Promise<MessageResponse> {
+  async sendMessage(
+    message: Message,
+    options?: { async?: boolean; traceContext?: TraceContextV1 }
+  ): Promise<MessageResponse> {
     const payload: OutgoingMessage = {
       content: message.content,
       channelType: message.channelType,
@@ -185,6 +190,7 @@ export class RPCClient {
       threadId: message.threadId,
       metadata: message.rawData,
       ...(message.providerIdentity ? { providerIdentity: message.providerIdentity } : {}),
+      ...(options?.traceContext ? { traceContext: options.traceContext } : {}),
     }
 
     console.log(`[RPC] Sending message to mcp-host: ${message.messageId}`)

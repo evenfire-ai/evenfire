@@ -1,7 +1,11 @@
 import { type DbClient, pool, withTransaction } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
+import {
+  type ControlApiPermissionChange,
+  appendControlApiPermissionEventsInTransaction,
+} from '../tracing/controlApiPermissionEvents.js'
 import type { InvitationTeamAssignment } from './membership.js'
-import { normalizeTeamRoleInput } from './types.js'
+import { type TeamRole, normalizeTeamRoleInput } from './types.js'
 
 const logger = rootLogger.child({ module: 'admin-provisioning' })
 
@@ -138,6 +142,7 @@ export async function findMemberByEmail(
 
 export async function provisionMemberFromAdmin(input: {
   adminId: string
+  operatorSub: string
   teamAssignments: readonly InvitationTeamAssignment[]
   seedPassword: boolean
 }): Promise<
@@ -147,7 +152,7 @@ export async function provisionMemberFromAdmin(input: {
     }
   | { error: 'admin_not_found' | 'admin_email_required' }
 > {
-  const assignments = new Map<string, string>()
+  const assignments = new Map<string, TeamRole>()
   for (const assignment of input.teamAssignments || []) {
     const teamId = String(assignment.teamId || '').trim()
     const role = normalizeTeamRoleInput(assignment.role) || 'member'
@@ -189,6 +194,18 @@ export async function provisionMemberFromAdmin(input: {
       created = true
     }
 
+    const changes: ControlApiPermissionChange[] = created
+      ? [
+          {
+            action: 'grant' as const,
+            resourceClass: 'platform_user_access',
+            resourceRef: `platform_user:${user.id}`,
+            subject: { kind: 'user' as const, id: user.id },
+            status: 'account_created',
+          },
+        ]
+      : []
+
     await db.query(
       `INSERT INTO profiles(user_id, display_name)
        VALUES($1, $2)
@@ -210,6 +227,25 @@ export async function provisionMemberFromAdmin(input: {
     }
 
     if (assignments.size > 0) {
+      const teamIds = Array.from(assignments.keys())
+      const previousMemberships = await db.query(
+        `SELECT team_id::text AS team_id, role, status
+           FROM team_members
+          WHERE user_id = $1
+            AND team_id = ANY($2::uuid[])
+          FOR UPDATE`,
+        [user.id, teamIds]
+      )
+      const previousByTeamId = new Map(
+        (
+          previousMemberships.rows as Array<{
+            team_id: string
+            role: TeamRole
+            status: string
+          }>
+        ).map(row => [row.team_id, row])
+      )
+
       await db.query(
         `INSERT INTO team_members(team_id, user_id, role, status)
          SELECT item.team_id::uuid, $2::uuid, item.role, 'active'
@@ -223,7 +259,37 @@ export async function provisionMemberFromAdmin(input: {
           user.id,
         ]
       )
+
+      for (const [teamId, role] of assignments) {
+        const previous = previousByTeamId.get(teamId)
+        if (previous?.status === 'active' && previous.role !== role) {
+          changes.push({
+            action: 'revoke',
+            resourceClass: 'team_membership',
+            resourceRef: `team_membership:${teamId}:role:${previous.role}`,
+            subject: { kind: 'user', id: user.id },
+            teamId,
+            status: 'role_replaced',
+          })
+        }
+        if (!previous || previous.status !== 'active' || previous.role !== role) {
+          changes.push({
+            action: 'grant',
+            resourceClass: 'team_membership',
+            resourceRef: `team_membership:${teamId}:role:${role}`,
+            subject: { kind: 'user', id: user.id },
+            teamId,
+            status: previous?.status === 'active' ? 'role_assigned' : 'membership_activated',
+          })
+        }
+      }
     }
+
+    await appendControlApiPermissionEventsInTransaction(db, {
+      operatorSub: input.operatorSub,
+      operatorKind: 'control_admin',
+      changes,
+    })
 
     return { created, user }
   })

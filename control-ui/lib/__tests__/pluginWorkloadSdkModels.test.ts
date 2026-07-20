@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { LlmModelCatalogEntry } from '../llm'
 import {
   appendCustomPluginWorkloadSdkModel,
   buildPluginWorkloadSdkModelOptions,
@@ -6,9 +7,16 @@ import {
   validateCustomPluginWorkloadSdkModel,
 } from '../pluginWorkloadSdkModels'
 
+// Allowlist rows the helper filters by provider (enabled only).
+const CATALOG: LlmModelCatalogEntry[] = [
+  { provider: 'zai', model: 'glm-5.2', enabled: true },
+  { provider: 'zai', model: 'glm-5.1', enabled: true },
+  { provider: 'openai', model: 'gpt-5.4', enabled: true },
+]
+
 describe('plugin workload SDK model helpers', () => {
   it('keeps known provider models and appends selected custom models', () => {
-    const options = buildPluginWorkloadSdkModelOptions('zai', [
+    const options = buildPluginWorkloadSdkModelOptions(CATALOG, 'zai', [
       'glm-5.1',
       'glm-6-preview',
       'glm-6-preview',

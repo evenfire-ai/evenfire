@@ -3,6 +3,9 @@ FROM node:24-alpine AS builder
 
 WORKDIR /app
 
+# Shared prebuilt data-only package (no build step). @clerum/workflow-runtime-core
+# depends on it (file:../llm-providers) and workflow-recipes consumes it directly.
+COPY packages/llm-providers ./packages/llm-providers
 COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/
 COPY packages/workflow-runtime-core/tsconfig.json ./packages/workflow-runtime-core/
 COPY packages/workflow-runtime-core/src ./packages/workflow-runtime-core/src
@@ -24,6 +27,7 @@ FROM node:24-alpine
 
 WORKDIR /app
 
+COPY packages/llm-providers ./packages/llm-providers
 COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/
 COPY --from=builder /app/packages/workflow-runtime-core/dist ./packages/workflow-runtime-core/dist
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy

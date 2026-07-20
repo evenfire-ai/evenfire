@@ -5,7 +5,7 @@ import { asyncHandler } from '../../../http/asyncHandler.js'
 import type { K8sGateway } from '../../../k8s.js'
 import { rootLogger } from '../../../observability/logger.js'
 import { K8sNotFoundError } from '../../../services/resourceService.js'
-import type { WorkflowRunRow } from '../../../services/workflowRunService.js'
+import { type WorkflowRunRow, getRun } from '../../../services/workflowRunService.js'
 import type { WorkflowLeaderDto } from '../../../services/workflows/types.js'
 import {
   WORKFLOW_RECIPE_PLURAL,
@@ -24,6 +24,7 @@ import { requireAdminWorkflowCaller } from '../../workflows/shared/auth.js'
 import { parseLimit } from '../../workflows/shared/validation.js'
 
 const BASE = '/admin/workflows'
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const logger = rootLogger.child({ module: 'admin-workflow-runs' })
 
 function sendArtifactError(res: Response, err: unknown): void {
@@ -159,12 +160,49 @@ export function createAdminWorkflowRunsRoutes(
         res.status(403).json({ error: 'Not authorized to view runs for this recipe' })
         return
       }
-
       try {
         await gateway.getResource(WORKFLOW_RECIPE_PLURAL, name, ns)
         const limit = parseLimit(req.query?.limit)
         const items = await listCanonicalRuns(ns, name, limit)
         res.json({ items, count: items.length })
+      } catch (err) {
+        if (err instanceof K8sNotFoundError) {
+          res.status(404).json({ error: `Recipe ${ns}/${name} not found` })
+          return
+        }
+        throw err
+      }
+    })
+  )
+
+  router.get(
+    `${BASE}/:ns/:name/runs/:runId`,
+    asyncHandler(async (req: Request, res: Response) => {
+      const caller = await requireAdminWorkflowCaller(req, res)
+      if (!caller) return
+
+      const { ns, name, runId } = req.params
+      if (!isRecipeNamespaceAllowed(ns)) {
+        res.status(404).json({ error: `Recipe ${ns}/${name} not found` })
+        return
+      }
+      if (!(await ensureRecipeAuthorized(caller, ns, name))) {
+        res.status(403).json({ error: 'Not authorized to view runs for this recipe' })
+        return
+      }
+      if (!UUID_RE.test(runId)) {
+        res.status(400).json({ error: 'Invalid workflow run id' })
+        return
+      }
+
+      try {
+        await gateway.getResource(WORKFLOW_RECIPE_PLURAL, name, ns)
+        const row = await getRun(runId)
+        if (!row || row.recipe_namespace !== ns || row.recipe_name !== name) {
+          res.status(404).json({ error: `Workflow run ${runId} not found` })
+          return
+        }
+        res.json(mapDbRun(row))
       } catch (err) {
         if (err instanceof K8sNotFoundError) {
           res.status(404).json({ error: `Recipe ${ns}/${name} not found` })

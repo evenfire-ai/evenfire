@@ -24,6 +24,7 @@ export interface StepStatusUpdate {
   failureReason?: string
   startedAt?: string
   completedAt?: string
+  approvalBindingSha256?: string
 }
 
 export interface WorkflowStatusUpdate {

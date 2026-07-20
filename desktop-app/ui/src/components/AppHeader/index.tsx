@@ -4,6 +4,7 @@ import { useNotificationsContext } from '@contexts/NotificationsContext'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Button, IconButton, Pill, SelectableOption, TextInput } from '@components/Common'
+import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
@@ -82,6 +83,9 @@ function notificationPillLabel(kind: AppNotificationKind): string {
 }
 
 export const AppHeader = React.memo(function AppHeader({
+  notificationTrayMode = 'overlay',
+  notificationTrayReady = true,
+  onNotificationTrayOpenChange,
   onShellOverlayOpenChange,
 }: AppHeaderProps) {
   const { accessCatalog: agentsAccessCatalog } = useAgentsDataController()
@@ -115,8 +119,8 @@ export const AppHeader = React.memo(function AppHeader({
     handleDecidePendingApproval: onDecidePendingApproval,
   } = useNotificationsContext()
 
-  const onOpenAgents = () => handleNavSelect('agents')
-  const onOpenConnectors = () => handleNavSelect('mcp-servers')
+  const onOpenAgents = () => handleNavSelect(DESKTOP_ROUTES.agents)
+  const onOpenConnectors = () => handleNavSelect(DESKTOP_ROUTES.connectors)
   const [now, setNow] = useState(Date.now())
   const [searchQuery, setSearchQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
@@ -126,6 +130,9 @@ export const AppHeader = React.memo(function AppHeader({
   const searchDirectoryInFlightRef = useRef(false)
   const searchDirectoryRefreshQueryRef = useRef('')
   const accessCatalog = agentsAccessCatalog
+  const notificationTrayUsesDrawer = notificationTrayMode === 'drawer'
+  const notificationTrayVisible =
+    notificationsOpen && (!notificationTrayUsesDrawer || notificationTrayReady)
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000)
@@ -136,12 +143,22 @@ export const AppHeader = React.memo(function AppHeader({
   useClickOutside(notificationsRef, notificationsOpen, () => setNotificationsOpen(false))
 
   React.useLayoutEffect(() => {
-    onShellOverlayOpenChange?.(searchOpen || notificationsOpen)
-  }, [notificationsOpen, onShellOverlayOpenChange, searchOpen])
+    onShellOverlayOpenChange?.(searchOpen || (notificationsOpen && !notificationTrayUsesDrawer))
+    onNotificationTrayOpenChange?.(notificationsOpen)
+  }, [
+    notificationTrayUsesDrawer,
+    notificationsOpen,
+    onNotificationTrayOpenChange,
+    onShellOverlayOpenChange,
+    searchOpen,
+  ])
 
   useEffect(() => {
-    return () => onShellOverlayOpenChange?.(false)
-  }, [onShellOverlayOpenChange])
+    return () => {
+      onShellOverlayOpenChange?.(false)
+      onNotificationTrayOpenChange?.(false)
+    }
+  }, [onNotificationTrayOpenChange, onShellOverlayOpenChange])
 
   useEffect(() => {
     if (!notificationsOpen) return
@@ -694,9 +711,11 @@ export const AppHeader = React.memo(function AppHeader({
               </span>
             )}
           </IconButton>
-          {notificationsOpen && (
+          {notificationTrayVisible && (
             <div
-              className="notification-menu"
+              className={`notification-menu${
+                notificationTrayUsesDrawer ? ' notification-menu--app-drawer' : ''
+              }`}
               role="dialog"
               aria-label="Notifications and approvals"
             >

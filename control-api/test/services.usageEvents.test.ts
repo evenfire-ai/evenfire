@@ -11,6 +11,7 @@ vi.mock('../src/db.js', () => ({
 const VALID_EVENT = {
   request_id: '11111111-1111-4111-8111-111111111111',
   ts: '2026-04-29T10:00:00.000Z',
+  run_id: null,
   host_ref: 'trader',
   context_ref: 'trader-context',
   team_id: '11111111-1111-4111-8111-111111111111',
@@ -73,12 +74,20 @@ describe('validateUsageEvent', () => {
     const workflowEvent = {
       ...VALID_EVENT,
       source_kind: 'workflow',
+      run_id: '00000000-0000-4000-8000-000000000001',
       host_ref: 'sandbox-recipes/e2e-recipe',
       context_ref: null,
       recipe_name: 'e2e-recipe',
       task_id: '00000000-0000-4000-8000-000000000001:e2e-recipe:2026-05-09T00:00:00.000Z',
     }
     expect(validateUsageEvent(workflowEvent)).not.toBeNull()
+    expect(validateUsageEvent({ ...workflowEvent, run_id: null })).toBeNull()
+    expect(
+      validateUsageEvent({
+        ...workflowEvent,
+        run_id: '00000000-0000-4000-8000-000000000002',
+      })
+    ).toBeNull()
     expect(validateUsageEvent({ ...workflowEvent, task_id: 'e2e-recipe:now' })).toBeNull()
     expect(validateUsageEvent({ ...workflowEvent, llm_secret_name: null })).toBeNull()
   })
@@ -110,6 +119,16 @@ describe('validateUsageEvent', () => {
     const ev = validateUsageEvent(VALID_EVENT)
     expect(ev?.cache_read_tokens).toBe(40)
     expect(ev?.cache_write_tokens).toBe(10)
+    expect(ev?.cache_tokens_reported).toBe(true)
+  })
+
+  it('distinguishes a reported cache zero from an omitted cache measurement', () => {
+    const ev = validateUsageEvent({
+      ...VALID_EVENT,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    })
+    expect(ev?.cache_tokens_reported).toBe(true)
   })
 
   it('defaults cache token counts to 0 when absent', () => {
@@ -120,6 +139,7 @@ describe('validateUsageEvent', () => {
     expect(ev).not.toBeNull()
     expect(ev?.cache_read_tokens).toBe(0)
     expect(ev?.cache_write_tokens).toBe(0)
+    expect(ev?.cache_tokens_reported).toBe(false)
   })
 
   it('rejects negative cache token counts', () => {
@@ -155,7 +175,13 @@ describe('ingestUsageEvents', () => {
   })
 
   it('counts inserted rows as accepted and the gap as duplicates', async () => {
-    mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 2 })
+    mockPoolQuery.mockResolvedValue({
+      rows: [
+        { request_id: VALID_EVENT.request_id },
+        { request_id: '22222222-2222-4222-8222-222222222222' },
+      ],
+      rowCount: 2,
+    })
     const result = await ingestUsageEvents([
       VALID_EVENT,
       { ...VALID_EVENT, request_id: '22222222-2222-4222-8222-222222222222' },
@@ -165,25 +191,29 @@ describe('ingestUsageEvents', () => {
   })
 
   it('emits a parameterized INSERT ... ON CONFLICT DO NOTHING', async () => {
-    mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 1 })
+    mockPoolQuery.mockResolvedValue({ rows: [{ request_id: VALID_EVENT.request_id }], rowCount: 1 })
     await ingestUsageEvents([VALID_EVENT])
     const [sql, params] = mockPoolQuery.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain('INSERT INTO usage_events')
     expect(sql).toContain('ON CONFLICT (request_id) DO NOTHING')
+    expect(sql).toContain('RETURNING request_id')
     expect(sql).toContain('cache_read_tokens')
     expect(sql).toContain('cache_write_tokens')
+    expect(sql).toContain('cache_tokens_reported')
     expect(params).toContain(VALID_EVENT.request_id)
+    expect(params).toContain(VALID_EVENT.run_id)
     expect(params).toContain(VALID_EVENT.host_ref)
     expect(params).toContain(VALID_EVENT.team_id)
     expect(params).toContain(VALID_EVENT.input_tokens)
     expect(params).toContain(VALID_EVENT.cache_read_tokens)
     expect(params).toContain(VALID_EVENT.cache_write_tokens)
-    // 20 columns per event (single event => 20 bound params).
-    expect(params).toHaveLength(20)
+    expect(params.at(-1)).toBe(true)
+    // 22 columns per event (single event => 22 bound params).
+    expect(params).toHaveLength(22)
   })
 
   it('mixes valid + invalid + duplicate accounting in a single call', async () => {
-    mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 1 })
+    mockPoolQuery.mockResolvedValue({ rows: [{ request_id: VALID_EVENT.request_id }], rowCount: 1 })
     const result = await ingestUsageEvents([
       VALID_EVENT,
       { ...VALID_EVENT, request_id: '22222222-2222-4222-8222-222222222222' },

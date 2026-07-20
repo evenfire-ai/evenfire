@@ -7,6 +7,7 @@ import { useConfirmDialog } from '@components/ConfirmDialog'
 import { ContextTable } from '@components/ContextTable'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { useToast } from '@components/Toast'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { apiSend, getContexts, isSilentApiError } from '@lib/api'
 import type { ContextResource } from '@lib/api'
 
@@ -70,12 +71,12 @@ export default function ContextsPage() {
         {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
         <ContextTable
           items={contexts}
-          onView={context => router.push(`/contexts/${encodeURIComponent(context.name)}`)}
-          onEdit={context => router.push(`/contexts/${encodeURIComponent(context.name)}#edit`)}
+          onView={context => router.push(CONTROL_ROUTES.contexts.connectors(context.name))}
+          onEdit={context => router.push(CONTROL_ROUTES.contexts.connectors(context.name))}
           onDelete={handleDeleteContext}
           deletingKey={deletingKey}
           onRefresh={loadAll}
-          onCreate={() => router.push('/contexts/new')}
+          onCreate={() => router.push(CONTROL_ROUTES.contexts.new)}
           refreshing={loading}
           loading={loading}
         />

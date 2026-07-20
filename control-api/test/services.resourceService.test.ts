@@ -3,7 +3,9 @@ import {
   K8sConflictError,
   K8sNotFoundError,
   ResourceService,
+  setAdministrativeOperationService,
 } from '../src/services/resourceService.js'
+import { runWithAdministrativeRequestContext } from '../src/services/tracing/adminOperationContext.js'
 
 function makeNotFoundError(): Error & { statusCode: number } {
   const err = new Error('not found') as Error & { statusCode: number }
@@ -579,5 +581,81 @@ describe('ResourceService.patchAnnotationMonotonic', () => {
     await expect(
       service.patchAnnotationMonotonic('hosts', 'chatllm', KEY, 1.5, NS)
     ).rejects.toThrow(/non-negative integer/)
+  })
+})
+
+describe('ResourceService Host administrative intent', () => {
+  it('strips caller authority and projects the control-api operation id before create', async () => {
+    const persistHostIntent = vi.fn().mockResolvedValue({
+      operationId: '11111111-1111-4111-8111-111111111111',
+      action: 'create',
+      namespace: 'mcp-host',
+      targetRef: 'mcp-host/host-a',
+      operatorSub: 'admin-1',
+      requestId: 'request-1',
+    })
+    const persistHostOutcome = vi.fn()
+    setAdministrativeOperationService({ persistHostIntent, persistHostOutcome } as never)
+    const customApi = { createNamespacedCustomObject: vi.fn().mockResolvedValue({}) }
+    const service = new ResourceService(customApi as never, 'control-plane', { hosts: 'mcp-host' })
+
+    try {
+      await runWithAdministrativeRequestContext(
+        { operatorSub: 'admin-1', requestId: 'request-1' },
+        () =>
+          service.createResource(
+            'hosts',
+            {
+              metadata: {
+                name: 'host-a',
+                annotations: {
+                  'clerum.io/administrative-intent-id': 'caller-value',
+                  'clerum.io/administrative-intent-generation': '999',
+                  keep: 'yes',
+                },
+              },
+              spec: {},
+            },
+            'mcp-host'
+          )
+      )
+    } finally {
+      setAdministrativeOperationService(null)
+    }
+
+    expect(persistHostIntent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operatorSub: 'admin-1',
+        requestId: 'request-1',
+        name: 'host-a',
+      })
+    )
+    expect(customApi.createNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({
+            annotations: {
+              keep: 'yes',
+              'clerum.io/administrative-intent-id': '11111111-1111-4111-8111-111111111111',
+              'clerum.io/administrative-intent-generation': '1',
+            },
+          }),
+        }),
+      })
+    )
+  })
+
+  it('does not create an operator-bound intent outside an authenticated admin context', async () => {
+    const persistHostIntent = vi.fn()
+    setAdministrativeOperationService({ persistHostIntent } as never)
+    const customApi = { createNamespacedCustomObject: vi.fn().mockResolvedValue({}) }
+    try {
+      await new ResourceService(customApi as never, 'control-plane', {
+        hosts: 'mcp-host',
+      }).createResource('hosts', { metadata: { name: 'host-a' }, spec: {} }, 'mcp-host')
+    } finally {
+      setAdministrativeOperationService(null)
+    }
+    expect(persistHostIntent).not.toHaveBeenCalled()
   })
 })

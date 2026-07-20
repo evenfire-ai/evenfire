@@ -1,4 +1,5 @@
 import { redirect } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 
 export default async function CommunicationChannelDetailsRedirect({
   params,
@@ -7,5 +8,5 @@ export default async function CommunicationChannelDetailsRedirect({
 }) {
   const { name } = await params
 
-  redirect(`/communication-channels/${encodeURIComponent(name)}/edit`)
+  redirect(CONTROL_ROUTES.externalChannels.edit(name))
 }

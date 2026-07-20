@@ -121,16 +121,20 @@ export class ShellTool implements Tool {
     }
 
     // §13 (stateless agents) — credential-slot stripping. The child env
-    // carries ONLY the ACTIVE provider's credential slot; the other N−1
-    // provider env vars are explicitly deleted, even when present in
-    // process.env (via the allowlist) or in the ConfigStore layer above.
+    // carries ONLY the ACTIVE provider's credential slots; every OTHER
+    // provider's credential env vars are explicitly deleted, even when present
+    // in process.env (via the allowlist) or in the ConfigStore layer above.
     // The slot set is DERIVED from the provider registry (registryCore
-    // PROVIDERS), so a future 5th provider is stripped automatically.
-    const activeCredentialEnvName =
-      this.activeLlmProvider !== undefined ? PROVIDERS[this.activeLlmProvider].envName : undefined
+    // PROVIDERS), so a future provider is stripped automatically. Multi-slot
+    // providers (R4: Bedrock's key pair, Vertex's SA JSON) keep ALL of the
+    // active provider's slots; primarySlot() is deliberately NOT used here
+    // (the exclusion boundary must span the full slot set — spec §3-R4.3).
+    const activeProvider = this.activeLlmProvider
     for (const provider of ALL_PROVIDERS) {
-      const { envName } = PROVIDERS[provider]
-      if (envName !== activeCredentialEnvName) delete safeEnv[envName]
+      if (provider === activeProvider) continue
+      for (const slot of PROVIDERS[provider].credentialSlots) {
+        delete safeEnv[slot.envName]
+      }
     }
 
     return new Promise<ToolOutput>(resolve => {

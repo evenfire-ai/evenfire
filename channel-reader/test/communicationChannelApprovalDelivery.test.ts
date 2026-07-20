@@ -53,7 +53,10 @@ describe('CommunicationChannel approval delivery path', () => {
         channelId: 'telegram-chat-1',
         sender: '123456',
       }),
-      { async: true }
+      expect.objectContaining({
+        async: true,
+        traceContext: expect.objectContaining({ origin: 'channel_event' }),
+      })
     )
     expect(rpcClient.sendApproval).toHaveBeenCalledWith(
       'user-q3',

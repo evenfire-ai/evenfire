@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs'
 import { type DbClient, pool, withTransaction } from '../../db.js'
 import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
+import { appendControlApiPermissionEventsInTransaction } from '../tracing/controlApiPermissionEvents.js'
 import type { InviteRole, TeamRole } from './types.js'
 import {
   normalizeChannels,
@@ -486,30 +487,107 @@ export async function findMemberRole(teamId: string, userId: string) {
   return (result.rows[0] as { role: TeamRole } | undefined) || null
 }
 
-export async function updateMemberRole(teamId: string, userId: string, role: TeamRole) {
-  const result = await pool.query(
-    `UPDATE team_members
-        SET role = $3,
-            updated_at = NOW()
-      WHERE team_id = $1
-        AND user_id = $2
-        AND status = 'active'
-    RETURNING team_id, user_id, role, status`,
-    [teamId, userId, role]
-  )
-  return result.rows[0]
+export async function updateMemberRole(
+  teamId: string,
+  userId: string,
+  role: TeamRole,
+  operatorSub: string
+) {
+  return withTransaction(async db => {
+    const before = await db.query(
+      `SELECT role
+         FROM team_members
+        WHERE team_id = $1
+          AND user_id = $2
+          AND status = 'active'
+        FOR UPDATE`,
+      [teamId, userId]
+    )
+    const previousRole = (before.rows[0] as { role: TeamRole } | undefined)?.role ?? null
+    const result = await db.query(
+      `UPDATE team_members
+          SET role = $3,
+              updated_at = NOW()
+        WHERE team_id = $1
+          AND user_id = $2
+          AND status = 'active'
+      RETURNING team_id, user_id, role, status`,
+      [teamId, userId, role]
+    )
+    if ((result.rowCount ?? 0) > 0 && previousRole && previousRole !== role) {
+      await appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub,
+        changes: [
+          {
+            action: 'revoke',
+            resourceClass: 'team_membership',
+            resourceRef: `team_membership:${teamId}:role:${previousRole}`,
+            subject: { kind: 'user', id: userId },
+            teamId,
+            status: 'role_replaced',
+          },
+          {
+            action: 'grant',
+            resourceClass: 'team_membership',
+            resourceRef: `team_membership:${teamId}:role:${role}`,
+            subject: { kind: 'user', id: userId },
+            teamId,
+            status: 'role_assigned',
+          },
+        ],
+      })
+    }
+    return result.rows[0]
+  })
 }
 
-export async function addMemberToTeam(teamId: string, userId: string, role: TeamRole = 'member') {
-  const result = await pool.query(
-    `INSERT INTO team_members(team_id, user_id, role, status)
-     VALUES($1, $2, $3, 'active')
-     ON CONFLICT (team_id, user_id)
-     DO UPDATE SET role = EXCLUDED.role, status = 'active', updated_at = NOW()
-     RETURNING team_id, user_id, role, status`,
-    [teamId, userId, role]
-  )
-  return result.rows[0]
+export async function addMemberToTeam(
+  teamId: string,
+  userId: string,
+  operatorSub: string,
+  role: TeamRole = 'member'
+) {
+  return withTransaction(async db => {
+    const before = await db.query(
+      `SELECT role, status
+         FROM team_members
+        WHERE team_id = $1 AND user_id = $2
+        FOR UPDATE`,
+      [teamId, userId]
+    )
+    const previous = before.rows[0] as { role: TeamRole; status: string } | undefined
+    const result = await db.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES($1, $2, $3, 'active')
+       ON CONFLICT (team_id, user_id)
+       DO UPDATE SET role = EXCLUDED.role, status = 'active', updated_at = NOW()
+       RETURNING team_id, user_id, role, status`,
+      [teamId, userId, role]
+    )
+    const changes = []
+    if (previous?.status === 'active' && previous.role !== role) {
+      changes.push({
+        action: 'revoke' as const,
+        resourceClass: 'team_membership',
+        resourceRef: `team_membership:${teamId}:role:${previous.role}`,
+        subject: { kind: 'user' as const, id: userId },
+        teamId,
+        status: 'role_replaced',
+      })
+    }
+    if (!previous || previous.status !== 'active' || previous.role !== role) {
+      changes.push({
+        action: 'grant' as const,
+        resourceClass: 'team_membership',
+        resourceRef: `team_membership:${teamId}:role:${role}`,
+        subject: { kind: 'user' as const, id: userId },
+        teamId,
+        status: previous?.status === 'active' ? 'role_assigned' : 'membership_activated',
+      })
+    }
+    await appendControlApiPermissionEventsInTransaction(db, { operatorSub, changes })
+    return result.rows[0]
+  })
 }
 
 async function insertInvitationForTeams(
@@ -771,22 +849,39 @@ export async function requestProfilePasswordReset(email: string): Promise<{ requ
   return { requested: true }
 }
 
-export async function softDeleteMember(teamId: string, userId: string) {
-  const result = await pool.query(
-    `UPDATE team_members
-        SET status = 'deleted',
-            updated_at = NOW()
-      WHERE team_id = $1
-        AND user_id = $2
-        AND status = 'active'
-    RETURNING team_id, user_id, role, status`,
-    [teamId, userId]
-  )
-  return (
-    (result.rows[0] as
-      | { team_id: string; user_id: string; role: TeamRole; status: string }
-      | undefined) || null
-  )
+export async function softDeleteMember(teamId: string, userId: string, operatorSub: string) {
+  return withTransaction(async db => {
+    const result = await db.query(
+      `UPDATE team_members
+          SET status = 'deleted',
+              updated_at = NOW()
+        WHERE team_id = $1
+          AND user_id = $2
+          AND status = 'active'
+      RETURNING team_id, user_id, role, status`,
+      [teamId, userId]
+    )
+    const deleted =
+      (result.rows[0] as
+        | { team_id: string; user_id: string; role: TeamRole; status: string }
+        | undefined) ?? null
+    if (deleted) {
+      await appendControlApiPermissionEventsInTransaction(db, {
+        operatorSub,
+        changes: [
+          {
+            action: 'revoke',
+            resourceClass: 'team_membership',
+            resourceRef: `team_membership:${teamId}:role:${deleted.role}`,
+            subject: { kind: 'user', id: userId },
+            teamId,
+            status: 'membership_removed',
+          },
+        ],
+      })
+    }
+    return deleted
+  })
 }
 
 export async function listPendingInvitations(email: string) {
@@ -1637,7 +1732,9 @@ export async function updateManagedMemberRoleForUser(
   if (!target) {
     return { error: 'not_found' as const }
   }
-  return { membership: await updateMemberRole(teamId, targetUserId, normalizedRole) }
+  return {
+    membership: await updateMemberRole(teamId, targetUserId, normalizedRole, managerUserId),
+  }
 }
 
 export async function deleteManagedMemberForUser(
@@ -1652,7 +1749,7 @@ export async function deleteManagedMemberForUser(
   if (!roleCanDeleteMembers(manager?.role)) {
     return { error: 'forbidden' as const }
   }
-  const deleted = await softDeleteMember(teamId, targetUserId)
+  const deleted = await softDeleteMember(teamId, targetUserId, managerUserId)
   if (!deleted) {
     return { error: 'not_found' as const }
   }

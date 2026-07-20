@@ -30,7 +30,7 @@ function applyProdEnv(env: Record<string, string | undefined>): void {
   // dev-only — production must set these explicitly.
   env.INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET = randomBytes(32).toString('hex')
   env.INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET = randomBytes(32).toString('hex')
-  env.CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL = 'https://example.com/api/v1'
+  env.CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL = 'https://registration.evenfire.ai/api/v1'
   env.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET = randomBytes(32).toString('hex')
   env.CONTROL_API_MEMBER_REGISTRATION_HMAC_KID = 'clerum'
   env.CONTROL_API_MEMBER_REGISTRATION_TENANT_ID = 'clerum'
@@ -68,7 +68,7 @@ describe('config: production voucher key guard', () => {
 
   it('throws in managed mode when CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY is unset', async () => {
     process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'true'
-    process.env.CLERUM_REGISTRY_URL = 'https://example.com'
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
     process.env.REGISTRY_CONNECTION_MODE = 'managed'
     process.env.CLERUM_REGISTRY_CLIENT_ID = 'id'
     process.env.CLERUM_REGISTRY_CLIENT_SECRET = 's'
@@ -81,7 +81,7 @@ describe('config: production voucher key guard', () => {
 
   it('boots in managed mode with the dedicated voucher key + kid set', async () => {
     process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'true'
-    process.env.CLERUM_REGISTRY_URL = 'https://example.com'
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
     process.env.REGISTRY_CONNECTION_MODE = 'managed'
     process.env.CLERUM_REGISTRY_CLIENT_ID = 'id'
     process.env.CLERUM_REGISTRY_CLIENT_SECRET = 's'

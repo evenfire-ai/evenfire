@@ -82,6 +82,49 @@ describe('ChannelReader provider event idempotency', () => {
     expect(rpc.sendMessage).not.toHaveBeenCalled()
   })
 
+  it('records denied provider events so duplicate redelivery does not reauthorize', async () => {
+    const rpc = rpcClient()
+    rpc.authorizeProviderMessage = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map(),
+    })
+
+    const denied = telegramMessage()
+    const deniedDuplicate = telegramMessage({
+      messageId: '9001-redelivered',
+      providerIdentity: {
+        medium: 'telegram',
+        providerUserId: '123456',
+        providerChannelId: '424242',
+        providerEventId: 'telegram:424242:9001',
+      },
+    })
+    const allowed = telegramMessage({
+      messageId: '9002',
+      providerIdentity: {
+        medium: 'telegram',
+        providerUserId: '123456',
+        providerChannelId: '424242',
+        providerEventId: 'telegram:424242:9002',
+      },
+    })
+
+    await reader.handleMessages([denied, deniedDuplicate, allowed])
+
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledTimes(2)
+    expect(rpc.authorizeProviderMessage).toHaveBeenNthCalledWith(1, denied.providerIdentity)
+    expect(rpc.authorizeProviderMessage).toHaveBeenNthCalledWith(2, allowed.providerIdentity)
+    expect(rpc.sendMessage).toHaveBeenCalledOnce()
+    expect(rpc.sendMessage).toHaveBeenCalledWith(
+      allowed,
+      expect.objectContaining({
+        traceContext: expect.objectContaining({ origin: 'channel_event' }),
+      })
+    )
+  })
+
   it('forwards a redelivered provider event to mcp-host only once', async () => {
     const rpc = rpcClient()
     const reader = new ChannelReader({
@@ -104,7 +147,12 @@ describe('ChannelReader provider event idempotency', () => {
     await reader.handleMessages([first, duplicate])
 
     expect(rpc.sendMessage).toHaveBeenCalledTimes(1)
-    expect(rpc.sendMessage).toHaveBeenCalledWith(first)
+    expect(rpc.sendMessage).toHaveBeenCalledWith(
+      first,
+      expect.objectContaining({
+        traceContext: expect.objectContaining({ origin: 'channel_event' }),
+      })
+    )
   })
 
   it('falls back to channel message identity when provider event id is absent', async () => {
@@ -151,7 +199,10 @@ describe('ChannelReader bot mention normalization', () => {
     ])
 
     expect(rpc.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ content: 'download result' })
+      expect.objectContaining({ content: 'download result' }),
+      expect.objectContaining({
+        traceContext: expect.objectContaining({ origin: 'channel_event' }),
+      })
     )
   })
 
@@ -182,7 +233,10 @@ describe('ChannelReader bot mention normalization', () => {
     ])
 
     expect(rpc.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ content: '@other_bot download result' })
+      expect.objectContaining({ content: '@other_bot download result' }),
+      expect.objectContaining({
+        traceContext: expect.objectContaining({ origin: 'channel_event' }),
+      })
     )
   })
 })

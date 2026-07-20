@@ -13,6 +13,7 @@ export type RpcScope =
   | 'host:task:read'
   | 'host:approval:write'
   | 'host:session:read'
+  | 'host:model:write'
   | 'host:cron:read'
   | 'host:cron:ack'
   | 'desktop:view'
@@ -29,6 +30,7 @@ export const RPC_SCOPES: RpcScope[] = [
   'host:task:read',
   'host:approval:write',
   'host:session:read',
+  'host:model:write',
   'host:cron:read',
   'host:cron:ack',
   'desktop:view',

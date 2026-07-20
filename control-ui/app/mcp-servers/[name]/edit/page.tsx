@@ -9,6 +9,7 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { EgressEditor } from '@components/EgressEditor'
 import { IconCable } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { getMcpServer, updateMcpServer } from '@lib/api'
 import type { EgressBinding, McpServerResource } from '@lib/api'
 import type { EgressEditorStatus } from '@lib/egressModel'
@@ -28,7 +29,7 @@ export default function EditMcpServerPage() {
   const [egressStatus, setEgressStatus] = useState<EgressEditorStatus | null>(null)
 
   function backToList() {
-    router.push('/mcp-servers')
+    router.push(CONTROL_ROUTES.connectors.root)
   }
 
   const handleEgressChange = useCallback(

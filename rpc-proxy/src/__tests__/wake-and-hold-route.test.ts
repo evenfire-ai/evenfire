@@ -130,14 +130,17 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)
     const firstBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1] as {
       messageId?: unknown
+      traceContext?: unknown
     }
     const retryBody = serviceMock.forwardHostMessageToHost.mock.calls[1][1] as {
       messageId?: unknown
+      traceContext?: unknown
     }
     expect(typeof firstBody.messageId).toBe('string')
     expect((firstBody.messageId as string).length).toBeGreaterThan(0)
     // Neither Date.now() nor random: the two deliveries MUST be byte-identical.
     expect(retryBody.messageId).toBe(firstBody.messageId)
+    expect(retryBody.traceContext).toBe(firstBody.traceContext)
   })
 
   it('two DISTINCT sends with identical content in one thread get DIFFERENT messageIds (D1)', async () => {

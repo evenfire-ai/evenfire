@@ -1,6 +1,7 @@
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
+  type DirectRunBindingRequest,
   type UserAllowedServers,
   fetchHostConnectionFromControlApi,
   fetchUserAllowedServersFromControlApi,
@@ -80,9 +81,12 @@ export async function resolveHostConnectionForUser(
     accessScope?: 'team' | 'user'
     teamId?: string | null
     requestId?: string
+    directRunBinding?: DirectRunBindingRequest
   }
 ): Promise<ResolvedServerConnection | null> {
-  const host = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken)
+  const host = await fetchHostConnectionFromControlApi(userId, hostRef, rpcAccessToken, {
+    directRunBinding: edgeContext?.directRunBinding,
+  })
   if (!host) return null
 
   const headers: Record<string, string> = {

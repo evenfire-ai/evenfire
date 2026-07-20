@@ -10,6 +10,7 @@ const sandboxUi = {
   close: vi.fn(),
   reload: vi.fn(),
   setBounds: vi.fn(),
+  setVisible: vi.fn(),
   capturePreview: vi.fn(),
   onClosed: vi.fn(() => vi.fn()),
   onRefreshError: vi.fn(() => vi.fn()),
@@ -22,6 +23,8 @@ function installClerumApi(): void {
 describe('SandboxUiPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    sandboxUi.setBounds.mockResolvedValue(undefined)
+    sandboxUi.setVisible.mockResolvedValue(undefined)
     installClerumApi()
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
       cb(0)
@@ -146,6 +149,40 @@ describe('SandboxUiPage', () => {
     expect(await screen.findByRole('button', { name: 'Back to apps' })).toBeTruthy()
   })
 
+  it('reports when resized embedded app bounds are applied', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    sandboxUi.setBounds.mockResolvedValue(undefined)
+    const onEmbedBoundsApplied = vi.fn()
+
+    const { rerender } = render(
+      <SandboxUiPage boundsRefreshKey="drawer-closed" onEmbedBoundsApplied={onEmbedBoundsApplied} />
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    await screen.findByRole('button', { name: 'Back to apps' })
+    onEmbedBoundsApplied.mockClear()
+
+    rerender(
+      <SandboxUiPage boundsRefreshKey="drawer-open" onEmbedBoundsApplied={onEmbedBoundsApplied} />
+    )
+
+    await waitFor(() => {
+      expect(onEmbedBoundsApplied).toHaveBeenCalled()
+    })
+  })
+
   it('reloads the embed in place when the Refresh button is clicked (no navigate-away needed)', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({
       apps: [
@@ -176,7 +213,7 @@ describe('SandboxUiPage', () => {
     expect(sandboxUi.close).not.toHaveBeenCalled()
   })
 
-  it('shows an embed preview and parks the native view while shell overlays are open', async () => {
+  it('shows an embed preview and hides the native view while shell overlays are open', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({
       apps: [
         {
@@ -201,18 +238,20 @@ describe('SandboxUiPage', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('sandbox-ui-embed-preview')).toBeTruthy()
-      expect(sandboxUi.setBounds).toHaveBeenLastCalledWith({
-        x: -10000,
-        y: -10000,
-        width: 1,
-        height: 1,
-        dpr: expect.any(Number),
-      })
+      expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(false)
     })
 
+    let resolveRestore: (() => void) | undefined
+    sandboxUi.setVisible.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          resolveRestore = resolve
+        })
+    )
     rerender(<SandboxUiPage />)
 
     await waitFor(() => {
+      expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true)
       expect(sandboxUi.setBounds).toHaveBeenLastCalledWith({
         x: 16,
         y: 12,
@@ -221,6 +260,63 @@ describe('SandboxUiPage', () => {
         dpr: expect.any(Number),
       })
     })
+    expect(screen.getByTestId('sandbox-ui-embed-preview')).toBeTruthy()
+
+    resolveRestore?.()
+    await waitFor(() => {
+      expect(screen.queryByTestId('sandbox-ui-embed-preview')).toBeNull()
+    })
+  })
+
+  it('keeps the native view visible until the toast preview is ready', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    let resolvePreview: ((value: string | null) => void) | undefined
+    sandboxUi.capturePreview.mockReturnValueOnce(
+      new Promise<string | null>(resolve => {
+        resolvePreview = resolve
+      })
+    )
+
+    const { rerender } = render(<SandboxUiPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    await screen.findByRole('button', { name: 'Back to apps' })
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+    sandboxUi.setVisible.mockClear()
+
+    rerender(<SandboxUiPage toastShellOverlayOpen />)
+
+    await waitFor(() => expect(sandboxUi.capturePreview).toHaveBeenCalledTimes(1))
+    expect(sandboxUi.setVisible).not.toHaveBeenCalled()
     expect(screen.queryByTestId('sandbox-ui-embed-preview')).toBeNull()
+
+    resolvePreview?.('data:image/png;base64,toast-preview')
+    expect(await screen.findByTestId('sandbox-ui-embed-preview')).toBeTruthy()
+    await waitFor(() => {
+      expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(false)
+    })
+  })
+
+  it('hides an active native view even before local launch state is available', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({ apps: [] })
+    sandboxUi.capturePreview.mockResolvedValueOnce(null)
+
+    render(<SandboxUiPage headerShellOverlayOpen />)
+
+    await waitFor(() => {
+      expect(sandboxUi.setVisible).toHaveBeenCalledWith(false)
+    })
   })
 })

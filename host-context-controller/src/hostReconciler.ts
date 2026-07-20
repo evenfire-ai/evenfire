@@ -1,10 +1,15 @@
 import * as k8s from '@kubernetes/client-node'
 import { IntOrString } from '@kubernetes/client-node/dist/types.js'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import * as path from 'path'
+import type { AdministrativeOutcomeReporter } from './administrativeOutcomeReporter'
 import { config } from './config'
 import { HOST_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE } from './constants'
 import { mintHostGfsToken } from './gfsHostBinding'
+import type {
+  HccInfrastructureTelemetryPayload,
+  InfrastructureTelemetryReporter,
+} from './infrastructureTelemetryReporter'
 import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
 import {
   SFS_LABEL,
@@ -163,6 +168,8 @@ type HostReconcilerDeps = {
   customApi?: k8s.CustomObjectsApi
   /** Injectable clock so tests get deterministic condition lastTransitionTime. */
   now?: () => Date
+  /** Stable per-enqueue identity; the reporter reuses it for transport retries. */
+  newTelemetryOccurrenceId?: () => string
   /**
    * Resolve which SharedFileSystem PVCs to mount into a Host's mcp-host
    * Deployment. The default (no override) returns []. Production wires this
@@ -201,6 +208,8 @@ type HostReconcilerDeps = {
    * Default returns false — safe: preserves existing replicas until wired.
    */
   isCommunicationChannelCacheSynced?: () => boolean
+  infrastructureTelemetryReporter?: InfrastructureTelemetryReporter
+  administrativeOutcomeReporter?: AdministrativeOutcomeReporter
 }
 
 type HostSecretValidationResult =
@@ -235,6 +244,7 @@ export class HostReconciler {
   private customApiInstance: k8s.CustomObjectsApi | undefined
   private readonly kubeConfig: k8s.KubeConfig
   private readonly now: () => Date
+  private readonly newTelemetryOccurrenceId: () => string
   private readonly statusMap: Map<string, HostRuntimeStatus> = new Map()
   private readonly readinessTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
   /**
@@ -257,6 +267,8 @@ export class HostReconciler {
   private findCommunicationChannelsByCredentialsSecretName: (
     name: string
   ) => CommunicationChannelCRD[]
+  private readonly infrastructureTelemetryReporter?: InfrastructureTelemetryReporter
+  private readonly administrativeOutcomeReporter?: AdministrativeOutcomeReporter
   // B2: whether the CC cache initial-list has completed. Defaults to false
   // (safe: preserves existing Deployment replicas until wired by McpServerWatcher).
   private ccCacheSyncedFn: () => boolean = () => false
@@ -275,11 +287,14 @@ export class HostReconciler {
     this.kubeConfig = kc
     this.customApiInstance = deps?.customApi
     this.now = deps?.now ?? (() => new Date())
+    this.newTelemetryOccurrenceId = deps?.newTelemetryOccurrenceId ?? randomUUID
     this.resolveContextMounts = deps?.resolveContextMounts ?? (async () => [])
     this.countCommunicationChannels = deps?.countCommunicationChannels ?? (() => 0)
     this.findCommunicationChannelsByHostRef = deps?.findCommunicationChannelsByHostRef ?? (() => [])
     this.findCommunicationChannelsByCredentialsSecretName =
       deps?.findCommunicationChannelsByCredentialsSecretName ?? (() => [])
+    this.infrastructureTelemetryReporter = deps?.infrastructureTelemetryReporter
+    this.administrativeOutcomeReporter = deps?.administrativeOutcomeReporter
     if (deps?.isCommunicationChannelCacheSynced) {
       this.ccCacheSyncedFn = deps.isCommunicationChannelCacheSynced
     }
@@ -291,6 +306,19 @@ export class HostReconciler {
       countCommunicationChannels: hostName => this.countCommunicationChannels(hostName),
       isCommunicationChannelCacheSynced: () => this.ccCacheSyncedFn(),
       reconcileCore: host => this.reconcileCore(host),
+      onLifecycleStatusCommitted: (host, lifecycle) => {
+        const occurredAt = this.now().toISOString()
+        this.infrastructureTelemetryReporter?.enqueueHealthTransition({
+          sourceEventId: `hcc-health-transition:${this.newTelemetryOccurrenceId()}`,
+          occurredAt,
+          hostLookupReference: {
+            name: host.name,
+            namespace: host.namespace,
+            ...(host.generation !== undefined ? { generation: host.generation } : {}),
+          },
+          payload: { transition: `lifecycle:${lifecycle.state}`, state: lifecycle.state },
+        })
+      },
     })
   }
 
@@ -506,9 +534,13 @@ export class HostReconciler {
           verbs: ['get', 'watch', 'list'],
         },
         {
+          // Per-Host env ConfigMap + the cluster-wide R3 allowlist ConfigMap
+          // (clerum-llm-allowed-models). The allowlist is a single shared object
+          // materialized by control-api; every Host may read it. resourceNames
+          // are rewritten on every reconcile, so this propagates to existing Roles.
           apiGroups: [''],
           resources: ['configmaps'],
-          resourceNames: [`host-${host.name}-env`],
+          resourceNames: [`host-${host.name}-env`, 'clerum-llm-allowed-models'],
           verbs: ['get', 'watch', 'list'],
         },
         {
@@ -1289,6 +1321,83 @@ export class HostReconciler {
       clearTimeout(timer)
       this.readinessTimers.delete(name)
     }
+  }
+
+  private hostLookupReference(host: HostCRD): {
+    name: string
+    namespace: string
+    generation?: number
+  } {
+    return {
+      name: host.name,
+      namespace: host.namespace,
+      ...(host.generation !== undefined ? { generation: host.generation } : {}),
+    }
+  }
+
+  private enqueueHostTelemetry(
+    host: HostCRD,
+    telemetryType: 'lifecycle_transition' | 'reconcile_outcome' | 'controller_error',
+    reasonCode: string,
+    payload: HccInfrastructureTelemetryPayload
+  ): void {
+    const occurredAt = this.now().toISOString()
+    const eventPayload = {
+      resource_class: 'Host',
+      reason_code: reasonCode,
+      ...payload,
+    }
+    if (telemetryType === 'reconcile_outcome') {
+      this.infrastructureTelemetryReporter?.enqueue({
+        occurredAt,
+        telemetryType,
+        hostLookupReference: this.hostLookupReference(host),
+        payload: eventPayload,
+      })
+      return
+    }
+    this.infrastructureTelemetryReporter?.enqueue({
+      sourceEventId: `hcc-${telemetryType}:${this.newTelemetryOccurrenceId()}`,
+      occurredAt,
+      telemetryType,
+      hostLookupReference: this.hostLookupReference(host),
+      payload: eventPayload,
+    })
+  }
+
+  private enqueueControllerError(host: HostCRD, reasonCode: string, error: unknown): void {
+    this.enqueueHostTelemetry(host, 'controller_error', reasonCode, {
+      status: 'failed',
+      error_class: error instanceof Error ? error.name : typeof error,
+    })
+    this.enqueueAdministrativeOutcome(host, 'failed', reasonCode)
+  }
+
+  private enqueueReconcileOutcome(host: HostCRD): void {
+    const status = this.getStatus(host.name)
+    const succeeded = status.deployed && status.ready
+    this.enqueueHostTelemetry(host, 'reconcile_outcome', succeeded ? 'ready' : 'not_ready', {
+      status: succeeded ? 'succeeded' : 'failed',
+      phase: status.deployed ? 'deployed' : 'not_deployed',
+      state: status.ready ? 'ready' : 'not_ready',
+    })
+    if (succeeded) this.enqueueAdministrativeOutcome(host, 'succeeded', 'reconciled')
+  }
+
+  private enqueueAdministrativeOutcome(
+    host: HostCRD,
+    outcome: 'succeeded' | 'failed',
+    reasonCode: string
+  ): void {
+    const operationId = host.annotations?.['clerum.io/administrative-intent-id']
+    if (!operationId || host.generation === undefined) return
+    this.administrativeOutcomeReporter?.enqueueHostOutcome({
+      sourceEventId: `hcc-admin-outcome:${operationId}:${host.generation}:${outcome}`,
+      occurredAt: this.now().toISOString(),
+      hostRef: { name: host.name, namespace: host.namespace, generation: host.generation },
+      outcome,
+      reasonCode,
+    })
   }
 
   private pvcName(host: HostCRD): string {
@@ -3217,7 +3326,16 @@ export class HostReconciler {
   }
 
   async reconcile(host: HostCRD): Promise<void> {
-    return this.lifecycle.serializeByHost(host.name, () => this.reconcileCore(host))
+    return this.lifecycle.serializeByHost(host.name, async () => {
+      try {
+        await this.reconcileCore(host)
+        this.enqueueReconcileOutcome(host)
+      } catch (error) {
+        this.enqueueControllerError(host, 'reconcile_exception', error)
+        this.enqueueReconcileOutcome(host)
+        throw error
+      }
+    })
   }
 
   private async reconcileCore(host: HostCRD): Promise<void> {
@@ -3255,6 +3373,7 @@ export class HostReconciler {
         ready: false,
         message: secretResult.message,
       })
+      this.enqueueControllerError(host, secretResult.reason, new Error(secretResult.message))
       return
     }
 
@@ -3290,7 +3409,19 @@ export class HostReconciler {
       return
     }
     lifecycle = guardedLifecycle
-    await this.lifecycle.writeLifecycleStatusToCluster(host, lifecycle)
+    const lifecycleStatusCommitted = await this.lifecycle.writeLifecycleStatusToCluster(
+      host,
+      lifecycle
+    )
+    if (lifecycleStatusCommitted) {
+      this.enqueueHostTelemetry(host, 'lifecycle_transition', lifecycle.effective.state, {
+        status: 'committed',
+        transition: `lifecycle:${lifecycle.effective.state}`,
+        state: lifecycle.effective.state,
+        phase: lifecycle.effective.stateless ? 'stateless' : 'stateful',
+        summary: lifecycle.lifecycle.reason,
+      })
+    }
 
     await this.ensurePvc(host)
     await this.ensureService(host)
@@ -3495,6 +3626,11 @@ export class HostReconciler {
       // are visible (the deploy error may explain why the Deployment is missing).
       channelReaderStatus.message = `reconcile error: ${channelReaderError}`
       channelReaderStatus.ready = false
+      this.enqueueControllerError(
+        host,
+        'channel_reader_reconcile_failed',
+        new Error(channelReaderError)
+      )
     }
     const prev = this.getStatus(host.name)
     this.setStatus(host.name, { ...prev, channelReader: channelReaderStatus })

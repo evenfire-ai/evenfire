@@ -119,7 +119,7 @@ describe('routes/profile', () => {
   function mountInternalRoutes(app: express.Express, gateway: unknown) {
     app.use(requireInternalToken)
     app.use(createExternalRouter(gateway as never))
-    app.use(createRpcAccessRouter(gateway as never))
+    app.use(createRpcAccessRouter(gateway as never, { bind: vi.fn() }))
   }
 
   function accessCatalogGateway() {
@@ -207,6 +207,71 @@ describe('routes/profile', () => {
     expect(gateway.listResource).toHaveBeenCalledWith('contexts', 'mcp-server')
     expect(gateway.listResource).toHaveBeenCalledWith('mcpservers', 'mcp-server')
     expect(gateway.listResource).toHaveBeenCalledWith('hosts', 'mcp-host')
+  })
+
+  it('accepts a host:model:write-only token on the mcp-hosts access endpoint (per-session model selector, R2)', async () => {
+    // Regression lock for the R2 per-session model-selector authz bug: the
+    // desktop mints an rpc token scoped to ONLY `host:model:write` for the
+    // model-write flow (rpc-proxy POST /rpc/hosts/:hostRef/model resolves host
+    // access via THIS endpoint). Before the fix this scope was missing from the
+    // requireValidRpcAccessTokenAny allow-list, so control-api returned 403 and
+    // the model write was silently dropped. Uses the REAL middleware + a REAL
+    // signed token so the scope gate is genuinely exercised (not mocked).
+    const modelWriteToken = signRpcAccessToken({
+      sub: 'u1',
+      typ: 'user',
+      teamId: 't1',
+      role: 'member',
+      scopes: ['host:model:write'],
+      hostRefs: ['agent-a'],
+      jti: 'rpc-jti-model-write',
+    })
+
+    svc.getUserAgents.mockResolvedValue({ userId: 'u1', agentNames: ['agent-a'] })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuth(
+      request(app)
+        .get('/rpc/access/users/u1/mcp-hosts/agent-a')
+        .set('x-rpc-access-token', modelWriteToken)
+    )
+      .expect(200)
+      .expect({
+        userId: 'u1',
+        hostRef: 'agent-a',
+        url: 'http://agent-a.mcp-host.svc.cluster.local:8080',
+      })
+  })
+
+  it('rejects a token whose scopes are all outside the mcp-hosts allow-list (gate still closed)', async () => {
+    // Negative half of the allow-list contract: `mcp:servers:list` is NOT an
+    // accepted scope for the host-access endpoint, so a token carrying only it
+    // must still be forbidden. Guards against the fix accidentally widening the
+    // gate to any valid user token.
+    const catalogOnlyToken = signRpcAccessToken({
+      sub: 'u1',
+      typ: 'user',
+      teamId: 't1',
+      role: 'member',
+      scopes: ['mcp:servers:list'],
+      hostRefs: ['agent-a'],
+      jti: 'rpc-jti-catalog-only',
+    })
+
+    svc.getUserAgents.mockResolvedValue({ userId: 'u1', agentNames: ['agent-a'] })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuth(
+      request(app)
+        .get('/rpc/access/users/u1/mcp-hosts/agent-a')
+        .set('x-rpc-access-token', catalogOnlyToken)
+    ).expect(403)
   })
 
   it('returns validation errors for bad payloads and role checks', async () => {

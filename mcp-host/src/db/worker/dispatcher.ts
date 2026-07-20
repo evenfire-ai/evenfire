@@ -87,6 +87,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             channel_id: row.channel_id ?? null,
             thread_id: row.thread_id ?? null,
             model: row.model ?? null,
+            model_selections: row.model_selections ?? null,
             system_prompt_stable_hash: row.system_prompt_stable_hash ?? null,
             parent_session_id: row.parent_session_id ?? null,
             started_at: row.started_at,
@@ -102,6 +103,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             title: row.title ?? null,
             state: row.state ?? 'idle',
             active_task_id: row.active_task_id ?? null,
+            active_trace_context: row.active_trace_context ?? null,
           })
         })
         tx.immediate(op.payload)
@@ -119,6 +121,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             ended_at: op.endedAt ?? null,
             end_reason: op.endReason ?? null,
             active_task_id: op.activeTaskId ?? null,
+            active_trace_context: op.activeTraceContext ?? null,
+            clear_active_trace_context: op.activeTraceContext === null ? 1 : 0,
           })
           // D.1 — null means "clear". COALESCE can't clear, so run the
           // dedicated statement in the SAME transaction (atomic with the state
@@ -196,6 +200,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 ended_at: null,
                 end_reason: null,
                 active_task_id: null,
+                active_trace_context: null,
+                clear_active_trace_context: 1,
               })
               s.clearSessionActiveTask.run({ id: sess.id })
               out.push({
@@ -229,13 +235,9 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       //  - includeLive=false (D.8 default): reap only sessions whose approval can
       //    no longer resolve (all pending_approvals expired, or the row was already
       //    swept leaving an orphan). Synthetic msg: APPROVAL_EXPIRED_DURING_DOWNTIME.
-      //  - includeLive=true (S1, used by the boot reaper): reap EVERY
-      //    'awaiting_approval' session, live or expired. After a restart no such
-      //    session is resumable (executor rehydration was never implemented), so a
-      //    live approval is as un-resolvable as an expired one — handleApproval
-      //    finds an empty activeExecutors and returns "Task is no longer awaiting
-      //    approval" without transitioning the session, leaving the chat stuck on
-      //    "Connecting". Synthetic msg: APPROVAL_INTERRUPTED_BY_RESTART.
+      //  - includeLive=true (S1, explicit operator recovery): reap EVERY
+      //    'awaiting_approval' session, live or expired. Normal boot keeps this
+      //    false because live approval executors are reconstructed below.
       //
       // Runs at PHASE 1b (before approval rehydration) so loadAllPendingApprovals
       // never re-hydrates an approval we just deleted. Chunked like D.2 so a
@@ -255,6 +257,12 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       for (;;) {
         const chunkReaped = await withBusyRetry(() => {
           const tx = db.transaction(() => {
+            // The inverse orphan case is a pending row whose parent session is
+            // no longer awaiting the same task (for example, cancellation made
+            // the session idle but a transient SQLite failure left the delete
+            // behind). Prune those rows in the same transaction as the session
+            // reconciliation so PHASE 2 can only observe a coherent pair.
+            s.deleteUnrehydratablePendingApprovals.run()
             const sessions = (
               includeLive
                 ? s.selectAwaitingApprovalSessions.all({ limit: chunkSize })
@@ -311,6 +319,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 ended_at: null,
                 end_reason: null,
                 active_task_id: null,
+                active_trace_context: null,
+                clear_active_trace_context: 1,
               })
               s.clearSessionActiveTask.run({ id: sess.id })
               out.push({
@@ -358,6 +368,18 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           s.updateSessionPromptStableHash.run({
             id: op.sessionId,
             system_prompt_stable_hash: op.stableHash,
+          })
+        })
+        tx.immediate()
+        return { ok: true }
+      })
+
+    case 'update_session_model_selections':
+      return withBusyRetry(() => {
+        const tx = db.transaction(() => {
+          s.updateSessionModelSelections.run({
+            id: op.sessionId,
+            model_selections: op.modelSelections,
           })
         })
         tx.immediate()
@@ -447,6 +469,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             ended_at: null,
             end_reason: null,
             active_task_id: op.activeTaskId ?? null,
+            active_trace_context: op.activeTraceContext ?? null,
+            clear_active_trace_context: op.activeTraceContext === null ? 1 : 0,
           })
           // null means "clear" — COALESCE can't, so run the dedicated
           // statement in the SAME transaction (see 'update_session_state').

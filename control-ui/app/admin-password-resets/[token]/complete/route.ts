@@ -1,16 +1,15 @@
 import { NextRequest } from 'next/server'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { verifyControlAdminPasswordResetCsrfToken } from '@lib/controlAdminCsrf'
 import { completeControlAdminPasswordResetServer } from '@lib/controlAdminPublicServerApi'
 import { sameOriginRedirect } from '@lib/sameOriginRedirect'
 
 function resetPath(token: string, error: string): string {
-  const searchParams = new URLSearchParams({ error })
-  return `/admin-password-resets/${encodeURIComponent(token)}?${searchParams}`
+  return CONTROL_ROUTES.adminPasswordResets.detail(token, { error })
 }
 
 function resetCompletePath(login: string): string {
-  const searchParams = new URLSearchParams({ login })
-  return `/admin-password-resets/complete?${searchParams}`
+  return CONTROL_ROUTES.adminPasswordResets.complete({ login })
 }
 
 export async function POST(req: NextRequest, context: { params: Promise<{ token?: string }> }) {

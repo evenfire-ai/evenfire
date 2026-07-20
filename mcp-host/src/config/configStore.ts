@@ -15,6 +15,11 @@
  *   3. Per-Host env Secret (`host-<hostRef>-env-secret`)
  *      — secret operator-managed env vars, keys are shell-style.
  *
+ *   4. LLM allowlist ConfigMap (name from `allowlistConfigMapName`)
+ *      — operator-declared, per-provider list of usable models (R3). Orthogonal
+ *      to the env merge below: it is exposed via {@link allowedModels} /
+ *      {@link allowlistAvailable}, not merged into the effective env table.
+ *
  * Precedence (first match wins): host secret > host CM > LLM secret > process.env.
  *
  * Updates fire `onChange` with `{llmKeyChanged, envChanged}` so subscribers
@@ -25,7 +30,15 @@
  * backoff; on "too old" the watch falls back to a fresh list and resumes.
  */
 import * as k8s from '@kubernetes/client-node'
-import { ALL_PROVIDERS, type LlmProvider, descriptorFor } from '../llm/registryCore'
+import {
+  ALL_PROVIDERS,
+  ALL_PROVIDER_SLOT_ENV_NAMES,
+  type LlmProvider,
+  descriptorFor,
+  primarySlot,
+} from '../llm/registryCore'
+import type { ProviderCredentials } from '../types'
+import { llmAllowlistMissingTotal } from './allowlistMetrics'
 
 // ─── Provider mapping ──────────────────────────────────────────────────────
 
@@ -33,35 +46,33 @@ import { ALL_PROVIDERS, type LlmProvider, descriptorFor } from '../llm/registryC
 export type { LlmProvider }
 
 /**
- * Lowercase-hyphen data key used inside the LLM Secret per provider.
- * Derived from the registry (single source of truth) so it cannot drift from
- * the external Secret contract.
- */
-const PROVIDER_DATA_KEY = Object.fromEntries(
-  ALL_PROVIDERS.map(p => [p, descriptorFor(p).dataKey])
-) as Record<LlmProvider, string>
-
-/**
- * Shell-style env var name per provider — what mcp-host code expects to read.
- * Derived from the registry (single source of truth). Exported so the
- * shell-tool env boundary (agentToolEnv.ts) and its lock test can reference
- * the exact env-var names that must never reach a tool subprocess.
+ * Shell-style env var name of each provider's PRIMARY credential slot — what
+ * mcp-host code expects to read for a single-key provider. Derived from the
+ * registry (single source of truth). Multi-slot providers (Bedrock) also have
+ * secondary slots; those live in {@link PROVIDER_ENV_NAMES}, NOT here.
+ * Exported for status/debug callers that key on the primary env name.
  */
 export const PROVIDER_ENV_NAME = Object.fromEntries(
-  ALL_PROVIDERS.map(p => [p, descriptorFor(p).envName])
+  ALL_PROVIDERS.map(p => [p, primarySlot(descriptorFor(p)).envName])
 ) as Record<LlmProvider, string>
 
 /**
- * Reverse: any of the provider env var names (derived from the registry, so it
- * tracks the provider set). Used by the sanitizer when matching the LLM Secret's
- * contributed key.
+ * Every provider credential env var name across ALL providers and ALL their
+ * slots (registry-derived, so it tracks the provider/slot set). This is the
+ * registry half of the subprocess credential-exclusion boundary and the
+ * sanitizer's provider-key matcher. Multi-slot (R4): Bedrock contributes two
+ * names here; a single-key provider one.
  */
-export const PROVIDER_ENV_NAMES: ReadonlySet<string> = new Set(Object.values(PROVIDER_ENV_NAME))
+export const PROVIDER_ENV_NAMES: ReadonlySet<string> = ALL_PROVIDER_SLOT_ENV_NAMES
 
 /**
- * Env var names that must NEVER be logged or surfaced through
- * clerum__get_capabilities (plan §3.5). Plugin Workload SDK credentials
- * join the provider keys in the redaction set.
+ * Env var names that must NEVER reach a tool subprocess, be logged, or be
+ * surfaced through clerum__get_capabilities (plan §3.5): every provider
+ * credential slot (all providers) plus the platform runtime tokens. Wired into
+ * {@link ConfigStore.userEnvSnapshot} as the registry+platform half of the
+ * credential boundary (spec §3-R4.3); the by-source half (keys actually
+ * delivered by the llm-secret tier, covering R5's dynamic fallback slots) is
+ * added on top there.
  */
 export const RESERVED_SECRET_ENV_NAMES: ReadonlySet<string> = new Set([
   ...PROVIDER_ENV_NAMES,
@@ -77,6 +88,20 @@ export const RESERVED_SECRET_ENV_NAMES: ReadonlySet<string> = new Set([
 export interface ConfigStoreChange {
   llmKeyChanged: boolean
   envChanged: boolean
+  /** The LLM allowlist ConfigMap (R3) was delivered, updated, or removed. */
+  allowlistChanged: boolean
+}
+
+/**
+ * One operator-declared model in the allowlist ConfigMap (R3). Shape mirrors
+ * the shared contract: a JSON array of these per provider key. Only `model` is
+ * required; the rest are optional metadata.
+ */
+export interface AllowedModelEntry {
+  model: string
+  displayName?: string
+  contextWindowTokens?: number
+  vendor?: string
 }
 
 export type ConfigStoreChangeHandler = (change: ConfigStoreChange) => void
@@ -90,6 +115,22 @@ export interface ConfigStoreOptions {
   llmSecretRef: string | null
   /** Configured LLM provider — selects which key inside the LLM Secret is exposed. */
   provider: LlmProvider | null
+  /**
+   * Name of the operator-managed LLM allowlist ConfigMap to watch (R3). When
+   * null/undefined the fourth tier is disabled entirely (no watch, no bootstrap)
+   * and {@link allowlistAvailable} stays false — preserves the 3-tier behavior.
+   */
+  allowlistConfigMapName?: string | null
+  /**
+   * R5 — extra credential-slot dataKeys (of the SAME LLM Secret) the failover
+   * policy references: fallback `credentialSlot` overrides PLUS the normal slot
+   * dataKeys of every fallback provider (for cross-provider fallbacks whose keys
+   * the active-provider load below never touches). Their decoded values are
+   * exposed ONLY via {@link fallbackSlotValue} — deliberately NEVER merged into
+   * the effective env, so they can never reach a tool subprocess (spec §3-R5
+   * step 2 + the by-source exclusion of §3-R4.3). Empty/undefined = no failover.
+   */
+  fallbackCredentialSlots?: string[]
   /** KubeConfig (default: loadFromDefault). Tests inject a fake. */
   kc?: k8s.KubeConfig
   /**
@@ -102,7 +143,7 @@ export interface ConfigStoreOptions {
 
 // ─── ConfigStore ───────────────────────────────────────────────────────────
 
-type SourceTier = 'host-secret' | 'host-cm' | 'llm-secret'
+type SourceTier = 'host-secret' | 'host-cm' | 'llm-secret' | 'allowlist-cm'
 
 interface Entry {
   value: string
@@ -139,8 +180,24 @@ export class ConfigStore {
   /** Per-source tables. The merge takes precedence: host-secret > host-cm > llm-secret. */
   private hostSecret: Map<string, string> = new Map()
   private hostCm: Map<string, string> = new Map()
-  /** The single provider-matching key from the LLM Secret, if present. */
-  private llmKeyEntry: { name: string; value: string } | null = null
+  /**
+   * The active provider's credential slots loaded from the LLM Secret, in
+   * descriptor order (primary first). Multi-slot (R4): single-key providers
+   * hold one entry, Bedrock two, Vertex one (its JSON). Empty when the Secret
+   * is missing the relevant entries. `dataKey` keys the credentials bag handed
+   * to the driver factory; `name` is the shell-style env var name.
+   */
+  private llmSlots: Array<{ dataKey: string; name: string; value: string }> = []
+
+  /**
+   * R5 — decoded values of the failover policy's referenced credential slots,
+   * keyed by Secret dataKey (e.g. `claude-api-key-fb1`, or a cross-provider
+   * `openai-api-key`). Loaded from the SAME LLM Secret as {@link llmSlots} but
+   * kept in a SEPARATE map that is NEVER merged into {@link effective} — so a
+   * fallback slot can never reach a tool subprocess env. Read via
+   * {@link fallbackSlotValue} by the fallback provider factory in main.ts.
+   */
+  private fallbackSlotValues: Map<string, string> = new Map()
 
   /** Effective merged table, populated by `recompute()` after every source update. */
   private effective: Map<string, Entry> = new Map()
@@ -157,8 +214,17 @@ export class ConfigStore {
     'host-secret': RECONNECT_INITIAL_MS,
     'host-cm': RECONNECT_INITIAL_MS,
     'llm-secret': RECONNECT_INITIAL_MS,
+    'allowlist-cm': RECONNECT_INITIAL_MS,
   }
   private stopped = false
+
+  // ─── Allowlist tier (R3) — orthogonal to the env merge above ─────────────
+  /** Per-provider allowed models, parsed from the allowlist ConfigMap data. */
+  private allowedModelsMap: Map<string, AllowedModelEntry[]> = new Map()
+  /** True once a watch/bootstrap has delivered the allowlist CM (exists). */
+  private allowlistDelivered = false
+  /** Dedupe flag for the "CM absent" WARN + metric (fires once per transition). */
+  private allowlistMissingWarned = false
 
   constructor(opts: ConfigStoreOptions) {
     this.opts = opts
@@ -182,6 +248,7 @@ export class ConfigStore {
       this.bootstrapLlmSecret(),
       this.bootstrapHostCm(),
       this.bootstrapHostSecret(),
+      this.bootstrapAllowlistCm(),
     ])
     this.recompute()
     // Watches start even if a list returned 404 — kubelet may create the
@@ -189,6 +256,7 @@ export class ConfigStore {
     this.startWatch('llm-secret')
     this.startWatch('host-cm')
     this.startWatch('host-secret')
+    this.startWatch('allowlist-cm')
   }
 
   /** Tear down watches and timers. */
@@ -241,26 +309,74 @@ export class ConfigStore {
    * which reads it via {@link llmKey}. No subprocess needs it.
    */
   userEnvSnapshot(): Record<string, string> {
-    const llmName = this.opts.provider ? PROVIDER_ENV_NAME[this.opts.provider] : null
+    // Credential-exclusion boundary (spec §3-R4.3). Exclude, by TWO derivations:
+    //  1. registry + platform: every provider's every credential slot env name
+    //     (for ANY provider, present or not) plus the reserved platform tokens
+    //     — RESERVED_SECRET_ENV_NAMES;
+    //  2. by-source: every env key the LLM Secret tier actually loaded
+    //     (`llmSlots`). Today this is a SUBSET of (1) — the loader only reads
+    //     the active provider's registry-known slots, so it adds nothing yet.
+    //     It is kept as a distinct, by-source rule because it derives from what
+    //     was LOADED, not from the registry: when R5 extends the llm-secret
+    //     load with dynamically-named fallback slots, they land in `llmSlots`
+    //     and are excluded here automatically — the registry set (1) cannot
+    //     know those names.
+    // NEVER derive this from a single "active provider key" (primarySlot is
+    // prohibited here): that would leak Bedrock's second slot / fallback slots.
     const out: Record<string, string> = {}
     for (const [k, v] of this.effective) {
-      if (llmName && k === llmName) continue
+      if (RESERVED_SECRET_ENV_NAMES.has(k)) continue
+      if (this.llmSlots.some(s => s.name === k)) continue
       out[k] = v.value
     }
     return out
   }
 
   /**
-   * The provider key (translated to shell-style) currently in the LLM Secret,
-   * or null if the Secret is missing the relevant entry. Always reflects the
-   * latest watched state.
+   * The active provider's PRIMARY credential slot (translated to shell-style),
+   * or null if the Secret is missing it. Always reflects the latest watched
+   * state. Kept for single-key callers/back-compat; multi-slot callers use
+   * {@link llmCredentials}.
    */
   llmKey(): { name: string; value: string } | null {
-    return this.llmKeyEntry ? { ...this.llmKeyEntry } : null
+    const primary = this.llmSlots[0]
+    return primary ? { name: primary.name, value: primary.value } : null
   }
 
+  /**
+   * The active provider id and its full credential bag (keyed by slot
+   * `dataKey`), or null when no provider is configured or none of its slots are
+   * present. Feeds the driver factory (a multi-slot provider like Bedrock
+   * needs the whole bag).
+   */
+  llmCredentials(): { provider: LlmProvider; credentials: ProviderCredentials } | null {
+    if (!this.opts.provider || this.llmSlots.length === 0) return null
+    const credentials: ProviderCredentials = {}
+    for (const s of this.llmSlots) credentials[s.dataKey] = s.value
+    return { provider: this.opts.provider, credentials }
+  }
+
+  /**
+   * R5 — decoded value of a failover policy credential slot (by Secret dataKey),
+   * or undefined when absent. Used by the fallback provider factory to build a
+   * fallback provider from the SAME LLM Secret. Never merged into the effective
+   * env, so it cannot reach a subprocess.
+   */
+  fallbackSlotValue(dataKey: string): string | undefined {
+    return this.fallbackSlotValues.get(dataKey)
+  }
+
+  /**
+   * True when EVERY required credential slot of the active provider is present
+   * and non-empty. Multi-slot (R4): Bedrock reports configured only once BOTH
+   * AWS keys are present. Single-key providers are unchanged.
+   */
   isLlmKeyConfigured(): boolean {
-    return this.llmKeyEntry !== null && this.llmKeyEntry.value.length > 0
+    if (!this.opts.provider) return false
+    const loaded = new Set(this.llmSlots.filter(s => s.value.length > 0).map(s => s.dataKey))
+    return descriptorFor(this.opts.provider).credentialSlots.every(
+      slot => !slot.required || loaded.has(slot.dataKey)
+    )
   }
 
   /**
@@ -281,6 +397,12 @@ export class ConfigStore {
       const e = this.effective.get(k)
       if (e && e.value.length > 0) values.push(e.value)
     }
+    // R5 — the failover slot values live outside `effective`, but they are still
+    // LLM credentials: redact them from tool output too (defense in depth; no
+    // realistic path echoes them since they never enter a subprocess env).
+    for (const v of this.fallbackSlotValues.values()) {
+      if (v.length > 0) values.push(v)
+    }
     return values
   }
 
@@ -296,6 +418,10 @@ export class ConfigStore {
       const e = this.effective.get(k)
       if (e && e.value.length > 0) out.push({ name: k, value: e.value })
     }
+    // R5 — see listSecretValues: fallback slot values are LLM credentials too.
+    for (const [name, value] of this.fallbackSlotValues) {
+      if (value.length > 0) out.push({ name, value })
+    }
     out.sort((a, b) => b.value.length - a.value.length)
     return out
   }
@@ -306,6 +432,28 @@ export class ConfigStore {
     return () => {
       this.handlers.delete(handler)
     }
+  }
+
+  // ─── Allowlist read API (R3) ─────────────────────────────────────────
+
+  /**
+   * Per-provider allowed models from the operator allowlist ConfigMap. Keyed
+   * by provider id (registry id, e.g. `openai`). Empty until the CM is
+   * delivered; callers MUST gate on {@link allowlistAvailable} to distinguish
+   * "no models allowed" from "allowlist not yet known" (degraded-explicit).
+   */
+  allowedModels(): ReadonlyMap<string, AllowedModelEntry[]> {
+    return this.allowedModelsMap
+  }
+
+  /**
+   * True once the allowlist ConfigMap has been delivered by a bootstrap read
+   * or watch event. False when the CM does not exist yet or the tier is
+   * disabled — the consumer then treats only the Host-configured model as
+   * permitted (spec §3-R3.5).
+   */
+  allowlistAvailable(): boolean {
+    return this.allowlistDelivered
   }
 
   // ─── Bootstrap (initial list) ────────────────────────────────────────
@@ -339,6 +487,116 @@ export class ConfigStore {
     const data = await this.readSecretData(name)
     if (!data) return
     this.hostSecret = new Map(Object.entries(data).map(([k, v]) => [k, decodeSecretValue(v)]))
+  }
+
+  /**
+   * (Re)read the allowlist CM. Returns whether the observable allowlist state
+   * changed (content or availability) so the reconnect path can fire
+   * `allowlistChanged` only on a real transition, not on every watch cycle.
+   */
+  private async bootstrapAllowlistCm(): Promise<boolean> {
+    const name = this.opts.allowlistConfigMapName
+    if (!name) return false
+    try {
+      const cm = await this.coreApi.readNamespacedConfigMap({
+        name,
+        namespace: this.opts.namespace,
+      })
+      const wasAvailable = this.allowlistDelivered
+      const contentChanged = this.applyAllowlistData(cm.data ?? {})
+      this.allowlistDelivered = true
+      this.allowlistMissingWarned = false
+      return contentChanged || !wasAvailable
+    } catch (err) {
+      if (errorCode(err) === 404) {
+        return this.markAllowlistMissing()
+      }
+      console.warn(`[ConfigStore] readNamespacedConfigMap ${name} failed:`, err)
+      return false
+    }
+  }
+
+  /**
+   * Parse the allowlist ConfigMap data — one key per provider, value a JSON
+   * array of {@link AllowedModelEntry}. Per-key fail-loud: a key with invalid
+   * JSON (or a non-array / malformed entry) is logged at ERROR naming the key
+   * and skipped, without tumbling the other providers (§13 per-row principle).
+   *
+   * Returns whether the parsed result differs from the current in-memory
+   * allowlist — callers use this to notify subscribers only on a real content
+   * change (so routine watch reconnects don't re-fire the R3.7 signal).
+   */
+  private applyAllowlistData(data: Record<string, string>): boolean {
+    const next = new Map<string, AllowedModelEntry[]>()
+    for (const [provider, raw] of Object.entries(data)) {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(raw)
+      } catch (err) {
+        // Log only the key and the error class — never the raw error/message: a
+        // V8 SyntaxError can embed a snippet of the offending value. Mirrors the
+        // deliberate no-log-value policy in WRC's modelConfigHandler parser.
+        const errName = err instanceof Error ? err.name : 'ParseError'
+        console.error(
+          `[ConfigStore] allowlist key '${provider}' has invalid JSON (${errName}) — skipping`
+        )
+        continue
+      }
+      if (!Array.isArray(parsed)) {
+        console.error(`[ConfigStore] allowlist key '${provider}' is not a JSON array — skipping`)
+        continue
+      }
+      const entries: AllowedModelEntry[] = []
+      for (const item of parsed) {
+        if (!item || typeof item !== 'object') {
+          console.error(
+            `[ConfigStore] allowlist key '${provider}' has a non-object entry — skipping it`
+          )
+          continue
+        }
+        const rec = item as Record<string, unknown>
+        if (typeof rec.model !== 'string' || rec.model.length === 0) {
+          console.error(
+            `[ConfigStore] allowlist key '${provider}' has an entry without a model — skipping it`
+          )
+          continue
+        }
+        const entry: AllowedModelEntry = { model: rec.model }
+        if (typeof rec.displayName === 'string') entry.displayName = rec.displayName
+        // Optional, operator-declared: accept only a positive integer; drop
+        // NaN/Infinity/negatives silently (it is metadata, not part of the
+        // allow/deny decision).
+        if (Number.isInteger(rec.contextWindowTokens) && (rec.contextWindowTokens as number) > 0) {
+          entry.contextWindowTokens = rec.contextWindowTokens as number
+        }
+        if (typeof rec.vendor === 'string') entry.vendor = rec.vendor
+        entries.push(entry)
+      }
+      next.set(provider, entries)
+    }
+    const changed = !allowlistMapsEqual(this.allowedModelsMap, next)
+    this.allowedModelsMap = next
+    return changed
+  }
+
+  /**
+   * Transition into "allowlist CM absent" — clear the parsed models and, once
+   * per transition, emit the degraded-explicit WARN + metric. Returns whether
+   * this was an actual availability transition (was delivered → now missing),
+   * so callers fire `allowlistChanged` only on the real edge.
+   */
+  private markAllowlistMissing(): boolean {
+    const wasAvailable = this.allowlistDelivered
+    this.allowlistDelivered = false
+    this.allowedModelsMap = new Map()
+    if (!this.allowlistMissingWarned) {
+      this.allowlistMissingWarned = true
+      llmAllowlistMissingTotal.inc()
+      console.warn(
+        '[ConfigStore] LLM allowlist ConfigMap absent — degraded-explicit mode (only the Host-configured model is treated as permitted)'
+      )
+    }
+    return wasAvailable
   }
 
   private async readSecretData(name: string): Promise<Record<string, string> | null> {
@@ -404,25 +662,57 @@ export class ConfigStore {
       this.reconnectTimers[tier] = undefined
       // Refresh state via list before resubscribing — handles "watch too old"
       // and keeps us correct after extended disconnects.
-      const refresh =
+      const refresh: Promise<void | boolean> =
         tier === 'llm-secret'
           ? this.bootstrapLlmSecret()
           : tier === 'host-cm'
             ? this.bootstrapHostCm()
-            : this.bootstrapHostSecret()
-      void refresh
-        .catch(() => undefined)
-        .finally(() => {
+            : tier === 'host-secret'
+              ? this.bootstrapHostSecret()
+              : this.bootstrapAllowlistCm()
+      void (async () => {
+        let allowlistChanged = false
+        try {
+          allowlistChanged = (await refresh) === true
+        } catch {
+          // Bootstrap already logs its own failures; fall through to resubscribe.
+        }
+        // The allowlist tier is orthogonal to the env merge: notify its own
+        // subscribers, but only when the refresh actually changed state. The env
+        // tiers go through recompute(), which already diff-gates its own emit.
+        if (tier === 'allowlist-cm') {
+          if (allowlistChanged) this.fireAllowlistChanged()
+        } else {
           this.recompute()
-          this.startWatch(tier)
-        })
+        }
+        this.startWatch(tier)
+      })()
     }, delay)
   }
 
   private applyWatchEvent(tier: SourceTier, type: string, obj: KubeObject): void {
+    if (tier === 'allowlist-cm') {
+      if (type === 'DELETED') {
+        if (this.markAllowlistMissing()) this.fireAllowlistChanged()
+        return
+      }
+      if (type !== 'ADDED' && type !== 'MODIFIED') return
+      const wasAvailable = this.allowlistDelivered
+      const contentChanged = this.applyAllowlistData(
+        (obj.data as Record<string, string> | undefined) ?? {}
+      )
+      this.allowlistDelivered = true
+      this.allowlistMissingWarned = false
+      // Only notify subscribers on a real transition — a re-delivered,
+      // byte-identical CM (routine watch churn) must not re-fire the signal.
+      if (contentChanged || !wasAvailable) this.fireAllowlistChanged()
+      return
+    }
     if (type === 'DELETED') {
-      if (tier === 'llm-secret') this.llmKeyEntry = null
-      else if (tier === 'host-cm') this.hostCm.clear()
+      if (tier === 'llm-secret') {
+        this.llmSlots = []
+        this.fallbackSlotValues = new Map()
+      } else if (tier === 'host-cm') this.hostCm.clear()
       else this.hostSecret.clear()
       this.recompute()
       return
@@ -440,39 +730,50 @@ export class ConfigStore {
   }
 
   private applyLlmSecretData(data: Record<string, string>): void {
-    if (!this.opts.provider) {
-      this.llmKeyEntry = null
-      return
+    // R5 — load the failover policy's referenced slots FIRST (independent of the
+    // active provider). These are kept out of `effective` entirely (see
+    // `fallbackSlotValues` doc) so they never reach a subprocess.
+    this.fallbackSlotValues = new Map()
+    for (const dataKey of this.opts.fallbackCredentialSlots ?? []) {
+      const raw = data[dataKey]
+      if (!raw) continue
+      const value = decodeSecretValue(raw)
+      if (value) this.fallbackSlotValues.set(dataKey, value)
     }
-    const dataKey = PROVIDER_DATA_KEY[this.opts.provider]
-    const envName = PROVIDER_ENV_NAME[this.opts.provider]
-    const raw = data[dataKey]
-    if (!raw) {
-      this.llmKeyEntry = null
-      return
+
+    this.llmSlots = []
+    if (!this.opts.provider) return
+    // Load EVERY slot of the active provider (multi-slot, R4). A missing or
+    // empty slot is simply omitted; `isLlmKeyConfigured` decides completeness.
+    for (const slot of descriptorFor(this.opts.provider).credentialSlots) {
+      const raw = data[slot.dataKey]
+      if (!raw) continue
+      const value = decodeSecretValue(raw)
+      if (!value) continue
+      this.llmSlots.push({ dataKey: slot.dataKey, name: slot.envName, value })
     }
-    const value = decodeSecretValue(raw)
-    if (!value) {
-      this.llmKeyEntry = null
-      return
-    }
-    this.llmKeyEntry = { name: envName, value }
   }
 
   // ─── Effective merge + change detection ──────────────────────────────
 
   private recompute(): void {
     const previous = this.effective
-    const previousLlm = previous.get(
-      this.opts.provider ? PROVIDER_ENV_NAME[this.opts.provider] : ''
-    )
+    // The active provider's slot env-var names (stable per configured provider,
+    // regardless of which slots are currently loaded). Multi-slot (R4): a
+    // change to ANY of them is an llmKeyChanged, and ALL are excluded from the
+    // env-diff below (they are reported via llmKeyChanged, not envChanged).
+    const slotNames = this.opts.provider
+      ? descriptorFor(this.opts.provider).credentialSlots.map(s => s.envName)
+      : []
+    const previousSig = llmSlotSignature(previous, slotNames)
+
     const next: Map<string, Entry> = new Map()
     const nextSecretKeys = new Set<string>()
 
     // Lowest precedence first (LLM secret), then ConfigMap, then per-Host secret.
-    if (this.llmKeyEntry) {
-      next.set(this.llmKeyEntry.name, { value: this.llmKeyEntry.value, source: 'llm-secret' })
-      nextSecretKeys.add(this.llmKeyEntry.name)
+    for (const slot of this.llmSlots) {
+      next.set(slot.name, { value: slot.value, source: 'llm-secret' })
+      nextSecretKeys.add(slot.name)
     }
     for (const [k, v] of this.hostCm) {
       next.set(k, { value: v, source: 'host-cm' })
@@ -486,22 +787,30 @@ export class ConfigStore {
     this.effective = next
     this.secretEffectiveKeys = nextSecretKeys
 
-    const llmName = this.opts.provider ? PROVIDER_ENV_NAME[this.opts.provider] : null
-    const currentLlm = llmName ? next.get(llmName) : undefined
-    const llmKeyChanged = (previousLlm?.value ?? null) !== (currentLlm?.value ?? null)
+    const currentSig = llmSlotSignature(next, slotNames)
+    const llmKeyChanged = previousSig !== currentSig
 
     let envChanged = false
-    // Compare envs excluding the LLM key (that's reported separately).
-    if (!sameMapExcept(previous, next, llmName)) envChanged = true
+    // Compare envs excluding the LLM slot keys (those are reported separately).
+    if (!sameMapExcept(previous, next, slotNames)) envChanged = true
 
     if (llmKeyChanged || envChanged) {
-      const change: ConfigStoreChange = { llmKeyChanged, envChanged }
-      for (const h of this.handlers) {
-        try {
-          h(change)
-        } catch (err) {
-          console.warn('[ConfigStore] onChange handler threw:', err)
-        }
+      this.emit({ llmKeyChanged, envChanged, allowlistChanged: false })
+    }
+  }
+
+  /** Notify subscribers that the allowlist tier (R3) changed. */
+  private fireAllowlistChanged(): void {
+    this.emit({ llmKeyChanged: false, envChanged: false, allowlistChanged: true })
+  }
+
+  /** Dispatch a change to all subscribers, isolating handler throws. */
+  private emit(change: ConfigStoreChange): void {
+    for (const h of this.handlers) {
+      try {
+        h(change)
+      } catch (err) {
+        console.warn('[ConfigStore] onChange handler threw:', err)
       }
     }
   }
@@ -530,6 +839,13 @@ export class ConfigStore {
         name: this.hostCmName(),
       }
     }
+    if (tier === 'allowlist-cm') {
+      if (!this.opts.allowlistConfigMapName) return null
+      return {
+        path: `/api/v1/namespaces/${this.opts.namespace}/configmaps`,
+        name: this.opts.allowlistConfigMapName,
+      }
+    }
     return {
       path: `/api/v1/namespaces/${this.opts.namespace}/secrets`,
       name: this.hostSecretName(),
@@ -542,6 +858,36 @@ interface KubeObject {
   data?: Record<string, string>
 }
 
+/**
+ * Deep, order-sensitive equality for two parsed allowlist maps. Used to decide
+ * whether a re-delivered allowlist ConfigMap actually changed (so routine watch
+ * churn doesn't re-fire the R3.7 signal). Order is significant — it is the
+ * operator-declared display order carried straight from the CM.
+ */
+function allowlistMapsEqual(
+  a: Map<string, AllowedModelEntry[]>,
+  b: Map<string, AllowedModelEntry[]>
+): boolean {
+  if (a.size !== b.size) return false
+  for (const [provider, aEntries] of a) {
+    const bEntries = b.get(provider)
+    if (!bEntries || bEntries.length !== aEntries.length) return false
+    for (let i = 0; i < aEntries.length; i++) {
+      const x = aEntries[i]
+      const y = bEntries[i]
+      if (
+        x.model !== y.model ||
+        x.displayName !== y.displayName ||
+        x.contextWindowTokens !== y.contextWindowTokens ||
+        x.vendor !== y.vendor
+      ) {
+        return false
+      }
+    }
+  }
+  return true
+}
+
 function errorCode(err: unknown): number | undefined {
   if (err && typeof err === 'object') {
     const e = err as { code?: number; statusCode?: number; response?: { statusCode?: number } }
@@ -552,21 +898,32 @@ function errorCode(err: unknown): number | undefined {
   return undefined
 }
 
+/**
+ * Signature of the active provider's LLM slot values in `map`, in slot order.
+ * Used to detect an llmKeyChanged across ALL slots (multi-slot, R4) — any slot
+ * added/removed/rotated changes the signature. NUL is a safe joiner (never
+ * appears in a decoded secret env value).
+ */
+function llmSlotSignature(map: Map<string, Entry>, slotNames: string[]): string {
+  return slotNames.map(n => map.get(n)?.value ?? '').join('\u0000')
+}
+
 function sameMapExcept(
   a: Map<string, Entry>,
   b: Map<string, Entry>,
-  exceptKey: string | null
+  exceptKeys: string[]
 ): boolean {
-  // Compare on key+value, ignoring `exceptKey` and the source tier.
+  // Compare on key+value, ignoring `exceptKeys` and the source tier.
+  const skip = new Set(exceptKeys)
   let aSize = a.size
   let bSize = b.size
-  if (exceptKey !== null) {
-    if (a.has(exceptKey)) aSize -= 1
-    if (b.has(exceptKey)) bSize -= 1
+  for (const key of skip) {
+    if (a.has(key)) aSize -= 1
+    if (b.has(key)) bSize -= 1
   }
   if (aSize !== bSize) return false
   for (const [k, v] of a) {
-    if (k === exceptKey) continue
+    if (skip.has(k)) continue
     const other = b.get(k)
     if (!other || other.value !== v.value) return false
   }

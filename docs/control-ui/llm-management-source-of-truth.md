@@ -1,37 +1,136 @@
 # Control UI LLM Management Source of Truth
 
-This document records the frontend-only implementation for:
+## Source of truth for models (spec §3-R3, allowlist)
 
-- Z.AI provider support in agent setup/edit flows
-- New `LLM Secrets` sidebar section for secret lifecycle operations
+**The list of usable models is the operator-declared allowlist, not a static
+catalog.** It lives in the control-api Postgres table `llm_allowed_models` and is
+served by the admin API `GET/POST/PUT/DELETE /admin/llm-models`. A mutation also
+materializes the `clerum-llm-allowed-models` ConfigMap that mcp-host and the WRC
+read at runtime.
 
-No backend code was modified.
+Fail-closed semantics: a model is usable only if a row exists for
+`(provider, model)` and `enabled = true`. Disabled/absent rows are not
+selectable in new host creation, host editing, or the runtime picker.
 
-## Files changed
+The former static `LLM_MODELS_BY_PROVIDER` map in `control-ui/lib/llm.ts` has
+been **removed**. `lib/llm.ts` now keeps only provider-level metadata; every
+model picker loads the allowlist and passes the rows to the catalog helpers.
 
-## New shared LLM config
+### Data flow in control-ui
 
-- `control-ui/lib/llm.ts`
-  - Defines supported providers for control-ui host forms:
-    - `openai`
-    - `claude`
-    - `zai`
-  - Defines provider labels and model presets (newest first; legacy entries kept available):
-    - OpenAI: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.1-codex`, `gpt-5.1-codex-mini`
-    - Anthropic (`claude` provider value): `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`, `claude-opus-4-6`, `claude-sonnet-4-5`
-    - Z.AI: `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`
-  - Defines wizard pre-select / fallback default per provider (`LLM_DEFAULT_MODEL_BY_PROVIDER`); kept separate from the dropdown order so the wizard lands on the cost-effective tier (matches each provider's `defaultModel` in `mcp-host` `src/llm/registryCore.ts` `PROVIDERS`):
-    - OpenAI: `gpt-5.4-mini`
-    - Anthropic: `claude-sonnet-4-6`
-    - Z.AI: `glm-5.1`
-  - Defines LLM secret key fields used in UI forms:
-    - `openai-api-key`
-    - `claude-api-key`
-    - `zai-api-key`
-  - Helper utilities:
-    - `normalizeProvider()`
-    - `getModelOptions()`
-    - `getDefaultModel()`
+- `lib/api.ts` — typed wrappers `getLlmModels`, `getLlmModel`, `createLlmModel`,
+  `updateLlmModel`, `deleteLlmModel` (+ types `LlmAllowedModel`,
+  `CreateLlmModelInput`, `UpdateLlmModelInput`) and `isLlmModelConfigMapDeferred`
+  (detects the 503 `configmap_write_failed` — the row was saved, only the
+  ConfigMap propagation is delayed; surfaced as an info toast, not a failure).
+- `lib/hooks/useLlmAllowedModels.ts` — loads the allowlist once and exposes
+  `{ models, loading, error, reload }`. On error the caller shows an
+  error/empty picker; there is **no** hardcoded fallback list (spec R4.5.1).
+- `lib/llm.ts` catalog helpers (all take the allowlist rows as an argument):
+  - `getModelOptions(catalog, provider, { includeDisabled? })` — model names for
+    a provider (enabled only by default).
+  - `getAllModelOptions(catalog, { includeDisabled? })` — de-duplicated model
+    names across all providers (budget-scope suggestions).
+  - `resolveDefaultModel(provider, enabledModels)` — the static
+    `LLM_DEFAULT_MODEL_BY_PROVIDER` default when enabled, else the first enabled
+    model, else `''`.
+  - `inferProviderFromModels(models, catalog)` — recovers the provider for a
+    legacy grant that stored model names but no explicit provider.
+
+### Admin page
+
+- `control-ui/app/llm-models/` (`page.tsx` + `new/page.tsx` +
+  `[id]/edit/page.tsx`) — App Router list / create / edit, mirroring
+  `app/cost/llm-prices/`. Columns: provider, model, vendor, display name,
+  context window, enabled; provider filter + search; disabled badge. Rows for
+  enabled models that have no enabled price render a "No price" chip linking to
+  `/cost/llm-prices` (cross-check against `getUnpricedModels`, spec R3.3).
+  A 503 `configmap_write_failed` is treated as "saved, propagation delayed".
+- `components/LlmModelTable.tsx` / `components/LlmModelForm/` — table and form.
+- Sidebar entry `llm-models` ("LLM Models", `IconModels`) registered in
+  `components/Sidebar/constants.tsx` + `types.ts`, with the route→tab mapping in
+  `components/DashboardLayout.tsx`.
+
+## Provider metadata source: the shared `@clerum/llm-providers` package (spec §3-R4)
+
+The canonical provider set, their display labels, credential slots, and
+non-secret env vars now live in the shared **`@clerum/llm-providers`** package
+(`packages/llm-providers/`), consumed by control-ui, control-api, mcp-host, and
+the WRC. `lib/llm.ts` derives its provider-level UI metadata from that package
+instead of re-declaring the enum — this is the single source of truth referenced
+by spec R4.5.1 ("the slot list always comes from the package; never a hardcoded
+field list in the UI").
+
+Exports the package provides:
+
+- `PROVIDER_IDS` / `LlmProviderId` — the canonical 6 provider ids
+  (`openai`, `claude`, `zai`, `bailian`, `vertex`, `bedrock`).
+- `PROVIDER_CREDENTIAL_SLOTS` — the credential slots each provider loads from the
+  LLM Secret (single key for the 4 originals; the `aws-access-key-id` /
+  `aws-secret-access-key` pair for Bedrock; the `vertex-service-account-json`
+  slot for Vertex), each mapped to its shell env name.
+- `PROVIDER_DISPLAY_LABELS` — the brand label per provider.
+- `PROVIDER_NON_SECRET_ENV` — the non-secret per-Host env vars a provider needs
+  (`VERTEX_PROJECT_ID`/`VERTEX_LOCATION`, `AWS_REGION`), which flow via
+  `host-<ref>-env`, **not** the Secret.
+- `isLlmProviderId` — a prototype-safe own-property guard.
+
+### Provider metadata that stays local to `lib/llm.ts`
+
+- `LlmProvider` union + `LLM_PROVIDER_OPTIONS` (labels) — derived from the package.
+- `LLM_CREDENTIAL_GROUPS` — the grouped structure the multi-slot secrets form
+  renders (one group per provider, derived from `PROVIDER_CREDENTIAL_SLOTS` +
+  UI-only label/placeholder hints; the Vertex slot is flagged `multiline`). This
+  **replaces** the former flat `LLM_SECRET_FIELDS` (removed in B3).
+- `getLlmGroupCompleteness(group, isPresent)` — powers the "provider usable" chip
+  (all `required` slots present, spec R4.5.5).
+- `validateLlmSecretData(draft)` — slot-aware validation shared with the
+  server-side gate in control-api's secrets route (spec R4.5.3): the Bedrock pair
+  must be written together; the Vertex JSON must parse with `client_email` +
+  `private_key`. The `BEDROCK_CREDENTIAL_KEYS` set it uses is derived from the
+  package, not hardcoded.
+- `LLM_DEFAULT_MODEL_BY_PROVIDER` — wizard pre-select default per provider (a
+  provider-level mirror of each provider's `defaultModel` in
+  `mcp-host/src/llm/registryCore.ts`; includes `vertex: gemini-2.5-pro` and
+  `bedrock: anthropic.claude-sonnet-4-6-v1:0`, aligned with the registry and the
+  control-api migration `0052` seed rows). Consumed only via `resolveDefaultModel`,
+  which falls back to the first enabled allowlist model when this default is not
+  enabled.
+- Helpers `normalizeProvider`, `isKnownProvider`, `getProviderLabel`,
+  `getProviderDisplayLabel`.
+
+### Multi-slot secrets form (spec R4.5)
+
+`components/LlmCredentialFields/` renders the grouped credential form from
+`LLM_CREDENTIAL_GROUPS`, reused by the create-secret page
+(`app/secrets/new/page.tsx`), the update-secret modal (`components/SecretsTable.tsx`),
+and the HostWizard credential step. Each provider is a group with a completeness
+chip; single-key providers show one password field; Bedrock shows its pair;
+Vertex shows a JSON textarea. Non-secret env vars appear only as a hint linking
+to **Host → Environment** (`HostEnvTable`) — the form never duplicates that
+editor. An "Add credential slot" action creates an extra key in the same Secret
+(suggested `<provider>-api-key-fb1`, validated as a data key) for the R5 fallback
+credentials. The write-only pattern is intact: existing values are never
+re-rendered (the listing returns names only).
+
+## Consumers migrated off the static catalog
+
+`HostWizard`, host edit page (`app/hosts/[name]/page.tsx`), `LlmPriceForm`
+(suggestions, includes disabled), `TokenBudgetForm` (`getAllModelOptions`),
+the SDK grant picker (`app/plugin-workload-sdk/page.tsx` +
+`lib/pluginWorkloadSdkModels.ts`) all load the allowlist via
+`useLlmAllowedModels`. The host edit page keeps a host's saved model selectable
+even if it fell out of the allowlist (preexisting resources are not
+interrupted — spec R3.7), marking it "(out of allowlist)".
+
+---
+
+## Historical notes (pre-allowlist)
+
+The sections below record the earlier frontend-only work (Z.AI provider support
+and the `LLM Secrets` section) and predate the allowlist. `LLM_MODELS_BY_PROVIDER`
+and `getDefaultModel`/`getModelOptions` as described there no longer exist in
+their original static form.
 
 ## Host creation (wizard)
 

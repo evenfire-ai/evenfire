@@ -1,6 +1,11 @@
 import type { ReactNode } from 'react'
 
-export type ProfileRouteKey = 'home' | 'members' | 'approvalChannels' | 'connectedAccounts' | 'settings'
+export type ProfileRouteKey =
+  | 'home'
+  | 'members'
+  | 'approvalChannels'
+  | 'connectedAccounts'
+  | 'settings'
 
 export type ProfileSidebarItem = {
   label: string
@@ -10,5 +15,7 @@ export type ProfileSidebarItem = {
 
 export type SidebarProps = {
   currentRoute: ProfileRouteKey
+  isOpen?: boolean
+  onNavigate?: () => void
   onLogout: () => void
 }

@@ -1,5 +1,16 @@
+import { config } from '../config.js'
 import { type DbClient, pool, withTransaction } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { currentAdministrativeRequestContext } from './tracing/adminOperationContext.js'
+import { AdministrativeEventService } from './tracing/administrativeEvents.js'
+import { CONTROL_API_LOCAL_ADMINISTRATIVE_PRINCIPAL_V1 } from './tracing/controlApiLocalAdministrativeBindingResolver.js'
+import { canonicalTracingEnvironment } from './tracing/environment.js'
+
+const administrativeEvents = new AdministrativeEventService({
+  transaction: async () => {
+    throw new Error('administrative event append requires the caller transaction')
+  },
+})
 
 export type AdminUserRecord = {
   id: string
@@ -556,7 +567,7 @@ export async function deleteControlAdmin(
       email: string | null
     }
 
-    await db.query(
+    const auditResult = await db.query(
       `INSERT INTO control_admin_deletion_audit (
          actor_admin_id,
          actor_username,
@@ -565,7 +576,8 @@ export async function deleteControlAdmin(
          target_username,
          target_email
        )
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id::text AS id`,
       [
         actor?.id ?? actorAdminId,
         actor?.username ?? null,
@@ -574,6 +586,52 @@ export async function deleteControlAdmin(
         deleted.username,
         deleted.email,
       ]
+    )
+
+    const audit = auditResult.rows[0] as { id: string } | undefined
+    if (!audit?.id) throw new Error('control admin deletion audit insert did not return an id')
+    const requestContext = currentAdministrativeRequestContext()
+    await administrativeEvents.appendInTransaction(
+      db,
+      CONTROL_API_LOCAL_ADMINISTRATIVE_PRINCIPAL_V1,
+      {
+        action: 'control_admin_deleted',
+        outcome: 'committed',
+        operatorSub: actor?.id ?? actorAdminId,
+        operatorUserId: actor?.id ?? actorAdminId,
+        operationId: audit.id,
+        relatedRunId: null,
+        requestId:
+          requestContext?.operatorSub === (actor?.id ?? actorAdminId)
+            ? requestContext.requestId
+            : null,
+        targetType: 'control_admin',
+        targetRef: `control_admin:${deleted.id}`,
+        environment: canonicalTracingEnvironment(),
+        tenantId: null,
+        teamId: null,
+        namespace: null,
+        sourceAuditRef: `control_admin_deletion_audit:${audit.id}`,
+        identityIssuer: config.adminJwtIssuer,
+        resourceAud: config.adminJwtAudience,
+        effectiveScopes: [],
+        authorizationDecision: 'allow',
+        decisionActorSub: actor?.id ?? actorAdminId,
+        targetIdentityIssuer: config.adminJwtIssuer,
+        targetHumanSub: deleted.id,
+        targetUserId: null,
+      },
+      {
+        kind: 'service_action',
+        sourceEventId: `control_admin_deletion_audit:${audit.id}`,
+        occurredAt: new Date().toISOString(),
+        reasonCode: 'control_admin_access_revoked',
+        payload: {
+          resource_class: 'control_admin_access',
+          status: 'revoked',
+          target_label: deleted.username,
+        },
+      }
     )
 
     return { deleted: true as const }

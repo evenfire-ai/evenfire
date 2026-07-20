@@ -195,6 +195,7 @@ set -euo pipefail
 LOG_FILE="${TEST_LOG_FILE:?}"
 args="$*"
 printf '%s\n' "$args" >>"$LOG_FILE"
+if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
 
 if [[ "${1:-}" == "kustomize" ]]; then
   cat <<'YAML'
@@ -292,7 +293,9 @@ fi
 if [[ "${1:-}" == "exec" ]]; then
   sql="$(cat || true)"
   printf 'SQL\n%s\n' "$sql" >>"$LOG_FILE"
-  if [[ "$sql" == *"COUNT(*)"* ]]; then
+  if [[ "$sql" == *"public.schema_migrations"* && "$sql" == *"has_table_privilege"* ]]; then
+    echo "f"
+  elif [[ "$sql" == *"COUNT(*)"* ]]; then
     echo "0"
   else
     echo "t"
@@ -305,6 +308,7 @@ STUB
   chmod +x "$tmp/kubectl"
 
   if TEST_LOG_FILE="$log_file" GITHUB_RUN_ID=123456 PATH="$tmp:$PATH" \
+    CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" >/dev/null 2>&1; then
     if grep -q 'control-api-db-migrate-123456' "$log_file"; then
       pass "db migration job appends CI suffix to avoid name collisions"
@@ -332,6 +336,7 @@ set -euo pipefail
 LOG_FILE="${TEST_LOG_FILE:?}"
 args="$*"
 printf '%s\n' "$args" >>"$LOG_FILE"
+if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
 
 if [[ "${1:-}" == "kustomize" ]]; then
   cat <<'YAML'
@@ -428,7 +433,9 @@ fi
 if [[ "${1:-}" == "exec" ]]; then
   sql="$(cat || true)"
   printf 'SQL\n%s\n' "$sql" >>"$LOG_FILE"
-  if [[ "$sql" == *"COUNT(*)"* ]]; then
+  if [[ "$sql" == *"public.schema_migrations"* && "$sql" == *"has_table_privilege"* ]]; then
+    echo "f"
+  elif [[ "$sql" == *"COUNT(*)"* ]]; then
     echo "0"
   else
     echo "t"
@@ -441,6 +448,7 @@ STUB
   chmod +x "$tmp/kubectl"
 
   if TEST_LOG_FILE="$log_file" GITHUB_RUN_ID=999 PATH="$tmp:$PATH" \
+    CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
     bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" >/dev/null 2>&1; then
     if grep -q 'wait --for=condition=complete --timeout=300s job/control-api-db-migrate-999 -n control-plane' "$log_file"; then
       pass "db migration script tolerates concurrent create AlreadyExists race"
@@ -493,6 +501,7 @@ assert_db_migration_reports_missing_migrate_artifact() {
 #!/usr/bin/env bash
 set -euo pipefail
 args="$*"
+if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
 
 if [[ "${1:-}" == "kustomize" ]]; then
   cat <<'YAML'
@@ -594,7 +603,8 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  out="$(PATH="$tmp:$PATH" bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
+  out="$(PATH="$tmp:$PATH" CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
+    bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
   if [[ "$out" == *"is missing dist/migrate.js"* ]] && [[ "$out" == *"example/control-api:broken"* ]]; then
     pass "db migration script emits a direct error for images missing dist/migrate.js"
   else
@@ -618,6 +628,7 @@ set -euo pipefail
 LOG_FILE="${TEST_LOG_FILE:?}"
 args="$*"
 printf '%s\n' "$args" >>"$LOG_FILE"
+if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
 
 if [[ "${1:-}" == "kustomize" ]]; then
   cat <<'YAML'
@@ -662,12 +673,19 @@ items:
             - name: control-api
               image: example/control-api:test
               env:
+                - name: CONTROL_API_PG_CONNECTION_STRING
+                  valueFrom:
+                    secretKeyRef:
+                      name: control-api-postgres-runtime
+                      key: connection-string
                 - name: DATABASE_URL
                   valueFrom:
                     secretKeyRef:
                       name: control-api-secrets
                       key: DATABASE_URL
-              envFrom: []
+              envFrom:
+                - configMapRef:
+                    name: control-api-config
 YAML
   exit 0
 fi
@@ -694,7 +712,8 @@ if [[ "${1:-}" == "get" && "${2:-}" == "job" ]]; then
 fi
 
 if [[ "${1:-}" == "create" && "${2:-}" == "-f" && "${3:-}" == "-" ]]; then
-  cat >/dev/null
+  job_manifest="$(cat)"
+  printf 'JOB_MANIFEST %s\n' "$job_manifest" >>"$LOG_FILE"
   echo "job.batch/control-api-db-migrate created"
   exit 0
 fi
@@ -706,7 +725,9 @@ fi
 if [[ "${1:-}" == "exec" ]]; then
   sql="$(cat || true)"
   printf 'SQL\n%s\n' "$sql" >>"$LOG_FILE"
-  if [[ "$sql" == *"COUNT(*)"* ]]; then
+  if [[ "$sql" == *"public.schema_migrations"* && "$sql" == *"has_table_privilege"* ]]; then
+    echo "f"
+  elif [[ "$sql" == *"COUNT(*)"* ]]; then
     echo "0"
   else
     echo "t"
@@ -718,11 +739,43 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  out="$(TEST_LOG_FILE="$log_file" PATH="$tmp:$PATH" bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
+  out="$(TEST_LOG_FILE="$log_file" PATH="$tmp:$PATH" CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
+    bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
   if [[ "$out" == *"Using control-api image for migration: example/control-api:test"* ]] && \
      [[ "$out" == *"Verifying DB-first schema in control-postgres"* ]] && \
-     [[ "$(grep -c '^exec -i deployment/control-postgres -n control-plane -- sh -lc psql -v ON_ERROR_STOP=1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -At$' "$log_file" || true)" -ge 18 ]] && \
+     [[ "$(grep -c '^--context=fake-context exec -i deployment/control-postgres -n control-plane -- sh -lc psql -v ON_ERROR_STOP=1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -At$' "$log_file" || true)" -ge 15 ]] && \
      grep -q "0016_workflow_trigger_shared_foundation" "$log_file" && \
+     grep -q "0061_governed_run_trace_schema_foundation" "$log_file" && \
+     grep -q "0062_governed_trace_runtime_roles" "$log_file" && \
+     grep -q "0063_workflow_approval_trace_binding" "$log_file" && \
+     grep -q "0064_agent_decision_source_catalog" "$log_file" && \
+     grep -q "0065_governed_session_replay_and_prompt_history" "$log_file" && \
+     grep -q "0066_governed_trace_target_principal_projection" "$log_file" && \
+     grep -q "0067_llm_runtime_access_profiles" "$log_file" && \
+     grep -q "table_name = 'governed_event_stream'" "$log_file" && \
+     grep -q "table_name = 'administrative_events'" "$log_file" && \
+     grep -q "column_name = 'tenant_id'" "$log_file" && \
+     grep -q "data_type = 'text'" "$log_file" && \
+     grep -q "is_nullable = 'YES'" "$log_file" && \
+     grep -q "column_default IS NULL" "$log_file" && \
+     grep -q "relation_constraint.contype = 'u'" "$log_file" && \
+     grep -q "relation_constraint.conkey = ARRAY" "$log_file" && \
+     grep -q "governed_administrative_event_stream_integrity" "$log_file" && \
+     grep -q "governed_event_stream_family_integrity" "$log_file" && \
+     grep -q "tgfoid = 'public.governed_trace_assert_stream_integrity()'::regprocedure" "$log_file" && \
+     grep -q "tgdeferrable" "$log_file" && \
+     grep -q "tginitdeferred" "$log_file" && \
+     grep -q "tgtype = 13" "$log_file" && \
+     grep -q "0054_workflow_run_completed_notification_download_detection" "$log_file" && \
+     grep -q "has_table_privilege('control_api_runtime', 'public.schema_migrations'" "$log_file" && \
+     grep -q "relation.relkind IN ('r', 'p', 'v', 'm')" "$log_file" && \
+     grep -q 'JOB_MANIFEST.*DATABASE_URL' "$log_file" && \
+     grep -q 'JOB_MANIFEST.*control-api-config' "$log_file" && \
+     grep -q 'JOB_MANIFEST.*CONTROL_API_PG_CONNECTION_STRING.*"value":""' "$log_file" && \
+     grep -q 'JOB_MANIFEST.*CONTROL_API_MIGRATION_PG_HOST' "$log_file" && \
+     grep -q 'JOB_MANIFEST.*control-postgres.*POSTGRES_PASSWORD' "$log_file" && \
+     grep -q -- '--context=fake-context get secret control-postgres -n control-plane' "$log_file" && \
+     ! grep -q 'JOB_MANIFEST.*postgresql://postgres:' "$log_file" && \
      grep -q "workflow_approval_trigger_intents" "$log_file" && \
      grep -q "idx_wati_trigger" "$log_file" && \
      grep -q "NOT EXISTS" "$log_file"; then
@@ -749,6 +802,7 @@ set -euo pipefail
 LOG_FILE="${TEST_LOG_FILE:?}"
 args="$*"
 printf '%s\n' "$args" >>"$LOG_FILE"
+if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
 
 if [[ "${1:-}" == "kustomize" ]]; then
   cat <<'YAML'
@@ -850,7 +904,9 @@ fi
 if [[ "${1:-}" == "exec" ]]; then
   sql="$(cat || true)"
   printf 'SQL\n%s\n' "$sql" >>"$LOG_FILE"
-  if [[ "$sql" == *"COUNT(*)"* ]]; then
+  if [[ "$sql" == *"public.schema_migrations"* && "$sql" == *"has_table_privilege"* ]]; then
+    echo "f"
+  elif [[ "$sql" == *"COUNT(*)"* ]]; then
     echo "0"
   else
     echo "t"
@@ -862,7 +918,8 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  out="$(TEST_LOG_FILE="$log_file" PATH="$tmp:$PATH" bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
+  out="$(TEST_LOG_FILE="$log_file" PATH="$tmp:$PATH" CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
+    bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
   if [[ "$out" == *"Reusing existing PVC control-plane/control-postgres-data"* ]] && \
      [[ "$out" != *"Creating PVC control-plane/control-postgres-data"* ]] && \
      [[ "$out" != *"unexpected pvc"* ]]; then
@@ -889,6 +946,7 @@ set -euo pipefail
 LOG_FILE="${TEST_LOG_FILE:?}"
 args="$*"
 printf '%s\n' "$args" >>"$LOG_FILE"
+if [[ "${1:-}" == "--context=fake-context" ]]; then shift; fi
 
 if [[ "${1:-}" == "kustomize" ]]; then
   cat <<'YAML'
@@ -991,7 +1049,9 @@ fi
 if [[ "${1:-}" == "exec" ]]; then
   sql="$(cat || true)"
   printf 'SQL\n%s\n' "$sql" >>"$LOG_FILE"
-  if [[ "$sql" == *"COUNT(*)"* ]]; then
+  if [[ "$sql" == *"public.schema_migrations"* && "$sql" == *"has_table_privilege"* ]]; then
+    echo "f"
+  elif [[ "$sql" == *"COUNT(*)"* ]]; then
     echo "0"
   else
     echo "t"
@@ -1003,7 +1063,8 @@ exit 0
 STUB
   chmod +x "$tmp/kubectl"
 
-  out="$(TEST_LOG_FILE="$log_file" PATH="$tmp:$PATH" bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
+  out="$(TEST_LOG_FILE="$log_file" PATH="$tmp:$PATH" CONTEXT=fake-context ALLOWED_CONTEXTS=fake-context \
+    bash deploy/scripts/run-control-api-db-migration.sh --overlay "$overlay" 2>&1 || true)"
   if [[ "$out" == *"Creating PVC control-plane/control-postgres-data"* ]] && \
      grep -q '^PVC_CREATE$' "$log_file" && \
      grep -q '^JOB_CREATE$' "$log_file" && \
@@ -1315,6 +1376,117 @@ assert_deploy_dev_provisions_gfs_after_networkpolicy_verify() {
   fi
 }
 
+assert_deploy_paths_reconcile_runtime_roles_after_migration() {
+  local dev prod dev_migration dev_roles prod_migration prod_roles
+  dev="$(cat .github/workflows/deploy-dev.yaml)"
+  prod="$(cat .github/workflows/deploy-prod.yaml)"
+  dev_migration="$(printf '%s\n' "$dev" | nl -ba | grep 'Run control-api DB migration gate' | awk '{print $1}' | head -n1)"
+  dev_roles="$(printf '%s\n' "$dev" | nl -ba | grep 'Reconcile control-api runtime database roles' | awk '{print $1}' | head -n1)"
+  prod_migration="$(printf '%s\n' "$prod" | nl -ba | grep 'Run control-api DB migration gate' | awk '{print $1}' | head -n1)"
+  prod_roles="$(printf '%s\n' "$prod" | nl -ba | grep 'Reconcile control-api runtime database roles' | awk '{print $1}' | head -n1)"
+
+  if [[ -n "$dev_migration" && -n "$dev_roles" && "$dev_migration" -lt "$dev_roles" ]] && \
+     [[ -n "$prod_migration" && -n "$prod_roles" && "$prod_migration" -lt "$prod_roles" ]] && \
+     [[ "$dev" == *'provision-control-api-runtime-roles.sh'* ]] && \
+     [[ "$prod" == *'provision-control-api-runtime-roles.sh'* ]] && \
+     [[ "$dev" == *'CONTEXT="$target_context" ALLOWED_CONTEXTS="$target_context"'* ]] && \
+     [[ "$prod" == *'CONTEXT="$target_context" ALLOWED_CONTEXTS="$target_context"'* ]] && \
+     [[ -x deploy/scripts/provision-control-api-runtime-roles.sh ]] && \
+     grep -q 'ALLOWED_CONTEXTS="${PROFILE}"' scripts/minikube/full-setup.sh && \
+     grep -q 'ALLOWED_CONTEXTS="${PROFILE}"' scripts/minikube/pre-gate-sync.sh && \
+     grep -q 'ALLOWED_CONTEXTS=$(GCP_DEV_CONTEXT).*run-control-api-db-migration.sh' Makefile && \
+     grep -q 'ALLOWED_CONTEXTS=$(GCP_PROD_CONTEXT).*run-control-api-db-migration.sh' Makefile && \
+     grep -q 'provision-control-api-runtime-roles.sh' scripts/minikube/full-setup.sh && \
+     grep -q 'provision-control-api-runtime-roles.sh' scripts/minikube/pre-gate-sync.sh && \
+     grep -q 'provision-control-api-runtime-roles.sh' Makefile; then
+    pass "deploy paths reconcile runtime roles after the migration gate"
+  else
+    fail "deploy paths do not reconcile runtime roles after migration"
+  fi
+}
+
+assert_runtime_role_provisioning_script() {
+  if bash scripts/tests/test-provision-control-api-runtime-roles.sh; then
+    pass "runtime role provisioning preserves valid credentials and fails closed"
+  else
+    fail "runtime role provisioning regression suite failed"
+  fi
+}
+
+assert_db_migration_context_fails_closed() {
+  local missing_context denied_context
+  missing_context="$(bash deploy/scripts/run-control-api-db-migration.sh --overlay deploy/overlays/minikube 2>&1 || true)"
+  denied_context="$(CONTEXT=denied ALLOWED_CONTEXTS=allowed \
+    bash deploy/scripts/run-control-api-db-migration.sh --overlay deploy/overlays/minikube 2>&1 || true)"
+
+  if [[ "$missing_context" == *'set CONTEXT to the target kube-context'* ]] && \
+     [[ "$denied_context" == *'CONTEXT=denied is not in ALLOWED_CONTEXTS'* ]]; then
+    pass "db migration context authority fails closed"
+  else
+    fail "db migration context authority did not fail closed"
+  fi
+}
+
+assert_trace_maintenance_runtime_access_contract_is_exact() {
+  local relation_file sequence_file function_file migration_script
+  local relation_count sequence_count function_count
+  relation_file="deploy/scripts/trace-maintenance-runtime-access-profiles.tsv"
+  sequence_file="deploy/scripts/trace-maintenance-runtime-sequence-access-profiles.tsv"
+  function_file="deploy/scripts/trace-maintenance-runtime-function-access-profiles.tsv"
+  migration_script="$(cat deploy/scripts/run-control-api-db-migration.sh)"
+
+  relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$relation_file")"
+  sequence_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$sequence_file")"
+  function_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$function_file")"
+
+  if [[ "$relation_count" == "8" && "$sequence_count" == "2" && "$function_count" == "11" ]] && \
+     [[ "$migration_script" == *'verify_trace_maintenance_access_contract'* ]] && \
+     [[ "$migration_script" == *'has_table_privilege('* ]] && \
+     [[ "$migration_script" == *'has_sequence_privilege('* ]] && \
+     [[ "$migration_script" == *'has_function_privilege('* ]] && \
+     [[ "$migration_script" == *"'trace_maintenance_runtime'"* ]] && \
+     [[ "$migration_script" == *"routine.proname LIKE 'governed_trace_%'"* ]]; then
+    pass "trace maintenance runtime contract rejects missing and excessive privileges"
+  else
+    fail "trace maintenance runtime access contract is incomplete or not exact"
+  fi
+}
+
+assert_control_api_runtime_access_contract_is_exact() {
+  local profile_file sequence_profile_file migration_script
+  local relation_count duplicate_count invalid_count sequence_count sequence_duplicate_count sequence_invalid_count
+  profile_file="deploy/scripts/control-api-runtime-access-profiles.tsv"
+  sequence_profile_file="deploy/scripts/control-api-runtime-sequence-access-profiles.tsv"
+  migration_script="$(cat deploy/scripts/run-control-api-db-migration.sh)"
+
+  relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$profile_file")"
+  duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$profile_file")"
+  invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|append|read)$/) { count++ } END { print count + 0 }' "$profile_file")"
+  sequence_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print count + 0 }' "$sequence_profile_file")"
+  sequence_duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$sequence_profile_file")"
+  sequence_invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_rw|consume)$/) { count++ } END { print count + 0 }' "$sequence_profile_file")"
+
+  if [[ "$relation_count" == "75" && "$duplicate_count" == "0" && "$invalid_count" == "0" ]] && \
+     grep -qx $'llm_allowed_models\tlegacy_dml' "$profile_file" && \
+     grep -qx $'member_registration_credentials\tlegacy_dml' "$profile_file" && \
+     grep -qx $'llm_allowed_models_audit\tappend' "$profile_file" && \
+     grep -qx $'llm_catalog_sync_runs\tappend' "$profile_file" && \
+     [[ "$sequence_count" == "7" && "$sequence_duplicate_count" == "0" && "$sequence_invalid_count" == "0" ]] && \
+     grep -qx $'member_registration_credentials_id_seq\tconsume' "$sequence_profile_file" && \
+     [[ "$migration_script" != *'RUNTIME_ACCESS_PROFILES_FILE:-'* ]] && \
+     [[ "$migration_script" == *'FULL OUTER JOIN actual_relations'* ]] && \
+     [[ "$migration_script" == *'FULL OUTER JOIN actual_sequences'* ]] && \
+     [[ "$migration_script" == *'IS DISTINCT FROM required.allowed'* ]] && \
+     [[ "$migration_script" == *'has_sequence_privilege('* ]] && \
+     [[ "$migration_script" == *"('TRUNCATE', false)"* ]] && \
+     [[ "$migration_script" == *"('REFERENCES', false)"* ]] && \
+     [[ "$migration_script" == *"('TRIGGER', false)"* ]]; then
+    pass "control-api runtime access contract rejects missing and excessive relation privileges"
+  else
+    fail "control-api runtime access contract is incomplete or not exact"
+  fi
+}
+
 assert_setup_defaults_prod
 assert_setup_dev_overrides
 assert_teardown_dev
@@ -1337,5 +1509,10 @@ assert_deploy_dev_rollout_gate_is_baseline_aware
 assert_deploy_dev_restarts_subpath_gateway_after_apply
 assert_deploy_workflows_verify_networkpolicies_after_apply
 assert_deploy_dev_provisions_gfs_after_networkpolicy_verify
+assert_control_api_runtime_access_contract_is_exact
+assert_trace_maintenance_runtime_access_contract_is_exact
+assert_deploy_paths_reconcile_runtime_roles_after_migration
+assert_runtime_role_provisioning_script
+assert_db_migration_context_fails_closed
 
 exit $FAIL

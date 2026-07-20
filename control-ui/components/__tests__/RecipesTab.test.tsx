@@ -40,33 +40,15 @@ describe('RecipesTab — render', () => {
     expect(screen.getByText('test-recipe')).toBeInTheDocument()
   })
 
-  it('shows namespace', () => {
+  it('does not show namespace in the table', () => {
     render(<RecipesTab {...DEFAULT_PROPS} />)
-    expect(screen.getByText('sandbox-recipes')).toBeInTheDocument()
+    expect(screen.queryByText('sandbox-recipes')).not.toBeInTheDocument()
   })
 
-  it('shows spec workload ids when no status data available', () => {
+  it('does not show workload ids in the table', () => {
     render(<RecipesTab {...DEFAULT_PROPS} />)
-    expect(screen.getByText('w1')).toBeInTheDocument()
-    expect(screen.getByText('w2')).toBeInTheDocument()
-  })
-
-  it('shows workload readiness indicators from the parent recipe resource', () => {
-    const recipe: WorkflowRecipeResource = {
-      ...BASE_RECIPE,
-      status: {
-        phase: 'active',
-        workloads: [
-          { id: 'w1', ready: true, replicas: 1 },
-          { id: 'w2', ready: false },
-        ],
-      },
-    }
-    render(<RecipesTab {...DEFAULT_PROPS} items={[recipe]} />)
-    expect(screen.getByText('w1')).toBeInTheDocument()
-    expect(screen.getByText('w2')).toBeInTheDocument()
-    expect(screen.getByTitle('Ready')).toBeInTheDocument()
-    expect(screen.getByTitle('Not Ready')).toBeInTheDocument()
+    expect(screen.queryByText('w1')).not.toBeInTheDocument()
+    expect(screen.queryByText('w2')).not.toBeInTheDocument()
   })
 
   it("shows phase badge with 'active' text", () => {
@@ -176,10 +158,14 @@ describe('RecipesTab — render', () => {
     expect(screen.getByText('API error 500')).toBeInTheDocument()
   })
 
-  it('shows table headers (no actions column)', () => {
+  it('shows table headers with an unlabeled navigation column', () => {
     render(<RecipesTab {...DEFAULT_PROPS} />)
     expect(screen.getByText('Name')).toBeInTheDocument()
-    expect(screen.getByText('Namespace')).toBeInTheDocument()
+    expect(screen.getByText('Created')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Navigation' })).toBeInTheDocument()
+    expect(screen.queryByText('Navigation')).not.toBeInTheDocument()
+    expect(screen.queryByText('Namespace')).not.toBeInTheDocument()
+    expect(screen.queryByText('Workloads')).not.toBeInTheDocument()
     expect(screen.getByText('Phase')).toBeInTheDocument()
     expect(screen.queryByText('Actions')).not.toBeInTheDocument()
   })
@@ -203,7 +189,7 @@ describe('RecipesTab — actions', () => {
   it("navigates to the Plugin SDK when 'Plugins SDK' clicked", () => {
     render(<RecipesTab {...DEFAULT_PROPS} />)
     fireEvent.click(screen.getByRole('button', { name: 'Plugins SDK' }))
-    expect(pushSpy).toHaveBeenCalledWith('/plugin-workload-sdk')
+    expect(pushSpy).toHaveBeenCalledWith('/plugins/sdk')
   })
 
   it('does NOT render per-row Status/Edit/Run/Uninstall buttons', () => {
@@ -220,21 +206,21 @@ describe('RecipesTab — row navigation', () => {
     render(<RecipesTab {...DEFAULT_PROPS} />)
     const row = screen.getByRole('link', { name: /open test-recipe/i })
     fireEvent.click(row)
-    expect(pushSpy).toHaveBeenCalledWith('/workflow-recipes/sandbox-recipes/test-recipe')
+    expect(pushSpy).toHaveBeenCalledWith('/plugins/sandbox-recipes/test-recipe/workloads')
   })
 
   it('row is keyboard-activatable via Enter', () => {
     render(<RecipesTab {...DEFAULT_PROPS} />)
     const row = screen.getByRole('link', { name: /open test-recipe/i })
     fireEvent.keyDown(row, { key: 'Enter' })
-    expect(pushSpy).toHaveBeenCalledWith('/workflow-recipes/sandbox-recipes/test-recipe')
+    expect(pushSpy).toHaveBeenCalledWith('/plugins/sandbox-recipes/test-recipe/workloads')
   })
 
   it('row is keyboard-activatable via Space', () => {
     render(<RecipesTab {...DEFAULT_PROPS} />)
     const row = screen.getByRole('link', { name: /open test-recipe/i })
     fireEvent.keyDown(row, { key: ' ' })
-    expect(pushSpy).toHaveBeenCalledWith('/workflow-recipes/sandbox-recipes/test-recipe')
+    expect(pushSpy).toHaveBeenCalledWith('/plugins/sandbox-recipes/test-recipe/workloads')
   })
 
   it('URL-encodes namespace and name', () => {
@@ -245,6 +231,6 @@ describe('RecipesTab — row navigation', () => {
     render(<RecipesTab {...DEFAULT_PROPS} items={[tricky]} />)
     const row = screen.getByRole('link', { name: /open spaces in name/i })
     fireEvent.click(row)
-    expect(pushSpy).toHaveBeenCalledWith('/workflow-recipes/sandbox-recipes/spaces%20in%20name')
+    expect(pushSpy).toHaveBeenCalledWith('/plugins/sandbox-recipes/spaces%20in%20name/workloads')
   })
 })

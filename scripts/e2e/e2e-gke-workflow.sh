@@ -628,13 +628,13 @@ else
   fail "BUG: workflow-recipes Service wrong port: $wrc_svc_port"
 fi
 
-# Post-refactor: model-secret-mapping lives in mcp-host ns, value format is
-# "<secretName>/<keyName>" pointing to chatllm-api-keys (single source of truth).
-zai_mapping=$(kubectl --context="$GKE_CONTEXT" get configmap clerum-model-secret-mapping -n mcp-host -o jsonpath='{.data.zai__glm-4\.7}' 2>/dev/null || echo "")
+# R1: model-secret-mapping lives in mcp-host ns, keyed by PROVIDER, value format
+# is "<secretName>/<keyName>" pointing to chatllm-api-keys (single source of truth).
+zai_mapping=$(kubectl --context="$GKE_CONTEXT" get configmap clerum-model-secret-mapping -n mcp-host -o jsonpath='{.data.zai}' 2>/dev/null || echo "")
 if [ "$zai_mapping" = "chatllm-api-keys/zai-api-key" ]; then
-  pass "model-secret-mapping has zai__glm-4.7 → chatllm-api-keys/zai-api-key"
+  pass "model-secret-mapping has zai → chatllm-api-keys/zai-api-key"
 else
-  fail "model-secret-mapping missing or wrong for zai__glm-4.7: got '$zai_mapping' (expected 'chatllm-api-keys/zai-api-key')"
+  fail "model-secret-mapping missing or wrong for zai: got '$zai_mapping' (expected 'chatllm-api-keys/zai-api-key')"
 fi
 
 # BUG: mcp-proxy readiness with empty routing table

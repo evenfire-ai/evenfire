@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { Button, CheckboxField, Field, FormSection, SelectInput, TextInput } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateTokenBudgetInput,
   type LlmModelPrice,
@@ -12,7 +13,8 @@ import {
   getLlmPrices,
   getRecipeSecrets,
 } from '@lib/api'
-import { LLM_MODELS_BY_PROVIDER, LLM_PROVIDER_OPTIONS } from '@lib/llm'
+import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
+import { LLM_PROVIDER_OPTIONS, getAllModelOptions } from '@lib/llm'
 import { ScopeSelector } from './ScopeSelector'
 import { DEFAULT_CURRENCY, DEFAULT_TIMEZONE } from './constants'
 import type { ScopeDimensionConfig, ScopeOption, TokenBudgetFormProps } from './types'
@@ -30,10 +32,6 @@ const PROVIDER_OPTIONS: ScopeOption[] = LLM_PROVIDER_OPTIONS.map(o => ({
   value: o.value,
   label: o.label,
 }))
-
-const MODEL_SUGGESTIONS: string[] = Array.from(
-  new Set(Object.values(LLM_MODELS_BY_PROVIDER).flat())
-)
 
 export function TokenBudgetForm({
   mode,
@@ -75,6 +73,13 @@ export function TokenBudgetForm({
   // flight (empty list would otherwise look like "nothing is priced").
   const [prices, setPrices] = useState<LlmModelPrice[]>([])
   const [pricesLoaded, setPricesLoaded] = useState(false)
+
+  // Free-text model-scope suggestions come from the allowlist (all providers).
+  const { models: allowedModels } = useLlmAllowedModels()
+  const modelSuggestions = useMemo(
+    () => getAllModelOptions(allowedModels, { includeDisabled: true }),
+    [allowedModels]
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -127,7 +132,7 @@ export function TokenBudgetForm({
         key: 'model',
         label: 'Model',
         options: null,
-        suggestions: MODEL_SUGGESTIONS,
+        suggestions: modelSuggestions,
         placeholder: 'claude-sonnet-4-6',
         description: 'Free-text; press Enter or Add.',
       },
@@ -136,7 +141,7 @@ export function TokenBudgetForm({
       { key: 'host_ref', label: 'Agent', options: hostOptions },
       { key: 'llm_secret_name', label: 'Secret', options: secretOptions },
     ],
-    [teamOptions, userOptions, hostOptions, secretOptions]
+    [teamOptions, userOptions, hostOptions, secretOptions, modelSuggestions]
   )
 
   // Labels for already-selected team/user values so edited budgets show names.
@@ -282,7 +287,7 @@ export function TokenBudgetForm({
             {unpricedScopeModels.join(', ')}
             {'). '}
             Cost won&apos;t be counted and saving may be rejected until you{' '}
-            <Link href="/cost/llm-prices" className="cu-link">
+            <Link href={CONTROL_ROUTES.costAndUsage.llmPrices} className="cu-link">
               add prices
             </Link>
             .
@@ -410,7 +415,7 @@ export function TokenBudgetForm({
             .map(m => (m.provider ? `${m.provider}/${m.model}` : m.model))
             .join(', ')}
           {'). '}
-          <Link href="/cost/llm-prices" className="cu-link">
+          <Link href={CONTROL_ROUTES.costAndUsage.llmPrices} className="cu-link">
             Add prices
           </Link>{' '}
           first, then save.

@@ -1,9 +1,13 @@
 import type { Request, Router } from 'express'
 import { createHash } from 'node:crypto'
-import { pool } from '../../db.js'
+import { type DbClient, pool, withTransaction } from '../../db.js'
 import { isValidHostSubjectId } from '../../gfs/hostSubject.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
+import {
+  type ControlApiPermissionSubject,
+  appendControlApiPermissionEventsInTransaction,
+} from '../../services/tracing/controlApiPermissionEvents.js'
 
 /**
  * gfs grant write API (Layer-1 operator seed + Layer-2 folder-owner delegation).
@@ -343,7 +347,7 @@ export async function auditMutation(
     requestId?: string
     sourceIp?: string
   }
-): Promise<void> {
+): Promise<string | null> {
   const gfsUri = `gfs://${params.drive}/${params.resourceId}`
   const rowHash = createHash('sha256')
     .update(
@@ -357,9 +361,10 @@ export async function auditMutation(
       ].join(' ')
     )
     .digest('hex')
-  await db.query(
+  const result = await db.query(
     `INSERT INTO gfs_audit (subject, actor_on_behalf_of, op, gfs_uri, outcome, source_ip, request_id, row_hash)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING sequence_no::text AS id`,
     [
       params.targetKey,
       params.actorKey,
@@ -371,6 +376,8 @@ export async function auditMutation(
       rowHash,
     ]
   )
+  const row = result.rows[0] as { id?: unknown } | undefined
+  return row?.id === null || row?.id === undefined ? null : String(row.id)
 }
 
 export function parseSubject(value: unknown): GfsSubject {
@@ -424,6 +431,80 @@ export function requestIdOf(req: Request): string | undefined {
   return typeof id === 'string' && id.length > 0 ? id : undefined
 }
 
+type GfsPermissionEventOperator = {
+  kind: 'control_admin' | 'platform_user'
+  sub: string
+}
+
+function permissionEventOperator(req: Request, caller: GfsCaller): GfsPermissionEventOperator {
+  const adminSub = (req as { adminAuth?: { sub?: string } }).adminAuth?.sub
+  if (adminSub) return { kind: 'control_admin', sub: adminSub }
+  const userId = (req as { externalAuth?: { userId?: string } }).externalAuth?.userId
+  if (userId) return { kind: 'platform_user', sub: userId }
+  if (caller.actorKey.startsWith('user:') && caller.actorKey.length > 'user:'.length) {
+    return { kind: 'platform_user', sub: caller.actorKey.slice('user:'.length) }
+  }
+  throw new GfsGrantError(401, 'unauthenticated')
+}
+
+function permissionEventSubject(subject: GfsSubject): ControlApiPermissionSubject {
+  if (subject.type === 'user' && subject.id) return { kind: 'user', id: subject.id }
+  if (subject.type === 'team' && subject.id) return { kind: 'team', id: subject.id }
+  const principalKind =
+    subject.type === 'operator' || subject.type === 'host' || subject.type === 'context'
+      ? subject.type
+      : 'service'
+  return {
+    kind: 'service',
+    id: subjectKey(subject),
+    principalKind,
+  }
+}
+
+function permissionsDetailRef(permissions: readonly string[]): string {
+  return `gfs_permissions/${[...new Set(permissions)].sort().join('.')}`
+}
+
+export async function appendGfsPermissionEvent(
+  db: DbClient,
+  params: {
+    req: Request
+    caller: GfsCaller
+    subject: GfsSubject
+    permissions: readonly string[]
+    drive: string
+    resourceId: string
+    mutation: 'grant' | 'share'
+    action: 'grant' | 'revoke'
+    outcome: 'committed' | 'rejected'
+    auditId: string | null
+  }
+): Promise<void> {
+  const operator = permissionEventOperator(params.req, params.caller)
+  await appendControlApiPermissionEventsInTransaction(db, {
+    operatorSub: operator.sub,
+    operatorKind: operator.kind,
+    requestId: requestIdOf(params.req) ?? null,
+    changes: [
+      {
+        action: params.action,
+        resourceClass: params.mutation === 'grant' ? 'gfs_folder_grant' : 'gfs_share',
+        resourceRef: `gfs://${params.drive}/${params.resourceId}`,
+        subject: permissionEventSubject(params.subject),
+        sourceAuditRef: params.auditId ? `gfs_audit:${params.auditId}` : null,
+        status:
+          params.outcome === 'rejected'
+            ? `${params.mutation}_${params.action}_rejected`
+            : `${params.mutation}_${params.action === 'grant' ? 'configured' : 'revoked'}`,
+        detailRef: permissionsDetailRef(params.permissions),
+        count: new Set(params.permissions).size,
+        outcome: params.outcome,
+        authorizationDecision: params.outcome === 'rejected' ? 'deny' : 'allow',
+      },
+    ],
+  })
+}
+
 export function registerGfsGrantRoutes(router: Router): void {
   // Operator (Control UI) seeds Layer-1/2 folder grants. The no-escalation
   // engine (assertMayGrant) is caller-agnostic; the Profile/Desktop folder-owner
@@ -448,14 +529,14 @@ export async function handleGrantWrite(
     const subject = parseSubject(body.subject)
     const permissions = parsePermissions(body.permissions)
     const inherit = Boolean(body.inherit)
-
-    try {
-      await assertMayGrant(pool, caller, drive, resourceId, permissions, subject, {
-        isShare: false,
-      })
-    } catch (err) {
-      if (err instanceof GfsGrantError) {
-        await auditMutation(pool, {
+    const result = await withTransaction(async db => {
+      try {
+        await assertMayGrant(db, caller, drive, resourceId, permissions, subject, {
+          isShare: false,
+        })
+      } catch (error) {
+        if (!(error instanceof GfsGrantError)) throw error
+        const auditId = await auditMutation(db, {
           actorKey: caller.actorKey,
           targetKey: subjectKey(subject),
           op: `grant.put[${permissions.join(',')}]`,
@@ -465,30 +546,57 @@ export async function handleGrantWrite(
           requestId: requestIdOf(req),
           sourceIp: req.ip,
         })
-        res.status(err.status).json({ error: err.code })
-        return
+        await appendGfsPermissionEvent(db, {
+          req,
+          caller,
+          subject,
+          permissions,
+          drive,
+          resourceId,
+          mutation: 'grant',
+          action: 'grant',
+          outcome: 'rejected',
+          auditId,
+        })
+        return { error }
       }
-      throw err
-    }
 
-    await pool.query(
-      `INSERT INTO gfs_grants (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
-       VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
-       ON CONFLICT (drive, resource_id, subject_type, subject_id)
-       DO UPDATE SET permissions = EXCLUDED.permissions, inherit = EXCLUDED.inherit,
-                     granted_by = EXCLUDED.granted_by, updated_at = now()`,
-      [drive, resourceId, subject.type, subject.id ?? '', permissions, inherit, caller.actorKey]
-    )
-    await auditMutation(pool, {
-      actorKey: caller.actorKey,
-      targetKey: subjectKey(subject),
-      op: `grant.put[${permissions.join(',')}]`,
-      drive,
-      resourceId,
-      outcome: 'allowed',
-      requestId: requestIdOf(req),
-      sourceIp: req.ip,
+      await db.query(
+        `INSERT INTO gfs_grants (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
+         VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
+         ON CONFLICT (drive, resource_id, subject_type, subject_id)
+         DO UPDATE SET permissions = EXCLUDED.permissions, inherit = EXCLUDED.inherit,
+                       granted_by = EXCLUDED.granted_by, updated_at = now()`,
+        [drive, resourceId, subject.type, subject.id ?? '', permissions, inherit, caller.actorKey]
+      )
+      const auditId = await auditMutation(db, {
+        actorKey: caller.actorKey,
+        targetKey: subjectKey(subject),
+        op: `grant.put[${permissions.join(',')}]`,
+        drive,
+        resourceId,
+        outcome: 'allowed',
+        requestId: requestIdOf(req),
+        sourceIp: req.ip,
+      })
+      await appendGfsPermissionEvent(db, {
+        req,
+        caller,
+        subject,
+        permissions,
+        drive,
+        resourceId,
+        mutation: 'grant',
+        action: 'grant',
+        outcome: 'committed',
+        auditId,
+      })
+      return { error: null }
     })
+    if (result.error) {
+      res.status(result.error.status).json({ error: result.error.code })
+      return
+    }
     res.status(200).json({ ok: true })
   } catch (err) {
     if (err instanceof GfsGrantError) {
@@ -510,48 +618,96 @@ export async function handleGrantDelete(
       res.status(400).json({ error: 'grant_invalid' })
       return
     }
-    const existing = await pool.query(
-      `SELECT drive, resource_id, subject_type, subject_id, permissions
-         FROM gfs_grants WHERE id = $1::uuid`,
-      [id]
-    )
-    if (existing.rows.length === 0) {
+    const result = await withTransaction(async db => {
+      const existing = await db.query(
+        `SELECT drive, resource_id, subject_type, subject_id, permissions
+           FROM gfs_grants WHERE id = $1::uuid
+           FOR UPDATE`,
+        [id]
+      )
+      if (existing.rows.length === 0) return { kind: 'not_found' as const }
+      const row = existing.rows[0] as {
+        drive: string
+        resource_id: string
+        subject_type: string
+        subject_id: string
+        permissions: string[]
+      }
+      const subject = {
+        type: row.subject_type as GfsSubjectType,
+        id: row.subject_id || undefined,
+      }
+      // Revoking uses the same no-escalation gate as granting. A lower authority
+      // cannot remove access that was seeded with permissions it does not hold.
+      try {
+        await assertMayGrant(
+          db,
+          caller,
+          row.drive,
+          String(row.resource_id),
+          (row.permissions as GfsPermission[]) ?? ['manage_acl'],
+          subject,
+          { isShare: false }
+        )
+      } catch (error) {
+        if (!(error instanceof GfsGrantError)) throw error
+        const auditId = await auditMutation(db, {
+          actorKey: caller.actorKey,
+          targetKey: subjectKey(subject),
+          op: 'grant.delete',
+          drive: row.drive,
+          resourceId: String(row.resource_id),
+          outcome: 'denied',
+          requestId: requestIdOf(req),
+          sourceIp: req.ip,
+        })
+        await appendGfsPermissionEvent(db, {
+          req,
+          caller,
+          subject,
+          permissions: row.permissions,
+          drive: row.drive,
+          resourceId: String(row.resource_id),
+          mutation: 'grant',
+          action: 'revoke',
+          outcome: 'rejected',
+          auditId,
+        })
+        return { kind: 'denied' as const, error }
+      }
+      await db.query(`DELETE FROM gfs_grants WHERE id = $1::uuid`, [id])
+      const auditId = await auditMutation(db, {
+        actorKey: caller.actorKey,
+        targetKey: subjectKey(subject),
+        op: 'grant.delete',
+        drive: row.drive,
+        resourceId: String(row.resource_id),
+        outcome: 'allowed',
+        requestId: requestIdOf(req),
+        sourceIp: req.ip,
+      })
+      await appendGfsPermissionEvent(db, {
+        req,
+        caller,
+        subject,
+        permissions: row.permissions,
+        drive: row.drive,
+        resourceId: String(row.resource_id),
+        mutation: 'grant',
+        action: 'revoke',
+        outcome: 'committed',
+        auditId,
+      })
+      return { kind: 'ok' as const }
+    })
+    if (result.kind === 'not_found') {
       res.status(404).json({ error: 'grant_not_found' })
       return
     }
-    const row = existing.rows[0] as {
-      drive: string
-      resource_id: string
-      subject_type: string
-      subject_id: string
-      permissions: string[]
+    if (result.kind === 'denied') {
+      res.status(result.error.status).json({ error: result.error.code })
+      return
     }
-    // Revoking is itself a manage_acl act — same no-escalation gate ON PURPOSE:
-    // a non-operator may only revoke a grant whose bits it itself holds, so it
-    // cannot remove access that a HIGHER authority (e.g. the operator) seeded
-    // with bits above its own. That "deadlock" is the intended security property
-    // — the operator (intrinsic authority) manages operator-seeded grants. Do NOT
-    // weaken this to require only manage_acl.
-    await assertMayGrant(
-      pool,
-      caller,
-      row.drive,
-      String(row.resource_id),
-      (row.permissions as GfsPermission[]) ?? ['manage_acl'],
-      { type: row.subject_type as GfsSubjectType, id: row.subject_id || undefined },
-      { isShare: false }
-    )
-    await pool.query(`DELETE FROM gfs_grants WHERE id = $1::uuid`, [id])
-    await auditMutation(pool, {
-      actorKey: caller.actorKey,
-      targetKey: `${row.subject_type}:${row.subject_id ?? ''}`,
-      op: 'grant.delete',
-      drive: row.drive,
-      resourceId: String(row.resource_id),
-      outcome: 'allowed',
-      requestId: requestIdOf(req),
-      sourceIp: req.ip,
-    })
     res.status(200).json({ ok: true })
   } catch (err) {
     if (err instanceof GfsGrantError) {

@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test'
 import {
+  CHANNELS_NS,
   type FakeTelegramClientPortForward,
+  TELEGRAM_CHANNEL_NAME,
   applyTelegramCommunicationChannel,
   configureChannelReaderTelegramApiRoot,
   expectChannelReaderCanReachMcpHost,
@@ -56,6 +58,7 @@ const MODEL = {
   provider: process.env.E2E_WORKFLOW_MODEL_PROVIDER || 'zai',
   model: process.env.E2E_WORKFLOW_MODEL || 'glm-4.7',
 }
+const TELEGRAM_COMMUNICATION_CHANNEL_REF = `${CHANNELS_NS}/${TELEGRAM_CHANNEL_NAME}`
 
 function latestWorkflowRunStepSignal(recipeName: string): string {
   return profilesSql(`
@@ -83,6 +86,70 @@ async function waitForLatestWorkflowRunStepSignal(recipeName: string, pattern: R
       message: `waiting for workflow run step signal ${pattern} on ${recipeName}`,
     })
     .toMatch(pattern)
+}
+
+function latestWorkflowRunId(recipeName: string): string {
+  return profilesSql(`
+    SELECT run_id::text
+      FROM workflow_runs
+     WHERE recipe_namespace = ${sqlLiteral(WORKFLOW_RECIPE_NS)}
+       AND recipe_name = ${sqlLiteral(recipeName)}
+     ORDER BY created_at DESC
+     LIMIT 1;
+  `)
+}
+
+function governedApprovalTraceSignal(params: {
+  recipeName: string
+  runId: string
+  approvalId: string
+  requesterUserId: string
+  approverUserId: string
+}): string {
+  return profilesSql(`
+    SELECT COUNT(*)::text || ':' ||
+           BOOL_AND(run_id = ${sqlLiteral(params.runId)}::uuid)::text || ':' ||
+           BOOL_AND(approval_request_id = ${sqlLiteral(params.approvalId)}::uuid)::text || ':' ||
+           BOOL_AND(payload_metadata->>'detail_ref' = 'workflow-step:approval-gated-step')::text || ':' ||
+           BOOL_AND(source_kind = 'control_api_local' AND source_service = 'control-api' AND origin = 'workflow_runtime')::text || ':' ||
+           BOOL_AND(actor_human_sub = ${sqlLiteral(params.requesterUserId)})::text || ':' ||
+           BOOL_AND(
+             (decision = 'require_approval' AND decision_actor_sub IS NULL)
+             OR (decision IN ('allow', 'deny') AND decision_actor_sub = ${sqlLiteral(params.approverUserId)})
+           )::text || ':' || COALESCE(
+             string_agg(
+               decision,
+               ',' ORDER BY occurred_at, ingest_sequence
+             ),
+             ''
+           )
+      FROM agent_run_events
+     WHERE recipe_namespace = ${sqlLiteral(WORKFLOW_RECIPE_NS)}
+       AND recipe_name = ${sqlLiteral(params.recipeName)}
+       AND event_type = 'approval';
+  `)
+}
+
+function approvalRunBindingSignal(approvalId: string): string {
+  return profilesSql(`
+    SELECT COALESCE(bound_workflow_run_id::text, 'none') || ':' ||
+           COALESCE(bound_workflow_step_id, 'none')
+      FROM workflow_approval_requests
+     WHERE id = ${sqlLiteral(approvalId)};
+  `)
+}
+
+async function waitForGovernedApprovalTrace(
+  params: Parameters<typeof governedApprovalTraceSignal>[0],
+  terminalDecision: 'allow' | 'deny'
+) {
+  await expect
+    .poll(() => governedApprovalTraceSignal(params), {
+      timeout: 90_000,
+      intervals: [1_000, 2_000, 5_000],
+      message: `waiting for exact governed approval trace on ${params.recipeName}`,
+    })
+    .toBe(`2:true:true:true:true:true:true:require_approval,${terminalDecision}`)
 }
 
 function ensureUserWorkflowGrant(recipeName: string, userId: string): void {
@@ -125,7 +192,7 @@ function telegramTriggeredStepApprovalManifest(
     manifest.spec as {
       triggers?: { onDemand?: { requiresApproval?: boolean; allowedActors?: string[] } }
     }
-  ).triggers = { onDemand: { requiresApproval: true, allowedActors: ['autonomous'] } }
+  ).triggers = { onDemand: { requiresApproval: true, allowedActors: ['user'] } }
   return manifest
 }
 
@@ -167,6 +234,8 @@ test.describe('Telegram group trigger -> Figure D step approval DM', () => {
     let telegramPage: Awaited<ReturnType<typeof openTelegramClient>>['page'] | null = null
     let telegramPortForward: FakeTelegramClientPortForward | null = null
     let figureDProvider: Awaited<ReturnType<typeof installFigureDProviderHarness>> | null = null
+    let requesterUserId = ''
+    let approverUserId = ''
 
     async function triggerFromTelegramGroup(
       recipeName: string,
@@ -196,6 +265,7 @@ test.describe('Telegram group trigger -> Figure D step approval DM', () => {
           message: `Telegram group command should create one workflow run for ${recipeName}`,
         })
         .toBe(1)
+      return triggerApprovalId
     }
 
     async function expectPrivateApprovalDm(recipeName: string, label: 'Approve' | 'Deny') {
@@ -221,35 +291,47 @@ test.describe('Telegram group trigger -> Figure D step approval DM', () => {
 
         installFakeTelegramProvider()
         configureChannelReaderTelegramApiRoot(HOST_REF)
-        applyTelegramCommunicationChannel(HOST_REF, [approveRequesterGroup, denyRequesterGroup])
-        waitForChannelReader(HOST_REF)
-        expectChannelReaderHasNoProviderHttpIngress(HOST_REF)
-        expectChannelReaderCanReachMcpHost(HOST_REF)
-        await expect.poll(() => fakeTelegramPollingCount(), { timeout: 30_000 }).toBeGreaterThan(0)
 
         const telegram = await openTelegramClient(browser)
         telegramPage = telegram.page
         telegramPortForward = telegram.portForward
 
-        const { userId: requesterUserId } = await loginAs(E2E_EMAIL)
-        const { userId: approverUserId } = await loginAs(E2E_ALT_EMAIL)
+        requesterUserId = (await loginAs(E2E_EMAIL)).userId
+        approverUserId = (await loginAs(E2E_ALT_EMAIL)).userId
+        applyTelegramCommunicationChannel(
+          HOST_REF,
+          [
+            { ...approveRequesterGroup, confirmedByUserId: requesterUserId },
+            { ...denyRequesterGroup, confirmedByUserId: requesterUserId },
+            { ...approverPrivateChat, confirmedByUserId: approverUserId },
+          ],
+          [requesterUserId, approverUserId]
+        )
+        waitForChannelReader(HOST_REF)
+        expectChannelReaderHasNoProviderHttpIngress(HOST_REF)
+        expectChannelReaderCanReachMcpHost(HOST_REF)
+        await expect.poll(() => fakeTelegramPollingCount(), { timeout: 30_000 }).toBeGreaterThan(0)
+
         seedVerifiedApprovalMediumBinding({
           userId: requesterUserId,
           medium: 'telegram',
           providerUserId: approveRequesterGroup.providerUserId,
           providerChannelId: approveRequesterGroup.providerChannelId,
+          communicationChannelRef: TELEGRAM_COMMUNICATION_CHANNEL_REF,
         })
         seedVerifiedApprovalMediumBinding({
           userId: requesterUserId,
           medium: 'telegram',
           providerUserId: denyRequesterGroup.providerUserId,
           providerChannelId: denyRequesterGroup.providerChannelId,
+          communicationChannelRef: TELEGRAM_COMMUNICATION_CHANNEL_REF,
         })
         seedVerifiedApprovalMediumBinding({
           userId: approverUserId,
           medium: 'telegram',
           providerUserId: approverPrivateChat.providerUserId,
           providerChannelId: approverPrivateChat.providerChannelId,
+          communicationChannelRef: TELEGRAM_COMMUNICATION_CHANNEL_REF,
         })
         expect(verifiedTelegramBindingUserId(approveRequesterGroup)).toBe(requesterUserId)
         expect(verifiedTelegramBindingUserId(denyRequesterGroup)).toBe(requesterUserId)
@@ -277,13 +359,18 @@ test.describe('Telegram group trigger -> Figure D step approval DM', () => {
       })
 
       await test.step('Approve path: group trigger waits on private approver DM and then succeeds', async () => {
-        await triggerFromTelegramGroup(
+        const triggerRequestId = await triggerFromTelegramGroup(
           approveRecipe,
           `${markerBase}-approve`,
           messageBase + 11,
           approveRequesterGroup
         )
         const previewApprovalId = await expectPrivateApprovalDm(approveRecipe, 'Approve')
+        expect(previewApprovalId).not.toBe(triggerRequestId)
+        expect(approvalRunBindingSignal(triggerRequestId)).toBe('none:none')
+        expect(approvalRunBindingSignal(previewApprovalId)).toMatch(
+          /^[0-9a-f-]{36}:approval-gated-step$/
+        )
         expect(latestWorkflowRunPhase(approveRecipe)).not.toBe('Succeeded')
 
         const decidedApprovalId = await approveLatestTelegramDm({
@@ -300,16 +387,31 @@ test.describe('Telegram group trigger -> Figure D step approval DM', () => {
           approveRecipe,
           /Succeeded:.*approval-gated-step=Succeeded.*finalize-after-approval=Succeeded/
         )
+        await waitForGovernedApprovalTrace(
+          {
+            recipeName: approveRecipe,
+            runId: latestWorkflowRunId(approveRecipe),
+            approvalId: decidedApprovalId,
+            requesterUserId,
+            approverUserId,
+          },
+          'allow'
+        )
       })
 
       await test.step('Deny path: private approver denial blocks the protected workflow segment', async () => {
-        await triggerFromTelegramGroup(
+        const triggerRequestId = await triggerFromTelegramGroup(
           denyRecipe,
           `${markerBase}-deny`,
           messageBase + 22,
           denyRequesterGroup
         )
         const previewApprovalId = await expectPrivateApprovalDm(denyRecipe, 'Deny')
+        expect(previewApprovalId).not.toBe(triggerRequestId)
+        expect(approvalRunBindingSignal(triggerRequestId)).toBe('none:none')
+        expect(approvalRunBindingSignal(previewApprovalId)).toMatch(
+          /^[0-9a-f-]{36}:approval-gated-step$/
+        )
         expect(latestWorkflowRunPhase(denyRecipe)).not.toBe('Succeeded')
 
         const decidedApprovalId = await denyLatestTelegramDm({
@@ -328,6 +430,16 @@ test.describe('Telegram group trigger -> Figure D step approval DM', () => {
         )
         expect(latestWorkflowRunStepSignal(denyRecipe)).not.toContain(
           'finalize-after-approval=Succeeded'
+        )
+        await waitForGovernedApprovalTrace(
+          {
+            recipeName: denyRecipe,
+            runId: latestWorkflowRunId(denyRecipe),
+            approvalId: decidedApprovalId,
+            requesterUserId,
+            approverUserId,
+          },
+          'deny'
         )
       })
     } finally {

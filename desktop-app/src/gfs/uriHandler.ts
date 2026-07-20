@@ -61,6 +61,7 @@ export function parseGfsUri(uri: string): ParsedGfsUri {
 export interface ResolvedGfsResource {
   drive: string
   resourceId: string
+  parentResourceId: string | null
   rid?: string
   gfsUri: string
   name: string

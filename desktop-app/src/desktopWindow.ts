@@ -67,7 +67,7 @@ export async function openDesktopWindow(args: OpenDesktopWindowArgs): Promise<vo
     width: 1280,
     height: 800,
     show: false,
-    title: `Desktop — ${hostRef}`,
+    title: `Evenfire — ${hostRef}`,
     webPreferences: {
       partition,
       contextIsolation: true,

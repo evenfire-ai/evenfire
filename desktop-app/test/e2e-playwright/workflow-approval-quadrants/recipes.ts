@@ -338,7 +338,7 @@ export async function cleanupQuadrantResidues(): Promise<void> {
     `${raw}\n${dbRaw}`.split(/\s+/).filter(name => /^e2e-quadrant-[a-z0-9-]+$/.test(name))
   )
   for (const match of runtimeRaw.matchAll(/(?:^|\s)(?:wf-)?(e2e-quadrant-q[1-4]-\d+)/g)) {
-    names.add(match[1])
+    names.add(match[1]!)
   }
 
   const recipeNames = [...names]

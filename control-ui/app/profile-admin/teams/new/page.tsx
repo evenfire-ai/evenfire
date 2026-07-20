@@ -12,6 +12,7 @@ import { IconUsers } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconTrash } from '@components/icons'
 import { Button, Field, TextInput } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { getAgentDisplayName } from '@lib/agentName'
 import {
   addAdminTeamMember,
@@ -243,7 +244,7 @@ export default function CreateTeamPage() {
           : Promise.resolve(),
       ])
       showToast('Team created.', { tone: 'success' })
-      router.push('/profile-admin/teams')
+      router.push(CONTROL_ROUTES.usersAndTeams.teams)
     } catch (createError) {
       if (createdTeamId) {
         setCreatedTeamRecoveryId(createdTeamId)
@@ -270,7 +271,7 @@ export default function CreateTeamPage() {
               title="Create team"
               subtitle="Create a team now. Add members and roles next."
               backLabel="Back to teams"
-              onBack={() => router.push('/profile-admin/teams')}
+              onBack={() => router.push(CONTROL_ROUTES.usersAndTeams.teams)}
               backDisabled={saving}
             />
           }
@@ -462,9 +463,7 @@ export default function CreateTeamPage() {
                     variant="ghost"
                     size="sm"
                     onClick={() =>
-                      router.push(
-                        `/profile-admin/teams/${encodeURIComponent(createdTeamRecoveryId)}`
-                      )
+                      router.push(CONTROL_ROUTES.usersAndTeams.team(createdTeamRecoveryId))
                     }
                   >
                     Open created team
@@ -480,7 +479,7 @@ export default function CreateTeamPage() {
                 size="sm"
                 onClick={() =>
                   step === 0
-                    ? router.push('/profile-admin/teams')
+                    ? router.push(CONTROL_ROUTES.usersAndTeams.teams)
                     : setStep(current => Math.max(current - 1, 0) as TeamCreateStep)
                 }
                 disabled={saving}

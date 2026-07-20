@@ -9,6 +9,7 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { EgressEditor } from '@components/EgressEditor'
 import { IconStore } from '@components/Sidebar/icons'
 import { Button, Field, TextAreaInput, TextInput } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { getRegistryEntryVersion, updateRegistryEntry } from '@lib/api'
 import type { RegistryEntry } from '@lib/api'
 import { egressStatusToRegistrySummary, registrySummaryToEgressBindings } from '@lib/egressModel'
@@ -70,7 +71,7 @@ export default function EditRegistryEntryPage() {
   }, [name, version])
 
   function backToCatalog() {
-    router.push('/registry')
+    router.push(CONTROL_ROUTES.marketplace.root)
   }
 
   const handleEgressChange = useCallback((_bindings: unknown, status: EgressEditorStatus) => {

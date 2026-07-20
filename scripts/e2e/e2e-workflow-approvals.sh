@@ -58,7 +58,7 @@
 #   E2E_GATEWAY_NS            (default: mcp-host — namespace used for ephemeral curl pods)
 #   E2E_GATEWAY_POD_LABELS    (default: clerum.io/managed-by=host-context-controller)
 #   E2E_TEST_EMAIL            (default: test@clerum.io)
-#   E2E_OUTSIDER_EMAIL        (default: outsider-e2e@clerum.io)
+#   E2E_OUTSIDER_EMAIL        (default: test2@clerum.io, seeded without recipe access)
 #   E2E_ADMIN_USERNAME        (default: admin)
 #   E2E_ADMIN_PASSWORD        (required for Case 17 product-side grant seed)
 #   E2E_RECIPE_NAMESPACE      (default: sandbox-recipes)
@@ -104,7 +104,7 @@ GATEWAY_NS="${E2E_GATEWAY_NS:-mcp-host}"
 GATEWAY_POD_LABELS="${E2E_GATEWAY_POD_LABELS:-clerum.io/managed-by=host-context-controller}"
 GATEWAY_CURL_IMAGE="${E2E_GATEWAY_CURL_IMAGE:-curlimages/curl:8.7.1}"
 APPROVER_EMAIL="${E2E_TEST_EMAIL:-test@clerum.io}"
-OUTSIDER_EMAIL="${E2E_OUTSIDER_EMAIL:-outsider-e2e@clerum.io}"
+OUTSIDER_EMAIL="${E2E_OUTSIDER_EMAIL:-test2@clerum.io}"
 ADMIN_USERNAME="${E2E_ADMIN_USERNAME:-admin}"
 ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-${ADMIN_PASSWORD:-}}"
 RECIPE_NS="${E2E_RECIPE_NAMESPACE:-sandbox-recipes}"
@@ -454,10 +454,21 @@ admin_login() {
   local pw_var="ADMIN_PASS""WORD"
   local body; body=$(U="$ADMIN_USERNAME" P="${!pw_var:-}" K="pass""word" node --no-warnings -e \
     'const k=process.env.K; process.stdout.write(JSON.stringify({username:process.env.U,[k]:process.env.P}))')
-  http_request POST "${CONTROL_URL}/api/v1/admin/auth/login" "$body"
+  local headers_file body_file response_file
+  headers_file=$(mktemp "${TMPDIR:-/tmp}/clerum-e2e-admin-headers.XXXXXX")
+  body_file=$(mktemp "${TMPDIR:-/tmp}/clerum-e2e-admin-body.XXXXXX")
+  response_file=$(mktemp "${TMPDIR:-/tmp}/clerum-e2e-admin-response.XXXXXX")
+  chmod 600 "$headers_file" "$body_file" "$response_file"
+  printf '%s' "$body" >"$body_file"
+  HTTP_STATUS=$(curl -sS --max-time 30 -D "$headers_file" -o "$response_file" \
+    -w '%{http_code}' -H 'Content-Type: application/json' --data-binary "@$body_file" \
+    "${CONTROL_URL}/api/v1/admin/auth/login")
+  HTTP_BODY=$(cat "$response_file")
+  ADMIN_AUTH=$(sed -n 's/^Set-Cookie: control_ui_admin_session=\([^;]*\).*/\1/p' "$headers_file" \
+    | tr -d '\r' | head -1)
+  rm -f "$headers_file" "$body_file" "$response_file"
   [[ "$HTTP_STATUS" == "200" ]] || fail "admin-login ${ADMIN_USERNAME} (HTTP $HTTP_STATUS): $HTTP_BODY"
-  ADMIN_AUTH=$(json_field "$HTTP_BODY" "o['to'+'ken']")
-  [[ -n "$ADMIN_AUTH" ]] || fail "admin-login missing auth field: $HTTP_BODY"
+  [[ -n "$ADMIN_AUTH" ]] || fail "admin-login missing control-ui session cookie"
 }
 
 APPROVER_SPLIT=$(password_login "$APPROVER_EMAIL")
@@ -868,12 +879,12 @@ EXPECTED_METRICS=(
   "rate_limit_hits_total"
 )
 for m in "${EXPECTED_METRICS[@]}"; do
-  if ! echo "$HTTP_BODY" | grep -q "$m"; then
+  if ! grep -q "$m" <<<"$HTTP_BODY"; then
     fail "/metrics missing counter: $m"
   fi
 done
 # Default node process metric must also be exposed.
-echo "$HTTP_BODY" | grep -q "process_start_time_seconds" \
+grep -q "process_start_time_seconds" <<<"$HTTP_BODY" \
   || fail "/metrics missing default node metrics (process_start_time_seconds)"
 pass "/metrics exposed Prometheus text with ${#EXPECTED_METRICS[@]} app counters + default node metrics"
 echo ""
@@ -1000,7 +1011,7 @@ log "Case 12: archival cron simulation"
 http_request GET "${CONTROL_URL}/metrics"
 [[ "$HTTP_STATUS" == "200" ]] || fail "Case 12: /metrics expected 200, got $HTTP_STATUS"
 for m in user_approval_requests_archive_runs_total user_approval_requests_archived_total user_approval_requests_archive_duration_seconds; do
-  echo "$HTTP_BODY" | grep -q "$m" || fail "Case 12: /metrics missing archive counter $m"
+  grep -q "$m" <<<"$HTTP_BODY" || fail "Case 12: /metrics missing archive counter $m"
 done
 pass "Case 12a: archive metrics exposed by /metrics"
 
@@ -1282,7 +1293,7 @@ YAML
 
     http_request PUT "${CONTROL_URL}/api/v1/admin/workflows/${RECIPE_17_NS}/${RECIPE_17_NAME}/grants" \
       "{\"userIds\":[\"${APPROVER_USER_ID}\"]}" \
-      "Authorization: Bearer ${ADMIN_AUTH}"
+      "Cookie: control_ui_admin_session=${ADMIN_AUTH}"
     [[ "$HTTP_STATUS" == "200" ]] || fail "Case 17: grant seed failed (HTTP $HTTP_STATUS): $HTTP_BODY"
     GRANT_17_ROWS=$(pg_psql "SELECT count(*) FROM user_workflow_triggers WHERE recipe_namespace='${RECIPE_17_NS}' AND recipe_name='${RECIPE_17_NAME}' AND user_id='${APPROVER_USER_ID}';")
     [[ "$GRANT_17_ROWS" == "1" ]] || fail "Case 17: grant API did not persist canonical user_workflow_triggers row"

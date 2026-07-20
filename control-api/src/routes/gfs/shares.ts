@@ -1,5 +1,5 @@
 import type { Request, Response, Router } from 'express'
-import { pool } from '../../db.js'
+import { withTransaction } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
 import {
@@ -7,6 +7,7 @@ import {
   type GfsPermission,
   type GfsSubjectType,
   UUID_RE,
+  appendGfsPermissionEvent,
   assertMayGrant,
   auditMutation,
   driveOf,
@@ -45,11 +46,14 @@ export async function handleShareWrite(req: Request, res: Response): Promise<voi
     const permissions = parsePermissions(body.permissions)
     const includeDescendants = Boolean(body.includeDescendants)
 
-    try {
-      await assertMayGrant(pool, caller, drive, resourceId, permissions, subject, { isShare: true })
-    } catch (err) {
-      if (err instanceof GfsGrantError) {
-        await auditMutation(pool, {
+    const result = await withTransaction(async db => {
+      try {
+        await assertMayGrant(db, caller, drive, resourceId, permissions, subject, {
+          isShare: true,
+        })
+      } catch (error) {
+        if (!(error instanceof GfsGrantError)) throw error
+        const auditId = await auditMutation(db, {
           actorKey: caller.actorKey,
           targetKey: subjectKey(subject),
           op: `share.create[${permissions.join(',')}]`,
@@ -59,39 +63,66 @@ export async function handleShareWrite(req: Request, res: Response): Promise<voi
           requestId: requestIdOf(req),
           sourceIp: req.ip,
         })
-        res.status(err.status).json({ error: err.code })
-        return
+        await appendGfsPermissionEvent(db, {
+          req,
+          caller,
+          subject,
+          permissions,
+          drive,
+          resourceId,
+          mutation: 'share',
+          action: 'grant',
+          outcome: 'rejected',
+          auditId,
+        })
+        return { error }
       }
-      throw err
-    }
 
-    await pool.query(
-      `INSERT INTO gfs_shares (drive, resource_id, subject_type, subject_id, permissions, include_descendants, created_by)
-       VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
-       ON CONFLICT (drive, resource_id, subject_type, subject_id)
-       DO UPDATE SET permissions = EXCLUDED.permissions,
-                     include_descendants = EXCLUDED.include_descendants,
-                     created_by = EXCLUDED.created_by`,
-      [
+      await db.query(
+        `INSERT INTO gfs_shares (drive, resource_id, subject_type, subject_id, permissions, include_descendants, created_by)
+         VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
+         ON CONFLICT (drive, resource_id, subject_type, subject_id)
+         DO UPDATE SET permissions = EXCLUDED.permissions,
+                       include_descendants = EXCLUDED.include_descendants,
+                       created_by = EXCLUDED.created_by`,
+        [
+          drive,
+          resourceId,
+          subject.type,
+          subject.id ?? '',
+          permissions,
+          includeDescendants,
+          caller.actorKey,
+        ]
+      )
+      const auditId = await auditMutation(db, {
+        actorKey: caller.actorKey,
+        targetKey: subjectKey(subject),
+        op: `share.create[${permissions.join(',')}]`,
         drive,
         resourceId,
-        subject.type,
-        subject.id ?? '',
+        outcome: 'allowed',
+        requestId: requestIdOf(req),
+        sourceIp: req.ip,
+      })
+      await appendGfsPermissionEvent(db, {
+        req,
+        caller,
+        subject,
         permissions,
-        includeDescendants,
-        caller.actorKey,
-      ]
-    )
-    await auditMutation(pool, {
-      actorKey: caller.actorKey,
-      targetKey: subjectKey(subject),
-      op: `share.create[${permissions.join(',')}]`,
-      drive,
-      resourceId,
-      outcome: 'allowed',
-      requestId: requestIdOf(req),
-      sourceIp: req.ip,
+        drive,
+        resourceId,
+        mutation: 'share',
+        action: 'grant',
+        outcome: 'committed',
+        auditId,
+      })
+      return { error: null }
     })
+    if (result.error) {
+      res.status(result.error.status).json({ error: result.error.code })
+      return
+    }
     res.status(200).json({ ok: true })
   } catch (err) {
     if (err instanceof GfsGrantError) {
@@ -110,43 +141,94 @@ export async function handleShareDelete(req: Request, res: Response): Promise<vo
       res.status(400).json({ error: 'share_invalid' })
       return
     }
-    const existing = await pool.query(
-      `SELECT drive, resource_id, subject_type, subject_id, permissions
-         FROM gfs_shares WHERE id = $1::uuid`,
-      [id]
-    )
-    if (existing.rows.length === 0) {
+    const result = await withTransaction(async db => {
+      const existing = await db.query(
+        `SELECT drive, resource_id, subject_type, subject_id, permissions
+           FROM gfs_shares WHERE id = $1::uuid
+           FOR UPDATE`,
+        [id]
+      )
+      if (existing.rows.length === 0) return { kind: 'not_found' as const }
+      const row = existing.rows[0] as {
+        drive: string
+        resource_id: string
+        subject_type: string
+        subject_id: string
+        permissions: string[]
+      }
+      const subject = {
+        type: row.subject_type as GfsSubjectType,
+        id: row.subject_id || undefined,
+      }
+      try {
+        await assertMayGrant(
+          db,
+          caller,
+          row.drive,
+          String(row.resource_id),
+          (row.permissions as GfsPermission[]) ?? ['share'],
+          subject,
+          { isShare: true }
+        )
+      } catch (error) {
+        if (!(error instanceof GfsGrantError)) throw error
+        const auditId = await auditMutation(db, {
+          actorKey: caller.actorKey,
+          targetKey: subjectKey(subject),
+          op: 'share.delete',
+          drive: row.drive,
+          resourceId: String(row.resource_id),
+          outcome: 'denied',
+          requestId: requestIdOf(req),
+          sourceIp: req.ip,
+        })
+        await appendGfsPermissionEvent(db, {
+          req,
+          caller,
+          subject,
+          permissions: row.permissions,
+          drive: row.drive,
+          resourceId: String(row.resource_id),
+          mutation: 'share',
+          action: 'revoke',
+          outcome: 'rejected',
+          auditId,
+        })
+        return { kind: 'denied' as const, error }
+      }
+      await db.query(`DELETE FROM gfs_shares WHERE id = $1::uuid`, [id])
+      const auditId = await auditMutation(db, {
+        actorKey: caller.actorKey,
+        targetKey: subjectKey(subject),
+        op: 'share.delete',
+        drive: row.drive,
+        resourceId: String(row.resource_id),
+        outcome: 'allowed',
+        requestId: requestIdOf(req),
+        sourceIp: req.ip,
+      })
+      await appendGfsPermissionEvent(db, {
+        req,
+        caller,
+        subject,
+        permissions: row.permissions,
+        drive: row.drive,
+        resourceId: String(row.resource_id),
+        mutation: 'share',
+        action: 'revoke',
+        outcome: 'committed',
+        auditId,
+      })
+      return { kind: 'ok' as const }
+    })
+    if (result.kind === 'not_found') {
       res.status(404).json({ error: 'share_not_found' })
       return
     }
-    const row = existing.rows[0] as {
-      drive: string
-      resource_id: string
-      subject_type: string
-      subject_id: string
-      permissions: string[]
+    if (result.kind === 'denied') {
+      res.status(result.error.status).json({ error: result.error.code })
+      return
     }
-    // Revoking a share is itself a `share`-authority act — same no-escalation gate.
-    await assertMayGrant(
-      pool,
-      caller,
-      row.drive,
-      String(row.resource_id),
-      (row.permissions as GfsPermission[]) ?? ['share'],
-      { type: row.subject_type as GfsSubjectType, id: row.subject_id || undefined },
-      { isShare: true }
-    )
-    await pool.query(`DELETE FROM gfs_shares WHERE id = $1::uuid`, [id])
-    await auditMutation(pool, {
-      actorKey: caller.actorKey,
-      targetKey: `${row.subject_type}:${row.subject_id ?? ''}`,
-      op: 'share.delete',
-      drive: row.drive,
-      resourceId: String(row.resource_id),
-      outcome: 'allowed',
-      requestId: requestIdOf(req),
-      sourceIp: req.ip,
-    })
     res.status(200).json({ ok: true })
   } catch (err) {
     if (err instanceof GfsGrantError) {

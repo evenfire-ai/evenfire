@@ -304,7 +304,9 @@ describe('ShellTool', () => {
   })
 
   describe('credential-slot stripping (§13 stateless agents)', () => {
-    const SLOT_ENV_NAMES = ALL_PROVIDERS.map(p => PROVIDERS[p].envName)
+    const SLOT_ENV_NAMES = ALL_PROVIDERS.flatMap(p =>
+      PROVIDERS[p].credentialSlots.map(s => s.envName)
+    )
     // Probes every registry slot in one shell round-trip: NAME=value or NAME=ABSENT.
     const probeCommand =
       'echo "' + SLOT_ENV_NAMES.map(n => n + '=${' + n + ':-ABSENT}').join(';') + '"'
@@ -329,11 +331,13 @@ describe('ShellTool', () => {
       prefix: string
     ) => {
       for (const provider of ALL_PROVIDERS) {
-        const envName = PROVIDERS[provider].envName
-        if (provider === active) {
-          expect(content).toContain(envName + '=' + prefix + envName)
-        } else {
-          expect(content).toContain(envName + '=ABSENT')
+        for (const slot of PROVIDERS[provider].credentialSlots) {
+          const envName = slot.envName
+          if (provider === active) {
+            expect(content).toContain(envName + '=' + prefix + envName)
+          } else {
+            expect(content).toContain(envName + '=ABSENT')
+          }
         }
       }
     }

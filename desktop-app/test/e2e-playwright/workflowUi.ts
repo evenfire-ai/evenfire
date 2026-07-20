@@ -535,7 +535,7 @@ export async function launchAndLogin(
       args: [`--user-data-dir=${userDataDir}`, path.resolve(__dirname, '../../dist/main.js')],
       env: {
         ...process.env,
-        ELECTRON_RENDERER_URL: '',
+        EVENFIRE_RENDERER_URL: '',
         EXTERNAL_REST_API_BASE_URL: EXT_API,
         RPC_PROXY_BASE_URL: process.env.RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094',
         // Isolate the desktop runtime-config from the global appData profile
@@ -570,30 +570,26 @@ export async function launchAndLogin(
   const userDisplayName = page.getByTestId('user-display-name')
 
   try {
-    let entryState: 'loading' | 'login' | 'authenticated' = 'loading'
+    const readEntryState = async (): Promise<'loading' | 'login' | 'authenticated'> => {
+      if (await authenticatedShell.isVisible().catch(() => false)) return 'authenticated'
+      if (
+        (await emailInput.isVisible().catch(() => false)) &&
+        (await passwordInput.isVisible().catch(() => false))
+      ) {
+        return 'login'
+      }
+      return 'loading'
+    }
+
     await expect
-      .poll(
-        async () => {
-          if (await authenticatedShell.isVisible().catch(() => false)) {
-            entryState = 'authenticated'
-          } else if (
-            (await emailInput.isVisible().catch(() => false)) &&
-            (await passwordInput.isVisible().catch(() => false))
-          ) {
-            entryState = 'login'
-          } else {
-            entryState = 'loading'
-          }
-          return entryState
-        },
-        {
-          timeout: 45_000,
-          intervals: [250, 500, 1_000],
-          message: `waiting for Desktop login or authenticated shell for ${email}`,
-        }
-      )
+      .poll(async () => readEntryState(), {
+        timeout: 45_000,
+        intervals: [250, 500, 1_000],
+        message: `waiting for Desktop login or authenticated shell for ${email}`,
+      })
       .not.toBe('loading')
 
+    const entryState = await readEntryState()
     if (entryState === 'login') {
       await emailInput.fill(email)
       await passwordInput.fill(E2E_DESKTOP_PASSWORD)

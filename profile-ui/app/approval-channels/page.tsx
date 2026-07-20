@@ -8,6 +8,7 @@ import { ProfileShell } from '@components/ProfileShell'
 import { SelectControl } from '@components/SelectControl'
 import { useToast } from '@components/Toast'
 import { IconRefresh } from '@components/icons'
+import { PROFILE_ROUTES } from '@constants/routes'
 import {
   getMe,
   getNotificationPreferences,
@@ -39,9 +40,9 @@ function LoadingSkeleton() {
 }
 
 function settingsPathForMedium(medium: string): string {
-  if (medium === 'slack') return '/settings/social/slack'
-  if (medium === 'teams') return '/settings/social/teams'
-  return '/settings/social/telegram'
+  if (medium === 'slack') return PROFILE_ROUTES.settings.social('slack')
+  if (medium === 'teams') return PROFILE_ROUTES.settings.social('teams')
+  return PROFILE_ROUTES.settings.social('telegram')
 }
 
 function ApprovalChannelsContent() {

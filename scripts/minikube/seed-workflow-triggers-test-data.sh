@@ -83,13 +83,13 @@ fi
 ok "WorkflowRecipe CRD installed"
 
 verify_model_secret_mapping() {
+  # R1: the credential is keyed by provider, not by provider__model.
   local provider="$1"
   local model="$2"
-  local mapping_key="${provider}__${model}"
   local mapping secret_name secret_key
-  mapping="$($KC -n mcp-host get configmap clerum-model-secret-mapping -o "go-template={{ index .data \"${mapping_key}\" }}" 2>/dev/null || true)"
+  mapping="$($KC -n mcp-host get configmap clerum-model-secret-mapping -o "go-template={{ index .data \"${provider}\" }}" 2>/dev/null || true)"
   if [ -z "$mapping" ] || [[ "$mapping" != */* ]]; then
-    err "Model secret mapping missing or invalid for ${mapping_key}"
+    err "Model secret mapping missing or invalid for provider ${provider}"
     exit 1
   fi
   secret_name="${mapping%%/*}"
@@ -98,7 +98,7 @@ verify_model_secret_mapping() {
     err "Mapped LLM Secret key not found: ${secret_name}/${secret_key}"
     exit 1
   fi
-  ok "Workflow E2E model ${provider}/${model} uses ${secret_name}/${secret_key}"
+  ok "Workflow E2E model ${provider}/${model} uses ${secret_name}/${secret_key} (provider mapping)"
 }
 
 verify_model_secret_mapping "$E2E_WORKFLOW_MODEL_PROVIDER" "$E2E_WORKFLOW_MODEL_NAME"

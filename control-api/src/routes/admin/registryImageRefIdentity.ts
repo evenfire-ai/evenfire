@@ -1,7 +1,7 @@
 /**
  * Registry Phase 2.5 — evenfire imageRef ↔ entry-name identity check.
  *
- * For an evenfire-hosted (`example.com`) local plugin, the realm
+ * For an evenfire-hosted (`registry.evenfire.ai`) local plugin, the realm
  * resolves the cross-org pull grant from the OCI path as
  * `callerHasGrant("@<org>/<name>")` (spec 2.2 / I5). So the imageRef's repo path
  * `<org>/<name>` MUST equal the entry's scoped name `@<org>/<name>`. A mismatch

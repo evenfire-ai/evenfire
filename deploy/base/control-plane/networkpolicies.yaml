@@ -60,7 +60,7 @@ spec:
     matchExpressions:
     - key: app
       operator: In
-      values: [host-context-controller, workflow-recipes, control-api]
+      values: [host-context-controller, workflow-recipes, control-api, trace-maintenance-worker]
   policyTypes:
   - Egress
   egress:
@@ -81,8 +81,10 @@ metadata:
     clerum.io/policy-type: service
 spec:
   podSelector:
-    matchLabels:
-      app: control-api
+    matchExpressions:
+    - key: app
+      operator: In
+      values: [control-api, trace-maintenance-worker]
   policyTypes:
   - Egress
   egress:
@@ -110,8 +112,10 @@ spec:
   ingress:
   - from:
     - podSelector:
-        matchLabels:
-          app: control-api
+        matchExpressions:
+        - key: app
+          operator: In
+          values: [control-api, trace-maintenance-worker]
     ports:
     - port: 5432
       protocol: TCP
@@ -370,7 +374,7 @@ spec:
         except: []
 ---
 # Mirror of control-api-external-egress for WRC: needed so workflow-recipes can
-# reach example.com (anycast hostname, app-layer pinning). The
+# reach registry.evenfire.ai (anycast hostname, app-layer pinning). The
 # ipBlock.except list excludes non-public/reserved ranges; it is not a hardcoded
 # provider IP list.
 # Scope is rule-level: WRC still reaches Postgres, the K8s API, sandbox-recipes,
@@ -446,8 +450,9 @@ spec:
       protocol: TCP
 ---
 # ─── L2: nginx-workflow-approval-gateway ──────────────────────────────────────
-# Allows workflow mcp-host pods (sandbox-recipes) to call approval/auth endpoints
-# via this nginx gateway, which proxies to control-api:8090.
+# Allows workflow mcp-host pods (sandbox-recipes) to call the bounded
+# approval/auth/usage/tracing endpoints exposed by this nginx gateway, which
+# proxies to control-api:8090.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

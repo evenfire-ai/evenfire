@@ -3,13 +3,10 @@
 import React, { useMemo, useState } from 'react'
 import Link from 'next/link'
 import { Button, CheckboxField, Field, FormSection, SelectInput, TextInput } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import type { CreateLlmPriceInput, LlmModelPrice } from '@lib/api'
-import {
-  LLM_MODELS_BY_PROVIDER,
-  LLM_PROVIDER_OPTIONS,
-  type LlmProvider,
-  isKnownProvider,
-} from '@lib/llm'
+import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
+import { LLM_PROVIDER_OPTIONS, getModelOptions, isKnownProvider } from '@lib/llm'
 import { DEFAULT_CURRENCY, PRICE_FIELDS } from './constants'
 import type { LlmPriceFormProps, PriceFieldKey } from './types'
 
@@ -55,7 +52,10 @@ export function LlmPriceForm({
   const [prices, setPrices] = useState<PriceDraft>(() => initialPriceDraft(initial))
   const [showErrors, setShowErrors] = useState(false)
 
-  const modelSuggestions = LLM_MODELS_BY_PROVIDER[provider as LlmProvider] ?? []
+  // Suggestions come from the allowlist. Prices can be set for a model even if
+  // it is currently disabled, so include disabled rows here.
+  const { models: allowedModels } = useLlmAllowedModels()
+  const modelSuggestions = getModelOptions(allowedModels, provider, { includeDisabled: true })
   // Preserve an unrecognized provider as a selectable option instead of dropping it.
   const providerIsKnown = isKnownProvider(provider)
 
@@ -208,7 +208,7 @@ export function LlmPriceForm({
             <React.Fragment key={budget.id}>
               {index > 0 ? ', ' : ''}
               <Link
-                href={`/cost/token-budgets/${encodeURIComponent(budget.id)}/edit`}
+                href={CONTROL_ROUTES.costAndUsage.editTokenBudget(budget.id)}
                 className="cu-link"
               >
                 {budget.name}

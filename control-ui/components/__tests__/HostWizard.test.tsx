@@ -35,6 +35,23 @@ vi.mock('../../lib/api', () => ({
   }),
   updateAgentUsers: vi.fn().mockResolvedValue({ agentName: '', userIds: [] }),
   updateAgentTeams: vi.fn().mockResolvedValue({ agentName: '', teamIds: [] }),
+  // The model picker now loads the operator allowlist via useLlmAllowedModels.
+  getLlmModels: vi.fn().mockResolvedValue({
+    rows: [
+      {
+        id: 'm1',
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+        vendor: 'OpenAI',
+        display_name: null,
+        context_window_tokens: null,
+        enabled: true,
+        created_at: '',
+        updated_at: '',
+      },
+    ],
+  }),
+  isSilentApiError: vi.fn().mockReturnValue(false),
 }))
 
 // scrollIntoView is used by some step rendering and is not implemented in jsdom
@@ -95,8 +112,8 @@ async function walkToAccessStep(opts?: { agentName?: string }) {
   fireEvent.click(mcpCheckbox)
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
-  // Step 2: Model & Credentials — default model is valid; pick the secret we provided.
-  fireEvent.click(screen.getByLabelText(/Use existing secret/i))
+  // Step 2: Model & Credentials — default model is valid; reuse the secret we provided.
+  fireEvent.click(screen.getByLabelText(/Reuse an existing Secret/i))
   fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
   fireEvent.click(screen.getByRole('option', { name: /secret-a/i }))
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
@@ -116,6 +133,66 @@ function openTeamsAccessTab() {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+})
+
+describe('HostWizard — credential draft is projected onto the active provider domain', () => {
+  it('a Bedrock fallback key does NOT block save nor get written once the fallback is removed', async () => {
+    await renderWizard()
+    await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
+
+    // Step 0: name.
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), {
+      target: { value: 'bedrock-orphan' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    // Step 1: a new context with just a name.
+    fireEvent.click(screen.getByLabelText(/Create new context/i))
+    fireEvent.change(screen.getByPlaceholderText(/context-name/i), { target: { value: 'ctx1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    // Step 2: default "new secret". Make the OpenAI primary usable.
+    fireEvent.change(screen.getByLabelText(/OpenAI API key/i), { target: { value: 'sk-openai' } })
+
+    // Add a fallback and switch it to Bedrock (a different provider than the
+    // primary), then type ONLY one of its two required keys.
+    fireEvent.click(screen.getByRole('button', { name: 'Add fallback provider' }))
+    fireEvent.change(screen.getByLabelText('Provider', { selector: '#llm-fallback-0-provider' }), {
+      target: { value: 'bedrock' },
+    })
+    fireEvent.change(screen.getByLabelText(/Amazon Bedrock access key ID/i), {
+      target: { value: 'AKIA-half-pair' },
+    })
+
+    // While the Bedrock fallback is present, the half-pair correctly blocks.
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+
+    // Remove the fallback → its keys leave the active domain. The orphaned
+    // half-pair must neither block save nor get written.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove fallback 1' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
+    })
+
+    // Walk to the last step and create.
+    fireEvent.click(screen.getByRole('button', { name: 'Next' })) // → Access
+    await continueFromAccessToChannels() // → Channels
+    fireEvent.click(screen.getByRole('button', { name: /Skip channel setup/i }))
+
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'POST',
+        '/api/v1/admin/secrets',
+        expect.objectContaining({ stringData: { 'openai-api-key': 'sk-openai' } })
+      )
+    })
+    const secretCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/secrets')
+    const stringData = (secretCall![2] as { stringData: Record<string, string> }).stringData
+    expect(stringData['aws-access-key-id']).toBeUndefined()
+    expect(stringData['aws-secret-access-key']).toBeUndefined()
+  })
 })
 
 describe('HostWizard — Context creation', () => {

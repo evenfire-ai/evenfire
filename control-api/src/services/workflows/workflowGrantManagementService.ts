@@ -1,4 +1,5 @@
-import { pool } from '../../db.js'
+import { randomUUID } from 'node:crypto'
+import { pool, withTransaction } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import {
   listTeamWorkflowGrants,
@@ -6,6 +7,7 @@ import {
   setTeamWorkflowGrants,
   setWorkflowGrants,
 } from '../directory/index.js'
+import { appendControlApiPermissionEventsInTransaction } from '../tracing/controlApiPermissionEvents.js'
 import { findRecipeNamespace, isRecipeNamespaceAllowed } from './workflowRecipeAccessService.js'
 
 const MAX_GRANTS_PER_RECIPE = 500
@@ -160,22 +162,46 @@ export async function allowWorkflowRecipeApprovalTeam(params: {
     throw new WorkflowGrantHttpError(404, { error: `Team ${teamId} not found` })
   }
 
-  await pool.query(
-    `WITH inserted AS (
-       INSERT INTO workflow_recipe_allowed_teams (recipe_namespace, recipe_name, team_id)
-       VALUES ($1, $2, $3::uuid)
-       ON CONFLICT DO NOTHING
-       RETURNING team_id
-     ), audit AS (
-       INSERT INTO workflow_recipe_allowed_teams_audit (
-         actor_user_id, target_team_id, recipe_namespace, recipe_name, action, payload_json
+  await withTransaction(async db => {
+    const operationId = randomUUID()
+    const inserted = await db.query(
+      `WITH inserted AS (
+         INSERT INTO workflow_recipe_allowed_teams (recipe_namespace, recipe_name, team_id)
+         VALUES ($1, $2, $3::uuid)
+         ON CONFLICT DO NOTHING
+         RETURNING team_id
+       ), audit AS (
+         INSERT INTO workflow_recipe_allowed_teams_audit (
+           actor_user_id, target_team_id, recipe_namespace, recipe_name, action, payload_json
+         )
+         SELECT $4::uuid, team_id, $1, $2, 'allow', $5::jsonb
+           FROM inserted
        )
-       SELECT $4::uuid, team_id, $1, $2, 'allow', '{}'::jsonb
-         FROM inserted
-     )
-     SELECT team_id::text AS "teamId" FROM inserted`,
-    [ns, name, teamId, params.actorUserId]
-  )
+       SELECT team_id::text AS "teamId" FROM inserted`,
+      [
+        ns,
+        name,
+        teamId,
+        params.actorUserId,
+        JSON.stringify({ administrative_operation_id: operationId }),
+      ]
+    )
+    if ((inserted.rowCount ?? 0) === 0) return
+    await appendControlApiPermissionEventsInTransaction(db, {
+      operatorSub: params.actorUserId,
+      operationId,
+      changes: [
+        {
+          action: 'grant',
+          resourceClass: 'workflow_approval_target',
+          resourceRef: `workflow_approval_target:${ns}/${name}`,
+          subject: { kind: 'team', id: teamId },
+          namespace: ns,
+          sourceAuditRef: `workflow_recipe_allowed_teams_audit:operation:${operationId}:action:allow`,
+        },
+      ],
+    })
+  })
 
   return { teamId }
 }
@@ -226,21 +252,46 @@ export async function revokeWorkflowRecipeApprovalTeam(params: {
     throw new WorkflowGrantHttpError(400, { error: `Invalid teamId format: "${params.teamId}"` })
   }
 
-  const result = await pool.query(
-    `WITH deleted AS (
-       DELETE FROM workflow_recipe_allowed_teams
-        WHERE recipe_namespace = $1 AND recipe_name = $2 AND team_id = $3::uuid
-        RETURNING team_id
-     ), audit AS (
-       INSERT INTO workflow_recipe_allowed_teams_audit (
-         actor_user_id, target_team_id, recipe_namespace, recipe_name, action, payload_json
+  const removed = await withTransaction(async db => {
+    const operationId = randomUUID()
+    const result = await db.query(
+      `WITH deleted AS (
+         DELETE FROM workflow_recipe_allowed_teams
+          WHERE recipe_namespace = $1 AND recipe_name = $2 AND team_id = $3::uuid
+          RETURNING team_id
+       ), audit AS (
+         INSERT INTO workflow_recipe_allowed_teams_audit (
+           actor_user_id, target_team_id, recipe_namespace, recipe_name, action, payload_json
+         )
+         SELECT $4::uuid, team_id, $1, $2, 'revoke', $5::jsonb
+           FROM deleted
        )
-       SELECT $4::uuid, team_id, $1, $2, 'revoke', '{}'::jsonb
-         FROM deleted
-     )
-     SELECT team_id::text AS "teamId" FROM deleted`,
-    [ns, name, teamId, params.actorUserId]
-  )
+       SELECT team_id::text AS "teamId" FROM deleted`,
+      [
+        ns,
+        name,
+        teamId,
+        params.actorUserId,
+        JSON.stringify({ administrative_operation_id: operationId }),
+      ]
+    )
+    if ((result.rowCount ?? 0) === 0) return false
+    await appendControlApiPermissionEventsInTransaction(db, {
+      operatorSub: params.actorUserId,
+      operationId,
+      changes: [
+        {
+          action: 'revoke',
+          resourceClass: 'workflow_approval_target',
+          resourceRef: `workflow_approval_target:${ns}/${name}`,
+          subject: { kind: 'team', id: teamId },
+          namespace: ns,
+          sourceAuditRef: `workflow_recipe_allowed_teams_audit:operation:${operationId}:action:revoke`,
+        },
+      ],
+    })
+    return true
+  })
 
-  return { teamId, removed: (result.rowCount ?? 0) > 0 }
+  return { teamId, removed }
 }

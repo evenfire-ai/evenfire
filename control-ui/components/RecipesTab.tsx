@@ -1,7 +1,8 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import type { WorkflowRecipeResource } from '../lib/api'
 import { SectionSearchInput } from './SectionSearchInput'
@@ -10,15 +11,13 @@ import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconRefresh } from './icons'
+import { IconChevronRight, IconRefresh } from './icons'
 
 const RECIPE_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
-  { key: 'namespace', label: 'Namespace' },
   { key: 'phase', label: 'Phase' },
-  { key: 'workloads', label: 'Workloads' },
   { key: 'created', label: 'Created' },
-  { key: 'arrow', label: '' },
+  { key: 'navigation', ariaLabel: 'Navigation', align: 'right' },
 ]
 
 type Props = {
@@ -29,51 +28,8 @@ type Props = {
   onRefresh: () => void
 }
 
-function normalizeRecipePhase(phase?: string): string | undefined {
-  const normalized = phase?.trim().toLowerCase()
-  if (
-    normalized === 'deploying' ||
-    normalized === 'running' ||
-    normalized === 'active' ||
-    normalized === 'failed' ||
-    normalized === 'cancelled'
-  ) {
-    return normalized
-  }
-  return undefined
-}
-
-function getRecipeResourcePhase(item: WorkflowRecipeResource): string {
-  const phase = item.status?.phase?.trim()
-  return phase ? phase.toLowerCase() : 'unknown'
-}
-
-function phaseBadgeStyle(phase?: string): React.CSSProperties {
-  const base: React.CSSProperties = {
-    padding: '2px 8px',
-    borderRadius: 4,
-    fontSize: '0.78rem',
-    fontWeight: 600,
-    display: 'inline-block',
-  }
-  switch (normalizeRecipePhase(phase)) {
-    case 'active':
-      return { ...base, background: '#1a3a2a', color: '#34d399' }
-    case 'failed':
-      return { ...base, background: '#3a1a1a', color: '#f87171' }
-    case 'cancelled':
-      return { ...base, background: 'var(--cu-bg-elevated)', color: 'var(--cu-text-soft)' }
-    case 'deploying':
-      return { ...base, background: '#2a2a1a', color: '#fbbf24' }
-    case 'running':
-      return {
-        ...base,
-        background: 'rgba(var(--cu-accent-rgb), 0.14)',
-        color: 'var(--cu-accent-hover)',
-      }
-    default:
-      return { ...base, background: 'var(--cu-bg-elevated)', color: 'var(--cu-text-soft)' }
-  }
+function normalizeRecipePhase(phase?: string): string {
+  return phase?.trim().toLowerCase() || 'unknown'
 }
 
 export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Props) {
@@ -84,16 +40,16 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
     if (!normalizedSearch) return items
     return items.filter(item => {
       const name = item.metadata?.name ?? ''
-      const ns = item.metadata?.namespace ?? DEFAULT_WORKFLOW_RECIPE_NAMESPACE
-      const phase = getRecipeResourcePhase(item)
+      const namespace = item.metadata?.namespace ?? DEFAULT_WORKFLOW_RECIPE_NAMESPACE
+      const phase = normalizeRecipePhase(item.status?.phase)
       const statusWorkloads = (item.status?.workloads as Array<{ id?: string }> | undefined) ?? []
       const specWorkloads = (item.spec?.workloads as Array<{ id?: string }> | undefined) ?? []
       return [
         name,
-        ns,
+        namespace,
         phase,
-        ...statusWorkloads.map(w => w.id || ''),
-        ...specWorkloads.map(w => w.id || ''),
+        ...statusWorkloads.map(workload => workload.id || ''),
+        ...specWorkloads.map(workload => workload.id || ''),
       ]
         .join(' ')
         .toLowerCase()
@@ -103,11 +59,11 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
   const isInitialLoad = loading && items.length === 0
 
   function detailHref(name: string, namespace: string): string {
-    return `/workflow-recipes/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`
+    return CONTROL_ROUTES.plugins.tab(namespace, name, 'workloads')
   }
 
   return (
-    <div className="cu-card cu-card--viewport-fill" style={{ marginBottom: '1.25rem' }}>
+    <div className="cu-card cu-card--viewport-fill cu-section-card">
       <TablePanelHeader
         title={
           <>
@@ -115,7 +71,7 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
             {isInitialLoad ? 'Plugins' : `Plugins (${filteredItems.length})`}
           </>
         }
-        subtitle="Click a row to view status, run history, and actions."
+        subtitle="Select a plugin to view status, run history, and actions."
         actions={
           <>
             <SectionSearchInput
@@ -137,7 +93,7 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
             <button
               type="button"
               className="cu-btn cu-btn--sm cu-nowrap"
-              onClick={() => router.push('/plugin-workload-sdk')}
+              onClick={() => router.push(CONTROL_ROUTES.plugins.sdk)}
               disabled={isInitialLoad}
             >
               Plugins SDK
@@ -153,15 +109,11 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
           </>
         }
       />
-      {error ? (
-        <div className="cu-banner cu-banner--error" style={{ padding: '0.85rem 1rem 0' }}>
-          {error}
-        </div>
-      ) : null}
+      {error ? <div className="cu-banner cu-banner--error cu-table-error">{error}</div> : null}
 
       {isInitialLoad ? (
         <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+          <table className="cu-table cu-table--header-band cu-installed-plugins-table">
             <thead>
               <TableHeaderRow columns={RECIPE_COLUMNS} />
             </thead>
@@ -176,151 +128,54 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
             'No plugins match this search.'
           ) : (
             <>
-              No plugins installed. Click <strong>Install Plugin</strong> to deploy one.
+              No plugins installed. Select <strong>Install Plugin</strong> to deploy one.
             </>
           )}
         </div>
       ) : (
         <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
+          <table className="cu-table cu-table--header-band cu-installed-plugins-table">
             <thead>
               <TableHeaderRow columns={RECIPE_COLUMNS} />
             </thead>
             <tbody>
               {filteredItems.map(item => {
                 const name = item.metadata?.name ?? '(unnamed)'
-                const ns = item.metadata?.namespace ?? DEFAULT_WORKFLOW_RECIPE_NAMESPACE
-                const key = `${ns}/${name}`
-                const phase = getRecipeResourcePhase(item)
-                const statusWorkloads = item.status?.workloads as
-                  | Array<{ id: string; ready: boolean; replicas?: number }>
-                  | undefined
-                const workloadIds = (
-                  (item.spec?.workloads as Array<{ id?: string }> | undefined) ?? []
-                ).map((w, i) => w.id ?? `wl-${i}`)
+                const namespace = item.metadata?.namespace ?? DEFAULT_WORKFLOW_RECIPE_NAMESPACE
+                const key = `${namespace}/${name}`
+                const phase = normalizeRecipePhase(item.status?.phase)
                 const created = item.metadata?.creationTimestamp
                   ? new Date(item.metadata.creationTimestamp).toLocaleDateString()
                   : '—'
-                const href = detailHref(name, ns)
+                const href = detailHref(name, namespace)
 
                 return (
                   <tr
                     key={key}
                     className="cu-table__row cu-table__row--clickable"
                     onClick={() => router.push(href)}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
                         router.push(href)
                       }
                     }}
                     tabIndex={0}
                     role="link"
                     aria-label={`Open ${name}`}
-                    style={{
-                      borderBottom: '1px solid var(--cu-border-subtle)',
-                      cursor: 'pointer',
-                    }}
                   >
-                    <td style={{ padding: '10px 10px', fontWeight: 600, color: 'var(--cu-text)' }}>
-                      {name}
-                    </td>
-                    <td
-                      style={{
-                        padding: '10px 10px',
-                        color: 'var(--cu-text-soft)',
-                        fontSize: '0.85rem',
-                      }}
-                    >
-                      {ns}
-                    </td>
-                    <td style={{ padding: '10px 10px' }}>
-                      <span aria-label={`Phase: ${phase}`} style={phaseBadgeStyle(phase)}>
+                    <td className="cu-installed-plugin__name">{name}</td>
+                    <td>
+                      <span
+                        className={`cu-plugin-phase cu-plugin-phase--${phase}`}
+                        aria-label={`Phase: ${phase}`}
+                      >
                         {phase}
                       </span>
                     </td>
-                    <td style={{ padding: '10px 10px' }}>
-                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                        {statusWorkloads ? (
-                          statusWorkloads.length === 0 ? (
-                            <span style={{ color: 'var(--cu-text-muted)' }}>—</span>
-                          ) : (
-                            statusWorkloads.map(w => (
-                              <span
-                                key={w.id}
-                                title={w.ready ? 'Ready' : 'Not Ready'}
-                                style={{
-                                  padding: '1px 7px',
-                                  borderRadius: 4,
-                                  background: 'var(--cu-bg-elevated)',
-                                  color: 'var(--cu-text-soft)',
-                                  fontSize: '0.75rem',
-                                  fontFamily: 'monospace',
-                                  border: `1px solid ${w.ready ? 'rgba(var(--cu-success-rgb), 0.5)' : '#4a3a10'}`,
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: 4,
-                                }}
-                              >
-                                <span
-                                  style={{
-                                    color: w.ready ? 'var(--cu-success)' : '#fbbf24',
-                                    fontSize: '0.65rem',
-                                  }}
-                                >
-                                  ●
-                                </span>
-                                {w.id}
-                                {w.replicas !== undefined && (
-                                  <span
-                                    style={{ color: 'var(--cu-text-muted)', fontSize: '0.7rem' }}
-                                  >
-                                    ×{w.replicas}
-                                  </span>
-                                )}
-                              </span>
-                            ))
-                          )
-                        ) : workloadIds.length === 0 ? (
-                          <span style={{ color: 'var(--cu-text-muted)' }}>—</span>
-                        ) : (
-                          workloadIds.map(id => (
-                            <span
-                              key={id}
-                              style={{
-                                padding: '1px 7px',
-                                borderRadius: 4,
-                                background: 'var(--cu-bg-elevated)',
-                                color: 'var(--cu-text-soft)',
-                                fontSize: '0.75rem',
-                                fontFamily: 'monospace',
-                                border: '1px solid var(--cu-border)',
-                              }}
-                            >
-                              {id}
-                            </span>
-                          ))
-                        )}
-                      </div>
-                    </td>
-                    <td
-                      style={{
-                        padding: '10px 10px',
-                        color: 'var(--cu-text-soft)',
-                        fontSize: '0.85rem',
-                      }}
-                    >
-                      {created}
-                    </td>
-                    <td
-                      style={{
-                        padding: '10px 10px',
-                        textAlign: 'right',
-                        color: 'var(--cu-text-muted)',
-                      }}
-                      aria-hidden
-                    >
-                      ›
+                    <td className="cu-installed-plugin__created">{created}</td>
+                    <td className="cu-installed-plugin__navigation" aria-hidden="true">
+                      <IconChevronRight width={18} height={18} />
                     </td>
                   </tr>
                 )

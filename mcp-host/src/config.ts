@@ -19,6 +19,11 @@ export interface Config {
   // Kubernetes namespace
   namespace: string
 
+  // Name of the operator-managed LLM allowlist ConfigMap watched by the
+  // ConfigStore (R3). Configurable so canary/test namespaces can point at a
+  // differently-named artifact; default matches the control-api writer.
+  llmAllowlistConfigMapName: string
+
   // Dev mode: Model configuration from env vars
   devModelProvider?: LlmProvider
   devModelName?: string
@@ -176,6 +181,11 @@ export interface Config {
   // the whole check path (BudgetClient construction + SessionProcessor wiring)
   // is gated on this flag, and the check is fail-open (§0.2).
   budgetsEnabled: boolean
+
+  // Governed tracing defaults ON; false skips best-effort tracing reporter wiring.
+  governedTracingEnabled: boolean
+  approvalPromptHistoryEnabled: boolean
+  approvalPromptHistoryMaxBytes: number
 
   // Workflow mode — set by WRC via CLERUM_WORKFLOW_ENABLED=true on the Pod
   workflowEnabled: boolean
@@ -409,6 +419,12 @@ function parseApprovalConfig(): ApprovalConfig | undefined {
   }
 }
 
+function parseApprovalPromptHistoryMaxBytes(raw: string): number {
+  if (!/^(?:0|[1-9][0-9]*)$/.test(raw)) return Number.NaN
+  const value = Number(raw)
+  return Number.isSafeInteger(value) && value >= 1_024 && value <= 32_768 ? value : Number.NaN
+}
+
 export const config: Config = {
   devMode,
   devHostConfig: getDevHostConfig(),
@@ -424,6 +440,14 @@ export const config: Config = {
 
   // Kubernetes namespace
   namespace: getEnv('CLERUM_NAMESPACE', 'default')!,
+
+  // LLM allowlist ConfigMap name (R3). CROSS-SERVICE CONTRACT: the default
+  // (`clerum-llm-allowed-models`) is the CM produced by control-api
+  // (control-api/src/services/llmAllowedModelsConfigMap.ts) and also read by WRC
+  // (workflow-recipes/src/workflow/modelConfigHandler.ts). The env override is a
+  // canary/test knob for THIS mcp-host only — pointing it at a CM control-api does
+  // not write breaks the allowlist seam (the Host then sees no allowed models).
+  llmAllowlistConfigMapName: getEnv('CLERUM_LLM_ALLOWED_MODELS_CM', 'clerum-llm-allowed-models')!,
 
   // Dev mode model config. Provider is validated (and only resolved) in dev mode;
   // resolveDevModelProvider fail-closes on a set-but-invalid value.
@@ -683,6 +707,13 @@ export const config: Config = {
 
   // Token budgets (P1)
   budgetsEnabled: getEnvBool('CLERUM_BUDGETS_ENABLED', false),
+
+  // Governed tracing
+  governedTracingEnabled: getEnvBool('GOVERNED_TRACING_ENABLED', true),
+  approvalPromptHistoryEnabled: process.env.TRACING_APPROVAL_PROMPT_HISTORY_ENABLED === 'true',
+  approvalPromptHistoryMaxBytes: parseApprovalPromptHistoryMaxBytes(
+    getEnv('TRACING_APPROVAL_PROMPT_HISTORY_MAX_BYTES', '16384')!
+  ),
 
   // Workflow mode
   workflowEnabled: getEnvBool('CLERUM_WORKFLOW_ENABLED', false),

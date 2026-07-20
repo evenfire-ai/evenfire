@@ -271,7 +271,11 @@ spec:
                       description: LLM model name (e.g., glm-4.7, gpt-4o, claude-3-opus).
                     provider:
                       type: string
-                      enum: [openai, claude, zai, bailian]
+                      # bedrock AND azure intentionally absent: the WRC configure
+                      # transport is mono-credential and cannot deliver Bedrock's key
+                      # pair nor azure's required non-secret AZURE_OPENAI_ENDPOINT —
+                      # fail at admission, not mid-workflow (see workflowService).
+                      enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita]
                       description: LLM provider.
                     secretRef:
                       type: object
@@ -539,7 +543,10 @@ spec:
                             type: string
                           provider:
                             type: string
-                            enum: [openai, claude, zai, bailian]
+                            # bedrock AND azure intentionally absent (mono-credential
+                            # WRC transport; see the comment on the first llm provider
+                            # enum above).
+                            enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita]
                           soul:
                             type: string
                             description: Per-step SOUL content override.
@@ -2038,6 +2045,9 @@ spec:
                         enum: [agentic, snippet, custom]
                       modelUsed:
                         type: string
+                      approvalBindingSha256:
+                        type: string
+                        pattern: '^[0-9a-f]{64}$'
                       toolsCalled:
                         type: array
                         items:

@@ -63,6 +63,13 @@ export interface ToolRegistry {
   register(tool: Tool): void
 }
 
+export type ToolTraceKind = 'internal_tool' | 'mcp_server_tool' | 'workflow'
+
+export interface ToolTraceDescriptor {
+  kind: ToolTraceKind
+  sourceRef: string | null
+}
+
 /**
  * Passed to Tool.execute() for tools that stream output during execution.
  * Tools that opt in (via supportsProgressOutput() === true) call onOutput()
@@ -85,6 +92,12 @@ export interface Tool {
   execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput>
   requiresSanitization(): boolean
   requiresApproval(): boolean
+  /**
+   * Safe, producer-owned classification for governed replay. This must never
+   * include tool arguments or output. Native tools may omit it and are then
+   * classified as internal by the orchestration layer.
+   */
+  traceDescriptor?(params: Record<string, unknown>, output?: ToolOutput): ToolTraceDescriptor
   /**
    * Optional. Return true if this tool writes to `context.onOutput()` during
    * execute(). Signals the tool-use loop to attach a progress watcher.

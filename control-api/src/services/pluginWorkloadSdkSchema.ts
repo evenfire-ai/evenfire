@@ -11,6 +11,11 @@ export async function applyPluginWorkloadSdkSchema(db: DbClient): Promise<void> 
       recipe_namespace TEXT NOT NULL,
       recipe_name TEXT NOT NULL,
       capability_family TEXT NOT NULL CHECK (capability_family IN ('promptBridge','clientNotifications')),
+      -- Explicit provider bound to a promptBridge grant (R1: credentials resolve
+      -- per-provider, not per-model). NULLABLE: rows written before migration
+      -- 0050 carry NULL and are read back with a provider inferred from the
+      -- model list (control-ui fallback). clientNotifications grants leave it NULL.
+      provider TEXT,
       allowed_models JSONB NOT NULL DEFAULT '[]'::jsonb,
       allowed_event_types JSONB NOT NULL DEFAULT '[]'::jsonb,
       allowed_target_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -67,5 +72,18 @@ export async function dropPluginWorkloadSdkSuperAdminApprovedColumn(db: DbClient
   await db.query(`
     ALTER TABLE plugin_workload_sdk_grants
       DROP COLUMN IF EXISTS super_admin_approved;
+  `)
+}
+
+/**
+ * Adds the explicit `provider` column to promptBridge grants (R1). Idempotent
+ * (IF NOT EXISTS) so it is a no-op on fresh clusters that already created the
+ * column via applyPluginWorkloadSdkSchema. Existing rows keep NULL — the read
+ * path (control-ui) falls back to inferring the provider from the model list.
+ */
+export async function addPluginWorkloadSdkProviderColumn(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE plugin_workload_sdk_grants
+      ADD COLUMN IF NOT EXISTS provider TEXT;
   `)
 }

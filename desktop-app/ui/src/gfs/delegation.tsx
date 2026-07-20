@@ -1,6 +1,9 @@
 import { useState } from 'react'
-import { Button, DropdownSelect, Field, SelectableOption, StatusBanner } from '@components/Common'
-import type { GfsDelegationPanelProps, GfsDelegationSubjectType } from './delegation.types'
+import { Button, StatusBanner } from '@components/Common'
+import { GfsSubjectBatchError } from '@lib/gfsSubjectBatch'
+import { GfsPermissionDropdown } from '@/gfs/GfsPermissionDropdown'
+import { GfsSubjectPicker } from '@/gfs/GfsSubjectPicker'
+import type { GfsDelegationPanelProps } from './delegation.types'
 
 /**
  * P4-S07 — Desktop gfs delegation panel (renderer). A folder owner delegates
@@ -9,8 +12,8 @@ import type { GfsDelegationPanelProps, GfsDelegationSubjectType } from './delega
  * in the main process and passed in). Enforcement is ALWAYS server-side
  * (control-api/gfsc) — hiding a control is usability, never the security boundary.
  *
- * Composes the shared Common primitives (Field/DropdownSelect/SelectableOption/
- * Button/StatusBanner) per the desktop-app/ui frontend rules — no raw inputs/buttons.
+ * Composes the shared Common primitives through the GFS picker controls per the
+ * desktop-app/ui frontend rules — no raw inputs/buttons.
  */
 
 export function GfsDelegationPanel({
@@ -21,9 +24,10 @@ export function GfsDelegationPanel({
   onGrant,
   onCreateShare,
 }: GfsDelegationPanelProps) {
-  const [subjectType, setSubjectType] = useState<GfsDelegationSubjectType>('user')
-  const [subjectId, setSubjectId] = useState('')
-  const [bits, setBits] = useState<string[]>([])
+  const [subjectKeys, setSubjectKeys] = useState<string[]>([])
+  const [bits, setBits] = useState<string[]>(() =>
+    affordances.grantableBits.includes('read') ? ['read'] : affordances.grantableBits.slice(0, 1)
+  )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -37,110 +41,54 @@ export function GfsDelegationPanel({
     )
   }
 
-  const toggle = (bit: string) =>
-    setBits(prev => (prev.includes(bit) ? prev.filter(b => b !== bit) : [...prev, bit]))
-
   async function run(action: () => Promise<void>) {
     setError(null)
     setBusy(true)
     try {
       await action()
-      setSubjectId('')
-      setBits([])
+      setSubjectKeys([])
     } catch (e) {
       // Surface the server's verdict (e.g. escalation_rejected) — never swallow.
+      if (e instanceof GfsSubjectBatchError) setSubjectKeys(e.failedSubjectKeys)
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
     }
   }
 
-  const visibleSubjects = subjectOptions.filter(subject => subject.type === subjectType)
-  const subjectValid = subjectId.trim().length > 0
-  const subjectKey = `${subjectType}:${subjectId}`
-
   return (
     <div className="da-gfs-delegation">
-      <div className="da-gfs-delegation__summary" role="note">
-        <strong>Grantable permissions</strong>
-        <span>{affordances.grantableBits.join(', ')}</span>
-      </div>
-      <div className="da-gfs-delegation__subject-grid">
-        <Field label="Subject type" htmlFor="gfs-delegation-subject-type">
-          <DropdownSelect
-            ariaLabel="Subject type"
-            id="gfs-delegation-subject-type"
-            value={subjectType}
-            onChange={value => {
-              setSubjectType(value as GfsDelegationSubjectType)
-              setSubjectId('')
-            }}
-            disabled={busy}
-            options={[
-              { value: 'user', label: 'User' },
-              { value: 'team', label: 'Team' },
-            ]}
-            placeholder="Choose a subject type"
-          />
-        </Field>
-        <Field
-          label={subjectType === 'user' ? 'User' : 'Team'}
-          htmlFor="gfs-delegation-subject"
-          hint={`Choose the ${subjectType} that will receive access.`}
-        >
-          <DropdownSelect
-            ariaLabel="subject"
-            id="gfs-delegation-subject"
-            value={subjectId}
-            onChange={setSubjectId}
-            disabled={busy || subjectOptionsLoading || visibleSubjects.length === 0}
-            options={visibleSubjects.map(subject => ({
-              value: subject.id,
-              label: subject.description
-                ? `${subject.label} (${subject.description})`
-                : subject.label,
-            }))}
-            placeholder={
-              subjectOptionsLoading
-                ? `Loading ${subjectType === 'user' ? 'users' : 'teams'}...`
-                : `Choose a ${subjectType}`
-            }
-          />
-        </Field>
+      <div className="da-gfs-delegation__composer">
+        <GfsSubjectPicker
+          disabled={busy}
+          loading={subjectOptionsLoading}
+          onChange={setSubjectKeys}
+          options={subjectOptions}
+          value={subjectKeys}
+        />
+        <GfsPermissionDropdown
+          disabled={busy}
+          onChange={setBits}
+          permissions={affordances.grantableBits}
+          value={bits}
+        />
       </div>
       {subjectOptionsError ? <StatusBanner tone="error" text={subjectOptionsError} /> : null}
-      <Field label="Permissions">
-        {/* Only bits the caller itself holds are offered (no escalation). */}
-        <div className="da-gfs-delegation__bits" role="group" aria-label="permissions">
-          {affordances.grantableBits.map(bit => (
-            <SelectableOption
-              key={bit}
-              type="button"
-              size="sm"
-              selected={bits.includes(bit)}
-              aria-pressed={bits.includes(bit)}
-              onClick={() => toggle(bit)}
-            >
-              {bit}
-            </SelectableOption>
-          ))}
-        </div>
-      </Field>
       <div className="da-gfs-delegation__actions">
         <Button
           type="button"
           loading={busy}
-          disabled={busy || !subjectValid || bits.length === 0}
-          onClick={() => run(() => onGrant(subjectKey, bits))}
+          disabled={busy || subjectKeys.length === 0 || bits.length === 0}
+          onClick={() => run(() => onGrant(subjectKeys, bits))}
         >
-          Grant
+          Grant access
         </Button>
         {affordances.canCreateShare && onCreateShare && (
           <Button
             type="button"
             variant="outline"
-            disabled={busy || !subjectValid}
-            onClick={() => run(() => onCreateShare(subjectKey))}
+            disabled={busy || subjectKeys.length === 0}
+            onClick={() => run(() => onCreateShare(subjectKeys))}
           >
             Create share
           </Button>

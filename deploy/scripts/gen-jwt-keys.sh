@@ -53,6 +53,10 @@ OAUTH_STATE_HMAC_SECRET=$(openssl rand -hex 32)
 OAUTH_ENCRYPTION_KEY=$(openssl rand -hex 32)
 echo "  oauth-state-hmac and oauth-encryption-key generated."
 
+echo "=== Generating tracing approval prompt-history encryption key ==="
+TRACING_APPROVAL_PROMPT_HISTORY_ENCRYPTION_KEY=$(openssl rand -hex 32)
+echo "  tracing prompt-history encryption key generated."
+
 WRC_PRIVATE_KEY=$(cat "$TMPDIR/wrc-private.pem")
 WRC_PUBLIC_KEY=$(cat "$TMPDIR/wrc-public.pem")
 SESSION_PRIVATE_KEY=$(cat "$TMPDIR/session-private.pem")
@@ -83,6 +87,7 @@ kctl create secret generic control-api-secrets \
   --from-literal="CONTROL_API_ADMIN_BOOTSTRAP_PASSWORD_HASH=$ADMIN_HASH" \
   --from-literal="CONTROL_API_OAUTH_STATE_HMAC_SECRET=$OAUTH_STATE_HMAC_SECRET" \
   --from-literal="CONTROL_API_OAUTH_ENCRYPTION_KEY=$OAUTH_ENCRYPTION_KEY" \
+  --from-literal="TRACING_APPROVAL_PROMPT_HISTORY_ENCRYPTION_KEY=$TRACING_APPROVAL_PROMPT_HISTORY_ENCRYPTION_KEY" \
   --dry-run=client -o yaml | kctl apply -f -
 
 # --- 2. control-ui-secrets (control-plane namespace) ---

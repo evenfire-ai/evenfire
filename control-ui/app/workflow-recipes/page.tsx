@@ -10,6 +10,7 @@ import { RecipeEditor } from '@components/RecipeEditor'
 import { RecipesTab } from '@components/RecipesTab'
 import { IconWorkflow } from '@components/Sidebar/icons'
 import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { isSilentApiError } from '@lib/api'
 import { buildControlUiLoginPath, getCurrentControlUiPath } from '@lib/authRedirect'
 import { useRecipePolling } from '@lib/hooks/useRecipePolling'
@@ -62,7 +63,7 @@ function WorkflowRecipesPageContent() {
     const params = new URLSearchParams()
     params.set('entry', entry)
     params.set('version', version)
-    router.replace(`/registry/install?${params.toString()}`)
+    router.replace(CONTROL_ROUTES.marketplace.install(Object.fromEntries(params)))
   }, [authState.isLoggedIn, searchParams, router])
 
   useEffect(() => {

@@ -9,7 +9,9 @@ export default defineConfig({
     fileParallelism: false,
     maxWorkers: 1,
     pool: 'threads',
-    retry: 2,
+    // Real-Postgres tests mutate shared database state and cannot be retried safely
+    // after a timeout because the abandoned async work may still commit.
+    retry: process.env.CONTROL_API_REAL_PG_ADMIN_URL ? 0 : 2,
     testTimeout: 10_000,
     sequence: {
       hooks: 'list',

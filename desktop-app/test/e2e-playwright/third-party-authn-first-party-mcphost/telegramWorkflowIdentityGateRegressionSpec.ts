@@ -22,9 +22,10 @@ import {
   type TelegramClientIdentity,
   openTelegramClient,
   sendTelegramClientMessage,
+  sendTelegramClientMessageExpectRejected,
+  setTelegramClientIdentity,
   telegramReplyItems,
   waitForPendingApprovalId,
-  waitForTelegramFinalReplyTextAfter,
 } from './telegramE2eClient'
 import {
   approvalRequestCountForRecipe,
@@ -154,18 +155,8 @@ async function stableTelegramReplyCount(page: Page, minimum = 0): Promise<number
   throw new Error(`Telegram reply count did not stabilize at or above ${minimum}`)
 }
 
-async function expectNoTelegramReply(page: Page): Promise<void> {
-  await expect
-    .poll(() => stableTelegramReplyCount(page), {
-      timeout: 30_000,
-      intervals: [500, 1_000, 2_000],
-      message: 'non-allowlisted Telegram sender should not receive an mcp-host reply',
-    })
-    .toBe(0)
-}
-
 test.describe('Telegram workflow identity gate scope regression', () => {
-  test('Fake Telegram allows unverified normal chat but denies unverified workflow access', async ({
+  test('Fake Telegram rejects unverified provider messages and allows verified workflow access', async ({
     browser,
   }) => {
     test.setTimeout(720_000)
@@ -177,17 +168,17 @@ test.describe('Telegram workflow identity gate scope regression', () => {
     const telegramIdentitySeed = Date.now() % 1_000_000
     const unverifiedUser: TelegramClientIdentity = {
       providerUserId: String(830_000_000 + telegramIdentitySeed * 10 + 1),
-      providerChannelId: String(840_000_000 + telegramIdentitySeed * 10 + 1),
+      providerChannelId: String(830_000_000 + telegramIdentitySeed * 10 + 1),
       conversationLabel: 'Unverified Telegram private chat',
     }
     const verifiedUser: TelegramClientIdentity = {
       providerUserId: String(830_000_000 + telegramIdentitySeed * 10 + 2),
-      providerChannelId: String(840_000_000 + telegramIdentitySeed * 10 + 2),
+      providerChannelId: String(830_000_000 + telegramIdentitySeed * 10 + 2),
       conversationLabel: 'Verified Telegram private chat',
     }
     const nonAllowlistedUser: TelegramClientIdentity = {
       providerUserId: String(830_000_000 + telegramIdentitySeed * 10 + 3),
-      providerChannelId: String(840_000_000 + telegramIdentitySeed * 10 + 3),
+      providerChannelId: String(830_000_000 + telegramIdentitySeed * 10 + 3),
       conversationLabel: 'Non-allowlisted Telegram private chat',
     }
     const telegramMessageBase = Math.floor(Date.now() / 1000) * 1000
@@ -203,9 +194,10 @@ test.describe('Telegram workflow identity gate scope regression', () => {
         cleanupTelegramMediumBinding(verifiedUser)
         cleanupTelegramMediumBinding(nonAllowlistedUser)
 
+        const { userId, userToken } = await loginAs(E2E_EMAIL)
         installFakeTelegramProvider()
         configureChannelReaderTelegramApiRoot()
-        applyTelegramCommunicationChannel(HOST_REF, [unverifiedUser, verifiedUser])
+        applyTelegramCommunicationChannel(HOST_REF, [unverifiedUser, verifiedUser], [userId])
         waitForChannelReader(HOST_REF)
         waitForStableFakeTelegramReader(HOST_REF)
         expectChannelReaderHasNoProviderHttpIngress(HOST_REF)
@@ -218,7 +210,6 @@ test.describe('Telegram workflow identity gate scope regression', () => {
           })
           .toBeGreaterThan(0)
 
-        const { userId, userToken } = await loginAs(E2E_EMAIL)
         await enrollTelegramMedium(userToken, userId, verifiedUser)
         installWorkflowRecipe({ recipeName: unverifiedRecipe, marker: unverifiedMarker })
         await installWorkflowRecipeForUser({
@@ -232,54 +223,37 @@ test.describe('Telegram workflow identity gate scope regression', () => {
         telegramPortForward = telegram.portForward
       })
 
-      await test.step('Unverified allowlisted Telegram normal chat reaches mcp-host', async () => {
+      await test.step('Unverified allowlisted Telegram normal chat fails closed', async () => {
         if (!telegramPage) throw new Error('Telegram user client was not initialized')
-        const before = await stableTelegramReplyCount(telegramPage)
-        await sendTelegramClientMessage(
+        await sendTelegramClientMessageExpectRejected(
           telegramPage,
           'Hello. Please answer with a short normal chat response.',
           telegramMessageBase + 11,
           unverifiedUser
         )
-        const reply = await finalTelegramReplyTextAfter(telegramPage, before)
-        expect(reply).not.toMatch(
-          /Could not verify this Telegram conversation for workflow access/i
-        )
         expect(approvalRequestCountForRecipe(unverifiedRecipe)).toBe(0)
         expect(workflowRunCountForRecipe(unverifiedRecipe)).toBe(0)
       })
 
-      await test.step('Unverified allowlisted Telegram workflow listing is denied', async () => {
+      await test.step('Unverified allowlisted Telegram workflow listing fails closed', async () => {
         if (!telegramPage) throw new Error('Telegram user client was not initialized')
-        const before = await stableTelegramReplyCount(telegramPage, 1)
-        await sendTelegramClientMessage(
+        await sendTelegramClientMessageExpectRejected(
           telegramPage,
           'what workflows are available?',
           telegramMessageBase + 12,
           unverifiedUser
         )
-        await waitForTelegramFinalReplyTextAfter(
-          telegramPage,
-          before,
-          /Could not verify this Telegram conversation for workflow access/i
-        )
         expect(approvalRequestCountForRecipe(unverifiedRecipe)).toBe(0)
         expect(workflowRunCountForRecipe(unverifiedRecipe)).toBe(0)
       })
 
-      await test.step('Unverified allowlisted Telegram workflow trigger is denied', async () => {
+      await test.step('Unverified allowlisted Telegram workflow trigger fails closed', async () => {
         if (!telegramPage) throw new Error('Telegram user client was not initialized')
-        const before = await stableTelegramReplyCount(telegramPage, 2)
-        await sendTelegramClientMessage(
+        await sendTelegramClientMessageExpectRejected(
           telegramPage,
           `Run ${unverifiedRecipe} with marker: ${unverifiedMarker}.`,
           telegramMessageBase + 13,
           unverifiedUser
-        )
-        await waitForTelegramFinalReplyTextAfter(
-          telegramPage,
-          before,
-          /Could not verify this Telegram conversation for workflow access/i
         )
         expect(pendingApprovalCountForRecipe(unverifiedRecipe)).toBe(0)
         expect(workflowRunCountForRecipe(unverifiedRecipe)).toBe(0)
@@ -287,19 +261,19 @@ test.describe('Telegram workflow identity gate scope regression', () => {
 
       await test.step('Non-allowlisted Telegram sender is ignored by channel-reader', async () => {
         if (!telegramPage) throw new Error('Telegram user client was not initialized')
-        await sendTelegramClientMessage(
+        await sendTelegramClientMessageExpectRejected(
           telegramPage,
           'what workflows are available?',
           telegramMessageBase + 14,
           nonAllowlistedUser
         )
-        await expectNoTelegramReply(telegramPage)
         expect(approvalRequestCountForRecipe(unverifiedRecipe)).toBe(0)
         expect(workflowRunCountForRecipe(unverifiedRecipe)).toBe(0)
       })
 
       await test.step('Verified Telegram workflow request still reaches the approved path', async () => {
         if (!telegramPage) throw new Error('Telegram user client was not initialized')
+        await setTelegramClientIdentity(telegramPage, verifiedUser)
         const beforeList = await stableTelegramReplyCount(telegramPage)
         await sendTelegramClientMessage(
           telegramPage,

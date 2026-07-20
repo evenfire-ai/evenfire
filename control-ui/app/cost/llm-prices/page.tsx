@@ -7,6 +7,7 @@ import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { LlmPriceTable } from '@components/LlmPriceTable'
 import { useToast } from '@components/Toast'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type BudgetRef,
   type LlmModelPrice,
@@ -95,7 +96,7 @@ export default function LlmPricesPage() {
 
   function handleAddForUnpriced(model: UnpricedModel) {
     const query = new URLSearchParams({ provider: model.provider, model: model.model })
-    router.push(`/cost/llm-prices/new?${query.toString()}`)
+    router.push(CONTROL_ROUTES.costAndUsage.newLlmPrice(Object.fromEntries(query)))
   }
 
   useEffect(() => {
@@ -120,7 +121,7 @@ export default function LlmPricesPage() {
             <React.Fragment key={budget.id}>
               {index > 0 ? ', ' : ''}
               <Link
-                href={`/cost/token-budgets/${encodeURIComponent(budget.id)}/edit`}
+                href={CONTROL_ROUTES.costAndUsage.editTokenBudget(budget.id)}
                 className="cu-link"
               >
                 {budget.name}
@@ -160,8 +161,8 @@ export default function LlmPricesPage() {
             </div>
           ) : null
         }
-        onCreate={() => router.push('/cost/llm-prices/new')}
-        onEdit={id => router.push(`/cost/llm-prices/${encodeURIComponent(id)}/edit`)}
+        onCreate={() => router.push(CONTROL_ROUTES.costAndUsage.newLlmPrice())}
+        onEdit={id => router.push(CONTROL_ROUTES.costAndUsage.editLlmPrice(id))}
         onDelete={handleDelete}
         onRefresh={loadAll}
         deletingId={deletingId}

@@ -1,10 +1,6 @@
-import { AuthGate } from '@components/AuthGate'
-import { SettingsContent } from '../SettingsContent'
+import { redirect } from 'next/navigation'
+import { PROFILE_ROUTES } from '@constants/routes'
 
 export default function SocialSettingsPage() {
-  return (
-    <AuthGate>
-      <SettingsContent activeSettingsTab="social" activeSocialTab="telegram" />
-    </AuthGate>
-  )
+  redirect(PROFILE_ROUTES.settings.social('telegram'))
 }

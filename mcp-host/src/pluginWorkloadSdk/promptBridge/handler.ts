@@ -44,6 +44,7 @@ export interface PromptBridgeHandlerDeps {
     inputTokens: number
     outputTokens: number
     callerRef: string
+    metadata?: Record<string, unknown>
   }) => void
 }
 
@@ -194,6 +195,9 @@ export class PromptBridgeHandler {
         maxTokens: clampMaxTokens(request.maxTokens, authorized.maxOutputTokens),
         temperature: request.temperature ?? authorized.modelPolicy?.temperature,
         timeoutMs: this.deps.promptTimeoutMs,
+        // R5 F6 — same-provider failover gated by the grant's allowed models.
+        // The bridge never switches provider, so these stay inside the grant.
+        fallbackModels: authorized.allowedModels?.filter(m => m !== authorized.model),
       })
 
       this.deps.onUsage?.({
@@ -201,6 +205,7 @@ export class PromptBridgeHandler {
         inputTokens: completion.usage.inputTokens,
         outputTokens: completion.usage.outputTokens,
         callerRef,
+        ...(request.metadata ? { metadata: request.metadata } : {}),
       })
 
       await this.deps.controlApiClient.reportInvocationStatus(

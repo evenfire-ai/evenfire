@@ -8,12 +8,25 @@ import {
 
 // ─── Mock Factories ─────────────────────────────────────────────────────
 
+// The R3 allowlist ConfigMap (clerum-llm-allowed-models) is read via
+// `readConfigMapWithPresence`; the secret-mapping ConfigMap via `readConfigMap`.
+// `allowlist` defaults to null → `{ exists: false }` (absent → degraded mode).
+// Fixture allowlist values mirror control-api buildConfigMapData
+// (llmAllowedModelsConfigMap.ts) — keep in sync.
 function mockK8s(
   configMap: Record<string, string> | null = null,
-  secret: Record<string, string> | null = null
+  secret: Record<string, string> | null = null,
+  allowlist: Record<string, string> | null = null
 ): K8sSecretReader {
   return {
-    readConfigMap: vi.fn().mockResolvedValue(configMap),
+    readConfigMap: vi.fn(async (_namespace: string, name: string) =>
+      name === 'clerum-llm-allowed-models' ? allowlist : configMap
+    ),
+    readConfigMapWithPresence: vi.fn(async () =>
+      allowlist === null
+        ? ({ exists: false } as const)
+        : ({ exists: true, data: allowlist } as const)
+    ),
     readSecret: vi.fn().mockResolvedValue(secret),
   }
 }
@@ -27,7 +40,8 @@ function mockMcpHost(
   }
 }
 
-const DEFAULT_CONFIGMAP = { 'openai__gpt-4': 'openai-secret/apiKey' }
+// New format (R1): the mapping key is the provider, not `provider__model`.
+const DEFAULT_CONFIGMAP = { openai: 'openai-secret/apiKey' }
 const DEFAULT_SECRET = { apiKey: 'sk-test-super-secret-key-12345' }
 
 // ─── S11: Zero-Secret-Knowledge — coordinator never sees apiKey ────────
@@ -90,11 +104,15 @@ describe('S11: coordinator zero-secret-knowledge invariant', () => {
     expect(result.status).toBe(400)
     expect(result.body.error).toContain('Invalid provider')
     // Should not reveal any ConfigMap data
-    expect(JSON.stringify(result.body)).not.toContain('openai__gpt-4')
+    expect(JSON.stringify(result.body)).not.toContain('openai-secret/apiKey')
     expect(JSON.stringify(result.body)).not.toContain('openai-secret')
   })
 
-  it('404 error for valid provider but unknown model does not leak ConfigMap data', async () => {
+  it('R1: valid provider resolves regardless of model (per-model gate removed) and does not leak ConfigMap data', async () => {
+    // Post-R1 the credential is keyed by provider, so any model name (that
+    // passes the shape regex) resolves via the provider key. The per-model 404
+    // gate is intentionally gone — allowlist enforcement moves to R3. The
+    // no-leak invariant still holds: the response never echoes ConfigMap values.
     const k8s = mockK8s(DEFAULT_CONFIGMAP, DEFAULT_SECRET)
     const handler = new ModelConfigHandler(k8s, mockMcpHost())
 
@@ -103,7 +121,7 @@ describe('S11: coordinator zero-secret-knowledge invariant', () => {
       'http://mcp:8080',
       'tok'
     )
-    expect(result.status).toBe(404)
+    expect(result.status).toBe(202)
     expect(JSON.stringify(result.body)).not.toContain('openai-secret')
   })
 })
@@ -174,7 +192,7 @@ describe('S10: apiKey only on WRC→mcp_host leg', () => {
   it('supports api-key (hyphenated) as alternative Secret field name', async () => {
     // Post-refactor: the ConfigMap value is `"secretName/keyName"` — the keyName is
     // addressable per-entry, so hyphenated names work the same as camelCase.
-    const k8s = mockK8s({ 'openai__gpt-4': 'openai-secret/api-key' }, { 'api-key': 'sk-alt-key' })
+    const k8s = mockK8s({ openai: 'openai-secret/api-key' }, { 'api-key': 'sk-alt-key' })
     const mcpHost = mockMcpHost()
     const handler = new ModelConfigHandler(k8s, mcpHost)
 

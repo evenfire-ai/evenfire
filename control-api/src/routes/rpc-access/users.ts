@@ -1,20 +1,88 @@
-import { Router } from 'express'
+import express, { Router } from 'express'
 import type { Request } from 'express'
 import { config } from '../../config.js'
 import { K8sGateway } from '../../k8s.js'
 import {
-  requireRpcTokenHostMatch,
   requireRpcTokenUserMatch,
   requireValidRpcAccessToken,
   requireValidRpcAccessTokenAny,
 } from '../../middleware/rpcAccessAuth.js'
 import type { RpcAccessClaims } from '../../profileTypes.js'
 import { resolveInvocableMcpServersForContexts } from '../../services/access/mcpInvocable.js'
-import { getTeamAgents, getUserAgents, getUserContexts } from '../../services/directory/index.js'
+import {
+  type RpcHostAccessDenialReason,
+  type RpcHostAccessDirectory,
+  authorizeRpcHostAccess,
+} from '../../services/access/rpcHostAccessAuthorizer.js'
+import { getUserAgents, getUserContexts } from '../../services/directory/index.js'
+import {
+  type DirectRunAttributionBindingService,
+  DirectRunBindingConflictError,
+} from '../../services/tracing/directRunAttributionBindingService.js'
+import { parseDirectRunBindingRequest } from '../../services/tracing/directRunBindingRequest.js'
 
-export function createRpcAccessUsersRouter(gateway: K8sGateway): Router {
+type RpcAccessUsersRouterOptions = {
+  bindingService: Pick<DirectRunAttributionBindingService, 'bind'>
+  directory?: RpcHostAccessDirectory
+  bindingBudgetMs?: number
+}
+
+const DEFAULT_DIRECT_RUN_BINDING_BUDGET_MS = 750
+
+const HOST_ACCESS_SCOPES = [
+  'host:message:invoke',
+  'host:status:read',
+  'host:health:read',
+  'host:activity:read',
+  'host:approval:write',
+  'host:model:write',
+  'host:task:read',
+  'host:session:read',
+  'desktop:view',
+] as const
+
+type RpcAuthedRequest = Request & { rpcAuth?: RpcAccessClaims }
+
+function logHostAccessDenial(
+  req: RpcAuthedRequest,
+  reason: RpcHostAccessDenialReason | 'claims_missing'
+): void {
+  req.log?.warn(
+    { event: 'rpc_host_access_denied', reason },
+    'rpc host access denied by control-plane authority'
+  )
+}
+
+async function bindDirectRunWithinBudget(
+  bindingService: Pick<DirectRunAttributionBindingService, 'bind'>,
+  input: Parameters<DirectRunAttributionBindingService['bind']>[0],
+  budgetMs: number
+): Promise<'recorded' | 'unavailable' | 'conflict'> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const bindingAttempt = bindingService.bind(input).then(
+    () => 'recorded' as const,
+    error =>
+      error instanceof DirectRunBindingConflictError
+        ? ('conflict' as const)
+        : ('unavailable' as const)
+  )
+  const deadline = new Promise<'unavailable'>(resolve => {
+    timeout = setTimeout(() => resolve('unavailable'), budgetMs)
+  })
+  try {
+    return await Promise.race([bindingAttempt, deadline])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
+
+export function createRpcAccessUsersRouter(
+  gateway: K8sGateway,
+  options: RpcAccessUsersRouterOptions
+): Router {
   const router = Router()
-  const mcpServerNamespace = config.mcpServersNamespace
+  const { bindingService, directory } = options
+  const bindingBudgetMs = options.bindingBudgetMs ?? DEFAULT_DIRECT_RUN_BINDING_BUDGET_MS
 
   router.get(
     '/rpc/access/users/:userId/contexts',
@@ -51,7 +119,7 @@ export function createRpcAccessUsersRouter(gateway: K8sGateway): Router {
         const userContexts = await getUserContexts(req.params.userId)
         const servers = await resolveInvocableMcpServersForContexts(
           gateway,
-          mcpServerNamespace,
+          config.mcpServersNamespace,
           userContexts.contextIds
         )
         res.status(200).json({
@@ -65,58 +133,111 @@ export function createRpcAccessUsersRouter(gateway: K8sGateway): Router {
     }
   )
 
-  // Authorization gate: verifies the user has an explicit user_agents row for
-  // the requested host (directly, or via team membership) before returning the
-  // host's invocation URL. Without an explicit grant, an agent created without
-  // selecting any authorized users would otherwise be silently unusable by
-  // everyone. Population: PUT /admin/agents/:agentName/users
-  // (agentAccess.setAgentUsers). Tests: test/routes.rpcAccessUsersMcpHost.test.ts
-  // (16 cases).
+  // One control-plane authority serves both read-only Host resolution and the
+  // message-path resolve+bind operation. Access requires the signed subject and
+  // host claim, a live user/team directory grant, and an enabled Host CR.
+  const hostAccessPath = '/rpc/access/users/:userId/mcp-hosts/:hostRef'
+
   router.get(
-    '/rpc/access/users/:userId/mcp-hosts/:hostRef',
-    requireValidRpcAccessTokenAny([
-      'host:message:invoke',
-      'host:status:read',
-      'host:health:read',
-      'host:activity:read',
-      'host:approval:write',
-      'host:task:read',
-      'host:session:read',
-      'desktop:view',
-    ]),
-    requireRpcTokenUserMatch(),
-    requireRpcTokenHostMatch(),
-    async (req, res, next) => {
+    hostAccessPath,
+    requireValidRpcAccessTokenAny([...HOST_ACCESS_SCOPES]),
+    async (req: RpcAuthedRequest, res, next) => {
       try {
         const userId = String(req.params.userId || '').trim()
         const hostRef = String(req.params.hostRef || '').trim()
-        const rpcAuth = (req as Request & { rpcAuth?: RpcAccessClaims }).rpcAuth
-        const userAgents = await getUserAgents(userId)
-        if (!userAgents.agentNames.includes(hostRef)) {
-          const teamId = rpcAuth?.teamId
-          if (!teamId) {
-            res.status(403).json({ error: 'Forbidden' })
-            return
-          }
-          const teamAgents = await getTeamAgents(teamId)
-          if (!teamAgents.agentNames.includes(hostRef)) {
-            res.status(403).json({ error: 'Forbidden' })
-            return
-          }
+        const claims = req.rpcAuth
+        if (!claims) {
+          logHostAccessDenial(req, 'claims_missing')
+          res.status(403).json({ error: 'Forbidden' })
+          return
+        }
+        const authorization = await authorizeRpcHostAccess(
+          gateway,
+          claims,
+          userId,
+          hostRef,
+          directory
+        )
+        if (!authorization.authorized) {
+          logHostAccessDenial(req, authorization.reason)
+          res.status(403).json({ error: 'Forbidden' })
+          return
+        }
+        res.status(200).json(authorization.connection)
+      } catch (error) {
+        next(error)
+      }
+    }
+  )
+
+  router.post(
+    hostAccessPath,
+    requireValidRpcAccessToken('host:message:invoke'),
+    express.json({ limit: '2kb', strict: true }),
+    async (req: RpcAuthedRequest, res, next) => {
+      try {
+        const userId = String(req.params.userId || '').trim()
+        const hostRef = String(req.params.hostRef || '').trim()
+        const claims = req.rpcAuth
+        const binding = parseDirectRunBindingRequest(req.body)
+        if (!claims) {
+          logHostAccessDenial(req, 'claims_missing')
+          res.status(403).json({ error: 'Forbidden' })
+          return
+        }
+        if (!binding) {
+          res.status(400).json({ error: 'invalid_direct_run_binding' })
+          return
         }
 
-        const hosts = (await gateway.listResource('hosts', config.hostsNamespace)) as Array<{
-          metadata?: { name?: string }
-          spec?: { enabled?: boolean }
-        }>
-        const host = hosts.find(entry => entry.metadata?.name === hostRef)
-        if (!host || host.spec?.enabled === false) {
+        const authorization = await authorizeRpcHostAccess(
+          gateway,
+          claims,
+          userId,
+          hostRef,
+          directory
+        )
+        if (!authorization.authorized) {
+          logHostAccessDenial(req, authorization.reason)
           res.status(403).json({ error: 'Forbidden' })
           return
         }
 
-        const url = `http://${hostRef}.${config.hostsNamespace}.svc.cluster.local:8080`
-        res.status(200).json({ userId, hostRef, url })
+        const bindingStatus = await bindDirectRunWithinBudget(
+          bindingService,
+          {
+            ...binding,
+            hostRef,
+            identityIssuer: config.rpcJwtIssuer,
+            actorHumanSub: claims.sub,
+            userId: claims.sub,
+            teamId: claims.teamId,
+          },
+          bindingBudgetMs
+        )
+        if (bindingStatus === 'recorded') {
+          res.status(200).json({
+            ...authorization.connection,
+            bindingStatus: 'recorded',
+          })
+          return
+        }
+        if (bindingStatus === 'conflict') {
+          res.status(409).json({ error: 'direct_run_binding_conflict' })
+          return
+        }
+        req.log?.warn(
+          {
+            event: 'governed_trace_operational_error',
+            scope: 'agent_run',
+            reason: 'attribution_binding_unavailable',
+          },
+          'direct run attribution binding unavailable after host authorization'
+        )
+        res.status(200).json({
+          ...authorization.connection,
+          bindingStatus: 'unavailable',
+        })
       } catch (error) {
         next(error)
       }

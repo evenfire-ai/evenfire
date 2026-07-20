@@ -1,5 +1,6 @@
 import Image from 'next/image'
 import Link from 'next/link'
+import { PROFILE_ROUTES } from '@constants/routes'
 
 export default function NotFound() {
   return (
@@ -22,7 +23,7 @@ export default function NotFound() {
           <p className="cu-not-found__copy">
             This Profile UI route is not available. Return home to continue from your profile.
           </p>
-          <Link className="cu-btn cu-btn--primary cu-not-found__button" href="/">
+          <Link className="cu-btn cu-btn--primary cu-not-found__button" href={PROFILE_ROUTES.home}>
             Back to Profile UI
           </Link>
         </div>

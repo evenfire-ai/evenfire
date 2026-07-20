@@ -15,12 +15,23 @@
 import * as path from 'node:path'
 import { HostActivityHub } from './activityHub'
 import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
+import type { ResolvedTaskModel } from './agent'
 import { agentToolEnvProvider } from './agent/agentToolEnv'
 import type { PendingCronResult } from './agent/cronDispatch'
+import { applySessionModelSelection as applySessionModelSelectionCore } from './agent/sessionModelSelection'
 import { BudgetClient } from './budget/budgetClient'
 // Structured JSON logging — must be first import
 import { config } from './config'
+import type { AllowlistView } from './config/allowlistCheck'
+import { signalHostModelAllowlist } from './config/allowlistCheck'
 import { ConfigStore } from './config/configStore'
+import {
+  contextWindowForModel,
+  hostSubsetAllowlistView,
+  isModelAllowed,
+  projectModels,
+  resolveSessionModel,
+} from './config/modelResolution'
 import { ContextMapperClient, getContextMapperClient } from './contextMapperClient'
 import {
   type ConversationStoreHandle,
@@ -44,7 +55,11 @@ import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
 import { isTerminal } from './lifecycle/types'
 import type { TransitionEvent } from './lifecycle/types'
-import { SingleTurnProvider, createLLMProvider } from './llm'
+import { SingleTurnProvider, apiKeysFromEnv, createLLMProvider } from './llm'
+import { FailoverEngine } from './llm/failover/engine'
+import { llmFallbackTotal } from './llm/failover/metrics'
+import { parseLlmPolicy } from './llm/failover/policy'
+import type { FailoverSwitchEvent, FallbackEntry, LlmPolicy } from './llm/failover/types'
 import { PromptCache } from './llm/promptCache'
 import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
@@ -71,6 +86,7 @@ import {
   ProviderWorkflowResultRequest,
   RPCServer,
   RuntimeCallerContext,
+  SetModelResult,
   StatusResponse,
   TelegramWorkflowApprovalVerification,
   WorkflowApprovalMediumEnrollment,
@@ -84,6 +100,7 @@ import {
   projectTurnToolSteps,
 } from './server/wireProjections'
 import { SessionProcessor } from './session'
+import { serializeSessionKey } from './session/types.js'
 import { approxDecodedBytes } from './shared/encoding'
 import {
   StatelessBootError,
@@ -91,8 +108,13 @@ import {
   resolveSessionDbPathFrom,
 } from './statelessBootGuard'
 import { StatelessCronPolicyError, assertStatelessCronPolicyConfig } from './statelessCronPolicy'
-import { ApiKeys, HostCRD, McpServerInfo } from './types'
-import { UsageReporter } from './usage/usageReporter'
+import { ApiKeys, HostCRD, McpServerInfo, ProviderCredentials } from './types'
+import { ApprovalPromptHistoryClient } from './usage/approvalPromptHistoryClient'
+import {
+  GovernedRunReporter,
+  UsageReporter,
+  createGovernedRunReporter,
+} from './usage/usageReporter'
 import { setOutputDirHostAccessor } from './workflow/internalTools'
 import { submitProviderWorkflowApprovalDecision } from './workflow/providerWorkflowApprovalDecisionClient'
 import { confirmProviderWorkflowApprovalMediumEnrollment } from './workflow/providerWorkflowApprovalMediumEnrollmentClient'
@@ -121,6 +143,15 @@ setOutputDirHostAccessor(() => currentHost)
 let currentKeys: ApiKeys = {}
 let currentProvider: SingleTurnProvider | null = null
 let configStore: ConfigStore | null = null
+// R5 — provider-fallback. `currentPolicy` is the normalized `spec.llmPolicy`
+// (null = no failover); `failoverEngine` holds the Host-wide sticky state
+// (cooldown + served pair) and is (re)built only when the policy changes.
+// `bootFallbackEntry` is set when the PRIMARY was inconstructible at boot and a
+// fallback entry is serving in its place (spec §3-R5.10) — cleared once the
+// primary key appears and rebuilds.
+let currentPolicy: LlmPolicy | null = null
+let failoverEngine: FailoverEngine | null = null
+let bootFallbackEntry: FallbackEntry | null = null
 let hostWatcher: HostWatcher | null = null
 let contextMapperPollTimer: ReturnType<typeof setInterval> | null = null
 let mcpStatusHeartbeatTimer: ReturnType<typeof setInterval> | null = null
@@ -152,6 +183,7 @@ let statelessHeartbeat: StatelessHeartbeat | null = null
 let runtimeAuth: McpHostRuntimeAuth | null = null
 let pluginWorkloadSdkServer: PluginWorkloadSdkServer | null = null
 let usageReporter: UsageReporter | null = null
+let governedRunReporter: GovernedRunReporter | null = null
 
 // Populated once at startup for approval-config validation warnings.
 // Constructed without workspace/cron (optional deps) so the set covers the
@@ -324,21 +356,221 @@ function sanitizeIncomingAttachments(raw: Attachment[] | undefined): Attachment[
 }
 
 /**
- * Project the ConfigStore's single provider-matching LLM key into the
- * legacy `ApiKeys` shape. ConfigStore only ever exposes the key for the
- * configured provider (translated to shell-style env-name); this helper
- * routes it into the matching field that `createLLMProvider` reads.
+ * Project the ConfigStore's active-provider credential bag into the `ApiKeys`
+ * shape. ConfigStore exposes the full multi-slot credential bag (keyed by slot
+ * dataKey) for the configured provider; this helper routes it into the matching
+ * provider field that `createLLMProvider` reads. Multi-slot (R4): Bedrock's two
+ * keys travel together in the same bag.
  */
 function apiKeysFromConfigStore(store: ConfigStore): ApiKeys {
-  const llm = store.llmKey()
+  const llm = store.llmCredentials()
   if (!llm) return {}
-  const out: ApiKeys = {}
-  // Registry-driven: map the configured key's env-name back to its provider id.
-  const provider = ALL_PROVIDERS.find(p => descriptorFor(p).envName === llm.name)
-  if (provider) {
-    out[provider] = llm.value
+  return { [llm.provider]: llm.credentials }
+}
+
+// ─── R5 — provider fallback ────────────────────────────────────────────────
+
+/** Structured WARN on every failover switch (no secrets). */
+function warnOnFailoverSwitch(event: FailoverSwitchEvent): void {
+  console.warn(
+    JSON.stringify({
+      level: 'warn',
+      event: 'llm_fallback_switch',
+      fromProvider: event.from.provider,
+      fromModel: event.from.model,
+      toProvider: event.to.provider,
+      toModel: event.to.model,
+      reason: event.reason,
+    })
+  )
+}
+
+/**
+ * Set `currentPolicy`/`failoverEngine` from the Host's `spec.llmPolicy`. The
+ * engine is rebuilt (resetting sticky cooldown) only when the policy actually
+ * changed, so an unrelated Host edit doesn't wipe an active failover state.
+ */
+function refreshFailoverPolicy(host: HostCRD): void {
+  const next = parseLlmPolicy(host.spec.llmPolicy)
+  const changed = JSON.stringify(next) !== JSON.stringify(currentPolicy)
+  currentPolicy = next
+  if (!next) {
+    failoverEngine = null
+    bootFallbackEntry = null
+    return
   }
-  return out
+  if (!failoverEngine) {
+    failoverEngine = new FailoverEngine(next, { onSwitch: warnOnFailoverSwitch })
+  } else if (changed) {
+    failoverEngine.setPolicy(next)
+    bootFallbackEntry = null
+  }
+}
+
+/**
+ * The Secret dataKeys the failover policy needs loaded from the LLM Secret: each
+ * fallback's explicit `credentialSlot` override PLUS every fallback provider's
+ * normal slot dataKeys (for cross-provider fallbacks the active-provider load
+ * never touches). Fed to the ConfigStore, exposed via `fallbackSlotValue` only.
+ */
+function fallbackCredentialSlotsFor(policy: LlmPolicy | null): string[] {
+  if (!policy) return []
+  const set = new Set<string>()
+  for (const entry of policy.fallbacks) {
+    if (entry.credentialSlot) set.add(entry.credentialSlot)
+    if (isLlmProvider(entry.provider)) {
+      for (const slot of descriptorFor(entry.provider).credentialSlots) set.add(slot.dataKey)
+    }
+  }
+  return [...set]
+}
+
+/**
+ * Build the credential bag for a fallback entry from the LIVE ConfigStore
+ * fallback-slot values (same `chatllm-api-keys` Secret). The entry's optional
+ * `credentialSlot` overrides the provider's PRIMARY slot source; the remaining
+ * (multi-slot) slots read their normal dataKeys. Returns null when any required
+ * slot is absent → the engine skips that entry.
+ */
+function buildFallbackCredentials(
+  store: ConfigStore,
+  entry: FallbackEntry
+): ProviderCredentials | null {
+  if (!isLlmProvider(entry.provider)) return null
+  const slots = descriptorFor(entry.provider).credentialSlots
+  const creds: ProviderCredentials = {}
+  slots.forEach((slot, i) => {
+    const dataKey = i === 0 && entry.credentialSlot ? entry.credentialSlot : slot.dataKey
+    const value = store.fallbackSlotValue(dataKey)
+    if (value) creds[slot.dataKey] = value
+  })
+  for (const slot of slots) {
+    if (slot.required && !creds[slot.dataKey]) return null
+  }
+  return creds
+}
+
+/**
+ * R5.3 — the fallback provider factory. Builds a fresh provider for `entry`
+ * from the live ConfigStore keys (rotation-safe: rebuilt per attempt). Returns
+ * null when unconstructible (missing slot / unknown provider). Shared by the
+ * per-task/-compact wrappers (via {@link currentFailoverSupport}) and the boot
+ * resolver.
+ */
+function buildFallbackProvider(entry: FallbackEntry): SingleTurnProvider | null {
+  if (!configStore) return null
+  const creds = buildFallbackCredentials(configStore, entry)
+  if (!creds) return null
+  return createLLMProvider(
+    { [entry.provider]: creds },
+    { provider: entry.provider as LlmProvider, name: entry.model }
+  )
+}
+
+/**
+ * The current {@link ExecutorFailoverSupport} for the agent, or null when no
+ * policy. The engine and the port builder MUST share one index space, so the
+ * FULL policy is always used (never sliced): the engine iterates every target
+ * and `buildFallbackPort(index)` indexes the same full `fallbacks` array. When
+ * serving via a boot fallback (primary inconstructible), the earlier entries are
+ * still unconstructible → `buildProvider` returns null and the engine skips
+ * them; the boot entry (== the effective primary) may be retried once as a
+ * harmless duplicate, then iteration advances to the later entries.
+ */
+function currentFailoverSupport(): {
+  engine: FailoverEngine
+  policy: LlmPolicy
+  buildProvider: (entry: FallbackEntry) => SingleTurnProvider | null
+} | null {
+  if (!failoverEngine || !currentPolicy) return null
+  return { engine: failoverEngine, policy: currentPolicy, buildProvider: buildFallbackProvider }
+}
+
+/**
+ * R2 — the allowlist view for the resolver/endpoints. In dev mode (no
+ * ConfigStore) present an unavailable allowlist so only the Host default is
+ * permitted (degraded-explicit), consistent with real K8s bootstrap.
+ */
+const UNAVAILABLE_ALLOWLIST: AllowlistView = {
+  allowlistAvailable: () => false,
+  allowedModels: () => new Map(),
+}
+function allowlistView(): AllowlistView {
+  return configStore ?? UNAVAILABLE_ALLOWLIST
+}
+
+/**
+ * T3a — the allowlist view the end-user-facing R2 model endpoints project/
+ * validate against: the global {@link allowlistView} narrowed to this Host's
+ * `spec.allowedModels` subset (live intersection; absent/empty = full global).
+ * Only the user-selection surface (`GET /v1/runtime/models` + the
+ * `applySessionModelSelection` write gate) uses this; the per-task resolver
+ * (`resolveTaskModel`) and the R5 failover engine keep the unfiltered global
+ * view BY DESIGN — `spec.allowedModels` gates only what a user may SELECT, not
+ * what already-saved selections resolve to at execution time. Consequence: if an
+ * operator NARROWS the subset to drop a pair a session already saved (still
+ * globally enabled), `GET /v1/runtime/models` reports it `blocked`/fell-back
+ * while the running task still serves it until the user re-selects. That model
+ * stays globally allowed (no privilege escalation), and the write gate keeps
+ * `modelSelections` from ever persisting an out-of-subset pair in the first
+ * place. To make the subset an execution boundary too, switch this resolver to
+ * `hostAllowlistView()` — deliberately NOT done here (out of R2 scope).
+ */
+function hostAllowlistView(): AllowlistView {
+  return hostSubsetAllowlistView(allowlistView(), currentHost?.spec.allowedModels)
+}
+
+/**
+ * R2.9(a) — build a provider instance for a specific model within the Host's
+ * configured provider, reading the LIVE ConfigStore keys. Called per task by
+ * {@link resolveTaskModel}, so a key rotation never reverts a session's
+ * selection: the next task rebuilds with the new key. Returns null when no Host
+ * model is configured or the key/provider is unavailable.
+ */
+function buildProviderForModel(model: string): SingleTurnProvider | null {
+  const modelCfg = currentHost?.spec.model
+  if (!modelCfg?.provider) return null
+  const keys = configStore ? apiKeysFromConfigStore(configStore) : currentKeys
+  return createLLMProvider(keys, { provider: modelCfg.provider, name: model })
+}
+
+/**
+ * R2 — the per-task model resolver injected into the agent. Turns a session's
+ * saved `{ provider → model }` selection into the concrete provider instance +
+ * effective model + context window for the task. Falls back to the Host default
+ * when the saved model is no longer allowed (blocked) or absent.
+ */
+function resolveTaskModel(
+  selections: Record<string, string> | undefined
+): ResolvedTaskModel | null {
+  const modelCfg = currentHost?.spec.model
+  if (!modelCfg?.provider || !modelCfg.name) return null
+  const view = allowlistView()
+  // R5.10 — boot fallback: the primary is inconstructible, so serve the boot
+  // fallback pair (cross-provider → ignore the session selection, R5.4). The
+  // runtime failover engine (currentFailoverSupport) still advances from here.
+  if (bootFallbackEntry && currentProvider) {
+    return {
+      provider: currentProvider,
+      model: bootFallbackEntry.model,
+      contextWindowTokens: contextWindowForModel(
+        view,
+        bootFallbackEntry.provider,
+        bootFallbackEntry.model
+      ),
+    }
+  }
+  const { model } = resolveSessionModel(view, modelCfg.provider, modelCfg.name, selections)
+  const contextWindowTokens = contextWindowForModel(view, modelCfg.provider, model)
+  // Hot-path short-circuit (review nit): when the resolution lands on the Host
+  // default, reuse the process provider instead of constructing a fresh
+  // instance per task. Rotation-safe: onChange rebuilds currentProvider too.
+  if (model === modelCfg.name && currentProvider) {
+    return { provider: currentProvider, model, contextWindowTokens }
+  }
+  const provider = buildProviderForModel(model)
+  if (!provider) return null
+  return { provider, model, contextWindowTokens }
 }
 
 /**
@@ -358,14 +590,25 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
     hostRef: host.name,
     llmSecretRef: host.spec.secretRef,
     provider,
+    allowlistConfigMapName: config.llmAllowlistConfigMapName,
+    // R5 — load the failover policy's referenced credential slots from the same
+    // LLM Secret (kept out of the effective env; read via fallbackSlotValue).
+    fallbackCredentialSlots: fallbackCredentialSlotsFor(currentPolicy),
   })
   await store.start()
   configStore = store
 
+  // R3.7 — non-disruptive signal: warn (+ metric) if this Host's configured
+  // model is not in the operator allowlist. No enforcement here; the hard gate
+  // lives in control-api/WRC. Re-checked on every allowlist reload below.
+  signalHostModelAllowlist(store, host.spec.model)
+
   // Hot reload: rebuild the LLM provider on key rotation. The agent receives
   // a swapped provider via setLLMProvider; in-flight requests finish on the
   // old client (already dispatched), the next task uses the new one.
-  store.onChange(({ llmKeyChanged }) => {
+  store.onChange(({ llmKeyChanged, allowlistChanged }) => {
+    // R3.7 — re-evaluate the Host model against the freshly-loaded allowlist.
+    if (allowlistChanged && currentHost) signalHostModelAllowlist(store, currentHost.spec.model)
     if (!llmKeyChanged || !currentHost) return
     const keys = apiKeysFromConfigStore(store)
     currentKeys = keys
@@ -375,6 +618,13 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
       return
     }
     currentProvider = next
+    // R5.10 — the primary is now constructible again (key rotated/fixed): clear
+    // any boot fallback so tasks resume on the primary, and clear the sticky
+    // cooldown so the recovered primary is retried immediately instead of
+    // waiting out a cooldown it never truly earned (the key was missing/invalid,
+    // the provider was not "down"). Status stops reporting the boot fallback.
+    bootFallbackEntry = null
+    failoverEngine?.clearCooldown()
     if (agent) {
       agent.setLLMProvider(next, currentHost.spec.model?.name)
       console.log('[Main] LLM provider rebuilt and re-attached to agent (key rotated)')
@@ -388,8 +638,20 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
 
 /**
  * Initialize or update the LLM provider based on host configuration.
+ *
+ * `llmConfigChanged` (R5.10) — set by `onHostChange` ONLY when the primary's
+ * credential surface actually changed (secretRef/provider), so a recovered
+ * primary can clear a sticky runtime cooldown. It is deliberately NOT set on
+ * unrelated Host edits (channels/approval/personalization…), which also reinit
+ * the provider but must NOT wipe an active cooldown (would defeat the V13
+ * anti-flapping invariant). Boot callers omit it — the engine has no cooldown
+ * yet, so clearing there would be a no-op.
  */
-async function initializeProvider(host: HostCRD, keys: ApiKeys): Promise<void> {
+async function initializeProvider(
+  host: HostCRD,
+  keys: ApiKeys,
+  opts?: { llmConfigChanged?: boolean }
+): Promise<void> {
   currentHost = host
   currentKeys = keys
 
@@ -398,13 +660,68 @@ async function initializeProvider(host: HostCRD, keys: ApiKeys): Promise<void> {
   console.log(`[Main] Context ref: ${host.spec.contextRef}`)
 
   currentProvider = createLLMProvider(keys, host.spec.model)
+  bootFallbackEntry = null
+
+  // R5.10 — boot with fallback (Q8 ratified): if the PRIMARY is inconstructible
+  // at boot (key/slot absent), resolve the first constructible fallback entry
+  // and serve by it (badge/metric/WARN from the first message). Degraded
+  // `llm_key_missing` is reserved for when NO entry (primary nor fallbacks) is
+  // constructible. A key that is present-but-invalid (401) is not detectable at
+  // boot; it surfaces on the first task and the runtime failover handles it.
+  let effectiveModel = host.spec.model?.name
+  if (!currentProvider && currentPolicy?.fallbacks.length) {
+    for (const entry of currentPolicy.fallbacks) {
+      const provider = buildFallbackProvider(entry)
+      if (!provider) continue
+      currentProvider = provider
+      bootFallbackEntry = entry
+      effectiveModel = entry.model
+      // servedBy status in boot-fallback mode is projected from
+      // `bootFallbackEntry` directly (getStatus); the engine's runtime served
+      // state is set by engine.run once tasks start.
+      llmFallbackTotal.inc({
+        from: `${host.spec.model?.provider ?? 'unknown'}/${host.spec.model?.name ?? 'unknown'}`,
+        to: `${entry.provider}/${entry.model}`,
+        reason: 'boot',
+      })
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          event: 'llm_fallback_boot',
+          fromProvider: host.spec.model?.provider ?? null,
+          fromModel: host.spec.model?.name ?? null,
+          toProvider: entry.provider,
+          toModel: entry.model,
+        })
+      )
+      break
+    }
+  }
 
   if (currentProvider) {
-    console.log('[Main] LLM provider initialized successfully')
+    console.log(
+      bootFallbackEntry
+        ? '[Main] LLM primary inconstructible — serving via boot fallback'
+        : '[Main] LLM provider initialized successfully'
+    )
+
+    // R5.10 — the primary's credentials just changed (secretRef/provider) and it
+    // is constructible again while NOT in boot-fallback mode. Clear any sticky
+    // RUNTIME cooldown the engine may still hold from a prior failure so the
+    // recovered primary is retried on the very next task instead of waiting it
+    // out. The `store.onChange` clearCooldown path (ensureConfigStore) only fires
+    // on a key rotation of an ALREADY-built ConfigStore; a `secretRefChanged`
+    // rebuilds the store fresh, so its onChange never runs for the fix — this is
+    // the path that covers that gap. Gated on `llmConfigChanged` so an unrelated
+    // Host edit (which also reinitializes the provider) does NOT wipe a still-
+    // valid cooldown of a genuinely-down primary (anti-flapping, V13).
+    if (!bootFallbackEntry && opts?.llmConfigChanged) {
+      failoverEngine?.clearCooldown()
+    }
 
     // Update agent with new provider
     if (agent) {
-      agent.setLLMProvider(currentProvider, host.spec.model?.name)
+      agent.setLLMProvider(currentProvider, effectiveModel)
     }
   } else {
     console.error('[Main] Failed to initialize LLM provider')
@@ -589,12 +906,26 @@ async function onHostChange(host: HostCRD): Promise<void> {
   const providerChanged = currentHost?.spec.model?.provider !== host.spec.model?.provider
   const secretRefChanged = currentHost?.spec.secretRef !== host.spec.secretRef
   const modelChanged = currentHost?.spec.model?.name !== host.spec.model?.name
-  if (!configStore || providerChanged || secretRefChanged) {
-    console.log('[Main] Rebuilding ConfigStore (provider or secretRef changed)')
+  // R5 — refresh the failover policy BEFORE (re)building the ConfigStore so the
+  // fallback credential slots are loaded. A policy change that alters which
+  // Secret slots are needed forces a ConfigStore rebuild even if provider/
+  // secretRef are unchanged.
+  const prevFallbackSlots = fallbackCredentialSlotsFor(currentPolicy)
+  refreshFailoverPolicy(host)
+  const fallbackSlotsChanged =
+    JSON.stringify(prevFallbackSlots) !== JSON.stringify(fallbackCredentialSlotsFor(currentPolicy))
+  if (!configStore || providerChanged || secretRefChanged || fallbackSlotsChanged) {
+    console.log('[Main] Rebuilding ConfigStore (provider/secretRef/failover slots changed)')
     await ensureConfigStore(host)
   }
   currentKeys = apiKeysFromConfigStore(configStore!)
-  await initializeProvider(host, currentKeys)
+  // R5.10 — only a primary credential-surface change (secretRef/provider) may
+  // clear a sticky runtime cooldown; unrelated CR edits must not (see
+  // initializeProvider). A `secretRefChanged` rebuilds the ConfigStore fresh, so
+  // the store.onChange clearCooldown path never fires for it — this covers it.
+  await initializeProvider(host, currentKeys, {
+    llmConfigChanged: secretRefChanged || providerChanged,
+  })
 
   // PMC-2 — the cached `stable` tier embeds the model+provider runtime line
   // (see DefaultPromptBuilder). A model/provider/secretRef swap must invalidate
@@ -654,6 +985,11 @@ function setupUsageReporting(): void {
   // unconsumed refresh token never expires beyond grace into an unrecoverable
   // pod that HCC cannot detect as NotReady.
   startRuntimeAuthProactiveRefresh(auth)
+  governedRunReporter = createGovernedRunReporter(config.governedTracingEnabled, {
+    baseUrl: auth.baseUrl,
+    getAccessToken: () => auth.accessToken,
+    refreshOnUnauthorized: () => refreshWithRecovery(auth),
+  })
   usageReporter = new UsageReporter({
     baseUrl: auth.baseUrl,
     getAccessToken: () => auth.accessToken,
@@ -668,6 +1004,16 @@ function setupUsageReporting(): void {
     context_ref: currentHost.spec.contextRef ?? null,
     llm_secret_name: currentHost.spec.secretRef ?? null,
   })
+  if (governedRunReporter) agent.setGovernedRunReporter(governedRunReporter)
+  agent.setApprovalPromptHistoryClient(
+    new ApprovalPromptHistoryClient({
+      baseUrl: auth.baseUrl,
+      getAccessToken: () => auth.accessToken,
+      refreshOnUnauthorized: () => refreshWithRecovery(auth),
+      enabled: config.approvalPromptHistoryEnabled,
+      maxBytes: config.approvalPromptHistoryMaxBytes,
+    })
+  )
   console.log(
     `[Main] LLM usage reporting wired (host=${currentHost.name}, gateway=${auth.baseUrl})`
   )
@@ -804,6 +1150,17 @@ async function initializeAgent(): Promise<void> {
   console.log(
     `[Main] Agent config: taskDelay=${config.agentTaskDelay}ms, maxTaskDuration=${config.agentMaxTaskDuration}ms, maxToolCalls=${config.agentMaxToolCallsPerTask}, maxQueueSize=${config.agentMaxQueueSize}, approvalTimeout=${config.agentApprovalTimeout}ms`
   )
+
+  // R2 — inject the per-task model resolver. Closes over the module globals
+  // (currentHost + configStore) so it always reads the live keys/allowlist; a
+  // key rotation or allowlist reload is picked up on the next task with no
+  // re-wiring. Set once here (the agent is created once).
+  agent.setTaskModelResolver(resolveTaskModel)
+
+  // R5 — inject the provider-fallback support. Closes over the module globals
+  // (currentPolicy/failoverEngine/bootFallbackEntry + configStore) so each task
+  // reads the live policy + sticky failover state. Null when no policy.
+  agent.setFailoverSupport(currentFailoverSupport)
 
   // Phase 6: Set approval config
   const approvalCfg = currentHost?.spec.approval || config.approvalConfig
@@ -989,25 +1346,42 @@ async function initializeAgent(): Promise<void> {
   // BEFORE SessionProcessor accepts new traffic. No-op when the cold-start
   // loader is still the NoOp default (memory mode).
   //
-  // Guarded: under sqlite/dual a worker boot/load failure must NOT crashloop
-  // the pod. Degrade to an empty approval set (waiting users re-trigger) —
-  // matching the retention-sweep degrade policy — instead of taking the host
-  // down on every restart.
-  try {
-    await agent.bootstrap()
-  } catch (err) {
-    console.error(
-      '[Main] agent.bootstrap() failed — starting with an empty pending-approval set. ' +
-        'Durable approvals (if any) will not be rehydrated this boot.',
-      err
-    )
-  }
+  // Fail closed: accepting traffic with durable approvals present but no
+  // reconstructed executor would strand decisions and break trace continuity.
+  await agent.bootstrap()
 
   // Start the agent
   agent.start()
   cronScheduler.start()
 
   console.log('[Main] Agent and cron scheduler started')
+}
+
+// R2 — thin wrapper that injects live process state (current Host model config,
+// allowlist snapshot, conversation manager) into the shared, dependency-injected
+// `applySessionModelSelectionCore`. Both the `POST /v1/runtime/model` route
+// (`handleSetModel`) and the piggybacked `message.model` path in
+// `handleIncomingMessage` go through here so they cannot diverge.
+function applySessionModelSelection(
+  userSub: string,
+  hostRef: string,
+  chatId: string | undefined,
+  model: string
+): Promise<SetModelResult> {
+  return applySessionModelSelectionCore(
+    {
+      modelCfg: currentHost?.spec.model,
+      // T3a — validate the requested model against the host SUBSET
+      // (spec.allowedModels ∩ global), not the full global. Covers both the
+      // `POST /v1/runtime/model` route and the piggybacked `message.model` write.
+      allowlistView: hostAllowlistView(),
+      convManager: agent!.getConversationManager(),
+    },
+    userSub,
+    hostRef,
+    chatId,
+    model
+  )
 }
 
 /**
@@ -1072,21 +1446,73 @@ function handleIncomingMessage(
     }
   }
 
-  const handler = new IncomingMessageHandler(normalizedMessage, {
-    messageQueue,
-    agent,
-    pendingTaskResults,
-    getModel: () => currentHost?.spec.model?.name || 'unknown',
-    sanitizeAttachments,
-    sessionProcessor: sessionProcessor ?? undefined,
-    taskLifecycle: taskLifecycle!,
-  })
+  const runHandler = (): MessageResponse | Promise<MessageResponse> => {
+    const handler = new IncomingMessageHandler(normalizedMessage, {
+      messageQueue: messageQueue!,
+      agent,
+      pendingTaskResults,
+      getModel: () => currentHost?.spec.model?.name || 'unknown',
+      sanitizeAttachments,
+      sessionProcessor: sessionProcessor ?? undefined,
+      taskLifecycle: taskLifecycle!,
+    })
 
-  if (options?.async) {
-    return handler.executeAsync()
+    if (options?.async) {
+      return handler.executeAsync()
+    }
+
+    return handler.execute()
   }
 
-  return handler.execute()
+  // R2 — piggybacked per-session model. Because a suspended Host can't serve
+  // `POST /v1/runtime/model`, the desktop rides the user's pick on the message
+  // that wakes us. Apply it to THIS session and AWAIT the write BEFORE the task
+  // is created, so the per-task resolver (`stateMachine` taskModelResolver over
+  // `conv.modelSelections`) reads the row we just wrote. Fail-OPEN on the
+  // message: a rejected/degraded selection is logged and ignored, never dropping
+  // the user's turn (fail-closed only on the selection, inside the helper).
+  const piggybackModel = typeof message.model === 'string' ? message.model.trim() : ''
+  if (piggybackModel && normalizedMessage.channelType === 'rpc') {
+    return (async () => {
+      try {
+        const applied = await applySessionModelSelection(
+          normalizedMessage.sender,
+          normalizedMessage.channelId,
+          normalizedMessage.threadId,
+          piggybackModel
+        )
+        if (!applied.ok) {
+          console.warn(
+            JSON.stringify({
+              level: 'warn',
+              event: 'message_model_ignored',
+              userId: normalizedMessage.sender,
+              chatId: normalizedMessage.threadId ?? null,
+              provider: applied.provider,
+              model: piggybackModel,
+              reason: applied.reason,
+            })
+          )
+        }
+      } catch (error) {
+        console.warn(
+          JSON.stringify({
+            level: 'warn',
+            event: 'message_model_ignored',
+            userId: normalizedMessage.sender,
+            chatId: normalizedMessage.threadId ?? null,
+            provider: currentHost?.spec.model?.provider ?? 'unknown',
+            model: piggybackModel,
+            reason: 'apply_failed',
+            error: error instanceof Error ? error.message : String(error),
+          })
+        )
+      }
+      return runHandler()
+    })()
+  }
+
+  return runHandler()
 }
 
 function sourceMatchesRuntimeCaller(
@@ -1478,6 +1904,35 @@ async function getStatus(): Promise<StatusResponse> {
   const mcpServers = mcpManager ? mcpManager.status.snapshot() : []
   const degraded = computeDegradedReason()
 
+  // R2 — project the Host's configured (default) provider/model. Optional field;
+  // the per-session selection is served separately by GET /v1/runtime/models.
+  const modelCfg = currentHost?.spec.model
+  const model =
+    modelCfg?.provider && modelCfg.name
+      ? { provider: modelCfg.provider, name: modelCfg.name }
+      : undefined
+
+  // R5 — project the pair currently serving when a failover policy is wired.
+  // `fallback: true` drives the desktop "operating with fallback" badge. In
+  // boot-fallback mode the engine treats the boot entry as its "primary", so its
+  // servedBy would read fallback:false after the first task — project the boot
+  // fallback directly to keep the badge on until the real primary recovers.
+  let servedBy: StatusResponse['servedBy']
+  if (currentPolicy) {
+    if (bootFallbackEntry && currentProvider) {
+      servedBy = {
+        provider: bootFallbackEntry.provider,
+        name: bootFallbackEntry.model,
+        fallback: true,
+      }
+    } else {
+      const served = failoverEngine?.servedBy()
+      servedBy = served
+        ? { provider: served.provider, name: served.model, fallback: served.fallback }
+        : undefined
+    }
+  }
+
   return {
     agent: {
       state: agentStats.state,
@@ -1497,6 +1952,8 @@ async function getStatus(): Promise<StatusResponse> {
     pendingApprovals,
     mcpServers,
     degraded,
+    model,
+    servedBy,
   }
 }
 
@@ -1511,6 +1968,11 @@ async function getStatus(): Promise<StatusResponse> {
 function computeDegradedReason(): StatusResponse['degraded'] {
   if (!configStore) return null // dev mode or pre-init
   if (configStore.isLlmKeyConfigured()) return null
+  // R5.10 — serving via a boot fallback is NOT degraded: the primary key is
+  // absent but a constructible fallback entry is answering. Degraded
+  // `llm_key_missing` is reserved for when NO entry (primary nor fallbacks) is
+  // constructible.
+  if (bootFallbackEntry && currentProvider) return null
   return {
     reason: 'llm_key_missing',
     message:
@@ -1639,6 +2101,60 @@ async function startRPCServer(): Promise<void> {
     return { breakdown: projectContextBreakdown(conversation) ?? null }
   }
 
+  // R2 — GET /v1/runtime/models. Projects the in-memory allowlist for the Host's
+  // provider + the per-session selection (when chatId is passed). The session
+  // key is built server-side from the verified edge user + hostRef (never a
+  // client param), same anti-enumeration contract as the other session reads.
+  //
+  // KEY-DERIVATION CONTRACT: the "agent" slot is `hostRef`. This MUST match the
+  // task's session key, whose `channelId` slot the desktop app populates with the
+  // same rpc `hostRef` (desktop-app appService: `channelId: targetHostRef`), so
+  // `resolveTaskSessionKey` and this lookup resolve the same row. hostRef comes
+  // from the edge caller (guard-pinned to this pod), never the client body — so
+  // this is stricter than /messages (which trusts the client `:agent` param).
+  const handleModelsList = async (userSub: string, hostRef: string, chatId: string | undefined) => {
+    const modelCfg = currentHost?.spec.model
+    const provider = modelCfg?.provider ?? 'unknown'
+    const hostDefault = modelCfg?.name ?? 'unknown'
+    // T3a — project the host's SUBSET (spec.allowedModels ∩ global), not the
+    // full global, so the desktop selector only offers what this host allows.
+    const view = hostAllowlistView()
+    const { degraded, models } = projectModels(view, provider, hostDefault)
+    let sessionModel: string | null = null
+    let sessionModelBlocked: string | undefined
+    if (chatId && modelCfg?.provider && modelCfg.name) {
+      const key = serializeSessionKey({
+        userId: userSub,
+        channelType: 'rpc',
+        channelId: hostRef,
+        threadId: chatId,
+      })
+      const conversation = await agent!.getConversationManager().getSessionByKeyAsync(key)
+      const saved = conversation?.modelSelections?.[provider]
+      if (saved) {
+        const resolution = resolveSessionModel(
+          view,
+          provider,
+          hostDefault,
+          conversation!.modelSelections
+        )
+        // Saved-but-no-longer-allowed → fall back to the Host default and surface
+        // the stale choice as `sessionModelBlocked` so the UI can explain it.
+        if (resolution.blocked) sessionModelBlocked = resolution.blocked
+        else sessionModel = saved
+      }
+    }
+    return { provider, hostDefault, sessionModel, sessionModelBlocked, degraded, models }
+  }
+
+  // R2 — POST /v1/runtime/model. Thin route adapter over the shared
+  // `applySessionModelSelection` core (validate model ∈ allowlist, fail-closed;
+  // degraded → only the Host default; persist the per-session selection; report
+  // next-task effectivity). The same core also runs for a piggybacked
+  // `message.model` in `handleIncomingMessage`, so the two paths cannot diverge.
+  const handleSetModel = (userSub: string, hostRef: string, chatId: string, model: string) =>
+    applySessionModelSelection(userSub, hostRef, chatId, model)
+
   rpcServer.onMessage(handleIncomingMessage)
   rpcServer.setArtifactSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
   rpcServer.onStatus(getStatus)
@@ -1661,6 +2177,8 @@ async function startRPCServer(): Promise<void> {
   rpcServer.onSessionsList(handleSessionsList)
   rpcServer.onSessionMessages(handleSessionMessages)
   rpcServer.onContextBreakdown(handleContextBreakdown)
+  rpcServer.onModelsList(handleModelsList)
+  rpcServer.onSetModel(handleSetModel)
   // T3.1 — session search REST endpoint. Only wired when the feature is
   // enabled and the SQLite backend is live; otherwise the route returns 501
   // through `handleSessionSearchRoute`.
@@ -1931,6 +2449,17 @@ async function shutdown(signal: string): Promise<void> {
       )
     }
   }
+  if (governedRunReporter) {
+    try {
+      governedRunReporter.stop()
+      await governedRunReporter.drain()
+    } catch (err) {
+      console.warn(
+        '[Main] GovernedRunReporter drain failed during shutdown:',
+        err instanceof Error ? err.message : String(err)
+      )
+    }
+  }
 
   cronScheduler?.stop()
   spilloverStorage?.stopGc()
@@ -1957,23 +2486,25 @@ async function startDevMode(): Promise<void> {
   console.log('[Main] Starting in DEV MODE')
 
   // Use API keys from environment variables. Registry-driven: read each
-  // provider's env var by its descriptor (ALL_PROVIDERS order = dev priority).
-  const keys: ApiKeys = {}
-  for (const p of ALL_PROVIDERS) {
-    const value = process.env[descriptorFor(p).envName]
-    if (value) keys[p] = value
-  }
+  // provider's credential slots by env var (ALL_PROVIDERS order = dev priority).
+  // Multi-slot (R4): a provider is "available" only when all its required slots
+  // are present in the env (e.g. Bedrock needs both AWS keys).
+  const keys = apiKeysFromEnv()
 
   if (ALL_PROVIDERS.every(p => !keys[p])) {
+    const allSlotNames = ALL_PROVIDERS.flatMap(p =>
+      descriptorFor(p).credentialSlots.map(s => s.envName)
+    )
     throw new Error(
-      `Dev mode requires one of these environment variables: ${ALL_PROVIDERS.map(p => descriptorFor(p).envName).join(', ')}`
+      `Dev mode requires the credential env var(s) of one provider: ${allSlotNames.join(', ')}`
     )
   }
 
   let hostSpec = config.devHostConfig!
 
   // Auto-detect provider from available API keys if not explicitly set.
-  // ALL_PROVIDERS preserves the priority order (openai > claude > zai > bailian).
+  // ALL_PROVIDERS preserves the priority order
+  // (openai > claude > zai > bailian > vertex > bedrock).
   if (!hostSpec.model) {
     // Safe `!`: the `ALL_PROVIDERS.every(p => !keys[p])` throw-guard above
     // already proved at least one key is present.
@@ -1999,6 +2530,9 @@ async function startDevMode(): Promise<void> {
     spec: hostSpec,
   }
 
+  // R5 — parse `spec.llmPolicy` (dev mode has no ConfigStore, so fallback
+  // providers won't build — failover stays inert, byte-identical to today).
+  refreshFailoverPolicy(host)
   await initializeProvider(host, keys)
 
   // Initialize MCP manager
@@ -2055,6 +2589,9 @@ async function startProductionMode(): Promise<void> {
     process.exit(1)
   }
 
+  // R5 — parse `spec.llmPolicy` BEFORE the ConfigStore so its referenced
+  // fallback credential slots are loaded from the LLM Secret at boot.
+  refreshFailoverPolicy(host)
   await ensureConfigStore(host)
   const keys = apiKeysFromConfigStore(configStore!)
 

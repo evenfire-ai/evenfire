@@ -43,4 +43,13 @@ describe('normalizeGfsResourceName', () => {
       await normalizeGfsResourceName(second)
     )
   })
+
+  it.each(['..', '../secret.md', 'folder\\secret.md', 'bad\u0000name.md'])(
+    'rejects unsafe path-like name %j',
+    async name => {
+      await expect(normalizeGfsResourceName(name)).rejects.toThrow(
+        'File and folder names cannot contain path separators or control characters.'
+      )
+    }
+  )
 })

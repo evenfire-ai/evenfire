@@ -1,6 +1,7 @@
 /**
  * Shared types for the Skill Mapper.
  */
+import type { LlmProviderId } from '@clerum/llm-providers'
 
 /**
  * McpServer transport configuration.
@@ -356,7 +357,7 @@ export interface ContextCRD {
 // ─── Host CRD ───────────────────────────────────────────────────────────────
 
 export interface HostModelSpec {
-  provider?: 'openai' | 'claude' | 'zai' | 'bailian'
+  provider?: LlmProviderId
   name?: string
 }
 

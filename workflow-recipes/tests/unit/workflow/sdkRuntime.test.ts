@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import {
   McpHostClient,
   SignalPoller,
@@ -257,6 +258,61 @@ describe('sdk workflow runtime', () => {
           call.args[2]?.executor === 'snippet'
       )
     ).toBe(true)
+  })
+
+  it('binds approval-gated agentic steps with an ephemeral proof and persisted hash', async () => {
+    const { status } = makeStatus()
+    const statusMock = status as unknown as {
+      reportStepStatus: ReturnType<typeof vi.fn>
+    }
+    const executeAgentStep = vi.fn().mockResolvedValue({
+      stepId: 'approve',
+      status: 'completed',
+      output: 'approved output',
+      durationMs: 10,
+      toolsCalled: [],
+    })
+    const mcpHost = {
+      healthCheck: vi.fn().mockResolvedValue({ status: 'healthy' }),
+      executeAgentStep,
+    } as unknown as McpHostClient
+
+    const result = await runWorkflowRuntime({
+      config: runtimeConfig(),
+      spec: {
+        name: 'runtime-test',
+        namespace: 'sandbox-recipes',
+        agent: { provider: 'openai', model: 'gpt-4o' },
+        steps: [
+          {
+            id: 'approve',
+            instruction: 'Perform the approved action',
+            requiresApproval: {
+              target: { userId: '11111111-1111-4111-8111-111111111111' },
+              message: 'Approve this step?',
+            },
+          },
+        ],
+      },
+      coordinator: new StepCoordinator(),
+      status,
+      signals: makeSignals(),
+      mcpHost,
+      snippetRunner: null,
+      modelInjection: vi.fn(),
+    })
+
+    expect(result).toEqual({ exitCode: 0, workflowPhase: 'completed' })
+    const request = executeAgentStep.mock.calls[0]?.[0] as { approvalBindingProof?: string }
+    expect(request.approvalBindingProof).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    )
+    const runningCall = statusMock.reportStepStatus.mock.calls.find(
+      ([stepId, phase]) => stepId === 'approve' && phase === 'running'
+    )
+    expect(runningCall?.[2]?.approvalBindingSha256).toBe(
+      createHash('sha256').update(request.approvalBindingProof!).digest('hex')
+    )
   })
 
   it('forwards agentic approval gates to mcp-host', async () => {

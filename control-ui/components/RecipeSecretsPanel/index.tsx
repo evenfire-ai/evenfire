@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RecipeSecretItem,
   deleteRecipeSecret,
@@ -112,7 +113,7 @@ export function RecipeSecretsPanel({
 
   function navigateToEdit(name: string, namespace: string) {
     const qs = new URLSearchParams({ namespace })
-    router.push(`/secrets/recipe/${encodeURIComponent(name)}/edit?${qs.toString()}`)
+    router.push(CONTROL_ROUTES.secrets.editRecipe(name, Object.fromEntries(qs)))
   }
 
   function navigateToCreate(secretName: string, namespace: string, keys: string[]) {
@@ -123,11 +124,11 @@ export function RecipeSecretsPanel({
       namespace,
     })
     if (keys.length > 0) params.set('keys', keys.join(','))
-    router.push(`/secrets/new?${params.toString()}`)
+    router.push(CONTROL_ROUTES.secrets.new(Object.fromEntries(params)))
   }
 
   function navigateToCreateBlank() {
-    router.push('/secrets/new?scope=recipe')
+    router.push(CONTROL_ROUTES.secrets.new({ scope: 'recipe' }))
   }
 
   async function deleteRow(name: string, namespace: string) {

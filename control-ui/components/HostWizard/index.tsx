@@ -5,6 +5,7 @@ import { ChannelCredentialsPanel } from '@/components/ChannelCredentialsPanel'
 import type { CredentialDraft } from '@/components/ChannelCredentialsPanel/types'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
+import { LlmProviderConfig } from '@/components/LlmProviderConfig'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
 import { IconAlertTriangle, IconCheck, IconInfoCircle, IconX } from '@/components/icons'
@@ -18,13 +19,21 @@ import {
   updateAgentUsers,
 } from '@/lib/api'
 import { cn } from '@/lib/cn'
+import { useLlmAllowedModels } from '@/lib/hooks/useLlmAllowedModels'
 import { FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES } from '@/lib/hostWorkflowControl'
 import {
-  LLM_PROVIDER_OPTIONS,
+  type HostAllowedModel,
+  type LlmPolicy,
   type LlmProvider,
-  getDefaultModel,
+  buildAllowedModelsSpec,
+  createEmptyLlmKeyDraft,
+  getActiveCredentialKeys,
   getModelOptions,
-  normalizeProvider,
+  getProviderLabel,
+  isProviderUsable,
+  projectCredentialDraft,
+  resolveDefaultModel,
+  validateLlmSecretData,
 } from '@/lib/llm'
 import { toKebabCase, toKebabInput } from '@/lib/string'
 import {
@@ -96,6 +105,13 @@ function missingCredentialLabel(
 
 function isValidTelegramBotHandle(value: string): boolean {
   return /^@?[A-Za-z0-9_]{5,32}$/.test(value.trim())
+}
+
+// Asymmetric save gate (spec Topic 1b): the PRIMARY provider must be usable —
+// its required credential slot(s) filled — before create is allowed. Fallbacks
+// are optional and only warn, so they never enter this gate.
+function primaryCredentialUsable(provider: LlmProvider, draft: Record<string, string>): boolean {
+  return isProviderUsable(provider, key => (draft[key] ?? '').trim().length > 0)
 }
 
 function providerSettings(provider: ChannelProvider, draft: NewChannelDraft) {
@@ -206,9 +222,9 @@ function isStepValid(
     secretMode: 'existing' | 'new'
     existingSecret: string
     newSecretName: string
-    openaiApiKey: string
-    claudeApiKey: string
-    zaiApiKey: string
+    llmKeyDraft: Record<string, string>
+    llmPolicy: LlmPolicy | undefined
+    provider: LlmProvider
     modelName: string
     selectedUserIds: string[]
     selectedTeamIds: string[]
@@ -221,13 +237,23 @@ function isStepValid(
     return state.contextName.trim().length > 0
   }
   if (stepIndex === 2) {
+    // New secret: the PRIMARY provider must be usable (asymmetric gate — a
+    // fallback missing its key only warns). Cross-slot mistakes (half Bedrock
+    // pair, malformed Vertex JSON) anywhere still block. Existing secret: the
+    // wizard can't introspect its keys, so a selection is the only gate.
+    // Validate only the ACTIVE-domain keys — a value typed for a provider whose
+    // block later unmounted (primary switched, or a fallback removed) must not
+    // block (e.g. a lone Bedrock access key left behind by a removed fallback).
+    const projectedDraft = projectCredentialDraft(
+      state.llmKeyDraft,
+      getActiveCredentialKeys(state.provider, state.llmPolicy)
+    )
     const hasValidSecret =
       state.secretMode === 'existing'
         ? state.existingSecret.trim().length > 0
         : toKebabCase(state.newSecretName).length > 0 &&
-          (state.openaiApiKey.trim().length > 0 ||
-            state.claudeApiKey.trim().length > 0 ||
-            state.zaiApiKey.trim().length > 0)
+          primaryCredentialUsable(state.provider, state.llmKeyDraft) &&
+          validateLlmSecretData(projectedDraft).length === 0
     return hasValidSecret && state.modelName.trim().length > 0
   }
   if (stepIndex === 3) {
@@ -298,16 +324,29 @@ export function HostWizard({
   const channelSelectRef = useRef<HTMLDivElement | null>(null)
   const [pendingCredentials, setPendingCredentials] = useState<CredentialDraft>({})
 
-  const [secretMode, setSecretMode] = useState<'existing' | 'new'>('existing')
+  // Per-host secret: default to a new, auto-named Secret ("this agent's
+  // credentials") so the operator never has to name a Kubernetes Secret; reusing
+  // an existing shared Secret stays a first-class choice (spec Topic 1b R4).
+  const [secretMode, setSecretMode] = useState<'existing' | 'new'>('new')
   const [existingSecret, setExistingSecret] = useState('')
   const [newSecretName, setNewSecretName] = useState('')
-  const [openaiApiKey, setOpenaiApiKey] = useState('')
-  const [claudeApiKey, setClaudeApiKey] = useState('')
-  const [zaiApiKey, setZaiApiKey] = useState('')
-  const [credentialTab, setCredentialTab] = useState<LlmProvider>('openai')
+  const [secretNameTouched, setSecretNameTouched] = useState(false)
+  const [llmKeyDraft, setLlmKeyDraft] = useState<Record<string, string>>(createEmptyLlmKeyDraft)
+  const [llmPolicy, setLlmPolicy] = useState<LlmPolicy | undefined>(undefined)
+  // Per-host model allowlist subset (spec.allowedModels, Topic 3a). Empty = the
+  // host offers the full global allowlist per provider (back-compat default).
+  const [allowedModels, setAllowedModels] = useState<HostAllowedModel[]>([])
 
   const [provider, setProvider] = useState<LlmProvider>('openai')
-  const [modelName, setModelName] = useState(getDefaultModel('openai'))
+  // Model list is the operator allowlist (enabled only), loaded async. Start
+  // empty; an effect selects the default once the allowlist arrives. No
+  // hardcoded fallback list (spec R4.5.1).
+  const {
+    models: allowedCatalog,
+    loading: modelsLoading,
+    error: modelsError,
+  } = useLlmAllowedModels()
+  const [modelName, setModelName] = useState('')
   const [stateless, setStateless] = useState(false)
   const [users, setUsers] = useState<
     Array<{ id: string; email: string; name: string | null; displayName: string | null }>
@@ -349,58 +388,47 @@ export function HostWizard({
     [existingChannels, selectedExistingChannel]
   )
   const selectedChannelLabel = selectedChannelOption?.name || 'Select channel...'
-  const providerModelOptions = useMemo(() => getModelOptions(provider), [provider])
+  const providerModelOptions = useMemo(
+    () => getModelOptions(allowedCatalog, provider),
+    [allowedCatalog, provider]
+  )
+  // Keep the selected model valid for the current provider's enabled models:
+  // seed the default once the allowlist loads, and re-default if a provider
+  // switch left the model out of range.
+  useEffect(() => {
+    if (modelsLoading) return
+    if (!providerModelOptions.includes(modelName)) {
+      setModelName(resolveDefaultModel(provider, providerModelOptions))
+    }
+    // Intentionally omit modelName: this reconciles the picker to the options.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerModelOptions, modelsLoading])
+
+  // Auto-derive the new Secret name from the agent name ("this agent's
+  // credentials") until the operator edits it, so naming a Kubernetes Secret is
+  // never a required step (spec Topic 1b R4). The field stays visible + editable.
+  useEffect(() => {
+    if (secretNameTouched) return
+    const base = toKebabCase(hostName)
+    setNewSecretName(base ? `${base}-llm` : '')
+  }, [hostName, secretNameTouched])
+
+  // Keys feeding the fallback credentialSlot dropdown in create: the extra slots
+  // the operator typed a value for, plus any slot a fallback already points at.
+  const llmSecretKeys = useMemo(() => {
+    const keys = new Set<string>()
+    for (const [key, value] of Object.entries(llmKeyDraft)) {
+      if (value.trim().length > 0) keys.add(key)
+    }
+    for (const fallback of llmPolicy?.fallbacks ?? []) {
+      if (fallback.credentialSlot) keys.add(fallback.credentialSlot)
+    }
+    return Array.from(keys)
+  }, [llmKeyDraft, llmPolicy])
   const secretOptions = useMemo(
     () => secretNames.map(name => ({ value: name, label: name, meta: HOST_NAMESPACE })),
     [secretNames]
   )
-  const providerOptions = useMemo(
-    () =>
-      LLM_PROVIDER_OPTIONS.map(option => ({
-        value: option.value,
-        label: option.label,
-        meta: 'Provider',
-      })),
-    []
-  )
-  const modelOptions = useMemo(
-    () => providerModelOptions.map(model => ({ value: model, label: model, meta: provider })),
-    [providerModelOptions, provider]
-  )
-  const credentialTabs = useMemo(
-    () => [
-      {
-        description: 'Used when the selected provider is OpenAI.',
-        filled: openaiApiKey.trim().length > 0,
-        key: 'openai' as const,
-        label: 'OpenAI',
-        placeholder: 'sk-...',
-        value: openaiApiKey,
-        onChange: setOpenaiApiKey,
-      },
-      {
-        description: 'Used when the selected provider is Anthropic.',
-        filled: claudeApiKey.trim().length > 0,
-        key: 'claude' as const,
-        label: 'Claude',
-        placeholder: 'sk-ant-...',
-        value: claudeApiKey,
-        onChange: setClaudeApiKey,
-      },
-      {
-        description: 'Used when the selected provider is Z.AI.',
-        filled: zaiApiKey.trim().length > 0,
-        key: 'zai' as const,
-        label: 'Z.AI',
-        placeholder: 'zai-...',
-        value: zaiApiKey,
-        onChange: setZaiApiKey,
-      },
-    ],
-    [claudeApiKey, openaiApiKey, zaiApiKey]
-  )
-  const activeCredential =
-    credentialTabs.find(tab => tab.key === credentialTab) ?? credentialTabs[0]
   const memberAccessOptions = useMemo(
     () =>
       users.map(user => ({
@@ -438,9 +466,9 @@ export function HostWizard({
       secretMode,
       existingSecret,
       newSecretName,
-      openaiApiKey,
-      claudeApiKey,
-      zaiApiKey,
+      llmKeyDraft,
+      llmPolicy,
+      provider,
       modelName,
       selectedUserIds,
       selectedTeamIds,
@@ -462,9 +490,9 @@ export function HostWizard({
     secretMode,
     existingSecret,
     newSecretName,
-    openaiApiKey,
-    claudeApiKey,
-    zaiApiKey,
+    llmKeyDraft,
+    llmPolicy,
+    provider,
     modelName,
     selectedUserIds,
     selectedTeamIds,
@@ -536,10 +564,6 @@ export function HostWizard({
     void loadDirectory()
   }, [loadDirectory])
 
-  useEffect(() => {
-    setCredentialTab(provider)
-  }, [provider])
-
   const canJumpToStep = useMemo(
     () => (targetStep: number) => {
       if (targetStep <= step) return true
@@ -560,9 +584,9 @@ export function HostWizard({
             secretMode,
             existingSecret,
             newSecretName,
-            openaiApiKey,
-            claudeApiKey,
-            zaiApiKey,
+            llmKeyDraft,
+            llmPolicy,
+            provider,
             modelName,
             selectedUserIds,
             selectedTeamIds,
@@ -590,9 +614,9 @@ export function HostWizard({
       secretMode,
       existingSecret,
       newSecretName,
-      openaiApiKey,
-      claudeApiKey,
-      zaiApiKey,
+      llmKeyDraft,
+      llmPolicy,
+      provider,
       modelName,
       selectedUserIds,
       selectedTeamIds,
@@ -609,13 +633,19 @@ export function HostWizard({
     if (step === 2 && !modelName.trim()) return 'Model name is required.'
     if (step === 2 && secretMode === 'existing' && !existingSecret.trim())
       return 'Select an existing secret.'
-    if (
-      step === 2 &&
-      secretMode === 'new' &&
-      (!toKebabCase(newSecretName) ||
-        (!openaiApiKey.trim() && !claudeApiKey.trim() && !zaiApiKey.trim()))
-    ) {
-      return 'For a new secret, set a name and at least one LLM API key.'
+    if (step === 2 && secretMode === 'new' && !toKebabCase(newSecretName)) {
+      return 'For a new secret, set a name.'
+    }
+    if (step === 2 && secretMode === 'new' && !primaryCredentialUsable(provider, llmKeyDraft)) {
+      return `Add the ${getProviderLabel(provider)} credential for the primary model.`
+    }
+    if (step === 2 && secretMode === 'new') {
+      const projected = projectCredentialDraft(
+        llmKeyDraft,
+        getActiveCredentialKeys(provider, llmPolicy)
+      )
+      const slotErrors = validateLlmSecretData(projected)
+      if (slotErrors.length > 0) return slotErrors[0]
     }
     if (step === 4 && channelMode === 'existing' && !selectedExistingChannel.trim())
       return 'Select an existing channel or skip channel setup.'
@@ -658,9 +688,9 @@ export function HostWizard({
     secretMode,
     existingSecret,
     newSecretName,
-    openaiApiKey,
-    claudeApiKey,
-    zaiApiKey,
+    llmKeyDraft,
+    llmPolicy,
+    provider,
     modelName,
     selectedUserIds,
     selectedTeamIds,
@@ -696,14 +726,15 @@ export function HostWizard({
     setSelectedExistingChannel('')
     setChannelSelectOpen(false)
     setPendingCredentials({})
-    setSecretMode('existing')
+    setSecretMode('new')
     setExistingSecret('')
     setNewSecretName('')
-    setOpenaiApiKey('')
-    setClaudeApiKey('')
-    setZaiApiKey('')
+    setSecretNameTouched(false)
+    setLlmKeyDraft(createEmptyLlmKeyDraft())
+    setLlmPolicy(undefined)
+    setAllowedModels([])
     setProvider('openai')
-    setModelName(getDefaultModel('openai'))
+    setModelName(resolveDefaultModel('openai', getModelOptions(allowedCatalog, 'openai')))
     setStateless(false)
     setSelectedUserIds([])
     setSelectedTeamIds([])
@@ -755,17 +786,26 @@ export function HostWizard({
       const normalizedSecretName = toKebabCase(newSecretName)
 
       if (secretMode === 'new') {
+        // Project the draft onto the active domain before writing: only the
+        // primary provider's slots ∪ each fallback's effective slot(s) reach the
+        // Secret — a key left behind by a since-removed provider is dropped, not
+        // written as an orphan (spec Topic 1b).
+        const stringData = projectCredentialDraft(
+          llmKeyDraft,
+          getActiveCredentialKeys(provider, llmPolicy)
+        )
+        // Slot-aware validation (spec R4.5.3), mirrored server-side.
+        const slotErrors = validateLlmSecretData(stringData)
+        if (slotErrors.length > 0) {
+          throw new Error(slotErrors[0])
+        }
         await apiSend('POST', '/api/v1/admin/secrets', {
           name: normalizedSecretName,
           namespace: hostNamespace,
           labels: {
             [HOST_SECRET_LABEL_KEY]: HOST_SECRET_LABEL_VALUE,
           },
-          stringData: {
-            ...(openaiApiKey ? { 'openai-api-key': openaiApiKey } : {}),
-            ...(claudeApiKey ? { 'claude-api-key': claudeApiKey } : {}),
-            ...(zaiApiKey ? { 'zai-api-key': zaiApiKey } : {}),
-          },
+          stringData,
         })
       }
 
@@ -838,41 +878,49 @@ export function HostWizard({
         )
       }
 
+      // Effective per-host model subset (Topic 3a): prune the draft to the
+      // providers actually in this host's domain (primary + fallbacks), then
+      // collapse unrestricted/all-selected providers via buildAllowedModelsSpec.
+      const activeAllowedProviders = new Set<string>([
+        provider,
+        ...(llmPolicy?.fallbacks ?? []).map(fallback => fallback.provider),
+      ])
+      const allowedModelsSpec = buildAllowedModelsSpec(
+        allowedModels.filter(entry => activeAllowedProviders.has(entry.provider)),
+        allowedCatalog
+      )
+
+      const hostSpec: Record<string, unknown> = {
+        host: normalizedHostName,
+        contextRef: resolvedContextName,
+        secretRef: secretMode === 'existing' ? existingSecret : normalizedSecretName,
+        channels: channelRefs,
+        model: {
+          provider,
+          name: modelName,
+        },
+        // Opt-in fallback policy (spec §3-R5): only set when at least one
+        // fallback is configured, so a Host without fallbacks behaves as today.
+        ...(llmPolicy && llmPolicy.fallbacks.length > 0 ? { llmPolicy } : {}),
+        // Per-host model allowlist subset (spec Topic 3a): only set when the
+        // operator restricted at least one provider to a genuine subset;
+        // unrestricted providers are omitted so absent=all-global holds.
+        ...(allowedModelsSpec.length > 0 ? { allowedModels: allowedModelsSpec } : {}),
+        ...(stateless ? { lifecycle: { stateless: true } } : {}),
+        ...(channelRefs.length > 0
+          ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
+          : {}),
+      }
+
       await upsertResource(
         'admin/hosts',
         normalizedHostName,
         {
           metadata: { name: normalizedHostName },
-          spec: {
-            host: normalizedHostName,
-            contextRef: resolvedContextName,
-            secretRef: secretMode === 'existing' ? existingSecret : normalizedSecretName,
-            channels: channelRefs,
-            model: {
-              provider,
-              name: modelName,
-            },
-            ...(stateless ? { lifecycle: { stateless: true } } : {}),
-            ...(channelRefs.length > 0
-              ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
-              : {}),
-          },
+          spec: hostSpec,
         },
         {
-          spec: {
-            host: normalizedHostName,
-            contextRef: resolvedContextName,
-            secretRef: secretMode === 'existing' ? existingSecret : normalizedSecretName,
-            channels: channelRefs,
-            model: {
-              provider,
-              name: modelName,
-            },
-            ...(stateless ? { lifecycle: { stateless: true } } : {}),
-            ...(channelRefs.length > 0
-              ? { workflowControl: { scopes: [...FIRST_PARTY_CHANNEL_WORKFLOW_CONTROL_SCOPES] } }
-              : {}),
-          },
+          spec: hostSpec,
         }
       )
 
@@ -1391,43 +1439,11 @@ export function HostWizard({
         {step === 2 && (
           <div className="cu-form-stack cu-agent-form-stack">
             <div className="cu-agent-access-section">
-              <strong>Model</strong>
-              <WizardSelect
-                value={provider}
-                placeholder="Select provider..."
-                options={providerOptions}
-                onChange={nextValue => {
-                  const nextProvider = normalizeProvider(nextValue)
-                  setProvider(nextProvider)
-                  setModelName(getDefaultModel(nextProvider))
-                }}
-              />
-              <WizardSelect
-                value={modelName}
-                placeholder="Select model..."
-                options={modelOptions}
-                onChange={setModelName}
-              />
-            </div>
-            <div className="cu-agent-access-section">
-              <strong>LLM API keys</strong>
+              <strong>Credentials</strong>
               <span className="cu-muted cu-agent-access-hint">
-                These credentials let the agent call the selected LLM provider.
+                Store this agent&apos;s own LLM credentials, or reuse a shared Kubernetes Secret.
               </span>
               <div className="cu-agent-radio-group">
-                <label className="cu-agent-radio cu-agent-radio--card">
-                  <input
-                    type="radio"
-                    checked={secretMode === 'existing'}
-                    onChange={() => setSecretMode('existing')}
-                  />
-                  <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">Use existing secret</span>
-                    <span className="cu-agent-radio__description">
-                      Select a saved Kubernetes Secret that already contains LLM API keys.
-                    </span>
-                  </span>
-                </label>
                 <label className="cu-agent-radio cu-agent-radio--card">
                   <input
                     type="radio"
@@ -1435,9 +1451,22 @@ export function HostWizard({
                     onChange={() => setSecretMode('new')}
                   />
                   <span className="cu-agent-radio__copy">
-                    <span className="cu-agent-radio__title">Create new secret</span>
+                    <span className="cu-agent-radio__title">This agent&apos;s credentials</span>
                     <span className="cu-agent-radio__description">
-                      Store new provider API keys for this agent to run LLM requests.
+                      Create a new Secret for this agent. Its name is derived from the agent name.
+                    </span>
+                  </span>
+                </label>
+                <label className="cu-agent-radio cu-agent-radio--card">
+                  <input
+                    type="radio"
+                    checked={secretMode === 'existing'}
+                    onChange={() => setSecretMode('existing')}
+                  />
+                  <span className="cu-agent-radio__copy">
+                    <span className="cu-agent-radio__title">Reuse an existing Secret</span>
+                    <span className="cu-agent-radio__description">
+                      Select a saved Kubernetes Secret that already contains LLM API keys.
                     </span>
                   </span>
                 </label>
@@ -1450,67 +1479,60 @@ export function HostWizard({
                   onChange={setExistingSecret}
                 />
               ) : (
-                <div className="cu-agent-secret-fields">
-                  <Field
-                    description="Automatically formatted to lowercase with hyphens."
-                    label="New secret name"
-                  >
-                    <span className="cu-agent-input-shell">
-                      <TextInput
-                        value={newSecretName}
-                        onChange={e => setNewSecretName(toKebabInput(e.target.value))}
-                        placeholder="secret-name"
-                      />
-                      <span
-                        className={cn(
-                          'cu-agent-input-shell__status',
-                          !toKebabCase(newSecretName) && 'cu-agent-input-shell__status--empty'
-                        )}
-                        aria-label={
-                          toKebabCase(newSecretName) ? 'Valid secret name' : 'Secret name empty'
-                        }
-                      >
-                        {toKebabCase(newSecretName) ? <IconCheck width={16} height={16} /> : null}
-                      </span>
-                    </span>
-                  </Field>
-                  <div
-                    className="cu-agent-secret-tabs"
-                    role="tablist"
-                    aria-label="LLM API key providers"
-                  >
-                    {credentialTabs.map(tab => (
-                      <button
-                        key={tab.key}
-                        type="button"
-                        className="cu-agent-secret-tab"
-                        role="tab"
-                        aria-selected={credentialTab === tab.key}
-                        data-active={credentialTab === tab.key}
-                        onClick={() => setCredentialTab(tab.key)}
-                      >
-                        {tab.filled ? (
-                          <IconCheck title={`${tab.label} API key filled`} width={14} height={14} />
-                        ) : null}
-                        <span>{tab.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                  <Field
-                    description={activeCredential.description}
-                    label={`${activeCredential.label} API key`}
-                  >
+                <Field
+                  description="Auto-named from the agent — edit if you prefer a different name."
+                  label="Secret name"
+                >
+                  <span className="cu-agent-input-shell">
                     <TextInput
-                      autoComplete="off"
-                      placeholder={activeCredential.placeholder}
-                      type="password"
-                      value={activeCredential.value}
-                      onChange={e => activeCredential.onChange(e.target.value)}
+                      value={newSecretName}
+                      onChange={e => {
+                        setSecretNameTouched(true)
+                        setNewSecretName(toKebabInput(e.target.value))
+                      }}
+                      placeholder="secret-name"
                     />
-                  </Field>
-                </div>
+                    <span
+                      className={cn(
+                        'cu-agent-input-shell__status',
+                        !toKebabCase(newSecretName) && 'cu-agent-input-shell__status--empty'
+                      )}
+                      aria-label={
+                        toKebabCase(newSecretName) ? 'Valid secret name' : 'Secret name empty'
+                      }
+                    >
+                      {toKebabCase(newSecretName) ? <IconCheck width={16} height={16} /> : null}
+                    </span>
+                  </span>
+                </Field>
               )}
             </div>
+            <LlmProviderConfig
+              provider={provider}
+              model={modelName}
+              onPrimaryChange={next => {
+                setProvider(next.provider)
+                setModelName(next.model)
+              }}
+              policy={llmPolicy}
+              onPolicyChange={setLlmPolicy}
+              allowedModels={allowedModels}
+              onAllowedModelsChange={setAllowedModels}
+              catalog={allowedCatalog}
+              catalogLoading={modelsLoading}
+              catalogError={modelsError}
+              credentials={
+                secretMode === 'new'
+                  ? {
+                      draft: llmKeyDraft,
+                      onChange: (dataKey, value) =>
+                        setLlmKeyDraft(prev => ({ ...prev, [dataKey]: value })),
+                    }
+                  : undefined
+              }
+              secretKeys={secretMode === 'new' ? llmSecretKeys : []}
+              disabled={busy}
+            />
           </div>
         )}
 

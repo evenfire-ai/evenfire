@@ -121,16 +121,15 @@ const expiredApprovalsReapedCounter = (() => {
   }
 })()
 
-// S1 — incremented once per session the boot reaper transitioned from
-// awaiting_approval→idle because the approval was still live but cannot be
-// resumed after a pod restart (no executor rehydration). Kept distinct from the
-// expired counter so dashboards don't conflate restart-interruption with TTL
-// expiry.
+// S1 — incremented once per session an explicit abandon-all recovery moves
+// from awaiting_approval to idle while its approval is still live. Kept
+// distinct from the expired counter so dashboards do not conflate operator
+// recovery with TTL expiry. The metric name remains stable for compatibility.
 const restartInterruptedApprovalsReapedCounter = (() => {
   try {
     return new Counter({
       name: 'clerum_restart_interrupted_approvals_reaped_total',
-      help: 'Sessions transitioned awaiting_approval→idle on boot because a pod restart interrupted a live approval',
+      help: 'Sessions transitioned awaiting_approval→idle by explicit recovery while an approval was still live',
       labelNames: ['channel_type'] as const,
     })
   } catch {
@@ -435,11 +434,10 @@ export class SqliteConversationStore implements ConversationStore {
   }
 
   /**
-   * S1 — boot-time reaper for EVERY session left in 'awaiting_approval', live or
-   * expired. No awaiting_approval session is resumable after a pod restart (no
-   * executor rehydration exists), so the boot path uses this form instead of the
-   * expired-only one above. Same chunked worker sweep + counter + cache-evict
-   * pattern; the worker stamps a distinct APPROVAL_INTERRUPTED_BY_RESTART message.
+   * S1 — explicit recovery operation for EVERY session left in
+   * 'awaiting_approval', live or expired. Normal boot uses the expired-only
+   * operation above and reconstructs valid live executors. This method remains
+   * available for an operator-directed abandon-all recovery.
    */
   async reapAwaitingApprovalSessions(now: number): Promise<ReapedSession[]> {
     const reaped = await this.persistQueue.enqueueSync<ReapedSession[]>({
@@ -476,7 +474,11 @@ export class SqliteConversationStore implements ConversationStore {
       channel_type: opts.channelType ?? parsed?.channelType ?? null,
       channel_id: opts.channelId ?? parsed?.channelId ?? null,
       thread_id: opts.threadId ?? parsed?.threadId ?? null,
+      // R2 — `model` now records the effective model served (opts.model); the
+      // user's saved selection lives in `model_selections`. Both may be null on
+      // a brand-new session (no task served, no selection yet).
       model: opts.model ?? null,
+      model_selections: conv.modelSelections ? JSON.stringify(conv.modelSelections) : null,
       system_prompt_stable_hash: null,
       parent_session_id: null,
       started_at: conv.created_at.getTime() / 1000,
@@ -492,6 +494,7 @@ export class SqliteConversationStore implements ConversationStore {
       title: null,
       state: conv.state,
       active_task_id: conv.activeTaskId ?? null,
+      active_trace_context: conv.traceContext ? JSON.stringify(conv.traceContext) : null,
     }
     this.persistQueue.enqueueAsync(sessionKey, {
       kind: 'insert_session',
@@ -537,6 +540,7 @@ export class SqliteConversationStore implements ConversationStore {
         state: conv.state,
         // D.1 — mirror the in-RAM activeTaskId (set by startTurn) to the column.
         activeTaskId: conv.activeTaskId ?? null,
+        activeTraceContext: conv.traceContext ? JSON.stringify(conv.traceContext) : null,
       },
       sessionKey
     )
@@ -588,6 +592,7 @@ export class SqliteConversationStore implements ConversationStore {
         sessionId: conv.id,
         state: conv.state,
         activeTaskId: null, // D.1 — turn complete clears the in-flight task
+        activeTraceContext: null,
       },
       sessionKey
     )
@@ -635,6 +640,7 @@ export class SqliteConversationStore implements ConversationStore {
         sessionId: conv.id,
         state: 'idle',
         activeTaskId: null, // D.1 — cancel clears the in-flight task
+        activeTraceContext: null,
       },
       sessionKey
     )
@@ -658,6 +664,7 @@ export class SqliteConversationStore implements ConversationStore {
         sessionId: conv.id,
         state: 'idle',
         activeTaskId: null, // D.1 — fail clears the in-flight task
+        activeTraceContext: null,
       },
       sessionKey
     )
@@ -762,15 +769,35 @@ export class SqliteConversationStore implements ConversationStore {
     })
   }
 
+  /**
+   * R2 — persist the per-session `{ provider → model }` selection map. Enqueued
+   * (async) and keyed by sessionKey so it chains AFTER the session's own
+   * `insert_session` (a set-model on a brand-new session getOrCreates the row
+   * first, enqueuing the insert on the same FIFO chain). Full-overwrite: the
+   * ConversationManager owns the in-RAM map and re-serializes on every mutation.
+   */
+  persistModelSelections(conv: Conversation): void {
+    const sessionKey = this.sessionKeyById.get(conv.id)
+    if (!sessionKey) return
+    this.persistQueue.enqueueAsync(sessionKey, {
+      kind: 'update_session_model_selections',
+      sessionId: conv.id,
+      modelSelections: JSON.stringify(conv.modelSelections ?? {}),
+    })
+  }
+
   async persistSuspend(conv: Conversation, approval: PendingApproval): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
+    if (!conv.activeTaskId) {
+      throw new Error(`Cannot persist approval ${approval.request_id} without an active task`)
+    }
     this.reconcilePinning(sessionKey, conv)
     const now = Date.now()
     const row: PendingApprovalRow = {
       request_id: approval.request_id,
       session_id: conv.id,
-      task_id: approval.request_id,
+      task_id: conv.activeTaskId,
       tool_name: approval.tool_name,
       tool_call_id: approval.tool_call_id,
       parameters: JSON.stringify(approval.parameters),
@@ -784,6 +811,7 @@ export class SqliteConversationStore implements ConversationStore {
       registered_at: now / 1000,
       expires_at:
         (now + (this.opts.pendingApprovalTtlMs ?? DEFAULT_PENDING_APPROVAL_TTL_MS)) / 1000,
+      trace_context: approval.traceContext ? JSON.stringify(approval.traceContext) : null,
     }
     await this.persistQueue.enqueueSync(
       { kind: 'insert_pending_approval', payload: row },
@@ -813,6 +841,7 @@ export class SqliteConversationStore implements ConversationStore {
         // D.1 — approve resumes the SAME task (→ Processing): preserve.
         // deny/cancel are terminal (→ Idle): clear the in-flight task.
         activeTaskId: decision === 'approve' ? undefined : null,
+        activeTraceContext: decision === 'approve' ? undefined : null,
       },
       sessionKey
     )

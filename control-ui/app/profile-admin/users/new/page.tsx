@@ -12,6 +12,7 @@ import { IconUsers } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconTrash } from '@components/icons'
 import { Button, CheckboxField, Field, TextInput } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { createMemberFromControlAdmin, getAdminTeams, inviteAdminTeamMember } from '@lib/api'
 import type { TeamRole } from '@lib/api'
 import { permissionsForTeamRole, setDeletePermission, setInvitePermission } from '@lib/teamRoles'
@@ -158,7 +159,7 @@ export default function CreateMemberPage() {
         await inviteAdminTeamMember(null, payload)
         showToast(`Invitation sent to ${payload.email}.`, { tone: 'success' })
       }
-      router.push('/profile-admin/users')
+      router.push(CONTROL_ROUTES.usersAndTeams.users)
     } catch (createError) {
       setError(formatCreateMemberError(createError))
     } finally {
@@ -201,7 +202,7 @@ export default function CreateMemberPage() {
               title="Create member"
               subtitle="Create a pending invitation and send the invitation email."
               backLabel="Back to members"
-              onBack={() => router.push('/profile-admin/users')}
+              onBack={() => router.push(CONTROL_ROUTES.usersAndTeams.users)}
               backDisabled={saving}
             />
           }
@@ -371,7 +372,7 @@ export default function CreateMemberPage() {
                 variant="ghost"
                 size="sm"
                 onClick={() =>
-                  step === 0 ? router.push('/profile-admin/users') : setStep(step - 1)
+                  step === 0 ? router.push(CONTROL_ROUTES.usersAndTeams.users) : setStep(step - 1)
                 }
                 disabled={saving}
               >

@@ -484,7 +484,7 @@ const envMatchesLocalhostOption = configsMatch(envRuntimeConfig, localhostRuntim
 function shouldPreferLocalhostByDefault(): boolean {
   return (
     !app?.isPackaged &&
-    Boolean(process.env.ELECTRON_RENDERER_URL?.trim()) &&
+    Boolean(process.env.EVENFIRE_RENDERER_URL?.trim()) &&
     envMatchesLocalhostOption
   )
 }
@@ -514,7 +514,7 @@ export const config: DesktopConfig = {
   rpcProxyBaseUrl: initialRuntimeConfig.rpcProxyBaseUrl || '',
   memberRegistrationServiceBaseUrl: requiredOrDefault(
     'MEMBER_REGISTRATION_SERVICE_BASE_URL',
-    'https://example.com'
+    'https://registration.evenfire.ai'
   ),
   desktopProfileUiBaseUrl: deriveProfileUiBaseUrl(initialRuntimeConfig.externalRestApiBaseUrl),
   requestTimeoutMs: Number(requiredOrDefault('REQUEST_TIMEOUT_MS', '60000')),

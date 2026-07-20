@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { type DragEvent as ReactDragEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
+import { GfsImagePreview } from '@components/GfsImagePreview'
+import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
 import {
   IconAttachFile,
@@ -8,23 +10,25 @@ import {
   IconClose,
   IconConnectors,
   IconContexts,
-  IconCopy,
   IconDownload,
-  IconEdit,
-  IconPlus,
-  IconTrash,
 } from '@components/SidebarNav/icons'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
+import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
+import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
+import { GfsSubjectBatchError, runGfsSubjectBatch } from '@lib/gfsSubjectBatch'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsDelegationPanel, type GfsDelegationSubjectOption } from '@/gfs/delegation'
 import { GfsFilePicker } from '@/gfs/filePicker'
 import { normalizeGfsResourceName } from '@/gfs/resourceName'
 import type { TeamDirectoryResult } from '../../../src/types'
-import type { FilesPageProps, GfsDriveResource } from './FilesPage.types'
+import type { FilesPageProps, GfsDriveResource, GfsPreviewResource } from './FilesPage.types'
 
 async function fileToEncodedData(file: File): Promise<string> {
+  assertGfsFileUploadSize(file.size)
   const bytes = new Uint8Array(await file.arrayBuffer())
+  assertGfsFileUploadSize(bytes.byteLength)
   let binary = ''
   const chunkSize = 0x8000
   for (let offset = 0; offset < bytes.length; offset += chunkSize) {
@@ -35,6 +39,22 @@ async function fileToEncodedData(file: File): Promise<string> {
 
 function hasBit(affordances: { held?: string[] } | null, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
+}
+
+function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
+  return Array.from(event.dataTransfer.types || []).includes('Files')
+}
+
+function isDroppedPreviewFile(file: File): boolean {
+  return (
+    file.type.toLowerCase().startsWith('image/') ||
+    gfsImagePreviewMimeType(file.name) !== null ||
+    isGfsMarkdownPreviewFile(file.name)
+  )
+}
+
+function isGfsPreviewFile(fileName: string): boolean {
+  return gfsImagePreviewMimeType(fileName) !== null || isGfsMarkdownPreviewFile(fileName)
 }
 
 function delegationSubjectOptions(
@@ -76,6 +96,9 @@ export function FilesPage({ pushToast }: FilesPageProps) {
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
+  const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
+  const [dragActive, setDragActive] = useState(false)
+  const [droppedUploadCount, setDroppedUploadCount] = useState(0)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
   const ctrl = useGfsBrowserController()
@@ -86,6 +109,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     items,
     affordances,
     affordancesError,
+    loadingAffordances,
     loadingAccessible,
     loading,
     accessibleError,
@@ -93,6 +117,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     error,
     openError,
     resolving,
+    refreshAffordances,
   } = ctrl
 
   const teamDirectoryQuery = useQuery({
@@ -108,6 +133,56 @@ export function FilesPage({ pushToast }: FilesPageProps) {
   const canDeleteCurrent = hasBit(affordances, 'delete')
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
+  const currentPreviewAvailable = currentIsFile && isGfsPreviewFile(current?.name ?? '')
+  const droppedUploadRestriction = useMemo(() => {
+    if (!current) {
+      return 'Open a folder before uploading files. The shared-files view has no upload destination.'
+    }
+    if (!currentIsFolder) {
+      return `Open a folder before uploading files. ${current.name} is a file, not an upload destination.`
+    }
+    if (affordancesError) {
+      return `Uploads to ${current.name} are unavailable because permissions could not be verified: ${affordancesError}`
+    }
+    if (!affordances) {
+      return `Upload permissions for ${current.name} are still loading. Try again in a moment.`
+    }
+    if (!canWriteCurrent) {
+      return `You can’t upload to ${current.name} because you don’t have write permission for this folder.`
+    }
+    return null
+  }, [affordances, affordancesError, canWriteCurrent, current, currentIsFolder])
+
+  useEffect(() => {
+    if (!manageOpen || !current?.resourceId) return
+    void refreshAffordances()
+  }, [current?.resourceId, manageOpen, refreshAffordances])
+
+  const openFilePreview = (
+    resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'>
+  ): boolean => {
+    const mimeType = gfsImagePreviewMimeType(resource.name)
+    if (mimeType) {
+      setFilePreview({
+        gfsUri: resource.gfsUri,
+        kind: 'image',
+        mimeType,
+        name: resource.name,
+        bytes: resource.bytes,
+      })
+      return true
+    }
+    if (isGfsMarkdownPreviewFile(resource.name)) {
+      setFilePreview({
+        bytes: resource.bytes,
+        gfsUri: resource.gfsUri,
+        kind: 'markdown',
+        name: resource.name,
+      })
+      return true
+    }
+    return false
+  }
 
   useEffect(() => {
     if (!manageOpen && !openLinkOpen) return
@@ -120,14 +195,44 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [manageOpen, openLinkOpen])
 
-  const handleGrant = async (subjectKey: string, bits: string[]) => {
-    await ctrl.grant(subjectKey, bits)
-    pushToast?.('Access granted', 'success')
+  const handleGrant = async (subjectKeys: string[], bits: string[]) => {
+    try {
+      await runGfsSubjectBatch('Grant access', subjectKeys, subjectKey =>
+        ctrl.grant(subjectKey, bits)
+      )
+    } catch (error) {
+      if (error instanceof GfsSubjectBatchError && error.succeededSubjectKeys.length > 0) {
+        pushToast?.(
+          `Access granted to ${error.succeededSubjectKeys.length} of ${subjectKeys.length} subjects`,
+          'success'
+        )
+      }
+      throw error
+    }
+    pushToast?.(
+      `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
+      'success'
+    )
   }
 
-  const handleCreateShare = async (subjectKey: string) => {
-    await ctrl.createShare(subjectKey)
-    pushToast?.('Share created', 'success')
+  const handleCreateShare = async (subjectKeys: string[]) => {
+    try {
+      await runGfsSubjectBatch('Create share', subjectKeys, subjectKey =>
+        ctrl.createShare(subjectKey)
+      )
+    } catch (error) {
+      if (error instanceof GfsSubjectBatchError && error.succeededSubjectKeys.length > 0) {
+        pushToast?.(
+          `${error.succeededSubjectKeys.length} of ${subjectKeys.length} shares created`,
+          'success'
+        )
+      }
+      throw error
+    }
+    pushToast?.(
+      `${subjectKeys.length} ${subjectKeys.length === 1 ? 'share' : 'shares'} created`,
+      'success'
+    )
   }
 
   const handleDownload = async (uri: string, name: string) => {
@@ -157,6 +262,13 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     }
   }
 
+  const handleOpenGfsLink = async (uri: string) => {
+    const opened = await ctrl.openUri(uri)
+    if (opened === false) return false
+    if (typeof opened === 'object' && opened.kind === 'file') openFilePreview(opened)
+    return true
+  }
+
   const handleCreateFolder = async () => {
     const requestedName = createFolderName.trim()
     if (!requestedName) return
@@ -171,14 +283,74 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     }
   }
 
-  const handleUploadFile = async (file: File | null | undefined) => {
-    if (!file) return
+  const handleUploadFile = async (
+    file: File | null | undefined,
+    parentResourceId = current?.resourceId
+  ) => {
+    if (!file || !parentResourceId) return
     try {
       const name = await normalizeGfsResourceName(file.name)
-      await ctrl.createFile(name, await fileToEncodedData(file))
+      await ctrl.createFile(parentResourceId, name, await fileToEncodedData(file))
       pushToast?.(`Uploaded ${name}`, 'success')
     } catch (uploadError) {
       pushToast?.(uploadError instanceof Error ? uploadError.message : String(uploadError), 'error')
+    }
+  }
+
+  const handleGfsDragEnter = (event: ReactDragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event)) return
+    event.preventDefault()
+    setDragActive(true)
+  }
+
+  const handleGfsDragOver = (event: ReactDragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = droppedUploadRestriction ? 'none' : 'copy'
+    setDragActive(true)
+  }
+
+  const handleGfsDragLeave = (event: ReactDragEvent<HTMLElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
+    setDragActive(false)
+  }
+
+  const handleGfsDrop = async (event: ReactDragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event)) return
+    event.preventDefault()
+    setDragActive(false)
+
+    if (droppedUploadRestriction) {
+      pushToast?.(droppedUploadRestriction, 'error')
+      return
+    }
+    const destinationResourceId = current?.resourceId
+    if (!destinationResourceId) {
+      pushToast?.('Open a folder before uploading files.', 'error')
+      return
+    }
+
+    const droppedFiles = Array.from(event.dataTransfer.files || [])
+    const previewFiles = droppedFiles.filter(isDroppedPreviewFile)
+    if (!previewFiles.length) {
+      pushToast?.('Only image and Markdown files can be dropped here.', 'error')
+      return
+    }
+
+    setDroppedUploadCount(previewFiles.length)
+    try {
+      for (const file of previewFiles) {
+        await handleUploadFile(file, destinationResourceId)
+      }
+      const skippedCount = droppedFiles.length - previewFiles.length
+      if (skippedCount > 0) {
+        pushToast?.(
+          `${skippedCount} unsupported ${skippedCount === 1 ? 'file was' : 'files were'} skipped.`,
+          'error'
+        )
+      }
+    } finally {
+      setDroppedUploadCount(0)
     }
   }
 
@@ -222,11 +394,13 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     }
   }
 
-  const visibleResources: GfsDriveResource[] = currentIsFolder
-    ? items
-    : currentIsFile
-      ? []
-      : accessibleResources
+  const visibleResources = useMemo<GfsDriveResource[]>(() => {
+    const resources = currentIsFolder ? items : currentIsFile ? [] : accessibleResources
+    return [...resources].sort((left, right) => {
+      if (left.kind === right.kind) return 0
+      return left.kind === 'directory' ? -1 : 1
+    })
+  }, [accessibleResources, currentIsFile, currentIsFolder, items])
   const visibleLoading = currentIsFolder ? loading : !current ? loadingAccessible : false
   const visibleError = currentIsFolder ? error : !current ? accessibleError : null
   const hasMoreVisible = currentIsFolder ? ctrl.hasMore : !current && ctrl.hasMoreAccessible
@@ -246,6 +420,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
       else ctrl.openResource(resource)
       return
     }
+    if (openFilePreview(resource)) return
     void handleDownload(resource.gfsUri, resource.name)
   }
 
@@ -257,7 +432,15 @@ export function FilesPage({ pushToast }: FilesPageProps) {
       </div>
 
       <div className="page-layout da-gfs-layout">
-        <section className="page-card da-gfs-drive" aria-label="Global File System browser">
+        <section
+          className="page-card da-gfs-drive"
+          aria-label="Global File System browser"
+          aria-busy={visibleLoading || droppedUploadCount > 0}
+          onDragEnter={handleGfsDragEnter}
+          onDragLeave={handleGfsDragLeave}
+          onDragOver={handleGfsDragOver}
+          onDrop={event => void handleGfsDrop(event)}
+        >
           <div className="page-card__header da-gfs-drive__header">
             <nav className="da-gfs-drive__breadcrumbs" aria-label="File location">
               <Button
@@ -296,7 +479,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
               >
                 Open GFS link
               </Button>
-              {current ? (
+              {current && !currentIsFile ? (
                 <GfsResourceMenu
                   resourceName={current.name}
                   onManage={() => {
@@ -316,27 +499,62 @@ export function FilesPage({ pushToast }: FilesPageProps) {
             </div>
           </div>
 
+          {dragActive || droppedUploadCount > 0 ? (
+            <div className="composer-drop-overlay da-gfs-drop-overlay" role="status">
+              {droppedUploadCount > 0
+                ? `Uploading ${droppedUploadCount} ${droppedUploadCount === 1 ? 'file' : 'files'}…`
+                : droppedUploadRestriction ||
+                  `Drop images or Markdown files to upload to ${current?.name || 'this folder'}`}
+            </div>
+          ) : null}
+
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
           {visibleError ? <StatusBanner tone="error" text={visibleError} /> : null}
 
-          <div className="da-gfs-drive__table-toolbar">
-            <span>
-              {currentIsFolder
-                ? `${visibleResources.length} items in this folder`
-                : currentIsFile
-                  ? 'File selected'
-                  : `${visibleResources.length} shared items`}
-            </span>
-            <span className="muted">Use the three-dot menu to manage an item.</span>
-          </div>
-
           {visibleLoading ? (
-            <EmptyState title="Loading files" body="Fetching your Global File System resources…" />
+            <div
+              className="da-gfs-loading"
+              role="status"
+              aria-label="Loading files"
+              aria-live="polite"
+            >
+              <span className="da-gfs-loading__dots" aria-hidden="true">
+                <span className="da-gfs-loading__dot" />
+                <span className="da-gfs-loading__dot" />
+                <span className="da-gfs-loading__dot" />
+              </span>
+              <span>Loading files…</span>
+            </div>
           ) : currentIsFile ? (
-            <EmptyState
-              title={current.name}
-              body="Use the three-dot menu above to manage, download, or copy this file's link."
-            />
+            <div className="da-gfs-current-file">
+              <span className="da-gfs-current-file__icon" aria-hidden="true">
+                <IconAttachFile />
+              </span>
+              <div className="da-gfs-current-file__copy">
+                <div className="da-gfs-current-file__title-row">
+                  <h3>{current.name}</h3>
+                  <GfsResourceMenu
+                    resourceName={current.name}
+                    onManage={() => {
+                      setCreateFolderOpen(false)
+                      setRenameOpen(false)
+                      setDeleteOpen(false)
+                      setManageOpen(true)
+                    }}
+                    onCopyLink={() => void handleCopyLink(current.gfsUri)}
+                    onPreview={
+                      currentPreviewAvailable ? () => void openFilePreview(current) : undefined
+                    }
+                    onDownload={() => void handleDownload(current.gfsUri, current.name)}
+                  />
+                </div>
+                <p className="muted">
+                  {currentPreviewAvailable
+                    ? 'Preview this file again or use the menu to manage and download it.'
+                    : 'Use the menu to manage, download, or copy this file’s GFS link.'}
+                </p>
+              </div>
+            </div>
           ) : visibleResources.length === 0 ? (
             <EmptyState
               title={currentIsFolder ? 'This folder is empty' : 'No shared files yet'}
@@ -393,12 +611,27 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                       {resourceSource(resource, currentIsFolder ? current?.name : undefined)}
                     </span>
                     <span className="da-gfs-list__actions da-grid__cell da-grid__cell--right">
+                      {resource.kind === 'file' ? (
+                        <IconButton
+                          label={`Download ${resource.name}`}
+                          onClick={() => void handleDownload(resource.gfsUri, resource.name)}
+                          size="sm"
+                          variant="ghost"
+                        >
+                          <IconDownload width={16} height={16} />
+                        </IconButton>
+                      ) : null}
                       <GfsResourceMenu
                         resourceName={resource.name}
                         onManage={() => openManage(resource)}
                         onCopyLink={() => void handleCopyLink(resource.gfsUri)}
                         onOpen={
                           resource.kind === 'directory' ? () => openResource(resource) : undefined
+                        }
+                        onPreview={
+                          isGfsPreviewFile(resource.name)
+                            ? () => void openFilePreview(resource)
+                            : undefined
                         }
                         onDownload={
                           resource.kind === 'file'
@@ -449,7 +682,9 @@ export function FilesPage({ pushToast }: FilesPageProps) {
               <span className="da-gfs-link-dialog__heading">
                 <span className="da-gfs-eyebrow">Direct access</span>
                 <h3 id="gfs-link-dialog-title">Open GFS link</h3>
-                <span className="muted">Paste a GFS URI to jump directly to a shared resource.</span>
+                <span className="muted">
+                  Paste a GFS URI to jump directly to a shared resource.
+                </span>
               </span>
               <IconButton
                 label="Close GFS link dialog"
@@ -462,7 +697,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
             </header>
             <div className="da-gfs-link-dialog__body">
               <GfsFilePicker
-                onOpen={ctrl.openUri}
+                onOpen={handleOpenGfsLink}
                 onOpened={() => setOpenLinkOpen(false)}
                 busy={resolving}
                 error={openError}
@@ -484,7 +719,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
             className="da-gfs-manage-dialog"
             role="dialog"
             aria-modal="true"
-            aria-labelledby="gfs-manage-title"
+            aria-label={`Manage ${currentIsFolder ? 'folder' : 'file'} ${current.name}`}
           >
             <header className="da-gfs-manage-dialog__header">
               <span
@@ -494,262 +729,23 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                 {currentIsFolder ? <IconContexts /> : <IconAttachFile />}
               </span>
               <span className="da-gfs-manage-dialog__heading">
-                <span className="da-gfs-eyebrow">Manage {currentIsFolder ? 'folder' : 'file'}</span>
-                <h3 id="gfs-manage-title">{current.name}</h3>
-                <span className="da-gfs-manage-dialog__meta">
-                  <span className="da-gfs-manage-dialog__badge">
-                    {currentIsFolder ? 'Folder' : 'File'}
-                  </span>
-                  <span>Version {current.version}</span>
-                  <span>
-                    {affordances
-                      ? `${affordances.held.length} permission${affordances.held.length === 1 ? '' : 's'}`
-                      : 'Checking access'}
-                  </span>
-                </span>
-              </span>
-              <IconButton
-                autoFocus
-                label="Close manage dialog"
-                onClick={() => setManageOpen(false)}
-                size="sm"
-                variant="ghost"
-              >
-                <IconClose />
-              </IconButton>
-            </header>
-
-            <div className="da-gfs-manage-dialog__body">
-              <section className="da-gfs-manage-section da-gfs-manage-section--actions">
-                <div className="da-gfs-manage-section__header">
-                  <div>
-                    <span className="da-gfs-manage-section__step">Resource</span>
-                    <h4>Quick actions</h4>
-                    <p className="muted">Only actions available to you are shown.</p>
-                  </div>
-                </div>
-
-                <div className="da-gfs-manage-resource-link">
-                  <span className="da-gfs-manage-resource-link__copy">
-                    <span>GFS location</span>
-                    <code title={current.gfsUri}>{current.gfsUri}</code>
-                  </span>
-                  <IconButton
-                    label={`Copy GFS link for ${current.name}`}
-                    onClick={() => void handleCopyLink(current.gfsUri)}
-                    size="sm"
-                    title="Copy GFS link"
-                    variant="ghost"
-                  >
-                    <IconCopy />
-                  </IconButton>
-                </div>
-
-                {currentIsFolder && canWriteCurrent ? (
-                  <input
-                    aria-label="Upload file"
-                    className="visually-hidden"
-                    ref={uploadInputRef}
-                    type="file"
-                    onChange={event => {
-                      const file = event.currentTarget.files?.[0]
-                      event.currentTarget.value = ''
-                      void handleUploadFile(file)
-                    }}
-                  />
-                ) : null}
-                {currentIsFile && canWriteCurrent ? (
-                  <input
-                    aria-label="Replace file"
-                    className="visually-hidden"
-                    ref={replaceInputRef}
-                    type="file"
-                    onChange={event => {
-                      const file = event.currentTarget.files?.[0]
-                      event.currentTarget.value = ''
-                      void handleReplaceCurrentFile(file)
-                    }}
-                  />
-                ) : null}
-
-                <div className="da-gfs-current-actions da-gfs-current-actions--manage">
-                  {currentIsFolder && canWriteCurrent ? (
-                    <>
-                      <Button
-                        align="start"
-                        className="da-gfs-manage-action"
-                        loading={ctrl.mutating}
-                        onClick={() => {
-                          setCreateFolderName('')
-                          setCreateFolderOpen(true)
-                          setRenameOpen(false)
-                          setDeleteOpen(false)
-                        }}
-                        variant="ghost"
-                      >
-                        <span className="da-gfs-manage-action__icon" aria-hidden="true">
-                          <IconPlus />
-                        </span>
-                        <span className="da-gfs-manage-action__copy">
-                          <strong>New folder</strong>
-                          <small>Create inside this folder</small>
-                        </span>
-                      </Button>
-                      <Button
-                        align="start"
-                        className="da-gfs-file-action da-gfs-manage-action"
-                        loading={ctrl.mutating}
-                        onClick={() => uploadInputRef.current?.click()}
-                        variant="ghost"
-                      >
-                        <span className="da-gfs-manage-action__icon" aria-hidden="true">
-                          <IconAttachFile />
-                        </span>
-                        <span className="da-gfs-manage-action__copy">
-                          <strong>Upload file</strong>
-                          <small>Add a file to this folder</small>
-                        </span>
-                      </Button>
-                    </>
-                  ) : null}
-                  {currentIsFile && canWriteCurrent ? (
-                    <Button
-                      align="start"
-                      className="da-gfs-file-action da-gfs-manage-action"
-                      loading={ctrl.mutating}
-                      onClick={() => replaceInputRef.current?.click()}
-                      variant="ghost"
-                    >
-                      <span className="da-gfs-manage-action__icon" aria-hidden="true">
-                        <IconAttachFile />
-                      </span>
-                      <span className="da-gfs-manage-action__copy">
-                        <strong>Replace file</strong>
-                        <small>Upload a new version</small>
-                      </span>
-                    </Button>
-                  ) : null}
-                  {canWriteCurrent ? (
-                    <Button
-                      align="start"
-                      className="da-gfs-manage-action"
-                      loading={ctrl.mutating}
-                      onClick={() => {
-                        setRenameName(current.name)
-                        setRenameOpen(true)
-                        setCreateFolderOpen(false)
-                        setDeleteOpen(false)
-                      }}
-                      variant="ghost"
-                    >
-                      <span className="da-gfs-manage-action__icon" aria-hidden="true">
-                        <IconEdit />
-                      </span>
-                      <span className="da-gfs-manage-action__copy">
-                        <strong>Rename</strong>
-                        <small>Change the display name</small>
-                      </span>
-                    </Button>
-                  ) : null}
-                  {currentIsFile ? (
-                    <Button
-                      align="start"
-                      className="da-gfs-manage-action"
-                      onClick={() => void handleDownload(current.gfsUri, current.name)}
-                      variant="ghost"
-                    >
-                      <span className="da-gfs-manage-action__icon" aria-hidden="true">
-                        <IconDownload />
-                      </span>
-                      <span className="da-gfs-manage-action__copy">
-                        <strong>Download</strong>
-                        <small>Save a local copy</small>
-                      </span>
-                    </Button>
-                  ) : null}
-                  {canDeleteCurrent ? (
-                    <Button
-                      align="start"
-                      className="da-gfs-manage-action da-gfs-manage-action--danger"
-                      color="danger"
-                      loading={ctrl.mutating}
-                      onClick={() => {
-                        setDeleteOpen(true)
-                        setCreateFolderOpen(false)
-                        setRenameOpen(false)
-                      }}
-                      variant="ghost"
-                    >
-                      <span className="da-gfs-manage-action__icon" aria-hidden="true">
-                        <IconTrash />
-                      </span>
-                      <span className="da-gfs-manage-action__copy">
-                        <strong>Delete</strong>
-                        <small>Remove this {currentIsFolder ? 'folder' : 'file'}</small>
-                      </span>
-                    </Button>
-                  ) : null}
-                </div>
-
-                {canWriteCurrent ? (
-                  <StatusBanner tone="warn" compact>
-                    For reliable uploads, use raw files around 110 MB or smaller.
-                  </StatusBanner>
-                ) : null}
-
-                {currentIsFolder && canWriteCurrent && createFolderOpen ? (
+                {renameOpen ? (
                   <form
-                    className="da-gfs-inline-form"
-                    aria-label="Create folder"
-                    onSubmit={event => {
-                      event.preventDefault()
-                      void handleCreateFolder()
-                    }}
-                  >
-                    <label className="da-gfs-inline-form__field">
-                      <span>Folder name</span>
-                      <TextInput
-                        autoFocus
-                        value={createFolderName}
-                        onChange={event => setCreateFolderName(event.currentTarget.value)}
-                      />
-                    </label>
-                    <Button loading={ctrl.mutating} size="sm" type="submit">
-                      Create folder
-                    </Button>
-                    <Button
-                      onClick={() => {
-                        setCreateFolderName('')
-                        setCreateFolderOpen(false)
-                      }}
-                      size="sm"
-                      type="button"
-                      variant="ghost"
-                    >
-                      Cancel
-                    </Button>
-                  </form>
-                ) : null}
-
-                {canWriteCurrent && renameOpen ? (
-                  <form
-                    className="da-gfs-inline-form"
+                    className="da-gfs-manage-dialog__title-edit"
                     aria-label="Rename resource"
                     onSubmit={event => {
                       event.preventDefault()
                       void handleRenameCurrent()
                     }}
                   >
-                    <label className="da-gfs-inline-form__field">
-                      <span>New name</span>
-                      <TextInput
-                        autoFocus
-                        value={renameName}
-                        onChange={event => setRenameName(event.currentTarget.value)}
-                      />
-                    </label>
+                    <TextInput
+                      aria-label="New name"
+                      autoFocus
+                      value={renameName}
+                      onChange={event => setRenameName(event.currentTarget.value)}
+                    />
                     <Button loading={ctrl.mutating} size="sm" type="submit">
-                      Save name
+                      Save
                     </Button>
                     <Button
                       onClick={() => setRenameOpen(false)}
@@ -760,45 +756,181 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                       Cancel
                     </Button>
                   </form>
-                ) : null}
-
-                {canDeleteCurrent && deleteOpen ? (
-                  <div
-                    className="da-gfs-inline-form"
-                    role="alertdialog"
-                    aria-label="Delete resource"
+                ) : (
+                  <span className="da-gfs-manage-dialog__title-row">
+                    <h3>{current.name}</h3>
+                    <GfsResourceMenu
+                      resourceName={current.name}
+                      onCopyLink={() => void handleCopyLink(current.gfsUri)}
+                      onCreateFolder={
+                        currentIsFolder && canWriteCurrent
+                          ? () => {
+                              setCreateFolderName('')
+                              setCreateFolderOpen(true)
+                              setDeleteOpen(false)
+                            }
+                          : undefined
+                      }
+                      onDelete={
+                        canDeleteCurrent
+                          ? () => {
+                              setDeleteOpen(true)
+                              setCreateFolderOpen(false)
+                            }
+                          : undefined
+                      }
+                      onDownload={
+                        currentIsFile
+                          ? () => void handleDownload(current.gfsUri, current.name)
+                          : undefined
+                      }
+                      onPreview={
+                        currentIsFile && currentPreviewAvailable
+                          ? () => void openFilePreview(current)
+                          : undefined
+                      }
+                      onRename={
+                        canWriteCurrent
+                          ? () => {
+                              setRenameName(current.name)
+                              setRenameOpen(true)
+                              setCreateFolderOpen(false)
+                              setDeleteOpen(false)
+                            }
+                          : undefined
+                      }
+                    />
+                  </span>
+                )}
+              </span>
+              <span className="da-gfs-manage-dialog__top-actions">
+                {currentIsFolder && canWriteCurrent ? (
+                  <Button
+                    loading={ctrl.mutating}
+                    onClick={() => uploadInputRef.current?.click()}
+                    size="sm"
+                    variant="outline"
                   >
-                    <span className="da-gfs-inline-form__copy">Delete {current.name}?</span>
-                    <Button
-                      color="danger"
-                      loading={ctrl.mutating}
-                      onClick={() => void handleDeleteCurrent()}
-                      size="sm"
-                    >
-                      Delete
-                    </Button>
-                    <Button
-                      onClick={() => setDeleteOpen(false)}
-                      size="sm"
-                      type="button"
-                      variant="ghost"
-                    >
-                      Cancel
-                    </Button>
-                  </div>
+                    Upload file
+                  </Button>
                 ) : null}
-              </section>
+                {currentIsFile && canWriteCurrent ? (
+                  <Button
+                    loading={ctrl.mutating}
+                    onClick={() => replaceInputRef.current?.click()}
+                    size="sm"
+                    variant="outline"
+                  >
+                    Replace file
+                  </Button>
+                ) : null}
+                <IconButton
+                  autoFocus
+                  label="Close manage dialog"
+                  onClick={() => setManageOpen(false)}
+                  size="sm"
+                  variant="ghost"
+                >
+                  <IconClose />
+                </IconButton>
+              </span>
+            </header>
+
+            {currentIsFolder && canWriteCurrent ? (
+              <input
+                aria-label="Upload file"
+                className="visually-hidden"
+                ref={uploadInputRef}
+                type="file"
+                onChange={event => {
+                  const file = event.currentTarget.files?.[0]
+                  event.currentTarget.value = ''
+                  void handleUploadFile(file)
+                }}
+              />
+            ) : null}
+            {currentIsFile && canWriteCurrent ? (
+              <input
+                aria-label="Replace file"
+                className="visually-hidden"
+                ref={replaceInputRef}
+                type="file"
+                onChange={event => {
+                  const file = event.currentTarget.files?.[0]
+                  event.currentTarget.value = ''
+                  void handleReplaceCurrentFile(file)
+                }}
+              />
+            ) : null}
+
+            <div className="da-gfs-manage-dialog__body">
+              {currentIsFolder && canWriteCurrent && createFolderOpen ? (
+                <form
+                  className="da-gfs-inline-form"
+                  aria-label="Create folder"
+                  onSubmit={event => {
+                    event.preventDefault()
+                    void handleCreateFolder()
+                  }}
+                >
+                  <label className="da-gfs-inline-form__field">
+                    <span>Folder name</span>
+                    <TextInput
+                      autoFocus
+                      value={createFolderName}
+                      onChange={event => setCreateFolderName(event.currentTarget.value)}
+                    />
+                  </label>
+                  <Button loading={ctrl.mutating} size="sm" type="submit">
+                    Create folder
+                  </Button>
+                  <Button
+                    onClick={() => {
+                      setCreateFolderName('')
+                      setCreateFolderOpen(false)
+                    }}
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                  >
+                    Cancel
+                  </Button>
+                </form>
+              ) : null}
+              {canDeleteCurrent && deleteOpen ? (
+                <div className="da-gfs-inline-form" role="alertdialog" aria-label="Delete resource">
+                  <span className="da-gfs-inline-form__copy">Delete {current.name}?</span>
+                  <Button
+                    color="danger"
+                    loading={ctrl.mutating}
+                    onClick={() => void handleDeleteCurrent()}
+                    size="sm"
+                  >
+                    Delete
+                  </Button>
+                  <Button
+                    onClick={() => setDeleteOpen(false)}
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              ) : null}
 
               <section className="da-gfs-manage-section da-gfs-manage-section--access">
                 <div className="da-gfs-manage-section__header">
                   <div>
-                    <span className="da-gfs-manage-section__step">Sharing</span>
                     <h4>Access</h4>
                     <p className="muted">Control who can use this resource and what they can do.</p>
                   </div>
                 </div>
-                {affordancesError ? <StatusBanner tone="error" text={affordancesError} /> : null}
-                {affordances ? (
+                {loadingAffordances ? (
+                  <p className="muted">Refreshing permissions…</p>
+                ) : affordancesError ? (
+                  <StatusBanner tone="error" text={affordancesError} />
+                ) : affordances ? (
                   <GfsDelegationPanel
                     affordances={affordances}
                     subjectOptions={delegationSubjects}
@@ -813,13 +945,32 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                     onGrant={handleGrant}
                     onCreateShare={affordances.canCreateShare ? handleCreateShare : undefined}
                   />
-                ) : !affordancesError ? (
+                ) : (
                   <p className="muted">Loading permissions…</p>
-                ) : null}
+                )}
               </section>
             </div>
           </section>
         </div>
+      ) : null}
+
+      {filePreview?.kind === 'image' ? (
+        <GfsImagePreview
+          byteLength={filePreview.bytes}
+          fileName={filePreview.name}
+          gfsUri={filePreview.gfsUri}
+          mimeType={filePreview.mimeType}
+          onClose={() => setFilePreview(null)}
+        />
+      ) : null}
+
+      {filePreview?.kind === 'markdown' ? (
+        <GfsMarkdownPreview
+          byteLength={filePreview.bytes}
+          fileName={filePreview.name}
+          gfsUri={filePreview.gfsUri}
+          onClose={() => setFilePreview(null)}
+        />
       ) : null}
     </section>
   )

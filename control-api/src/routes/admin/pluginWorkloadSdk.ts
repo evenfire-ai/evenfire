@@ -1,5 +1,8 @@
 import { type Response, Router } from 'express'
+import { isLlmProviderId } from '@clerum/llm-providers'
 import { asyncHandler } from '../../http/asyncHandler.js'
+import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
+import { listEnabledModelNamesForProvider } from '../../services/llmAllowedModels.js'
 import {
   MAX_ALLOWLIST_ENTRY_LENGTH,
   MAX_ALLOWLIST_ITEMS,
@@ -218,23 +221,62 @@ export function createAdminPluginWorkloadSdkRouter(): Router {
         return
       }
 
+      // R1: promptBridge credentials resolve per-provider, so the grant stores an
+      // explicit provider (it is no longer inferred from the model list). It is
+      // required for promptBridge and irrelevant for clientNotifications.
+      // R4: `provider` is now validated against the canonical provider set from
+      // the shared @clerum/llm-providers package (the guard is prototype-safe).
+      // provider↔allowedModels consistency IS also enforced (R3): after the
+      // provider is resolved, every allowedModels entry must exist enabled under
+      // that provider in the `llm_allowed_models` allowlist (checked below).
+      let provider: string | undefined
+      if (capabilityFamily === 'promptBridge') {
+        const rawProvider = typeof body.provider === 'string' ? body.provider.trim() : ''
+        if (!rawProvider) {
+          res.status(400).json({ error: 'provider is required for promptBridge grants' })
+          return
+        }
+        if (!isLlmProviderId(rawProvider)) {
+          res.status(400).json({ error: 'Invalid provider' })
+          return
+        }
+        provider = rawProvider
+      }
+
+      // R3: close the R1 hand-off (documented in the migration notes). Every
+      // promptBridge model must be enabled under the grant's provider in the
+      // operator allowlist — reject the offenders with 400 model_not_allowed.
+      // (clientNotifications grants carry no models and skip this.)
+      if (provider && allowedModels.length > 0) {
+        const enabled = new Set(await listEnabledModelNamesForProvider(provider))
+        const offenders = allowedModels.filter(model => !enabled.has(model))
+        if (offenders.length > 0) {
+          res.status(400).json({ error: 'model_not_allowed', provider, models: offenders })
+          return
+        }
+      }
+
       if (allowedCallers.length === 0) {
         res.status(400).json({ error: 'allowedCallers must be non-empty' })
         return
       }
 
-      const grant = await upsertGrant({
-        recipeNamespace,
-        recipeName,
-        capabilityFamily: capabilityFamily as PluginWorkloadSdkFamily,
-        allowedModels,
-        allowedEventTypes,
-        allowedTargetRefs,
-        allowedUserRefs,
-        allowedCallers,
-        quotaLimits,
-        modelPolicies,
-      })
+      const grant = await upsertGrant(
+        {
+          recipeNamespace,
+          recipeName,
+          capabilityFamily: capabilityFamily as PluginWorkloadSdkFamily,
+          provider,
+          allowedModels,
+          allowedEventTypes,
+          allowedTargetRefs,
+          allowedUserRefs,
+          allowedCallers,
+          quotaLimits,
+          modelPolicies,
+        },
+        (req as UiAuthedRequest).adminAuth!.sub
+      )
       res.status(200).json({ grant })
     })
   )
@@ -253,7 +295,12 @@ export function createAdminPluginWorkloadSdkRouter(): Router {
           .json({ error: 'recipeNamespace and recipeName query parameters are required' })
         return
       }
-      const deleted = await deleteGrant(req.params.id, recipeNamespace, recipeName)
+      const deleted = await deleteGrant(
+        req.params.id,
+        recipeNamespace,
+        recipeName,
+        (req as UiAuthedRequest).adminAuth!.sub
+      )
       if (!deleted) {
         res.status(404).json({ error: 'grant not found' })
         return

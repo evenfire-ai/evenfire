@@ -1,4 +1,6 @@
-const LOGIN_PATH = '/'
+import { CONTROL_ROUTES } from '@constants/routes'
+
+const LOGIN_PATH = CONTROL_ROUTES.login
 const RETURN_PATH_BASE = 'http://control-ui.local'
 
 export function sanitizeControlUiReturnPath(value: string | null | undefined): string | null {
@@ -35,6 +37,5 @@ export function buildControlUiLoginPath(returnTo: string | null | undefined): st
   const safeReturnTo = sanitizeControlUiReturnPath(returnTo)
   if (!safeReturnTo || safeReturnTo === LOGIN_PATH) return LOGIN_PATH
 
-  const params = new URLSearchParams({ next: safeReturnTo })
-  return `${LOGIN_PATH}?${params.toString()}`
+  return CONTROL_ROUTES.loginWith({ next: safeReturnTo })
 }

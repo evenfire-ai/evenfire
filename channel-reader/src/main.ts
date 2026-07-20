@@ -19,6 +19,7 @@ import type { NotificationDeliveryClient } from './notificationDeliveryClient'
 import { createProgressStream } from './progressClient'
 import { formatFinalMessage, formatProgressUpdate } from './progressFormatter'
 import { type ChannelReaderRuntimeSource, MessageResponse, RPCClient } from './rpcClient'
+import { type TraceContextV1, mintChannelTraceContext } from './traceContext'
 import {
   Attachment,
   ChannelAdapter,
@@ -84,6 +85,10 @@ interface PendingApprovalState {
   actionToken: string
   startResultPollingFallback?: () => void
   updateStatusAfterDecision?: (content: string) => Promise<void>
+}
+
+interface ProcessedProviderEvent {
+  seenAt: number
 }
 
 /** Stale approval entries are cleaned up after this interval. */
@@ -275,7 +280,7 @@ export class ChannelReader {
   /** Pending approvals keyed by provider conversation/thread and sender. */
   private pendingApprovals: Map<string, PendingApprovalState> = new Map()
   /** Recently processed provider events keyed by stable provider or channel message identity. */
-  private processedProviderEvents: Map<string, number> = new Map()
+  private processedProviderEvents: Map<string, ProcessedProviderEvent> = new Map()
   /** Adapter route key by provider + CommunicationChannel ref. */
   private adapterKeysByCommunicationChannel: Map<string, string> = new Map()
   /** Adapter route key by provider + runtime channel id. */
@@ -1374,19 +1379,23 @@ export class ChannelReader {
         console.warn(`[Main] Duplicate provider message ignored: ${providerEventKey}`)
         continue
       }
-      if (providerEventKey) {
-        this.processedProviderEvents.set(providerEventKey, Date.now())
-      }
-
       if (
         msg.providerIdentity &&
         this.rpcClient.authorizeProviderMessage &&
         !(await this.rpcClient.authorizeProviderMessage(msg.providerIdentity))
       ) {
+        if (providerEventKey) {
+          this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+        }
         console.warn(
           `[Main] Ignoring unauthorized ${msg.channelType} message from ${msg.sender} in ${msg.channelId}`
         )
         continue
+      }
+
+      const traceContext = mintChannelTraceContext(msg)
+      if (providerEventKey) {
+        this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
       }
 
       // Check if this is an approval/denial command
@@ -1431,11 +1440,11 @@ export class ChannelReader {
       if (adapter && msg.channelType !== 'email') {
         // Telegram, Slack, and Teams: use async progress flow with edit-in-place
         try {
-          await this.handleMessageWithProgress(runtimeMsg, adapter)
+          await this.handleMessageWithProgress(runtimeMsg, adapter, traceContext)
         } catch (err) {
           console.error(`[Main] Progress flow failed, falling back:`, err)
           // Fall back to synchronous
-          const response = await this.rpcClient.sendMessage(runtimeMsg)
+          const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
           if (response.success && response.status === 'waiting_approval' && response.approval) {
             const { taskId, requestId, userId, notification } = response.approval
             console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
@@ -1475,7 +1484,7 @@ export class ChannelReader {
         }
       } else {
         // Email: existing synchronous flow
-        const response = await this.rpcClient.sendMessage(runtimeMsg)
+        const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
 
         if (response.success && response.status === 'waiting_approval' && response.approval) {
           const { taskId, requestId, userId, notification } = response.approval
@@ -1633,9 +1642,13 @@ export class ChannelReader {
    *   if the stream closes or misses the terminal event.
    * - No waitForTaskResult. No drainApprovalCommands.
    */
-  private async handleMessageWithProgress(msg: Message, adapter: ChannelAdapter): Promise<void> {
+  private async handleMessageWithProgress(
+    msg: Message,
+    adapter: ChannelAdapter,
+    traceContext: TraceContextV1
+  ): Promise<void> {
     // 1. Send message with async=true
-    const response = await this.rpcClient.sendMessage(msg, { async: true })
+    const response = await this.rpcClient.sendMessage(msg, { async: true, traceContext })
 
     if (!response.taskId) {
       console.log('[Main] No taskId returned from async send, falling back to sync')
@@ -2137,8 +2150,8 @@ export class ChannelReader {
         this.pendingApprovals.delete(key)
       }
     }
-    for (const [key, seenAt] of this.processedProviderEvents) {
-      if (now - seenAt > PROVIDER_EVENT_DEDUPE_TTL_MS) {
+    for (const [key, processed] of this.processedProviderEvents) {
+      if (now - processed.seenAt > PROVIDER_EVENT_DEDUPE_TTL_MS) {
         this.processedProviderEvents.delete(key)
       }
     }

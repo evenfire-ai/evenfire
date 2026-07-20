@@ -3,6 +3,10 @@ WORKDIR /app
 
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
 COPY packages/image-policy ./packages/image-policy
+# Shared prebuilt data-only providers package (no build step). Copied before
+# both the workflow-runtime-core build (it depends on it) and control-api's
+# npm ci (control-api validates the provider set from it, R4).
+COPY packages/llm-providers ./packages/llm-providers
 
 # Build the shared @clerum/workflow-runtime-core package (TS → dist) BEFORE
 # control-api's npm ci, so its file: dependency on it resolves with the compiled

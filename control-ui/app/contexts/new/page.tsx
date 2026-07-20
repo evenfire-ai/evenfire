@@ -10,6 +10,7 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconGroupWork } from '@components/Sidebar/icons'
 import { Button, Field, TextAreaInput, TextInput } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { createContext, getMcpServers } from '@lib/api'
 import { toKebabCase, toKebabInput } from '@lib/string'
 
@@ -92,7 +93,7 @@ export default function CreateContextPage() {
           mcpServers: selectedServers,
         },
       })
-      router.replace(`/contexts/${encodeURIComponent(nextName)}`)
+      router.replace(CONTROL_ROUTES.contexts.detail(nextName))
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : 'Failed to create context')
     } finally {
@@ -110,7 +111,7 @@ export default function CreateContextPage() {
               title="Create context"
               subtitle="Define a new context and attach connectors."
               backLabel="Back to contexts"
-              onBack={() => router.push('/contexts')}
+              onBack={() => router.push(CONTROL_ROUTES.contexts.root)}
             />
           }
         >
@@ -181,7 +182,9 @@ export default function CreateContextPage() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => (step === 0 ? router.push('/contexts') : setStep(step - 1))}
+                onClick={() =>
+                  step === 0 ? router.push(CONTROL_ROUTES.contexts.root) : setStep(step - 1)
+                }
                 disabled={busy}
               >
                 {step === 0 ? 'Cancel' : 'Back'}

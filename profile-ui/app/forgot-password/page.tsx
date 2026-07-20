@@ -7,6 +7,7 @@ import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { Button } from '@components/Button'
 import { TextInput } from '@components/TextInput'
+import { PROFILE_ROUTES } from '@constants/routes'
 import { requestPasswordReset } from '@lib/api'
 
 function ForgotPasswordContent() {
@@ -105,7 +106,7 @@ function ForgotPasswordContent() {
             </>
           )}
           <div className="cu-auth-return-link">
-            <Link className="text-link" href="/">
+            <Link className="text-link" href={PROFILE_ROUTES.login()}>
               Back to sign in
             </Link>
           </div>

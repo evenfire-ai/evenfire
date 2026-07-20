@@ -451,6 +451,7 @@ describe('workflowApprovalProviderDecisionService', () => {
         message: null,
         actor: { type: 'user-session', userId: 'user-1' },
         executionRef: null,
+        approvalRequestId: APPROVAL_ID,
       },
     })
     expect(userApprovalRequestService.recordDecision).toHaveBeenCalledTimes(1)

@@ -1,3 +1,4 @@
+import type { LlmProviderId } from '@clerum/llm-providers'
 import type { RuntimeTokenProvider } from '../runtime-token-provider/provider'
 
 export interface WorkflowConfig {
@@ -11,10 +12,18 @@ export interface WorkflowConfig {
   snippetRunnerUrl?: string
   snippetRunnerTokenFile?: string
   correlationId: string
+  traceContext: WorkflowTraceContext
   signalPollIntervalMs: number
   restPort: number
   registryUrl?: string
   storageEndpoint?: string
+}
+
+/** Immutable workflow tracing identity reconstructed from the durable run id. */
+export interface WorkflowTraceContext {
+  origin: 'workflow_runtime'
+  runId: string | null
+  correlationId: string
 }
 
 export interface StepSpec {
@@ -74,7 +83,7 @@ export interface RuntimeEgressSpec {
 
 export interface AgentSpec {
   model: string
-  provider: 'openai' | 'claude' | 'zai' | 'bailian'
+  provider: LlmProviderId
 }
 
 export interface ToolScope {

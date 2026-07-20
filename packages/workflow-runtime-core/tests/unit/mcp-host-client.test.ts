@@ -30,6 +30,7 @@ describe('McpHostClient', () => {
         mcpServers: [{ name: 'db', url: 'http://db:3000' }],
         allowedTools: { include: ['query'] },
         instruction: 'Do something',
+        approvalBindingProof: '00000000-0000-4000-8000-000000000123',
       })
       expect(result.status).toBe('completed')
       expect(result.output).toBe('result')
@@ -37,6 +38,9 @@ describe('McpHostClient', () => {
         'http://mcp:8080/api/v1/workflow/execute',
         expect.objectContaining({ method: 'POST' })
       )
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+        approvalBindingProof: '00000000-0000-4000-8000-000000000123',
+      })
     })
 
     it('returns failed result when mcp-host returns non-ok', async () => {

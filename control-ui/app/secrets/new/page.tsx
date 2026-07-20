@@ -8,11 +8,13 @@ import { CreateFlowSkeleton } from '@components/CreateFlowSkeleton'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { CreateStepFlow } from '@components/CreateStepFlow'
 import { DashboardLayout } from '@components/DashboardLayout'
+import { LlmCredentialFields } from '@components/LlmCredentialFields'
 import { IconKey } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconX } from '@components/icons'
 import { Button, Field, FormSection, SelectInput, TextInput } from '@components/ui'
 import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RecipeSecretOwnership,
   apiSend,
@@ -20,7 +22,7 @@ import {
   createRecipeSecret,
   getRecipes,
 } from '@lib/api'
-import { LLM_SECRET_FIELDS } from '@lib/llm'
+import { createEmptyLlmKeyDraft, validateLlmSecretData } from '@lib/llm'
 
 const HOST_SECRET_LABEL_KEY = 'clerum.io/host-secret'
 const HOST_SECRET_LABEL_VALUE = 'true'
@@ -48,13 +50,6 @@ function createSecretDraftRow(id: string, secretKey = '', value = ''): SecretDra
   return { id, secretKey, value }
 }
 
-function createEmptyKeyDraft(): Record<string, string> {
-  return LLM_SECRET_FIELDS.reduce<Record<string, string>>((acc, field) => {
-    acc[field.key] = ''
-    return acc
-  }, {})
-}
-
 function CreateSecretPageContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -63,14 +58,18 @@ function CreateSecretPageContent() {
   const rawScope = searchParams.get('scope')
   const scope: SecretScope = rawScope === 'mcp' ? 'mcp' : rawScope === 'recipe' ? 'recipe' : 'llm'
   const secretsListPath =
-    scope === 'mcp' ? '/secrets/mcp' : scope === 'recipe' ? '/secrets/recipe' : '/secrets'
+    scope === 'mcp'
+      ? CONTROL_ROUTES.secrets.connector
+      : scope === 'recipe'
+        ? CONTROL_ROUTES.secrets.recipe
+        : CONTROL_ROUTES.secrets.llm
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [step, setStep] = useState(0)
 
   const [llmName, setLlmName] = useState('')
-  const [llmKeyDraft, setLlmKeyDraft] = useState<Record<string, string>>(createEmptyKeyDraft)
+  const [llmKeyDraft, setLlmKeyDraft] = useState<Record<string, string>>(createEmptyLlmKeyDraft)
 
   const prefillMcpName = scope === 'mcp' ? (searchParams.get('name') ?? '').trim() : ''
   const [mcpName, setMcpName] = useState(prefillMcpName)
@@ -222,6 +221,14 @@ function CreateSecretPageContent() {
     )
     if (Object.keys(stringData).length === 0) {
       setError('Provide at least one API key.')
+      return
+    }
+    // Slot-aware validation (spec R4.5.3): reject a half-written Bedrock pair or
+    // a malformed Vertex service-account JSON before writing. control-api
+    // enforces the same rules server-side.
+    const slotErrors = validateLlmSecretData(stringData)
+    if (slotErrors.length > 0) {
+      setError(slotErrors[0])
       return
     }
 
@@ -409,20 +416,14 @@ function CreateSecretPageContent() {
               ) : null}
 
               {step === 1 && scope === 'llm' ? (
-                <div className="cu-form-stack cu-agent-form-stack">
-                  {LLM_SECRET_FIELDS.map(field => (
-                    <Field key={field.key} htmlFor={`llm-secret-${field.key}`} label={field.label}>
-                      <TextInput
-                        id={`llm-secret-${field.key}`}
-                        value={llmKeyDraft[field.key] || ''}
-                        onChange={event =>
-                          setLlmKeyDraft(prev => ({ ...prev, [field.key]: event.target.value }))
-                        }
-                        placeholder={field.placeholder}
-                        disabled={saving}
-                      />
-                    </Field>
-                  ))}
+                <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
+                  <LlmCredentialFields
+                    draft={llmKeyDraft}
+                    onChange={(dataKey, value) =>
+                      setLlmKeyDraft(prev => ({ ...prev, [dataKey]: value }))
+                    }
+                    disabled={saving}
+                  />
                 </div>
               ) : null}
 
@@ -679,7 +680,7 @@ export default function CreateSecretPage() {
           <DashboardLayout isDetailPage>
             <CreateFlowSkeleton
               {...CREATE_FLOW_LOADING.createSecret}
-              onBack={() => router.push('/secrets')}
+              onBack={() => router.push(CONTROL_ROUTES.secrets.root)}
               backDisabled={false}
             />
           </DashboardLayout>

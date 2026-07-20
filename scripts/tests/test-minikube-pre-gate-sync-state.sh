@@ -104,4 +104,13 @@ else
   fail "evenfire registry deploy helper does not patch minikube PVC ownership"
 fi
 
+if contains 'if ! gate_needs_registry; then' &&
+   contains 'this gate does not require the sibling service' &&
+   contains 'if gate_needs_registry; then' &&
+   contains 'rollout_if_present registry registry-api'; then
+  pass "pre-gate sync keeps the sibling registry scoped to registry-backed gates"
+else
+  fail "pre-gate sync can couple unrelated gates to the sibling registry"
+fi
+
 exit "$FAIL"

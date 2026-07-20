@@ -239,6 +239,13 @@ async function authorizePromptBridgeInner(
       model: requestedModel,
       modelPolicy,
       maxOutputTokens: grant.quotaLimits.maxOutputTokens ?? null,
+      // TODO(R5-F6): this is the promptBridge failover STOP-POINT. The bridge's
+      // same-provider failover (mcp-host `LlmBridge`) reads `allowedModels` off
+      // this authorize response; today NO build populates it, so the bridge
+      // always receives `undefined` → zero fallback candidates → the F6 path is
+      // inert end-to-end. Exposing `allowedModels: grant.allowedModels` HERE is
+      // what activates it (fail over only within the grant, spec §3-R5.7).
+      // Deliberately NOT wired yet — out of R5 scope.
     },
   }
 }

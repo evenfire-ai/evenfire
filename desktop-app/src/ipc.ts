@@ -68,7 +68,7 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
 
 export function assertTrustedSender(event: IpcMainInvokeEvent): void {
   const senderUrl = String(event.senderFrame?.url || '')
-  const devUrl = String(process.env.ELECTRON_RENDERER_URL || '').trim()
+  const devUrl = String(process.env.EVENFIRE_RENDERER_URL || '').trim()
   const isFileSender = senderUrl.startsWith('file://')
   const isDevSender = Boolean(devUrl) && senderUrl.startsWith(devUrl)
   if (!isFileSender && !isDevSender) {
@@ -86,6 +86,7 @@ type DesktopNotificationInput = {
   title?: string
   body?: string
   tag?: string
+  silent?: boolean
   actions?: DesktopNotificationActionInput[]
 }
 
@@ -235,6 +236,7 @@ export function registerIpcHandlers(service: AppService): void {
     const notification = new Notification({
       title,
       body,
+      silent: payload?.silent === true,
       actions: actions.map(action => ({ type: 'button', text: action.title })),
       closeButtonText: 'Dismiss',
       timeoutType: actions.length > 0 ? 'never' : 'default',
@@ -916,6 +918,38 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
 
+  ipcMain.handle(
+    'rpc:getHostModels',
+    async (event, payload: { hostRef: string; chatId: string; hostRefs?: string[] }) => {
+      assertTrustedSender(event)
+      const hostRef = sanitizeString(payload?.hostRef)
+      // `chatId` is optional for the model LIST (host-level allowlist). A new chat
+      // has no id yet; the server returns the list with `sessionModel: null`.
+      const chatId = sanitizeString(payload?.chatId)
+      if (!hostRef) {
+        throw new Error('hostRef is required')
+      }
+      return service.getHostModels(hostRef, chatId, payload?.hostRefs)
+    }
+  )
+
+  ipcMain.handle(
+    'rpc:setHostModel',
+    async (
+      event,
+      payload: { hostRef: string; chatId: string; model: string; hostRefs?: string[] }
+    ) => {
+      assertTrustedSender(event)
+      const hostRef = sanitizeString(payload?.hostRef)
+      const chatId = sanitizeString(payload?.chatId)
+      const model = sanitizeString(payload?.model)
+      if (!hostRef || !chatId || !model) {
+        throw new Error('hostRef, chatId, and model are required')
+      }
+      return service.setHostModel(hostRef, chatId, model, payload?.hostRefs)
+    }
+  )
+
   ipcMain.handle('rpc:getTokenMetadata', async event => {
     assertTrustedSender(event)
     return service.getTokenMetadata()
@@ -1278,6 +1312,14 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     const bounds = parseBounds(payload?.bounds)
     await service.setSandboxUiBounds(bounds)
+  })
+
+  ipcMain.handle('sandboxUi:setVisible', async (event, payload: { visible?: unknown }) => {
+    assertTrustedSender(event)
+    if (typeof payload?.visible !== 'boolean') {
+      throw new Error('visible must be boolean')
+    }
+    await service.setSandboxUiVisible(payload.visible)
   })
 
   ipcMain.handle('sandboxUi:capturePreview', async event => {

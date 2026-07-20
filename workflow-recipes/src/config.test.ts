@@ -39,6 +39,7 @@ describe('loadConfig', () => {
     delete process.env.WRC_RUNTIME_EGRESS_DNS_OVERLAP_SECONDS
     delete process.env.CLERUM_NETWORK_POLICY_ENFORCEMENT_MODE
     delete process.env.CLERUM_NETWORK_POLICY_ENFORCEMENT_CONFIRMED
+    delete process.env.GOVERNED_TRACING_ENABLED
     const config = loadConfig()
     expect(config.port).toBe(8082)
     expect(config.namespace).toBe('mcp-server')
@@ -50,6 +51,7 @@ describe('loadConfig', () => {
     expect(config.allowedCoordinatorImagePrefixes).toEqual([])
     expect(config.requireCoordinatorImageDigest).toBe(true)
     expect(config.enableDeterministicMode).toBe(true)
+    expect(config.governedTracingEnabled).toBe(true)
     expect(config.workflowDefaultRunDurationSeconds).toBe(3600)
     expect(config.workflowMaxRunDurationSeconds).toBe(86400)
     expect(config.workflowStepOutputPreviewMaxChars).toBe(32768)
@@ -79,6 +81,12 @@ describe('loadConfig', () => {
     process.env.CLERUM_DEV_MODE = 'true'
     const config = loadConfig()
     expect(config.devMode).toBe(true)
+  })
+
+  it('reads GOVERNED_TRACING_ENABLED=false', () => {
+    process.env.GOVERNED_TRACING_ENABLED = 'false'
+    const config = loadConfig()
+    expect(config.governedTracingEnabled).toBe(false)
   })
 
   it('reads the NetworkPolicy enforcement mode override', () => {

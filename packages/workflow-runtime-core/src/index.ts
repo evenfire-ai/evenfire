@@ -37,6 +37,7 @@ export type {
   WorkflowPhase,
   StepPhase,
   Signal,
+  WorkflowTraceContext,
 } from './config-loader/types'
 export type {
   AgentStepRequest,

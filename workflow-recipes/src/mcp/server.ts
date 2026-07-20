@@ -339,7 +339,8 @@ export class ClerumMcpServer {
         this.workflowHandlers = createWorkflowEndpointHandlers(
           this.customApi,
           this.sandboxNamespace,
-          this.tokenFactory ?? undefined
+          this.tokenFactory ?? undefined,
+          { traceReporter: this.provider.getTraceReporter() }
         )
       }
       const handlers = this.workflowHandlers

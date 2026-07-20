@@ -323,3 +323,165 @@ export const pluginWorkloadSdkMaintenanceRunsTotal = getOrCreateCounter({
   help: 'Plugin Workload SDK maintenance sweeps (stale-invocations + idempotency pruning).',
   labelNames: ['result'] as const as Array<'result'>, // ok | error
 })
+
+// ─── Governed tracing foundation ──────────────────────────────────────────
+// Keep these dimensions bounded. Run, event, request, session, human, agent,
+// team, recipe, Host, workload, and correlation identifiers are trace data,
+// never Prometheus labels.
+export const governedTraceAcceptedTotal = getOrCreateCounter({
+  name: 'governed_trace_accepted_total',
+  help: 'Count of governed trace events accepted for persistence.',
+  labelNames: ['family', 'source', 'type'] as const as Array<'family' | 'source' | 'type'>,
+})
+
+export const governedTraceReplayedTotal = getOrCreateCounter({
+  name: 'governed_trace_replayed_total',
+  help: 'Count of governed trace events accepted as idempotent replays.',
+  labelNames: ['family', 'source', 'type'] as const as Array<'family' | 'source' | 'type'>,
+})
+
+export const governedTraceRejectedTotal = getOrCreateCounter({
+  name: 'governed_trace_rejected_total',
+  help: 'Count of governed trace events rejected before persistence.',
+  labelNames: ['family', 'source', 'type'] as const as Array<'family' | 'source' | 'type'>,
+})
+
+export const governedTraceConflictingTotal = getOrCreateCounter({
+  name: 'governed_trace_conflicting_total',
+  help: 'Count of governed trace events rejected because an idempotency key conflicted.',
+  labelNames: ['family', 'source', 'type'] as const as Array<'family' | 'source' | 'type'>,
+})
+
+export const governedTraceIngestDurationSeconds = getOrCreateHistogram({
+  name: 'governed_trace_ingest_duration_seconds',
+  help: 'Duration of governed trace ingestion and stream registration.',
+  labelNames: ['family', 'source'] as const as Array<'family' | 'source'>,
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+})
+
+export const governedTraceBatchSize = getOrCreateHistogram({
+  name: 'governed_trace_batch_size',
+  help: 'Number of events submitted in each governed tracing ingestion batch.',
+  labelNames: ['family', 'source'] as const as Array<'family' | 'source'>,
+  buckets: [1, 2, 5, 10, 25, 50, 100],
+})
+
+export const governedTraceQueryCount = getOrCreateHistogram({
+  name: 'governed_trace_query_count',
+  help: 'Database query round trips used by each governed family append transaction.',
+  labelNames: ['family', 'source'] as const as Array<'family' | 'source'>,
+  buckets: [1, 2, 3, 4, 5, 8, 13],
+})
+
+export const governedTraceReadDurationSeconds = getOrCreateHistogram({
+  name: 'governed_trace_read_duration_seconds',
+  help: 'Duration of governed trace read operations.',
+  labelNames: ['family'] as const as Array<'family'>,
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+})
+
+export const governedTracePoolAcquisitionDurationSeconds = getOrCreateHistogram({
+  name: 'governed_trace_pool_acquisition_duration_seconds',
+  help: 'Time spent acquiring a governed tracing database pool connection.',
+  labelNames: ['pool'] as const as Array<'pool'>,
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2],
+})
+
+export const governedTracePoolRejectionsTotal = getOrCreateCounter({
+  name: 'governed_trace_pool_rejections_total',
+  help: 'Count of governed tracing work rejected because its pool could not serve it.',
+  labelNames: ['pool'] as const as Array<'pool'>,
+})
+
+export const governedTracePoolConnections = getOrCreateGauge({
+  name: 'governed_trace_pool_connections',
+  help: 'Current active, idle, and waiting connection counts for governed tracing pools.',
+  labelNames: ['pool', 'state'] as const as Array<'pool' | 'state'>,
+})
+
+export const governedTracePoolStatementTimeoutsTotal = getOrCreateCounter({
+  name: 'governed_trace_pool_statement_timeouts_total',
+  help: 'Governed tracing statements cancelled by the configured pool timeout.',
+  labelNames: ['pool'] as const as Array<'pool'>,
+})
+
+export const GOVERNED_TRACE_OPERATIONAL_ERROR_REASONS = [
+  'unsupported_content_type',
+  'invalid_json',
+  'body_too_large',
+  'batch_too_large',
+  'capacity_exhausted',
+  'event_rejected',
+  'idempotency_conflict',
+  'submission_failed',
+  'pool_rejected',
+  'statement_timeout',
+  'attribution_binding_unavailable',
+  'attribution_binding_conflict',
+  'prompt_history_disabled',
+  'prompt_history_key_unavailable',
+  'prompt_history_rejected',
+] as const
+
+export type GovernedTraceOperationalErrorReason =
+  (typeof GOVERNED_TRACE_OPERATIONAL_ERROR_REASONS)[number]
+
+export const GOVERNED_TRACE_OPERATIONAL_SCOPES = [
+  'agent_run',
+  'administrative',
+  'infrastructure_telemetry',
+  'read',
+  'pool',
+] as const
+
+export type GovernedTraceOperationalScope = (typeof GOVERNED_TRACE_OPERATIONAL_SCOPES)[number]
+
+export const governedTraceAdmissionRequestsTotal = getOrCreateCounter({
+  name: 'governed_trace_admission_requests_total',
+  help: 'Count of governed tracing requests admitted or rejected at the request boundary.',
+  labelNames: ['family', 'result', 'reason'] as const as Array<'family' | 'result' | 'reason'>,
+})
+
+export const governedTraceRequestBodyBytes = getOrCreateHistogram({
+  name: 'governed_trace_request_body_bytes',
+  help: 'Raw byte size of governed tracing JSON request bodies accepted by the parser.',
+  labelNames: ['family'] as const as Array<'family'>,
+  buckets: [1_024, 4_096, 16_384, 65_536, 131_072, 262_144, 393_216, 524_288],
+})
+
+export const governedTraceInFlightRequests = getOrCreateGauge({
+  name: 'governed_trace_in_flight_requests',
+  help: 'Current governed tracing requests inside the control-api admission limiter.',
+  labelNames: [] as string[],
+})
+
+export const governedTraceOperationalErrorsTotal = getOrCreateCounter({
+  name: 'governed_trace_operational_errors_total',
+  help: 'Count of bounded governed tracing operational error occurrences.',
+  labelNames: ['scope', 'reason'] as const as Array<'scope' | 'reason'>,
+})
+
+export const governedTraceLastErrorTimestampSeconds = getOrCreateGauge({
+  name: 'governed_trace_last_error_timestamp_seconds',
+  help: 'Unix timestamp of the most recent bounded governed tracing operational error.',
+  labelNames: ['scope', 'reason'] as const as Array<'scope' | 'reason'>,
+})
+
+export function recordGovernedTraceOperationalError(
+  scope: GovernedTraceOperationalScope,
+  reason: GovernedTraceOperationalErrorReason,
+  timestampSeconds = Date.now() / 1_000
+): void {
+  governedTraceOperationalErrorsTotal.inc({ scope, reason })
+  governedTraceLastErrorTimestampSeconds.set({ scope, reason }, timestampSeconds)
+}
+// ─── LLM allowlist ConfigMap materialization (spec §3-R3.4 / V7) ─────────
+// Increments when the `clerum-llm-allowed-models` ConfigMap write fails after
+// its short retry — either during a CRUD mutation (phase=mutation, the route
+// then answers 503) or during the non-fatal boot reconcile (phase=boot). A
+// rate > 0 means Postgres and the delivered ConfigMap have drifted.
+export const llmAllowlistConfigMapWriteFailuresTotal = getOrCreateCounter({
+  name: 'clerum_llm_allowlist_configmap_write_failures_total',
+  help: 'Count of failed clerum-llm-allowed-models ConfigMap writes, labelled by phase.',
+  labelNames: ['phase'] as const as Array<'phase'>, // mutation | boot
+})

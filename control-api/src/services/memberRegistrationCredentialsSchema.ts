@@ -1,6 +1,6 @@
 import type { DbClient } from '../db.js'
 
-// ─── Hosted member-registration credentials — schema (migration 0055) ──
+// ─── Hosted member-registration credentials — schema (migration 0068) ──
 // One row per (bound_domain, mint). The hub binds each credential to exactly one
 // destination hostname; hosted mode mints one per configured UI host (spec §8.2).
 // `secret_encrypted` is AES-256-GCM via src/oauth/encryption.ts — never plaintext.

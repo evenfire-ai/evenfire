@@ -23,7 +23,7 @@ import {
   expectTelegramWorkflowList,
   openTelegramClient,
   sendTelegramClientMessage,
-  setTelegramClientIdentity,
+  sendTelegramClientMessageExpectRejected,
   telegramReplyItems,
   waitForPendingApprovalId,
   waitForTelegramFinalReplyTextAfter,
@@ -66,18 +66,19 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
     const telegramIdentitySeed = Date.now() % 1_000_000
     const telegramUserA: TelegramClientIdentity = {
       providerUserId: String(800_000_000 + telegramIdentitySeed * 10 + 1),
-      providerChannelId: String(810_000_000 + telegramIdentitySeed * 10 + 1),
+      providerChannelId: String(800_000_000 + telegramIdentitySeed * 10 + 1),
       conversationLabel: 'Test User - Telegram private chat',
     }
     const telegramUserB: TelegramClientIdentity = {
       providerUserId: String(800_000_000 + telegramIdentitySeed * 10 + 2),
-      providerChannelId: String(810_000_000 + telegramIdentitySeed * 10 + 2),
+      providerChannelId: String(800_000_000 + telegramIdentitySeed * 10 + 2),
       conversationLabel: 'Belen QA - Telegram private chat',
     }
     const telegramUserAWrongChannel: TelegramClientIdentity = {
       providerUserId: telegramUserA.providerUserId,
       providerChannelId: String(810_000_000 + telegramIdentitySeed * 10 + 3),
-      conversationLabel: 'Test User - Telegram secondary chat',
+      providerChannelType: 'group',
+      conversationLabel: 'Test User - unconfigured Telegram group',
     }
     const telegramMessageBase = Math.floor(Date.now() / 1000) * 1000
     let telegramPage: Page | null = null
@@ -101,13 +102,15 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
         cleanupTelegramMediumBinding(telegramUserB)
         cleanupTelegramMediumBinding(telegramUserAWrongChannel)
 
+        const { userId: userAId, userToken: userAToken } = await loginAs(E2E_EMAIL)
+        const { userId: userBId, userToken: userBToken } = await loginAs(E2E_ALT_EMAIL)
         installFakeTelegramProvider()
         configureChannelReaderTelegramApiRoot()
-        applyTelegramCommunicationChannel(HOST_REF, [
-          telegramUserA,
-          telegramUserB,
-          telegramUserAWrongChannel,
-        ])
+        applyTelegramCommunicationChannel(
+          HOST_REF,
+          [telegramUserA, telegramUserB],
+          [userAId, userBId]
+        )
         waitForChannelReader(HOST_REF)
         expectChannelReaderHasNoProviderHttpIngress(HOST_REF)
         expectChannelReaderCanReachMcpHost(HOST_REF)
@@ -119,8 +122,6 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
           })
           .toBeGreaterThan(0)
 
-        const { userId: userAId, userToken: userAToken } = await loginAs(E2E_EMAIL)
-        const { userId: userBId, userToken: userBToken } = await loginAs(E2E_ALT_EMAIL)
         await enrollTelegramMedium(userAToken, userAId, telegramUserA)
         await enrollTelegramMedium(userBToken, userBId, telegramUserB)
 
@@ -268,24 +269,16 @@ test.describe('3rd-party AuthN + 1st-party MCP-host through channel-reader', () 
         expect(workflowRunCountForRecipe(ambiguousRecipe)).toBe(1)
       })
 
-      await test.step('Same Telegram profile from another chat does not inherit User A grants', async () => {
+      await test.step('Same Telegram profile from an unconfigured group does not inherit User A grants', async () => {
         if (!telegramPage) throw new Error('Telegram user client was not initialized')
-        await setTelegramClientIdentity(telegramPage, telegramUserAWrongChannel)
-        const before = await telegramReplyItems(telegramPage).count()
-        await sendTelegramClientMessage(
+        await sendTelegramClientMessageExpectRejected(
           telegramPage,
           'List the workflow recipes I can run. Include exact workflow recipe names only.',
           telegramMessageBase + 19,
           telegramUserAWrongChannel
         )
-        await waitForTelegramFinalReplyTextAfter(telegramPage, before, /workflow/i)
-        await expect(telegramPage.getByTestId('telegram-workflow-list')).not.toContainText(
-          userARecipe
-        )
-        await expect(telegramPage.getByTestId('telegram-workflow-list')).not.toContainText(
-          teamOnlyRecipe
-        )
         expect(pendingApprovalCountForRecipe(userARecipe)).toBe(0)
+        expect(workflowRunCountForRecipe(userARecipe)).toBe(0)
       })
 
       await test.step('User B sees only User B recipe and completes a Telegram approval/run', async () => {

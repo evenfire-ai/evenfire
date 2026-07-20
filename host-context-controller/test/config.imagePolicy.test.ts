@@ -16,11 +16,11 @@ describe('HCC image-allowlist config', () => {
   })
 
   it('parses env overrides (list + bool)', async () => {
-    process.env.CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES = 'example.com/, ghcr.io/acme/'
+    process.env.CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES = 'registry.evenfire.ai/, ghcr.io/acme/'
     process.env.CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST = 'true'
     vi.resetModules()
     const { config } = await import('../src/config')
-    expect(config.allowedPluginImagePrefixes).toEqual(['example.com/', 'ghcr.io/acme/'])
+    expect(config.allowedPluginImagePrefixes).toEqual(['registry.evenfire.ai/', 'ghcr.io/acme/'])
     expect(config.enforcePluginImageAllowlist).toBe(true)
   })
 })

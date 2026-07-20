@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from './queryKeys'
 
 /**
@@ -46,6 +47,7 @@ export interface GfsCrumb {
   name: string
   kind: 'file' | 'directory'
   version: number
+  bytes: number
 }
 
 export interface GfsBrowserAffordances {
@@ -130,8 +132,23 @@ export function useGfsBrowserController() {
     queryFn: () => window.clerum.gfs.affordances(current!.resourceId, DRIVE),
     enabled: Boolean(sessionScope) && Boolean(current),
   })
+  const refreshAffordances = useCallback(async () => {
+    const resourceId = current?.resourceId
+    if (!sessionScope || !resourceId) return
+    await queryClient.invalidateQueries({
+      exact: true,
+      queryKey: desktopQueryKeys.gfsAffordances(sessionScope, resourceId, DRIVE),
+      refetchType: 'active',
+    })
+  }, [current?.resourceId, queryClient, sessionScope])
   const refreshGfs = useCallback(async () => {
-    await queryClient.invalidateQueries({ queryKey: desktopQueryKeys.gfsRoot })
+    await queryClient.invalidateQueries({
+      queryKey: desktopQueryKeys.gfsRoot,
+      // Content mutations refresh discovery and folder listings. Permission
+      // affordances are refreshed explicitly when Manage opens; coupling them
+      // here temporarily removes write controls between consecutive uploads.
+      predicate: query => query.queryKey[3] !== 'affordances',
+    })
   }, [queryClient])
   const createFolderMutation = useMutation({
     mutationFn: async (name: string) => {
@@ -141,10 +158,8 @@ export function useGfsBrowserController() {
     onSuccess: refreshGfs,
   })
   const createFileMutation = useMutation({
-    mutationFn: async (input: { name: string; encodedData: string }) => {
-      if (!current) throw new Error('No folder selected')
-      return window.clerum.gfs.createFile(current.resourceId, input.name, input.encodedData, DRIVE)
-    },
+    mutationFn: (input: { parentResourceId: string; name: string; encodedData: string }) =>
+      window.clerum.gfs.createFile(input.parentResourceId, input.name, input.encodedData, DRIVE),
     onSuccess: refreshGfs,
   })
   const replaceFileMutation = useMutation({
@@ -205,16 +220,45 @@ export function useGfsBrowserController() {
     setResolving(true)
     try {
       const resource = await window.clerum.gfs.resolve(uri.trim())
-      setCrumbs([
-        {
-          resourceId: resource.resourceId,
-          gfsUri: resource.gfsUri,
-          name: resource.name,
-          kind: resource.kind === 'directory' ? 'directory' : 'file',
-          version: resource.version ?? 0,
-        },
-      ])
-      return true
+      const crumb: GfsCrumb = {
+        resourceId: resource.resourceId,
+        gfsUri: resource.gfsUri,
+        name: resource.name,
+        kind: resource.kind === 'directory' ? 'directory' : 'file',
+        version: resource.version ?? 0,
+        bytes: resource.bytes,
+      }
+      const ancestors: GfsCrumb[] = []
+      const seenResourceIds = new Set([resource.resourceId])
+      let parentResourceId = resource.parentResourceId
+
+      while (parentResourceId && ancestors.length < GFS_BREADCRUMB_MAX_DEPTH) {
+        if (seenResourceIds.has(parentResourceId)) break
+        seenResourceIds.add(parentResourceId)
+        try {
+          const parentRid = parentResourceId.replace(/-/g, '').toLowerCase()
+          const parent = await window.clerum.gfs.resolve(`gfs://${resource.drive}/${parentRid}`)
+          if (parent.kind !== 'directory') break
+          if (parent.name) {
+            ancestors.push({
+              resourceId: parent.resourceId,
+              gfsUri: parent.gfsUri,
+              name: parent.name,
+              kind: 'directory',
+              version: parent.version ?? 0,
+              bytes: parent.bytes,
+            })
+          }
+          parentResourceId = parent.parentResourceId
+        } catch {
+          // A direct file grant can be readable while its parent is not. Keep
+          // the file open and show only the ancestors the caller may resolve.
+          break
+        }
+      }
+
+      setCrumbs([...ancestors.reverse(), crumb])
+      return crumb
     } catch (error) {
       setOpenError(toMessage(error))
       return false
@@ -233,6 +277,7 @@ export function useGfsBrowserController() {
         name: child.name,
         kind: 'directory',
         version: child.version,
+        bytes: child.bytes,
       },
     ])
   }, [])
@@ -246,6 +291,7 @@ export function useGfsBrowserController() {
         name: resource.name,
         kind: resource.kind === 'directory' ? 'directory' : 'file',
         version: resource.version,
+        bytes: resource.bytes,
       },
     ])
   }, [])
@@ -285,6 +331,7 @@ export function useGfsBrowserController() {
     items,
     affordances: (affordancesQuery.data as GfsBrowserAffordances | undefined) ?? null,
     affordancesError: affordancesQuery.error ? toMessage(affordancesQuery.error) : null,
+    loadingAffordances: affordancesQuery.isFetching,
     loading: childrenQuery.isFetching && items.length === 0,
     loadingAccessible:
       canListAccessibleResources && accessibleQuery.isFetching && accessibleResources.length === 0,
@@ -309,11 +356,12 @@ export function useGfsBrowserController() {
     openChild,
     goToCrumb,
     reset,
+    refreshAffordances,
     grant,
     createShare,
     createFolder: (name: string) => createFolderMutation.mutateAsync(name),
-    createFile: (name: string, encodedData: string) =>
-      createFileMutation.mutateAsync({ name, encodedData }),
+    createFile: (parentResourceId: string, name: string, encodedData: string) =>
+      createFileMutation.mutateAsync({ parentResourceId, name, encodedData }),
     replaceFile: (resourceId: string, encodedData: string, ifMatch?: number) =>
       replaceFileMutation.mutateAsync({ resourceId, encodedData, ifMatch }),
     renameResource: (resourceId: string, name: string, ifMatch?: number) =>

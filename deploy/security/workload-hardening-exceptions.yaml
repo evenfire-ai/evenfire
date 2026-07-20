@@ -3,6 +3,10 @@ exceptions:
     allowServiceAccountToken: true
     reason: "Controller path needs Kubernetes API access through explicit RBAC."
 
+  - workload: control-plane/trace-maintenance-worker
+    allowServiceAccountToken: true
+    reason: "Maintenance inventory sampling needs namespace-scoped Deployment informers through explicit read-only RBAC."
+
   - workload: control-plane/host-context-controller
     allowServiceAccountToken: true
     allowWritableRootFilesystem:

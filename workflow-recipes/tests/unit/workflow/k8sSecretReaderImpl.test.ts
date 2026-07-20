@@ -65,6 +65,55 @@ describe('K8sSecretReaderImpl', () => {
     })
   })
 
+  describe('readConfigMapWithPresence', () => {
+    it('returns { exists: true, data } when the ConfigMap has data', async () => {
+      const api = mockCoreApi({
+        readNamespacedConfigMap: async () => ({ data: { openai: '[{"model":"gpt-4"}]' } }),
+      })
+      const reader = new K8sSecretReaderImpl(api)
+      const result = await reader.readConfigMapWithPresence('mcp-host', 'clerum-llm-allowed-models')
+      expect(result).toEqual({ exists: true, data: { openai: '[{"model":"gpt-4"}]' } })
+    })
+
+    it('returns { exists: true, data: {} } when the CM exists but data is omitted', async () => {
+      // kube-apiserver drops an empty `data: {}` — the CM still exists, so this
+      // must report present-with-empty-data (deny-all), NOT absent.
+      const api = mockCoreApi({
+        readNamespacedConfigMap: async () => ({ data: undefined }),
+      })
+      const reader = new K8sSecretReaderImpl(api)
+      const result = await reader.readConfigMapWithPresence('mcp-host', 'clerum-llm-allowed-models')
+      expect(result).toEqual({ exists: true, data: {} })
+    })
+
+    it('returns { exists: false } on a real 404', async () => {
+      const api = mockCoreApi({
+        readNamespacedConfigMap: async () => {
+          const err = new Error('Not Found') as Error & { response: { statusCode: number } }
+          err.response = { statusCode: 404 }
+          throw err
+        },
+      })
+      const reader = new K8sSecretReaderImpl(api)
+      const result = await reader.readConfigMapWithPresence('mcp-host', 'nonexistent')
+      expect(result).toEqual({ exists: false })
+    })
+
+    it('propagates non-404 errors', async () => {
+      const api = mockCoreApi({
+        readNamespacedConfigMap: async () => {
+          const err = new Error('Forbidden') as Error & { response: { statusCode: number } }
+          err.response = { statusCode: 403 }
+          throw err
+        },
+      })
+      const reader = new K8sSecretReaderImpl(api)
+      await expect(reader.readConfigMapWithPresence('mcp-host', 'forbidden')).rejects.toThrow(
+        'Forbidden'
+      )
+    })
+  })
+
   describe('readSecret', () => {
     it('decodes base64 Secret data', async () => {
       const api = mockCoreApi({

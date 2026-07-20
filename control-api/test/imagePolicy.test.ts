@@ -12,8 +12,8 @@ const DEFAULTS = [...DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES]
 describe('extracted helpers (behavior parity with coordinator)', () => {
   it('hasLatestTag detects :latest only as a tag', () => {
     expect(hasLatestTag('mongodb/mongodb-mcp-server:latest')).toBe(true)
-    expect(hasLatestTag('example.com/a/x:1.2.3')).toBe(false)
-    expect(hasLatestTag('example.com/latest/x:1.0')).toBe(false)
+    expect(hasLatestTag('registry.evenfire.ai/a/x:1.2.3')).toBe(false)
+    expect(hasLatestTag('registry.evenfire.ai/latest/x:1.0')).toBe(false)
   })
   it('hasUnsafeImageReferenceSyntax flags whitespace and empty/dot segments', () => {
     expect(hasUnsafeImageReferenceSyntax('a b/c')).toBe(true)
@@ -26,7 +26,7 @@ describe('extracted helpers (behavior parity with coordinator)', () => {
   it('matchesAllowedImagePrefix respects path/tag/digest boundaries', () => {
     expect(matchesAllowedImagePrefix('mongodb/mongodb-mcp-server:latest', 'mongodb/')).toBe(true)
     expect(matchesAllowedImagePrefix('mongodbevil/x:1', 'mongodb')).toBe(false)
-    expect(matchesAllowedImagePrefix('example.com/a/x:1', 'example.com/')).toBe(
+    expect(matchesAllowedImagePrefix('registry.evenfire.ai/a/x:1', 'registry.evenfire.ai/')).toBe(
       true
     )
   })
@@ -36,7 +36,7 @@ describe('classifyPluginImage', () => {
   it('accepts current first-party + evenfire images against the default allowlist', () => {
     for (const img of [
       'us-central1-docker.pkg.dev/your-gcp-project/clerum/airtable-mcp-server:latest',
-      'example.com/acme/forecast:1.2.3',
+      'registry.evenfire.ai/acme/forecast:1.2.3',
       'mongodb/mongodb-mcp-server:latest',
       'mcr.microsoft.com/playwright/mcp@sha256:' + 'a'.repeat(64),
       'clerum/nginx-egress-proxy:0.1.0',
@@ -62,7 +62,7 @@ describe('classifyPluginImage', () => {
   })
   it('flags unsafe syntax before host', () => {
     expect(
-      classifyPluginImage('example.com/ ok/x:1', { allowedPrefixes: DEFAULTS })
+      classifyPluginImage('registry.evenfire.ai/ ok/x:1', { allowedPrefixes: DEFAULTS })
     ).toEqual({
       ok: false,
       reason: 'unsafe_syntax',
@@ -80,7 +80,7 @@ describe('classifyPluginImage', () => {
     ).toEqual({ ok: false, reason: 'latest_tag' })
   })
   it('denies everything when the allowlist is empty', () => {
-    expect(classifyPluginImage('example.com/a/x:1', { allowedPrefixes: [] })).toEqual({
+    expect(classifyPluginImage('registry.evenfire.ai/a/x:1', { allowedPrefixes: [] })).toEqual({
       ok: false,
       reason: 'host_not_allowed',
     })
@@ -91,7 +91,7 @@ describe('DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES', () => {
   it('covers the current fleet hosts + evenfire', () => {
     expect(DEFAULTS).toEqual([
       'us-central1-docker.pkg.dev/your-gcp-project/clerum/',
-      'example.com/',
+      'registry.evenfire.ai/',
       'mongodb/',
       'mcr.microsoft.com/',
       'clerum/',

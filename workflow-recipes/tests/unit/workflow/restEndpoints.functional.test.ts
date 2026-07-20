@@ -93,6 +93,35 @@ describe('postStepStatus — step-level update', () => {
     expect(result.body).toEqual({ accepted: true })
   })
 
+  it('persists a valid approval binding hash on the exact step status', async () => {
+    const hash = 'a'.repeat(64)
+    const result = await handlers.postStepStatus('my-recipe', makeClaims(), {
+      stepId: 's1',
+      phase: 'running',
+      approvalBindingSha256: hash,
+    })
+
+    expect(result.status).toBe(200)
+    const patchOps = getStatusPatchOps(api)
+    expect(patchOps.find(op => op.path === '/status/steps/-')?.value).toMatchObject({
+      id: 's1',
+      phase: 'running',
+      approvalBindingSha256: hash,
+    })
+  })
+
+  it('rejects malformed approval binding hashes before patching Kubernetes', async () => {
+    const result = await handlers.postStepStatus('my-recipe', makeClaims(), {
+      stepId: 's1',
+      phase: 'running',
+      approvalBindingSha256: 'not-a-sha256',
+    })
+
+    expect(result.status).toBe(422)
+    expect(result.body).toEqual({ error: 'approvalBindingSha256 must be sha256 hex' })
+    expect(api.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+  })
+
   it('reads and patches WorkflowRecipes in the token namespace', async () => {
     const getNamespacedCustomObject = vi.fn().mockResolvedValue({
       metadata: { name: 'my-recipe', resourceVersion: '1' },
@@ -1136,10 +1165,13 @@ describe('requestModelInjection', () => {
 
     expect(result).toEqual({ status: 200, body: { configured: true } })
     expect(tokenFactory.signWrcConfigureToken).toHaveBeenCalledWith('my-recipe', 'sandbox-recipes')
+    // The SDK injection path validates the declared model upstream, so it passes
+    // no degraded-mode validator to the broker (4th arg is undefined).
     expect(modelConfigHandler.handle).toHaveBeenCalledWith(
       { stepId: 'broker-review', provider: 'zai', model: 'glm-4.7' },
       'http://wf-my-recipe-mcp-host.sandbox-recipes.svc.cluster.local:8080',
-      'wrc-configure-token'
+      'wrc-configure-token',
+      undefined
     )
   })
 

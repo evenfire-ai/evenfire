@@ -19,6 +19,7 @@ import type {
   MessageToolStep,
 } from '../../../../src/types'
 import type { SessionMessagesResult } from '../../../../src/types'
+import { DESKTOP_ROUTES } from '../../constants/navigation'
 import {
   classifyErrorKind,
   errorRecoveryHint,
@@ -817,7 +818,7 @@ export function useAgentChatController({
         }
         return
       }
-      if (navItem === 'chat') {
+      if (navItem === DESKTOP_ROUTES.chat) {
         const latest = merged[0]
         if (latest) {
           await switchToChat(selectedAgent, latest.id)
@@ -1842,6 +1843,17 @@ export function useAgentChatController({
           autoCreatedMeta = meta
           appendNewEntry(sendAgent, meta)
           sendChatId = chatId
+          // R2 new-chat composer: a per-session model picked BEFORE this chat
+          // existed was held in the agent-keyed pre-chat slot (no chatId to key a
+          // pending entry, no session to POST to). Now that the chatId exists,
+          // migrate it into this chat's pending slot so the standard piggyback
+          // logic below attaches it as `message.model` on message 1 and clears it
+          // on a successful POST (a thrown POST leaves it for the retry).
+          const preChatModel = chatStore.getPreChatModel(sendAgent)
+          if (preChatModel) {
+            chatStore.setPendingModel(sendAgent, chatId, preChatModel)
+            chatStore.clearPreChatModel(sendAgent)
+          }
           activeChatVisibilityRef.current = {
             ...activeChatVisibilityRef.current,
             activeChatId: chatId,
@@ -1938,6 +1950,12 @@ export function useAgentChatController({
 
       try {
         await ensureAgentActivityStream(sendAgent)
+        // R2 "Option A": a per-session model chosen while the host was suspended
+        // couldn't be persisted server-side, so it was held as pending. Piggyback
+        // it here — this send wakes the host and applies the model to this task.
+        const pendingModel = sendChatId
+          ? chatStore.getPendingModel(sendAgent, sendChatId)
+          : undefined
         const request = {
           content: effectiveContentForRequest,
           channelType: 'rpc',
@@ -1947,6 +1965,7 @@ export function useAgentChatController({
             effectiveAttachments.length > 0
               ? mapComposerAttachmentsToHostRequest(effectiveAttachments)
               : undefined,
+          ...(pendingModel ? { model: pendingModel } : {}),
         }
 
         const response = await window.clerum.rpc.invokeHostMessage(
@@ -1957,6 +1976,12 @@ export function useAgentChatController({
             async: true,
           }
         )
+        // The runtime accepted the POST (sync reply or async task) — it received
+        // the piggybacked model, so drop the pending entry. A thrown POST skips
+        // this (the catch below leaves it set) so the next attempt retries it.
+        if (pendingModel && sendChatId) {
+          chatStore.clearPendingModel(sendAgent, sendChatId)
+        }
         const responseRecord = response as Record<string, unknown>
         const taskId =
           (typeof responseRecord.taskId === 'string' ? responseRecord.taskId : undefined) ||

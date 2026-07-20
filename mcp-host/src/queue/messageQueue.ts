@@ -108,6 +108,7 @@ export class MessageQueue extends EventEmitter {
       id: uuidv4(),
       source: 'channel',
       sourceMessage: message,
+      traceContext: message.traceContext ?? null,
       priority,
       status: 'pending',
       conversationHistory: [

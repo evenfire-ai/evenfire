@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
-import { SelectionDropdown } from '@components/SelectionDropdown'
+import { GfsPermissionDropdown } from '@components/GfsPermissionDropdown'
+import { GfsSubjectPicker } from '@components/GfsSubjectPicker'
+import type { SelectionDropdownOption } from '@components/SelectionDropdown/types'
 import { useToast } from '@components/Toast'
-import { Button, CheckboxField, Field, SelectInput } from '@components/ui'
-import { GFS_GRANT_SUBJECT_TYPE_OPTIONS } from '@constants/gfsGrantSubjects'
+import { Button, CheckboxField } from '@components/ui'
 import {
   type AdminUser,
   type HostResource,
@@ -15,30 +16,28 @@ import {
   getAdminUsers,
   getHosts,
   getRecipes,
-  postGfsShare,
   putGfsGrant,
 } from '@lib/api'
 import type { GfsGrantPanelProps, GfsGrantSubjectType } from './GfsGrantPanel.types'
-import {
-  buildGfsGrantSubjectOptions,
-  gfsGrantSubjectFieldLabel,
-  gfsGrantSubjectPlaceholder,
-  gfsGrantSubjectSearchPlaceholder,
-  toGfsSubjectInput,
-} from './gfsGrantSubjectOptions'
+import { buildGfsGrantSubjectOptions, toGfsSubjectInput } from './gfsGrantSubjectOptions'
 
 /**
  * P4-S07 — Operator delegation panel for the Global File System. The operator
- * (Control UI / Admin-JWT plane) seeds Layer-1/2 grants and creates URI shares
- * on a selected resource. Reuses the existing grant/share write API (PUT
- * /api/v1/gfs/grants, POST /api/v1/gfs/shares) — no new authority. The
- * no-escalation / authority engine runs server-side; this panel surfaces the
- * machine error code (e.g. escalation_rejected) on rejection. Composes the
- * shared `components/ui` primitives per the control-ui frontend rules.
+ * (Control UI / Admin-JWT plane) seeds Layer-1/2 grants on a selected resource.
+ * Reuses the existing grant write API (PUT /api/v1/gfs/grants) — no new
+ * authority. The no-escalation / authority engine runs server-side; this panel
+ * surfaces the machine error code (e.g. escalation_rejected) on rejection.
+ * Composes the shared `components/ui` primitives per the control-ui frontend
+ * rules.
  */
 
 const PERMISSION_BITS = ['read', 'write', 'delete', 'manage_acl', 'share'] as const
 const DRIVE = 'main'
+
+type GrantSubjectSelection = {
+  option: SelectionDropdownOption & { id: string; badge: string }
+  subjectType: GfsGrantSubjectType
+}
 
 export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Element {
   const { showToast } = useToast()
@@ -49,7 +48,6 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const [recipes, setRecipes] = useState<WorkflowRecipeResource[]>([])
   const [directoryLoading, setDirectoryLoading] = useState(true)
   const [directoryError, setDirectoryError] = useState('')
-  const [subjectType, setSubjectType] = useState<GfsGrantSubjectType>('user')
   const [subjectValue, setSubjectValue] = useState('')
   const [bits, setBits] = useState<string[]>([])
   const [includeDescendants, setIncludeDescendants] = useState(resource.kind === 'directory')
@@ -103,35 +101,57 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     setIncludeDescendants(resource.kind === 'directory')
   }, [resource.kind, resource.resourceId])
 
-  const subjectOptions = useMemo(
-    () => buildGfsGrantSubjectOptions({ subjectType, users, teams, hosts, recipes }),
-    [hosts, recipes, subjectType, teams, users]
-  )
-  const selectedSubject = subjectOptions.find(option => option.value === subjectValue) ?? null
-  const subjectValid = subjectType === 'operator' || selectedSubject !== null
-  const canCreateShare = subjectType !== 'firstPartyAgent' && subjectType !== 'workflowPlugin'
-  const canSubmit = subjectValid && bits.length > 0 && !busy
+  const subjectSelections = useMemo<GrantSubjectSelection[]>(() => {
+    const selections: GrantSubjectSelection[] = []
+    const addOptions = (subjectType: GfsGrantSubjectType) => {
+      const options = buildGfsGrantSubjectOptions({
+        subjectType,
+        users,
+        teams,
+        hosts,
+        recipes,
+      })
+      selections.push(...options.map(option => ({ option, subjectType })))
+    }
 
-  const toggleBit = (bit: string) =>
-    setBits(prev => (prev.includes(bit) ? prev.filter(b => b !== bit) : [...prev, bit]))
-
-  function changeSubjectType(nextType: GfsGrantSubjectType) {
-    setSubjectType(nextType)
-    setSubjectValue('')
-  }
+    addOptions('user')
+    addOptions('team')
+    addOptions('firstPartyAgent')
+    addOptions('workflowPlugin')
+    selections.push({
+      subjectType: 'operator',
+      option: {
+        value: 'operator',
+        id: '',
+        label: 'Operator',
+        description: 'Intrinsic cluster operator',
+        badge: 'Operator',
+      },
+    })
+    return selections
+  }, [hosts, recipes, teams, users])
+  const subjectOptions = subjectSelections.map(selection => selection.option)
+  const selectedSelection =
+    subjectSelections.find(selection => selection.option.value === subjectValue) ?? null
+  const canSubmit = selectedSelection !== null && bits.length > 0 && !busy
 
   function subjectLabel(): string {
-    if (subjectType === 'operator') return 'operator'
-    if (!selectedSubject) return 'the selected subject'
-    return `${selectedSubject.badge.toLowerCase()} ${selectedSubject.label}`
+    if (!selectedSelection) return 'the selected subject'
+    if (selectedSelection.subjectType === 'operator') return 'operator'
+    return `${selectedSelection.option.badge.toLowerCase()} ${selectedSelection.option.label}`
   }
 
-  async function submit(kind: 'grant' | 'share') {
+  async function submit() {
     setError('')
+    if (!selectedSelection || bits.length === 0) {
+      setError('subject_and_permissions_required')
+      return
+    }
+    const grantSelection = selectedSelection
     const confirmed = await confirm({
-      title: kind === 'grant' ? 'Grant access?' : 'Create share?',
+      title: 'Grant access?',
       message: `Give ${subjectLabel()} [${bits.join(', ')}] on "${resource.name}"?`,
-      confirmLabel: kind === 'grant' ? 'Grant' : 'Create share',
+      confirmLabel: 'Grant',
     })
     if (!confirmed) return
     setBusy(true)
@@ -139,16 +159,14 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       const body = {
         drive: DRIVE,
         resourceId: resource.resourceId,
-        subject: toGfsSubjectInput(subjectType, selectedSubject),
+        subject: toGfsSubjectInput(grantSelection.subjectType, grantSelection.option),
         permissions: bits,
       }
-      if (kind === 'grant') await putGfsGrant({ ...body, inherit: includeDescendants })
-      else await postGfsShare({ ...body, includeDescendants })
-      showToast(kind === 'grant' ? 'Grant saved.' : 'Share created.', { tone: 'success' })
+      await putGfsGrant({ ...body, inherit: includeDescendants })
+      showToast('Grant saved.', { tone: 'success' })
       // Reset the whole form — leaving the subject populated risks a mis-targeted
       // second grant on the next click.
       setBits([])
-      setSubjectType('user')
       setSubjectValue('')
       setIncludeDescendants(resource.kind === 'directory')
     } catch (e) {
@@ -163,86 +181,39 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
 
   return (
     <div className="cu-gfs-grant-panel">
-      <Field
-        label="Subject type"
-        htmlFor="gfs-grant-subject-type"
-        description="Choose the subject category before selecting the exact grant target."
-      >
-        <SelectInput
-          id="gfs-grant-subject-type"
-          value={subjectType}
-          onChange={event => changeSubjectType(event.target.value as GfsGrantSubjectType)}
+      <div className="cu-gfs-grant__composer">
+        <GfsSubjectPicker
           disabled={busy}
-        >
-          {GFS_GRANT_SUBJECT_TYPE_OPTIONS.map(option => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </SelectInput>
-      </Field>
-      {subjectType === 'operator' ? (
-        <Field
-          label="Subject"
-          description="The intrinsic cluster operator subject will receive the selected permissions."
-        >
-          <div className="cu-field__readonly">Operator</div>
-        </Field>
-      ) : (
-        <Field
-          label={gfsGrantSubjectFieldLabel(subjectType)}
-          htmlFor="gfs-grant-subject"
-          description={`Choose the ${gfsGrantSubjectFieldLabel(subjectType).toLowerCase()} that will receive access.`}
-        >
-          <SelectionDropdown
-            id="gfs-grant-subject"
-            multiple={false}
-            showSelectedChips={false}
-            value={subjectValue ? [subjectValue] : []}
-            onChange={next => setSubjectValue(next[0] ?? '')}
-            options={subjectOptions}
-            placeholder={gfsGrantSubjectPlaceholder(subjectType, directoryLoading)}
-            searchPlaceholder={gfsGrantSubjectSearchPlaceholder(subjectType)}
-            selectionLabel="Selected subject"
-            emptyLabel={`No matching ${gfsGrantSubjectFieldLabel(subjectType).toLowerCase()} options.`}
-            disabled={busy || directoryLoading}
-          />
-        </Field>
-      )}
+          loading={directoryLoading}
+          onChange={setSubjectValue}
+          options={subjectOptions}
+          value={subjectValue}
+        />
+        <GfsPermissionDropdown
+          disabled={busy}
+          onChange={setBits}
+          permissions={PERMISSION_BITS}
+          value={bits}
+        />
+      </div>
       {directoryError ? (
         <p role="alert" className="cu-field__error">
           {directoryError}
         </p>
       ) : null}
       {canIncludeDescendants ? (
-        <Field label="Scope">
-          <CheckboxField
-            label="Include descendants"
-            description="Apply this grant or share to the full folder tree."
-            checked={includeDescendants}
-            onChange={() => setIncludeDescendants(current => !current)}
-            disabled={busy}
-          />
-        </Field>
+        <CheckboxField
+          className="cu-gfs-grant__scope"
+          label="Include descendants"
+          description="Apply this grant or share to the full folder tree."
+          checked={includeDescendants}
+          onChange={() => setIncludeDescendants(current => !current)}
+          disabled={busy}
+        />
       ) : null}
-      <Field label="Permissions">
-        <div className="cu-gfs-grant__bits">
-          {PERMISSION_BITS.map(bit => (
-            <CheckboxField
-              key={bit}
-              label={bit}
-              checked={bits.includes(bit)}
-              onChange={() => toggleBit(bit)}
-            />
-          ))}
-        </div>
-      </Field>
       <div className="cu-gfs-grant__actions">
-        <Button variant="primary" disabled={!canSubmit} onClick={() => submit('grant')}>
-          Grant
-        </Button>
-        <Button disabled={!canSubmit || !canCreateShare} onClick={() => submit('share')}>
-          Create share
+        <Button variant="primary" disabled={!canSubmit} onClick={() => submit()}>
+          Grant access
         </Button>
       </div>
       {error ? (

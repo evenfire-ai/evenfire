@@ -49,7 +49,7 @@ function resolveOsxNotarizeConfig() {
   }
 
   throw new Error(
-    'ENABLE_APPLE_CODESIGN=1 requires either APPLE_API_KEY/APPLE_API_KEY_ID/APPLE_API_ISSUER or APPLE_KEYCHAIN_PROFILE.',
+    'ENABLE_APPLE_CODESIGN=1 requires either APPLE_API_KEY/APPLE_API_KEY_ID/APPLE_API_ISSUER or APPLE_KEYCHAIN_PROFILE.'
   )
 }
 
@@ -60,10 +60,10 @@ module.exports = {
   packagerConfig: {
     asar: true,
     executableName: 'Evenfire',
+    name: 'Evenfire',
+    icon: './assets/icon',
     appBundleId: process.env.APPLE_BUNDLE_ID || defaultAppleBundleId,
     appCategoryType: 'public.app-category.productivity',
-    // When you have a real mac icon, uncomment this:
-    // icon: './assets/icon.icns',
     ...(osxSign ? { osxSign } : {}),
     ...(osxNotarize ? { osxNotarize } : {}),
   },
@@ -72,6 +72,7 @@ module.exports = {
 
   hooks: {
     prePackage: async () => {
+      if (process.env.EVENFIRE_SKIP_PACKAGE_BUILD === '1') return
       execSync('npm run build', { stdio: 'inherit' })
     },
   },

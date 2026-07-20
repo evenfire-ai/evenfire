@@ -20,7 +20,7 @@ export function buildMongoMcpManifest(params: {
       triggers: {
         onDemand: {
           requiresApproval: false,
-          allowedActors: ['autonomous'],
+          allowedActors: ['user', 'autonomous'],
         },
       },
       mcpServers: [

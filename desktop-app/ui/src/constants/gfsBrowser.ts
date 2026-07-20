@@ -1,0 +1,1 @@
+export const GFS_BREADCRUMB_MAX_DEPTH = 64

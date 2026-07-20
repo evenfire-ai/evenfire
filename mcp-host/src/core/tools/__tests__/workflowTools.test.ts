@@ -1444,6 +1444,10 @@ describe('workflow native tools', () => {
         requestedAt: Date.parse('2026-05-26T12:44:18.681Z'),
       },
     })
+    expect(tool.traceDescriptor({ name: 'spoofed-name' }, result)).toEqual({
+      kind: 'workflow',
+      sourceRef: 'sandbox-recipes/due-diligence',
+    })
     expect(fetchMock.mock.calls[0][0]).toBe(
       'http://gateway:8092/api/v1/workflows/effective-targets/resolve'
     )

@@ -6,6 +6,7 @@ import {
   defaultEnv,
 } from '../core/tools/workflowShared'
 import { createWorkflowControlTokenProvider } from '../core/tools/workflowTokenProvider'
+import type { TraceContextV1 } from '../core/types'
 import type { IncomingMessage } from '../server'
 
 const CONVERSATION_ID_RE = /^[a-zA-Z0-9._:-]{1,128}$/
@@ -53,7 +54,8 @@ function providerIdentityPayload(message: IncomingMessage): Record<string, unkno
 
 export async function resolveProviderWorkflowCallerContext(
   message: IncomingMessage | undefined,
-  getEnv: EnvGetter = defaultEnv
+  getEnv: EnvGetter = defaultEnv,
+  traceContext?: TraceContextV1 | null
 ): Promise<WorkflowCallerContext | null> {
   if (
     !message ||
@@ -68,9 +70,17 @@ export async function resolveProviderWorkflowCallerContext(
   if (!providerIdentity) return null
 
   const client = new WorkflowBrokerClient(getEnv, createWorkflowControlTokenProvider(getEnv))
+  const traceBinding =
+    traceContext?.origin === 'channel_event' && traceContext.sessionId
+      ? {
+          runId: traceContext.runId,
+          sessionId: traceContext.sessionId,
+          origin: traceContext.origin,
+        }
+      : undefined
   const result = await client.request('/api/v1/workflow-approval-mediums/resolve', {
     method: 'POST',
-    body: JSON.stringify({ providerIdentity }),
+    body: JSON.stringify({ providerIdentity, ...(traceBinding ? { traceBinding } : {}) }),
   })
   const record =
     result && typeof result === 'object' && !Array.isArray(result)

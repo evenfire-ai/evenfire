@@ -9,6 +9,7 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { LlmPriceForm } from '@components/LlmPriceForm'
 import { IconPrice } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { type CreateLlmPriceInput, createLlmPrice } from '@lib/api'
 
 function CreateLlmPriceContent() {
@@ -25,7 +26,7 @@ function CreateLlmPriceContent() {
   }
 
   function backToList() {
-    router.push('/cost/llm-prices')
+    router.push(CONTROL_ROUTES.costAndUsage.llmPrices)
   }
 
   async function handleSubmit(input: CreateLlmPriceInput) {

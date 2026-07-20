@@ -14,6 +14,7 @@ import {
   HostActivityStreamEvent,
   HostMessageRequest,
   HostMessageResponse,
+  HostModelsResult,
   HostRuntimeStatus,
   HostStatusStreamEvent,
   MessageToolStep,
@@ -26,6 +27,7 @@ import {
   SessionLifecycleState,
   SessionState,
   SessionTokensLite,
+  SetHostModelResult,
   TaskProgressStreamEvent,
   TeamDirectoryResult,
   TeamMember,
@@ -87,6 +89,7 @@ declare global {
         resolve: (uri: string) => Promise<{
           drive: string
           resourceId: string
+          parentResourceId: string | null
           rid?: string
           gfsUri: string
           name: string
@@ -100,6 +103,7 @@ declare global {
           resource: {
             drive: string
             resourceId: string
+            parentResourceId: string | null
             rid?: string
             gfsUri: string
             name: string
@@ -257,6 +261,7 @@ declare global {
           title: string
           body: string
           tag?: string
+          silent?: boolean
           actions?: Array<{ action: string; title: string }>
         }) => Promise<{ supported: boolean; id: string }>
         onClick: (callback: (payload: { id: string }) => void) => () => void
@@ -414,6 +419,26 @@ declare global {
           chatId: string,
           hostRefs?: string[]
         ) => Promise<ContextBreakdownResult>
+        /**
+         * R2 model selector. Resolves to `null` when the host predates the
+         * endpoint (404/501) so the UI hides the selector (compat, R2.6).
+         */
+        getHostModels: (
+          hostRef: string,
+          chatId: string,
+          hostRefs?: string[]
+        ) => Promise<HostModelsResult | null>
+        /**
+         * Sets the per-session model (applies to the next task). Rejects with an
+         * error whose message contains `model_not_allowed` when the model is not
+         * in the operator allowlist.
+         */
+        setHostModel: (
+          hostRef: string,
+          chatId: string,
+          model: string,
+          hostRefs?: string[]
+        ) => Promise<SetHostModelResult>
         getTokenMetadata: () => Promise<TokenMetadata>
       }
       app: {
@@ -511,6 +536,7 @@ declare global {
           height: number
           dpr?: number
         }) => Promise<void>
+        setVisible: (visible: boolean) => Promise<void>
         capturePreview: () => Promise<string | null>
         onClosed: (callback: (args: { appRef: string }) => void) => () => void
         onRefreshError: (

@@ -13,6 +13,7 @@ import { TablePanelHeader } from '@components/TablePanelHeader'
 import { useToast } from '@components/Toast'
 import { IconRefresh, IconX } from '@components/icons'
 import { Button } from '@components/ui'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type SharedFileSystemResource,
   deleteSharedFileSystem,
@@ -226,7 +227,7 @@ export default function SharedFileSystemsPage() {
               <button
                 type="button"
                 className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => router.push('/shared-filesystems/new')}
+                onClick={() => router.push(CONTROL_ROUTES.sharedFiles.new)}
                 disabled={isInitialLoad}
               >
                 New
@@ -278,14 +279,14 @@ export default function SharedFileSystemsPage() {
                       className="cu-table__row cu-table__row--clickable"
                       onClick={() => {
                         if (!isDeleting) {
-                          router.push(`/shared-filesystems/${encodeURIComponent(name)}`)
+                          router.push(CONTROL_ROUTES.sharedFiles.detail(name))
                         }
                       }}
                       onKeyDown={e => {
                         if (isDeleting) return
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault()
-                          router.push(`/shared-filesystems/${encodeURIComponent(name)}`)
+                          router.push(CONTROL_ROUTES.sharedFiles.detail(name))
                         }
                       }}
                       tabIndex={0}

@@ -20,22 +20,32 @@ const log = createLogger('wrc', 'db')
 
 let pool: Pool | null = null
 
-export function initDb(cfg: DbConfig): Pool {
-  if (pool) return pool
+export function createPoolConfig(cfg: DbConfig): PoolConfig {
+  const endpoint: PoolConfig = cfg.connectionString
+    ? { connectionString: cfg.connectionString }
+    : {
+        host: cfg.host,
+        port: cfg.port,
+        user: cfg.user,
+        password: cfg.password,
+        database: cfg.database,
+      }
 
-  const poolConfig: PoolConfig = {
-    host: cfg.host,
-    port: cfg.port,
-    user: cfg.user,
-    password: cfg.password,
-    database: cfg.database,
-    ssl: cfg.ssl ? { rejectUnauthorized: false } : undefined,
+  return {
+    ...endpoint,
+    ...(cfg.ssl ? { ssl: { rejectUnauthorized: false } } : {}),
     max: cfg.poolMax,
     // Fail fast on connection attempts rather than hanging.
     connectionTimeoutMillis: 5_000,
     // Keep idle connections long enough to service LISTEN + bursty polls.
     idleTimeoutMillis: 60_000,
   }
+}
+
+export function initDb(cfg: DbConfig): Pool {
+  if (pool) return pool
+
+  const poolConfig = createPoolConfig(cfg)
 
   const p = new Pool(poolConfig)
   // Pool-level error listener is mandatory — a single client error without a

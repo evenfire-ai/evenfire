@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { AuthGate } from '../../components/AuthGate'
 import { DashboardLayout } from '../../components/DashboardLayout'
 import { SectionSearchInput } from '../../components/SectionSearchInput'
@@ -21,7 +22,7 @@ import type { ChatArtifactOutputRow, WorkflowOutputRow } from '../../lib/api'
 type OutputsTab = 'workflow' | 'desktop'
 
 function parseOutputsTab(value: string | undefined): OutputsTab {
-  return value === 'desktop' ? 'desktop' : 'workflow'
+  return value === 'desktop-app-artifacts' ? 'desktop' : 'workflow'
 }
 
 function formatBytes(bytes: number): string {
@@ -176,7 +177,7 @@ function OutputsPageContent() {
             options={[
               {
                 value: 'workflow',
-                href: '/outputs',
+                href: CONTROL_ROUTES.outputs.recipeArtifacts,
                 label:
                   activeTab === 'workflow'
                     ? `Recipe Artifacts (${filteredWorkflowOutputs.length})`
@@ -184,7 +185,7 @@ function OutputsPageContent() {
               },
               {
                 value: 'desktop',
-                href: '/outputs/desktop',
+                href: CONTROL_ROUTES.outputs.desktopAppArtifacts,
                 label:
                   activeTab === 'desktop'
                     ? `Desktop App Artifacts (${filteredChatArtifacts.length})`

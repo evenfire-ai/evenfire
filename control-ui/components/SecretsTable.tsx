@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RecipeSecretItem,
   apiSend,
@@ -10,9 +11,10 @@ import {
   getRecipeSecrets,
   getRecipes,
 } from '../lib/api'
-import { LLM_SECRET_FIELDS } from '../lib/llm'
+import { createEmptyLlmKeyDraft, validateLlmSecretData } from '../lib/llm'
 import { collectWorkflowRecipeSecretRefs } from '../lib/workflowRecipeSecretRefs'
 import { useConfirmDialog } from './ConfirmDialog'
+import { LlmCredentialFields } from './LlmCredentialFields'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconKey } from './Sidebar/icons'
 import { TabBar } from './TabBar'
@@ -23,6 +25,9 @@ import { IconPencil, IconRefresh, IconX } from './icons'
 type SecretItem = {
   name?: string
   metadata?: { name?: string }
+  // Data-key names already stored in the Secret (values are never returned by
+  // the listing — spec R4.5.3). Lights up the "present" chips in edit mode.
+  keys?: string[]
 }
 
 type SecretScope = 'llm' | 'mcp' | 'recipe'
@@ -47,13 +52,6 @@ type RecipeSecretRow = {
 }
 
 const DEFAULT_RECIPE_SECRET_NAMESPACE = 'sandbox-recipes'
-
-function createEmptyKeyDraft(): Record<string, string> {
-  return LLM_SECRET_FIELDS.reduce<Record<string, string>>((acc, field) => {
-    acc[field.key] = ''
-    return acc
-  }, {})
-}
 
 export function SecretsTable({
   activeScope = 'llm',
@@ -93,8 +91,9 @@ export function SecretsTable({
 
   // LLM secrets state
   const [editingName, setEditingName] = useState('')
+  const [editingKeys, setEditingKeys] = useState<string[]>([])
   const [isLlmModalOpen, setIsLlmModalOpen] = useState(false)
-  const [keyDraft, setKeyDraft] = useState<Record<string, string>>(createEmptyKeyDraft)
+  const [keyDraft, setKeyDraft] = useState<Record<string, string>>(createEmptyLlmKeyDraft)
   const [saving, setSaving] = useState(false)
   const [deletingName, setDeletingName] = useState<string | null>(null)
   const [error, setError] = useState('')
@@ -121,6 +120,16 @@ export function SecretsTable({
         .sort((a, b) => a.localeCompare(b)),
     [items]
   )
+  // Secret name -> stored data-key names, so the update modal can light up the
+  // "present" chips for the row being edited (names only, never values).
+  const keysByName = useMemo(() => {
+    const map = new Map<string, string[]>()
+    for (const item of items) {
+      const name = String(item.name || item.metadata?.name || '').trim()
+      if (name) map.set(name, Array.isArray(item.keys) ? item.keys : [])
+    }
+    return map
+  }, [items])
   const normalizedLlmSearch = llmSearchQuery.trim().toLowerCase()
   const filteredRows = useMemo(() => {
     if (!normalizedLlmSearch) return rows
@@ -152,13 +161,15 @@ export function SecretsTable({
   function closeLlmModal() {
     setIsLlmModalOpen(false)
     setEditingName('')
-    setKeyDraft(createEmptyKeyDraft())
+    setEditingKeys([])
+    setKeyDraft(createEmptyLlmKeyDraft())
     setError('')
   }
 
   function openUpdate(name: string) {
     setEditingName(name)
-    setKeyDraft(createEmptyKeyDraft())
+    setEditingKeys(keysByName.get(name) ?? [])
+    setKeyDraft(createEmptyLlmKeyDraft())
     setError('')
     setIsLlmModalOpen(true)
   }
@@ -179,12 +190,22 @@ export function SecretsTable({
       setError('Provide at least one API key.')
       return
     }
+    // Slot-aware validation (spec R4.5.3), mirrored server-side in control-api.
+    const slotErrors = validateLlmSecretData(stringData)
+    if (slotErrors.length > 0) {
+      setError(slotErrors[0])
+      return
+    }
 
     setSaving(true)
     setError('')
     try {
+      // merge:true → server-side read-then-replace that preserves the keys of
+      // other providers stored in this shared LLM secret (spec R4 FIX 2b).
+      // Individual key removal has its own path (removeSecretKey).
       await apiSend('PUT', '/api/v1/admin/secrets', {
         name: secretName,
+        merge: true,
         stringData,
       })
       showToast(`Secret ${secretName} updated.`, { tone: 'success' })
@@ -366,7 +387,7 @@ export function SecretsTable({
 
   function navigateToRecipeEdit(name: string, namespace: string) {
     const qs = new URLSearchParams({ namespace })
-    router.push(`/secrets/recipe/${encodeURIComponent(name)}/edit?${qs.toString()}`)
+    router.push(CONTROL_ROUTES.secrets.editRecipe(name, Object.fromEntries(qs)))
   }
 
   async function deleteRecipeSecretRow(name: string, namespace: string) {
@@ -491,9 +512,9 @@ export function SecretsTable({
             activeValue={scope}
             className="cu-tabs--flush"
             options={[
-              { value: 'llm', href: '/secrets', label: 'LLM' },
-              { value: 'mcp', href: '/secrets/mcp', label: 'Connector' },
-              { value: 'recipe', href: '/secrets/recipe', label: 'Recipe' },
+              { value: 'llm', href: CONTROL_ROUTES.secrets.llm, label: 'LLM' },
+              { value: 'mcp', href: CONTROL_ROUTES.secrets.connector, label: 'Connector' },
+              { value: 'recipe', href: CONTROL_ROUTES.secrets.recipe, label: 'Recipe' },
             ]}
           />
         </div>
@@ -657,7 +678,7 @@ export function SecretsTable({
                         type="button"
                         className="cu-btn cu-btn--primary cu-btn--sm"
                         onClick={() =>
-                          router.push(`/secrets/new?scope=mcp&name=${encodeURIComponent(row.name)}`)
+                          router.push(CONTROL_ROUTES.secrets.new({ scope: 'mcp', name: row.name }))
                         }
                         aria-label={`Add connector secret ${row.name}`}
                       >
@@ -891,18 +912,15 @@ export function SecretsTable({
             </div>
 
             <div className="cu-form-stack" style={{ maxWidth: '100%' }}>
-              {LLM_SECRET_FIELDS.map(field => (
-                <div key={field.key} className="cu-field" style={{ marginBottom: 0 }}>
-                  <label htmlFor={`llm-secret-${field.key}`}>{field.label}</label>
-                  <input
-                    id={`llm-secret-${field.key}`}
-                    value={keyDraft[field.key] || ''}
-                    onChange={e => setKeyDraft(prev => ({ ...prev, [field.key]: e.target.value }))}
-                    placeholder={field.placeholder}
-                    disabled={saving}
-                  />
-                </div>
-              ))}
+              <p className="cu-field__hint">
+                Updates the listed keys; other keys already stored in this secret are preserved.
+              </p>
+              <LlmCredentialFields
+                draft={keyDraft}
+                onChange={(dataKey, value) => setKeyDraft(prev => ({ ...prev, [dataKey]: value }))}
+                existingKeys={editingKeys}
+                disabled={saving}
+              />
             </div>
 
             {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}

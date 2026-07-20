@@ -18,6 +18,7 @@ export function DetailPageShell<T extends string>({
   contentClassName,
   contentMode = 'card',
   error,
+  eyebrow,
   icon,
   notice,
   onBack,
@@ -39,6 +40,7 @@ export function DetailPageShell<T extends string>({
             actions={actions}
             backDisabled={backDisabled}
             backLabel={backLabel}
+            eyebrow={eyebrow}
             icon={icon}
             onBack={onBack}
             subtitle={subtitle}

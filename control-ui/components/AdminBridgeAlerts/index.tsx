@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { IconX } from '@components/icons'
+import { CONTROL_ROUTES } from '@constants/routes'
 import { getControlAdminBridgeStatus } from '@lib/api'
 import type { ControlAdminBridgeStatus } from '@lib/api'
 import type { AdminBridgeAlertKind, AdminBridgeAlertState } from './types'
@@ -133,7 +134,11 @@ export function AdminBridgeAlerts() {
 
   function primaryAction() {
     if (alert.kind === 'email') {
-      router.push(alert.status.admin.pendingEmailChange ? '/settings' : '/settings?focus=email')
+      router.push(
+        alert.status.admin.pendingEmailChange
+          ? CONTROL_ROUTES.settings.root
+          : CONTROL_ROUTES.settings.withFocus('email')
+      )
       closeAlert()
       return
     }
@@ -148,7 +153,7 @@ export function AdminBridgeAlerts() {
       email,
       name: alert.status.admin.username,
     })
-    router.push(`/profile-admin/users/new?${searchParams.toString()}`)
+    router.push(CONTROL_ROUTES.usersAndTeams.newUser(Object.fromEntries(searchParams)))
     closeAlert()
   }
 

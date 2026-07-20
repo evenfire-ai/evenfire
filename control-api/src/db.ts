@@ -1,7 +1,13 @@
 import { Pool, type PoolClient } from 'pg'
+import {
+  type BoundedPoolBudget,
+  type PoolConstructor,
+  createBoundedPgPoolForConnection,
+} from './boundedPgPool.js'
 import { config } from './config.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
 import {
+  addPluginWorkloadSdkProviderColumn,
   applyPluginWorkloadSdkSchema,
   dropPluginWorkloadSdkSuperAdminApprovedColumn,
 } from './services/pluginWorkloadSdkSchema.js'
@@ -23,12 +29,71 @@ const INIT_DB_LOCK_KEY_SQL = "hashtext('control-api-init-db-v1')::bigint"
 
 type DbMigration = {
   version: string
+  // Equivalent names used before a branch merge renumbered the same migration body.
+  legacyVersions?: readonly string[]
   apply: (db: DbClient) => Promise<void>
 }
 
-export const pool = new Pool({
-  connectionString: config.pgConnectionString,
-})
+export type { BoundedPoolBudget, PoolConstructor } from './boundedPgPool.js'
+
+const MIN_POOL_MAX = 1
+const MAX_POOL_MAX = 64
+const MIN_IDLE_TIMEOUT_MS = 1_000
+const MAX_IDLE_TIMEOUT_MS = 120_000
+const MIN_CONNECTION_TIMEOUT_MS = 100
+const MAX_CONNECTION_TIMEOUT_MS = 30_000
+const MIN_STATEMENT_TIMEOUT_MS = 100
+const MAX_STATEMENT_TIMEOUT_MS = 30_000
+
+const DEFAULT_CORE_POOL_MAX = 10
+const DEFAULT_CORE_POOL_IDLE_TIMEOUT_MS = 30_000
+const DEFAULT_CORE_POOL_CONNECTION_TIMEOUT_MS = 2_000
+const DEFAULT_CORE_POOL_STATEMENT_TIMEOUT_MS = 15_000
+
+function boundedEnvInteger(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]
+  if (!raw) return fallback
+  const value = Number(raw)
+  return Number.isInteger(value) && value >= min && value <= max ? value : fallback
+}
+
+export function createBoundedPgPool(
+  budget: BoundedPoolBudget,
+  PoolClass: PoolConstructor = Pool
+): Pool {
+  return createBoundedPgPoolForConnection(config.pgConnectionString, budget, PoolClass)
+}
+
+export function corePoolBudget(): BoundedPoolBudget {
+  return {
+    max: boundedEnvInteger('CORE_POOL_MAX', DEFAULT_CORE_POOL_MAX, MIN_POOL_MAX, MAX_POOL_MAX),
+    idleTimeoutMillis: boundedEnvInteger(
+      'CORE_POOL_IDLE_TIMEOUT_MS',
+      DEFAULT_CORE_POOL_IDLE_TIMEOUT_MS,
+      MIN_IDLE_TIMEOUT_MS,
+      MAX_IDLE_TIMEOUT_MS
+    ),
+    connectionTimeoutMillis: boundedEnvInteger(
+      'CORE_POOL_CONNECTION_TIMEOUT_MS',
+      DEFAULT_CORE_POOL_CONNECTION_TIMEOUT_MS,
+      MIN_CONNECTION_TIMEOUT_MS,
+      MAX_CONNECTION_TIMEOUT_MS
+    ),
+    statementTimeoutMillis: boundedEnvInteger(
+      'CORE_POOL_STATEMENT_TIMEOUT_MS',
+      DEFAULT_CORE_POOL_STATEMENT_TIMEOUT_MS,
+      MIN_STATEMENT_TIMEOUT_MS,
+      MAX_STATEMENT_TIMEOUT_MS
+    ),
+  }
+}
+
+export function createCorePool(PoolClass: PoolConstructor = Pool): Pool {
+  return createBoundedPgPool(corePoolBudget(), PoolClass)
+}
+
+export const pool = createCorePool()
+export const corePool = pool
 
 async function applyBaselineSchema(db: DbClient): Promise<void> {
   // Baseline includes additive Phase 0 workflow-trigger tables for fresh
@@ -794,7 +859,7 @@ async function applyBaselineSchema(db: DbClient): Promise<void> {
 
 export async function applyWorkflowRunCompletedNotificationTrigger(db: DbClient): Promise<void> {
   await db.query(`
-    CREATE OR REPLACE FUNCTION workflow_run_step_output_jsonb(raw_value TEXT) RETURNS JSONB AS $$
+    CREATE OR REPLACE FUNCTION public.workflow_run_step_output_jsonb(raw_value TEXT) RETURNS JSONB AS $$
     BEGIN
       IF raw_value IS NULL OR btrim(raw_value) = '' THEN
         RETURN NULL;
@@ -806,13 +871,13 @@ export async function applyWorkflowRunCompletedNotificationTrigger(db: DbClient)
     END;
     $$ LANGUAGE plpgsql IMMUTABLE;
 
-    CREATE OR REPLACE FUNCTION notify_workflow_run_update() RETURNS trigger AS $$
+    CREATE OR REPLACE FUNCTION public.notify_workflow_run_update() RETURNS trigger AS $$
     BEGIN
       IF TG_OP = 'UPDATE'
          AND OLD.phase IS DISTINCT FROM NEW.phase
          AND NEW.phase IN ('Succeeded', 'Failed', 'Canceled')
          AND NEW.approval_request_id IS NOT NULL THEN
-        INSERT INTO notification_deliveries
+        INSERT INTO public.notification_deliveries
           (event_type, dedupe_key, audience, payload, priority, status, expires_at)
         SELECT
           'workflow.run.completed',
@@ -845,15 +910,15 @@ export async function applyWorkflowRunCompletedNotificationTrigger(db: DbClient)
           'normal',
           'queued',
           NOW() + INTERVAL '7 days'
-        FROM workflow_approval_requests war
-        JOIN workflow_approval_trigger_intents wati
+        FROM public.workflow_approval_requests war
+        JOIN public.workflow_approval_trigger_intents wati
           ON wati.approval_request_id = war.id
         CROSS JOIN LATERAL (
           SELECT EXISTS (
             SELECT 1
-              FROM workflow_run_steps wrs
+              FROM public.workflow_run_steps wrs
               CROSS JOIN LATERAL (
-                SELECT workflow_run_step_output_jsonb(wrs.output) AS output_json
+                SELECT public.workflow_run_step_output_jsonb(wrs.output) AS output_json
               ) wrs_output
              WHERE wrs.run_id = NEW.run_id
                AND (
@@ -876,7 +941,7 @@ export async function applyWorkflowRunCompletedNotificationTrigger(db: DbClient)
                          WHEN jsonb_typeof(tool_call->'result') = 'object'
                            THEN tool_call->'result'
                          WHEN jsonb_typeof(tool_call->'result') = 'string'
-                           THEN workflow_run_step_output_jsonb(tool_call->>'result')
+                           THEN public.workflow_run_step_output_jsonb(tool_call->>'result')
                          ELSE NULL
                        END AS result_json
                      ) tool_result
@@ -895,12 +960,17 @@ export async function applyWorkflowRunCompletedNotificationTrigger(db: DbClient)
       PERFORM pg_notify('workflow_run_update', NEW.run_id::text);
       RETURN NEW;
     END;
-    $$ LANGUAGE plpgsql;
+    $$ LANGUAGE plpgsql
+       SECURITY DEFINER
+       SET search_path = pg_catalog;
 
-    DROP TRIGGER IF EXISTS workflow_runs_notify ON workflow_runs;
+    REVOKE ALL ON FUNCTION public.workflow_run_step_output_jsonb(TEXT) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION public.notify_workflow_run_update() FROM PUBLIC;
+
+    DROP TRIGGER IF EXISTS workflow_runs_notify ON public.workflow_runs;
     CREATE TRIGGER workflow_runs_notify
-      AFTER INSERT OR UPDATE OF phase ON workflow_runs
-      FOR EACH ROW EXECUTE FUNCTION notify_workflow_run_update();
+      AFTER INSERT OR UPDATE OF phase ON public.workflow_runs
+      FOR EACH ROW EXECUTE FUNCTION public.notify_workflow_run_update();
   `)
 }
 
@@ -2191,7 +2261,11 @@ async function applyGfsPermissionStoreSchema(db: DbClient): Promise<void> {
   `)
 }
 
-const CONTROL_API_MIGRATIONS: DbMigration[] = [
+// Exported (read-only) so the migration-order invariant test can assert the
+// array is monotonic by version-string. Applied strictly in array order and
+// tracked by full version-string in `schema_migrations`, so a non-monotonic
+// array is a latent footgun — the test guards it going forward.
+export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     // Keep auto-migrations strictly additive / non-destructive. If we ever
     // need a destructive cleanup (DROP column/table, rewrite data, etc.), it
@@ -2649,11 +2723,2029 @@ const CONTROL_API_MIGRATIONS: DbMigration[] = [
   },
   {
     version: '0054_workflow_run_completed_notification_download_detection',
+    legacyVersions: ['0059_workflow_run_completed_notification_download_detection'],
     apply: applyWorkflowRunCompletedNotificationTrigger,
   },
   {
-    version: '0055_member_registration_credentials',
+    version: '0055_plugin_workload_sdk_grant_provider',
+    apply: addPluginWorkloadSdkProviderColumn,
+  },
+  {
+    version: '0056_llm_allowed_models',
+    apply: async db => {
+      // Operator-declared allowlist of usable (provider, model) pairs
+      // (spec v2 §3-R3). Source of truth in control-api; materialized to the
+      // `clerum-llm-allowed-models` ConfigMap for mcp-host/WRC. Fail-closed: a
+      // model is usable only when a row exists AND enabled = true.
+      //
+      // `vendor` is metadata with no logic — it identifies the model creator so
+      // the UI can group and cross-runtime reports reconcile (e.g. bailian hosts
+      // models from Alibaba, MiniMax, Zhipu and Moonshot under one runtime).
+      // `context_window_tokens` is operator-declared and optional; the service
+      // validates its range. The (provider, model) UNIQUE index (not partial —
+      // one row per pair regardless of enabled) surfaces as a 409 on conflict.
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS llm_allowed_models (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          vendor TEXT,
+          display_name TEXT,
+          context_window_tokens INTEGER,
+          enabled BOOLEAN NOT NULL DEFAULT true,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_allowed_models_pm
+          ON llm_allowed_models (provider, model);
+
+        CREATE TABLE IF NOT EXISTS llm_allowed_models_audit (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          actor TEXT NOT NULL,
+          action TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          detail JSONB,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `)
+
+      // Seed the current static catalog (control-ui/lib/llm.ts LLM_MODELS_BY_
+      // PROVIDER, 25 models) so the upgrade is a behavior no-op — the allowlist
+      // reintroduces the model gate R1 removed without disrupting deployed
+      // Hosts. `vendor` is set per row. ON CONFLICT DO NOTHING keeps this
+      // idempotent and never clobbers an admin-edited row on re-run.
+      await db.query(`
+        INSERT INTO llm_allowed_models (provider, model, vendor)
+        VALUES
+          -- openai (runtime) → OpenAI (vendor)
+          ('openai', 'gpt-5.5', 'OpenAI'),
+          ('openai', 'gpt-5.4', 'OpenAI'),
+          ('openai', 'gpt-5.4-mini', 'OpenAI'),
+          ('openai', 'gpt-5.4-nano', 'OpenAI'),
+          ('openai', 'gpt-5.1-codex', 'OpenAI'),
+          ('openai', 'gpt-5.1-codex-mini', 'OpenAI'),
+          -- claude (runtime) → Anthropic (vendor)
+          ('claude', 'claude-opus-4-7', 'Anthropic'),
+          ('claude', 'claude-sonnet-4-6', 'Anthropic'),
+          ('claude', 'claude-haiku-4-5', 'Anthropic'),
+          ('claude', 'claude-opus-4-6', 'Anthropic'),
+          ('claude', 'claude-sonnet-4-5', 'Anthropic'),
+          -- zai (runtime) → Zhipu (vendor)
+          ('zai', 'glm-5.2', 'Zhipu'),
+          ('zai', 'glm-5.1', 'Zhipu'),
+          ('zai', 'glm-5', 'Zhipu'),
+          ('zai', 'glm-5-turbo', 'Zhipu'),
+          ('zai', 'glm-4.7', 'Zhipu'),
+          -- bailian (runtime) hosts multiple vendors under one platform
+          ('bailian', 'qwen3-coder-plus', 'Alibaba'),
+          ('bailian', 'qwen3.5-plus', 'Alibaba'),
+          ('bailian', 'qwen3-coder-next', 'Alibaba'),
+          ('bailian', 'qwen3-max-2026-01-23', 'Alibaba'),
+          ('bailian', 'MiniMax-M2.5', 'MiniMax'),
+          ('bailian', 'glm-5.1', 'Zhipu'),
+          ('bailian', 'glm-5', 'Zhipu'),
+          ('bailian', 'glm-4.7', 'Zhipu'),
+          ('bailian', 'kimi-k2.5', 'Moonshot')
+        ON CONFLICT DO NOTHING;
+      `)
+    },
+  },
+  {
+    version: '0057_llm_allowed_models_vertex_bedrock',
+    apply: async db => {
+      // R4: seed a curated allowlist for the two new providers (Google Vertex AI
+      // and Amazon Bedrock). enabled=true — a provider without credentials is
+      // unusable regardless (the "provider usable" chip is an R4.5 concern), so
+      // enabling the rows just makes them selectable once creds are configured.
+      // ON CONFLICT DO NOTHING keeps this idempotent and never clobbers an
+      // admin-edited row. Bedrock model ids are runtime-specific (distinct from
+      // the native `claude` ids); the sonnet id matches registryCore's
+      // bedrock defaultModel (B1).
+      await db.query(`
+        INSERT INTO llm_allowed_models (provider, model, vendor)
+        VALUES
+          -- vertex (runtime) → Google (vendor)
+          ('vertex', 'gemini-2.5-pro', 'Google'),
+          ('vertex', 'gemini-2.5-flash', 'Google'),
+          -- bedrock (runtime) → Anthropic (vendor); Bedrock model ids
+          ('bedrock', 'anthropic.claude-sonnet-4-6-v1:0', 'Anthropic'),
+          ('bedrock', 'anthropic.claude-haiku-4-5-v1:0', 'Anthropic')
+        ON CONFLICT DO NOTHING;
+      `)
+    },
+  },
+  {
+    version: '0058_llm_allowed_models_new_providers',
+    apply: async db => {
+      // Seed one sensible default model per new provider added in the LLM
+      // provider expansion (packages/llm-providers now carries 21 ids). Same
+      // shape as 0056/0057: enabled=true (a provider without credentials is
+      // unusable regardless), a `vendor` label for UI grouping, and ON CONFLICT
+      // DO NOTHING to stay idempotent and never clobber an admin-edited row.
+      //
+      // Model strings that embed `/` (together, fireworks, deepinfra, nebius,
+      // novita, openrouter) are plain data — the allowlist keys on
+      // (provider, model) and url-encoding is handled via the surrogate id, so
+      // the slashes carry no routing meaning here.
+      //
+      // azure is intentionally NOT seeded: its `model` is an Azure OpenAI
+      // deployment name, not a catalog id, so there is no sensible default —
+      // the operator registers their own deployment names via /llm-models.
+      await db.query(`
+        INSERT INTO llm_allowed_models (provider, model, vendor)
+        VALUES
+          -- openrouter (runtime) is an aggregator; vendor = model creator
+          ('openrouter', 'anthropic/claude-sonnet-latest', 'OpenRouter'),
+          -- gemini (runtime) → Google (vendor)
+          ('gemini', 'gemini-2.5-flash', 'Google'),
+          -- deepseek (runtime) → DeepSeek (vendor)
+          ('deepseek', 'deepseek-v4-flash', 'DeepSeek'),
+          -- groq (runtime) hosts Meta's Llama
+          ('groq', 'llama-3.3-70b-versatile', 'Meta'),
+          -- together (runtime) hosts Meta's Llama
+          ('together', 'meta-llama/Llama-3.3-70B-Instruct-Turbo', 'Meta'),
+          -- fireworks (runtime) hosts Meta's Llama
+          ('fireworks', 'accounts/fireworks/models/llama-v3p3-70b-instruct', 'Meta'),
+          -- mistral (runtime) → Mistral (vendor)
+          ('mistral', 'mistral-medium-latest', 'Mistral'),
+          -- xai (runtime) → xAI (vendor)
+          ('xai', 'grok-4.3', 'xAI'),
+          -- cerebras (runtime) hosts OpenAI's gpt-oss
+          ('cerebras', 'gpt-oss-120b', 'OpenAI'),
+          -- deepinfra (runtime) hosts DeepSeek
+          ('deepinfra', 'deepseek-ai/DeepSeek-V3.2', 'DeepSeek'),
+          -- perplexity (runtime) → Perplexity (vendor)
+          ('perplexity', 'sonar-pro', 'Perplexity'),
+          -- moonshot (runtime) → Moonshot (vendor)
+          ('moonshot', 'kimi-k2.6', 'Moonshot'),
+          -- nebius (runtime) hosts Alibaba's Qwen
+          ('nebius', 'Qwen/Qwen3-235B-A22B-Instruct-2507', 'Alibaba'),
+          -- novita (runtime) hosts DeepSeek
+          ('novita', 'deepseek/deepseek-v3.2', 'DeepSeek')
+        ON CONFLICT DO NOTHING;
+      `)
+    },
+  },
+  {
+    version: '0059_llm_allowed_models_catalog_lifecycle',
+    apply: async db => {
+      // F1 of "unified provider/model management" (spec 09 §2.2 + §8-F1): add the
+      // catalog lifecycle columns to `llm_allowed_models`. ADDITIVE, zero behavior
+      // change — the foundation for auto-discovery (F2, later), but this ships
+      // alone and is reversible.
+      //
+      //   - `source`        provenance: 'manual' (operator/seed) | 'discovery'
+      //                     (auto-discovered, F2). Every EXISTING row is
+      //                     operator/seed, so the DEFAULT 'manual' is the intended
+      //                     backfill — no separate UPDATE needed.
+      //   - `discovered_at` when discovery first inserted the row (NULL for manual).
+      //   - `last_seen_at`  when discovery last saw the id live (NULL for manual).
+      //   - `stale`         discovery ran and the id has disappeared; never
+      //                     auto-disabled (R3.7) — an operator decision flag.
+      //
+      // ADD COLUMN IF NOT EXISTS keeps this idempotent. The materializer
+      // (listEnabledGroupedByProvider → clerum-llm-allowed-models ConfigMap) does
+      // NOT select or serialize any of these, so the CM contract stays
+      // byte-identical for mcp-host/WRC. The CHECK constrains `source` to the two
+      // known provenances.
+      await db.query(`
+        ALTER TABLE llm_allowed_models
+          ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual'
+            CHECK (source IN ('manual','discovery'));
+        ALTER TABLE llm_allowed_models
+          ADD COLUMN IF NOT EXISTS discovered_at TIMESTAMPTZ;
+        ALTER TABLE llm_allowed_models
+          ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+        ALTER TABLE llm_allowed_models
+          ADD COLUMN IF NOT EXISTS stale BOOLEAN NOT NULL DEFAULT false;
+      `)
+    },
+  },
+  {
+    version: '0060_llm_catalog_sync_runs',
+    apply: async db => {
+      // F2 of "unified provider/model management" (spec 09 §2 + §8-F2): a tiny
+      // per-run summary of the models.dev catalog sync so the admin UI can show
+      // "last synced" (source + counts). One row per sync; the actual catalog
+      // state lives in `llm_allowed_models` (source/stale columns from 0059).
+      // ADDITIVE and self-contained — no change to the allowlist contract or the
+      // `clerum-llm-allowed-models` ConfigMap. `source` mirrors the client's
+      // provenance ('live' fetch of api.json, or the vendored offline snapshot).
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS llm_catalog_sync_runs (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          ran_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          source TEXT NOT NULL CHECK (source IN ('live','vendored')),
+          added INTEGER NOT NULL DEFAULT 0,
+          updated INTEGER NOT NULL DEFAULT 0,
+          staled INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_llm_catalog_sync_runs_ran_at
+          ON llm_catalog_sync_runs (ran_at DESC);
+      `)
+    },
+  },
+  {
+    version: '0061_governed_run_trace_schema_foundation',
+    legacyVersions: ['0054_governed_run_trace_schema_foundation'],
+    apply: async db => {
+      // The governed trace is three physical append-only ledgers plus a payload-free
+      // stream. Controllers never receive database authority; later services insert a
+      // family row and its stream pointer in the same transaction. The deferred
+      // constraint triggers below reject either side being committed on its own.
+      await db.query(`
+        ALTER TABLE usage_events
+          ADD COLUMN IF NOT EXISTS run_id UUID NULL;
+
+        CREATE OR REPLACE FUNCTION governed_trace_safe_metadata(value JSONB)
+        RETURNS BOOLEAN
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$
+          SELECT jsonb_typeof(value) = 'object'
+             AND octet_length(value::text) <= 16384
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM jsonb_object_keys(value) AS key_name
+                WHERE key_name NOT IN (
+                  'reason_code', 'error_class', 'phase', 'state', 'status',
+                  'transition', 'resource_class', 'unit', 'provider_ref',
+                  'summary', 'detail_ref', 'target_label', 'tool_name', 'tool_kind',
+                  'tool_source_ref', 'model', 'attempt', 'count', 'config_hash'
+                )
+             )
+             AND (
+               NOT (value ? 'tool_kind')
+               OR (
+                 jsonb_typeof(value->'tool_kind') = 'string'
+                 AND value->>'tool_kind' IN ('internal_tool', 'mcp_server_tool', 'workflow')
+               )
+             )
+             AND (
+               NOT (value ? 'target_label')
+               OR (
+                 jsonb_typeof(value->'target_label') = 'string'
+                 AND value->>'target_label' ~ '^[A-Za-z0-9._-]{3,64}$'
+               )
+             )
+             AND (
+               NOT (value ? 'tool_source_ref')
+               OR (
+                 jsonb_typeof(value->'tool_source_ref') = 'string'
+                 AND char_length(value->>'tool_source_ref') BETWEEN 1 AND 128
+               )
+             );
+        $$;
+
+        CREATE OR REPLACE FUNCTION governed_trace_safe_agent_run_metadata(event_kind TEXT, value JSONB)
+        RETURNS BOOLEAN
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$
+          SELECT CASE
+            WHEN event_kind <> 'token_usage' THEN governed_trace_safe_metadata(value)
+            ELSE jsonb_typeof(value) = 'object'
+             AND octet_length(value::text) <= 16384
+             AND value ?& ARRAY[
+               'request_ref', 'provider', 'model', 'source_kind',
+               'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'
+             ]
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM jsonb_object_keys(value) AS key_name
+                WHERE key_name NOT IN (
+                  'request_ref', 'provider', 'model', 'source_kind',
+                  'input_tokens', 'output_tokens', 'cache_read_tokens',
+                  'cache_write_tokens', 'iteration'
+                )
+             )
+             AND jsonb_typeof(value->'request_ref') = 'string'
+             AND (value->>'request_ref') ~ '^[0-9a-f]{64}$'
+             AND jsonb_typeof(value->'provider') = 'string'
+             AND jsonb_typeof(value->'model') = 'string'
+             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown')
+             AND jsonb_typeof(value->'source_kind') = 'string'
+             AND jsonb_typeof(value->'input_tokens') = 'number'
+             AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
+             AND jsonb_typeof(value->'output_tokens') = 'number'
+             AND (value->>'output_tokens') ~ '^(0|[1-9][0-9]*)$'
+             AND jsonb_typeof(value->'cache_read_tokens') = 'number'
+             AND (value->>'cache_read_tokens') ~ '^(0|[1-9][0-9]*)$'
+             AND jsonb_typeof(value->'cache_write_tokens') = 'number'
+             AND (value->>'cache_write_tokens') ~ '^(0|[1-9][0-9]*)$'
+             AND (
+               NOT (value ? 'iteration')
+               OR (
+                 jsonb_typeof(value->'iteration') = 'number'
+                 AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+               )
+             )
+          END;
+        $$;
+
+        CREATE OR REPLACE FUNCTION governed_trace_sorted_unique_text_array(value TEXT[])
+        RETURNS BOOLEAN
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$
+          SELECT cardinality(value) <= 32
+             AND array_position(value, NULL) IS NULL
+             AND value = COALESCE(
+               (SELECT array_agg(item ORDER BY item)
+                  FROM unnest(value) AS item),
+               ARRAY[]::TEXT[]
+             );
+        $$;
+
+        CREATE TABLE IF NOT EXISTS agent_run_events (
+          event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          source_kind TEXT NOT NULL CHECK (source_kind IN ('mcp_host_runtime', 'wrc_internal_control', 'control_api_local')),
+          source_service TEXT NOT NULL CHECK (char_length(source_service) BETWEEN 1 AND 128),
+          source_event_id TEXT NOT NULL CHECK (char_length(source_event_id) BETWEEN 1 AND 256),
+          idempotency_key TEXT NOT NULL CHECK (idempotency_key ~ '^[0-9a-f]{64}$'),
+          run_id UUID NOT NULL,
+          session_id TEXT NULL CHECK (char_length(session_id) <= 256),
+          span_id TEXT NOT NULL CHECK (span_id ~ '^[A-Za-z0-9._:-]{1,128}$'),
+          parent_span_id TEXT NULL CHECK (parent_span_id IS NULL OR parent_span_id ~ '^[A-Za-z0-9._:-]{1,128}$'),
+          origin TEXT NOT NULL CHECK (origin IN ('direct_chat', 'workflow_runtime', 'channel_event', 'api')),
+          event_type TEXT NOT NULL CHECK (event_type IN (
+            'run_start', 'run_end', 'llm_call', 'tool_call', 'approval', 'token_usage'
+          )),
+          outcome TEXT NOT NULL CHECK (outcome IN ('started', 'succeeded', 'failed', 'cancelled', 'approved', 'denied', 'unknown')),
+          identity_issuer TEXT NULL CHECK (identity_issuer IS NULL OR char_length(identity_issuer) <= 512),
+          actor_human_sub TEXT NULL CHECK (actor_human_sub IS NULL OR char_length(actor_human_sub) <= 256),
+          actor_medium TEXT NULL CHECK (actor_medium IS NULL OR actor_medium IN ('desktop', 'channel', 'api', 'workflow', 'unknown')),
+          agent_sub TEXT NOT NULL CHECK (char_length(agent_sub) BETWEEN 1 AND 256),
+          resource_aud TEXT NULL CHECK (resource_aud IS NULL OR char_length(resource_aud) <= 512),
+          effective_scopes TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]
+            CHECK (governed_trace_sorted_unique_text_array(effective_scopes)),
+          decision TEXT NOT NULL DEFAULT 'not_applicable'
+            CHECK (decision IN ('allow', 'deny', 'require_approval', 'not_applicable')),
+          decision_source_kind TEXT NULL CHECK (decision_source_kind IS NULL OR decision_source_kind IN ('approval_request', 'approval_resolution', 'policy', 'runtime_guard')),
+          decision_source_ref TEXT NULL CHECK (decision_source_ref IS NULL OR char_length(decision_source_ref) <= 256),
+          decision_actor_sub TEXT NULL CHECK (decision_actor_sub IS NULL OR char_length(decision_actor_sub) <= 256),
+          approval_request_id UUID NULL,
+          token_exchange_id UUID NULL,
+          host_ref TEXT NULL CHECK (host_ref IS NULL OR char_length(host_ref) <= 256),
+          recipe_namespace TEXT NULL CHECK (recipe_namespace IS NULL OR char_length(recipe_namespace) <= 253),
+          recipe_name TEXT NULL CHECK (recipe_name IS NULL OR char_length(recipe_name) <= 253),
+          team_id TEXT NULL CHECK (team_id IS NULL OR char_length(team_id) <= 256),
+          user_id TEXT NULL CHECK (user_id IS NULL OR char_length(user_id) <= 256),
+          source_adapter_kind TEXT NULL CHECK (source_adapter_kind IS NULL OR char_length(source_adapter_kind) <= 64),
+          source_adapter_version TEXT NULL CHECK (source_adapter_version IS NULL OR char_length(source_adapter_version) <= 128),
+          runtime_version_ref TEXT NULL CHECK (runtime_version_ref IS NULL OR char_length(runtime_version_ref) <= 256),
+          code_digest TEXT NULL CHECK (code_digest IS NULL OR code_digest ~ '^[0-9a-f]{64}$'),
+          config_digest TEXT NULL CHECK (config_digest IS NULL OR config_digest ~ '^[0-9a-f]{64}$'),
+          policy_digest TEXT NULL CHECK (policy_digest IS NULL OR policy_digest ~ '^[0-9a-f]{64}$'),
+          model_version_ref TEXT NULL CHECK (model_version_ref IS NULL OR char_length(model_version_ref) <= 256),
+          tool_definition_digest TEXT NULL CHECK (tool_definition_digest IS NULL OR tool_definition_digest ~ '^[0-9a-f]{64}$'),
+          authorization_ref TEXT NULL CHECK (authorization_ref IS NULL OR char_length(authorization_ref) <= 256),
+          effect_ref TEXT NULL CHECK (effect_ref IS NULL OR char_length(effect_ref) <= 256),
+          pre_state_digest TEXT NULL CHECK (pre_state_digest IS NULL OR pre_state_digest ~ '^[0-9a-f]{64}$'),
+          post_state_digest TEXT NULL CHECK (post_state_digest IS NULL OR post_state_digest ~ '^[0-9a-f]{64}$'),
+          payload_metadata JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (governed_trace_safe_agent_run_metadata(event_type, payload_metadata)),
+          payload_sha256 TEXT NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
+          duration_ms BIGINT NULL CHECK (duration_ms IS NULL OR duration_ms BETWEEN 0 AND 86400000),
+          occurred_at TIMESTAMPTZ NOT NULL,
+          ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          ingest_sequence BIGSERIAL NOT NULL UNIQUE,
+          schema_version SMALLINT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
+          CHECK (occurred_at <= ingested_at + INTERVAL '5 minutes'),
+          CHECK (
+            (decision = 'not_applicable' AND decision_source_kind IS NULL AND decision_source_ref IS NULL)
+            OR (decision <> 'not_applicable' AND decision_source_kind IS NOT NULL AND decision_source_ref IS NOT NULL)
+          ),
+          UNIQUE (source_service, source_kind, idempotency_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS administrative_events (
+          event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          source_kind TEXT NOT NULL CHECK (source_kind IN ('control_api_local', 'hcc_internal_control', 'wrc_internal_control')),
+          source_service TEXT NOT NULL CHECK (char_length(source_service) BETWEEN 1 AND 128),
+          source_event_id TEXT NOT NULL CHECK (char_length(source_event_id) BETWEEN 1 AND 256),
+          idempotency_key TEXT NOT NULL CHECK (idempotency_key ~ '^[0-9a-f]{64}$'),
+          event_kind TEXT NOT NULL CHECK (event_kind IN ('intent', 'linked_outcome', 'service_action')),
+          action TEXT NOT NULL CHECK (action IN (
+            'agent_mutation', 'host_mutation', 'permission_grant', 'permission_revoke',
+            'delegated_resource_mutation', 'folder_mutation', 'resource_mutation',
+            'configuration_mutation', 'service_maintenance'
+          )),
+          outcome TEXT NOT NULL CHECK (outcome IN ('attempted', 'committed', 'succeeded', 'failed', 'rejected')),
+          operator_sub TEXT NULL CHECK (operator_sub IS NULL OR char_length(operator_sub) <= 256),
+          service_sub TEXT NOT NULL CHECK (char_length(service_sub) BETWEEN 1 AND 256),
+          target_type TEXT NOT NULL CHECK (target_type IN ('agent', 'host', 'permission', 'delegated_resource', 'folder', 'resource', 'configuration', 'service')),
+          target_ref TEXT NOT NULL CHECK (char_length(target_ref) BETWEEN 1 AND 512),
+          operation_id UUID NULL,
+          request_id TEXT NULL CHECK (request_id IS NULL OR char_length(request_id) <= 256),
+          correlation_id TEXT NULL CHECK (correlation_id IS NULL OR char_length(correlation_id) <= 256),
+          related_run_id UUID NULL,
+          environment TEXT NULL CHECK (environment IS NULL OR char_length(environment) <= 64),
+          namespace TEXT NULL CHECK (namespace IS NULL OR char_length(namespace) <= 253),
+          deployment_ref TEXT NULL CHECK (deployment_ref IS NULL OR char_length(deployment_ref) <= 512),
+          team_id TEXT NULL CHECK (team_id IS NULL OR char_length(team_id) <= 256),
+          source_audit_ref TEXT NULL CHECK (source_audit_ref IS NULL OR char_length(source_audit_ref) <= 256),
+          source_adapter_kind TEXT NULL CHECK (source_adapter_kind IS NULL OR char_length(source_adapter_kind) <= 64),
+          source_adapter_version TEXT NULL CHECK (source_adapter_version IS NULL OR char_length(source_adapter_version) <= 128),
+          code_digest TEXT NULL CHECK (code_digest IS NULL OR code_digest ~ '^[0-9a-f]{64}$'),
+          config_digest TEXT NULL CHECK (config_digest IS NULL OR config_digest ~ '^[0-9a-f]{64}$'),
+          policy_digest TEXT NULL CHECK (policy_digest IS NULL OR policy_digest ~ '^[0-9a-f]{64}$'),
+          authorization_ref TEXT NULL CHECK (authorization_ref IS NULL OR char_length(authorization_ref) <= 256),
+          effect_ref TEXT NULL CHECK (effect_ref IS NULL OR char_length(effect_ref) <= 256),
+          pre_state_digest TEXT NULL CHECK (pre_state_digest IS NULL OR pre_state_digest ~ '^[0-9a-f]{64}$'),
+          post_state_digest TEXT NULL CHECK (post_state_digest IS NULL OR post_state_digest ~ '^[0-9a-f]{64}$'),
+          payload_metadata JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (governed_trace_safe_metadata(payload_metadata)),
+          payload_sha256 TEXT NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
+          occurred_at TIMESTAMPTZ NOT NULL,
+          ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          ingest_sequence BIGSERIAL NOT NULL UNIQUE,
+          schema_version SMALLINT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
+          CHECK (occurred_at <= ingested_at + INTERVAL '5 minutes'),
+          CHECK ((event_kind = 'intent' AND outcome IN ('attempted', 'committed', 'rejected')) OR event_kind <> 'intent'),
+          UNIQUE (source_service, source_kind, idempotency_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS infrastructure_telemetry_events (
+          event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          source_service TEXT NOT NULL CHECK (source_service IN ('host-context-controller', 'workflow-recipes', 'control-api')),
+          source_kind TEXT NOT NULL CHECK (source_kind IN ('hcc_internal_control', 'wrc_internal_control', 'trace_maintenance')),
+          source_occurrence_id TEXT NOT NULL CHECK (char_length(source_occurrence_id) BETWEEN 1 AND 256),
+          telemetry_type TEXT NOT NULL CHECK (telemetry_type IN (
+            'reconcile_outcome', 'health_transition', 'lifecycle_transition',
+            'capacity_sample', 'usage_sample', 'controller_error'
+          )),
+          trigger_kind TEXT NOT NULL CHECK (trigger_kind IN ('administrative_intent', 'runtime_activity', 'controller_reconcile', 'periodic_sample')),
+          outcome TEXT NOT NULL CHECK (outcome IN ('succeeded', 'failed', 'healthy', 'unhealthy', 'started', 'stopped', 'unknown')),
+          reason_code TEXT NULL CHECK (reason_code IS NULL OR char_length(reason_code) <= 128),
+          environment TEXT NOT NULL CHECK (char_length(environment) BETWEEN 1 AND 64),
+          cluster_name TEXT NOT NULL CHECK (char_length(cluster_name) BETWEEN 1 AND 253),
+          namespace TEXT NOT NULL CHECK (char_length(namespace) BETWEEN 1 AND 253),
+          workload_kind TEXT NOT NULL CHECK (workload_kind IN ('Host', 'McpServer', 'WorkflowRecipe', 'Deployment', 'Service', 'NetworkPolicy')),
+          workload_ref TEXT NOT NULL CHECK (char_length(workload_ref) BETWEEN 1 AND 512),
+          kubernetes_kind TEXT NOT NULL CHECK (char_length(kubernetes_kind) BETWEEN 1 AND 128),
+          kubernetes_name TEXT NOT NULL CHECK (char_length(kubernetes_name) BETWEEN 1 AND 253),
+          kubernetes_uid TEXT NULL CHECK (kubernetes_uid IS NULL OR char_length(kubernetes_uid) <= 128),
+          metadata_generation BIGINT NULL CHECK (metadata_generation IS NULL OR metadata_generation >= 0),
+          interval_start TIMESTAMPTZ NULL,
+          interval_end TIMESTAMPTZ NULL,
+          desired_replicas INTEGER NULL CHECK (desired_replicas IS NULL OR desired_replicas >= 0),
+          observed_replicas INTEGER NULL CHECK (observed_replicas IS NULL OR observed_replicas >= 0),
+          ready_replicas INTEGER NULL CHECK (ready_replicas IS NULL OR ready_replicas >= 0),
+          cpu_request_cores NUMERIC(20, 6) NULL CHECK (cpu_request_cores IS NULL OR cpu_request_cores >= 0),
+          cpu_limit_cores NUMERIC(20, 6) NULL CHECK (cpu_limit_cores IS NULL OR cpu_limit_cores >= 0),
+          memory_request_bytes BIGINT NULL CHECK (memory_request_bytes IS NULL OR memory_request_bytes >= 0),
+          memory_limit_bytes BIGINT NULL CHECK (memory_limit_bytes IS NULL OR memory_limit_bytes >= 0),
+          cpu_usage_core_seconds NUMERIC(24, 9) NULL CHECK (cpu_usage_core_seconds IS NULL OR cpu_usage_core_seconds >= 0),
+          memory_usage_byte_seconds NUMERIC(30, 9) NULL CHECK (memory_usage_byte_seconds IS NULL OR memory_usage_byte_seconds >= 0),
+          related_operation_id UUID NULL,
+          related_run_id UUID NULL,
+          source_adapter_kind TEXT NULL CHECK (source_adapter_kind IS NULL OR char_length(source_adapter_kind) <= 64),
+          source_adapter_version TEXT NULL CHECK (source_adapter_version IS NULL OR char_length(source_adapter_version) <= 128),
+          code_digest TEXT NULL CHECK (code_digest IS NULL OR code_digest ~ '^[0-9a-f]{64}$'),
+          config_digest TEXT NULL CHECK (config_digest IS NULL OR config_digest ~ '^[0-9a-f]{64}$'),
+          policy_digest TEXT NULL CHECK (policy_digest IS NULL OR policy_digest ~ '^[0-9a-f]{64}$'),
+          authorization_ref TEXT NULL CHECK (authorization_ref IS NULL OR char_length(authorization_ref) <= 256),
+          effect_ref TEXT NULL CHECK (effect_ref IS NULL OR char_length(effect_ref) <= 256),
+          pre_state_digest TEXT NULL CHECK (pre_state_digest IS NULL OR pre_state_digest ~ '^[0-9a-f]{64}$'),
+          post_state_digest TEXT NULL CHECK (post_state_digest IS NULL OR post_state_digest ~ '^[0-9a-f]{64}$'),
+          payload_metadata JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (governed_trace_safe_metadata(payload_metadata)),
+          payload_sha256 TEXT NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
+          occurred_at TIMESTAMPTZ NOT NULL,
+          ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          ingest_sequence BIGSERIAL NOT NULL UNIQUE,
+          schema_version SMALLINT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
+          idempotency_key TEXT NOT NULL CHECK (idempotency_key ~ '^[0-9a-f]{64}$'),
+          CHECK (occurred_at <= ingested_at + INTERVAL '5 minutes'),
+          CHECK ((interval_start IS NULL AND interval_end IS NULL) OR (interval_start IS NOT NULL AND interval_end IS NOT NULL AND interval_end > interval_start)),
+          CHECK (
+            (telemetry_type IN ('capacity_sample', 'usage_sample') AND interval_start IS NOT NULL AND interval_end IS NOT NULL)
+            OR (
+              telemetry_type NOT IN ('capacity_sample', 'usage_sample')
+              AND (metadata_generation IS NOT NULL OR related_run_id IS NOT NULL)
+            )
+          ),
+          UNIQUE (source_service, source_kind, idempotency_key)
+        );
+
+        -- WRC owns workflow lifecycle facts. Delivery identity remains source-scoped,
+        -- while this separate invariant permits only one effective root and terminal
+        -- event for each canonical workflow run.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_run_events_wrc_lifecycle_once
+          ON agent_run_events (run_id, event_type)
+          WHERE source_kind = 'wrc_internal_control'
+            AND event_type IN ('run_start', 'run_end');
+
+        CREATE TABLE IF NOT EXISTS governed_event_stream (
+          stream_sequence BIGSERIAL PRIMARY KEY,
+          event_family TEXT NOT NULL CHECK (event_family IN ('agent_run', 'administrative', 'infrastructure_telemetry')),
+          event_id UUID NOT NULL,
+          schema_version SMALLINT NOT NULL CHECK (schema_version = 1),
+          occurred_at TIMESTAMPTZ NOT NULL,
+          ingested_at TIMESTAMPTZ NOT NULL,
+          environment TEXT NULL CHECK (environment IS NULL OR char_length(environment) <= 64),
+          tenant_id TEXT NULL CHECK (tenant_id IS NULL OR char_length(tenant_id) <= 256),
+          team_id TEXT NULL CHECK (team_id IS NULL OR char_length(team_id) <= 256),
+          run_id UUID NULL,
+          operation_id UUID NULL,
+          workload_ref TEXT NULL CHECK (workload_ref IS NULL OR char_length(workload_ref) <= 512),
+          payload_sha256 TEXT NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
+          UNIQUE (event_family, event_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS infrastructure_price_snapshots (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          cloud_provider TEXT NOT NULL CHECK (cloud_provider IN ('gcp')),
+          cloud_project_id TEXT NOT NULL CHECK (char_length(cloud_project_id) BETWEEN 1 AND 256),
+          region TEXT NOT NULL CHECK (char_length(region) BETWEEN 1 AND 128),
+          cluster_class TEXT NOT NULL CHECK (char_length(cluster_class) BETWEEN 1 AND 128),
+          resource_class TEXT NOT NULL CHECK (resource_class IN ('cpu', 'memory', 'ephemeral_storage', 'gpu')),
+          unit TEXT NOT NULL CHECK (unit IN ('vCPU_hour', 'GiB_hour', 'GiB_month', 'GPU_hour')),
+          unit_price NUMERIC(24, 9) NOT NULL CHECK (unit_price >= 0),
+          currency TEXT NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
+          effective_from TIMESTAMPTZ NOT NULL,
+          source_ref TEXT NOT NULL CHECK (char_length(source_ref) BETWEEN 1 AND 512),
+          source_sha256 TEXT NOT NULL CHECK (source_sha256 ~ '^[0-9a-f]{64}$'),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE (cloud_provider, cloud_project_id, region, cluster_class, resource_class, unit, currency, effective_from, source_sha256)
+        );
+
+        CREATE TABLE IF NOT EXISTS infrastructure_cost_daily (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          utc_day DATE NOT NULL,
+          cloud_provider TEXT NOT NULL CHECK (cloud_provider IN ('gcp')),
+          cloud_project_id TEXT NOT NULL CHECK (char_length(cloud_project_id) BETWEEN 1 AND 256),
+          cluster_location TEXT NOT NULL CHECK (char_length(cluster_location) BETWEEN 1 AND 128),
+          cluster_name TEXT NOT NULL CHECK (char_length(cluster_name) BETWEEN 1 AND 253),
+          environment TEXT NOT NULL CHECK (char_length(environment) BETWEEN 1 AND 64),
+          namespace TEXT NOT NULL CHECK (char_length(namespace) BETWEEN 1 AND 253),
+          workload_kind TEXT NOT NULL CHECK (char_length(workload_kind) BETWEEN 1 AND 128),
+          workload_ref TEXT NOT NULL CHECK (char_length(workload_ref) BETWEEN 1 AND 512),
+          valuation_kind TEXT NOT NULL CHECK (valuation_kind IN ('estimated', 'billed')),
+          selected_basis TEXT NOT NULL CHECK (selected_basis IN ('requested_capacity', 'measured_usage', 'gcp_request_allocation')),
+          currency TEXT NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
+          rollup_version INTEGER NOT NULL CHECK (rollup_version >= 1),
+          predecessor_version INTEGER NULL,
+          publication_state TEXT NOT NULL CHECK (publication_state IN ('provisional', 'finalized')),
+          completeness_status TEXT NOT NULL CHECK (completeness_status IN ('complete', 'partial', 'unavailable')),
+          as_of_utc TIMESTAMPTZ NOT NULL,
+          source_interval_start TIMESTAMPTZ NULL,
+          source_interval_end TIMESTAMPTZ NULL,
+          billing_export_watermark TIMESTAMPTZ NULL,
+          source_count BIGINT NOT NULL CHECK (source_count >= 0),
+          source_sha256 TEXT NOT NULL CHECK (source_sha256 ~ '^[0-9a-f]{64}$'),
+          gross_amount NUMERIC(24, 9) NOT NULL CHECK (gross_amount >= 0),
+          credits_amount NUMERIC(24, 9) NOT NULL DEFAULT 0 CHECK (credits_amount <= 0),
+          net_amount NUMERIC(24, 9) NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CHECK (net_amount = gross_amount + credits_amount),
+          CHECK ((source_interval_start IS NULL AND source_interval_end IS NULL) OR (source_interval_start IS NOT NULL AND source_interval_end IS NOT NULL AND source_interval_end > source_interval_start)),
+          CHECK (
+            (valuation_kind = 'estimated' AND selected_basis IN ('requested_capacity', 'measured_usage') AND source_interval_start IS NOT NULL AND billing_export_watermark IS NULL)
+            OR (valuation_kind = 'billed' AND selected_basis = 'gcp_request_allocation' AND billing_export_watermark IS NOT NULL)
+          ),
+          CHECK (
+            (rollup_version = 1 AND predecessor_version IS NULL)
+            OR (rollup_version > 1 AND predecessor_version = rollup_version - 1)
+          ),
+          UNIQUE (id, valuation_kind, selected_basis),
+          UNIQUE (utc_day, cloud_provider, cloud_project_id, cluster_location, cluster_name, environment, namespace, workload_kind, workload_ref, valuation_kind, selected_basis, currency, rollup_version),
+          FOREIGN KEY (utc_day, cloud_provider, cloud_project_id, cluster_location, cluster_name, environment, namespace, workload_kind, workload_ref, valuation_kind, selected_basis, currency, predecessor_version)
+            REFERENCES infrastructure_cost_daily (utc_day, cloud_provider, cloud_project_id, cluster_location, cluster_name, environment, namespace, workload_kind, workload_ref, valuation_kind, selected_basis, currency, rollup_version)
+            DEFERRABLE INITIALLY DEFERRED
+        );
+
+        CREATE TABLE IF NOT EXISTS infrastructure_cost_daily_components (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          daily_cost_id UUID NOT NULL,
+          valuation_kind TEXT NOT NULL CHECK (valuation_kind IN ('estimated', 'billed')),
+          selected_basis TEXT NOT NULL CHECK (selected_basis IN ('requested_capacity', 'measured_usage', 'gcp_request_allocation')),
+          component_key TEXT NOT NULL CHECK (char_length(component_key) BETWEEN 1 AND 512),
+          resource_class TEXT NOT NULL CHECK (resource_class IN ('cpu', 'memory', 'ephemeral_storage', 'gpu', 'provider_sku', 'allocation_bucket')),
+          allocation_bucket TEXT NULL CHECK (allocation_bucket IS NULL OR allocation_bucket IN ('platform_overhead', 'kube:system-overhead', 'kube:unallocated', 'unsupported', 'unmapped', 'missing_label', 'non_gke_shared', 'unknown', 'adjustment')),
+          unit_hours NUMERIC(24, 9) NULL CHECK (unit_hours IS NULL OR unit_hours >= 0),
+          price_snapshot_id UUID NULL REFERENCES infrastructure_price_snapshots(id) ON DELETE RESTRICT,
+          provider_service TEXT NULL CHECK (provider_service IS NULL OR char_length(provider_service) <= 256),
+          provider_sku TEXT NULL CHECK (provider_sku IS NULL OR char_length(provider_sku) <= 256),
+          billing_view_version TEXT NULL CHECK (billing_view_version IS NULL OR char_length(billing_view_version) <= 128),
+          source_row_count BIGINT NULL CHECK (source_row_count IS NULL OR source_row_count >= 0),
+          source_sha256 TEXT NOT NULL CHECK (source_sha256 ~ '^[0-9a-f]{64}$'),
+          billing_export_watermark TIMESTAMPTZ NULL,
+          gross_amount NUMERIC(24, 9) NOT NULL CHECK (gross_amount >= 0),
+          credits_amount NUMERIC(24, 9) NOT NULL DEFAULT 0 CHECK (credits_amount <= 0),
+          net_amount NUMERIC(24, 9) NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CHECK (net_amount = gross_amount + credits_amount),
+          CHECK (
+            (valuation_kind = 'estimated' AND selected_basis IN ('requested_capacity', 'measured_usage')
+             AND price_snapshot_id IS NOT NULL AND unit_hours IS NOT NULL
+             AND provider_service IS NULL AND provider_sku IS NULL AND billing_view_version IS NULL
+             AND source_row_count IS NULL AND billing_export_watermark IS NULL)
+            OR (valuation_kind = 'billed' AND selected_basis = 'gcp_request_allocation'
+             AND price_snapshot_id IS NULL AND unit_hours IS NULL
+             AND provider_service IS NOT NULL AND provider_sku IS NOT NULL AND billing_view_version IS NOT NULL
+             AND source_row_count IS NOT NULL AND billing_export_watermark IS NOT NULL)
+          ),
+          UNIQUE (daily_cost_id, component_key),
+          FOREIGN KEY (daily_cost_id, valuation_kind, selected_basis)
+            REFERENCES infrastructure_cost_daily (id, valuation_kind, selected_basis)
+            DEFERRABLE INITIALLY DEFERRED
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_run_events_run_time
+          ON agent_run_events (run_id, occurred_at DESC, ingest_sequence DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_run_events_source_time
+          ON agent_run_events (source_service, occurred_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_administrative_events_operation_time
+          ON administrative_events (operation_id, occurred_at DESC) WHERE operation_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_administrative_events_target_time
+          ON administrative_events (target_type, target_ref, occurred_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_infrastructure_telemetry_workload_time
+          ON infrastructure_telemetry_events (workload_ref, occurred_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_infrastructure_telemetry_interval
+          ON infrastructure_telemetry_events (interval_end) WHERE interval_end IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_governed_event_stream_cursor
+          ON governed_event_stream (stream_sequence);
+        CREATE INDEX IF NOT EXISTS idx_governed_event_stream_family_time
+          ON governed_event_stream (event_family, occurred_at, stream_sequence);
+        CREATE INDEX IF NOT EXISTS idx_governed_event_stream_run_cursor
+          ON governed_event_stream (run_id, stream_sequence) WHERE run_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_governed_event_stream_operation_cursor
+          ON governed_event_stream (operation_id, stream_sequence) WHERE operation_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_governed_event_stream_workload_cursor
+          ON governed_event_stream (workload_ref, stream_sequence) WHERE workload_ref IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_infrastructure_price_snapshots_lookup
+          ON infrastructure_price_snapshots (cloud_provider, cloud_project_id, region, cluster_class, resource_class, effective_from DESC);
+        CREATE INDEX IF NOT EXISTS idx_infrastructure_cost_daily_query
+          ON infrastructure_cost_daily (utc_day, cloud_provider, cloud_project_id, cluster_location, cluster_name, environment, namespace, workload_kind, workload_ref, valuation_kind, selected_basis, currency, rollup_version DESC);
+        CREATE INDEX IF NOT EXISTS idx_infrastructure_cost_daily_components_header
+          ON infrastructure_cost_daily_components (daily_cost_id, component_key);
+
+        CREATE OR REPLACE FUNCTION governed_trace_assert_stream_integrity()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          checked_family TEXT;
+          checked_event_id UUID;
+          family_row_exists BOOLEAN;
+          stream_row_exists BOOLEAN;
+        BEGIN
+          IF TG_TABLE_NAME = 'governed_event_stream' THEN
+            IF TG_OP = 'DELETE' THEN
+              checked_family := OLD.event_family;
+              checked_event_id := OLD.event_id;
+            ELSE
+              checked_family := NEW.event_family;
+              checked_event_id := NEW.event_id;
+            END IF;
+          ELSIF TG_TABLE_NAME = 'agent_run_events' THEN
+            checked_family := 'agent_run';
+            checked_event_id := CASE WHEN TG_OP = 'DELETE' THEN OLD.event_id ELSE NEW.event_id END;
+          ELSIF TG_TABLE_NAME = 'administrative_events' THEN
+            checked_family := 'administrative';
+            checked_event_id := CASE WHEN TG_OP = 'DELETE' THEN OLD.event_id ELSE NEW.event_id END;
+          ELSE
+            checked_family := 'infrastructure_telemetry';
+            checked_event_id := CASE WHEN TG_OP = 'DELETE' THEN OLD.event_id ELSE NEW.event_id END;
+          END IF;
+
+          SELECT EXISTS (
+            SELECT 1 FROM governed_event_stream
+             WHERE event_family = checked_family AND event_id = checked_event_id
+          ) INTO stream_row_exists;
+
+          IF checked_family = 'agent_run' THEN
+            SELECT EXISTS (SELECT 1 FROM agent_run_events WHERE event_id = checked_event_id) INTO family_row_exists;
+          ELSIF checked_family = 'administrative' THEN
+            SELECT EXISTS (SELECT 1 FROM administrative_events WHERE event_id = checked_event_id) INTO family_row_exists;
+          ELSE
+            SELECT EXISTS (SELECT 1 FROM infrastructure_telemetry_events WHERE event_id = checked_event_id) INTO family_row_exists;
+          END IF;
+
+          IF family_row_exists <> stream_row_exists THEN
+            RAISE EXCEPTION 'governed event family row and stream pointer must commit together (%:%)', checked_family, checked_event_id;
+          END IF;
+          RETURN NULL;
+        END;
+        $$;
+
+        CREATE OR REPLACE FUNCTION governed_trace_enforce_append_only()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF TG_OP = 'DELETE'
+             AND current_setting('governed_trace.retention_delete', true) = 'on'
+             AND TG_TABLE_NAME IN (
+               'agent_run_events', 'administrative_events',
+               'infrastructure_telemetry_events', 'governed_event_stream',
+               'infrastructure_cost_daily_components', 'infrastructure_cost_daily'
+             ) THEN
+            RETURN OLD;
+          END IF;
+          RAISE EXCEPTION 'governed trace relation % is append-only; % is not allowed', TG_TABLE_NAME, TG_OP;
+        END;
+        $$;
+
+        CREATE OR REPLACE FUNCTION governed_trace_enforce_rollup_finality()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          predecessor_state TEXT;
+        BEGIN
+          IF NEW.predecessor_version IS NULL THEN
+            RETURN NEW;
+          END IF;
+          SELECT publication_state INTO predecessor_state
+            FROM infrastructure_cost_daily
+           WHERE utc_day = NEW.utc_day
+             AND cloud_provider = NEW.cloud_provider
+             AND cloud_project_id = NEW.cloud_project_id
+             AND cluster_location = NEW.cluster_location
+             AND cluster_name = NEW.cluster_name
+             AND environment = NEW.environment
+             AND namespace = NEW.namespace
+             AND workload_kind = NEW.workload_kind
+             AND workload_ref = NEW.workload_ref
+             AND valuation_kind = NEW.valuation_kind
+             AND selected_basis = NEW.selected_basis
+             AND currency = NEW.currency
+             AND rollup_version = NEW.predecessor_version;
+          IF predecessor_state = 'finalized' AND NEW.publication_state <> 'finalized' THEN
+            RAISE EXCEPTION 'infrastructure cost finality cannot regress';
+          END IF;
+          RETURN NEW;
+        END;
+        $$;
+
+        CREATE OR REPLACE FUNCTION governed_trace_assert_cost_component_conservation()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          checked_daily_cost_id UUID;
+          header_gross NUMERIC(24, 9);
+          header_credits NUMERIC(24, 9);
+          header_net NUMERIC(24, 9);
+          component_gross NUMERIC(24, 9);
+          component_credits NUMERIC(24, 9);
+          component_net NUMERIC(24, 9);
+        BEGIN
+          IF TG_TABLE_NAME = 'infrastructure_cost_daily' THEN
+            checked_daily_cost_id := NEW.id;
+          ELSE
+            checked_daily_cost_id := NEW.daily_cost_id;
+          END IF;
+
+          SELECT gross_amount, credits_amount, net_amount
+            INTO header_gross, header_credits, header_net
+            FROM infrastructure_cost_daily
+           WHERE id = checked_daily_cost_id;
+          IF NOT FOUND THEN
+            RETURN NULL;
+          END IF;
+
+          SELECT
+            COALESCE(SUM(gross_amount), 0),
+            COALESCE(SUM(credits_amount), 0),
+            COALESCE(SUM(net_amount), 0)
+            INTO component_gross, component_credits, component_net
+            FROM infrastructure_cost_daily_components
+           WHERE daily_cost_id = checked_daily_cost_id;
+
+          IF component_gross <> header_gross
+             OR component_credits <> header_credits
+             OR component_net <> header_net THEN
+            RAISE EXCEPTION 'infrastructure cost header and components must conserve exact gross, credits, and net for %', checked_daily_cost_id;
+          END IF;
+          RETURN NULL;
+        END;
+        $$;
+
+        DROP TRIGGER IF EXISTS governed_agent_run_event_stream_integrity ON agent_run_events;
+        CREATE CONSTRAINT TRIGGER governed_agent_run_event_stream_integrity
+          AFTER INSERT OR DELETE ON agent_run_events
+          DEFERRABLE INITIALLY DEFERRED
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_assert_stream_integrity();
+        DROP TRIGGER IF EXISTS governed_administrative_event_stream_integrity ON administrative_events;
+        CREATE CONSTRAINT TRIGGER governed_administrative_event_stream_integrity
+          AFTER INSERT OR DELETE ON administrative_events
+          DEFERRABLE INITIALLY DEFERRED
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_assert_stream_integrity();
+        DROP TRIGGER IF EXISTS governed_infrastructure_telemetry_stream_integrity ON infrastructure_telemetry_events;
+        CREATE CONSTRAINT TRIGGER governed_infrastructure_telemetry_stream_integrity
+          AFTER INSERT OR DELETE ON infrastructure_telemetry_events
+          DEFERRABLE INITIALLY DEFERRED
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_assert_stream_integrity();
+        DROP TRIGGER IF EXISTS governed_event_stream_family_integrity ON governed_event_stream;
+        CREATE CONSTRAINT TRIGGER governed_event_stream_family_integrity
+          AFTER INSERT OR DELETE ON governed_event_stream
+          DEFERRABLE INITIALLY DEFERRED
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_assert_stream_integrity();
+
+        DROP TRIGGER IF EXISTS governed_agent_run_events_append_only ON agent_run_events;
+        CREATE TRIGGER governed_agent_run_events_append_only
+          BEFORE UPDATE OR DELETE ON agent_run_events
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_enforce_append_only();
+        DROP TRIGGER IF EXISTS governed_administrative_events_append_only ON administrative_events;
+        CREATE TRIGGER governed_administrative_events_append_only
+          BEFORE UPDATE OR DELETE ON administrative_events
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_enforce_append_only();
+        DROP TRIGGER IF EXISTS governed_infrastructure_telemetry_events_append_only ON infrastructure_telemetry_events;
+        CREATE TRIGGER governed_infrastructure_telemetry_events_append_only
+          BEFORE UPDATE OR DELETE ON infrastructure_telemetry_events
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_enforce_append_only();
+        DROP TRIGGER IF EXISTS governed_event_stream_append_only ON governed_event_stream;
+        CREATE TRIGGER governed_event_stream_append_only
+          BEFORE UPDATE OR DELETE ON governed_event_stream
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_enforce_append_only();
+        DROP TRIGGER IF EXISTS infrastructure_price_snapshots_append_only ON infrastructure_price_snapshots;
+        CREATE TRIGGER infrastructure_price_snapshots_append_only
+          BEFORE UPDATE OR DELETE ON infrastructure_price_snapshots
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_enforce_append_only();
+        DROP TRIGGER IF EXISTS infrastructure_cost_daily_append_only ON infrastructure_cost_daily;
+        CREATE TRIGGER infrastructure_cost_daily_append_only
+          BEFORE UPDATE OR DELETE ON infrastructure_cost_daily
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_enforce_append_only();
+        DROP TRIGGER IF EXISTS infrastructure_cost_daily_components_append_only ON infrastructure_cost_daily_components;
+        CREATE TRIGGER infrastructure_cost_daily_components_append_only
+          BEFORE UPDATE OR DELETE ON infrastructure_cost_daily_components
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_enforce_append_only();
+
+        DROP TRIGGER IF EXISTS infrastructure_cost_daily_finality ON infrastructure_cost_daily;
+        CREATE TRIGGER infrastructure_cost_daily_finality
+          BEFORE INSERT ON infrastructure_cost_daily
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_enforce_rollup_finality();
+
+        DROP TRIGGER IF EXISTS infrastructure_cost_daily_component_conservation ON infrastructure_cost_daily;
+        CREATE CONSTRAINT TRIGGER infrastructure_cost_daily_component_conservation
+          AFTER INSERT ON infrastructure_cost_daily
+          DEFERRABLE INITIALLY DEFERRED
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_assert_cost_component_conservation();
+        DROP TRIGGER IF EXISTS infrastructure_cost_daily_components_conservation ON infrastructure_cost_daily_components;
+        CREATE CONSTRAINT TRIGGER infrastructure_cost_daily_components_conservation
+          AFTER INSERT ON infrastructure_cost_daily_components
+          DEFERRABLE INITIALLY DEFERRED
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_assert_cost_component_conservation();
+
+        CREATE OR REPLACE FUNCTION governed_trace_reject_truncate()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RAISE EXCEPTION 'governed trace relation % is append-only; TRUNCATE is not allowed', TG_TABLE_NAME;
+        END;
+        $$;
+
+        DROP TRIGGER IF EXISTS governed_agent_run_events_no_truncate ON agent_run_events;
+        CREATE TRIGGER governed_agent_run_events_no_truncate BEFORE TRUNCATE ON agent_run_events FOR EACH STATEMENT EXECUTE FUNCTION governed_trace_reject_truncate();
+        DROP TRIGGER IF EXISTS governed_administrative_events_no_truncate ON administrative_events;
+        CREATE TRIGGER governed_administrative_events_no_truncate BEFORE TRUNCATE ON administrative_events FOR EACH STATEMENT EXECUTE FUNCTION governed_trace_reject_truncate();
+        DROP TRIGGER IF EXISTS governed_infrastructure_telemetry_events_no_truncate ON infrastructure_telemetry_events;
+        CREATE TRIGGER governed_infrastructure_telemetry_events_no_truncate BEFORE TRUNCATE ON infrastructure_telemetry_events FOR EACH STATEMENT EXECUTE FUNCTION governed_trace_reject_truncate();
+        DROP TRIGGER IF EXISTS governed_event_stream_no_truncate ON governed_event_stream;
+        CREATE TRIGGER governed_event_stream_no_truncate BEFORE TRUNCATE ON governed_event_stream FOR EACH STATEMENT EXECUTE FUNCTION governed_trace_reject_truncate();
+        DROP TRIGGER IF EXISTS infrastructure_price_snapshots_no_truncate ON infrastructure_price_snapshots;
+        CREATE TRIGGER infrastructure_price_snapshots_no_truncate BEFORE TRUNCATE ON infrastructure_price_snapshots FOR EACH STATEMENT EXECUTE FUNCTION governed_trace_reject_truncate();
+        DROP TRIGGER IF EXISTS infrastructure_cost_daily_no_truncate ON infrastructure_cost_daily;
+        CREATE TRIGGER infrastructure_cost_daily_no_truncate BEFORE TRUNCATE ON infrastructure_cost_daily FOR EACH STATEMENT EXECUTE FUNCTION governed_trace_reject_truncate();
+        DROP TRIGGER IF EXISTS infrastructure_cost_daily_components_no_truncate ON infrastructure_cost_daily_components;
+        CREATE TRIGGER infrastructure_cost_daily_components_no_truncate BEFORE TRUNCATE ON infrastructure_cost_daily_components FOR EACH STATEMENT EXECUTE FUNCTION governed_trace_reject_truncate();
+
+        -- Migration 0055 replaces this bootstrap function with the final
+        -- owner-bound retention implementation and dedicated runtime roles.
+        CREATE OR REPLACE FUNCTION governed_trace_prune_expired_events(
+          requested_family TEXT,
+          batch_limit INTEGER DEFAULT 1000
+        )
+        RETURNS TABLE (event_family TEXT, event_id UUID)
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = public, pg_temp
+        AS $$
+        BEGIN
+          IF requested_family NOT IN ('agent_run', 'administrative', 'infrastructure_telemetry') THEN
+            RAISE EXCEPTION 'unsupported governed event family: %', requested_family;
+          END IF;
+          IF batch_limit NOT BETWEEN 1 AND 1000 THEN
+            RAISE EXCEPTION 'governed trace retention batch must be between 1 and 1000';
+          END IF;
+
+          PERFORM set_config('governed_trace.retention_delete', 'on', true);
+          RETURN QUERY
+          WITH selected AS MATERIALIZED (
+            SELECT stream.event_family, stream.event_id
+              FROM governed_event_stream AS stream
+              LEFT JOIN infrastructure_telemetry_events AS telemetry
+                ON stream.event_family = 'infrastructure_telemetry'
+               AND telemetry.event_id = stream.event_id
+             WHERE stream.event_family = requested_family
+               AND (
+                 (stream.event_family IN ('agent_run', 'administrative')
+                  AND stream.occurred_at < clock_timestamp() - INTERVAL '90 days')
+                 OR (stream.event_family = 'infrastructure_telemetry'
+                     AND telemetry.telemetry_type IN ('capacity_sample', 'usage_sample')
+                     AND stream.occurred_at < clock_timestamp() - INTERVAL '30 days')
+                 OR (stream.event_family = 'infrastructure_telemetry'
+                     AND telemetry.telemetry_type NOT IN ('capacity_sample', 'usage_sample')
+                     AND stream.occurred_at < clock_timestamp() - INTERVAL '90 days')
+               )
+             ORDER BY stream.stream_sequence
+             LIMIT batch_limit
+             FOR UPDATE OF stream SKIP LOCKED
+          ),
+          deleted_agent AS (
+            DELETE FROM agent_run_events AS events
+             USING selected
+             WHERE selected.event_family = 'agent_run' AND events.event_id = selected.event_id
+             RETURNING events.event_id
+          ),
+          deleted_administrative AS (
+            DELETE FROM administrative_events AS events
+             USING selected
+             WHERE selected.event_family = 'administrative' AND events.event_id = selected.event_id
+             RETURNING events.event_id
+          ),
+          deleted_telemetry AS (
+            DELETE FROM infrastructure_telemetry_events AS events
+             USING selected
+             WHERE selected.event_family = 'infrastructure_telemetry' AND events.event_id = selected.event_id
+             RETURNING events.event_id
+          ),
+          deleted_stream AS (
+            DELETE FROM governed_event_stream AS stream
+             USING selected
+             WHERE stream.event_family = selected.event_family AND stream.event_id = selected.event_id
+             RETURNING stream.event_family, stream.event_id
+          )
+          SELECT deleted_stream.event_family, deleted_stream.event_id FROM deleted_stream;
+        END;
+        $$;
+        REVOKE ALL ON FUNCTION governed_trace_prune_expired_events(TEXT, INTEGER) FROM PUBLIC;
+
+        CREATE OR REPLACE VIEW governed_event_read_v1 AS
+          SELECT
+            stream.stream_sequence,
+            stream.event_family,
+            events.event_id,
+            events.ingest_sequence AS family_ingest_sequence,
+            events.occurred_at,
+            events.ingested_at,
+            events.schema_version,
+            events.run_id::TEXT AS correlation_ref,
+            'agent'::TEXT AS actor_kind,
+            events.agent_sub AS actor_sub,
+            events.source_service AS service_or_agent_ref,
+            events.actor_human_sub AS initiating_human_sub,
+            events.agent_sub AS acting_agent_sub,
+            events.resource_aud,
+            events.effective_scopes,
+            events.decision AS authorization_decision,
+            events.token_exchange_id::TEXT AS token_exchange_id,
+            events.event_type AS event_type,
+            events.outcome,
+            events.host_ref AS target_ref,
+            events.payload_metadata AS safe_payload,
+            'agent_run_events'::TEXT AS source_table,
+            events.decision_actor_sub
+          FROM governed_event_stream AS stream
+          JOIN agent_run_events AS events
+            ON stream.event_family = 'agent_run' AND stream.event_id = events.event_id
+          UNION ALL
+          SELECT
+            stream.stream_sequence,
+            stream.event_family,
+            events.event_id,
+            events.ingest_sequence,
+            events.occurred_at,
+            events.ingested_at,
+            events.schema_version,
+            COALESCE(events.operation_id::TEXT, events.request_id, events.correlation_id) AS correlation_ref,
+            CASE WHEN events.operator_sub IS NULL THEN 'service' ELSE 'operator' END,
+            COALESCE(events.operator_sub, events.service_sub),
+            events.source_service,
+            events.operator_sub,
+            NULL::TEXT,
+            NULL::TEXT,
+            ARRAY[]::TEXT[],
+            NULL::TEXT,
+            NULL::TEXT,
+            events.action,
+            events.outcome,
+            events.target_ref,
+            events.payload_metadata,
+            'administrative_events'::TEXT,
+            NULL::TEXT
+          FROM governed_event_stream AS stream
+          JOIN administrative_events AS events
+            ON stream.event_family = 'administrative' AND stream.event_id = events.event_id
+          UNION ALL
+          SELECT
+            stream.stream_sequence,
+            stream.event_family,
+            events.event_id,
+            events.ingest_sequence,
+            events.occurred_at,
+            events.ingested_at,
+            events.schema_version,
+            COALESCE(events.workload_ref, events.interval_start::TEXT),
+            'controller'::TEXT,
+            events.source_service,
+            events.source_service,
+            NULL::TEXT,
+            NULL::TEXT,
+            NULL::TEXT,
+            ARRAY[]::TEXT[],
+            NULL::TEXT,
+            NULL::TEXT,
+            events.telemetry_type,
+            events.outcome,
+            events.workload_ref,
+            events.payload_metadata,
+            'infrastructure_telemetry_events'::TEXT,
+            NULL::TEXT
+          FROM governed_event_stream AS stream
+          JOIN infrastructure_telemetry_events AS events
+            ON stream.event_family = 'infrastructure_telemetry' AND stream.event_id = events.event_id;
+
+      `)
+    },
+  },
+  {
+    version: '0062_governed_trace_runtime_roles',
+    legacyVersions: ['0055_governed_trace_runtime_roles'],
+    apply: async db => {
+      await db.query(`
+        ALTER FUNCTION governed_trace_safe_metadata(JSONB)
+          SET search_path = pg_catalog, public;
+        ALTER FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB)
+          SET search_path = pg_catalog, public;
+        ALTER FUNCTION governed_trace_sorted_unique_text_array(TEXT[])
+          SET search_path = pg_catalog, public;
+        ALTER FUNCTION governed_trace_assert_stream_integrity()
+          SET search_path = pg_catalog, public;
+        ALTER FUNCTION governed_trace_enforce_rollup_finality()
+          SET search_path = pg_catalog, public;
+        ALTER FUNCTION governed_trace_assert_cost_component_conservation()
+          SET search_path = pg_catalog, public;
+        ALTER FUNCTION governed_trace_reject_truncate()
+          SET search_path = pg_catalog, public;
+
+        CREATE OR REPLACE FUNCTION governed_trace_enforce_append_only()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          IF TG_OP = 'DELETE'
+             AND TG_TABLE_NAME IN (
+               'agent_run_events', 'administrative_events',
+               'infrastructure_telemetry_events', 'governed_event_stream',
+               'infrastructure_cost_daily_components', 'infrastructure_cost_daily'
+             )
+             AND current_user = (
+               SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = TG_RELID
+             ) THEN
+            RETURN OLD;
+          END IF;
+          RAISE EXCEPTION 'governed trace relation % is append-only; % is not allowed', TG_TABLE_NAME, TG_OP;
+        END;
+        $$;
+
+        CREATE OR REPLACE FUNCTION governed_trace_prune_expired_events(
+          requested_family TEXT,
+          batch_limit INTEGER DEFAULT 1000
+        )
+        RETURNS TABLE (event_family TEXT, event_id UUID)
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          IF requested_family NOT IN ('agent_run', 'administrative', 'infrastructure_telemetry') THEN
+            RAISE EXCEPTION 'unsupported governed event family: %', requested_family;
+          END IF;
+          IF batch_limit NOT BETWEEN 1 AND 1000 THEN
+            RAISE EXCEPTION 'governed trace retention batch must be between 1 and 1000';
+          END IF;
+
+          RETURN QUERY
+          WITH selected AS MATERIALIZED (
+            SELECT stream.event_family, stream.event_id
+              FROM governed_event_stream AS stream
+              LEFT JOIN infrastructure_telemetry_events AS telemetry
+                ON stream.event_family = 'infrastructure_telemetry'
+               AND telemetry.event_id = stream.event_id
+             WHERE stream.event_family = requested_family
+               AND (
+                 (stream.event_family IN ('agent_run', 'administrative')
+                  AND stream.occurred_at < clock_timestamp() - INTERVAL '90 days')
+                 OR (stream.event_family = 'infrastructure_telemetry'
+                     AND telemetry.telemetry_type IN ('capacity_sample', 'usage_sample')
+                     AND stream.occurred_at < clock_timestamp() - INTERVAL '30 days')
+                 OR (stream.event_family = 'infrastructure_telemetry'
+                     AND telemetry.telemetry_type NOT IN ('capacity_sample', 'usage_sample')
+                     AND stream.occurred_at < clock_timestamp() - INTERVAL '90 days')
+               )
+             ORDER BY stream.stream_sequence
+             LIMIT batch_limit
+             FOR UPDATE OF stream SKIP LOCKED
+          ),
+          deleted_agent AS (
+            DELETE FROM agent_run_events AS events
+             USING selected
+             WHERE selected.event_family = 'agent_run' AND events.event_id = selected.event_id
+             RETURNING events.event_id
+          ),
+          deleted_administrative AS (
+            DELETE FROM administrative_events AS events
+             USING selected
+             WHERE selected.event_family = 'administrative' AND events.event_id = selected.event_id
+             RETURNING events.event_id
+          ),
+          deleted_telemetry AS (
+            DELETE FROM infrastructure_telemetry_events AS events
+             USING selected
+             WHERE selected.event_family = 'infrastructure_telemetry' AND events.event_id = selected.event_id
+             RETURNING events.event_id
+          ),
+          deleted_stream AS (
+            DELETE FROM governed_event_stream AS stream
+             USING selected
+             WHERE stream.event_family = selected.event_family AND stream.event_id = selected.event_id
+             RETURNING stream.event_family, stream.event_id
+          )
+          SELECT deleted_stream.event_family, deleted_stream.event_id FROM deleted_stream;
+        END;
+        $$;
+        REVOKE ALL ON FUNCTION governed_trace_prune_expired_events(TEXT, INTEGER) FROM PUBLIC;
+
+        CREATE OR REPLACE FUNCTION governed_trace_prune_expired_costs(
+          batch_limit INTEGER DEFAULT 1000
+        )
+        RETURNS TABLE (id UUID)
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          IF batch_limit NOT BETWEEN 1 AND 1000 THEN
+            RAISE EXCEPTION 'governed trace retention batch must be between 1 and 1000';
+          END IF;
+
+          RETURN QUERY
+          WITH selected AS MATERIALIZED (
+            SELECT daily.id
+              FROM infrastructure_cost_daily AS daily
+             WHERE daily.utc_day < (clock_timestamp() AT TIME ZONE 'UTC')::date - 365
+             ORDER BY daily.utc_day, daily.id
+             LIMIT batch_limit
+             FOR UPDATE OF daily SKIP LOCKED
+          ),
+          deleted_components AS (
+            DELETE FROM infrastructure_cost_daily_components AS component
+             USING selected
+             WHERE component.daily_cost_id = selected.id
+             RETURNING component.daily_cost_id
+          ),
+          deleted_daily AS (
+            DELETE FROM infrastructure_cost_daily AS daily
+             USING selected
+             WHERE daily.id = selected.id
+             RETURNING daily.id
+          )
+          SELECT deleted_daily.id FROM deleted_daily;
+        END;
+        $$;
+        REVOKE ALL ON FUNCTION governed_trace_prune_expired_costs(INTEGER) FROM PUBLIC;
+
+        DO $governed_trace_roles$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'control_api_runtime') THEN
+            CREATE ROLE control_api_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_maintenance_runtime') THEN
+            CREATE ROLE trace_maintenance_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'workflow_recipes_runtime') THEN
+            CREATE ROLE workflow_recipes_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          END IF;
+        END
+        $governed_trace_roles$;
+
+        ALTER ROLE control_api_runtime
+          WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+        ALTER ROLE trace_maintenance_runtime
+          WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+        ALTER ROLE workflow_recipes_runtime
+          WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+
+        GRANT USAGE ON SCHEMA public
+          TO control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+
+        -- This is the whole control-api application role, so it retains the legacy
+        -- application DML surface. Governed trace relations are narrowed below.
+        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO control_api_runtime;
+        GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO control_api_runtime;
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE schema_migrations
+          FROM control_api_runtime;
+        GRANT SELECT ON TABLE schema_migrations TO control_api_runtime;
+
+        REVOKE ALL ON TABLE
+          agent_run_events,
+          administrative_events,
+          infrastructure_telemetry_events,
+          governed_event_stream,
+          infrastructure_price_snapshots,
+          infrastructure_cost_daily,
+          infrastructure_cost_daily_components,
+          governed_event_read_v1
+          FROM PUBLIC;
+        REVOKE UPDATE, DELETE, TRUNCATE ON TABLE
+          agent_run_events,
+          administrative_events,
+          infrastructure_telemetry_events,
+          governed_event_stream,
+          infrastructure_price_snapshots,
+          infrastructure_cost_daily,
+          infrastructure_cost_daily_components
+          FROM control_api_runtime;
+        REVOKE INSERT, UPDATE, DELETE ON TABLE governed_event_read_v1 FROM control_api_runtime;
+        REVOKE INSERT ON TABLE
+          infrastructure_price_snapshots,
+          infrastructure_cost_daily,
+          infrastructure_cost_daily_components
+          FROM control_api_runtime;
+        GRANT SELECT, INSERT ON TABLE
+          agent_run_events,
+          administrative_events,
+          infrastructure_telemetry_events,
+          governed_event_stream
+          TO control_api_runtime;
+        GRANT SELECT ON TABLE
+          infrastructure_price_snapshots,
+          infrastructure_cost_daily,
+          infrastructure_cost_daily_components
+          TO control_api_runtime;
+        GRANT SELECT ON TABLE governed_event_read_v1 TO control_api_runtime;
+
+        REVOKE ALL ON SEQUENCE
+          agent_run_events_ingest_sequence_seq,
+          administrative_events_ingest_sequence_seq,
+          infrastructure_telemetry_events_ingest_sequence_seq,
+          governed_event_stream_stream_sequence_seq
+          FROM PUBLIC;
+        REVOKE UPDATE ON SEQUENCE
+          agent_run_events_ingest_sequence_seq,
+          administrative_events_ingest_sequence_seq,
+          infrastructure_telemetry_events_ingest_sequence_seq,
+          governed_event_stream_stream_sequence_seq
+          FROM control_api_runtime;
+        GRANT USAGE, SELECT ON SEQUENCE
+          agent_run_events_ingest_sequence_seq,
+          administrative_events_ingest_sequence_seq,
+          infrastructure_telemetry_events_ingest_sequence_seq,
+          governed_event_stream_stream_sequence_seq
+          TO control_api_runtime;
+
+        REVOKE ALL ON ALL TABLES IN SCHEMA public FROM trace_maintenance_runtime;
+        GRANT SELECT, INSERT ON TABLE
+          infrastructure_telemetry_events,
+          governed_event_stream,
+          infrastructure_price_snapshots,
+          infrastructure_cost_daily,
+          infrastructure_cost_daily_components
+          TO trace_maintenance_runtime;
+        GRANT SELECT ON TABLE
+          agent_run_events,
+          administrative_events,
+          governed_event_read_v1
+          TO trace_maintenance_runtime;
+        REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM trace_maintenance_runtime;
+        GRANT USAGE, SELECT ON SEQUENCE
+          infrastructure_telemetry_events_ingest_sequence_seq,
+          governed_event_stream_stream_sequence_seq
+          TO trace_maintenance_runtime;
+
+        REVOKE ALL ON FUNCTION governed_trace_safe_metadata(JSONB) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION governed_trace_sorted_unique_text_array(TEXT[]) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION governed_trace_assert_stream_integrity() FROM PUBLIC;
+        REVOKE ALL ON FUNCTION governed_trace_enforce_append_only() FROM PUBLIC;
+        REVOKE ALL ON FUNCTION governed_trace_enforce_rollup_finality() FROM PUBLIC;
+        REVOKE ALL ON FUNCTION governed_trace_assert_cost_component_conservation() FROM PUBLIC;
+        REVOKE ALL ON FUNCTION governed_trace_reject_truncate() FROM PUBLIC;
+        REVOKE ALL ON FUNCTION governed_trace_prune_expired_events(TEXT, INTEGER) FROM control_api_runtime;
+        REVOKE ALL ON FUNCTION governed_trace_prune_expired_costs(INTEGER) FROM control_api_runtime;
+        GRANT EXECUTE ON FUNCTION governed_trace_safe_metadata(JSONB) TO control_api_runtime, trace_maintenance_runtime;
+        GRANT EXECUTE ON FUNCTION governed_trace_safe_agent_run_metadata(TEXT, JSONB) TO control_api_runtime;
+        GRANT EXECUTE ON FUNCTION governed_trace_sorted_unique_text_array(TEXT[]) TO control_api_runtime;
+        REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM trace_maintenance_runtime;
+        GRANT EXECUTE ON FUNCTION governed_trace_safe_metadata(JSONB) TO trace_maintenance_runtime;
+        GRANT EXECUTE ON FUNCTION governed_trace_prune_expired_events(TEXT, INTEGER) TO trace_maintenance_runtime;
+        GRANT EXECUTE ON FUNCTION governed_trace_prune_expired_costs(INTEGER) TO trace_maintenance_runtime;
+
+        REVOKE ALL ON ALL TABLES IN SCHEMA public FROM workflow_recipes_runtime;
+        REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM workflow_recipes_runtime;
+        REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM workflow_recipes_runtime;
+        GRANT SELECT, UPDATE ON TABLE workflow_runs TO workflow_recipes_runtime;
+        GRANT SELECT, INSERT, UPDATE ON TABLE workflow_run_steps TO workflow_recipes_runtime;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE workflow_schedules TO workflow_recipes_runtime;
+        GRANT SELECT, UPDATE ON TABLE workflow_approval_requests TO workflow_recipes_runtime;
+        GRANT DELETE ON TABLE
+          team_workflow_triggers,
+          user_workflow_triggers,
+          workflow_recipe_allowed_teams
+          TO workflow_recipes_runtime;
+        GRANT SELECT (recipe_namespace, recipe_name)
+          ON TABLE team_workflow_triggers TO workflow_recipes_runtime;
+        GRANT SELECT (recipe_namespace, recipe_name)
+          ON TABLE user_workflow_triggers TO workflow_recipes_runtime;
+        GRANT SELECT (recipe_namespace, recipe_name)
+          ON TABLE workflow_recipe_allowed_teams TO workflow_recipes_runtime;
+        REVOKE ALL ON FUNCTION public.notify_workflow_run_update()
+          FROM workflow_recipes_runtime;
+      `)
+    },
+  },
+  {
+    version: '0063_workflow_approval_trace_binding',
+    legacyVersions: ['0056_workflow_approval_trace_binding'],
+    apply: async db => {
+      await db.query(`
+        ALTER TABLE agent_run_events
+          ADD COLUMN IF NOT EXISTS decision_actor_sub TEXT NULL;
+        ALTER TABLE agent_run_events
+          DROP CONSTRAINT IF EXISTS agent_run_events_source_kind_check;
+        ALTER TABLE agent_run_events
+          ADD CONSTRAINT agent_run_events_source_kind_check
+          CHECK (source_kind IN ('mcp_host_runtime', 'wrc_internal_control', 'control_api_local'));
+        ALTER TABLE agent_run_events
+          DROP CONSTRAINT IF EXISTS agent_run_events_decision_actor_sub_check;
+        ALTER TABLE agent_run_events
+          ADD CONSTRAINT agent_run_events_decision_actor_sub_check
+          CHECK (decision_actor_sub IS NULL OR char_length(decision_actor_sub) <= 256);
+
+        ALTER TABLE workflow_approval_requests
+          ADD COLUMN IF NOT EXISTS bound_workflow_run_id UUID NULL;
+        ALTER TABLE workflow_approval_requests
+          ADD COLUMN IF NOT EXISTS bound_workflow_step_id TEXT NULL;
+        ALTER TABLE workflow_run_steps
+          ADD COLUMN IF NOT EXISTS approval_binding_sha256 TEXT NULL;
+        ALTER TABLE workflow_run_steps
+          DROP CONSTRAINT IF EXISTS workflow_run_steps_approval_binding_sha256_check;
+        ALTER TABLE workflow_run_steps
+          ADD CONSTRAINT workflow_run_steps_approval_binding_sha256_check
+          CHECK (
+            approval_binding_sha256 IS NULL
+            OR approval_binding_sha256 ~ '^[0-9a-f]{64}$'
+          );
+        ALTER TABLE workflow_approval_requests
+          DROP CONSTRAINT IF EXISTS workflow_approval_requests_bound_workflow_run_id_fkey;
+        ALTER TABLE workflow_approval_requests
+          DROP CONSTRAINT IF EXISTS workflow_approval_requests_bound_workflow_step_fkey;
+        ALTER TABLE workflow_approval_requests
+          ADD CONSTRAINT workflow_approval_requests_bound_workflow_step_fkey
+          FOREIGN KEY (bound_workflow_run_id, bound_workflow_step_id)
+          REFERENCES workflow_run_steps(run_id, step_id)
+          ON DELETE SET NULL;
+        ALTER TABLE workflow_approval_requests
+          DROP CONSTRAINT IF EXISTS workflow_approval_requests_bound_workflow_pair_check;
+        ALTER TABLE workflow_approval_requests
+          ADD CONSTRAINT workflow_approval_requests_bound_workflow_pair_check
+          CHECK (
+            (bound_workflow_run_id IS NULL AND bound_workflow_step_id IS NULL)
+            OR (bound_workflow_run_id IS NOT NULL AND NULLIF(BTRIM(bound_workflow_step_id), '') IS NOT NULL)
+          );
+        CREATE INDEX IF NOT EXISTS idx_workflow_approval_requests_bound_workflow
+          ON workflow_approval_requests (bound_workflow_run_id, bound_workflow_step_id)
+          WHERE bound_workflow_run_id IS NOT NULL;
+
+        CREATE OR REPLACE VIEW governed_event_read_v1 AS
+          SELECT
+            stream.stream_sequence,
+            stream.event_family,
+            events.event_id,
+            events.ingest_sequence AS family_ingest_sequence,
+            events.occurred_at,
+            events.ingested_at,
+            events.schema_version,
+            events.run_id::TEXT AS correlation_ref,
+            'agent'::TEXT AS actor_kind,
+            events.agent_sub AS actor_sub,
+            events.source_service AS service_or_agent_ref,
+            events.actor_human_sub AS initiating_human_sub,
+            events.agent_sub AS acting_agent_sub,
+            events.resource_aud,
+            events.effective_scopes,
+            events.decision AS authorization_decision,
+            events.token_exchange_id::TEXT AS token_exchange_id,
+            events.event_type AS event_type,
+            events.outcome,
+            events.host_ref AS target_ref,
+            events.payload_metadata AS safe_payload,
+            'agent_run_events'::TEXT AS source_table,
+            events.decision_actor_sub
+          FROM governed_event_stream AS stream
+          JOIN agent_run_events AS events
+            ON stream.event_family = 'agent_run' AND stream.event_id = events.event_id
+          UNION ALL
+          SELECT
+            stream.stream_sequence,
+            stream.event_family,
+            events.event_id,
+            events.ingest_sequence,
+            events.occurred_at,
+            events.ingested_at,
+            events.schema_version,
+            COALESCE(events.operation_id::TEXT, events.request_id, events.correlation_id),
+            CASE WHEN events.operator_sub IS NULL THEN 'service' ELSE 'operator' END,
+            COALESCE(events.operator_sub, events.service_sub),
+            events.source_service,
+            events.operator_sub,
+            NULL::TEXT,
+            NULL::TEXT,
+            ARRAY[]::TEXT[],
+            NULL::TEXT,
+            NULL::TEXT,
+            events.action,
+            events.outcome,
+            events.target_ref,
+            events.payload_metadata,
+            'administrative_events'::TEXT,
+            NULL::TEXT
+          FROM governed_event_stream AS stream
+          JOIN administrative_events AS events
+            ON stream.event_family = 'administrative' AND stream.event_id = events.event_id
+          UNION ALL
+          SELECT
+            stream.stream_sequence,
+            stream.event_family,
+            events.event_id,
+            events.ingest_sequence,
+            events.occurred_at,
+            events.ingested_at,
+            events.schema_version,
+            COALESCE(events.workload_ref, events.interval_start::TEXT),
+            'controller'::TEXT,
+            events.source_service,
+            events.source_service,
+            NULL::TEXT,
+            NULL::TEXT,
+            NULL::TEXT,
+            ARRAY[]::TEXT[],
+            NULL::TEXT,
+            NULL::TEXT,
+            events.telemetry_type,
+            events.outcome,
+            events.workload_ref,
+            events.payload_metadata,
+            'infrastructure_telemetry_events'::TEXT,
+            NULL::TEXT
+          FROM governed_event_stream AS stream
+          JOIN infrastructure_telemetry_events AS events
+            ON stream.event_family = 'infrastructure_telemetry' AND stream.event_id = events.event_id;
+      `)
+      // WRC owns workflow lifecycle updates, while the trigger's fixed-path
+      // definer authority keeps notification delivery inside the control plane.
+      await applyWorkflowRunCompletedNotificationTrigger(db)
+      await db.query(`
+        REVOKE ALL ON FUNCTION public.notify_workflow_run_update()
+          FROM workflow_recipes_runtime;
+      `)
+    },
+  },
+  {
+    version: '0064_agent_decision_source_catalog',
+    legacyVersions: ['0057_agent_decision_source_catalog'],
+    apply: async db => {
+      await db.query(`
+        ALTER TABLE agent_run_events
+          DROP CONSTRAINT IF EXISTS agent_run_events_decision_source_kind_check;
+        ALTER TABLE agent_run_events
+          ADD CONSTRAINT agent_run_events_decision_source_kind_check
+          CHECK (
+            decision_source_kind IS NULL
+            OR decision_source_kind IN (
+              'approval_request',
+              'approval_resolution',
+              'policy',
+              'policy_evaluator',
+              'runtime_guard',
+              'legacy_gate'
+            )
+          );
+      `)
+    },
+  },
+  {
+    version: '0065_governed_session_replay_and_prompt_history',
+    legacyVersions: ['0058_governed_session_replay_and_prompt_history'],
+    apply: async db => {
+      await db.query(`
+        ALTER TABLE usage_events
+          ADD COLUMN IF NOT EXISTS cache_tokens_reported BOOLEAN NOT NULL DEFAULT FALSE;
+
+        UPDATE usage_events
+           SET cache_tokens_reported = TRUE
+         WHERE cache_tokens_reported = FALSE
+           AND (cache_read_tokens > 0 OR cache_write_tokens > 0);
+
+        CREATE OR REPLACE FUNCTION governed_trace_safe_metadata(value JSONB)
+        RETURNS BOOLEAN
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$
+          SELECT jsonb_typeof(value) = 'object'
+             AND octet_length(value::text) <= 16384
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM jsonb_object_keys(value) AS key_name
+                WHERE key_name NOT IN (
+                  'reason_code', 'error_class', 'phase', 'state', 'status',
+                  'transition', 'resource_class', 'unit', 'provider_ref',
+                  'summary', 'detail_ref', 'target_label', 'tool_name', 'tool_kind',
+                  'tool_source_ref', 'model', 'attempt', 'count', 'config_hash'
+                )
+             )
+             AND (
+               NOT (value ? 'tool_kind')
+               OR (
+                 jsonb_typeof(value->'tool_kind') = 'string'
+                 AND value->>'tool_kind' IN ('internal_tool', 'mcp_server_tool', 'workflow')
+               )
+             )
+             AND (
+               NOT (value ? 'target_label')
+               OR (
+                 jsonb_typeof(value->'target_label') = 'string'
+                 AND value->>'target_label' ~ '^[A-Za-z0-9._-]{3,64}$'
+               )
+             )
+             AND (
+               NOT (value ? 'tool_source_ref')
+               OR (
+                 jsonb_typeof(value->'tool_source_ref') = 'string'
+                 AND char_length(value->>'tool_source_ref') BETWEEN 1 AND 128
+               )
+             );
+        $$;
+
+        CREATE OR REPLACE FUNCTION governed_trace_safe_agent_run_metadata(event_kind TEXT, value JSONB)
+        RETURNS BOOLEAN
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$
+          SELECT CASE
+            WHEN event_kind <> 'token_usage' THEN governed_trace_safe_metadata(value)
+            ELSE jsonb_typeof(value) = 'object'
+             AND octet_length(value::text) <= 16384
+             AND value ?& ARRAY[
+               'request_ref', 'provider', 'model', 'source_kind',
+               'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens',
+               'cache_tokens_reported'
+             ]
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM jsonb_object_keys(value) AS key_name
+                WHERE key_name NOT IN (
+                  'request_ref', 'provider', 'model', 'source_kind',
+                  'input_tokens', 'output_tokens', 'cache_read_tokens',
+                  'cache_write_tokens', 'cache_tokens_reported', 'iteration'
+                )
+             )
+             AND jsonb_typeof(value->'request_ref') = 'string'
+             AND (value->>'request_ref') ~ '^[0-9a-f]{64}$'
+             AND jsonb_typeof(value->'provider') = 'string'
+             AND jsonb_typeof(value->'model') = 'string'
+             AND jsonb_typeof(value->'source_kind') = 'string'
+             AND value->>'source_kind' IN ('channel', 'desktop', 'workflow', 'cron', 'unknown')
+             AND jsonb_typeof(value->'input_tokens') = 'number'
+             AND (value->>'input_tokens') ~ '^(0|[1-9][0-9]*)$'
+             AND jsonb_typeof(value->'output_tokens') = 'number'
+             AND (value->>'output_tokens') ~ '^(0|[1-9][0-9]*)$'
+             AND jsonb_typeof(value->'cache_read_tokens') = 'number'
+             AND (value->>'cache_read_tokens') ~ '^(0|[1-9][0-9]*)$'
+             AND jsonb_typeof(value->'cache_write_tokens') = 'number'
+             AND (value->>'cache_write_tokens') ~ '^(0|[1-9][0-9]*)$'
+             AND jsonb_typeof(value->'cache_tokens_reported') = 'boolean'
+             AND (
+               NOT (value ? 'iteration')
+               OR (
+                 jsonb_typeof(value->'iteration') = 'number'
+                 AND (value->>'iteration') ~ '^(0|[1-9][0-9]*)$'
+               )
+             )
+          END;
+        $$;
+
+        CREATE TABLE IF NOT EXISTS governed_run_attribution_bindings (
+          run_id UUID PRIMARY KEY,
+          host_ref TEXT NOT NULL CHECK (char_length(host_ref) BETWEEN 1 AND 256),
+          session_id TEXT NOT NULL CHECK (char_length(session_id) BETWEEN 1 AND 256),
+          origin TEXT NOT NULL CHECK (origin IN ('direct_chat', 'channel_event', 'api')),
+          identity_issuer TEXT NOT NULL CHECK (char_length(identity_issuer) BETWEEN 1 AND 512),
+          actor_human_sub TEXT NOT NULL CHECK (char_length(actor_human_sub) BETWEEN 1 AND 256),
+          user_id UUID NULL,
+          team_id UUID NULL,
+          binding_sha256 TEXT NOT NULL CHECK (binding_sha256 ~ '^[0-9a-f]{64}$'),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+        );
+
+        CREATE TABLE IF NOT EXISTS governed_approval_prompt_history (
+          approval_request_id UUID PRIMARY KEY,
+          approval_kind TEXT NOT NULL CHECK (approval_kind IN ('tool', 'workflow')),
+          run_id UUID NULL,
+          host_ref TEXT NULL CHECK (host_ref IS NULL OR char_length(host_ref) BETWEEN 1 AND 256),
+          session_id TEXT NULL CHECK (session_id IS NULL OR char_length(session_id) BETWEEN 1 AND 256),
+          origin TEXT NULL CHECK (origin IS NULL OR origin IN ('direct_chat', 'workflow_runtime', 'channel_event', 'api')),
+          ciphertext BYTEA NOT NULL CHECK (octet_length(ciphertext) BETWEEN 17 AND 32784),
+          nonce BYTEA NOT NULL CHECK (octet_length(nonce) = 12),
+          key_version TEXT NOT NULL CHECK (key_version ~ '^[A-Za-z0-9._-]{1,32}$'),
+          plaintext_sha256 TEXT NOT NULL CHECK (plaintext_sha256 ~ '^[0-9a-f]{64}$'),
+          plaintext_bytes INTEGER NOT NULL CHECK (plaintext_bytes BETWEEN 1 AND 32768),
+          redaction_summary JSONB NOT NULL CHECK (
+            jsonb_typeof(redaction_summary) = 'object'
+            AND redaction_summary ?& ARRAY['redacted', 'replacementCount']
+            AND redaction_summary - ARRAY['redacted', 'replacementCount'] = '{}'::jsonb
+            AND jsonb_typeof(redaction_summary->'redacted') = 'boolean'
+            AND jsonb_typeof(redaction_summary->'replacementCount') = 'number'
+            AND (redaction_summary->>'replacementCount') ~ '^(0|[1-9][0-9]*)$'
+          ),
+          source_kind TEXT NOT NULL CHECK (source_kind IN ('mcp_host_runtime', 'control_api_local')),
+          captured_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+          expires_at TIMESTAMPTZ NOT NULL CHECK (expires_at > captured_at),
+          CHECK (
+            (approval_kind = 'tool' AND run_id IS NOT NULL AND host_ref IS NOT NULL AND session_id IS NOT NULL AND origin IS NOT NULL AND source_kind = 'mcp_host_runtime')
+            OR (approval_kind = 'workflow' AND source_kind = 'control_api_local')
+          )
+        );
+
+        ALTER TABLE administrative_events
+          ADD COLUMN IF NOT EXISTS identity_issuer TEXT NULL;
+        ALTER TABLE administrative_events
+          ADD COLUMN IF NOT EXISTS operator_user_id UUID NULL;
+        ALTER TABLE administrative_events
+          ADD COLUMN IF NOT EXISTS delegated_actor_sub TEXT NULL;
+        ALTER TABLE administrative_events
+          ADD COLUMN IF NOT EXISTS resource_aud TEXT NULL;
+        ALTER TABLE administrative_events
+          ADD COLUMN IF NOT EXISTS effective_scopes TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+        ALTER TABLE administrative_events
+          ADD COLUMN IF NOT EXISTS token_exchange_id UUID NULL;
+        ALTER TABLE administrative_events
+          ADD COLUMN IF NOT EXISTS authorization_decision TEXT NULL;
+        ALTER TABLE administrative_events
+          ADD COLUMN IF NOT EXISTS decision_actor_sub TEXT NULL;
+        ALTER TABLE administrative_events
+          ADD COLUMN IF NOT EXISTS approval_request_id UUID NULL;
+        ALTER TABLE administrative_events
+          ADD COLUMN IF NOT EXISTS target_identity_issuer TEXT NULL;
+        ALTER TABLE administrative_events
+          ADD COLUMN IF NOT EXISTS target_human_sub TEXT NULL;
+        ALTER TABLE administrative_events
+          ADD COLUMN IF NOT EXISTS target_user_id UUID NULL;
+
+        ALTER TABLE administrative_events
+          DROP CONSTRAINT IF EXISTS administrative_events_action_check;
+        ALTER TABLE administrative_events
+          ADD CONSTRAINT administrative_events_action_check
+          CHECK (action IN (
+            'agent_mutation', 'host_mutation', 'permission_grant', 'permission_revoke',
+            'delegated_resource_mutation', 'folder_mutation', 'resource_mutation',
+            'configuration_mutation', 'service_maintenance', 'control_admin_deleted'
+          ));
+        ALTER TABLE administrative_events
+          DROP CONSTRAINT IF EXISTS administrative_events_target_type_check;
+        ALTER TABLE administrative_events
+          ADD CONSTRAINT administrative_events_target_type_check
+          CHECK (target_type IN (
+            'agent', 'host', 'permission', 'delegated_resource', 'folder', 'resource',
+            'configuration', 'service', 'control_admin'
+          ));
+
+        ALTER TABLE administrative_events
+          DROP CONSTRAINT IF EXISTS administrative_events_identity_issuer_check;
+        ALTER TABLE administrative_events
+          ADD CONSTRAINT administrative_events_identity_issuer_check
+          CHECK (identity_issuer IS NULL OR char_length(identity_issuer) <= 512);
+        ALTER TABLE administrative_events
+          DROP CONSTRAINT IF EXISTS administrative_events_delegated_actor_sub_check;
+        ALTER TABLE administrative_events
+          ADD CONSTRAINT administrative_events_delegated_actor_sub_check
+          CHECK (delegated_actor_sub IS NULL OR char_length(delegated_actor_sub) <= 256);
+        ALTER TABLE administrative_events
+          DROP CONSTRAINT IF EXISTS administrative_events_resource_aud_check;
+        ALTER TABLE administrative_events
+          ADD CONSTRAINT administrative_events_resource_aud_check
+          CHECK (resource_aud IS NULL OR char_length(resource_aud) <= 512);
+        ALTER TABLE administrative_events
+          DROP CONSTRAINT IF EXISTS administrative_events_effective_scopes_check;
+        ALTER TABLE administrative_events
+          ADD CONSTRAINT administrative_events_effective_scopes_check
+          CHECK (governed_trace_sorted_unique_text_array(effective_scopes));
+        ALTER TABLE administrative_events
+          DROP CONSTRAINT IF EXISTS administrative_events_target_identity_issuer_check;
+        ALTER TABLE administrative_events
+          ADD CONSTRAINT administrative_events_target_identity_issuer_check
+          CHECK (target_identity_issuer IS NULL OR char_length(target_identity_issuer) <= 512);
+        ALTER TABLE administrative_events
+          DROP CONSTRAINT IF EXISTS administrative_events_target_human_sub_check;
+        ALTER TABLE administrative_events
+          ADD CONSTRAINT administrative_events_target_human_sub_check
+          CHECK (target_human_sub IS NULL OR char_length(target_human_sub) <= 256);
+        ALTER TABLE administrative_events
+          DROP CONSTRAINT IF EXISTS administrative_events_authorization_decision_check;
+        ALTER TABLE administrative_events
+          ADD CONSTRAINT administrative_events_authorization_decision_check
+          CHECK (authorization_decision IS NULL OR authorization_decision IN ('allow', 'deny', 'require_approval', 'not_applicable'));
+        ALTER TABLE administrative_events
+          DROP CONSTRAINT IF EXISTS administrative_events_decision_actor_sub_check;
+        ALTER TABLE administrative_events
+          ADD CONSTRAINT administrative_events_decision_actor_sub_check
+          CHECK (decision_actor_sub IS NULL OR char_length(decision_actor_sub) <= 256);
+
+        CREATE INDEX IF NOT EXISTS idx_governed_run_binding_session
+          ON governed_run_attribution_bindings (host_ref, session_id, created_at DESC, run_id);
+        CREATE INDEX IF NOT EXISTS idx_governed_run_binding_human
+          ON governed_run_attribution_bindings (user_id, created_at DESC)
+          WHERE user_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_governed_prompt_history_expiry
+          ON governed_approval_prompt_history (expires_at, approval_request_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_run_events_session_replay
+          ON agent_run_events (host_ref, session_id, occurred_at DESC, ingest_sequence DESC)
+          WHERE host_ref IS NOT NULL AND session_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_agent_run_events_session_window
+          ON agent_run_events (occurred_at DESC, host_ref, session_id, ingest_sequence DESC)
+          WHERE host_ref IS NOT NULL AND session_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_agent_run_events_tool_session_filter
+          ON agent_run_events ((payload_metadata->>'tool_name'), occurred_at DESC, host_ref, session_id)
+          WHERE event_type = 'tool_call' AND host_ref IS NOT NULL AND session_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_agent_run_events_approval_session_filter
+          ON agent_run_events (outcome, decision, occurred_at DESC, host_ref, session_id)
+          WHERE event_type = 'approval' AND host_ref IS NOT NULL AND session_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_administrative_events_list_filter
+          ON administrative_events (action, outcome, occurred_at DESC, event_id);
+        CREATE INDEX IF NOT EXISTS idx_infrastructure_telemetry_list_filter
+          ON infrastructure_telemetry_events
+             (telemetry_type, outcome, occurred_at DESC, event_id);
+        CREATE INDEX IF NOT EXISTS idx_administrative_events_operator_user
+          ON administrative_events (operator_user_id, occurred_at DESC)
+          WHERE operator_user_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_administrative_events_target_user
+          ON administrative_events (target_user_id, occurred_at DESC)
+          WHERE target_user_id IS NOT NULL;
+
+        CREATE OR REPLACE FUNCTION governed_trace_enforce_append_only()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          IF TG_OP = 'DELETE'
+             AND TG_TABLE_NAME IN (
+               'agent_run_events', 'administrative_events',
+               'infrastructure_telemetry_events', 'governed_event_stream',
+               'infrastructure_cost_daily_components', 'infrastructure_cost_daily',
+               'governed_approval_prompt_history'
+             )
+             AND current_user = (
+               SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = TG_RELID
+             ) THEN
+            RETURN OLD;
+          END IF;
+          RAISE EXCEPTION 'governed trace relation % is append-only; % is not allowed', TG_TABLE_NAME, TG_OP;
+        END;
+        $$;
+
+        DROP TRIGGER IF EXISTS governed_run_attribution_bindings_append_only
+          ON governed_run_attribution_bindings;
+        CREATE TRIGGER governed_run_attribution_bindings_append_only
+          BEFORE UPDATE OR DELETE ON governed_run_attribution_bindings
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_enforce_append_only();
+        DROP TRIGGER IF EXISTS governed_run_attribution_bindings_reject_truncate
+          ON governed_run_attribution_bindings;
+        CREATE TRIGGER governed_run_attribution_bindings_reject_truncate
+          BEFORE TRUNCATE ON governed_run_attribution_bindings
+          FOR EACH STATEMENT EXECUTE FUNCTION governed_trace_reject_truncate();
+        DROP TRIGGER IF EXISTS governed_approval_prompt_history_append_only
+          ON governed_approval_prompt_history;
+        CREATE TRIGGER governed_approval_prompt_history_append_only
+          BEFORE UPDATE OR DELETE ON governed_approval_prompt_history
+          FOR EACH ROW EXECUTE FUNCTION governed_trace_enforce_append_only();
+        DROP TRIGGER IF EXISTS governed_approval_prompt_history_reject_truncate
+          ON governed_approval_prompt_history;
+        CREATE TRIGGER governed_approval_prompt_history_reject_truncate
+          BEFORE TRUNCATE ON governed_approval_prompt_history
+          FOR EACH STATEMENT EXECUTE FUNCTION governed_trace_reject_truncate();
+
+        CREATE OR REPLACE FUNCTION governed_trace_prune_expired_prompts(batch_limit INTEGER DEFAULT 250)
+        RETURNS TABLE (approval_request_id UUID)
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, public
+        AS $$
+        BEGIN
+          IF batch_limit NOT BETWEEN 1 AND 250 THEN
+            RAISE EXCEPTION 'governed prompt retention batch must be between 1 and 250';
+          END IF;
+          RETURN QUERY
+          WITH selected AS MATERIALIZED (
+            SELECT history.approval_request_id
+              FROM public.governed_approval_prompt_history AS history
+             WHERE history.expires_at <= clock_timestamp()
+             ORDER BY history.expires_at, history.approval_request_id
+             LIMIT batch_limit
+             FOR UPDATE OF history SKIP LOCKED
+          )
+          DELETE FROM public.governed_approval_prompt_history AS history
+           USING selected
+           WHERE history.approval_request_id = selected.approval_request_id
+          RETURNING history.approval_request_id;
+        END;
+        $$;
+
+        CREATE OR REPLACE VIEW governed_event_read_v1 AS
+          SELECT
+            stream.stream_sequence, stream.event_family, events.event_id,
+            events.ingest_sequence AS family_ingest_sequence, events.occurred_at,
+            events.ingested_at, events.schema_version, events.run_id::TEXT AS correlation_ref,
+            'agent'::TEXT AS actor_kind, events.agent_sub AS actor_sub,
+            events.source_service AS service_or_agent_ref,
+            events.actor_human_sub AS initiating_human_sub, events.agent_sub AS acting_agent_sub,
+            events.resource_aud, events.effective_scopes,
+            events.decision AS authorization_decision,
+            events.token_exchange_id::TEXT AS token_exchange_id, events.event_type,
+            events.outcome, events.host_ref AS target_ref, events.payload_metadata AS safe_payload,
+            'agent_run_events'::TEXT AS source_table, events.decision_actor_sub,
+            events.identity_issuer, events.user_id::TEXT AS operator_user_id,
+            NULL::TEXT AS delegated_actor_sub, NULL::TEXT AS target_identity_issuer,
+            NULL::TEXT AS target_human_sub, NULL::TEXT AS target_user_id
+          FROM governed_event_stream AS stream
+          JOIN agent_run_events AS events
+            ON stream.event_family = 'agent_run' AND stream.event_id = events.event_id
+          UNION ALL
+          SELECT
+            stream.stream_sequence, stream.event_family, events.event_id,
+            events.ingest_sequence, events.occurred_at, events.ingested_at,
+            events.schema_version,
+            COALESCE(events.operation_id::TEXT, events.request_id, events.correlation_id),
+            CASE WHEN events.operator_sub IS NULL THEN 'service' ELSE 'operator' END,
+            COALESCE(events.operator_sub, events.service_sub), events.source_service,
+            events.operator_sub, events.delegated_actor_sub, events.resource_aud,
+            events.effective_scopes, events.authorization_decision, events.token_exchange_id::TEXT,
+            events.action, events.outcome, events.target_ref, events.payload_metadata,
+            'administrative_events'::TEXT, events.decision_actor_sub, events.identity_issuer,
+            events.operator_user_id::TEXT, events.delegated_actor_sub,
+            events.target_identity_issuer, events.target_human_sub, events.target_user_id::TEXT
+          FROM governed_event_stream AS stream
+          JOIN administrative_events AS events
+            ON stream.event_family = 'administrative' AND stream.event_id = events.event_id
+          UNION ALL
+          SELECT
+            stream.stream_sequence, stream.event_family, events.event_id,
+            events.ingest_sequence, events.occurred_at, events.ingested_at,
+            events.schema_version, COALESCE(events.workload_ref, events.interval_start::TEXT),
+            'controller'::TEXT, events.source_service, events.source_service,
+            NULL::TEXT, NULL::TEXT, NULL::TEXT, ARRAY[]::TEXT[], NULL::TEXT,
+            NULL::TEXT, events.telemetry_type, events.outcome, events.workload_ref,
+            events.payload_metadata, 'infrastructure_telemetry_events'::TEXT,
+            NULL::TEXT, NULL::TEXT, NULL::TEXT, NULL::TEXT, NULL::TEXT, NULL::TEXT, NULL::TEXT
+          FROM governed_event_stream AS stream
+          JOIN infrastructure_telemetry_events AS events
+            ON stream.event_family = 'infrastructure_telemetry' AND stream.event_id = events.event_id;
+
+        REVOKE ALL ON TABLE governed_run_attribution_bindings, governed_approval_prompt_history FROM PUBLIC;
+        REVOKE UPDATE, DELETE, TRUNCATE ON TABLE governed_run_attribution_bindings, governed_approval_prompt_history FROM control_api_runtime;
+        GRANT SELECT, INSERT ON TABLE governed_run_attribution_bindings TO control_api_runtime;
+        GRANT SELECT, INSERT ON TABLE governed_approval_prompt_history TO control_api_runtime;
+        REVOKE ALL ON TABLE governed_run_attribution_bindings, governed_approval_prompt_history FROM trace_maintenance_runtime, workflow_recipes_runtime;
+        REVOKE ALL ON FUNCTION governed_trace_prune_expired_prompts(INTEGER) FROM PUBLIC, control_api_runtime, workflow_recipes_runtime;
+        GRANT EXECUTE ON FUNCTION governed_trace_prune_expired_prompts(INTEGER) TO trace_maintenance_runtime;
+      `)
+    },
+  },
+  {
+    version: '0066_governed_trace_target_principal_projection',
+    legacyVersions: ['0060_governed_trace_target_principal_projection'],
+    apply: async db => {
+      await db.query(`
+        CREATE OR REPLACE FUNCTION governed_trace_safe_metadata(value JSONB)
+        RETURNS BOOLEAN
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$
+          SELECT jsonb_typeof(value) = 'object'
+             AND octet_length(value::text) <= 16384
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM jsonb_object_keys(value) AS key_name
+                WHERE key_name NOT IN (
+                  'reason_code', 'error_class', 'phase', 'state', 'status',
+                  'transition', 'resource_class', 'unit', 'provider_ref',
+                  'summary', 'detail_ref', 'target_label', 'target_principal_kind',
+                  'target_principal_ref', 'tool_name', 'tool_kind',
+                  'tool_source_ref', 'model', 'attempt', 'count', 'config_hash'
+                )
+             )
+             AND (
+               NOT (value ? 'tool_kind')
+               OR (
+                 jsonb_typeof(value->'tool_kind') = 'string'
+                 AND value->>'tool_kind' IN ('internal_tool', 'mcp_server_tool', 'workflow')
+               )
+             )
+             AND (
+               NOT (value ? 'target_label')
+               OR (
+                 jsonb_typeof(value->'target_label') = 'string'
+                 AND value->>'target_label' ~ '^[A-Za-z0-9._-]{3,64}$'
+               )
+             )
+             AND (
+               NOT (value ? 'target_principal_kind')
+               OR (
+                 jsonb_typeof(value->'target_principal_kind') = 'string'
+                 AND value->>'target_principal_kind' IN ('operator', 'host', 'context', 'service')
+               )
+             )
+             AND (
+               NOT (value ? 'target_principal_ref')
+               OR (
+                 jsonb_typeof(value->'target_principal_ref') = 'string'
+                 AND char_length(value->>'target_principal_ref') BETWEEN 1 AND 256
+                 AND value->>'target_principal_ref' ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]*$'
+               )
+             )
+             AND (
+               (NOT (value ? 'target_principal_kind') AND NOT (value ? 'target_principal_ref'))
+               OR (
+                 value ? 'target_principal_kind'
+                 AND value ? 'target_principal_ref'
+                 AND (
+                   (value->>'target_principal_kind' = 'operator'
+                    AND value->>'target_principal_ref' = 'operator:')
+                   OR
+                   (value->>'target_principal_kind' <> 'operator'
+                    AND value->>'target_principal_ref' LIKE ((value->>'target_principal_kind') || ':%'))
+                 )
+               )
+             )
+             AND (
+               NOT (value ? 'tool_source_ref')
+               OR (
+                 jsonb_typeof(value->'tool_source_ref') = 'string'
+                 AND char_length(value->>'tool_source_ref') BETWEEN 1 AND 128
+               )
+             );
+        $$;
+      `)
+    },
+  },
+  {
+    version: '0067_llm_runtime_access_profiles',
+    apply: async db => {
+      // The LLM catalog migrations can land after a database has already applied
+      // the legacy runtime-role migration. Reconcile these three relations in a
+      // new version so upgraded and fresh databases receive the same exact ACLs.
+      await db.query(`
+        REVOKE ALL ON TABLE
+          llm_allowed_models,
+          llm_allowed_models_audit,
+          llm_catalog_sync_runs
+          FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+
+        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+          llm_allowed_models
+          TO control_api_runtime;
+        GRANT SELECT, INSERT ON TABLE
+          llm_allowed_models_audit,
+          llm_catalog_sync_runs
+          TO control_api_runtime;
+      `)
+    },
+  },
+  {
+    version: '0068_member_registration_credentials',
     apply: applyMemberRegistrationCredentialsSchema,
+  },
+  {
+    version: '0069_member_registration_runtime_access',
+    apply: async db => {
+      // 0068 can already be applied on a long-lived database, so normalize the
+      // new table's ACL in a follow-up migration instead of rewriting history.
+      await db.query(`
+        REVOKE ALL ON TABLE member_registration_credentials
+          FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE member_registration_credentials
+          TO control_api_runtime;
+        REVOKE ALL ON SEQUENCE member_registration_credentials_id_seq
+          FROM PUBLIC, control_api_runtime, trace_maintenance_runtime, workflow_recipes_runtime;
+        GRANT USAGE, SELECT ON SEQUENCE member_registration_credentials_id_seq
+          TO control_api_runtime;
+      `)
+    },
   },
 ]
 
@@ -2785,8 +4877,14 @@ async function applyPendingMigrations(db: DbClient): Promise<void> {
 
   for (const migration of CONTROL_API_MIGRATIONS) {
     if (appliedVersions.has(migration.version)) continue
+    if (migration.legacyVersions?.some(version => appliedVersions.has(version))) {
+      await recordMigration(db, migration.version)
+      appliedVersions.add(migration.version)
+      continue
+    }
     await migration.apply(db)
     await recordMigration(db, migration.version)
+    appliedVersions.add(migration.version)
   }
 }
 
@@ -2824,6 +4922,18 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
       }
     }
     client.release()
+  }
+}
+
+export async function assertDbReady(db: DbClient = pool): Promise<void> {
+  const requiredVersion = CONTROL_API_MIGRATIONS.at(-1)?.version
+  if (!requiredVersion) throw new Error('Control API database has no registered migrations')
+  const result = await db.query(
+    'SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1) AS ready',
+    [requiredVersion]
+  )
+  if (!(result.rows[0] as { ready?: boolean } | undefined)?.ready) {
+    throw new Error(`Control API database is not ready: migration ${requiredVersion} is required`)
   }
 }
 

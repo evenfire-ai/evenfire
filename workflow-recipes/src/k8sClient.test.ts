@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   WorkflowRecipeWatcher,
+  controllerErrorTelemetryProjection,
   recipeReferencesNamedSecrets,
+  reconcileOutcomeTelemetryProjection,
   rotateBrokerTokensOnce,
   runtimeCredentialRefreshIntervalMs,
   shouldPatchRecipeStatus,
@@ -344,6 +346,49 @@ describe('shouldPatchRecipeStatus', () => {
         }
       )
     ).toBe(false)
+  })
+})
+
+describe('infrastructure telemetry projections', () => {
+  it('builds stable reconcile_outcome source ids bound to the canonical workflow run label', () => {
+    const recipe = makeWorkflowRecipe({
+      metadata: {
+        name: 'run-child',
+        namespace: 'sandbox-recipes',
+        generation: 3,
+        resourceVersion: 'rv-9',
+        labels: { 'clerum.io/workflow-run-id': 'run-123' },
+      },
+    })
+
+    expect(
+      reconcileOutcomeTelemetryProjection(
+        recipe,
+        { phase: 'active', message: 'ok', workloadStatuses: [] },
+        '2026-07-11T10:00:00.000Z'
+      )
+    ).toEqual({
+      sourceEventId: 'workflow-reconcile:sandbox-recipes:run-child:generation:3:active',
+      occurredAt: '2026-07-11T10:00:00.000Z',
+      telemetryType: 'reconcile_outcome',
+      runId: 'run-123',
+      payload: { phase: 'active', status: 'patched' },
+    })
+  })
+
+  it('skips infrastructure telemetry for recipes without a canonical workflow run label', () => {
+    const recipe = makeWorkflowRecipe({
+      metadata: { name: 'parent', namespace: 'sandbox-recipes' },
+    })
+
+    expect(
+      reconcileOutcomeTelemetryProjection(recipe, {
+        phase: 'active',
+        message: 'ok',
+        workloadStatuses: [],
+      })
+    ).toBeUndefined()
+    expect(controllerErrorTelemetryProjection(recipe, new Error('boom'))).toBeUndefined()
   })
 })
 
@@ -692,7 +737,12 @@ describe('workload status refresh loop helpers', () => {
           spec: {
             steps: [{ id: 'step-1', instruction: 'run' }],
             workloads: [
-              { id: 'api', type: 'deployment', image: 'clerum/api:test', imagePullSecrets: ['reg'] },
+              {
+                id: 'api',
+                type: 'deployment',
+                image: 'clerum/api:test',
+                imagePullSecrets: ['reg'],
+              },
             ],
           },
         })
@@ -1276,6 +1326,115 @@ describe('status-only events drive DB sync (terminal + heartbeat)', () => {
     // also calls syncFromRecipeExecution at its start.
     expect(sync).toHaveBeenCalledWith(specChanged)
     expect(reconcile).toHaveBeenCalledWith(specChanged)
+  })
+})
+
+describe('infrastructure telemetry enqueue isolation', () => {
+  function makeRunChild(): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: {
+        name: 'run-child',
+        namespace: 'sandbox-recipes',
+        generation: 8,
+        resourceVersion: 'rv-1',
+        labels: { 'clerum.io/workflow-run-id': 'run-telemetry' },
+      },
+      status: { phase: 'deploying', workflowExecution: { phase: 'initializing' } },
+    })
+  }
+
+  function makeInternal(
+    recipe: WorkflowRecipeCRD,
+    traceReporter: { enqueueInfrastructureTelemetry: ReturnType<typeof vi.fn> }
+  ) {
+    const result = {
+      phase: 'active' as const,
+      message: 'Workflow infrastructure ready',
+      workloadStatuses: [],
+    }
+    const internal = Object.create(WorkflowRecipeWatcher.prototype) as {
+      recipes: Map<string, WorkflowRecipeCRD>
+      transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+      stopped: boolean
+      traceReporter: typeof traceReporter
+      dbRunProcessor: null
+      reconciler: {
+        reconcile: ReturnType<typeof vi.fn>
+        isRecipeStillActive: ReturnType<typeof vi.fn>
+        ensureFinalizer: ReturnType<typeof vi.fn>
+        patchStatus: ReturnType<typeof vi.fn>
+      }
+      handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+    }
+    internal.recipes = new Map([[recipe.metadata.name, recipe]])
+    internal.transientRetries = new Map()
+    internal.stopped = false
+    internal.traceReporter = traceReporter
+    internal.dbRunProcessor = null
+    internal.reconciler = {
+      reconcile: vi.fn().mockResolvedValue(result),
+      isRecipeStillActive: vi.fn().mockResolvedValue(true),
+      ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+      patchStatus: vi.fn().mockResolvedValue(undefined),
+    }
+    return { internal, result }
+  }
+
+  it('enqueues reconcile_outcome only after the status patch commits', async () => {
+    const recipe = makeRunChild()
+    const enqueueInfrastructureTelemetry = vi.fn()
+    const { internal, result } = makeInternal(recipe, { enqueueInfrastructureTelemetry })
+    internal.reconciler.patchStatus.mockImplementation(async () => {
+      expect(enqueueInfrastructureTelemetry).not.toHaveBeenCalled()
+    })
+
+    await internal.handleRecipeEvent('ADDED', recipe)
+
+    expect(enqueueInfrastructureTelemetry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetryType: 'reconcile_outcome',
+        runId: 'run-telemetry',
+        payload: { phase: result.phase, status: 'patched' },
+      })
+    )
+  })
+
+  it('does not enqueue reconcile_outcome when the status patch fails', async () => {
+    const recipe = makeRunChild()
+    const enqueueInfrastructureTelemetry = vi.fn()
+    const { internal } = makeInternal(recipe, { enqueueInfrastructureTelemetry })
+    internal.reconciler.patchStatus.mockRejectedValue(new Error('patch failed'))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await internal.handleRecipeEvent('ADDED', recipe)
+
+    expect(enqueueInfrastructureTelemetry).toHaveBeenCalledTimes(1)
+    expect(enqueueInfrastructureTelemetry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telemetryType: 'controller_error',
+        runId: 'run-telemetry',
+      })
+    )
+    errSpy.mockRestore()
+  })
+
+  it('isolates enqueue failures after a committed status patch', async () => {
+    const recipe = makeRunChild()
+    const enqueueInfrastructureTelemetry = vi.fn(() => {
+      throw new Error('trace queue down')
+    })
+    const { internal } = makeInternal(recipe, { enqueueInfrastructureTelemetry })
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await expect(internal.handleRecipeEvent('ADDED', recipe)).resolves.toBeUndefined()
+
+    expect(internal.reconciler.patchStatus).toHaveBeenCalled()
+    expect(enqueueInfrastructureTelemetry).toHaveBeenCalled()
+    expect(errSpy).toHaveBeenCalledWith(
+      '[WR-K8s] Infrastructure telemetry enqueue failed:',
+      expect.any(Error)
+    )
+    errSpy.mockRestore()
   })
 })
 

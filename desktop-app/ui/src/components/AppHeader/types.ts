@@ -1,4 +1,7 @@
 export type AppHeaderProps = {
+  notificationTrayMode?: 'overlay' | 'drawer'
+  notificationTrayReady?: boolean
+  onNotificationTrayOpenChange?: (open: boolean) => void
   onShellOverlayOpenChange?: (open: boolean) => void
 }
 

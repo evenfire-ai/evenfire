@@ -274,6 +274,10 @@ export async function enterChatllmChat(page: Page): Promise<void> {
   if (await agentLink.isVisible().catch(() => false)) {
     await humanClick(agentLink, { afterMs: [520, 1_000] })
   }
+  const goToChat = page.getByRole('button', { name: /^Go to Chat$/i })
+  if (await goToChat.isVisible().catch(() => false)) {
+    await humanClick(goToChat, { afterMs: [520, 1_000] })
+  }
   await expect(chatInput).toBeVisible({ timeout: 15_000 })
   await expect(page.getByText(/^Workflow capabilities$/)).toHaveCount(0)
   await expect(page.getByRole('button', { name: /^Workflows$/ })).toHaveCount(0)
@@ -391,6 +395,12 @@ export async function approveNextToolCall(page: Page, approvalCountBefore: numbe
   const approvalButton = page.getByTestId('approval-approve-btn').nth(approvalCountBefore)
   await expect(approvalButton).toBeVisible({ timeout: 180_000 })
   await humanClick(approvalButton, { beforeMs: [800, 1_400], afterMs: [800, 1_400] })
+}
+
+export async function denyNextToolCall(page: Page, approvalCountBefore: number): Promise<void> {
+  const denialButton = page.getByTestId('approval-deny-btn').nth(approvalCountBefore)
+  await expect(denialButton).toBeVisible({ timeout: 180_000 })
+  await humanClick(denialButton, { beforeMs: [800, 1_400], afterMs: [800, 1_400] })
 }
 
 export async function approveNextToolCallIfPresent(

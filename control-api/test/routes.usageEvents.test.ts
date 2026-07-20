@@ -5,15 +5,43 @@ import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 import { MockGateway } from './mockGateway.js'
 
 const mockPoolQuery = vi.fn()
+const mockProjectAcceptedUsageEvents = vi.fn().mockResolvedValue(0)
+const transactionDb = {
+  query: (...args: unknown[]) => mockPoolQuery(...args),
+}
 vi.mock('../src/db.js', () => ({
+  createBoundedPgPool: () => ({
+    connect: vi.fn(async () => ({
+      query: (sql: string, ...args: unknown[]) =>
+        /^(BEGIN|COMMIT|ROLLBACK)$/.test(sql)
+          ? Promise.resolve({ rows: [], rowCount: 0 })
+          : mockPoolQuery(sql, ...args),
+      release: vi.fn(),
+    })),
+  }),
   pool: {
     query: (...args: unknown[]) => mockPoolQuery(...args),
   },
+}))
+vi.mock('../src/boundedPgPool.js', () => ({
+  createBoundedPgPoolForConnection: () => ({
+    connect: vi.fn(async () => ({
+      query: (sql: string, ...args: unknown[]) =>
+        /^(BEGIN|COMMIT|ROLLBACK)$/.test(sql)
+          ? Promise.resolve({ rows: [], rowCount: 0 })
+          : mockPoolQuery(sql, ...args),
+      release: vi.fn(),
+    })),
+  }),
+}))
+vi.mock('../src/services/tracing/usageProjection.js', () => ({
+  projectAcceptedUsageEvents: (...args: unknown[]) => mockProjectAcceptedUsageEvents(...args),
 }))
 
 const VALID_EVENT = {
   request_id: '11111111-1111-4111-8111-111111111111',
   ts: '2026-04-29T10:00:00.000Z',
+  run_id: '00000000-0000-4000-8000-000000000001',
   host_ref: 'trader',
   context_ref: 'trader-context',
   team_id: '11111111-1111-4111-8111-111111111111',
@@ -74,15 +102,20 @@ function mockWorkflowBindingThenIngest(
   binding: Record<string, unknown> = workflowRunBinding(),
   ingestRowCount = 1
 ) {
-  mockPoolQuery
-    .mockResolvedValueOnce({ rows: [binding], rowCount: 1 })
-    .mockResolvedValueOnce({ rows: [], rowCount: ingestRowCount })
+  mockPoolQuery.mockResolvedValueOnce({ rows: [binding], rowCount: 1 }).mockResolvedValueOnce({
+    rows: ingestRowCount > 0 ? [{ request_id: VALID_EVENT.request_id }] : [],
+    rowCount: ingestRowCount,
+  })
 }
 
 describe('POST /api/v1/internal/usage/llm/events', () => {
   beforeEach(() => {
     mockPoolQuery.mockReset()
-    mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 1 })
+    mockProjectAcceptedUsageEvents.mockClear()
+    mockPoolQuery.mockResolvedValue({
+      rows: [{ request_id: VALID_EVENT.request_id }],
+      rowCount: 1,
+    })
   })
 
   it('rejects unauthenticated requests with 401', async () => {
@@ -118,7 +151,7 @@ describe('POST /api/v1/internal/usage/llm/events', () => {
   })
 
   it('returns the ingest counts on the happy path', async () => {
-    mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 1 })
+    mockPoolQuery.mockResolvedValue({ rows: [{ request_id: VALID_EVENT.request_id }], rowCount: 1 })
     const app = createApp(new MockGateway('mcp-server') as never)
     const res = await authedPost(app)
       .send({ events: [VALID_EVENT] })
@@ -332,6 +365,50 @@ describe('POST /api/v1/internal/usage/llm/events', () => {
         .send({ events: [event] })
         .expect(200)
       expect(res.body).toEqual({ accepted: 1, duplicates: 0, rejected: 0 })
+      expect(mockProjectAcceptedUsageEvents).toHaveBeenCalledTimes(1)
+      const [projectionDb, acceptedEvents, bindings, projectionContext] =
+        mockProjectAcceptedUsageEvents.mock.calls[0]!
+      expect(projectionDb).toEqual(expect.objectContaining({ query: expect.any(Function) }))
+      expect(acceptedEvents).toEqual([
+        expect.objectContaining({ request_id: VALID_EVENT.request_id }),
+      ])
+      expect(bindings.get(WORKFLOW_RUN_ID)).toMatchObject({ recipeName: 'my-recipe' })
+      expect(projectionContext).toEqual({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'my-recipe',
+        hostRef: 'sandbox-recipes/my-recipe',
+      })
+    })
+
+    it('does not project a workflow usage duplicate omitted by RETURNING', async () => {
+      mockWorkflowBindingThenIngest(workflowRunBinding(), 0)
+      const app = createApp(new MockGateway('mcp-server') as never)
+      const event = {
+        ...VALID_EVENT,
+        recipe_name: 'my-recipe',
+        source_kind: 'workflow',
+        host_ref: 'sandbox-recipes/my-recipe',
+        task_id: WORKFLOW_TASK_ID,
+        user_id: null,
+        sender: null,
+        channel_type: null,
+      }
+
+      const res = await authedPost(app, {
+        kind: 'recipe',
+        namespace: 'sandbox-recipes',
+        name: 'my-recipe',
+      })
+        .send({ events: [event] })
+        .expect(200)
+
+      expect(res.body).toEqual({ accepted: 0, duplicates: 1, rejected: 0 })
+      expect(mockProjectAcceptedUsageEvents).toHaveBeenCalledWith(
+        expect.objectContaining({ query: expect.any(Function) }),
+        [],
+        expect.any(Map),
+        expect.any(Object)
+      )
     })
 
     it('rejects recipe-token workflow events without a matching workflow run', async () => {
@@ -493,7 +570,10 @@ describe('POST /api/v1/internal/usage/llm/events', () => {
     })
 
     it('accepts sentinel-token events whose trimmed host_ref matches hostRefs[0]', async () => {
-      mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 1 })
+      mockPoolQuery.mockResolvedValue({
+        rows: [{ request_id: VALID_EVENT.request_id }],
+        rowCount: 1,
+      })
       const app = createApp(new MockGateway('mcp-server') as never)
       const event = { ...VALID_EVENT, host_ref: '  trader  ' } // whitespace tolerated by trim
       const res = await authedPost(app, { kind: 'sentinel', hostName: 'trader' })

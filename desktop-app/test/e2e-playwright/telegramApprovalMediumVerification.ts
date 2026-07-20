@@ -16,6 +16,7 @@ import {
 import { K8S_CONTEXT } from './workflowUi'
 
 const PENDING_PROVIDER_EVENT_USER_ID = '__telegram_provider_event_pending__'
+const TELEGRAM_BOT_HANDLE = '@clerum_e2e_bot'
 const CONTROL_UI = (process.env.CONTROL_UI_BASE_URL || process.env.CONTROL_UI_URL || '').replace(
   /\/$/,
   ''
@@ -36,11 +37,6 @@ function externalChannelsNav(page: Page) {
 
 function loginUsernameInput(page: Page) {
   return page.getByLabel(/Username(?: or email)?/i)
-}
-
-type TelegramRoute = {
-  channelId: string
-  chatType: 'private' | 'group' | 'supergroup'
 }
 
 async function controlUiWatchdogStep<T>(
@@ -106,37 +102,25 @@ async function loginControlUi(page: Page, baseUrl: string): Promise<void> {
   await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible({ timeout: 30_000 })
 }
 
-export function telegramCommunicationChannelRoutes(): TelegramRoute[] {
-  const raw = kubectl(
-    ['-n', CHANNELS_NS, 'get', 'communicationchannel', TELEGRAM_CHANNEL_NAME, '-o', 'json'],
-    undefined,
-    10_000
-  )
-  const parsed = JSON.parse(raw) as {
-    spec?: { telegram?: Array<{ channelId?: string; chatType?: string }> }
+async function dismissOptionalAdminEmailAlert(page: Page): Promise<void> {
+  const remindLater = page.getByRole('button', { name: 'Remind me later' })
+  if (await remindLater.isVisible().catch(() => false)) {
+    await remindLater.click()
+    await expect(remindLater).toBeHidden()
   }
-  return (parsed.spec?.telegram ?? [])
-    .map(item => ({
-      channelId: String(item.channelId || ''),
-      chatType:
-        item.chatType === 'group' || item.chatType === 'private' || item.chatType === 'supergroup'
-          ? item.chatType
-          : null,
-    }))
-    .filter((item): item is TelegramRoute => !!item.channelId && !!item.chatType)
 }
 
 export async function createTelegramCommunicationChannelFromControlUi(
   page: Page,
   hostName: string,
-  routes: TelegramRoute[]
+  memberEmail: string
 ): Promise<void> {
   const baseUrl = requireControlUiBaseUrl()
   await controlUiWatchdogStep('login Control UI', 35_000, () => loginControlUi(page, baseUrl))
 
   await controlUiWatchdogStep('open communication channels tab', 35_000, async () => {
     await externalChannelsNav(page).click()
-    await expect(page).toHaveURL(/tab=communication-channels/, { timeout: 30_000 })
+    await expect(page).toHaveURL(/\/communication-channels(?:$|[?#])/, { timeout: 30_000 })
     await expect(page.getByText(/Communication channels/i).first()).toBeVisible({
       timeout: 30_000,
     })
@@ -146,6 +130,7 @@ export async function createTelegramCommunicationChannelFromControlUi(
     await page.getByRole('button', { name: 'Add channel' }).click()
     await expect(page).toHaveURL(/\/communication-channels\/new$/, { timeout: 30_000 })
     await expect(page.getByRole('heading', { name: 'Create communication channel' })).toBeVisible()
+    await dismissOptionalAdminEmailAlert(page)
   })
 
   await controlUiWatchdogStep('fill channel name', 10_000, async () => {
@@ -153,31 +138,33 @@ export async function createTelegramCommunicationChannelFromControlUi(
   })
 
   await controlUiWatchdogStep('select channel agent reference', 15_000, async () => {
-    await page.getByLabel('Agent reference').selectOption(hostName)
+    const agentReference = page.getByLabel('Agent reference')
+    await expect(agentReference).toBeVisible()
+    await agentReference.click()
+    await page.getByRole('option', { name: hostName, exact: true }).click()
+    await expect(agentReference).toContainText(hostName)
   })
 
-  await controlUiWatchdogStep('continue to channel routing', 15_000, async () => {
+  await controlUiWatchdogStep('continue to provider setup', 15_000, async () => {
     await page.getByRole('button', { name: 'Continue' }).click()
   })
 
-  await controlUiWatchdogStep('complete Telegram routing', 35_000, async () => {
-    await expect(page.getByRole('heading', { name: 'Channel routing' })).toBeVisible({
-      timeout: 15_000,
-    })
+  await controlUiWatchdogStep('complete Telegram provider setup', 35_000, async () => {
+    await expect(page.getByText('Telegram bot', { exact: true })).toBeVisible({ timeout: 15_000 })
+    await page.getByLabel(/Telegram bot handle/i).fill(TELEGRAM_BOT_HANDLE)
     await page.getByLabel('Telegram Bot Token').fill(TELEGRAM_BOT_TOKEN)
-
-    for (const [index, route] of routes.entries()) {
-      await page.getByRole('button', { name: 'Add Telegram channel' }).click()
-      const channelIdInput = page.getByLabel('Telegram channel ID').nth(index)
-      await expect(channelIdInput).toBeVisible()
-      await channelIdInput.fill(route.channelId)
-      await page.getByLabel('Telegram chat type').nth(index).selectOption(route.chatType)
-    }
+    const memberSearch = page.getByLabel('Members')
+    await expect(memberSearch).toBeVisible({ timeout: 15_000 })
+    await memberSearch.fill(memberEmail)
+    const memberOption = page.getByRole('option').filter({ hasText: memberEmail })
+    await expect(memberOption).toBeVisible()
+    await memberOption.click()
+    await expect(memberOption).toHaveAttribute('aria-selected', 'true')
   })
 
   await controlUiWatchdogStep('submit Telegram communication channel', 45_000, async () => {
     await page.getByRole('button', { name: 'Create channel' }).click()
-    await expect(page).toHaveURL(/tab=communication-channels/, { timeout: 45_000 })
+    await expect(page).toHaveURL(/\/communication-channels(?:$|[?#])/, { timeout: 45_000 })
     await expect(
       page.getByRole('button', { name: TELEGRAM_CHANNEL_NAME, exact: true })
     ).toBeVisible({
@@ -185,14 +172,44 @@ export async function createTelegramCommunicationChannelFromControlUi(
     })
   })
 
-  await controlUiWatchdogStep('verify persisted Telegram channel routes', 35_000, async () => {
+  await controlUiWatchdogStep('verify persisted Telegram provider setup', 35_000, async () => {
     await expect
-      .poll(() => telegramCommunicationChannelRoutes(), {
-        timeout: 30_000,
-        intervals: [500, 1_000, 2_000],
-        message: 'Control UI should persist Telegram private and group channel routes',
+      .poll(
+        () => {
+          const raw = kubectl(
+            ['-n', CHANNELS_NS, 'get', 'communicationchannel', TELEGRAM_CHANNEL_NAME, '-o', 'json'],
+            undefined,
+            10_000
+          )
+          const resource = JSON.parse(raw) as {
+            spec?: {
+              hostRef?: string
+              access?: { users?: string[] }
+              telegram?: unknown[]
+              telegramSettings?: { botHandle?: string }
+            }
+          }
+          return {
+            botHandle: resource.spec?.telegramSettings?.botHandle || '',
+            hostRef: resource.spec?.hostRef || '',
+            memberCount: Array.isArray(resource.spec?.access?.users)
+              ? resource.spec.access.users.length
+              : -1,
+            routeCount: Array.isArray(resource.spec?.telegram) ? resource.spec.telegram.length : -1,
+          }
+        },
+        {
+          timeout: 30_000,
+          intervals: [500, 1_000, 2_000],
+          message: 'Control UI should persist Telegram provider settings without fake routes',
+        }
+      )
+      .toEqual({
+        botHandle: TELEGRAM_BOT_HANDLE,
+        hostRef: hostName,
+        memberCount: 1,
+        routeCount: 0,
       })
-      .toEqual(expect.arrayContaining(routes))
   })
 }
 
@@ -258,10 +275,19 @@ export function telegramAssociationUserIds(providerChannelId: string): string[] 
     10_000
   )
   const parsed = JSON.parse(raw) as {
-    spec?: { telegram?: Array<{ channelId?: string; chatType?: string; userIds?: string[] }> }
+    spec?: {
+      telegram?: Array<{
+        channelId?: string
+        chatType?: string
+        confirmedByUserId?: string
+        userIds?: string[]
+      }>
+    }
   }
   const group = (parsed.spec?.telegram ?? []).find(item => item.channelId === providerChannelId)
-  return group?.userIds ?? []
+  return [group?.confirmedByUserId, ...(group?.userIds ?? [])].filter(
+    (userId): userId is string => !!userId
+  )
 }
 
 export function workflowApprovalMediumAccountCount(binding: TelegramMediumBinding): number {

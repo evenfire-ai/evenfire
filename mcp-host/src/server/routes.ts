@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
+import { isTraceContextV1 } from '../core/types'
 import { getRuntimeCallerContext } from './edgeRuntimeAuth'
 import { badRequest, json } from './httpUtils'
 import type {
@@ -13,6 +14,7 @@ import type {
   HostActivityEvent,
   IncomingMessage,
   MessageHandler,
+  ModelsListHandler,
   ProgressStreamHandler,
   ProviderMessageAuthorizationHandler,
   ProviderWorkflowApprovalDecision,
@@ -24,6 +26,7 @@ import type {
   SessionMessagesHandler,
   SessionSearchHandler,
   SessionsListHandler,
+  SetModelHandler,
   StatusHandler,
   TaskResultHandler,
   TelegramWorkflowApprovalVerificationHandler,
@@ -56,6 +59,8 @@ export type RouteHandlers = {
   contextBreakdownHandler?: ContextBreakdownHandler | null
   sessionSearchHandler?: SessionSearchHandler | null
   compactionHandler?: CompactionHandler | null
+  modelsListHandler?: ModelsListHandler | null
+  setModelHandler?: SetModelHandler | null
 }
 
 function channelRuntimeSourceMismatch(
@@ -113,6 +118,8 @@ export function runtimeApiInfo() {
       'GET /v1/runtime/sessions/:agent/:chatId/messages': 'Get message history for a session',
       'GET /v1/runtime/sessions/search':
         'Full-text search across past messages of the authenticated user',
+      'GET /v1/runtime/models': 'List selectable models for the session (per-session selection)',
+      'POST /v1/runtime/model': 'Set the per-session model (applies next task)',
       'POST /v1/runtime/compact':
         'Force compaction for a session with optional focus topic (operator-only)',
     },
@@ -140,6 +147,8 @@ export function runtimeApiInfo() {
       'GET /v1/runtime/sessions': 'onSessionsList(handler)',
       'GET /v1/runtime/sessions/:agent/:chatId/messages': 'onSessionMessages(handler)',
       'GET /v1/runtime/sessions/search': 'onSessionSearch(handler)',
+      'GET /v1/runtime/models': 'onModelsList(handler)',
+      'POST /v1/runtime/model': 'onSetModel(handler)',
       'POST /v1/runtime/compact': 'onCompaction(handler)',
     },
   }
@@ -235,6 +244,11 @@ export async function handleMessageRoute(
   try {
     const message = req.body as IncomingMessage
 
+    if (message?.traceContext != null && !isTraceContextV1(message.traceContext)) {
+      badRequest(res, 'Invalid traceContext')
+      return
+    }
+
     // Identity invariant for the desktop / rpc channel: the sender MUST be the
     // trusted rpc-proxy edge user, regardless of what the body claims.
     // rpc-proxy already does this; re-enforcing here is defense-in-depth for
@@ -280,9 +294,13 @@ export async function handleMessageRoute(
     }
 
     const isAsync = req.query.async === 'true'
-    const response = isAsync
-      ? handlers.messageHandler(message, { async: true })
-      : await handlers.messageHandler(message)
+    // Await BOTH branches. `executeAsync()` returns its ack (`{ taskId, ... }`)
+    // synchronously, so awaiting it is a no-op and the background task still
+    // runs fire-and-forget. But the piggybacked-model path wraps the handler in
+    // an async IIFE (it must persist `message.model` before enqueue), so the
+    // async branch can return a Promise; without this await `json()` would
+    // `JSON.stringify` a Promise to `{}` and drop `taskId`.
+    const response = await handlers.messageHandler(message, isAsync ? { async: true } : undefined)
     json(res, 200, response)
   } catch (error) {
     console.error('[Server] Error processing message:', error)
@@ -1205,6 +1223,85 @@ export async function handleContextBreakdownRoute(
     json(res, 200, result)
   } catch (error) {
     console.error('[Server] Error fetching context breakdown:', error)
+    json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
+  }
+}
+
+/**
+ * R2 — GET /v1/runtime/models. Read-only projection of the in-memory allowlist
+ * for the Host's provider, plus the per-session selection when `?chatId=` is
+ * passed. `runtimeEdgeGuard(['rpc-proxy'])` at the server layer guarantees a
+ * verified edge user + hostRef; the session lookup is scoped server-side to
+ * `${userId}:rpc:${hostRef}:${chatId}` (anti-enumeration, same as /messages).
+ */
+export async function handleModelsListRoute(
+  req: Request,
+  res: Response,
+  handlers: RouteHandlers
+): Promise<void> {
+  try {
+    const caller = getRuntimeCallerContext(req)
+    if (caller?.caller !== 'rpc-proxy' || !caller.userId || !caller.hostRef) {
+      json(res, 401, { error: 'Missing rpc edge caller context' })
+      return
+    }
+    if (!handlers.modelsListHandler) {
+      json(res, 501, { error: 'Models handler not configured' })
+      return
+    }
+    const chatId = typeof req.query.chatId === 'string' ? req.query.chatId.trim() : ''
+    const result = await handlers.modelsListHandler(
+      caller.userId,
+      caller.hostRef,
+      chatId || undefined
+    )
+    json(res, 200, result)
+  } catch (error) {
+    console.error('[Server] Error listing models:', error)
+    json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
+  }
+}
+
+/**
+ * R2 — POST /v1/runtime/model `{ chatId, model }`. `chatId` is MANDATORY (no
+ * global model switch in v1). Validates `model ∈ allowlist` (403
+ * `model_not_allowed`, degraded → only the Host default), persists the session
+ * selection and responds `{ effective:'next-task', provider, model }`.
+ */
+export async function handleSetModelRoute(
+  req: Request,
+  res: Response,
+  handlers: RouteHandlers
+): Promise<void> {
+  try {
+    const caller = getRuntimeCallerContext(req)
+    if (caller?.caller !== 'rpc-proxy' || !caller.userId || !caller.hostRef) {
+      json(res, 401, { error: 'Missing rpc edge caller context' })
+      return
+    }
+    if (!handlers.setModelHandler) {
+      json(res, 501, { error: 'Set model handler not configured' })
+      return
+    }
+    const body = (req.body as Record<string, unknown>) || {}
+    const chatId = typeof body.chatId === 'string' ? body.chatId.trim() : ''
+    const model = typeof body.model === 'string' ? body.model.trim() : ''
+    if (!chatId) {
+      badRequest(res, 'chatId is required')
+      return
+    }
+    if (!model) {
+      badRequest(res, 'model is required')
+      return
+    }
+    const result = await handlers.setModelHandler(caller.userId, caller.hostRef, chatId, model)
+    if (!result.ok) {
+      json(res, 403, { error: result.reason, provider: result.provider, model: result.model })
+      return
+    }
+    json(res, 200, { effective: 'next-task', provider: result.provider, model: result.model })
+  } catch (error) {
+    console.error('[Server] Error setting model:', error)
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }

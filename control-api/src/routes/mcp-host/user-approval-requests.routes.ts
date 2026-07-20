@@ -12,7 +12,9 @@ import {
   resolvePendingWorkflowApprovalDelivery,
 } from '../../services/notificationDeliveryQueueService.js'
 import { checkAndIncrement } from '../../services/rateLimiterService.js'
+import type { DirectRunAttributionBindingService } from '../../services/tracing/directRunAttributionBindingService.js'
 import {
+  InvalidWorkflowApprovalRunBindingError,
   InvalidWorkflowTriggerIntentError,
   allowlistCheck,
   cancelRequest,
@@ -240,6 +242,64 @@ type ProviderIdentityParts = {
   providerTarget: ProviderTargetBindingInput | null
 }
 
+type ProviderTraceBinding = {
+  runId: string
+  sessionId: string
+  origin: 'channel_event'
+}
+
+export function parseProviderTraceBinding(
+  body: unknown
+): { ok: true; binding: ProviderTraceBinding | null } | { ok: false; status: 400; error: string } {
+  const record = isPlainObject(body) ? body : {}
+  const value = record.traceBinding
+  if (value === undefined || value === null) return { ok: true, binding: null }
+  if (!isPlainObject(value)) {
+    return { ok: false, status: 400, error: 'traceBinding must be an object' }
+  }
+  const allowedKeys = new Set(['runId', 'sessionId', 'origin'])
+  if (
+    Object.keys(value).length !== allowedKeys.size ||
+    Object.keys(value).some(key => !allowedKeys.has(key))
+  ) {
+    return { ok: false, status: 400, error: 'traceBinding contains unrecognized fields' }
+  }
+  const runId = providerIdentityString(value, 'runId')
+  const sessionId = providerIdentityString(value, 'sessionId')
+  if (
+    !runId ||
+    !UUID_RE.test(runId) ||
+    !sessionId ||
+    sessionId.length > 256 ||
+    value.origin !== 'channel_event'
+  ) {
+    return { ok: false, status: 400, error: 'invalid channel trace binding' }
+  }
+  return { ok: true, binding: { runId, sessionId, origin: 'channel_event' } }
+}
+
+export async function bindVerifiedProviderTraceAttribution(input: {
+  binding: ProviderTraceBinding | null
+  callerHostRef: string
+  providerHostRef: string | null | undefined
+  identityIssuer: string
+  accountUserId: string
+  service: Pick<DirectRunAttributionBindingService, 'bind'>
+}): Promise<'not_requested' | 'host_mismatch' | 'bound'> {
+  if (!input.binding) return 'not_requested'
+  const providerHostRef = input.providerHostRef?.trim() || ''
+  if (!providerHostRef || providerHostRef !== input.callerHostRef) return 'host_mismatch'
+  await input.service.bind({
+    ...input.binding,
+    hostRef: input.callerHostRef,
+    identityIssuer: input.identityIssuer,
+    actorHumanSub: input.accountUserId,
+    userId: input.accountUserId,
+    teamId: null,
+  })
+  return 'bound'
+}
+
 function parseProviderIdentityFromBody(
   body: unknown,
   options: { requireEventId?: boolean } = {}
@@ -408,7 +468,10 @@ async function enforceMediumResolveRateLimit(
   return true
 }
 
-export function createUserApprovalRequestsRoutes(gateway: K8sGateway): Router {
+export function createUserApprovalRequestsRoutes(
+  gateway: K8sGateway,
+  directRunAttributionBindingService: DirectRunAttributionBindingService
+): Router {
   const router = Router()
 
   router.post(
@@ -433,6 +496,7 @@ export function createUserApprovalRequestsRoutes(gateway: K8sGateway): Router {
             target,
             payload,
             correlation,
+            workflowRunBindingProof,
             ttlSeconds,
             recipeNamespace: bodyRecipeNamespace,
             recipeName: bodyRecipeName,
@@ -523,6 +587,13 @@ export function createUserApprovalRequestsRoutes(gateway: K8sGateway): Router {
           }
           if (correlation && JSON.stringify(correlation).length > 1024) {
             return res.status(400).json({ error: 'correlation exceeds maximum size of 1KB' })
+          }
+          if (
+            workflowRunBindingProof !== undefined &&
+            (typeof workflowRunBindingProof !== 'string' ||
+              !UUID_RE.test(workflowRunBindingProof.trim()))
+          ) {
+            return res.status(400).json({ error: 'workflowRunBindingProof must be a UUID' })
           }
           if (ttlSeconds !== undefined) {
             if (!Number.isInteger(ttlSeconds) || ttlSeconds <= 0) {
@@ -669,11 +740,18 @@ export function createUserApprovalRequestsRoutes(gateway: K8sGateway): Router {
               payload,
               idempotencyKey,
               correlation,
+              runBindingProof:
+                typeof workflowRunBindingProof === 'string'
+                  ? workflowRunBindingProof.trim()
+                  : undefined,
               ttlSeconds,
             })
           } catch (err) {
             if (err instanceof InvalidWorkflowTriggerIntentError) {
               return res.status(400).json({ error: 'Invalid payload.metadata.workflowTrigger' })
+            }
+            if (err instanceof InvalidWorkflowApprovalRunBindingError) {
+              return res.status(409).json({ error: 'workflow_approval_run_binding_invalid' })
             }
             throw err
           }
@@ -789,6 +867,10 @@ export function createUserApprovalRequestsRoutes(gateway: K8sGateway): Router {
           if (!parsedIdentity.ok) {
             return res.status(parsedIdentity.status).json({ error: parsedIdentity.error })
           }
+          const parsedTraceBinding = parseProviderTraceBinding(req.body)
+          if (!parsedTraceBinding.ok) {
+            return res.status(parsedTraceBinding.status).json({ error: parsedTraceBinding.error })
+          }
           const {
             medium,
             providerUserId,
@@ -870,6 +952,18 @@ export function createUserApprovalRequestsRoutes(gateway: K8sGateway): Router {
             ) {
               return res.status(403).json({ error: 'communication_channel_access_denied' })
             }
+          }
+
+          const traceBindingResult = await bindVerifiedProviderTraceAttribution({
+            binding: parsedTraceBinding.binding,
+            callerHostRef: callerKey,
+            providerHostRef: providerTarget?.hostRef,
+            identityIssuer: config.jwtIssuer,
+            accountUserId: account.userId,
+            service: directRunAttributionBindingService,
+          })
+          if (traceBindingResult === 'host_mismatch') {
+            return res.status(403).json({ error: 'trace_binding_host_mismatch' })
           }
 
           return res.status(200).json({ userId: account.userId })
