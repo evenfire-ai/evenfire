@@ -184,18 +184,22 @@ jobs:
             changed: ${{ needs.detect.outputs.host-context-controller }}
           - image: mcp-host
             path: mcp-host
+            rooted: true
             platforms: linux/amd64,linux/arm64
             changed: ${{ needs.detect.outputs.mcp-host }}
           - image: mcp-host-slim
             path: mcp-host
+            rooted: true
             dockerfile: Dockerfile.slim
             changed: ${{ needs.detect.outputs.mcp-host }}
           - image: mcp-host-full
             path: mcp-host
+            rooted: true
             dockerfile: Dockerfile.full
             changed: ${{ needs.detect.outputs.mcp-host }}
           - image: mcp-host-desktop
             path: mcp-host
+            rooted: true
             dockerfile: Dockerfile.desktop
             changed: ${{ needs.detect.outputs.mcp-host }}
           - image: mcp-proxy
