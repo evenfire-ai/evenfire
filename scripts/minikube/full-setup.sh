@@ -586,7 +586,7 @@ if [ "$SKIP_BUILD" = true ]; then
       control-api/src \
       control-ui/components \
       control-ui/lib \
-      -type f -newer "$LAST_BUILD_MARKER" 2>/dev/null | head -1)
+      -type f -newer "$LAST_BUILD_MARKER" 2>/dev/null | head -1 || true)
     if [ -n "$NEWEST_SRC" ]; then
       warn "Source files changed since last image build (e.g., $NEWEST_SRC)."
       warn "Images may be STALE. Run without --skip-build to rebuild."

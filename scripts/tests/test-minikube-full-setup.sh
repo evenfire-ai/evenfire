@@ -295,6 +295,33 @@ assert_reset_db_flag_backcompat() {
   fi
 }
 
+assert_skip_build_staleness_find_is_sigpipe_guarded() {
+  # full-setup.sh runs `set -euo pipefail`. The --skip-build staleness check
+  # pipes `find <source dirs> -newer "$LAST_BUILD_MARKER" | head -1`; when find
+  # has matches, head closes the pipe after line 1 and find dies with SIGPIPE
+  # (141), which pipefail turns into a fatal `make Error 141`. The pipeline must
+  # tolerate that exit status.
+  if grep -Fq 'newer "$LAST_BUILD_MARKER" 2>/dev/null | head -1 || true' scripts/minikube/full-setup.sh; then
+    pass "skip-build staleness find|head pipeline is SIGPIPE-guarded"
+  else
+    fail "skip-build staleness find|head is unguarded — SIGPIPE (141) aborts --skip-build"
+  fi
+}
+
+assert_pipefail_head_guard_prevents_abort() {
+  # Deterministic proof the guard is not vacuous: `yes | head -1` always leaves
+  # the producer writing when head exits, so under `set -euo pipefail` the bare
+  # form aborts (SIGPIPE 141) while the `|| true` form (as applied above) exits 0.
+  local bare_rc=0 guarded_rc=0
+  bash -c 'set -euo pipefail; v=$(yes | head -1); : "$v"' >/dev/null 2>&1 || bare_rc=$?
+  bash -c 'set -euo pipefail; v=$(yes | head -1 || true); : "$v"' >/dev/null 2>&1 || guarded_rc=$?
+  if [ "$bare_rc" -ne 0 ] && [ "$guarded_rc" -eq 0 ]; then
+    pass "pipefail SIGPIPE guard (|| true) prevents the abort the bare pipeline hits"
+  else
+    fail "SIGPIPE guard behaved unexpectedly (bare_rc=$bare_rc guarded_rc=$guarded_rc)"
+  fi
+}
+
 assert_broken_profile_is_recreated
 assert_healthy_profile_skips_recreate
 assert_branch_profile_deploy_dir_is_used
@@ -305,5 +332,7 @@ assert_full_setup_defaults_to_db_rebuild
 assert_makefile_passes_reuse_db
 assert_reuse_db_normalizer_precedes_flag_loop
 assert_reset_db_flag_backcompat
+assert_skip_build_staleness_find_is_sigpipe_guarded
+assert_pipefail_head_guard_prevents_abort
 
 exit $FAIL
