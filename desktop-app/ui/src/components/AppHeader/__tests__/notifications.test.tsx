@@ -7,6 +7,16 @@ import { AppHeader } from '../index'
 const notificationMocks = vi.hoisted(() => ({
   clear: vi.fn(),
   markRead: vi.fn(),
+  notifications: [] as Array<{
+    id: string
+    kind: 'assistant_reply'
+    agentName: string
+    text: string
+    timestamp: number
+    read: boolean
+  }>,
+  open: vi.fn(),
+  remove: vi.fn(),
   refresh: vi.fn(async () => undefined),
 }))
 
@@ -45,7 +55,7 @@ vi.mock('@contexts/NavigationContext', () => ({
 
 vi.mock('@contexts/NotificationsContext', () => ({
   useNotificationsContext: () => ({
-    notifications: [],
+    notifications: notificationMocks.notifications,
     unreadNotificationCount: 0,
     notificationActionById: {},
     pendingApprovals: [],
@@ -53,8 +63,8 @@ vi.mock('@contexts/NotificationsContext', () => ({
     pendingApprovalActionId: null,
     markNotificationsRead: notificationMocks.markRead,
     clearNotifications: notificationMocks.clear,
-    removeNotification: vi.fn(),
-    handleOpenNotification: vi.fn(),
+    removeNotification: notificationMocks.remove,
+    handleOpenNotification: notificationMocks.open,
     handleApproveNotification: vi.fn(),
     handleDenyNotification: vi.fn(),
     handleRefreshPendingApprovals: notificationMocks.refresh,
@@ -67,7 +77,48 @@ vi.mock('@hooks/useClickOutside', () => ({ useClickOutside: vi.fn() }))
 describe('AppHeader notification tray presentation', () => {
   afterEach(() => {
     cleanup()
+    notificationMocks.notifications.length = 0
     vi.clearAllMocks()
+  })
+
+  it('opens a notification when its card surface is clicked', () => {
+    const notification = {
+      id: 'notification-1',
+      kind: 'assistant_reply' as const,
+      agentName: 'Research agent',
+      text: 'Your answer is ready.',
+      timestamp: Date.now(),
+      read: true,
+    }
+    notificationMocks.notifications.push(notification)
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+    expect(screen.getByText('Inbox (1)')).toBeTruthy()
+    expect(screen.queryByText('1 item')).toBeNull()
+    fireEvent.click(screen.getByTestId('notification-menu-item'))
+
+    expect(notificationMocks.open).toHaveBeenCalledWith(notification)
+    expect(screen.queryByRole('dialog', { name: 'Notifications and approvals' })).toBeNull()
+  })
+
+  it('does not open a notification when its delete button is clicked', () => {
+    const notification = {
+      id: 'notification-1',
+      kind: 'assistant_reply' as const,
+      agentName: 'Research agent',
+      text: 'Your answer is ready.',
+      timestamp: Date.now(),
+      read: true,
+    }
+    notificationMocks.notifications.push(notification)
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete notification' }))
+
+    expect(notificationMocks.remove).toHaveBeenCalledWith(notification.id)
+    expect(notificationMocks.open).not.toHaveBeenCalled()
   })
 
   it('waits for embedded app bounds before showing the drawer', async () => {
