@@ -33,11 +33,15 @@ import {
   WorkflowRecipeStatus,
   WorkloadDef,
 } from '../types'
-import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFactory'
+import {
+  INHERITED_PARENT_RESOURCES_ANNOTATION,
+  buildDbRunChildName,
+} from '../workflow/childRecipeFactory'
 import { HttpMcpHostClient } from '../workflow/httpMcpHostClient'
 import { JwtTokenFactory } from '../workflow/jwtTokenFactory'
 import { K8sSecretReaderImpl } from '../workflow/k8sSecretReaderImpl'
 import { ModelConfigHandler } from '../workflow/modelConfigHandler'
+import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
 import { validateWorkflowRecipeLimits } from '../workflow/workflowLimits'
 import {
@@ -543,6 +547,69 @@ export interface WorkflowRecipeReconcilerDeps {
    * left unset.
    */
   secretReverseIndex?: SecretReverseIndex
+  /**
+   * Test seam for the durable DB-run provenance check used before a child
+   * WorkflowRecipe may inherit its parent's runtime identity. Production uses
+   * the authoritative `workflow_runs` row directly.
+   */
+  verifyWorkflowRunProvenance?: (expected: {
+    runId: string
+    parentNamespace: string
+    parentName: string
+    childNamespace: string
+    childName: string
+  }) => Promise<WorkflowRunProvenanceState>
+}
+
+export type WorkflowRunProvenanceState = 'verified' | 'pending' | 'invalid'
+
+export interface WorkflowRunProvenanceRow {
+  phase: string
+  recipe_namespace: string
+  recipe_name: string
+  child_recipe_namespace: string | null
+  child_recipe_name: string | null
+}
+
+export function classifyWorkflowRunProvenance(
+  row: WorkflowRunProvenanceRow | undefined,
+  expected: {
+    runId: string
+    parentNamespace: string
+    parentName: string
+    childNamespace: string
+    childName: string
+  }
+): WorkflowRunProvenanceState {
+  if (
+    !row ||
+    row.recipe_namespace !== expected.parentNamespace ||
+    row.recipe_name !== expected.parentName
+  ) {
+    return 'invalid'
+  }
+  if (
+    row.child_recipe_namespace === expected.childNamespace &&
+    row.child_recipe_name === expected.childName
+  ) {
+    return 'verified'
+  }
+  if (
+    row.phase === 'Pending' &&
+    row.child_recipe_namespace === null &&
+    row.child_recipe_name === null &&
+    expected.childName === buildDbRunChildName(expected.parentName, expected.runId)
+  ) {
+    return 'pending'
+  }
+  return 'invalid'
+}
+
+export class RuntimeScopeResolutionPendingError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'RuntimeScopeResolutionPendingError'
+  }
 }
 
 export class WorkflowRecipeReconciler {
@@ -556,6 +623,9 @@ export class WorkflowRecipeReconciler {
   private _tokenFactory: JwtTokenFactory | null = null
   private fqdnLookup: FqdnLookup
   private secretReverseIndex: SecretReverseIndex | null
+  private verifyWorkflowRunProvenance: NonNullable<
+    WorkflowRecipeReconcilerDeps['verifyWorkflowRunProvenance']
+  >
 
   constructor(kc: k8s.KubeConfig, config?: OperatorConfig, deps?: WorkflowRecipeReconcilerDeps) {
     this.appsApi = kc.makeApiClient(k8s.AppsV1Api)
@@ -566,6 +636,19 @@ export class WorkflowRecipeReconciler {
     this.config = config ?? loadConfig()
     this.fqdnLookup = deps?.fqdnLookup ?? defaultFqdnLookup
     this.secretReverseIndex = deps?.secretReverseIndex ?? null
+    this.verifyWorkflowRunProvenance =
+      deps?.verifyWorkflowRunProvenance ??
+      (async expected => {
+        const result = await getPool().query<WorkflowRunProvenanceRow>(
+          `SELECT phase, recipe_namespace, recipe_name,
+                  child_recipe_namespace, child_recipe_name
+             FROM workflow_runs
+            WHERE run_id = $1
+            LIMIT 1`,
+          [expected.runId]
+        )
+        return classifyWorkflowRunProvenance(result.rows[0], expected)
+      })
   }
 
   /**
@@ -734,6 +817,7 @@ export class WorkflowRecipeReconciler {
 
   private async workflowRuntimeScopeRecipeName(recipe: WorkflowRecipeCRD): Promise<string> {
     const parentLabel = recipe.metadata.labels?.[PARENT_RECIPE_LABEL]?.trim()
+    const workflowRunId = recipe.metadata.labels?.[WORKFLOW_RUN_ID_LABEL]?.trim()
     const ownerRecipe = recipe.metadata.ownerReferences?.find(
       ref =>
         ref.apiVersion === `${CRD_GROUP}/${CRD_VERSION}` &&
@@ -747,6 +831,18 @@ export class WorkflowRecipeReconciler {
     const ownerRecipeUid = ownerRecipe?.uid?.trim()
 
     if (ownerRecipeName && ownerRecipeUid) {
+      if (
+        !workflowRunId ||
+        !parentLabel ||
+        parentLabel !== ownerRecipeName ||
+        recipe.metadata.annotations?.[INHERITED_PARENT_RESOURCES_ANNOTATION] !== 'true'
+      ) {
+        console.warn(
+          `[WR-Reconciler] Ignoring controller ownerReference "${ownerRecipeName}" on workflow "${recipe.metadata.name}" because normal DB-run inheritance metadata is incomplete or inconsistent`
+        )
+        return recipe.metadata.name
+      }
+
       const verifiedOwnerRecipeName = await this.verifyControllerOwnerRecipe(
         recipe,
         ownerRecipeName,
@@ -760,11 +856,38 @@ export class WorkflowRecipeReconciler {
         }
         return recipe.metadata.name
       }
-      if (parentLabel && parentLabel !== ownerRecipeName) {
+
+      try {
+        const provenance = await this.verifyWorkflowRunProvenance({
+          runId: workflowRunId,
+          parentNamespace: recipe.metadata.namespace,
+          parentName: ownerRecipeName,
+          childNamespace: recipe.metadata.namespace,
+          childName: recipe.metadata.name,
+        })
+        if (provenance === 'pending') {
+          throw new RuntimeScopeResolutionPendingError(
+            `workflow_runs binding for run "${workflowRunId}" is still pending`
+          )
+        }
+        if (provenance === 'invalid') {
+          console.warn(
+            `[WR-Reconciler] Ignoring controller ownerReference "${ownerRecipeName}" on workflow "${recipe.metadata.name}" because workflow_runs does not bind run "${workflowRunId}" to this exact parent and child`
+          )
+          return recipe.metadata.name
+        }
+      } catch (error) {
+        if (error instanceof RuntimeScopeResolutionPendingError) throw error
         console.warn(
-          `[WR-Reconciler] Ignoring mismatched ${PARENT_RECIPE_LABEL}="${parentLabel}" on workflow "${recipe.metadata.name}"; using controller ownerReference "${ownerRecipeName}"`
+          `[WR-Reconciler] Deferring runtime scope resolution for workflow "${recipe.metadata.name}" because DB-run provenance is temporarily unavailable:`,
+          error
+        )
+        throw new RuntimeScopeResolutionPendingError(
+          `DB-run provenance is temporarily unavailable for workflow "${recipe.metadata.name}"`,
+          { cause: error }
         )
       }
+
       return verifiedOwnerRecipeName
     }
 
@@ -779,11 +902,22 @@ export class WorkflowRecipeReconciler {
   private async hasVerifiedInheritedParentResources(recipe: WorkflowRecipeCRD): Promise<boolean> {
     if (!declaresInheritedParentResources(recipe)) return false
     const parentName = recipe.metadata.labels?.[PARENT_RECIPE_LABEL]?.trim()
-    return Boolean(
-      parentName &&
-      parentName !== recipe.metadata.name &&
-      (await this.workflowRuntimeScopeRecipeName(recipe)) === parentName
+    const ownerRecipe = recipe.metadata.ownerReferences?.find(
+      ref =>
+        ref.apiVersion === `${CRD_GROUP}/${CRD_VERSION}` &&
+        ref.kind === 'WorkflowRecipe' &&
+        ref.controller === true &&
+        ref.name === parentName &&
+        typeof ref.uid === 'string' &&
+        ref.uid.trim().length > 0
     )
+    if (!parentName || parentName === recipe.metadata.name || !ownerRecipe?.uid) return false
+    const verifiedOwner = await this.verifyControllerOwnerRecipe(
+      recipe,
+      parentName,
+      ownerRecipe.uid.trim()
+    )
+    return verifiedOwner === parentName
   }
 
   private workflowAwaitsTriggeredRun(recipe: WorkflowRecipeCRD): boolean {
@@ -808,7 +942,9 @@ export class WorkflowRecipeReconciler {
         namespace: recipe.metadata.namespace,
         plural: WORKFLOWRECIPE_PLURAL,
         name: ownerRecipeName,
-      })) as { metadata?: { uid?: string; deletionTimestamp?: string } }
+      })) as {
+        metadata?: { uid?: string; deletionTimestamp?: string }
+      }
 
       const liveOwnerUid = liveOwner.metadata?.uid
       if (liveOwner.metadata?.deletionTimestamp) {
@@ -833,16 +969,23 @@ export class WorkflowRecipeReconciler {
         return null
       }
       console.warn(
-        `[WR-Reconciler] Ignoring controller ownerReference "${ownerRecipeName}" on workflow "${recipe.metadata.name}" because the owner WorkflowRecipe could not be verified:`,
+        `[WR-Reconciler] Deferring runtime scope resolution for workflow "${recipe.metadata.name}" because the owner WorkflowRecipe is temporarily unavailable:`,
         error
       )
-      return null
+      throw new RuntimeScopeResolutionPendingError(
+        `Owner WorkflowRecipe "${ownerRecipeName}" is temporarily unavailable`,
+        { cause: error }
+      )
     }
   }
 
-  private async ensureSteadyWorkflowRuntimeCredentials(recipe: WorkflowRecipeCRD): Promise<void> {
+  private async ensureSteadyWorkflowRuntimeCredentials(
+    recipe: WorkflowRecipeCRD,
+    resolvedRuntimeScopeRecipeName?: string
+  ): Promise<void> {
     if (!this.workflowReconciler) return
-    const runtimeScopeRecipeName = await this.workflowRuntimeScopeRecipeName(recipe)
+    const runtimeScopeRecipeName =
+      resolvedRuntimeScopeRecipeName ?? (await this.workflowRuntimeScopeRecipeName(recipe))
     const coordinatorRefresher = this.workflowReconciler as WorkflowReconciler & {
       ensureCoordinatorRuntimeCredentials?: (
         recipeNamespace: string,
@@ -1082,8 +1225,16 @@ export class WorkflowRecipeReconciler {
       return this.staleRecipeResult(recipe, 'initial check')
     }
 
+    const isWorkflow = recipe.spec.steps !== undefined && recipe.spec.steps.length > 0
+    if (isWorkflow) {
+      // Revocation must precede spec/policy validation: an invalid edit that also
+      // removes publishTargets must still close the previously opened lane.
+      await this.revokeCoordinatorGfsNetworkPolicyIfDisabled(recipe)
+    }
+
     const limitError = validateWorkflowRecipeLimits(recipe.spec, this.config)
     if (limitError) {
+      if (isWorkflow) await this.revokeCoordinatorGfsNetworkPolicy(recipe)
       return {
         phase: 'failed' as RecipePhase,
         message: limitError,
@@ -1103,6 +1254,7 @@ export class WorkflowRecipeReconciler {
       const policies = await listWorkflowRecipePolicies(this.customApi, ns)
       const violations = enforcePolicy(recipe, policies)
       if (violations.length > 0) {
+        if (isWorkflow) await this.revokeCoordinatorGfsNetworkPolicy(recipe)
         const details = violations.map(v => `[${v.policy}] ${v.rule}: ${v.message}`).join('; ')
         console.error(`[WR-Reconciler] Policy violation for "${name}": ${details}`)
         return {
@@ -1139,11 +1291,10 @@ export class WorkflowRecipeReconciler {
     // reconcile loop. This prevents the fundamental conflict between the WRC
     // reconciler (which patches recipe.phase) and the coordinator (which patches
     // workflowExecution.phase and steps[]) — two concurrent writers on the same CRD.
-    const isWorkflow = recipe.spec.steps !== undefined && recipe.spec.steps.length > 0
-
     if (isWorkflow) {
       const stepLimitError = this.validateWorkflowStepLimit(recipe)
       if (stepLimitError) {
+        await this.revokeCoordinatorGfsNetworkPolicy(recipe)
         return {
           phase: 'failed',
           message: stepLimitError,
@@ -1161,6 +1312,47 @@ export class WorkflowRecipeReconciler {
       const wfInProgress =
         wfExecPhase === 'initializing' || wfExecPhase === 'running' || wfExecPhase === 'recovering'
 
+      const workflowWorkloads = recipe.spec.workloads ?? []
+      const policyPreflight = this.buildWorkflowRuntimeSpec(recipe)
+      const policyPreflightError = this.workflowReconciler?.validateWorkflowSpec?.(
+        policyPreflight.workflowRuntimeSpec
+      )
+      const coordinatorGfsPolicyCanOpen =
+        this.workflowReconciler !== undefined &&
+        !recipe.spec.dryRun &&
+        !alreadyPolicyFailed &&
+        !policyPreflight.unresolvedMcpServerMessage &&
+        !policyPreflightError
+      if ((recipe.spec.gfs?.publishTargets ?? []).length > 0 && !coordinatorGfsPolicyCanOpen) {
+        await this.revokeCoordinatorGfsNetworkPolicy(recipe)
+      }
+
+      let approvalScopeRecipeName: string
+      try {
+        // Resolve provenance before any workflow-side mutation. A pending DB
+        // binding or transient DB/Kubernetes lookup must never mint credentials
+        // or create resources under the child fallback identity.
+        approvalScopeRecipeName = await this.workflowRuntimeScopeRecipeName(recipe)
+      } catch (error) {
+        if (!(error instanceof RuntimeScopeResolutionPendingError)) throw error
+        console.warn(
+          `[WR-Reconciler] Runtime scope resolution pending for workflow "${name}"; keeping current state and requeueing:`,
+          error
+        )
+        return {
+          phase: currentPhase as RecipePhase,
+          message: recipe.status?.message ?? '',
+          workloadStatuses: (recipe.status?.workloads ?? []).map(workload => ({
+            id: workload.id,
+            phase: workload.phase,
+            ready: workload.ready ?? false,
+            message: workload.message,
+          })),
+          skipStatusPatch: true,
+          requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+        }
+      }
+
       if (currentPhase === 'active' && awaitsTriggeredRun && !wfExecPhase) {
         // Plugin Workload SDK promptBridge recipes keep an eager mcp-host whose
         // provider must be (re-)configured once it becomes Ready and after any
@@ -1169,6 +1361,9 @@ export class WorkflowRecipeReconciler {
         // provider_unavailable forever. clientNotifications-only needs no provider,
         // so it keeps the cheap short-circuit.
         if (!recipe.spec.pluginWorkloadSdk?.promptBridge) {
+          if (coordinatorGfsPolicyCanOpen) {
+            await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
+          }
           // Issue #637 — this awaiting-trigger short-circuit also returns before the
           // Step 8 ownership gate, yet the recipe's envSecret/imagePullSecrets
           // workloads were already deployed on the first-deploy pass. Enforce
@@ -1190,10 +1385,15 @@ export class WorkflowRecipeReconciler {
       // error lives on workflowExecution.message) must NOT be re-confirmed here
       // — fall through to the recovery handoff below so the run is retried.
       if (wfTerminal && !awaitsTriggeredRun && !latchedByTransientError) {
+        if (wfExecPhase === 'completed' && coordinatorGfsPolicyCanOpen) {
+          await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
+        } else {
+          await this.revokeCoordinatorGfsNetworkPolicy(recipe)
+        }
         const derivedPhase: RecipePhase = wfExecPhase === 'completed' ? 'active' : 'failed'
         const derivedMessage = `Workflow ${wfExecPhase}`
         if (wfExecPhase === 'completed') {
-          await this.ensureSteadyWorkflowRuntimeCredentials(recipe)
+          await this.ensureSteadyWorkflowRuntimeCredentials(recipe, approvalScopeRecipeName)
         }
         // Free a terminal run's COMPUTE pods promptly (mcp-host, coordinator,
         // snippet-runner, and any cross-namespace transport/MCP-server such as
@@ -1247,10 +1447,13 @@ export class WorkflowRecipeReconciler {
           )
           // Fall through to WorkflowReconciler.reconcile() which will create/recreate pods
         } else {
+          if (coordinatorGfsPolicyCanOpen) {
+            await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
+          }
           console.log(
             `[WR-Reconciler] Workflow "${name}" in-progress (wf: ${wfExecPhase}) — skipping reconcile`
           )
-          await this.ensureSteadyWorkflowRuntimeCredentials(recipe)
+          await this.ensureSteadyWorkflowRuntimeCredentials(recipe, approvalScopeRecipeName)
           // Issue #637 — same revocation enforcement as the active short-circuit
           // below: a re-labeled Secret on an in-progress workflow must tear down the
           // affected workload(s) even though we skip the full reconcile here.
@@ -1272,7 +1475,10 @@ export class WorkflowRecipeReconciler {
       // "active" covers both completed workflow infrastructure and an already-active
       // recipe whose current execution is still running.
       if (currentPhase === 'active' && !awaitsTriggeredRun) {
-        await this.ensureSteadyWorkflowRuntimeCredentials(recipe)
+        if (coordinatorGfsPolicyCanOpen) {
+          await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
+        }
+        await this.ensureSteadyWorkflowRuntimeCredentials(recipe, approvalScopeRecipeName)
         // Issue #637 — this short-circuit runs BEFORE the Step 8 ownership gate to
         // protect the coordinator 409-window. Enforce Secret-ownership revocation on
         // the active workload(s) (teardown only, no redeploy) and re-seed the
@@ -1291,8 +1497,6 @@ export class WorkflowRecipeReconciler {
       // ─── First-time infrastructure creation ──────────────────────────
       // Only reaches here on first deploy (candidate phase) or when no wfExecPhase yet.
       // After this, the skip guards above prevent redundant reconciles.
-
-      const workflowWorkloads = recipe.spec.workloads ?? []
 
       const workflowComputedValues = recipe.spec.computed
         ? evaluateComputedValues(recipe.spec.computed, recipe.spec.inputs ?? {})
@@ -1362,56 +1566,16 @@ export class WorkflowRecipeReconciler {
         throw error
       }
 
-      const mcpServerNs = this.config.namespace
-      const computedMcpServers = (recipe.spec.workloads ?? [])
-        .filter(w => w.transport != null && w.port != null)
-        .map(w => ({
-          id: w.id,
-          endpoint: `http://${mcpServerName(recipe.metadata.name, w.id, recipe)}.${mcpServerNs}.svc.cluster.local:${w.port!}${w.transport?.path ?? '/mcp'}`,
-        }))
-      const mergedMcpServersMap = new Map<string, { id: string; endpoint: string }>()
-      for (const srv of (recipe.spec.mcpServers ?? []) as Array<{
-        id: string
-        endpoint?: string
-      }>) {
-        if (srv.id && srv.endpoint)
-          mergedMcpServersMap.set(srv.id, { id: srv.id, endpoint: srv.endpoint })
-      }
-      for (const srv of computedMcpServers) mergedMcpServersMap.set(srv.id, srv)
-
-      // Validate: every steps[].mcpServers[] ID must resolve to an endpoint
-      for (const step of recipe.spec.steps ?? []) {
-        for (const srvId of (step as { mcpServers?: string[] }).mcpServers ?? []) {
-          if (!mergedMcpServersMap.has(srvId)) {
-            return {
-              phase: 'failed' as RecipePhase,
-              message: `Step "${(step as { id: string }).id}" references MCP server "${srvId}" not found in MCP workloads or mcpServers (with endpoint)`,
-              workloadStatuses: [],
-            }
-          }
+      // Rebuild after instance assignment because transport Service names may
+      // depend on the newly persisted workload instance mapping.
+      const { workflowRuntimeSpec, unresolvedMcpServerMessage } =
+        this.buildWorkflowRuntimeSpec(recipe)
+      if (unresolvedMcpServerMessage) {
+        return {
+          phase: 'failed' as RecipePhase,
+          message: unresolvedMcpServerMessage,
+          workloadStatuses: [],
         }
-      }
-
-      const workflowRuntimeSpec = {
-        coordinatorImage: recipe.spec.coordinatorImage,
-        agent: recipe.spec.agent as import('../workflow/types').AgentSpec | undefined,
-        inputContract: recipe.spec.inputContract,
-        steps: recipe.spec.steps! as import('../workflow/types').StepSpec[],
-        mcpServers: [...mergedMcpServersMap.values()] as Array<{ id: string; endpoint: string }>,
-        output: recipe.spec.output as import('../workflow/types').OutputSpec | undefined,
-        runtimeEgress: recipe.spec.runtimeEgress,
-        resources: recipe.spec.resources,
-        // NP-04: inner reconciler needs to know which mcpServers are workload-spawned
-        // (vs external McpServer CRDs) to compute the correct NetworkPolicy pod selector.
-        workloads: recipe.spec.workloads,
-        // Phase 5: forward scheduling/triggers so the inner reconciler can keep
-        // `workflow_schedules` in sync. Without these, the DB worker never sees
-        // the cron (root cause of schedules E2E Case 2 failure).
-        triggers: recipe.spec.triggers,
-        scheduling: recipe.spec.scheduling,
-        // Plugin Workload SDK: forward so the inner reconciler can create the
-        // mcp-host eagerly (always-on SDK server, independent of trigger).
-        pluginWorkloadSdk: recipe.spec.pluginWorkloadSdk,
       }
       const workflowPreflightError =
         this.workflowReconciler.validateWorkflowSpec(workflowRuntimeSpec)
@@ -1442,7 +1606,9 @@ export class WorkflowRecipeReconciler {
         }
       }
 
-      if (!(await this.hasVerifiedInheritedParentResources(recipe))) {
+      const inheritsVerifiedParentResources =
+        approvalScopeRecipeName !== recipe.metadata.name && declaresInheritedParentResources(recipe)
+      if (!inheritsVerifiedParentResources) {
         await this.ensureRecipeResources(recipe)
       }
 
@@ -1493,7 +1659,6 @@ export class WorkflowRecipeReconciler {
       console.log(
         `[WR-Reconciler] Workflow "${name}" first deploy (${recipe.spec.steps!.length} steps) — creating infrastructure`
       )
-      const approvalScopeRecipeName = await this.workflowRuntimeScopeRecipeName(recipe)
       // Recovery handoff: when this workflow was latched `failed` by a transient
       // infra blip, hand the inner reconciler a `recovering` execution phase
       // (preserving message/steps/conditions) so it retries infrastructure
@@ -1528,6 +1693,11 @@ export class WorkflowRecipeReconciler {
         recipe.metadata.labels?.[WORKFLOW_ACTOR_ID_LABEL],
         recipe.metadata.labels?.[WORKFLOW_ACTOR_TYPE_LABEL]
       )
+      if (coordinatorGfsPolicyCanOpen && !result.skipStatusPatch && result.phase !== 'failed') {
+        await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
+      } else if (result.phase === 'failed' || !coordinatorGfsPolicyCanOpen) {
+        await this.revokeCoordinatorGfsNetworkPolicy(recipe)
+      }
       return {
         phase: result.phase as RecipePhase,
         message: result.message,
@@ -4026,6 +4196,149 @@ export class WorkflowRecipeReconciler {
         })
       },
       `NetworkPolicy "${policyName}" in ${namespace}`
+    )
+  }
+
+  private coordinatorGfsNetworkPolicy(recipe: WorkflowRecipeCRD): k8s.V1NetworkPolicy {
+    return buildCoordinatorGfsNetworkPolicy({
+      recipeName: recipe.metadata.name,
+      sandboxNamespace: this.config.sandboxNamespace,
+    })
+  }
+
+  private buildWorkflowRuntimeSpec(recipe: WorkflowRecipeCRD) {
+    const computedMcpServers = (recipe.spec.workloads ?? [])
+      .filter(workload => workload.transport != null && workload.port != null)
+      .map(workload => ({
+        id: workload.id,
+        endpoint: `http://${mcpServerName(recipe.metadata.name, workload.id, recipe)}.${this.config.namespace}.svc.cluster.local:${workload.port!}${workload.transport?.path ?? '/mcp'}`,
+      }))
+    const mergedMcpServers = new Map<string, { id: string; endpoint: string }>()
+    for (const server of (recipe.spec.mcpServers ?? []) as Array<{
+      id: string
+      endpoint?: string
+    }>) {
+      if (server.id && server.endpoint) {
+        mergedMcpServers.set(server.id, { id: server.id, endpoint: server.endpoint })
+      }
+    }
+    for (const server of computedMcpServers) mergedMcpServers.set(server.id, server)
+
+    let unresolvedMcpServerMessage: string | undefined
+    for (const step of recipe.spec.steps ?? []) {
+      for (const serverId of (step as { mcpServers?: string[] }).mcpServers ?? []) {
+        if (!mergedMcpServers.has(serverId)) {
+          unresolvedMcpServerMessage = `Step "${step.id}" references MCP server "${serverId}" not found in MCP workloads or mcpServers (with endpoint)`
+          break
+        }
+      }
+      if (unresolvedMcpServerMessage) break
+    }
+
+    return {
+      unresolvedMcpServerMessage,
+      workflowRuntimeSpec: {
+        coordinatorImage: recipe.spec.coordinatorImage,
+        agent: recipe.spec.agent as import('../workflow/types').AgentSpec | undefined,
+        inputContract: recipe.spec.inputContract,
+        steps: recipe.spec.steps! as import('../workflow/types').StepSpec[],
+        mcpServers: [...mergedMcpServers.values()] as Array<{ id: string; endpoint: string }>,
+        output: recipe.spec.output as import('../workflow/types').OutputSpec | undefined,
+        runtimeEgress: recipe.spec.runtimeEgress,
+        resources: recipe.spec.resources,
+        gfs: recipe.spec.gfs,
+        workloads: recipe.spec.workloads,
+        triggers: recipe.spec.triggers,
+        scheduling: recipe.spec.scheduling,
+        pluginWorkloadSdk: recipe.spec.pluginWorkloadSdk,
+      },
+    }
+  }
+
+  private async ensureCoordinatorGfsNetworkPolicyIfEnabled(
+    recipe: WorkflowRecipeCRD
+  ): Promise<void> {
+    if ((recipe.spec.gfs?.publishTargets ?? []).length === 0) return
+
+    const namespace = this.config.sandboxNamespace
+    const policy = this.coordinatorGfsNetworkPolicy(recipe)
+    const name = policy.metadata!.name!
+    await this.createOrReplace(
+      () => this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy }),
+      async () => {
+        const existing = await this.networkingApi.readNamespacedNetworkPolicy({
+          name,
+          namespace,
+        })
+        this.assertCoordinatorGfsNetworkPolicyOwnership(existing, recipe.metadata.name, namespace)
+        const desiredLabels = policy.metadata?.labels ?? {}
+        const existingLabels = existing.metadata?.labels ?? {}
+        const labelsMatch = Object.entries(desiredLabels).every(
+          ([key, value]) => existingLabels[key] === value
+        )
+        if (labelsMatch && JSON.stringify(existing.spec) === JSON.stringify(policy.spec)) {
+          return existing
+        }
+        policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
+        return this.networkingApi.replaceNamespacedNetworkPolicy({
+          name,
+          namespace,
+          body: policy,
+        })
+      },
+      `NetworkPolicy "${name}" in ${namespace}`
+    )
+  }
+
+  private async revokeCoordinatorGfsNetworkPolicyIfDisabled(
+    recipe: WorkflowRecipeCRD
+  ): Promise<void> {
+    if ((recipe.spec.gfs?.publishTargets ?? []).length > 0) return
+
+    await this.revokeCoordinatorGfsNetworkPolicy(recipe)
+  }
+
+  private async revokeCoordinatorGfsNetworkPolicy(recipe: WorkflowRecipeCRD): Promise<void> {
+    const namespace = this.config.sandboxNamespace
+    const policy = this.coordinatorGfsNetworkPolicy(recipe)
+    const name = policy.metadata!.name!
+    let existing: k8s.V1NetworkPolicy
+    try {
+      existing = await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return
+      throw error
+    }
+    this.assertCoordinatorGfsNetworkPolicyOwnership(existing, recipe.metadata.name, namespace)
+    const uid = existing.metadata?.uid
+    const resourceVersion = existing.metadata?.resourceVersion
+    if (!uid || !resourceVersion) {
+      throw new NetworkPolicyOwnershipConflictError(
+        `Refusing to delete NetworkPolicy "${name}" in ${namespace}: live object identity is incomplete`
+      )
+    }
+    await this.deleteOrThrow(
+      () =>
+        this.networkingApi.deleteNamespacedNetworkPolicy({
+          name,
+          namespace,
+          body: { preconditions: { uid, resourceVersion } },
+        }),
+      `NetworkPolicy "${name}" in ${namespace}`
+    )
+  }
+
+  private assertCoordinatorGfsNetworkPolicyOwnership(
+    existing: k8s.V1NetworkPolicy,
+    recipeName: string,
+    namespace: string
+  ): void {
+    const labels = existing.metadata?.labels ?? {}
+    if (labels['clerum.io/managed-by'] === 'wrc' && labels['clerum.io/recipe'] === recipeName) {
+      return
+    }
+    throw new NetworkPolicyOwnershipConflictError(
+      `Refusing to mutate NetworkPolicy "${recipeName}-coordinator-to-gfs" in ${namespace}: existing policy is not owned by WRC for WorkflowRecipe "${recipeName}"`
     )
   }
 

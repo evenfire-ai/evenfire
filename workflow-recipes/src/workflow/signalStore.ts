@@ -1,10 +1,9 @@
 /**
  * In-memory signal store for workflow runtime signals.
  *
- * Extracted from restEndpoints.ts into its own module so that
- * triggerHandler.ts can enqueue cancel signals without creating a
- * circular dependency (restEndpoints → triggerHandler → restEndpoints).
- * */
+ * Kept separate from the HTTP handlers so runtime signal state has a single
+ * owner and can be consumed by both the reconciler and REST surface.
+ */
 
 export interface WorkflowSignal {
   type: 'cancel' | 'pause' | 'resume' | 'approval'

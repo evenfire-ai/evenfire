@@ -195,11 +195,12 @@ describe('RegistryCatalog expansion and actions', () => {
     render(<RegistryCatalog />)
     const row = (await screen.findByText('brave-search')).closest('tr')!
 
-    expect(screen.queryByText('Main category')).not.toBeInTheDocument()
+    expect(screen.queryByText('local / streamableHttp')).not.toBeInTheDocument()
     fireEvent.click(row)
 
-    expect(screen.getByText('Main category')).toBeInTheDocument()
     expect(screen.getByText('Type')).toBeInTheDocument()
+    const detailRow = screen.getByText('Type').closest('tr')!
+    expect(within(detailRow).getAllByText('search')).toHaveLength(2)
     expect(screen.getByText('HIGH')).toBeInTheDocument()
     expect(screen.getByText('verified')).toBeInTheDocument()
     expect(screen.getByText('web')).toBeInTheDocument()

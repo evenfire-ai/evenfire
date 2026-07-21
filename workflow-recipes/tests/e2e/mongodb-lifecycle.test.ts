@@ -43,7 +43,7 @@ const LOCAL_PORT = 18086
 const MCP_REMOTE_PORT = 3000
 const HEALTH_REMOTE_PORT = 3001
 
-// Expected MongoDB MCP tool names (from us-central1-docker.pkg.dev/your-gcp-project/clerum/mongodb-mcp-server:latest)
+// Expected MongoDB MCP tool names (from us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/mongodb-mcp-server:latest)
 // Verified 2026-03-06: Server returns 15 READ-ONLY tools (no insert/update/delete)
 // Actual tools: aggregate, collection-indexes, collection-schema, collection-storage-size,
 //               connect, count, db-stats, explain, export, find, list-collections,

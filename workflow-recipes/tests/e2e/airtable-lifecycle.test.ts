@@ -281,7 +281,7 @@ describe('Airtable MCP Server - E2E Lifecycle', () => {
 
   // E10.3: Pod Ready + Health check passing
   // Note: In minikube without DOCR registry credentials, the image
-  // us-central1-docker.pkg.dev/your-gcp-project/clerum/airtable-mcp-server:latest may fail to pull
+  // us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/airtable-mcp-server:latest may fail to pull
   // (ImagePullBackOff). We attempt to wait but skip gracefully if image pull fails.
   it(
     'E10.3 — Pod Ready and MCP server healthy (skips if image unavailable)',

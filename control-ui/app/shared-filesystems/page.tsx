@@ -37,7 +37,7 @@ const DELETE_REFRESH_ATTEMPTS = 6
 /**
  * Lists every SharedFileSystem CRD (always in mcp-host namespace in v1) and
  * surfaces the status reported by HCC's sharedFileSystemReconciler. Clicking
- * a row drills into the per-SFS file browser at /shared-filesystems/[name].
+ * a row drills into the per-SFS file browser at the canonical Agent Files detail route.
  *
  * Admin can create + delete SharedFileSystems from this view; HCC reconciles
  * PVC + init Job + workspace-files-controller Deployment + Service +
@@ -160,7 +160,7 @@ export default function SharedFileSystemsPage() {
             title={
               <>
                 <IconSharedFiles />
-                Shared Files
+                Agent Files
               </>
             }
             subtitle="Workspace volumes that Contexts can mount read-only into agent pods."
@@ -202,7 +202,7 @@ export default function SharedFileSystemsPage() {
           title={
             <>
               <IconSharedFiles />
-              {isInitialLoad ? 'Shared Files' : `Shared Files (${filteredItems.length})`}
+              {isInitialLoad ? 'Agent Files' : `Agent Files (${filteredItems.length})`}
             </>
           }
           subtitle="Workspace volumes that Contexts can mount read-only into agent pods."
@@ -211,8 +211,8 @@ export default function SharedFileSystemsPage() {
               <SectionSearchInput
                 value={searchQuery}
                 onChange={setSearchQuery}
-                placeholder="Search shared files"
-                ariaLabel="Search shared files"
+                placeholder="Search agent files"
+                ariaLabel="Search agent files"
                 disabled={isInitialLoad}
               />
               <button
@@ -220,14 +220,14 @@ export default function SharedFileSystemsPage() {
                 className="cu-btn cu-btn--icon cu-btn--toolbar"
                 onClick={() => void load()}
                 disabled={loading || isInitialLoad}
-                aria-label={loading ? 'Refreshing shared files' : 'Refresh shared files'}
+                aria-label={loading ? 'Refreshing agent files' : 'Refresh agent files'}
               >
                 <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
               </button>
               <button
                 type="button"
                 className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => router.push(CONTROL_ROUTES.sharedFiles.new)}
+                onClick={() => router.push(CONTROL_ROUTES.agentFiles.new)}
                 disabled={isInitialLoad}
               >
                 New
@@ -279,14 +279,14 @@ export default function SharedFileSystemsPage() {
                       className="cu-table__row cu-table__row--clickable"
                       onClick={() => {
                         if (!isDeleting) {
-                          router.push(CONTROL_ROUTES.sharedFiles.detail(name))
+                          router.push(CONTROL_ROUTES.agentFiles.detail(name))
                         }
                       }}
                       onKeyDown={e => {
                         if (isDeleting) return
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault()
-                          router.push(CONTROL_ROUTES.sharedFiles.detail(name))
+                          router.push(CONTROL_ROUTES.agentFiles.detail(name))
                         }
                       }}
                       tabIndex={0}

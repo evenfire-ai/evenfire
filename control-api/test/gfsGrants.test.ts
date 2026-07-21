@@ -4,7 +4,9 @@ import {
   type GfsPermission,
   type GrantsDb,
   assertMayGrant,
+  assertMayGrantBatch,
   auditMutation,
+  normalizeMutationSubjects,
   subjectKey,
 } from '../src/routes/gfs/grants.js'
 
@@ -38,6 +40,10 @@ interface AuditRow {
   outcome: string
   rowHash: string
 }
+interface QueryCall {
+  text: string
+  values?: unknown[]
+}
 
 function mockDb(opts: {
   ancestors?: Record<string, string[]>
@@ -45,13 +51,46 @@ function mockDb(opts: {
   shares?: MockShare[]
   audit?: AuditRow[]
   auditSql?: string[]
+  queries?: QueryCall[]
+  rejectConcurrentQueries?: boolean
 }): GrantsDb {
+  let queryInFlight = false
   return {
     async query(text: string, values?: unknown[]) {
+      if (opts.rejectConcurrentQueries && queryInFlight) {
+        throw new Error('concurrent transaction query')
+      }
+      queryInFlight = true
+      await Promise.resolve()
+      opts.queries?.push({ text, values })
+      const complete = <T>(result: T): T => {
+        queryInFlight = false
+        return result
+      }
+      if (text.includes('authority_grants AS') && text.includes('authority_shares AS')) {
+        const rid = String(values?.[1] ?? '')
+        const chain = opts.ancestors?.[rid] ?? []
+        const subjectTypes = (values?.[2] as string[]) ?? []
+        const subjectIds = (values?.[3] as string[]) ?? []
+        const wanted = new Set(subjectTypes.map((type, i) => `${type}:${subjectIds[i] ?? ''}`))
+        return complete({
+          rows: [
+            {
+              ancestors: chain,
+              grants: (opts.grants ?? []).filter(grant =>
+                wanted.has(`${grant.subject_type}:${grant.subject_id ?? ''}`)
+              ),
+              shares: (opts.shares ?? []).filter(share =>
+                wanted.has(`${share.subject_type}:${share.subject_id ?? ''}`)
+              ),
+            },
+          ],
+        })
+      }
       if (text.includes('WITH RECURSIVE chain')) {
         const rid = String(values?.[1] ?? '')
         const chain = opts.ancestors?.[rid] ?? []
-        return { rows: chain.map(resource_id => ({ resource_id })) }
+        return complete({ rows: chain.map(resource_id => ({ resource_id })) })
       }
       if (text.includes('FROM gfs_grants')) {
         // Faithfully model the real SQL subject filter on subject_type +
@@ -59,21 +98,21 @@ function mockDb(opts: {
         const subjectTypes = (values?.[1] as string[]) ?? []
         const subjectIds = (values?.[2] as string[]) ?? []
         const wanted = new Set(subjectTypes.map((type, i) => `${type}:${subjectIds[i] ?? ''}`))
-        return {
+        return complete({
           rows: (opts.grants ?? []).filter(g =>
             wanted.has(`${g.subject_type}:${g.subject_id ?? ''}`)
           ),
-        }
+        })
       }
       if (text.includes('FROM gfs_shares')) {
         const subjectTypes = (values?.[1] as string[]) ?? []
         const subjectIds = (values?.[2] as string[]) ?? []
         const wanted = new Set(subjectTypes.map((type, i) => `${type}:${subjectIds[i] ?? ''}`))
-        return {
+        return complete({
           rows: (opts.shares ?? []).filter(s =>
             wanted.has(`${s.subject_type}:${s.subject_id ?? ''}`)
           ),
-        }
+        })
       }
       if (text.includes('INSERT INTO gfs_audit')) {
         opts.auditSql?.push(text)
@@ -86,9 +125,9 @@ function mockDb(opts: {
           outcome: String(v[4]),
           rowHash: String(v[7]),
         })
-        return { rows: [], rowCount: 1 }
+        return complete({ rows: [], rowCount: 1 })
       }
-      return { rows: [] }
+      return complete({ rows: [] })
     },
   }
 }
@@ -96,6 +135,12 @@ function mockDb(opts: {
 const R = '11111111-1111-1111-1111-111111111111'
 const PARENT = '22222222-2222-2222-2222-222222222222'
 const OTHER = '33333333-3333-3333-3333-333333333333'
+const USER_ID = '44444444-4444-4444-8444-444444444444'
+const TEAM_ID = '55555555-5555-4555-8555-555555555555'
+
+function indexedUuid(index: number): string {
+  return `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`
+}
 
 const operator: GfsCaller = {
   isOperator: true,
@@ -107,6 +152,260 @@ function user(id: string): GfsCaller {
 }
 
 const perms = (...p: GfsPermission[]): GfsPermission[] => p
+
+describe('normalizeMutationSubjects — singular/plural grant transport', () => {
+  it('requires exactly one own property named subject or subjects', () => {
+    for (const body of [
+      {},
+      { subject: { type: 'user', id: USER_ID }, subjects: [] },
+      { subject: undefined, subjects: [{ type: 'user', id: USER_ID }] },
+    ]) {
+      expect(() => normalizeMutationSubjects(body, { isShare: false })).toThrowError(
+        expect.objectContaining({
+          status: 400,
+          code: 'subjects_invalid',
+        })
+      )
+    }
+  })
+
+  it('preserves every currently accepted singular grant subject type', () => {
+    const singularSubjects = [
+      { type: 'operator' },
+      { type: 'user', id: USER_ID },
+      { type: 'team', id: TEAM_ID },
+      { type: 'host', id: '1st:mcp-host/standalone' },
+      { type: 'context', id: 'sandbox-recipes' },
+    ] as const
+
+    for (const subject of singularSubjects) {
+      expect(normalizeMutationSubjects({ subject }, { isShare: false })).toEqual([subject])
+    }
+  })
+
+  it('accepts the inclusive 1-100 plural bounds', () => {
+    expect(
+      normalizeMutationSubjects(
+        { subjects: [{ type: 'user', id: indexedUuid(1) }] },
+        { isShare: false }
+      )
+    ).toHaveLength(1)
+
+    expect(
+      normalizeMutationSubjects(
+        {
+          subjects: Array.from({ length: 100 }, (_, index) => ({
+            type: 'user',
+            id: indexedUuid(index + 1),
+          })),
+        },
+        { isShare: false }
+      )
+    ).toHaveLength(100)
+  })
+
+  it.each([
+    { label: 'non-array', subjects: 'user' },
+    { label: 'empty', subjects: [] },
+    {
+      label: 'oversized',
+      subjects: Array.from({ length: 101 }, (_, index) => ({
+        type: 'user',
+        id: indexedUuid(index + 1),
+      })),
+    },
+  ])('rejects a $label plural collection', ({ subjects }) => {
+    expect(() => normalizeMutationSubjects({ subjects }, { isShare: false })).toThrowError(
+      expect.objectContaining({ status: 400, code: 'subjects_invalid' })
+    )
+  })
+
+  it('normalizes canonical user, team, first-party host, and third-party host targets in order', () => {
+    const subjects = [
+      { type: 'user', id: USER_ID },
+      { type: 'team', id: TEAM_ID },
+      { type: 'host', id: '1st:mcp-host/standalone' },
+      { type: 'host', id: '3rd:sandbox-recipes/daily-report' },
+    ]
+
+    expect(normalizeMutationSubjects({ subjects }, { isShare: false })).toEqual(subjects)
+  })
+
+  it('canonicalizes uppercase user and team UUIDs before returning normalized subjects', () => {
+    expect(
+      normalizeMutationSubjects(
+        {
+          subjects: [
+            { type: 'user', id: USER_ID.toUpperCase() },
+            { type: 'team', id: TEAM_ID.toUpperCase() },
+          ],
+        },
+        { isShare: false }
+      )
+    ).toEqual([
+      { type: 'user', id: USER_ID },
+      { type: 'team', id: TEAM_ID },
+    ])
+  })
+
+  it('rejects a later mixed-case UUID duplicate by its stable plural index', () => {
+    expect(() =>
+      normalizeMutationSubjects(
+        {
+          subjects: [
+            { type: 'user', id: USER_ID },
+            { type: 'user', id: USER_ID.toUpperCase() },
+          ],
+        },
+        { isShare: false }
+      )
+    ).toThrowError(
+      expect.objectContaining({
+        status: 400,
+        code: 'subjects_invalid',
+        invalidIndexes: [1],
+      })
+    )
+  })
+
+  it.each([
+    ['user only', [{ type: 'user', id: USER_ID }]],
+    ['team only', [{ type: 'team', id: TEAM_ID }]],
+    ['host only', [{ type: 'host', id: '1st:mcp-host/standalone' }]],
+    [
+      'user and team',
+      [
+        { type: 'user', id: USER_ID },
+        { type: 'team', id: TEAM_ID },
+      ],
+    ],
+    [
+      'user and host',
+      [
+        { type: 'user', id: USER_ID },
+        { type: 'host', id: '1st:mcp-host/standalone' },
+      ],
+    ],
+    [
+      'team and host',
+      [
+        { type: 'team', id: TEAM_ID },
+        { type: 'host', id: '3rd:sandbox-recipes/daily-report' },
+      ],
+    ],
+  ])('accepts the grant matrix for %s', (_label, subjects) => {
+    expect(normalizeMutationSubjects({ subjects }, { isShare: false })).toEqual(subjects)
+  })
+
+  it('rejects malformed, singular-only, and later duplicate plural entries with stable indexes', () => {
+    expect(() =>
+      normalizeMutationSubjects(
+        {
+          subjects: [
+            { type: 'user', id: USER_ID },
+            { type: 'host', id: 'not-canonical' },
+            { type: 'team', id: TEAM_ID },
+            { type: 'user', id: USER_ID },
+            { type: 'context', id: 'sandbox-recipes' },
+            { type: 'operator' },
+          ],
+        },
+        { isShare: false }
+      )
+    ).toThrowError(
+      expect.objectContaining({
+        status: 400,
+        code: 'subjects_invalid',
+        invalidIndexes: [1, 3, 4, 5],
+      })
+    )
+  })
+})
+
+describe('assertMayGrantBatch — common grant authorization', () => {
+  it('loads one authority snapshot statement with the caller subjects in stable order', async () => {
+    const queries: QueryCall[] = []
+    const db = mockDb({
+      queries,
+      rejectConcurrentQueries: true,
+      ancestors: { [R]: [R, PARENT] },
+      grants: [
+        {
+          subject_type: 'user',
+          subject_id: 'owner',
+          resource_id: R,
+          permissions: ['read', 'manage_acl'],
+          inherit: true,
+        },
+      ],
+      shares: [
+        {
+          subject_type: 'team',
+          subject_id: 'owners',
+          resource_id: R,
+          permissions: ['write'],
+          include_descendants: false,
+        },
+      ],
+    })
+    const owner: GfsCaller = {
+      isOperator: false,
+      subjects: new Set(['user:owner', 'team:owners']),
+      actorKey: 'user:owner',
+    }
+    const targets = [
+      { type: 'user', id: USER_ID },
+      { type: 'team', id: TEAM_ID },
+      { type: 'host', id: '1st:mcp-host/standalone' },
+    ] as const
+
+    await expect(
+      assertMayGrantBatch(db, owner, 'main', R, perms('read', 'write'), targets, {
+        isShare: false,
+      })
+    ).resolves.toBeUndefined()
+
+    expect(queries).toHaveLength(1)
+    expect(queries[0]?.text).toContain('WITH RECURSIVE chain AS')
+    expect(queries[0]?.text).toContain('requested_subjects(subject_type, subject_id)')
+    expect(queries[0]?.text).toContain('FROM gfs_grants')
+    expect(queries[0]?.text).toContain('FROM gfs_shares')
+    expect(queries[0]?.values).toEqual(['main', R, ['user', 'team'], ['owner', 'owners']])
+  })
+
+  it('keeps the existing operator host policy intact for bulk API grants', async () => {
+    const db = mockDb({})
+    await expect(
+      assertMayGrantBatch(
+        db,
+        operator,
+        'main',
+        R,
+        perms('read', 'write', 'delete', 'manage_acl', 'share'),
+        [
+          { type: 'host', id: '1st:mcp-host/standalone' },
+          { type: 'host', id: '3rd:sandbox-recipes/daily-report' },
+        ],
+        { isShare: false }
+      )
+    ).resolves.toBeUndefined()
+  })
+
+  it('keeps the existing caller-dependent host restriction intact', async () => {
+    const db = mockDb({})
+    await expect(
+      assertMayGrantBatch(
+        db,
+        user('owner'),
+        'main',
+        R,
+        perms('manage_acl'),
+        [{ type: 'host', id: '1st:mcp-host/standalone' }],
+        { isShare: false }
+      )
+    ).rejects.toMatchObject({ status: 403, code: 'agent_manager_forbidden' })
+  })
+})
 
 describe('assertMayGrant — operator intrinsic authority', () => {
   it('lets the operator grant any bit without a stored grant', async () => {

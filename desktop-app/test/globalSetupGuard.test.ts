@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { validateBaseUrls } from './e2e-playwright/global-setup'
 
-const DEV_CONTEXT = 'gke_your-gcp-project_us-central1-a_example-dev'
+const DEV_CONTEXT = 'gke_${GCP_PROJECT}_us-central1-a_example-dev'
 
 describe('validateBaseUrls', () => {
   it('requires localhost for clerum-test', () => {

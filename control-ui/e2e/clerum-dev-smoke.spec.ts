@@ -32,7 +32,7 @@ const BASE_UI = process.env.CONTROL_UI_URL || 'http://localhost:3000'
 const ADMIN_USER = process.env.ADMIN_USER || 'admin'
 const ADMIN_PASS = process.env.ADMIN_PASS || 'changeme123!'
 const K8S_CONTEXT =
-  process.env.KUBECONTEXT || process.env.CONTEXT || 'gke_your-gcp-project_us-central1-a_example-dev'
+  process.env.KUBECONTEXT || process.env.CONTEXT || 'gke_${GCP_PROJECT}_us-central1-a_example-dev'
 const EXPECTED_GFS_STORAGE_CLASS = process.env.GFS_STORAGE_CLASS || 'standard-rwo'
 
 // Minimum entries we expect the registry to serve. The registry base seed is
@@ -168,8 +168,8 @@ test.describe('example-dev — cluster smoke', () => {
   test('S7. GFS — sidebar navigation loads through Control UI proxy and live cluster resources exist', async () => {
     await login(page)
     await page.goto(BASE_UI)
-    const globalFilesLink = page.getByRole('link', { name: /Global Files/i })
-    await expect(globalFilesLink).toBeVisible()
+    const globalFileSystemLink = page.getByRole('link', { name: /Global File System/i })
+    await expect(globalFileSystemLink).toBeVisible()
 
     const treeResponse = page.waitForResponse(
       response =>
@@ -177,8 +177,8 @@ test.describe('example-dev — cluster smoke', () => {
         response.request().method() === 'GET'
     )
 
-    await globalFilesLink.click()
-    await expect(page).toHaveURL(/\/gfs$/)
+    await globalFileSystemLink.click()
+    await expect(page).toHaveURL(/\/global-file-system$/)
     await expect(page.getByRole('heading', { name: 'Global File System' })).toBeVisible()
     await expect(page.getByText('Drive', { exact: true })).toBeVisible()
     await expect(page.getByText('main', { exact: true }).first()).toBeVisible()

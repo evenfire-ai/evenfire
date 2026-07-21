@@ -3,6 +3,8 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { config } from '../config'
+import { FinishReason } from '../core/types'
+import { createGfscClient } from '../internalTools/gfsClient'
 import type { SingleTurnProvider } from '../llm'
 import { getMcpHostJwtStateFilePath } from './mcpHostJwtState'
 import { gateStep } from './userApprovalRequester'
@@ -10,6 +12,21 @@ import { WorkflowService } from './workflowService'
 
 vi.mock('./userApprovalRequester', () => ({
   gateStep: vi.fn(),
+}))
+
+const gfsGate = vi.hoisted(() => ({ enabled: false }))
+const gfsClient = vi.hoisted(() => ({
+  accessible: vi.fn(),
+  list: vi.fn(),
+  read: vi.fn(),
+  stat: vi.fn(),
+  resolve: vi.fn(),
+  write: vi.fn(),
+}))
+
+vi.mock('../internalTools/gfsClient', () => ({
+  hasGfsRuntimeAccess: vi.fn(() => gfsGate.enabled),
+  createGfscClient: vi.fn(() => gfsClient),
 }))
 
 function makeJwt(exp: number, label: string): string {
@@ -58,6 +75,7 @@ describe('WorkflowService approval gating', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    gfsGate.enabled = false
     const nowSecs = Math.floor(Date.now() / 1000)
     config.mcpHostRuntimeAccessToken = makeJwt(nowSecs + 600, 'initial-access')
     config.mcpHostRuntimeRefreshToken = makeJwt(nowSecs + 900, 'initial-refresh')
@@ -325,10 +343,13 @@ describe('WorkflowService approval gating', () => {
 describe('WorkflowService internal-tools capability gate (#592)', () => {
   const originalOutputDir = process.env.CLERUM_OUTPUT_DIR
   const originalMounts = process.env.CLERUM_CONTEXT_FILES_MOUNTS
+  const originalGfsScopes = process.env.MCP_HOST_GFS_SCOPES
   let tempDir = ''
 
   beforeEach(() => {
     vi.clearAllMocks()
+    gfsGate.enabled = false
+    delete process.env.MCP_HOST_GFS_SCOPES
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-capgate-'))
     process.env.CLERUM_OUTPUT_DIR = tempDir
   })
@@ -338,6 +359,8 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
     else process.env.CLERUM_OUTPUT_DIR = originalOutputDir
     if (originalMounts === undefined) delete process.env.CLERUM_CONTEXT_FILES_MOUNTS
     else process.env.CLERUM_CONTEXT_FILES_MOUNTS = originalMounts
+    if (originalGfsScopes === undefined) delete process.env.MCP_HOST_GFS_SCOPES
+    else process.env.MCP_HOST_GFS_SCOPES = originalGfsScopes
     fs.rmSync(tempDir, { recursive: true, force: true })
   })
 
@@ -346,7 +369,13 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
   // getFilteredTools() returns the intersection of the REGISTERED catalog with
   // the include list, so a context-files tool appears here only if
   // workflowService actually registered it (i.e. the SFS gate let it through).
-  async function toolNamesExposedToProvider(): Promise<string[]> {
+  async function toolNamesExposedToProvider(
+    include = [
+      'clerum__generate_markdown',
+      'clerum__context_files_list',
+      'clerum__context_files_read',
+    ]
+  ): Promise<string[]> {
     const provider = makeProvider()
     const service = new WorkflowService('recipe-1', {
       llmFactory: () => provider,
@@ -362,11 +391,7 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
       stepId: 'gate-step',
       instruction: 'Do the thing.',
       allowedTools: {
-        include: [
-          'clerum__generate_markdown',
-          'clerum__context_files_list',
-          'clerum__context_files_read',
-        ],
+        include,
       },
     })
     expect(result.status).toBe('completed')
@@ -398,5 +423,147 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
     expect(names).toContain('clerum__generate_markdown')
     expect(names).toContain('clerum__context_files_list')
     expect(names).toContain('clerum__context_files_read')
+  })
+
+  it('does not expose GFS tools when runtime access is absent', async () => {
+    process.env.MCP_HOST_GFS_SCOPES = 'gfs.read,gfs.write'
+    const names = await toolNamesExposedToProvider([
+      'clerum__generate_markdown',
+      'clerum__gfs_read',
+      'clerum__gfs_write',
+    ])
+
+    expect(names).toContain('clerum__generate_markdown')
+    expect(names).not.toContain('clerum__gfs_read')
+    expect(names).not.toContain('clerum__gfs_write')
+  })
+
+  it('does not register or expose GFS tools without an explicit allowedTools opt-in', async () => {
+    gfsGate.enabled = true
+    process.env.MCP_HOST_GFS_SCOPES = 'gfs.read,gfs.write'
+
+    const names = await toolNamesExposedToProvider(['clerum__generate_markdown'])
+
+    expect(names).toEqual(['clerum__generate_markdown'])
+    expect(createGfscClient).not.toHaveBeenCalled()
+  })
+
+  it('exposes the existing GFS read and write tools when runtime access is present', async () => {
+    gfsGate.enabled = true
+    process.env.MCP_HOST_GFS_SCOPES = 'gfs.read,gfs.write'
+
+    const names = await toolNamesExposedToProvider([
+      'clerum__generate_markdown',
+      'clerum__gfs_accessible',
+      'clerum__gfs_list',
+      'clerum__gfs_read',
+      'clerum__gfs_stat',
+      'clerum__gfs_resolve',
+      'clerum__gfs_write',
+    ])
+
+    expect(names).toEqual(
+      expect.arrayContaining([
+        'clerum__generate_markdown',
+        'clerum__gfs_accessible',
+        'clerum__gfs_list',
+        'clerum__gfs_read',
+        'clerum__gfs_stat',
+        'clerum__gfs_resolve',
+        'clerum__gfs_write',
+      ])
+    )
+  })
+
+  it('does not register a GFS write tool for a read-only runtime credential', async () => {
+    gfsGate.enabled = true
+    process.env.MCP_HOST_GFS_SCOPES = 'gfs.read'
+
+    const names = await toolNamesExposedToProvider([
+      'clerum__generate_markdown',
+      'clerum__gfs_read',
+      'clerum__gfs_write',
+    ])
+
+    expect(names).toContain('clerum__gfs_read')
+    expect(names).not.toContain('clerum__gfs_write')
+  })
+
+  it('dispatches workflow GFS calls through the existing gfsc client boundary', async () => {
+    gfsGate.enabled = true
+    process.env.MCP_HOST_GFS_SCOPES = 'gfs.read'
+    gfsClient.read.mockResolvedValue({ content: 'granted file content' })
+    const provider = makeProvider()
+    vi.mocked(provider.completeSingleTurnWithTools)
+      .mockResolvedValueOnce({
+        content: '',
+        tool_calls: [
+          {
+            id: 'gfs-read-1',
+            name: 'clerum__gfs_read',
+            arguments: { drive: 'main', resourceId: '0123456789abcdef0123456789abcdef' },
+          },
+        ],
+        usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+        finish_reason: FinishReason.ToolUse,
+      })
+      .mockResolvedValueOnce({
+        content: 'Read completed.',
+        tool_calls: [],
+        usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+        finish_reason: FinishReason.Stop,
+      })
+    const service = new WorkflowService('recipe-1', {
+      llmFactory: () => provider,
+      mcpClientFactory: () => {
+        throw new Error('mcp client must not be created in this GFS gate test')
+      },
+    })
+    service.configure({ provider: 'openai', apiKey: 'test-key', model: 'gpt-4o' })
+
+    const result = await service.executeStep({
+      stepId: 'gfs-read-step',
+      instruction: 'Read the granted file.',
+      allowedTools: { include: ['clerum__gfs_read'] },
+    })
+
+    expect(result.status).toBe('completed')
+    expect(result.toolsCalled).toEqual([
+      expect.objectContaining({
+        serverName: 'clerum',
+        toolName: 'gfs_read',
+        result: expect.objectContaining({ success: true }),
+      }),
+    ])
+    expect(gfsClient.read).toHaveBeenCalledWith({
+      drive: 'main',
+      resourceId: '0123456789abcdef0123456789abcdef',
+    })
+  })
+
+  it('fails closed when toolChoice is required but no allowed tool is available', async () => {
+    const provider = makeProvider()
+    const service = new WorkflowService('recipe-1', {
+      llmFactory: () => provider,
+      mcpClientFactory: () => {
+        throw new Error('mcp client must not be created in this required-tool gate test')
+      },
+    })
+    service.configure({ provider: 'openai', apiKey: 'test-key', model: 'gpt-4o' })
+
+    const result = await service.executeStep({
+      stepId: 'required-missing-tool',
+      instruction: 'Use the unavailable tool.',
+      allowedTools: { include: ['clerum__gfs_read'] },
+      toolChoice: 'required',
+    })
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      error:
+        'required-tool-unavailable: step requires a tool call but no allowed tools are available',
+    })
+    expect(provider.completeSingleTurn).not.toHaveBeenCalled()
+    expect(provider.completeSingleTurnWithTools).not.toHaveBeenCalled()
   })
 })

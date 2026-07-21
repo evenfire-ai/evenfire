@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DashboardLayout } from '@components/DashboardLayout'
+import { LoadingScreen } from '@components/LoadingScreen'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconPluginSdk } from '@components/Sidebar/icons'
@@ -260,15 +261,7 @@ export default function PluginWorkloadSdkPage() {
   }
 
   if (authState.isLoading) {
-    return (
-      <div className="cu-app-layout">
-        <main className="cu-main">
-          <div className="cu-card">
-            <div className="cu-card__body">Loading…</div>
-          </div>
-        </main>
-      </div>
-    )
+    return <LoadingScreen />
   }
   if (!authState.isLoggedIn) return null
 

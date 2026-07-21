@@ -3,7 +3,7 @@ import type { SelectionDropdownOption } from '@components/SelectionDropdown/type
 export interface GfsSubjectPickerProps {
   disabled?: boolean
   loading?: boolean
-  onChange: (next: string) => void
+  onChange: (next: string[]) => void
   options: SelectionDropdownOption[]
-  value: string
+  value: string[]
 }

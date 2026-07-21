@@ -28,6 +28,7 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
     isLocalhost: false,
     selectorVisible: true,
     activeOptionId: null,
+    envKey: 'env-test-key',
     storagePath: '/tmp/evenfire-runtime-config',
     options: [],
   },
@@ -143,6 +144,7 @@ describe('SettingsPage', () => {
         isLocalhost: true,
         selectorVisible: true,
         activeOptionId: '__localhost__',
+        envKey: 'env-test-key',
         storagePath: '/tmp/evenfire-runtime-config',
         options: [
           {

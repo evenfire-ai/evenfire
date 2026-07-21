@@ -282,32 +282,56 @@ describe('userApprovalRequestService', () => {
   })
 
   describe('assertApprovalTriggerBinding', () => {
-    it('accepts a matching typed trigger intent without reading JSON metadata', async () => {
-      mockedQuery.mockResolvedValueOnce({
-        rows: [
-          {
-            status: 'approved',
-            triggerNamespace: 'sandbox-recipes',
-            triggerName: 'target',
-            triggerCaller: 'sandbox-recipes/caller',
-          },
-        ],
-        rowCount: 1,
-      } as any)
+    it.each([
+      { actorType: 'user', requestedActor: 'user', approvalRequestId: 'approval-user' },
+      { actorType: 'admin', requestedActor: 'user', approvalRequestId: 'approval-admin' },
+      {
+        actorType: 'autonomous',
+        requestedActor: 'autonomous',
+        approvalRequestId: 'approval-autonomous',
+      },
+      {
+        actorType: 'scheduled',
+        requestedActor: 'scheduled',
+        approvalRequestId: 'approval-scheduled',
+      },
+      {
+        actorType: null,
+        requestedActor: 'autonomous',
+        approvalRequestId: 'approval-legacy',
+      },
+    ] as const)(
+      'maps persisted actor type $actorType to $requestedActor',
+      async ({ actorType, requestedActor, approvalRequestId }) => {
+        mockedQuery.mockResolvedValueOnce({
+          rows: [
+            {
+              status: 'approved',
+              triggerNamespace: 'sandbox-recipes',
+              triggerName: 'target',
+              triggerCaller: 'sandbox-recipes/caller',
+              actorType,
+            },
+          ],
+          rowCount: 1,
+        } as any)
 
-      await expect(
-        assertApprovalTriggerBinding({
-          approvalRequestId: 'approval-1',
-          recipeNamespace: 'sandbox-recipes',
-          recipeName: 'target',
-          callerKey: 'sandbox-recipes/caller',
-        })
-      ).resolves.toBeUndefined()
+        await expect(
+          assertApprovalTriggerBinding({
+            approvalRequestId,
+            recipeNamespace: 'sandbox-recipes',
+            recipeName: 'target',
+            callerKey: 'sandbox-recipes/caller',
+          })
+        ).resolves.toEqual({ requestedActor })
 
-      const sql = String(mockedQuery.mock.calls[0]?.[0])
-      expect(sql).toContain('LEFT JOIN workflow_approval_trigger_intents')
-      expect(sql).not.toContain("payload->'metadata'->'workflowTrigger'")
-    })
+        const sql = String(mockedQuery.mock.calls[0]?.[0])
+        expect(sql).toContain('LEFT JOIN workflow_approval_trigger_intents')
+        expect(sql).toContain('LEFT JOIN workflow_approval_trigger_run_intents')
+        expect(sql).toContain('watri.actor_type AS "actorType"')
+        expect(sql).not.toContain("payload->'metadata'->'workflowTrigger'")
+      }
+    )
 
     it.each([
       'chatllm',
@@ -333,7 +357,7 @@ describe('userApprovalRequestService', () => {
           recipeName: 'target',
           callerKey,
         })
-      ).resolves.toBeUndefined()
+      ).resolves.toEqual({ requestedActor: 'autonomous' })
     })
 
     it('rejects a trigger preflight when the typed caller or target recipe mismatches', async () => {

@@ -1079,6 +1079,31 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
 
+  ipcMain.handle(
+    'chat:reconcileSessions',
+    async (
+      event,
+      payload: {
+        agentRef: string
+        sessions?: Array<{ chatId?: unknown; lastActivityAt?: unknown }>
+      }
+    ) => {
+      assertTrustedSender(event)
+      const agentRef = sanitizeString(payload?.agentRef)
+      if (!agentRef) throw new Error('agentRef is required')
+      const sessions = Array.isArray(payload?.sessions)
+        ? payload.sessions
+            .map(session => ({
+              chatId: sanitizeString(session?.chatId),
+              lastActivityAt:
+                typeof session?.lastActivityAt === 'string' ? session.lastActivityAt : undefined,
+            }))
+            .filter(session => Boolean(session.chatId))
+        : []
+      return requireChatStore().upsertServerSessions(agentRef, sessions)
+    }
+  )
+
   ipcMain.handle('chat:getIndex', async (event, payload: { agentRef: string }) => {
     assertTrustedSender(event)
     const agentRef = sanitizeString(payload?.agentRef)

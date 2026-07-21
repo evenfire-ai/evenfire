@@ -7,6 +7,7 @@ import { useConfirmDialog } from '@components/ConfirmDialog'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
+import { LoadingScreen } from '@components/LoadingScreen'
 import { RegistryEntryDetailSkeleton } from '@components/RegistryEntryDetailSkeleton'
 import { IconStore } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
@@ -111,17 +112,7 @@ function RegistryEntryActionsMenu({
 
 export default function RegistryEntryDetailPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="cu-app-layout">
-          <main className="cu-main cu-detail-layout">
-            <div className="cu-card">
-              <div className="cu-card__body">Loading…</div>
-            </div>
-          </main>
-        </div>
-      }
-    >
+    <Suspense fallback={<LoadingScreen />}>
       <RegistryEntryDetailContent />
     </Suspense>
   )

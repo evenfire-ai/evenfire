@@ -6,6 +6,7 @@ import { useAuth } from '@components/AuthContext'
 import { CreateFlowSkeleton } from '@components/CreateFlowSkeleton'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
+import { LoadingScreen } from '@components/LoadingScreen'
 import { RecipeEditor } from '@components/RecipeEditor'
 import { RecipesTab } from '@components/RecipesTab'
 import { IconWorkflow } from '@components/Sidebar/icons'
@@ -19,17 +20,7 @@ export const dynamic = 'force-dynamic'
 
 export default function WorkflowRecipesPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="cu-app-layout">
-          <main className="cu-main">
-            <div className="cu-card">
-              <div className="cu-card__body">Loading…</div>
-            </div>
-          </main>
-        </div>
-      }
-    >
+    <Suspense fallback={<LoadingScreen />}>
       <WorkflowRecipesPageContent />
     </Suspense>
   )
@@ -90,15 +81,7 @@ function WorkflowRecipesPageContent() {
   }, [installerStarting])
 
   if (authState.isLoading) {
-    return (
-      <div className="cu-app-layout">
-        <main className="cu-main">
-          <div className="cu-card">
-            <div className="cu-card__body">Loading…</div>
-          </div>
-        </main>
-      </div>
-    )
+    return <LoadingScreen />
   }
 
   if (!authState.isLoggedIn) {

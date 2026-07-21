@@ -1,9 +1,9 @@
+import { IconPaperclip } from '@components/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   IconAdministrativeTrace,
   IconBroadcast,
   IconCable,
-  IconFolder,
   IconGroupWork,
   IconInfrastructureTrace,
   IconKey,
@@ -57,29 +57,33 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
       },
     ],
   },
+  directories: {
+    label: 'Directories',
+    href: CONTROL_ROUTES.agentFiles.root,
+    icon: <IconPaperclip />,
+    children: [
+      {
+        label: 'Agent Files',
+        href: CONTROL_ROUTES.agentFiles.root,
+        icon: <IconSharedFiles />,
+      },
+      {
+        label: 'Agent Outputs',
+        href: CONTROL_ROUTES.agentOutputs.root,
+        icon: <IconOutputs />,
+        matchPath: CONTROL_ROUTES.agentOutputs.base,
+      },
+      {
+        label: 'Global File System',
+        href: CONTROL_ROUTES.globalFileSystem,
+        icon: <IconPaperclip />,
+      },
+    ],
+  },
   'communication-channels': {
     label: 'External Channels',
     href: CONTROL_ROUTES.externalChannels.root,
     icon: <IconBroadcast />,
-  },
-  files: {
-    label: 'Files',
-    href: CONTROL_ROUTES.globalFiles,
-    icon: <IconFolder />,
-    children: [
-      { label: 'Global Files', href: CONTROL_ROUTES.globalFiles, icon: <IconFolder /> },
-      {
-        label: 'Outputs',
-        href: CONTROL_ROUTES.outputs.root,
-        icon: <IconOutputs />,
-        matchPath: CONTROL_ROUTES.outputs.base,
-      },
-      {
-        label: 'Shared Files',
-        href: CONTROL_ROUTES.sharedFiles.root,
-        icon: <IconSharedFiles />,
-      },
-    ],
   },
   'llm-models': {
     label: 'LLM Models',
@@ -117,24 +121,24 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     hidden: true,
     children: [
       {
-        label: 'Dashboard',
-        href: CONTROL_ROUTES.traces.operations,
-        icon: <IconTraceDashboard />,
-      },
-      {
-        label: 'Run replay',
-        href: CONTROL_ROUTES.traces.root,
-        icon: <IconRunReplay />,
-      },
-      {
         label: 'Administrative',
         href: CONTROL_ROUTES.traces.administrative,
         icon: <IconAdministrativeTrace />,
       },
       {
+        label: 'Dashboard',
+        href: CONTROL_ROUTES.traces.operations,
+        icon: <IconTraceDashboard />,
+      },
+      {
         label: 'Infrastructure',
         href: CONTROL_ROUTES.traces.infrastructure,
         icon: <IconInfrastructureTrace />,
+      },
+      {
+        label: 'Run replay',
+        href: CONTROL_ROUTES.traces.root,
+        icon: <IconRunReplay />,
       },
     ],
   },

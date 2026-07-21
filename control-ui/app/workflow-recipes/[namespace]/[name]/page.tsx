@@ -8,6 +8,7 @@ import { CreateFlowSkeleton } from '@components/CreateFlowSkeleton'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { DetailPageShell } from '@components/DetailPageShell'
+import { LoadingScreen } from '@components/LoadingScreen'
 import { RecipeEditor } from '@components/RecipeEditor'
 import { RecipeIntegrationsPanel } from '@components/RecipeIntegrationsPanel'
 import { RecipeSecretsPanel } from '@components/RecipeSecretsPanel'
@@ -297,17 +298,7 @@ export const dynamic = 'force-dynamic'
 
 export default function WorkflowRecipeDetailPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="cu-app-layout">
-          <main className="cu-main cu-detail-layout">
-            <div className="cu-card">
-              <div className="cu-card__body">Loading…</div>
-            </div>
-          </main>
-        </div>
-      }
-    >
+    <Suspense fallback={<LoadingScreen />}>
       <WorkflowRecipeDetailContent />
     </Suspense>
   )

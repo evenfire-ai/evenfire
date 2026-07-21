@@ -1201,6 +1201,34 @@ describe('status-only events drive DB sync (terminal + heartbeat)', () => {
     return { internal, reconcile, sync }
   }
 
+  it('does not reconcile a run child until the workflow_runs sync barrier completes', async () => {
+    let markSyncStarted!: () => void
+    let releaseSync!: () => void
+    const syncStarted = new Promise<void>(resolve => {
+      markSyncStarted = resolve
+    })
+    const syncBarrier = new Promise<void>(resolve => {
+      releaseSync = resolve
+    })
+    const child = makeRunChild()
+    const { internal, reconcile, sync } = makeInternal(child, async () => {
+      markSyncStarted()
+      await syncBarrier
+    })
+
+    const event = internal.handleRecipeEvent('ADDED', child)
+    await syncStarted
+
+    expect(sync).toHaveBeenCalledTimes(1)
+    expect(reconcile).not.toHaveBeenCalled()
+
+    releaseSync()
+    await event
+
+    expect(reconcile).toHaveBeenCalledTimes(1)
+    expect(sync.mock.invocationCallOrder[0]).toBeLessThan(reconcile.mock.invocationCallOrder[0])
+  })
+
   it.each(['completed', 'failed', 'cancelled'] as const)(
     'runs syncFromRecipeExecution AND reconciles a %s run-scoped status-only event',
     async phase => {

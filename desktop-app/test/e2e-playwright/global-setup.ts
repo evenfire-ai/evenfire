@@ -2,13 +2,13 @@ import { execFileSync } from 'node:child_process'
 import { E2E_TEST_EMAIL } from '../../../tests/e2e/testUser'
 
 const ALLOWED_CONTEXTS = new Set(
-  (process.env.E2E_ALLOWED_CONTEXTS || 'clerum-test,gke_your-gcp-project_us-central1-a_example-dev')
+  (process.env.E2E_ALLOWED_CONTEXTS || 'clerum-test,gke_${GCP_PROJECT}_us-central1-a_example-dev')
     .split(',')
     .map(context => context.trim())
     .filter(Boolean)
 )
-const DEV_CONTEXT = 'gke_your-gcp-project_us-central1-a_example-dev'
-const PROD_CONTEXT = 'gke_your-gcp-project_us-central1-a_clerum'
+const DEV_CONTEXT = 'gke_${GCP_PROJECT}_us-central1-a_example-dev'
+const PROD_CONTEXT = 'gke_${GCP_PROJECT}_us-central1-a_clerum'
 
 function isLocalhost(url: string): boolean {
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(url)

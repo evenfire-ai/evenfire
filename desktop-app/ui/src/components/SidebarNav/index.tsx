@@ -326,7 +326,7 @@ export function SidebarNav({
               <React.Fragment key={item.id}>
                 <div
                   className={`nav-link nav-link--with-toggle${
-                    item.id === DESKTOP_ROUTES.chat ? ' nav-link--with-new-chat' : ''
+                    item.id === DESKTOP_ROUTES.chat && !collapsed ? ' nav-link--with-new-chat' : ''
                   } ${navItem === item.id ? 'active' : ''}`}
                   title={collapsed ? item.label : undefined}
                   data-tooltip={item.label}
@@ -345,7 +345,7 @@ export function SidebarNav({
                   >
                     {item.label}
                   </NavItemControl>
-                  {item.id === DESKTOP_ROUTES.chat && (
+                  {item.id === DESKTOP_ROUTES.chat && !collapsed && (
                     <IconButton
                       className="nav-link-new-chat"
                       label="New chat"

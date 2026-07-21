@@ -1,9 +1,86 @@
-const { execSync } = require('node:child_process')
+const { execFileSync, execSync } = require('node:child_process')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
 const { FusesPlugin } = require('@electron-forge/plugin-fuses')
 const { FuseV1Options, FuseVersion } = require('@electron/fuses')
 
 const desktopLicense = require('./package.json').license
 const defaultAppleBundleId = 'ai.evenfire.desktop'
+const assetsDirectory = path.resolve(__dirname, 'assets')
+const adaptiveIconDocument = path.join(assetsDirectory, 'adaptive-icon.icon')
+
+function compileMacAdaptiveIcon(buildPath, _electronVersion, platform, _arch, callback) {
+  if (platform !== 'darwin') {
+    callback()
+    return
+  }
+
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'evenfire-app-icon-'))
+  const compileDirectory = path.join(temporaryDirectory, 'compiled')
+  const compileInput = path.join(temporaryDirectory, 'Icon.icon')
+  const partialInfoPath = path.join(temporaryDirectory, 'partial-info.plist')
+  const appDirectory = path.join(buildPath, 'Evenfire.app')
+  const resourcesDirectory = path.join(appDirectory, 'Contents', 'Resources')
+  const infoPlistPath = path.join(appDirectory, 'Contents', 'Info.plist')
+
+  let hookError
+  try {
+    fs.mkdirSync(compileDirectory, { recursive: true })
+    fs.cpSync(adaptiveIconDocument, compileInput, { recursive: true })
+    execFileSync(
+      'xcrun',
+      [
+        'actool',
+        compileInput,
+        '--compile',
+        compileDirectory,
+        '--output-format',
+        'human-readable-text',
+        '--notices',
+        '--warnings',
+        '--platform',
+        'macosx',
+        '--minimum-deployment-target',
+        '26.0',
+        '--app-icon',
+        'Icon',
+        '--include-all-app-icons',
+        '--output-partial-info-plist',
+        partialInfoPath,
+        '--enable-on-demand-resources',
+        'NO',
+        '--target-device',
+        'mac',
+      ],
+      { stdio: 'inherit' }
+    )
+    fs.copyFileSync(
+      path.join(compileDirectory, 'Assets.car'),
+      path.join(resourcesDirectory, 'Assets.car')
+    )
+    fs.copyFileSync(
+      path.join(compileDirectory, 'Icon.icns'),
+      path.join(resourcesDirectory, 'Icon.icns')
+    )
+    execFileSync(
+      '/usr/bin/plutil',
+      ['-replace', 'CFBundleIconName', '-string', 'Icon', infoPlistPath],
+      { stdio: 'inherit' }
+    )
+  } catch (error) {
+    if (process.env.EVENFIRE_REQUIRE_ADAPTIVE_ICONS === '1') {
+      hookError = error
+    } else {
+      console.warn(
+        'Skipping the macOS adaptive icon catalog; the compatible static icon remains available.'
+      )
+    }
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true })
+  }
+  callback(hookError)
+}
 
 function resolveOsxSignConfig() {
   if (process.platform !== 'darwin' || process.env.ENABLE_APPLE_CODESIGN !== '1') {
@@ -62,6 +139,9 @@ module.exports = {
     executableName: 'Evenfire',
     name: 'Evenfire',
     icon: './assets/icon',
+    darwinDarkModeSupport: true,
+    extraResource: ['./assets/icon-light.png', './assets/icon-dark.png'],
+    afterCopyExtraResources: [compileMacAdaptiveIcon],
     appBundleId: process.env.APPLE_BUNDLE_ID || defaultAppleBundleId,
     appCategoryType: 'public.app-category.productivity',
     ...(osxSign ? { osxSign } : {}),
@@ -85,7 +165,9 @@ module.exports = {
     {
       name: '@electron-forge/maker-dmg',
       platforms: ['darwin'],
-      config: {},
+      config: {
+        icon: path.join(assetsDirectory, 'icon.icns'),
+      },
     },
     {
       name: '@electron-forge/maker-squirrel',
@@ -95,6 +177,7 @@ module.exports = {
         name: 'Evenfire',
         title: 'Evenfire',
         setupExe: 'EvenfireSetup.exe',
+        setupIcon: path.join(assetsDirectory, 'icon.ico'),
       },
     },
     {
@@ -107,6 +190,7 @@ module.exports = {
           genericName: 'Evenfire',
           bin: 'Evenfire',
           categories: ['Utility'],
+          icon: path.join(assetsDirectory, 'icon.png'),
         },
       },
     },
@@ -121,6 +205,7 @@ module.exports = {
           bin: 'Evenfire',
           license: desktopLicense,
           categories: ['Utility'],
+          icon: path.join(assetsDirectory, 'icon.png'),
         },
       },
     },

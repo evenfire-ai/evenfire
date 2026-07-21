@@ -1,8 +1,15 @@
 import * as k8s from '@kubernetes/client-node'
+import { isDeepStrictEqual } from 'node:util'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants.js'
 import type { ChildRecipeRef, DbRunRow } from '../reconciler/dbRunProcessor.js'
 import { getErrorCode } from '../reconciler/k8sErrors.js'
-import { type ParentRecipe, buildChildRecipe, buildDbRunChildName } from './childRecipeFactory.js'
+import type { WorkflowRecipeGfsIntentSpec } from '../types.js'
+import {
+  INHERITED_PARENT_RESOURCES_ANNOTATION,
+  type ParentRecipe,
+  buildChildRecipe,
+  buildDbRunChildName,
+} from './childRecipeFactory.js'
 import { WORKFLOW_TEAM_ID_LABEL } from './schedulingHandler.js'
 
 export const RUN_ID_LABEL = 'clerum.io/workflow-run-id'
@@ -12,8 +19,27 @@ export const RUN_ACTOR_TYPE_LABEL = 'clerum.io/workflow-actor-type'
 export const RUN_OUTPUT_OVERRIDES_ANNOTATION = 'clerum.io/run-output-overrides'
 export const RUN_INTERMEDIATE_PARAMS_ANNOTATION = 'clerum.io/run-intermediate-parameters'
 
+const WORKFLOW_RECIPE_API_VERSION = `${CRD_GROUP}/${CRD_VERSION}`
+const WORKFLOW_RECIPE_KIND = 'WorkflowRecipe'
+const PARENT_RECIPE_LABEL = 'clerum.io/parent-recipe'
+
 type ParentRecipeResponse = {
-  metadata?: { name?: string; namespace?: string; uid?: string; labels?: Record<string, string> }
+  apiVersion?: string
+  kind?: string
+  metadata?: {
+    name?: string
+    namespace?: string
+    uid?: string
+    labels?: Record<string, string>
+    annotations?: Record<string, string>
+    ownerReferences?: Array<{
+      apiVersion?: string
+      kind?: string
+      name?: string
+      uid?: string
+      controller?: boolean
+    }>
+  }
   spec?: {
     contextRef?: string
     security?: Record<string, unknown>
@@ -27,8 +53,40 @@ type ParentRecipeResponse = {
     workloads?: unknown[]
     resources?: unknown[]
     runtimeEgress?: Record<string, unknown>
+    gfs?: WorkflowRecipeGfsIntentSpec
     output?: unknown
   }
+}
+
+function isExpectedExistingChild(
+  existing: ParentRecipeResponse,
+  expected: {
+    name: string
+    namespace: string
+    runId: string
+    parentName: string
+    parentUid: string
+    spec: ParentRecipeResponse['spec']
+  }
+): boolean {
+  const controllerOwners =
+    existing.metadata?.ownerReferences?.filter(owner => owner.controller === true) ?? []
+  const controllerOwner = controllerOwners.length === 1 ? controllerOwners[0] : undefined
+
+  return (
+    existing.apiVersion === WORKFLOW_RECIPE_API_VERSION &&
+    existing.kind === WORKFLOW_RECIPE_KIND &&
+    existing.metadata?.name === expected.name &&
+    existing.metadata?.namespace === expected.namespace &&
+    existing.metadata?.labels?.[RUN_ID_LABEL] === expected.runId &&
+    existing.metadata?.labels?.[PARENT_RECIPE_LABEL] === expected.parentName &&
+    existing.metadata?.annotations?.[INHERITED_PARENT_RESOURCES_ANNOTATION] === 'true' &&
+    controllerOwner?.apiVersion === WORKFLOW_RECIPE_API_VERSION &&
+    controllerOwner.kind === WORKFLOW_RECIPE_KIND &&
+    controllerOwner.name === expected.parentName &&
+    controllerOwner.uid === expected.parentUid &&
+    isDeepStrictEqual(existing.spec, expected.spec)
+  )
 }
 
 export async function createDbRunChildRecipe(
@@ -76,6 +134,7 @@ export async function createDbRunChildRecipe(
       workloads: response.spec?.workloads,
       resources: response.spec?.resources,
       runtimeEgress: response.spec?.runtimeEgress,
+      gfs: response.spec?.gfs,
       output: response.spec?.output,
     },
   }
@@ -112,6 +171,11 @@ export async function createDbRunChildRecipe(
         : {}),
     },
   })
+  // Match the JSON representation persisted by Kubernetes: buildChildRecipe
+  // retains undefined keys in memory, while the API payload omits them.
+  const expectedChildSpec = JSON.parse(
+    JSON.stringify(childRecipe.spec)
+  ) as ParentRecipeResponse['spec']
 
   try {
     await customApi.createNamespacedCustomObject({
@@ -132,10 +196,18 @@ export async function createDbRunChildRecipe(
       name: childName,
     })) as ParentRecipeResponse
 
-    const existingRunId = existing.metadata?.labels?.[RUN_ID_LABEL]
-    if (existingRunId !== run.run_id) {
+    if (
+      !isExpectedExistingChild(existing, {
+        name: childName,
+        namespace: parentNamespace,
+        runId: run.run_id,
+        parentName,
+        parentUid,
+        spec: expectedChildSpec,
+      })
+    ) {
       throw new Error(
-        `Child recipe "${parentNamespace}/${childName}" already exists for a different workflow run`
+        `Child recipe "${parentNamespace}/${childName}" already exists but does not match the expected workflow run child identity and inherited intent`
       )
     }
   }

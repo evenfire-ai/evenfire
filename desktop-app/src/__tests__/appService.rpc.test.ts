@@ -1,9 +1,24 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests } from '../chatStoreBinding.js'
 import { ApiError } from '../httpClient.js'
 
 describe('AppService.invokeHostMessage', () => {
+  let chatStoreBaseDir: string
+
+  beforeEach(async () => {
+    chatStoreBaseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clerum-app-service-rpc-'))
+    __setChatStoreBaseDirForTests(chatStoreBaseDir)
+  })
+
+  afterEach(async () => {
+    __setChatStoreBaseDirForTests(null)
+    await fs.rm(chatStoreBaseDir, { recursive: true, force: true })
+  })
+
   it('forces desktop host messages onto the authenticated rpc envelope', async () => {
     const service = new AppService() as any
     service.sessionToken = 'session-token'
@@ -60,7 +75,6 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('switches to a matching directory team before issuing RPC tokens for teamless sessions', async () => {
-    __setChatStoreBaseDirForTests('/private/tmp/clerum-desktop-app-test-chats')
     const service = new AppService() as any
     service.sessionToken = 'teamless-token'
     service.me = {
@@ -128,11 +142,9 @@ describe('AppService.invokeHostMessage', () => {
       ['host:message:invoke', 'host:task:read', 'host:wake:write'],
       ['pro-agent']
     )
-    __setChatStoreBaseDirForTests(null)
   })
 
   it('uses the teamless session when a directly granted agent needs an RPC token', async () => {
-    __setChatStoreBaseDirForTests('/private/tmp/clerum-desktop-app-test-chats')
     const service = new AppService() as any
     service.sessionToken = 'teamless-token'
     service.me = {
@@ -180,11 +192,9 @@ describe('AppService.invokeHostMessage', () => {
       ['pro-agent']
     )
     expect(service.rpcClient.invokeHostMessage).toHaveBeenCalled()
-    __setChatStoreBaseDirForTests(null)
   })
 
   it('uses the access catalog response without probing host status', async () => {
-    __setChatStoreBaseDirForTests('/private/tmp/clerum-desktop-app-test-chats')
     const service = new AppService() as any
     service.sessionToken = 'session-token'
     service.me = {
@@ -233,6 +243,5 @@ describe('AppService.invokeHostMessage', () => {
     expect(catalog.mcpServersByAgent).toEqual({ 'allowed-agent': [], 'denied-agent': [] })
     expect(service.rpcTokenManager.clear).toHaveBeenCalledTimes(1)
     expect(service.rpcClient.getHostStatus).not.toHaveBeenCalled()
-    __setChatStoreBaseDirForTests(null)
   })
 })

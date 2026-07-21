@@ -16,7 +16,7 @@ if [[ "${1:-}" == "--context" ]]; then
 fi
 
 if [[ "${1:-}" == "kustomize" ]]; then
-  cidr="203.0.113.1/32"
+  cidr="203.0.113.10/32"
   if [[ "${mode}" == "forbidden" ]]; then
     cidr="10.109.0.1/32"
   fi
@@ -71,7 +71,7 @@ if [[ "${1:-}" == "get" && "${2:-}" == "networkpolicy" ]]; then
     printf '{"items":[]}\n'
     exit 0
   fi
-  cidr="203.0.113.1/32"
+  cidr="203.0.113.10/32"
   if [[ "${mode}" == "drift" ]]; then
     cidr="35.199.192.1/32"
   fi

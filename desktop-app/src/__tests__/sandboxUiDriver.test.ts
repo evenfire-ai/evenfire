@@ -8,12 +8,22 @@ import {
 } from '../sandboxUiDriver.js'
 
 describe('partitionFor', () => {
-  it('produces a stable persist:sandbox-ui partition name per recipe', () => {
-    expect(partitionFor('sandbox-recipes', 'r1')).toBe('persist:sandbox-ui-sandbox-recipes-r1')
+  it('produces a stable persist:sandbox-ui partition name per (env, recipe)', () => {
+    expect(partitionFor('env1', 'sandbox-recipes', 'r1')).toBe(
+      'persist:sandbox-ui-env1-sandbox-recipes-r1'
+    )
   })
 
   it('keeps recipe A and recipe B in distinct partitions (storage isolation)', () => {
-    expect(partitionFor('sandbox-recipes', 'a')).not.toBe(partitionFor('sandbox-recipes', 'b'))
+    expect(partitionFor('env1', 'sandbox-recipes', 'a')).not.toBe(
+      partitionFor('env1', 'sandbox-recipes', 'b')
+    )
+  })
+
+  it('keeps the same recipe in distinct partitions across environments (spec §5.2)', () => {
+    expect(partitionFor('envA', 'sandbox-recipes', 'r1')).not.toBe(
+      partitionFor('envB', 'sandbox-recipes', 'r1')
+    )
   })
 })
 

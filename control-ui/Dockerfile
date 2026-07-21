@@ -20,6 +20,8 @@ RUN npm ci \
   && rm -rf node_modules/@clerum/llm-providers \
   && cp -R ../packages/llm-providers node_modules/@clerum/llm-providers
 
+# Next type-checks the Playwright config, which imports this shared loader.
+COPY scripts/qa-recorder /app/scripts/qa-recorder
 COPY control-ui ./
 RUN npm run build
 

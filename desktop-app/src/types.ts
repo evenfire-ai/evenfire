@@ -541,6 +541,14 @@ export type DesktopRuntimeConfigState = {
   isLocalhost: boolean
   selectorVisible: boolean
   activeOptionId: string | null
+  /**
+   * Stable, filesystem-safe namespacing key for the ACTIVE environment (spec
+   * §5.1). Derived from `new URL(externalRestApiBaseUrl).origin`; every local
+   * cache surface (chat store path, session-token keychain slot, gfs session
+   * scope, sandbox partitions) is scoped by this so switching clusters never
+   * shows or reconciles another environment's data.
+   */
+  envKey: string
   storagePath: string
   options: DesktopRuntimeConfigOption[]
 }

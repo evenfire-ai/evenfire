@@ -148,7 +148,6 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     signCoordinatorToMcpHostToken: vi.fn().mockResolvedValue('coordinator-mcp-host-token'),
     signCustomCoordinatorToWrcToken: vi.fn().mockResolvedValue('custom-coordinator-wrc-token'),
     signCoordinatorToWrcToken: vi.fn().mockResolvedValue('coordinator-wrc-token'),
-    signCronJobTriggerToken: vi.fn().mockResolvedValue('cronjob-trigger-token'),
   }
 
   const deps = {
@@ -300,6 +299,95 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       sandboxNamespace,
       'read-recipe',
       { scopes: ['gfs.read'] }
+    )
+  })
+
+  it('mints exactly read scope when a recipe mount is read-only', async () => {
+    const reconciler = new WorkflowReconciler(deps)
+
+    await reconciler.ensureMcpHostRuntimeCredentials(sandboxNamespace, 'read-mount-recipe', {
+      steps: [{ id: 'step-1', instruction: 'read mounted inputs' }],
+      gfs: {
+        mounts: [{ drive: 'main', target: 'inputs', scopes: ['gfs.read'] }],
+      },
+    })
+
+    expect(gfsBindingMocks.mintRecipeHostGfsToken).toHaveBeenCalledTimes(1)
+    expect(gfsBindingMocks.mintRecipeHostGfsToken).toHaveBeenCalledWith(
+      sandboxNamespace,
+      'read-mount-recipe',
+      { scopes: ['gfs.read'] }
+    )
+  })
+
+  it('keeps the read ceiling and adds write when a recipe mount is write-only', async () => {
+    const reconciler = new WorkflowReconciler(deps)
+
+    await reconciler.ensureMcpHostRuntimeCredentials(sandboxNamespace, 'write-mount-recipe', {
+      steps: [{ id: 'step-1', instruction: 'write mounted outputs' }],
+      gfs: {
+        mounts: [{ drive: 'main', target: 'outputs', scopes: ['gfs.write'] }],
+      },
+    })
+
+    expect(gfsBindingMocks.mintRecipeHostGfsToken).toHaveBeenCalledTimes(1)
+    expect(gfsBindingMocks.mintRecipeHostGfsToken).toHaveBeenCalledWith(
+      sandboxNamespace,
+      'write-mount-recipe',
+      { scopes: ['gfs.read', 'gfs.write'] }
+    )
+  })
+
+  it('orders and de-duplicates read-write mount scopes before minting', async () => {
+    const reconciler = new WorkflowReconciler(deps)
+
+    await reconciler.ensureMcpHostRuntimeCredentials(sandboxNamespace, 'read-write-mount-recipe', {
+      steps: [{ id: 'step-1', instruction: 'read and write mounted content' }],
+      gfs: {
+        mounts: [
+          {
+            drive: 'main',
+            target: 'workspace',
+            scopes: ['gfs.write', 'gfs.read', 'gfs.write'],
+          },
+        ],
+      },
+    })
+
+    expect(gfsBindingMocks.mintRecipeHostGfsToken).toHaveBeenCalledTimes(1)
+    expect(gfsBindingMocks.mintRecipeHostGfsToken).toHaveBeenCalledWith(
+      sandboxNamespace,
+      'read-write-mount-recipe',
+      { scopes: ['gfs.read', 'gfs.write'] }
+    )
+  })
+
+  it('mints inherited child GFS scopes against the parent runtime identity', async () => {
+    const reconciler = new WorkflowReconciler(deps)
+
+    await reconciler.ensureMcpHostRuntimeCredentials(
+      sandboxNamespace,
+      'child-run',
+      {
+        steps: [{ id: 'step-1', instruction: 'use the parent grant' }],
+        gfs: {
+          mounts: [
+            {
+              drive: 'main',
+              target: 'workspace',
+              scopes: ['gfs.read', 'gfs.write'],
+            },
+          ],
+        },
+      },
+      'parent-recipe'
+    )
+
+    expect(gfsBindingMocks.mintRecipeHostGfsToken).toHaveBeenCalledTimes(1)
+    expect(gfsBindingMocks.mintRecipeHostGfsToken).toHaveBeenCalledWith(
+      sandboxNamespace,
+      'parent-recipe',
+      { scopes: ['gfs.read', 'gfs.write'] }
     )
   })
 
@@ -728,6 +816,77 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
     )
     expect(podNames).toContain('agentic-recipe-mcp-host')
     expect(podNames).not.toContain('agentic-recipe-coordinator')
+  })
+
+  it('preserves required toolChoice in the workflow config ConfigMap', async () => {
+    crashRecoveryMocks.getPodPhase.mockImplementation(async (_api, name: string) => {
+      if (name === 'tool-choice-recipe-workflow-output-anchor') return 'Running'
+      if (name === 'tool-choice-recipe-workflow-output-prepare') return 'Succeeded'
+      return undefined
+    })
+    mockMcpHostReadiness({ ready: false, phase: 'Pending' })
+    const reconciler = new WorkflowReconciler(deps)
+
+    await reconciler.reconcile(
+      'tool-choice-recipe',
+      'uid-tool-choice',
+      sandboxNamespace,
+      {
+        agent: { provider: 'openai', model: 'gpt-4.1' },
+        steps: [
+          {
+            id: 'use-gfs',
+            instruction: 'Use the available GFS tools',
+            toolChoice: 'required',
+          },
+        ],
+      },
+      { workflowExecution: { phase: 'initializing' } },
+      undefined,
+      'tool-choice-recipe',
+      'run-1'
+    )
+
+    const configMap = mockCoreApi.createNamespacedConfigMap.mock.calls
+      .map(call => call[0].body)
+      .find(body => body.metadata?.name === 'tool-choice-recipe-workflow-config')
+    const workflowConfig = JSON.parse(configMap.data['config.json'])
+
+    expect(workflowConfig.steps[0]).toMatchObject({
+      id: 'use-gfs',
+      toolChoice: 'required',
+    })
+  })
+
+  it('does not add toolChoice to workflow config steps when it is absent', async () => {
+    crashRecoveryMocks.getPodPhase.mockImplementation(async (_api, name: string) => {
+      if (name === 'default-tool-choice-recipe-workflow-output-anchor') return 'Running'
+      if (name === 'default-tool-choice-recipe-workflow-output-prepare') return 'Succeeded'
+      return undefined
+    })
+    mockMcpHostReadiness({ ready: false, phase: 'Pending' })
+    const reconciler = new WorkflowReconciler(deps)
+
+    await reconciler.reconcile(
+      'default-tool-choice-recipe',
+      'uid-default-tool-choice',
+      sandboxNamespace,
+      {
+        agent: { provider: 'openai', model: 'gpt-4.1' },
+        steps: [{ id: 'answer', instruction: 'Answer without a tool requirement' }],
+      },
+      { workflowExecution: { phase: 'initializing' } },
+      undefined,
+      'default-tool-choice-recipe',
+      'run-1'
+    )
+
+    const configMap = mockCoreApi.createNamespacedConfigMap.mock.calls
+      .map(call => call[0].body)
+      .find(body => body.metadata?.name === 'default-tool-choice-recipe-workflow-config')
+    const workflowConfig = JSON.parse(configMap.data['config.json'])
+
+    expect(workflowConfig.steps[0]).not.toHaveProperty('toolChoice')
   })
 
   it('preserves recovering while the mcp-host pod is not ready', async () => {
@@ -1261,6 +1420,26 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       call => call[0].body.metadata.name
     )
     expect(svcNames).toContain('wf-sdk-recipe-mcp-host')
+  })
+
+  it('leaves coordinator GFS NetworkPolicy ownership to the outer recipe reconciler', async () => {
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    await reconciler.reconcile(
+      'sdk-recipe',
+      'uid-sdk',
+      sandboxNamespace,
+      sdkSpec({ gfs: { publishTargets: [{ drive: 'main', target: 'outputs' }] } }),
+      { workflowExecution: { phase: 'initializing' } },
+      undefined,
+      'sdk-recipe',
+      undefined
+    )
+
+    const npNames = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.map(
+      call => call[0].body.metadata.name
+    )
+    expect(npNames).not.toContain('sdk-recipe-coordinator-to-gfs')
   })
 
   it('creates eager mcp-host for SDK-only recipes without agentic steps', async () => {

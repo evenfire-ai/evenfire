@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { LoadingScreen } from '@components/LoadingScreen'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { useAuth } from '../../components/AuthContext'
 import { useConfirmDialog } from '../../components/ConfirmDialog'
@@ -203,15 +204,7 @@ export default function McpServersPage() {
   }, [authState.isLoading, authState.isLoggedIn, router])
 
   if (authState.isLoading) {
-    return (
-      <div className="cu-app-layout">
-        <main className="cu-main">
-          <div className="cu-card">
-            <div className="cu-card__body">Loading...</div>
-          </div>
-        </main>
-      </div>
-    )
+    return <LoadingScreen />
   }
 
   if (!authState.isLoggedIn) {

@@ -175,15 +175,18 @@ function makeRunRow(overrides: Record<string, unknown> = {}) {
 
 function mockTypedApprovalBinding(
   triggerName = 'test-recipe',
-  triggerCaller = 'sandbox-recipes/test-recipe'
+  triggerCaller = 'sandbox-recipes/test-recipe',
+  actorType: 'user' | 'admin' | 'autonomous' | 'scheduled' | null = null,
+  status: 'approved' | 'consumed' = 'approved'
 ) {
   mockPoolQuery.mockResolvedValueOnce({
     rows: [
       {
-        status: 'approved',
+        status,
         triggerNamespace: 'sandbox-recipes',
         triggerName,
         triggerCaller,
+        actorType,
       },
     ],
     rowCount: 1,
@@ -361,6 +364,183 @@ describe('routes/mcp-host/workflows', () => {
     })
     expect(detail.body.latestRun).toBeNull()
     expect(mockListRunsByRecipe).not.toHaveBeenCalled()
+  })
+
+  it('returns only conversation-scoped status and health for a shared mcp-host', async () => {
+    const targetUserId = '00000000-0000-4000-8000-000000000001'
+    const succeededRun = makeRunRow({
+      run_id: 'conversation-run',
+      phase: 'Succeeded',
+      actor_type: 'user',
+      actor_id: targetUserId,
+      completed_at: '2026-05-03T00:02:00.000Z',
+      activeRuns: 2,
+    })
+    mockPoolQuery.mockImplementation((sql: string) => {
+      if (String(sql).includes('WITH scoped_runs AS')) {
+        return Promise.resolve({ rows: [succeededRun], rowCount: 1 })
+      }
+      return Promise.resolve({
+        rows: [{ recipe_namespace: 'sandbox-recipes', recipe_name: 'test-recipe' }],
+        rowCount: 1,
+      })
+    })
+
+    const app = makeApp()
+    const detail = await request(app)
+      .get(
+        `/workflows/sandbox-recipes/test-recipe?targetUserId=${targetUserId}&workflowConversationId=thread-1`
+      )
+      .set('Authorization', 'Bearer shared-host-control-token')
+    const health = await request(app)
+      .get(
+        `/workflows/sandbox-recipes/test-recipe/health?targetUserId=${targetUserId}&workflowConversationId=thread-1`
+      )
+      .set('Authorization', 'Bearer shared-host-control-token')
+
+    expect(detail.status).toBe(200)
+    expect(detail.body.latestRun).toMatchObject({ id: 'conversation-run', phase: 'Succeeded' })
+    expect(health.status).toBe(200)
+    expect(health.body).toMatchObject({
+      activeRuns: 2,
+      lastRun: { id: 'conversation-run', phase: 'Succeeded' },
+    })
+    const scopedQueries = mockPoolQuery.mock.calls.filter(call =>
+      String(call[0]).includes('WITH scoped_runs AS')
+    )
+    expect(scopedQueries).toHaveLength(2)
+    for (const [sql, values] of scopedQueries) {
+      expect(String(sql)).toContain("phase IN ('Pending', 'Running')")
+      expect(sql).toContain("workflowTrigger'->>'conversationId' = $6")
+      expect(values).toEqual([
+        'sandbox-recipes',
+        'test-recipe',
+        targetUserId,
+        null,
+        'chatllm',
+        'thread-1',
+      ])
+    }
+    expect(mockListRunsByRecipe).not.toHaveBeenCalled()
+  })
+
+  it('keeps shared-host run summaries null when conversation context is missing', async () => {
+    const targetUserId = '00000000-0000-4000-8000-000000000001'
+    mockPoolQuery.mockResolvedValue({
+      rows: [{ recipe_namespace: 'sandbox-recipes', recipe_name: 'test-recipe' }],
+      rowCount: 1,
+    })
+
+    const app = makeApp()
+    const detail = await request(app)
+      .get(`/workflows/sandbox-recipes/test-recipe?targetUserId=${targetUserId}`)
+      .set('Authorization', 'Bearer shared-host-control-token')
+    const health = await request(app)
+      .get(`/workflows/sandbox-recipes/test-recipe/health?targetUserId=${targetUserId}`)
+      .set('Authorization', 'Bearer shared-host-control-token')
+
+    expect(detail.status).toBe(200)
+    expect(detail.body.latestRun).toBeNull()
+    expect(health.status).toBe(200)
+    expect(health.body.activeRuns).toBeNull()
+    expect(health.body.lastRun).toBeNull()
+    expect(
+      mockPoolQuery.mock.calls.some(call => String(call[0]).includes('WITH scoped_runs AS'))
+    ).toBe(false)
+  })
+
+  it('does not leak a shared-host run from another conversation', async () => {
+    const targetUserId = '00000000-0000-4000-8000-000000000001'
+    mockPoolQuery.mockImplementation((sql: string) => {
+      if (String(sql).includes('WITH scoped_runs AS')) {
+        return Promise.resolve({ rows: [], rowCount: 0 })
+      }
+      return Promise.resolve({
+        rows: [{ recipe_namespace: 'sandbox-recipes', recipe_name: 'test-recipe' }],
+        rowCount: 1,
+      })
+    })
+
+    const app = makeApp()
+    const detail = await request(app)
+      .get(
+        `/workflows/sandbox-recipes/test-recipe?targetUserId=${targetUserId}&workflowConversationId=wrong-thread`
+      )
+      .set('Authorization', 'Bearer shared-host-control-token')
+    const health = await request(app)
+      .get(
+        `/workflows/sandbox-recipes/test-recipe/health?targetUserId=${targetUserId}&workflowConversationId=wrong-thread`
+      )
+      .set('Authorization', 'Bearer shared-host-control-token')
+
+    expect(detail.status).toBe(200)
+    expect(detail.body.latestRun).toBeNull()
+    expect(JSON.stringify(detail.body)).not.toContain('conversation-run')
+    expect(health.status).toBe(200)
+    expect(health.body).toMatchObject({ activeRuns: 0, lastRun: null })
+    expect(JSON.stringify(health.body)).not.toContain('conversation-run')
+    const scopedQueries = mockPoolQuery.mock.calls.filter(call =>
+      String(call[0]).includes('WITH scoped_runs AS')
+    )
+    expect(scopedQueries).toHaveLength(2)
+    expect(scopedQueries.every(call => call[1]?.[5] === 'wrong-thread')).toBe(true)
+  })
+
+  it.each([
+    '/workflows/sandbox-recipes/test-recipe',
+    '/workflows/sandbox-recipes/test-recipe/health',
+  ])('rejects malformed shared-host conversation context on %s', async route => {
+    const targetUserId = '00000000-0000-4000-8000-000000000001'
+    mockPoolQuery.mockResolvedValue({
+      rows: [{ recipe_namespace: 'sandbox-recipes', recipe_name: 'test-recipe' }],
+      rowCount: 1,
+    })
+
+    const response = await request(makeApp())
+      .get(`${route}?targetUserId=${targetUserId}&workflowConversationId=bad/../thread`)
+      .set('Authorization', 'Bearer shared-host-control-token')
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'Invalid workflowConversationId format' })
+    expect(
+      mockPoolQuery.mock.calls.some(call => String(call[0]).includes('WITH scoped_runs AS'))
+    ).toBe(false)
+  })
+
+  it.each([
+    '/workflows/sandbox-recipes/test-recipe',
+    '/workflows/sandbox-recipes/test-recipe/health',
+  ])('accepts a maximum-length Teams conversation ID on %s', async route => {
+    const targetUserId = '00000000-0000-4000-8000-000000000001'
+    const teamsConversationId = `19:${'A'.repeat(509)}`
+    const succeededRun = makeRunRow({
+      run_id: 'teams-conversation-run',
+      phase: 'Succeeded',
+      actor_type: 'user',
+      actor_id: targetUserId,
+      completed_at: '2026-05-03T00:02:00.000Z',
+      activeRuns: 0,
+    })
+    mockPoolQuery.mockImplementation((sql: string) => {
+      if (String(sql).includes('WITH scoped_runs AS')) {
+        return Promise.resolve({ rows: [succeededRun], rowCount: 1 })
+      }
+      return Promise.resolve({
+        rows: [{ recipe_namespace: 'sandbox-recipes', recipe_name: 'test-recipe' }],
+        rowCount: 1,
+      })
+    })
+
+    const response = await request(makeApp())
+      .get(`${route}?targetUserId=${targetUserId}&workflowConversationId=${teamsConversationId}`)
+      .set('Authorization', 'Bearer shared-host-control-token')
+
+    expect(teamsConversationId).toHaveLength(512)
+    expect(response.status).toBe(200)
+    const scopedQuery = mockPoolQuery.mock.calls.find(call =>
+      String(call[0]).includes('WITH scoped_runs AS')
+    )
+    expect(scopedQuery?.[1]?.[5]).toBe(teamsConversationId)
   })
 
   it('does not let a sandbox caller read a cross-target workflow without explicit approval target context', async () => {
@@ -1725,6 +1905,50 @@ describe('routes/mcp-host/workflows', () => {
 
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ id: 'existing-run' })
+    expect(mockCreateApprovedWorkflowRun).toHaveBeenCalledTimes(1)
+    expect(mockCreateWorkflowRun).not.toHaveBeenCalled()
+  })
+
+  it('returns an existing user run when the consumed approval recipe only allows user actors', async () => {
+    const approvalRequestId = '00000000-0000-4000-8000-000000000123'
+    mockTypedApprovalBinding(
+      'test-recipe',
+      'sandbox-recipes/workflow-caller-alpha',
+      'user',
+      'consumed'
+    )
+    mockCreateApprovedWorkflowRun.mockResolvedValueOnce({
+      row: makeRunRow({
+        run_id: 'existing-user-run',
+        actor_type: 'user',
+        trigger_source: 'onDemand',
+        idempotency_key: 'idem-user-retry',
+        approval_request_id: approvalRequestId,
+      }),
+      created: false,
+    })
+
+    const res = await request(
+      makeApp(
+        ['test-recipe'],
+        {},
+        {
+          'test-recipe': {
+            triggers: { onDemand: { requiresApproval: true, allowedActors: ['user'] } },
+          },
+        }
+      )
+    )
+      .post('/workflows/sandbox-recipes/test-recipe/trigger')
+      .set('Authorization', 'Bearer workflow-caller-alpha-token')
+      .set('Idempotency-Key', 'idem-user-retry')
+      .send({ approvalRequestId })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      id: 'existing-user-run',
+      actor: { type: 'user-session' },
+    })
     expect(mockCreateApprovedWorkflowRun).toHaveBeenCalledTimes(1)
     expect(mockCreateWorkflowRun).not.toHaveBeenCalled()
   })

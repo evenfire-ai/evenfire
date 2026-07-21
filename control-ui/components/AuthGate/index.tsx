@@ -3,6 +3,7 @@
 import { useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
+import { LoadingScreen } from '@components/LoadingScreen'
 import { buildControlUiLoginPath, getCurrentControlUiPath } from '@lib/authRedirect'
 import type { AuthGateProps } from './types'
 
@@ -17,15 +18,7 @@ export function AuthGate({ children }: AuthGateProps) {
   }, [authState.isLoading, authState.isLoggedIn, router])
 
   if (authState.isLoading) {
-    return (
-      <div className="cu-app-layout">
-        <main className="cu-main">
-          <div className="cu-card">
-            <div className="cu-card__body">Loading...</div>
-          </div>
-        </main>
-      </div>
-    )
+    return <LoadingScreen />
   }
 
   if (!authState.isLoggedIn) {

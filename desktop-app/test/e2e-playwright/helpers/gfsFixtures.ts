@@ -3,7 +3,7 @@
  *
  * Seeds two isolated GFS files through the shared SQL fixtures:
  *  - `granted`:   visible to the Desktop user AND granted read to the agent
- *                 host sentinel — the happy path.
+ *                 host `chatllm` — the happy path.
  *  - `ungranted`: visible to the Desktop user but NOT granted to the host —
  *                 the agent must receive a clean authorization denial (403),
  *                 never a permission-store outage (503 not_mounted).
@@ -24,11 +24,11 @@ import {
 } from '../../../../tests/e2e/gfsUiFixtures'
 
 /**
- * Every HCC-provisioned 1st-party host shares this sentinel gfs subject —
- * the host NAME (e.g. `chatllm`) is Kubernetes-provisioning-only and never a
- * token claim (see host-context-controller/src/gfsHostBinding.ts).
+ * The Desktop agent journey runs through the concrete `chatllm` Host. GFS
+ * grants are host-specific, so `chatllm-stateless` and every other first-party
+ * Host remain independently denied unless they receive their own grant.
  */
-export const FIRST_PARTY_HOST_SUBJECT_ID = '1st:mcp-host/standalone'
+export const FIRST_PARTY_HOST_SUBJECT_ID = '1st:mcp-host/chatllm'
 
 const GFS_NS = 'gfs'
 // Pod-template labels — pods do NOT inherit the deployment-level managed-by

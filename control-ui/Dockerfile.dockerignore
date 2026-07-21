@@ -2,6 +2,9 @@
 !packages/
 !packages/workflow-recipe-capability-policy/
 !packages/workflow-recipe-capability-policy/**
+!scripts/
+!scripts/qa-recorder/
+!scripts/qa-recorder/loadEnv.ts
 !control-ui/
 !control-ui/package.json
 !control-ui/package-lock.json
@@ -9,6 +12,7 @@
 !control-ui/next.config.js
 !control-ui/next-env.d.ts
 !control-ui/global.d.ts
+!control-ui/playwright.qa-recorder.config.ts
 !control-ui/app/
 !control-ui/app/**
 !control-ui/components/

@@ -6,7 +6,7 @@
  *   2. Wait for workflow completion
  *   3. Download artifact from the run-scoped recipe status view
  *   4. Delete per-file via ✕ button — verify removal + CRD update
- *   5. Navigate to /outputs — verify page loads and shows recipe data
+ *   5. Navigate to /agent-outputs — verify page loads and shows recipe data
  *   6. Re-deploy → generate → Clear All via bulk delete
  *
  * Uses the local glm-4.7 model mapping available in the minikube E2E profile.
@@ -545,17 +545,17 @@ test.describe('Artifact Full Flow E2E', () => {
     console.log('  [PASS] Per-file delete works, API confirms 404')
   })
 
-  test('4. /outputs page loads and shows recipe', async ({ page }) => {
+  test('4. /agent-outputs page loads and shows recipe', async ({ page }) => {
     await login(page)
 
-    // Navigate to /outputs
-    await page.goto(`${BASE_UI}/outputs`)
+    // Navigate to the canonical Agent Outputs route.
+    await page.goto(`${BASE_UI}/agent-outputs`)
 
     // The page should show the recipe name (even if artifacts are deleted,
     // the regex fallback on step output may still detect filenames)
     await expect(page.locator('text=Recipe Artifacts')).toBeVisible({ timeout: 10_000 })
 
-    console.log('  [PASS] /outputs page loads correctly')
+    console.log('  [PASS] /agent-outputs page loads correctly')
   })
 
   test('5. re-deploy + bulk delete via Clear All', async ({ page }) => {

@@ -449,18 +449,6 @@ export class ClerumMcpServer {
           res.end(JSON.stringify(result.body))
           return
         }
-
-        // POST /api/v1/workflow/:name/trigger
-        if (subPath === '/trigger') {
-          // Recipe namespace travels via the token claim (signed by WRC when it
-          // minted the CronJob trigger token). Callers never need to hardcode
-          // sandbox vs mcp-server — whichever namespace the CRD lives in,
-          // the claim says so.
-          const result = await handlers.postTrigger(recipeName, claims.recipeNamespace, claims)
-          res.writeHead(result.status, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(result.body))
-          return
-        }
       }
     }
 

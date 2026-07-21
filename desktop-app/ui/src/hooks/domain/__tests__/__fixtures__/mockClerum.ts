@@ -26,6 +26,7 @@ interface ChatMock {
   getLastActive: Fn
   setLastActive: Fn
   getIndex: Fn
+  reconcileServerSessions: Fn
   dismissOnboarding: Fn
 }
 
@@ -84,6 +85,7 @@ export function installMockClerum(): MockClerum {
       onboardingDismissed: false,
       chats: [],
     })),
+    reconcileServerSessions: vi.fn(async () => 0),
     dismissOnboarding: vi.fn(async () => undefined),
   }
 

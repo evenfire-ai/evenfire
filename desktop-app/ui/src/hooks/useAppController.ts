@@ -647,6 +647,11 @@ export function useAppController() {
       teamsData.reset()
       resetWorkflowsData()
       queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+      // Drop ALL cached queries on logout (spec §5.2 P1): the singleton
+      // desktopQueryClient uses staleTime:Infinity, so any env-scoped data left
+      // in cache would otherwise bleed into the next login (possibly a different
+      // environment, since the env is chosen pre-login).
+      queryClient.clear()
       authenticatedSessionIdentityRef.current = null
       await window.clerum.auth.logout()
       chat.resetChat()
@@ -983,6 +988,11 @@ export function useAppController() {
   return {
     // Auth
     booting: auth.booting,
+    initialExperienceLoading:
+      auth.isAuthenticated &&
+      !auth.hasDependencyOutage &&
+      agentsData.loading &&
+      !agentsData.accessCatalog,
     busy: auth.busy,
     statusText,
     statusTone,

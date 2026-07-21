@@ -14,6 +14,7 @@ const mockVerifyExternalSessionToken = vi.fn()
 const mockSignGfsToken = vi.hoisted(() => vi.fn())
 const mockQuery = vi.hoisted(() => vi.fn())
 const mockAppendPermissionEvents = vi.hoisted(() => vi.fn())
+const mockWithTransaction = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...a: unknown[]) => mockVerifyExternalSessionToken(...a),
@@ -33,8 +34,7 @@ vi.mock('../src/config.js', () => ({
 }))
 vi.mock('../src/db.js', () => ({
   pool: { query: (...a: unknown[]) => mockQuery(...a) },
-  withTransaction: async (work: (db: { query: typeof mockQuery }) => Promise<unknown>) =>
-    work({ query: mockQuery }),
+  withTransaction: (...a: unknown[]) => mockWithTransaction(...a),
 }))
 vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
   appendControlApiPermissionEventsInTransaction: (...a: unknown[]) =>
@@ -53,6 +53,8 @@ const U1 = '11111111-aaaa-4aaa-8aaa-111111111111'
 const U2 = '22222222-bbbb-4bbb-8bbb-222222222222'
 const T1 = '33333333-cccc-4ccc-8ccc-333333333333'
 const T2 = '44444444-dddd-4ddd-8ddd-444444444444'
+const H1 = '1st:mcp-host/standalone'
+const CORRELATION_ID = '55555555-eeee-4eee-8eee-555555555555'
 const SESSION = {
   userId: U1,
   email: 'u@example.com',
@@ -66,9 +68,27 @@ const R_RID = R.replace(/-/g, '')
 
 async function buildApp() {
   const { createExternalGfsRouter } = await import('../src/routes/external/gfs.js')
+  const { correlationIdMiddleware } = await import('../src/middleware/correlationId.js')
   const app = express()
   app.use(express.json())
+  app.use(correlationIdMiddleware)
   app.use(createExternalGfsRouter())
+  return app
+}
+
+async function buildOperatorShareApp() {
+  const { registerGfsShareRoutes } = await import('../src/routes/gfs/shares.js')
+  const app = express()
+  app.use(express.json())
+  app.use((req, _res, next) => {
+    ;(req as typeof req & { adminAuth: { sub: string } }).adminAuth = {
+      sub: 'operator-share-test',
+    }
+    next()
+  })
+  const router = express.Router()
+  registerGfsShareRoutes(router)
+  app.use(router)
   return app
 }
 
@@ -77,6 +97,11 @@ beforeEach(() => {
   mockSignGfsToken.mockReset()
   mockQuery.mockReset()
   mockAppendPermissionEvents.mockReset()
+  mockWithTransaction.mockReset()
+  mockWithTransaction.mockImplementation(
+    async (work: (db: { query: typeof mockQuery }) => Promise<unknown>) =>
+      work({ query: mockQuery })
+  )
   mockAppendPermissionEvents.mockResolvedValue(null)
   mockSignGfsToken.mockReturnValue({ token: 'gfs-user-token', expiresInSeconds: 300 })
 })
@@ -84,9 +109,32 @@ afterEach(() => vi.unstubAllGlobals())
 
 const auth = () => mockVerifyExternalSessionToken.mockReturnValue(SESSION)
 
+function combinedAuthorityRow(
+  grants: Record<string, unknown>[],
+  values?: unknown[]
+): { rows: Array<{ ancestors: string[]; grants: Record<string, unknown>[]; shares: never[] }> } {
+  const subjectTypes = (values?.[2] as string[]) ?? []
+  const subjectIds = (values?.[3] as string[]) ?? []
+  const wanted = new Set(subjectTypes.map((type, i) => `${type}:${subjectIds[i] ?? ''}`))
+  return {
+    rows: [
+      {
+        ancestors: [String(values?.[1])],
+        grants: grants.filter(grant =>
+          wanted.has(`${String(grant.subject_type)}:${String(grant.subject_id ?? '')}`)
+        ),
+        shares: [],
+      },
+    ],
+  }
+}
+
 /** Route the grant engine's queries by SQL shape. */
 function dbReturning(grants: Record<string, unknown>[]) {
   mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
+    if (text.includes('authority_grants AS') && text.includes('authority_shares AS')) {
+      return combinedAuthorityRow(grants, values)
+    }
     if (text.includes('WITH RECURSIVE chain'))
       return { rows: [{ resource_id: String(values?.[1]) }] }
     if (text.includes('FROM gfs_grants')) {
@@ -201,24 +249,29 @@ describe('PUT /external/gfs/grants (user delegation via existing engine)', () =>
 
   it('honors grants held through any active team, not only the session teamId', async () => {
     auth()
+    const teamGrants = [
+      {
+        subject_type: 'team',
+        subject_id: T2,
+        resource_id: R,
+        permissions: ['manage_acl', 'read'],
+        inherit: false,
+      },
+    ]
     mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
       if (text.includes('FROM team_members')) return { rows: [{ team_id: T2 }] }
+      if (text.includes('authority_grants AS') && text.includes('authority_shares AS')) {
+        return combinedAuthorityRow(teamGrants, values)
+      }
       if (text.includes('WITH RECURSIVE chain'))
         return { rows: [{ resource_id: String(values?.[1]) }] }
       if (text.includes('FROM gfs_grants')) {
         const subjectTypes = (values?.[1] as string[]) ?? []
         const subjectIds = (values?.[2] as string[]) ?? []
         const wanted = new Set(subjectTypes.map((type, i) => `${type}:${subjectIds[i] ?? ''}`))
-        const rows = [
-          {
-            subject_type: 'team',
-            subject_id: T2,
-            resource_id: R,
-            permissions: ['manage_acl', 'read'],
-            inherit: false,
-          },
-        ]
-        return { rows: rows.filter(row => wanted.has(`${row.subject_type}:${row.subject_id}`)) }
+        return {
+          rows: teamGrants.filter(row => wanted.has(`${row.subject_type}:${row.subject_id}`)),
+        }
       }
       if (text.includes('FROM gfs_shares')) return { rows: [] }
       if (text.includes('INSERT INTO gfs_grants')) return { rows: [] }
@@ -339,6 +392,12 @@ describe('POST /external/gfs/shares (user delegation via existing engine)', () =
       })
 
     expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      ok: true,
+      resourceId: R,
+      updated: [{ type: 'user', id: U2 }],
+      count: 1,
+    })
     expect(
       mockQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO gfs_shares'))
     ).toBe(true)
@@ -355,6 +414,449 @@ describe('POST /external/gfs/shares (user delegation via existing engine)', () =
         ],
       })
     )
+  })
+
+  it.each([
+    ['operator', { type: 'operator' }],
+    ['context', { type: 'context', id: 'run-context' }],
+  ])('preserves singular %s shares for an operator caller', async (_label, subject) => {
+    dbReturning([])
+    const app = await buildOperatorShareApp()
+
+    const res = await request(app)
+      .post('/gfs/shares')
+      .send({
+        resourceId: R,
+        subject,
+        permissions: ['read'],
+        includeDescendants: false,
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, resourceId: R, updated: [subject], count: 1 })
+    const mutations = mockQuery.mock.calls.filter(call =>
+      String(call[0]).includes('INSERT INTO gfs_shares')
+    )
+    expect(mutations).toHaveLength(1)
+    expect(mutations[0]?.[1]?.[2]).toEqual([subject.type])
+    expect(mutations[0]?.[1]?.[3]).toEqual(['id' in subject ? subject.id : ''])
+  })
+
+  it('preserves the singular host share rejection for an operator caller', async () => {
+    dbReturning([])
+    const app = await buildOperatorShareApp()
+
+    const res = await request(app)
+      .post('/gfs/shares')
+      .send({
+        resourceId: R,
+        subject: { type: 'host', id: H1 },
+        permissions: ['read'],
+        includeDescendants: false,
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({
+      error: 'share_to_agent_forbidden',
+      message: 'share_to_agent_forbidden',
+    })
+    expect(
+      mockQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO gfs_shares'))
+    ).toBe(false)
+    expect(mockAppendPermissionEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        operatorSub: 'operator-share-test',
+        operatorKind: 'control_admin',
+        changes: [
+          expect.objectContaining({
+            outcome: 'rejected',
+            authorizationDecision: 'deny',
+            subject: { kind: 'service', id: `host:${H1}`, principalKind: 'host' },
+          }),
+        ],
+      })
+    )
+  })
+})
+
+describe('authenticated bulk grant/share transport', () => {
+  const authority = (permissions: string[]) =>
+    dbReturning([
+      {
+        subject_type: 'user',
+        subject_id: U1,
+        resource_id: R,
+        permissions,
+        inherit: false,
+      },
+    ])
+
+  it('keeps singular grant responses compatible with the ordered result envelope', async () => {
+    auth()
+    authority(['manage_acl', 'read'])
+    const app = await buildApp()
+
+    const res = await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .send({
+        resourceId: R,
+        subject: { type: 'user', id: U2 },
+        permissions: ['read'],
+        inherit: false,
+      })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      ok: true,
+      resourceId: R,
+      updated: [{ type: 'user', id: U2 }],
+      count: 1,
+    })
+  })
+
+  it('bulk grants user, team, and canonical host subjects in input order with one mutation', async () => {
+    auth()
+    authority(['manage_acl', 'read'])
+    const app = await buildApp()
+    const subjects = [
+      { type: 'user', id: U2 },
+      { type: 'team', id: T2 },
+      { type: 'host', id: H1 },
+    ]
+
+    const res = await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .set('x-correlation-id', CORRELATION_ID)
+      .send({ resourceId: R, subjects, permissions: ['read'], inherit: true })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, resourceId: R, updated: subjects, count: 3 })
+    const mutations = mockQuery.mock.calls.filter(call =>
+      String(call[0]).includes('INSERT INTO gfs_grants')
+    )
+    expect(mutations).toHaveLength(1)
+
+    const audits = mockQuery.mock.calls.filter(call =>
+      String(call[0]).includes('INSERT INTO gfs_audit')
+    )
+    expect(audits.map(call => call[1]?.[0])).toEqual([`user:${U2}`, `team:${T2}`, `host:${H1}`])
+    expect(audits.map(call => call[1]?.[6])).toEqual([
+      CORRELATION_ID,
+      CORRELATION_ID,
+      CORRELATION_ID,
+    ])
+    expect(mockAppendPermissionEvents).toHaveBeenCalledTimes(1)
+    expect(mockAppendPermissionEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        requestId: CORRELATION_ID,
+        changes: [
+          expect.objectContaining({ subject: { kind: 'user', id: U2 }, outcome: 'committed' }),
+          expect.objectContaining({ subject: { kind: 'team', id: T2 }, outcome: 'committed' }),
+          expect.objectContaining({
+            subject: { kind: 'service', id: `host:${H1}`, principalKind: 'host' },
+            outcome: 'committed',
+          }),
+        ],
+      })
+    )
+  })
+
+  it('bulk shares user and team subjects in input order with one mutation', async () => {
+    auth()
+    authority(['share', 'read'])
+    const app = await buildApp()
+    const subjects = [
+      { type: 'team', id: T2 },
+      { type: 'user', id: U2 },
+    ]
+
+    const res = await request(app)
+      .post('/external/gfs/shares')
+      .set('x-user-session-token', 'sess')
+      .send({ resourceId: R, subjects, permissions: ['read'], includeDescendants: true })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, resourceId: R, updated: subjects, count: 2 })
+    expect(
+      mockQuery.mock.calls.filter(call => String(call[0]).includes('INSERT INTO gfs_shares'))
+    ).toHaveLength(1)
+    expect(mockAppendPermissionEvents).toHaveBeenCalledTimes(1)
+    expect(mockAppendPermissionEvents.mock.calls[0]?.[1]?.changes).toHaveLength(2)
+  })
+
+  it.each([
+    ['grant', 'put', '/external/gfs/grants', 'INSERT INTO gfs_grants', ['manage_acl', 'read']],
+    ['share', 'post', '/external/gfs/shares', 'INSERT INTO gfs_shares', ['share', 'read']],
+  ] as const)(
+    'canonicalizes uppercase UUID subjects throughout a successful %s mutation',
+    async (_label, method, path, mutationSql, heldPermissions) => {
+      auth()
+      authority([...heldPermissions])
+      const app = await buildApp()
+
+      const res = await request(app)
+        [method](path)
+        .set('x-user-session-token', 'sess')
+        .send({
+          resourceId: R,
+          subjects: [
+            { type: 'user', id: U2.toUpperCase() },
+            { type: 'team', id: T2.toUpperCase() },
+          ],
+          permissions: ['read'],
+        })
+
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({
+        ok: true,
+        resourceId: R,
+        updated: [
+          { type: 'user', id: U2 },
+          { type: 'team', id: T2 },
+        ],
+        count: 2,
+      })
+      const mutation = mockQuery.mock.calls.find(call => String(call[0]).includes(mutationSql))
+      expect(mutation?.[1]?.[3]).toEqual([U2, T2])
+      const audits = mockQuery.mock.calls.filter(call =>
+        String(call[0]).includes('INSERT INTO gfs_audit')
+      )
+      expect(audits.map(call => call[1]?.[0])).toEqual([`user:${U2}`, `team:${T2}`])
+    }
+  )
+
+  it.each([
+    ['grant', 'put', '/external/gfs/grants', 'INSERT INTO gfs_grants', ['manage_acl', 'read']],
+    ['share', 'post', '/external/gfs/shares', 'INSERT INTO gfs_shares', ['share', 'read']],
+  ] as const)(
+    'rejects a mixed-case duplicate %s batch with the common structured error',
+    async (_label, method, path, mutationSql, heldPermissions) => {
+      auth()
+      authority([...heldPermissions])
+      const app = await buildApp()
+
+      const res = await request(app)
+        [method](path)
+        .set('x-user-session-token', 'sess')
+        .send({
+          resourceId: R,
+          subjects: [
+            { type: 'user', id: U2 },
+            { type: 'user', id: U2.toUpperCase() },
+          ],
+          permissions: ['read'],
+        })
+
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({
+        error: 'subjects_invalid',
+        message: 'subjects_invalid',
+        invalidIndexes: [1],
+      })
+      expect(mockQuery.mock.calls.some(call => String(call[0]).includes(mutationSql))).toBe(false)
+      expect(mockAppendPermissionEvents).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    ['grant with neither field', 'put', '/external/gfs/grants', {}],
+    [
+      'grant with both fields',
+      'put',
+      '/external/gfs/grants',
+      { subject: { type: 'user', id: U2 }, subjects: [{ type: 'team', id: T2 }] },
+    ],
+    ['share with neither field', 'post', '/external/gfs/shares', {}],
+    [
+      'share with both fields',
+      'post',
+      '/external/gfs/shares',
+      { subject: { type: 'user', id: U2 }, subjects: [{ type: 'team', id: T2 }] },
+    ],
+  ] as const)(
+    'gives subject transport precedence for %s even when resourceId is invalid',
+    async (_label, method, path, subjectFields) => {
+      auth()
+      mockQuery.mockResolvedValue({ rows: [] })
+      const app = await buildApp()
+
+      const res = await request(app)
+        [method](path)
+        .set('x-user-session-token', 'sess')
+        .send({ resourceId: 'not-a-uuid', ...subjectFields, permissions: ['read'] })
+
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'subjects_invalid', message: 'subjects_invalid' })
+      expect(
+        mockQuery.mock.calls.some(call => /INSERT INTO gfs_(?:grants|shares)/.test(String(call[0])))
+      ).toBe(false)
+      expect(mockAppendPermissionEvents).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    ['grant', 'put', '/external/gfs/grants'],
+    ['share', 'post', '/external/gfs/shares'],
+  ] as const)(
+    'serializes an invalid resource consistently for %s writes',
+    async (_label, method, path) => {
+      auth()
+      mockQuery.mockResolvedValue({ rows: [] })
+      const app = await buildApp()
+
+      const res = await request(app)
+        [method](path)
+        .set('x-user-session-token', 'sess')
+        .send({
+          resourceId: 'not-a-uuid',
+          subject: { type: 'user', id: U2 },
+          permissions: ['read'],
+        })
+
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'resource_invalid', message: 'resource_invalid' })
+      expect(
+        mockQuery.mock.calls.some(call => /INSERT INTO gfs_(?:grants|shares)/.test(String(call[0])))
+      ).toBe(false)
+      expect(mockAppendPermissionEvents).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    ['operator', { type: 'operator' }],
+    ['context', { type: 'context', id: 'run-context' }],
+  ])('rejects plural %s grants before mutation', async (_label, unsupported) => {
+    auth()
+    authority(['manage_acl', 'read'])
+    const app = await buildApp()
+
+    const res = await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .send({
+        resourceId: R,
+        subjects: [{ type: 'user', id: U2 }, unsupported],
+        permissions: ['read'],
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: 'subjects_invalid', invalidIndexes: [1] })
+    expect(
+      mockQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO gfs_grants'))
+    ).toBe(false)
+    expect(mockAppendPermissionEvents).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['host', { type: 'host', id: H1 }],
+    ['operator', { type: 'operator' }],
+    ['context', { type: 'context', id: 'run-context' }],
+  ])('rejects a %s in plural shares before mutation', async (_label, unsupported) => {
+    auth()
+    authority(['share', 'read'])
+    const app = await buildApp()
+
+    const res = await request(app)
+      .post('/external/gfs/shares')
+      .set('x-user-session-token', 'sess')
+      .send({
+        resourceId: R,
+        subjects: [{ type: 'user', id: U2 }, unsupported],
+        permissions: ['read'],
+      })
+
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: 'subjects_invalid', invalidIndexes: [1] })
+    expect(
+      mockQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO gfs_shares'))
+    ).toBe(false)
+    expect(mockAppendPermissionEvents).not.toHaveBeenCalled()
+  })
+
+  it('denies an entire mixed grant batch without mutation and records correlated denial evidence', async () => {
+    auth()
+    authority(['manage_acl'])
+    const app = await buildApp()
+
+    const res = await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .set('x-correlation-id', CORRELATION_ID)
+      .send({
+        resourceId: R,
+        subjects: [
+          { type: 'user', id: U2 },
+          { type: 'host', id: H1 },
+        ],
+        permissions: ['manage_acl'],
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('agent_manager_forbidden')
+    expect(
+      mockQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO gfs_grants'))
+    ).toBe(false)
+    const audits = mockQuery.mock.calls.filter(call =>
+      String(call[0]).includes('INSERT INTO gfs_audit')
+    )
+    expect(audits.map(call => [call[1]?.[0], call[1]?.[4], call[1]?.[6]])).toEqual([
+      [`user:${U2}`, 'denied', CORRELATION_ID],
+      [`host:${H1}`, 'denied', CORRELATION_ID],
+    ])
+    expect(mockAppendPermissionEvents).toHaveBeenCalledTimes(1)
+    expect(mockAppendPermissionEvents.mock.calls[0]?.[1]?.changes).toEqual([
+      expect.objectContaining({ outcome: 'rejected', authorizationDecision: 'deny' }),
+      expect.objectContaining({ outcome: 'rejected', authorizationDecision: 'deny' }),
+    ])
+  })
+
+  it('does not publish staged mutation or audit effects when event persistence fails', async () => {
+    auth()
+    authority(['manage_acl', 'read'])
+    const attempted: string[] = []
+    const committed: string[] = []
+    mockWithTransaction.mockImplementation(
+      async (
+        work: (db: {
+          query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[] }>
+        }) => Promise<unknown>
+      ) => {
+        const staged: string[] = []
+        const result = await work({
+          query: async (text: string, values?: unknown[]) => {
+            if (text.includes('INSERT INTO gfs_grants')) staged.push('grant')
+            if (text.includes('INSERT INTO gfs_audit')) staged.push('audit')
+            attempted.push(...staged.slice(attempted.length))
+            return mockQuery(text, values)
+          },
+        })
+        committed.push(...staged)
+        return result
+      }
+    )
+    mockAppendPermissionEvents.mockRejectedValueOnce(new Error('permission event write failed'))
+    const app = await buildApp()
+
+    const res = await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .send({
+        resourceId: R,
+        subjects: [
+          { type: 'user', id: U2 },
+          { type: 'team', id: T2 },
+        ],
+        permissions: ['read'],
+      })
+
+    expect(res.status).toBe(500)
+    expect(attempted).toContain('grant')
+    expect(attempted).toContain('audit')
+    expect(committed).toEqual([])
   })
 })
 

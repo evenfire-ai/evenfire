@@ -10,6 +10,7 @@ import {
   WorkspaceActionsProvider,
 } from '@contexts/index'
 import { AppHeader } from '@components/AppHeader'
+import { BootSplash } from '@components/BootSplash'
 import { Button, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { SidebarNav } from '@components/SidebarNav'
@@ -613,141 +614,137 @@ export function App() {
       />
     ) : null
 
-  if (vm.booting) {
-    return (
-      <main className="auth-page">
-        <section className="auth-card glass-card">
-          <h1>Evenfire</h1>
-          <p className="muted">Loading session...</p>
-        </section>
-      </main>
-    )
-  }
-
-  if (!vm.isAuthenticated) {
-    return (
-      <AuthContext.Provider value={authValue}>
-        {vm.hasDependencyOutage ? <UnavailablePage /> : <AuthPage />}
-        {environmentSetupConfirmationDialog}
-        {environmentSetupSuccessDialog}
-        <ToastStack items={vm.toasts} />
-      </AuthContext.Provider>
-    )
-  }
+  const bootSplashLoading = vm.booting || vm.initialExperienceLoading
 
   return (
     <AuthContext.Provider value={authValue}>
-      <NavigationContext.Provider value={navValue}>
-        <NotificationsContext.Provider value={notifValue}>
-          <WorkspaceActionsProvider value={workspaceActionsValue}>
-            <AgentActivityProvider value={agentActivityValue}>
-              <AgentChatProviders
-                actions={agentChatActionsValue}
-                chatList={chatListValue}
-                composerState={chatComposerStateValue}
-                threadState={chatThreadStateValue}
-              >
-                <McpRuntimeProvider value={mcpRuntimeValue}>
-                  <DesktopStateProvider value={desktopStateValue}>
-                    <main className="app-shell">
-                      <SidebarNav
-                        navItem={
-                          vm.navItem === DESKTOP_ROUTES.teamDetails
-                            ? DESKTOP_ROUTES.teams
-                            : vm.navItem === DESKTOP_ROUTES.contextDetails
-                              ? DESKTOP_ROUTES.contexts
-                              : vm.navItem
-                        }
-                        activeSandboxUiApp={activeSandboxUiApp}
-                        availableSandboxUiApps={availableSandboxUiApps}
-                        collapsed={sidebarCollapsed}
-                        onCollapsedChange={setSidebarCollapsed}
-                        onOpenSandboxUiApp={handleOpenSandboxUiApp}
-                        onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
-                        onSelect={vm.handleNavSelect}
-                      />
-                      <section className="workspace-layout">
-                        <section
-                          ref={contentPanelRef}
-                          className={`content-panel glass-card${
-                            isAgentChatView ? ' content-panel--agent-chat' : ''
-                          }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''}${
-                            appNotificationDrawerOpen
-                              ? ' content-panel--app-notification-drawer-open'
-                              : ''
-                          }`}
-                        >
-                          <AppHeader
-                            notificationTrayMode={notificationTrayUsesDrawer ? 'drawer' : 'overlay'}
-                            notificationTrayReady={notificationDrawerReady}
-                            onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
-                            onShellOverlayOpenChange={setHeaderShellOverlayOpen}
+      <div className="app-root" inert={bootSplashLoading || undefined}>
+        {vm.isAuthenticated ? (
+          <NavigationContext.Provider value={navValue}>
+            <NotificationsContext.Provider value={notifValue}>
+              <WorkspaceActionsProvider value={workspaceActionsValue}>
+                <AgentActivityProvider value={agentActivityValue}>
+                  <AgentChatProviders
+                    actions={agentChatActionsValue}
+                    chatList={chatListValue}
+                    composerState={chatComposerStateValue}
+                    threadState={chatThreadStateValue}
+                  >
+                    <McpRuntimeProvider value={mcpRuntimeValue}>
+                      <DesktopStateProvider value={desktopStateValue}>
+                        <main className="app-shell">
+                          <SidebarNav
+                            navItem={
+                              vm.navItem === DESKTOP_ROUTES.teamDetails
+                                ? DESKTOP_ROUTES.teams
+                                : vm.navItem === DESKTOP_ROUTES.contextDetails
+                                  ? DESKTOP_ROUTES.contexts
+                                  : vm.navItem
+                            }
+                            activeSandboxUiApp={activeSandboxUiApp}
+                            availableSandboxUiApps={availableSandboxUiApps}
+                            collapsed={sidebarCollapsed}
+                            onCollapsedChange={setSidebarCollapsed}
+                            onOpenSandboxUiApp={handleOpenSandboxUiApp}
+                            onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
+                            onSelect={vm.handleNavSelect}
                           />
-                          <ToastStack items={vm.toasts} />
-                          {vm.navItem === DESKTOP_ROUTES.chat && (
-                            <ChatPage scrollContainerRef={contentPanelRef} />
-                          )}
-                          {vm.navItem === DESKTOP_ROUTES.agents && (
-                            <AgentsPage scrollContainerRef={contentPanelRef} />
-                          )}
-                          {vm.navItem === DESKTOP_ROUTES.contexts && <ContextsPage />}
-                          {vm.navItem === DESKTOP_ROUTES.files && (
-                            <FilesPage pushToast={vm.pushToast} />
-                          )}
-                          {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
-                          {vm.navItem === DESKTOP_ROUTES.contextDetails && <ContextDetailsPage />}
-                          {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
-                          {vm.navItem === DESKTOP_ROUTES.apps && (
-                            <SandboxUiPage
-                              boundsRefreshKey={sandboxUiBoundsRefreshKey}
-                              headerShellOverlayOpen={headerShellOverlayOpen}
-                              sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
-                              toastShellOverlayOpen={vm.toasts.length > 0}
-                              shortcutApp={activeSandboxUiApp}
-                              shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
-                              onEmbeddedAppOpening={handleSandboxUiOpening}
-                              onEmbeddedAppBack={handleSandboxUiClosed}
-                              onEmbeddedAppRemoved={handleSandboxUiRemoved}
-                              onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
-                            />
-                          )}
-                          {vm.navItem === DESKTOP_ROUTES.settings && (
-                            <SettingsPage
-                              notificationSettings={vm.notificationSettings}
-                              desktopNotificationPermission={vm.desktopNotificationPermission}
-                              themeMode={themeMode}
-                              onNotify={vm.pushToast}
-                              onThemeModeChange={setThemeMode}
-                              onNotificationSoundVolumeChange={vm.setNotificationSoundVolume}
-                              onPlayNotificationSoundPreview={vm.playNotificationSoundPreview}
-                              onSaveNotificationSettings={vm.saveNotificationSettings}
-                              channelNotificationPreferences={vm.channelNotificationPreferences}
-                              channelNotificationPreferencesLoading={
-                                vm.channelNotificationPreferencesLoading
-                              }
-                              channelNotificationPreferencesSaving={
-                                vm.channelNotificationPreferencesSaving
-                              }
-                              onSaveChannelNotificationPreferences={
-                                vm.saveChannelNotificationPreferences
-                              }
-                            />
-                          )}
-                          {vm.navItem === DESKTOP_ROUTES.teams && <TeamsPage />}
-                          {vm.navItem === DESKTOP_ROUTES.teamDetails && <TeamDetailsPage />}
-                        </section>
-                      </section>
-                    </main>
-                    {desktopUpdateRequiredDialog}
-                    {environmentSetupConfirmationDialog}
-                    {environmentSetupSuccessDialog}
-                  </DesktopStateProvider>
-                </McpRuntimeProvider>
-              </AgentChatProviders>
-            </AgentActivityProvider>
-          </WorkspaceActionsProvider>
-        </NotificationsContext.Provider>
-      </NavigationContext.Provider>
+                          <section className="workspace-layout">
+                            <section
+                              ref={contentPanelRef}
+                              className={`content-panel glass-card${
+                                isAgentChatView ? ' content-panel--agent-chat' : ''
+                              }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''}${
+                                appNotificationDrawerOpen
+                                  ? ' content-panel--app-notification-drawer-open'
+                                  : ''
+                              }`}
+                            >
+                              <AppHeader
+                                notificationTrayMode={
+                                  notificationTrayUsesDrawer ? 'drawer' : 'overlay'
+                                }
+                                notificationTrayReady={notificationDrawerReady}
+                                onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
+                                onShellOverlayOpenChange={setHeaderShellOverlayOpen}
+                              />
+                              <ToastStack items={vm.toasts} />
+                              {vm.navItem === DESKTOP_ROUTES.chat && (
+                                <ChatPage scrollContainerRef={contentPanelRef} />
+                              )}
+                              {vm.navItem === DESKTOP_ROUTES.agents && (
+                                <AgentsPage scrollContainerRef={contentPanelRef} />
+                              )}
+                              {vm.navItem === DESKTOP_ROUTES.contexts && <ContextsPage />}
+                              {vm.navItem === DESKTOP_ROUTES.files && (
+                                <FilesPage pushToast={vm.pushToast} />
+                              )}
+                              {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
+                              {vm.navItem === DESKTOP_ROUTES.contextDetails && (
+                                <ContextDetailsPage />
+                              )}
+                              {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
+                              {vm.navItem === DESKTOP_ROUTES.apps && (
+                                <SandboxUiPage
+                                  boundsRefreshKey={sandboxUiBoundsRefreshKey}
+                                  headerShellOverlayOpen={headerShellOverlayOpen}
+                                  sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
+                                  toastShellOverlayOpen={vm.toasts.length > 0}
+                                  shortcutApp={activeSandboxUiApp}
+                                  shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
+                                  onEmbeddedAppOpening={handleSandboxUiOpening}
+                                  onEmbeddedAppBack={handleSandboxUiClosed}
+                                  onEmbeddedAppRemoved={handleSandboxUiRemoved}
+                                  onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
+                                />
+                              )}
+                              {vm.navItem === DESKTOP_ROUTES.settings && (
+                                <SettingsPage
+                                  notificationSettings={vm.notificationSettings}
+                                  desktopNotificationPermission={vm.desktopNotificationPermission}
+                                  themeMode={themeMode}
+                                  onNotify={vm.pushToast}
+                                  onThemeModeChange={setThemeMode}
+                                  onNotificationSoundVolumeChange={vm.setNotificationSoundVolume}
+                                  onPlayNotificationSoundPreview={vm.playNotificationSoundPreview}
+                                  onSaveNotificationSettings={vm.saveNotificationSettings}
+                                  channelNotificationPreferences={vm.channelNotificationPreferences}
+                                  channelNotificationPreferencesLoading={
+                                    vm.channelNotificationPreferencesLoading
+                                  }
+                                  channelNotificationPreferencesSaving={
+                                    vm.channelNotificationPreferencesSaving
+                                  }
+                                  onSaveChannelNotificationPreferences={
+                                    vm.saveChannelNotificationPreferences
+                                  }
+                                />
+                              )}
+                              {vm.navItem === DESKTOP_ROUTES.teams && <TeamsPage />}
+                              {vm.navItem === DESKTOP_ROUTES.teamDetails && <TeamDetailsPage />}
+                            </section>
+                          </section>
+                        </main>
+                        {desktopUpdateRequiredDialog}
+                        {environmentSetupConfirmationDialog}
+                        {environmentSetupSuccessDialog}
+                      </DesktopStateProvider>
+                    </McpRuntimeProvider>
+                  </AgentChatProviders>
+                </AgentActivityProvider>
+              </WorkspaceActionsProvider>
+            </NotificationsContext.Provider>
+          </NavigationContext.Provider>
+        ) : (
+          <>
+            {vm.hasDependencyOutage ? <UnavailablePage /> : <AuthPage />}
+            {environmentSetupConfirmationDialog}
+            {environmentSetupSuccessDialog}
+            <ToastStack items={vm.toasts} />
+          </>
+        )}
+      </div>
+      <BootSplash loading={bootSplashLoading} />
     </AuthContext.Provider>
   )
 }

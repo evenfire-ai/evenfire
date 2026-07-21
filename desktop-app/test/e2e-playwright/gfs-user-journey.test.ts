@@ -74,8 +74,9 @@ async function loginControlUi(page: Page): Promise<void> {
 
 async function openControlGfs(page: Page): Promise<void> {
   await loginControlUi(page)
-  await page.getByRole('link', { name: /Global Files/i }).click()
-  await expect(page).toHaveURL(/\/gfs(?:$|\?)/, { timeout: 15_000 })
+  await page.getByRole('button', { name: 'Directories', exact: true }).click()
+  await page.getByRole('link', { name: /Global File System/i }).click()
+  await expect(page).toHaveURL(/\/global-file-system(?:$|\?)/, { timeout: 15_000 })
   await expect(page.getByRole('region', { name: 'Global File System browser' })).toBeVisible()
 }
 

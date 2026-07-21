@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { WorkflowRecipeGfsIntentSpec } from '../types.js'
 import { type ParentRecipe, buildChildRecipe } from './childRecipeFactory.js'
 
 function makeParent(overrides: Partial<ParentRecipe['spec']> = {}): ParentRecipe {
@@ -62,5 +63,54 @@ describe('buildChildRecipe', () => {
 
     expect(spec.inputs).toEqual({ db_name: 'run-db' })
     expect(spec.computed).toEqual([{ name: 'db_mode', expression: "'readonly'" }])
+  })
+
+  it('inherits the parent GFS intent exactly into the per-run child', () => {
+    const gfs: WorkflowRecipeGfsIntentSpec = {
+      publishTargets: [{ drive: 'main', target: 'published-results' }],
+      mounts: [
+        {
+          drive: 'main',
+          target: 'shared-inputs',
+          scopes: ['gfs.read', 'gfs.write'],
+        },
+      ],
+    }
+
+    const child = buildChildRecipe(makeParent({ gfs }), 0)
+
+    expect((child.spec as Record<string, unknown>).gfs).toEqual(gfs)
+  })
+
+  it('omits GFS intent when the parent recipe does not declare it', () => {
+    const child = buildChildRecipe(makeParent(), 0)
+
+    expect(child.spec).not.toHaveProperty('gfs')
+  })
+
+  it('deep-copies inherited GFS intent so parent mutations cannot change a run', () => {
+    const mount = {
+      drive: 'main',
+      target: 'shared-inputs',
+      scopes: ['gfs.read', 'gfs.write'] as Array<'gfs.read' | 'gfs.write'>,
+    }
+    const gfs: WorkflowRecipeGfsIntentSpec = {
+      mounts: [mount],
+    }
+    const parent = makeParent({ gfs })
+
+    const child = buildChildRecipe(parent, 0)
+    mount.target = 'mutated-after-child-creation'
+    mount.scopes.pop()
+
+    expect((child.spec as Record<string, unknown>).gfs).toEqual({
+      mounts: [
+        {
+          drive: 'main',
+          target: 'shared-inputs',
+          scopes: ['gfs.read', 'gfs.write'],
+        },
+      ],
+    })
   })
 })

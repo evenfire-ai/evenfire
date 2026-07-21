@@ -74,6 +74,21 @@ function mockDb(opts?: { teams?: Record<string, string[]>; grants?: GrantRow[] }
         const userId = String(values?.[0] ?? '')
         return { rows: (teams[userId] ?? []).map(team_id => ({ team_id })) }
       }
+      if (text.includes('authority_grants AS') && text.includes('authority_shares AS')) {
+        const rid = String(values?.[1] ?? '')
+        const subjectTypes = (values?.[2] as string[]) ?? []
+        const subjectIds = (values?.[3] as string[]) ?? []
+        const wanted = new Set(subjectTypes.map((type, i) => `${type}:${subjectIds[i] ?? ''}`))
+        return {
+          rows: [
+            {
+              ancestors: ANCESTORS[rid] ?? [],
+              grants: grants.filter(g => wanted.has(`${g.subject_type}:${g.subject_id ?? ''}`)),
+              shares: [],
+            },
+          ],
+        }
+      }
       if (text.includes('WITH RECURSIVE chain')) {
         const rid = String(values?.[1] ?? '')
         return { rows: (ANCESTORS[rid] ?? []).map(resource_id => ({ resource_id })) }

@@ -6,6 +6,7 @@ import {
   clearDesktopRuntimeConfigSelection,
   config,
   deleteDesktopRuntimeConfigOption,
+  getActiveEnvKey,
   getDesktopRuntimeConfigState,
   hydrateDesktopRuntimeConfig,
   isDesktopRuntimeConfigured,
@@ -332,7 +333,7 @@ export class AppService {
     if (tokenChanged) {
       this.rpcTokenManager.clear()
       this.accessCatalog = null
-      await this.tokenStore.setSessionToken(token)
+      await this.tokenStore.setSessionToken(token, getActiveEnvKey())
     }
     if (options.refreshMe) {
       try {
@@ -341,7 +342,7 @@ export class AppService {
         unbindChatStore()
         throw error
       }
-      await bindChatStoreForUser(this.me.id)
+      await bindChatStoreForUser(this.me.id, getActiveEnvKey())
       this.updateCachedCurrentTeam(this.me.teamId)
     }
   }
@@ -349,7 +350,7 @@ export class AppService {
   private async getCurrentSessionTeamId(token: string): Promise<string> {
     if (this.me?.teamId) return this.me.teamId
     this.me = await this.authClient.getMe(token)
-    await bindChatStoreForUser(this.me.id)
+    await bindChatStoreForUser(this.me.id, getActiveEnvKey())
     this.updateCachedCurrentTeam(this.me.teamId)
     return this.me.teamId || ''
   }
@@ -465,13 +466,13 @@ export class AppService {
 
   async initialize(): Promise<SessionState> {
     hydrateDesktopRuntimeConfig()
-    this.sessionToken = await this.tokenStore.getSessionToken()
+    this.sessionToken = await this.tokenStore.getSessionToken(getActiveEnvKey())
     if (!this.sessionToken) {
       return { authenticated: false, me: null }
     }
     try {
       this.me = await this.authClient.getMe(this.sessionToken)
-      await bindChatStoreForUser(this.me.id)
+      await bindChatStoreForUser(this.me.id, getActiveEnvKey())
       this.accessCatalog = null
       this.teamDirectoryCache = null
       this.workflowApprovalTeamById.clear()
@@ -493,6 +494,7 @@ export class AppService {
       const { runSandboxUiPartitionGc } = await import('./sandboxUiPartitionGc.js')
       const result = await runSandboxUiPartitionGc({
         userDataDir: app.getPath('userData'),
+        envKey: getActiveEnvKey(),
         listAccessibleApps: () => this.listSandboxUiApps(),
       })
       if (result.wiped.length || result.evicted.length) {
@@ -510,12 +512,13 @@ export class AppService {
     const result = await this.authClient.passwordLogin(email, password)
     this.sessionToken = result.token
     this.me = result.me
+    await bindChatStoreForUser(result.me.id, getActiveEnvKey())
     this.accessCatalog = null
     this.teamDirectoryCache = null
     this.workflowApprovalTeamById.clear()
     this.workflowTeamByKey.clear()
     this.rpcTokenManager.clear()
-    await this.tokenStore.setSessionToken(result.token)
+    await this.tokenStore.setSessionToken(result.token, getActiveEnvKey())
     return { authenticated: true, me: result.me }
   }
 
@@ -578,13 +581,13 @@ export class AppService {
     const result = await this.authClient.googleLogin(idToken)
     this.sessionToken = result.token
     this.me = result.me
-    await bindChatStoreForUser(result.me.id)
+    await bindChatStoreForUser(result.me.id, getActiveEnvKey())
     this.accessCatalog = null
     this.teamDirectoryCache = null
     this.workflowApprovalTeamById.clear()
     this.workflowTeamByKey.clear()
     this.rpcTokenManager.clear()
-    await this.tokenStore.setSessionToken(result.token)
+    await this.tokenStore.setSessionToken(result.token, getActiveEnvKey())
     return { authenticated: true, me: result.me }
   }
 
@@ -768,7 +771,7 @@ export class AppService {
     this.workflowApprovalTeamById.clear()
     this.workflowTeamByKey.clear()
     this.rpcTokenManager.clear()
-    await this.tokenStore.clearSessionToken()
+    await this.tokenStore.clearSessionToken(getActiveEnvKey())
     unbindChatStore()
   }
 
@@ -1312,7 +1315,7 @@ export class AppService {
     const token = this.requireSessionToken()
     const me = this.me ?? (await this.authClient.getMe(token))
     this.me = me
-    await bindChatStoreForUser(me.id)
+    await bindChatStoreForUser(me.id, getActiveEnvKey())
     const currentTeamId = String(me.teamId || '').trim()
 
     const [userContexts, userAgents, teamContexts, teamAgents] = await Promise.all([

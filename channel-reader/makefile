@@ -1,6 +1,6 @@
 .PHONY: dev build install clean docker-build docker-push docker-push-cross docker-login
 
-REGISTRY ?= us-central1-docker.pkg.dev/your-gcp-project/clerum
+REGISTRY ?= us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum
 IMAGE_NAME ?= channel-reader
 TAG      ?= $(shell git describe --tags --always 2>/dev/null || echo "latest")
 TELEGRAM_BOT_TOKEN ?= # fill this in for local development

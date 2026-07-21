@@ -112,6 +112,7 @@ Test files are co-located with source in `src/` (e.g., `reconciler/resourceBuild
 ## Further Reading
 
 - [WorkflowRecipe CRD reference](../docs/crds/workflowrecipe.md)
+- [Workflow Recipes feature hub](../docs/features/workflow-recipes.md)
 
 ## Source Layout
 
@@ -159,7 +160,6 @@ src/
     ├── modelConfigHandler.ts # Per-step model overrides
     ├── httpMcpHostClient.ts  # mcp-host HTTP client
     ├── schedulingHandler.ts  # Cron/trigger scheduling
-    ├── triggerHandler.ts     # External trigger support
     ├── signalStore.ts        # Inter-step signal passing
     ├── rateLimiter.ts        # LLM call rate limiting
     ├── historyManager.ts     # Execution history

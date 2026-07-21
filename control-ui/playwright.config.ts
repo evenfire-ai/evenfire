@@ -49,13 +49,13 @@ const gfsAuthCrossBrowserProjects: NonNullable<PlaywrightTestConfig['projects']>
         {
           name: 'chrome-gfs-auth',
           testMatch: /gfs-operator-journey\.spec\.ts/,
-          grep: /authenticated operator reaches Global Files/,
+          grep: /authenticated operator reaches Global File System/,
           use: { channel: 'chrome' },
         },
         {
           name: 'firefox-gfs-auth',
           testMatch: /gfs-operator-journey\.spec\.ts/,
-          grep: /authenticated operator reaches Global Files/,
+          grep: /authenticated operator reaches Global File System/,
           use: { browserName: 'firefox' },
         },
       ]
@@ -71,11 +71,13 @@ const gfsAuthCrossBrowserProjects: NonNullable<PlaywrightTestConfig['projects']>
 // when you need html/json for CI artifacts.
 export default defineConfig({
   testDir: './e2e',
+  testIgnore: '**/support/**',
   timeout: 300_000, // 5 min default — long-running workflow specs override via test.setTimeout()
   expect: { timeout: 120_000 },
   reporter: [['list']],
   use: {
-    baseURL: process.env.CONTROL_UI_URL || 'http://localhost:3000',
+    baseURL:
+      process.env.CONTROL_UI_BASE_URL || process.env.CONTROL_UI_URL || 'http://localhost:3000',
     headless: true,
     screenshot: 'only-on-failure',
     trace: 'on-first-retry',

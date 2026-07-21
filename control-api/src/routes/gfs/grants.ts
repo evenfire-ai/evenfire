@@ -51,7 +51,8 @@ export function subjectKey(subject: GfsSubject): string {
 export class GfsGrantError extends Error {
   constructor(
     readonly status: number,
-    readonly code: string
+    readonly code: string,
+    readonly invalidIndexes?: readonly number[]
   ) {
     super(code)
     this.name = 'GfsGrantError'
@@ -234,6 +235,106 @@ export async function assertMayGrant(
   target: GfsSubject,
   opts: { isShare: boolean }
 ): Promise<void> {
+  await assertMayGrantBatch(db, caller, drive, resourceId, permissions, [target], opts)
+}
+
+interface GrantAuthoritySnapshot {
+  ancestors: Set<string>
+  grants: GrantRow[]
+  shares: ShareRow[]
+}
+
+async function loadGrantAuthority(
+  db: GrantsDb,
+  caller: GfsCaller,
+  drive: string,
+  resourceId: string
+): Promise<GrantAuthoritySnapshot | null> {
+  if (caller.isOperator) return null
+  const { types, ids } = subjectColumns(caller.subjects)
+  const result = await db.query(
+    `WITH RECURSIVE chain AS (
+       SELECT resource_id, parent_resource_id, 0 AS depth
+         FROM gfs_resources
+        WHERE drive = $1 AND resource_id = $2::uuid AND deleted_at IS NULL
+       UNION ALL
+       SELECT r.resource_id, r.parent_resource_id, c.depth + 1
+         FROM gfs_resources r
+         JOIN chain c ON r.resource_id = c.parent_resource_id
+        WHERE r.drive = $1 AND r.deleted_at IS NULL
+     ),
+     requested_subjects(subject_type, subject_id) AS (
+       SELECT * FROM unnest($3::text[], $4::text[])
+     ),
+     authority_grants AS (
+       SELECT g.subject_type, g.subject_id, g.resource_id, g.permissions, g.inherit
+         FROM gfs_grants g
+         JOIN requested_subjects s
+           ON s.subject_type = g.subject_type AND s.subject_id = g.subject_id
+        WHERE g.drive = $1
+     ),
+     authority_shares AS (
+       SELECT s0.subject_type, s0.subject_id, s0.resource_id, s0.permissions,
+              s0.include_descendants
+         FROM gfs_shares s0
+         JOIN requested_subjects s
+           ON s.subject_type = s0.subject_type AND s.subject_id = s0.subject_id
+        WHERE s0.drive = $1
+     )
+     SELECT
+       COALESCE(
+         (SELECT jsonb_agg(c.resource_id ORDER BY c.depth ASC) FROM chain c),
+         '[]'::jsonb
+       ) AS ancestors,
+       COALESCE(
+         (SELECT jsonb_agg(jsonb_build_object(
+            'subject_type', g.subject_type,
+            'subject_id', g.subject_id,
+            'resource_id', g.resource_id,
+            'permissions', g.permissions,
+            'inherit', g.inherit
+          )) FROM authority_grants g),
+         '[]'::jsonb
+       ) AS grants,
+       COALESCE(
+         (SELECT jsonb_agg(jsonb_build_object(
+            'subject_type', s.subject_type,
+            'subject_id', s.subject_id,
+            'resource_id', s.resource_id,
+            'permissions', s.permissions,
+            'include_descendants', s.include_descendants
+          )) FROM authority_shares s),
+         '[]'::jsonb
+       ) AS shares`,
+    [drive, resourceId, types, ids]
+  )
+  const row = (result.rows[0] ?? {}) as Record<string, unknown>
+  const ancestorList = Array.isArray(row.ancestors) ? row.ancestors.map(String) : []
+  const grantRows = Array.isArray(row.grants) ? (row.grants as Record<string, unknown>[]) : []
+  const shareRows = Array.isArray(row.shares) ? (row.shares as Record<string, unknown>[]) : []
+  return {
+    ancestors: new Set(ancestorList),
+    grants: grantRows.map(grant => ({
+      subjectKey: `${String(grant.subject_type)}:${String(grant.subject_id ?? '')}`,
+      resourceId: String(grant.resource_id),
+      permissions: (grant.permissions as string[]) ?? [],
+      inherit: Boolean(grant.inherit),
+    })),
+    shares: shareRows.map(share => ({
+      subjectKey: `${String(share.subject_type)}:${String(share.subject_id ?? '')}`,
+      resourceId: String(share.resource_id),
+      permissions: (share.permissions as string[]) ?? [],
+      includeDescendants: Boolean(share.include_descendants),
+    })),
+  }
+}
+
+function assertTargetPolicy(
+  caller: GfsCaller,
+  permissions: readonly GfsPermission[],
+  target: GfsSubject,
+  opts: { isShare: boolean }
+): void {
   // Agent (host) restriction (spec §Delegation): manage_acl/share are never
   // grantable to a host by a folder owner — only the operator can. `share` as a
   // share-grant is for users/teams only, never a host.
@@ -251,34 +352,52 @@ export async function assertMayGrant(
   if (!caller.isOperator && target.type === 'operator') {
     throw new GfsGrantError(403, 'operator_grant_forbidden')
   }
+}
 
+function assertAuthorityMayGrant(
+  snapshot: GrantAuthoritySnapshot | null,
+  caller: GfsCaller,
+  resourceId: string,
+  permissions: readonly GfsPermission[],
+  opts: { isShare: boolean }
+): void {
   // Operator is the intrinsic root of trust — may grant any bit anywhere.
   if (caller.isOperator) return
 
-  const ancestorList = await ancestorsOf(db, drive, resourceId)
-  if (ancestorList.length === 0) {
+  if (!snapshot || snapshot.ancestors.size === 0) {
     throw new GfsGrantError(403, opts.isShare ? 'not_sharer' : 'not_manager')
   }
-  const ancestors = new Set(ancestorList)
-  const [grants, shares] = await Promise.all([
-    loadGrants(db, drive, caller.subjects),
-    loadShares(db, drive, caller.subjects),
-  ])
 
   // Subtree confinement: the grantor must hold the authority bit on R (or an
   // inheriting ancestor) — `manage_acl` to write a folder grant, `share` to
   // write a URI share (spec §Permission bits). Holding it on R via the inherit
   // rule is exactly "R is within the grantor's subtree".
   const authorityBit: GfsPermission = opts.isShare ? 'share' : 'manage_acl'
-  if (!holds(authorityBit, resourceId, ancestors, grants, shares)) {
+  if (!holds(authorityBit, resourceId, snapshot.ancestors, snapshot.grants, snapshot.shares)) {
     throw new GfsGrantError(403, opts.isShare ? 'not_sharer' : 'not_manager')
   }
   // No-escalation: the grantor may only hand out bits it itself holds.
   for (const p of permissions) {
-    if (!holds(p, resourceId, ancestors, grants, shares)) {
+    if (!holds(p, resourceId, snapshot.ancestors, snapshot.grants, snapshot.shares)) {
       throw new GfsGrantError(403, 'escalation_rejected')
     }
   }
+}
+
+export async function assertMayGrantBatch(
+  db: GrantsDb,
+  caller: GfsCaller,
+  drive: string,
+  resourceId: string,
+  permissions: readonly GfsPermission[],
+  targets: readonly GfsSubject[],
+  opts: { isShare: boolean }
+): Promise<void> {
+  for (const target of targets) {
+    assertTargetPolicy(caller, permissions, target, opts)
+  }
+  const snapshot = await loadGrantAuthority(db, caller, drive, resourceId)
+  assertAuthorityMayGrant(snapshot, caller, resourceId, permissions, opts)
 }
 
 /**
@@ -399,14 +518,70 @@ export function parseSubject(value: unknown): GfsSubject {
   if ((type === 'user' || type === 'team') && !UUID_RE.test(id)) {
     throw new GfsGrantError(400, 'subject_invalid')
   }
+  const canonicalId = type === 'user' || type === 'team' ? id.toLowerCase() : id
   // host ids are canonical provisioner principals: 1st/3rd party plus a
   // Kubernetes namespace/name pair. Do not accept free-form host strings here:
   // grants written with a shape the token minter never issues become an inert
   // second source of truth and can mask security-review drift.
-  if (type === 'host' && !isValidHostSubjectId(id)) {
+  if (type === 'host' && !isValidHostSubjectId(canonicalId)) {
     throw new GfsGrantError(400, 'subject_invalid')
   }
-  return { type: type as GfsSubjectType, id }
+  return { type: type as GfsSubjectType, id: canonicalId }
+}
+
+export function assertMutationSubjectTransport(body: Record<string, unknown>): void {
+  const hasSubject = Object.prototype.hasOwnProperty.call(body, 'subject')
+  const hasSubjects = Object.prototype.hasOwnProperty.call(body, 'subjects')
+  if (hasSubject === hasSubjects) {
+    throw new GfsGrantError(400, 'subjects_invalid')
+  }
+}
+
+export function normalizeMutationSubjects(
+  body: Record<string, unknown>,
+  opts: { isShare: boolean }
+): GfsSubject[] {
+  assertMutationSubjectTransport(body)
+  const hasSubject = Object.prototype.hasOwnProperty.call(body, 'subject')
+  if (hasSubject) return [parseSubject(body.subject)]
+
+  if (!Array.isArray(body.subjects) || body.subjects.length < 1 || body.subjects.length > 100) {
+    throw new GfsGrantError(400, 'subjects_invalid')
+  }
+
+  const normalized: GfsSubject[] = []
+  const seen = new Set<string>()
+  const invalidIndexes: number[] = []
+  for (const [index, value] of body.subjects.entries()) {
+    try {
+      const subject = parseSubject(value)
+      const pluralTypeAllowed = opts.isShare
+        ? subject.type === 'user' || subject.type === 'team'
+        : subject.type === 'user' || subject.type === 'team' || subject.type === 'host'
+      const key = subjectKey(subject)
+      if (!pluralTypeAllowed || seen.has(key)) {
+        invalidIndexes.push(index)
+        continue
+      }
+      seen.add(key)
+      normalized.push(subject)
+    } catch (error) {
+      if (!(error instanceof GfsGrantError)) throw error
+      invalidIndexes.push(index)
+    }
+  }
+  if (invalidIndexes.length > 0) {
+    throw new GfsGrantError(400, 'subjects_invalid', invalidIndexes)
+  }
+  return normalized
+}
+
+export function sendGfsGrantError(res: import('express').Response, error: GfsGrantError): void {
+  res.status(error.status).json({
+    error: error.code,
+    message: error.message,
+    ...(error.invalidIndexes ? { invalidIndexes: error.invalidIndexes } : {}),
+  })
 }
 
 export function parsePermissions(value: unknown): GfsPermission[] {
@@ -424,6 +599,14 @@ export function parsePermissions(value: unknown): GfsPermission[] {
 
 export function driveOf(value: unknown): string {
   return typeof value === 'string' && value.length > 0 ? value : DEFAULT_DRIVE
+}
+
+export function permissionReadFilter(req: Request): { drive: string; resourceId: string } {
+  const drive = typeof req.query.drive === 'string' ? req.query.drive : ''
+  const resourceId = typeof req.query.resourceId === 'string' ? req.query.resourceId : ''
+  if (!drive) throw new GfsGrantError(400, 'drive_required')
+  if (!UUID_RE.test(resourceId)) throw new GfsGrantError(400, 'resource_invalid')
+  return { drive, resourceId }
 }
 
 export function requestIdOf(req: Request): string | undefined {
@@ -480,37 +663,179 @@ export async function appendGfsPermissionEvent(
     auditId: string | null
   }
 ): Promise<void> {
+  await appendGfsPermissionEvents(db, {
+    ...params,
+    subjects: [params.subject],
+    auditIds: [params.auditId],
+  })
+}
+
+export async function appendGfsPermissionEvents(
+  db: DbClient,
+  params: {
+    req: Request
+    caller: GfsCaller
+    subjects: readonly GfsSubject[]
+    permissions: readonly string[]
+    drive: string
+    resourceId: string
+    mutation: 'grant' | 'share'
+    action: 'grant' | 'revoke'
+    outcome: 'committed' | 'rejected'
+    auditIds: readonly (string | null)[]
+  }
+): Promise<void> {
   const operator = permissionEventOperator(params.req, params.caller)
   await appendControlApiPermissionEventsInTransaction(db, {
     operatorSub: operator.sub,
     operatorKind: operator.kind,
     requestId: requestIdOf(params.req) ?? null,
-    changes: [
-      {
-        action: params.action,
-        resourceClass: params.mutation === 'grant' ? 'gfs_folder_grant' : 'gfs_share',
-        resourceRef: `gfs://${params.drive}/${params.resourceId}`,
-        subject: permissionEventSubject(params.subject),
-        sourceAuditRef: params.auditId ? `gfs_audit:${params.auditId}` : null,
-        status:
-          params.outcome === 'rejected'
-            ? `${params.mutation}_${params.action}_rejected`
-            : `${params.mutation}_${params.action === 'grant' ? 'configured' : 'revoked'}`,
-        detailRef: permissionsDetailRef(params.permissions),
-        count: new Set(params.permissions).size,
-        outcome: params.outcome,
-        authorizationDecision: params.outcome === 'rejected' ? 'deny' : 'allow',
-      },
-    ],
+    changes: params.subjects.map((subject, index) => ({
+      action: params.action,
+      resourceClass: params.mutation === 'grant' ? 'gfs_folder_grant' : 'gfs_share',
+      resourceRef: `gfs://${params.drive}/${params.resourceId}`,
+      subject: permissionEventSubject(subject),
+      sourceAuditRef: params.auditIds[index] ? `gfs_audit:${params.auditIds[index]}` : null,
+      status:
+        params.outcome === 'rejected'
+          ? `${params.mutation}_${params.action}_rejected`
+          : `${params.mutation}_${params.action === 'grant' ? 'configured' : 'revoked'}`,
+      detailRef: permissionsDetailRef(params.permissions),
+      count: new Set(params.permissions).size,
+      outcome: params.outcome,
+      authorizationDecision: params.outcome === 'rejected' ? 'deny' : 'allow',
+    })),
   })
+}
+
+export async function writeGfsGrantBatchInTransaction(
+  db: DbClient,
+  params: {
+    req: Request
+    caller: GfsCaller
+    drive: string
+    resourceId: string
+    subjects: readonly GfsSubject[]
+    permissions: readonly GfsPermission[]
+    inherit: boolean
+  }
+): Promise<{ error: GfsGrantError | null }> {
+  const auditIds: Array<string | null> = []
+  let outcome: 'allowed' | 'denied' = 'allowed'
+  let policyError: GfsGrantError | null = null
+  try {
+    await assertMayGrantBatch(
+      db,
+      params.caller,
+      params.drive,
+      params.resourceId,
+      params.permissions,
+      params.subjects,
+      { isShare: false }
+    )
+  } catch (error) {
+    if (!(error instanceof GfsGrantError)) throw error
+    outcome = 'denied'
+    policyError = error
+  }
+
+  if (!policyError) {
+    const types = params.subjects.map(subject => subject.type)
+    const ids = params.subjects.map(subject => subject.id ?? '')
+    await db.query(
+      `INSERT INTO gfs_grants
+         (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
+       SELECT $1, $2::uuid, input.subject_type, input.subject_id, $5::text[], $6, $7
+         FROM unnest($3::text[], $4::text[]) AS input(subject_type, subject_id)
+       ON CONFLICT (drive, resource_id, subject_type, subject_id)
+       DO UPDATE SET permissions = EXCLUDED.permissions, inherit = EXCLUDED.inherit,
+                     granted_by = EXCLUDED.granted_by, updated_at = now()`,
+      [
+        params.drive,
+        params.resourceId,
+        types,
+        ids,
+        params.permissions,
+        params.inherit,
+        params.caller.actorKey,
+      ]
+    )
+  }
+
+  for (const subject of params.subjects) {
+    auditIds.push(
+      await auditMutation(db, {
+        actorKey: params.caller.actorKey,
+        targetKey: subjectKey(subject),
+        op: `grant.put[${params.permissions.join(',')}]`,
+        drive: params.drive,
+        resourceId: params.resourceId,
+        outcome,
+        requestId: requestIdOf(params.req),
+        sourceIp: params.req.ip,
+      })
+    )
+  }
+  await appendGfsPermissionEvents(db, {
+    req: params.req,
+    caller: params.caller,
+    subjects: params.subjects,
+    permissions: params.permissions,
+    drive: params.drive,
+    resourceId: params.resourceId,
+    mutation: 'grant',
+    action: 'grant',
+    outcome: policyError ? 'rejected' : 'committed',
+    auditIds,
+  })
+  return { error: policyError }
 }
 
 export function registerGfsGrantRoutes(router: Router): void {
   // Operator (Control UI) seeds Layer-1/2 folder grants. The no-escalation
   // engine (assertMayGrant) is caller-agnostic; the Profile/Desktop folder-owner
   // delegation surface (external user session) wires onto it when that UI lands.
+  router.get('/gfs/grants', requireAuthForControlUI, asyncHandler(handleGrantRead))
   router.put('/gfs/grants', requireAuthForControlUI, asyncHandler(handleGrantWrite))
   router.delete('/gfs/grants/:id', requireAuthForControlUI, asyncHandler(handleGrantDelete))
+}
+
+export async function handleGrantRead(
+  req: Request,
+  res: import('express').Response
+): Promise<void> {
+  try {
+    const { drive, resourceId } = permissionReadFilter(req)
+    const result = await pool.query(
+      `SELECT id, drive, resource_id, subject_type, subject_id, permissions, inherit
+         FROM gfs_grants
+        WHERE drive = $1 AND resource_id = $2::uuid
+        ORDER BY created_at ASC, id ASC`,
+      [drive, resourceId]
+    )
+    res.status(200).json({
+      items: (result.rows as Record<string, unknown>[]).map(row => {
+        const subjectId = String(row.subject_id ?? '')
+        return {
+          id: String(row.id),
+          drive: String(row.drive),
+          resourceId: String(row.resource_id),
+          subject: {
+            type: String(row.subject_type),
+            ...(subjectId ? { id: subjectId } : {}),
+          },
+          permissions: Array.isArray(row.permissions) ? row.permissions.map(String) : [],
+          inherit: Boolean(row.inherit),
+        }
+      }),
+    })
+  } catch (err) {
+    if (err instanceof GfsGrantError) {
+      sendGfsGrantError(res, err)
+      return
+    }
+    throw err
+  }
 }
 
 export async function handleGrantWrite(
@@ -522,85 +847,32 @@ export async function handleGrantWrite(
     const body = (req.body ?? {}) as Record<string, unknown>
     const drive = driveOf(body.drive)
     const resourceId = String(body.resourceId ?? '')
+    assertMutationSubjectTransport(body)
     if (!UUID_RE.test(resourceId)) {
-      res.status(400).json({ error: 'resource_invalid' })
-      return
+      throw new GfsGrantError(400, 'resource_invalid')
     }
-    const subject = parseSubject(body.subject)
+    const subjects = normalizeMutationSubjects(body, { isShare: false })
     const permissions = parsePermissions(body.permissions)
     const inherit = Boolean(body.inherit)
-    const result = await withTransaction(async db => {
-      try {
-        await assertMayGrant(db, caller, drive, resourceId, permissions, subject, {
-          isShare: false,
-        })
-      } catch (error) {
-        if (!(error instanceof GfsGrantError)) throw error
-        const auditId = await auditMutation(db, {
-          actorKey: caller.actorKey,
-          targetKey: subjectKey(subject),
-          op: `grant.put[${permissions.join(',')}]`,
-          drive,
-          resourceId,
-          outcome: 'denied',
-          requestId: requestIdOf(req),
-          sourceIp: req.ip,
-        })
-        await appendGfsPermissionEvent(db, {
-          req,
-          caller,
-          subject,
-          permissions,
-          drive,
-          resourceId,
-          mutation: 'grant',
-          action: 'grant',
-          outcome: 'rejected',
-          auditId,
-        })
-        return { error }
-      }
-
-      await db.query(
-        `INSERT INTO gfs_grants (drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by)
-         VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
-         ON CONFLICT (drive, resource_id, subject_type, subject_id)
-         DO UPDATE SET permissions = EXCLUDED.permissions, inherit = EXCLUDED.inherit,
-                       granted_by = EXCLUDED.granted_by, updated_at = now()`,
-        [drive, resourceId, subject.type, subject.id ?? '', permissions, inherit, caller.actorKey]
-      )
-      const auditId = await auditMutation(db, {
-        actorKey: caller.actorKey,
-        targetKey: subjectKey(subject),
-        op: `grant.put[${permissions.join(',')}]`,
-        drive,
-        resourceId,
-        outcome: 'allowed',
-        requestId: requestIdOf(req),
-        sourceIp: req.ip,
-      })
-      await appendGfsPermissionEvent(db, {
+    const result = await withTransaction(db =>
+      writeGfsGrantBatchInTransaction(db, {
         req,
         caller,
-        subject,
-        permissions,
         drive,
         resourceId,
-        mutation: 'grant',
-        action: 'grant',
-        outcome: 'committed',
-        auditId,
+        subjects,
+        permissions,
+        inherit,
       })
-      return { error: null }
-    })
+    )
     if (result.error) {
-      res.status(result.error.status).json({ error: result.error.code })
+      sendGfsGrantError(res, result.error)
       return
     }
-    res.status(200).json({ ok: true })
+    res.status(200).json({ ok: true, resourceId, updated: subjects, count: subjects.length })
   } catch (err) {
     if (err instanceof GfsGrantError) {
-      res.status(err.status).json({ error: err.code })
+      sendGfsGrantError(res, err)
       return
     }
     throw err

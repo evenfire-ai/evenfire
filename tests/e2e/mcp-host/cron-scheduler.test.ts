@@ -42,6 +42,7 @@
  * of the default deterministic minikube gate.
  */
 import { afterAll, describe, expect, it } from 'vitest'
+import { CRON_EXEC_PROBE_INSTRUCTION } from '../fixtures/cronExecProbeInstruction.js'
 import {
   MCP_HOST_URL,
   approveRequest,
@@ -204,28 +205,6 @@ function readAbsFileInContainer(absPath: string): string {
  * create -> fire -> wait -> verify -> report flow autonomously so the
  * LLM (not the test harness) orchestrates every step.
  */
-const CRON_EXEC_RECIPE_INSTRUCTION = [
-  'You are validating whether SCHEDULED (cron) tasks actually execute on this',
-  'mcp-host. Use the available tools and do these steps IN ORDER.',
-  '',
-  '1. CREATE — use the cron scheduling tool (cron_manage) to create a recurring job',
-  '   named "e2e-cron-exec" with schedule "*/1 * * * *". The job\'s task content MUST be',
-  '   EXACTLY this sentence (copy it verbatim):',
-  '   Use the shell tool to run this command: echo CRON_EXEC_OK > /tmp/cron-exec-proof.txt',
-  '',
-  '2. FIRE — use cron_manage to TRIGGER the "e2e-cron-exec" job immediately so it runs now.',
-  '',
-  '3. WAIT + VERIFY — the triggered task runs asynchronously in the background, so you',
-  '   must poll. Use the shell tool to run:',
-  '     sleep 8 ; cat /tmp/cron-exec-proof.txt',
-  '   If the file is missing or empty, repeat the same shell command (sleep 8 ; cat ...)',
-  '   up to 4 attempts total.',
-  '',
-  '4. REPORT — the FINAL line of your answer MUST be exactly one of:',
-  '   - if the file contains CRON_EXEC_OK   ->   CRON_EXEC_VERIFIED',
-  '   - if after all 4 attempts it is empty ->   CRON_EXEC_FAILED',
-].join('\n')
-
 type CronResultEntry = {
   id: string
   cronJobId: string
@@ -545,7 +524,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
     // Single-shot: hand the full recipe instruction to the agent and let it
     // self-orchestrate every step. Long timeout: the agent polls with
     // `sleep 8` up to 4 times plus multiple LLM rounds.
-    const { response } = await sendWithApproval(CRON_EXEC_RECIPE_INSTRUCTION, {
+    const { response } = await sendWithApproval(CRON_EXEC_PROBE_INSTRUCTION, {
       userId,
       timeoutMs: 720_000,
     })

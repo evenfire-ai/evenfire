@@ -1092,7 +1092,10 @@ describe('workflow native tools', () => {
         }),
       } as Response)
 
-    const workflowCallerContext = { targetUserId: '00000000-0000-4000-8000-000000000001' }
+    const workflowCallerContext = {
+      targetUserId: '00000000-0000-4000-8000-000000000001',
+      conversationId: 'thread-1',
+    }
     const statusResult = await new WorkflowStatusTool({
       getEnv: env(),
       workflowCallerContext,
@@ -1123,13 +1126,13 @@ describe('workflow native tools', () => {
       'http://gateway:8092/api/v1/workflows/effective-targets/resolve'
     )
     expect(fetchMock.mock.calls[1][0]).toBe(
-      'http://gateway:8092/api/v1/workflows/sandbox-recipes/source-recipe?targetUserId=00000000-0000-4000-8000-000000000001'
+      'http://gateway:8092/api/v1/workflows/sandbox-recipes/source-recipe?targetUserId=00000000-0000-4000-8000-000000000001&workflowConversationId=thread-1'
     )
     expect(fetchMock.mock.calls[2][0]).toBe(
       'http://gateway:8092/api/v1/workflows/effective-targets/resolve'
     )
     expect(fetchMock.mock.calls[3][0]).toBe(
-      'http://gateway:8092/api/v1/workflows/sandbox-recipes/source-recipe/health?targetUserId=00000000-0000-4000-8000-000000000001'
+      'http://gateway:8092/api/v1/workflows/sandbox-recipes/source-recipe/health?targetUserId=00000000-0000-4000-8000-000000000001&workflowConversationId=thread-1'
     )
   })
 
@@ -1169,6 +1172,7 @@ describe('workflow native tools', () => {
     const workflowCallerContext = {
       targetUserId: '00000000-0000-4000-8000-000000000001',
       targetTeamId: '00000000-0000-4000-8000-0000000000aa',
+      conversationId: 'thread-1',
     }
     const statusResult = await new WorkflowStatusTool({
       getEnv: env(),
@@ -1189,21 +1193,23 @@ describe('workflow native tools', () => {
     expect(healthResult.is_error).toBe(false)
     expect(fetchMock.mock.calls.map(call => call[0])).toEqual([
       'http://gateway:8092/api/v1/workflows/effective-targets/resolve',
-      'http://gateway:8092/api/v1/workflows/sandbox-recipes/team-recipe?targetTeamId=00000000-0000-4000-8000-0000000000aa',
+      'http://gateway:8092/api/v1/workflows/sandbox-recipes/team-recipe?targetTeamId=00000000-0000-4000-8000-0000000000aa&workflowConversationId=thread-1',
       'http://gateway:8092/api/v1/workflows/effective-targets/resolve',
-      'http://gateway:8092/api/v1/workflows/sandbox-recipes/team-recipe/health?targetTeamId=00000000-0000-4000-8000-0000000000aa',
+      'http://gateway:8092/api/v1/workflows/sandbox-recipes/team-recipe/health?targetTeamId=00000000-0000-4000-8000-0000000000aa&workflowConversationId=thread-1',
     ])
     expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({
       purpose: 'trigger',
       userId: '00000000-0000-4000-8000-000000000001',
       recipeNamespace: 'sandbox-recipes',
       recipeName: 'team-recipe',
+      conversationId: 'thread-1',
     })
     expect(JSON.parse(String((fetchMock.mock.calls[2][1] as RequestInit).body))).toEqual({
       purpose: 'trigger',
       userId: '00000000-0000-4000-8000-000000000001',
       recipeNamespace: 'sandbox-recipes',
       recipeName: 'team-recipe',
+      conversationId: 'thread-1',
     })
   })
 

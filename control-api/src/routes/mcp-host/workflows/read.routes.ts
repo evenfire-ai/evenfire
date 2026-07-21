@@ -9,6 +9,7 @@ import {
   resolveEffectiveWorkflowTriggerTarget,
 } from '../../../services/workflows/effectiveWorkflowTargetsService.js'
 import type { RuntimeWorkflowStatusDto } from '../../../services/workflows/types.js'
+import { getConversationScopedWorkflowHealth } from '../../../services/workflows/workflowConversationRunReadService.js'
 import {
   WORKFLOW_RECIPE_PLURAL,
   type WorkflowApprovalTarget,
@@ -31,6 +32,7 @@ import {
   getLatestWorkflowRunWithApprovalTarget,
   getProviderScopedWorkflowRun,
   getWorkflowHealth,
+  mapDbRun,
 } from '../../../services/workflows/workflowRunReadService.js'
 import {
   requireMcpHostControlScope,
@@ -96,6 +98,22 @@ function parseConversationIdQuery(req: Request, res: Response): string | null {
     res.status(400).json({ error: 'workflowConversationId is required' })
     return null
   }
+  const isValidTeamsConversationId =
+    rawConversationId.length <= TEAMS_CONVERSATION_ID_MAX_LENGTH &&
+    TEAMS_CONVERSATION_ID_RE.test(rawConversationId)
+  if (!CONVERSATION_ID_RE.test(rawConversationId) && !isValidTeamsConversationId) {
+    res.status(400).json({ error: 'Invalid workflowConversationId format' })
+    return null
+  }
+  return rawConversationId
+}
+
+function parseOptionalConversationIdQuery(req: Request, res: Response): string | null | undefined {
+  const rawConversationId =
+    typeof req.query.workflowConversationId === 'string'
+      ? req.query.workflowConversationId.trim()
+      : ''
+  if (!rawConversationId) return undefined
   const isValidTeamsConversationId =
     rawConversationId.length <= TEAMS_CONVERSATION_ID_MAX_LENGTH &&
     TEAMS_CONVERSATION_ID_RE.test(rawConversationId)
@@ -329,16 +347,34 @@ export function createMcpHostWorkflowReadRoutes(gateway: K8sGateway): Router {
       }
       const { recipeNamespace: ns, recipeName: name } = readableRef
 
+      const sharedApprovalTarget =
+        isSharedMcpHostControlCaller(caller) && hasApprovalTargetContext(approvalTarget)
+      const conversationId = sharedApprovalTarget
+        ? parseOptionalConversationIdQuery(req, res)
+        : undefined
+      if (conversationId === null) return
+
       try {
         const resource = (await gateway.getResource(WORKFLOW_RECIPE_PLURAL, name, ns)) as Record<
           string,
           unknown
         >
+        let latestRun = null
+        if (canIncludeRunSummary(caller, ns, name, approvalTarget)) {
+          latestRun = await getLatestRun(ns, name)
+        } else if (sharedApprovalTarget && conversationId) {
+          const scopedHealth = await getConversationScopedWorkflowHealth({
+            caller,
+            recipeNamespace: ns,
+            recipeName: name,
+            approvalTarget,
+            conversationId,
+          })
+          latestRun = scopedHealth.lastRun ? mapDbRun(scopedHealth.lastRun) : null
+        }
         const dto: RuntimeWorkflowStatusDto = {
           ...mapRuntimeWorkflow(resource),
-          latestRun: canIncludeRunSummary(caller, ns, name, approvalTarget)
-            ? await getLatestRun(ns, name)
-            : null,
+          latestRun,
         }
         res.json(dto)
       } catch (err) {
@@ -377,21 +413,43 @@ export function createMcpHostWorkflowReadRoutes(gateway: K8sGateway): Router {
       }
       const { recipeNamespace: ns, recipeName: name } = readableRef
 
+      const sharedApprovalTarget =
+        isSharedMcpHostControlCaller(caller) && hasApprovalTargetContext(approvalTarget)
+      const conversationId = sharedApprovalTarget
+        ? parseOptionalConversationIdQuery(req, res)
+        : undefined
+      if (conversationId === null) return
+
       try {
         const resource = (await gateway.getResource(WORKFLOW_RECIPE_PLURAL, name, ns)) as Record<
           string,
           unknown
         >
         const status = asRecord(resource.status) ?? {}
-        const { activeRuns, lastRun } = canIncludeRunSummary(caller, ns, name, approvalTarget)
-          ? await getWorkflowHealth(ns, name)
-          : { activeRuns: null, lastRun: null }
+        let runHealth: { activeRuns: number | null; lastRun: ReturnType<typeof mapDbRun> | null }
+        if (canIncludeRunSummary(caller, ns, name, approvalTarget)) {
+          runHealth = await getWorkflowHealth(ns, name)
+        } else if (sharedApprovalTarget && conversationId) {
+          const scopedHealth = await getConversationScopedWorkflowHealth({
+            caller,
+            recipeNamespace: ns,
+            recipeName: name,
+            approvalTarget,
+            conversationId,
+          })
+          runHealth = {
+            activeRuns: scopedHealth.activeRuns,
+            lastRun: scopedHealth.lastRun ? mapDbRun(scopedHealth.lastRun) : null,
+          }
+        } else {
+          runHealth = { activeRuns: null, lastRun: null }
+        }
         res.json({
           recipe: `${ns}/${name}`,
           phase: status.phase ?? 'Unknown',
           workflowPhase: asRecord(status.workflowExecution)?.phase ?? null,
-          activeRuns,
-          lastRun,
+          activeRuns: runHealth.activeRuns,
+          lastRun: runHealth.lastRun,
         })
       } catch (err) {
         if (err instanceof K8sNotFoundError) {

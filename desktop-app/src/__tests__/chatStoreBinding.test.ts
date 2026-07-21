@@ -9,6 +9,17 @@ import {
   unbindChatStore,
 } from '../chatStoreBinding'
 
+// Env keys are opaque, filesystem-safe slugs from resolveEnvKey. Any two distinct
+// strings model two distinct environments for these tests.
+const ENV_A = 'env-a-0011223344'
+const ENV_B = 'env-b-5566778899'
+
+const exists = (p: string) =>
+  fs
+    .stat(p)
+    .then(() => true)
+    .catch(() => false)
+
 describe('chatStoreBinding', () => {
   let tmpBase: string
 
@@ -27,75 +38,89 @@ describe('chatStoreBinding', () => {
     expect(() => requireChatStore()).toThrow(/Not authenticated/)
   })
 
-  it('bindChatStoreForUser returns a store rooted under the user subdir', async () => {
-    await bindChatStoreForUser('user-a')
+  it('roots the store under <base>/<envKey>/<userId> (spec §5.2)', async () => {
+    await bindChatStoreForUser('user-a', ENV_A)
     const store = requireChatStore()
     await store.createChat('agent-x', 'chat-1')
-    const exists = await fs
-      .stat(path.join(tmpBase, 'user-a', 'agent-x', 'index.json'))
-      .then(() => true)
-      .catch(() => false)
-    expect(exists).toBe(true)
+    expect(await exists(path.join(tmpBase, ENV_A, 'user-a', 'agent-x', 'index.json'))).toBe(true)
+    // Never under the legacy (pre-envKey) location.
+    expect(await exists(path.join(tmpBase, 'user-a', 'agent-x', 'index.json'))).toBe(false)
+  })
+
+  it('isolates the SAME user across environments (the cross-cluster bug)', async () => {
+    await bindChatStoreForUser('user-a', ENV_A)
+    await requireChatStore().createChat('agent-x', 'chat-in-a')
+
+    await bindChatStoreForUser('user-a', ENV_B)
+    // Env B starts empty — env A's chat is invisible here.
+    expect(await requireChatStore().listChats('agent-x')).toEqual([])
+    await requireChatStore().createChat('agent-x', 'chat-in-b')
+
+    // Both env subtrees exist and hold only their own chat.
+    await bindChatStoreForUser('user-a', ENV_A)
+    expect((await requireChatStore().listChats('agent-x')).map(c => c.id)).toEqual(['chat-in-a'])
+    await bindChatStoreForUser('user-a', ENV_B)
+    expect((await requireChatStore().listChats('agent-x')).map(c => c.id)).toEqual(['chat-in-b'])
+  })
+
+  it('re-binds when the envKey changes for the same user', async () => {
+    await bindChatStoreForUser('user-a', ENV_A)
+    const storeA = requireChatStore()
+    await bindChatStoreForUser('user-a', ENV_B)
+    expect(requireChatStore()).not.toBe(storeA)
   })
 
   it('unbindChatStore makes requireChatStore throw again', async () => {
-    await bindChatStoreForUser('user-a')
+    await bindChatStoreForUser('user-a', ENV_A)
     unbindChatStore()
     expect(() => requireChatStore()).toThrow(/Not authenticated/)
   })
 
-  it("rebinding to a different user does not touch the previous user's files", async () => {
-    await bindChatStoreForUser('user-a')
+  it('rebinding the same (env, userId) is idempotent (no files moved or lost)', async () => {
+    await bindChatStoreForUser('user-a', ENV_A)
     await requireChatStore().createChat('agent-x', 'chat-a')
-
-    await bindChatStoreForUser('user-b')
-    await requireChatStore().createChat('agent-x', 'chat-b')
-
-    const userAIndex = path.join(tmpBase, 'user-a', 'agent-x', 'index.json')
-    const userBIndex = path.join(tmpBase, 'user-b', 'agent-x', 'index.json')
-    expect((await fs.stat(userAIndex)).isFile()).toBe(true)
-    expect((await fs.stat(userBIndex)).isFile()).toBe(true)
-  })
-
-  it('rebinding the same userId is idempotent (no files moved or lost)', async () => {
-    await bindChatStoreForUser('user-a')
-    await requireChatStore().createChat('agent-x', 'chat-a')
-    await bindChatStoreForUser('user-a')
+    await bindChatStoreForUser('user-a', ENV_A)
     const chats = await requireChatStore().listChats('agent-x')
     expect(chats.find(c => c.id === 'chat-a')).toBeDefined()
   })
 
-  it('rebinding the same userId keeps the store bound (no "Not authenticated" window)', async () => {
-    await bindChatStoreForUser('user-a')
+  it('rebinding the same (env, userId) keeps the store bound (no "Not authenticated" window)', async () => {
+    await bindChatStoreForUser('user-a', ENV_A)
     const firstStore = requireChatStore()
-
-    // Same-user re-bind (team switch / catalog refresh) must not tear down the
-    // active store: a concurrent chat IPC between unbind and rebind would
-    // throw "Not authenticated" and blank the UI's session lists.
-    const rebind = bindChatStoreForUser('user-a')
+    const rebind = bindChatStoreForUser('user-a', ENV_A)
     expect(requireChatStore()).toBe(firstStore)
     await rebind
     expect(requireChatStore()).toBe(firstStore)
   })
 
-  it('coalesces concurrent binds for the same userId', async () => {
-    const first = bindChatStoreForUser('user-a')
-    const second = bindChatStoreForUser('user-a')
+  it('coalesces concurrent binds for the same (env, userId)', async () => {
+    const first = bindChatStoreForUser('user-a', ENV_A)
+    const second = bindChatStoreForUser('user-a', ENV_A)
     await Promise.all([first, second])
     const store = requireChatStore()
     await store.createChat('agent-x', 'chat-1')
     expect((await store.listChats('agent-x')).map(c => c.id)).toEqual(['chat-1'])
   })
 
-  // D.4 §7.1 / §5.2 — bootstrap wipes any pre-v2 (legacy) per-agent cache dir.
-  describe('legacy cache wipe on bind', () => {
+  it('rejects an unsafe userId or envKey before touching the filesystem (no wipe escape)', async () => {
+    for (const bad of ['', '.', '..', '../../etc', 'a/b', 'a\\b']) {
+      await expect(bindChatStoreForUser(bad, ENV_A)).rejects.toThrow(/unsafe path segment/)
+      await expect(bindChatStoreForUser('user-a', bad)).rejects.toThrow(/unsafe path segment/)
+    }
+    expect(() => requireChatStore()).toThrow(/Not authenticated/)
+  })
+
+  // §5.2 / §7.1 — bootstrap wipes any pre-v2 (legacy schema) per-agent cache dir
+  // WITHIN the env-scoped user directory.
+  describe('legacy schema wipe on bind', () => {
     async function seedAgentDir(
+      envKey: string,
       userId: string,
       agentRef: string,
       indexContent: string | null,
       chatFiles: Record<string, string> = {}
     ) {
-      const agentDir = path.join(tmpBase, userId, agentRef)
+      const agentDir = path.join(tmpBase, envKey, userId, agentRef)
       await fs.mkdir(agentDir, { recursive: true })
       if (indexContent !== null) {
         await fs.writeFile(path.join(agentDir, 'index.json'), indexContent)
@@ -105,36 +130,28 @@ describe('chatStoreBinding', () => {
       }
     }
 
-    const exists = (p: string) =>
-      fs
-        .stat(p)
-        .then(() => true)
-        .catch(() => false)
-
     it('wipes an agent dir whose index.json is v1', async () => {
       const v1Index = JSON.stringify({
         version: 1,
         chats: [{ id: 'old' }],
         lastActiveChatId: 'old',
       })
-      await seedAgentDir('user-legacy', 'agent-x', v1Index, { 'old.json': '{"version":1}' })
+      await seedAgentDir(ENV_A, 'user-legacy', 'agent-x', v1Index, { 'old.json': '{"version":1}' })
 
-      await bindChatStoreForUser('user-legacy')
+      await bindChatStoreForUser('user-legacy', ENV_A)
 
-      expect(await exists(path.join(tmpBase, 'user-legacy', 'agent-x'))).toBe(false)
-      // A fresh store works and starts empty.
-      const chats = await requireChatStore().listChats('agent-x')
-      expect(chats).toEqual([])
+      expect(await exists(path.join(tmpBase, ENV_A, 'user-legacy', 'agent-x'))).toBe(false)
+      expect(await requireChatStore().listChats('agent-x')).toEqual([])
     })
 
     it('wipes an agent dir with a missing/unparseable index.json', async () => {
-      await seedAgentDir('user-broken', 'agent-x', 'not json{', { 'c.json': '{}' })
-      await seedAgentDir('user-broken', 'agent-y', null, { 'c.json': '{}' })
+      await seedAgentDir(ENV_A, 'user-broken', 'agent-x', 'not json{', { 'c.json': '{}' })
+      await seedAgentDir(ENV_A, 'user-broken', 'agent-y', null, { 'c.json': '{}' })
 
-      await bindChatStoreForUser('user-broken')
+      await bindChatStoreForUser('user-broken', ENV_A)
 
-      expect(await exists(path.join(tmpBase, 'user-broken', 'agent-x'))).toBe(false)
-      expect(await exists(path.join(tmpBase, 'user-broken', 'agent-y'))).toBe(false)
+      expect(await exists(path.join(tmpBase, ENV_A, 'user-broken', 'agent-x'))).toBe(false)
+      expect(await exists(path.join(tmpBase, ENV_A, 'user-broken', 'agent-y'))).toBe(false)
     })
 
     it('preserves a v2 agent dir', async () => {
@@ -142,30 +159,83 @@ describe('chatStoreBinding', () => {
         version: 2,
         chats: [{ id: 'keep', title: 'Keep', createdAt: 'x', updatedAt: 'x', messageCount: 1 }],
         lastActiveChatId: 'keep',
-        chatPanelOpen: false,
         onboardingDismissed: false,
       })
-      await seedAgentDir('user-current', 'agent-x', v2Index)
+      await seedAgentDir(ENV_A, 'user-current', 'agent-x', v2Index)
 
-      await bindChatStoreForUser('user-current')
+      await bindChatStoreForUser('user-current', ENV_A)
 
-      expect(await exists(path.join(tmpBase, 'user-current', 'agent-x', 'index.json'))).toBe(true)
-      const chats = await requireChatStore().listChats('agent-x')
-      expect(chats.find(c => c.id === 'keep')).toBeDefined()
+      expect(await exists(path.join(tmpBase, ENV_A, 'user-current', 'agent-x', 'index.json'))).toBe(
+        true
+      )
+      expect(
+        (await requireChatStore().listChats('agent-x')).find(c => c.id === 'keep')
+      ).toBeDefined()
     })
 
     it('is a no-op when the user has no cache directory yet', async () => {
-      await expect(bindChatStoreForUser('brand-new-user')).resolves.toBeUndefined()
-      const chats = await requireChatStore().listChats('agent-x')
-      expect(chats).toEqual([])
+      await expect(bindChatStoreForUser('brand-new-user', ENV_A)).resolves.toBeUndefined()
+      expect(await requireChatStore().listChats('agent-x')).toEqual([])
+    })
+  })
+
+  // §5.5 (D3) — the pre-envKey cache tree (<base>/<userId>/<agentRef>/…, no env
+  // level) is discarded once on the first bind after the update, then rebuilt
+  // from the server. Env-scoped subtrees are never touched.
+  describe('one-shot pre-envKey legacy tree wipe', () => {
+    async function seedLegacyUserDir(userId: string, agentRef: string) {
+      const agentDir = path.join(tmpBase, userId, agentRef)
+      await fs.mkdir(agentDir, { recursive: true })
+      await fs.writeFile(
+        path.join(agentDir, 'index.json'),
+        JSON.stringify({
+          version: 2,
+          chats: [],
+          lastActiveChatId: null,
+          onboardingDismissed: false,
+        })
+      )
+    }
+
+    it('drops the legacy per-user tree on first env-scoped bind', async () => {
+      await seedLegacyUserDir('user-a', 'agent-x')
+      await seedLegacyUserDir('user-b', 'agent-y')
+
+      await bindChatStoreForUser('user-a', ENV_A)
+
+      // Both legacy user dirs are gone; the env-scoped store is separate + empty.
+      expect(await exists(path.join(tmpBase, 'user-a', 'agent-x'))).toBe(false)
+      expect(await exists(path.join(tmpBase, 'user-b', 'agent-y'))).toBe(false)
+      expect(await requireChatStore().listChats('agent-x')).toEqual([])
     })
 
-    it('rejects an unsafe userId before touching the filesystem (no wipe escape)', async () => {
-      for (const bad of ['', '.', '..', '../../etc', 'a/b', 'a\\b']) {
-        await expect(bindChatStoreForUser(bad)).rejects.toThrow(/unsafe path segment/)
-      }
-      // A rejected bind leaves the store unbound rather than serving a wrong dir.
-      expect(() => requireChatStore()).toThrow(/Not authenticated/)
+    it('runs only once — a legacy dir re-created after the marker survives', async () => {
+      await seedLegacyUserDir('user-a', 'agent-x')
+      await bindChatStoreForUser('user-a', ENV_A)
+      expect(await exists(path.join(tmpBase, 'user-a', 'agent-x'))).toBe(false)
+
+      // Simulate a stray legacy-shaped dir appearing after migration; the marker
+      // must prevent a second destructive sweep.
+      await seedLegacyUserDir('user-c', 'agent-z')
+      unbindChatStore()
+      await bindChatStoreForUser('user-a', ENV_A)
+      expect(await exists(path.join(tmpBase, 'user-c', 'agent-z'))).toBe(true)
+    })
+
+    it('never wipes an env-scoped subtree (index.json is one level deeper)', async () => {
+      // Pre-seed env A with a real chat, then bind env B for the first time.
+      await bindChatStoreForUser('user-a', ENV_A)
+      await requireChatStore().createChat('agent-x', 'chat-a')
+      unbindChatStore()
+
+      // A fresh process would re-run the one-shot if the marker were missing;
+      // simulate that by removing the marker before binding a different env.
+      await fs.rm(path.join(tmpBase, '.env-scoped'), { force: true })
+      await bindChatStoreForUser('user-a', ENV_B)
+
+      // Env A's data is untouched — it lives at depth 3, not the legacy depth 2.
+      await bindChatStoreForUser('user-a', ENV_A)
+      expect((await requireChatStore().listChats('agent-x')).map(c => c.id)).toEqual(['chat-a'])
     })
   })
 })

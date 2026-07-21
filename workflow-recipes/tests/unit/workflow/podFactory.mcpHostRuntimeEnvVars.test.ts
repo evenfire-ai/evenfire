@@ -148,6 +148,23 @@ describe('Pod Factory — mcpHost Runtime Env Vars', () => {
     expect(volume!.emptyDir).toEqual({ sizeLimit: '16Mi' })
   })
 
+  it('projects only the verified WorkflowRecipe GFS token scopes into the mcp-host pod', () => {
+    const scopedPod = buildMcpHostPod(
+      'test-child-run',
+      mockAgent,
+      mockConfig,
+      'test-recipe',
+      'sandbox-recipes',
+      'test-recipe-workflow-output',
+      undefined,
+      undefined,
+      { gfsScopes: ['gfs.read', 'gfs.write'], mountWorkflowOutput: false }
+    )
+
+    expect(envByName(scopedPod, 'MCP_HOST_GFS_SCOPES')?.value).toBe('gfs.read,gfs.write')
+    expect(envByName(mcpHostPod, 'MCP_HOST_GFS_SCOPES')).toBeUndefined()
+  })
+
   it('mcp-host pod exposes the logical approval recipe name', () => {
     const pod = buildMcpHostPod(
       'test-child-run',

@@ -8,6 +8,8 @@ import {
   apiSend,
   getAdminTeams,
   getAdminUsers,
+  getGfsGrants,
+  getGfsShares,
   getHosts,
   getRecipes,
   gfsDownload,
@@ -23,6 +25,8 @@ vi.mock('@lib/api', () => ({
   apiSend: vi.fn(),
   getAdminTeams: vi.fn(),
   getAdminUsers: vi.fn(),
+  getGfsGrants: vi.fn(),
+  getGfsShares: vi.fn(),
   getHosts: vi.fn(),
   getRecipes: vi.fn(),
   gfsDownload: vi.fn(),
@@ -35,6 +39,8 @@ const mockApiGet = apiGet as unknown as ReturnType<typeof vi.fn>
 const mockApiSend = apiSend as unknown as ReturnType<typeof vi.fn>
 const mockGetAdminUsers = vi.mocked(getAdminUsers)
 const mockGetAdminTeams = vi.mocked(getAdminTeams)
+const mockGetGfsGrants = vi.mocked(getGfsGrants)
+const mockGetGfsShares = vi.mocked(getGfsShares)
 const mockGetHosts = vi.mocked(getHosts)
 const mockGetRecipes = vi.mocked(getRecipes)
 const mockPutGfsGrant = putGfsGrant as unknown as ReturnType<typeof vi.fn>
@@ -91,6 +97,8 @@ describe('GfsBrowser', () => {
     mockApiSend.mockReset()
     mockGetAdminUsers.mockReset()
     mockGetAdminTeams.mockReset()
+    mockGetGfsGrants.mockReset()
+    mockGetGfsShares.mockReset()
     mockGetHosts.mockReset()
     mockGetRecipes.mockReset()
     mockPutGfsGrant.mockReset()
@@ -126,6 +134,8 @@ describe('GfsBrowser', () => {
     mockGetRecipes.mockResolvedValue({
       items: [{ metadata: { namespace: 'sandbox-recipes', name: 'sandbox-ui-hello' } }],
     })
+    mockGetGfsGrants.mockResolvedValue({ items: [] })
+    mockGetGfsShares.mockResolvedValue({ items: [] })
   })
 
   it('loads the root tree and renders directories + files', async () => {
@@ -665,7 +675,7 @@ describe('GfsBrowser', () => {
     expect(alert.textContent).toContain('boom')
   })
 
-  it('operator grants access on a selected resource (confirmed) with the correct body', async () => {
+  it('grants access to a selected bulk subject with the correct body', async () => {
     mockApiGet.mockResolvedValueOnce({ items: [child('report.md', 'file', 2)], nextCursor: null })
     mockPutGfsGrant.mockResolvedValueOnce({ ok: true })
     renderBrowser()
@@ -700,7 +710,7 @@ describe('GfsBrowser', () => {
       expect(mockPutGfsGrant).toHaveBeenCalledWith({
         drive: 'main',
         resourceId: 'id-2',
-        subject: { type: 'user', id: '11111111-1111-1111-1111-111111111111' },
+        subjects: [{ type: 'user', id: '11111111-1111-1111-1111-111111111111' }],
         permissions: ['read'],
         inherit: false,
       })
@@ -722,7 +732,7 @@ describe('GfsBrowser', () => {
     expect(screen.getByRole('button', { name: 'Grant access' })).not.toBeDisabled()
   })
 
-  it('includes descendants for directory grants while keeping share creation hidden', async () => {
+  it('includes descendants for directory grants and exposes share creation', async () => {
     mockApiGet.mockResolvedValueOnce({
       items: [child('team-folder', 'directory', 2)],
       nextCursor: null,
@@ -735,7 +745,7 @@ describe('GfsBrowser', () => {
     await waitFor(() => expect(mockGetAdminUsers).toHaveBeenCalledWith(''))
     expect(await screen.findByRole('checkbox', { name: /Include descendants/ })).toBeChecked()
     expect(screen.getByText('Apply this grant or share to the full folder tree.')).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'Create share' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Create share' })).toBeDisabled()
     await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Read')
@@ -776,7 +786,7 @@ describe('GfsBrowser', () => {
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith(
         expect.objectContaining({
-          subject: { type: 'team', id: '22222222-2222-2222-2222-222222222222' },
+          subjects: [{ type: 'team', id: '22222222-2222-2222-2222-222222222222' }],
         })
       )
     )

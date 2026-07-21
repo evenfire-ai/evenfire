@@ -88,10 +88,7 @@ export function McpServersPage() {
     <section className="page">
       <div className="page-header">
         <h2>Connectors</h2>
-        <p className="muted">
-          Connectors mapped across available agents and contexts. Select an agent to open its
-          connector mappings. This is a global aggregate view and not a per-context guarantee.
-        </p>
+        <p className="muted">Connectors mapped across available agents and contexts.</p>
       </div>
 
       <div className="page-layout">

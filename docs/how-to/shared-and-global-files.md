@@ -12,7 +12,7 @@ evenfire has two ways to give agents files, with different trust models:
 
 ### 1. Create the workspace
 
-Apply a `SharedFileSystem` (or use **Control UI → Shared Files → New**):
+Apply a `SharedFileSystem` (or use **Control UI → Directories → Agent Files → New**):
 
 ```yaml
 apiVersion: clerum.io/v1alpha1
@@ -48,7 +48,7 @@ sees the workspace read-only at that path.
 ### 3. Put files in it
 
 Humans and admins write through the workspace API: in Control UI, open the
-Shared Filesystem and upload — the request is proxied through control-api to the
+Agent Files workspace and upload — the request is proxied through control-api to the
 per-SFS controller. Agents **cannot** write: their mount is read-only, so an
 agent reads the files with its file tools but never mutates them.
 
@@ -70,7 +70,7 @@ HTTP API, and that indirection is the point:
   writes) through the broker.
 
 Create one with a `GlobalFileSystem` CRD and manage access from Control UI's
-Global Files area. For the full API, the writer/reader roles, and the
+**Directories → Global File System** area. For the full API, the writer/reader roles, and the
 authorization chain, see [`gfs-controller`](../../gfs-controller/README.md) and
 the [GlobalFileSystem CRD](../crds/globalfilesystem.md).
 

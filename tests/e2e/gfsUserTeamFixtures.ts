@@ -1,6 +1,7 @@
 import {
   type E2EDelegateVisibility,
   UUID_RE,
+  assertFixtureName,
   firstDataLine,
   runControlPostgresSql,
   splitSqlRow,
@@ -82,6 +83,15 @@ export function cleanupE2EUserTeam(teamId: string): void {
   runControlPostgresSql(`
     DELETE FROM teams
      WHERE id = ${sqlLiteral(teamId)}::uuid
+       AND name LIKE 'e2e-gfs-%';
+  `)
+}
+
+export function cleanupE2EUserTeamByName(name: string): void {
+  assertFixtureName(name)
+  runControlPostgresSql(`
+    DELETE FROM teams
+     WHERE name = ${sqlLiteral(name)}
        AND name LIKE 'e2e-gfs-%';
   `)
 }

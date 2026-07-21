@@ -89,11 +89,13 @@ vi.mock('../src/mcpHostRuntimeTokenIssuerClient', () => ({
 }))
 
 vi.mock('../src/gfsHostBinding', () => ({
-  mintHostGfsToken: vi.fn().mockResolvedValue({
-    ['to'.concat('ken')]: 'gfs-runtime-value',
-    expiresInSeconds: 300,
-    subject: 'host:1st:mcp-host/standalone',
-  }),
+  mintHostGfsToken: vi
+    .fn()
+    .mockImplementation(async ({ name, namespace }: { name: string; namespace: string }) => ({
+      ['to'.concat('ken')]: 'gfs-runtime-value',
+      expiresInSeconds: 300,
+      subject: `host:1st:${namespace}/${name}`,
+    })),
 }))
 
 function makeHost(overrides?: Partial<HostCRD>): HostCRD {

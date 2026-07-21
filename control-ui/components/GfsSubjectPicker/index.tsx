@@ -27,13 +27,17 @@ export function GfsSubjectPicker({
   const [query, setQuery] = useState('')
   const rootRef = useRef<HTMLDivElement | null>(null)
   const selected = useMemo(
-    () => options.find(option => option.value === value) ?? null,
+    () => value.map(item => options.find(option => option.value === item)).filter(Boolean),
     [options, value]
   )
   const availableOptions = useMemo(
-    () => options.filter(option => option.value !== value && optionMatches(option, query)),
+    () => options.filter(option => !value.includes(option.value) && optionMatches(option, query)),
     [options, query, value]
   )
+
+  function focusInput() {
+    rootRef.current?.querySelector<HTMLInputElement>('.cu-gfs-subject-picker__input')?.focus()
+  }
 
   useEffect(() => {
     if (!open) return
@@ -59,15 +63,15 @@ export function GfsSubjectPicker({
   }, [disabled])
 
   function selectSubject(option: SelectionDropdownOption) {
-    onChange(option.value)
+    onChange([...value, option.value])
     setQuery('')
-    setOpen(false)
+    focusInput()
   }
 
-  function clearSubject() {
-    onChange('')
+  function clearSubject(subjectValue: string) {
+    onChange(value.filter(item => item !== subjectValue))
     setQuery('')
-    rootRef.current?.querySelector<HTMLInputElement>('.cu-gfs-subject-picker__input')?.focus()
+    focusInput()
   }
 
   return (
@@ -76,27 +80,29 @@ export function GfsSubjectPicker({
         aria-label="Grant subject"
         className={`cu-gfs-subject-picker__field${open ? ' is-open' : ''}`}
       >
-        {selected ? (
-          <span className="cu-gfs-subject-picker__chip">
-            <span
-              className={`cu-gfs-subject-picker__avatar cu-gfs-subject-picker__avatar--${selected.badge?.toLowerCase()}`}
-              aria-hidden="true"
-            >
-              {selected.label.charAt(0).toUpperCase()}
+        {selected.map(subject =>
+          subject ? (
+            <span className="cu-gfs-subject-picker__chip" key={subject.value}>
+              <span
+                className={`cu-gfs-subject-picker__avatar cu-gfs-subject-picker__avatar--${subject.badge?.toLowerCase()}`}
+                aria-hidden="true"
+              >
+                {subject.label.charAt(0).toUpperCase()}
+              </span>
+              <span className="cu-gfs-subject-picker__chip-label">{subject.label}</span>
+              <Button
+                aria-label={`Remove ${subject.label}`}
+                className="cu-gfs-subject-picker__chip-remove"
+                disabled={disabled}
+                onClick={() => clearSubject(subject.value)}
+                size="sm"
+                variant="ghost"
+              >
+                <IconX width={12} height={12} />
+              </Button>
             </span>
-            <span className="cu-gfs-subject-picker__chip-label">{selected.label}</span>
-            <Button
-              aria-label={`Remove ${selected.label}`}
-              className="cu-gfs-subject-picker__chip-remove"
-              disabled={disabled}
-              onClick={clearSubject}
-              size="sm"
-              variant="ghost"
-            >
-              <IconX width={12} height={12} />
-            </Button>
-          </span>
-        ) : null}
+          ) : null
+        )}
         <TextInput
           aria-autocomplete="list"
           aria-controls="cu-gfs-subject-options"
@@ -110,7 +116,7 @@ export function GfsSubjectPicker({
             setOpen(true)
           }}
           onFocus={() => setOpen(true)}
-          placeholder={selected ? '' : SUBJECT_PICKER_LABEL}
+          placeholder={selected.length > 0 ? '' : SUBJECT_PICKER_LABEL}
           role="combobox"
           value={query}
         />
@@ -119,7 +125,7 @@ export function GfsSubjectPicker({
       {open ? (
         <div
           aria-label="Available grant subjects"
-          aria-multiselectable="false"
+          aria-multiselectable="true"
           className="cu-gfs-subject-picker__menu"
           id="cu-gfs-subject-options"
           role="listbox"
@@ -128,8 +134,8 @@ export function GfsSubjectPicker({
             <span className="cu-gfs-subject-picker__empty">Loading subjects…</span>
           ) : availableOptions.length === 0 ? (
             <span className="cu-gfs-subject-picker__empty">
-              {options.length === 1 && selected
-                ? 'The available subject is selected.'
+              {options.length > 0 && selected.length === options.length
+                ? 'All available subjects are selected.'
                 : 'No subjects found.'}
             </span>
           ) : (

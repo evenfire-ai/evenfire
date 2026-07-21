@@ -275,6 +275,15 @@ function approvalTargetParamSet(
   return [{ targetUserId: context.targetUserId }, { targetTeamId: context.targetTeamId }]
 }
 
+function attachWorkflowConversation(
+  targets: Record<string, unknown>[],
+  context: WorkflowCallerContext | null
+): Record<string, unknown>[] {
+  const conversationId = context?.conversationId?.trim()
+  if (!conversationId) return targets
+  return targets.map(target => ({ ...target, workflowConversationId: conversationId }))
+}
+
 function isApprovalTargetMiss(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   return /\((403|404)\)/.test(error.message)
@@ -906,6 +915,7 @@ export class WorkflowStatusTool extends WorkflowTool {
     } else {
       targets = approvalTargetParamSet(params, this.workflowCallerContext)
     }
+    targets = attachWorkflowConversation(targets, this.workflowCallerContext)
     const result = await requestWithApprovalTargetFallback(targets, target =>
       this.client.request(
         appendApprovalTargetQuery(
@@ -963,6 +973,7 @@ export class WorkflowHealthTool extends WorkflowTool {
     } else {
       targets = approvalTargetParamSet(params, this.workflowCallerContext)
     }
+    targets = attachWorkflowConversation(targets, this.workflowCallerContext)
     const result = await requestWithApprovalTargetFallback(targets, target =>
       this.client.request(
         appendApprovalTargetQuery(

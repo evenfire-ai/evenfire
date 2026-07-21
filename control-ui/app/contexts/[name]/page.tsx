@@ -43,12 +43,12 @@ import {
   updateContext,
 } from '../../../lib/api'
 
-type ContextTab = 'connectors' | 'shared-files' | 'agents' | 'teams' | 'members'
-const CONTEXT_TABS: ContextTab[] = ['connectors', 'shared-files', 'agents', 'teams', 'members']
+type ContextTab = 'connectors' | 'agent-files' | 'agents' | 'teams' | 'members'
+const CONTEXT_TABS: ContextTab[] = ['connectors', 'agent-files', 'agents', 'teams', 'members']
 
 const TAB_LABELS: Record<ContextTab, string> = {
   connectors: 'Connectors',
-  'shared-files': 'Shared Files',
+  'agent-files': 'Agent Files',
   agents: 'Agents',
   teams: 'Teams',
   members: 'Members',
@@ -881,7 +881,7 @@ export default function ContextDetailsPage() {
             </>
           )}
 
-          {activeTab === 'shared-files' && (
+          {activeTab === 'agent-files' && (
             <>
               {sharedFileSystemsDraft.length === 0 ? (
                 <div className="cu-empty">No SharedFileSystems attached.</div>
@@ -897,7 +897,7 @@ export default function ContextDetailsPage() {
                           <td>
                             <a
                               className="cu-link"
-                              href={CONTROL_ROUTES.sharedFiles.detail(ref.name)}
+                              href={CONTROL_ROUTES.agentFiles.detail(ref.name)}
                               style={{
                                 display: 'inline-flex',
                                 alignItems: 'center',

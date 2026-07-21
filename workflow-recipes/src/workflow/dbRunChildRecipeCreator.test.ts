@@ -1,53 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
-import type { DbRunRow } from '../reconciler/dbRunProcessor.js'
+import type { WorkflowRecipeGfsIntentSpec } from '../types.js'
 import { createDbRunChildRecipe } from './dbRunChildRecipeCreator.js'
-
-function makeRun(overrides: Partial<DbRunRow> = {}): DbRunRow {
-  return {
-    run_id: '00000000-0000-0000-0000-000000000123',
-    recipe_namespace: 'sandbox-recipes',
-    recipe_name: 'demo-parent',
-    phase: 'Pending',
-    team_id: null,
-    usage_team_id: null,
-    actor_type: 'user',
-    actor_id: null,
-    inputs: null,
-    intermediate_parameters: null,
-    output_overrides: null,
-    trigger_source: 'onDemand',
-    owner_instance_id: null,
-    max_duration_seconds: 600,
-    started_at: null,
-    child_recipe_name: null,
-    child_recipe_namespace: null,
-    ...overrides,
-  }
-}
-
-function makeParent() {
-  return {
-    metadata: {
-      name: 'demo-parent',
-      namespace: 'sandbox-recipes',
-      uid: 'parent-uid-1',
-    },
-    spec: {
-      coordinatorImage: 'clerum/workflow-custom-sdk-e2e:test',
-      inputContract: {
-        properties: {
-          greeting: { type: 'string', default: 'hello' },
-        },
-      },
-      steps: [{ id: 'step-1' }],
-      inputs: { greeting: 'hello' },
-      computed: [{ name: 'db_mode', expression: "'readonly'" }],
-      resources: [{ id: 'api-key', type: 'secret', data: { token: 'redacted' } }],
-      runtimeEgress: { http: { allowedHosts: ['swapi.info'] } },
-    },
-  }
-}
+import { makeExistingChild, makeParent, makeRun } from './dbRunChildRecipeCreator.testFixtures.js'
 
 describe('createDbRunChildRecipe', () => {
   it('creates a stable child name derived from the run id', async () => {
@@ -210,14 +165,7 @@ describe('createDbRunChildRecipe', () => {
       getNamespacedCustomObject: vi
         .fn()
         .mockResolvedValueOnce(makeParent())
-        .mockResolvedValueOnce({
-          metadata: {
-            name: 'demo-parent-00000000',
-            labels: {
-              'clerum.io/workflow-run-id': '00000000-0000-0000-0000-000000000123',
-            },
-          },
-        }),
+        .mockResolvedValueOnce(makeExistingChild()),
       createNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 409 }),
     } as unknown as k8s.CustomObjectsApi
 
@@ -249,24 +197,71 @@ describe('createDbRunChildRecipe', () => {
     expect(childSpec?.computed).toEqual([{ name: 'db_mode', expression: "'readonly'" }])
   })
 
-  it('throws if a 409 resolves to a child owned by a different run', async () => {
+  it('retains the exact parent GFS intent on a DB-run child recipe', async () => {
+    const gfs: WorkflowRecipeGfsIntentSpec = {
+      publishTargets: [{ drive: 'main', target: 'published-results' }],
+      mounts: [
+        {
+          drive: 'main',
+          target: 'shared-inputs',
+          scopes: ['gfs.read', 'gfs.write'],
+        },
+      ],
+    }
+    const customApi = {
+      getNamespacedCustomObject: vi.fn().mockResolvedValue(makeParent(gfs)),
+      createNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: { name: 'demo-parent-00000000' },
+      }),
+    } as unknown as k8s.CustomObjectsApi
+
+    await createDbRunChildRecipe(customApi, makeRun())
+
+    expect(
+      (customApi.createNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>).mock
+        .calls[0]?.[0]?.body?.spec?.gfs
+    ).toEqual(gfs)
+  })
+
+  const expectedGfs: WorkflowRecipeGfsIntentSpec = {
+    mounts: [{ drive: 'main', target: 'shared-inputs', scopes: ['gfs.read'] }],
+  }
+  const collisionCases: Array<[string, (child: ReturnType<typeof makeExistingChild>) => void]> = [
+    [
+      'a different run id',
+      child => void (child.metadata.labels['clerum.io/workflow-run-id'] = 'other-run'),
+    ],
+    ['the wrong owner', child => void (child.metadata.ownerReferences[0]!.name = 'other-parent')],
+    ['a stale parent UID', child => void (child.metadata.ownerReferences[0]!.uid = 'stale-uid')],
+    ['no controller owner', child => void (child.metadata.ownerReferences = [])],
+    [
+      'the wrong parent label',
+      child => void (child.metadata.labels['clerum.io/parent-recipe'] = 'other-parent'),
+    ],
+    [
+      'the wrong inherited-resource annotation',
+      child => void (child.metadata.annotations['clerum.io/inherited-parent-resources'] = 'false'),
+    ],
+    ['mismatched GFS intent', child => void (child.spec.gfs = { mounts: [] })],
+    ['changed steps', child => void (child.spec.steps = [{ id: 'different-step' }])],
+    ['changed coordinator image', child => void (child.spec.coordinatorImage = 'attacker/image')],
+    ['changed resources', child => void (child.spec.resources[0]!.id = 'other-resource')],
+    ['the wrong child kind', child => void (child.kind = 'ConfigMap')],
+  ]
+
+  it.each(collisionCases)('rejects a 409 collision with %s', async (_description, mutate) => {
+    const existing = makeExistingChild(expectedGfs)
+    mutate(existing)
     const customApi = {
       getNamespacedCustomObject: vi
         .fn()
-        .mockResolvedValueOnce(makeParent())
-        .mockResolvedValueOnce({
-          metadata: {
-            name: 'demo-parent-00000000',
-            labels: {
-              'clerum.io/workflow-run-id': 'ffffffff-ffff-ffff-ffff-ffffffffffff',
-            },
-          },
-        }),
+        .mockResolvedValueOnce(makeParent(expectedGfs))
+        .mockResolvedValueOnce(existing),
       createNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 409 }),
     } as unknown as k8s.CustomObjectsApi
 
     await expect(createDbRunChildRecipe(customApi, makeRun())).rejects.toThrow(
-      /already exists for a different workflow run/i
+      /does not match the expected workflow run child identity/i
     )
   })
 })

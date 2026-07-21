@@ -102,16 +102,16 @@ describe('Sidebar publisher gating', () => {
   })
 
   it.each([
-    ['/global-files', 'Global Files', '/global-files'],
-    ['/outputs/recipe-artifacts', 'Outputs', '/outputs/recipe-artifacts'],
-    ['/outputs/desktop-app-artifacts', 'Outputs', '/outputs/recipe-artifacts'],
-    ['/shared-files/example', 'Shared Files', '/shared-files'],
-  ])('selects the matching Files child for %s', (pathname, label, href) => {
+    ['/agent-files/example', 'Agent Files', '/agent-files'],
+    ['/agent-outputs/recipe-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
+    ['/agent-outputs/desktop-app-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
+    ['/global-file-system', 'Global File System', '/global-file-system'],
+  ])('selects the matching Directories child for %s', (pathname, label, href) => {
     vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
     navigationState.pathname = pathname
-    render(<Sidebar currentTab="files" />)
+    render(<Sidebar currentTab="directories" />)
 
-    const group = screen.getByRole('button', { name: 'Files' })
+    const group = screen.getByRole('button', { name: 'Directories' })
     expect(group).toHaveAttribute('aria-expanded', 'true')
     expect(group).toHaveAttribute('data-active', 'true')
     const child = screen.getByRole('link', { name: label })
@@ -121,17 +121,36 @@ describe('Sidebar publisher gating', () => {
 
   it('renders a thin icon for every visible child route', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
-    render(<Sidebar currentTab="files" />)
+    render(<Sidebar currentTab="directories" />)
 
-    for (const label of ['Global Files', 'Outputs', 'Shared Files']) {
+    for (const label of ['Agent Files', 'Agent Outputs', 'Global File System']) {
       const child = screen.getByRole('link', { name: label })
       expect(child.querySelector('.cu-sidebar__subitem-icon svg')).toBeInTheDocument()
     }
   })
 
+  it('uses the shared Desktop paperclip glyph for Global File System', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    navigationState.pathname = '/global-file-system'
+    render(<Sidebar currentTab="directories" />)
+
+    const globalFileSystem = screen.getByRole('link', { name: 'Global File System' })
+    expect(globalFileSystem.querySelector('path')).toHaveAttribute(
+      'd',
+      'm21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48'
+    )
+  })
+
   it('defines an icon for every sidebar child route, including hidden groups', () => {
     for (const item of Object.values(SIDEBAR_TABS)) {
       expect(item.children?.every(child => Boolean(child.icon)) ?? true).toBe(true)
+    }
+  })
+
+  it('sorts every sidebar group by the displayed child label', () => {
+    for (const item of Object.values(SIDEBAR_TABS)) {
+      const labels = item.children?.map(child => child.label) ?? []
+      expect(labels).toEqual([...labels].sort((first, second) => first.localeCompare(second)))
     }
   })
 

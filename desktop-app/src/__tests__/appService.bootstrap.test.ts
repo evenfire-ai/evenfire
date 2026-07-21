@@ -3,6 +3,14 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+// The chat store binds to the filesystem (Electron userData). Mock it so
+// passwordLogin can be asserted to bind the env-scoped store without touching
+// real directories.
+vi.mock('../chatStoreBinding.js', () => ({
+  bindChatStoreForUser: vi.fn(),
+  unbindChatStore: vi.fn(),
+}))
+
 describe('AppService invitation configuration lookup', () => {
   const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
   const originalExternalRestApiBaseUrl = process.env.EXTERNAL_REST_API_BASE_URL
@@ -44,10 +52,9 @@ describe('AppService invitation configuration lookup', () => {
     delete process.env.PROFILE_UI_BASE_URL
     vi.resetModules()
 
-    const [{ AppService }, { config, isDesktopRuntimeConfigured }] = await Promise.all([
-      import('../appService.js'),
-      import('../config.js'),
-    ])
+    const [{ AppService }, { config, isDesktopRuntimeConfigured, resolveEnvKey }] =
+      await Promise.all([import('../appService.js'), import('../config.js')])
+    const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
 
     const service = new AppService() as unknown as {
       authClient: {
@@ -109,6 +116,12 @@ describe('AppService invitation configuration lookup', () => {
 
     expect(service.authClient.passwordLogin).toHaveBeenCalledWith('user@example.com', 'password123')
     expect(result).toMatchObject({ authenticated: true, me: { email: 'user@example.com' } })
+    // The env-scoped chat store must be bound after a password login, or every
+    // chat:* IPC throws "Not authenticated" until something else re-binds.
+    expect(bindChatStoreForUser).toHaveBeenCalledWith(
+      'user-1',
+      resolveEnvKey('https://api.example.com')
+    )
     expect(config.externalRestApiBaseUrl).toBe('https://api.example.com')
     expect(config.rpcProxyBaseUrl).toBe('https://rpc.example.com')
     expect(config.desktopProfileUiBaseUrl).toBe('https://profile.example.com')
