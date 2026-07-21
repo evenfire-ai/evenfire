@@ -237,10 +237,16 @@ export function createFilesRouter(opts: FilesRouterOptions): Router {
 
   // ── write endpoints (P3) ──────────────────────────────────────────────
 
-  const uploader = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: opts.maxUploadBytes, files: 1 },
-  })
+  // Multer 2.2 supports fieldNestingDepth; DefinitelyTyped has not exposed it yet.
+  const uploadLimits: NonNullable<multer.Options['limits']> & {
+    fieldNestingDepth: number
+  } = {
+    fileSize: opts.maxUploadBytes,
+    files: 1,
+    fields: 1,
+    fieldNestingDepth: 1,
+  }
+  const uploader = multer({ storage: multer.memoryStorage(), limits: uploadLimits })
 
   /**
    * Atomic write: open a sibling temp file, write contents, then rename it

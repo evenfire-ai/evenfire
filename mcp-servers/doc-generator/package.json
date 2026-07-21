@@ -1,6 +1,6 @@
 {
   "name": "@clerum/doc-generator-mcp",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -9,16 +9,20 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "express": "^4.21.2",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "exceljs": "^4.4.0",
-    "markdown-it": "^14.1.0"
+    "markdown-it": "^14.3.0"
   },
   "devDependencies": {
-    "@types/express": "^5.0.0",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^22.13.0",
-    "tsx": "^4.19.0",
+    "tsx": "^4.23.1",
     "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "@hono/node-server": "2.0.5",
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
   }
 }
