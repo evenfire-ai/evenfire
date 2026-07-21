@@ -44,7 +44,8 @@ export function PublisherView({ activeTab }: { activeTab: PublisherTab }) {
   return (
     <section>
       <div className="cu-card cu-card--viewport-fill">
-        <TablePanelHeader title={`Publisher — @${orgScope}`} />
+        {/* orgScope (scope.scope) is already `@<org>`-prefixed by resolvePublishScope(); do not add another '@'. */}
+        <TablePanelHeader title={`Publisher — ${orgScope}`} />
         <div className="cu-card__body">
           <TabBar<PublisherTab>
             ariaLabel="Publisher sections"

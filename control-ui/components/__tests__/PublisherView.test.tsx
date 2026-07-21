@@ -58,6 +58,20 @@ describe('PublisherView', () => {
     expect(await screen.findByText('owned-entries-panel')).toBeInTheDocument()
   })
 
+  it('header renders the already-@-prefixed org scope once (no double @@)', () => {
+    // resolvePublishScope() in control-api returns `scope` already prefixed as
+    // `@<org>` (registryClient.ts). The header must render it verbatim and must
+    // NOT prepend a second '@', otherwise it reads "Publisher — @@acme".
+    vi.mocked(hook.usePublishScope).mockReturnValue({
+      scope: { scope: '@acme', curator: false, orgName: 'Acme' },
+      loading: false,
+      error: false,
+    })
+    render(<PublisherView activeTab="entries" />)
+    expect(screen.getByText('Publisher — @acme')).toBeInTheDocument()
+    expect(screen.queryByText(/@@/)).not.toBeInTheDocument()
+  })
+
   it('renders the docker-credentials panel on the credentials tab', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue({
       scope: { scope: 'acme', curator: false, orgName: 'Acme' },

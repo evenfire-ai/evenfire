@@ -19,6 +19,15 @@ describe('dockerCredential helpers', () => {
     )
   })
 
+  it('strips the leading @ from an org-scoped coordinate', () => {
+    // resolvePublishScope() returns `scope` already prefixed as `@<org>`, but a
+    // Docker repo path must not contain '@' (it is the digest delimiter), so the
+    // coordinate the user copies must be `registry/<org>/…`, not `registry/@<org>/…`.
+    expect(buildPushCoordinate('registry.evenfire.ai', '@acme')).toBe(
+      'registry.evenfire.ai/acme/<name>:<tag>'
+    )
+  })
+
   it('derives dockerconfigjson with username _, password key, and base64 auth', () => {
     const json = deriveDockerconfigjson('registry.evenfire.ai', 'efrk_secret')
     const parsed = JSON.parse(json)
