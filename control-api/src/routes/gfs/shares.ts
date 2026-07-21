@@ -2,6 +2,7 @@ import type { Request, Response, Router } from 'express'
 import { pool, withTransaction } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
   GfsGrantError,
   type GfsPermission,
@@ -34,9 +35,28 @@ import {
  */
 
 export function registerGfsShareRoutes(router: Router): void {
-  router.get('/gfs/shares', requireAuthForControlUI, asyncHandler(handleShareRead))
-  router.post('/gfs/shares', requireAuthForControlUI, asyncHandler(handleShareWrite))
-  router.delete('/gfs/shares/:id', requireAuthForControlUI, asyncHandler(handleShareDelete))
+  // Per-admin token bucket, same shape as the folder-grant routes above.
+  const sharesRateLimit = rateLimitMiddleware({
+    bucketType: 'gfs_shares',
+    maxPerMinute: 30,
+    getBucketKey: req => {
+      const sub = (req as { adminAuth?: { sub?: string } }).adminAuth?.sub
+      return sub ? `gfsshares:${sub}` : null
+    },
+  })
+  router.get('/gfs/shares', requireAuthForControlUI, sharesRateLimit, asyncHandler(handleShareRead))
+  router.post(
+    '/gfs/shares',
+    requireAuthForControlUI,
+    sharesRateLimit,
+    asyncHandler(handleShareWrite)
+  )
+  router.delete(
+    '/gfs/shares/:id',
+    requireAuthForControlUI,
+    sharesRateLimit,
+    asyncHandler(handleShareDelete)
+  )
 }
 
 export async function handleShareRead(req: Request, res: Response): Promise<void> {

@@ -33,7 +33,9 @@ describe('resolveEnvKey (spec §5.1, D1)', () => {
   })
 
   it('keys distinct origins apart — dev vs prod (D1 subdomain case)', () => {
-    expect(resolveEnvKey('https://example.com')).not.toBe(resolveEnvKey('https://example.com'))
+    expect(resolveEnvKey('https://api.dev.example.com')).not.toBe(
+      resolveEnvKey('https://api.example.com')
+    )
   })
 
   it('keys apart on scheme and port (origin includes both)', () => {

@@ -4,6 +4,7 @@ import { type DbClient, pool, withTransaction } from '../../db.js'
 import { isValidHostSubjectId } from '../../gfs/hostSubject.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
   type ControlApiPermissionSubject,
   appendControlApiPermissionEventsInTransaction,
@@ -795,9 +796,29 @@ export function registerGfsGrantRoutes(router: Router): void {
   // Operator (Control UI) seeds Layer-1/2 folder grants. The no-escalation
   // engine (assertMayGrant) is caller-agnostic; the Profile/Desktop folder-owner
   // delegation surface (external user session) wires onto it when that UI lands.
-  router.get('/gfs/grants', requireAuthForControlUI, asyncHandler(handleGrantRead))
-  router.put('/gfs/grants', requireAuthForControlUI, asyncHandler(handleGrantWrite))
-  router.delete('/gfs/grants/:id', requireAuthForControlUI, asyncHandler(handleGrantDelete))
+  // Per-admin token bucket, same shape as the admin registry surfaces; auth runs
+  // first, so adminAuth.sub is always present by the time the limiter keys.
+  const grantsRateLimit = rateLimitMiddleware({
+    bucketType: 'gfs_grants',
+    maxPerMinute: 30,
+    getBucketKey: req => {
+      const sub = (req as { adminAuth?: { sub?: string } }).adminAuth?.sub
+      return sub ? `gfsgrants:${sub}` : null
+    },
+  })
+  router.get('/gfs/grants', requireAuthForControlUI, grantsRateLimit, asyncHandler(handleGrantRead))
+  router.put(
+    '/gfs/grants',
+    requireAuthForControlUI,
+    grantsRateLimit,
+    asyncHandler(handleGrantWrite)
+  )
+  router.delete(
+    '/gfs/grants/:id',
+    requireAuthForControlUI,
+    grantsRateLimit,
+    asyncHandler(handleGrantDelete)
+  )
 }
 
 export async function handleGrantRead(
