@@ -549,15 +549,13 @@ export const config: Config = {
   registryClientSecret: process.env.CLERUM_REGISTRY_CLIENT_SECRET ?? '',
   registryAuthEnabled: process.env.CLERUM_REGISTRY_AUTH_ENABLED === 'true',
   registryConnectionMode,
-  // 'true'/'false' wins explicitly; otherwise default OFF for self-hosted,
-  // ON for managed — reuses the registryConnectionMode value above rather
-  // than re-parsing REGISTRY_CONNECTION_MODE.
-  publisherUiEnabled:
-    process.env.CONTROL_API_PUBLISHER_UI_ENABLED === 'true'
-      ? true
-      : process.env.CONTROL_API_PUBLISHER_UI_ENABLED === 'false'
-        ? false
-        : registryConnectionMode !== 'self-hosted',
+  // Default ON for every deploy now that the Publisher UI is production-ready
+  // (publish → install verified end-to-end); only an explicit
+  // CONTROL_API_PUBLISHER_UI_ENABLED='false' disables it. This flag only exposes
+  // the surface — the control-ui still fails CLOSED for curator / non-org-bound
+  // deploys (isPublisherEnabled requires scope.scope !== null && !curator), so an
+  // unconnected self-hosted deploy won't show the Publisher regardless.
+  publisherUiEnabled: process.env.CONTROL_API_PUBLISHER_UI_ENABLED !== 'false',
   adminAuthMaxFailures: Number(process.env.CONTROL_API_ADMIN_AUTH_MAX_FAILURES || 5),
   adminAuthLockMinutes: Number(process.env.CONTROL_API_ADMIN_AUTH_LOCK_MINUTES || 15),
   adminBootstrapUsername: requiredOrDevDefault('CONTROL_API_ADMIN_BOOTSTRAP_USERNAME', 'admin'),

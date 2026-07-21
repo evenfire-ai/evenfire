@@ -60,13 +60,13 @@ describe('GET /admin/registry/publish-scope: publisherUiEnabled (effective, thro
     vi.resetModules()
   })
 
-  it('is false by default in self-hosted mode', async () => {
+  it('is true by default in self-hosted mode (now production-ready)', async () => {
     process.env.REGISTRY_CONNECTION_MODE = 'self-hosted'
     const { createApp } = await import('../src/app.js')
     const app = createApp(new MockGateway('mcp-server') as never)
     const res = await request(app).get('/api/v1/admin/registry/publish-scope')
     expect(res.status).toBe(200)
-    expect(res.body.publisherUiEnabled).toBe(false)
+    expect(res.body.publisherUiEnabled).toBe(true)
     // The registry-derived fields still pass through untouched.
     expect(res.body.scope).toBe('@acme')
   })

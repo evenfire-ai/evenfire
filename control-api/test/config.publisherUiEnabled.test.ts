@@ -13,42 +13,49 @@ afterEach(() => {
   vi.resetModules()
 })
 
-describe('config: publisherUiEnabled (mode-based default + env override)', () => {
-  it('defaults to false when REGISTRY_CONNECTION_MODE=self-hosted', async () => {
+describe('config: publisherUiEnabled (default ON; only CONTROL_API_PUBLISHER_UI_ENABLED=false disables)', () => {
+  it('defaults to true on self-hosted (Publisher UI is production-ready)', async () => {
     process.env.REGISTRY_CONNECTION_MODE = 'self-hosted'
     const { config } = await import('../src/config.js')
-    expect(config.publisherUiEnabled).toBe(false)
+    expect(config.publisherUiEnabled).toBe(true)
   })
 
-  it('defaults to true when REGISTRY_CONNECTION_MODE=managed', async () => {
+  it('defaults to true on managed', async () => {
     process.env.REGISTRY_CONNECTION_MODE = 'managed'
     const { config } = await import('../src/config.js')
     expect(config.publisherUiEnabled).toBe(true)
   })
 
-  it('defaults to true when REGISTRY_CONNECTION_MODE is unset (implicit managed)', async () => {
+  it('defaults to true when REGISTRY_CONNECTION_MODE is unset', async () => {
     const { config } = await import('../src/config.js')
     expect(config.publisherUiEnabled).toBe(true)
   })
 
-  it('CONTROL_API_PUBLISHER_UI_ENABLED=true overrides the self-hosted default to true', async () => {
-    process.env.REGISTRY_CONNECTION_MODE = 'self-hosted'
-    process.env.CONTROL_API_PUBLISHER_UI_ENABLED = 'true'
-    const { config } = await import('../src/config.js')
-    expect(config.publisherUiEnabled).toBe(true)
-  })
-
-  it('CONTROL_API_PUBLISHER_UI_ENABLED=false overrides the managed default to false', async () => {
+  it('CONTROL_API_PUBLISHER_UI_ENABLED=false disables it (even on managed)', async () => {
     process.env.REGISTRY_CONNECTION_MODE = 'managed'
     process.env.CONTROL_API_PUBLISHER_UI_ENABLED = 'false'
     const { config } = await import('../src/config.js')
     expect(config.publisherUiEnabled).toBe(false)
   })
 
-  it('an unrecognized CONTROL_API_PUBLISHER_UI_ENABLED value falls back to the mode-based default', async () => {
+  it('CONTROL_API_PUBLISHER_UI_ENABLED=false disables it on self-hosted too', async () => {
+    process.env.REGISTRY_CONNECTION_MODE = 'self-hosted'
+    process.env.CONTROL_API_PUBLISHER_UI_ENABLED = 'false'
+    const { config } = await import('../src/config.js')
+    expect(config.publisherUiEnabled).toBe(false)
+  })
+
+  it('CONTROL_API_PUBLISHER_UI_ENABLED=true keeps it enabled', async () => {
+    process.env.REGISTRY_CONNECTION_MODE = 'self-hosted'
+    process.env.CONTROL_API_PUBLISHER_UI_ENABLED = 'true'
+    const { config } = await import('../src/config.js')
+    expect(config.publisherUiEnabled).toBe(true)
+  })
+
+  it('an unrecognized value stays enabled — only "false" disables', async () => {
     process.env.REGISTRY_CONNECTION_MODE = 'self-hosted'
     process.env.CONTROL_API_PUBLISHER_UI_ENABLED = 'yes'
     const { config } = await import('../src/config.js')
-    expect(config.publisherUiEnabled).toBe(false)
+    expect(config.publisherUiEnabled).toBe(true)
   })
 })
