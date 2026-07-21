@@ -34,6 +34,51 @@ describe('OwnedEntries', () => {
     expect(screen.getByText('@acme/pub')).toBeInTheDocument()
   })
 
+  it('Type column shows Connector for mcp-servers (serverMode) and Plugin for recipes', async () => {
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [
+        {
+          name: '@acme/conn',
+          version: '1.0.0',
+          visibility: 'public',
+          status: 'published',
+          serverMode: 'local',
+        },
+        {
+          name: '@acme/plug',
+          version: '1.0.0',
+          visibility: 'public',
+          status: 'published',
+          serverMode: null,
+        },
+      ],
+    })
+    render(<OwnedEntries orgScope="acme" />)
+    await screen.findByText('@acme/conn')
+    expect(screen.getByText('Connector')).toBeInTheDocument()
+    expect(screen.getByText('Plugin')).toBeInTheDocument()
+  })
+
+  it('Type prefers explicit entry_type over the serverMode inference', async () => {
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [
+        {
+          name: '@acme/x',
+          version: '1.0.0',
+          visibility: 'public',
+          status: 'published',
+          entry_type: 'recipe',
+          serverMode: 'local',
+        },
+      ],
+    })
+    render(<OwnedEntries orgScope="acme" />)
+    await screen.findByText('@acme/x')
+    // entry_type 'recipe' wins even though serverMode is set → "Plugin".
+    expect(screen.getByText('Plugin')).toBeInTheDocument()
+    expect(screen.queryByText('Connector')).toBeNull()
+  })
+
   it('shows Share access only for private entries; public shows a no-grant note', async () => {
     vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
       data: [
