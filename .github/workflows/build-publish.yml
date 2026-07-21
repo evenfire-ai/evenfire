@@ -320,6 +320,22 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,scope=${{ matrix.image }},mode=max
 
+      # Record that this image was actually (re)built + pushed at this sha, so
+      # notify-infra can tell the infra repo EXACTLY which images to mirror/pin
+      # (build-publish is change-detected — an incremental merge builds a subset).
+      - name: Record built-image marker
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        run: mkdir -p /tmp/built && echo "${{ matrix.image }}" > "/tmp/built/${{ matrix.image }}"
+
+      - name: Upload built-image marker
+        if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-${{ matrix.image }}
+          path: /tmp/built/${{ matrix.image }}
+          retention-days: 1
+          if-no-files-found: warn
+
   # Notify the private infra repo that a fresh image set is available so it can
   # mirror ghcr -> GCP Artifact Registry and bump the dev pins. Dormant until the
   # operator sets the INFRA_DISPATCH_REPO variable and INFRA_DISPATCH_TOKEN secret;
@@ -330,6 +346,13 @@ jobs:
     needs: build-push
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_all }}
     steps:
+      - name: Collect built-image markers
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/built
+          pattern: built-*
+          merge-multiple: true
+        continue-on-error: true
       - name: Fire repository_dispatch to the infra repo
         env:
           DISPATCH_REPO: ${{ vars.INFRA_DISPATCH_REPO }}
@@ -337,8 +360,21 @@ jobs:
           SHA: ${{ github.sha }}
         if: ${{ env.DISPATCH_REPO != '' && env.DISPATCH_TOKEN != '' }}
         run: |
+          set -euo pipefail
+          # Space-separated list of images actually (re)built this run. Empty on a
+          # no-op / config-only push — in which case DO NOT dispatch (nothing to
+          # mirror; a bare dispatch would make the mirror fail on absent tags).
+          IMAGES="$(find /tmp/built -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ' | sed 's/ *$//')"
+          if [ -z "$IMAGES" ]; then
+            echo "no images built (no-op / config-only push) — skipping dispatch"
+            exit 0
+          fi
+          echo "built images: $IMAGES"
+          payload="$(jq -cn --arg sha "$SHA" --arg short "${SHA:0:7}" --arg images "$IMAGES" \
+            '{event_type:"images-published",client_payload:{sha:$sha,short_sha:$short,images:$images}}')"
           curl --fail-with-body -sS -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $DISPATCH_TOKEN" \
             "https://api.github.com/repos/$DISPATCH_REPO/dispatches" \
-            -d "$(printf '{"event_type":"images-published","client_payload":{"sha":"%s","short_sha":"%s"}}' "$SHA" "${SHA:0:7}")"
+            -d "$payload"
+          echo "dispatched images-published for: $IMAGES"
