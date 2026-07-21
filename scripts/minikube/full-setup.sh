@@ -111,12 +111,22 @@ validate_mcpserver_secrets() {
 # ── Parse flags ────────────────────────────────────────────────────────
 SKIP_BUILD=false
 SKIP_UIS="${MINIKUBE_SKIP_UIS:-false}"
-RESET_DB=false
+RESET_DB=true
 FORCE_KEYS=false
 
 case "${SKIP_UIS}" in
   true|1|yes) SKIP_UIS=true ;;
   *) SKIP_UIS=false ;;
+esac
+
+# Rebuild the DB from scratch by default (RESET_DB=true above) so a stale
+# control-postgres volume from an older build cannot drift from the current
+# schema/grant contract: the migration gate enforces an exact runtime-access
+# contract, and already-recorded migrations never re-run to reconcile it. Opt
+# out with REUSE_DB=true (or --keep-db) to preserve an existing volume.
+case "${REUSE_DB:-false}" in
+  true|1|yes) RESET_DB=false ;;
+  *) : ;;
 esac
 
 SEED_PROFILE="${MINIKUBE_SEED_PROFILE:-minimal}"
@@ -145,7 +155,8 @@ Options:
                          test fixtures. e2e: adds the E2E fixtures (test user,
                          e2e-* recipes, demo MCP servers). Requires ADMIN_PASSWORD
                          unless --seed-profile=e2e.
-  --reset-db     Reset postgres database for MINIKUBE_PROFILE (deletes PVC, re-deploys)
+  --reset-db     Force a postgres DB rebuild (already the default; deletes PVC, re-deploys)
+  --keep-db      Preserve the existing postgres DB volume (skip the default rebuild)
   --force-keys   Force JWT key regeneration (invalidates existing tokens)
   -h, --help     Show this help message
 
@@ -154,6 +165,8 @@ Environment:
   MINIKUBE_MULTI_NODE    Set true to opt into a two-node local cluster
   MINIKUBE_NODES         Explicit node count; values >1 imply multi-node
   MINIKUBE_SKIP_UIS      Set true to skip Control UI, Profile UI, and Desktop App
+  REUSE_DB               Set true to preserve the existing postgres DB volume;
+                         default rebuilds control-postgres from scratch every run
   MINIKUBE_SEED_PROFILE, ADMIN_PASSWORD
                          See --seed-profile above
   MINIKUBE_RECREATE_PROFILE
@@ -174,7 +187,7 @@ Examples:
   $(basename "$0") --skip-build          # Re-deploy without rebuilding images
   $(basename "$0") --skip-uis            # Deploy backend services without UIs
   $(basename "$0") --seed-profile=e2e     # Full E2E fixture set
-  $(basename "$0") --reset-db            # Fix postgres WAL corruption
+  $(basename "$0") --keep-db             # Preserve the existing DB (skip the default rebuild)
   $(basename "$0") --force-keys          # Regenerate all JWT keys
 EOF
   exit 0
@@ -186,6 +199,7 @@ for arg in "$@"; do
     --skip-uis)   SKIP_UIS=true ;;
     --seed-profile=*) SEED_PROFILE="${arg#*=}" ;;
     --reset-db)   RESET_DB=true ;;
+    --keep-db)    RESET_DB=false ;;
     --force-keys) FORCE_KEYS=true ;;
     -h|--help)    usage ;;
     *) err "Unknown flag: $arg"; usage ;;
@@ -357,6 +371,24 @@ if [ "$SEED_PROFILE" = "minimal" ] && [ -z "${ADMIN_PASSWORD:-}" ]; then
   err "  No default password ships with Evenfire. For the E2E fixture profile"
   err "  (which pins a known test password), run: make minikube-setup-e2e"
   exit 1
+fi
+# Reject a too-short/too-long password here rather than at seed time (Step 10).
+# control-api enforces 8-256 chars (control-api/src/routes/admin/auth.ts); if we
+# defer, the bootstrap POST fails with "password must be between 8 and 256
+# characters" only AFTER image builds + deploy, and the admin account may still
+# hold the publicly-known default. Keep these bounds in sync with auth.ts. Scope
+# to the minimal profile: e2e force-assigns ADMIN_PASSWORD later (search
+# E2E_ADMIN_PASSWORD), so a short .env value there is irrelevant.
+if [ "$SEED_PROFILE" = "minimal" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
+  pw_len=${#ADMIN_PASSWORD}
+  if [ "$pw_len" -lt 8 ] || [ "$pw_len" -gt 256 ]; then
+    err "ADMIN_PASSWORD must be between 8 and 256 characters (got ${pw_len})."
+    err ""
+    err "  Set a longer value in .env at the project root:"
+    err ""
+    err "      ADMIN_PASSWORD=<choose-a-password-8-256-chars>"
+    exit 1
+  fi
 fi
 ok "ADMIN_PASSWORD is set"
 
@@ -582,7 +614,7 @@ step_header 6 $TOTAL_STEPS "Deploy"
 
 # 6a. Optional DB reset
 if [ "$RESET_DB" = true ]; then
-  log "Resetting postgres database (--reset-db)..."
+  log "Rebuilding postgres database from scratch (set REUSE_DB=true to keep it)..."
   # Scale down to release PVC
   $KC scale deployment/control-api -n control-plane --replicas=0 2>/dev/null || true
   $KC scale deployment/control-postgres -n control-plane --replicas=0 2>/dev/null || true

@@ -10,6 +10,7 @@ import { ShareAccessPanel } from './ShareAccessPanel'
 
 const COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
+  { key: 'type', label: 'Type' },
   { key: 'version', label: 'Version' },
   { key: 'visibility', label: 'Visibility' },
   { key: 'status', label: 'Status' },
@@ -18,6 +19,15 @@ const COLUMNS: TableHeaderColumn[] = [
 
 function entryKey(e: OwnedRegistryEntry): string {
   return `${e.name}@${e.version}`
+}
+
+// The registry's owned-entries payload carries `serverMode` but not `entry_type`
+// (mcp-servers always have a serverMode; recipes don't). Prefer an explicit
+// entry_type if the registry ever starts sending it, else infer from serverMode.
+// "Connector" / "Plugin" mirror the labels in PublishToRegistryForm.
+function entryTypeLabel(e: OwnedRegistryEntry): string {
+  const kind = e.entry_type ?? (e.serverMode != null ? 'mcp-server' : 'recipe')
+  return kind === 'mcp-server' ? 'Connector' : 'Plugin'
 }
 
 export function OwnedEntries({ orgScope }: { orgScope: string }) {
@@ -70,6 +80,7 @@ export function OwnedEntries({ orgScope }: { orgScope: string }) {
                   <td>
                     <code>{e.name}</code>
                   </td>
+                  <td>{entryTypeLabel(e)}</td>
                   <td>{e.version}</td>
                   <td>
                     <span

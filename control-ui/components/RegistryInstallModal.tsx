@@ -5,7 +5,7 @@ import type { CredentialSchema, RegistryEntry } from '../lib/api'
 import { getContexts, getRegistryCredentialSchema, installFromRegistry } from '../lib/api'
 import { registryEntryToEgressBindings } from '../lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '../lib/egressModel'
-import { isValidK8sName } from '../lib/k8sValidation'
+import { isValidK8sName, toK8sName } from '../lib/k8sValidation'
 import { buildPastedValue } from '../lib/pasteUtils'
 import { trustBgColor, trustColor } from '../lib/trustLevel'
 import { EgressEditor } from './EgressEditor'
@@ -21,7 +21,9 @@ interface Props {
 
 export function RegistryInstallModal({ entry, isOpen, onClose, onInstalled }: Props) {
   const { showToast } = useToast()
-  const [serverName, setServerName] = useState(entry.name)
+  // Default to a K8s-valid name derived from the scoped registry name (e.g.
+  // `@org/name` → `org-name`); `entry.name` itself is not a valid resource name.
+  const [serverName, setServerName] = useState(toK8sName(entry.name))
   const [contextRef, setContextRef] = useState('')
   const [contexts, setContexts] = useState<Array<{ name: string }>>([])
   const [credSchema, setCredSchema] = useState<CredentialSchema | null>(null)
@@ -38,7 +40,7 @@ export function RegistryInstallModal({ entry, isOpen, onClose, onInstalled }: Pr
   useEffect(() => {
     if (!isOpen) return
     installInFlightRef.current = false
-    setServerName(entry.name)
+    setServerName(toK8sName(entry.name))
     setError('')
     setCredValues({})
     setEgressBindings(registryInitialEgressBindings)
@@ -338,7 +340,9 @@ export function RegistryInstallModal({ entry, isOpen, onClose, onInstalled }: Pr
                 id="ri-name"
                 className="cu-input"
                 value={serverName}
-                onChange={e => setServerName(e.target.value.toLowerCase())}
+                onChange={e =>
+                  setServerName(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
+                }
                 placeholder="my-mcp-server"
               />
               {serverName && !nameValid && (

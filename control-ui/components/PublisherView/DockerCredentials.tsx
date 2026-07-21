@@ -15,6 +15,7 @@ import { useToast } from '../Toast'
 import { Button } from '../ui'
 import { DockerCredentialModal } from './DockerCredentialModal'
 import { RetryBanner } from './RetryBanner'
+import { dockerNamespace } from './dockerCredential'
 
 // Mirrors RegistryApiKeysPanel's state machine: the org registry-keys route is
 // user+owner-gated, so a non-owner admin on an org-bound deploy (Publisher is
@@ -129,8 +130,8 @@ export function DockerCredentialsPanel({ orgScope }: { orgScope: string }) {
     <div className="cu-card__body">
       <p className="cu-field__hint">
         Generate a durable credential to <code>docker push</code> images to{' '}
-        <code>registry.evenfire.ai/{orgScope}/…</code>. Keys are listable and revocable for CI
-        hygiene.
+        <code>registry.evenfire.ai/{dockerNamespace(orgScope)}/…</code>. Keys are listable and
+        revocable for CI hygiene.
       </p>
 
       {isReady ? (

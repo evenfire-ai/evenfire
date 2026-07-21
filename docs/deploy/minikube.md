@@ -135,11 +135,20 @@ profile; run them explicitly with `E2E_RUN_SOFTWARE_CREATION=1`.
 ### Options
 
 ```bash
-make minikube-setup                        # Full setup from scratch
+make minikube-setup                        # Full setup; rebuilds the DB from scratch every run
 make minikube-setup ARGS="--skip-build"    # Re-deploy without rebuilding images (~1 min)
-make minikube-setup ARGS="--reset-db"      # Reset postgres before deploy (fixes WAL corruption)
+make minikube-setup REUSE_DB=true          # Preserve the existing postgres DB volume
+make minikube-setup ARGS="--reset-db"      # Force a DB rebuild (already the default; also fixes WAL corruption)
 make minikube-setup ARGS="--force-keys"    # Regenerate all JWT signing keys
 ```
+
+`make minikube-setup` deletes the `control-postgres-data` volume and replays every
+migration from an empty schema by default, so a leftover DB from an older build
+cannot drift from the current schema/grant contract — that drift otherwise
+surfaces at the migration gate as
+`control_api_runtime relation privileges differ from the explicit access contract`.
+The rebuild is a no-op on a fresh cluster (nothing to delete). Pass
+`REUSE_DB=true` to keep an existing volume (the old fast-iterate / keep-data path).
 
 ### Manual Steps (Advanced)
 

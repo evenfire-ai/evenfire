@@ -1209,9 +1209,7 @@ export async function deleteMcpSecret(name: string) {
 }
 
 export type RecipeSecretOwnership =
-  | { kind: 'shared' }
-  | { kind: 'owner-recipe'; recipeName: string }
-  | { kind: 'unlabeled' }
+  { kind: 'shared' } | { kind: 'owner-recipe'; recipeName: string } | { kind: 'unlabeled' }
 
 export type RecipeSecretItem = {
   name: string
@@ -1930,13 +1928,7 @@ export type WorkflowRecipePhase =
   | 'rollback-failed'
 
 export type WorkflowExecutionPhase =
-  | 'pending'
-  | 'initializing'
-  | 'running'
-  | 'completed'
-  | 'failed'
-  | 'cancelled'
-  | 'recovering'
+  'pending' | 'initializing' | 'running' | 'completed' | 'failed' | 'cancelled' | 'recovering'
 
 export type WorkflowRecipeStatus = {
   phase?: WorkflowRecipePhase
@@ -2729,6 +2721,10 @@ export type OwnedRegistryEntry = {
   visibility: 'public' | 'private'
   status: string // "published" | "deprecated" | "removed"
   entry_type?: string // "mcp-server" | "recipe"
+  // Present ("local"/"remote") for mcp-servers, null/absent for recipes. The
+  // registry's /org/:org/entries returns this but NOT entry_type, so the
+  // Publisher's Type column infers Connector/Plugin from it (see OwnedEntries).
+  serverMode?: string | null
 }
 export type OwnedRegistryEntriesResponse = {
   data: OwnedRegistryEntry[]
@@ -2815,8 +2811,7 @@ export async function listOrgGrants(pluginName?: string): Promise<{ grants: OrgG
 
 export async function createOrgGrant(input: CreateOrgGrantInput): Promise<OrgGrant> {
   const raw = (await registryCodedRequest('POST', '/api/v1/admin/registry/grants', input)) as
-    | RawOrgGrant
-    | undefined
+    RawOrgGrant | undefined
   return normalizeOrgGrant(raw ?? {})
 }
 
@@ -3076,12 +3071,7 @@ export type PluginWorkloadSdkQuotaCounter = {
 }
 
 export type PluginWorkloadSdkInvocationStatus =
-  | 'in_progress'
-  | 'complete'
-  | 'failed'
-  | 'provider_unavailable'
-  | 'accepted'
-  | 'delivered'
+  'in_progress' | 'complete' | 'failed' | 'provider_unavailable' | 'accepted' | 'delivered'
 
 export type PluginWorkloadSdkInvocation = {
   id: string
@@ -3264,11 +3254,7 @@ export async function revokeRegistryApiKey(id: string): Promise<void> {
 // There is NO rejection_reason in the contract.
 
 export type RegistryConnectionState =
-  | 'disconnected'
-  | 'pending'
-  | 'approved'
-  | 'rejected'
-  | 'connected'
+  'disconnected' | 'pending' | 'approved' | 'rejected' | 'connected'
 export type RegistryConnectionStatus = {
   state: RegistryConnectionState
   deploymentId?: string
