@@ -215,7 +215,7 @@ flowchart LR
     CAPI --> CRDS[("clerum.io CRDs")]
     CR --> MH["mcp-host<br/>agent runtime · approval gate"]
     RP --> MH
-    MH <--> LLM[("OpenAI · Claude<br/>Z.AI · Bailian")]
+    MH <--> LLM[("21 LLM providers<br/>OpenAI · Claude · Gemini · …")]
     MH --> HCC["host-context-controller<br/>connector discovery"]
     MH --> MP[mcp-proxy] --> MCP["MCP servers<br/>(HTTP · stdio via bridge)"]
     CRDS -.watched by.-> HCC
@@ -302,17 +302,42 @@ Reference: [docs/crds/README.md](docs/crds/README.md).
 
 ## Supported LLM providers
 
-| Provider         | `provider` value | Default model       |
-| ---------------- | ---------------- | ------------------- |
-| OpenAI           | `openai`         | `gpt-5.4-mini`      |
-| Anthropic Claude | `claude`         | `claude-sonnet-4-6` |
-| Z.AI             | `zai`            | `glm-5.1`           |
-| Alibaba Bailian  | `bailian`        | `qwen3-coder-plus`  |
+**21 providers** behind one interface. The set is defined once in the
+`@clerum/llm-providers` package — provider ids, credential slots, and display
+labels — and given runtime behavior (default model, endpoint, tokenizer) in
+`mcp-host`. Keys live in a Kubernetes Secret you create (dev mode: a single
+environment variable; setup infers the matching provider).
 
-Four providers behind one interface; OpenAI-compatible endpoints can plug in as
-registry descriptors where the code supports it. Keys live in a Kubernetes
-Secret you create (dev mode: environment variables). Details:
-[mcp-host/README.md](mcp-host/README.md).
+| Provider          | `provider` value | Default model                       | Integration       |
+| ----------------- | ---------------- | ----------------------------------- | ----------------- |
+| OpenAI            | `openai`         | `gpt-5.4-mini`                      | Native SDK        |
+| Anthropic         | `claude`         | `claude-sonnet-4-6`                 | Native SDK        |
+| Z.AI              | `zai`            | `glm-5.1`                           | OpenAI-compatible |
+| Bailian           | `bailian`        | `qwen3-coder-plus`                  | OpenAI-compatible |
+| Google Vertex AI  | `vertex`         | `gemini-2.5-pro`                    | Native SDK        |
+| Amazon Bedrock    | `bedrock`        | `anthropic.claude-sonnet-4-6-v1:0`  | Native SDK        |
+| OpenRouter        | `openrouter`     | `anthropic/claude-sonnet-latest`    | OpenAI-compatible |
+| Google Gemini     | `gemini`         | `gemini-2.5-flash`                  | OpenAI-compatible |
+| DeepSeek          | `deepseek`       | `deepseek-v4-flash`                 | OpenAI-compatible |
+| Groq              | `groq`           | `llama-3.3-70b-versatile`           | OpenAI-compatible |
+| Together AI       | `together`       | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | OpenAI-compatible |
+| Fireworks AI      | `fireworks`      | `llama-v3p3-70b-instruct`           | OpenAI-compatible |
+| Mistral AI        | `mistral`        | `mistral-medium-latest`             | OpenAI-compatible |
+| xAI (Grok)        | `xai`            | `grok-4.3`                          | OpenAI-compatible |
+| Cerebras          | `cerebras`       | `gpt-oss-120b`                      | OpenAI-compatible |
+| DeepInfra         | `deepinfra`      | `deepseek-ai/DeepSeek-V3.2`         | OpenAI-compatible |
+| Perplexity        | `perplexity`     | `sonar-pro`                         | OpenAI-compatible |
+| Moonshot (Kimi)   | `moonshot`       | `kimi-k2.6`                         | OpenAI-compatible |
+| Nebius            | `nebius`         | `Qwen/Qwen3-235B-A22B-Instruct-2507` | OpenAI-compatible |
+| Novita AI         | `novita`         | `deepseek/deepseek-v3.2`            | OpenAI-compatible |
+| Azure OpenAI      | `azure`          | `gpt-4.1`                           | Light driver      |
+
+Most providers expose an OpenAI-compatible endpoint and plug in as pure data (a
+credential slot plus a `baseURL`/default-model row) — no driver code. Only
+bespoke wire protocols (`claude`, `vertex`, `bedrock`) or non-vanilla auth
+(`azure`: per-resource host + `api-key` header) need a dedicated driver arm.
+Adding one: [docs/llm-providers/adding-a-provider.md](docs/llm-providers/adding-a-provider.md).
+Details: [mcp-host/README.md](mcp-host/README.md).
 
 ---
 
@@ -374,7 +399,8 @@ namespace).
 
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — dev loop, what we accept
 - **[SECURITY.md](SECURITY.md)** — private vulnerability disclosure
-- **[GOVERNANCE.md](GOVERNANCE.md)** · **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)**
+- **[GOVERNANCE.md](GOVERNANCE.md)** — project governance
+- **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** — community standards
 
 evenfire is **open source** under the [Mozilla Public License 2.0](LICENSE)
 (MPL-2.0) — an OSI-approved, file-level copyleft license. Use it, modify it,
