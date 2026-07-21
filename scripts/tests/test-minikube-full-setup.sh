@@ -287,6 +287,14 @@ assert_makefile_passes_reuse_db() {
   fi
 }
 
+assert_reset_db_flag_backcompat() {
+  if grep -Eq -- '--reset-db\)[[:space:]]+RESET_DB=true' scripts/minikube/full-setup.sh; then
+    pass "--reset-db flag still forces a DB rebuild (back-compat)"
+  else
+    fail "--reset-db flag no longer sets RESET_DB=true (back-compat broken)"
+  fi
+}
+
 assert_broken_profile_is_recreated
 assert_healthy_profile_skips_recreate
 assert_branch_profile_deploy_dir_is_used
@@ -296,5 +304,6 @@ assert_gfs_provisioning_follows_migrations_and_core_readiness
 assert_full_setup_defaults_to_db_rebuild
 assert_makefile_passes_reuse_db
 assert_reuse_db_normalizer_precedes_flag_loop
+assert_reset_db_flag_backcompat
 
 exit $FAIL

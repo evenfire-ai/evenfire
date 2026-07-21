@@ -142,7 +142,7 @@ make minikube-setup ARGS="--reset-db"      # Force a DB rebuild (already the def
 make minikube-setup ARGS="--force-keys"    # Regenerate all JWT signing keys
 ```
 
-`make minikube-setup` deletes the `control-postgres` volume and replays every
+`make minikube-setup` deletes the `control-postgres-data` volume and replays every
 migration from an empty schema by default, so a leftover DB from an older build
 cannot drift from the current schema/grant contract — that drift otherwise
 surfaces at the migration gate as
