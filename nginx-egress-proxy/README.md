@@ -82,6 +82,7 @@ The generated config, sanitization rules, and deployment shape are asserted in
 
 CI builds and publishes the image via
 [.github/workflows/build-publish.yml](../.github/workflows/build-publish.yml)
-(ghcr.io). There are no static manifests for this service: Deployments,
-ConfigMaps, and Services are created dynamically by host-context-controller —
-see its [README](../host-context-controller/README.md).
+(ghcr.io), tagged `sha-<short>`. The private infra repo then mirrors that tag
+into the deploy-time GCP Artifact Registry. There are no static manifests for
+this service: Deployments, ConfigMaps, and Services are created dynamically by
+host-context-controller — see its [README](../host-context-controller/README.md).
