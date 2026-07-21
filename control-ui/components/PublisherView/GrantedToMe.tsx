@@ -1,7 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
-import { type GrantedToMeItem, listGrantedToMe } from '../../lib/api'
+import { CONTROL_ROUTES } from '@constants/routes'
+import type { GrantedToMeItem } from '../../lib/api'
+import type { InboundGrantsStatus } from '../../lib/hooks/useInboundGrants'
 import { TableHeaderRow } from '../TableHeaderRow'
 import type { TableHeaderColumn } from '../TableHeaderRow/types'
 import { RetryBanner } from './RetryBanner'
@@ -16,31 +17,34 @@ function fmt(v?: string): string {
   return v ? new Date(v).toLocaleDateString() : '—'
 }
 
-export function GrantedToMe() {
-  const [grants, setGrants] = useState<GrantedToMeItem[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(false)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(false)
-    try {
-      const { grants: rows } = await listGrantedToMe()
-      setGrants(rows)
-    } catch {
-      setError(true)
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    void load()
-  }, [load])
-
-  if (loading) return <p>Loading…</p>
-  if (error) {
-    return <RetryBanner message="Could not load inbound grants." onRetry={() => void load()} />
+/**
+ * Presentational — the fetch lives in `useInboundGrants` (owned by PublisherView,
+ * which also uses its status to hide this tab when `unavailable`). On a deep-link
+ * to the hidden route we still render, so `unavailable` shows an accurate
+ * signpost rather than an error: shared plugins are installable from the
+ * Marketplace even though this convenience list isn't served for the deployment.
+ */
+export function GrantedToMe({
+  status,
+  grants,
+  reload,
+}: {
+  status: InboundGrantsStatus
+  grants: GrantedToMeItem[]
+  reload: () => void
+}) {
+  if (status === 'loading') return <p>Loading…</p>
+  if (status === 'unavailable') {
+    return (
+      <p className="cu-banner cu-banner--warn">
+        Plugins shared with your org appear in your{' '}
+        <a href={CONTROL_ROUTES.marketplace.root}>Marketplace catalog</a> and can be installed from
+        there.
+      </p>
+    )
+  }
+  if (status === 'error') {
+    return <RetryBanner message="Could not load inbound grants." onRetry={reload} />
   }
   if (grants.length === 0) {
     return <p>No plugins have been shared with your org yet.</p>

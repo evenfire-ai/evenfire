@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
+import * as inboundHook from '../../lib/hooks/useInboundGrants'
 import * as hook from '../../lib/hooks/usePublishScope'
 import { PublisherView } from '../PublisherView'
 
@@ -17,9 +18,19 @@ vi.mock('../../lib/hooks/usePublishScope', async orig => {
   const actual = await orig<typeof import('../../lib/hooks/usePublishScope')>()
   return { ...actual, usePublishScope: vi.fn() }
 })
+vi.mock('../../lib/hooks/useInboundGrants', () => ({ useInboundGrants: vi.fn() }))
 
 afterEach(cleanup)
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  // Default: grant listing available → the "Shared with me" tab shows. The
+  // tab-visibility tests below override this per-case.
+  vi.mocked(inboundHook.useInboundGrants).mockReturnValue({
+    status: 'available',
+    grants: [],
+    reload: vi.fn(),
+  })
+})
 
 describe('PublisherView', () => {
   it('renders a loading state while publish-scope resolves', () => {
@@ -101,5 +112,37 @@ describe('PublisherView', () => {
     render(<PublisherView activeTab="entries" />)
     const shared = screen.getByRole('tab', { name: /shared with me/i })
     expect(shared).toHaveAttribute('href', '/publisher/shared-with-me')
+  })
+
+  it('hides the "Shared with me" tab when inbound grants are unavailable (403)', () => {
+    vi.mocked(inboundHook.useInboundGrants).mockReturnValue({
+      status: 'unavailable',
+      grants: [],
+      reload: vi.fn(),
+    })
+    vi.mocked(hook.usePublishScope).mockReturnValue({
+      scope: { scope: '@acme', curator: false, orgName: 'Acme' },
+      loading: false,
+      error: false,
+    })
+    render(<PublisherView activeTab="entries" />)
+    expect(screen.queryByRole('tab', { name: /shared with me/i })).toBeNull()
+    expect(screen.getByRole('tab', { name: /published entries/i })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /docker credentials/i })).toBeInTheDocument()
+  })
+
+  it('shows the "Shared with me" tab when inbound grants are available', () => {
+    vi.mocked(inboundHook.useInboundGrants).mockReturnValue({
+      status: 'available',
+      grants: [],
+      reload: vi.fn(),
+    })
+    vi.mocked(hook.usePublishScope).mockReturnValue({
+      scope: { scope: '@acme', curator: false, orgName: 'Acme' },
+      loading: false,
+      error: false,
+    })
+    render(<PublisherView activeTab="entries" />)
+    expect(screen.getByRole('tab', { name: /shared with me/i })).toBeInTheDocument()
   })
 })
