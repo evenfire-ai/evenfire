@@ -127,8 +127,7 @@ type SecretSnapshot = {
 }
 
 type CredentialPayloadValidation =
-  | { ok: true; secretData: Record<string, string> }
-  | { ok: false; body: Record<string, unknown> }
+  { ok: true; secretData: Record<string, string> } | { ok: false; body: Record<string, unknown> }
 
 function looksLikeCredentialPlaceholder(value: string): boolean {
   const normalized = value.trim().toLowerCase()
@@ -786,7 +785,28 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
       // clients publish unscoped and the registry maps them to @clerum, so the
       // name is left untouched there.
       const scope = await resolvePublishScope()
-      const body = { ...req.body, name: applyPublishScope(req.body?.name, scope) }
+      const scopedName = applyPublishScope(req.body?.name, scope)
+
+      // Phase 2.5 parity: reject an evenfire-hosted local connector whose imageRef
+      // repo != its scoped name AT PUBLISH, not only at install/upgrade (the same
+      // check runs there — see registryImageRefIdentity). Otherwise the publish
+      // succeeds but every install 422s later (cross-org pull would be denied),
+      // which is exactly the surprise we want to surface up front.
+      const mcp = req.body?.mcpServer as Record<string, unknown> | undefined
+      const imageRefIdentity = checkEvenfireImageRefMatchesEntry({
+        isLocal: req.body?.entryType === 'mcp-server' && mcp?.serverMode === 'local',
+        entryName: scopedName,
+        image: mcp?.imageRef,
+        registryUrl: config.registryUrl,
+      })
+      if (!imageRefIdentity.ok) {
+        res.status(422).json({
+          error: `Registry entry imageRef repo "${imageRefIdentity.actual}" must equal the entry name "${imageRefIdentity.expected}" for evenfire-hosted plugins; cross-org pull would be denied.`,
+        })
+        return
+      }
+
+      const body = { ...req.body, name: scopedName }
       const result = await publishEntry(body)
       res.status(201).json(result)
     } catch (err) {
@@ -1055,9 +1075,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         }
 
         const transport = (entry.transport ?? 'streamableHttp') as
-          | 'streamableHttp'
-          | 'sse'
-          | 'stdio'
+          'streamableHttp' | 'sse' | 'stdio'
         const port = (meta?.port as number | undefined) ?? 3000
         const secretName = `${serverName}-credentials`
 
@@ -2379,9 +2397,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
       const limit = toPageNum(req.query.limit)
       const offset = toPageNum(req.query.offset)
       const raw = (await listOrgEntries(ctx.orgName, { limit, offset })) as
-        | { data?: unknown[]; entries?: unknown[]; meta?: unknown }
-        | null
-        | undefined
+        { data?: unknown[]; entries?: unknown[]; meta?: unknown } | null | undefined
       const data = raw?.data ?? raw?.entries ?? []
       res.status(200).json(raw?.meta !== undefined ? { data, meta: raw.meta } : { data })
     } catch (err) {

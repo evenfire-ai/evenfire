@@ -1,6 +1,7 @@
 'use client'
 
 import { CONTROL_ROUTES } from '@constants/routes'
+import { useInboundGrants } from '../../lib/hooks/useInboundGrants'
 import { isPublisherEnabled, usePublishScope } from '../../lib/hooks/usePublishScope'
 import { TabBar } from '../TabBar'
 import { TablePanelHeader } from '../TablePanelHeader'
@@ -17,6 +18,7 @@ const TABS: { value: PublisherTab; href: string; label: string }[] = [
 
 export function PublisherView({ activeTab }: { activeTab: PublisherTab }) {
   const { scope, loading } = usePublishScope()
+  const inbound = useInboundGrants()
 
   if (loading) {
     return (
@@ -41,19 +43,32 @@ export function PublisherView({ activeTab }: { activeTab: PublisherTab }) {
 
   const orgScope = scope.scope
 
+  // Grant *listing* is a hosted/curator surface. A self-hosted deploy's registry
+  // client lacks `registry:grant`, so `granted-to-me` 403s (`unavailable`) — hide
+  // the "Shared with me" tab (plugins shared with the org still install from the
+  // Marketplace). Transient errors keep the tab (the feature exists); it stays
+  // hidden only while probing or on a 403.
+  const tabs =
+    inbound.status === 'available' || inbound.status === 'error'
+      ? TABS
+      : TABS.filter(t => t.value !== 'shared')
+
   return (
     <section>
       <div className="cu-card cu-card--viewport-fill">
-        <TablePanelHeader title={`Publisher — @${orgScope}`} />
+        {/* orgScope (scope.scope) is already `@<org>`-prefixed by resolvePublishScope(); do not add another '@'. */}
+        <TablePanelHeader title={`Publisher — ${orgScope}`} />
         <div className="cu-card__body">
           <TabBar<PublisherTab>
             ariaLabel="Publisher sections"
             activeValue={activeTab}
             className="cu-tabs--flush-top"
-            options={TABS}
+            options={tabs}
           />
           {activeTab === 'entries' ? <OwnedEntries orgScope={orgScope} /> : null}
-          {activeTab === 'shared' ? <GrantedToMe /> : null}
+          {activeTab === 'shared' ? (
+            <GrantedToMe status={inbound.status} grants={inbound.grants} reload={inbound.reload} />
+          ) : null}
           {activeTab === 'credentials' ? <DockerCredentialsPanel orgScope={orgScope} /> : null}
         </div>
       </div>

@@ -372,6 +372,24 @@ if [ "$SEED_PROFILE" = "minimal" ] && [ -z "${ADMIN_PASSWORD:-}" ]; then
   err "  (which pins a known test password), run: make minikube-setup-e2e"
   exit 1
 fi
+# Reject a too-short/too-long password here rather than at seed time (Step 10).
+# control-api enforces 8-256 chars (control-api/src/routes/admin/auth.ts); if we
+# defer, the bootstrap POST fails with "password must be between 8 and 256
+# characters" only AFTER image builds + deploy, and the admin account may still
+# hold the publicly-known default. Keep these bounds in sync with auth.ts. Scope
+# to the minimal profile: e2e force-assigns ADMIN_PASSWORD later (search
+# E2E_ADMIN_PASSWORD), so a short .env value there is irrelevant.
+if [ "$SEED_PROFILE" = "minimal" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
+  pw_len=${#ADMIN_PASSWORD}
+  if [ "$pw_len" -lt 8 ] || [ "$pw_len" -gt 256 ]; then
+    err "ADMIN_PASSWORD must be between 8 and 256 characters (got ${pw_len})."
+    err ""
+    err "  Set a longer value in .env at the project root:"
+    err ""
+    err "      ADMIN_PASSWORD=<choose-a-password-8-256-chars>"
+    exit 1
+  fi
+fi
 ok "ADMIN_PASSWORD is set"
 
 # ======================================================================
