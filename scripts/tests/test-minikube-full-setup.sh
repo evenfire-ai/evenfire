@@ -267,6 +267,18 @@ assert_full_setup_defaults_to_db_rebuild() {
   fi
 }
 
+assert_reuse_db_normalizer_precedes_flag_loop() {
+  local normalizer_line flag_loop_line
+  normalizer_line="$(grep -Fn 'case "${REUSE_DB:-false}" in' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+  flag_loop_line="$(grep -Fn 'for arg in "$@"; do' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+
+  if [[ -n "$normalizer_line" && -n "$flag_loop_line" && "$normalizer_line" -lt "$flag_loop_line" ]]; then
+    pass "REUSE_DB normalizer runs before the flag-parse loop (flag overrides env)"
+  else
+    fail "REUSE_DB normalizer does not precede the flag-parse loop — flag>env precedence not enforced"
+  fi
+}
+
 assert_broken_profile_is_recreated
 assert_healthy_profile_skips_recreate
 assert_branch_profile_deploy_dir_is_used
@@ -274,5 +286,6 @@ assert_member_registration_hmac_is_patched
 assert_branch_scoped_minikube_context_is_supported
 assert_gfs_provisioning_follows_migrations_and_core_readiness
 assert_full_setup_defaults_to_db_rebuild
+assert_reuse_db_normalizer_precedes_flag_loop
 
 exit $FAIL
