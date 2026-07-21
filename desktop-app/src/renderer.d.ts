@@ -530,6 +530,7 @@ declare global {
           recipeNs: string
           recipeName: string
           defaultPath?: string
+          routePath?: string
           bounds: { x: number; y: number; width: number; height: number; dpr?: number }
         }) => Promise<void>
         close: () => Promise<void>

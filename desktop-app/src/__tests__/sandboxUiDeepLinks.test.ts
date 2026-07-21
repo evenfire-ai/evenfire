@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildSandboxUiDeepLink,
+  buildSandboxUiWebLink,
   extractSandboxUiViewRoute,
   parseSandboxUiDeepLink,
 } from '../sandboxUiDeepLinks.js'
@@ -19,6 +20,30 @@ describe('sandbox UI deep links', () => {
       path: '/boards/product/tasks/task-42?view=detail#activity',
       teamId: 'team-123',
     })
+  })
+
+  it('builds a browser-safe HTTPS handoff link for messaging apps', () => {
+    expect(
+      buildSandboxUiWebLink('https://profile.prod.evenfire.ai', {
+        recipeNs: 'sandbox-recipes',
+        recipeName: 'agentic-task-board',
+        path: '/tasks/task-42?view=detail#activity',
+        teamId: 'team-123',
+      })
+    ).toBe(
+      'https://profile.prod.evenfire.ai/open/apps/sandbox-recipes/agentic-task-board' +
+        '?path=%2Ftasks%2Ftask-42%3Fview%3Ddetail%23activity&team=team-123'
+    )
+  })
+
+  it('rejects a non-web handoff origin', () => {
+    expect(() =>
+      buildSandboxUiWebLink('javascript:alert(1)', {
+        recipeNs: 'sandbox-recipes',
+        recipeName: 'agentic-task-board',
+        path: '/',
+      })
+    ).toThrow('Cannot create a shareable link')
   })
 
   it('rejects malformed app routes and unrelated evenfire links', () => {

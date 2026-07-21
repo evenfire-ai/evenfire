@@ -152,6 +152,39 @@ describe('SandboxUiPage', () => {
     expect(screen.getAllByRole('button', { name: /^Back to / })).toHaveLength(1)
   })
 
+  it('opens a deep-linked app at its stable entry point before handing off the client route', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({ apps: [] })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+
+    render(
+      <SandboxUiPage
+        shortcutApp={{
+          appRef: 'sandbox-recipes/task-board',
+          label: 'Agentic Task Board',
+          defaultPath: '/',
+          routePath: '/tasks/task-42?panel=details',
+        }}
+        shortcutOpenRequestId={1}
+      />
+    )
+
+    await waitFor(() => {
+      expect(sandboxUi.open).toHaveBeenCalledWith({
+        recipeNs: 'sandbox-recipes',
+        recipeName: 'task-board',
+        defaultPath: '/',
+        routePath: '/tasks/task-42?panel=details',
+        bounds: {
+          x: 16,
+          y: 12,
+          width: 400,
+          height: 300,
+          dpr: expect.any(Number),
+        },
+      })
+    })
+  })
+
   it('returns to the originating conversation from an app', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({
       apps: [

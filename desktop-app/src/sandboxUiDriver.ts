@@ -1,7 +1,7 @@
 import { BrowserWindow, WebContentsView, session } from 'electron'
 import path from 'node:path'
 import { getActiveEnvKey } from './config.js'
-import { extractSandboxUiViewRoute } from './sandboxUiDeepLinks.js'
+import { extractSandboxUiViewRoute, normalizeSandboxUiRoute } from './sandboxUiDeepLinks.js'
 import { touchSandboxUiPartition } from './sandboxUiPartitionGc.js'
 import {
   applySandboxUiNavigationPolicies,
@@ -78,6 +78,7 @@ export type MountSandboxUiArgs = {
   defaultPath?: string
   parentWindow: BrowserWindow
   bounds: SandboxUiBounds
+  routePath?: string
   onClosed?: () => void
   /**
    * Spec §9.9 — recipe-author Connect button affordance. Fired when the
@@ -263,6 +264,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     defaultPath,
     parentWindow,
     bounds,
+    routePath,
     onClosed,
   } = args
 
@@ -280,7 +282,8 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
 
   const partition = partitionFor(getActiveEnvKey(), recipeNs, recipeName)
   const proxyOriginUrl = new URL(rpcProxyUrl).toString().replace(/\/+$/, '')
-  const viewPath = defaultPath && defaultPath.startsWith('/') ? defaultPath : '/'
+  const viewPath = normalizeSandboxUiRoute(defaultPath || '/') || '/'
+  const clientRoutePath = normalizeSandboxUiRoute(routePath || '')
   const allowedNavigationPrefix =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
     `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view/`
@@ -350,7 +353,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     view,
     recipeNs,
     recipeName,
-    initialPath: viewPath,
+    initialPath: clientRoutePath || viewPath,
     partition,
     parentWindow,
     rpcProxyOrigin: proxyOriginUrl,
@@ -373,6 +376,17 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   const url =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
     `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${viewPath}`
+  if (clientRoutePath && clientRoutePath !== viewPath) {
+    const clientRouteUrl =
+      `${proxyOriginUrl}/api/v1/sandbox-ui/` +
+      `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${clientRoutePath}`
+    view.webContents.once('did-finish-load', () => {
+      if (!active || active.view !== view || view.webContents.isDestroyed()) return
+      void applySandboxUiClientRoute(view.webContents, clientRouteUrl).catch(err => {
+        console.warn('[SandboxUI] client route handoff failed:', err)
+      })
+    })
+  }
   // Drop the HTTP cache on every open so a stale entry from a prior
   // broken pod can't keep painting after the recipe is healthy. The
   // partition is persistent (cookies, IndexedDB, localStorage all
@@ -390,6 +404,30 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   // The view is already attached + has bounds, so the user sees the URL
   // resolve into the embed naturally.
   void view.webContents.loadURL(url)
+}
+
+export async function applySandboxUiClientRoute(
+  webContents: Pick<WebContentsView['webContents'], 'executeJavaScript' | 'isDestroyed'>,
+  targetUrl: string
+): Promise<boolean> {
+  if (webContents.isDestroyed()) return false
+  const serializedTarget = JSON.stringify(targetUrl)
+  return Boolean(
+    await webContents.executeJavaScript(`(() => {
+      const targetUrl = ${serializedTarget};
+      const previousUrl = window.location.href;
+      if (previousUrl === targetUrl) return true;
+      window.history.replaceState(window.history.state, '', targetUrl);
+      window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }));
+      if (new URL(previousUrl).hash !== new URL(targetUrl).hash) {
+        window.dispatchEvent(new HashChangeEvent('hashchange', {
+          oldURL: previousUrl,
+          newURL: targetUrl,
+        }));
+      }
+      return window.location.href === targetUrl;
+    })()`)
+  )
 }
 
 /**

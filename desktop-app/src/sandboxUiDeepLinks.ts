@@ -1,5 +1,6 @@
 export const SANDBOX_UI_DEEP_LINK_HOST = 'app'
 export const SANDBOX_UI_DEEP_LINK_PROTOCOL = 'evenfire:'
+export const SANDBOX_UI_WEB_LINK_PATH = '/open/apps'
 
 const MAX_APP_SEGMENT_LENGTH = 253
 const MAX_APP_ROUTE_LENGTH = 4096
@@ -74,6 +75,31 @@ export function buildSandboxUiDeepLink(parts: SandboxUiDeepLinkParts): string {
   )
   url.searchParams.set('path', path)
   if (teamId) url.searchParams.set('team', teamId)
+  return url.toString()
+}
+
+export function buildSandboxUiWebLink(
+  profileUiBaseUrl: string,
+  parts: SandboxUiDeepLinkParts
+): string {
+  const recipeNs = String(parts.recipeNs || '').trim()
+  const recipeName = String(parts.recipeName || '').trim()
+  const deepLink = new URL(buildSandboxUiDeepLink({ ...parts, recipeNs, recipeName }))
+  let baseUrl: URL
+  try {
+    baseUrl = new URL(profileUiBaseUrl)
+  } catch {
+    throw new Error('Cannot create a shareable link for this desktop environment')
+  }
+  if (!['http:', 'https:'].includes(baseUrl.protocol) || baseUrl.username || baseUrl.password) {
+    throw new Error('Cannot create a shareable link for this desktop environment')
+  }
+
+  const url = new URL(
+    `${SANDBOX_UI_WEB_LINK_PATH}/${encodeURIComponent(recipeNs)}/` + encodeURIComponent(recipeName),
+    baseUrl
+  )
+  url.search = deepLink.search
   return url.toString()
 }
 

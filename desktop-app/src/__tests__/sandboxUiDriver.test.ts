@@ -1,11 +1,40 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   SANDBOX_UI_COOKIE_NAME,
+  applySandboxUiClientRoute,
   extractSandboxUiCookie,
   extractSandboxUiPath,
   partitionFor,
   reloadSandboxUiWebContents,
 } from '../sandboxUiDriver.js'
+
+describe('applySandboxUiClientRoute', () => {
+  it('hands a nested route to the loaded app without requesting it from the server', async () => {
+    const executeJavaScript = vi.fn().mockResolvedValue(true)
+
+    const applied = await applySandboxUiClientRoute(
+      { isDestroyed: () => false, executeJavaScript },
+      'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/task-board/view/tasks/task-42'
+    )
+
+    expect(applied).toBe(true)
+    expect(executeJavaScript).toHaveBeenCalledOnce()
+    expect(executeJavaScript.mock.calls[0]?.[0]).toContain('window.history.replaceState')
+    expect(executeJavaScript.mock.calls[0]?.[0]).toContain("PopStateEvent('popstate'")
+  })
+
+  it('does not hand off a route to a destroyed app view', async () => {
+    const executeJavaScript = vi.fn()
+
+    await expect(
+      applySandboxUiClientRoute(
+        { isDestroyed: () => true, executeJavaScript },
+        'https://rpc.example'
+      )
+    ).resolves.toBe(false)
+    expect(executeJavaScript).not.toHaveBeenCalled()
+  })
+})
 
 describe('partitionFor', () => {
   it('produces a stable persist:sandbox-ui partition name per (env, recipe)', () => {

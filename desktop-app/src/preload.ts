@@ -406,6 +406,7 @@ const clerum = Object.freeze({
       recipeNs: string
       recipeName: string
       defaultPath?: string
+      routePath?: string
       bounds: { x: number; y: number; width: number; height: number; dpr?: number }
     }) => ipcRenderer.invoke('sandboxUi:open', args),
     close: () => ipcRenderer.invoke('sandboxUi:close'),

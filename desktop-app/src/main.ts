@@ -112,6 +112,10 @@ function focusMainWindow(): void {
   mainWindow.focus()
 }
 
+function findProtocolUrl(argv: string[], protocol: string): string | undefined {
+  return argv.find(arg => arg.startsWith(`${protocol}://`))
+}
+
 function handleSandboxUiDeepLink(rawUrl: string): boolean {
   const target = parseSandboxUiDeepLink(rawUrl)
   if (!target) return false
@@ -313,6 +317,12 @@ async function createWindow(): Promise<void> {
   mainWindow.maximize()
   // Show window after successful load to avoid hidden-startup deadlocks.
   mainWindow.show()
+  if (process.platform !== 'darwin') {
+    const initialEvenfireUrl = findProtocolUrl(process.argv, DESKTOP_SETUP_PROTOCOL)
+    if (initialEvenfireUrl) handleEvenfireUrl(initialEvenfireUrl)
+    const initialClerumUrl = findProtocolUrl(process.argv, CLERUM_PROTOCOL)
+    if (initialClerumUrl) handleClerumUrl(initialClerumUrl)
+  }
   while (pendingEvenfireUrls.length > 0) {
     const pendingUrl = pendingEvenfireUrls.shift()
     if (pendingUrl) handleEvenfireUrl(pendingUrl)

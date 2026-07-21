@@ -239,6 +239,7 @@ export function SandboxUiPage({
       label: string
       icon?: string
       defaultPath: string
+      routePath?: string
       ready?: boolean
     }) => {
       if (app.ready === false) return
@@ -266,6 +267,7 @@ export function SandboxUiPage({
           recipeNs,
           recipeName,
           defaultPath: app.defaultPath,
+          ...(app.routePath ? { routePath: app.routePath } : {}),
           bounds,
         })
         setLaunch({ kind: 'mounted', appRef: app.appRef })
@@ -293,6 +295,7 @@ export function SandboxUiPage({
         label: appLabel(app),
         icon: app.icon,
         defaultPath: app.defaultPath,
+        routePath: app.routePath,
         ready: app.ready,
       })
     },

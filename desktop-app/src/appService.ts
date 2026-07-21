@@ -2764,6 +2764,7 @@ export class AppService {
     recipeNs: string
     recipeName: string
     defaultPath?: string
+    routePath?: string
     bounds: import('./sandboxUiDriver.js').SandboxUiBounds
     parentWindow: import('electron').BrowserWindow
     onClosed?: () => void
@@ -2782,6 +2783,7 @@ export class AppService {
       setCookie,
       rpcProxyUrl: config.rpcProxyBaseUrl,
       defaultPath: args.defaultPath,
+      routePath: args.routePath,
       parentWindow: args.parentWindow,
       bounds: args.bounds,
       onClosed: () => {
@@ -2832,11 +2834,11 @@ export class AppService {
 
   async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {
     const driver = await import('./sandboxUiDriver.js')
-    const { buildSandboxUiDeepLink } = await import('./sandboxUiDeepLinks.js')
+    const { buildSandboxUiWebLink } = await import('./sandboxUiDeepLinks.js')
     const location = driver.getActiveSandboxUiLocation()
     if (!location) throw new Error('No app is currently open')
     return {
-      url: buildSandboxUiDeepLink({
+      url: buildSandboxUiWebLink(config.desktopProfileUiBaseUrl, {
         ...location,
         teamId: String(teamId || '').trim() || undefined,
       }),

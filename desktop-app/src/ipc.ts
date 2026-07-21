@@ -1298,6 +1298,7 @@ export function registerIpcHandlers(service: AppService): void {
         recipeNs: string
         recipeName: string
         defaultPath?: string
+        routePath?: string
         bounds: unknown
       }
     ) => {
@@ -1317,6 +1318,7 @@ export function registerIpcHandlers(service: AppService): void {
         recipeNs,
         recipeName,
         defaultPath: typeof payload?.defaultPath === 'string' ? payload.defaultPath : undefined,
+        routePath: typeof payload?.routePath === 'string' ? payload.routePath : undefined,
         bounds,
         parentWindow,
         onClosed: () => {

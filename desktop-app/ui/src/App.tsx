@@ -374,7 +374,7 @@ export function App() {
         launchSandboxUiApp(
           {
             ...app,
-            defaultPath: pending.link.path,
+            routePath: pending.link.path,
           },
           pending.conversationOrigin
         )
