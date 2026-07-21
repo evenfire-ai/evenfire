@@ -17,6 +17,7 @@ import {
 import { ApprovalPromptHistoryService } from './tracing/approvalPromptHistoryService.js'
 import { enqueueWorkflowApprovalTraceProjection } from './tracing/workflowApprovalTraceProjector.js'
 import type { WorkflowRunActorType, WorkflowRunRow } from './workflowRunService.js'
+import type { TriggerAllowedActor } from './workflows/types.js'
 import {
   type WorkflowTriggerGrantResult,
   resolveWorkflowTriggerGrant,
@@ -1270,15 +1271,18 @@ export async function assertApprovalTriggerBinding(params: {
   recipeNamespace: string
   recipeName: string
   callerKey: string
-}): Promise<void> {
+}): Promise<{ requestedActor: TriggerAllowedActor }> {
   const existing = await pool.query(
     `SELECT war.status,
             wati.trigger_namespace AS "triggerNamespace",
             wati.trigger_name AS "triggerName",
-            wati.trigger_caller_key AS "triggerCaller"
+            wati.trigger_caller_key AS "triggerCaller",
+            watri.actor_type AS "actorType"
        FROM workflow_approval_requests war
   LEFT JOIN workflow_approval_trigger_intents wati
          ON wati.approval_request_id = war.id
+  LEFT JOIN workflow_approval_trigger_run_intents watri
+         ON watri.approval_request_id = war.id
       WHERE war.id = $1
       LIMIT 1`,
     [params.approvalRequestId]
@@ -1296,6 +1300,7 @@ export async function assertApprovalTriggerBinding(params: {
     triggerNamespace?: string | null
     triggerName?: string | null
     triggerCaller?: string | null
+    actorType?: WorkflowRunActorType | null
   }
 
   if (
@@ -1310,6 +1315,17 @@ export async function assertApprovalTriggerBinding(params: {
       `Approval request ${params.approvalRequestId} cannot be used for trigger preflight: trigger binding mismatch (${actualTrigger} actual, ${expectedTrigger} expected)`,
       row.status
     )
+  }
+
+  switch (row.actorType ?? null) {
+    case 'user':
+    case 'admin':
+      return { requestedActor: 'user' }
+    case 'scheduled':
+      return { requestedActor: 'scheduled' }
+    case 'autonomous':
+    case null:
+      return { requestedActor: 'autonomous' }
   }
 }
 

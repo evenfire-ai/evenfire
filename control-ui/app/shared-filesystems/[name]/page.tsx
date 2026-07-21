@@ -337,9 +337,9 @@ export default function SharedFileSystemDetailsPage() {
           header={
             <CreatePageHeader
               icon={<IconFolder />}
-              title={sfsName || 'Shared Files'}
-              backLabel="Back to Shared Files"
-              onBack={() => router.push(CONTROL_ROUTES.sharedFiles.root)}
+              title={sfsName || 'Agent Files'}
+              backLabel="Back to Agent Files"
+              onBack={() => router.push(CONTROL_ROUTES.agentFiles.root)}
             />
           }
         >
@@ -402,8 +402,8 @@ export default function SharedFileSystemDetailsPage() {
           <CreatePageHeader
             icon={<IconFolder />}
             title={sfsName}
-            backLabel="Back to Shared Files"
-            onBack={() => router.push(CONTROL_ROUTES.sharedFiles.root)}
+            backLabel="Back to Agent Files"
+            onBack={() => router.push(CONTROL_ROUTES.agentFiles.root)}
           />
         }
       >

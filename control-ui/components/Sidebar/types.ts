@@ -4,7 +4,7 @@ export type SidebarTab =
   | 'hosts'
   | 'contexts'
   | 'mcp-servers'
-  | 'files'
+  | 'directories'
   | 'communication-channels'
   | 'llm-secrets'
   | 'llm-models'

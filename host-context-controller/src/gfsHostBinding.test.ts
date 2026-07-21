@@ -6,32 +6,47 @@ import {
   mintHostGfsToken,
 } from './gfsHostBinding'
 
-/**
- * P3-S02 — HCC 1st-party host gfs token mint. Every Host shares the sentinel
- * binding mcp-host/standalone; read-only scope in P3; fail-loud on error.
- */
+/** P3-S02 — first-party tokens preserve the concrete Host identity. */
 
 function okResponse(body: unknown): Response {
   return { ok: true, status: 200, json: async () => body } as Response
 }
 
-describe('mintHostGfsToken', () => {
-  it('POSTs to the sentinel provisioner route with the InternalControl bearer and read scope', async () => {
-    const fetchFn = vi.fn(async () =>
-      okResponse({ token: 'tok', expiresInSeconds: 300, subject: 'host:1st:mcp-host/standalone' })
-    ) as unknown as typeof fetch
-    const out = await mintHostGfsToken({
-      controlApiBaseUrl: 'http://control-api:8090',
-      signToken: () => 'hcc-jwt',
-      fetchFn,
-    })
+function jwt(payload: unknown): string {
+  return [
+    Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url'),
+    Buffer.from(JSON.stringify(payload)).toString('base64url'),
+    'unverified-signature',
+  ].join('.')
+}
 
-    expect(out.subject).toBe('host:1st:mcp-host/standalone')
-    expect(out.token).toBe('tok')
+describe('mintHostGfsToken', () => {
+  it.each([
+    ['chatllm', 'host:1st:mcp-host/chatllm'],
+    ['chatllm-stateless', 'host:1st:mcp-host/chatllm-stateless'],
+  ])('mints an independent token for Host %s', async (name, subject) => {
+    const token = jwt({ sub: subject, scopes: ['gfs.read', 'gfs.write'] })
+    const fetchFn = vi.fn(async () =>
+      okResponse({ token, expiresInSeconds: 300, subject })
+    ) as unknown as typeof fetch
+    const out = await mintHostGfsToken(
+      { name, namespace: 'mcp-host' },
+      {
+        controlApiBaseUrl: 'http://control-api:8090',
+        signToken: () => 'hcc-jwt',
+        fetchFn,
+      }
+    )
+
+    expect(out.subject).toBe(subject)
+    expect(out.token).toBe(token)
     const [url, init] = (fetchFn as unknown as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(url).toBe('http://control-api:8090/api/v1/auth/gfs/standalone/tokens')
+    expect(url).toBe(`http://control-api:8090/api/v1/auth/gfs/${name}/tokens`)
     expect(init.headers.Authorization).toBe('Bearer hcc-jwt')
-    expect(JSON.parse(init.body)).toEqual({ namespace: 'mcp-host', scopes: ['gfs.read'] })
+    expect(JSON.parse(init.body)).toEqual({
+      namespace: 'mcp-host',
+      scopes: ['gfs.read', 'gfs.write'],
+    })
   })
 
   it('fails loud on a non-2xx response (never silently degrades)', async () => {
@@ -39,8 +54,92 @@ describe('mintHostGfsToken', () => {
       async () => ({ ok: false, status: 403 }) as Response
     ) as unknown as typeof fetch
     await expect(
-      mintHostGfsToken({ controlApiBaseUrl: 'http://x', signToken: () => 'j', fetchFn })
+      mintHostGfsToken(
+        { name: 'chatllm', namespace: 'mcp-host' },
+        { controlApiBaseUrl: 'http://x', signToken: () => 'j', fetchFn }
+      )
     ).rejects.toThrow(/403/)
+  })
+
+  it('rejects a fleet-wide subject returned for a concrete Host', async () => {
+    const fetchFn = vi.fn(async () =>
+      okResponse({
+        token: jwt({
+          sub: 'host:1st:mcp-host/standalone',
+          scopes: ['gfs.read', 'gfs.write'],
+        }),
+        expiresInSeconds: 300,
+        subject: 'host:1st:mcp-host/standalone',
+      })
+    ) as unknown as typeof fetch
+
+    await expect(
+      mintHostGfsToken(
+        { name: 'chatllm', namespace: 'mcp-host' },
+        { controlApiBaseUrl: 'http://x', signToken: () => 'j', fetchFn }
+      )
+    ).rejects.toThrow(
+      'gfs host token subject mismatch: expected host:1st:mcp-host/chatllm, received host:1st:mcp-host/standalone'
+    )
+  })
+
+  it.each([
+    ['an opaque token', 'not-a-jwt', 'gfs host token is not a JWT'],
+    ['a malformed payload', 'header.bm90LWpzb24.signature', 'malformed JWT payload'],
+  ])('rejects %s after response metadata validation', async (_case, token, message) => {
+    const subject = 'host:1st:mcp-host/chatllm'
+    const fetchFn = vi.fn(async () =>
+      okResponse({ token, expiresInSeconds: 300, subject })
+    ) as unknown as typeof fetch
+
+    await expect(
+      mintHostGfsToken(
+        { name: 'chatllm', namespace: 'mcp-host' },
+        { controlApiBaseUrl: 'http://x', signToken: () => 'j', fetchFn }
+      )
+    ).rejects.toThrow(message)
+  })
+
+  it('rejects a JWT whose subject claim does not match the concrete Host', async () => {
+    const subject = 'host:1st:mcp-host/chatllm'
+    const fetchFn = vi.fn(async () =>
+      okResponse({
+        token: jwt({
+          sub: 'host:1st:mcp-host/other-host',
+          scopes: ['gfs.read', 'gfs.write'],
+        }),
+        expiresInSeconds: 300,
+        subject,
+      })
+    ) as unknown as typeof fetch
+
+    await expect(
+      mintHostGfsToken(
+        { name: 'chatllm', namespace: 'mcp-host' },
+        { controlApiBaseUrl: 'http://x', signToken: () => 'j', fetchFn }
+      )
+    ).rejects.toThrow(
+      'gfs host token claim subject mismatch: expected host:1st:mcp-host/chatllm, received host:1st:mcp-host/other-host'
+    )
+  })
+
+  it.each([
+    ['missing', undefined],
+    ['read-only', ['gfs.read']],
+    ['reordered', ['gfs.write', 'gfs.read']],
+    ['expanded', ['gfs.read', 'gfs.write', 'gfs.delete']],
+  ])('rejects %s JWT scopes', async (_case, scopes) => {
+    const subject = 'host:1st:mcp-host/chatllm'
+    const fetchFn = vi.fn(async () =>
+      okResponse({ token: jwt({ sub: subject, scopes }), expiresInSeconds: 300, subject })
+    ) as unknown as typeof fetch
+
+    await expect(
+      mintHostGfsToken(
+        { name: 'chatllm', namespace: 'mcp-host' },
+        { controlApiBaseUrl: 'http://x', signToken: () => 'j', fetchFn }
+      )
+    ).rejects.toThrow('gfs host token claim scopes mismatch: expected ["gfs.read","gfs.write"]')
   })
 
   it('aborts a hung request and waits for the transport to reject', async () => {
@@ -56,11 +155,14 @@ describe('mintHostGfsToken', () => {
       }) as unknown as typeof fetch
 
       let settled = false
-      const request = mintHostGfsToken({
-        controlApiBaseUrl: 'http://control-api:8090',
-        signToken: () => 'hcc-jwt',
-        fetchFn,
-      })
+      const request = mintHostGfsToken(
+        { name: 'chatllm', namespace: 'mcp-host' },
+        {
+          controlApiBaseUrl: 'http://control-api:8090',
+          signToken: () => 'hcc-jwt',
+          fetchFn,
+        }
+      )
       const outcome = request.then(
         value => {
           settled = true

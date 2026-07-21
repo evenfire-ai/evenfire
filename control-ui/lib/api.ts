@@ -268,26 +268,75 @@ export async function apiSend(
 // Like registryKeysRequest: unlike apiSend (friendly-remaps the message), these
 // routes need the machine-readable error CODE (e.g. escalation_rejected,
 // resource_invalid) so the operator panel can surface the precise verdict.
-export type GfsSubjectInput =
-  | { type: 'user'; id: string }
-  | { type: 'team'; id: string }
-  | { type: 'host'; id: string }
-  | { type: 'operator' }
+export type GfsUserSubjectInput = { type: 'user'; id: string }
+export type GfsTeamSubjectInput = { type: 'team'; id: string }
+export type GfsHostSubjectInput = { type: 'host'; id: string }
+export type GfsOperatorSubjectInput = { type: 'operator' }
+export type GfsContextSubjectInput = { type: 'context'; id: string }
 
-export type GfsGrantRequestBody = {
+export type GfsBulkGrantSubjectInput =
+  | GfsUserSubjectInput
+  | GfsTeamSubjectInput
+  | GfsHostSubjectInput
+export type GfsBulkShareSubjectInput = GfsUserSubjectInput | GfsTeamSubjectInput
+export type GfsSubjectInput =
+  | GfsBulkGrantSubjectInput
+  | GfsOperatorSubjectInput
+  | GfsContextSubjectInput
+
+type GfsSubjectMutationInput<TBulkSubject extends GfsSubjectInput> =
+  | { subject: GfsSubjectInput; subjects?: never }
+  | { subject?: never; subjects: TBulkSubject[] }
+
+type GfsMutationRequestBody = {
   drive?: string
   resourceId: string
-  subject: GfsSubjectInput
   permissions: string[]
-  inherit?: boolean
 }
 
-export type GfsShareRequestBody = {
-  drive?: string
+export type GfsGrantRequestBody = GfsMutationRequestBody &
+  GfsSubjectMutationInput<GfsBulkGrantSubjectInput> & {
+    inherit?: boolean
+  }
+
+export type GfsShareRequestBody = GfsMutationRequestBody &
+  GfsSubjectMutationInput<GfsBulkShareSubjectInput> & {
+    includeDescendants?: boolean
+  }
+
+export type GfsMutationResponse = {
+  ok: true
+  resourceId: string
+  updated: GfsSubjectInput[]
+  count: number
+}
+
+export type GfsGrantListItem = {
+  id: string
+  drive: string
   resourceId: string
   subject: GfsSubjectInput
   permissions: string[]
-  includeDescendants?: boolean
+  inherit: boolean
+}
+
+export type GfsShareListItem = {
+  id: string
+  drive: string
+  resourceId: string
+  subject: GfsSubjectInput
+  permissions: string[]
+  includeDescendants: boolean
+}
+
+export type GfsGrantListResponse = { items: GfsGrantListItem[] }
+export type GfsShareListResponse = { items: GfsShareListItem[] }
+
+export type GfsGrantError = Error & {
+  status?: number
+  code?: string
+  serverMessage?: string
+  invalidIndexes?: number[]
 }
 
 async function gfsMutate(
@@ -307,18 +356,34 @@ async function gfsMutate(
   if (!res.ok) {
     if (res.status === 401) handleUnauthorized()
     let code = ''
+    let serverMessage = ''
+    let invalidIndexes: number[] | undefined
     try {
-      const parsed = (await res.json()) as { error?: string }
+      const parsed = (await res.json()) as {
+        error?: string
+        message?: unknown
+        invalidIndexes?: unknown
+      }
       code = parsed?.error ?? ''
+      if (typeof parsed?.message === 'string') serverMessage = parsed.message
+      if (Array.isArray(parsed?.invalidIndexes)) {
+        invalidIndexes = parsed.invalidIndexes.filter(
+          (index): index is number =>
+            typeof index === 'number' && Number.isInteger(index) && index >= 0
+        )
+      }
     } catch {
       /* no body */
     }
-    const error = new Error(`${res.status} ${code || res.statusText}`) as Error & {
-      status?: number
-      code?: string
-    }
+    const detail =
+      code && serverMessage && serverMessage !== code
+        ? `${code}: ${serverMessage}`
+        : serverMessage || code || res.statusText
+    const error = new Error(`${res.status} ${detail}`) as GfsGrantError
     error.status = res.status
     error.code = code
+    error.serverMessage = serverMessage
+    error.invalidIndexes = invalidIndexes
     throw error
   }
   if (res.status === 204) return undefined
@@ -326,13 +391,47 @@ async function gfsMutate(
 }
 
 /** Operator grants a Layer-1/2 folder grant (PUT /api/v1/gfs/grants). */
-export async function putGfsGrant(body: GfsGrantRequestBody): Promise<void> {
-  await gfsMutate('PUT', '/api/v1/gfs/grants', body)
+export async function putGfsGrant(body: GfsGrantRequestBody): Promise<GfsMutationResponse> {
+  return (await gfsMutate('PUT', '/api/v1/gfs/grants', body)) as GfsMutationResponse
+}
+
+/** Lists direct grants configured on one resource. Inherited effective access is not expanded. */
+export async function getGfsGrants(
+  resourceId: string,
+  drive = 'main',
+  signal?: AbortSignal
+): Promise<GfsGrantListResponse> {
+  return (await apiGet(
+    '/api/v1/gfs/grants',
+    { drive, resourceId },
+    { signal }
+  )) as GfsGrantListResponse
+}
+
+export async function deleteGfsGrant(id: string): Promise<void> {
+  await gfsMutate('DELETE', `/api/v1/gfs/grants/${encodeURIComponent(id)}`)
 }
 
 /** Operator creates a URI share (POST /api/v1/gfs/shares). */
-export async function postGfsShare(body: GfsShareRequestBody): Promise<void> {
-  await gfsMutate('POST', '/api/v1/gfs/shares', body)
+export async function postGfsShare(body: GfsShareRequestBody): Promise<GfsMutationResponse> {
+  return (await gfsMutate('POST', '/api/v1/gfs/shares', body)) as GfsMutationResponse
+}
+
+/** Lists direct URI shares configured on one resource. */
+export async function getGfsShares(
+  resourceId: string,
+  drive = 'main',
+  signal?: AbortSignal
+): Promise<GfsShareListResponse> {
+  return (await apiGet(
+    '/api/v1/gfs/shares',
+    { drive, resourceId },
+    { signal }
+  )) as GfsShareListResponse
+}
+
+export async function deleteGfsShare(id: string): Promise<void> {
+  await gfsMutate('DELETE', `/api/v1/gfs/shares/${encodeURIComponent(id)}`)
 }
 
 export type AdminLoginResponse = {
@@ -1209,7 +1308,9 @@ export async function deleteMcpSecret(name: string) {
 }
 
 export type RecipeSecretOwnership =
-  { kind: 'shared' } | { kind: 'owner-recipe'; recipeName: string } | { kind: 'unlabeled' }
+  | { kind: 'shared' }
+  | { kind: 'owner-recipe'; recipeName: string }
+  | { kind: 'unlabeled' }
 
 export type RecipeSecretItem = {
   name: string
@@ -1928,7 +2029,13 @@ export type WorkflowRecipePhase =
   | 'rollback-failed'
 
 export type WorkflowExecutionPhase =
-  'pending' | 'initializing' | 'running' | 'completed' | 'failed' | 'cancelled' | 'recovering'
+  | 'pending'
+  | 'initializing'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'recovering'
 
 export type WorkflowRecipeStatus = {
   phase?: WorkflowRecipePhase
@@ -2811,7 +2918,8 @@ export async function listOrgGrants(pluginName?: string): Promise<{ grants: OrgG
 
 export async function createOrgGrant(input: CreateOrgGrantInput): Promise<OrgGrant> {
   const raw = (await registryCodedRequest('POST', '/api/v1/admin/registry/grants', input)) as
-    RawOrgGrant | undefined
+    | RawOrgGrant
+    | undefined
   return normalizeOrgGrant(raw ?? {})
 }
 
@@ -3071,7 +3179,12 @@ export type PluginWorkloadSdkQuotaCounter = {
 }
 
 export type PluginWorkloadSdkInvocationStatus =
-  'in_progress' | 'complete' | 'failed' | 'provider_unavailable' | 'accepted' | 'delivered'
+  | 'in_progress'
+  | 'complete'
+  | 'failed'
+  | 'provider_unavailable'
+  | 'accepted'
+  | 'delivered'
 
 export type PluginWorkloadSdkInvocation = {
   id: string
@@ -3254,7 +3367,11 @@ export async function revokeRegistryApiKey(id: string): Promise<void> {
 // There is NO rejection_reason in the contract.
 
 export type RegistryConnectionState =
-  'disconnected' | 'pending' | 'approved' | 'rejected' | 'connected'
+  | 'disconnected'
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'connected'
 export type RegistryConnectionStatus = {
   state: RegistryConnectionState
   deploymentId?: string

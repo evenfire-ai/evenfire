@@ -6,6 +6,7 @@
 import * as k8s from '@kubernetes/client-node'
 import { createHash } from 'node:crypto'
 import { privateWorkflowContextName } from '../reconciler/workflowContext'
+import type { WorkflowRecipeGfsScope } from '../types'
 import { truncateRfc1123WithHash } from './networkPolicyFactory'
 import {
   PLUGIN_WORKLOAD_SDK_PORT,
@@ -539,6 +540,8 @@ export function buildCoordinatorPod(
 }
 
 export interface McpHostPodOptions {
+  /** Verified scopes derived from the WorkflowRecipe spec and used to mint the mounted GFS token. */
+  gfsScopes?: readonly WorkflowRecipeGfsScope[]
   workflowOutputScope?: string
   mountWorkflowOutput: boolean
   /**
@@ -687,6 +690,9 @@ export function buildMcpHostPod(
               name: 'MCP_HOST_RUNTIME_AUTH_STATE_DIR',
               value: MCP_HOST_RUNTIME_AUTH_STATE_PATH,
             },
+            ...(options.gfsScopes && options.gfsScopes.length > 0
+              ? [{ name: 'MCP_HOST_GFS_SCOPES', value: options.gfsScopes.join(',') }]
+              : []),
             // Downward API namespace — defense-in-depth leg of the Plugin
             // Workload SDK triple activation gate. Always injected so a
             // misplaced Deployment fails the gate closed.

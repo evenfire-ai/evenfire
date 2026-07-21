@@ -1687,47 +1687,6 @@ describe('getArtifact', () => {
   })
 })
 
-// ─── postTrigger legacy direct path ────────────────────────────────────────
-
-describe('postTrigger — legacy direct path', () => {
-  const ORIGINAL_FLAG = process.env.WRC_ENABLE_LEGACY_DIRECT_TRIGGER
-
-  afterEach(() => {
-    if (ORIGINAL_FLAG === undefined) delete process.env.WRC_ENABLE_LEGACY_DIRECT_TRIGGER
-    else process.env.WRC_ENABLE_LEGACY_DIRECT_TRIGGER = ORIGINAL_FLAG
-  })
-
-  it('is disabled by default so runtime triggers must use control-api broker', async () => {
-    delete process.env.WRC_ENABLE_LEGACY_DIRECT_TRIGGER
-    const api = makeCustomApi()
-    const handlers = createWorkflowEndpointHandlers(api, 'sandbox-recipes')
-
-    const result = await handlers.postTrigger(
-      'my-recipe',
-      'sandbox-recipes',
-      makeClaims({ sub: 'cronjob', scopes: ['trigger_write'] })
-    )
-
-    expect(result.status).toBe(410)
-    expect(result.body.error).toContain('control-api workflow broker')
-  })
-
-  it('returns precise 403 when a runtime token lacks trigger_write even if legacy trigger is disabled', async () => {
-    delete process.env.WRC_ENABLE_LEGACY_DIRECT_TRIGGER
-    const api = makeCustomApi()
-    const handlers = createWorkflowEndpointHandlers(api, 'sandbox-recipes')
-
-    const result = await handlers.postTrigger(
-      'my-recipe',
-      'sandbox-recipes',
-      makeClaims({ sub: 'custom-coordinator', scopes: ['status_write', 'status_read'] })
-    )
-
-    expect(result.status).toBe(403)
-    expect(result.body.error).toContain('trigger_write')
-  })
-})
-
 // ─── deleteArtifact (bulk) ─────────────────────────────────────────────────
 
 describe('deleteArtifact — bulk artifact cleanup', () => {

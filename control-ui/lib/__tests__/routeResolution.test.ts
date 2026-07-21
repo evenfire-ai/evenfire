@@ -96,4 +96,28 @@ describe('CONTROL_ROUTES App Router resolution', () => {
 
     expect(unresolved).toEqual([])
   })
+
+  it('redirects the previous directory section URLs to their canonical names', async () => {
+    const redirects = ((await nextConfig.redirects?.()) ?? []) as RouteRule[]
+
+    expect(redirects).toEqual(
+      expect.arrayContaining([
+        {
+          source: '/global-files',
+          destination: CONTROL_ROUTES.globalFileSystem,
+          permanent: true,
+        },
+        {
+          source: '/outputs',
+          destination: CONTROL_ROUTES.agentOutputs.root,
+          permanent: true,
+        },
+        {
+          source: '/shared-files',
+          destination: CONTROL_ROUTES.agentFiles.root,
+          permanent: true,
+        },
+      ])
+    )
+  })
 })

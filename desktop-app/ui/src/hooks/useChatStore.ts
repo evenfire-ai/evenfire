@@ -101,6 +101,11 @@ export function useChatStore() {
     []
   )
   const getIndex = useCallback((agentRef: string) => window.clerum.chat.getIndex(agentRef), [])
+  const reconcileServerSessions = useCallback(
+    (agentRef: string, sessions: Array<{ chatId: string; lastActivityAt?: string }>) =>
+      window.clerum.chat.reconcileServerSessions(agentRef, sessions),
+    []
+  )
   const dismissOnboarding = useCallback(
     (agentRef: string) => window.clerum.chat.dismissOnboarding(agentRef),
     []
@@ -175,6 +180,7 @@ export function useChatStore() {
     getLastActive,
     setLastActive,
     getIndex,
+    reconcileServerSessions,
     dismissOnboarding,
     listSessions,
     loadSessionMessages,

@@ -126,7 +126,10 @@ const RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION = 'clerum.io/runtime-token-bootst
 const RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION = 'clerum.io/runtime-token-rollout-required'
 const RUNTIME_TOKEN_ISSUER = 'control-api'
 const RUNTIME_TOKEN_AUDIENCE = 'workflow-approvals'
-const RUNTIME_TOKEN_SCHEMA_VERSION = '1'
+// v2 binds the GFS token to the concrete Host CRD instead of the historical
+// fleet-wide `mcp-host/standalone` sentinel. The version change makes existing
+// Secrets fail the contract check so HCC rotates them and rolls each Host.
+const RUNTIME_TOKEN_SCHEMA_VERSION = '2'
 const RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH = 'fresh'
 const RUNTIME_TOKEN_BOOTSTRAP_STATE_CONSUMED = 'consumed'
 // Deployments affected by the historical stringData/data hashing bug can carry
@@ -1082,7 +1085,7 @@ export class HostReconciler {
           host.name,
           this.resolveWorkflowControlScopesForHost(host, hasChannelIngress)
         )
-        const gfs = await mintHostGfsToken()
+        const gfs = await mintHostGfsToken({ name: host.name, namespace: host.namespace })
         const body = buildMcpHostRuntimeTokenSecret(
           host,
           tokens.accessToken,

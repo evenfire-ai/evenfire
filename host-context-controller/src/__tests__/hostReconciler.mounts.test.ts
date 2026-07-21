@@ -30,11 +30,13 @@ vi.mock('../mcpHostRuntimeTokenIssuerClient', () => ({
 }))
 
 vi.mock('../gfsHostBinding', () => ({
-  mintHostGfsToken: vi.fn().mockResolvedValue({
-    token: 'gfs-runtime-value',
-    expiresInSeconds: 300,
-    subject: 'host:1st:mcp-host/standalone',
-  }),
+  mintHostGfsToken: vi
+    .fn()
+    .mockImplementation(async ({ name, namespace }: { name: string; namespace: string }) => ({
+      token: 'gfs-runtime-value',
+      expiresInSeconds: 300,
+      subject: `host:1st:${namespace}/${name}`,
+    })),
 }))
 
 // Stand-in KubeConfig that returns a stub for every makeApiClient — buildDeployment
@@ -176,7 +178,7 @@ function runtimeSecretAnnotations(host = makeHost(), refreshBefore = '2999-01-01
     'clerum.io/runtime-token-scope-hash': helper.runtimeTokenScopeHash(host),
     'clerum.io/runtime-token-issuer': 'control-api',
     'clerum.io/runtime-token-audience': 'workflow-approvals',
-    'clerum.io/runtime-token-schema-version': '1',
+    'clerum.io/runtime-token-schema-version': '2',
     'clerum.io/runtime-token-refresh-before': refreshBefore,
     'clerum.io/gfs-token-refresh-before': '2999-01-01T00:00:00.000Z',
   }
@@ -304,6 +306,48 @@ describe('HostReconciler runtime credential Secret revision', () => {
     expect(result.revision).toBe('deployed-revision')
     expect(issueMcpHostRuntimeTokens).not.toHaveBeenCalled()
     expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('rotates and rolls a legacy fleet-wide GFS token contract', async () => {
+    const host = makeHost()
+    const legacyAnnotations = {
+      ...runtimeSecretAnnotations(host),
+      'clerum.io/runtime-token-schema-version': '1',
+    }
+    const legacySecret = runtimeSecret(host, legacyAnnotations)
+    const helper = HostReconciler as unknown as {
+      runtimeTokenRefreshDecision: (
+        h: HostCRD,
+        secret: k8s.V1Secret,
+        nowMs: number
+      ) => { refresh: boolean; rolloutRequired: boolean; reason: string }
+      runtimeTokenSecretRevisionFromSecret: (value: k8s.V1Secret) => string | null
+    }
+    expect(helper.runtimeTokenRefreshDecision(host, legacySecret, Date.now())).toMatchObject({
+      refresh: true,
+      rolloutRequired: true,
+      reason: 'contract_changed',
+    })
+
+    const legacyRevision = helper.runtimeTokenSecretRevisionFromSecret(legacySecret)!
+    const { reconciler, coreApi } = runtimeSecretReconciler({
+      secret: legacySecret,
+      deployment: deploymentWithRevision(legacyRevision, 1),
+    })
+
+    const result = await (
+      reconciler as unknown as {
+        ensureMcpHostRuntimeTokenSecret: (h: HostCRD) => Promise<RuntimeTokenProvision>
+      }
+    ).ensureMcpHostRuntimeTokenSecret(host)
+
+    expect(issueMcpHostRuntimeTokens).toHaveBeenCalledTimes(1)
+    expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
+    expect(result.revision).not.toBe(legacyRevision)
+    expect(replacedRuntimeSecret(coreApi).metadata?.annotations).toMatchObject({
+      'clerum.io/runtime-token-schema-version': '2',
+      'clerum.io/runtime-token-rollout-required': 'true',
+    })
   })
 
   it('keeps a matching fresh bootstrap stable while booting, then marks it consumed when Ready', async () => {
@@ -644,7 +688,7 @@ describe('HostReconciler runtime credential Secret revision', () => {
     expect(replaceBody.metadata?.annotations).toMatchObject({
       'clerum.io/runtime-token-issuer': 'control-api',
       'clerum.io/runtime-token-audience': 'workflow-approvals',
-      'clerum.io/runtime-token-schema-version': '1',
+      'clerum.io/runtime-token-schema-version': '2',
     })
   })
 

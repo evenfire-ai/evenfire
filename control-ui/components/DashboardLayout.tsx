@@ -31,17 +31,17 @@ export function DashboardLayout({ children, isDetailPage = false }: DashboardLay
     if (isControlRouteSection(pathname, CONTROL_ROUTES.plugins.root)) {
       return 'workflow-recipes'
     }
-    if (isControlRouteSection(pathname, CONTROL_ROUTES.outputs.base)) {
-      return 'files'
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.agentOutputs.base)) {
+      return 'directories'
     }
     if (isControlRouteSection(pathname, CONTROL_ROUTES.connectors.root)) {
       return 'mcp-servers'
     }
-    if (isControlRouteSection(pathname, CONTROL_ROUTES.sharedFiles.root)) {
-      return 'files'
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.agentFiles.root)) {
+      return 'directories'
     }
-    if (isControlRouteSection(pathname, CONTROL_ROUTES.globalFiles)) {
-      return 'files'
+    if (isControlRouteSection(pathname, CONTROL_ROUTES.globalFileSystem)) {
+      return 'directories'
     }
     if (isControlRouteSection(pathname, CONTROL_ROUTES.externalChannels.root)) {
       return 'communication-channels'

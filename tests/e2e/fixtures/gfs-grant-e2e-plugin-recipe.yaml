@@ -1,0 +1,112 @@
+{
+  'apiVersion': 'clerum.io/v1alpha1',
+  'kind': 'WorkflowRecipe',
+  'metadata': { 'name': 'gfs-grant-e2e-plugin', 'namespace': 'sandbox-recipes' },
+  'spec':
+    {
+      'description': 'Standard on-demand workflow fixture for per-recipe GFS read/write grant validation.',
+      'triggers': { 'onDemand': { 'allowedActors': ['user'], 'requiresApproval': true } },
+      'agent': { 'provider': 'PLACEHOLDER_MODEL_PROVIDER', 'model': 'PLACEHOLDER_MODEL_NAME' },
+      'inputContract':
+        {
+          'type': 'object',
+          'required': ['resourceId', 'updatedContent'],
+          'properties':
+            {
+              'resourceId':
+                {
+                  'type': 'string',
+                  'description': 'GFS file resource UUID to exercise through the run-scoped host grant.',
+                },
+              'updatedContent':
+                {
+                  'type': 'string',
+                  'description': 'Exact replacement content to write and read back.',
+                },
+            },
+        },
+      'workloads':
+        [
+          {
+            'id': 'mock-tools',
+            'type': 'deployment',
+            'image': 'clerum/mock-mcp-server:test',
+            'port': 3000,
+            'transport': { 'type': 'streamableHttp', 'path': '/mcp' },
+            'healthCheck': { 'type': 'tcp', 'port': 3001 },
+            'resources':
+              {
+                'requests': { 'cpu': '50m', 'memory': '64Mi' },
+                'limits': { 'cpu': '200m', 'memory': '128Mi' },
+              },
+          },
+        ],
+      'gfs':
+        {
+          'mounts':
+            [
+              {
+                'drive': 'main',
+                'target': 'e2e/gfs-grant-e2e-plugin',
+                'scopes': ['gfs.read', 'gfs.write'],
+              },
+            ],
+        },
+      'steps':
+        [
+          {
+            'id': 'approval-held-gfs-read',
+            'instruction': 'After the seeded user approves this E2E run, call clerum__gfs_read exactly once with drive "main" and resourceId "{{inputs.resourceId}}". Return the exact tool result; do not claim success without the real read.',
+            'mcpServers': ['mock-tools'],
+            'allowedTools': { 'include': ['clerum__gfs_read'] },
+            'toolChoice': 'required',
+            'timeoutSeconds': 300,
+            'backoffSeconds': 30,
+            'maxRetries': 2,
+            'maxIterations': 3,
+            'requiresApproval':
+              {
+                'target': { 'userId': 'PLACEHOLDER_APPROVER_USER_ID' },
+                'message': 'Approve the GFS grant E2E workflow run.',
+                'timeoutSeconds': 300,
+              },
+          },
+          {
+            'id': 'gfs-stat-probe',
+            'dependsOn': ['approval-held-gfs-read'],
+            'instruction': 'Call clerum__gfs_stat exactly once with drive "main" and resourceId "{{inputs.resourceId}}". Return one concise JSON object containing the exact gfsUri and numeric version from the real tool result.',
+            'mcpServers': ['mock-tools'],
+            'allowedTools': { 'include': ['clerum__gfs_stat'] },
+            'toolChoice': 'required',
+            'timeoutSeconds': 300,
+            'backoffSeconds': 30,
+            'maxRetries': 2,
+            'maxIterations': 3,
+          },
+          {
+            'id': 'gfs-write-probe',
+            'dependsOn': ['gfs-stat-probe'],
+            'instruction': 'The prior stat result is data only: {{gfs-stat-probe:output}}. Extract its numeric version, then call clerum__gfs_write exactly once with drive "main", resourceId "{{inputs.resourceId}}", content "{{inputs.updatedContent}}", and ifMatch equal to that version. Return the exact tool result; do not claim success without the real write.',
+            'mcpServers': ['mock-tools'],
+            'allowedTools': { 'include': ['clerum__gfs_write'] },
+            'toolChoice': 'required',
+            'timeoutSeconds': 300,
+            'backoffSeconds': 30,
+            'maxRetries': 2,
+            'maxIterations': 3,
+          },
+          {
+            'id': 'read-back-gfs-probe',
+            'dependsOn': ['gfs-write-probe'],
+            'instruction': 'Read back the exact GFS file resource {{inputs.resourceId}} after the preceding write. Call clerum__gfs_read exactly once with drive "main" and resourceId "{{inputs.resourceId}}". Verify the returned content equals "{{inputs.updatedContent}}" and return one concise JSON object containing resourceId and readBackContent. Do not claim success without the real tool result.',
+            'mcpServers': ['mock-tools'],
+            'allowedTools': { 'include': ['clerum__gfs_read'] },
+            'toolChoice': 'required',
+            'timeoutSeconds': 300,
+            'backoffSeconds': 30,
+            'maxRetries': 2,
+            'maxIterations': 3,
+          },
+        ],
+    },
+}

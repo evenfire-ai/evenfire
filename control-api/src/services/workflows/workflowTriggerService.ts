@@ -111,6 +111,7 @@ type WorkflowTriggerResult =
 type McpHostApprovalTriggerContext = {
   approvalRequestId: string
   callerKey: string
+  requestedActor: TriggerAllowedActor
 }
 
 type WorkflowTriggerRecipeValidation = {
@@ -236,12 +237,13 @@ export async function triggerWorkflow(params: {
       })
     }
     try {
-      await assertApprovalTriggerBinding({
+      const approvalBinding = await assertApprovalTriggerBinding({
         approvalRequestId,
         recipeNamespace: ns,
         recipeName: name,
         callerKey,
       })
+      mcpHostApprovalContext = { approvalRequestId, callerKey, ...approvalBinding }
     } catch (err) {
       if (err instanceof ApprovalConsumeError) {
         throw new WorkflowTriggerHttpError(
@@ -251,7 +253,6 @@ export async function triggerWorkflow(params: {
       }
       throw err
     }
-    mcpHostApprovalContext = { approvalRequestId, callerKey }
   }
 
   let userSessionGrant: WorkflowTriggerGrantResult | null = null
@@ -288,7 +289,7 @@ export async function triggerWorkflow(params: {
         ? 'admin'
         : 'user'
   const triggerSource = caller.kind === 'mcp-host-control' ? 'autonomous' : 'onDemand'
-  const requestedActor = getTriggerActorForCaller(caller)
+  const requestedActor = mcpHostApprovalContext?.requestedActor ?? getTriggerActorForCaller(caller)
   const triggerRecipe = await validateWorkflowTriggerRecipeForActor({
     gateway,
     recipeNamespace: ns,

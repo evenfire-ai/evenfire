@@ -18,7 +18,6 @@ import {
 } from './resourceNames'
 import { drainSignals } from './signalStore'
 import { buildStatusOutputPreview } from './statusOutputPreview'
-import { handleTrigger } from './triggerHandler'
 import { StepPhase, WorkflowPhase, isTerminalStepPhase, isTerminalWorkflowPhase } from './types'
 import { type AuthenticatedRequest, CONTROL_API_ISSUER } from './workflowAuth'
 import { workflowStatusMessage } from './workflowStatusMessage'
@@ -614,8 +613,6 @@ function validateDeclaredModelInjection(
 }
 
 // ─── Signal Store (re-exported from signalStore.ts) ─────────────────────
-// enqueueSignal + drainSignals live in signalStore.ts so that triggerHandler.ts
-// can import them without creating a circular dependency.
 export { enqueueSignal, drainSignals, type WorkflowSignal } from './signalStore'
 
 // ─── Endpoint Handlers ──────────────────────────────────────────────────
@@ -1549,32 +1546,6 @@ export function createWorkflowEndpointHandlers(
       }
 
       return { status: 204, body: {} }
-    },
-
-    /** POST /api/v1/workflow/:name/trigger — legacy scheduled execution */
-    async postTrigger(
-      parentName: string,
-      namespace: string,
-      claims: AuthenticatedRequest['tokenClaims']
-    ): Promise<{ status: number; body: Record<string, unknown> }> {
-      const bindingError = validateWorkflowClaimBinding(parentName, claims)
-      if (bindingError) return bindingError
-      if (!claims.scopes.includes('trigger_write')) {
-        return { status: 403, body: { error: 'Missing scope: trigger_write' } }
-      }
-      if (process.env.WRC_ENABLE_LEGACY_DIRECT_TRIGGER !== 'true') {
-        return {
-          status: 410,
-          body: {
-            error: 'Legacy direct trigger endpoint disabled; use control-api workflow broker',
-          },
-        }
-      }
-      // Coordinator tokens also carry trigger_write, so require CronJob subject.
-      if (claims.sub !== 'cronjob') {
-        return { status: 403, body: { error: 'Endpoint requires sub: cronjob' } }
-      }
-      return handleTrigger(customApi, parentName, namespace)
     },
 
     // ─── Helpers ──────────────────────────────────────────────────────

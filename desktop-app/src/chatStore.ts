@@ -243,6 +243,43 @@ export class ChatStore {
     })
   }
 
+  /**
+   * Reconcile the local index against the server's session listing (spec §5.3).
+   * The mcp-host is the source of truth; this refreshes `updatedAt` for chats
+   * ALREADY tracked locally so the persisted sidebar order/freshness survives a
+   * cold start without a server round-trip.
+   *
+   * Deliberately does NOT create entries for server-only sessions: the sidebar's
+   * in-memory merge (`useChatListController`) already surfaces those, and a local
+   * `deleteChat` doesn't remove the server session — eagerly re-persisting it
+   * would resurrect a chat the user just deleted. Titles are never touched (the
+   * server has none; the client derives them on open). Returns the count of
+   * entries reconciled.
+   */
+  async upsertServerSessions(
+    agentRef: string,
+    sessions: Array<{ chatId: string; lastActivityAt?: string }>
+  ): Promise<number> {
+    if (!sessions.length) return 0
+    return this.serializeIndex(agentRef, async () => {
+      const index = await this.getIndex(agentRef)
+      const byId = new Map(index.chats.map(chat => [chat.id, chat]))
+      let changed = 0
+      for (const session of sessions) {
+        const chat = byId.get(session.chatId)
+        if (!chat) continue // server-only session — do not resurrect a local delete
+        const lastActivityAt = session.lastActivityAt
+        if (!lastActivityAt) continue
+        if (new Date(lastActivityAt).getTime() > new Date(chat.updatedAt).getTime()) {
+          chat.updatedAt = lastActivityAt
+          changed += 1
+        }
+      }
+      if (changed > 0) await this.saveIndex(agentRef, index)
+      return changed
+    })
+  }
+
   /** Clear the unread-terminal flag (D.5), e.g. when the user opens the chat. */
   async clearUnreadTerminal(agentRef: string, chatId: string): Promise<void> {
     return this.serializeIndex(agentRef, async () => {

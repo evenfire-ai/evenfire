@@ -21,4 +21,10 @@ describe('CONTROL_ROUTES', () => {
     expect(isControlRouteSection('/agents/example/overview', CONTROL_ROUTES.agents.root)).toBe(true)
     expect(isControlRouteSection('/agents-old', CONTROL_ROUTES.agents.root)).toBe(false)
   })
+
+  it('uses the canonical directory section names in public paths', () => {
+    expect(CONTROL_ROUTES.agentFiles.root).toBe('/agent-files')
+    expect(CONTROL_ROUTES.agentOutputs.root).toBe('/agent-outputs/recipe-artifacts')
+    expect(CONTROL_ROUTES.globalFileSystem).toBe('/global-file-system')
+  })
 })

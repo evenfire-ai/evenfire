@@ -36,8 +36,8 @@ export function buildCoordinatorTokenSecret(
       // WorkflowRecipe lived in different namespaces so ownerRefs were unsafe.
       // Now both live in sandbox-recipes and native GC *could* be wired back
       // up, but the explicit cleanup in finalizationHandler.reconcileDelete()
-      // still handles Pods, PVCs, NetworkPolicies, and trigger Secrets that
-      // do not all share the same parent — so adding the ownerRef here would
+      // still handles Pods, PVCs, and NetworkPolicies that do not all share
+      // the same parent — so adding the ownerRef here would
       // only cover half the cleanup surface. Left unchanged until a broader
       // ownership refactor is scheduled.
     },
@@ -50,37 +50,6 @@ export function buildCoordinatorTokenSecret(
         : {}),
     },
     ...(gfsToken ? { stringData: { 'gfs-token': gfsToken } } : {}),
-  }
-}
-
-/**
- * Builds the CronJob trigger token Secret in control-plane namespace.
- *
- * This Secret CANNOT use ownerReferences because the WorkflowRecipe lives in
- * sandbox-recipes (cross-namespace ownerRefs are not enforced by K8s GC).
- * Cleanup is handled explicitly by finalizationHandler.reconcileDelete.
- */
-export function buildTriggerTokenSecret(
-  recipeName: string,
-  triggerToken: string,
-  namespace: string
-): k8s.V1Secret {
-  return {
-    apiVersion: 'v1',
-    kind: 'Secret',
-    metadata: {
-      name: `wf-${recipeName}-trigger-token`,
-      namespace,
-      labels: {
-        'clerum.io/recipe': recipeName,
-        'clerum.io/managed-by': 'wrc',
-        'clerum.io/component': 'trigger-token',
-      },
-    },
-    type: 'Opaque',
-    data: {
-      token: Buffer.from(triggerToken).toString('base64'),
-    },
   }
 }
 
@@ -170,7 +139,7 @@ export async function createCoordinatorTokens(
     includeSnippetRunnerToken?: boolean
     gfsToken?: string
   } = {}
-): Promise<{ secret: k8s.V1Secret; cronJobTriggerToken: string }> {
+): Promise<k8s.V1Secret> {
   const includeMcpHostToken = options.includeMcpHostToken ?? true
   const mcpHostToken = includeMcpHostToken
     ? await tokenFactory.signCoordinatorToMcpHostToken(recipeName, namespace)
@@ -178,12 +147,10 @@ export async function createCoordinatorTokens(
   const wrcToken = options.useCustomCoordinatorWrcToken
     ? await tokenFactory.signCustomCoordinatorToWrcToken(recipeName, namespace)
     : await tokenFactory.signCoordinatorToWrcToken(recipeName, namespace)
-  // Mint a minimal token for the CronJob — trigger_write scope only (least privilege).
-  const cronJobTriggerToken = await tokenFactory.signCronJobTriggerToken(recipeName, namespace)
   const snippetRunnerToken =
     options.includeSnippetRunnerToken === true ? randomBytes(32).toString('base64url') : undefined
 
-  const secret = buildCoordinatorTokenSecret(
+  return buildCoordinatorTokenSecret(
     recipeName,
     mcpHostToken,
     wrcToken,
@@ -191,6 +158,4 @@ export async function createCoordinatorTokens(
     snippetRunnerToken,
     options.gfsToken
   )
-
-  return { secret, cronJobTriggerToken }
 }

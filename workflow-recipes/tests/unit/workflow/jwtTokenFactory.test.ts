@@ -158,7 +158,6 @@ describe('JwtTokenFactory', () => {
       'status_read',
       'signal_read',
       'health_read',
-      'trigger_write',
     ])
   })
 
@@ -177,7 +176,6 @@ describe('JwtTokenFactory', () => {
       'health_read',
     ])
     expect(scopes).not.toContain('configure_model')
-    expect(scopes).not.toContain('trigger_write')
   })
 
   // ─── Uninitialized factory rejects signing ───────────────────────────────

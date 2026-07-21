@@ -133,7 +133,7 @@ function OutputsPageContent() {
           title={
             <>
               <IconOutputs />
-              {isRefreshing ? 'Outputs' : `Outputs (${visibleOutputsCount})`}
+              {isRefreshing ? 'Agent Outputs' : `Agent Outputs (${visibleOutputsCount})`}
             </>
           }
           subtitle="Browse generated artifacts from workflows and chat sessions."
@@ -142,8 +142,8 @@ function OutputsPageContent() {
               <SectionSearchInput
                 value={searchQuery}
                 onChange={setSearchQuery}
-                placeholder="Search outputs"
-                ariaLabel="Search outputs"
+                placeholder="Search agent outputs"
+                ariaLabel="Search agent outputs"
                 disabled={isRefreshing}
               />
               <button
@@ -171,13 +171,13 @@ function OutputsPageContent() {
           ) : null}
 
           <TabBar<OutputsTab>
-            ariaLabel="Output sections"
+            ariaLabel="Agent output sections"
             activeValue={activeTab}
             className="cu-tabs--flush-top"
             options={[
               {
                 value: 'workflow',
-                href: CONTROL_ROUTES.outputs.recipeArtifacts,
+                href: CONTROL_ROUTES.agentOutputs.recipeArtifacts,
                 label:
                   activeTab === 'workflow'
                     ? `Recipe Artifacts (${filteredWorkflowOutputs.length})`
@@ -185,7 +185,7 @@ function OutputsPageContent() {
               },
               {
                 value: 'desktop',
-                href: CONTROL_ROUTES.outputs.desktopAppArtifacts,
+                href: CONTROL_ROUTES.agentOutputs.desktopAppArtifacts,
                 label:
                   activeTab === 'desktop'
                     ? `Desktop App Artifacts (${filteredChatArtifacts.length})`

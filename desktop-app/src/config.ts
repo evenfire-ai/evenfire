@@ -1,4 +1,5 @@
 import { app } from 'electron'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
@@ -647,6 +648,42 @@ export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Prom
   await persistProfilesIndex(storedProfiles, activeRuntimeOptionId)
 }
 
+/**
+ * Derive the environment namespacing key from a runtime config's external-rest-api
+ * base URL (spec §5.1, D1). Semantically "one environment = one external-rest-api
+ * origin": `new URL(url).origin` includes scheme + host + port, so
+ * `https://api.dev…` and `https://api.prod…` (or `:8091` vs `:8092`) key apart
+ * automatically, and `rpcProxyBaseUrl` is deliberately NOT mixed in.
+ *
+ * The raw origin is not filesystem/keychain-safe (it carries `://`, `:`), so we
+ * emit a stable, collision-resistant slug: a lowercase `scheme_host_port`
+ * fragment for human debuggability, suffixed with a 12-hex sha256 of the origin
+ * so distinct origins can never collide even when the slug is truncated. Purely a
+ * function of the origin ⇒ deterministic and stable across restarts.
+ */
+export function resolveEnvKey(externalRestApiBaseUrl: string): string {
+  const raw = String(externalRestApiBaseUrl || '').trim()
+  let origin: string
+  try {
+    origin = new URL(raw).origin
+  } catch {
+    origin = raw || 'unknown'
+  }
+  const slug = origin
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48)
+  const hash = createHash('sha256').update(origin).digest('hex').slice(0, 12)
+  return `${slug || 'env'}-${hash}`
+}
+
+/** Env key for the CURRENTLY active runtime config (main-process surfaces). */
+export function getActiveEnvKey(): string {
+  hydrateDesktopRuntimeConfig()
+  return resolveEnvKey(config.externalRestApiBaseUrl)
+}
+
 export function getDesktopRuntimeConfigState(): DesktopRuntimeConfigState {
   hydrateDesktopRuntimeConfig()
   const current = currentRuntimeConfig()
@@ -666,6 +703,7 @@ export function getDesktopRuntimeConfigState(): DesktopRuntimeConfigState {
     isLocalhost,
     selectorVisible,
     activeOptionId,
+    envKey: resolveEnvKey(current.externalRestApiBaseUrl),
     storagePath: process.env.CLERUM_DESKTOP_CONFIG_PATH?.trim() || runtimeConfigDirectoryPath(),
     options,
   }

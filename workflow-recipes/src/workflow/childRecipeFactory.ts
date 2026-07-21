@@ -10,6 +10,7 @@ import * as k8s from '@kubernetes/client-node'
 import { createHash } from 'node:crypto'
 import { createLogger } from '../observability/logger'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants'
+import type { WorkflowRecipeGfsIntentSpec } from '../types'
 
 // Strict allowlist: child WorkflowRecipe CRDs inherit the platform-owned
 // WorkflowRecipe namespace only. Rendered MCP transport children are represented
@@ -36,6 +37,7 @@ export interface ParentRecipe {
     workloads?: unknown[]
     resources?: unknown[]
     runtimeEgress?: Record<string, unknown>
+    gfs?: WorkflowRecipeGfsIntentSpec
     output?: unknown
     // scheduling intentionally NOT included in child
   }
@@ -264,6 +266,7 @@ export function buildChildRecipe(
       workloads: deepCopy(parent.spec.workloads),
       resources: deepCopy(parent.spec.resources),
       runtimeEgress: deepCopy(parent.spec.runtimeEgress),
+      ...(parent.spec.gfs ? { gfs: deepCopy(parent.spec.gfs) } : {}),
       inputContract: deepCopy(parent.spec.inputContract),
       computed: deepCopy(parent.spec.computed),
       ...(options.inputs ? { inputs: deepCopy(options.inputs) } : {}),

@@ -1,42 +1,57 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { GfsPermissionDropdown } from '@components/GfsPermissionDropdown'
 import { GfsSubjectPicker } from '@components/GfsSubjectPicker'
 import type { SelectionDropdownOption } from '@components/SelectionDropdown/types'
 import { useToast } from '@components/Toast'
+import { IconTrash } from '@components/icons'
 import { Button, CheckboxField } from '@components/ui'
+import { GFS_MAX_BULK_SUBJECTS } from '@constants/gfsGrantSubjects'
 import {
   type AdminUser,
+  type GfsBulkShareSubjectInput,
+  type GfsGrantError,
   type HostResource,
   type TeamListItem,
   type WorkflowRecipeResource,
+  deleteGfsGrant,
+  deleteGfsShare,
   getAdminTeams,
   getAdminUsers,
+  getGfsGrants,
+  getGfsShares,
   getHosts,
   getRecipes,
+  postGfsShare,
   putGfsGrant,
 } from '@lib/api'
-import type { GfsGrantPanelProps, GfsGrantSubjectType } from './GfsGrantPanel.types'
-import { buildGfsGrantSubjectOptions, toGfsSubjectInput } from './gfsGrantSubjectOptions'
+import type { GfsExistingAccessItem, GfsGrantPanelProps } from './GfsGrantPanel.types'
+import {
+  buildGfsBulkSubjectOptions,
+  summarizeGfsBulkSubjectTypes,
+  toGfsBulkSubjectInputs,
+} from './gfsGrantSubjectOptions'
 
 /**
  * P4-S07 — Operator delegation panel for the Global File System. The operator
- * (Control UI / Admin-JWT plane) seeds Layer-1/2 grants on a selected resource.
- * Reuses the existing grant write API (PUT /api/v1/gfs/grants) — no new
- * authority. The no-escalation / authority engine runs server-side; this panel
- * surfaces the machine error code (e.g. escalation_rejected) on rejection.
- * Composes the shared `components/ui` primitives per the control-ui frontend
- * rules.
+ * (Control UI / Admin-JWT plane) seeds Layer-1/2 grants and creates URI shares
+ * on a selected resource. Bulk actions accept users, teams, and canonical host
+ * subjects; the intrinsic operator remains a singular request. The existing
+ * server-side authority and no-escalation policies remain authoritative.
  */
 
 const PERMISSION_BITS = ['read', 'write', 'delete', 'manage_acl', 'share'] as const
+const HOST_PERMISSION_BITS = ['read', 'write'] as const
+const OPERATOR_VALUE = 'operator'
 const DRIVE = 'main'
 
-type GrantSubjectSelection = {
-  option: SelectionDropdownOption & { id: string; badge: string }
-  subjectType: GfsGrantSubjectType
+const OPERATOR_OPTION: SelectionDropdownOption = {
+  value: OPERATOR_VALUE,
+  label: 'Operator',
+  description: 'Intrinsic cluster operator',
+  badge: 'Operator',
 }
 
 export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Element {
@@ -48,12 +63,57 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const [recipes, setRecipes] = useState<WorkflowRecipeResource[]>([])
   const [directoryLoading, setDirectoryLoading] = useState(true)
   const [directoryError, setDirectoryError] = useState('')
-  const [subjectValue, setSubjectValue] = useState('')
+  const [selectedValues, setSelectedValues] = useState<string[]>([])
+  const [selectionError, setSelectionError] = useState('')
   const [bits, setBits] = useState<string[]>([])
   const [includeDescendants, setIncludeDescendants] = useState(resource.kind === 'directory')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [existingAccess, setExistingAccess] = useState<GfsExistingAccessItem[]>([])
+  const [existingAccessLoading, setExistingAccessLoading] = useState(true)
+  const [existingAccessError, setExistingAccessError] = useState('')
+  const existingAccessRequest = useRef(0)
+  const existingAccessController = useRef<AbortController | null>(null)
   const canIncludeDescendants = resource.kind === 'directory'
+
+  const loadExistingAccess = useCallback(async () => {
+    existingAccessController.current?.abort()
+    const requestId = ++existingAccessRequest.current
+    const controller = new AbortController()
+    existingAccessController.current = controller
+    setExistingAccessLoading(true)
+    setExistingAccessError('')
+    try {
+      const [grantResult, shareResult] = await Promise.all([
+        getGfsGrants(resource.resourceId, DRIVE, controller.signal),
+        getGfsShares(resource.resourceId, DRIVE, controller.signal),
+      ])
+      if (requestId !== existingAccessRequest.current) return
+      setExistingAccess([
+        ...grantResult.items.map(item => ({ ...item, kind: 'grant' as const })),
+        ...shareResult.items.map(item => ({ ...item, kind: 'share' as const })),
+      ])
+    } catch (caught) {
+      if (requestId !== existingAccessRequest.current) return
+      setExistingAccessError(
+        caught instanceof Error ? caught.message : 'Failed to load existing access'
+      )
+    } finally {
+      if (requestId === existingAccessRequest.current) {
+        existingAccessController.current = null
+        setExistingAccessLoading(false)
+      }
+    }
+  }, [resource.resourceId])
+
+  useEffect(() => {
+    void loadExistingAccess()
+    return () => {
+      existingAccessController.current?.abort()
+      existingAccessController.current = null
+      existingAccessRequest.current += 1
+    }
+  }, [loadExistingAccess])
 
   useEffect(() => {
     let active = true
@@ -101,79 +161,175 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     setIncludeDescendants(resource.kind === 'directory')
   }, [resource.kind, resource.resourceId])
 
-  const subjectSelections = useMemo<GrantSubjectSelection[]>(() => {
-    const selections: GrantSubjectSelection[] = []
-    const addOptions = (subjectType: GfsGrantSubjectType) => {
-      const options = buildGfsGrantSubjectOptions({
-        subjectType,
-        users,
-        teams,
-        hosts,
-        recipes,
-      })
-      selections.push(...options.map(option => ({ option, subjectType })))
+  const bulkSubjectOptions = useMemo(
+    () => buildGfsBulkSubjectOptions({ users, teams, hosts, recipes }),
+    [hosts, recipes, teams, users]
+  )
+  const subjectOptions = useMemo<SelectionDropdownOption[]>(
+    () => [...bulkSubjectOptions, OPERATOR_OPTION],
+    [bulkSubjectOptions]
+  )
+  const operatorSelected = selectedValues.includes(OPERATOR_VALUE)
+  const selectedBulkOptions = useMemo(
+    () =>
+      selectedValues
+        .map(value => bulkSubjectOptions.find(option => option.value === value))
+        .filter(option => option !== undefined),
+    [bulkSubjectOptions, selectedValues]
+  )
+  const selectedSubjects = useMemo(
+    () => toGfsBulkSubjectInputs(selectedBulkOptions),
+    [selectedBulkOptions]
+  )
+  const hasHost = selectedSubjects.some(subject => subject.type === 'host')
+  const visiblePermissionBits = hasHost ? HOST_PERMISSION_BITS : PERMISSION_BITS
+  const subjectValid = operatorSelected || selectedSubjects.length > 0
+  const canCreateShare =
+    operatorSelected || selectedSubjects.every(subject => subject.type !== 'host')
+  const canSubmit = subjectValid && bits.length > 0 && !busy
+
+  function changeSelectedSubjects(nextValues: string[]) {
+    const addingOperator = nextValues.includes(OPERATOR_VALUE) && !operatorSelected
+    if (addingOperator) {
+      setSelectedValues([OPERATOR_VALUE])
+      setSelectionError('')
+      return
     }
 
-    addOptions('user')
-    addOptions('team')
-    addOptions('firstPartyAgent')
-    addOptions('workflowPlugin')
-    selections.push({
-      subjectType: 'operator',
-      option: {
-        value: 'operator',
-        id: '',
-        label: 'Operator',
-        description: 'Intrinsic cluster operator',
-        badge: 'Operator',
-      },
-    })
-    return selections
-  }, [hosts, recipes, teams, users])
-  const subjectOptions = subjectSelections.map(selection => selection.option)
-  const selectedSelection =
-    subjectSelections.find(selection => selection.option.value === subjectValue) ?? null
-  const canSubmit = selectedSelection !== null && bits.length > 0 && !busy
+    const bulkValues = nextValues.filter(value => value !== OPERATOR_VALUE)
+    if (bulkValues.length > GFS_MAX_BULK_SUBJECTS) {
+      setSelectionError(`You can select up to ${GFS_MAX_BULK_SUBJECTS} subjects.`)
+      return
+    }
 
-  function subjectLabel(): string {
-    if (!selectedSelection) return 'the selected subject'
-    if (selectedSelection.subjectType === 'operator') return 'operator'
-    return `${selectedSelection.option.badge.toLowerCase()} ${selectedSelection.option.label}`
+    const nextOptions = bulkValues
+      .map(value => bulkSubjectOptions.find(option => option.value === value))
+      .filter(option => option !== undefined)
+    if (nextOptions.some(option => option.subject.type === 'host')) {
+      setBits(current =>
+        current.filter(bit => HOST_PERMISSION_BITS.includes(bit as 'read' | 'write'))
+      )
+    }
+    setSelectionError('')
+    setSelectedValues(bulkValues)
   }
 
-  async function submit() {
+  function confirmationMessage(kind: 'grant' | 'share'): string {
+    const action = kind === 'grant' ? 'Grant' : 'Share with'
+    const recipients = operatorSelected
+      ? '1 operator'
+      : `${selectedSubjects.length} subjects (${summarizeGfsBulkSubjectTypes(selectedSubjects)})`
+    const scope = includeDescendants ? 'resource and descendants' : 'resource only'
+    return `${action} ${recipients} [${bits.join(', ')}] on "${resource.name}". Scope: ${scope}.`
+  }
+
+  async function submit(kind: 'grant' | 'share') {
     setError('')
-    if (!selectedSelection || bits.length === 0) {
+    if (!subjectValid || bits.length === 0) {
       setError('subject_and_permissions_required')
       return
     }
-    const grantSelection = selectedSelection
     const confirmed = await confirm({
-      title: 'Grant access?',
-      message: `Give ${subjectLabel()} [${bits.join(', ')}] on "${resource.name}"?`,
-      confirmLabel: 'Grant',
+      title: kind === 'grant' ? 'Grant access?' : 'Create share?',
+      message: confirmationMessage(kind),
+      confirmLabel: kind === 'grant' ? 'Grant' : 'Create share',
     })
     if (!confirmed) return
     setBusy(true)
     try {
-      const body = {
-        drive: DRIVE,
-        resourceId: resource.resourceId,
-        subject: toGfsSubjectInput(grantSelection.subjectType, grantSelection.option),
-        permissions: bits,
+      if (operatorSelected) {
+        const body = {
+          drive: DRIVE,
+          resourceId: resource.resourceId,
+          subject: { type: 'operator' as const },
+          permissions: bits,
+        }
+        if (kind === 'grant') await putGfsGrant({ ...body, inherit: includeDescendants })
+        else await postGfsShare({ ...body, includeDescendants })
+      } else {
+        const body = {
+          drive: DRIVE,
+          resourceId: resource.resourceId,
+          subjects: selectedSubjects,
+          permissions: bits,
+        }
+        if (kind === 'grant') {
+          await putGfsGrant({ ...body, inherit: includeDescendants })
+        } else {
+          const shareSubjects = selectedSubjects.filter(
+            (subject): subject is GfsBulkShareSubjectInput => subject.type !== 'host'
+          )
+          if (shareSubjects.length !== selectedSubjects.length) throw new Error('subjects_invalid')
+          await postGfsShare({ ...body, subjects: shareSubjects, includeDescendants })
+        }
       }
-      await putGfsGrant({ ...body, inherit: includeDescendants })
-      showToast('Grant saved.', { tone: 'success' })
-      // Reset the whole form — leaving the subject populated risks a mis-targeted
-      // second grant on the next click.
+      showToast(kind === 'grant' ? 'Grant saved.' : 'Share created.', { tone: 'success' })
+      await loadExistingAccess()
       setBits([])
-      setSubjectValue('')
+      setSelectedValues([])
+      setSelectionError('')
       setIncludeDescendants(resource.kind === 'directory')
     } catch (e) {
-      // Surface the machine code (e.g. escalation_rejected, resource_invalid)
-      // so the operator sees the precise verdict — never swallow it.
-      const code = (e as { code?: string }).code
-      setError(code || (e instanceof Error ? e.message : String(e)))
+      const grantError = e as GfsGrantError
+      const verdict = grantError.code
+        ? grantError.serverMessage && grantError.serverMessage !== grantError.code
+          ? `${grantError.code}: ${grantError.serverMessage}`
+          : grantError.code
+        : e instanceof Error
+          ? e.message
+          : String(e)
+      const invalidIndexes = grantError.invalidIndexes
+      setError(
+        invalidIndexes && invalidIndexes.length > 0
+          ? `${verdict} (invalid indexes: ${invalidIndexes.join(', ')})`
+          : verdict
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function subjectLabel(item: GfsExistingAccessItem): string {
+    if (item.subject.type === 'operator') return 'Operator'
+    const option = bulkSubjectOptions.find(
+      candidate =>
+        candidate.subject.type === item.subject.type && candidate.subject.id === item.subject.id
+    )
+    if (option) return option.label
+    const typeLabel =
+      item.subject.type === 'host'
+        ? 'Agent or workflow'
+        : item.subject.type.charAt(0).toUpperCase() + item.subject.type.slice(1)
+    return item.subject.id ? `${typeLabel} · ${item.subject.id}` : typeLabel
+  }
+
+  async function revokeAccess(item: GfsExistingAccessItem) {
+    const label = subjectLabel(item)
+    const confirmed = await confirm({
+      title: 'Remove access?',
+      message: `Remove ${item.kind} access for ${label} from "${resource.name}"?`,
+      confirmLabel: 'Remove access',
+      tone: 'danger',
+    })
+    if (!confirmed) return
+    setBusy(true)
+    setError('')
+    try {
+      if (item.kind === 'grant') await deleteGfsGrant(item.id)
+      else await deleteGfsShare(item.id)
+      showToast('Access removed.', { tone: 'success' })
+      await loadExistingAccess()
+    } catch (caught) {
+      const accessError = caught as GfsGrantError
+      if (
+        accessError.status === 404 &&
+        (accessError.code === 'grant_not_found' || accessError.code === 'share_not_found')
+      ) {
+        showToast('Access was already removed.', { tone: 'success' })
+        await loadExistingAccess()
+        return
+      }
+      setError(caught instanceof Error ? caught.message : 'Failed to remove access')
     } finally {
       setBusy(false)
     }
@@ -185,22 +341,85 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         <GfsSubjectPicker
           disabled={busy}
           loading={directoryLoading}
-          onChange={setSubjectValue}
+          onChange={changeSelectedSubjects}
           options={subjectOptions}
-          value={subjectValue}
+          value={selectedValues}
         />
         <GfsPermissionDropdown
           disabled={busy}
           onChange={setBits}
-          permissions={PERMISSION_BITS}
+          permissions={visiblePermissionBits}
           value={bits}
         />
       </div>
+      {selectionError ? (
+        <p role="alert" className="cu-field__error">
+          {selectionError}
+        </p>
+      ) : null}
       {directoryError ? (
         <p role="alert" className="cu-field__error">
           {directoryError}
         </p>
       ) : null}
+      {hasHost ? (
+        <p className="cu-field__hint">
+          Host selections are limited to read and write in Control UI. Incompatible permissions were
+          removed.
+        </p>
+      ) : null}
+      <section className="cu-gfs-existing-access" aria-label="Existing access">
+        <div className="cu-gfs-existing-access__header">
+          <h3>Existing access</h3>
+          <p>Direct grants and shares configured on this resource.</p>
+        </div>
+        {existingAccessLoading ? (
+          <p className="cu-gfs-existing-access__empty" role="status">
+            Loading existing access…
+          </p>
+        ) : existingAccessError ? (
+          <div className="cu-gfs-existing-access__error">
+            <p role="alert" className="cu-field__error">
+              {existingAccessError}
+            </p>
+            <Button size="sm" disabled={busy} onClick={() => void loadExistingAccess()}>
+              Retry
+            </Button>
+          </div>
+        ) : existingAccess.length === 0 ? (
+          <p className="cu-gfs-existing-access__empty">No direct access configured.</p>
+        ) : (
+          <ul className="cu-gfs-existing-access__list">
+            {existingAccess.map(item => {
+              const label = subjectLabel(item)
+              const coversDescendants =
+                item.kind === 'grant' ? item.inherit : item.includeDescendants
+              return (
+                <li className="cu-gfs-existing-access__item" key={`${item.kind}:${item.id}`}>
+                  <div className="cu-gfs-existing-access__copy">
+                    <span className="cu-gfs-existing-access__subject">{label}</span>
+                    <span className="cu-gfs-existing-access__detail">
+                      {item.kind === 'grant' ? 'Grant' : 'Share'} · {item.permissions.join(', ')} ·{' '}
+                      {coversDescendants ? 'resource and descendants' : 'resource only'}
+                    </span>
+                  </div>
+                  <Button
+                    aria-label={`Remove ${item.kind} access for ${label}`}
+                    title={`Remove ${item.kind} access for ${label}`}
+                    variant="danger"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => void revokeAccess(item)}
+                  >
+                    <IconTrash width={15} height={15} />
+                    Remove
+                  </Button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </section>
       {canIncludeDescendants ? (
         <CheckboxField
           className="cu-gfs-grant__scope"
@@ -212,8 +431,11 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         />
       ) : null}
       <div className="cu-gfs-grant__actions">
-        <Button variant="primary" disabled={!canSubmit} onClick={() => submit()}>
+        <Button variant="primary" disabled={!canSubmit} onClick={() => submit('grant')}>
           Grant access
+        </Button>
+        <Button disabled={!canSubmit || !canCreateShare} onClick={() => submit('share')}>
+          Create share
         </Button>
       </div>
       {error ? (

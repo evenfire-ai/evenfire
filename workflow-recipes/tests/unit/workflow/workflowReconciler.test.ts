@@ -97,7 +97,6 @@ function makeTokenFactory() {
     signWrcArtifactToken: vi.fn().mockResolvedValue('wrc-artifact-token'),
     signWrcArtifactDeleteToken: vi.fn().mockResolvedValue('wrc-artifact-delete-token'),
     signCustomCoordinatorToWrcToken: vi.fn().mockResolvedValue('custom-coord-wrc-token'),
-    signCronJobTriggerToken: vi.fn().mockResolvedValue('cronjob-trigger-token'),
   }
 }
 
@@ -4822,7 +4821,6 @@ describe('WorkflowReconciler — reconcile loop', () => {
     // Coordinator tokens are persistent (Secret-mounted) → signed at reconcile time.
     expect(tf.signCoordinatorToMcpHostToken).toHaveBeenCalled()
     expect(tf.signCoordinatorToWrcToken).toHaveBeenCalled()
-    expect(tf.signCronJobTriggerToken).toHaveBeenCalled()
     // WRC→mcp-host configure/artifact tokens are no longer issued on reconcile —
     // they are signed fresh per call by restEndpoints handlers.
     expect(tf.signWrcConfigureToken).not.toHaveBeenCalled()

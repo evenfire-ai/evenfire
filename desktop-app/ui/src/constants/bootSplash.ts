@@ -1,0 +1,2 @@
+export const BOOT_SPLASH_MIN_DISPLAY_MS = 400
+export const BOOT_SPLASH_EXIT_MS = 240

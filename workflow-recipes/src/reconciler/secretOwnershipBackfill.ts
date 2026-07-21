@@ -2,10 +2,10 @@
 // pre-existing recipe Secrets that were created before the ownership-label model
 // and are therefore UNLABELED. The #637 fail-closed gate denies unlabeled
 // envSecret / imagePullSecrets / snippet capability Secrets at reconcile time,
-// which silently breaks any recipe whose credential Secrets predate the model
-// (e.g. leadforge-mcp-credentials). New Secrets created via control-api's
-// /admin/recipe-secrets are already labeled; only legacy / `kubectl
-// apply`-created Secrets need this.
+// which silently breaks plugins whose credential Secrets predate the model (prod
+// incident 2026-06-26: leadforge-mcp-credentials, atb-secrets). New Secrets
+// created via control-api's /admin/recipe-secrets are already labeled; only
+// legacy / `kubectl apply`-created Secrets need this.
 //
 // CORRECTNESS: this planner mirrors the reconciler's two authoritative rules so it
 // cannot drift from enforcement:

@@ -823,6 +823,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
 
     expect(issueTokens).toHaveBeenCalledOnce()
     expect(mintGfs).toHaveBeenCalledOnce()
+    expect(mintGfs).toHaveBeenCalledWith({ name: host.name, namespace: host.namespace })
     expect(issueTokens).toHaveBeenCalledWith(
       host.name,
       expect.arrayContaining([

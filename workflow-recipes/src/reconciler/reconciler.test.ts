@@ -4,8 +4,9 @@ import { loadAll } from 'js-yaml'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { loadConfig } from '../config'
-import { CronJobDef, WorkflowRecipeCRD, WorkloadDef } from '../types'
+import { CronJobDef, WorkflowRecipeCRD, WorkflowRecipeGfsIntentSpec, WorkloadDef } from '../types'
 import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFactory'
+import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import { isRetryableInfraError } from './k8sErrors'
 import * as brokerIssuer from './oauthBrokerTokenIssuerClient'
 import {
@@ -101,6 +102,8 @@ const mockNetworkingApi = {
   deleteCollectionNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
 }
 
+const mockVerifyWorkflowRunProvenance = vi.fn().mockResolvedValue('verified')
+
 vi.mock('@kubernetes/client-node', () => ({
   KubeConfig: vi.fn().mockImplementation(() => ({
     makeApiClient: vi.fn().mockImplementation((ApiClass: unknown) => {
@@ -160,6 +163,7 @@ describe('WorkflowRecipeReconciler', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockVerifyWorkflowRunProvenance.mockResolvedValue('verified')
     process.env.CLERUM_NETWORK_POLICY_ENFORCEMENT_CONFIRMED = 'true'
     mockAppsApi.readNamespacedDeployment.mockReset()
     mockAppsApi.readNamespacedDeployment.mockResolvedValue({
@@ -216,9 +220,19 @@ describe('WorkflowRecipeReconciler', () => {
     mockNetworkingApi.createNamespacedNetworkPolicy.mockReset()
     mockNetworkingApi.createNamespacedNetworkPolicy.mockResolvedValue({})
     mockNetworkingApi.readNamespacedNetworkPolicy.mockReset()
-    mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
-      metadata: { resourceVersion: '1' },
-    })
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(({ name }: { name: string }) =>
+      Promise.resolve({
+        metadata: {
+          name,
+          uid: `uid-${name}`,
+          resourceVersion: '1',
+          labels: {
+            'clerum.io/managed-by': 'wrc',
+            'clerum.io/recipe': name.replace(/-coordinator-to-gfs$/, ''),
+          },
+        },
+      })
+    )
     mockNetworkingApi.replaceNamespacedNetworkPolicy.mockReset()
     mockNetworkingApi.replaceNamespacedNetworkPolicy.mockResolvedValue({})
     mockNetworkingApi.deleteNamespacedNetworkPolicy.mockReset()
@@ -226,7 +240,9 @@ describe('WorkflowRecipeReconciler', () => {
     mockNetworkingApi.listNamespacedNetworkPolicy.mockReset()
     mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
     const kc = new k8s.KubeConfig()
-    reconciler = new WorkflowRecipeReconciler(kc)
+    reconciler = new WorkflowRecipeReconciler(kc, undefined, {
+      verifyWorkflowRunProvenance: mockVerifyWorkflowRunProvenance,
+    })
   })
 
   // ─── Pipeline Tests ─────────────────────────────────────────────
@@ -3800,6 +3816,68 @@ describe('WorkflowRecipeReconciler', () => {
     })
   })
 
+  it('forwards the exact GFS read/write intent to the workflow reconciler', async () => {
+    const workflowReconcile = vi.fn().mockResolvedValue({
+      phase: 'deploying',
+      message: 'Workflow infrastructure created',
+      workflowPhase: 'initializing',
+    })
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          validateWorkflowSpec: () => undefined
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+
+    const gfs: WorkflowRecipeGfsIntentSpec = {
+      mounts: [
+        {
+          drive: 'main',
+          target: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          scopes: ['gfs.read', 'gfs.write'],
+        },
+      ],
+    }
+    const recipe = makeRecipe({
+      spec: {
+        steps: [{ id: 'read-write', run: snippetRun() }],
+        gfs,
+      },
+    })
+
+    await reconciler.reconcile(recipe)
+
+    expect(workflowReconcile.mock.calls[0][3].gfs).toEqual(gfs)
+  })
+
+  it('does not synthesize GFS intent when the recipe omits it', async () => {
+    const workflowReconcile = vi.fn().mockResolvedValue({
+      phase: 'deploying',
+      message: 'Workflow infrastructure created',
+      workflowPhase: 'initializing',
+    })
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          validateWorkflowSpec: () => undefined
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+
+    const recipe = makeRecipe({
+      spec: {
+        steps: [{ id: 'no-gfs', run: snippetRun() }],
+      },
+    })
+
+    await reconciler.reconcile(recipe)
+
+    expect(workflowReconcile.mock.calls[0][3].gfs).toBeUndefined()
+  })
+
   it('delegates workflow transport workloads without contextRef and waits for ExternalEgressReady', async () => {
     const workflowReconcile = vi.fn().mockResolvedValue({
       phase: 'deploying',
@@ -5158,6 +5236,7 @@ describe('WorkflowRecipeReconciler', () => {
         name: 'child-run',
         namespace: 'sandbox-recipes',
         uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
         labels: {
           'clerum.io/parent-recipe': 'parent-recipe',
           'clerum.io/workflow-run-id': 'run-child',
@@ -5187,6 +5266,13 @@ describe('WorkflowRecipeReconciler', () => {
       recipe.spec,
       'parent-recipe'
     )
+    expect(mockVerifyWorkflowRunProvenance).toHaveBeenCalledWith({
+      runId: 'run-child',
+      parentNamespace: 'sandbox-recipes',
+      parentName: 'parent-recipe',
+      childNamespace: 'sandbox-recipes',
+      childName: 'child-run',
+    })
     // Terminal run-scoped workflow → compute pods are freed.
     expect(teardownComputePodsForTerminalRun).toHaveBeenCalledWith('child-run')
   })
@@ -5422,7 +5508,7 @@ describe('WorkflowRecipeReconciler', () => {
     })
   })
 
-  it('repairs active workflow credentials using the controller ownerReference scope', async () => {
+  it('repairs active normal DB-run workflow credentials using verified parent provenance', async () => {
     const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
     ;(
       reconciler as unknown as {
@@ -5437,8 +5523,9 @@ describe('WorkflowRecipeReconciler', () => {
         name: 'child-run',
         namespace: 'sandbox-recipes',
         uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
         labels: {
-          'clerum.io/parent-recipe': 'spoofed-parent',
+          'clerum.io/parent-recipe': 'parent-recipe',
           'clerum.io/workflow-run-id': 'run-child',
         },
         ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
@@ -5466,6 +5553,331 @@ describe('WorkflowRecipeReconciler', () => {
     )
   })
 
+  it('uses the child runtime identity when the DB run does not bind the exact child', async () => {
+    mockVerifyWorkflowRunProvenance.mockResolvedValue('invalid')
+    const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          ensureMcpHostRuntimeCredentials: typeof ensureMcpHostRuntimeCredentials
+        }
+      }
+    ).workflowReconciler = { ensureMcpHostRuntimeCredentials }
+
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
+        labels: {
+          'clerum.io/parent-recipe': 'parent-recipe',
+          'clerum.io/workflow-run-id': 'run-child',
+        },
+        ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
+      },
+      spec: { steps: [{ id: 'research', instruction: 'run' }] },
+      status: { phase: 'active' } as WorkflowRecipeCRD['status'],
+    })
+
+    await reconciler.reconcile(recipe)
+
+    expect(mockVerifyWorkflowRunProvenance).toHaveBeenCalledWith({
+      runId: 'run-child',
+      parentNamespace: 'sandbox-recipes',
+      parentName: 'parent-recipe',
+      childNamespace: 'sandbox-recipes',
+      childName: 'child-run',
+    })
+    expect(ensureMcpHostRuntimeCredentials).toHaveBeenCalledWith(
+      'sandbox-recipes',
+      'child-run',
+      recipe.spec,
+      'child-run'
+    )
+  })
+
+  it('requeues a Pending DB binding before creating or rotating workflow runtime resources', async () => {
+    mockVerifyWorkflowRunProvenance.mockResolvedValue('pending')
+    const ensureCoordinatorRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
+    const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
+    const refreshRuntimeHttpEgressNetworkPolicies = vi.fn().mockResolvedValue(undefined)
+    const reconcileWorkflow = vi.fn().mockResolvedValue({ phase: 'active', message: 'unexpected' })
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          ensureCoordinatorRuntimeCredentials: typeof ensureCoordinatorRuntimeCredentials
+          ensureMcpHostRuntimeCredentials: typeof ensureMcpHostRuntimeCredentials
+          refreshRuntimeHttpEgressNetworkPolicies: typeof refreshRuntimeHttpEgressNetworkPolicies
+          reconcile: typeof reconcileWorkflow
+        }
+      }
+    ).workflowReconciler = {
+      ensureCoordinatorRuntimeCredentials,
+      ensureMcpHostRuntimeCredentials,
+      refreshRuntimeHttpEgressNetworkPolicies,
+      reconcile: reconcileWorkflow,
+    }
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
+        labels: {
+          'clerum.io/parent-recipe': 'parent-recipe',
+          'clerum.io/workflow-run-id': 'run-child',
+        },
+        ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
+      },
+      spec: { steps: [{ id: 'research', instruction: 'run' }] },
+      status: {
+        phase: 'active',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+      } as WorkflowRecipeCRD['status'],
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(result).toMatchObject({
+      phase: 'active',
+      message: 'Workflow running',
+      skipStatusPatch: true,
+      requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+    })
+    expect(ensureCoordinatorRuntimeCredentials).not.toHaveBeenCalled()
+    expect(ensureMcpHostRuntimeCredentials).not.toHaveBeenCalled()
+    expect(refreshRuntimeHttpEgressNetworkPolicies).not.toHaveBeenCalled()
+    expect(reconcileWorkflow).not.toHaveBeenCalled()
+    expect(mockCoreApi.createNamespacedSecret).not.toHaveBeenCalled()
+    expect(mockCoreApi.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
+    expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
+  it('requeues a transient DB provenance failure without downgrading to child identity', async () => {
+    mockVerifyWorkflowRunProvenance.mockRejectedValue(new Error('ECONNRESET'))
+    const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          ensureMcpHostRuntimeCredentials: typeof ensureMcpHostRuntimeCredentials
+        }
+      }
+    ).workflowReconciler = { ensureMcpHostRuntimeCredentials }
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
+        labels: {
+          'clerum.io/parent-recipe': 'parent-recipe',
+          'clerum.io/workflow-run-id': 'run-child',
+        },
+        ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
+      },
+      spec: { steps: [{ id: 'research', instruction: 'run' }] },
+      status: {
+        phase: 'active',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+      } as WorkflowRecipeCRD['status'],
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(result).toMatchObject({
+      phase: 'active',
+      message: 'Workflow running',
+      skipStatusPatch: true,
+      requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+    })
+    expect(ensureMcpHostRuntimeCredentials).not.toHaveBeenCalled()
+    expect(mockCoreApi.createNamespacedSecret).not.toHaveBeenCalled()
+    expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'child-run-coordinator-to-gfs',
+      namespace: 'sandbox-recipes',
+      body: {
+        preconditions: {
+          uid: 'uid-child-run-coordinator-to-gfs',
+          resourceVersion: '1',
+        },
+      },
+    })
+  })
+
+  it('does not open coordinator GFS egress while a child DB binding is Pending', async () => {
+    mockVerifyWorkflowRunProvenance.mockResolvedValue('pending')
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
+        labels: {
+          'clerum.io/parent-recipe': 'parent-recipe',
+          'clerum.io/workflow-run-id': 'run-child',
+        },
+        ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
+      },
+      spec: {
+        steps: [{ id: 'research', instruction: 'run' }],
+        gfs: { publishTargets: [{ drive: 'main', target: 'outputs' }] },
+      },
+      status: {
+        phase: 'active',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+      } as WorkflowRecipeCRD['status'],
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(result).toMatchObject({
+      phase: 'active',
+      message: 'Workflow running',
+      skipStatusPatch: true,
+      requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+    })
+    expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
+  it('requeues a transient owner lookup failure without downgrading to child identity', async () => {
+    mockCustomApi.getNamespacedCustomObject
+      .mockReset()
+      .mockResolvedValueOnce({ metadata: { uid: 'uid-child' } })
+      .mockRejectedValueOnce({ code: 503 })
+    const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          ensureMcpHostRuntimeCredentials: typeof ensureMcpHostRuntimeCredentials
+        }
+      }
+    ).workflowReconciler = { ensureMcpHostRuntimeCredentials }
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
+        labels: {
+          'clerum.io/parent-recipe': 'parent-recipe',
+          'clerum.io/workflow-run-id': 'run-child',
+        },
+        ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
+      },
+      spec: { steps: [{ id: 'research', instruction: 'run' }] },
+      status: {
+        phase: 'active',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+      } as WorkflowRecipeCRD['status'],
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(result).toMatchObject({
+      phase: 'active',
+      message: 'Workflow running',
+      skipStatusPatch: true,
+      requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+    })
+    expect(mockVerifyWorkflowRunProvenance).not.toHaveBeenCalled()
+    expect(ensureMcpHostRuntimeCredentials).not.toHaveBeenCalled()
+    expect(mockCoreApi.createNamespacedSecret).not.toHaveBeenCalled()
+    expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+  })
+
+  it('uses the child runtime identity when the workflow run id is missing', async () => {
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
+        labels: { 'clerum.io/parent-recipe': 'parent-recipe' },
+        ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
+      },
+      spec: { steps: [{ id: 'research', instruction: 'run' }] },
+      status: { phase: 'active' } as WorkflowRecipeCRD['status'],
+    })
+
+    const runtimeScope = await (
+      reconciler as unknown as {
+        workflowRuntimeScopeRecipeName: (input: WorkflowRecipeCRD) => Promise<string>
+      }
+    ).workflowRuntimeScopeRecipeName(recipe)
+
+    expect(mockVerifyWorkflowRunProvenance).not.toHaveBeenCalled()
+    expect(runtimeScope).toBe('child-run')
+  })
+
+  it('keeps the verified parent identity when the live parent GFS changes after run creation', async () => {
+    mockCustomApi.getNamespacedCustomObject.mockResolvedValue({
+      metadata: { uid: 'uid-parent-recipe', resourceVersion: '1' },
+      spec: {
+        gfs: {
+          mounts: [
+            {
+              drive: 'main',
+              target: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              scopes: ['gfs.write'],
+            },
+          ],
+        },
+      },
+    })
+
+    const recipe = makeRecipe({
+      metadata: {
+        name: 'child-run',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
+        labels: {
+          'clerum.io/parent-recipe': 'parent-recipe',
+          'clerum.io/workflow-run-id': 'run-child',
+        },
+        ownerReferences: [workflowRecipeOwnerRef('parent-recipe')],
+      },
+      spec: {
+        steps: [{ id: 'research', instruction: 'run' }],
+        gfs: {
+          mounts: [
+            {
+              drive: 'main',
+              target: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              scopes: ['gfs.read'],
+            },
+          ],
+        },
+      },
+      status: { phase: 'active' } as WorkflowRecipeCRD['status'],
+    })
+
+    const runtimeScope = await (
+      reconciler as unknown as {
+        workflowRuntimeScopeRecipeName: (input: WorkflowRecipeCRD) => Promise<string>
+      }
+    ).workflowRuntimeScopeRecipeName(recipe)
+
+    expect(mockVerifyWorkflowRunProvenance).toHaveBeenCalledWith({
+      runId: 'run-child',
+      parentNamespace: 'sandbox-recipes',
+      parentName: 'parent-recipe',
+      childNamespace: 'sandbox-recipes',
+      childName: 'child-run',
+    })
+    expect(runtimeScope).toBe('parent-recipe')
+    expect(recipe.spec.gfs?.mounts?.[0]?.scopes).toEqual(['gfs.read'])
+  })
+
   it('does not trust forged controller ownerReferences with mismatched UIDs', async () => {
     const ensureMcpHostRuntimeCredentials = vi.fn().mockResolvedValue(undefined)
     ;(
@@ -5481,6 +5893,7 @@ describe('WorkflowRecipeReconciler', () => {
         name: 'child-run',
         namespace: 'sandbox-recipes',
         uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
         labels: {
           'clerum.io/parent-recipe': 'parent-recipe',
           'clerum.io/workflow-run-id': 'run-child',
@@ -5529,6 +5942,7 @@ describe('WorkflowRecipeReconciler', () => {
         name: 'child-run',
         namespace: 'sandbox-recipes',
         uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
         labels: {
           'clerum.io/parent-recipe': 'missing-parent',
           'clerum.io/workflow-run-id': 'run-child',
@@ -5545,6 +5959,14 @@ describe('WorkflowRecipeReconciler', () => {
 
     await reconciler.reconcile(recipe)
 
+    expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledWith({
+      group: 'clerum.io',
+      version: 'v1alpha1',
+      namespace: 'sandbox-recipes',
+      plural: 'workflowrecipes',
+      name: 'missing-parent',
+    })
+    expect(mockVerifyWorkflowRunProvenance).not.toHaveBeenCalled()
     expect(ensureMcpHostRuntimeCredentials).toHaveBeenCalledWith(
       'sandbox-recipes',
       'child-run',
@@ -5580,6 +6002,7 @@ describe('WorkflowRecipeReconciler', () => {
         name: 'child-run',
         namespace: 'sandbox-recipes',
         uid: 'uid-child',
+        annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
         labels: {
           'clerum.io/parent-recipe': 'parent-recipe',
           'clerum.io/workflow-run-id': 'run-child',
@@ -5596,6 +6019,14 @@ describe('WorkflowRecipeReconciler', () => {
 
     await reconciler.reconcile(recipe)
 
+    expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledWith({
+      group: 'clerum.io',
+      version: 'v1alpha1',
+      namespace: 'sandbox-recipes',
+      plural: 'workflowrecipes',
+      name: 'parent-recipe',
+    })
+    expect(mockVerifyWorkflowRunProvenance).not.toHaveBeenCalled()
     expect(ensureMcpHostRuntimeCredentials).toHaveBeenCalledWith(
       'sandbox-recipes',
       'child-run',
@@ -5682,7 +6113,7 @@ describe('WorkflowRecipeReconciler', () => {
     )
   })
 
-  it('passes the ownerReference parent scope on first workflow infrastructure reconcile', async () => {
+  it('does not inherit a parent scope on first reconcile without DB-run metadata', async () => {
     const reconcileWorkflow = vi.fn().mockResolvedValue({
       phase: 'deploying',
       message: 'Workflow infrastructure created',
@@ -5727,7 +6158,7 @@ describe('WorkflowRecipeReconciler', () => {
       expect.objectContaining({ steps: recipe.spec.steps }),
       expect.objectContaining({ workflowExecution: undefined }),
       {},
-      'parent-recipe',
+      'child-run',
       undefined,
       undefined,
       undefined,
@@ -5983,6 +6414,601 @@ describe('WorkflowRecipeReconciler', () => {
       'test-recipe',
       recipe.spec,
       'test-recipe'
+    )
+  })
+
+  describe('steady workflow coordinator GFS NetworkPolicy convergence', () => {
+    function stubSteadyWorkflowRuntime(): void {
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            ensureCoordinatorRuntimeCredentials: () => Promise<void>
+            ensureMcpHostRuntimeCredentials: () => Promise<void>
+          }
+        }
+      ).workflowReconciler = {
+        ensureCoordinatorRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+        ensureMcpHostRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+      }
+    }
+
+    function activeWorkflow(
+      publishTargets?: Array<{ drive: string; target: string }>
+    ): WorkflowRecipeCRD {
+      return makeRecipe({
+        metadata: {
+          name: 'gfs-policy-workflow',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-gfs-policy',
+          labels: { 'clerum.io/workflow-run-id': 'run-gfs-policy' },
+        },
+        spec: {
+          steps: [{ id: 'publish', instruction: 'publish output' }],
+          gfs: publishTargets ? { publishTargets } : undefined,
+        },
+        status: {
+          phase: 'active',
+          workflowExecution: { phase: 'running' },
+        } as WorkflowRecipeCRD['status'],
+      })
+    }
+
+    it('creates the exact coordinator GFS policy when publishTargets become present', async () => {
+      stubSteadyWorkflowRuntime()
+      const recipe = activeWorkflow([{ drive: 'main', target: 'published-results' }])
+
+      const result = await reconciler.reconcile(recipe)
+
+      expect(result).toMatchObject({
+        phase: 'active',
+        message: 'Workflow running',
+        skipStatusPatch: true,
+      })
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        namespace: 'sandbox-recipes',
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({
+            name: 'gfs-policy-workflow-coordinator-to-gfs',
+            namespace: 'sandbox-recipes',
+          }),
+          spec: expect.objectContaining({
+            podSelector: {
+              matchLabels: {
+                'clerum.io/recipe': 'gfs-policy-workflow',
+                'clerum.io/component': 'workflow-coordinator',
+              },
+            },
+            egress: [
+              {
+                to: [
+                  {
+                    namespaceSelector: {
+                      matchLabels: { 'kubernetes.io/metadata.name': 'gfs' },
+                    },
+                    podSelector: { matchLabels: { app: 'gfs-controller' } },
+                  },
+                ],
+                ports: [{ port: 8087, protocol: 'TCP' }],
+              },
+            ],
+          }),
+        }),
+      })
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('deletes only the exact coordinator GFS policy when publishTargets become absent', async () => {
+      stubSteadyWorkflowRuntime()
+
+      const result = await reconciler.reconcile(activeWorkflow())
+
+      expect(result).toMatchObject({
+        phase: 'active',
+        message: 'Workflow running',
+        skipStatusPatch: true,
+      })
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'gfs-policy-workflow-coordinator-to-gfs',
+        namespace: 'sandbox-recipes',
+        body: {
+          preconditions: {
+            uid: 'uid-gfs-policy-workflow-coordinator-to-gfs',
+            resourceVersion: '1',
+          },
+        },
+      })
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('tolerates an already-absent coordinator GFS policy', async () => {
+      stubSteadyWorkflowRuntime()
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
+
+      const result = await reconciler.reconcile(activeWorkflow())
+
+      expect(result).toMatchObject({
+        phase: 'active',
+        message: 'Workflow running',
+        skipStatusPatch: true,
+      })
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'gfs-policy-workflow-coordinator-to-gfs',
+        namespace: 'sandbox-recipes',
+      })
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('tolerates a concurrent 404 after reading the owned policy', async () => {
+      stubSteadyWorkflowRuntime()
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
+
+      const result = await reconciler.reconcile(activeWorkflow())
+
+      expect(result).toMatchObject({ phase: 'active', message: 'Workflow running' })
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    })
+
+    it('surfaces non-404 reads without attempting a delete', async () => {
+      stubSteadyWorkflowRuntime()
+      const apiError = { code: 503, message: 'apiserver unavailable' }
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce(apiError)
+
+      await expect(reconciler.reconcile(activeWorkflow())).rejects.toBe(apiError)
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('refuses to delete an owned policy without complete live identity', async () => {
+      stubSteadyWorkflowRuntime()
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValueOnce({
+        metadata: {
+          name: 'gfs-policy-workflow-coordinator-to-gfs',
+          resourceVersion: '7',
+          labels: { 'clerum.io/managed-by': 'wrc', 'clerum.io/recipe': 'gfs-policy-workflow' },
+        },
+      })
+
+      await expect(reconciler.reconcile(activeWorkflow())).rejects.toThrow(
+        'live object identity is incomplete'
+      )
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('surfaces non-404 revocation failures instead of reporting false convergence', async () => {
+      stubSteadyWorkflowRuntime()
+      const apiError = { code: 503, message: 'apiserver unavailable' }
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockRejectedValueOnce(apiError)
+
+      await expect(reconciler.reconcile(activeWorkflow())).rejects.toBe(apiError)
+    })
+
+    it.each([
+      {
+        branch: 'awaiting-trigger',
+        recipe: () =>
+          makeRecipe({
+            metadata: {
+              name: 'gfs-policy-workflow',
+              namespace: 'sandbox-recipes',
+              uid: 'uid-gfs-policy',
+            },
+            spec: {
+              agent: { provider: 'zai', model: 'glm-4.7' },
+              triggers: { onDemand: { allowedActors: ['user'] } },
+              steps: [{ id: 'publish', instruction: 'publish output' }],
+            },
+            status: { phase: 'active' },
+          }),
+        expected: {
+          phase: 'active',
+          message: 'Workflow trigger infrastructure registered',
+          skipStatusPatch: true,
+        },
+      },
+      {
+        branch: 'terminal',
+        recipe: () =>
+          makeRecipe({
+            metadata: {
+              name: 'gfs-policy-workflow',
+              namespace: 'sandbox-recipes',
+              uid: 'uid-gfs-policy',
+              labels: { 'clerum.io/workflow-run-id': 'run-gfs-policy' },
+            },
+            spec: {
+              agent: { provider: 'zai', model: 'glm-4.7' },
+              steps: [{ id: 'publish', instruction: 'publish output' }],
+            },
+            status: {
+              phase: 'active',
+              message: 'Workflow completed',
+              workflowExecution: { phase: 'completed' },
+            } as WorkflowRecipeCRD['status'],
+          }),
+        expected: {
+          phase: 'active',
+          message: 'Workflow completed',
+          skipStatusPatch: true,
+        },
+      },
+      {
+        branch: 'in-progress',
+        recipe: () =>
+          makeRecipe({
+            metadata: {
+              name: 'gfs-policy-workflow',
+              namespace: 'sandbox-recipes',
+              uid: 'uid-gfs-policy',
+            },
+            spec: {
+              agent: { provider: 'zai', model: 'glm-4.7' },
+              steps: [{ id: 'publish', instruction: 'publish output' }],
+            },
+            status: {
+              phase: 'deploying',
+              workflowExecution: { phase: 'running' },
+            } as WorkflowRecipeCRD['status'],
+          }),
+        expected: {
+          phase: 'active',
+          message: 'Workflow running',
+          skipStatusPatch: false,
+        },
+      },
+    ])('converges the absent policy without changing the $branch result', async testCase => {
+      stubSteadyWorkflowRuntime()
+      const workflowRuntime = (
+        reconciler as unknown as {
+          workflowReconciler: Record<string, unknown>
+        }
+      ).workflowReconciler
+      workflowRuntime.teardownComputePodsForTerminalRun = vi.fn().mockResolvedValue(undefined)
+
+      const result = await reconciler.reconcile(testCase.recipe())
+
+      expect(result).toMatchObject(testCase.expected)
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'gfs-policy-workflow-coordinator-to-gfs',
+        namespace: 'sandbox-recipes',
+        body: {
+          preconditions: {
+            uid: 'uid-gfs-policy-workflow-coordinator-to-gfs',
+            resourceVersion: '1',
+          },
+        },
+      })
+    })
+
+    it.each([
+      {
+        branch: 'awaiting-trigger',
+        recipe: () =>
+          makeRecipe({
+            metadata: {
+              name: 'gfs-policy-workflow',
+              namespace: 'sandbox-recipes',
+              uid: 'uid-gfs-policy',
+            },
+            spec: {
+              agent: { provider: 'zai', model: 'glm-4.7' },
+              triggers: { onDemand: { allowedActors: ['user'] } },
+              steps: [{ id: 'publish', instruction: 'publish output' }],
+              gfs: { publishTargets: [{ drive: 'main', target: 'published-results' }] },
+            },
+            status: { phase: 'active' },
+          }),
+      },
+      {
+        branch: 'terminal',
+        recipe: () =>
+          makeRecipe({
+            metadata: {
+              name: 'gfs-policy-workflow',
+              namespace: 'sandbox-recipes',
+              uid: 'uid-gfs-policy',
+              labels: { 'clerum.io/workflow-run-id': 'run-gfs-policy' },
+            },
+            spec: {
+              agent: { provider: 'zai', model: 'glm-4.7' },
+              steps: [{ id: 'publish', instruction: 'publish output' }],
+              gfs: { publishTargets: [{ drive: 'main', target: 'published-results' }] },
+            },
+            status: {
+              phase: 'active',
+              message: 'Workflow completed',
+              workflowExecution: { phase: 'completed' },
+            } as WorkflowRecipeCRD['status'],
+          }),
+      },
+      {
+        branch: 'in-progress',
+        recipe: () =>
+          makeRecipe({
+            metadata: {
+              name: 'gfs-policy-workflow',
+              namespace: 'sandbox-recipes',
+              uid: 'uid-gfs-policy',
+            },
+            spec: {
+              agent: { provider: 'zai', model: 'glm-4.7' },
+              steps: [{ id: 'publish', instruction: 'publish output' }],
+              gfs: { publishTargets: [{ drive: 'main', target: 'published-results' }] },
+            },
+            status: {
+              phase: 'deploying',
+              workflowExecution: { phase: 'running' },
+            } as WorkflowRecipeCRD['status'],
+          }),
+      },
+    ])('converges the present policy before returning from $branch', async testCase => {
+      stubSteadyWorkflowRuntime()
+      const workflowRuntime = (
+        reconciler as unknown as { workflowReconciler: Record<string, unknown> }
+      ).workflowReconciler
+      workflowRuntime.teardownComputePodsForTerminalRun = vi.fn().mockResolvedValue(undefined)
+
+      await reconciler.reconcile(testCase.recipe())
+
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        namespace: 'sandbox-recipes',
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({
+            name: 'gfs-policy-workflow-coordinator-to-gfs',
+          }),
+        }),
+      })
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('does not open coordinator GFS egress for a workflow rejected by preflight', async () => {
+      stubSteadyWorkflowRuntime()
+      const workflowRuntime = (
+        reconciler as unknown as { workflowReconciler: Record<string, unknown> }
+      ).workflowReconciler
+      workflowRuntime.validateWorkflowSpec = vi.fn().mockReturnValue('invalid runtime spec')
+
+      const result = await reconciler.reconcile(
+        activeWorkflow([{ drive: 'main', target: 'published-results' }])
+      )
+
+      expect(result).toMatchObject({ phase: 'active', message: 'Workflow running' })
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'gfs-policy-workflow-coordinator-to-gfs',
+        namespace: 'sandbox-recipes',
+        body: {
+          preconditions: {
+            uid: 'uid-gfs-policy-workflow-coordinator-to-gfs',
+            resourceVersion: '1',
+          },
+        },
+      })
+    })
+
+    it('refuses to replace a homonymous policy not owned by the exact recipe', async () => {
+      stubSteadyWorkflowRuntime()
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 409 })
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValueOnce({
+        metadata: {
+          name: 'gfs-policy-workflow-coordinator-to-gfs',
+          uid: 'uid-foreign-policy',
+          resourceVersion: '7',
+          labels: { 'clerum.io/managed-by': 'operator', 'clerum.io/recipe': 'other-recipe' },
+        },
+      })
+
+      await expect(
+        reconciler.reconcile(activeWorkflow([{ drive: 'main', target: 'published-results' }]))
+      ).rejects.toThrow('existing policy is not owned by WRC')
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('replaces the exact owned coordinator GFS policy with its live resourceVersion', async () => {
+      stubSteadyWorkflowRuntime()
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 409 })
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValueOnce({
+        metadata: {
+          name: 'gfs-policy-workflow-coordinator-to-gfs',
+          uid: 'uid-owned-policy',
+          resourceVersion: '7',
+          labels: { 'clerum.io/managed-by': 'wrc', 'clerum.io/recipe': 'gfs-policy-workflow' },
+        },
+      })
+
+      await reconciler.reconcile(activeWorkflow([{ drive: 'main', target: 'published-results' }]))
+
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'gfs-policy-workflow-coordinator-to-gfs',
+        namespace: 'sandbox-recipes',
+        body: expect.objectContaining({
+          metadata: expect.objectContaining({
+            name: 'gfs-policy-workflow-coordinator-to-gfs',
+            resourceVersion: '7',
+          }),
+        }),
+      })
+    })
+
+    it('does not replace an already-converged owned policy', async () => {
+      stubSteadyWorkflowRuntime()
+      const existing = buildCoordinatorGfsNetworkPolicy({
+        recipeName: 'gfs-policy-workflow',
+        sandboxNamespace: 'sandbox-recipes',
+      })
+      existing.metadata = {
+        ...existing.metadata,
+        uid: 'uid-owned-policy',
+        resourceVersion: '7',
+      }
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 409 })
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValueOnce(existing)
+
+      const result = await reconciler.reconcile(
+        activeWorkflow([{ drive: 'main', target: 'published-results' }])
+      )
+
+      expect(result).toMatchObject({ phase: 'active', message: 'Workflow running' })
+      expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('refuses to delete a homonymous policy not owned by the exact recipe', async () => {
+      stubSteadyWorkflowRuntime()
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValueOnce({
+        metadata: {
+          name: 'gfs-policy-workflow-coordinator-to-gfs',
+          uid: 'uid-foreign-policy',
+          resourceVersion: '7',
+          labels: { 'clerum.io/managed-by': 'operator', 'clerum.io/recipe': 'other-recipe' },
+        },
+      })
+
+      await expect(reconciler.reconcile(activeWorkflow())).rejects.toThrow(
+        'existing policy is not owned by WRC'
+      )
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('revokes stale coordinator GFS egress before returning a spec limit failure', async () => {
+      const recipe = makeRecipe({
+        metadata: {
+          name: 'gfs-policy-workflow',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-gfs-policy',
+        },
+        spec: {
+          gfs: { publishTargets: [{ drive: 'main', target: 'published-results' }] },
+          steps: [
+            { id: 'duplicate', instruction: 'first' },
+            { id: 'duplicate', instruction: 'second' },
+          ],
+        },
+        status: { phase: 'active' },
+      })
+
+      const result = await reconciler.reconcile(recipe)
+
+      expect(result).toMatchObject({ phase: 'failed' })
+      expect(result.message).toContain('duplicate step id "duplicate" is not allowed')
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'gfs-policy-workflow-coordinator-to-gfs',
+        namespace: 'sandbox-recipes',
+        body: {
+          preconditions: {
+            uid: 'uid-gfs-policy-workflow-coordinator-to-gfs',
+            resourceVersion: '1',
+          },
+        },
+      })
+    })
+
+    it('opens coordinator GFS egress once only after a successful first deploy', async () => {
+      const workflowReconcile = vi.fn().mockResolvedValue({
+        phase: 'deploying',
+        message: 'Workflow infrastructure created',
+        workflowPhase: 'initializing',
+      })
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcile: typeof workflowReconcile
+            validateWorkflowSpec: () => undefined
+          }
+        }
+      ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+
+      const result = await reconciler.reconcile(
+        makeRecipe({
+          metadata: {
+            name: 'gfs-policy-workflow',
+            namespace: 'sandbox-recipes',
+            uid: 'uid-gfs-policy',
+          },
+          spec: {
+            steps: [{ id: 'publish', instruction: 'publish output' }],
+            gfs: { publishTargets: [{ drive: 'main', target: 'published-results' }] },
+          },
+          status: { phase: 'candidate' },
+        })
+      )
+
+      expect(result).toMatchObject({ phase: 'deploying' })
+      expect(workflowReconcile).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(workflowReconcile.mock.invocationCallOrder[0]).toBeLessThan(
+        mockNetworkingApi.createNamespacedNetworkPolicy.mock.invocationCallOrder[0]
+      )
+    })
+
+    it('does not open coordinator GFS egress when first deploy fails asynchronously', async () => {
+      const workflowReconcile = vi.fn().mockResolvedValue({
+        phase: 'failed',
+        message: 'snippet Secret reference is invalid',
+        workflowPhase: 'failed',
+      })
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcile: typeof workflowReconcile
+            validateWorkflowSpec: () => undefined
+          }
+        }
+      ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+
+      const result = await reconciler.reconcile(
+        makeRecipe({
+          metadata: {
+            name: 'gfs-policy-workflow',
+            namespace: 'sandbox-recipes',
+            uid: 'uid-gfs-policy',
+          },
+          spec: {
+            steps: [{ id: 'publish', instruction: 'publish output' }],
+            gfs: { publishTargets: [{ drive: 'main', target: 'published-results' }] },
+          },
+          status: { phase: 'candidate' },
+        })
+      )
+
+      expect(result).toMatchObject({ phase: 'failed' })
+      expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    })
+
+    it.each(['failed', 'cancelled'] as const)(
+      'revokes coordinator GFS egress for a terminal %s workflow',
+      async workflowPhase => {
+        stubSteadyWorkflowRuntime()
+        const workflowRuntime = (
+          reconciler as unknown as { workflowReconciler: Record<string, unknown> }
+        ).workflowReconciler
+        workflowRuntime.teardownComputePodsForTerminalRun = vi.fn().mockResolvedValue(undefined)
+
+        const result = await reconciler.reconcile(
+          makeRecipe({
+            metadata: {
+              name: 'gfs-policy-workflow',
+              namespace: 'sandbox-recipes',
+              uid: 'uid-gfs-policy',
+              labels: { 'clerum.io/workflow-run-id': 'run-gfs-policy' },
+            },
+            spec: {
+              steps: [{ id: 'publish', instruction: 'publish output' }],
+              gfs: { publishTargets: [{ drive: 'main', target: 'published-results' }] },
+            },
+            status: {
+              phase: 'active',
+              workflowExecution: { phase: workflowPhase },
+            } as WorkflowRecipeCRD['status'],
+          })
+        )
+
+        expect(result).toMatchObject({ phase: 'failed', message: `Workflow ${workflowPhase}` })
+        expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+        expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      }
     )
   })
 
@@ -6272,6 +7298,7 @@ describe('WorkflowRecipeReconciler', () => {
         workloads: [{ id: 'api', type: 'deployment', image: 'api:latest', port: 8080 }],
         resources: [{ id: 'data', type: 'pvc', size: '10Gi' }],
         steps: [{ id: 'run', run: snippetRun() }],
+        gfs: { publishTargets: [{ drive: 'main', target: 'published-results' }] },
       },
       status: { phase: 'candidate' },
     })
@@ -6290,6 +7317,7 @@ describe('WorkflowRecipeReconciler', () => {
     expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
     expect(mockCoreApi.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
     expect(mockCoreApi.createNamespacedService).not.toHaveBeenCalled()
+    expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
   })
 
   it('dryRun still validates that at least one workload or step is configured', async () => {
@@ -7828,7 +8856,7 @@ describe('WorkflowRecipeReconciler', () => {
     function etimedout(): Error {
       return Object.assign(
         new Error(
-          'request to https://203.0.113.1/api/v1/namespaces/sandbox-recipes/services/app failed, reason: connect ETIMEDOUT 203.0.113.1:443'
+          'request to https://203.0.113.10/api/v1/namespaces/sandbox-recipes/services/app failed, reason: connect ETIMEDOUT 203.0.113.10:443'
         ),
         { code: 'ETIMEDOUT', name: 'FetchError' }
       )
@@ -7888,7 +8916,7 @@ describe('WorkflowRecipeReconciler', () => {
         status: {
           phase: 'failed',
           message:
-            'FetchError: request to https://203.0.113.1/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies failed, reason: connect ETIMEDOUT 203.0.113.1:443',
+            'FetchError: request to https://203.0.113.10/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies failed, reason: connect ETIMEDOUT 203.0.113.10:443',
           workloads: [{ id: 'app', type: 'deployment', phase: 'deployed', ready: true }],
         },
       })
@@ -8080,11 +9108,11 @@ describe('WorkflowRecipeReconciler', () => {
     it('self-heals recipes latched by the real dev API-timeout messages', async () => {
       const devMessages = [
         // helpdesk — pre-deploy Context allowlist fetch
-        'Error: Pre-deploy failed for WorkflowRecipe "recipe-helpdesk-v1-0-0-4549198b". WRC cannot start transport workloads until HCC can reconcile child McpServers: Error: Pre-deploy Context allowlist failed for "recipe-helpdesk-v1-0-0-4549198b": request to https://203.0.113.1/apis/clerum.io/v1alpha1/namespaces/mcp-server/contexts/context1 failed, reason: connect ETIMEDOUT 203.0.113.1:443',
+        'Error: Pre-deploy failed for WorkflowRecipe "recipe-helpdesk-v1-0-0-4549198b". WRC cannot start transport workloads until HCC can reconcile child McpServers: Error: Pre-deploy Context allowlist failed for "recipe-helpdesk-v1-0-0-4549198b": request to https://203.0.113.10/apis/clerum.io/v1alpha1/namespaces/mcp-server/contexts/context1 failed, reason: connect ETIMEDOUT 203.0.113.10:443',
         // leadforge — NetworkPolicy fetch
-        'FetchError: request to https://203.0.113.1/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies/wl-egress-recipe-leadforge-app-v1-0-0-bdb457b6-prospector-api failed, reason: connect ETIMEDOUT 203.0.113.1:443',
+        'FetchError: request to https://203.0.113.10/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies/wl-egress-recipe-leadforge-app-v1-0-0-bdb457b6-prospector-api failed, reason: connect ETIMEDOUT 203.0.113.10:443',
         // recap — NetworkPolicy list
-        'FetchError: request to https://203.0.113.1/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies failed, reason: connect ETIMEDOUT 203.0.113.1:443',
+        'FetchError: request to https://203.0.113.10/apis/networking.k8s.io/v1/namespaces/sandbox-recipes/networkpolicies failed, reason: connect ETIMEDOUT 203.0.113.10:443',
       ]
       for (const message of devMessages) {
         const recipe = makeRecipe({

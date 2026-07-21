@@ -71,7 +71,7 @@ function isResourceDiscoveryUnavailable(message: string): boolean {
 
 export function useGfsBrowserController() {
   const queryClient = useQueryClient()
-  const { isAuthenticated, me } = useAuthContext()
+  const { isAuthenticated, me, runtimeConfigState } = useAuthContext()
   const [crumbs, setCrumbs] = useState<GfsCrumb[]>([])
   const [openError, setOpenError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
@@ -79,9 +79,13 @@ export function useGfsBrowserController() {
 
   const current = crumbs.length ? crumbs[crumbs.length - 1] : null
   const currentIsDirectory = current?.kind === 'directory'
+  // Scope gfs cache/crumbs by environment too (spec §5.2): the same user/team
+  // pair addresses different resources across clusters, so an env switch must
+  // reset the browser + drop the gfs query subtree.
+  const envKey = runtimeConfigState?.envKey ?? ''
   const sessionScope = useMemo(
-    () => (isAuthenticated && me ? `${me.id}:${me.teamId ?? ''}` : null),
-    [isAuthenticated, me]
+    () => (isAuthenticated && me ? `${envKey}:${me.id}:${me.teamId ?? ''}` : null),
+    [envKey, isAuthenticated, me]
   )
   const canListAccessibleResources = typeof window.clerum?.gfs?.listAccessible === 'function'
 

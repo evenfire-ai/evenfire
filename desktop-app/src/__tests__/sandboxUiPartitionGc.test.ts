@@ -1,17 +1,43 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import {
   type GcPlanInput,
+  SANDBOX_UI_PRE_ENV_MIGRATION_MARKER,
+  isPreEnvSandboxUiPartitionDirName,
   isSandboxUiPartitionDirName,
+  isSandboxUiPartitionDirNameForEnv,
+  maybeWipePreEnvSandboxUiPartitions,
   partitionDirNameFor,
   planSandboxUiPartitionGc,
 } from '../sandboxUiPartitionGc.js'
 
+const clearStorageData = vi.fn(async () => {})
+vi.mock('electron', () => ({
+  app: { getPath: vi.fn(() => '/tmp/clerum-desktop-test') },
+  session: { fromPartition: vi.fn(() => ({ clearStorageData })) },
+}))
+
 describe('partitionDirNameFor', () => {
-  it('matches the persist:sandbox-ui-<ns>-<name> partition encoding (minus the `persist:` prefix)', () => {
-    // The driver stamps `persist:sandbox-ui-${ns}-${name}` as the
+  it('matches the persist:sandbox-ui-<env>-<ns>-<name> partition encoding (minus the `persist:` prefix)', () => {
+    // The driver stamps `persist:sandbox-ui-${env}-${ns}-${name}` as the
     // Electron partition; on disk, Chromium drops the `persist:`
-    // prefix, so the directory name is `sandbox-ui-${ns}-${name}`.
-    expect(partitionDirNameFor('sandbox-recipes', 'r1')).toBe('sandbox-ui-sandbox-recipes-r1')
+    // prefix, so the directory name is `sandbox-ui-${env}-${ns}-${name}`.
+    expect(partitionDirNameFor('env1', 'sandbox-recipes', 'r1')).toBe(
+      'sandbox-ui-env1-sandbox-recipes-r1'
+    )
+  })
+})
+
+describe('isSandboxUiPartitionDirNameForEnv', () => {
+  it('matches only the given environment prefix (spec §5.2)', () => {
+    expect(isSandboxUiPartitionDirNameForEnv('sandbox-ui-envA-sandbox-recipes-r1', 'envA')).toBe(
+      true
+    )
+    expect(isSandboxUiPartitionDirNameForEnv('sandbox-ui-envB-sandbox-recipes-r1', 'envA')).toBe(
+      false
+    )
   })
 })
 
@@ -26,6 +52,92 @@ describe('isSandboxUiPartitionDirName', () => {
     expect(isSandboxUiPartitionDirName('default')).toBe(false)
     expect(isSandboxUiPartitionDirName('persist%3Achatllm-rpc')).toBe(false)
     expect(isSandboxUiPartitionDirName('')).toBe(false)
+  })
+})
+
+describe('isPreEnvSandboxUiPartitionDirName', () => {
+  it('flags pre-env partitions (no envKey segment)', () => {
+    expect(isPreEnvSandboxUiPartitionDirName('sandbox-ui-sandbox-recipes-r1')).toBe(true)
+    expect(isPreEnvSandboxUiPartitionDirName('sandbox-ui-mcp-server-r1')).toBe(true)
+  })
+
+  it('does NOT flag env-scoped partitions (valid <slug>-<12hex> envKey)', () => {
+    expect(
+      isPreEnvSandboxUiPartitionDirName('sandbox-ui-localhost_8091-ab12cd34ef56-sandbox-recipes-r1')
+    ).toBe(false)
+    expect(isPreEnvSandboxUiPartitionDirName('sandbox-ui-env-0123456789ab-mcp-server-r1')).toBe(
+      false
+    )
+  })
+
+  it('ignores non-sandbox-ui dirs and the bare prefix', () => {
+    expect(isPreEnvSandboxUiPartitionDirName('default')).toBe(false)
+    expect(isPreEnvSandboxUiPartitionDirName('sandbox-ui-')).toBe(false)
+  })
+})
+
+describe('maybeWipePreEnvSandboxUiPartitions', () => {
+  let userDataDir: string
+  let partitionsRoot: string
+  const legacyDir = 'sandbox-ui-sandbox-recipes-r1'
+  const envDir = 'sandbox-ui-localhost_8091-ab12cd34ef56-sandbox-recipes-r1'
+
+  beforeEach(async () => {
+    clearStorageData.mockClear()
+    userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sandbox-ui-gc-'))
+    partitionsRoot = path.join(userDataDir, 'Partitions')
+    await fs.mkdir(path.join(partitionsRoot, legacyDir), { recursive: true })
+    await fs.writeFile(path.join(partitionsRoot, legacyDir, 'Cookies'), 'x')
+    await fs.mkdir(path.join(partitionsRoot, envDir), { recursive: true })
+    await fs.writeFile(path.join(partitionsRoot, envDir, 'Cookies'), 'y')
+    await fs.mkdir(path.join(partitionsRoot, 'default'), { recursive: true })
+  })
+
+  afterEach(async () => {
+    await fs.rm(userDataDir, { recursive: true, force: true })
+  })
+
+  const exists = async (p: string) =>
+    fs
+      .access(p)
+      .then(() => true)
+      .catch(() => false)
+
+  it('(a) wipes the pre-env legacy partition', async () => {
+    const wiped = await maybeWipePreEnvSandboxUiPartitions(userDataDir)
+    expect(wiped).toEqual([legacyDir])
+    expect(await exists(path.join(partitionsRoot, legacyDir))).toBe(false)
+    expect(clearStorageData).toHaveBeenCalledTimes(1)
+  })
+
+  it('(b) leaves valid env-scoped partitions and unrelated dirs intact', async () => {
+    await maybeWipePreEnvSandboxUiPartitions(userDataDir)
+    expect(await exists(path.join(partitionsRoot, envDir))).toBe(true)
+    expect(await exists(path.join(partitionsRoot, 'default'))).toBe(true)
+  })
+
+  it('(c) marker prevents a second run from re-scanning/wiping', async () => {
+    await maybeWipePreEnvSandboxUiPartitions(userDataDir)
+    expect(await exists(path.join(userDataDir, SANDBOX_UI_PRE_ENV_MIGRATION_MARKER))).toBe(true)
+
+    // Re-create a legacy dir; the marker must keep the second pass a no-op.
+    await fs.mkdir(path.join(partitionsRoot, legacyDir), { recursive: true })
+    clearStorageData.mockClear()
+    const wiped = await maybeWipePreEnvSandboxUiPartitions(userDataDir)
+    expect(wiped).toEqual([])
+    expect(await exists(path.join(partitionsRoot, legacyDir))).toBe(true)
+    expect(clearStorageData).not.toHaveBeenCalled()
+  })
+
+  it('returns [] with no marker when the Partitions dir does not exist', async () => {
+    const fresh = await fs.mkdtemp(path.join(os.tmpdir(), 'sandbox-ui-gc-fresh-'))
+    try {
+      const wiped = await maybeWipePreEnvSandboxUiPartitions(fresh)
+      expect(wiped).toEqual([])
+      expect(await exists(path.join(fresh, SANDBOX_UI_PRE_ENV_MIGRATION_MARKER))).toBe(false)
+    } finally {
+      await fs.rm(fresh, { recursive: true, force: true })
+    }
   })
 })
 

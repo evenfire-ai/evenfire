@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import Image from 'next/image'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
+import { LoadingScreen } from '@components/LoadingScreen'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { requestControlAdminPasswordReset } from '@lib/api'
 import { sanitizeControlUiReturnPath } from '@lib/authRedirect'
@@ -68,13 +69,7 @@ function PageContent() {
   }
 
   if (authState.isLoading || authState.isLoggedIn) {
-    return (
-      <main className="cu-app cu-app--auth">
-        <div className="cu-card cu-card--auth">
-          <div className="cu-card__body">Loading...</div>
-        </div>
-      </main>
-    )
+    return <LoadingScreen />
   }
 
   return (
@@ -195,15 +190,7 @@ function PageContent() {
 
 export default function Page() {
   return (
-    <React.Suspense
-      fallback={
-        <main className="cu-app cu-app--auth">
-          <div className="cu-card cu-card--auth">
-            <div className="cu-card__body">Loading...</div>
-          </div>
-        </main>
-      }
-    >
+    <React.Suspense fallback={<LoadingScreen />}>
       <PageContent />
     </React.Suspense>
   )

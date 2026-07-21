@@ -84,6 +84,50 @@ export interface NetworkPolicyConfig {
   pluginWorkloadSdkSandboxAccess?: boolean
 }
 
+export function buildCoordinatorGfsNetworkPolicy(
+  config: Pick<NetworkPolicyConfig, 'recipeName' | 'sandboxNamespace' | 'gfsNamespace' | 'gfscPort'>
+): k8s.V1NetworkPolicy {
+  const gfsNamespace = config.gfsNamespace ?? 'gfs'
+  const gfscPort = config.gfscPort ?? 8087
+
+  return {
+    apiVersion: 'networking.k8s.io/v1',
+    kind: 'NetworkPolicy',
+    metadata: {
+      name: `${config.recipeName}-coordinator-to-gfs`,
+      namespace: config.sandboxNamespace,
+      labels: {
+        'clerum.io/recipe': config.recipeName,
+        'clerum.io/managed-by': 'wrc',
+      },
+    },
+    spec: {
+      podSelector: {
+        matchLabels: {
+          'clerum.io/recipe': config.recipeName,
+          'clerum.io/component': 'workflow-coordinator',
+        },
+      },
+      policyTypes: ['Egress'],
+      egress: [
+        {
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': gfsNamespace },
+              },
+              podSelector: {
+                matchLabels: { app: 'gfs-controller' },
+              },
+            },
+          ],
+          ports: [{ port: gfscPort, protocol: 'TCP' }],
+        },
+      ],
+    },
+  }
+}
+
 export const PUBLIC_HTTP_EGRESS_EXCEPT_CIDRS = [
   '0.0.0.0/8',
   '10.0.0.0/8',
@@ -181,39 +225,7 @@ export function buildWorkflowNetworkPolicies(
     snippetRunnerPublicHttpEgressRule
       ? { 'clerum.io/egress-class': config.snippetRunnerPublicHttpEgressClass ?? 'exact-host' }
       : {}
-  const coordinatorToGfs: k8s.V1NetworkPolicy = {
-    apiVersion: 'networking.k8s.io/v1',
-    kind: 'NetworkPolicy',
-    metadata: {
-      name: `${config.recipeName}-coordinator-to-gfs`,
-      namespace: config.sandboxNamespace,
-      labels: commonLabels,
-    },
-    spec: {
-      podSelector: {
-        matchLabels: {
-          'clerum.io/recipe': config.recipeName,
-          'clerum.io/component': 'workflow-coordinator',
-        },
-      },
-      policyTypes: ['Egress'],
-      egress: [
-        {
-          to: [
-            {
-              namespaceSelector: {
-                matchLabels: { 'kubernetes.io/metadata.name': gfsNamespace },
-              },
-              podSelector: {
-                matchLabels: { app: 'gfs-controller' },
-              },
-            },
-          ],
-          ports: [{ port: gfscPort, protocol: 'TCP' as const }],
-        },
-      ],
-    },
-  }
+  const coordinatorToGfs = buildCoordinatorGfsNetworkPolicy(config)
 
   const coordinatorToWrc: k8s.V1NetworkPolicy = {
     apiVersion: 'networking.k8s.io/v1',

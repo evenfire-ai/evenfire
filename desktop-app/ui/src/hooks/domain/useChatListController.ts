@@ -145,9 +145,28 @@ export function useChatListController({
 
       const merged = [...localChats, ...fromServerOnly].sort(byUpdatedDesc)
       setChatList(merged)
+
+      // Persist server freshness into the local index (spec §5.3): keeps the
+      // durable sidebar order aligned with the source of truth. A pure tail
+      // effect that does NOT affect this render — the merge above sorts local
+      // chats by their (possibly stale) local `updatedAt`, so a chat whose
+      // server `lastActivityAt` is newer only re-sorts on the next cold start
+      // from this persisted reconcile. Best-effort: must never block or fail the
+      // load (fully swallowed).
+      try {
+        void chatStore
+          .reconcileServerSessions(
+            agentRef,
+            serverSessions.map(s => ({ chatId: s.chatId, lastActivityAt: s.lastActivityAt }))
+          )
+          .catch(() => undefined)
+      } catch {
+        // ignore — reconciliation is best-effort freshness only
+      }
+
       return { index, merged }
     },
-    [chatStore.getIndex, chatStore.listSessions, fsm]
+    [chatStore.getIndex, chatStore.listSessions, chatStore.reconcileServerSessions, fsm]
   )
 
   const loadChatList = useCallback(

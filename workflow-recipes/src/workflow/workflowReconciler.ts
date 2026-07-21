@@ -114,11 +114,7 @@ import {
   deleteScheduling,
   reconcileScheduling,
 } from './schedulingHandler'
-import {
-  buildMcpHostRuntimeTokenSecret,
-  buildTriggerTokenSecret,
-  createCoordinatorTokens,
-} from './secretFactory'
+import { buildMcpHostRuntimeTokenSecret, createCoordinatorTokens } from './secretFactory'
 import { SNIPPET_RUN_KEYS } from './snippetRunSchema'
 import {
   CyclicDependencyError,
@@ -134,8 +130,6 @@ import {
   WorkflowPhase,
 } from './types'
 import { validateWorkflowRecipeLimits } from './workflowLimits'
-
-const TRIGGER_TOKEN_NAMESPACE = 'control-plane'
 
 const DEFAULT_WORKFLOW_OUTPUT_STORAGE_SIZE = '256Mi'
 const WORKFLOW_OUTPUT_PVC_DELETE_WAIT_MS = 30_000
@@ -1243,7 +1237,7 @@ export class WorkflowReconciler {
       const coordinatorGfsToken = coordinatorGfsBinding ? coordinatorGfsBinding.token : undefined
 
       // 1. Create coordinator token Secret
-      const { secret: tokenSecret, cronJobTriggerToken } = await createCoordinatorTokens(
+      const tokenSecret = await createCoordinatorTokens(
         recipeName,
         this.deps.tokenFactory,
         this.deps.config.sandboxNamespace,
@@ -1269,27 +1263,6 @@ export class WorkflowReconciler {
           gfsSubject: coordinatorGfsSubject,
           gfsScopes: coordinatorGfsScopes,
         })
-      }
-
-      // Create trigger token Secret in control-plane for CronJob access.
-      // Uses a minimal-scope token (trigger_write only) — least privilege for the CronJob container.
-      // Cross-namespace ownerRefs are not enforced by K8s GC; cleanup is in reconcileDelete().
-      const triggerTokenSecret = buildTriggerTokenSecret(
-        recipeName,
-        cronJobTriggerToken,
-        TRIGGER_TOKEN_NAMESPACE
-      )
-      const triggerSecretCreated = await this.createIfNotExists(
-        () =>
-          this.deps.coreApi.createNamespacedSecret({
-            namespace: TRIGGER_TOKEN_NAMESPACE,
-            body: triggerTokenSecret,
-          }),
-        `Secret "wf-${recipeName}-trigger-token" in ${TRIGGER_TOKEN_NAMESPACE}`
-      )
-      // Refresh stale tokens (1-hour TTL) so multi-hour schedules don't 401.
-      if (!triggerSecretCreated) {
-        await this.refreshTriggerTokenIfExpiring(recipeName, cronJobTriggerToken)
       }
 
       if (needsMcpHost && !awaitsTriggeredRun) {
@@ -1603,6 +1576,7 @@ export class WorkflowReconciler {
           runtime.pods.mcpHost!.workflowOutputSubPath,
           effectiveWorkflowContextRefForSpec(recipeName, spec),
           {
+            gfsScopes: coordinatorGfsScopes,
             mountWorkflowOutput: runtime.pods.mcpHost!.mountWorkflowOutput,
             workflowOutputScope: runtime.pods.mcpHost!.workflowOutputScope,
             pluginWorkloadSdkEnabled:
@@ -2207,7 +2181,7 @@ export class WorkflowReconciler {
         artifactReaderPort: 8080,
         snippetRunnerPort: 8095,
         includeMcpHost: false,
-        includeCoordinatorGfs: workflowHasGfsPublishTargets(spec),
+        includeCoordinatorGfs: false,
         includeArtifactReader: false,
         includeSnippetRunner: hasSnippetHttpEgress,
         coordinatorPublicHttpEgress: hasCustomCoordinatorHttpEgress,
@@ -2323,7 +2297,9 @@ export class WorkflowReconciler {
       artifactReaderPort: 8080,
       snippetRunnerPort: 8095,
       includeMcpHost: runtime.network.includeMcpHost && mcpHostLaneLive,
-      includeCoordinatorGfs: workflowHasGfsPublishTargets(spec),
+      // The outer WorkflowRecipe reconciler owns this declarative lane so it can
+      // revoke before phase short-circuits while gating creation on provenance.
+      includeCoordinatorGfs: false,
       includeArtifactReader: runtime.network.includeArtifactReader && !awaitsTriggeredRun,
       includeSnippetRunner: runtime.network.includeSnippetRunner && !awaitsTriggeredRun,
       // Plugin Workload SDK (plan §6.1): open the SDK lane when the recipe
@@ -2934,19 +2910,6 @@ export class WorkflowReconciler {
             this.deps.coreApi.deleteCollectionNamespacedService({
               namespace: mcpNs,
               labelSelector: `clerum.io/recipe=${recipeName},clerum.io/managed-by=workflow-recipes`,
-            })
-          ),
-      },
-      // No K8s-level schedule object to delete — `deleteScheduling()` at the
-      // top of this method already cleared the `workflow_schedules` row.
-      // Cross-namespace Secret (control-plane) has no ownerRef GC.
-      {
-        label: `Secret "wf-${recipeName}-trigger-token"`,
-        run: () =>
-          this.safeDelete(() =>
-            this.deps.coreApi.deleteNamespacedSecret({
-              name: `wf-${recipeName}-trigger-token`,
-              namespace: TRIGGER_TOKEN_NAMESPACE,
             })
           ),
       },
@@ -3753,6 +3716,7 @@ export class WorkflowReconciler {
           .filter((x): x is { name: string; url: string } => x !== null),
         ...(s.allowedTools && { allowedTools: s.allowedTools }),
         ...(s.maxIterations && { maxIterations: s.maxIterations }),
+        ...(s.toolChoice !== undefined && { toolChoice: s.toolChoice }),
         ...(s.agent && {
           agent: {
             ...(s.agent.provider && { provider: s.agent.provider }),
@@ -3915,41 +3879,6 @@ export class WorkflowReconciler {
       await this.deps.coreApi.deleteNamespacedPersistentVolumeClaim({ name, namespace })
     } catch (error: unknown) {
       if (getErrorCode(error) !== 404) throw error
-    }
-  }
-
-  /** Replaces the trigger-token Secret if its JWT expires near the runtime refresh window. */
-  private async refreshTriggerTokenIfExpiring(
-    recipeName: string,
-    freshToken: string
-  ): Promise<void> {
-    try {
-      const existing = await this.deps.coreApi.readNamespacedSecret({
-        name: `wf-${recipeName}-trigger-token`,
-        namespace: TRIGGER_TOKEN_NAMESPACE,
-      })
-      const rawToken = existing.data?.['token']
-      const storedToken = rawToken ? Buffer.from(rawToken, 'base64').toString('utf-8') : ''
-      const exp = WorkflowReconciler.jwtExp(storedToken)
-      const nowSecs = Math.floor(Date.now() / 1000)
-      if (exp === 0 || exp - nowSecs < this.runtimeTokenRefreshBeforeSeconds) {
-        await this.deps.coreApi.patchNamespacedSecret(
-          {
-            name: `wf-${recipeName}-trigger-token`,
-            namespace: TRIGGER_TOKEN_NAMESPACE,
-            body: { data: { token: Buffer.from(freshToken).toString('base64') } },
-          },
-          { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
-        )
-        this.log.info(
-          `Refreshed trigger token for ${recipeName} (was expiring in ${exp - nowSecs}s)`
-        )
-      }
-    } catch (err) {
-      // Non-fatal: next reconcile will retry.
-      this.log.error(`Failed to refresh trigger token for ${recipeName}`, {
-        error: err instanceof Error ? err.message : String(err),
-      })
     }
   }
 

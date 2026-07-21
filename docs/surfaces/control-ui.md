@@ -29,7 +29,7 @@ five steps live together.
    can answer "whose usage is this."
 
    ![Control UI usage dashboard: stacked-area token usage over time, grouped by agent](../assets/control-ui-usage-dashboard.webp)
-   *Dev cluster, demo tenant.*
+   _Dev cluster, demo tenant._
 
 2. **Cap it** — `TokenBudgetTable` (`/cost/token-budgets`) and
    `LlmPriceTable` (`/cost/llm-prices`): per-1M-token model prices (input,
@@ -61,7 +61,7 @@ five steps live together.
    [Configure approvals](../how-to/configure-approvals.md).
 
    ![Control UI per-tool approval editor on a host detail page](../assets/control-ui-approval-editor.webp)
-   *Dev cluster, demo tenant.*
+   _Dev cluster, demo tenant._
 
 4. **Constrain it** — `EgressEditor` (`components/EgressEditor.tsx`, model in
    `lib/egressModel.ts`): closed-by-default, exact-host, exact-CIDR/IP (where
@@ -74,7 +74,7 @@ five steps live together.
    URL.
 
    ![Control UI EgressEditor on the Edit Connector page: exact-host mode with allowed domain api.airtable.com, allowed ports, and an egress summary capped at a maximum of 20](../assets/control-ui-egress-editor.webp)
-   *Dev cluster, demo tenant.*
+   _Dev cluster, demo tenant._
 
 5. **Govern what gets installed** — `RegistryCatalog`
    (`components/RegistryCatalog.tsx`), at `/registry`: marketplace entries
@@ -96,7 +96,7 @@ five steps live together.
    [publish](../how-to/publish-plugin-to-registry.md) under its own org.
 
    ![Control UI registry catalog at /registry showing trust levels and the install flow](../assets/control-ui-registry-install.webp)
-   *Dev cluster, demo tenant.*
+   _Dev cluster, demo tenant._
 
 ## Every screen writes a CRD
 
@@ -107,25 +107,25 @@ CRD (registry entries, publisher credentials, users/teams, secrets, outputs,
 cost records, global-file resources and grants, settings). See the
 [CRD reference](../crds/README.md) for the full schema of each resource. One
 caveat to the heading: the `GlobalFileSystem` CRD itself is applied out of band
-(kustomize), and the Global Files screen only manages the brokered gfs
+(kustomize), and the Global File System screen only manages the brokered gfs
 resources and grants inside it — it never writes that CR.
 
-| Sidebar label     | Route                                                    | CRD / control-api resource                    |
-| ------------------ | --------------------------------------------------------- | ---------------------------------------------- |
-| Agents             | `/hosts`                                                 | `Host`                                          |
-| Connectors         | `/mcp-servers`                                           | `McpServer`                                     |
-| Plugins            | `/workflow-recipes`                                      | `WorkflowRecipe`                                |
-| Shared Files       | `/shared-filesystems`                                    | `SharedFileSystem`                              |
-| Global Files       | `/gfs`                                                   | gfs resources & grants (non-CRD)               |
-| Marketplace        | `/registry`                                              | registry (non-CRD)                             |
-| Publisher          | `/publisher`                                             | publisher (non-CRD)                             |
-| External Channels  | `/communication-channels`                                | `CommunicationChannel`                          |
-| Users & Teams      | `/profile-admin/users`                                   | users/teams (non-CRD)                           |
-| Contexts           | `/contexts`                                              | `Context`                                       |
-| Secrets            | `/secrets`                                               | secrets (non-CRD)                               |
-| Outputs            | `/outputs`                                               | outputs (non-CRD)                               |
-| Cost & Usage       | `/cost/usage`, `/cost/llm-prices`, `/cost/token-budgets` | cost (non-CRD)                                  |
-| Settings           | `/settings`                                              | settings (non-CRD)                              |
+| Sidebar label      | Route                                                                                  | CRD / control-api resource       |
+| ------------------ | -------------------------------------------------------------------------------------- | -------------------------------- |
+| Agent Files        | `/agent-files`                                                                         | `SharedFileSystem`               |
+| Agent Outputs      | `/agent-outputs/recipe-artifacts`                                                      | outputs (non-CRD)                |
+| Agents             | `/agents`                                                                              | `Host`                           |
+| Connectors         | `/connectors`                                                                          | `McpServer`                      |
+| Contexts           | `/contexts`                                                                            | `Context`                        |
+| Cost & Usage       | `/cost-and-usage/usage`, `/cost-and-usage/llm-prices`, `/cost-and-usage/token-budgets` | cost (non-CRD)                   |
+| External Channels  | `/external-channels`                                                                   | `CommunicationChannel`           |
+| Global File System | `/global-file-system`                                                                  | gfs resources & grants (non-CRD) |
+| Marketplace        | `/marketplace/connectors`                                                              | registry (non-CRD)               |
+| Plugins            | `/plugins`                                                                             | `WorkflowRecipe`                 |
+| Publisher          | `/publisher`                                                                           | publisher (non-CRD)              |
+| Secrets            | `/secrets/llm`                                                                         | secrets (non-CRD)                |
+| Settings           | `/settings/ui`                                                                         | settings (non-CRD)               |
+| Users & Teams      | `/users-and-teams/users`                                                               | users/teams (non-CRD)            |
 
 Secret **values are write-only from the UI**: the Secrets screen lets an
 admin create or replace a value, but never displays one back.

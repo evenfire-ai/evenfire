@@ -152,7 +152,19 @@ export function seedGfsFileFixture(name: string): GfsFileFixture {
   if (!UUID_RE.test(resourceId) || !UUID_RE.test(fileResourceId)) {
     throw new Error(`failed to seed GFS file fixture ${name}: ${row}`)
   }
-  seedGfsBlob(fileResourceId, fileContent)
+  try {
+    seedGfsBlob(fileResourceId, fileContent)
+  } catch (error) {
+    try {
+      cleanupGfsFixture(name)
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `failed to seed and roll back GFS file fixture ${name}`
+      )
+    }
+    throw error
+  }
   return {
     name,
     fileName,
@@ -292,29 +304,41 @@ export function cleanupGfsFixture(name: string): void {
     .split('\n')
     .map(line => line.trim())
     .filter(line => UUID_RE.test(line))
+  const cleanupErrors: unknown[] = []
   for (const resourceId of resourceIds) {
-    cleanupGfsBlob(resourceId)
+    try {
+      cleanupGfsBlob(resourceId)
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
   }
-  runControlPostgresSql(`
-    WITH fixture_resources AS (
-      SELECT resource_id
-        FROM gfs_resources
-       WHERE drive = ${sqlLiteral(GFS_E2E_DRIVE)}
-         AND (path_cache = ${sqlLiteral(`/${name}`)} OR path_cache LIKE ${sqlLiteral(`/${name}/%`)})
-    )
-    DELETE FROM gfs_grants WHERE resource_id IN (SELECT resource_id FROM fixture_resources);
+  try {
+    runControlPostgresSql(`
+      WITH fixture_resources AS (
+        SELECT resource_id
+          FROM gfs_resources
+         WHERE drive = ${sqlLiteral(GFS_E2E_DRIVE)}
+           AND (path_cache = ${sqlLiteral(`/${name}`)} OR path_cache LIKE ${sqlLiteral(`/${name}/%`)})
+      )
+      DELETE FROM gfs_grants WHERE resource_id IN (SELECT resource_id FROM fixture_resources);
 
-    WITH fixture_resources AS (
-      SELECT resource_id
-        FROM gfs_resources
-       WHERE drive = ${sqlLiteral(GFS_E2E_DRIVE)}
-         AND (path_cache = ${sqlLiteral(`/${name}`)} OR path_cache LIKE ${sqlLiteral(`/${name}/%`)})
-    )
-    DELETE FROM gfs_shares WHERE resource_id IN (SELECT resource_id FROM fixture_resources);
+      WITH fixture_resources AS (
+        SELECT resource_id
+          FROM gfs_resources
+         WHERE drive = ${sqlLiteral(GFS_E2E_DRIVE)}
+           AND (path_cache = ${sqlLiteral(`/${name}`)} OR path_cache LIKE ${sqlLiteral(`/${name}/%`)})
+      )
+      DELETE FROM gfs_shares WHERE resource_id IN (SELECT resource_id FROM fixture_resources);
 
-    UPDATE gfs_resources
-       SET deleted_at = now(), updated_at = now()
-     WHERE drive = ${sqlLiteral(GFS_E2E_DRIVE)}
-       AND (path_cache = ${sqlLiteral(`/${name}`)} OR path_cache LIKE ${sqlLiteral(`/${name}/%`)});
-  `)
+      UPDATE gfs_resources
+         SET deleted_at = now(), updated_at = now()
+       WHERE drive = ${sqlLiteral(GFS_E2E_DRIVE)}
+         AND (path_cache = ${sqlLiteral(`/${name}`)} OR path_cache LIKE ${sqlLiteral(`/${name}/%`)});
+    `)
+  } catch (error) {
+    cleanupErrors.push(error)
+  }
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(cleanupErrors, `failed to fully clean GFS fixture ${name}`)
+  }
 }

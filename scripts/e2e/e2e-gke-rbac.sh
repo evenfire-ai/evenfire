@@ -46,7 +46,7 @@ echo ""
 # ═════════════════════════════════════════════════════════════════════
 log "Phase 1: ClusterRoles Exist"
 
-for role in control-api-cluster-role control-api-pod-reader wrc-trigger-role host-context-controller-role; do
+for role in control-api-cluster-role control-api-pod-reader host-context-controller-role; do
   if kubectl get clusterrole "$role" >/dev/null 2>&1; then
     pass "ClusterRole $role exists"
     detail "$(kubectl get clusterrole "$role" -o jsonpath='{.metadata.creationTimestamp}')"
@@ -61,7 +61,7 @@ echo ""
 # ═════════════════════════════════════════════════════════════════════
 log "Phase 2: ClusterRoleBindings Exist"
 
-for binding in control-api-cluster-binding control-api-pod-reader-binding wrc-trigger-binding host-context-controller-binding; do
+for binding in control-api-cluster-binding control-api-pod-reader-binding host-context-controller-binding; do
   if kubectl get clusterrolebinding "$binding" >/dev/null 2>&1; then
     pass "ClusterRoleBinding $binding exists"
     detail "$(kubectl get clusterrolebinding "$binding" -o jsonpath='{.roleRef.name}')"

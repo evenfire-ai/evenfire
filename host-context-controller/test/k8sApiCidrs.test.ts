@@ -12,22 +12,22 @@ describe('parseK8sApiCidrs', () => {
   })
 
   it('accepts a single /32', () => {
-    expect(parseK8sApiCidrs('203.0.113.1/32')).toEqual(['203.0.113.1/32'])
+    expect(parseK8sApiCidrs('203.0.113.10/32')).toEqual(['203.0.113.10/32'])
   })
 
   it('accepts two CIDRs and trims whitespace', () => {
-    expect(parseK8sApiCidrs(' 203.0.113.1/32 , 10.128.0.2/32 ')).toEqual([
-      '203.0.113.1/32',
-      '10.128.0.2/32',
+    expect(parseK8sApiCidrs(' 203.0.113.10/32 , 203.0.113.11/32 ')).toEqual([
+      '203.0.113.10/32',
+      '203.0.113.11/32',
     ])
   })
 
   it('accepts the /24 boundary', () => {
-    expect(parseK8sApiCidrs('10.128.0.0/24')).toEqual(['10.128.0.0/24'])
+    expect(parseK8sApiCidrs('203.0.113.11/24')).toEqual(['203.0.113.11/24'])
   })
 
   it('rejects a missing prefix', () => {
-    expect(() => parseK8sApiCidrs('203.0.113.1')).toThrow(/missing prefix/)
+    expect(() => parseK8sApiCidrs('203.0.113.10')).toThrow(/missing prefix/)
   })
 
   it('rejects an invalid IP', () => {
@@ -48,7 +48,7 @@ describe('parseK8sApiCidrs', () => {
 
   it('rejects an IPv4 prefix wider than /24', () => {
     expect(() => parseK8sApiCidrs('10.0.0.0/8')).toThrow(/over-broad/)
-    expect(() => parseK8sApiCidrs('10.128.0.0/23')).toThrow(/over-broad/)
+    expect(() => parseK8sApiCidrs('203.0.113.11/23')).toThrow(/over-broad/)
   })
 
   it('rejects ::/0 as over-broad', () => {
@@ -56,7 +56,7 @@ describe('parseK8sApiCidrs', () => {
   })
 
   it('throws if any entry in a list is bad (no partial accept)', () => {
-    expect(() => parseK8sApiCidrs('203.0.113.1/32,0.0.0.0/0')).toThrow(/over-broad/)
+    expect(() => parseK8sApiCidrs('203.0.113.10/32,0.0.0.0/0')).toThrow(/over-broad/)
   })
 })
 
@@ -86,6 +86,6 @@ describe('parseNodeLocalDnsCidr', () => {
   })
 
   it('rejects ranges wider than a single service IP', () => {
-    expect(() => parseNodeLocalDnsCidr('203.0.113.0/24')).toThrow(/expected \/32/)
+    expect(() => parseNodeLocalDnsCidr('203.0.113.10/24')).toThrow(/expected \/32/)
   })
 })

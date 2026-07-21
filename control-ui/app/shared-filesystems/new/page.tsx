@@ -135,7 +135,7 @@ export default function CreateSharedFileSystemPage() {
     try {
       await createSharedFileSystem(input)
       showToast(`Shared filesystem "${normalizedName}" created.`, { tone: 'success' })
-      router.push(CONTROL_ROUTES.sharedFiles.root)
+      router.push(CONTROL_ROUTES.agentFiles.root)
     } catch (createError) {
       setError(
         createError instanceof Error ? createError.message : 'Failed to create SharedFileSystem'
@@ -154,8 +154,8 @@ export default function CreateSharedFileSystemPage() {
               icon={<IconSharedFiles />}
               title="Create SharedFileSystem"
               subtitle="Provision workspace storage that Contexts can mount read-only into agent pods."
-              backLabel="Back to shared files"
-              onBack={() => router.push(CONTROL_ROUTES.sharedFiles.root)}
+              backLabel="Back to Agent Files"
+              onBack={() => router.push(CONTROL_ROUTES.agentFiles.root)}
               backDisabled={saving}
             />
           }
@@ -339,7 +339,7 @@ export default function CreateSharedFileSystemPage() {
                 variant="ghost"
                 size="sm"
                 onClick={() =>
-                  step === 0 ? router.push(CONTROL_ROUTES.sharedFiles.root) : setStep(step - 1)
+                  step === 0 ? router.push(CONTROL_ROUTES.agentFiles.root) : setStep(step - 1)
                 }
                 disabled={saving}
               >

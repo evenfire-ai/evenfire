@@ -8,13 +8,12 @@
  * 4. Coordinator → mcp_host (execute) — mounted in Secret
  * 5. Coordinator → WRC (status/configure_model/model_injection_request) — mounted in Secret
  * 5b. Custom coordinator → WRC (reduced status/signal/health/model_injection_request) — mounted in Secret
- * 6. CronJob → WRC (trigger_write) — mounted in Secret
  * */
 import { SignJWT, importPKCS8 } from 'jose'
 import { randomUUID } from 'node:crypto'
 
 export type TokenAudience = 'mcp-host' | 'clerum-wrc'
-export type TokenSubject = 'coordinator' | 'custom-coordinator' | 'wrc' | 'cronjob'
+export type TokenSubject = 'coordinator' | 'custom-coordinator' | 'wrc'
 
 export interface TokenClaims {
   sub: TokenSubject
@@ -33,8 +32,6 @@ export interface TokenClaims {
 
 /** Default TTL for rotatable runtime JWTs mounted through Kubernetes Secret volumes. */
 export const DEFAULT_RUNTIME_TOKEN_TTL_SECONDS = 15 * 60
-/** Cron trigger tokens are separate from live runtime JWTs and are refreshed by WRC. */
-const CRONJOB_TRIGGER_TOKEN_EXPIRY_SECONDS = 60 * 60
 /** Ephemeral artifact tokens (60s) — signed fresh per request, never stored. */
 const ARTIFACT_TOKEN_EXPIRY_SECONDS = 60
 
@@ -137,7 +134,7 @@ export class JwtTokenFactory {
     )
   }
 
-  /** Token Type 3: Coordinator → WRC (scopes: configure_model, model_injection_request, status_write, status_read, signal_read, health_read, trigger_write) */
+  /** Token Type 3: Coordinator → WRC (configure/model/status/signal/health scopes). */
   async signCoordinatorToWrcToken(recipeName: string, recipeNamespace: string): Promise<string> {
     return this.sign(
       {
@@ -152,14 +149,13 @@ export class JwtTokenFactory {
           'status_read',
           'signal_read',
           'health_read',
-          'trigger_write',
         ],
       },
       this.runtimeTokenTtlSeconds
     )
   }
 
-  /** Token Type 3b: Custom coordinator → WRC (no trigger_write or configure_model). */
+  /** Token Type 3b: Custom coordinator → WRC (no configure_model). */
   async signCustomCoordinatorToWrcToken(
     recipeName: string,
     recipeNamespace: string
@@ -179,20 +175,6 @@ export class JwtTokenFactory {
         ],
       },
       this.runtimeTokenTtlSeconds
-    )
-  }
-
-  /** Token Type 4: CronJob → WRC (scope: trigger_write only — least privilege for scheduled triggers) */
-  async signCronJobTriggerToken(recipeName: string, recipeNamespace: string): Promise<string> {
-    return this.sign(
-      {
-        sub: 'cronjob',
-        aud: 'clerum-wrc',
-        recipeName,
-        recipeNamespace,
-        scopes: ['trigger_write'],
-      },
-      CRONJOB_TRIGGER_TOKEN_EXPIRY_SECONDS
     )
   }
 

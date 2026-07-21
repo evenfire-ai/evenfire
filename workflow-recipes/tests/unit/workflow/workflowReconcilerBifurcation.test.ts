@@ -75,6 +75,8 @@ const mockCustomApi = {
 
 const mockNetworkingApi = {
   createNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
+  readNamespacedNetworkPolicy: vi.fn().mockRejectedValue({ code: 404 }),
+  replaceNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
   deleteNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
   listNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ items: [] }),
 }
@@ -471,7 +473,9 @@ describe('Workflow Reconciler Bifurcation', () => {
       message: 'Workflow trigger infrastructure registered',
       skipStatusPatch: true,
     })
-    expect(validateWorkflowSpec).not.toHaveBeenCalled()
+    // The steady short-circuit still runs semantic preflight before deciding
+    // whether coordinator GFS egress is eligible; only the inner reconcile is skipped.
+    expect(validateWorkflowSpec).toHaveBeenCalledTimes(1)
     expect(innerReconcile).not.toHaveBeenCalled()
   })
 
@@ -598,6 +602,10 @@ describe('Workflow Reconciler Bifurcation', () => {
   })
 
   it('uses inherited child resources for templates without re-creating parent-owned resources', async () => {
+    const verifyWorkflowRunProvenance = vi.fn().mockResolvedValue('verified')
+    reconciler = new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+      verifyWorkflowRunProvenance,
+    })
     const callOrder: string[] = []
     mockCoreApi.createNamespacedSecret.mockImplementationOnce(async () => {
       callOrder.push('secret')
@@ -640,7 +648,10 @@ describe('Workflow Reconciler Bifurcation', () => {
         name: 'wf-db-run-00000000',
         namespace: 'sandbox-recipes',
         uid: 'uid-wf-db-run',
-        labels: { 'clerum.io/parent-recipe': 'wf-db' },
+        labels: {
+          'clerum.io/parent-recipe': 'wf-db',
+          'clerum.io/workflow-run-id': '00000000-0000-4000-8000-000000000123',
+        },
         annotations: { [INHERITED_PARENT_RESOURCES_ANNOTATION]: 'true' },
         ownerReferences: [
           {
@@ -685,6 +696,13 @@ describe('Workflow Reconciler Bifurcation', () => {
     const result = await reconciler.reconcile(recipe)
 
     expect(result.phase).toBe('deploying')
+    expect(verifyWorkflowRunProvenance).toHaveBeenCalledWith({
+      runId: '00000000-0000-4000-8000-000000000123',
+      parentNamespace: 'sandbox-recipes',
+      parentName: 'wf-db',
+      childNamespace: 'sandbox-recipes',
+      childName: 'wf-db-run-00000000',
+    })
     expect(callOrder).toEqual(['statefulset', 'runtime'])
     expect(mockCoreApi.createNamespacedSecret).not.toHaveBeenCalled()
     const statefulSet = mockAppsApi.createNamespacedStatefulSet.mock.calls[0]?.[0].body
@@ -794,7 +812,9 @@ describe('Workflow Reconciler Bifurcation', () => {
 
     expect(result.phase).toBe('failed')
     expect(result.message).toBe('snippet postgres capability must declare access')
-    expect(validateWorkflowSpec).toHaveBeenCalledTimes(1)
+    // Preflight runs once before GFS policy eligibility and again after instance
+    // assignment, when runtime Service names reflect the persisted mapping.
+    expect(validateWorkflowSpec).toHaveBeenCalledTimes(2)
     expect(innerReconcile).not.toHaveBeenCalled()
     // Two status patches reserve the name maps before preflight: workload
     // instances and resource instances (issue #571). Neither creates real K8s

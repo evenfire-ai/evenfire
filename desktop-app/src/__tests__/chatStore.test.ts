@@ -296,3 +296,54 @@ describe('path-segment validation', () => {
     await expect(store.loadMessages('agent-1', 'a/b')).resolves.toEqual([])
   })
 })
+
+// ── upsertServerSessions (spec §5.3) ──────────────────────────────────────────
+
+describe('upsertServerSessions', () => {
+  it('refreshes updatedAt for an existing chat when the server is newer', async () => {
+    await store.createChat('agent-1', 'c1')
+    // Force an old updatedAt.
+    await store.saveMessages('agent-1', 'c1', [])
+    const before = (await store.listChats('agent-1')).find(c => c.id === 'c1')!
+    const newer = new Date(Date.now() + 60_000).toISOString()
+
+    const changed = await store.upsertServerSessions('agent-1', [
+      { chatId: 'c1', lastActivityAt: newer },
+    ])
+
+    expect(changed).toBe(1)
+    const after = (await store.listChats('agent-1')).find(c => c.id === 'c1')!
+    expect(new Date(after.updatedAt).getTime()).toBeGreaterThan(
+      new Date(before.updatedAt).getTime()
+    )
+    expect(after.updatedAt).toBe(newer)
+  })
+
+  it('does NOT resurrect a server-only session as a local chat (no delete-resurrection)', async () => {
+    await store.createChat('agent-1', 'c1')
+    const changed = await store.upsertServerSessions('agent-1', [
+      { chatId: 'server-only', lastActivityAt: new Date().toISOString() },
+    ])
+    expect(changed).toBe(0)
+    expect((await store.listChats('agent-1')).map(c => c.id)).toEqual(['c1'])
+  })
+
+  it('never moves a local chat backwards in time (server older is ignored)', async () => {
+    await store.createChat('agent-1', 'c1')
+    const current = (await store.listChats('agent-1')).find(c => c.id === 'c1')!
+    const older = new Date(Date.now() - 60_000).toISOString()
+
+    const changed = await store.upsertServerSessions('agent-1', [
+      { chatId: 'c1', lastActivityAt: older },
+    ])
+
+    expect(changed).toBe(0)
+    const after = (await store.listChats('agent-1')).find(c => c.id === 'c1')!
+    expect(after.updatedAt).toBe(current.updatedAt)
+  })
+
+  it('is a no-op for an empty session list', async () => {
+    await store.createChat('agent-1', 'c1')
+    expect(await store.upsertServerSessions('agent-1', [])).toBe(0)
+  })
+})

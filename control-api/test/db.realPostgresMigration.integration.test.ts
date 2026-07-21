@@ -1,11 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import express from 'express'
+import express, { type Request as ExpressRequest } from 'express'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import type { K8sGateway } from '../src/k8s.js'
-import { auditMutation } from '../src/routes/gfs/grants.js'
+import {
+  type GfsSubject,
+  auditMutation,
+  writeGfsGrantBatchInTransaction,
+} from '../src/routes/gfs/grants.js'
+import { writeGfsShareBatchInTransaction } from '../src/routes/gfs/shares.js'
 import { createRpcAccessUsersRouter } from '../src/routes/rpc-access/users.js'
 import { getCurrentTeam, getTeamAgents, getUserAgents } from '../src/services/directory/index.js'
 import { runWithAdministrativeRequestContext } from '../src/services/tracing/adminOperationContext.js'
@@ -1511,6 +1516,242 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     )
     expect(stored.rows).toEqual([{ sequence_no: auditId, subject: 'host:1st:mcp-host/chatllm' }])
   })
+
+  it('commits GFS grant/share batches atomically and invalidates only after commit', async () => {
+    const operator = await dbPool.query<{ id: string }>(
+      `SELECT id::text FROM control_admin_users
+        WHERE status = 'active' ORDER BY created_at, id LIMIT 1`
+    )
+    const operatorId = operator.rows[0]!.id
+    const shareUserId = randomUUID()
+    const shareTeamId = randomUUID()
+    await dbPool.query(
+      `INSERT INTO users (id, email, name) VALUES ($1, $2, 'Issue 792 Share User')`,
+      [shareUserId, `issue792-share-${shareUserId}@example.test`]
+    )
+    await dbPool.query(`INSERT INTO teams (id, name) VALUES ($1, 'Issue 792 Share Team')`, [
+      shareTeamId,
+    ])
+    const listener = await dbPool.connect()
+    const notifications: string[] = []
+    listener.on('notification', message => {
+      if (message.channel === 'gfs_perm_invalidate') notifications.push(message.channel)
+    })
+    await listener.query('LISTEN gfs_perm_invalidate')
+
+    type BatchCase = {
+      kind: 'grant' | 'share'
+      table: 'gfs_grants' | 'gfs_shares'
+      targets: readonly GfsSubject[]
+      write: (
+        client: PoolClient,
+        params: { req: ExpressRequest; drive: string; resourceId: string }
+      ) => Promise<{ error: unknown }>
+    }
+    const caller = {
+      isOperator: true,
+      subjects: new Set(['operator:']),
+      actorKey: 'operator:',
+    }
+    const cases: BatchCase[] = [
+      {
+        kind: 'grant',
+        table: 'gfs_grants',
+        targets: Array.from({ length: 3 }, () => ({
+          type: 'host' as const,
+          id: `1st:mcp-host/bulk-${randomUUID()}`,
+        })),
+        write: (client, params) =>
+          writeGfsGrantBatchInTransaction(client, {
+            ...params,
+            caller,
+            subjects: cases[0]!.targets,
+            permissions: ['read'],
+            inherit: false,
+          }),
+      },
+      {
+        kind: 'share',
+        table: 'gfs_shares',
+        targets: [
+          { type: 'user', id: shareUserId },
+          { type: 'team', id: shareTeamId },
+        ],
+        write: (client, params) =>
+          writeGfsShareBatchInTransaction(client, {
+            ...params,
+            caller,
+            subjects: cases[1]!.targets,
+            permissions: ['read'],
+            includeDescendants: true,
+          }),
+      },
+    ]
+    const createResource = async (drive: string): Promise<string> => {
+      const resourceId = randomUUID()
+      await dbPool.query(
+        `INSERT INTO gfs_resources (resource_id, drive, name, kind, path_cache)
+         VALUES ($1, $2, '/', 'directory', '/')`,
+        [resourceId, drive]
+      )
+      return resourceId
+    }
+    const runBatch = async (
+      batchCase: BatchCase,
+      resourceId: string,
+      drive: string,
+      requestId: string,
+      beforeCommit?: (client: PoolClient) => Promise<void>
+    ): Promise<void> => {
+      const client = await dbPool.connect()
+      try {
+        await client.query('BEGIN')
+        const req = {
+          adminAuth: { sub: operatorId },
+          correlationId: requestId,
+          ip: '127.0.0.1',
+        } as unknown as ExpressRequest
+        const result = await batchCase.write(client, {
+          req,
+          drive,
+          resourceId,
+        })
+        expect(result.error).toBeNull()
+        await beforeCommit?.(client)
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+    const counts = async (
+      batchCase: BatchCase,
+      resourceId: string,
+      requestId: string
+    ): Promise<{ mutations: string; audits: string; events: string }> => {
+      const result = await dbPool.query<{ mutations: string; audits: string; events: string }>(
+        `SELECT
+           (SELECT COUNT(*)::text FROM ${batchCase.table}
+             WHERE resource_id = $1::uuid) AS mutations,
+           (SELECT COUNT(*)::text FROM gfs_audit WHERE request_id = $2) AS audits,
+           (SELECT COUNT(*)::text FROM administrative_events WHERE request_id = $2) AS events`,
+        [resourceId, requestId]
+      )
+      return result.rows[0]!
+    }
+    const settleListener = async (): Promise<void> => {
+      await listener.query('SELECT 1')
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    const waitForInvalidationCount = async (count: number): Promise<void> => {
+      if (notifications.length >= count) return
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          listener.off('notification', onNotification)
+          reject(new Error('timed out waiting for GFS invalidation'))
+        }, 2_000)
+        const onNotification = (): void => {
+          if (notifications.length < count) return
+          clearTimeout(timeout)
+          listener.off('notification', onNotification)
+          resolve()
+        }
+        listener.on('notification', onNotification)
+      })
+    }
+
+    try {
+      let committedNotificationCount = 0
+      for (const batchCase of cases) {
+        const targetCount = String(batchCase.targets.length)
+        const committedDrive = `issue792-${batchCase.kind}-commit-${randomUUID()}`
+        const committedResourceId = await createResource(committedDrive)
+        const committedRequestId = `issue792-${batchCase.kind}-commit-${randomUUID()}`
+        await runBatch(
+          batchCase,
+          committedResourceId,
+          committedDrive,
+          committedRequestId,
+          async client => {
+            const inside = await client.query<{
+              mutations: string
+              audits: string
+              events: string
+            }>(
+              `SELECT
+                 (SELECT COUNT(*)::text FROM ${batchCase.table}
+                   WHERE resource_id = $1::uuid) AS mutations,
+                 (SELECT COUNT(*)::text FROM gfs_audit WHERE request_id = $2) AS audits,
+                 (SELECT COUNT(*)::text FROM administrative_events
+                   WHERE request_id = $2) AS events`,
+              [committedResourceId, committedRequestId]
+            )
+            expect(inside.rows[0]).toEqual({
+              mutations: targetCount,
+              audits: targetCount,
+              events: targetCount,
+            })
+            expect(notifications).toHaveLength(committedNotificationCount)
+          }
+        )
+        committedNotificationCount += 1
+        await waitForInvalidationCount(committedNotificationCount)
+        expect(await counts(batchCase, committedResourceId, committedRequestId)).toEqual({
+          mutations: targetCount,
+          audits: targetCount,
+          events: targetCount,
+        })
+        expect(notifications).toHaveLength(committedNotificationCount)
+
+        for (const failure of [
+          { stage: 'audit', table: 'gfs_audit' },
+          { stage: 'event', table: 'administrative_events' },
+        ] as const) {
+          const requestId = `issue792-${batchCase.kind}-${failure.stage}-failure-${randomUUID()}`
+          const functionName = `issue792_fail_${batchCase.kind}_${failure.stage}`
+          const triggerName = `${functionName}_trigger`
+          await dbPool.query(
+            `CREATE OR REPLACE FUNCTION ${functionName}() RETURNS trigger
+               LANGUAGE plpgsql AS $$
+             BEGIN
+               IF NEW.request_id = '${requestId}' THEN
+                 RAISE EXCEPTION
+                   'injected issue 792 ${batchCase.kind} ${failure.stage} failure';
+               END IF;
+               RETURN NEW;
+             END;
+             $$;
+             CREATE TRIGGER ${triggerName} BEFORE INSERT ON ${failure.table}
+               FOR EACH ROW EXECUTE FUNCTION ${functionName}();`
+          )
+          const drive = `issue792-${batchCase.kind}-${failure.stage}-${randomUUID()}`
+          const resourceId = await createResource(drive)
+          try {
+            await expect(runBatch(batchCase, resourceId, drive, requestId)).rejects.toThrow(
+              `injected issue 792 ${batchCase.kind} ${failure.stage} failure`
+            )
+          } finally {
+            await dbPool.query(
+              `DROP TRIGGER IF EXISTS ${triggerName} ON ${failure.table};
+               DROP FUNCTION IF EXISTS ${functionName}();`
+            )
+          }
+          await settleListener()
+          expect(await counts(batchCase, resourceId, requestId)).toEqual({
+            mutations: '0',
+            audits: '0',
+            events: '0',
+          })
+          expect(notifications).toHaveLength(committedNotificationCount)
+        }
+      }
+    } finally {
+      await listener.query('UNLISTEN gfs_perm_invalidate')
+      listener.release()
+    }
+  }, 60_000)
 
   it('resolves host intent tenant attribution from the canonical event stream', async () => {
     const operationId = randomUUID()

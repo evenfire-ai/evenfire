@@ -12,6 +12,8 @@ import type { BudgetVerdict } from '../budget/types'
 import { createGetCapabilitiesTool } from '../capabilities/getCapabilitiesTool'
 import { config } from '../config'
 import { FinishReason, type ToolDefinition } from '../core/types'
+import { buildGfsReadTools, buildGfsWriteTools } from '../internalTools/gfs'
+import { createGfscClient, hasGfsRuntimeAccess } from '../internalTools/gfsClient'
 import { SingleTurnProvider, createLLMProvider } from '../llm'
 import { type LlmProvider, descriptorFor, isLlmProvider, primarySlot } from '../llm/registryCore'
 import type { ApiKeys } from '../types'
@@ -717,10 +719,38 @@ export class WorkflowService {
     // a recipe (workflow) runtime never mounts a SharedFileSystem (the SFS PVC is
     // in the mcp-host namespace; recipe pods run in sandbox-recipes), so they would
     // be dead tools in every recipe step agent's toolset.
-    router.registerInternalTools(
-      [...resolveInternalTools(), createGetCapabilitiesTool(key => process.env[key])],
-      getOutputDir()
+    const internalTools = [
+      ...resolveInternalTools(),
+      createGetCapabilitiesTool(key => process.env[key]),
+    ]
+    const requestedGfsToolNames = new Set(
+      (req.allowedTools?.include ?? []).filter(name => name.startsWith('clerum__gfs_'))
     )
+    const gfsEnv = {
+      get: (key: string): string | undefined => process.env[key],
+    }
+    const rawGfsScopes = (process.env.MCP_HOST_GFS_SCOPES ?? '')
+      .split(',')
+      .map(scope => scope.trim())
+      .filter(Boolean)
+    const knownGfsScopes = new Set([
+      'gfs.read',
+      'gfs.write',
+      'gfs.delete',
+      'gfs.manage_acl',
+      'gfs.share',
+    ])
+    const validGfsScopes = rawGfsScopes.every(scope => knownGfsScopes.has(scope))
+    const gfsScopes = new Set(validGfsScopes ? rawGfsScopes : [])
+    if (requestedGfsToolNames.size > 0 && gfsScopes.size > 0 && hasGfsRuntimeAccess(gfsEnv)) {
+      const gfsClient = createGfscClient(gfsEnv)
+      const scopedGfsTools = [
+        ...(gfsScopes.has('gfs.read') ? buildGfsReadTools(gfsClient) : []),
+        ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
+      ].filter(tool => requestedGfsToolNames.has(tool.name))
+      internalTools.push(...scopedGfsTools)
+    }
+    router.registerInternalTools(internalTools, getOutputDir())
     const toolsCalled: ToolCallRecord[] = []
     let totalInputTokens = 0
     let totalOutputTokens = 0
@@ -880,6 +910,17 @@ export class WorkflowService {
         description: t.description ?? '',
         parameters: (t.inputSchema ?? {}) as Record<string, unknown>,
       }))
+      if (req.toolChoice === 'required' && toolDefs.length === 0) {
+        this.revertSoulToGlobal()
+        return {
+          stepId: req.stepId,
+          status: 'failed',
+          error:
+            'required-tool-unavailable: step requires a tool call but no allowed tools are available',
+          toolsCalled,
+          durationMs: Date.now() - startTime,
+        }
+      }
 
       // 3. Build system prompt
       const soulContent = this.soulOverrideActive ? this.stepSoulContent : this.globalSoulContent
@@ -923,7 +964,7 @@ export class WorkflowService {
       const envDefault = parseInt(process.env.CLERUM_WORKFLOW_MAX_ITERATIONS ?? '50', 10)
       const MAX_ITERATIONS = req.maxIterations ?? (envDefault > 0 ? envDefault : 50)
       const WRAP_UP_THRESHOLD = 3 // Force wrap-up when this many iterations remain
-      const requiresToolCall = req.toolChoice === 'required' && toolDefs.length > 0
+      const requiresToolCall = req.toolChoice === 'required'
 
       for (let i = 0; i < MAX_ITERATIONS; i++) {
         onProgress?.({ iteration: i + 1 })

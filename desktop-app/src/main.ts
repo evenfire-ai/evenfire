@@ -1,8 +1,9 @@
-import { BrowserWindow, app, ipcMain, powerMonitor } from 'electron'
+import { BrowserWindow, app, ipcMain, nativeTheme, powerMonitor } from 'electron'
 import path from 'node:path'
 import { AppService } from './appService.js'
 import { config } from './config.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
+import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
 const EVENFIRE_APP_ID = 'ai.evenfire.desktop'
@@ -18,6 +19,26 @@ process.stderr?.on?.('error', () => {})
 let mainWindow: BrowserWindow | null = null
 const appService = new AppService()
 const pendingEvenfireUrls: string[] = []
+
+function systemIconAssetsDirectory(): string {
+  return app.isPackaged ? process.resourcesPath : path.join(__dirname, '../assets')
+}
+
+function wireAdaptiveSystemIcon(): void {
+  installAdaptiveSystemIcon({
+    assetsDirectory: systemIconAssetsDirectory(),
+    getAllWindows: () => BrowserWindow.getAllWindows(),
+    onThemeUpdated: listener => {
+      nativeTheme.on('updated', listener)
+    },
+    onWindowCreated: listener => {
+      app.on('browser-window-created', (_event, window) => listener(window))
+    },
+    platform: process.platform,
+    setDockIcon: app.dock ? icon => app.dock?.setIcon(icon) : undefined,
+    shouldUseDarkColors: () => nativeTheme.shouldUseDarkColors,
+  })
+}
 
 /** True when the window is actually on-screen (not hidden/minimized). Drives the
  *  D.5b T4 nudge copy — `document.visibilityState` doesn't detect minimize on macOS. */
@@ -213,7 +234,7 @@ async function createWindow(): Promise<void> {
       config.appName === EVENFIRE_APP_NAME
         ? EVENFIRE_APP_NAME
         : `${EVENFIRE_APP_NAME} — ${config.appName}`,
-    icon: path.join(__dirname, '../assets/icon.png'),
+    icon: resolveSystemIconPath(systemIconAssetsDirectory(), nativeTheme.shouldUseDarkColors),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -255,6 +276,7 @@ async function createWindow(): Promise<void> {
 
 if (gotSingleInstanceLock) {
   app.whenReady().then(async () => {
+    wireAdaptiveSystemIcon()
     registerIpcHandlers(appService)
     for (const arg of process.argv) {
       if (arg.startsWith(`${DESKTOP_SETUP_PROTOCOL}://`)) {

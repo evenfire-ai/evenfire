@@ -1,16 +1,17 @@
 /**
  * Integration tests for clerumRegistryClient against a live registry.
  *
- * Requires a running registry server reachable at TEST_REGISTRY_URL
- * (any server implementing the registry contract — npm-style /:name and
- * OCI-style /api/v1/entries routes). Run locally:
+ * Run locally (boot evenfire-registry yourself first):
  *   docker run -d --name pg -e POSTGRES_PASSWORD=postgres -p 15432:5432 postgres:16-alpine
- *   # Start your registry server (see your private deployment runbook for setup)
- *   # then export the URL:
+ *   cd ../evenfire-registry
+ *   CLERUM_REGISTRY_DB_URL=postgres://postgres:postgres@127.0.0.1:15432/registry \
+ *   CLERUM_REGISTRY_AUTH_ENABLED=false \
+ *   PORT=18085 npm start &
+ *   cd ../clerum/.claude/worktrees/feat-registry-consumer/workflow-recipes
  *   TEST_REGISTRY_URL=http://127.0.0.1:18085 npm test test/integration/clerumRegistryClient.test.ts
  *
- * In CI: set TEST_REGISTRY_URL to point at a running registry server before
- * running this suite.
+ * In CI: the `registry-contract` job in clerum/.github/workflows/ci.yaml boots
+ * evenfire-registry as a sibling checkout and exports TEST_REGISTRY_URL.
  *
  * Skip when TEST_REGISTRY_URL is unset so `npm test` doesn't fail when a
  * developer runs the full WRC suite without booting a registry.

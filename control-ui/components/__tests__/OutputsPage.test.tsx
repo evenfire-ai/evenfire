@@ -26,7 +26,7 @@ vi.mock('../../components/DashboardLayout', () => ({
 }))
 
 vi.mock('../../components/SectionSearchInput', () => ({
-  SectionSearchInput: () => <input aria-label="Search outputs" />,
+  SectionSearchInput: () => <input aria-label="Search agent outputs" />,
 }))
 
 vi.mock('../../components/Sidebar/icons', () => ({
@@ -80,6 +80,7 @@ describe('OutputsPage', () => {
 
     const { container } = render(<OutputsPage />)
 
+    expect(screen.getByText('Agent Outputs')).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'File' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Recipe' })).toBeInTheDocument()
     expect(screen.queryByText(/No workflow artifacts found/)).not.toBeInTheDocument()

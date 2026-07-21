@@ -145,9 +145,15 @@ describe('SidebarNav new-chat affordance', () => {
 
   it('renders exactly one new-chat button (on the chat nav row)', () => {
     // The chat nav item is always present in primaryItems, so the new-chat
-    // affordance is always rendered — regardless of which nav item is active.
+    // affordance is rendered while expanded, regardless of which nav item is active.
     const { container } = render(<SidebarNav {...baseProps({ navItem: 'sandbox-ui' })} />)
     const newChatButtons = container.querySelectorAll('.nav-link-new-chat')
     expect(newChatButtons.length).toBe(1)
+  })
+
+  it('does not render the new-chat button when the sidebar is collapsed', () => {
+    render(<SidebarNav {...baseProps({ collapsed: true })} />)
+
+    expect(screen.queryByTestId('nav-new-chat')).toBeNull()
   })
 })

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { type NetworkPolicyConfig, buildWorkflowNetworkPolicies } from './networkPolicyFactory'
+import {
+  type NetworkPolicyConfig,
+  buildCoordinatorGfsNetworkPolicy,
+  buildWorkflowNetworkPolicies,
+} from './networkPolicyFactory'
 
 const baseConfig: NetworkPolicyConfig = {
   recipeName: 'daily-report',
@@ -73,5 +77,49 @@ describe('workflow GFS NetworkPolicy', () => {
     expect(rule?.to?.[0]?.namespaceSelector?.matchLabels?.['kubernetes.io/metadata.name']).toBe(
       'gfs'
     )
+  })
+
+  it('uses the canonical coordinator GFS policy for custom destinations', () => {
+    const policy = buildCoordinatorGfsNetworkPolicy({
+      recipeName: 'daily-report',
+      sandboxNamespace: 'sandbox-recipes',
+      gfsNamespace: 'custom-gfs',
+      gfscPort: 19087,
+    })
+
+    expect(policy).toEqual({
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name: 'daily-report-coordinator-to-gfs',
+        namespace: 'sandbox-recipes',
+        labels: {
+          'clerum.io/recipe': 'daily-report',
+          'clerum.io/managed-by': 'wrc',
+        },
+      },
+      spec: {
+        podSelector: {
+          matchLabels: {
+            'clerum.io/recipe': 'daily-report',
+            'clerum.io/component': 'workflow-coordinator',
+          },
+        },
+        policyTypes: ['Egress'],
+        egress: [
+          {
+            to: [
+              {
+                namespaceSelector: {
+                  matchLabels: { 'kubernetes.io/metadata.name': 'custom-gfs' },
+                },
+                podSelector: { matchLabels: { app: 'gfs-controller' } },
+              },
+            ],
+            ports: [{ port: 19087, protocol: 'TCP' }],
+          },
+        ],
+      },
+    })
   })
 })

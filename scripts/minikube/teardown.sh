@@ -164,7 +164,8 @@ for ns in "${NAMESPACES[@]}"; do
 done
 ok "ServiceAccounts, Roles, RoleBindings deleted"
 
-# Cluster-scoped RBAC (Clerum-specific only)
+# Cluster-scoped RBAC (Clerum-specific only). The obsolete wrc-trigger names
+# remain here only so teardown also cleans profiles created by older releases.
 for name in clerum-channel-reader control-api workflow-recipes-cluster-watch wrc-trigger-role control-api-pod-reader; do
   $KC delete clusterrole "$name" 2>/dev/null || true
 done

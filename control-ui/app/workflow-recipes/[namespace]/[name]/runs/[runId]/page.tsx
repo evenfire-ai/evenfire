@@ -6,6 +6,7 @@ import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
+import { LoadingScreen } from '@components/LoadingScreen'
 import { RecipeStatusContent } from '@components/RecipeStatusContent'
 import { IconWorkflow } from '@components/Sidebar/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -15,17 +16,7 @@ export const dynamic = 'force-dynamic'
 
 export default function WorkflowRunDetailPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="cu-app-layout">
-          <main className="cu-main cu-detail-layout">
-            <div className="cu-card">
-              <div className="cu-card__body">Loading…</div>
-            </div>
-          </main>
-        </div>
-      }
-    >
+    <Suspense fallback={<LoadingScreen />}>
       <WorkflowRunDetailContent />
     </Suspense>
   )

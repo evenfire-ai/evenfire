@@ -1,5 +1,6 @@
 import { BrowserWindow, WebContentsView, session } from 'electron'
 import path from 'node:path'
+import { getActiveEnvKey } from './config.js'
 import { touchSandboxUiPartition } from './sandboxUiPartitionGc.js'
 import {
   applySandboxUiNavigationPolicies,
@@ -112,12 +113,14 @@ export function getActiveSandboxUi(): {
   }
 }
 
-export function partitionFor(recipeNs: string, recipeName: string): string {
-  // Per-recipe partition — Chromium isolates storage (cookies, IndexedDB,
-  // localStorage, service workers) by partition. The launch-time GC pass
-  // walks all `persist:sandbox-ui-*` partitions and wipes the ones the user
-  // no longer has ACL for.
-  return `persist:sandbox-ui-${recipeNs}-${recipeName}`
+export function partitionFor(envKey: string, recipeNs: string, recipeName: string): string {
+  // Per-(environment, recipe) partition — Chromium isolates storage (cookies,
+  // IndexedDB, localStorage, service workers) by partition. `envKey` (spec §5.2)
+  // scopes it so the same recipe ns/name in two clusters never shares KasmVNC
+  // cookies/storage. The launch-time GC pass walks the current env's
+  // `persist:sandbox-ui-${envKey}-*` partitions and wipes the ones the user no
+  // longer has ACL for; other environments' partitions are left untouched.
+  return `persist:sandbox-ui-${envKey}-${recipeNs}-${recipeName}`
 }
 
 /**
@@ -254,7 +257,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   // within the ACL window.
   await teardownActive('replaced')
 
-  const partition = partitionFor(recipeNs, recipeName)
+  const partition = partitionFor(getActiveEnvKey(), recipeNs, recipeName)
   const proxyOriginUrl = new URL(rpcProxyUrl).toString().replace(/\/+$/, '')
   const allowedNavigationPrefix =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +

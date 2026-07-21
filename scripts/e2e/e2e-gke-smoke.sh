@@ -259,7 +259,7 @@ echo ""
 # ═════════════════════════════════════════════════════════════════════
 log "Phase 7: RBAC Validation"
 
-for cr in control-api control-api-pod-reader wrc-trigger-role clerum-channel-reader workflow-recipes-cluster-watch; do
+for cr in control-api control-api-pod-reader clerum-channel-reader workflow-recipes-cluster-watch; do
   if kubectl get clusterrole "$cr" >/dev/null 2>&1; then
     pass "ClusterRole $cr exists"
   else
@@ -267,7 +267,7 @@ for cr in control-api control-api-pod-reader wrc-trigger-role clerum-channel-rea
   fi
 done
 
-for crb in control-api control-api-pod-reader wrc-trigger-binding clerum-channel-reader workflow-recipes-cluster-watch; do
+for crb in control-api control-api-pod-reader clerum-channel-reader workflow-recipes-cluster-watch; do
   if kubectl get clusterrolebinding "$crb" >/dev/null 2>&1; then
     pass "ClusterRoleBinding $crb exists"
   else

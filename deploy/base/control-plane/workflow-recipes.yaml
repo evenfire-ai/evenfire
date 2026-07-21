@@ -5,15 +5,6 @@ metadata:
   name: workflow-recipes
   namespace: control-plane
 ---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: wrc-trigger-sa
-  namespace: control-plane
-  labels:
-    clerum.io/component: scheduling-trigger
-    clerum.io/managed-by: clerum-wrc
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:

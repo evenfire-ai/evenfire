@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { DEFAULT_TOAST_DURATION_MS } from '@constants/toasts'
+import { desktopQueryClient } from '@lib/queryClient'
 import type {
   DependencyHealth,
   DesktopReleaseStatus,
@@ -299,6 +300,10 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     try {
       setBusy(true)
       const state = await window.clerum.auth.selectRuntimeConfig(optionId)
+      // Switching environment (pre-login) must not carry another env's cached
+      // queries forward (spec §5.2 P1). The env is bound to login (D4: no switch
+      // without logout), so a full clear is sufficient — no per-env query keys.
+      desktopQueryClient.clear()
       setRuntimeConfigState(state)
       setDesktopSetupAuthorizationToken('')
       setDesktopSetupStarted(false)

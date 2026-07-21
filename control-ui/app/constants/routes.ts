@@ -60,7 +60,7 @@ export const CONTROL_ROUTES = {
     new: (query?: ControlRouteQuery) => withQuery('/external-channels/new', query),
     edit: (name: string) => `/external-channels/${segment(name)}/edit`,
   },
-  globalFiles: '/global-files',
+  globalFileSystem: '/global-file-system',
   llmModels: {
     root: '/llm-models',
     discovery: '/llm-models/discovery',
@@ -80,11 +80,11 @@ export const CONTROL_ROUTES = {
     editEntry: (name: string, version: string) =>
       `/marketplace/entries/${segment(name)}/${segment(version)}/edit`,
   },
-  outputs: {
-    base: '/outputs',
-    root: '/outputs/recipe-artifacts',
-    recipeArtifacts: '/outputs/recipe-artifacts',
-    desktopAppArtifacts: '/outputs/desktop-app-artifacts',
+  agentOutputs: {
+    base: '/agent-outputs',
+    root: '/agent-outputs/recipe-artifacts',
+    recipeArtifacts: '/agent-outputs/recipe-artifacts',
+    desktopAppArtifacts: '/agent-outputs/desktop-app-artifacts',
   },
   plugins: {
     root: '/plugins',
@@ -117,10 +117,10 @@ export const CONTROL_ROUTES = {
     ui: '/settings/ui',
     withFocus: (focus: string) => withQuery('/settings', { focus }),
   },
-  sharedFiles: {
-    root: '/shared-files',
-    new: '/shared-files/new',
-    detail: (name: string) => `/shared-files/${segment(name)}`,
+  agentFiles: {
+    root: '/agent-files',
+    new: '/agent-files/new',
+    detail: (name: string) => `/agent-files/${segment(name)}`,
   },
   traces: {
     root: '/traces',

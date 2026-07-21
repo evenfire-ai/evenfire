@@ -503,6 +503,10 @@ declare global {
         getLastActive: (agentRef: string) => Promise<string | null>
         setLastActive: (agentRef: string, chatId: string) => Promise<void>
         getIndex: (agentRef: string) => Promise<ChatIndex>
+        reconcileServerSessions: (
+          agentRef: string,
+          sessions: Array<{ chatId: string; lastActivityAt?: string }>
+        ) => Promise<number>
         dismissOnboarding: (agentRef: string) => Promise<void>
         markUnreadTerminal: (agentRef: string, chatId: string) => Promise<void>
         clearUnreadTerminal: (agentRef: string, chatId: string) => Promise<void>
