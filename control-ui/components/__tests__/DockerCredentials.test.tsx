@@ -44,6 +44,14 @@ describe('DockerCredentialsPanel', () => {
     expect(await screen.findByText('efrk_abc')).toBeInTheDocument()
   })
 
+  it('push hint strips the leading @ from the org scope (valid Docker path)', async () => {
+    // orgScope is `@<org>`-prefixed; the hint must show a valid Docker path.
+    vi.mocked(api.listRegistryApiKeys).mockResolvedValue({ org: 'acme', keys: [] })
+    render(<DockerCredentialsPanel orgScope="@acme" />)
+    expect(await screen.findByText('registry.evenfire.ai/acme/…')).toBeInTheDocument()
+    expect(screen.queryByText(/@acme/)).not.toBeInTheDocument()
+  })
+
   it('generate → shows the reveal modal (docker login snippet) → refetches', async () => {
     vi.mocked(api.listRegistryApiKeys)
       .mockResolvedValueOnce({ org: 'acme', keys: [] })

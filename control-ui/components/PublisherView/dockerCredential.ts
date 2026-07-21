@@ -6,8 +6,18 @@ export function buildDockerLoginCommand(registry: string, key: string): string {
   return `docker login ${registry} -u _ -p ${key}`
 }
 
+/**
+ * The Docker namespace for an org scope. resolvePublishScope() returns the scope
+ * already prefixed as `@<org>`, but a Docker repo path must not contain '@' (it
+ * is the digest delimiter — `docker` rejects it with "invalid reference format"),
+ * so the leading '@' is dropped.
+ */
+export function dockerNamespace(orgScope: string): string {
+  return orgScope.replace(/^@/, '')
+}
+
 export function buildPushCoordinate(registry: string, orgScope: string): string {
-  return `${registry}/${orgScope}/<name>:<tag>`
+  return `${registry}/${dockerNamespace(orgScope)}/<name>:<tag>`
 }
 
 export function deriveDockerconfigjson(registry: string, key: string): string {
