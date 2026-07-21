@@ -52,8 +52,9 @@ describe('SandboxUiPage', () => {
     } as DOMRect)
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanup()
+    await new Promise(resolve => window.setTimeout(resolve, 0))
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     delete (window as { clerum?: unknown }).clerum
@@ -186,6 +187,43 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.close).toHaveBeenCalledTimes(1)
       expect(onBackToConversation).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it('keeps the conversation origin during Strict Mode effect replay', async () => {
+    sandboxUi.listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/task-board',
+          title: 'Agentic Task Board',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onBackToConversation = vi.fn()
+    const onEmbeddedAppBack = vi.fn()
+
+    render(
+      <React.StrictMode>
+        <SandboxUiPage
+          conversationOrigin={{
+            agentName: 'task-board-agent',
+            chatId: 'chat-123',
+            title: 'Plan the launch',
+          }}
+          onBackToConversation={onBackToConversation}
+          onEmbeddedAppBack={onEmbeddedAppBack}
+        />
+      </React.StrictMode>
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Agentic Task Board' }))
+
+    expect(await screen.findByRole('button', { name: 'Back to Plan the launch' })).toBeTruthy()
+    expect(onEmbeddedAppBack).not.toHaveBeenCalled()
   })
 
   it('copies a deep link for the current app route and active team', async () => {

@@ -174,6 +174,7 @@ export function SandboxUiPage({
   const [embedPreviewDataUrl, setEmbedPreviewDataUrl] = useState<string | null>(null)
   const embedSlotRef = useRef<HTMLDivElement>(null)
   const lastShortcutOpenRequestIdRef = useRef(0)
+  const pendingUnmountCleanupRef = useRef<number | null>(null)
   const shellOverlayOpen =
     headerShellOverlayOpen || sidebarShellOverlayOpen || toastShellOverlayOpen
 
@@ -219,9 +220,16 @@ export function SandboxUiPage({
 
   // Tear down the embed when this page unmounts (user navigates away).
   useEffect(() => {
+    if (pendingUnmountCleanupRef.current !== null) {
+      window.clearTimeout(pendingUnmountCleanupRef.current)
+      pendingUnmountCleanupRef.current = null
+    }
     return () => {
-      void window.clerum.sandboxUi.close()
-      onEmbeddedAppBack?.()
+      pendingUnmountCleanupRef.current = window.setTimeout(() => {
+        pendingUnmountCleanupRef.current = null
+        void window.clerum.sandboxUi.close()
+        onEmbeddedAppBack?.()
+      }, 0)
     }
   }, [onEmbeddedAppBack])
 
