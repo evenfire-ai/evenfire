@@ -1,3 +1,4 @@
+import type { SandboxUiDeepLinkEnvelope } from './sandboxUiDeepLinks.js'
 import {
   AccessCatalog,
   ApprovalDecisionResult,
@@ -533,6 +534,9 @@ declare global {
         }) => Promise<void>
         close: () => Promise<void>
         reload: () => Promise<void>
+        copyDeepLink: (teamId?: string) => Promise<{ url: string }>
+        listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
+        acknowledgeDeepLink: (id: number) => Promise<void>
         setBounds: (bounds: {
           x: number
           y: number
@@ -542,6 +546,7 @@ declare global {
         }) => Promise<void>
         setVisible: (visible: boolean) => Promise<void>
         capturePreview: () => Promise<string | null>
+        onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
         onClosed: (callback: (args: { appRef: string }) => void) => () => void
         onRefreshError: (
           callback: (args: { appRef: string; message: string }) => void

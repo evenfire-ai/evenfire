@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button, StatusBanner } from '@components/Common'
-import { IconChat, IconClose, IconRefresh, IconSandboxUi } from '../components/SidebarNav/icons'
+import {
+  IconChat,
+  IconClose,
+  IconCopy,
+  IconRefresh,
+  IconSandboxUi,
+} from '../components/SidebarNav/icons'
 import { clickableRowProps } from '../lib/clickableRowProps'
 import type { SandboxUiPageProps } from './SandboxUiPage.types'
 
@@ -147,6 +153,7 @@ const APP_PAGE_SIZE = 6
 export function SandboxUiPage({
   boundsRefreshKey = 0,
   conversationOrigin = null,
+  currentTeamId = '',
   headerShellOverlayOpen = false,
   sidebarShellOverlayOpen = false,
   toastShellOverlayOpen = false,
@@ -157,6 +164,7 @@ export function SandboxUiPage({
   onEmbeddedAppBack,
   onEmbeddedAppRemoved,
   onEmbedBoundsApplied,
+  onNotify,
 }: SandboxUiPageProps = {}) {
   const [apps, setApps] = useState<App[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -302,7 +310,7 @@ export function SandboxUiPage({
   const handleBackToConversation = useCallback(async () => {
     if (!conversationOrigin || !onBackToConversation) return
     await closeEmbed()
-    onBackToConversation()
+    await onBackToConversation()
   }, [closeEmbed, conversationOrigin, onBackToConversation])
 
   // In-place hard-reload of the embedded app — fetches freshly-arrived
@@ -311,6 +319,16 @@ export function SandboxUiPage({
   const onRefresh = useCallback(() => {
     void window.clerum.sandboxUi.reload()
   }, [])
+
+  const onCopyDeepLink = useCallback(async () => {
+    try {
+      await window.clerum.sandboxUi.copyDeepLink(currentTeamId || undefined)
+      onNotify?.('App link copied to clipboard.', 'success')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      onNotify?.(`Could not copy app link: ${message}`, 'error')
+    }
+  }, [currentTeamId, onNotify])
 
   const onRemoveApp = useCallback(async () => {
     await closeEmbed()
@@ -419,18 +437,32 @@ export function SandboxUiPage({
             <span>Back to apps</span>
           </Button>
           {launch.kind === 'mounted' && (
-            <Button
-              color="neutral"
-              variant="soft"
-              size="sm"
-              className="sandbox-ui-refresh-btn"
-              aria-label="Refresh"
-              title="Refresh app content"
-              onClick={onRefresh}
-            >
-              <IconRefresh />
-              <span>Refresh</span>
-            </Button>
+            <>
+              <Button
+                color="neutral"
+                variant="soft"
+                size="sm"
+                className="sandbox-ui-refresh-btn"
+                aria-label="Refresh"
+                title="Refresh app content"
+                onClick={onRefresh}
+              >
+                <IconRefresh />
+                <span>Refresh</span>
+              </Button>
+              <Button
+                color="neutral"
+                variant="soft"
+                size="sm"
+                className="sandbox-ui-copy-link-btn"
+                aria-label="Copy current app link"
+                title="Copy current app link"
+                onClick={() => void onCopyDeepLink()}
+              >
+                <IconCopy />
+                <span>Copy URL</span>
+              </Button>
+            </>
           )}
         </div>
         {showRefreshBanner && (

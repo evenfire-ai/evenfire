@@ -1,6 +1,7 @@
 import { BrowserWindow, WebContentsView, session } from 'electron'
 import path from 'node:path'
 import { getActiveEnvKey } from './config.js'
+import { extractSandboxUiViewRoute } from './sandboxUiDeepLinks.js'
 import { touchSandboxUiPartition } from './sandboxUiPartitionGc.js'
 import {
   applySandboxUiNavigationPolicies,
@@ -91,6 +92,7 @@ type ActiveView = {
   view: WebContentsView
   recipeNs: string
   recipeName: string
+  initialPath: string
   partition: string
   parentWindow: BrowserWindow
   rpcProxyOrigin: string
@@ -110,6 +112,25 @@ export function getActiveSandboxUi(): {
     recipeName: active.recipeName,
     appRef: `${active.recipeNs}/${active.recipeName}`,
     webContentsId: active.view.webContents.id,
+  }
+}
+
+export function getActiveSandboxUiLocation(): {
+  recipeNs: string
+  recipeName: string
+  path: string
+} | null {
+  if (!active) return null
+  const currentPath = extractSandboxUiViewRoute({
+    currentUrl: active.view.webContents.getURL(),
+    rpcProxyOrigin: active.rpcProxyOrigin,
+    recipeNs: active.recipeNs,
+    recipeName: active.recipeName,
+  })
+  return {
+    recipeNs: active.recipeNs,
+    recipeName: active.recipeName,
+    path: currentPath ?? active.initialPath,
   }
 }
 
@@ -259,6 +280,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
 
   const partition = partitionFor(getActiveEnvKey(), recipeNs, recipeName)
   const proxyOriginUrl = new URL(rpcProxyUrl).toString().replace(/\/+$/, '')
+  const viewPath = defaultPath && defaultPath.startsWith('/') ? defaultPath : '/'
   const allowedNavigationPrefix =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
     `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view/`
@@ -328,6 +350,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     view,
     recipeNs,
     recipeName,
+    initialPath: viewPath,
     partition,
     parentWindow,
     rpcProxyOrigin: proxyOriginUrl,
@@ -347,7 +370,6 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     console.warn('[SandboxUI] touchSandboxUiPartition failed:', err)
   })
 
-  const viewPath = defaultPath && defaultPath.startsWith('/') ? defaultPath : '/'
   const url =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
     `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${viewPath}`

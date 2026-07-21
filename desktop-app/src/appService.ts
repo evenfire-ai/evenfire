@@ -2830,6 +2830,19 @@ export class AppService {
     await driver.unmountSandboxUiView()
   }
 
+  async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {
+    const driver = await import('./sandboxUiDriver.js')
+    const { buildSandboxUiDeepLink } = await import('./sandboxUiDeepLinks.js')
+    const location = driver.getActiveSandboxUiLocation()
+    if (!location) throw new Error('No app is currently open')
+    return {
+      url: buildSandboxUiDeepLink({
+        ...location,
+        teamId: String(teamId || '').trim() || undefined,
+      }),
+    }
+  }
+
   // In-place hard-reload of the active embed (user-initiated "Refresh"). The
   // session cookie is still valid, so this only reloads page content — it does
   // NOT re-mint the session or cancel the refresh timer. No-op when nothing is

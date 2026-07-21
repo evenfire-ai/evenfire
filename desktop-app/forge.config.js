@@ -144,6 +144,16 @@ module.exports = {
     afterCopyExtraResources: [compileMacAdaptiveIcon],
     appBundleId: process.env.APPLE_BUNDLE_ID || defaultAppleBundleId,
     appCategoryType: 'public.app-category.productivity',
+    protocols: [
+      {
+        name: 'Evenfire',
+        schemes: ['evenfire'],
+      },
+      {
+        name: 'Clerum OAuth callback',
+        schemes: ['clerum'],
+      },
+    ],
     ...(osxSign ? { osxSign } : {}),
     ...(osxNotarize ? { osxNotarize } : {}),
   },
@@ -191,6 +201,7 @@ module.exports = {
           bin: 'Evenfire',
           categories: ['Utility'],
           icon: path.join(assetsDirectory, 'icon.png'),
+          mimeType: ['x-scheme-handler/evenfire', 'x-scheme-handler/clerum'],
         },
       },
     },
@@ -206,6 +217,7 @@ module.exports = {
           license: desktopLicense,
           categories: ['Utility'],
           icon: path.join(assetsDirectory, 'icon.png'),
+          mimeType: ['x-scheme-handler/evenfire', 'x-scheme-handler/clerum'],
         },
       },
     },

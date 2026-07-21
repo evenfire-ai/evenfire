@@ -521,7 +521,7 @@ export function useAppController() {
     ]
   )
 
-  const ensureNotificationTeamContext = useCallback(
+  const ensureTeamContext = useCallback(
     async (target: { teamId?: string }) => {
       const targetTeamId = String(target.teamId || '').trim()
       if (!targetTeamId) return
@@ -777,7 +777,7 @@ export function useAppController() {
 
       try {
         if (requiresTeamSwitch) {
-          await ensureNotificationTeamContext({ teamId: targetTeamId })
+          await ensureTeamContext({ teamId: targetTeamId })
         }
 
         if (targetChatId && !requiresTeamSwitch && nav.selectedAgent === targetAgent) {
@@ -803,7 +803,7 @@ export function useAppController() {
     [
       chat.setPendingChatSelection,
       chat.switchToChat,
-      ensureNotificationTeamContext,
+      ensureTeamContext,
       fullSetStatus,
       nav.selectedAgent,
       nav.setNavItem,
@@ -818,7 +818,7 @@ export function useAppController() {
       const target = notification.workflow
       if (!target) return
       try {
-        await ensureNotificationTeamContext({ teamId: notification.teamId })
+        await ensureTeamContext({ teamId: notification.teamId })
         nav.setNavItem(DESKTOP_ROUTES.plugins)
 
         const fallbackWorkflow = {
@@ -880,7 +880,7 @@ export function useAppController() {
         )
       }
     },
-    [ensureNotificationTeamContext, fullSetStatus, nav.setNavItem, queryClient]
+    [ensureTeamContext, fullSetStatus, nav.setNavItem, queryClient]
   )
 
   const openSdkNotificationTarget = useCallback(
@@ -998,6 +998,7 @@ export function useAppController() {
     statusTone,
     isAuthenticated: auth.isAuthenticated,
     me: auth.me,
+    currentTeamId,
     email: auth.email,
     password: auth.password,
     desktopSetupAuthorizationToken: auth.desktopSetupAuthorizationToken,
@@ -1049,6 +1050,7 @@ export function useAppController() {
     handleNavSelect,
     handleOpenAgentWorkspace,
     handleSelectChatAgent,
+    handleEnsureTeamContext: ensureTeamContext,
     handleBackToAgents: nav.handleBackToAgents,
     handleOpenContextDetails: nav.handleOpenContextDetails,
     handleBackToContexts: nav.handleBackToContexts,

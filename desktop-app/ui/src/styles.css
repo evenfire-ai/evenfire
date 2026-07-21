@@ -12259,6 +12259,7 @@ pre {
 
 .sandbox-ui-conversation-btn,
 .sandbox-ui-close-btn,
+.sandbox-ui-copy-link-btn,
 .sandbox-ui-refresh-btn {
   display: inline-flex;
   align-items: center;
@@ -12282,6 +12283,7 @@ pre {
 
 .sandbox-ui-conversation-btn svg,
 .sandbox-ui-close-btn svg,
+.sandbox-ui-copy-link-btn svg,
 .sandbox-ui-refresh-btn svg {
   width: 16px;
   height: 16px;

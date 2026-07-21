@@ -3,6 +3,7 @@ import path from 'node:path'
 import { AppService } from './appService.js'
 import { config } from './config.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
+import { type SandboxUiDeepLinkEnvelope, parseSandboxUiDeepLink } from './sandboxUiDeepLinks.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
@@ -19,6 +20,9 @@ process.stderr?.on?.('error', () => {})
 let mainWindow: BrowserWindow | null = null
 const appService = new AppService()
 const pendingEvenfireUrls: string[] = []
+const pendingSandboxUiDeepLinks: SandboxUiDeepLinkEnvelope[] = []
+let sandboxUiDeepLinkSequence = 0
+let lastSandboxUiDeepLink: { rawUrl: string; receivedAt: number } | null = null
 
 function systemIconAssetsDirectory(): string {
   return app.isPackaged ? process.resourcesPath : path.join(__dirname, '../assets')
@@ -85,8 +89,52 @@ ipcMain.handle('window:getVisibility', event => {
   assertTrustedSender(event)
   return { visible: isWindowVisible(mainWindow) }
 })
+
+ipcMain.handle('sandboxUi:listPendingDeepLinks', event => {
+  assertTrustedSender(event)
+  return { links: [...pendingSandboxUiDeepLinks] }
+})
+
+ipcMain.handle('sandboxUi:acknowledgeDeepLink', (event, payload: { id?: unknown }) => {
+  assertTrustedSender(event)
+  const id = Number(payload?.id)
+  if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid app deep-link id')
+  const index = pendingSandboxUiDeepLinks.findIndex(link => link.id === id)
+  if (index >= 0) pendingSandboxUiDeepLinks.splice(index, 1)
+})
 const DESKTOP_SETUP_PROTOCOL = 'evenfire'
 const CLERUM_PROTOCOL = 'clerum'
+
+function focusMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+function handleSandboxUiDeepLink(rawUrl: string): boolean {
+  const target = parseSandboxUiDeepLink(rawUrl)
+  if (!target) return false
+
+  const now = Date.now()
+  if (lastSandboxUiDeepLink?.rawUrl === rawUrl && now - lastSandboxUiDeepLink.receivedAt < 1_000) {
+    focusMainWindow()
+    return true
+  }
+  lastSandboxUiDeepLink = { rawUrl, receivedAt: now }
+
+  const envelope: SandboxUiDeepLinkEnvelope = {
+    id: (sandboxUiDeepLinkSequence += 1),
+    ...target,
+  }
+  pendingSandboxUiDeepLinks.push(envelope)
+  if (pendingSandboxUiDeepLinks.length > 20) pendingSandboxUiDeepLinks.shift()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('sandboxUi:deepLink', envelope)
+  }
+  focusMainWindow()
+  return true
+}
 
 function registerCustomProtocols(): void {
   // In dev mode (`electron .`), Electron needs the explicit execPath +
@@ -110,6 +158,11 @@ function handleEvenfireUrl(rawUrl: string): void {
     return
   }
   if (parsed.protocol !== `${DESKTOP_SETUP_PROTOCOL}:`) {
+    return
+  }
+
+  if (parsed.hostname === 'app') {
+    handleSandboxUiDeepLink(rawUrl)
     return
   }
 
@@ -205,11 +258,7 @@ if (!gotSingleInstanceLock) {
     if (desktopSetupLink) handleEvenfireUrl(desktopSetupLink)
     const clerumLink = argv.find(arg => arg.startsWith(`${CLERUM_PROTOCOL}://`))
     if (clerumLink) handleClerumUrl(clerumLink)
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      if (mainWindow.isMinimized()) mainWindow.restore()
-      mainWindow.show()
-      mainWindow.focus()
-    }
+    focusMainWindow()
   })
 }
 

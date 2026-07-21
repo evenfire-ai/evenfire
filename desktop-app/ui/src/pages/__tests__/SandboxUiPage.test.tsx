@@ -9,6 +9,7 @@ const sandboxUi = {
   open: vi.fn(),
   close: vi.fn(),
   reload: vi.fn(),
+  copyDeepLink: vi.fn(),
   setBounds: vi.fn(),
   setVisible: vi.fn(),
   capturePreview: vi.fn(),
@@ -147,7 +148,7 @@ describe('SandboxUiPage', () => {
       })
     })
     expect(await screen.findByRole('button', { name: 'Back to apps' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /^Back to .+ planning$/ })).toBeNull()
+    expect(screen.getAllByRole('button', { name: /^Back to / })).toHaveLength(1)
   })
 
   it('returns to the originating conversation from an app', async () => {
@@ -184,6 +185,36 @@ describe('SandboxUiPage', () => {
     await waitFor(() => {
       expect(sandboxUi.close).toHaveBeenCalledTimes(1)
       expect(onBackToConversation).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('copies a deep link for the current app route and active team', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/accounts',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    sandboxUi.copyDeepLink.mockResolvedValueOnce({
+      url: 'evenfire://app/sandbox-recipes/sales-crm?path=%2Faccounts&team=team-123',
+    })
+    const onNotify = vi.fn()
+
+    render(<SandboxUiPage currentTeamId="team-123" onNotify={onNotify} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy current app link' }))
+
+    await waitFor(() => {
+      expect(sandboxUi.copyDeepLink).toHaveBeenCalledWith('team-123')
+      expect(onNotify).toHaveBeenCalledWith('App link copied to clipboard.', 'success')
     })
   })
 

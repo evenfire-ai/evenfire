@@ -410,10 +410,24 @@ const clerum = Object.freeze({
     }) => ipcRenderer.invoke('sandboxUi:open', args),
     close: () => ipcRenderer.invoke('sandboxUi:close'),
     reload: () => ipcRenderer.invoke('sandboxUi:reload'),
+    copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
+    listPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:listPendingDeepLinks'),
+    acknowledgeDeepLink: (id: number) =>
+      ipcRenderer.invoke('sandboxUi:acknowledgeDeepLink', { id }),
     setBounds: (bounds: { x: number; y: number; width: number; height: number; dpr?: number }) =>
       ipcRenderer.invoke('sandboxUi:setBounds', { bounds }),
     setVisible: (visible: boolean) => ipcRenderer.invoke('sandboxUi:setVisible', { visible }),
     capturePreview: () => ipcRenderer.invoke('sandboxUi:capturePreview'),
+    onDeepLink: (
+      callback: (args: { id: number; appRef: string; path: string; teamId?: string }) => void
+    ) => {
+      const listener = (
+        _event: unknown,
+        args: { id: number; appRef: string; path: string; teamId?: string }
+      ) => callback(args)
+      ipcRenderer.on('sandboxUi:deepLink', listener)
+      return () => ipcRenderer.off('sandboxUi:deepLink', listener)
+    },
     onClosed: (callback: (args: { appRef: string }) => void) => {
       const listener = (_event: unknown, args: { appRef: string }) => callback(args)
       ipcRenderer.on('sandboxUi:closed', listener)

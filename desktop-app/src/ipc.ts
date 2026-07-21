@@ -1,4 +1,12 @@
-import { BrowserWindow, IpcMainInvokeEvent, Notification, app, dialog, ipcMain } from 'electron'
+import {
+  BrowserWindow,
+  IpcMainInvokeEvent,
+  Notification,
+  app,
+  clipboard,
+  dialog,
+  ipcMain,
+} from 'electron'
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -1331,6 +1339,14 @@ export function registerIpcHandlers(service: AppService): void {
   ipcMain.handle('sandboxUi:reload', async event => {
     assertTrustedSender(event)
     await service.reloadSandboxUi()
+  })
+
+  ipcMain.handle('sandboxUi:copyDeepLink', async (event, payload: { teamId?: unknown }) => {
+    assertTrustedSender(event)
+    const teamId = sanitizeString(payload?.teamId)
+    const result = await service.createSandboxUiDeepLink(teamId || undefined)
+    clipboard.writeText(result.url)
+    return result
   })
 
   ipcMain.handle('sandboxUi:setBounds', async (event, payload: { bounds: unknown }) => {
