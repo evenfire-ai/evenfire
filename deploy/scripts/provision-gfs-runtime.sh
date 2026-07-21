@@ -9,6 +9,12 @@ Usage:
 Runs the post-overlay GFS runtime provisioning steps and applies overlay CRD
 instances. Production contexts require --allow-prod; the Makefile prod target
 must perform the human confirmation before passing that flag.
+
+Environment:
+  ALLOWED_CONTEXTS   Comma-separated exact kube-contexts to treat as allowed dev
+                     contexts (in addition to the built-in generic patterns).
+                     A self-hosted deploy pipeline whose GKE dev context is not
+                     named by the built-ins sets this to that exact context.
 EOF
 }
 
@@ -77,11 +83,32 @@ done
 }
 [ -d "$OVERLAY" ] || die "overlay directory not found: $OVERLAY"
 
+# Contexts listed in ALLOWED_CONTEXTS (comma-separated) are treated as allowed
+# dev contexts. A self-hosted deploy pipeline whose GKE dev context is not named
+# by the generic built-in patterns below sets this to that exact context — the
+# same override idiom the sibling scripts use (run-control-api-db-migration.sh,
+# scripts/e2e/seed-e2e-data.sh). A prod-looking context is hard-denied regardless.
+context_allowed_via_env() {
+  local c allowed
+  IFS=',' read -r -a allowed <<<"${ALLOWED_CONTEXTS:-}"
+  for c in "${allowed[@]}"; do
+    [ -n "$c" ] && [ "$CONTEXT" = "$c" ] && return 0
+  done
+  return 1
+}
+
 case "$CONTEXT" in
   *example-dev*|minikube|clerum-test|clerum-codex-*|clerum-detached-*|clerum-feat-*|clerum-pr-*)
     ;;
   *)
-    [ "$ALLOW_PROD" = "1" ] || die "refusing non-dev context without --allow-prod: $CONTEXT"
+    # A non-dev context passes only if explicitly named in ALLOWED_CONTEXTS or
+    # via --allow-prod. Both are conscious opt-ins; the explicit allowlist IS the
+    # guard. (This script legitimately serves prod via --allow-prod, so there is
+    # deliberately no blanket prod-pattern hard-deny here — cf. seed-e2e-data.sh,
+    # which is dev-only and does hard-deny prod.)
+    if ! context_allowed_via_env && [ "$ALLOW_PROD" != "1" ]; then
+      die "refusing non-dev context without an ALLOWED_CONTEXTS entry or --allow-prod: $CONTEXT"
+    fi
     ;;
 esac
 
