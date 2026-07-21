@@ -18,6 +18,10 @@ import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
+import {
+  getConversationOriginForAppLaunch,
+  getConversationOriginForNavigation,
+} from '@lib/sandboxUiConversationOrigin'
 import { AgentsPage } from '@pages/AgentsPage'
 import { AuthPage } from '@pages/AuthPage'
 import { ChatPage } from '@pages/ChatPage'
@@ -33,7 +37,7 @@ import { TeamsPage } from '@pages/TeamsPage'
 import { UnavailablePage } from '@pages/UnavailablePage'
 import { WorkflowsPage } from '@pages/WorkflowsPage'
 import type { PendingSandboxUiDeepLink, SandboxUiDeepLinkEnvelope } from '@/App.types'
-import type { ActiveSandboxUiApp, ThemeMode } from '@/uiTypes'
+import type { ActiveSandboxUiApp, NavItem, ThemeMode } from '@/uiTypes'
 
 function getInitialThemeMode(): ThemeMode {
   if (typeof window === 'undefined') return 'dark'
@@ -306,11 +310,26 @@ export function App() {
     [vm.handleNavSelect]
   )
 
+  const handleSidebarNavSelect = React.useCallback(
+    (item: NavItem) => {
+      setSandboxUiConversationOrigin(
+        getConversationOriginForNavigation(item, activeConversationOrigin)
+      )
+      vm.handleNavSelect(item)
+    },
+    [activeConversationOrigin, vm.handleNavSelect]
+  )
+
   const handleOpenSandboxUiApp = React.useCallback(
     (app: ActiveSandboxUiApp) => {
-      launchSandboxUiApp(app, activeConversationOrigin)
+      const conversationOrigin = getConversationOriginForAppLaunch(
+        vm.navItem,
+        activeConversationOrigin,
+        sandboxUiConversationOrigin
+      )
+      launchSandboxUiApp(app, conversationOrigin)
     },
-    [activeConversationOrigin, launchSandboxUiApp]
+    [activeConversationOrigin, launchSandboxUiApp, sandboxUiConversationOrigin, vm.navItem]
   )
 
   React.useEffect(() => {
@@ -787,7 +806,7 @@ export function App() {
                             onCollapsedChange={setSidebarCollapsed}
                             onOpenSandboxUiApp={handleOpenSandboxUiApp}
                             onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
-                            onSelect={vm.handleNavSelect}
+                            onSelect={handleSidebarNavSelect}
                           />
                           <section className="workspace-layout">
                             <section
