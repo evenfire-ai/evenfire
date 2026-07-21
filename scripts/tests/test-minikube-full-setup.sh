@@ -256,11 +256,23 @@ assert_gfs_provisioning_follows_migrations_and_core_readiness() {
   fi
 }
 
+assert_full_setup_defaults_to_db_rebuild() {
+  if grep -Eq '^RESET_DB=true$' scripts/minikube/full-setup.sh && \
+     grep -Fq 'case "${REUSE_DB:-false}" in' scripts/minikube/full-setup.sh && \
+     grep -Eq -- '--keep-db\)[[:space:]]+RESET_DB=false' scripts/minikube/full-setup.sh && \
+     grep -Fq 'delete pvc control-postgres-data' scripts/minikube/full-setup.sh; then
+    pass "full-setup rebuilds the DB by default with a REUSE_DB/--keep-db opt-out"
+  else
+    fail "full-setup does not default to a clean DB rebuild with a REUSE_DB/--keep-db opt-out"
+  fi
+}
+
 assert_broken_profile_is_recreated
 assert_healthy_profile_skips_recreate
 assert_branch_profile_deploy_dir_is_used
 assert_member_registration_hmac_is_patched
 assert_branch_scoped_minikube_context_is_supported
 assert_gfs_provisioning_follows_migrations_and_core_readiness
+assert_full_setup_defaults_to_db_rebuild
 
 exit $FAIL
