@@ -256,11 +256,54 @@ assert_gfs_provisioning_follows_migrations_and_core_readiness() {
   fi
 }
 
+assert_full_setup_defaults_to_db_rebuild() {
+  if grep -Eq '^RESET_DB=true$' scripts/minikube/full-setup.sh && \
+     grep -Fq 'case "${REUSE_DB:-false}" in' scripts/minikube/full-setup.sh && \
+     grep -Eq -- '--keep-db\)[[:space:]]+RESET_DB=false' scripts/minikube/full-setup.sh && \
+     grep -Fq 'delete pvc control-postgres-data' scripts/minikube/full-setup.sh; then
+    pass "full-setup rebuilds the DB by default with a REUSE_DB/--keep-db opt-out"
+  else
+    fail "full-setup does not default to a clean DB rebuild with a REUSE_DB/--keep-db opt-out"
+  fi
+}
+
+assert_reuse_db_normalizer_precedes_flag_loop() {
+  local normalizer_line flag_loop_line
+  normalizer_line="$(grep -Fn 'case "${REUSE_DB:-false}" in' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+  flag_loop_line="$(grep -Fn 'for arg in "$@"; do' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+
+  if [[ -n "$normalizer_line" && -n "$flag_loop_line" && "$normalizer_line" -lt "$flag_loop_line" ]]; then
+    pass "REUSE_DB normalizer runs before the flag-parse loop (flag overrides env)"
+  else
+    fail "REUSE_DB normalizer does not precede the flag-parse loop — flag>env precedence not enforced"
+  fi
+}
+
+assert_makefile_passes_reuse_db() {
+  if grep -Fq 'REUSE_DB="$(REUSE_DB)"' Makefile; then
+    pass "minikube-setup Make target forwards REUSE_DB to full-setup.sh"
+  else
+    fail "minikube-setup Make target does not forward REUSE_DB to full-setup.sh"
+  fi
+}
+
+assert_reset_db_flag_backcompat() {
+  if grep -Eq -- '--reset-db\)[[:space:]]+RESET_DB=true' scripts/minikube/full-setup.sh; then
+    pass "--reset-db flag still forces a DB rebuild (back-compat)"
+  else
+    fail "--reset-db flag no longer sets RESET_DB=true (back-compat broken)"
+  fi
+}
+
 assert_broken_profile_is_recreated
 assert_healthy_profile_skips_recreate
 assert_branch_profile_deploy_dir_is_used
 assert_member_registration_hmac_is_patched
 assert_branch_scoped_minikube_context_is_supported
 assert_gfs_provisioning_follows_migrations_and_core_readiness
+assert_full_setup_defaults_to_db_rebuild
+assert_makefile_passes_reuse_db
+assert_reuse_db_normalizer_precedes_flag_loop
+assert_reset_db_flag_backcompat
 
 exit $FAIL
