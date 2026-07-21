@@ -279,6 +279,14 @@ assert_reuse_db_normalizer_precedes_flag_loop() {
   fi
 }
 
+assert_makefile_passes_reuse_db() {
+  if grep -Fq 'REUSE_DB="$(REUSE_DB)"' Makefile; then
+    pass "minikube-setup Make target forwards REUSE_DB to full-setup.sh"
+  else
+    fail "minikube-setup Make target does not forward REUSE_DB to full-setup.sh"
+  fi
+}
+
 assert_broken_profile_is_recreated
 assert_healthy_profile_skips_recreate
 assert_branch_profile_deploy_dir_is_used
@@ -286,6 +294,7 @@ assert_member_registration_hmac_is_patched
 assert_branch_scoped_minikube_context_is_supported
 assert_gfs_provisioning_follows_migrations_and_core_readiness
 assert_full_setup_defaults_to_db_rebuild
+assert_makefile_passes_reuse_db
 assert_reuse_db_normalizer_precedes_flag_loop
 
 exit $FAIL
