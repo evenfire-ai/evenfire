@@ -105,3 +105,19 @@ describe('RegistryInstallForm -- pending connector credentials', () => {
     expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
   })
 })
+
+describe('RegistryInstallForm -- server name default', () => {
+  it('defaults the Server name to a K8s-valid derivation of a scoped registry name', async () => {
+    const scopedEntry = { ...MOCK_ENTRY, name: '@test-oss-jose/helloo' }
+    render(<RegistryInstallForm entry={scopedEntry} onCancel={vi.fn()} onInstalled={vi.fn()} />)
+
+    // Advance from step 0 (review) to step 1 (name & credentials).
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Continue' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    const nameInput = (await screen.findByLabelText('Server name')) as HTMLInputElement
+    // `@test-oss-jose/helloo` sanitized to a valid RFC 1123 label — no manual fix.
+    expect(nameInput.value).toBe('test-oss-jose-helloo')
+    expect(screen.queryByText(/Must be a valid K8s name/i)).toBeNull()
+  })
+})
