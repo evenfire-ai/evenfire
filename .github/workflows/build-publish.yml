@@ -361,6 +361,11 @@ jobs:
         if: ${{ env.DISPATCH_REPO != '' && env.DISPATCH_TOKEN != '' }}
         run: |
           set -euo pipefail
+          # download-artifact creates nothing when zero markers match, so
+          # /tmp/built may not exist. Ensure it does — otherwise `find` errors
+          # and, under `set -e`, fails the job before the empty-check runs
+          # (a no-op push must skip cleanly, not go red).
+          mkdir -p /tmp/built
           # Space-separated list of images actually (re)built this run. Empty on a
           # no-op / config-only push — in which case DO NOT dispatch (nothing to
           # mirror; a bare dispatch would make the mirror fail on absent tags).
