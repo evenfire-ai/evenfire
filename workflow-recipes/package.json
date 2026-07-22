@@ -1,6 +1,6 @@
 {
   "name": "workload-recipes-controller",
-  "version": "0.1.254",
+  "version": "0.1.255",
   "description": "Workload Recipes Controller (WRC) - WorkloadRecipe lifecycle management and MCP server interface",
   "main": "dist/main.js",
   "engines": {
@@ -51,6 +51,6 @@
     "vitest": "^3.0.0"
   },
   "overrides": {
-    "@hono/node-server": "2.0.5"
+    "@hono/node-server": "2.0.11"
   }
 }

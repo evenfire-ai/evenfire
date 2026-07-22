@@ -1,6 +1,6 @@
 {
   "name": "clerum-stdio-bridge",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "stdio-to-StreamableHTTP bridge sidecar for MCP servers",
   "main": "dist/main.js",
   "engines": {
@@ -30,6 +30,6 @@
     "vitest": "^4.0.18"
   },
   "overrides": {
-    "@hono/node-server": "2.0.5"
+    "@hono/node-server": "2.0.11"
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@clerum/doc-generator-mcp",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -20,7 +20,7 @@
     "typescript": "^5.7.0"
   },
   "overrides": {
-    "@hono/node-server": "2.0.5",
+    "@hono/node-server": "2.0.11",
     "exceljs": {
       "uuid": "11.1.1"
     }
