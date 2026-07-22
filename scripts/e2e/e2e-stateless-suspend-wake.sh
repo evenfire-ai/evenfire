@@ -404,6 +404,17 @@ deployment_has_stateless_template() {
   ' >/dev/null
 }
 
+# A STATEFUL effective template is discriminated ONLY by the effective-mode
+# markers: no interactive priority class and no CLERUM_STATELESS_LIFECYCLE env.
+# The requested stateless STORAGE layout (workspace-layout-init init container +
+# the /var/lib/clerum/state and /workspace subPath mounts) is durable-
+# compatibility state that a HARD REJECTION deliberately RETAINS — exactly like
+# a spec.desktop/SFS rejection (buildDeployment gates the storage layout on the
+# spec REQUEST `usesStatelessStorageLayout`, never on effective mode, so a
+# rejection never remounts the PVC root and creates a second state.db). So the
+# storage layout must NOT be part of the stateful discriminator: this helper
+# must pass for a genuinely-stateful host (no layout) AND a channel/desktop hard-
+# rejected stateless-requesting host (layout retained). See Addendum 6.
 deployment_has_stateful_template() {
   local deployment
   deployment="$(kctl get deployment "$HOST_REF" -n "$MCP_HOST_NS" -o json 2>/dev/null)" || return 2
@@ -411,9 +422,7 @@ deployment_has_stateful_template() {
     .spec.template.spec as $pod
     | [
         ($pod.priorityClassName != "clerum-interactive-host"),
-        ([ $pod.initContainers[]? | select(.name == "workspace-layout-init") ] | length == 0),
-        ([ $pod.containers[] | select(.name == "mcp-host") | .env[]? | select(.name == "CLERUM_STATELESS_LIFECYCLE") ] | length == 0),
-        ([ $pod.containers[] | select(.name == "mcp-host") | .volumeMounts[]? | select(.name == "workspace" and (.subPath == "workspace" or .subPath == "state")) ] | length == 0)
+        ([ $pod.containers[] | select(.name == "mcp-host") | .env[]? | select(.name == "CLERUM_STATELESS_LIFECYCLE") ] | length == 0)
       ] | all
   ' >/dev/null
 }
@@ -796,6 +805,87 @@ if assert_refusal "2c pendingResults" "pendingResults"; then
 else
   fail "2c: could not induce pendingResults (see mcp-host resultStore/pendingTaskResults flow -- the async intake did not park a result)"
   print_results; exit 1
+fi
+post_wake || { fail "wake POST failed resurrecting for 2d"; print_results; exit 1; }
+wait_for_ready_pod "$POD_READY_TIMEOUT" >/dev/null || { fail "no pod after wake for 2d"; print_results; exit 1; }
+
+# (d-pre) REVERSE arrival order: a genuinely stateful Host that ALREADY has a
+# CommunicationChannel, then flipped to spec.lifecycle.stateless:true, must
+# hard-reject from the FIRST stateless-requesting reconcile -- the requested
+# stateless lifecycle must NEVER be transiently enabled. Direct CRD writes are
+# used deliberately: control-api blocks this flip at the admin API with a 409
+# (stateless_host_communication_channel_conflict), so the state-derived HCC
+# backstop is exactly the racing/direct-write path under test. Uses the shared
+# $HOST_REF sequentially (the suite's established pattern; test 11 also flips
+# spec.lifecycle.stateless on it) and restores it via the cleanup trap.
+header "Test 2d-pre -- reverse arrival: channel-bound host flipped to stateless hard-rejects"
+# 1. Make the Host genuinely stateful (direct CRD).
+kctl patch host "$HOST_REF" -n "$MCP_HOST_NS" --type=merge \
+  -p '{"spec":{"lifecycle":{"stateless":false}}}' >/dev/null 2>&1 \
+  || { fail "2d-pre: failed to flip spec.lifecycle.stateless:false"; print_results; exit 1; }
+STATELESS_DISABLED=1
+wait_for_deployment_template stateful 120 "2d-pre: baseline genuinely stateful" || { print_results; exit 1; }
+# 2. Associate a CommunicationChannel with the stateful Host (direct CRD).
+CREATED_CHANNEL="e2e-stateless-prekillswitch-${RUN_ID}"
+printf '%s\n' \
+"apiVersion: clerum.io/v1alpha1" \
+"kind: CommunicationChannel" \
+"metadata:" \
+"  name: ${CREATED_CHANNEL}" \
+"  namespace: ${CHANNELS_NS:-channels}" \
+"spec:" \
+"  hostRef: ${HOST_REF}" \
+"  telegram:" \
+"    - channelId: \"e2e-prekillswitch-${RUN_ID}\"" \
+"      chatType: \"private\"" \
+"      userIds: [\"000000000\"]" \
+  | kctl apply -f - >/dev/null 2>&1 || { fail "2d-pre: failed to apply CommunicationChannel"; print_results; exit 1; }
+# Deterministic barrier: wait until HCC has OBSERVED the channel (it provisions
+# channel-reader-<host> from the same watcher cache that countCommunicationChannels
+# reads), so the channel is in cache BEFORE the stateless flip -- the first
+# stateless reconcile cannot momentarily see zero channels and enable stateless.
+cr_elapsed=0; cr_ok=0
+while [ "$cr_elapsed" -lt 120 ]; do
+  if kctl get deployment "channel-reader-${HOST_REF}" -n "${CHANNELS_NS:-channels}" >/dev/null 2>&1; then cr_ok=1; break; fi
+  sleep "$POLL_INTERVAL"; cr_elapsed=$((cr_elapsed + POLL_INTERVAL))
+done
+[ "$cr_ok" = "1" ] || { fail "2d-pre: HCC did not provision channel-reader-${HOST_REF} within 120s (cannot prove the channel is observed before the stateless flip)"; print_results; exit 1; }
+# 3. Flip spec.lifecycle.stateless:true on the channel-bound Host (direct CRD).
+kctl patch host "$HOST_REF" -n "$MCP_HOST_NS" --type=merge \
+  -p '{"spec":{"lifecycle":{"stateless":true}}}' >/dev/null 2>&1 \
+  || { fail "2d-pre: failed to flip spec.lifecycle.stateless:true"; print_results; exit 1; }
+STATELESS_DISABLED=0
+# 4. Assert hard rejection to stateful active with the channel-count reason. The
+#    effective mode is stateful throughout (genuinely-stateful -> rejected-
+#    stateful, never a transient stateless): replicas 1, StatelessEnableRejected=True.
+dp_elapsed=0; dp_ok=0
+while [ "$dp_elapsed" -lt 120 ]; do
+  cond="$(kctl get host "$HOST_REF" -n "$MCP_HOST_NS" -o jsonpath='{.status.conditions[?(@.type=="StatelessEnableRejected")].status}' 2>/dev/null || true)"
+  emode="$(kctl get host "$HOST_REF" -n "$MCP_HOST_NS" -o jsonpath='{.status.lifecycle.effectiveMode}' 2>/dev/null || true)"
+  reps="$(deployment_replicas)"
+  if [ "$cond" = "True" ] && [ "$emode" = "stateful" ] && [ "${reps:-0}" = "1" ] && deployment_has_stateful_template; then dp_ok=1; break; fi
+  sleep "$POLL_INTERVAL"; dp_elapsed=$((dp_elapsed + POLL_INTERVAL))
+done
+if [ "$dp_ok" != "1" ]; then
+  fail "2d-pre: expected hard rejection to stateful after stateless flip on channel-bound host (cond=${cond:-<none>} effectiveMode=${emode:-<none>} state=$(lifecycle_state) replicas=$(deployment_replicas) reason=$(lifecycle_reason))"; print_results; exit 1
+fi
+# The durable rejection reason must name the channel count + recovery action
+# (control-ui renders the StatelessEnableRejected message verbatim).
+pre_reason="$(lifecycle_reason)"
+case "$pre_reason" in
+  *"CommunicationChannel(s) reference this Host"*disassociate*)
+    ok "2d-pre: reverse-order flip hard-rejects to stateful with the channel-count reason (${pre_reason})" ;;
+  *)
+    fail "2d-pre: rejection reason missing channel-count/disassociate recovery text (got '${pre_reason}')"; print_results; exit 1 ;;
+esac
+# 5. Disassociate the channel (direct CRD) -> stateless activates and suspends.
+kctl delete communicationchannel "$CREATED_CHANNEL" -n "${CHANNELS_NS:-channels}" --ignore-not-found >/dev/null 2>&1
+CREATED_CHANNEL=""
+if wait_for_deployment_template stateless "$POD_READY_TIMEOUT" "2d-pre: channel removed" \
+  && wait_for_ready_pod "$POD_READY_TIMEOUT" >/dev/null && force_idle_and_suspend; then
+  ok "2d-pre: stateless activates and suspends after the channel is disassociated (state-derived recovery)"
+else
+  fail "2d-pre: stateless did not activate after channel disassociation (reverse-order recovery)"; print_results; exit 1
 fi
 post_wake || { fail "wake POST failed resurrecting for 2d"; print_results; exit 1; }
 wait_for_ready_pod "$POD_READY_TIMEOUT" >/dev/null || { fail "no pod after wake for 2d"; print_results; exit 1; }
