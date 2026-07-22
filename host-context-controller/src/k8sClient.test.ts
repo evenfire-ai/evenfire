@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HostFleetReconcileError } from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
 import { McpServerWatcher, listAllCommunicationChannels, listAllHosts } from './k8sClient'
+import type { HostCRD } from './types'
 
 function deferred<T = void>(): {
   promise: Promise<T>
