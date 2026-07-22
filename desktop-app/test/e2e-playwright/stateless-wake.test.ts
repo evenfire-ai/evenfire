@@ -103,9 +103,11 @@ async function openStatelessAgent(appPage: import('@playwright/test').Page): Pro
 // fresh replicas-0 state in-spec with a deliberate FIXED bounded idle (see
 // SCENARIO4_IDLE_RESUSPEND_MS) — mirroring the real user journey (idle → the host
 // suspends under the aggressive HCC test cadences → the user returns and bursts).
-// This spec still never queries Kubernetes: the cold burst's own waking-state
-// affordance (resolveWakeOutcome) is the definitive replicas-0 proof, not a K8s
-// read. Desktop proves catalog prewarm before the user selects the agent.
+// This spec still never queries Kubernetes: the cold burst's own prewarm response
+// (probeStatelessPrewarm → 202 'wake-requested', control-api Postgres-backed) is the
+// authoritative replicas-0 proof, not a K8s read. resolveWakeOutcome still drives the
+// message retry/response verification in Scenario 4 and Scenario 5, but is no longer
+// the mode oracle. Desktop proves catalog prewarm before the user selects the agent.
 function requireSuspendPrecondition(): void {
   if (process.env.E2E_STATELESS_SUSPENDED !== '1') {
     throw new Error(
@@ -579,7 +581,11 @@ async function probeStatelessPrewarm(appPage: import('@playwright/test').Page): 
     try {
       const result = await window.clerum.rpc.prewarmHost(hostRef)
       return {
-        error: null,
+        // AppService.prewarmHost surfaces operational failures as a RESOLVED
+        // result ({ requested: false, error }), not a throw, so the catch below
+        // never sees them. Propagate result.error here or the indeterminate
+        // diagnostics would drop the real cause behind a status='null'.
+        error: typeof result?.error === 'string' ? result.error : null,
         status: typeof result?.status === 'string' ? result.status : null,
         skipped: typeof result?.skipped === 'string' ? result.skipped : null,
         requested: typeof result?.requested === 'boolean' ? result.requested : null,
@@ -842,19 +848,23 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
   // SUSPENDED at first touch; 'active' (200) proves it was already warm. An error,
   // a `skipped` (cooldown/in-flight), or a missing/unknown status is INDETERMINATE
   // — fail loud naming the reason, never silently classify warm.
+  // Every indeterminate throw below carries the FULL raw prewarm payload
+  // (status + skipped + requested + error) so a classification failure is
+  // debuggable from the log alone, not just the single field that branched.
+  const rawPrewarmA = JSON.stringify(prewarmDuringColdWake)
   let modeA: 'warm' | 'cold'
   if (prewarmDuringColdWake.error) {
     throw new Error(
       `[stateless-wake] Scenario 4 prewarm oracle errored (${prewarmDuringColdWake.error}); ` +
-        `cannot classify the cold burst. INDETERMINATE — not warm. Idle window: ` +
-        `${idleStartedAt} → ${idleEndedAt}.`
+        `cannot classify the cold burst. INDETERMINATE — not warm. Raw prewarm payload: ` +
+        `${rawPrewarmA}. Idle window: ${idleStartedAt} → ${idleEndedAt}.`
     )
   } else if (prewarmDuringColdWake.skipped) {
     throw new Error(
       `[stateless-wake] Scenario 4 prewarm was skipped='${prewarmDuringColdWake.skipped}' ` +
         `(cooldown or in-flight collision with the app's own prewarm controller), so it ` +
         `returned no authoritative wake status. INDETERMINATE — never classified as warm. ` +
-        `Idle window: ${idleStartedAt} → ${idleEndedAt}.`
+        `Raw prewarm payload: ${rawPrewarmA}. Idle window: ${idleStartedAt} → ${idleEndedAt}.`
     )
   } else if (prewarmDuringColdWake.status === 'wake-requested') {
     modeA = 'cold'
@@ -863,7 +873,8 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
   } else {
     throw new Error(
       `[stateless-wake] Scenario 4 prewarm returned a non-classifiable status=` +
-        `'${prewarmDuringColdWake.status}' (expected 'wake-requested' | 'active'). INDETERMINATE.`
+        `'${prewarmDuringColdWake.status}' (expected 'wake-requested' | 'active'). INDETERMINATE. ` +
+        `Raw prewarm payload: ${rawPrewarmA}.`
     )
   }
   // Audit trail: emit the RAW prewarm response alongside the derived mode.
@@ -872,6 +883,7 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
       status: prewarmDuringColdWake.status,
       skipped: prewarmDuringColdWake.skipped,
       requested: prewarmDuringColdWake.requested,
+      error: prewarmDuringColdWake.error,
     },
   })
   // Await the marker reply for continuity (chatIdA + the transcript legs below need
@@ -1082,7 +1094,10 @@ test('Scenario 5 — repeat suspend/wake cycle keeps prior chats continuous (sec
   ).toBeGreaterThanOrEqual(2)
 
   // Reopen the first prior chat: its transcript (a prior assistant reply) must
-  // still render — continuity BEFORE the second wake.
+  // still render — continuity BEFORE the measured second wake. This reopen is a
+  // wake-capable read, so it (and the Playwright login/mount prewarm) may leave
+  // the host warm; the in-spec re-suspension below restores a genuine replicas-0
+  // state before the measured cold burst.
   const [targetChatId] = priorIds
   if (!targetChatId) {
     throw new Error('[stateless-wake] cycle-2 session catalog exposed no prior chat to reopen')
@@ -1097,21 +1112,113 @@ test('Scenario 5 — repeat suspend/wake cycle keeps prior chats continuous (sec
   await expect(priorResponse).not.toHaveText('', { timeout: TURN_TIMEOUT })
   await expect(priorResponse).not.toHaveClass(/chat-bubble--error/)
 
-  // Drive the SECOND wake through the UI: a fresh send into the SAME existing
-  // thread must wake the re-suspended host and continue the conversation.
+  // Deliberate in-spec re-suspension, IDENTICAL to Scenario 4's established
+  // pattern. The catalog + reopen reads above legitimately woke the host, and the
+  // Playwright preflight/login/mount prewarm may already have warmed it, so
+  // measuring the second wake right now would race a still-warm host (the cycle-2
+  // warm-flake). Idle for a FIXED bounded window so the aggressive HCC test
+  // cadences (idle floor 1m + drain + poll, set by the bash gate) scale the host
+  // back to 0. No early probe send during the idle — a probe is itself a wake that
+  // would burn the cold state. Log the window bounds so the orchestrator audit can
+  // verify the idle actually elapsed. This makes the "repeat suspend/wake" cycle
+  // the in-spec deterministic one, faithful to its own title.
+  const idleStartedAt = new Date().toISOString()
+  console.log(
+    `[StatelessWakeJourney] ${JSON.stringify({
+      scenario: 'scenario-5-idle-resuspend',
+      phase: 'start',
+      host_ref: HOST_REF,
+      idle_ms: SCENARIO4_IDLE_RESUSPEND_MS,
+      at: idleStartedAt,
+    })}`
+  )
+  await appPage.waitForTimeout(SCENARIO4_IDLE_RESUSPEND_MS)
+  const idleEndedAt = new Date().toISOString()
+  console.log(
+    `[StatelessWakeJourney] ${JSON.stringify({
+      scenario: 'scenario-5-idle-resuspend',
+      phase: 'end',
+      host_ref: HOST_REF,
+      idle_ms: SCENARIO4_IDLE_RESUSPEND_MS,
+      at: idleEndedAt,
+    })}`
+  )
+
+  // Drive the SECOND wake through the UI as a CONCURRENT cold burst on the FIRST
+  // post-idle send into the SAME existing thread: the authoritative wake
+  // (prewarmHost) races the send's own server-side reactive wake, exactly like
+  // Scenario 4. Keep the click LAST. The prewarm 202 'wake-requested' is the
+  // cold/warm oracle (control-api Postgres-backed); the UI waking-state affordance
+  // is NOT used for the mode because a transparent sub-hold-deadline wake never
+  // renders it.
   const chatInput = appPage.getByTestId('chat-input')
   const sendButton = appPage.getByRole('button', { name: /send message/i })
   const markerCycle2 = `WAKE_S5_${Date.now()}`
   await chatInput.fill(`Reply with exactly: ${markerCycle2}`)
-  await sendButton.click()
-  await expect(
-    messageList.getByText(`Reply with exactly: ${markerCycle2}`).first()
-  ).toBeVisible({ timeout: 30_000 })
-  const mode = await resolveWakeOutcome(appPage, markerCycle2)
-  await recordMode(testInfo, 'scenario-5-second-cycle', mode)
+  const [prewarmSecondCycle] = await Promise.all([
+    probeStatelessPrewarm(appPage),
+    sendButton.click(),
+  ])
+
+  // Authoritative cold/warm classification from the app's own prewarm response.
+  // 'wake-requested' (202) proves the host was SUSPENDED at first touch; 'active'
+  // (200) proves it was already warm. An error, a `skipped` (cooldown/in-flight),
+  // or a missing/unknown status is INDETERMINATE — fail loud naming the reason and
+  // the full raw payload, never silently classify warm.
+  const rawPrewarm5 = JSON.stringify(prewarmSecondCycle)
+  let mode: 'warm' | 'cold'
+  if (prewarmSecondCycle.error) {
+    throw new Error(
+      `[stateless-wake] Scenario 5 prewarm oracle errored (${prewarmSecondCycle.error}); ` +
+        `cannot classify the second-cycle wake. INDETERMINATE — not warm. Raw prewarm ` +
+        `payload: ${rawPrewarm5}. Idle window: ${idleStartedAt} → ${idleEndedAt}.`
+    )
+  } else if (prewarmSecondCycle.skipped) {
+    throw new Error(
+      `[stateless-wake] Scenario 5 prewarm was skipped='${prewarmSecondCycle.skipped}' ` +
+        `(cooldown or in-flight collision with the app's own prewarm controller), so it ` +
+        `returned no authoritative wake status. INDETERMINATE — never classified as warm. ` +
+        `Raw prewarm payload: ${rawPrewarm5}. Idle window: ${idleStartedAt} → ${idleEndedAt}.`
+    )
+  } else if (prewarmSecondCycle.status === 'wake-requested') {
+    mode = 'cold'
+  } else if (prewarmSecondCycle.status === 'active') {
+    mode = 'warm'
+  } else {
+    throw new Error(
+      `[stateless-wake] Scenario 5 prewarm returned a non-classifiable status=` +
+        `'${prewarmSecondCycle.status}' (expected 'wake-requested' | 'active'). INDETERMINATE. ` +
+        `Raw prewarm payload: ${rawPrewarm5}.`
+    )
+  }
+  // Audit trail: emit the RAW prewarm response alongside the derived mode.
+  await recordMode(testInfo, 'scenario-5-second-cycle', mode, {
+    prewarm: {
+      status: prewarmSecondCycle.status,
+      skipped: prewarmSecondCycle.skipped,
+      requested: prewarmSecondCycle.requested,
+      error: prewarmSecondCycle.error,
+    },
+  })
+  // Scenario 5 is the REPEAT suspend/wake proof: the second cycle must exercise a
+  // genuine replicas-0 wake, not a warm no-op. Fail loud on a warm burst — it means
+  // the fixed idle did not re-suspend the host and the repeat-cold contract was NOT
+  // exercised.
+  expect(
+    mode,
+    `[stateless-wake] Scenario 5 second-cycle burst took the WARM branch (prewarm status=` +
+      `'${prewarmSecondCycle.status}') after a fixed ` +
+      `${Math.round(SCENARIO4_IDLE_RESUSPEND_MS / 1000)}s in-spec idle. The repeat cycle must ` +
+      `exercise a second replicas-0 wake; a warm burst means the host never re-suspended and ` +
+      `the repeat-cold contract was NOT exercised. Idle window: ${idleStartedAt} → ${idleEndedAt}.`
+  ).toBe('cold')
+  // resolveWakeOutcome drives the transparent-warm / visible-waking-state retry and
+  // verifies the marker reply completed; its return value is intentionally NOT the
+  // mode oracle — the prewarm status above is authoritative.
+  await resolveWakeOutcome(appPage, markerCycle2)
   await expectComposerIdleReady(appPage, chatInput)
 
-  // Identity survives the SECOND wake too.
+  // Identity survives the SECOND wake too — continuity AFTER the measured cold wake.
   const afterWake = await readStatelessSessionIds(appPage)
   expect(
     afterWake.error,
