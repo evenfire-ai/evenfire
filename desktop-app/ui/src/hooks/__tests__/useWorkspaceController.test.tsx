@@ -66,12 +66,17 @@ function createSessionState(authenticated: boolean): SessionState {
 }
 
 function installClerumHarness(
-  options: { delayAuthenticatedLoad?: boolean; passwordLoginError?: unknown } = {}
+  options: {
+    delayAuthenticatedLoad?: boolean
+    delayHealth?: boolean
+    passwordLoginError?: unknown
+  } = {}
 ) {
   let authenticated = false
   const teamDirectoryDeferred = createDeferred<{ items: []; currentTeamId: string }>()
   const catalogDeferred = createDeferred<ReturnType<typeof createCatalog>>()
   const approvalsDeferred = createDeferred<[]>()
+  const healthDeferred = createDeferred<ReturnType<typeof createHealth>>()
 
   const getSessionState = vi.fn(async () => createSessionState(authenticated))
   const passwordLogin = vi.fn(async () => {
@@ -111,7 +116,9 @@ function installClerumHarness(
           isPackaged: false,
           options: [],
         })),
-        getDependenciesHealth: vi.fn(async () => createHealth()),
+        getDependenciesHealth: vi.fn(async () =>
+          options.delayHealth ? healthDeferred.promise : createHealth()
+        ),
         getSessionState,
         passwordLogin,
         onDesktopSetupToken: vi.fn(() => () => undefined),
@@ -214,6 +221,9 @@ function installClerumHarness(
     passwordLogin,
     getSessionState,
     getDesktopReleaseStatus,
+    resolveHealth() {
+      healthDeferred.resolve(createHealth())
+    },
     resolveAuthenticatedLoad() {
       teamDirectoryDeferred.resolve({ items: [], currentTeamId: '' })
       catalogDeferred.resolve(createCatalog())
@@ -288,6 +298,17 @@ describe('useWorkspaceController', () => {
     cleanup()
     vi.restoreAllMocks()
     delete (window as { clerum?: unknown }).clerum
+  })
+
+  it('restores the session without waiting for a slow dependency-health probe', async () => {
+    const clerum = installClerumHarness({ delayHealth: true })
+
+    renderControllerHarness()
+
+    await waitFor(() => expect(clerum.getSessionState).toHaveBeenCalledOnce())
+    await waitFor(() => expect(screen.getByTestId('booting').textContent).toBe('false'))
+
+    clerum.resolveHealth()
   })
 
   it('preserves a workflow nav selection while login session hydration finishes', async () => {

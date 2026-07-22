@@ -18,18 +18,18 @@ function collectRoutePaths(value: unknown): string[] {
 
 function appRoutePatterns(): RegExp[] {
   const appDirectory = path.join(process.cwd(), 'app')
-  const pageFiles: string[] = []
+  const routeFiles: string[] = []
 
   function visit(directory: string) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const entryPath = path.join(directory, entry.name)
       if (entry.isDirectory()) visit(entryPath)
-      else if (/^page\.(?:js|jsx|ts|tsx)$/.test(entry.name)) pageFiles.push(entryPath)
+      else if (/^(?:page|route)\.(?:js|jsx|ts|tsx)$/.test(entry.name)) routeFiles.push(entryPath)
     }
   }
 
   visit(appDirectory)
-  return pageFiles.map(file => {
+  return routeFiles.map(file => {
     const relativeDirectory = path.relative(appDirectory, path.dirname(file))
     const routePath = relativeDirectory ? `/${relativeDirectory}` : '/'
     const pattern = routePath
@@ -40,7 +40,7 @@ function appRoutePatterns(): RegExp[] {
   })
 }
 
-test('PROFILE_ROUTES resolve to App Router pages', () => {
+test('PROFILE_ROUTES resolve to App Router pages or route handlers', () => {
   const appRoutes = appRoutePatterns()
   const routePaths = [...new Set(collectRoutePaths(PROFILE_ROUTES))]
   const unresolved = routePaths.filter(route => !appRoutes.some(pattern => pattern.test(route)))

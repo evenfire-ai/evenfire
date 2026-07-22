@@ -569,8 +569,10 @@ export function useAppController() {
     async (options: { preserveNav?: boolean } = {}) => {
       const { preserveNav = false } = options
       try {
-        const health = await window.clerum.auth.getDependenciesHealth()
-        auth.setDependencyHealth(health)
+        void window.clerum.auth
+          .getDependenciesHealth()
+          .then(auth.setDependencyHealth)
+          .catch(() => undefined)
         const sessionState = await window.clerum.auth.getSessionState()
         const authenticated = Boolean(sessionState.authenticated && sessionState.me)
         auth.setIsAuthenticated(authenticated)

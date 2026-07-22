@@ -38,3 +38,35 @@ export function buildEvenfireDesktopAppLink(parts: {
   if (teamId) url.searchParams.set('team', teamId)
   return url.toString()
 }
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+export function buildEvenfireDesktopAppRedirectDocument(deepLink: string): string {
+  const parsed = new URL(deepLink)
+  if (parsed.protocol !== 'evenfire:' || parsed.hostname !== 'app') {
+    throw new Error('Cannot redirect to an invalid desktop app link')
+  }
+
+  const escapedLink = escapeHtml(deepLink)
+  const scriptLink = JSON.stringify(deepLink).replaceAll('<', '\\u003c')
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="0;url=${escapedLink}">
+  <title>Open in Evenfire</title>
+</head>
+<body>
+  <p>Opening Evenfire… <a href="${escapedLink}">Open the desktop app</a></p>
+  <script>window.location.replace(${scriptLink})</script>
+</body>
+</html>`
+}

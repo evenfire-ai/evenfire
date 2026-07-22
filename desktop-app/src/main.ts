@@ -3,6 +3,7 @@ import path from 'node:path'
 import { AppService } from './appService.js'
 import { config } from './config.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
+import { createMainWindowCoordinator } from './mainWindowCoordinator.js'
 import { type SandboxUiDeepLinkEnvelope, parseSandboxUiDeepLink } from './sandboxUiDeepLinks.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
 
@@ -23,6 +24,7 @@ const pendingEvenfireUrls: string[] = []
 const pendingSandboxUiDeepLinks: SandboxUiDeepLinkEnvelope[] = []
 let sandboxUiDeepLinkSequence = 0
 let lastSandboxUiDeepLink: { rawUrl: string; receivedAt: number } | null = null
+let mainWindowLifecycleReady = false
 
 function systemIconAssetsDirectory(): string {
   return app.isPackaged ? process.resourcesPath : path.join(__dirname, '../assets')
@@ -112,6 +114,19 @@ function focusMainWindow(): void {
   mainWindow.focus()
 }
 
+const mainWindowCoordinator = createMainWindowCoordinator<BrowserWindow>({
+  createWindow,
+  focusWindow: focusMainWindow,
+  getWindow: () => mainWindow,
+})
+
+function requestMainWindow(): void {
+  if (!mainWindowLifecycleReady || !app.isReady()) return
+  void mainWindowCoordinator.ensureWindow().catch(error => {
+    console.error('[Desktop] Could not create the main window for a deep link:', error)
+  })
+}
+
 function findProtocolUrl(argv: string[], protocol: string): string | undefined {
   return argv.find(arg => arg.startsWith(`${protocol}://`))
 }
@@ -122,7 +137,7 @@ function handleSandboxUiDeepLink(rawUrl: string): boolean {
 
   const now = Date.now()
   if (lastSandboxUiDeepLink?.rawUrl === rawUrl && now - lastSandboxUiDeepLink.receivedAt < 1_000) {
-    focusMainWindow()
+    requestMainWindow()
     return true
   }
   lastSandboxUiDeepLink = { rawUrl, receivedAt: now }
@@ -136,7 +151,7 @@ function handleSandboxUiDeepLink(rawUrl: string): boolean {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('sandboxUi:deepLink', envelope)
   }
-  focusMainWindow()
+  requestMainWindow()
   return true
 }
 
@@ -197,6 +212,7 @@ function handleEvenfireUrl(rawUrl: string): void {
       })
     } else {
       pendingEvenfireUrls.push(rawUrl)
+      requestMainWindow()
     }
     return
   }
@@ -213,6 +229,7 @@ function handleEvenfireUrl(rawUrl: string): void {
     mainWindow.webContents.send('auth:desktopSetupToken', { email, authorizationToken })
   } else {
     pendingEvenfireUrls.push(rawUrl)
+    requestMainWindow()
   }
 }
 
@@ -262,7 +279,7 @@ if (!gotSingleInstanceLock) {
     if (desktopSetupLink) handleEvenfireUrl(desktopSetupLink)
     const clerumLink = argv.find(arg => arg.startsWith(`${CLERUM_PROTOCOL}://`))
     if (clerumLink) handleClerumUrl(clerumLink)
-    focusMainWindow()
+    requestMainWindow()
   })
 }
 
@@ -276,10 +293,9 @@ app.on('open-url', (event, rawUrl) => {
 })
 
 async function createWindow(): Promise<void> {
-  await appService.initialize()
   const devUrl = String(process.env.EVENFIRE_RENDERER_URL || '').trim()
 
-  mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     width: 1240,
     height: 860,
     show: false,
@@ -295,11 +311,15 @@ async function createWindow(): Promise<void> {
       nodeIntegration: false,
     },
   })
+  mainWindow = window
+  window.on('closed', () => {
+    if (mainWindow === window) mainWindow = null
+  })
 
-  wireWindowVisibility(mainWindow)
+  wireWindowVisibility(window)
 
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  mainWindow.webContents.on('will-navigate', (event, url) => {
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.webContents.on('will-navigate', (event, url) => {
     const allowFile = url.startsWith('file://')
     const allowDev = Boolean(devUrl) && url.startsWith(devUrl)
     if (!allowFile && !allowDev) {
@@ -308,15 +328,15 @@ async function createWindow(): Promise<void> {
   })
 
   if (devUrl) {
-    await mainWindow.loadURL(devUrl)
+    await window.loadURL(devUrl)
   } else {
     const htmlPath = path.join(__dirname, '../ui-dist/index.html')
-    await mainWindow.loadFile(htmlPath)
+    await window.loadFile(htmlPath)
   }
   // Open maximized by default; users can manually resize afterward.
-  mainWindow.maximize()
+  window.maximize()
   // Show window after successful load to avoid hidden-startup deadlocks.
-  mainWindow.show()
+  window.show()
   if (process.platform !== 'darwin') {
     const initialEvenfireUrl = findProtocolUrl(process.argv, DESKTOP_SETUP_PROTOCOL)
     if (initialEvenfireUrl) handleEvenfireUrl(initialEvenfireUrl)
@@ -327,9 +347,10 @@ async function createWindow(): Promise<void> {
     const pendingUrl = pendingEvenfireUrls.shift()
     if (pendingUrl) handleEvenfireUrl(pendingUrl)
   }
-  mainWindow.once('ready-to-show', () => {
-    mainWindow?.maximize()
-    mainWindow?.show()
+  window.once('ready-to-show', () => {
+    if (window.isDestroyed()) return
+    window.maximize()
+    window.show()
   })
 }
 
@@ -337,17 +358,21 @@ if (gotSingleInstanceLock) {
   app.whenReady().then(async () => {
     wireAdaptiveSystemIcon()
     registerIpcHandlers(appService)
+    // AppService belongs to the process, not a BrowserWindow. Initialize it once
+    // so recreating a closed macOS window does not repeat session network I/O.
+    await appService.initialize()
+    mainWindowLifecycleReady = true
     for (const arg of process.argv) {
       if (arg.startsWith(`${DESKTOP_SETUP_PROTOCOL}://`)) {
         pendingEvenfireUrls.push(arg)
       }
     }
-    await createWindow()
+    await mainWindowCoordinator.ensureWindow()
     wirePowerMonitor()
 
     app.on('activate', async () => {
       if (BrowserWindow.getAllWindows().length === 0) {
-        await createWindow()
+        await mainWindowCoordinator.ensureWindow()
       }
     })
   })
