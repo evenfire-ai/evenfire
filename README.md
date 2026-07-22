@@ -1,22 +1,91 @@
-# evenfire
-
-> **A complete, self-hosted platform for LLM agents that do real work** —
-> connect tools, compose workflows, manage teams, and govern cost, all declared
-> as Kubernetes resources. Bring your own model keys; every risky action waits
-> for a human "yes."
-
-[![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-brightgreen.svg)](LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/evenfire-ai/evenfire/ci-public.yml?branch=main&label=CI)](https://github.com/evenfire-ai/evenfire/actions)
-[![GitHub release](https://img.shields.io/github/v/release/evenfire-ai/evenfire?sort=semver)](https://github.com/evenfire-ai/evenfire/releases)
-
-[What is evenfire](#what-is-evenfire) · [The platform](#the-platform) · [See it work](#see-it-work) · [Why evenfire](#why-evenfire) · [Get started](#get-started-minikube) · [Architecture](#architecture) · [Security model](#security-model) · [Docs](docs/README.md) · [License](#community-and-license)
-
 <p align="center">
-  <img src="docs/assets/desktop-app-sandbox-ui.webp" alt="Desktop App: the LeadForge prospecting plugin rendered inside the app, with its own dashboard, outreach pipeline, approval queue, and charts" width="49%" />
-  <img src="docs/assets/control-ui-usage-dashboard.webp" alt="Control UI: the Cost &amp; Usage console with token totals and a stacked area chart of usage by agent" width="49%" />
+  <a href="https://evenfire.ai">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/evenfire-logo-light.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/assets/evenfire-logo-dark.svg">
+      <img alt="evenfire" src="docs/assets/evenfire-logo-dark.svg" width="300">
+    </picture>
+  </a>
 </p>
 
-<p align="center"><sub><b>Left:</b> a plugin renders its own full UI — the LeadForge prospecting app, approval queue and all — inside the Desktop App. <b>Right:</b> the Control UI console governs the fleet — usage, budgets, and model prices. <a href="docs/surfaces/README.md">Tour all three UIs →</a></sub></p>
+<h3 align="center">Build your company's intelligence layer, without losing control.</h3>
+
+<p align="center">
+  A complete, self-hosted platform for <b>LLM agents that do real work</b> — connect tools,<br/>
+  compose workflows, manage teams, and govern cost, all declared as Kubernetes resources.<br/>
+  Bring your own model keys; every risky action waits for a human "yes."
+</p>
+
+<p align="center">
+  <a href="https://evenfire.ai"><b>Website</b></a>
+  ·
+  <a href="https://calendar.app.google/Nd21Z6LT99JkPrae7"><b>Book a demo</b></a>
+  ·
+  <a href="docs/README.md"><b>Docs</b></a>
+  ·
+  <a href="#quick-start"><b>Quick start</b></a>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: MPL-2.0" src="https://img.shields.io/badge/License-MPL--2.0-brightgreen.svg"></a>
+  <a href="https://github.com/evenfire-ai/evenfire/actions"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/evenfire-ai/evenfire/ci-public.yml?branch=main&label=CI"></a>
+  <a href="https://github.com/evenfire-ai/evenfire/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/evenfire-ai/evenfire?sort=semver"></a>
+  <img alt="Status: Beta" src="https://img.shields.io/badge/status-beta-blue.svg">
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#see-it-work">See it work</a> · <a href="#why-evenfire">Why</a> · <a href="#architecture">Architecture</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="docs/README.md">Docs</a> · <a href="#community-and-license">License</a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/desktop-app-sandbox-ui.webp" alt="Desktop App: the LeadForge prospecting plugin rendered inside the app, with its own dashboard, outreach pipeline, approval queue, and charts" width="82%" />
+</p>
+
+<p align="center"><sub>A plugin renders its own full UI — the LeadForge prospecting app, approval queue and all — inside the Desktop App. <a href="docs/surfaces/README.md">Tour all three UIs →</a></sub></p>
+
+---
+
+## Quick start
+
+Stand up the whole platform on a local cluster with one command — every service,
+deny-all NetworkPolicies, the JWT chain, and a seeded agent named `chatllm`:
+
+```bash
+git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
+cp .env.example .env
+# edit .env: set ADMIN_PASSWORD (required — no default ships) and ONE LLM key
+make minikube-setup     # first run ~5–10 min (image builds dominate); re-run safe
+make minikube-status    # wait for every deployment READY
+```
+
+Then run the UIs from your workstation and say hello to the `chatllm` agent:
+
+```bash
+make install-all && npm --prefix control-ui install
+npm run ui              # Control UI + Profile UI + Desktop App
+```
+
+Full walkthrough — prerequisites, login, and the pure-API path — is in
+[Get started](#get-started-minikube) below.
+
+---
+
+## Status
+
+**Beta.** evenfire runs end-to-end today: the whole platform comes up locally
+with one command, and every capability below is backed by code and tests in this
+repo. It is under active development — some APIs and CRDs may still change before
+a 1.0 release, so pin a release tag if you need stability.
+
+<!-- Roadmap is a placeholder — edit to reflect the real plan. -->
+_Roadmap (indicative, subject to change):_
+
+- Broader connector registry and more first-party MCP servers
+- Additional channels and richer workflow-lifecycle tooling
+- Deeper cost governance, reporting, and budget controls
+
+See [releases](https://github.com/evenfire-ai/evenfire/releases) for what has
+shipped, and [CONTRIBUTING.md](CONTRIBUTING.md) for what we're accepting.
 
 ---
 
