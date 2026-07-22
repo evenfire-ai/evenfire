@@ -1,3 +1,4 @@
+/// <reference path="../../src/renderer.d.ts" />
 // Desktop prewarm and recovery UX for a suspended stateless host.
 //
 // This spec is the final Playwright phase of scripts/e2e/e2e-stateless-suspend-wake.sh.
@@ -40,6 +41,14 @@ const WAKE_VISIBLE_TIMEOUT = 270_000
 // test.setTimeout, giving a precise failure rather than a blanket timeout.
 const TURN_TIMEOUT = 120_000
 const CATALOG_PREWARM_TIMEOUT = 90_000
+// Scenario 4 re-suspends the host in-spec before its cold burst: Scenario 0's
+// catalog prewarm consumes the bash gate's one-shot suspended precondition, so
+// the cold contract needs a fresh replicas-0 state. A FIXED bounded idle at the
+// ceiling (no early probe — a probe is itself a wake that would burn the cold
+// state) lets the aggressive HCC test cadences (idle floor 1m + drain + poll,
+// set by the bash gate) scale the host to 0. Deterministic over fast, per the
+// realism-over-speed directive.
+const SCENARIO4_IDLE_RESUSPEND_MS = 180_000
 
 test.describe.configure({ mode: 'serial' })
 
@@ -86,11 +95,17 @@ async function openStatelessAgent(appPage: import('@playwright/test').Page): Pro
   )
 }
 
-// The bash phase establishes the suspended-host precondition before Electron
-// starts. We do not sleep or query Kubernetes from this user-journey spec:
-// E2E_STATELESS_SUSPENDED is set only after the enclosing bash gate has proved
-// state=suspended, replicas=0, and no running host pod. Desktop then proves
-// catalog prewarm before the user selects the agent.
+// The bash phase establishes the FIRST suspended-host precondition before
+// Electron starts: E2E_STATELESS_SUSPENDED is set only after the enclosing bash
+// gate has proved state=suspended, replicas=0, and no running host pod. Scenario
+// 0's catalog prewarm then legitimately WAKES the host (wake-eligible catalog
+// ops), consuming that one-shot cold state. Scenario 4 therefore re-establishes a
+// fresh replicas-0 state in-spec with a deliberate FIXED bounded idle (see
+// SCENARIO4_IDLE_RESUSPEND_MS) — mirroring the real user journey (idle → the host
+// suspends under the aggressive HCC test cadences → the user returns and bursts).
+// This spec still never queries Kubernetes: the cold burst's own waking-state
+// affordance (resolveWakeOutcome) is the definitive replicas-0 proof, not a K8s
+// read. Desktop proves catalog prewarm before the user selects the agent.
 function requireSuspendPrecondition(): void {
   if (process.env.E2E_STATELESS_SUSPENDED !== '1') {
     throw new Error(
@@ -718,14 +733,43 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
   // N5 — cheap env guard before any expensive UI navigation.
   requireSuspendPrecondition()
 
-  // Chat A — the first distinct conversation, sent while the host is genuinely at
-  // replicas 0 (the suspend precondition guarantees it). SF1: the concurrent
-  // list-sessions + load-models burst runs against THIS in-flight cold wake, so
-  // the wake-scoped reads are exercised while the host is actually waking — not
+  // Chat A — the first distinct conversation, driven as a CONCURRENT cold burst
+  // against a genuinely replicas-0 host. Scenario 0's prewarm already woke the
+  // host, so we first re-suspend it in-spec: open the agent composer (a wake),
+  // then idle for a FIXED bounded window so the aggressive HCC test cadences scale
+  // it back to 0. No early probe send during the idle — a probe is itself a wake
+  // that would burn the cold state. SF1: the concurrent list-sessions +
+  // load-models burst then runs against THIS in-flight cold wake, so the
+  // wake-scoped reads are exercised while the host is actually waking — not
   // against an already-warm host.
   await openStatelessAgent(appPage)
   const chatInput = appPage.getByTestId('chat-input')
   const sendButton = appPage.getByRole('button', { name: /send message/i })
+
+  // Deliberate in-spec re-suspension (Option A). Log the window bounds so the
+  // orchestrator audit can verify the idle actually elapsed. FIXED ceiling wait,
+  // no early exit: deterministic over fast.
+  const idleStartedAt = new Date().toISOString()
+  console.log(
+    `[StatelessWakeJourney] ${JSON.stringify({
+      scenario: 'scenario-4-idle-resuspend',
+      phase: 'start',
+      host_ref: HOST_REF,
+      idle_ms: SCENARIO4_IDLE_RESUSPEND_MS,
+      at: idleStartedAt,
+    })}`
+  )
+  await appPage.waitForTimeout(SCENARIO4_IDLE_RESUSPEND_MS)
+  const idleEndedAt = new Date().toISOString()
+  console.log(
+    `[StatelessWakeJourney] ${JSON.stringify({
+      scenario: 'scenario-4-idle-resuspend',
+      phase: 'end',
+      host_ref: HOST_REF,
+      idle_ms: SCENARIO4_IDLE_RESUSPEND_MS,
+      at: idleEndedAt,
+    })}`
+  )
 
   const markerA = `WAKE_S4_A_${Date.now()}`
   await chatInput.fill(`Reply with exactly: ${markerA}`)
@@ -745,6 +789,21 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
 
   const modeA = await resolveWakeOutcome(appPage, markerA)
   await recordMode(testInfo, 'scenario-4-chat-a-cold-burst', modeA)
+  // Scenario 4 is the runtime proof of THIS PR's core contract — a CONCURRENT
+  // session/model/message burst against a SUSPENDED host (the wake-displacement
+  // fix). A warm burst proves nothing about it, so fail loud rather than record a
+  // silent warm degrade. The FIXED idle above should have re-suspended the host;
+  // a warm outcome means it stayed up.
+  expect(
+    modeA,
+    `[stateless-wake] Scenario 4 cold burst took the WARM branch after a fixed ` +
+      `${Math.round(SCENARIO4_IDLE_RESUSPEND_MS / 1000)}s in-spec idle. This scenario ` +
+      `must exercise the concurrent-on-COLD contract (replicas-0 wake-displacement). ` +
+      `The aggressive HCC test cadences from the bash gate (idle floor 1m + drain + ` +
+      `poll) must scale the host to 0 within that window; a warm burst means the host ` +
+      `never re-suspended and the cold contract was NOT exercised. Idle window: ` +
+      `${idleStartedAt} → ${idleEndedAt}.`
+  ).toBe('cold')
   await expectComposerIdleReady(appPage, chatInput)
   const chatIdA = await readActiveChatId(appPage)
 
