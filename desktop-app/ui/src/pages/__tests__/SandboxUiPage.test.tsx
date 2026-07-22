@@ -147,6 +147,44 @@ describe('SandboxUiPage', () => {
       })
     })
     expect(await screen.findByRole('button', { name: 'Back to apps' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /^Back to .+ planning$/ })).toBeNull()
+  })
+
+  it('returns to the originating conversation from an app', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    sandboxUi.close.mockResolvedValueOnce(undefined)
+    const onBackToConversation = vi.fn()
+
+    render(
+      <SandboxUiPage
+        conversationOrigin={{
+          agentName: 'sales-agent',
+          chatId: 'chat-123',
+          title: 'Quarterly planning',
+        }}
+        onBackToConversation={onBackToConversation}
+      />
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to Quarterly planning' }))
+
+    await waitFor(() => {
+      expect(sandboxUi.close).toHaveBeenCalledTimes(1)
+      expect(onBackToConversation).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('reports when resized embedded app bounds are applied', async () => {

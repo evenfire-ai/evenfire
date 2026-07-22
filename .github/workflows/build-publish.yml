@@ -16,7 +16,12 @@ name: Build & Publish
 
 on:
   push:
-    branches: [main]
+    # `dev` is the integration branch → drives the clerum-dev deploy (build →
+    # dispatch → infra mirror + apply). `main` is the release branch (→ clerum
+    # prod via a dev→main promotion) and does NOT build/dispatch here — prod
+    # promotes dev-proven digests, it never rebuilds. The main→prod trigger is
+    # added with the prod pipeline (see the cutover spec, Phase 2).
+    branches: [dev]
   workflow_dispatch:
     inputs:
       build_all:

@@ -434,7 +434,7 @@ runtime_access_contract_values() {
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF != 2 { exit 2 }
     $1 !~ /^[a-z][a-z0-9_]*$/ { exit 3 }
-    $2 !~ /^(legacy_dml|append|read)$/ { exit 4 }
+    $2 !~ /^(legacy_dml|upsert|append|read)$/ { exit 4 }
     seen[$1]++ { exit 5 }
     {
       count++
@@ -576,8 +576,8 @@ verify_runtime_access_contract() {
          CROSS JOIN LATERAL (
            VALUES
              ('SELECT', true),
-             ('INSERT', expected.access_profile IN ('legacy_dml', 'append')),
-             ('UPDATE', expected.access_profile = 'legacy_dml'),
+             ('INSERT', expected.access_profile IN ('legacy_dml', 'upsert', 'append')),
+             ('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert')),
              ('DELETE', expected.access_profile = 'legacy_dml'),
              ('TRUNCATE', false),
              ('REFERENCES', false),
@@ -873,6 +873,10 @@ verify_db_migration_state() {
   assert_db_query_true \
     "LLM runtime access profile migration was not recorded" \
     "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0067_llm_runtime_access_profiles');"
+
+  assert_db_query_true \
+    "member-registration runtime DELETE revoke migration was not recorded" \
+    "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0070_member_registration_runtime_delete_revoke');"
 
   assert_db_query_true \
     "governed_event_stream.tenant_id is missing or incompatible after the tracing migrations" \

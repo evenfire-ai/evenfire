@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button, StatusBanner } from '@components/Common'
-import { IconClose, IconRefresh, IconSandboxUi } from '../components/SidebarNav/icons'
+import { IconChat, IconClose, IconRefresh, IconSandboxUi } from '../components/SidebarNav/icons'
 import { clickableRowProps } from '../lib/clickableRowProps'
 import type { SandboxUiPageProps } from './SandboxUiPage.types'
 
@@ -146,11 +146,13 @@ const APP_PAGE_SIZE = 6
 
 export function SandboxUiPage({
   boundsRefreshKey = 0,
+  conversationOrigin = null,
   headerShellOverlayOpen = false,
   sidebarShellOverlayOpen = false,
   toastShellOverlayOpen = false,
   shortcutApp = null,
   shortcutOpenRequestId = 0,
+  onBackToConversation,
   onEmbeddedAppOpening,
   onEmbeddedAppBack,
   onEmbeddedAppRemoved,
@@ -297,6 +299,12 @@ export function SandboxUiPage({
     onEmbeddedAppBack?.()
   }, [closeEmbed, onEmbeddedAppBack])
 
+  const handleBackToConversation = useCallback(async () => {
+    if (!conversationOrigin || !onBackToConversation) return
+    await closeEmbed()
+    onBackToConversation()
+  }, [closeEmbed, conversationOrigin, onBackToConversation])
+
   // In-place hard-reload of the embedded app — fetches freshly-arrived
   // server data (e.g. new inbox items) without tearing the view down, so the
   // user no longer has to navigate away and back to see updates.
@@ -384,6 +392,20 @@ export function SandboxUiPage({
     return (
       <section className="page">
         <div className="sandbox-ui-mounted-header">
+          {conversationOrigin && onBackToConversation ? (
+            <Button
+              color="neutral"
+              variant="soft"
+              size="sm"
+              className="sandbox-ui-conversation-btn"
+              aria-label={`Back to ${conversationOrigin.title}`}
+              title={`Back to ${conversationOrigin.title}`}
+              onClick={() => void handleBackToConversation()}
+            >
+              <IconChat />
+              <span>Back to {conversationOrigin.title}</span>
+            </Button>
+          ) : null}
           <Button
             color="neutral"
             variant="soft"
