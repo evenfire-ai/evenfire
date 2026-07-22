@@ -4,9 +4,19 @@ import React, { useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { IconX } from '@/components/icons'
-import { Button, Field, TextAreaInput, TextInput } from '@/components/ui'
+import { Button, Field, SelectInput, TextAreaInput, TextInput } from '@/components/ui'
 import { cn } from '@/lib/cn'
-import { LLM_CREDENTIAL_GROUPS, type LlmCredentialGroup, getLlmGroupCompleteness } from '@/lib/llm'
+import {
+  LLM_CREDENTIAL_GROUPS,
+  type LlmCredentialGroup,
+  type LlmProvider,
+  getLlmGroupCompleteness,
+  mintFallbackSlot,
+  providerForDataKey,
+} from '@/lib/llm'
+import type { ExtraSlot, LlmCredentialFieldsProps } from './types'
+
+export type { LlmCredentialFieldsProps } from './types'
 
 // Where the non-secret per-Host env vars (VERTEX_PROJECT_ID/-LOCATION,
 // AWS_REGION) are configured — the secrets form only links to it, it never
@@ -18,33 +28,38 @@ const HOST_ENV_HREF = CONTROL_ROUTES.agents.root
 // dataKey", never free-form).
 const DATA_KEY_PATTERN = /^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$/
 
-// An operator-created extra credential slot (spec R4.5.6). The slot OWNS its
-// name draft and value; only a validated, non-colliding key is ever projected
-// into the parent `draft` (`committedKey`). This guarantees editing an extra
-// slot can never write to — and clobber — a real provider slot, and that an
-// invalid/colliding key never reaches submit.
-type ExtraSlot = {
-  id: string
-  provider: string
-  nameInput: string
-  value: string
-  committedKey: string | null
-}
-
-export type LlmCredentialFieldsProps = {
-  // dataKey -> value. Write-only: existing values are NEVER passed in here (the
-  // status-only listing returns names only, spec R4.5.3).
-  draft: Record<string, string>
-  onChange: (dataKey: string, value: string) => void
-  disabled?: boolean
-  // Keys already stored in the Secret (edit mode) — light up the present chips
-  // without ever exposing a value. Create flows omit it.
-  existingKeys?: string[]
-}
-
 // Input-id prefix. Only one LlmCredentialFields renders per page and every slot
 // id already ends in a unique dataKey/slot id, so this is a fixed constant.
 const ID_PREFIX = 'llm-secret'
+
+// Every canonical (registry) slot dataKey across providers. An existing Secret
+// key outside this set is an operator-minted extra slot (`claude-api-key-fb1`).
+const CANONICAL_SLOT_KEYS: ReadonlySet<string> = new Set(
+  LLM_CREDENTIAL_GROUPS.flatMap(group => group.slots.map(slot => slot.dataKey))
+)
+
+// Seed one ExtraSlot per stored NON-canonical key so a Secret that only holds
+// an extra slot of a provider (e.g. `claude-api-key-fb1` minted by the agents
+// flow) still shows that key visible and editable inside its provider section
+// (additive editor spec B1). `committedKey` starts null: stored values never
+// enter the write-only draft until the operator types a replacement.
+function seedExistingExtraSlots(existingKeys: string[] | undefined): ExtraSlot[] {
+  const slots: ExtraSlot[] = []
+  for (const key of new Set(existingKeys ?? [])) {
+    if (CANONICAL_SLOT_KEYS.has(key)) continue
+    const provider = providerForDataKey(key)
+    if (!provider) continue
+    slots.push({
+      id: `existing-${key}`,
+      provider,
+      nameInput: key,
+      value: '',
+      committedKey: null,
+      existingKey: key,
+    })
+  }
+  return slots
+}
 
 function completenessChip(group: LlmCredentialGroup, present: (dataKey: string) => boolean) {
   const { present: filled, total, usable } = getLlmGroupCompleteness(group, present)
@@ -71,12 +86,45 @@ export function LlmCredentialFields({
   disabled = false,
   existingKeys,
 }: LlmCredentialFieldsProps) {
-  const [extraSlots, setExtraSlots] = useState<ExtraSlot[]>([])
+  const [extraSlots, setExtraSlots] = useState<ExtraSlot[]>(() =>
+    seedExistingExtraSlots(existingKeys)
+  )
+  // Providers the operator surfaced with "＋ Add provider" this session. Resets
+  // with the mount (the update modal mounts fresh per row; the create flow
+  // remounts per step) — a remount is auto-cured by the draft term below.
+  const [manuallyAdded, setManuallyAdded] = useState<ReadonlySet<LlmProvider>>(() => new Set())
   const nextExtraId = useRef(0)
 
   const existingKeySet = useMemo(() => new Set(existingKeys ?? []), [existingKeys])
   const present = (dataKey: string): boolean =>
     (draft[dataKey] ?? '').trim().length > 0 || existingKeySet.has(dataKey)
+
+  // Additive visibility (spec S1) — a provider section renders only when:
+  //   - the Secret already stores one of its keys (canonical or extra), or
+  //   - the draft carries a non-empty value for one of its keys (typed now, or
+  //     surviving a create-flow step remount — never "key present in draft":
+  //     createEmptyLlmKeyDraft seeds '' under EVERY canonical key), or
+  //   - the operator added it this session.
+  // Everything else stays hidden behind "＋ Add provider".
+  const visibleProviders = useMemo(() => {
+    const visible = new Set<LlmProvider>()
+    for (const key of existingKeySet) {
+      const provider = providerForDataKey(key)
+      if (provider) visible.add(provider)
+    }
+    for (const [key, value] of Object.entries(draft)) {
+      if (value.trim().length === 0) continue
+      const provider = providerForDataKey(key)
+      if (provider) visible.add(provider)
+    }
+    for (const provider of manuallyAdded) visible.add(provider)
+    return visible
+  }, [draft, existingKeySet, manuallyAdded])
+
+  // Filtering LLM_CREDENTIAL_GROUPS (instead of iterating the sets) keeps the
+  // canonical package order regardless of the order providers were added.
+  const visibleGroups = LLM_CREDENTIAL_GROUPS.filter(group => visibleProviders.has(group.provider))
+  const addableGroups = LLM_CREDENTIAL_GROUPS.filter(group => !visibleProviders.has(group.provider))
 
   // The full set of keys the form already knows (package slots + created extra
   // slots) — used to flag duplicate extra-slot names.
@@ -89,12 +137,16 @@ export function LlmCredentialFields({
     return keys
   }, [existingKeySet])
 
-  function extraSlotError(id: string, nameInput: string): string | null {
+  function extraSlotError(slot: ExtraSlot, nameInput: string): string | null {
     const trimmed = nameInput.trim()
     if (!trimmed) return 'Key name is required.'
     if (!DATA_KEY_PATTERN.test(trimmed)) return 'Use lowercase letters, numbers, and - . _'
-    if (knownKeys.has(trimmed)) return 'This key already exists as a provider slot.'
-    if (extraSlots.some(slot => slot.id !== id && slot.nameInput.trim() === trimmed)) {
+    // A slot seeded from a stored key may keep (and rewrite) its own name; any
+    // OTHER known key is still a collision.
+    if (knownKeys.has(trimmed) && trimmed !== slot.existingKey) {
+      return 'This key already exists as a provider slot.'
+    }
+    if (extraSlots.some(item => item.id !== slot.id && item.nameInput.trim() === trimmed)) {
       return 'Duplicate key name.'
     }
     return null
@@ -104,7 +156,7 @@ export function LlmCredentialFields({
   // valid, non-colliding key is committed; the previously-committed key (always
   // itself a validated key, never a real provider slot) is cleared on change.
   function commitExtraSlot(slot: ExtraSlot, nextName: string, nextValue: string) {
-    const nextCommitted = extraSlotError(slot.id, nextName) === null ? nextName.trim() : null
+    const nextCommitted = extraSlotError(slot, nextName) === null ? nextName.trim() : null
     if (slot.committedKey && slot.committedKey !== nextCommitted) {
       onChange(slot.committedKey, '')
     }
@@ -118,13 +170,19 @@ export function LlmCredentialFields({
     )
   }
 
-  function addExtraSlot(provider: string) {
-    const existingForProvider = extraSlots.filter(slot => slot.provider === provider).length
-    const suggested = `${provider}-api-key-fb${existingForProvider + 1}`
+  function addExtraSlot(provider: LlmProvider) {
+    // Suggest the first `${provider}-api-key-fbN` not already claimed by the
+    // stored Secret or another slot in the form (mirrors mintFallbackSlot in
+    // the agents flow), so a seeded `-fb1` never collides with the suggestion.
+    const claimed = new Set<string>([
+      ...existingKeySet,
+      ...extraSlots.map(slot => slot.nameInput.trim()),
+    ])
+    const suggested = mintFallbackSlot(provider, claimed)
     const id = `extra-${provider}-${nextExtraId.current++}`
     setExtraSlots(prev => [
       ...prev,
-      { id, provider, nameInput: suggested, value: '', committedKey: null },
+      { id, provider, nameInput: suggested, value: '', committedKey: null, existingKey: null },
     ])
   }
 
@@ -135,21 +193,85 @@ export function LlmCredentialFields({
     setExtraSlots(prev => prev.filter(item => item.id !== id))
   }
 
+  function addProvider(value: string) {
+    const group = LLM_CREDENTIAL_GROUPS.find(item => item.provider === value)
+    if (!group) return
+    setManuallyAdded(prev => new Set(prev).add(group.provider))
+  }
+
+  // Removable only when hiding the section cannot lose anything (spec S2): the
+  // provider was added this session AND no key of it carries a committed value
+  // (canonical or extra). Two terms compose the value check:
+  //   - draft scan via providerForDataKey — canonical slots and extras whose
+  //     key still carries a recognizable provider prefix;
+  //   - the extra-slot STATE — an extra slot renamed to a custom key (e.g.
+  //     `team1.key`) commits to the draft under a key providerForDataKey can't
+  //     attribute, so the slot's own committedKey/value must gate too.
+  // A provider with a stored key never reaches `manuallyAdded` — it is already
+  // visible, so "＋ Add provider" never offers it. Deleting a stored key stays
+  // on removeSecretKey, not here.
+  function isProviderRemovable(provider: LlmProvider): boolean {
+    if (!manuallyAdded.has(provider)) return false
+    const hasDraftValue = Object.entries(draft).some(
+      ([key, value]) => value.trim().length > 0 && providerForDataKey(key) === provider
+    )
+    if (hasDraftValue) return false
+    return !extraSlots.some(
+      slot =>
+        slot.provider === provider && slot.committedKey !== null && slot.value.trim().length > 0
+    )
+  }
+
+  function removeProvider(provider: LlmProvider) {
+    // Clear the provider's extra slots first so no committedKey stays orphaned
+    // in the parent draft (spec §5 — their values are empty per the gate, but
+    // the committed keys themselves must not linger).
+    for (const slot of extraSlots.filter(item => item.provider === provider)) {
+      removeExtraSlot(slot.id)
+    }
+    setManuallyAdded(prev => {
+      const next = new Set(prev)
+      next.delete(provider)
+      return next
+    })
+  }
+
   return (
     <div className="cu-llm-cred-groups">
-      {LLM_CREDENTIAL_GROUPS.map(group => {
+      {visibleGroups.length === 0 ? (
+        <p className="cu-field__hint cu-llm-cred-empty">
+          No providers added yet — add a provider below to enter its credentials.
+        </p>
+      ) : null}
+
+      {visibleGroups.map(group => {
         const chip = completenessChip(group, present)
         const providerExtras = extraSlots.filter(slot => slot.provider === group.provider)
+        const removable = isProviderRemovable(group.provider)
         return (
           <section className="cu-llm-cred-group" key={group.provider}>
             <div className="cu-llm-cred-group__head">
               <span className="cu-llm-cred-group__title">{group.label}</span>
-              <span
-                className={cn('cu-slot-chip', `cu-slot-chip--${chip.state}`)}
-                aria-label={`${group.label} credentials ${chip.text}`}
-              >
-                <span aria-hidden="true">{chip.symbol}</span>
-                {chip.text}
+              <span className="cu-llm-cred-group__head-actions">
+                <span
+                  className={cn('cu-slot-chip', `cu-slot-chip--${chip.state}`)}
+                  aria-label={`${group.label} credentials ${chip.text}`}
+                >
+                  <span aria-hidden="true">{chip.symbol}</span>
+                  {chip.text}
+                </span>
+                {removable ? (
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                    onClick={() => removeProvider(group.provider)}
+                    disabled={disabled}
+                    aria-label={`Remove ${group.label} provider`}
+                    title={`Remove ${group.label} provider`}
+                  >
+                    <IconX width={16} height={16} />
+                  </button>
+                ) : null}
               </span>
             </div>
 
@@ -212,7 +334,7 @@ export function LlmCredentialFields({
 
             {providerExtras.map(slot => {
               const inputId = `${ID_PREFIX}-extra-${slot.id}`
-              const error = extraSlotError(slot.id, slot.nameInput)
+              const error = extraSlotError(slot, slot.nameInput)
               return (
                 <Field
                   key={slot.id}
@@ -267,6 +389,23 @@ export function LlmCredentialFields({
           </section>
         )
       })}
+
+      {addableGroups.length > 0 ? (
+        <SelectInput
+          className="cu-llm-cred-add"
+          value=""
+          onChange={event => addProvider(event.target.value)}
+          disabled={disabled}
+          aria-label="Add provider"
+        >
+          <option value="">＋ Add provider…</option>
+          {addableGroups.map(group => (
+            <option key={group.provider} value={group.provider}>
+              {group.label}
+            </option>
+          ))}
+        </SelectInput>
+      ) : null}
     </div>
   )
 }

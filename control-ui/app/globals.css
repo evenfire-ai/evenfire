@@ -6698,6 +6698,23 @@ textarea.cu-input {
   align-items: center;
 }
 
+/* Chip + optional remove icon-button on the right side of a group head. */
+.cu-llm-cred-group__head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Empty state of the additive editor (no provider sections mounted yet). */
+.cu-llm-cred-empty {
+  margin: 0;
+}
+
+/* The "＋ Add provider" picker of the additive editor. */
+select.cu-input.cu-llm-cred-add {
+  max-width: 14rem;
+}
+
 /* ── Host LLM config surface (spec Topic 1b, jury design C) ───────────────── */
 .cu-llm-config {
   display: flex;
