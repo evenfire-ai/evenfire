@@ -84,3 +84,5 @@ src/
 ├── bridge.ts  # StdioBridge: process lifecycle, HTTP server, request/response routing
 └── types.ts   # BridgeConfig interface + env-based config loader
 ```
+
+<!-- auto-deploy proof #2: OSS dev → build → mirror → infra apply (2026-07-22) -->
