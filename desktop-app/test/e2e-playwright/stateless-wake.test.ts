@@ -259,13 +259,18 @@ async function resolveWakeOutcome(
 async function recordMode(
   testInfo: import('@playwright/test').TestInfo,
   scenario: string,
-  mode: 'warm' | 'cold'
+  mode: 'warm' | 'cold',
+  // Optional raw evidence for the derived mode (e.g. the authoritative prewarm
+  // response behind a Scenario-4 classification). Merged into the emitted
+  // [StatelessWakeJourney] line so the orchestrator audit reads the raw signal
+  // alongside the derived verdict.
+  extra?: Record<string, unknown>
 ): Promise<void> {
   // The per-scenario line is observability; the suite-level aggregate this feeds
   // (the afterAll below) IS a gate — a pass where no scenario ever took the cold
   // (replicas-0) branch under an active suspend precondition fails loudly (N1).
   recordedWakeModes.push({ scenario, mode })
-  const line = { scenario, host_ref: HOST_REF, mode }
+  const line = { scenario, host_ref: HOST_REF, mode, ...(extra ?? {}) }
   console.log(`[StatelessWakeJourney] ${JSON.stringify(line)}`)
   await testInfo.attach(`stateless-wake-${scenario}-mode`, {
     body: JSON.stringify(line, null, 2),
@@ -554,6 +559,42 @@ async function probeStatelessHostModels(
   }, HOST_REF)
 }
 
+// Fires the app's own wake op (window.clerum.rpc.prewarmHost → POST …/wake) as a
+// member of the cold burst, and returns its raw response. The 202 `wake-requested`
+// status is control-api's Postgres-backed AUTHORITATIVE signal that the host was
+// SUSPENDED at first touch — robust to the transparent sub-hold-deadline wakes that
+// blind the UI waking-state oracle (a fast rpc-proxy wake-and-hold returns the LLM
+// reply with no visible waking-state, so the affordance never renders). `active`
+// (200) means the host was already warm. `skipped` ('cooldown'/'in-flight' — the
+// app's own useHostPrewarmController may prewarm on chat mount; the 60s cooldown
+// clears across the 180s idle, and any residual collision surfaces here) or a
+// missing status is INDETERMINATE — the caller MUST fail loud, never classify warm.
+async function probeStatelessPrewarm(appPage: import('@playwright/test').Page): Promise<{
+  error: string | null
+  status: string | null
+  skipped: string | null
+  requested: boolean | null
+}> {
+  return appPage.evaluate(async hostRef => {
+    try {
+      const result = await window.clerum.rpc.prewarmHost(hostRef)
+      return {
+        error: null,
+        status: typeof result?.status === 'string' ? result.status : null,
+        skipped: typeof result?.skipped === 'string' ? result.skipped : null,
+        requested: typeof result?.requested === 'boolean' ? result.requested : null,
+      }
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+        status: null,
+        skipped: null,
+        requested: null,
+      }
+    }
+  }, HOST_REF)
+}
+
 // Navigate to the dedicated agent view (no active chat) where the visible
 // "Latest sessions for selected agent" region renders — the same path the sibling
 // stateless-watch-session-continuity spec uses (Agents → Open details → Go to
@@ -773,11 +814,20 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
 
   const markerA = `WAKE_S4_A_${Date.now()}`
   await chatInput.fill(`Reply with exactly: ${markerA}`)
-  const [sessionsDuringColdWake, modelsDuringColdWake] = await Promise.all([
-    readStatelessSessionIds(appPage),
-    probeStatelessHostModels(appPage),
-    sendButton.click(),
-  ])
+  // FOUR concurrent ops as the first touch against the (now re-suspended) host: the
+  // authoritative wake (prewarmHost) + the two wake-scoped reads + the send. Keep
+  // the click LAST so the explicit prewarm and reads race the send's own
+  // server-side reactive wake (rpc-proxy wake-and-hold) — a strictly harder
+  // exercise of the coordinator dedup (the Desktop mirror of bash Test 6). The
+  // prewarm's status is the cold/warm oracle; the UI waking-state affordance is NOT
+  // used for the mode because a transparent sub-hold-deadline wake never renders it.
+  const [prewarmDuringColdWake, sessionsDuringColdWake, modelsDuringColdWake] =
+    await Promise.all([
+      probeStatelessPrewarm(appPage),
+      readStatelessSessionIds(appPage),
+      probeStatelessHostModels(appPage),
+      sendButton.click(),
+    ])
   expect(
     sessionsDuringColdWake.error,
     `[stateless-wake] concurrent listSessions during the COLD wake must not 403/fail — ${sessionsDuringColdWake.error}`
@@ -787,8 +837,48 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
     `[stateless-wake] concurrent getHostModels during the COLD wake must not 403/fail — ${modelsDuringColdWake.error}`
   ).toBeNull()
 
-  const modeA = await resolveWakeOutcome(appPage, markerA)
-  await recordMode(testInfo, 'scenario-4-chat-a-cold-burst', modeA)
+  // Authoritative cold/warm classification from the app's own prewarm response
+  // (control-api Postgres-backed). 'wake-requested' (202) proves the host was
+  // SUSPENDED at first touch; 'active' (200) proves it was already warm. An error,
+  // a `skipped` (cooldown/in-flight), or a missing/unknown status is INDETERMINATE
+  // — fail loud naming the reason, never silently classify warm.
+  let modeA: 'warm' | 'cold'
+  if (prewarmDuringColdWake.error) {
+    throw new Error(
+      `[stateless-wake] Scenario 4 prewarm oracle errored (${prewarmDuringColdWake.error}); ` +
+        `cannot classify the cold burst. INDETERMINATE — not warm. Idle window: ` +
+        `${idleStartedAt} → ${idleEndedAt}.`
+    )
+  } else if (prewarmDuringColdWake.skipped) {
+    throw new Error(
+      `[stateless-wake] Scenario 4 prewarm was skipped='${prewarmDuringColdWake.skipped}' ` +
+        `(cooldown or in-flight collision with the app's own prewarm controller), so it ` +
+        `returned no authoritative wake status. INDETERMINATE — never classified as warm. ` +
+        `Idle window: ${idleStartedAt} → ${idleEndedAt}.`
+    )
+  } else if (prewarmDuringColdWake.status === 'wake-requested') {
+    modeA = 'cold'
+  } else if (prewarmDuringColdWake.status === 'active') {
+    modeA = 'warm'
+  } else {
+    throw new Error(
+      `[stateless-wake] Scenario 4 prewarm returned a non-classifiable status=` +
+        `'${prewarmDuringColdWake.status}' (expected 'wake-requested' | 'active'). INDETERMINATE.`
+    )
+  }
+  // Audit trail: emit the RAW prewarm response alongside the derived mode.
+  await recordMode(testInfo, 'scenario-4-chat-a-cold-burst', modeA, {
+    prewarm: {
+      status: prewarmDuringColdWake.status,
+      skipped: prewarmDuringColdWake.skipped,
+      requested: prewarmDuringColdWake.requested,
+    },
+  })
+  // Await the marker reply for continuity (chatIdA + the transcript legs below need
+  // the turn to complete). resolveWakeOutcome covers both the transparent-warm and
+  // the visible-waking-state retry paths; its return value is intentionally NOT the
+  // mode oracle — the prewarm status above is authoritative.
+  await resolveWakeOutcome(appPage, markerA)
   // Scenario 4 is the runtime proof of THIS PR's core contract — a CONCURRENT
   // session/model/message burst against a SUSPENDED host (the wake-displacement
   // fix). A warm burst proves nothing about it, so fail loud rather than record a
@@ -796,7 +886,8 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
   // a warm outcome means it stayed up.
   expect(
     modeA,
-    `[stateless-wake] Scenario 4 cold burst took the WARM branch after a fixed ` +
+    `[stateless-wake] Scenario 4 cold burst took the WARM branch (prewarm status=` +
+      `'${prewarmDuringColdWake.status}') after a fixed ` +
       `${Math.round(SCENARIO4_IDLE_RESUSPEND_MS / 1000)}s in-spec idle. This scenario ` +
       `must exercise the concurrent-on-COLD contract (replicas-0 wake-displacement). ` +
       `The aggressive HCC test cadences from the bash gate (idle floor 1m + drain + ` +
