@@ -37,6 +37,10 @@ test('buildEvenfireDesktopAppRedirectDocument creates an unauthenticated protoco
   assert.match(document, /http-equiv="refresh"/)
   assert.match(document, /window\.location\.replace/)
   assert.match(document, /evenfire:\/\/app\/sandbox-recipes\/agentic-task-board/)
+  assert.match(document, /<style>/)
+  assert.match(document, /class="page-card"/)
+  assert.match(document, /<h1>Open agentic-task-board<\/h1>/)
+  assert.match(document, /class="open-button"/)
   assert.doesNotMatch(document, /login|authenticate|authorization/i)
 })
 

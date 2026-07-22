@@ -32,10 +32,11 @@ export async function GET(
     headers: {
       'Cache-Control': 'no-store',
       'Content-Security-Policy':
-        "default-src 'none'; script-src 'unsafe-inline'; base-uri 'none'; " +
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; " +
         "form-action 'none'; frame-ancestors 'none'",
       'Content-Type': 'text/html; charset=utf-8',
       'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
     },
   })
 }
