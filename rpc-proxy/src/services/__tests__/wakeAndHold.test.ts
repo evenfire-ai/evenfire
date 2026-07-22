@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Response as ExpressResponse } from 'express'
-import type { ResolvedServerConnection } from '../../types.js'
+import type { ResolvedServerConnection, RpcAccessClaims, RpcScope } from '../../types.js'
 import type { HostWakeApiResponse } from '../controlApiRestService.js'
 import {
   WakeAndHoldCoordinator,
@@ -39,12 +39,32 @@ function makeCoordinator(overrides?: Partial<WakeCoordinatorDeps>): {
   return { coordinator, requestWake, probeReady }
 }
 
-function holdParams(overrides?: { hostRef?: string; tokenExpMs?: number }) {
+// Wake-capable by default (§11.2): the branch-matrix below asserts a wake IS
+// triggered, which now requires the caller to carry host:wake:write + the
+// target hostRef. `tokenExpMs` drives claims.exp so the token-TTL cases still
+// exercise the hold budget.
+function holdClaims(hostRef: string, tokenExpMs: number, scopes?: RpcScope[]): RpcAccessClaims {
   return {
-    hostRef: overrides?.hostRef ?? 'chatllm',
+    sub: 'user-1',
+    typ: 'user',
+    accessScope: 'team',
+    teamId: 'team-1',
+    scopes: scopes ?? ['host:wake:write', 'host:message:invoke'],
+    hostRefs: [hostRef],
+    jti: 'jti-1',
+    iat: 1,
+    exp: Math.floor(tokenExpMs / 1000),
+  }
+}
+
+function holdParams(overrides?: { hostRef?: string; tokenExpMs?: number; scopes?: RpcScope[] }) {
+  const hostRef = overrides?.hostRef ?? 'chatllm'
+  const tokenExpMs = overrides?.tokenExpMs ?? Date.now() + 3_600_000
+  return {
+    hostRef,
     host: HOST,
+    claims: holdClaims(hostRef, tokenExpMs, overrides?.scopes),
     rpcAccessToken: 'rpc-token',
-    tokenExpMs: overrides?.tokenExpMs ?? Date.now() + 3_600_000,
   }
 }
 
@@ -429,12 +449,13 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
       respondLegacy?: (error: unknown) => void
     }
   ) {
+    const hostRef = overrides?.hostRef ?? 'chatllm'
     return {
       res: res as unknown as ExpressResponse,
-      hostRef: overrides?.hostRef ?? 'chatllm',
+      hostRef,
       host: overrides?.host ?? HOST,
+      claims: holdClaims(hostRef, Date.now() + 3_600_000),
       rpcAccessToken: 'rpc-token',
-      tokenExpMs: Date.now() + 3_600_000,
       attemptUpstream,
       respondLegacy:
         overrides?.respondLegacy ??
