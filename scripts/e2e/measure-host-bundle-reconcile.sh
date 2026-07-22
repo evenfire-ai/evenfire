@@ -19,6 +19,10 @@
 #     Addendum 1 bundle-wide measurement mandate (ALL services this PR
 #           touches: mcp-host bundle + channel-reader bundle + wake +
 #           independent admission + non-regression side-clock)
+#     Addendum 4.7 delete-while-pass-active runtime evidence (#827):
+#           CR deletion issued while a full fleet pass is demonstrably
+#           active must converge to exactly-one complete cleanup with no
+#           resurrection (see the delete-during-pass step)
 #
 # House style: mirrors scripts/e2e/e2e-lib.sh (kctl wrapper, log/ok/fail
 # helpers, truncate_rfc1123) and scripts/e2e/stateless-cold-start-measure.sh
@@ -63,16 +67,28 @@
 #   ADMISSION_BLOCKER_READY  (independent-admission subcommand) set to 1 to
 #                         assert the orchestrator has engaged a deterministic
 #                         HCC block/slow-pass. ADMISSION_BLOCKER describes it.
+#   DELETE_DURING_PASS    set to 1 to run the Addendum 4.7
+#                         delete-while-pass-active step inside `all`.
+#                         Opt-in because it RESTARTS the HCC pod (a
+#                         supported operational event) to force a
+#                         demonstrable full fleet pass; existing callers
+#                         are unaffected by default.
 #   KEEP_FIXTURES         set to 1 to skip teardown (diagnosis).
 #
 # SUBCOMMANDS (default: all)
 #   all                  bundle + independent-admission(if hook ready) +
-#                        metrics + sideclock, then teardown.
+#                        metrics + sideclock + delete-during-pass(if
+#                        DELETE_DURING_PASS=1), then teardown.
 #   bundle               phase 1 only (stateful control Host + stateless Host)
 #   wake                 phase 2 only (orchestrator calls after suspend+wake)
 #   independent-admission phase 3 only (needs ADMISSION_BLOCKER_READY=1)
 #   metrics              phase 4 only (HCC §14.1 scrape)
 #   sideclock            phase 5 only (Context/McpServer non-regression)
+#   delete-during-pass   Addendum 4.7 step only (#827): delete a fixture
+#                        Host WHILE a full fleet pass is demonstrably
+#                        active (HCC restart -> 'initial Host
+#                        reconciliation'); assert exactly-one complete
+#                        cleanup + no resurrection. Restarts the HCC pod.
 #   teardown             delete only this run's fixtures; fail-loud on leftover
 #
 # EXIT CODES
@@ -121,6 +137,25 @@ readonly FIXTURE_RUN_KEY='e2e-measure-run'
 readonly SLO_MATERIALIZE_S=20   # Host creation -> Deployment creation
 readonly SLO_READY_S=60         # Host creation -> Pod Ready (warm local gate)
 readonly SLO_WAKE_S=45          # wake accepted -> Pod Ready
+
+# Addendum 4.7 delete-while-pass-active budgets (each constant states its
+# contract; expiry is a hard fail with diagnostics, never a silent skip).
+readonly DELPASS_HCC_READY_DEADLINE_S=120     # replacement HCC pod Running after the restart
+readonly DELPASS_PASS_ACTIVE_DEADLINE_S=60    # initial-pass START marker observed on the new pod
+readonly DELPASS_PASS_COMPLETE_DEADLINE_S=180 # pass COMPLETED marker observed after the delete
+readonly DELPASS_CLEANUP_DEADLINE_S=180       # deleted CR + owned bundle fully gone
+readonly DELPASS_RESURRECTION_SETTLE_S=30     # quiet window before re-asserting nothing came back
+# Bounded EXTENSION for owned children already Terminating (deletionTimestamp
+# set) at the teardown leftover check — e.g. a workspace PVC whose
+# kubernetes.io/pvc-protection finalizer drains for the deleting pod's
+# termination grace. A child with NO deletionTimestamp never gets this
+# extension (the delete was never issued → immediate fail).
+readonly MEASURE_TEARDOWN_CONVERGE_S=120
+# Exact log lines emitted by host-context-controller/src/k8sClient.ts for
+# the startup full fleet pass (reason string 'initial Host reconciliation').
+readonly HCC_PASS_STARTED_MARKER='Running initial Host reconciliation'
+readonly HCC_PASS_COMPLETED_MARKER='Completed Host reconciliation after initial Host reconciliation'
+readonly HCC_PASS_FAILED_MARKER='Host reconciliation after initial Host reconciliation failed'
 
 # ─── Colors (mirrors e2e-lib.sh) ──────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'; BOLD='\033[1m'
@@ -218,26 +253,31 @@ trap cleanup_portforward EXIT
 # ======================================================================
 # Populated by init_run(): unique, RFC1123-safe host names for this run.
 RUN_ID=''; RUN_SLUG=''; RUN_DIR=''
-HOST_CONTROL=''; HOST_STATELESS=''; HOST_PROBE=''; FIXTURE_SECRET=''
+HOST_CONTROL=''; HOST_STATELESS=''; HOST_PROBE=''; HOST_DELPASS=''; FIXTURE_SECRET=''
 
 init_run() {
   [[ -n "${RUN_LABEL:-}" ]] || die "RUN_LABEL is required (e.g. baseline | fixed)." 2
   [[ -n "${OUT_DIR:-}" ]]  || die "OUT_DIR is required." 2
   RUN_SLUG="$(sanitize_label "$RUN_LABEL" 15)"
   [[ -n "$RUN_SLUG" ]] || die "RUN_LABEL '${RUN_LABEL}' sanitized to empty; pick an alphanumeric label." 2
-  RUN_ID="$(now_ms)"; RUN_ID="${RUN_ID: -6}"   # 6-digit run discriminator
+  # Run discriminator: epoch-ms tail + 3-digit random suffix. Full epoch-ms
+  # would blow the 34-char host-name budget below; the random suffix removes
+  # the 16.7-minute tail-collision window between runs instead.
+  RUN_ID="$(now_ms)"; RUN_ID="${RUN_ID: -6}$(printf '%03d' $((RANDOM % 1000)))"
   RUN_DIR="${OUT_DIR%/}/${RUN_SLUG}-$(now_stamp)"
   mkdir -p "$RUN_DIR"
-  # Fixture names — keep host name <=35 chars so
-  # host-<name>-mcp-host-runtime-tokens stays within the 63-char RFC1123 limit.
+  # Fixture names — keep host name <=34 chars so
+  # host-<name>-mcp-host-runtime-tokens (5+34+24) stays within the 63-char
+  # RFC1123 limit.
   local base
   base="$(truncate_rfc1123 "m791-${RUN_SLUG}-${RUN_ID}")"
   HOST_CONTROL="$(truncate_rfc1123 "${base}-ctl")"
   HOST_STATELESS="$(truncate_rfc1123 "${base}-sl")"
   HOST_PROBE="$(truncate_rfc1123 "${base}-pr")"
+  HOST_DELPASS="$(truncate_rfc1123 "${base}-dp")"
   FIXTURE_SECRET="$(truncate_rfc1123 "${base}-keys")"
   log "run dir: ${RUN_DIR}"
-  log "fixtures: control=${HOST_CONTROL} stateless=${HOST_STATELESS} probe=${HOST_PROBE} run-id=${RUN_ID}"
+  log "fixtures: control=${HOST_CONTROL} stateless=${HOST_STATELESS} probe=${HOST_PROBE} delpass=${HOST_DELPASS} run-id=${RUN_ID}"
 }
 
 ensure_fixture_secret() {
@@ -310,15 +350,25 @@ host_created(){ kctl -n "$MCP_HOST_NS" get host "$1" -o jsonpath='{.metadata.cre
 # single JSON array [{namespace,kind,name,creationTimestamp}]. Uses the
 # authoritative HCC ownership selector (managed-by + host) — the same
 # predicate HostReconciler.isHccOwnedHostResource uses — so nothing is missed.
+#
+# FAIL-CLOSED (mirrors e2e-host-storm-gate.sh collect_children): emits the
+# JSON array on stdout and returns 0 only when EVERY kubectl read
+# succeeded; any read failure prints the captured stderr and flips the
+# return code to 2 ("verification impossible"). Every label-selector list
+# of these standard kinds returns exit 0 with an empty item list when
+# nothing matches, so a nonzero kubectl exit is a real read failure (API
+# outage, RBAC, unknown kind) — callers MUST treat rc=2 as failure, never
+# as "no children".
 collect_children_json() {
-  local host="$1" ns kind items
+  local host="$1" ns kind items rc=0
   local combined='[]'
   for ns in $BUNDLE_NAMESPACES; do
     for kind in $BUNDLE_KINDS; do
-      # -l on two labels; ignore kinds absent in a namespace (get returns []).
       if ! items="$(kctl -n "$ns" get "$kind" \
             -l "${OWNED_SELECTOR},${HOST_LABEL}=${host}" \
-            -o json 2>/dev/null)"; then
+            -o json 2>"${RUN_DIR}/collect-children.err")"; then
+        echo "collect_children_json: kubectl get ${kind} in ${ns} FAILED for host ${host}: $(cat "${RUN_DIR}/collect-children.err" 2>/dev/null)" >&2
+        rc=2
         continue
       fi
       combined="$(NS="$ns" KIND="$kind" ITEMS="$items" ACC="$combined" python3 -c '
@@ -335,12 +385,37 @@ for it in lst:
         "kind": os.environ["KIND"],
         "name": md.get("name"),
         "creationTimestamp": md.get("creationTimestamp"),
+        # Additive: lets the teardown check distinguish a CONVERGING child
+        # (delete issued, finalizer draining) from one never deleted.
+        "deletionTimestamp": md.get("deletionTimestamp"),
     })
 print(json.dumps(acc))
 ')"
     done
   done
   printf '%s' "$combined"
+  return "$rc"
+}
+
+# FAIL-CLOSED absence check (mirrors e2e-host-storm-gate.sh): returns 0
+# ONLY when the API positively answered NotFound for the Host. "Present"
+# returns 1; any other kubectl failure (outage, RBAC, timeout) returns 2
+# with the error on stderr — absence must never be inferred from an
+# unreadable API. The match is anchored on the API-server reason
+# '(NotFound)' or the kubectl trailing form naming EXACTLY the requested
+# Host, so a kubeconfig-level `context "..." not found` error can never
+# read as absence-confirmation.
+host_absent_confirmed() {
+  local h="$1" err
+  if kctl -n "$MCP_HOST_NS" get host "$h" -o name >/dev/null 2>"${RUN_DIR}/host-absent.err"; then
+    return 1
+  fi
+  err="$(cat "${RUN_DIR}/host-absent.err" 2>/dev/null || true)"
+  if printf '%s' "$err" | grep -Eq "\(NotFound\)|\"${h}\" not found\$"; then
+    return 0
+  fi
+  echo "host_absent_confirmed: kubectl get host ${h} FAILED without NotFound evidence: ${err}" >&2
+  return 2
 }
 
 # Ready-condition + phase for the mcp-host Pod of <host> (podSelector app=<host>).
@@ -375,7 +450,12 @@ pod_diagnostics() {
 _emit_bundle_record() {
   local host="$1" klass="$2" host_created="$3" note="$4"
   local children pod_json rec="${RUN_DIR}/bundle-${host}.json"
-  children="$(collect_children_json "$host")"
+  # FAIL-CLOSED: a partial child enumeration would make the bundle record
+  # silently under-report — refuse to emit it instead.
+  if ! children="$(collect_children_json "$host")"; then
+    fail "bundle[${host}]: could not enumerate owned children (kubectl read failed) — refusing to emit a partial record"
+    return 1
+  fi
   pod_json="$(host_pod_json "$host")"
   HOST="$host" KLASS="$klass" HOST_CREATED="$host_created" CHILDREN="$children" \
   POD_JSON="$pod_json" NOTE="$note" \
@@ -483,7 +563,8 @@ measure_bundle_for() {
 
   if ! wait_until "$materialize_deadline" 2 "first owned child of ${host}" _first_child_probe _diag_probe; then
     fail "bundle[${host}]: no owned child materialized within ${materialize_deadline}s"
-    _emit_bundle_record "$host" "$klass" "$host_created" "readiness=false phase=materialization_timeout" >>"${RUN_DIR}/bundle-rows.md"
+    _emit_bundle_record "$host" "$klass" "$host_created" "readiness=false phase=materialization_timeout" >>"${RUN_DIR}/bundle-rows.md" || \
+      warn "bundle[${host}]: record emission failed on the materialization-timeout path (failure already counted)"
     return 1
   fi
 
@@ -492,7 +573,9 @@ measure_bundle_for() {
     ready_ok='false'
   fi
 
-  _emit_bundle_record "$host" "$klass" "$host_created" "readiness=${ready_ok}" >>"${RUN_DIR}/bundle-rows.md"
+  if ! _emit_bundle_record "$host" "$klass" "$host_created" "readiness=${ready_ok}" >>"${RUN_DIR}/bundle-rows.md"; then
+    return 1
+  fi
   if [[ "$ready_ok" == 'true' ]]; then
     ok "bundle[${host}]: Pod Ready; bundle materialized (${klass})"
     return 0
@@ -789,6 +872,278 @@ PY
 }
 
 # ======================================================================
+# STEP (Addendum 4.7) — delete-while-pass-active convergence (#827)
+# ======================================================================
+# Proves the #827 integration property: a Host CR deleted WHILE a full
+# fleet pass is demonstrably active converges to exactly-one complete
+# cleanup (CR gone + zero ownership-labeled leftovers across the bundle
+# namespaces — the same predicate teardown uses) and is never resurrected
+# by the in-flight pass or a stale queued reconcile.
+#
+# The full pass is triggered through a supported operational event:
+# deleting the HCC pod. The replacement pod always runs the
+# 'initial Host reconciliation' full pass on startup (k8sClient.ts), so
+# the pass window is deterministic and log-anchored:
+#   ACTIVE   = START marker present, COMPLETED marker absent
+#   the delete is issued only inside that window; the COMPLETED marker is
+#   then observed AFTER the delete.
+# Overlap is proven with TWO belts, because the pass can complete inside
+# the ~0.5-2s window between the active-probe read and the delete landing:
+#   belt 1 — immediately after the delete succeeds, the logs are re-read
+#            once and the step HARD-FAILS if COMPLETED is already present;
+#   belt 2 — the COMPLETED line's own `kubectl logs --timestamps` stamp
+#            must postdate the delete-issued epoch-ms in the final
+#            adjudication.
+# A pass that completes before the delete could be issued is a HARD FAIL
+# ("overlap not established" — re-run), never silently accepted; a pass
+# that FAILS is a hard fail with the controller logs.
+phase_delete_during_pass() {
+  header "STEP — delete-while-pass-active (#827, plan Addendum 4.7)"
+  ensure_fixture_secret
+
+  # 1. Fixture Host with a real bundle (deleting a bundle-less Host would
+  # prove nothing about cleanup).
+  apply_host "$HOST_DELPASS" false
+  __cur_host="$HOST_DELPASS"
+  local materialize_deadline="${MATERIALIZE_DEADLINE_S:-60}"
+  if ! wait_until "$materialize_deadline" 2 "first owned child of ${HOST_DELPASS}" _first_child_probe _diag_probe; then
+    fail "delete-during-pass: fixture bundle did not materialize within ${materialize_deadline}s"
+    return 1
+  fi
+  # shellcheck disable=SC2329  # invoked by name via wait_until
+  _delpass_deploy_probe() { kctl -n "$MCP_HOST_NS" get deployment "$HOST_DELPASS" >/dev/null 2>&1; }
+  if ! wait_until "$materialize_deadline" 2 "Deployment ${HOST_DELPASS}" _delpass_deploy_probe _diag_probe; then
+    fail "delete-during-pass: fixture Deployment did not materialize within ${materialize_deadline}s"
+    return 1
+  fi
+  log "fixture ${HOST_DELPASS} bundle materialized"
+
+  # 2. Trigger the full fleet pass: restart HCC (supported operational
+  # event; the replacement pod runs 'initial Host reconciliation').
+  local old_pod
+  old_pod="$(kctl -n "$CONTROL_NS" get pods -l "app=${HCC_DEPLOY}" \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [[ -z "$old_pod" ]]; then
+    fail "delete-during-pass: no Running HCC pod to restart"
+    return 1
+  fi
+  local t_restart_ms; t_restart_ms="$(now_ms)"
+  if ! kctl -n "$CONTROL_NS" delete pod "$old_pod" --wait=false >/dev/null; then
+    fail "delete-during-pass: could not delete HCC pod ${old_pod}"
+    return 1
+  fi
+  log "HCC pod ${old_pod} deleted to force the full fleet pass"
+
+  local new_pod=''
+  # shellcheck disable=SC2329  # invoked by name via wait_until
+  _delpass_new_pod_probe() {
+    local name
+    name="$(kctl -n "$CONTROL_NS" get pods -l "app=${HCC_DEPLOY}" \
+      --field-selector=status.phase=Running \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.deletionTimestamp}{"\n"}{end}' 2>/dev/null \
+      | awk -F'\t' -v old="$old_pod" '$1 != "" && $1 != old && $2 == "" {print $1; exit}')"
+    [[ -n "$name" ]] && new_pod="$name"
+  }
+  # shellcheck disable=SC2329  # invoked by name via wait_until
+  _delpass_hcc_diag() {
+    { echo '----- HCC pods -----'
+      kctl -n "$CONTROL_NS" get pods -l "app=${HCC_DEPLOY}" -o wide 2>&1 || true
+    } >&2
+  }
+  if ! wait_until "$DELPASS_HCC_READY_DEADLINE_S" 2 "replacement HCC pod after restarting ${old_pod}" \
+    _delpass_new_pod_probe _delpass_hcc_diag; then
+    fail "delete-during-pass: no replacement HCC pod within ${DELPASS_HCC_READY_DEADLINE_S}s"
+    return 1
+  fi
+  log "replacement HCC pod: ${new_pod}"
+
+  # 3. Wait until the pass is demonstrably ACTIVE on the replacement pod.
+  local pass_state=''
+  # shellcheck disable=SC2329  # invoked by name via wait_until
+  _delpass_pass_active_probe() {
+    local logs
+    logs="$(kctl -n "$CONTROL_NS" logs "pod/${new_pod}" 2>/dev/null || true)"
+    if printf '%s' "$logs" | grep -Fq "$HCC_PASS_FAILED_MARKER"; then pass_state='failed'; return 0; fi
+    if printf '%s' "$logs" | grep -Fq "$HCC_PASS_COMPLETED_MARKER"; then pass_state='completed'; return 0; fi
+    if printf '%s' "$logs" | grep -Fq "$HCC_PASS_STARTED_MARKER"; then pass_state='active'; return 0; fi
+    return 1
+  }
+  # shellcheck disable=SC2329  # invoked by name via wait_until
+  _delpass_logs_diag() {
+    { echo "----- replacement HCC pod logs (${new_pod}) -----"
+      kctl -n "$CONTROL_NS" logs "pod/${new_pod}" --tail=80 2>&1 || true
+    } >&2
+  }
+  if ! wait_until "$DELPASS_PASS_ACTIVE_DEADLINE_S" 1 "initial full pass to start on ${new_pod}" \
+    _delpass_pass_active_probe _delpass_logs_diag; then
+    fail "delete-during-pass: replacement pod never logged '${HCC_PASS_STARTED_MARKER}' within ${DELPASS_PASS_ACTIVE_DEADLINE_S}s"
+    return 1
+  fi
+  local t_pass_active_ms=''
+  case "$pass_state" in
+    active)
+      t_pass_active_ms="$(now_ms)"
+      log "initial full pass ACTIVE on ${new_pod} (started, not completed)"
+      ;;
+    completed)
+      fail "delete-during-pass: the initial pass completed before the delete could be issued — pass-active overlap NOT established in this environment (fleet reconciled too fast); re-run"
+      _delpass_logs_diag
+      return 1
+      ;;
+    failed)
+      fail "delete-during-pass: the initial pass FAILED on the replacement pod — fix the controller before measuring"
+      _delpass_logs_diag
+      return 1
+      ;;
+  esac
+
+  # 4. Delete the fixture Host WHILE the pass is active.
+  local t_delete_ms; t_delete_ms="$(now_ms)"
+  if ! kctl -n "$MCP_HOST_NS" delete host "$HOST_DELPASS" --wait=false >/dev/null; then
+    fail "delete-during-pass: Host deletion failed for ${HOST_DELPASS}"
+    return 1
+  fi
+  log "Host ${HOST_DELPASS} deleted while the pass is active"
+
+  # B1 belt 1: the pass can log COMPLETED inside the ~0.5-2s window between
+  # the active-probe read and the delete landing. Re-read the logs ONCE,
+  # immediately; if COMPLETED is already present the delete cannot be
+  # proven to have landed mid-pass — hard fail, never silently accepted.
+  local post_delete_logs
+  if ! post_delete_logs="$(kctl -n "$CONTROL_NS" logs "pod/${new_pod}" 2>/dev/null)"; then
+    fail "delete-during-pass: could not re-read HCC logs immediately after the delete — overlap cannot be verified (fail-closed)"
+    return 1
+  fi
+  if printf '%s' "$post_delete_logs" | grep -Fq "$HCC_PASS_COMPLETED_MARKER"; then
+    fail "delete-during-pass: pass logged COMPLETED within the probe->delete window — overlap NOT established; re-run"
+    return 1
+  fi
+  log "belt 1: COMPLETED still absent immediately after the delete"
+
+  # 5. The pass must COMPLETE after the delete (a pass that fails instead
+  # would mask the property under test behind an unrelated error).
+  # shellcheck disable=SC2329  # invoked by name via wait_until
+  _delpass_pass_completed_probe() {
+    local logs
+    logs="$(kctl -n "$CONTROL_NS" logs "pod/${new_pod}" 2>/dev/null || true)"
+    if printf '%s' "$logs" | grep -Fq "$HCC_PASS_FAILED_MARKER"; then pass_state='failed'; return 0; fi
+    printf '%s' "$logs" | grep -Fq "$HCC_PASS_COMPLETED_MARKER" && pass_state='completed'
+  }
+  if ! wait_until "$DELPASS_PASS_COMPLETE_DEADLINE_S" 2 "initial full pass completion after the delete" \
+    _delpass_pass_completed_probe _delpass_logs_diag; then
+    fail "delete-during-pass: pass did not complete within ${DELPASS_PASS_COMPLETE_DEADLINE_S}s of the delete"
+    return 1
+  fi
+  if [[ "$pass_state" == 'failed' ]]; then
+    fail "delete-during-pass: the fleet pass FAILED after the mid-pass delete"
+    _delpass_logs_diag
+    return 1
+  fi
+  local t_pass_completed_ms; t_pass_completed_ms="$(now_ms)"
+  ok "delete-during-pass: observed sequence pass-active@${t_pass_active_ms}ms -> delete@${t_delete_ms}ms -> completed-observed@${t_pass_completed_ms}ms (belt 1 passed at the delete)"
+
+  # B1 belt 2: adjudicate overlap from the COMPLETED line's OWN log
+  # timestamp (kubectl --timestamps stamps each line at write time),
+  # closing the window the poll-granular reads cannot see. Clock note: the
+  # log stamp is the node's clock while t_delete_ms is the runner's; on
+  # minikube both derive from the host clock. A node clock ahead of the
+  # runner could only mask a completion belt 1 already catches; a lagging
+  # clock produces a LOUD false-fail, never a false-pass.
+  local completed_line completed_ts completed_ms
+  completed_line="$(kctl -n "$CONTROL_NS" logs "pod/${new_pod}" --timestamps 2>/dev/null \
+    | grep -F "$HCC_PASS_COMPLETED_MARKER" | head -n1 || true)"
+  if [[ -z "$completed_line" ]]; then
+    fail "delete-during-pass: could not re-read the COMPLETED line with --timestamps for overlap adjudication"
+    return 1
+  fi
+  completed_ts="${completed_line%% *}"
+  if ! completed_ms="$(python3 -c '
+import datetime, re, sys
+ts = re.sub(r"\.(\d{1,6})\d*", r".\1", sys.argv[1]).replace("Z", "+00:00")
+print(int(datetime.datetime.fromisoformat(ts).timestamp() * 1000))
+' "$completed_ts" 2>/dev/null)"; then
+    fail "delete-during-pass: could not parse COMPLETED log timestamp '${completed_ts}'"
+    return 1
+  fi
+  if [[ "$completed_ms" -gt "$t_delete_ms" ]]; then
+    ok "delete-during-pass: overlap established — COMPLETED log stamp postdates the delete (belt 2: completed-log=${completed_ms}ms > delete-issued=${t_delete_ms}ms)"
+  else
+    fail "delete-during-pass: COMPLETED log stamp (${completed_ms}ms) does NOT postdate the delete (${t_delete_ms}ms) — overlap NOT established; re-run"
+    return 1
+  fi
+
+  # 6. Exactly-one complete cleanup converges: CR gone + zero ownership-
+  # labeled leftovers across the bundle namespaces (teardown's predicate).
+  # FAIL-CLOSED: the probe succeeds ONLY on positive evidence — confirmed
+  # NotFound for the CR and a fully-readable, empty children enumeration.
+  # A kubectl read failure keeps the probe failing, so an API blip ends in
+  # the bounded deadline FAILING, never in a false "cleanup converged".
+  # shellcheck disable=SC2329  # invoked by name via wait_until
+  _delpass_clean_probe() {
+    host_absent_confirmed "$HOST_DELPASS" || return 1
+    local children n
+    children="$(collect_children_json "$HOST_DELPASS")" || return 1
+    n="$(printf '%s' "$children" | jq 'length' 2>/dev/null || echo -1)"
+    [[ "${n:--1}" -eq 0 ]]
+  }
+  if ! wait_until "$DELPASS_CLEANUP_DEADLINE_S" 3 "complete cleanup of ${HOST_DELPASS}" \
+    _delpass_clean_probe _diag_probe; then
+    fail "delete-during-pass: cleanup did not converge within ${DELPASS_CLEANUP_DEADLINE_S}s (lingering CR or owned leftovers)"
+    return 1
+  fi
+  local t_clean_ms; t_clean_ms="$(now_ms)"
+  ok "delete-during-pass: cleanup converged (CR gone, 0 owned children across ${BUNDLE_NAMESPACES})"
+
+  # 7. No resurrection: the completed pass (and any stale queued reconcile)
+  # must not recreate the deleted Host's resources. Quiet settle, re-assert.
+  log "resurrection settle: ${DELPASS_RESURRECTION_SETTLE_S}s"
+  sleep "$DELPASS_RESURRECTION_SETTLE_S"
+  # FAIL-CLOSED: absence must be a confirmed NotFound and the children
+  # enumeration fully readable — an unverifiable state fails exactly like
+  # a resurrection would.
+  local res_absent_rc=0 res_children children
+  host_absent_confirmed "$HOST_DELPASS" || res_absent_rc=$?
+  if children="$(collect_children_json "$HOST_DELPASS")"; then
+    res_children="$(printf '%s' "$children" | jq 'length' 2>/dev/null || echo -1)"
+  else
+    res_children=-1
+  fi
+  if [[ "$res_absent_rc" -eq 0 && "$res_children" -eq 0 ]]; then
+    ok "delete-during-pass: no resurrection after ${DELPASS_RESURRECTION_SETTLE_S}s settle (CR NotFound-confirmed, 0 owned children)"
+  else
+    fail "delete-during-pass: RESURRECTION or unverifiable state after cleanup (host_absence_rc=${res_absent_rc}: 0=confirmed-absent 1=present 2=read-failed; owned_children=${res_children}: -1=unverifiable)"
+    pod_diagnostics "$HOST_DELPASS"
+    return 1
+  fi
+
+  # 8. Machine-readable record for the report roll-up.
+  jq -n \
+    --arg host "$HOST_DELPASS" \
+    --arg old_pod "$old_pod" --arg new_pod "$new_pod" \
+    --argjson t_hcc_restart_ms "$t_restart_ms" \
+    --argjson t_pass_active_seen_ms "$t_pass_active_ms" \
+    --argjson t_delete_issued_ms "$t_delete_ms" \
+    --argjson t_pass_completed_seen_ms "$t_pass_completed_ms" \
+    --argjson t_pass_completed_log_ts_ms "$completed_ms" \
+    --argjson t_cleanup_converged_ms "$t_clean_ms" \
+    --argjson settle_s "$DELPASS_RESURRECTION_SETTLE_S" \
+    '{subject:$host, trigger:"HCC pod restart -> initial full fleet pass",
+      hcc_pod_restarted:$old_pod, hcc_pod_replacement:$new_pod,
+      t_hcc_restart_ms:$t_hcc_restart_ms,
+      t_pass_active_seen_ms:$t_pass_active_seen_ms,
+      t_delete_issued_ms:$t_delete_issued_ms,
+      t_pass_completed_seen_ms:$t_pass_completed_seen_ms,
+      t_pass_completed_log_ts_ms:$t_pass_completed_log_ts_ms,
+      t_cleanup_converged_ms:$t_cleanup_converged_ms,
+      resurrection_settle_s:$settle_s,
+      note:"overlap proven with two belts: (1) COMPLETED absent in a re-read immediately after the delete; (2) the COMPLETED line own --timestamps stamp (t_pass_completed_log_ts_ms) postdates t_delete_issued_ms; cleanup predicate = CR gone + zero ownership-labeled leftovers across the bundle namespaces; re-asserted after the settle window"}' \
+    >"${RUN_DIR}/delete-during-pass.json"
+  log "record: ${RUN_DIR}/delete-during-pass.json"
+  return 0
+}
+
+# ======================================================================
 # Teardown — delete ONLY this run's fixtures (by run label). Fail-loud on
 # leftover after a bounded wait.
 # ======================================================================
@@ -809,10 +1164,17 @@ teardown_fixtures() {
 
   # Bounded wait for the Hosts to disappear, then verify no owned children of
   # our fixture hosts linger.
+  # FAIL-CLOSED (mirrors e2e-host-storm-gate.sh): a kubectl list failure
+  # must never read as "all gone" — the probe fails (error on stderr)
+  # until the API positively returns an empty list.
   # shellcheck disable=SC2329  # invoked by name via wait_until
   _hosts_gone() {
-    local n; n="$(kctl -n "$MCP_HOST_NS" get host -l "$sel" -o name 2>/dev/null | wc -l | tr -d ' ')"
-    [[ "${n:-0}" -eq 0 ]]
+    local out
+    if ! out="$(kctl -n "$MCP_HOST_NS" get host -l "$sel" -o name 2>"${RUN_DIR}/hosts-gone.err")"; then
+      echo "_hosts_gone: kubectl list FAILED: $(cat "${RUN_DIR}/hosts-gone.err" 2>/dev/null)" >&2
+      return 1
+    fi
+    [[ -z "$out" ]]
   }
   if ! wait_until "${TEARDOWN_DEADLINE_S:-120}" 3 "fixture Hosts (${sel}) deletion" _hosts_gone teardown_diagnostics; then
     fail "teardown: fixture Hosts still present after deadline (run-id ${RUN_ID})"
@@ -820,17 +1182,57 @@ teardown_fixtures() {
   fi
 
   # Verify no owned children of any of this run's hosts remain.
-  local leftover=0 host
-  for host in "$HOST_CONTROL" "$HOST_STATELESS" "$HOST_PROBE"; do
-    [[ -n "$host" ]] || continue
-    local n; n="$(collect_children_json "$host" | jq 'length' 2>/dev/null || echo 0)"
-    if [[ "${n:-0}" -gt 0 ]]; then
-      warn "teardown: ${n} owned children of ${host} still present"
-      leftover=$((leftover+n))
-    fi
+  # Convergence-aware (identical semantics to e2e-host-storm-gate.sh): a child
+  # carrying a deletionTimestamp is CONVERGING — its delete WAS issued and a
+  # finalizer (e.g. a workspace PVC's kubernetes.io/pvc-protection, held for the
+  # deleting pod's termination grace) is draining — so it gets a bounded
+  # extension. A child with NO deletionTimestamp means the delete was NEVER
+  # issued (a real cleanup gap) and fails immediately, no wait. An unverifiable
+  # read/parse is FAIL-CLOSED (verification impossible != "no children").
+  local leftover=0 host orphan=0 unverifiable=0 leftover_report=''
+  local converge_deadline=$(( SECONDS + MEASURE_TEARDOWN_CONVERGE_S ))
+  while :; do
+    leftover=0; orphan=0; unverifiable=0; leftover_report=''
+    for host in "$HOST_CONTROL" "$HOST_STATELESS" "$HOST_PROBE" "$HOST_DELPASS"; do
+      [[ -n "$host" ]] || continue
+      local children n_conv n_orph
+      if ! children="$(collect_children_json "$host")"; then
+        leftover_report+="  ${host}: kubectl read FAILED (unverifiable, fail-closed)"$'\n'
+        leftover=$((leftover+1)); unverifiable=1
+        continue
+      fi
+      n_conv="$(printf '%s' "$children" | jq '[.[] | select(.deletionTimestamp != null)] | length' 2>/dev/null || echo -1)"
+      n_orph="$(printf '%s' "$children" | jq '[.[] | select(.deletionTimestamp == null)] | length' 2>/dev/null || echo -1)"
+      if [[ "${n_conv:--1}" -lt 0 || "${n_orph:--1}" -lt 0 ]]; then
+        leftover_report+="  ${host}: owned-children JSON unparsable (jq failed, fail-closed)"$'\n'
+        leftover=$((leftover+1)); unverifiable=1
+        continue
+      fi
+      if [[ "$n_conv" -gt 0 ]]; then
+        leftover_report+="  ${host}: ${n_conv} owned child(ren) Terminating (converging)"$'\n'
+        leftover=$((leftover+n_conv))
+      fi
+      if [[ "$n_orph" -gt 0 ]]; then
+        leftover_report+="  ${host}: ${n_orph} owned child(ren) with NO deletionTimestamp (delete never issued — REAL cleanup gap)"$'\n'
+        leftover=$((leftover+n_orph)); orphan=1
+      fi
+    done
+    if [[ "$leftover" -eq 0 ]]; then break; fi
+    # A never-issued delete or an unverifiable read is a hard finding — do not wait.
+    if [[ "$orphan" -eq 1 || "$unverifiable" -eq 1 ]]; then break; fi
+    if [[ "$SECONDS" -ge "$converge_deadline" ]]; then break; fi
+    sleep 3
   done
-  # Verify our fixture Secret is gone.
-  if kctl -n "$MCP_HOST_NS" get secret -l "$sel" -o name 2>/dev/null | grep -q .; then
+  if [[ "$leftover" -gt 0 ]]; then
+    warn "teardown: owned-children leftovers after up to ${MEASURE_TEARDOWN_CONVERGE_S}s convergence extension:"
+    printf '%s' "$leftover_report" >&2
+  fi
+  # Verify our fixture Secret is gone — FAIL-CLOSED on unreadable API.
+  local sec_out
+  if ! sec_out="$(kctl -n "$MCP_HOST_NS" get secret -l "$sel" -o name 2>"${RUN_DIR}/secret-gone.err")"; then
+    warn "teardown: could not verify fixture Secret deletion: $(cat "${RUN_DIR}/secret-gone.err" 2>/dev/null) — counting as leftover"
+    leftover=$((leftover+1))
+  elif [[ -n "$sec_out" ]]; then
     warn "teardown: fixture Secret still present (${sel})"
     leftover=$((leftover+1))
   fi
@@ -886,7 +1288,15 @@ write_report() {
     echo "| Independent-Host admission while blocked | phase 3 | probe-Host bundle clock under asserted blocker |"
     echo "| HCC §14.1 histograms | phase 4 | /metrics scrape |"
     echo "| Context/McpServer non-regression | phase 5 | read-only resourceVersion/creationTimestamp snapshot |"
+    echo "| Delete-while-pass-active convergence (#827, Addendum 4.7) | delete-during-pass step | HCC pass logs + ownership-label leftover check + resurrection settle |"
     echo
+    if [[ -s "${RUN_DIR}/delete-during-pass.json" ]]; then
+      echo "## Addendum 4.7 — delete-while-pass-active (#827)"
+      echo
+      jq -r '"- subject: `\(.subject)`\n- pass active -> delete -> pass completed (epoch-ms): \(.t_pass_active_seen_ms) -> \(.t_delete_issued_ms) -> \(.t_pass_completed_seen_ms)\n- cleanup converged at (epoch-ms): \(.t_cleanup_converged_ms)\n- no resurrection after \(.resurrection_settle_s)s settle"' \
+        "${RUN_DIR}/delete-during-pass.json"
+      echo
+    fi
     echo "## Caveats"
     echo
     echo "- K8s object timestamps have 1-second resolution; sub-second deltas are reported at that granularity."
@@ -915,6 +1325,7 @@ report={
  "wake":load("wake-*.json"),
  "metrics":(load("hcc-metrics.summary.json") or [None])[0],
  "sideclock":(load("sideclock.json") or [None])[0],
+ "delete_during_pass":(load("delete-during-pass.json") or [None])[0],
 }
 json.dump(report,open(os.path.join(rd,"report.json"),"w"),indent=2)
 print("report.json + report.md written to "+rd)
@@ -927,8 +1338,8 @@ PY
 # Main
 # ======================================================================
 usage() {
-  sed -n '2,120p' "$0" | sed -n '1,/^set -euo/p' >&2
-  echo "Usage: CONTEXT=<clerum-...> RUN_LABEL=<label> OUT_DIR=<dir> $0 [all|bundle|wake|independent-admission|metrics|sideclock|teardown]" >&2
+  sed -n '2,160p' "$0" | sed -n '1,/^set -euo/p' >&2
+  echo "Usage: CONTEXT=<clerum-...> RUN_LABEL=<label> OUT_DIR=<dir> $0 [all|bundle|wake|independent-admission|metrics|sideclock|delete-during-pass|teardown]" >&2
 }
 
 main() {
@@ -958,6 +1369,13 @@ main() {
       else
         log "wake phase NOT requested in 'all' (WAKE_HOST unset). Call the 'wake' subcommand after suspending+waking a stateless Host via e2e-stateless-suspend-wake.sh."
       fi
+      if [[ "${DELETE_DURING_PASS:-}" == '1' ]]; then
+        # Runs LAST among the measurement phases: it restarts the HCC pod,
+        # which resets the §14.1 counters phase 4 already scraped.
+        phase_delete_during_pass || rc=1
+      else
+        log "delete-during-pass step NOT requested in 'all' (DELETE_DURING_PASS!=1). It restarts the HCC pod to force a demonstrable full fleet pass; set DELETE_DURING_PASS=1 to opt in (Addendum 4.7)."
+      fi
       write_report
       teardown_fixtures || rc=1
       ;;
@@ -966,6 +1384,7 @@ main() {
     independent-admission) phase_independent_admission || rc=1; write_report ;;
     metrics)               phase_metrics   || rc=1; write_report ;;
     sideclock)             phase_sideclock || rc=1; write_report ;;
+    delete-during-pass)    phase_delete_during_pass || rc=1; write_report ;;
     teardown)              teardown_fixtures || rc=1 ;;
     *) usage; die "unknown subcommand: ${cmd}" 2 ;;
   esac
