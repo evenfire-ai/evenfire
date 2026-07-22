@@ -1295,13 +1295,40 @@ if [ "$E2E_SKIP_DESKTOP_PHASE" = "1" ]; then
   exit 3
 fi
 force_idle_and_suspend || { print_results; exit 1; }
-log "Handing off to Playwright with E2E_HOST_REF=${HOST_REF}"
+log "Handing off to Playwright (cycle 1) with E2E_HOST_REF=${HOST_REF}"
+# Cycle 1 -- every scenario EXCEPT the repeat-cycle one, which requires its own
+# fresh suspension and is run in the second pass below. Scenario 5 is excluded
+# here by its title ("second cycle").
 if E2E_HOST_REF="$HOST_REF" E2E_STATELESS_HOST_REF="$HOST_REF" E2E_STATELESS_SUSPENDED=1 \
-   bash "${SCRIPT_DIR}/playwright-dev.sh" stateless-wake.test.ts; then
-  ok "Desktop Playwright stateless-wake phase PASSED"
+   E2E_STATELESS_CYCLE=1 \
+   bash "${SCRIPT_DIR}/playwright-dev.sh" stateless-wake.test.ts --grep-invert "second cycle"; then
+  ok "Desktop Playwright stateless-wake cycle 1 PASSED"
 else
   pw_rc=$?
-  fail "Desktop Playwright stateless-wake phase FAILED (exit ${pw_rc}). If Electron/display is unavailable, rerun with E2E_SKIP_DESKTOP_PHASE=1 for an explicit, loud opt-out."
+  fail "Desktop Playwright stateless-wake cycle 1 FAILED (exit ${pw_rc}). If Electron/display is unavailable, rerun with E2E_SKIP_DESKTOP_PHASE=1 for an explicit, loud opt-out."
+  print_results
+  exit 1
+fi
+
+# ====================================================================== #
+#  Phase 2 (cycle 2) -- repeat suspend/wake (§15.5 step 11)
+# ====================================================================== #
+# Re-suspend the SAME host and run only the second-cycle scenario. This excludes
+# a one-shot cache artifact: the chats created in cycle 1 must survive a second
+# replicas-0 suspension and a fresh, UI-driven wake. The desktop build from cycle
+# 1 is reused (E2E_SKIP_DESKTOP_BUILD=1); a second cold suspend is mandatory
+# before the pass, and any failure is surfaced loudly with the same exit-1
+# discipline as cycle 1.
+header "Phase 2 (cycle 2) -- repeat suspend/wake (stateless-wake.test.ts -g 'second cycle')"
+force_idle_and_suspend || { print_results; exit 1; }
+log "Handing off to Playwright (cycle 2) with E2E_HOST_REF=${HOST_REF}"
+if E2E_HOST_REF="$HOST_REF" E2E_STATELESS_HOST_REF="$HOST_REF" E2E_STATELESS_SUSPENDED=1 \
+   E2E_STATELESS_CYCLE=2 E2E_SKIP_DESKTOP_BUILD=1 \
+   bash "${SCRIPT_DIR}/playwright-dev.sh" stateless-wake.test.ts -g "second cycle"; then
+  ok "Desktop Playwright stateless-wake cycle 2 (repeat suspend/wake) PASSED"
+else
+  pw_rc=$?
+  fail "Desktop Playwright stateless-wake cycle 2 FAILED (exit ${pw_rc}). The repeat suspend/wake cycle did not prove continuity across a second suspension."
   print_results
   exit 1
 fi
