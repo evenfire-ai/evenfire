@@ -471,6 +471,40 @@ describe('HostReconciler bounded fleet workers', () => {
   })
 })
 
+describe('HostReconciler lifecycle-only vs full pass cleanup boundary', () => {
+  it('reconcileHosts (lifecycle-only) runs NO orphan cleanup; fullReconcile does', async () => {
+    const reconciler = new HostReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(createMockAppsApi()),
+      coreApi: asCoreApi(createMockCoreApi()),
+      networkingApi: asNetworkingApi(createMockNetworkingApi()),
+      rbacApi: asRbacApi(createMockRbacApi()),
+    })
+    const internals = reconciler as unknown as {
+      collectHostReconcileFailures(...args: unknown[]): Promise<unknown[]>
+      collectHostCleanupFailures(...args: unknown[]): Promise<unknown[]>
+    }
+    const reconcileFailures = vi
+      .spyOn(internals, 'collectHostReconcileFailures')
+      .mockResolvedValue([])
+    const cleanup = vi.spyOn(internals, 'collectHostCleanupFailures').mockResolvedValue([])
+
+    // The lifecycle-only pass is what CommunicationChannel recovery and the
+    // heartbeat-driven fleet convergence dispatch through (k8sClient
+    // reconcileHosts()). It MUST NOT run destructive orphan cleanup: a
+    // lifecycle pass whose watch authority is stale could otherwise delete a
+    // just-created Host's children (Risk register: "Stale full pass deletes a
+    // new Host's resources" — critical). Only the authoritative full pass,
+    // which captures watch authority up front, is allowed to clean up.
+    await reconciler.reconcileHosts([makeHost({ name: 'h1' })])
+    expect(reconcileFailures).toHaveBeenCalledTimes(1)
+    expect(cleanup).not.toHaveBeenCalled()
+
+    // The authoritative full pass is the ONLY caller that runs orphan cleanup.
+    await reconciler.fullReconcile([makeHost({ name: 'h1' })])
+    expect(cleanup).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('HostReconciler bounded orphan cleanup (Addendum 2)', () => {
   it('deletes orphan bundles through the bounded worker pool, never an unbounded fan-out', async () => {
     const getObj = vi.fn().mockRejectedValue({ code: 404 })

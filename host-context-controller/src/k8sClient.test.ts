@@ -3261,6 +3261,80 @@ describe('McpServerWatcher Host watch generation', () => {
     watcher.stop()
   })
 
+  it('recovery urgently admits a wake-pending Host that is otherwise unchanged (§10.2 step 7 wake branch)', async () => {
+    vi.clearAllMocks()
+    const watcher = new McpServerWatcher()
+    const reconcile = vi
+      .spyOn(watcher.getHostReconciler(), 'reconcile')
+      .mockResolvedValue(undefined)
+    // A Host unchanged by name, generation AND uid but carrying a pending wake
+    // annotation must still be admitted on the urgent lane after recovery, so a
+    // wake discovered during the LIST→WATCH gap is not deferred to the slow
+    // background fleet pass (A3: 2m47s admission vs 3s execution). This closes
+    // the recovery-time wake branch that the watch-time admission test does not
+    // exercise: deleting `|| wakePending` from enqueueRecoveredUrgentHosts()
+    // would make this assertion fail.
+    ;(watcher as any).hosts.set('waker', {
+      name: 'waker',
+      namespace: 'mcp-host',
+      uid: 'u1',
+      generation: 4,
+      annotations: { 'clerum.io/wake-requested': '7' },
+      spec: { host: 'waker' },
+    })
+    ;(watcher as any).enqueueRecoveredUrgentHosts(
+      [
+        {
+          name: 'waker',
+          namespace: 'mcp-host',
+          uid: 'u1',
+          generation: 4,
+          annotations: { 'clerum.io/wake-requested': '7' },
+          spec: { host: 'waker' },
+        },
+      ],
+      new Set(['waker']), // NOT new
+      new Map([['waker', 4]]), // NOT changed (same generation)
+      new Map([['waker', 'u1']]) // NOT recreated (same uid)
+    )
+    await vi.waitFor(() =>
+      expect(reconcile).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'waker' }),
+        'urgent'
+      )
+    )
+    watcher.stop()
+  })
+
+  it('recovery does NOT urgently dispatch a fully-unchanged Host with no wake annotation', async () => {
+    vi.clearAllMocks()
+    const watcher = new McpServerWatcher()
+    const reconcile = vi
+      .spyOn(watcher.getHostReconciler(), 'reconcile')
+      .mockResolvedValue(undefined)
+    // Same name, generation and uid as before recovery and no wake pending: the
+    // background fleet pass already covers it, so recovery must NOT enqueue a
+    // redundant urgent reconcile (guards the negative side of the predicate).
+    ;(watcher as any).hosts.set('steady', {
+      name: 'steady',
+      namespace: 'mcp-host',
+      uid: 'u1',
+      generation: 4,
+      spec: { host: 'steady' },
+    })
+    ;(watcher as any).enqueueRecoveredUrgentHosts(
+      [{ name: 'steady', namespace: 'mcp-host', uid: 'u1', generation: 4, spec: { host: 'steady' } }],
+      new Set(['steady']),
+      new Map([['steady', 4]]),
+      new Map([['steady', 'u1']])
+    )
+    // Let any erroneously-scheduled async dispatch run before asserting absence.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(reconcile).not.toHaveBeenCalled()
+    watcher.stop()
+  })
+
   it('reconciles a retried Host watch event on the "retry" lane, not "urgent" (F1)', async () => {
     vi.useFakeTimers()
     let hostWatchCallback: ((type: string, apiObj: any) => Promise<void>) | undefined
