@@ -5,11 +5,15 @@ credentials (including the multi-slot providers **Google Vertex AI** and
 **Amazon Bedrock**), how to manage the operator-declared model allowlist, and how
 the per-session model selector behaves in the desktop app.
 
-The canonical provider set — `openai`, `claude` (Anthropic), `zai`, `bailian`,
-`vertex`, `bedrock` — and their credential slots live in the shared
-`@clerum/llm-providers` package, which the Control UI, control-api, mcp-host, and
-the workflow runtime all consume. A Host is bound to **one** provider
-(`spec.model.provider`); the allowlist and selector operate within that provider.
+The canonical provider set — **21 providers**, from `openai`, `claude`
+(Anthropic), `zai` and `bailian` through the own-SDK `vertex` / `bedrock` to the
+OpenAI-compatible additions and `azure` — and their credential slots live in the
+shared `@clerum/llm-providers` package, which the Control UI, control-api,
+mcp-host, and the workflow runtime all consume. See the
+[providers overview](../llm-providers/README.md) for the full list and the
+per-surface support matrix (`bedrock` and `azure` are host-only). A Host is bound
+to **one** provider (`spec.model.provider`); the allowlist and selector operate
+within that provider.
 
 ## 1. Where credentials and non-secret config live
 

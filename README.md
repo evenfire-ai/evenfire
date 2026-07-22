@@ -321,7 +321,7 @@ environment variable; setup infers the matching provider).
 | DeepSeek          | `deepseek`       | `deepseek-v4-flash`                 | OpenAI-compatible |
 | Groq              | `groq`           | `llama-3.3-70b-versatile`           | OpenAI-compatible |
 | Together AI       | `together`       | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | OpenAI-compatible |
-| Fireworks AI      | `fireworks`      | `llama-v3p3-70b-instruct`           | OpenAI-compatible |
+| Fireworks AI      | `fireworks`      | `accounts/fireworks/models/llama-v3p3-70b-instruct` | OpenAI-compatible |
 | Mistral AI        | `mistral`        | `mistral-medium-latest`             | OpenAI-compatible |
 | xAI (Grok)        | `xai`            | `grok-4.3`                          | OpenAI-compatible |
 | Cerebras          | `cerebras`       | `gpt-oss-120b`                      | OpenAI-compatible |
@@ -336,7 +336,9 @@ Most providers expose an OpenAI-compatible endpoint and plug in as pure data (a
 credential slot plus a `baseURL`/default-model row) — no driver code. Only
 bespoke wire protocols (`claude`, `vertex`, `bedrock`) or non-vanilla auth
 (`azure`: per-resource host + `api-key` header) need a dedicated driver arm.
-Adding one: [docs/llm-providers/adding-a-provider.md](docs/llm-providers/adding-a-provider.md).
+Overview: [docs/llm-providers/README.md](docs/llm-providers/README.md) ·
+Configure: [docs/deploy/llm-providers.md](docs/deploy/llm-providers.md) ·
+Add one: [docs/llm-providers/adding-a-provider.md](docs/llm-providers/adding-a-provider.md) ·
 Details: [mcp-host/README.md](mcp-host/README.md).
 
 ---
