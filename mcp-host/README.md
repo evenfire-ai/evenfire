@@ -1,12 +1,12 @@
 # MCP Host
 
-MCP Host is a Kubernetes-native service that reads Host CRD configuration and provides LLM access via OpenAI, Anthropic Claude, Z.AI, or Alibaba Bailian. It exposes an HTTP RPC endpoint for receiving messages from channel-reader and connects to MCP (Model Context Protocol) servers for tool capabilities.
+MCP Host is a Kubernetes-native service that reads Host CRD configuration and provides LLM access across 21 supported providers (OpenAI, Anthropic, Google, Amazon Bedrock, Azure, and more). It exposes an HTTP RPC endpoint for receiving messages from channel-reader and connects to MCP (Model Context Protocol) servers for tool capabilities.
 
 ## Features
 
 - Reads Host CRD from Kubernetes
 - Fetches API keys from referenced Kubernetes Secret
-- Supports OpenAI, Anthropic Claude, Z.AI, and Bailian providers (see [Supported LLM Providers](#supported-llm-providers))
+- Supports 21 LLM providers behind one interface (see [Supported LLM Providers](#supported-llm-providers))
 - Watches for Host CRD changes and reloads configuration
 - HTTP RPC server for receiving messages from channel-reader
 - Connects to MCP servers via host-context-controller service for tool capabilities
@@ -74,7 +74,7 @@ spec:
   contextRef: context1
   secretRef: mcp-host-keys # Reference to Secret containing API keys
   model:
-    provider: openai # or "claude", "zai", "bailian"
+    provider: openai # any of the 21 supported providers
     name: gpt-5.4-mini # Model name
   channels:
     - telegram-channel
@@ -83,18 +83,29 @@ spec:
 
 ### Supported LLM Providers
 
-Configured via the Host CRD `spec.model.provider` field (or
-`CLERUM_MODEL_PROVIDER` in dev mode):
+mcp-host supports **21 LLM providers**, configured via the Host CRD
+`spec.model.provider` field (or `CLERUM_MODEL_PROVIDER` in dev mode). The
+canonical set (ids, credential slots, labels) is defined once in the
+`@clerum/llm-providers` package and given runtime behavior (default model,
+endpoint, tokenizer) in `src/llm/registryCore.ts`. Most providers are
+OpenAI-compatible data entries, so adding one is a descriptor, not new code;
+`openai`, `claude`, `vertex`, and `bedrock` use their own SDK, and `azure` uses a
+light driver.
 
-| Provider                             | `provider` value | Default Model       | API                     |
-| ------------------------------------ | ---------------- | ------------------- | ----------------------- |
-| OpenAI                               | `openai`         | `gpt-5.4-mini`      | OpenAI Chat Completions |
-| Anthropic Claude                     | `claude`         | `claude-sonnet-4-6` | Anthropic Messages      |
-| ZAI (z.ai)                           | `zai`            | `glm-5.1`           | OpenAI-compatible       |
-| Alibaba Cloud Model Studio (Bailian) | `bailian`        | `qwen3-coder-plus`  | OpenAI-compatible       |
+A few common ones:
 
-Providers are defined data-first in `src/llm/registryCore.ts` — OpenAI-compatible
-providers are pure data entries (adding one requires a descriptor, not new code).
+| Provider         | `provider` value | Default Model       | API                     |
+| ---------------- | ---------------- | ------------------- | ----------------------- |
+| OpenAI           | `openai`         | `gpt-5.4-mini`      | OpenAI Chat Completions |
+| Anthropic Claude | `claude`         | `claude-sonnet-4-6` | Anthropic Messages      |
+| Z.AI             | `zai`            | `glm-5.1`           | OpenAI-compatible       |
+| Bailian          | `bailian`        | `qwen3-coder-plus`  | OpenAI-compatible       |
+
+In dev mode each provider reads `<PROVIDER>_API_KEY` (e.g. `GROQ_API_KEY`); if
+`CLERUM_MODEL_PROVIDER` is unset, mcp-host auto-detects the first provider whose
+required keys are present. For the full list of 21 providers, credential slots,
+and setup (including multi-slot Vertex/Bedrock and Azure), see the
+[LLM providers guide](../docs/llm-providers/README.md).
 
 #### Bailian (Alibaba Cloud Model Studio)
 

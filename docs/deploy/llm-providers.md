@@ -5,11 +5,13 @@ credentials (including the multi-slot providers **Google Vertex AI** and
 **Amazon Bedrock**), how to manage the operator-declared model allowlist, and how
 the per-session model selector behaves in the desktop app.
 
-The canonical provider set — `openai`, `claude` (Anthropic), `zai`, `bailian`,
-`vertex`, `bedrock` — and their credential slots live in the shared
-`@clerum/llm-providers` package, which the Control UI, control-api, mcp-host, and
-the workflow runtime all consume. A Host is bound to **one** provider
-(`spec.model.provider`); the allowlist and selector operate within that provider.
+The canonical provider set (**21 providers**) and their credential slots live in
+the shared `@clerum/llm-providers` package, which the Control UI, control-api,
+mcp-host, and the workflow runtime all consume. A Host is bound to **one**
+provider (`spec.model.provider`); the allowlist and selector operate within that
+provider. This guide covers the operator mechanics (credentials, non-secret env,
+the allowlist). For the full provider list and the provider/model/credential
+model, see the [LLM providers guide](../llm-providers/README.md).
 
 ## 1. Where credentials and non-secret config live
 
@@ -23,14 +25,18 @@ per-Host environment variables managed under **Host → Environment**
 (`host-<ref>-env`, the `HostEnvTable` editor on the Host detail page). The
 secrets form only shows a hint linking there; it does not duplicate the editor.
 
-| Provider                    | Secret slots (in the LLM Secret)              | Non-secret env (Host → Environment)               |
-| --------------------------- | --------------------------------------------- | ------------------------------------------------- |
-| OpenAI                      | `openai-api-key`                              | —                                                 |
-| Anthropic (`claude`)        | `claude-api-key`                              | —                                                 |
-| Z.AI (`zai`)                | `zai-api-key`                                 | —                                                 |
-| Bailian                     | `bailian-api-key`                             | —                                                 |
-| Google Vertex AI (`vertex`) | `vertex-service-account-json`                 | `VERTEX_PROJECT_ID` (required), `VERTEX_LOCATION` |
-| Amazon Bedrock (`bedrock`)  | `aws-access-key-id` + `aws-secret-access-key` | `AWS_REGION` (required)                           |
+| Provider                    | Secret slots (in the LLM Secret)              | Non-secret env (Host → Environment)                            |
+| --------------------------- | --------------------------------------------- | -------------------------------------------------------------- |
+| OpenAI                      | `openai-api-key`                              | —                                                              |
+| Anthropic (`claude`)        | `claude-api-key`                              | —                                                              |
+| Z.AI (`zai`)                | `zai-api-key`                                 | —                                                              |
+| Bailian                     | `bailian-api-key`                             | —                                                              |
+| Google Vertex AI (`vertex`) | `vertex-service-account-json`                 | `VERTEX_PROJECT_ID` (required), `VERTEX_LOCATION`              |
+| Amazon Bedrock (`bedrock`)  | `aws-access-key-id` + `aws-secret-access-key` | `AWS_REGION` (required)                                        |
+| Azure OpenAI (`azure`)      | `azure-openai-api-key`                        | `AZURE_OPENAI_ENDPOINT` (required), `AZURE_OPENAI_API_VERSION` |
+
+Every other provider uses a single `<provider>-api-key` slot and no non-secret
+env. The [LLM providers guide](../llm-providers/README.md) lists all 21.
 
 The secrets form is **write-only**: existing values are never displayed (the API
 returns key names only). To rotate a key, re-enter it.
