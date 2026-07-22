@@ -42,6 +42,12 @@
 - Production checklist: deploy/production.md
 - WorkflowRecipes ops: deploy/workflow-recipes-guide.md
 
+## LLM providers
+
+- LLM providers overview (21 providers; provider/model/credential model, request flow, fallback): llm-providers/README.md
+- Operator guide (credentials incl. Vertex/Bedrock + model allowlist): deploy/llm-providers.md
+- Adding a provider (data-only vs driver-based): llm-providers/adding-a-provider.md
+
 ## Reference
 
 - CRD index: crds/README.md
