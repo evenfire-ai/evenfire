@@ -1697,7 +1697,8 @@ describe('HostReconciler stateless lifecycle — initContainer and mounts', () =
     expect(init.name).toBe('workspace-layout-init')
     expect(init.image).toBe('clerum/mcp-host:0.6.0')
     expect(init.command?.[0]).toBe('/bin/sh')
-    expect(init.command?.[2]).toContain('mkdir -p "$root/workspace" "$root/state"')
+    expect(init.command?.[2]).toContain('assert_managed_dir "$root/workspace" workspace')
+    expect(init.command?.[2]).toContain('directory is a symlink')
     expect(init.command?.[2]).toContain('state.db-wal')
     expect(init.volumeMounts).toEqual([{ name: 'workspace', mountPath: '/mnt/workspace-root' }])
     expect(init.securityContext).toEqual({
