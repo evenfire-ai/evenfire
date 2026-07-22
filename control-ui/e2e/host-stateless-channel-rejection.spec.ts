@@ -174,10 +174,27 @@ test.describe('operator sees the stateless × CommunicationChannel hard-rejectio
     expect(rejectionMessage).toMatch(/disassociate/i)
 
     // Assert the operator-facing banner shows the status message VERBATIM.
+    // The verbatim reason renders on TWO deliberate operator-visibility surfaces —
+    // the warning banner AND the lifecycle chip — so scope each assertion to its
+    // own surface rather than letting an unscoped getByText(reason) collide across
+    // both (strict-mode violation).
     await login(page)
     await page.goto(`${BASE_UI}/hosts/${encodeURIComponent(HOST)}`)
-    await expect(page.getByText('Stateless mode rejected:')).toBeVisible({ timeout: 20_000 })
-    await expect(page.getByText(rejectionMessage as string, { exact: false })).toBeVisible()
+    // Anchor on the banner CONTAINER, not the 'Stateless mode rejected:' text —
+    // that phrase lives in a <strong> leaf whose text is only the prefix, so the
+    // reason (a sibling text node in the same .cu-banner--warning div) is not part
+    // of the leaf. Match the container by class + its heading text, then assert
+    // the reason WITHIN it.
+    const rejectionBanner = page.locator('.cu-banner--warning', {
+      hasText: 'Stateless mode rejected:',
+    })
+    await expect(rejectionBanner).toBeVisible({ timeout: 20_000 })
+    // (1) the warning banner container carries the reason verbatim
+    await expect(rejectionBanner).toContainText(rejectionMessage as string, { timeout: 20_000 })
+    // (2) the lifecycle chip is a second visibility surface — assert it deliberately
+    await expect(
+      page.locator('.cu-chip', { hasText: rejectionMessage as string })
+    ).toBeVisible({ timeout: 20_000 })
 
     // Disassociation recovery: remove the channel; HCC clears the rejection.
     // Strict delete (not the best-effort cleanup helper) so a real failure here
@@ -191,8 +208,15 @@ test.describe('operator sees the stateless × CommunicationChannel hard-rejectio
       })
       .toMatch(/"rejected":false/)
 
-    // The banner must disappear once the Host reports stateless-active again.
+    // BOTH surfaces must clear once the Host reports stateless-active again: the
+    // warning banner disappears AND the rejection reason no longer renders on any
+    // surface (banner or lifecycle chip).
     await page.reload()
-    await expect(page.getByText('Stateless mode rejected:')).toHaveCount(0, { timeout: 20_000 })
+    await expect(
+      page.locator('.cu-banner--warning', { hasText: 'Stateless mode rejected:' })
+    ).toHaveCount(0, { timeout: 20_000 })
+    await expect(page.getByText(rejectionMessage as string, { exact: false })).toHaveCount(0, {
+      timeout: 20_000,
+    })
   })
 })
