@@ -26,6 +26,7 @@ import { ContextsPage } from '@pages/ContextsPage'
 import { FilesPage } from '@pages/FilesPage'
 import { McpServersPage } from '@pages/McpServersPage'
 import { SandboxUiPage } from '@pages/SandboxUiPage'
+import type { SandboxUiConversationOrigin } from '@pages/SandboxUiPage.types'
 import { SettingsPage } from '@pages/SettingsPage'
 import { TeamDetailsPage } from '@pages/TeamDetailsPage'
 import { TeamsPage } from '@pages/TeamsPage'
@@ -141,6 +142,8 @@ export function App() {
   const [activeSandboxUiApp, setActiveSandboxUiApp] = React.useState<ActiveSandboxUiApp | null>(
     null
   )
+  const [sandboxUiConversationOrigin, setSandboxUiConversationOrigin] =
+    React.useState<SandboxUiConversationOrigin | null>(null)
   const [sidebarSettingsMenuOpen, setSidebarSettingsMenuOpen] = React.useState(false)
   const [headerShellOverlayOpen, setHeaderShellOverlayOpen] = React.useState(false)
   const [headerNotificationTrayOpen, setHeaderNotificationTrayOpen] = React.useState(false)
@@ -155,6 +158,21 @@ export function App() {
     (vm.navItem === DESKTOP_ROUTES.chat && Boolean(vm.selectedAgent))
   const notificationTrayUsesDrawer = Boolean(activeSandboxUiApp)
   const appNotificationDrawerOpen = notificationTrayUsesDrawer && headerNotificationTrayOpen
+  const activeConversationOrigin = React.useMemo<SandboxUiConversationOrigin | null>(() => {
+    if (vm.navItem !== DESKTOP_ROUTES.chat || !vm.selectedAgent || !vm.activeChatId) {
+      return null
+    }
+    const conversation =
+      vm.chatList.find(chat => chat.id === vm.activeChatId) ??
+      vm.latestChatSessions.find(
+        chat => chat.agentRef === vm.selectedAgent && chat.id === vm.activeChatId
+      )
+    return {
+      agentName: vm.selectedAgent,
+      chatId: vm.activeChatId,
+      title: conversation?.title.trim() || 'Conversation',
+    }
+  }, [vm.activeChatId, vm.chatList, vm.latestChatSessions, vm.navItem, vm.selectedAgent])
 
   React.useEffect(() => {
     document.documentElement.setAttribute('data-theme', themeMode)
@@ -204,22 +222,35 @@ export function App() {
 
   const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp) => {
     setActiveSandboxUiApp(app)
-    setSidebarCollapsed(true)
   }, [])
 
   const handleSandboxUiClosed = React.useCallback(() => {
     setActiveSandboxUiApp(null)
-    setSidebarCollapsed(false)
+    setSandboxUiConversationOrigin(null)
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)
   }, [])
 
   const handleSandboxUiRemoved = React.useCallback(() => {
     setActiveSandboxUiApp(null)
-    setSidebarCollapsed(false)
+    setSandboxUiConversationOrigin(null)
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)
   }, [])
+
+  const handleSandboxUiBackToConversation = React.useCallback(() => {
+    if (!sandboxUiConversationOrigin) return
+    const origin = sandboxUiConversationOrigin
+    setActiveSandboxUiApp(null)
+    setSandboxUiConversationOrigin(null)
+    setHeaderShellOverlayOpen(false)
+    setSidebarSettingsMenuOpen(false)
+    vm.handleSelectChatAgent(origin.agentName, {
+      selectLatest: false,
+      chatId: origin.chatId,
+      title: origin.title,
+    })
+  }, [sandboxUiConversationOrigin, vm.handleSelectChatAgent])
 
   React.useEffect(() => {
     setNotificationDrawerReady(false)
@@ -231,12 +262,12 @@ export function App() {
 
   const handleOpenSandboxUiApp = React.useCallback(
     (app: ActiveSandboxUiApp) => {
+      setSandboxUiConversationOrigin(activeConversationOrigin)
       setActiveSandboxUiApp(app)
       vm.handleNavSelect(DESKTOP_ROUTES.apps)
-      setSidebarCollapsed(true)
       setSandboxUiShortcutOpenRequestId(value => value + 1)
     },
-    [vm.handleNavSelect]
+    [activeConversationOrigin, vm.handleNavSelect]
   )
 
   React.useEffect(() => {
@@ -252,7 +283,7 @@ export function App() {
       event.preventDefault()
       if (activeSandboxUiApp) {
         setActiveSandboxUiApp(null)
-        setSidebarCollapsed(false)
+        setSandboxUiConversationOrigin(null)
       }
       setHeaderShellOverlayOpen(false)
       setSidebarSettingsMenuOpen(false)
@@ -687,11 +718,13 @@ export function App() {
                               {vm.navItem === DESKTOP_ROUTES.apps && (
                                 <SandboxUiPage
                                   boundsRefreshKey={sandboxUiBoundsRefreshKey}
+                                  conversationOrigin={sandboxUiConversationOrigin}
                                   headerShellOverlayOpen={headerShellOverlayOpen}
                                   sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
                                   toastShellOverlayOpen={vm.toasts.length > 0}
                                   shortcutApp={activeSandboxUiApp}
                                   shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
+                                  onBackToConversation={handleSandboxUiBackToConversation}
                                   onEmbeddedAppOpening={handleSandboxUiOpening}
                                   onEmbeddedAppBack={handleSandboxUiClosed}
                                   onEmbeddedAppRemoved={handleSandboxUiRemoved}

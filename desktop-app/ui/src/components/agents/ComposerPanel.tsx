@@ -10,6 +10,7 @@ import {
   IconConnectors,
   IconContexts,
   IconPlus,
+  IconUpload,
   IconWorkflows,
 } from '@components/SidebarNav/icons'
 import {
@@ -649,7 +650,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                       Global File System
                     </MenuItem>
                     <MenuItem
-                      leadingIcon={<IconAttachFile />}
+                      leadingIcon={<IconUpload />}
                       onClick={openUploadPicker}
                       role="menuitem"
                     >

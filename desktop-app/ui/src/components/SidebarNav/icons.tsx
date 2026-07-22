@@ -92,6 +92,16 @@ export function IconDownload(props: IconProps) {
   )
 }
 
+export function IconUpload(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <path d="M12 21V9" />
+      <path d="m7 14 5-5 5 5" />
+      <path d="M5 3h14" />
+    </svg>
+  )
+}
+
 export function IconEdit(props: IconProps) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
