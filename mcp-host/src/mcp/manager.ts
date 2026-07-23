@@ -5,6 +5,22 @@ import { McpServerInfo, McpTool, ToolCallResult } from '../types'
 import { McpClient, type McpToolCallOptions } from './client'
 import { ServerStatusTracker } from './serverStatus'
 
+export interface McpStatusRefreshSummary {
+  serverCount: number
+  succeeded: number
+  failed: number
+  toolCount: number
+  outputSchemaCount: number
+  aborted: boolean
+}
+
+function deriveProbeSignal(roundSignal: AbortSignal | undefined): AbortSignal {
+  const probeController = new AbortController()
+  return roundSignal
+    ? AbortSignal.any([roundSignal, probeController.signal])
+    : probeController.signal
+}
+
 export class McpManager {
   private clients: Map<string, McpClient> = new Map()
   private serverInfos: Map<string, McpServerInfo> = new Map()
@@ -219,21 +235,62 @@ export class McpManager {
    * Called by the background heartbeat to keep `observedAt` fresh and to
    * classify refresh failures (spec §4.5 — stay connected, attach reason).
    *
-   * Returns the number of servers probed.
+   * Probes a stable client snapshot. State is written only after every probe
+   * settles; an aborted round never mutates the last known server status.
    */
-  async refreshAllServerStatus(): Promise<number> {
+  async refreshAllServerStatus(options: McpToolCallOptions = {}): Promise<McpStatusRefreshSummary> {
     const entries = [...this.clients.entries()]
-    await Promise.all(
+    if (options.signal?.aborted) {
+      return {
+        serverCount: entries.length,
+        succeeded: 0,
+        failed: 0,
+        toolCount: 0,
+        outputSchemaCount: 0,
+        aborted: true,
+      }
+    }
+
+    const results = await Promise.all(
       entries.map(async ([name, client]) => {
-        const result = await client.probeTools()
-        if (result.ok) {
-          this.statusTracker.updateToolCount(name, result.toolCount)
-        } else {
-          this.statusTracker.updateToolCount(name, 0, { refreshError: result.error })
+        try {
+          return {
+            name,
+            result: await client.probeTools({
+              timeoutMs: options.timeoutMs,
+              signal: deriveProbeSignal(options.signal),
+            }),
+          }
+        } catch (error) {
+          return { name, result: { ok: false as const, error } }
         }
       })
     )
-    return entries.length
+    const succeeded = results.filter(({ result }) => result.ok).length
+    const summary: McpStatusRefreshSummary = {
+      serverCount: entries.length,
+      succeeded,
+      failed: entries.length - succeeded,
+      toolCount: results.reduce(
+        (total, { result }) => total + (result.ok ? result.toolCount : 0),
+        0
+      ),
+      outputSchemaCount: results.reduce(
+        (total, { result }) => total + (result.ok ? result.outputSchemaCount : 0),
+        0
+      ),
+      aborted: options.signal?.aborted === true,
+    }
+    if (summary.aborted) return summary
+
+    for (const { name, result } of results) {
+      if (result.ok) {
+        this.statusTracker.updateToolCount(name, result.toolCount)
+      } else {
+        this.statusTracker.updateToolCount(name, 0, { refreshError: result.error })
+      }
+    }
+    return summary
   }
 
   /**

@@ -110,14 +110,21 @@ describe('McpManager.refreshAllServerStatus', () => {
     })
     const probe = vi
       .spyOn(McpClient.prototype, 'probeTools')
-      .mockResolvedValue({ ok: true, toolCount: 4 })
+      .mockResolvedValue({ ok: true, toolCount: 4, outputSchemaCount: 0 })
 
     const m = new McpManager()
     await m.addServer(serverInfo())
     expect(m.status.get('svc')!.toolCount).toBe(1)
 
-    const n = await m.refreshAllServerStatus()
-    expect(n).toBe(1)
+    const summary = await m.refreshAllServerStatus()
+    expect(summary).toMatchObject({
+      serverCount: 1,
+      succeeded: 1,
+      failed: 0,
+      toolCount: 4,
+      outputSchemaCount: 0,
+      aborted: false,
+    })
     expect(probe).toHaveBeenCalledTimes(1)
     expect(m.status.get('svc')!.toolCount).toBe(4)
   })
@@ -143,10 +150,16 @@ describe('McpManager.refreshAllServerStatus', () => {
     expect(s.reason).toBe('upstream_5xx')
   })
 
-  it('returns 0 and is a no-op when no servers are connected', async () => {
+  it('returns an empty summary and is a no-op when no servers are connected', async () => {
     const m = new McpManager()
-    const n = await m.refreshAllServerStatus()
-    expect(n).toBe(0)
+    await expect(m.refreshAllServerStatus()).resolves.toEqual({
+      serverCount: 0,
+      succeeded: 0,
+      failed: 0,
+      toolCount: 0,
+      outputSchemaCount: 0,
+      aborted: false,
+    })
   })
 })
 

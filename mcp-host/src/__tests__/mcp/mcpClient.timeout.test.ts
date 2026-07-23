@@ -9,6 +9,8 @@ const sdkState = vi.hoisted(() => ({
   callToolQueue: [] as Array<() => unknown>,
   listToolsCalls: [] as unknown[][],
   listToolsQueue: [] as Array<() => unknown>,
+  requestCalls: [] as unknown[][],
+  requestQueue: [] as Array<() => unknown>,
 }))
 
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
@@ -26,6 +28,13 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
     async listTools(...args: unknown[]) {
       sdkState.listToolsCalls.push(args)
       const next = sdkState.listToolsQueue.shift()
+      if (next) return next()
+      return { tools: [] }
+    }
+
+    async request(...args: unknown[]) {
+      sdkState.requestCalls.push(args)
+      const next = sdkState.requestQueue.shift()
       if (next) return next()
       return { tools: [] }
     }
@@ -70,6 +79,8 @@ describe('McpClient SDK request timeouts', () => {
     sdkState.callToolQueue.length = 0
     sdkState.listToolsCalls.length = 0
     sdkState.listToolsQueue.length = 0
+    sdkState.requestCalls.length = 0
+    sdkState.requestQueue.length = 0
   })
 
   afterEach(() => {
@@ -157,7 +168,7 @@ describe('McpClient SDK request timeouts', () => {
     expect(requestOptions.maxTotalTimeout).toBe(requestOptions.timeout)
   })
 
-  it('passes explicit timeout options to SDK listTools calls', async () => {
+  it('uses a raw validated SDK request for status probes without calling listTools', async () => {
     const controller = new AbortController()
     const c = client()
 
@@ -172,14 +183,16 @@ describe('McpClient SDK request timeouts', () => {
         signal: controller.signal,
       }),
     ])
-    expect(sdkState.listToolsCalls[1]).toEqual([
-      undefined,
+    expect(sdkState.requestCalls[0]).toEqual([
+      { method: 'tools/list', params: undefined },
+      expect.anything(),
       expect.objectContaining({
         timeout: 3_000,
         maxTotalTimeout: 3_000,
         signal: controller.signal,
       }),
     ])
+    expect(sdkState.listToolsCalls).toHaveLength(1)
   })
 
   it('fails connect when SDK tool discovery fails', async () => {
