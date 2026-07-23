@@ -29,11 +29,15 @@ import { AnnotationCanvas } from './AnnotationCanvas'
 import { ComposerAgentFilesModal } from './ComposerAgentFilesModal'
 import { ComposerGlobalFilesModal } from './ComposerGlobalFilesModal'
 import { ModelSelector } from './ModelSelector'
+import { SHOW_AGENT_FILES_UI } from './agentRoutes'
 
 type ComposerPanelProps = {
   inline?: boolean
   agentSelector?: React.ReactNode
 }
+
+// UI-only composer gate; the Global File System feature remains available elsewhere.
+const SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM = false
 
 function getComposerReferenceTypeLabel(type: ComposerReferenceAttachment['type']): string {
   if (type === 'plugin') return 'Plugin'
@@ -624,31 +628,37 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                     >
                       Connectors
                     </MenuItem>
-                    <MenuItem
-                      aria-disabled={agentFilesDisabled}
-                      className={
-                        agentFilesDisabled ? 'composer-reference-menu-item-disabled' : undefined
-                      }
-                      leadingIcon={<IconContexts />}
-                      onClick={agentFilesDisabled ? undefined : openAgentFilesModal}
-                      onFocus={() => setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)}
-                      onMouseEnter={() =>
-                        setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
-                      }
-                      role="menuitem"
-                      trailingIcon={
-                        agentFilesDisabled ? <span aria-hidden="true">&gt;</span> : undefined
-                      }
-                    >
-                      Agent Files
-                    </MenuItem>
-                    <MenuItem
-                      leadingIcon={<IconAttachFile />}
-                      onClick={openGlobalFilesModal}
-                      role="menuitem"
-                    >
-                      Global File System
-                    </MenuItem>
+                    {SHOW_AGENT_FILES_UI ? (
+                      <MenuItem
+                        aria-disabled={agentFilesDisabled}
+                        className={
+                          agentFilesDisabled ? 'composer-reference-menu-item-disabled' : undefined
+                        }
+                        leadingIcon={<IconContexts />}
+                        onClick={agentFilesDisabled ? undefined : openAgentFilesModal}
+                        onFocus={() =>
+                          setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
+                        }
+                        onMouseEnter={() =>
+                          setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
+                        }
+                        role="menuitem"
+                        trailingIcon={
+                          agentFilesDisabled ? <span aria-hidden="true">&gt;</span> : undefined
+                        }
+                      >
+                        Agent Files
+                      </MenuItem>
+                    ) : null}
+                    {SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM ? (
+                      <MenuItem
+                        leadingIcon={<IconAttachFile />}
+                        onClick={openGlobalFilesModal}
+                        role="menuitem"
+                      >
+                        Global File System
+                      </MenuItem>
+                    ) : null}
                     <MenuItem
                       leadingIcon={<IconUpload />}
                       onClick={openUploadPicker}
@@ -718,7 +728,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                       )}
                     </span>
                   ) : null}
-                  {composerSubmenu === 'agent-files' ? (
+                  {SHOW_AGENT_FILES_UI && composerSubmenu === 'agent-files' ? (
                     <span
                       className="composer-reference-submenu composer-reference-submenu--agent-files"
                       role="menu"

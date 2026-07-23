@@ -1536,6 +1536,7 @@ export function HostWizard({
                     }
                   : undefined
               }
+              inlinePrimaryCredential
               secretKeys={secretMode === 'new' ? llmSecretKeys : []}
               disabled={busy}
             />

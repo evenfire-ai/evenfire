@@ -20,6 +20,7 @@ function Harness({
   initialAllowed = [],
   withCredentials = true,
   existingKeys,
+  inlinePrimaryCredential = false,
 }: {
   initialProvider?: LlmProvider
   initialModel?: string
@@ -27,6 +28,7 @@ function Harness({
   initialAllowed?: HostAllowedModel[]
   withCredentials?: boolean
   existingKeys?: string[]
+  inlinePrimaryCredential?: boolean
 }) {
   const [provider, setProvider] = useState<LlmProvider>(initialProvider)
   const [model, setModel] = useState(initialModel)
@@ -55,6 +57,7 @@ function Harness({
             }
           : undefined
       }
+      inlinePrimaryCredential={inlinePrimaryCredential}
       secretKeys={existingKeys}
     />
   )
@@ -77,6 +80,17 @@ describe('LlmProviderConfig (spec Topic 1b — domain projection + usable gate)'
     expect(within(primary).getByText(/Add the OpenAI credential/i)).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText(/OpenAI API key/i), { target: { value: 'sk-live' } })
     expect(within(primary).queryByText(/Add the OpenAI credential/i)).not.toBeInTheDocument()
+  })
+
+  it('places the primary credential beside Provider and Model in the create layout', () => {
+    render(<Harness inlinePrimaryCredential />)
+
+    const row = screen
+      .getByLabelText('Provider', { selector: '#llm-primary-provider' })
+      .closest('.cu-llm-config__model-row')
+    expect(row).not.toBeNull()
+    expect(row).toHaveClass('cu-llm-config__model-row--with-credential')
+    expect(within(row as HTMLElement).getByLabelText(/OpenAI API key/i)).toBeInTheDocument()
   })
 
   it('treats a stored key (existingKeys) as usable without re-entry (edit mode)', () => {

@@ -109,6 +109,7 @@ export function LlmProviderConfig({
   catalogLoading = false,
   catalogError,
   credentials,
+  inlinePrimaryCredential = false,
   secretKeys = [],
   disabled = false,
 }: LlmProviderConfigProps) {
@@ -231,7 +232,12 @@ export function LlmProviderConfig({
           <span className="cu-llm-config__block-tag">Required</span>
         </div>
 
-        <div className="cu-llm-config__model-row">
+        <div
+          className={cn(
+            'cu-llm-config__model-row',
+            credentials && inlinePrimaryCredential && 'cu-llm-config__model-row--with-credential'
+          )}
+        >
           <Field htmlFor="llm-primary-provider" label="Provider">
             <SelectionDropdown
               id="llm-primary-provider"
@@ -282,6 +288,19 @@ export function LlmProviderConfig({
               }}
             />
           </Field>
+
+          {credentials && inlinePrimaryCredential ? (
+            <ProviderCredentialBlock
+              variant="primary"
+              group={primaryGroup}
+              slots={primaryGroup.slots}
+              idPrefix="llm-primary"
+              wiring={credentials}
+              present={present}
+              disabled={disabled}
+              inline
+            />
+          ) : null}
         </div>
 
         {catalogError ? (
@@ -308,7 +327,7 @@ export function LlmProviderConfig({
           disabled={disabled}
         />
 
-        {credentials ? (
+        {credentials && !inlinePrimaryCredential ? (
           <ProviderCredentialBlock
             variant="primary"
             group={primaryGroup}
@@ -515,6 +534,7 @@ type ProviderCredentialBlockProps = {
   wiring: LlmCredentialWiring
   present: (dataKey: string) => boolean
   disabled: boolean
+  inline?: boolean
 }
 
 // One provider's credential block: the usable/partial/absent chip, its slot
@@ -530,6 +550,7 @@ function ProviderCredentialBlock({
   wiring,
   present,
   disabled,
+  inline = false,
 }: ProviderCredentialBlockProps) {
   const chip = describeLlmCompleteness(group, present)
   const providerLabel = getProviderLabel(group.provider)
@@ -542,17 +563,22 @@ function ProviderCredentialBlock({
   const usable = chip.state === 'present'
 
   return (
-    <section className="cu-llm-cred-group" aria-label={`${group.label} credentials`}>
-      <div className="cu-llm-cred-group__head">
-        <span className="cu-llm-cred-group__title">{group.label}</span>
-        <span
-          className={cn('cu-slot-chip', `cu-slot-chip--${chip.state}`)}
-          aria-label={`${group.label} credentials ${chip.text}`}
-        >
-          <span aria-hidden="true">{chip.symbol}</span>
-          {chip.text}
-        </span>
-      </div>
+    <section
+      className={cn('cu-llm-cred-group', inline && 'cu-llm-cred-group--inline')}
+      aria-label={`${group.label} credentials`}
+    >
+      {!inline ? (
+        <div className="cu-llm-cred-group__head">
+          <span className="cu-llm-cred-group__title">{group.label}</span>
+          <span
+            className={cn('cu-slot-chip', `cu-slot-chip--${chip.state}`)}
+            aria-label={`${group.label} credentials ${chip.text}`}
+          >
+            <span aria-hidden="true">{chip.symbol}</span>
+            {chip.text}
+          </span>
+        </div>
+      ) : null}
 
       {slots.map(slot => {
         const inputId = `${idPrefix}-${slot.dataKey}`

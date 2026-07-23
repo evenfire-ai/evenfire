@@ -6776,6 +6776,24 @@ textarea.cu-input {
   gap: 0.75rem;
 }
 
+.cu-llm-config__model-row--with-credential {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+}
+
+.cu-llm-cred-group--inline {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+@media (max-width: 720px) {
+  .cu-llm-config__model-row--with-credential {
+    grid-template-columns: 1fr;
+  }
+}
+
 .cu-llm-provider-icon {
   display: inline-grid;
   place-items: center;
