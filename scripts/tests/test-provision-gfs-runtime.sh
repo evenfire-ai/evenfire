@@ -26,8 +26,12 @@ MOCK
 chmod +x "$TMP/bin/bash" "$TMP/bin/kubectl"
 
 export CALL_LOG="$TMP/calls.log"
+# clerum-dev-test is not one of the generic built-in dev patterns
+# (*example-dev*, minikube, clerum-test, clerum-codex-*, ...), so authorize it
+# through the ALLOWED_CONTEXTS override — the same mechanism a self-hosted dev
+# pipeline uses for a GKE dev context that the generic patterns do not name.
 for run in first-upgrade idempotent-rerun; do
-  PATH="$TMP/bin:$PATH" /bin/bash "$ROOT/deploy/scripts/provision-gfs-runtime.sh" \
+  ALLOWED_CONTEXTS=clerum-dev-test PATH="$TMP/bin:$PATH" /bin/bash "$ROOT/deploy/scripts/provision-gfs-runtime.sh" \
     --context clerum-dev-test \
     --overlay "$TMP/overlay" \
     --skip-auth-sync >/dev/null
