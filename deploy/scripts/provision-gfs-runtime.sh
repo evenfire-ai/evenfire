@@ -91,8 +91,10 @@ done
 # same override idiom the sibling scripts use (run-control-api-db-migration.sh,
 # scripts/e2e/seed-e2e-data.sh). A prod-looking context is hard-denied regardless.
 context_allowed_via_env() {
-  local c allowed
-  IFS=',' read -r -a allowed <<<"${ALLOWED_CONTEXTS:-}"
+  local c
+  [ -n "${ALLOWED_CONTEXTS:-}" ] || return 1
+  local -a allowed=()
+  IFS=',' read -r -a allowed <<<"${ALLOWED_CONTEXTS}"
   for c in "${allowed[@]}"; do
     [ -n "$c" ] && [ "$CONTEXT" = "$c" ] && return 0
   done
