@@ -3195,9 +3195,60 @@ describe('McpServerWatcher Host watch generation', () => {
       [{ name: 'live-host', namespace: 'mcp-host', uid: 'u1', spec: { host: 'live-host' } }],
       new Set(['live-host', 'gone-host'])
     )
-    await vi.waitFor(() => expect(reconcileDelete).toHaveBeenCalledWith('gone-host', 'mcp-host'))
+    await vi.waitFor(() =>
+      expect(reconcileDelete).toHaveBeenCalledWith('gone-host', 'mcp-host', expect.anything())
+    )
     // A Host still present in the fresh snapshot is never deleted.
-    expect(reconcileDelete).not.toHaveBeenCalledWith('live-host', 'mcp-host')
+    expect(reconcileDelete).not.toHaveBeenCalledWith(
+      'live-host',
+      'mcp-host',
+      expect.anything()
+    )
+    watcher.stop()
+  })
+
+  // The recovery diff resolves absence at LIST time. Between that diff and the
+  // moment the delete is admitted to the per-Host serializer, the recreation's
+  // ADDED can land: the watch callback sets `this.hosts` SYNCHRONOUSLY and
+  // enters the per-Host chain FIRST, while the fire-and-forget dispatch queues
+  // the delete SECOND. serializeByHost is strict FIFO, so without a fence the
+  // new bundle is created and then wiped. The fence must therefore read the
+  // LIVE cache at admission, not a value captured at enqueue time.
+  //
+  // This is the case the sibling recreation test does NOT cover: there the
+  // recreated Host is present in the snapshot, so enqueueRecoveredHostDeletes
+  // short-circuits on snapshotNames.has(name) and never dispatches at all.
+  it('recovery delete carries a live-cache fence for a Host recreated during admission (#827 F2 parity)', async () => {
+    vi.clearAllMocks()
+    const watcher = new McpServerWatcher()
+    const reconcileDelete = vi
+      .spyOn(watcher.getHostReconciler(), 'reconcileDelete')
+      .mockResolvedValue(undefined)
+    // "ghost" is absent from the fresh authoritative snapshot → genuinely
+    // disappeared → dispatched for delete.
+    ;(watcher as any).enqueueRecoveredHostDeletes([], new Set(['ghost']))
+    await vi.waitFor(() => expect(reconcileDelete).toHaveBeenCalled())
+
+    const [, , opts] = reconcileDelete.mock.calls[0] as [
+      string,
+      string,
+      { skipIf?: () => boolean } | undefined,
+    ]
+    expect(opts?.skipIf, 'the recovery delete must carry a skipIf fence').toBeTypeOf('function')
+
+    // Cache does not hold the name → the Host really is gone → do NOT skip.
+    expect(opts!.skipIf!()).toBe(false)
+
+    // The recreation lands in the live cache during the admission window.
+    ;(watcher as any).hosts.set('ghost', {
+      name: 'ghost',
+      namespace: 'mcp-host',
+      uid: 'uid-recreated',
+      generation: 1,
+      spec: { host: 'ghost' },
+    })
+    // Same fence, re-evaluated at admission → skip the destructive delete.
+    expect(opts!.skipIf!()).toBe(true)
     watcher.stop()
   })
 

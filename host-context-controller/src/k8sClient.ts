@@ -1033,7 +1033,20 @@ export class McpServerWatcher implements McpServerProvider {
     // cleanup.
     hostDeleteCleanupTotal.inc({ outcome: 'confirmed' })
     try {
-      await this.hostReconciler.reconcileDelete(name, config.hostNamespace)
+      // F2/#827 TOCTOU parity: absence was resolved at LIST time, but the
+      // recreation's ADDED can be delivered while the watch replays from the
+      // snapshot's resourceVersion — that callback sets `this.hosts`
+      // SYNCHRONOUSLY and enters this Host's chain FIRST, while this
+      // fire-and-forget dispatch queues the delete SECOND. serializeByHost is
+      // strict FIFO, so without this fence the rebuilt bundle (workspace PVC,
+      // per-Host RBAC, runtime-token Secret, channel-reader resources,
+      // NetworkPolicies) would be created and then wiped. Ownership labels
+      // cannot discriminate — the rebuilt bundle carries identical labels — and
+      // a name absent from the snapshot has no uid to compare, so live-cache
+      // presence AT ADMISSION is the fence, exactly as in the F2 orphan sweep.
+      await this.hostReconciler.reconcileDelete(name, config.hostNamespace, {
+        skipIf: () => this.hosts.has(name),
+      })
       hostDeleteCleanupTotal.inc({ outcome: 'completed' })
     } catch (error) {
       hostDeleteCleanupTotal.inc({ outcome: 'retried' })

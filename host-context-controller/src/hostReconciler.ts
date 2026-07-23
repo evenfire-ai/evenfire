@@ -52,6 +52,7 @@ import {
 } from './utils'
 import {
   hostCleanupDeferredTotal,
+  hostDeleteCleanupTotal,
   hostReconcileDurationSeconds,
   hostReconcileInFlight,
   hostReconcileQueueWaitSeconds,
@@ -3791,11 +3792,38 @@ export class HostReconciler {
     )
   }
 
-  async reconcileDelete(name: string, namespace: string): Promise<void> {
+  /**
+   * Delete a Host's runtime bundle.
+   *
+   * `opts.skipIf` is an OPTIONAL fence evaluated INSIDE the per-Host serializer,
+   * immediately before anything destructive runs. Callers whose "this Host is
+   * gone" decision was made BEFORE admission (the watch-recovery diff, which
+   * compares LIST-time names) pass it so a same-name Host recreated during the
+   * admission window is not wiped: the recreation's ADDED sets the cache and
+   * enters this Host's chain FIRST, its reconcile rebuilds the bundle, and only
+   * then does the stale delete reach the front of the strict-FIFO queue.
+   * Ownership labels cannot discriminate here — the rebuilt bundle carries
+   * identical `clerum.io/host` + managed-by labels — and no uid is available on
+   * that path, so cache presence at admission is the correct fence. This
+   * mirrors the F2/#827 in-serializer re-check in collectHostCleanupFailures.
+   *
+   * Callers that omit `opts` keep the previous unconditional behavior exactly.
+   */
+  async reconcileDelete(
+    name: string,
+    namespace: string,
+    opts?: { skipIf?: () => boolean }
+  ): Promise<void> {
     // A DELETED event must not race an in-flight create/update for the same
     // Host: route it through the same per-Host serializer as reconcile(). The
     // global convergence tail no longer provides this ordering.
     await this.lifecycle.serializeByHost(name, async () => {
+      if (opts?.skipIf?.()) {
+        // Same vocabulary the watch path already reports for this condition
+        // (reconcileHostWatchEvent), so the skip is observable, not silent.
+        hostDeleteCleanupTotal.inc({ outcome: 'superseded' })
+        return
+      }
       await this.deleteHostRuntimeResources(name, namespace)
       this.clearStatus(name)
       this.desktopHosts.delete(name)

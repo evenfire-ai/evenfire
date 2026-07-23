@@ -12,6 +12,7 @@ import {
 } from '../test/__fixtures__/testMocks'
 import { HostFleetReconcileError, HostReconciler, destructiveCleanupAllowed } from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
+import { registry } from './metrics'
 import { HostCRD } from './types'
 
 function deferred<T = void>(): {
@@ -384,6 +385,19 @@ describe('HostReconciler fleet failure isolation', () => {
   })
 })
 
+/**
+ * Current value of clerum_hcc_host_delete_cleanup_total for one `outcome`
+ * label. Read from the live HCC registry (metrics are NOT mocked here), so a
+ * skip that fails to record is caught rather than passing silently.
+ */
+async function readHostDeleteCleanupOutcome(outcome: string): Promise<number> {
+  const metric = registry.getSingleMetric('clerum_hcc_host_delete_cleanup_total')
+  if (!metric) throw new Error('clerum_hcc_host_delete_cleanup_total is not registered')
+  const snapshot = await metric.get()
+  const match = snapshot.values.find(entry => entry.labels.outcome === outcome)
+  return match?.value ?? 0
+}
+
 function makeCleanupReconciler(customApi: { getNamespacedCustomObject: ReturnType<typeof vi.fn> }) {
   return new HostReconciler({} as k8s.KubeConfig, {
     appsApi: asAppsApi(createMockAppsApi()),
@@ -717,6 +731,60 @@ describe('HostReconciler delete serialization', () => {
     reconcileGate.resolve()
     await Promise.all([reconcilePromise, deletePromise])
     expect(order).toEqual(['reconcile:start', 'reconcile:end', 'delete:start', 'delete:end'])
+  })
+
+  // Recovery-path TOCTOU parity with the F2 fence in collectHostCleanupFailures.
+  // The recovery delete (k8sClient.dispatchRecoveredHostDelete) diffs LIST-time
+  // names only; a same-name Host recreated AFTER that diff and admitted to the
+  // per-Host chain FIRST would otherwise have its freshly-reconciled bundle —
+  // workspace PVC, per-Host RBAC, runtime-token Secret, channel-reader
+  // resources, NetworkPolicies — wiped by the stale delete queued behind it.
+  it('suppresses the delete when skipIf reports a recreation inside the admission window', async () => {
+    const reconciler = makeCleanupReconciler({ getNamespacedCustomObject: vi.fn() })
+    const internals = reconciler as unknown as {
+      deleteHostRuntimeResources(name: string, namespace: string): Promise<void>
+    }
+    const del = vi.spyOn(internals, 'deleteHostRuntimeResources').mockResolvedValue()
+    const before = await readHostDeleteCleanupOutcome('superseded')
+
+    // The fence is evaluated INSIDE the serializer, so it observes the cache as
+    // of admission — not as of enqueue. Here it reports "recreated".
+    let evaluatedInsideSerializer = false
+    await reconciler.reconcileDelete('recreated-in-window', 'mcp-host', {
+      skipIf: () => {
+        evaluatedInsideSerializer = true
+        return true
+      },
+    })
+
+    expect(evaluatedInsideSerializer).toBe(true)
+    expect(del).not.toHaveBeenCalled()
+    // The skip is observable, not silent, and reuses the watch path's vocabulary.
+    expect(await readHostDeleteCleanupOutcome('superseded')).toBe(before + 1)
+  })
+
+  it('still deletes the bundle when skipIf reports the Host really is gone', async () => {
+    const reconciler = makeCleanupReconciler({ getNamespacedCustomObject: vi.fn() })
+    const internals = reconciler as unknown as {
+      deleteHostRuntimeResources(name: string, namespace: string): Promise<void>
+    }
+    const del = vi.spyOn(internals, 'deleteHostRuntimeResources').mockResolvedValue()
+
+    await reconciler.reconcileDelete('really-gone', 'mcp-host', { skipIf: () => false })
+
+    expect(del).toHaveBeenCalledWith('really-gone', 'mcp-host')
+  })
+
+  it('keeps the existing unconditional behavior for callers that pass no options', async () => {
+    const reconciler = makeCleanupReconciler({ getNamespacedCustomObject: vi.fn() })
+    const internals = reconciler as unknown as {
+      deleteHostRuntimeResources(name: string, namespace: string): Promise<void>
+    }
+    const del = vi.spyOn(internals, 'deleteHostRuntimeResources').mockResolvedValue()
+
+    await reconciler.reconcileDelete('no-opts', 'mcp-host')
+
+    expect(del).toHaveBeenCalledWith('no-opts', 'mcp-host')
   })
 })
 
