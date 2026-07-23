@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DeletedAgentHistoryLimitError,
   MAX_DELETED_ACCESS_HISTORY,
+  accessValueSetsEqual,
   filterAccessValues,
   mergeActiveUpdateWithDeletedHistory,
+  mergeActiveAgentUpdateWithDeletedHistory,
   normalizeUnique,
 } from '../src/services/directory/accessReconciliation.js'
 
@@ -28,5 +31,26 @@ describe('access reconciliation helpers', () => {
     expect(merged).not.toContain('stale-submit')
     expect(merged.at(-1)).toBe(`deleted-${MAX_DELETED_ACCESS_HISTORY}`)
     expect(merged).not.toContain(`deleted-${MAX_DELETED_ACCESS_HISTORY + 1}`)
+  })
+
+  it('compares complete snapshots as normalized sets', () => {
+    expect(accessValueSetsEqual([' agent-a ', 'agent-b', 'agent-a'], ['agent-b', 'agent-a'])).toBe(
+      true
+    )
+    expect(accessValueSetsEqual(['agent-a'], ['agent-b'])).toBe(false)
+  })
+
+  it('retains all deleted agent history at the limit and rejects overflow', () => {
+    const atLimit = Array.from(
+      { length: MAX_DELETED_ACCESS_HISTORY },
+      (_value, index) => `deleted-${index}`
+    )
+    expect(mergeActiveAgentUpdateWithDeletedHistory(['agent-live'], ['agent-live'], atLimit)).toEqual([
+      'agent-live',
+      ...atLimit,
+    ])
+    expect(() =>
+      mergeActiveAgentUpdateWithDeletedHistory(['agent-live'], ['agent-live'], [...atLimit, 'overflow'])
+    ).toThrow(DeletedAgentHistoryLimitError)
   })
 })

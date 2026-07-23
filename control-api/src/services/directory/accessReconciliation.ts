@@ -18,6 +18,13 @@ export type AccessPartition = {
 
 export const MAX_DELETED_ACCESS_HISTORY = 200
 
+export class DeletedAgentHistoryLimitError extends Error {
+  constructor(public readonly limit: number) {
+    super(`deleted agent history exceeds the ${limit}-entry limit`)
+    this.name = 'DeletedAgentHistoryLimitError'
+  }
+}
+
 export function normalizeUnique(values: unknown[]): string[] {
   const seen = new Set<string>()
   const normalized: string[] = []
@@ -28,6 +35,14 @@ export function normalizeUnique(values: unknown[]): string[] {
     normalized.push(item)
   }
   return normalized
+}
+
+export function accessValueSetsEqual(left: unknown[], right: unknown[]): boolean {
+  const normalizedLeft = normalizeUnique(left)
+  const normalizedRight = normalizeUnique(right)
+  if (normalizedLeft.length !== normalizedRight.length) return false
+  const rightSet = new Set(normalizedRight)
+  return normalizedLeft.every(value => rightSet.has(value))
 }
 
 export function filterAccessValues(
@@ -66,6 +81,23 @@ export function mergeActiveUpdateWithDeletedHistory(
   const retainedDeletedHistory = normalizeUnique(deletedHistory)
     .filter(value => !activeSet.has(value))
     .slice(0, MAX_DELETED_ACCESS_HISTORY)
+  return normalizeUnique([...activeRequested, ...retainedDeletedHistory])
+}
+
+/** Agent grants must never silently discard retained deleted-host history. */
+export function mergeActiveAgentUpdateWithDeletedHistory(
+  requestedValues: unknown[],
+  activeValues: Iterable<string>,
+  deletedHistory: unknown[]
+): string[] {
+  const activeSet = new Set(normalizeUnique(Array.from(activeValues)))
+  const retainedDeletedHistory = normalizeUnique(deletedHistory).filter(
+    value => !activeSet.has(value)
+  )
+  if (retainedDeletedHistory.length > MAX_DELETED_ACCESS_HISTORY) {
+    throw new DeletedAgentHistoryLimitError(MAX_DELETED_ACCESS_HISTORY)
+  }
+  const activeRequested = normalizeUnique(requestedValues).filter(value => activeSet.has(value))
   return normalizeUnique([...activeRequested, ...retainedDeletedHistory])
 }
 
