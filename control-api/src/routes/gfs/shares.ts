@@ -252,7 +252,7 @@ export async function handleShareDelete(req: Request, res: Response): Promise<vo
           String(row.resource_id),
           (row.permissions as GfsPermission[]) ?? ['share'],
           subject,
-          { isShare: true }
+          { isShare: true, allowLegacyRetirement: true }
         )
       } catch (error) {
         if (!(error instanceof GfsGrantError)) throw error

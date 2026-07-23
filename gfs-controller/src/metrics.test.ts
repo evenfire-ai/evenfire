@@ -41,11 +41,25 @@ describe("GfsMetrics", () => {
       "gfs_read_after_write_lag_ms",
       "gfs_quota_usage_ratio",
       "gfs_cache_hit_rate",
+      "gfs_blob_orphan_candidates",
+      "gfs_blob_orphan_bytes",
+      "gfs_blob_cleanup_failures_total",
     ]) {
       expect(text).toContain(metric);
     }
     expect(text).toContain("gfs_quota_usage_ratio 0.5");
     expect(text).toContain("gfs_read_after_write_lag_ms 7");
+  });
+
+  it("tracks conservative blob reconciliation candidates and failures", () => {
+    const m = new GfsMetrics();
+    m.setOrphanCandidates(3, 4096);
+    m.recordBlobCleanupFailure();
+    expect(m.snapshot()).toMatchObject({
+      orphanCandidates: 3,
+      orphanBytes: 4096,
+      blobCleanupFailures: 1,
+    });
   });
 
   it("is zero-valued before any observation (empty p99 = 0, no division by zero)", () => {

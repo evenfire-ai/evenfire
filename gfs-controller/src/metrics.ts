@@ -13,6 +13,9 @@ export interface SliSnapshot {
   readAfterWriteLagMs: number
   quotaUsageRatio: number
   cacheHitRate: number
+  orphanCandidates: number
+  orphanBytes: number
+  blobCleanupFailures: number
 }
 
 function percentile(values: number[], p: number): number {
@@ -31,6 +34,9 @@ export class GfsMetrics {
   private quotaUsageRatio = 0
   private cacheHits = 0
   private cacheMisses = 0
+  private orphanCandidates = 0
+  private orphanBytes = 0
+  private blobCleanupFailures = 0
 
   /** Cap retained latency samples so a long-running writer cannot grow unbounded. */
   private static readonly MAX_LAT_SAMPLES = 10_000
@@ -60,6 +66,13 @@ export class GfsMetrics {
   setReadAfterWriteLagMs(ms: number): void {
     this.readAfterWriteLagMs = ms
   }
+  setOrphanCandidates(count: number, bytes: number): void {
+    this.orphanCandidates = count
+    this.orphanBytes = bytes
+  }
+  recordBlobCleanupFailure(): void {
+    this.blobCleanupFailures += 1
+  }
 
   snapshot(): SliSnapshot {
     const totalCache = this.cacheHits + this.cacheMisses
@@ -71,6 +84,9 @@ export class GfsMetrics {
       readAfterWriteLagMs: this.readAfterWriteLagMs,
       quotaUsageRatio: this.quotaUsageRatio,
       cacheHitRate: totalCache === 0 ? 0 : this.cacheHits / totalCache,
+      orphanCandidates: this.orphanCandidates,
+      orphanBytes: this.orphanBytes,
+      blobCleanupFailures: this.blobCleanupFailures,
     }
   }
 
@@ -86,6 +102,9 @@ export class GfsMetrics {
       `gfs_read_after_write_lag_ms ${s.readAfterWriteLagMs}`,
       `gfs_quota_usage_ratio ${s.quotaUsageRatio}`,
       `gfs_cache_hit_rate ${s.cacheHitRate}`,
+      `gfs_blob_orphan_candidates ${s.orphanCandidates}`,
+      `gfs_blob_orphan_bytes ${s.orphanBytes}`,
+      `gfs_blob_cleanup_failures_total ${s.blobCleanupFailures}`,
     ]
     return lines.join('\n') + '\n'
   }

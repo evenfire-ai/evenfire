@@ -18,8 +18,6 @@ export function makeHostSubjectId(
   namespace: string,
   name: string
 ): string | null {
-  const normalizedNamespace = namespace.trim()
-  const normalizedName = name.trim()
-  if (!isK8sName(normalizedNamespace) || !isK8sName(normalizedName)) return null
-  return `${party}:${normalizedNamespace}/${normalizedName}`
+  if (!isK8sName(namespace) || !isK8sName(name)) return null
+  return `${party}:${namespace}/${name}`
 }

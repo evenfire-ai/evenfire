@@ -53,7 +53,7 @@ const U1 = '11111111-aaaa-4aaa-8aaa-111111111111'
 const U2 = '22222222-bbbb-4bbb-8bbb-222222222222'
 const T1 = '33333333-cccc-4ccc-8ccc-333333333333'
 const T2 = '44444444-dddd-4ddd-8ddd-444444444444'
-const H1 = '1st:mcp-host/standalone'
+const H1 = '1st:mcp-host/agent-a'
 const CORRELATION_ID = '55555555-eeee-4eee-8eee-555555555555'
 const SESSION = {
   userId: U1,
@@ -812,6 +812,33 @@ describe('authenticated bulk grant/share transport', () => {
       expect.objectContaining({ outcome: 'rejected', authorizationDecision: 'deny' }),
       expect.objectContaining({ outcome: 'rejected', authorizationDecision: 'deny' }),
     ])
+  })
+
+  it('denies an entire plural grant batch when a managed first-party host exceeds read/write', async () => {
+    auth()
+    // The caller holds every requested bit, so the only thing standing between
+    // this batch and a mutation is the managed first-party host permission cap.
+    authority(['manage_acl', 'read', 'delete'])
+    const app = await buildApp()
+
+    const res = await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .set('x-correlation-id', CORRELATION_ID)
+      .send({
+        resourceId: R,
+        subjects: [
+          { type: 'user', id: U2 },
+          { type: 'host', id: H1 },
+        ],
+        permissions: ['read', 'delete'],
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('managed_agent_permission_forbidden')
+    expect(
+      mockQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO gfs_grants'))
+    ).toBe(false)
   })
 
   it('does not publish staged mutation or audit effects when event persistence fails', async () => {

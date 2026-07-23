@@ -35,13 +35,39 @@ const NS = 'mcp-host'
 describe('POST /api/v1/auth/gfs/:subject/tokens', () => {
   it('hcc mints a 1st-party host token (read scope by default)', async () => {
     const res = await request(await app())
-      .post('/api/v1/auth/gfs/standalone/tokens')
+      .post('/api/v1/auth/gfs/chatllm/tokens')
       .set('Authorization', `Bearer ${signInternalControlJwt('hcc')}`)
       .send({ namespace: NS })
     expect(res.status).toBe(200)
-    expect(res.body.subject).toBe(`host:1st:${NS}/standalone`)
+    expect(res.body.subject).toBe(`host:1st:${NS}/chatllm`)
     expect(typeof res.body.token).toBe('string')
     expect(res.body.expiresInSeconds).toBeGreaterThan(0)
+  })
+
+  it('rejects the reserved legacy standalone subject for HCC issuance', async () => {
+    const res = await request(await app())
+      .post('/api/v1/auth/gfs/standalone/tokens')
+      .set('Authorization', `Bearer ${signInternalControlJwt('hcc')}`)
+      .send({ namespace: NS })
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'subject_reserved' })
+    expect(res.body.token).toBeUndefined()
+  })
+
+  it('does not reserve other standalone subjects or the third-party subject class', async () => {
+    const hcc = await request(await app())
+      .post('/api/v1/auth/gfs/standalone/tokens')
+      .set('Authorization', `Bearer ${signInternalControlJwt('hcc')}`)
+      .send({ namespace: 'sandbox-recipes' })
+    expect(hcc.status).toBe(200)
+    expect(hcc.body.subject).toBe('host:1st:sandbox-recipes/standalone')
+
+    const wrc = await request(await app())
+      .post('/api/v1/auth/gfs/standalone/tokens')
+      .set('Authorization', `Bearer ${signInternalControlJwt('wrc')}`)
+      .send({ namespace: NS })
+    expect(wrc.status).toBe(200)
+    expect(wrc.body.subject).toBe('host:3rd:mcp-host/standalone')
   })
 
   it('wrc mints a 3rd-party host token', async () => {
@@ -70,6 +96,17 @@ describe('POST /api/v1/auth/gfs/:subject/tokens', () => {
       .send({ namespace: 'sandbox-recipes', scopes: ['gfs.read', 'gfs.delete'] })
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('scope_forbidden')
+  })
+
+  it('hcc cannot mint destructive or governance scopes for first-party agents', async () => {
+    for (const scope of ['gfs.delete', 'gfs.manage_acl', 'gfs.share']) {
+      const res = await request(await app())
+        .post('/api/v1/auth/gfs/chatllm/tokens')
+        .set('Authorization', `Bearer ${signInternalControlJwt('hcc')}`)
+        .send({ namespace: NS, scopes: ['gfs.read', scope] })
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ error: 'scope_forbidden' })
+    }
   })
 
   it('rejects an unauthorized issuance namespace (400)', async () => {
@@ -101,7 +138,7 @@ describe('POST /api/v1/auth/gfs/:subject/tokens', () => {
 
   it('rejects an unknown scope (400 invalid_scope)', async () => {
     const res = await request(await app())
-      .post('/api/v1/auth/gfs/standalone/tokens')
+      .post('/api/v1/auth/gfs/chatllm/tokens')
       .set('Authorization', `Bearer ${signInternalControlJwt('hcc')}`)
       .send({ namespace: NS, scopes: ['gfs.bogus'] })
     expect(res.status).toBe(400)
