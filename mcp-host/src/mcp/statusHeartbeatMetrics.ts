@@ -65,6 +65,22 @@ export class McpStatusHeartbeatMetrics implements McpStatusHeartbeatMetricsPort 
       name: 'clerum_mcp_status_heartbeat_output_schemas',
       help: 'Tool output schemas observed during the most recent MCP status-heartbeat round.',
     })
+    this.initializeSeries()
+  }
+
+  /**
+   * Materialize every counter outcome at zero so a scrape distinguishes
+   * "none" from "not exported". The idle-memory gate needs this to prove
+   * zero failures and skipped rounds without inferring either fact from a
+   * missing series.
+   */
+  private initializeSeries(): void {
+    for (const outcome of ['completed', 'failed', 'skipped', 'aborted'] as const) {
+      this.runs.inc({ outcome }, 0)
+    }
+    for (const outcome of ['succeeded', 'failed'] as const) {
+      this.probes.inc({ outcome }, 0)
+    }
   }
 
   runStarted(): void {
