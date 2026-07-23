@@ -298,6 +298,23 @@ describe('McpServerReconciler remote egress proxy', () => {
       expect(conf).toContain('proxy_ssl_verify on')
     })
 
+    // nginx defaults proxy_ssl_verify_depth to 1, which only admits chains with a
+    // single untrusted intermediate. Upstreams mid-root-rollover (Let's Encrypt
+    // "Root YE"/"Root YR", "Microsoft TLS ECC Root G2") serve a chain that reaches
+    // a trusted anchor via a cross-signed root — two untrusted intermediates — and
+    // nginx rejects them with "(20:unable to get local issuer certificate)" even
+    // though the CA bundle is complete. Verified against real upstreams: without
+    // this directive mcp.postman.com / api.firecrawl.dev / learn.microsoft.com all
+    // fail the handshake; with it they connect while verification stays on.
+    it('should raise proxy_ssl_verify_depth to admit cross-signed root chains', () => {
+      const cm = (reconciler as any).buildNginxConfigMap(REMOTE_SERVER)
+      const conf = cm.data['default.conf.template']
+
+      const match = conf.match(/proxy_ssl_verify_depth\s+(\d+);/)
+      expect(match).not.toBeNull()
+      expect(Number(match![1])).toBeGreaterThanOrEqual(3)
+    })
+
     it('should include a /health endpoint returning 200', () => {
       const cm = (reconciler as any).buildNginxConfigMap(REMOTE_SERVER)
       const conf = cm.data['default.conf.template']

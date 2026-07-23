@@ -28,7 +28,7 @@ llm_allowed_models	legacy_dml
 llm_allowed_models_audit	append
 llm_catalog_sync_runs	append
 llm_model_prices	legacy_dml
-member_registration_credentials	legacy_dml
+member_registration_credentials	upsert
 notification_deliveries	legacy_dml
 oauth_grants	legacy_dml
 plugin_workload_sdk_grants	legacy_dml
