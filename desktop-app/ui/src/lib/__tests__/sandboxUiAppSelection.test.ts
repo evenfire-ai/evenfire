@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { resolveSandboxUiDeepLinkApp, toActiveSandboxUiApps } from '@lib/sandboxUiAppSelection'
+import {
+  canProcessSandboxUiDeepLinks,
+  resolveSandboxUiDeepLinkApp,
+  toActiveSandboxUiApps,
+} from '@lib/sandboxUiAppSelection'
 
 const apps = [
   {
@@ -19,6 +23,11 @@ const apps = [
 ]
 
 describe('sandbox UI app selection', () => {
+  it('waits for startup hydration before processing a queued deep link', () => {
+    expect(canProcessSandboxUiDeepLinks(true, true, 1)).toBe(false)
+    expect(canProcessSandboxUiDeepLinks(false, true, 1)).toBe(true)
+  })
+
   it('keeps provisioning apps out of the app picker', () => {
     expect(toActiveSandboxUiApps(apps)).toEqual([
       {

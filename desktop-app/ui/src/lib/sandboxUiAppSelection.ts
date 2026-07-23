@@ -17,6 +17,14 @@ export function toActiveSandboxUiApps(apps: SandboxUiAppListing[]): ActiveSandbo
   return apps.filter(app => app.ready).map(toActiveSandboxUiApp)
 }
 
+export function canProcessSandboxUiDeepLinks(
+  booting: boolean,
+  isAuthenticated: boolean,
+  pendingLinkCount: number
+): boolean {
+  return !booting && isAuthenticated && pendingLinkCount > 0
+}
+
 export function resolveSandboxUiDeepLinkApp(
   apps: SandboxUiAppListing[],
   appRef: string

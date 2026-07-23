@@ -18,7 +18,11 @@ import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
-import { resolveSandboxUiDeepLinkApp, toActiveSandboxUiApps } from '@lib/sandboxUiAppSelection'
+import {
+  canProcessSandboxUiDeepLinks,
+  resolveSandboxUiDeepLinkApp,
+  toActiveSandboxUiApps,
+} from '@lib/sandboxUiAppSelection'
 import {
   getConversationOriginForAppLaunch,
   getConversationOriginForNavigation,
@@ -336,7 +340,15 @@ export function App() {
   }, [])
 
   React.useEffect(() => {
-    if (!vm.isAuthenticated || pendingSandboxUiDeepLinks.length === 0) return
+    if (
+      !canProcessSandboxUiDeepLinks(
+        vm.booting,
+        vm.isAuthenticated,
+        pendingSandboxUiDeepLinks.length
+      )
+    ) {
+      return
+    }
     const pending = pendingSandboxUiDeepLinks[0]
     if (!pending || processingSandboxUiDeepLinkIdRef.current !== null) return
     processingSandboxUiDeepLinkIdRef.current = pending.link.id
@@ -379,6 +391,7 @@ export function App() {
   }, [
     launchSandboxUiApp,
     pendingSandboxUiDeepLinks,
+    vm.booting,
     vm.currentTeamId,
     vm.handleEnsureTeamContext,
     vm.isAuthenticated,
