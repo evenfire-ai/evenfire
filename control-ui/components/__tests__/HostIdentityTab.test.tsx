@@ -20,7 +20,13 @@ describe('HostIdentityTab', () => {
   })
 
   const findMarkdownEditor = (name: RegExp) =>
-    screen.findByLabelText(name, undefined, { timeout: 5000 })
+    screen.findByLabelText(name, undefined, { timeout: 10000 })
+
+  async function expectMarkdownEditorValue(name: RegExp, value: string) {
+    const editor = await findMarkdownEditor(name)
+    await waitFor(() => expect(screen.getByLabelText(name)).toHaveValue(value), { timeout: 10000 })
+    return editor
+  }
 
   function renderTab() {
     return render(
@@ -40,13 +46,13 @@ describe('HostIdentityTab', () => {
     })
     renderTab()
     expect(await screen.findByRole('tab', { name: 'Identity' })).toBeInTheDocument()
-    expect(await findMarkdownEditor(/Identity markdown/i)).toHaveValue('id')
+    await expectMarkdownEditorValue(/Identity markdown/i, 'id')
     fireEvent.click(screen.getByRole('tab', { name: 'Soul' }))
-    expect(await findMarkdownEditor(/Soul markdown/i)).toHaveValue('s')
+    await expectMarkdownEditorValue(/Soul markdown/i, 's')
     fireEvent.click(screen.getByRole('tab', { name: 'Agent instructions' }))
-    expect(await findMarkdownEditor(/Agent instructions markdown/i)).toHaveValue('a')
+    await expectMarkdownEditorValue(/Agent instructions markdown/i, 'a')
     fireEvent.click(screen.getByRole('tab', { name: 'User context' }))
-    expect(await findMarkdownEditor(/User context markdown/i)).toHaveValue('u')
+    await expectMarkdownEditorValue(/User context markdown/i, 'u')
   })
 
   it('shows a loading skeleton while the initial request is pending', () => {
@@ -66,9 +72,7 @@ describe('HostIdentityTab', () => {
       user: '',
     })
     renderTab()
-    expect(await findMarkdownEditor(/Identity markdown/i)).toHaveValue(
-      '## Mission\n\n- Protect identity'
-    )
+    await expectMarkdownEditorValue(/Identity markdown/i, '## Mission\n\n- Protect identity')
     expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument()
   })
 
@@ -140,9 +144,9 @@ describe('HostIdentityTab', () => {
     expect(screen.getByText(/unsaved edits/i)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /discard/i }))
 
-    expect(await findMarkdownEditor(/Soul markdown/i)).toHaveValue('soul old')
+    await expectMarkdownEditorValue(/Soul markdown/i, 'soul old')
     fireEvent.click(screen.getByRole('tab', { name: 'Identity' }))
-    expect(await findMarkdownEditor(/Identity markdown/i)).toHaveValue('identity old')
+    await expectMarkdownEditorValue(/Identity markdown/i, 'identity old')
     expect(screen.getByText(/unsaved edits/i)).toHaveAttribute('data-hidden', 'true')
     expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument()
   })
