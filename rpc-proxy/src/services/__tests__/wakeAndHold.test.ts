@@ -304,6 +304,38 @@ describe('kill-switch and poll-source failure while held', () => {
     await pending
   })
 
+  it('skips a retrigger whose wake authorization has expired, keeps holding, and does not settle', async () => {
+    // Drive the guard through the class's OWN injectable clock (deps.now, read
+    // via this.now()) rather than mutating global time. That is how the rest of
+    // this suite controls time, and it keeps the guard's predicate observable
+    // without a wall-clock side effect.
+    let clockMs = Date.now()
+    const { coordinator, requestWake, probeReady } = makeCoordinator({ now: () => clockMs })
+    requestWake.mockResolvedValue({ kind: 'wake-requested', wakeGeneration: 1 })
+    probeReady.mockResolvedValue(false)
+
+    const tokenExpMs = clockMs + 60_000
+    const pending = coordinator.hold(holdParams({ tokenExpMs }))
+    expect(requestWake).toHaveBeenCalledTimes(1) // initial wake only
+
+    // Drive the guard's precondition: the retrigger tick lands AFTER the wake
+    // authorization expired. Advancing the injected clock without advancing the
+    // timer queue models a blocked event loop / scheduler delay — the entry is
+    // still unsettled and holding, but its token is now inside the safety margin.
+    clockMs = tokenExpMs - 1_000
+    await vi.advanceTimersByTimeAsync(RETRIGGER_MS)
+
+    // The doomed POST is NOT spent...
+    expect(requestWake).toHaveBeenCalledTimes(1)
+    // ...and the hold survives: the entry is still tracked, not settled, so the
+    // readiness poll can still release this waiter.
+    expect(coordinator.trackedHostCount()).toBe(1)
+
+    // Drain: let the hold reach its deadline so the pending promise resolves.
+    await vi.advanceTimersByTimeAsync(MAX_HOLD_MS)
+    await pending
+  })
+
   it('releases held requests via the legacy path when the wake endpoint turns 409 mid-hold', async () => {
     const { coordinator, requestWake, probeReady } = makeCoordinator()
     requestWake

@@ -81,7 +81,15 @@ function firstScope(issueRpcTokenForHostRefs: ReturnType<typeof vi.fn>): unknown
 
 // ── POSITIVE: the nine finite operations that must request host:wake:write ──
 //
-// Each entry is one of the exactly-nine on-demand operations from plan §11.4.
+// Plan §11.4 makes TWELVE routes wake-capable. NINE of them map to operations
+// whose scope arrays THIS PR changes, and those nine are the cases below
+// (session ×4, model ×1, artifact ×2, approval ×2). The remaining three —
+// invokeHostMessage, getTaskResult, cancelTask — ride
+// HOST_FINITE_OPERATION_SCOPES.message, which already carried the wake scope on
+// origin/dev, so this PR adds no scope for them and there is nothing here to
+// pin. 9 + 3 = 12: the two counts describe different nouns (operations changed
+// vs routes wake-capable), not an inconsistency.
+//
 // The assertion is the FULL exact scope array, wake scope included — a widening
 // that dropped or reordered a scope would fail loudly here.
 
@@ -158,8 +166,21 @@ describe('issue #791 — finite operations request host:wake:write in addition t
 // ── NEGATIVE: observability reads and every SSE stream must NEVER request wake ──
 //
 // A suspended stateless Host must stay suspended under polling and streaming, or
-// observability would defeat scale-to-zero. These assert the EXACT non-wake
-// scope AND that no issued token on these surfaces carries host:wake:write.
+// observability would defeat scale-to-zero.
+//
+// SCOPE OF THIS ASSERTION — read carefully before strengthening it. The harness
+// stubs issueRpcTokenForHostRefs and inspects mock.calls[n][0], so these tests
+// prove that no stream/observability surface REQUESTS the wake scope. They do
+// NOT — and cannot — prove anything about the token actually DELIVERED:
+// RpcTokenManager reuses a cached token whose scopes are a superset of the
+// request (pinned in test/rpcTokenManager.test.ts), so a stream may legitimately
+// run on a token that already carries host:wake:write.
+//
+// That is safe because possessing the scope is not what wakes a Host: rpc-proxy
+// triggers a wake only from its explicit per-route allowlist plus the positive
+// isWakeCapable gate (wakeAndHold.ts). The no-wake-on-streams invariant is
+// therefore enforced SERVER-SIDE and survives a maximally-scoped token; these
+// client-side tests pin the request shape, which is the half the client owns.
 // (The status-stream reconnect lifecycle is additionally guarded by
 // appService.prewarm.test.ts.)
 

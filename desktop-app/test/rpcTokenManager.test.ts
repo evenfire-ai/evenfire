@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 vi.mock("../src/config.js", () => ({
   config: { requestTimeoutMs: 5000, externalRestApiBaseUrl: "http://localhost:8091" },
@@ -86,6 +86,7 @@ describe("RpcTokenManager — getOrIssue()", () => {
     // Override to return fresh token
     vi.mocked(authClient.issueRpcToken).mockResolvedValueOnce({
       token: "rpc-fresh-2",
+      accessScope: "team",
       teamId: "team-1",
       scopes: ["host:message:invoke"],
       hostRefs: ["chatllm"],
@@ -105,5 +106,52 @@ describe("RpcTokenManager — getOrIssue()", () => {
     expect(meta.expiresAtMs).toBeGreaterThan(Date.now());
     expect(meta.scopes).toContain("host:message:invoke");
     expect(meta.hostRefs).toContain("chatllm");
+  });
+});
+
+// ── Subset-scope reuse: INTENTIONAL, pinned on purpose ────────────────────────
+//
+// A narrower request is satisfied from a cached SUPERSET token, so the token a
+// caller receives can carry scopes it did not ask for — including
+// host:wake:write on a stream/observability surface. That is deliberate: it
+// keeps issuance to one round trip instead of one per distinct scope set, and
+// it is NOT a wake risk, because possessing the scope never wakes a Host —
+// rpc-proxy triggers a wake only from its explicit per-route allowlist plus the
+// isWakeCapable gate (wakeAndHold.ts).
+//
+// This test exists so the behavior is a pinned contract rather than an
+// undocumented side effect: if someone later makes stream open a wake-capable
+// route, or narrows this cache to exact-scope keying, one of these two
+// assertions turns red and forces the decision to be made explicitly.
+describe("RpcTokenManager — subset scope reuse", () => {
+  it("serves a narrower request from the cached superset token, which still carries host:wake:write", async () => {
+    const authClient = {
+      issueRpcToken: vi.fn().mockResolvedValue({
+        token: "rpc-token-superset",
+        accessScope: "team",
+        teamId: "team-1",
+        scopes: ["host:activity:read", "host:task:read", "host:wake:write"],
+        hostRefs: ["chatllm"],
+        expiresInSeconds: 60,
+      }),
+    } as unknown as AuthClient;
+    const manager = new RpcTokenManager(authClient);
+
+    // Broad issuance (e.g. a finite operation that legitimately needs wake).
+    await manager.getOrIssue(
+      "sess-token",
+      ["host:activity:read", "host:task:read", "host:wake:write"],
+      ["chatllm"]
+    );
+    expect(authClient.issueRpcToken).toHaveBeenCalledOnce();
+
+    // Narrower request (e.g. an observability read) — served from cache.
+    const reused = await manager.getOrIssue("sess-token", ["host:activity:read"], ["chatllm"]);
+
+    // 1. Exactly ONE issuance: the subset did not trigger a second round trip.
+    expect(authClient.issueRpcToken).toHaveBeenCalledOnce();
+    // 2. The DELIVERED token is the cached superset — it still carries wake.
+    expect(reused.token).toBe("rpc-token-superset");
+    expect(reused.scopes).toContain("host:wake:write");
   });
 });

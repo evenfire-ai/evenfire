@@ -126,6 +126,11 @@ fi
 # state/state.db. Preserve the older destination as state/<db>.pre-<ts>.bak
 # (NOTHING is ever deleted), then let the fresher root source migrate in via the
 # normal path below. The destination is proven non-symlink above.
+# WHY positional implies temporal: every stateless boot MOVES the SQLite set out
+# of root into state/ (the mv loops below), so root is left with no state.db. A
+# root state.db can therefore only have been (re)created by a STATEFUL life that
+# ran strictly AFTER the last stateless life — which is what makes "root source"
+# equivalent to "newer source" here, with no timestamp read required.
 root_dest_collision=0
 if [ "$root_sqlite_source" -eq 1 ]; then
   for db in state.db state.db-wal state.db-shm; do

@@ -3919,7 +3919,16 @@ export class HostReconciler {
             capturedWatchGeneration: capturedAuthority.generation,
             currentWatchGeneration: this.hostWatchAuthority().generation,
             currentCacheOmitsHost: !cacheHasHost(hostName),
-            freshAuthoritativeRead: 'confirmed404',
+            // Derived, not hardcoded. `presence` is provably 'absent' here (the
+            // 'present' and 'error' branches returned above), so this evaluates
+            // to the identical literal and the runtime behavior is unchanged.
+            // Deriving it makes the mapping total: if readHostPresence ever
+            // grows a fourth outcome, the else-branch type stops satisfying
+            // freshAuthoritativeRead's union and the compiler rejects it —
+            // instead of silently labelling a non-404 read as 'confirmed404'
+            // in a value that is DECISIONAL (a conjunct of
+            // destructiveCleanupAllowed, :94-95), not telemetry.
+            freshAuthoritativeRead: presence === 'absent' ? 'confirmed404' : presence,
           })
         ) {
           hostCleanupDeferredTotal.inc({ reason: 'watch_lost' })

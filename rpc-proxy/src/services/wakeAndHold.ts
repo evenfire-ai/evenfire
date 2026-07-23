@@ -400,6 +400,21 @@ export class WakeAndHoldCoordinator {
     }
     const scheduleRetrigger = () => {
       entry.retriggerTimer = setTimeout(async () => {
+        // Hygiene: a retrigger whose wake authorization has already expired is
+        // doomed — control-api would reject it — so skip the call rather than
+        // spend it. We deliberately KEEP HOLDING: the readiness poll runs on its
+        // own timer and the entry still has TTL left, so a host that wakes via
+        // any other path still resolves this waiter. Rescheduling matters
+        // because a later waiter can adopt this entry and upgrade
+        // `wakeAuthorization` to a longer-lived token, after which retriggers
+        // resume. Same predicate as the adopt path above.
+        if (entry.wakeAuthorization.tokenExpMs - TOKEN_EXP_SAFETY_MARGIN_MS <= this.now()) {
+          console.debug(
+            `[RPC_PROXY] wake retrigger skipped (wake authorization expired) host=${entry.hostRef}`
+          )
+          if (!entry.settled) scheduleRetrigger()
+          return
+        }
         await this.issueWake(entry, { initial: false })
         if (entry.settled) {
           console.debug(
