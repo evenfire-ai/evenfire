@@ -19,9 +19,16 @@
  *   Host, then asserts the operator-facing banner.
  *
  * Opt-in: this spec is skipped unless E2E_STATELESS_CHANNEL_REJECTION=1, because it
- * requires a dedicated stateless Host, a kubectl context, and the Addendum-6 executor
- * fix deployed (until it lands, a channel keeps effectiveMode=stateless and the
- * effectiveMode=stateful assertion below fails).
+ * requires a dedicated stateless Host and a kubectl context.
+ *
+ * KNOWN RED in this repository, for a reason unrelated to the executor fix: the
+ * assertion below reads `status.lifecycle.effectiveMode`, which is NOT part of this
+ * repo's HostLifecycleStatus (see host-context-controller/src/types.ts) and is never
+ * written by this tree's HCC. The channel hard-rejection itself DOES work here — it is
+ * observable through the StatelessEnableRejected condition, the stateful pod template,
+ * and the banner text — but this spec will fail on the effectiveMode token until the
+ * upstream hostLifecycleDecision model is ported. Do not weaken the assertion to make
+ * it pass; port the model, or assert on the condition instead.
  *
  * Prerequisites (when enabled):
  *   1. Port-forwards running (control-ui :3000, control-api :8090).

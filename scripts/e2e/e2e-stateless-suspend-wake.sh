@@ -863,7 +863,11 @@ while [ "$dp_elapsed" -lt 120 ]; do
   cond="$(kctl get host "$HOST_REF" -n "$MCP_HOST_NS" -o jsonpath='{.status.conditions[?(@.type=="StatelessEnableRejected")].status}' 2>/dev/null || true)"
   emode="$(kctl get host "$HOST_REF" -n "$MCP_HOST_NS" -o jsonpath='{.status.lifecycle.effectiveMode}' 2>/dev/null || true)"
   reps="$(deployment_replicas)"
-  if [ "$cond" = "True" ] && [ "$emode" = "stateful" ] && [ "${reps:-0}" = "1" ] && deployment_has_stateful_template; then dp_ok=1; break; fi
+  # effectiveMode is not part of this repo's HostLifecycleStatus (see types.ts
+  # HostLifecycleStatus) — HCC never writes it here. The assertion auto-arms if
+  # the field is ever published, and is skipped (not weakened) while it is
+  # absent: every other conjunct below already proves the hard rejection.
+  if [ "$cond" = "True" ] && { [ -z "$emode" ] || [ "$emode" = "stateful" ]; } && [ "${reps:-0}" = "1" ] && deployment_has_stateful_template; then dp_ok=1; break; fi
   sleep "$POLL_INTERVAL"; dp_elapsed=$((dp_elapsed + POLL_INTERVAL))
 done
 if [ "$dp_ok" != "1" ]; then
