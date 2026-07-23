@@ -115,21 +115,21 @@ to its deep dive.
 
 ## Security model
 
-A model can be steered, misled, or simply wrong, so the platform never trusts
-it by default. Four layers enforce that:
+We never fully trust the model. It can be steered, misled, or simply wrong, so
+four layers constrain what it can do:
 
-1. **Risky actions wait for a human.** Commands, outbound HTTP, and browser
-   control are approval-gated: the task suspends (surviving pod restarts) until
-   someone approves from the channel, and callbacks are signature-verified.
-2. **Least privilege.** Each agent reaches only the connectors its `Context`
-   grants, through short-lived, scope-narrowed tokens that can't widen
-   themselves; container images must match a pinned digest and an allowlist.
-3. **Deny-all networking.** Runtime namespaces start with no connectivity;
-   access is opened per (agent, connector), and outbound traffic is pinned to
-   the specific hosts a connector declares, never the open internet.
-4. **Authenticated internals.** Every service-to-service call carries a
-   short-lived, audience-scoped token; shared-file access is re-checked and
-   audited on each request, and inbound webhooks are signature-verified.
+- **Risky actions wait for a human.** Commands, outbound HTTP, and browser
+  control are approval-gated: the task suspends (surviving pod restarts) until
+  someone approves from the channel, and callbacks are signature-verified.
+- **Least privilege.** Each agent reaches only the connectors its `Context`
+  grants, through short-lived, scope-narrowed tokens that can't widen
+  themselves; container images must match a pinned digest and an allowlist.
+- **Deny-all networking.** Runtime namespaces start with no connectivity;
+  access is opened per (agent, connector), and outbound traffic is pinned to
+  the specific hosts a connector declares, never the open internet.
+- **Authenticated internals.** Every service-to-service call carries a
+  short-lived, audience-scoped token; shared-file access is re-checked and
+  audited on each request, and inbound webhooks are signature-verified.
 
 Report vulnerabilities privately: **[SECURITY.md](SECURITY.md)**.
 
