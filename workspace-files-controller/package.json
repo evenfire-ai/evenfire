@@ -24,7 +24,7 @@
   "dependencies": {
     "express": "^5.2.1",
     "jose": "^6.2.1",
-    "multer": "^2.1.1",
+    "multer": "^2.2.0",
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
     "prom-client": "^15.1.3"

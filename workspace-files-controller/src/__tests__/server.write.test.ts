@@ -144,6 +144,35 @@ describe('POST /v1/files/upload', () => {
     expect(res.body.error.code).toBe('path_invalid')
   })
 
+  it('rejects unsupported extra multipart fields', async () => {
+    const app = createApp(makeConfig())
+    const t = await token()
+    const res = await request(app)
+      .post('/v1/files/upload')
+      .set('authorization', `Bearer ${t}`)
+      .field('path', 'x.md')
+      .field('extra', 'unsupported')
+      .attach('file', Buffer.from('x'), 'x.md')
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('path_invalid')
+    await expect(fs.lstat(path.join(mountPath, 'x.md'))).rejects.toThrow()
+  })
+
+  it('rejects deeply nested multipart field names', async () => {
+    const app = createApp(makeConfig())
+    const t = await token()
+    const res = await request(app)
+      .post('/v1/files/upload')
+      .set('authorization', `Bearer ${t}`)
+      .field('path[first][second]', 'x.md')
+      .attach('file', Buffer.from('x'), 'x.md')
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('path_invalid')
+    await expect(fs.lstat(path.join(mountPath, 'x.md'))).rejects.toThrow()
+  })
+
   it('rejects traversal in the path field (400 path_invalid)', async () => {
     const app = createApp(makeConfig())
     const t = await token()
