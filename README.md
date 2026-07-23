@@ -63,9 +63,8 @@ The full walkthrough (prerequisites, login, and the pure-API path) is in
 ## What is evenfire
 
 evenfire is a complete platform for running LLM agents that take **real
-actions**, on **your** infrastructure. Agents converse across Telegram, Email,
-Slack, and a desktop app; call tools over the
-[Model Context Protocol](https://modelcontextprotocol.io) (MCP); compose
+actions**, on **your** infrastructure. Agents converse across the native desktop app, Telegram,
+and Slack; call tools over the [Model Context Protocol](https://modelcontextprotocol.io) (MCP); compose
 multi-step workflows; and draw on teams, shared files, and cost budgets, while
 risky actions pause for human review. Every piece of the fleet (agents,
 connectors, channels, workflows, policies) is a Kubernetes custom resource, so
@@ -250,6 +249,4 @@ The code uses the internal name clerum for the same project (`clerum.io` CRDs,
 - **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)**: community standards
 
 evenfire is **open source** under the [Mozilla Public License 2.0](LICENSE)
-(MPL-2.0), an OSI-approved, file-level copyleft license. Use it, modify it,
-self-host it, and build commercial products on it; changes to MPL-licensed files
-must remain under MPL when distributed.
+(MPL-2.0), an OSI-approved, file-level copyleft license. 
