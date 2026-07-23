@@ -38,4 +38,20 @@ describe('runtime access migrations', () => {
       'GRANT USAGE, SELECT ON SEQUENCE member_registration_credentials_id_seq'
     )
   })
+
+  it('0070 revokes DELETE while retaining the control-api runtime table boundary', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb()
+
+    const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
+    const deleteRevocation = sqls.find(sql =>
+      sql.includes('REVOKE DELETE ON TABLE member_registration_credentials')
+    )
+    const recordedVersions = clientQuery.mock.calls
+      .filter(([sql]) => String(sql).includes('INSERT INTO schema_migrations'))
+      .map(([, params]) => (Array.isArray(params) ? params[0] : undefined))
+
+    expect(deleteRevocation).toContain('FROM control_api_runtime')
+    expect(recordedVersions).toContain('0070_member_registration_runtime_delete_revoke')
+  })
 })

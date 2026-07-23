@@ -7,7 +7,7 @@ describe('assertDbReady', () => {
 
     await expect(assertDbReady({ query })).resolves.toBeUndefined()
     expect(query).toHaveBeenCalledWith(expect.stringContaining('schema_migrations'), [
-      '0069_member_registration_runtime_access',
+      '0070_member_registration_runtime_delete_revoke',
     ])
   })
 
@@ -15,7 +15,7 @@ describe('assertDbReady', () => {
     const query = vi.fn().mockResolvedValue({ rows: [{ ready: false }], rowCount: 1 })
 
     await expect(assertDbReady({ query })).rejects.toThrow(
-      'migration 0069_member_registration_runtime_access is required'
+      'migration 0070_member_registration_runtime_delete_revoke is required'
     )
   })
 })
