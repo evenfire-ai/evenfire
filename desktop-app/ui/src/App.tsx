@@ -18,6 +18,7 @@ import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
+import { resolveSandboxUiDeepLinkApp, toActiveSandboxUiApps } from '@lib/sandboxUiAppSelection'
 import {
   getConversationOriginForAppLaunch,
   getConversationOriginForNavigation,
@@ -57,25 +58,6 @@ function getInitialSidebarCollapsed(): boolean {
   } catch {
     return false
   }
-}
-
-function toActiveSandboxUiApps(
-  apps: Array<{
-    appRef: string
-    title?: string
-    icon?: string
-    defaultPath: string
-    ready: boolean
-  }>
-): ActiveSandboxUiApp[] {
-  return apps
-    .filter(app => app.ready)
-    .map(app => ({
-      appRef: app.appRef,
-      label: app.title?.trim() || app.appRef,
-      icon: app.icon,
-      defaultPath: app.defaultPath,
-    }))
 }
 
 function DesktopUpdateRequiredDialog({
@@ -367,13 +349,18 @@ export function App() {
         const result = await window.clerum.sandboxUi.listApps()
         const availableApps = toActiveSandboxUiApps(result.apps)
         setAvailableSandboxUiApps(availableApps)
-        const app = availableApps.find(candidate => candidate.appRef === pending.link.appRef)
-        if (!app) {
+        const resolution = resolveSandboxUiDeepLinkApp(result.apps, pending.link.appRef)
+        if (resolution.status === 'unavailable') {
           throw new Error("You don't have access to this app in the linked team")
+        }
+        if (resolution.status === 'starting') {
+          throw new Error(
+            `${resolution.label} is still starting up. Try this link again in a moment`
+          )
         }
         launchSandboxUiApp(
           {
-            ...app,
+            ...resolution.app,
             routePath: pending.link.path,
           },
           pending.conversationOrigin

@@ -69,6 +69,7 @@ function installClerumHarness(
   options: {
     delayAuthenticatedLoad?: boolean
     delayHealth?: boolean
+    healthError?: unknown
     passwordLoginError?: unknown
   } = {}
 ) {
@@ -105,6 +106,11 @@ function installClerumHarness(
     releaseUrl: 'https://github.com/your-org/evenfire/releases/tag/desktop-app-0.1.250',
   }))
 
+  const getDependenciesHealth = vi.fn(async () => {
+    if (options.healthError) throw options.healthError
+    return options.delayHealth ? healthDeferred.promise : createHealth()
+  })
+
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     writable: true,
@@ -116,9 +122,7 @@ function installClerumHarness(
           isPackaged: false,
           options: [],
         })),
-        getDependenciesHealth: vi.fn(async () =>
-          options.delayHealth ? healthDeferred.promise : createHealth()
-        ),
+        getDependenciesHealth,
         getSessionState,
         passwordLogin,
         onDesktopSetupToken: vi.fn(() => () => undefined),
@@ -219,6 +223,7 @@ function installClerumHarness(
 
   return {
     passwordLogin,
+    getDependenciesHealth,
     getSessionState,
     getDesktopReleaseStatus,
     resolveHealth() {
@@ -309,6 +314,23 @@ describe('useWorkspaceController', () => {
     await waitFor(() => expect(screen.getByTestId('booting').textContent).toBe('false'))
 
     clerum.resolveHealth()
+  })
+
+  it('logs dependency-health probe failures without blocking session restoration', async () => {
+    const healthError = new Error('health endpoint unavailable')
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const clerum = installClerumHarness({ healthError })
+
+    renderControllerHarness()
+
+    await waitFor(() => expect(clerum.getSessionState).toHaveBeenCalledOnce())
+    await waitFor(() => expect(screen.getByTestId('booting').textContent).toBe('false'))
+    await waitFor(() =>
+      expect(consoleWarn).toHaveBeenCalledWith(
+        '[Desktop] Could not refresh dependency health:',
+        healthError
+      )
+    )
   })
 
   it('preserves a workflow nav selection while login session hydration finishes', async () => {

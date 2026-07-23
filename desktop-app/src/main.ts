@@ -4,6 +4,7 @@ import { AppService } from './appService.js'
 import { config } from './config.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator } from './mainWindowCoordinator.js'
+import { collectInitialProtocolUrls } from './protocolLaunchArgs.js'
 import { type SandboxUiDeepLinkEnvelope, parseSandboxUiDeepLink } from './sandboxUiDeepLinks.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
 
@@ -125,10 +126,6 @@ function requestMainWindow(): void {
   void mainWindowCoordinator.ensureWindow().catch(error => {
     console.error('[Desktop] Could not create the main window for a deep link:', error)
   })
-}
-
-function findProtocolUrl(argv: string[], protocol: string): string | undefined {
-  return argv.find(arg => arg.startsWith(`${protocol}://`))
 }
 
 function handleSandboxUiDeepLink(rawUrl: string): boolean {
@@ -337,12 +334,6 @@ async function createWindow(): Promise<void> {
   window.maximize()
   // Show window after successful load to avoid hidden-startup deadlocks.
   window.show()
-  if (process.platform !== 'darwin') {
-    const initialEvenfireUrl = findProtocolUrl(process.argv, DESKTOP_SETUP_PROTOCOL)
-    if (initialEvenfireUrl) handleEvenfireUrl(initialEvenfireUrl)
-    const initialClerumUrl = findProtocolUrl(process.argv, CLERUM_PROTOCOL)
-    if (initialClerumUrl) handleClerumUrl(initialClerumUrl)
-  }
   while (pendingEvenfireUrls.length > 0) {
     const pendingUrl = pendingEvenfireUrls.shift()
     if (pendingUrl) handleEvenfireUrl(pendingUrl)
@@ -362,12 +353,15 @@ if (gotSingleInstanceLock) {
     // so recreating a closed macOS window does not repeat session network I/O.
     await appService.initialize()
     mainWindowLifecycleReady = true
-    for (const arg of process.argv) {
-      if (arg.startsWith(`${DESKTOP_SETUP_PROTOCOL}://`)) {
-        pendingEvenfireUrls.push(arg)
-      }
-    }
+    // Collect startup argv once. `createWindow` drains the queued Evenfire URLs
+    // after the renderer loads; rescanning argv there would dispatch setup links
+    // twice on Windows/Linux and redeem single-use setup tokens a second time.
+    const initialProtocolUrls = collectInitialProtocolUrls(process.argv)
+    pendingEvenfireUrls.push(...initialProtocolUrls.evenfireUrls)
     await mainWindowCoordinator.ensureWindow()
+    if (process.platform !== 'darwin' && initialProtocolUrls.clerumUrl) {
+      handleClerumUrl(initialProtocolUrls.clerumUrl)
+    }
     wirePowerMonitor()
 
     app.on('activate', async () => {

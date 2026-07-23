@@ -1,0 +1,53 @@
+import { describe, expect, it } from 'vitest'
+import { resolveSandboxUiDeepLinkApp, toActiveSandboxUiApps } from '@lib/sandboxUiAppSelection'
+
+const apps = [
+  {
+    appRef: 'sandbox-recipes/ready-app',
+    title: 'Ready app',
+    defaultPath: '/',
+    ready: true,
+    phase: 'Ready',
+  },
+  {
+    appRef: 'sandbox-recipes/provisioning-app',
+    title: 'Provisioning app',
+    defaultPath: '/',
+    ready: false,
+    phase: 'Installing',
+  },
+]
+
+describe('sandbox UI app selection', () => {
+  it('keeps provisioning apps out of the app picker', () => {
+    expect(toActiveSandboxUiApps(apps)).toEqual([
+      {
+        appRef: 'sandbox-recipes/ready-app',
+        label: 'Ready app',
+        defaultPath: '/',
+      },
+    ])
+  })
+
+  it('distinguishes a provisioning deep-link target from an inaccessible app', () => {
+    expect(resolveSandboxUiDeepLinkApp(apps, 'sandbox-recipes/provisioning-app')).toEqual({
+      status: 'starting',
+      label: 'Provisioning app',
+      phase: 'Installing',
+    })
+    expect(resolveSandboxUiDeepLinkApp(apps, 'sandbox-recipes/missing-app')).toEqual({
+      status: 'unavailable',
+    })
+  })
+
+  it('returns a launchable app when the deep-link target is ready', () => {
+    expect(resolveSandboxUiDeepLinkApp(apps, 'sandbox-recipes/ready-app')).toEqual({
+      status: 'ready',
+      app: {
+        appRef: 'sandbox-recipes/ready-app',
+        label: 'Ready app',
+        defaultPath: '/',
+      },
+    })
+  })
+})

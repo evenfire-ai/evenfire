@@ -295,7 +295,6 @@ export function SandboxUiPage({
         label: appLabel(app),
         icon: app.icon,
         defaultPath: app.defaultPath,
-        routePath: app.routePath,
         ready: app.ready,
       })
     },

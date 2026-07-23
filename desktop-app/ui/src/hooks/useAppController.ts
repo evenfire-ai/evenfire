@@ -572,7 +572,9 @@ export function useAppController() {
         void window.clerum.auth
           .getDependenciesHealth()
           .then(auth.setDependencyHealth)
-          .catch(() => undefined)
+          .catch(error => {
+            console.warn('[Desktop] Could not refresh dependency health:', error)
+          })
         const sessionState = await window.clerum.auth.getSessionState()
         const authenticated = Boolean(sessionState.authenticated && sessionState.me)
         auth.setIsAuthenticated(authenticated)
