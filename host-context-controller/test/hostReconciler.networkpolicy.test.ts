@@ -22,6 +22,7 @@ vi.mock('../src/config', () => ({
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
     channelsNamespace: 'channels',
+    hostFullReconcileConcurrency: 2,
     channelReaderImage: 'clerum/channel-reader:test',
     channelReaderImagePullPolicy: 'IfNotPresent',
     hostImage: 'clerum/mcp-host:0.6.0',
@@ -99,7 +100,7 @@ const HOST: HostCRD = {
   },
 }
 
-function createReconciler() {
+function createReconciler(customApi?: { getNamespacedCustomObject: ReturnType<typeof vi.fn> }) {
   const appsApi = createMockAppsApi()
   const coreApi = createMockCoreApi()
   const networkingApi = createMockNetworkingApi()
@@ -110,6 +111,7 @@ function createReconciler() {
     coreApi: asCoreApi(coreApi),
     networkingApi: asNetworkingApi(networkingApi),
     rbacApi: asRbacApi(rbacApi),
+    ...(customApi ? { customApi: customApi as unknown as k8s.CustomObjectsApi } : {}),
   })
 
   return { reconciler, mocks: { appsApi, coreApi, networkingApi, rbacApi } }
@@ -318,33 +320,44 @@ describe('HostReconciler.deleteHostNetworkPolicies', () => {
   })
 })
 
-describe('HostReconciler.fullReconcile — sweepOrphanHostNetworkPolicies wiring', () => {
-  // Regression guard: Phase 6 wired sweepOrphanHostNetworkPolicies into fullReconcile.
-  // This test ensures the wiring survives future refactors; the sweep method itself
-  // is exercised by the describe block below.
-  it('invokes sweepOrphanHostNetworkPolicies with the known host names', async () => {
-    const { reconciler } = createReconciler()
+describe('HostReconciler.fullReconcile — orphan NetworkPolicy cleanup wiring', () => {
+  // The Phase-6 `sweepOrphanHostNetworkPolicies` method was folded into the
+  // §10.5 authority-gated cleanup: under known watch authority a full pass
+  // gathers managed NetworkPolicies (across all three managed namespaces) as
+  // orphan candidates, then applies the fresh-read authority gate before any
+  // bundle deletion. This proves the NP sweep is still wired into fullReconcile.
+  it('gathers managed NetworkPolicy candidates across all managed namespaces during a full pass', async () => {
+    const { reconciler, mocks } = createReconciler()
+    // Known + stable watch authority so cleanup runs instead of deferring.
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 1 }))
 
-    // Stub per-Host work and channel-reader sweep to no-ops so only the NP
-    // sweep call is observable.
-    vi.spyOn(reconciler, 'reconcile').mockResolvedValue(undefined)
-    vi.spyOn(reconciler as any, 'listManagedHostDeployments').mockResolvedValue([])
-    vi.spyOn(reconciler as any, 'sweepOrphanChannelReaderResources').mockResolvedValue(undefined)
+    await reconciler.fullReconcile([])
 
-    const sweepSpy = vi
-      .spyOn(reconciler as any, 'sweepOrphanHostNetworkPolicies')
-      .mockResolvedValue(undefined)
-
-    await reconciler.fullReconcile([HOST])
-
-    expect(sweepSpy).toHaveBeenCalledTimes(1)
-    expect(sweepSpy).toHaveBeenCalledWith(['chatllm'])
+    for (const namespace of ['channels', 'mcp-host', 'rpc-proxy']) {
+      expect(mocks.networkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          namespace,
+          labelSelector: 'clerum.io/managed-by=host-context-controller',
+        })
+      )
+    }
   })
 })
 
-describe('HostReconciler.sweepOrphanHostNetworkPolicies', () => {
-  it('deletes NPs whose clerum.io/host label is not in knownHosts', async () => {
-    const { reconciler, mocks } = createReconciler()
+describe('HostReconciler orphan NetworkPolicy authority-gated cleanup', () => {
+  // Preserves the three semantics of the removed sweepOrphanHostNetworkPolicies,
+  // now realized through the §10.5 discover-owner + delete-owned-bundle path:
+  //   (A) an orphan NP (clerum.io/host not a live host, fresh 404 confirmed) →
+  //       that host's owned NP bundle is deleted;
+  //   (B) an NP whose owning host is still present → retained;
+  //   (C) an unlabeled/static NP (no derivable owner) → never touched.
+  it('deletes the owned NP bundle for an orphan host and retains a live host', async () => {
+    const getObj = vi.fn().mockRejectedValue({ code: 404 })
+    const { reconciler, mocks } = createReconciler({ getNamespacedCustomObject: getObj })
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 1 }))
+    reconciler.setResolveCurrentHost(name =>
+      name === 'livehost' ? { ...HOST, name: 'livehost' } : undefined
+    )
     ;(mocks.networkingApi.listNamespacedNetworkPolicy as any).mockImplementation(
       ({ namespace }: { namespace: string }) => {
         if (namespace === 'channels') {
@@ -377,8 +390,12 @@ describe('HostReconciler.sweepOrphanHostNetworkPolicies', () => {
       }
     )
 
-    await (reconciler as any).sweepOrphanHostNetworkPolicies(['livehost'])
+    await reconciler.fullReconcile([])
 
+    // (A) stale host confirmed gone (fresh 404) → its owned per-Host NPs deleted
+    // via the bundle; (B) the live host is never read nor deleted.
+    expect(getObj).toHaveBeenCalledWith(expect.objectContaining({ name: 'stalehost' }))
+    expect(getObj).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'livehost' }))
     expect(mocks.networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
       name: 'channel-reader-stalehost-egress',
       namespace: 'channels',
@@ -389,8 +406,11 @@ describe('HostReconciler.sweepOrphanHostNetworkPolicies', () => {
     })
   })
 
-  it('does not touch NPs without managed-by label (e.g. static base policies)', async () => {
-    const { reconciler, mocks } = createReconciler()
+  it('never touches an NP whose owning Host cannot be derived from labels (static base policies)', async () => {
+    const getObj = vi.fn()
+    const { reconciler, mocks } = createReconciler({ getNamespacedCustomObject: getObj })
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 1 }))
+    reconciler.setResolveCurrentHost(() => undefined)
     ;(mocks.networkingApi.listNamespacedNetworkPolicy as any).mockResolvedValue({
       items: [
         {
@@ -403,8 +423,44 @@ describe('HostReconciler.sweepOrphanHostNetworkPolicies', () => {
       ],
     })
 
-    await (reconciler as any).sweepOrphanHostNetworkPolicies([])
+    await reconciler.fullReconcile([])
 
+    // (C) No derivable owner → deferred before any fresh read, never deleted.
+    expect(getObj).not.toHaveBeenCalled()
     expect(mocks.networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
+  it('defers NP cleanup and deletes nothing when watch authority is unknown', async () => {
+    // §10.5 gate proven on purpose: unknown watch authority short-circuits the
+    // whole cleanup before any candidate is gathered, so a real orphan NP is
+    // left intact rather than risking a wrong delete.
+    const getObj = vi.fn()
+    const { reconciler, mocks } = createReconciler({ getNamespacedCustomObject: getObj })
+    reconciler.setHostWatchAuthority(() => ({ known: false, generation: 1 }))
+    reconciler.setResolveCurrentHost(() => undefined)
+    ;(mocks.networkingApi.listNamespacedNetworkPolicy as any).mockResolvedValue({
+      items: [
+        {
+          metadata: {
+            name: 'channel-reader-stalehost-egress',
+            namespace: 'channels',
+            labels: {
+              'clerum.io/managed-by': 'host-context-controller',
+              'clerum.io/host': 'stalehost',
+            },
+          },
+        },
+      ],
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    await reconciler.fullReconcile([])
+
+    expect(getObj).not.toHaveBeenCalled()
+    expect(mocks.networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Deferring orphan cleanup: authority_unknown')
+    )
+    warn.mockRestore()
   })
 })

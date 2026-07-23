@@ -42,8 +42,13 @@ describe('AppService.getHostModels', () => {
     const result = await service.getHostModels('chatllm', 'chat-1')
 
     expect(result).toEqual(payload)
-    // Reading the list reuses the session-read scope — NOT the write scope.
-    expect(issueRpcTokenForHostRefs).toHaveBeenCalledWith(['host:session:read'], ['chatllm'])
+    // Reading the list reuses the session-read scope — NOT the write scope — and
+    // (issue #791) additionally requests host:wake:write so loading the list can
+    // wake a suspended stateless Host.
+    expect(issueRpcTokenForHostRefs).toHaveBeenCalledWith(
+      ['host:session:read', 'host:wake:write'],
+      ['chatllm']
+    )
     expect(rpcClient.getHostModels).toHaveBeenCalledWith('rpc-token', 'chatllm', 'chat-1')
   })
 
@@ -54,7 +59,7 @@ describe('AppService.getHostModels', () => {
     await service.getHostModels('chatllm', 'chat-1', ['chatllm', 'other-host'])
 
     expect(issueRpcTokenForHostRefs).toHaveBeenCalledWith(
-      ['host:session:read'],
+      ['host:session:read', 'host:wake:write'],
       ['chatllm', 'other-host']
     )
   })
@@ -101,7 +106,10 @@ describe('AppService.getHostModels', () => {
     const result = await service.getHostModels('chatllm', '')
 
     expect(result?.sessionModel).toBeNull()
-    expect(issueRpcTokenForHostRefs).toHaveBeenCalledWith(['host:session:read'], ['chatllm'])
+    expect(issueRpcTokenForHostRefs).toHaveBeenCalledWith(
+      ['host:session:read', 'host:wake:write'],
+      ['chatllm']
+    )
     expect(rpcClient.getHostModels).toHaveBeenCalledWith('rpc-token', 'chatllm', '')
   })
 })
@@ -118,8 +126,13 @@ describe('AppService.setHostModel', () => {
     const result = await service.setHostModel('chatllm', 'chat-1', 'claude-haiku-4-5')
 
     expect(result.effective).toBe('next-task')
-    // The write path is gated by the dedicated write scope only (§8.2).
-    expect(issueRpcTokenForHostRefs).toHaveBeenCalledWith(['host:model:write'], ['chatllm'])
+    // The write path is gated by the dedicated write scope (§8.2) and (issue
+    // #791) additionally requests host:wake:write so a model swap can wake a
+    // suspended stateless Host.
+    expect(issueRpcTokenForHostRefs).toHaveBeenCalledWith(
+      ['host:model:write', 'host:wake:write'],
+      ['chatllm']
+    )
     expect(rpcClient.setHostModel).toHaveBeenCalledWith(
       'rpc-token',
       'chatllm',

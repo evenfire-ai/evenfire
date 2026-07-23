@@ -29,6 +29,7 @@ vi.mock('../src/config', () => ({
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
     channelsNamespace: 'channels',
+    hostFullReconcileConcurrency: 2,
     channelReaderImage: 'clerum/channel-reader:test',
     channelReaderImagePullPolicy: 'IfNotPresent',
     hostImage: 'clerum/mcp-host:0.6.0',
@@ -142,6 +143,12 @@ function createReconciler(
     infrastructureTelemetryReporter?: InfrastructureTelemetryReporter
     administrativeOutcomeReporter?: AdministrativeOutcomeReporter
     newTelemetryOccurrenceId?: () => string
+    // §10.5 orphan cleanup performs ONE fresh authoritative Host read
+    // (`customApi.getNamespacedCustomObject`) per orphan logical Host. Tests
+    // that exercise the authority-gated cleanup wire a mock here so a confirmed
+    // 404 authorizes deletion; without it the reconciler lazily constructs a
+    // real client that would never resolve under test.
+    customApi?: { getNamespacedCustomObject: ReturnType<typeof vi.fn> }
   } = {}
 ) {
   const appsApi = createMockAppsApi()
@@ -157,6 +164,9 @@ function createReconciler(
     infrastructureTelemetryReporter: options.infrastructureTelemetryReporter,
     administrativeOutcomeReporter: options.administrativeOutcomeReporter,
     newTelemetryOccurrenceId: options.newTelemetryOccurrenceId,
+    ...(options.customApi
+      ? { customApi: options.customApi as unknown as k8s.CustomObjectsApi }
+      : {}),
   })
 
   return { reconciler, appsApi, coreApi, networkingApi, rbacApi }
@@ -493,14 +503,26 @@ describe('HostReconciler', () => {
   })
 
   it('removes orphaned host runtime resources during full reconcile', async () => {
-    const { reconciler, appsApi, coreApi } = createReconciler()
+    // §10.5 authority-gated cleanup: an orphan managed Deployment is discovered,
+    // its owning Host is confirmed gone by a fresh 404 while watch authority is
+    // known and stable, and the whole owned bundle (Deployment/Service/PVC) is
+    // deleted through that Host's per-Host serializer.
+    const getObj = vi.fn().mockRejectedValue({ code: 404 })
+    const { reconciler, appsApi, coreApi } = createReconciler({
+      customApi: { getNamespacedCustomObject: getObj },
+    })
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 1 }))
+    reconciler.setResolveCurrentHost(() => undefined) // current cache omits every host
     appsApi.listNamespacedDeployment.mockResolvedValue({
       items: [
         {
           metadata: {
             name: 'orphan-host',
             namespace: 'mcp-host',
-            labels: { 'clerum.io/host': 'orphan-host' },
+            labels: {
+              'clerum.io/managed-by': 'host-context-controller',
+              'clerum.io/host': 'orphan-host',
+            },
           },
         },
       ],
@@ -508,6 +530,8 @@ describe('HostReconciler', () => {
 
     await reconciler.fullReconcile([])
 
+    // The fresh authoritative Host read gates the delete.
+    expect(getObj).toHaveBeenCalledWith(expect.objectContaining({ name: 'orphan-host' }))
     expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
       name: 'orphan-host',
       namespace: 'mcp-host',
@@ -1426,7 +1450,16 @@ describe('reconcile / reconcileDelete with channel-reader', () => {
 
 describe('orphan sweep on fullReconcile (channel-reader)', () => {
   it('deletes channel-reader Deployments without a matching Host', async () => {
-    const { reconciler, appsApi } = createReconciler()
+    // §10.5: an orphan is DISCOVERED via its channel-reader Deployment candidate,
+    // its owning Host is confirmed gone by a fresh 404 under known/stable watch
+    // authority, and that Host's owned bundle (which cascades to the channels-ns
+    // channel-reader Deployment) is deleted. The live Host "a" is retained.
+    const getObj = vi.fn().mockRejectedValue({ code: 404 })
+    const { reconciler, appsApi } = createReconciler({
+      customApi: { getNamespacedCustomObject: getObj },
+    })
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 1 }))
+    reconciler.setResolveCurrentHost(name => (name === 'a' ? makeHost({ name }) : undefined))
     // listNamespacedDeployment is called twice during fullReconcile:
     //   1) mcp-host ns (with labelSelector) for the existing host orphan sweep
     //   2) channels ns (no labelSelector) for the channel-reader sweep
@@ -1465,8 +1498,14 @@ describe('orphan sweep on fullReconcile (channel-reader)', () => {
     })
     appsApi.deleteNamespacedDeployment.mockResolvedValue({})
 
-    await reconciler.fullReconcile([makeHost({ name: 'a' })])
+    // Desired list is empty: "a" is live purely by current-cache presence
+    // (setResolveCurrentHost above), which is what §10.5 retention keys on.
+    await reconciler.fullReconcile([])
 
+    // The orphan ("orphan") got a fresh authoritative read; the live host ("a")
+    // stayed in cache and was never read/deleted.
+    expect(getObj).toHaveBeenCalledWith(expect.objectContaining({ name: 'orphan' }))
+    expect(getObj).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'a' }))
     expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
       name: 'channel-reader-orphan',
       namespace: 'channels',
@@ -1481,8 +1520,21 @@ describe('orphan sweep on fullReconcile (channel-reader)', () => {
     })
   })
 
-  it('deletes channel-reader Secrets without a matching Host', async () => {
-    const { reconciler, coreApi } = createReconciler()
+  it('deletes the owning Host bundle for an orphan discovered via a channel-reader Secret', async () => {
+    // The old per-name Secret sweep became discover-owner + delete-the-Host-bundle
+    // (§10.5): a managed channel-reader Secret whose owning Host is gone is a
+    // DISCOVERY signal. Its owner ("orphan") is confirmed absent by a fresh 404
+    // under known/stable authority, and that Host's entire owned bundle is
+    // deleted through its per-Host serializer. The live host "a" is retained.
+    // (The bundle deletes the Host's own managed Secrets — e.g.
+    // `channel-reader-orphan-mcp-host-runtime-auth` — not an arbitrary
+    // discovered name, so we assert at the bundle boundary.)
+    const getObj = vi.fn().mockRejectedValue({ code: 404 })
+    const { reconciler, coreApi } = createReconciler({
+      customApi: { getNamespacedCustomObject: getObj },
+    })
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 1 }))
+    reconciler.setResolveCurrentHost(name => (name === 'a' ? makeHost({ name }) : undefined))
     coreApi.listNamespacedSecret.mockResolvedValue({
       items: [
         {
@@ -1509,18 +1561,67 @@ describe('orphan sweep on fullReconcile (channel-reader)', () => {
         },
       ],
     })
-    coreApi.deleteNamespacedSecret.mockResolvedValue({})
+    const deleteBundle = vi
+      .spyOn(reconciler as any, 'deleteHostRuntimeResources')
+      .mockResolvedValue(undefined)
 
-    await reconciler.fullReconcile([makeHost({ name: 'a' })])
+    // Desired list is empty: "a" is live purely by current-cache presence
+    // (setResolveCurrentHost above), which is what §10.5 retention keys on.
+    await reconciler.fullReconcile([])
 
-    expect(coreApi.deleteNamespacedSecret).toHaveBeenCalledWith({
-      name: 'channel-reader-orphan-credentials',
+    expect(getObj).toHaveBeenCalledWith(expect.objectContaining({ name: 'orphan' }))
+    expect(deleteBundle).toHaveBeenCalledWith('orphan', 'mcp-host')
+    expect(deleteBundle).not.toHaveBeenCalledWith('a', 'mcp-host')
+  })
+
+  it('defers the orphan bundle and deletes nothing when watch authority is unknown', async () => {
+    // §10.5 gate proven on purpose: unknown watch authority short-circuits the
+    // whole cleanup BEFORE any candidate is gathered or any fresh read is made,
+    // so nothing is deleted even though an orphan channel-reader Deployment is
+    // present. This is the accidental safety the removed global tail used to
+    // provide, now made explicit.
+    const getObj = vi.fn()
+    const { reconciler, appsApi } = createReconciler({
+      customApi: { getNamespacedCustomObject: getObj },
+    })
+    reconciler.setHostWatchAuthority(() => ({ known: false, generation: 1 }))
+    reconciler.setResolveCurrentHost(() => undefined)
+    appsApi.listNamespacedDeployment.mockImplementation(({ namespace }: { namespace: string }) =>
+      namespace === 'channels'
+        ? Promise.resolve({
+            items: [
+              {
+                metadata: {
+                  name: 'channel-reader-orphan',
+                  namespace: 'channels',
+                  labels: {
+                    app: 'channel-reader',
+                    'clerum.io/host': 'orphan',
+                    'clerum.io/managed-by': 'host-context-controller',
+                  },
+                },
+              },
+            ],
+          })
+        : Promise.resolve({ items: [] })
+    )
+    const deleteBundle = vi
+      .spyOn(reconciler as any, 'deleteHostRuntimeResources')
+      .mockResolvedValue(undefined)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    await reconciler.fullReconcile([])
+
+    expect(getObj).not.toHaveBeenCalled()
+    expect(deleteBundle).not.toHaveBeenCalled()
+    expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalledWith({
+      name: 'channel-reader-orphan',
       namespace: 'channels',
     })
-    expect(coreApi.deleteNamespacedSecret).not.toHaveBeenCalledWith({
-      name: 'channel-reader-a-credentials',
-      namespace: 'channels',
-    })
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Deferring orphan cleanup: authority_unknown')
+    )
+    warn.mockRestore()
   })
 
   it('does NOT delete Secrets missing the clerum.io/managed-by label', async () => {

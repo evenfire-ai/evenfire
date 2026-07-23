@@ -4,7 +4,7 @@
  * Uses a dedicated Registry to avoid polluting the global default registry.
  * Metrics follow the naming convention: clerum_hcc_<metric>_<unit>.
  */
-import { Counter, Gauge, Registry } from 'prom-client'
+import { Counter, Gauge, Histogram, Registry } from 'prom-client'
 
 const REGISTRY_KEY = Symbol.for('clerum.hcc.prometheus.registry')
 type MetricsGlobal = typeof globalThis & { [REGISTRY_KEY]?: Registry }
@@ -38,6 +38,33 @@ function gauge(options: {
   return new Gauge({
     ...options,
     labelNames: [...(options.labelNames ?? [])],
+    registers: [registry],
+  })
+}
+
+/**
+ * Buckets spanning sub-second admission through the urgent (5s), watch-recovery
+ * (15s), and wake (45s) budgets, plus longer diagnostic tails. Shared by every
+ * HCC reconcile/recovery latency histogram.
+ */
+const RECONCILE_LATENCY_BUCKETS = [
+  0.05, 0.1, 0.25, 0.5, 1, 2, 5, 15, 45, 120,
+] as const
+
+/** Idempotent Histogram helper mirroring counter()/gauge(). */
+function histogram(options: {
+  name: string
+  help: string
+  labelNames?: readonly string[]
+  buckets?: readonly number[]
+}): Histogram<string> {
+  const existing = registry.getSingleMetric(options.name)
+  if (existing) return existing as Histogram<string>
+  return new Histogram({
+    name: options.name,
+    help: options.help,
+    labelNames: [...(options.labelNames ?? [])],
+    buckets: [...(options.buckets ?? RECONCILE_LATENCY_BUCKETS)],
     registers: [registry],
   })
 }
@@ -122,4 +149,57 @@ export const administrativeOutcomeReporterTotal = counter({
   name: 'clerum_hcc_administrative_outcome_reporter_total',
   help: 'Administrative outcome reporter enqueue, flush, and drop outcomes.',
   labelNames: ['result'] as const,
+})
+
+// ── Host reconciliation scheduler telemetry (issue #791 follow-up) ──
+// Low-cardinality labels only — never host names, users, teams, or session IDs.
+
+export const hostReconcileQueueWaitSeconds = histogram({
+  name: 'clerum_hcc_host_reconcile_queue_wait_seconds',
+  help: 'Seconds a Host reconcile waited between dispatch and its per-Host chain admitting it.',
+  labelNames: ['lane', 'outcome'] as const,
+})
+
+export const hostReconcileDurationSeconds = histogram({
+  name: 'clerum_hcc_host_reconcile_duration_seconds',
+  help: 'Seconds a Host reconcile body executed after admission to its per-Host chain.',
+  labelNames: ['source', 'outcome'] as const,
+})
+
+export const hostReconcileInFlight = gauge({
+  name: 'clerum_hcc_host_reconcile_in_flight',
+  help: 'Host reconciles currently executing, by lane (urgent/retry/fleet).',
+  labelNames: ['lane'] as const,
+})
+
+export const hostWatchRecoverySeconds = histogram({
+  name: 'clerum_hcc_host_watch_recovery_seconds',
+  help: 'Seconds for Host watch LIST-to-WATCH recovery phases (list/watch/total).',
+  labelNames: ['phase', 'outcome'] as const,
+})
+
+export const hostFleetRequestsTotal = counter({
+  name: 'clerum_hcc_host_fleet_requests_total',
+  help: 'Host fleet reconcile requests by coalescing result (started/coalesced/trailing/failed).',
+  labelNames: ['result'] as const,
+})
+
+export const hostCleanupDeferredTotal = counter({
+  name: 'clerum_hcc_host_cleanup_deferred_total',
+  help: 'Orphan Host cleanup deferrals by bounded reason.',
+  labelNames: ['reason'] as const,
+})
+
+// #827 (Addendum 4 item 5): bounded, low-cardinality Host deletion cleanup
+// counter. `outcome` is a small fixed set — never a Host name — so cardinality
+// stays flat regardless of fleet size.
+//   queued     — a disappeared Host was enqueued for authoritative delete cleanup
+//   confirmed  — the fresh authoritative snapshot confirmed the Host is gone
+//   completed  — the delete cleanup finished (bundle removed / already absent)
+//   retried    — a delete cleanup failed and is left to the safety-net sweep
+//   superseded — a stale delete was suppressed because a same-name Host was recreated
+export const hostDeleteCleanupTotal = counter({
+  name: 'clerum_hcc_host_delete_cleanup_total',
+  help: 'Host deletion cleanup by outcome (queued/confirmed/completed/retried/superseded).',
+  labelNames: ['outcome'] as const,
 })
