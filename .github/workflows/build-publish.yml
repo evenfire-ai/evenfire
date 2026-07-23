@@ -72,7 +72,7 @@ jobs:
       webhook-gateway: ${{ steps.filter.outputs.webhook-gateway }}
       webhook-proxy: ${{ steps.filter.outputs.webhook-proxy }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -275,20 +275,20 @@ jobs:
             path: webhook-proxy
             changed: ${{ needs.detect.outputs.webhook-proxy }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
 
       - name: Set up QEMU
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
 
       - name: Set up Docker Buildx
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Log in to ghcr.io
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -320,7 +320,7 @@ jobs:
 
       - name: Build and push
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: ${{ steps.buildargs.outputs.context }}
           file: ${{ steps.buildargs.outputs.file }}
@@ -341,7 +341,7 @@ jobs:
 
       - name: Upload built-image marker
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: built-${{ matrix.image }}
           path: /tmp/built/${{ matrix.image }}
@@ -359,7 +359,7 @@ jobs:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_all }}
     steps:
       - name: Collect built-image markers
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: /tmp/built
           pattern: built-*
