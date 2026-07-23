@@ -27,6 +27,7 @@ import {
 import { TokenStore } from './tokenStore.js'
 import {
   AccessCatalog,
+  AgentWithMcpServers,
   ApprovalDecisionResult,
   ContextBreakdownResult,
   DependencyHealth,
@@ -854,12 +855,48 @@ export class AppService {
     return delegationAffordances(new Set(held), isOperator)
   }
 
-  /** Delegate a grant (subjectKey → structured subject). No-escalation is server-side. */
-  async grantGfs(resourceId: string, subjectKey: string, bits: string[], drive?: string) {
+  /**
+   * Delegate a grant (subjectKey → structured subject). No-escalation is
+   * server-side. `inherit` is renderer-driven (agent grants on directories
+   * default it ON so contained files are covered); omitted means the client's
+   * historical `false`.
+   */
+  async grantGfs(
+    resourceId: string,
+    subjectKey: string,
+    bits: string[],
+    drive?: string,
+    inherit?: boolean
+  ) {
     await this.gfsClient.grant(
-      { resourceId, drive, subject: parseSubjectKey(subjectKey), permissions: bits },
+      { resourceId, drive, subject: parseSubjectKey(subjectKey), permissions: bits, inherit },
       this.requireSessionToken()
     )
+  }
+
+  /**
+   * List a resource's ACL rows for the Manage modal. The row `id` is the revoke
+   * handle (the grant PUT response carries no ids). View-ACL = manage-ACL is
+   * enforced server-side; a caller without manage_acl gets the API's 403.
+   */
+  async listGfsGrants(resourceId: string, drive?: string) {
+    return this.gfsClient.listGrants({ resourceId, drive }, this.requireSessionToken())
+  }
+
+  /** Revoke an ACL row by id (id learned from listGfsGrants). */
+  async revokeGfsGrant(grantId: string) {
+    await this.gfsClient.revokeGrant(grantId, this.requireSessionToken())
+  }
+
+  /**
+   * The caller's own agents with their canonical GFS host subjects — the grant
+   * targets for per-agent delegation. Served fresh from external-rest-api
+   * GET /me/agents on every call, NOT from the cached name-based AccessCatalog
+   * (which has no gfsSubject and would go stale across reconciliations).
+   */
+  async listMyAgents(): Promise<AgentWithMcpServers[]> {
+    const result = await this.authClient.getMyAgents(this.requireSessionToken())
+    return Array.isArray(result.agents) ? result.agents : []
   }
 
   /**

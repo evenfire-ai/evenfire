@@ -1,5 +1,6 @@
 import {
   AccessCatalog,
+  AgentWithMcpServers,
   ApprovalDecisionResult,
   ChatIndex,
   ChatMessage,
@@ -229,9 +230,27 @@ declare global {
           resourceId: string,
           subjectKey: string,
           bits: string[],
-          drive?: string
+          drive?: string,
+          inherit?: boolean
         ) => Promise<void>
+        listGrants: (
+          resourceId: string,
+          drive?: string
+        ) => Promise<
+          Array<{
+            id: string
+            drive: string
+            resourceId: string
+            subject: { type: string; id?: string }
+            permissions: string[]
+            inherit: boolean
+          }>
+        >
+        revokeGrant: (grantId: string) => Promise<void>
         createShare: (resourceId: string, subjectKey: string, drive?: string) => Promise<void>
+      }
+      agents: {
+        listMine: () => Promise<AgentWithMcpServers[]>
       }
       approvals: {
         listPending: (limit?: number) => Promise<PendingWorkflowApproval[]>

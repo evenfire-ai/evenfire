@@ -8,19 +8,25 @@ import {
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { GfsTreeError, clampLimit, decodeCursor, encodeCursor } from '../../gfs/tree.js'
+import { isValidHostSubjectId, makeHostSubjectId } from '../../gfs/hostSubject.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
 } from '../../middleware/externalSessionAuth.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
+import { getUserAgents } from '../../services/directory/index.js'
 import {
+  GfsGrantError,
   UUID_RE,
   driveOf,
   handleGrantDelete,
+  handleGrantListForCaller,
   handleGrantWrite,
   heldPermissions,
   resolveCaller,
+  sendGfsGrantError,
 } from '../gfs/grants.js'
 import { handlePatch } from '../gfs/resources.js'
 import { handleShareDelete, handleShareWrite } from '../gfs/shares.js'
@@ -76,6 +82,77 @@ async function attachExternalGfsCallerSubjects(
 }
 
 /**
+ * Indexes of well-formed host subjects in `values` that are NOT in
+ * `allowedHostIds`. Malformed entries (wrong shape, invalid host id) are
+ * deliberately skipped so `handleGrantWrite` keeps sole ownership of the
+ * `subjects_invalid` + `invalidIndexes` contract; only a syntactically valid
+ * host that simply is not the caller's is adjudicated here.
+ */
+export function foreignHostSubjectIndexes(
+  values: readonly unknown[],
+  allowedHostIds: ReadonlySet<string>
+): number[] {
+  const foreign: number[] = []
+  for (const [index, value] of values.entries()) {
+    if (typeof value !== 'object' || value === null) continue
+    const { type, id } = value as { type?: unknown; id?: unknown }
+    if (type !== 'host' || typeof id !== 'string' || !isValidHostSubjectId(id)) continue
+    if (!allowedHostIds.has(id)) foreign.push(index)
+  }
+  return foreign
+}
+
+/**
+ * User-plane eligibility: a folder owner may delegate only to agents in their
+ * own directory. The allowed set is derived from the SAME authorization
+ * boundary the agent catalog uses — `getUserAgents` (DB-only, no Kubernetes in
+ * the mutation path) — mapped to the exact `1st:<hostsNamespace>/<name>` ids
+ * `buildAgentDirectoryEntry` emits. Consequences: `3rd:` hosts and the legacy
+ * fleet-wide sentinel are foreign for every user; sentinel retirement stays on
+ * the DELETE `allowLegacyRetirement` path; an authorized-but-not-yet-reconciled
+ * agent is grantable (inert row, consistent with catalog semantics). The admin
+ * (operator) plane never runs this guard.
+ */
+async function assertHostTargetsWithinCallerAgents(
+  req: import('express').Request,
+  res: import('express').Response,
+  next: NextFunction
+): Promise<void> {
+  const externalReq = req as ExternalGfsRequest
+  const body = (externalReq.body ?? {}) as Record<string, unknown>
+  const plural = Array.isArray(body.subjects)
+  const values = plural
+    ? (body.subjects as unknown[])
+    : Object.prototype.hasOwnProperty.call(body, 'subject')
+      ? [body.subject]
+      : []
+  const probe = foreignHostSubjectIndexes(values, new Set())
+  if (probe.length === 0) {
+    // No well-formed host targets at all — nothing for this guard to decide.
+    next()
+    return
+  }
+  const { agentNames } = await getUserAgents(externalReq.externalAuth!.userId)
+  // makeHostSubjectId returns null for a name that cannot form a canonical
+  // host subject; such an agent is not grantable and never appears in the
+  // catalog either, so skipping it mirrors buildAgentDirectoryEntry exactly.
+  const allowed = new Set(
+    agentNames
+      .map(name => makeHostSubjectId('1st', config.hostsNamespace, name))
+      .filter((id): id is string => id !== null)
+  )
+  const foreign = foreignHostSubjectIndexes(values, allowed)
+  if (foreign.length > 0) {
+    sendGfsGrantError(
+      res,
+      new GfsGrantError(403, 'foreign_agent_forbidden', plural ? foreign : undefined)
+    )
+    return
+  }
+  next()
+}
+
+/**
  * End-user (folder-owner) gfs surface on the `/external` plane — the Session-JWT
  * plane (external-rest-api ← desktop-app / profile-ui) of the platform's defined
  * JWT scheme. NO new auth is introduced: the user session is verified by the
@@ -96,6 +173,24 @@ export function createExternalGfsRouter(): Router {
   // Every gfs user route is on the Session-JWT plane: the user session token
   // (x-user-session-token, forwarded by external-rest-api) is required.
   router.use('/external/gfs', requireValidExternalSessionToken)
+
+  // Per-user token bucket on the DELEGATION plane only (grants + shares),
+  // mirroring the admin plane's grantsRateLimit but in a DISTINCT bucket so the
+  // two planes never share quota. requireValidExternalSessionToken runs at
+  // router level first, so externalAuth.userId is always present by the time the
+  // limiter keys; the no-user branch is therefore unreachable, but it returns a
+  // shared sentinel (never null) so the limiter fails CLOSED — per
+  // rateLimitMiddleware's guidance for strict enforcement — instead of the
+  // default fail-open, keeping this plane strictly metered under any future
+  // auth-ordering change.
+  const externalGrantsRateLimit = rateLimitMiddleware({
+    bucketType: 'gfs_grants_external',
+    maxPerMinute: 30,
+    getBucketKey: req => {
+      const userId = (req as ExternalAuthedRequest).externalAuth?.userId
+      return userId ? `gfsgrants-ext:${userId}` : 'gfsgrants-ext:__no_user__'
+    },
+  })
 
   // ── token mint (mirror /external/rpc/token, but a gfs token sub=users.id) ──
   router.post(
@@ -126,23 +221,37 @@ export function createExternalGfsRouter(): Router {
   // resolveCaller(req) reads req.externalAuth → user:<id> plus all active team
   // memberships resolved here; assertMayGrant enforces no-escalation (a user may
   // grant only bits it holds, within its subtree).
+  // The grants list is delegation metadata naming third-party subjects, so
+  // reading it requires the same manage_acl authority as mutating it
+  // (view-ACL = manage-ACL); handleGrantListForCaller enforces that.
+  router.get(
+    '/external/gfs/grants',
+    externalGrantsRateLimit,
+    asyncHandler(attachExternalGfsCallerSubjects),
+    asyncHandler(handleGrantListForCaller)
+  )
   router.put(
     '/external/gfs/grants',
+    externalGrantsRateLimit,
     asyncHandler(attachExternalGfsCallerSubjects),
+    asyncHandler(assertHostTargetsWithinCallerAgents),
     asyncHandler(handleGrantWrite)
   )
   router.delete(
     '/external/gfs/grants/:id',
+    externalGrantsRateLimit,
     asyncHandler(attachExternalGfsCallerSubjects),
     asyncHandler(handleGrantDelete)
   )
   router.post(
     '/external/gfs/shares',
+    externalGrantsRateLimit,
     asyncHandler(attachExternalGfsCallerSubjects),
     asyncHandler(handleShareWrite)
   )
   router.delete(
     '/external/gfs/shares/:id',
+    externalGrantsRateLimit,
     asyncHandler(attachExternalGfsCallerSubjects),
     asyncHandler(handleShareDelete)
   )

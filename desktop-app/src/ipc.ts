@@ -389,19 +389,42 @@ export function registerIpcHandlers(service: AppService): void {
     'gfs:grant',
     async (
       event,
-      payload: { resourceId: string; subjectKey: string; bits: string[]; drive?: string }
+      payload: {
+        resourceId: string
+        subjectKey: string
+        bits: string[]
+        drive?: string
+        inherit?: boolean
+      }
     ) => {
       assertTrustedSender(event)
       const bits = Array.isArray(payload?.bits) ? payload.bits.map(sanitizeString) : []
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      const inherit = payload?.inherit
+      if (inherit !== undefined && typeof inherit !== 'boolean') {
+        throw new Error('inherit must be a boolean')
+      }
       return service.grantGfs(
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.subjectKey),
         bits,
-        drive
+        drive,
+        inherit
       )
     }
   )
+  ipcMain.handle(
+    'gfs:listGrants',
+    async (event, payload: { resourceId: string; drive?: string }) => {
+      assertTrustedSender(event)
+      const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
+      return service.listGfsGrants(sanitizeString(payload?.resourceId), drive)
+    }
+  )
+  ipcMain.handle('gfs:revokeGrant', async (event, payload: { grantId: string }) => {
+    assertTrustedSender(event)
+    return service.revokeGfsGrant(sanitizeString(payload?.grantId))
+  })
   ipcMain.handle(
     'gfs:createShare',
     async (event, payload: { resourceId: string; subjectKey: string; drive?: string }) => {
@@ -414,6 +437,13 @@ export function registerIpcHandlers(service: AppService): void {
       )
     }
   )
+  // The caller's own agents with canonical GFS host subjects (grant targets for
+  // per-agent delegation). Dedicated channel: the cached AccessCatalog is
+  // name-based and must not be reshaped to carry subjects.
+  ipcMain.handle('agents:listMine', async event => {
+    assertTrustedSender(event)
+    return service.listMyAgents()
+  })
   ipcMain.handle('approvals:listPending', async (event, payload?: { limit?: number }) => {
     assertTrustedSender(event)
     return service.listPendingWorkflowApprovals(

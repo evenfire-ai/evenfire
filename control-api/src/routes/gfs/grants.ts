@@ -852,35 +852,80 @@ export function registerGfsGrantRoutes(router: Router): void {
   )
 }
 
+export interface GfsGrantListItem {
+  id: string
+  drive: string
+  resourceId: string
+  subject: { type: string; id?: string }
+  permissions: string[]
+  inherit: boolean
+}
+
+/** One resource's grant rows in the canonical list shape (`id` powers revoke). */
+export async function queryGrantItems(
+  drive: string,
+  resourceId: string
+): Promise<GfsGrantListItem[]> {
+  const result = await pool.query(
+    `SELECT id, drive, resource_id, subject_type, subject_id, permissions, inherit
+       FROM gfs_grants
+      WHERE drive = $1 AND resource_id = $2::uuid
+      ORDER BY created_at ASC, id ASC`,
+    [drive, resourceId]
+  )
+  return (result.rows as Record<string, unknown>[]).map(row => {
+    const subjectId = String(row.subject_id ?? '')
+    return {
+      id: String(row.id),
+      drive: String(row.drive),
+      resourceId: String(row.resource_id),
+      subject: {
+        type: String(row.subject_type),
+        ...(subjectId ? { id: subjectId } : {}),
+      },
+      permissions: Array.isArray(row.permissions) ? row.permissions.map(String) : [],
+      inherit: Boolean(row.inherit),
+    }
+  })
+}
+
 export async function handleGrantRead(
   req: Request,
   res: import('express').Response
 ): Promise<void> {
   try {
     const { drive, resourceId } = permissionReadFilter(req)
-    const result = await pool.query(
-      `SELECT id, drive, resource_id, subject_type, subject_id, permissions, inherit
-         FROM gfs_grants
-        WHERE drive = $1 AND resource_id = $2::uuid
-        ORDER BY created_at ASC, id ASC`,
-      [drive, resourceId]
-    )
-    res.status(200).json({
-      items: (result.rows as Record<string, unknown>[]).map(row => {
-        const subjectId = String(row.subject_id ?? '')
-        return {
-          id: String(row.id),
-          drive: String(row.drive),
-          resourceId: String(row.resource_id),
-          subject: {
-            type: String(row.subject_type),
-            ...(subjectId ? { id: subjectId } : {}),
-          },
-          permissions: Array.isArray(row.permissions) ? row.permissions.map(String) : [],
-          inherit: Boolean(row.inherit),
-        }
-      }),
-    })
+    res.status(200).json({ items: await queryGrantItems(drive, resourceId) })
+  } catch (err) {
+    if (err instanceof GfsGrantError) {
+      sendGfsGrantError(res, err)
+      return
+    }
+    throw err
+  }
+}
+
+/**
+ * Non-operator grants listing for the external (folder-owner) plane. The ACL of
+ * a resource is delegation metadata naming third-party subjects, so viewing it
+ * requires the same authority as changing it: `manage_acl` on the resource,
+ * held directly or through an inheriting ancestor (view-ACL = manage-ACL).
+ * A missing resource yields the same 403 — no existence oracle.
+ */
+export async function handleGrantListForCaller(
+  req: Request,
+  res: import('express').Response
+): Promise<void> {
+  try {
+    const caller = resolveCaller(req)
+    const { drive, resourceId } = permissionReadFilter(req)
+    if (!caller.isOperator) {
+      const held = await heldPermissions(pool, caller, drive, resourceId)
+      if (!held.includes('manage_acl')) {
+        throw new GfsGrantError(403, 'manage_acl_required')
+      }
+    }
+    res.status(200).json({ items: await queryGrantItems(drive, resourceId) })
   } catch (err) {
     if (err instanceof GfsGrantError) {
       sendGfsGrantError(res, err)

@@ -206,6 +206,100 @@ describe('GfsClient.grant', () => {
       },
     })
   })
+
+  it('passes inherit through to the API body (agent folder grants set it true)', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
+    await new GfsClient(transport({ requestJson })).grant(
+      {
+        resourceId: RID,
+        subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+        permissions: ['read'],
+        inherit: true,
+      },
+      'tok'
+    )
+    expect(requestJson).toHaveBeenCalledWith('PUT', 'https://api.example/api/v1/me/gfs/grants', {
+      token: 'tok',
+      body: {
+        drive: 'main',
+        resourceId: RID,
+        subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+        permissions: ['read'],
+        inherit: true,
+      },
+    })
+  })
+})
+
+const GRANT_ID = '11111111-2222-3333-4444-555555555555'
+
+const GRANT_ITEM = {
+  id: GRANT_ID,
+  drive: 'main',
+  resourceId: RID,
+  subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+  permissions: ['read', 'write'],
+  inherit: true,
+}
+
+describe('GfsClient.listGrants', () => {
+  it('GETs the resource ACL and unwraps the items array (NOT enveloped)', async () => {
+    const requestJson = vi.fn(async () => ({
+      items: [GRANT_ITEM],
+    })) as GfsTransport['requestJson']
+    const out = await new GfsClient(transport({ requestJson })).listGrants(
+      { resourceId: RID, drive: 'main' },
+      'tok'
+    )
+    expect(out).toEqual([GRANT_ITEM])
+    expect(requestJson).toHaveBeenCalledWith(
+      'GET',
+      `https://api.example/api/v1/me/gfs/grants?drive=main&resourceId=${RID}`,
+      { token: 'tok' }
+    )
+  })
+
+  it('defaults the drive when omitted', async () => {
+    const requestJson = vi.fn(async () => ({ items: [] })) as GfsTransport['requestJson']
+    await new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
+    expect(requestJson).toHaveBeenCalledWith(
+      'GET',
+      `https://api.example/api/v1/me/gfs/grants?drive=main&resourceId=${RID}`,
+      { token: 'tok' }
+    )
+  })
+
+  it('fails loud when the response carries no items array', async () => {
+    const requestJson = vi.fn(async () => ({
+      ok: false,
+      error: { code: 'manage_acl_required', message: 'denied' },
+    })) as GfsTransport['requestJson']
+    await expect(
+      new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
+    ).rejects.toBeInstanceOf(GfsUriError)
+  })
+})
+
+describe('GfsClient.revokeGrant', () => {
+  it('DELETEs the grant by id with the bearer token', async () => {
+    const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
+    await new GfsClient(transport({ requestJson })).revokeGrant(GRANT_ID, 'tok')
+    expect(requestJson).toHaveBeenCalledWith(
+      'DELETE',
+      `https://api.example/api/v1/me/gfs/grants/${GRANT_ID}`,
+      { token: 'tok' }
+    )
+  })
+
+  it('rejects a non-UUID grant id before any round-trip (no path injection)', async () => {
+    const t = transport()
+    for (const bad of ['', 'not-a-uuid', '../grants', `${GRANT_ID}/extra`, 'main?x=1']) {
+      await expect(new GfsClient(t).revokeGrant(bad, 'tok')).rejects.toThrow(
+        /grant id must be a UUID/
+      )
+    }
+    expect(t.requestJson).not.toHaveBeenCalled()
+  })
 })
 
 describe('GfsClient.createShare', () => {
@@ -290,12 +384,45 @@ describe('parseSubjectKey', () => {
     expect(parseSubjectKey('team:xyz')).toEqual({ type: 'team', id: 'xyz' })
   })
 
+  it('parses managed host subject keys (first colon splits type from the canonical id)', () => {
+    expect(parseSubjectKey('host:1st:mcp-host/chatllm')).toEqual({
+      type: 'host',
+      id: '1st:mcp-host/chatllm',
+    })
+    expect(parseSubjectKey('host:3rd:sandbox-recipes/scraper-0')).toEqual({
+      type: 'host',
+      id: '3rd:sandbox-recipes/scraper-0',
+    })
+  })
+
+  it('rejects host subject keys that fail the server grammar shape', () => {
+    // No party/namespace (pre-822 grammar stays rejected).
+    expect(() => parseSubjectKey('host:chatllm')).toThrow(/host:<party>:<ns>\/<name>/)
+    // Unknown party.
+    expect(() => parseSubjectKey('host:2nd:mcp-host/chatllm')).toThrow(GfsUriError)
+    // Empty namespace or name.
+    expect(() => parseSubjectKey('host:1st:/chatllm')).toThrow(GfsUriError)
+    expect(() => parseSubjectKey('host:1st:mcp-host/')).toThrow(GfsUriError)
+    expect(() => parseSubjectKey('host:')).toThrow(GfsUriError)
+    // Not k8s DNS-1123 names.
+    expect(() => parseSubjectKey('host:1st:MCP-Host/chatllm')).toThrow(GfsUriError)
+    expect(() => parseSubjectKey('host:1st:mcp-host/-chatllm')).toThrow(GfsUriError)
+    // Extra path segment.
+    expect(() => parseSubjectKey('host:1st:mcp-host/a/b')).toThrow(GfsUriError)
+    // Over the 63-char k8s name budget.
+    expect(() => parseSubjectKey(`host:1st:mcp-host/${'a'.repeat(64)}`)).toThrow(GfsUriError)
+    // At the 63-char budget: accepted.
+    expect(parseSubjectKey(`host:1st:mcp-host/${'a'.repeat(63)}`)).toEqual({
+      type: 'host',
+      id: `1st:mcp-host/${'a'.repeat(63)}`,
+    })
+  })
+
   it('rejects malformed and operator/provisioner-only subject keys', () => {
     expect(() => parseSubjectKey('')).toThrow(GfsUriError)
     expect(() => parseSubjectKey('user:')).toThrow(GfsUriError)
     expect(() => parseSubjectKey('bogus:1')).toThrow(GfsUriError)
     expect(() => parseSubjectKey('operator')).toThrow(GfsUriError)
-    expect(() => parseSubjectKey('host:chatllm')).toThrow(GfsUriError)
     expect(() => parseSubjectKey('context:engineering')).toThrow(GfsUriError)
   })
 })

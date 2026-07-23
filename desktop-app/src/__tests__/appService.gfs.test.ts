@@ -20,7 +20,8 @@ function gfsService() {
       resourceId: string,
       subjectKey: string,
       bits: string[],
-      drive?: string
+      drive?: string,
+      inherit?: boolean
     ) => Promise<void>
     createGfsShare: (resourceId: string, subjectKey: string, drive?: string) => Promise<void>
   }
@@ -60,20 +61,53 @@ describe('AppService GFS delegation subject boundary', () => {
     )
   })
 
-  it.each(['operator:', 'host:mcp-host/standalone', 'context:engineering'])(
+  it('passes a managed host grant subject with inherit to the user-plane GFS client', async () => {
+    const service = gfsService()
+
+    await service.grantGfs(RESOURCE_ID, 'host:1st:mcp-host/chatllm', ['read'], 'main', true)
+
+    expect(service.gfsClient.grant).toHaveBeenCalledWith(
+      {
+        resourceId: RESOURCE_ID,
+        drive: 'main',
+        subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+        permissions: ['read'],
+        inherit: true,
+      },
+      'session-token'
+    )
+  })
+
+  it.each(['operator:', 'context:engineering'])(
     'rejects reserved subject %s before calling the user-plane GFS client',
     async subjectKey => {
       const service = gfsService()
 
       await expect(service.grantGfs(RESOURCE_ID, subjectKey, ['read'], 'main')).rejects.toThrow(
-        'subject must be user:<id> or team:<id>'
+        'subject must be user:<id>, team:<id>, or host:<party>:<ns>/<name>'
       )
       await expect(service.createGfsShare(RESOURCE_ID, subjectKey, 'main')).rejects.toThrow(
-        'subject must be user:<id> or team:<id>'
+        'subject must be user:<id>, team:<id>, or host:<party>:<ns>/<name>'
       )
 
       expect(service.gfsClient.grant).not.toHaveBeenCalled()
       expect(service.gfsClient.createShare).not.toHaveBeenCalled()
     }
   )
+
+  it('rejects the party-less legacy sentinel host key before calling the GFS client', async () => {
+    const service = gfsService()
+
+    // `host:mcp-host/standalone` has no 1st|3rd party prefix — the legacy
+    // fleet-wide sentinel form stays rejected by the host grammar shape check.
+    await expect(
+      service.grantGfs(RESOURCE_ID, 'host:mcp-host/standalone', ['read'], 'main')
+    ).rejects.toThrow('host subject must be host:<party>:<ns>/<name>')
+    await expect(
+      service.createGfsShare(RESOURCE_ID, 'host:mcp-host/standalone', 'main')
+    ).rejects.toThrow('host subject must be host:<party>:<ns>/<name>')
+
+    expect(service.gfsClient.grant).not.toHaveBeenCalled()
+    expect(service.gfsClient.createShare).not.toHaveBeenCalled()
+  })
 })

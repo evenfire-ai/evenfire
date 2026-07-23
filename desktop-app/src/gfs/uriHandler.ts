@@ -128,6 +128,7 @@ export interface GfsAccessibleResourcesPage {
 export type GfsSubject =
   | { type: 'user'; id: string }
   | { type: 'team'; id: string }
+  | { type: 'host'; id: string }
   | { type: 'operator' }
 
 export interface GfsGrantInput {
@@ -144,6 +145,21 @@ export interface GfsShareInput {
   subject: GfsSubject
   permissions: string[]
   includeDescendants?: boolean
+}
+
+/**
+ * One ACL row as GET /me/gfs/grants returns it (control-api queryGrantItems).
+ * The `id` is the revoke handle — the grant PUT response carries no ids, so the
+ * UI must list-after-write to learn them. `subject.id` is absent for the
+ * operator sentinel row.
+ */
+export interface GfsGrantListItem {
+  id: string
+  drive: string
+  resourceId: string
+  subject: { type: string; id?: string }
+  permissions: string[]
+  inherit: boolean
 }
 
 /** Bits the caller holds on a resource, as the affordances route reports them. */
@@ -182,6 +198,18 @@ export interface GfsDeleteInput {
 
 const DEFAULT_DRIVE = 'main'
 const TRANSPORT_TOKEN_FIELD = ['tok', 'en'].join('') as 'token'
+
+/** Grant ids name gfs_grants rows (control-api routes/gfs/grants.ts UUID_RE). */
+const GRANT_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
+/**
+ * Shape of a managed host subject id: `<party>:<namespace>/<name>` with k8s
+ * DNS-1123 names (mirrors control-api src/gfs/hostSubject.ts
+ * isValidHostSubjectId). Input shaping only — the server re-validates and
+ * additionally enforces that the target is in the caller's own agent directory.
+ */
+const HOST_SUBJECT_ID_RE =
+  /^(1st|3rd):[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\/[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/
 
 function joinUrl(base: string, path: string): string {
   return `${base.replace(/\/+$/, '')}${path}`
@@ -395,6 +423,46 @@ export class GfsClient {
     )
   }
 
+  /**
+   * List a resource's ACL rows ("Who has access"). Server-side, viewing the
+   * ACL requires the same authority as changing it (manage_acl, direct or via
+   * an inheriting ancestor) — a caller without it gets the API's 403, never a
+   * silent empty list. NOT enveloped: the route returns `{items}` directly.
+   */
+  async listGrants(
+    input: { resourceId: string; drive?: string },
+    token: string
+  ): Promise<GfsGrantListItem[]> {
+    const q = new URLSearchParams()
+    q.set('drive', input.drive ?? DEFAULT_DRIVE)
+    q.set('resourceId', input.resourceId)
+    const payload = await this.transport.requestJson<{ items: GfsGrantListItem[] }>(
+      'GET',
+      joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/grants?' + q.toString()),
+      { token }
+    )
+    if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) {
+      throw new GfsUriError('unexpected gfs grants response: missing items array')
+    }
+    return payload.items
+  }
+
+  /**
+   * Revoke a grant by its ACL row id (learned from listGrants — the grant PUT
+   * response carries no ids). The id is validated as a UUID before the URL is
+   * built so a malformed value can never become a path segment.
+   */
+  async revokeGrant(grantId: string, token: string): Promise<void> {
+    if (!GRANT_ID_RE.test(grantId)) {
+      throw new GfsUriError(`grant id must be a UUID: ${JSON.stringify(grantId)}`)
+    }
+    await this.transport.requestJson(
+      'DELETE',
+      joinUrl(this.transport.baseUrl, `/api/v1/me/gfs/grants/${encodeURIComponent(grantId)}`),
+      { token }
+    )
+  }
+
   /** Create a URI share for a subject (same no-escalation engine, isShare=true). */
   async createShare(input: GfsShareInput, token: string): Promise<void> {
     await this.transport.requestJson(
@@ -437,20 +505,35 @@ export class GfsClient {
 
 /**
  * Parse a Desktop folder-owner delegation subject. The user plane can delegate
- * only to visible users or teams; operator/host/context targets are reserved for
- * the operator/provisioner contracts and are rejected before the API call. The
- * server re-validates; this is an input-shaping convenience, not a trust point.
+ * to visible users, teams, or the caller's own managed agents
+ * (`host:<party>:<ns>/<name>` — the first `:` splits the type, so the id keeps
+ * its canonical `<party>:<ns>/<name>` form). Operator/context targets stay
+ * reserved for the operator/provisioner contracts and are rejected before the
+ * API call. The server re-validates (grammar AND agent-directory ownership);
+ * this is an input-shaping convenience, not a trust point.
  */
 export function parseSubjectKey(key: string): GfsSubject {
   const trimmed = key.trim()
   const sep = trimmed.indexOf(':')
   if (sep <= 0) {
-    throw new GfsUriError(`subject must be user:<id> or team:<id>: ${JSON.stringify(key)}`)
+    throw new GfsUriError(
+      `subject must be user:<id>, team:<id>, or host:<party>:<ns>/<name>: ${JSON.stringify(key)}`
+    )
   }
   const type = trimmed.slice(0, sep)
   const id = trimmed.slice(sep + 1)
+  if (type === 'host') {
+    if (!HOST_SUBJECT_ID_RE.test(id)) {
+      throw new GfsUriError(
+        `host subject must be host:<party>:<ns>/<name> (party 1st|3rd, k8s names): ${JSON.stringify(key)}`
+      )
+    }
+    return { type, id }
+  }
   if ((type !== 'user' && type !== 'team') || id.length === 0) {
-    throw new GfsUriError(`subject must be user:<id> or team:<id>: ${JSON.stringify(key)}`)
+    throw new GfsUriError(
+      `subject must be user:<id>, team:<id>, or host:<party>:<ns>/<name>: ${JSON.stringify(key)}`
+    )
   }
   return { type, id }
 }

@@ -101,7 +101,9 @@ export function GfsDelegationPanel({
 
 export type {
   DelegationAffordances,
+  GfsAgentSubjectOption,
   GfsDelegationPanelProps,
   GfsDelegationSubjectOption,
   GfsDelegationSubjectType,
+  GfsGrantListItem,
 } from './delegation.types'
