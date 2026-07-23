@@ -469,17 +469,14 @@ describe('HostWizard — baseline render', () => {
 })
 
 describe('HostWizard — Agent type (stateless lifecycle)', () => {
-  it('renders the Agent type selector on step 0 with Stateful selected by default', async () => {
+  it('hides the Agent type selector from the create flow', async () => {
     await renderWizard()
 
-    const stateful = screen.getByRole('radio', { name: /Stateful \(always on\)/i })
-    const stateless = screen.getByRole('radio', { name: /Stateless \(suspends when idle\)/i })
-    expect(stateful).toBeChecked()
-    expect(stateless).not.toBeChecked()
+    expect(screen.queryByText('Agent type')).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /Stateful \(always on\)/i })).not.toBeInTheDocument()
     expect(
-      screen.getByText(/communication channels keep stateless agents always-on/i)
-    ).toBeInTheDocument()
-    expect(screen.queryByText(/requires no active communication channels/i)).not.toBeInTheDocument()
+      screen.queryByRole('radio', { name: /Stateless \(suspends when idle\)/i })
+    ).not.toBeInTheDocument()
   })
 
   it('omits spec.lifecycle from the created Host when Stateful is kept (absent = disabled)', async () => {
@@ -502,26 +499,5 @@ describe('HostWizard — Agent type (stateless lifecycle)', () => {
     const payload = hostCall![2] as { spec: Record<string, unknown> }
     expect('lifecycle' in payload.spec).toBe(false)
     expect('workflowControl' in payload.spec).toBe(false)
-  })
-
-  it('carries spec.lifecycle.stateless=true on the created Host when Stateless is selected', async () => {
-    await renderWizard()
-
-    fireEvent.click(screen.getByRole('radio', { name: /Stateless \(suspends when idle\)/i }))
-    expect(screen.getByRole('radio', { name: /Stateless \(suspends when idle\)/i })).toBeChecked()
-
-    await walkToAccessStep({ agentName: 'stateless-agent' })
-    await continueFromAccessToChannels()
-    fireEvent.click(screen.getByRole('button', { name: /Skip channel setup/i }))
-
-    await waitFor(() => {
-      expect(api.apiSend).toHaveBeenCalledWith(
-        'PUT',
-        '/api/v1/admin/hosts/stateless-agent',
-        expect.objectContaining({
-          spec: expect.objectContaining({ lifecycle: { stateless: true } }),
-        })
-      )
-    })
   })
 })

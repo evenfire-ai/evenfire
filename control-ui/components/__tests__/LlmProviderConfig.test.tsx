@@ -122,7 +122,7 @@ describe('LlmProviderConfig (spec Topic 1b — domain projection + usable gate)'
     // Provider + model selection still render.
     expect(
       screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
-    ).toBeInTheDocument()
+    ).toHaveTextContent('OpenAI')
     expect(screen.getByLabelText('Model', { selector: '#llm-primary-model' })).toBeInTheDocument()
   })
 })
@@ -132,8 +132,8 @@ describe('LlmProviderConfig (spec Topic 3a — per-host allowed-models subset)',
     render(<Harness />)
     expect(screen.getByText(/this host offers every enabled OpenAI model/i)).toBeInTheDocument()
     // No restriction yet — the model dropdown still offers the full enabled list.
-    const modelSelect = screen.getByLabelText('Model', { selector: '#llm-primary-model' })
-    expect(within(modelSelect).getByRole('option', { name: 'gpt-5.4-mini' })).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Model', { selector: '#llm-primary-model' }))
+    expect(screen.getByRole('option', { name: 'gpt-5.4-mini' })).toBeInTheDocument()
   })
 
   it('constrains the primary model dropdown to a pre-loaded subset (edit hydration)', () => {
@@ -143,12 +143,11 @@ describe('LlmProviderConfig (spec Topic 3a — per-host allowed-models subset)',
     expect(
       screen.getByText(/Restricted — this host offers only the 1 selected OpenAI model/i)
     ).toBeInTheDocument()
-    const modelSelect = screen.getByLabelText('Model', {
-      selector: '#llm-primary-model',
-    }) as HTMLSelectElement
+    const modelSelect = screen.getByLabelText('Model', { selector: '#llm-primary-model' })
+    fireEvent.click(modelSelect)
     // The subset drives the dropdown: gpt-5.4-mini stays, gpt-5.4 is excluded.
-    expect(within(modelSelect).getByRole('option', { name: 'gpt-5.4-mini' })).toBeInTheDocument()
-    expect(within(modelSelect).queryByRole('option', { name: 'gpt-5.4' })).not.toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'gpt-5.4-mini' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'gpt-5.4' })).not.toBeInTheDocument()
   })
 
   it('warns (non-disruptive) when the saved primary model falls outside the subset', () => {
@@ -160,12 +159,8 @@ describe('LlmProviderConfig (spec Topic 3a — per-host allowed-models subset)',
     )
     // The saved model stays selectable but the operator is warned it won't be offered.
     expect(screen.getByText(/gpt-5\.4 isn.t in the models offered for OpenAI/i)).toBeInTheDocument()
-    const modelSelect = screen.getByLabelText('Model', {
-      selector: '#llm-primary-model',
-    }) as HTMLSelectElement
-    expect(
-      within(modelSelect).getByRole('option', { name: /gpt-5\.4 \(out of allowlist\)/i })
-    ).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Model', { selector: '#llm-primary-model' }))
+    expect(screen.getByRole('option', { name: 'gpt-5.4' })).toHaveTextContent('out of allowlist')
   })
 
   it('shows an allowed-models control for a fallback provider on a different provider', () => {
