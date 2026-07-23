@@ -53,7 +53,7 @@ function makeCoordinator(overrides?: Partial<WakeCoordinatorDeps>): {
     maxHoldMs: MAX_HOLD_MS,
     pollMs: POLL_MS,
     retriggerMs: RETRIGGER_MS,
-    maxTrackedHosts: 1_000,
+    maxTrackedCoordinations: 1_000,
     ...overrides,
   })
   return { coordinator, requestWake, probeReady }
@@ -123,7 +123,7 @@ describe('§13.3 wake coordination matrix', () => {
     })
     const pB = hold(coordinator, nonWakeLater, 'tok-nonwake')
 
-    expect(coordinator.trackedHostCount()).toBe(1) // same principal group
+    expect(coordinator.trackedCoordinationCount()).toBe(1) // same principal group
     expect(requestWake).toHaveBeenCalledTimes(1) // the non-wake waiter triggered NO new wake
     expect(requestWake).not.toHaveBeenCalledWith('chatllm', 'tok-nonwake')
 
@@ -160,7 +160,7 @@ describe('§13.3 wake coordination matrix', () => {
     const t2 = makeClaims({ accessScope: 'team', teamId: 'team-2' })
     const p1 = hold(coordinator, t1, 'tok-t1')
     const p2 = hold(coordinator, t2, 'tok-t2')
-    expect(coordinator.trackedHostCount()).toBe(2)
+    expect(coordinator.trackedCoordinationCount()).toBe(2)
     expect(requestWake).toHaveBeenCalledTimes(2)
     coordinator.drain()
     await Promise.all([p1, p2])
@@ -172,7 +172,7 @@ describe('§13.3 wake coordination matrix', () => {
     const b = makeClaims({ sub: 'user-b' })
     const pa = hold(coordinator, a, 'tok-a')
     const pb = hold(coordinator, b, 'tok-b')
-    expect(coordinator.trackedHostCount()).toBe(2)
+    expect(coordinator.trackedCoordinationCount()).toBe(2)
     expect(requestWake).toHaveBeenCalledTimes(2)
     coordinator.drain()
     await Promise.all([pa, pb])
@@ -184,7 +184,7 @@ describe('§13.3 wake coordination matrix', () => {
     const outcome = await hold(coordinator, nonWake, 'tok-nonwake')
     expect(outcome.kind).toBe('legacy')
     expect(requestWake).not.toHaveBeenCalled()
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('key is delimiter-safe: boundary-shifting identifiers cannot collide two principals', () => {
@@ -204,7 +204,7 @@ describe('§13.3 wake coordination matrix', () => {
       lastKnownState: 'unknown',
     })
     expect(requestWake).not.toHaveBeenCalled()
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('row 6: expired wake authorization + non-wake waiter → deterministic terminal, no wake', async () => {
@@ -221,7 +221,7 @@ describe('§13.3 wake coordination matrix', () => {
 
     await vi.advanceTimersByTimeAsync(2_000) // short wake token budget expires
     expect((await pShort).kind).toBe('waking')
-    expect(coordinator.trackedHostCount()).toBe(1) // entry persists for the long waiter
+    expect(coordinator.trackedCoordinationCount()).toBe(1) // entry persists for the long waiter
 
     await vi.advanceTimersByTimeAsync(2_000) // now past the wake token's exp
     const late = makeClaims({ scopes: ['host:session:read'], expMs: Date.now() + 3_600_000 })
@@ -241,7 +241,7 @@ describe('§13.3 wake coordination matrix', () => {
       hold(coordinator, a, 'tok-2'),
       hold(coordinator, a, 'tok-3'),
     ]
-    expect(coordinator.trackedHostCount()).toBe(1)
+    expect(coordinator.trackedCoordinationCount()).toBe(1)
     expect(requestWake).toHaveBeenCalledTimes(1) // one wake sequence for the principal group
 
     probeReady.mockResolvedValue(true)
@@ -249,7 +249,7 @@ describe('§13.3 wake coordination matrix', () => {
     for (const outcome of await Promise.all(pendings)) {
       expect(outcome.kind).toBe('proceed')
     }
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('row 8: waiter settles, a later probe failure does not re-settle', async () => {
@@ -259,13 +259,13 @@ describe('§13.3 wake coordination matrix', () => {
     const pending = hold(coordinator, makeClaims(), 'tok-1')
     await vi.advanceTimersByTimeAsync(POLL_MS)
     expect((await pending).kind).toBe('proceed')
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
 
     // Advancing past every window makes NO further probe/settle — group is gone.
     const probeCalls = probeReady.mock.calls.length
     await vi.advanceTimersByTimeAsync(MAX_HOLD_MS * 2)
     expect(probeReady.mock.calls.length).toBe(probeCalls)
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 })
 
@@ -283,7 +283,7 @@ describe('§13.4 operation outcomes (unit level)', () => {
     requestWake.mockResolvedValue({ kind: 'not-stateless' })
     const outcome = await hold(coordinator, makeClaims(), 'tok')
     expect(outcome).toEqual({ kind: 'legacy', reason: 'not-stateless' })
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('suspended + no wake grant → no fallback grant; deterministic legacy result', async () => {
@@ -300,7 +300,7 @@ describe('a mid-hold wake auth rejection distinguishes initial from retrigger', 
     requestWake.mockResolvedValue({ kind: 'auth', status: 403 })
     const outcome = await hold(coordinator, makeClaims(), 'tok')
     expect(outcome).toEqual({ kind: 'legacy', reason: 'wake-auth-403' })
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('a retrigger wake 403 does NOT collapse still-valid waiters (initial guard)', async () => {
@@ -313,12 +313,12 @@ describe('a mid-hold wake auth rejection distinguishes initial from retrigger', 
     const pending = hold(coordinator, makeClaims(), 'tok')
     await vi.advanceTimersByTimeAsync(RETRIGGER_MS) // fire one retrigger (auth 403)
     // The group is still held (bounded by deadlines), not collapsed to legacy.
-    expect(coordinator.trackedHostCount()).toBe(1)
+    expect(coordinator.trackedCoordinationCount()).toBe(1)
 
     await vi.advanceTimersByTimeAsync(MAX_HOLD_MS)
     const outcome = await pending
     expect(outcome).toMatchObject({ kind: 'waking' })
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 })
 
@@ -335,13 +335,13 @@ describe('shutdown drain', () => {
       conn('other'),
       'other'
     )
-    expect(coordinator.trackedHostCount()).toBe(2)
+    expect(coordinator.trackedCoordinationCount()).toBe(2)
 
     coordinator.drain()
 
     const [oa, ob] = await Promise.all([a, b])
     expect(oa.kind).toBe('waking')
     expect(ob.kind).toBe('waking')
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 })

@@ -29,12 +29,15 @@ import { forwardHostHealth } from './mcpHostRestService.js'
 const TOKEN_EXP_SAFETY_MARGIN_MS = 2_000
 const ENTRY_TTL_MARGIN_MS = 5_000
 /**
- * Capacity of the coordination map. Entries are per (principal, host) — a
- * fleet of H hosts with P concurrently-holding principals per host consumes
- * up to H×P slots (review F2). Oldest-first eviction settles the victim
+ * Capacity of the coordination map, counted in COORDINATIONS, not hosts. The
+ * map is keyed by `wakeCoordinationKey(claims, hostRef)` = principal × Host, so
+ * N distinct principals waking ONE Host consume N slots: a fleet of H hosts
+ * with P concurrently-holding principals per host consumes up to H×P slots
+ * (review F2). Named for what it bounds — a "hosts" name would understate the
+ * real limit by a factor of P. Oldest-first eviction settles the victim
  * retryable (503 host_waking), so overflow degrades politely.
  */
-const MAX_TRACKED_PRINCIPAL_HOSTS = 1_000
+const MAX_TRACKED_WAKE_COORDINATIONS = 1_000
 const WAKE_SCOPE = 'host:wake:write' as const
 /** Short upstream retry schedule after a wake reports the host is up. */
 const PROCEED_RETRY_DELAYS_MS = [0, 250, 1_000]
@@ -92,8 +95,11 @@ export type WakeCoordinatorDeps = {
   maxHoldMs: number
   pollMs: number
   retriggerMs: number
-  /** Capacity in (principal, host) entries — see MAX_TRACKED_PRINCIPAL_HOSTS. */
-  maxTrackedHosts: number
+  /**
+   * Capacity in (principal, host) coordination entries — NOT in distinct hosts.
+   * See MAX_TRACKED_WAKE_COORDINATIONS.
+   */
+  maxTrackedCoordinations: number
   now?: () => number
 }
 
@@ -142,8 +148,11 @@ export class WakeAndHoldCoordinator {
 
   constructor(private readonly deps: WakeCoordinatorDeps) {}
 
-  /** Exposed for tests and observability. */
-  trackedHostCount(): number {
+  /**
+   * Live (principal, host) coordination entries — NOT a count of distinct
+   * hosts. Exposed for tests and observability.
+   */
+  trackedCoordinationCount(): number {
     return this.entries.size
   }
 
@@ -280,14 +289,14 @@ export class WakeAndHoldCoordinator {
   }
 
   private enforceCapacity(): void {
-    if (this.entries.size < this.deps.maxTrackedHosts) return
+    if (this.entries.size < this.deps.maxTrackedCoordinations) return
     let oldest: HostWakeEntry | null = null
     for (const candidate of this.entries.values()) {
       if (!oldest || candidate.createdAt < oldest.createdAt) oldest = candidate
     }
     if (!oldest) return
     console.warn(
-      `[RPC_PROXY] wake-hold capacity exceeded (max=${this.deps.maxTrackedHosts} principal-scoped entries) — evicting oldest entry host=${oldest.hostRef} waiters=${oldest.waiters.size}`
+      `[RPC_PROXY] wake-hold capacity exceeded (max=${this.deps.maxTrackedCoordinations} principal-scoped entries) — evicting oldest entry host=${oldest.hostRef} waiters=${oldest.waiters.size}`
     )
     this.settle(oldest, {
       kind: 'waking',
@@ -551,7 +560,7 @@ export const hostWakeCoordinator = new WakeAndHoldCoordinator({
   maxHoldMs: config.wakeMaxHoldMs,
   pollMs: config.wakePollMs,
   retriggerMs: config.wakeRetriggerMs,
-  maxTrackedHosts: MAX_TRACKED_PRINCIPAL_HOSTS,
+  maxTrackedCoordinations: MAX_TRACKED_WAKE_COORDINATIONS,
 })
 
 export type RespondWithWakeAndHoldOptions = {
