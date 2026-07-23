@@ -24,7 +24,7 @@ describe('HostIdentityTab', () => {
 
   async function expectMarkdownEditorValue(name: RegExp, value: string) {
     const editor = await findMarkdownEditor(name)
-    await waitFor(() => expect(editor).toHaveValue(value), { timeout: 10000 })
+    await waitFor(() => expect(screen.getByLabelText(name)).toHaveValue(value), { timeout: 10000 })
     return editor
   }
 
