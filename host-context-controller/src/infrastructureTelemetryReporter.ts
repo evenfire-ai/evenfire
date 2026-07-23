@@ -35,6 +35,10 @@ export type HccInfrastructureTelemetryPayload = {
   detail_ref?: string
   attempt?: number
   count?: number
+  gfs_subject?: string
+  gfs_outcome?: 'minted' | 'rotated' | 'reused' | 'failed'
+  gfs_old_host_uid?: string
+  gfs_new_host_uid?: string
 }
 
 type HccInfrastructureTelemetryProjectionBase = {
@@ -74,6 +78,10 @@ export function hccReconcileOutcomeSourceId(projection: HccReconcileOutcomeProje
     payload.detail_ref ?? null,
     payload.attempt ?? null,
     payload.count ?? null,
+    payload.gfs_subject ?? null,
+    payload.gfs_outcome ?? null,
+    payload.gfs_old_host_uid ?? null,
+    payload.gfs_new_host_uid ?? null,
   ]
   return `hcc-reconcile-outcome-v2:${createHash('sha256').update(JSON.stringify(canonical)).digest('hex')}`
 }
