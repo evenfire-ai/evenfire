@@ -12257,6 +12257,7 @@ pre {
   padding-right: 360px;
 }
 
+.sandbox-ui-conversation-btn,
 .sandbox-ui-close-btn,
 .sandbox-ui-refresh-btn {
   display: inline-flex;
@@ -12268,6 +12269,18 @@ pre {
   background: rgba(var(--panel-rgb), 0.95);
 }
 
+.sandbox-ui-conversation-btn {
+  min-width: 0;
+  max-width: min(360px, 45vw);
+}
+
+.sandbox-ui-conversation-btn span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sandbox-ui-conversation-btn svg,
 .sandbox-ui-close-btn svg,
 .sandbox-ui-refresh-btn svg {
   width: 16px;
