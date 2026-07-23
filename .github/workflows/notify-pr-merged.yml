@@ -1,0 +1,246 @@
+name: Notify PR Merged
+
+# Ported from the private monorepo (clerum) so merges into this repo announce
+# themselves the same way. Two shapes: a per-PR message for `dev` (the
+# integration branch), and a roll-up for `main` that enumerates any dev PRs
+# bundled into a sync merge.
+#
+# Requires repo secrets TELEGRAM_DEPLOY_BOT_TOKEN and TELEGRAM_DEPLOY_CHAT_ID.
+# Without them the send step prints the message and exits 0, so a repo that
+# has not configured Telegram never shows a red X.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [dev, main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to format a dry-run message for"
+        required: true
+        type: string
+      dry_run:
+        description: "Print message to log instead of POSTing to Telegram"
+        required: false
+        default: true
+        type: boolean
+      branch_kind:
+        description: "Which message shape to render — must match the PR's actual base branch"
+        required: true
+        type: choice
+        options:
+          - dev
+          - main
+        default: dev
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  notify-dev:
+    name: Telegram notification — dev merge
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'dev' &&
+        !contains(github.event.pull_request.title, '[skip ci]') &&
+        github.event.pull_request.user.login != 'github-actions[bot]')
+      ||
+      (github.event_name == 'workflow_dispatch' && inputs.branch_kind == 'dev')
+    steps:
+      - name: Checkout (for scripts)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Resolve PR metadata
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          pr_json="$(gh pr view "$PR_NUMBER" --json number,title,author,body,commits,changedFiles,url)"
+          title=$(printf '%s' "$pr_json" | jq -r '.title')
+          author=$(printf '%s' "$pr_json" | jq -r '.author.login')
+          body=$(printf '%s' "$pr_json" | jq -r '.body // ""')
+          commits=$(printf '%s' "$pr_json" | jq -r '.commits | length')
+          files=$(printf '%s' "$pr_json" | jq -r '.changedFiles')
+          url=$(printf '%s' "$pr_json" | jq -r '.url')
+          summary=$(printf '%s' "$body" | ./.github/scripts/extract-pr-summary.sh)
+
+          # Persist to step outputs (one per line so multiline summaries survive).
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "title<<EOF"; echo "$title"; echo "EOF"
+            echo "author=$author"
+            echo "commits=$commits"
+            echo "files=$files"
+            echo "url=$url"
+            echo "summary<<EOF"; echo "$summary"; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Format and send Telegram message
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_DEPLOY_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_DEPLOY_CHAT_ID }}
+          PR_NUMBER: ${{ steps.meta.outputs.pr_number }}
+          TITLE: ${{ steps.meta.outputs.title }}
+          AUTHOR: ${{ steps.meta.outputs.author }}
+          COMMITS: ${{ steps.meta.outputs.commits }}
+          FILES: ${{ steps.meta.outputs.files }}
+          URL: ${{ steps.meta.outputs.url }}
+          SUMMARY: ${{ steps.meta.outputs.summary }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          # Minimal HTML escape for Telegram parse_mode=HTML.
+          html_escape() {
+            sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+          }
+          T=$(printf '%s' "$TITLE"   | html_escape)
+          A=$(printf '%s' "$AUTHOR"  | html_escape)
+          S=$(printf '%s' "$SUMMARY" | html_escape)
+
+          MSG="✅ Merged to <code>dev</code>: #${PR_NUMBER} <b>${T}</b>"$'\n'
+          MSG+="by @${A} · ${COMMITS} commits · ${FILES} files"$'\n'
+          if [[ -n "$SUMMARY" ]]; then
+            MSG+="<i>${S}</i>"$'\n'
+          fi
+          MSG+="${URL}"
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "── DRY RUN ── would send:"
+            printf '%s\n' "$MSG"
+            exit 0
+          fi
+
+          # Fork PRs run without secrets, and a repo that has not wired Telegram
+          # yet has none either. Neither is a failure — print and move on.
+          if [[ -z "${TELEGRAM_BOT_TOKEN}" || -z "${TELEGRAM_CHAT_ID}" ]]; then
+            echo "::notice::Telegram secrets unavailable — message not sent:"
+            printf '%s\n' "$MSG"
+            exit 0
+          fi
+
+          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MSG}" \
+            --data-urlencode "parse_mode=HTML" \
+            --data-urlencode "disable_web_page_preview=true"
+
+  notify-main:
+    name: Telegram notification — main merge
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'main' &&
+        !contains(github.event.pull_request.title, '[skip ci]') &&
+        github.event.pull_request.user.login != 'github-actions[bot]')
+      ||
+      (github.event_name == 'workflow_dispatch' && inputs.branch_kind == 'main')
+    steps:
+      - name: Checkout (for scripts)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Resolve main PR metadata
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          pr_json="$(gh pr view "$PR_NUMBER" --json number,title,url)"
+          title=$(printf '%s' "$pr_json" | jq -r '.title')
+          url=$(printf '%s' "$pr_json"   | jq -r '.url')
+
+          # Enumerate bundled dev PRs (TAB-separated records). A direct feature
+          # PR into main has no `Merge pull request #N` commits, so this is
+          # empty and the message degrades to a plain single-PR announcement.
+          bundled="$(./.github/scripts/enumerate-promoted-prs.sh "$PR_NUMBER")"
+          bundle_count=$(printf '%s' "$bundled" | grep -c . || true)
+
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "title<<EOF"; echo "$title"; echo "EOF"
+            echo "url=$url"
+            echo "bundle_count=$bundle_count"
+            echo "bundled<<EOF"; echo "$bundled"; echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Format and send Telegram message
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_DEPLOY_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_DEPLOY_CHAT_ID }}
+          PR_NUMBER: ${{ steps.meta.outputs.pr_number }}
+          TITLE: ${{ steps.meta.outputs.title }}
+          URL: ${{ steps.meta.outputs.url }}
+          BUNDLE_COUNT: ${{ steps.meta.outputs.bundle_count }}
+          BUNDLED: ${{ steps.meta.outputs.bundled }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          html_escape() {
+            sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+          }
+          T=$(printf '%s' "$TITLE" | html_escape)
+
+          MSG="📦 Merged to <code>main</code>: #${PR_NUMBER} <b>${T}</b>"$'\n'
+          (( BUNDLE_COUNT == 1 )) && NOUN="PR" || NOUN="PRs"
+
+          if (( BUNDLE_COUNT > 0 )); then
+            MSG+="${BUNDLE_COUNT} ${NOUN} bundled:"$'\n'
+            # Iterate TAB-separated records.
+            while IFS=$'\t' read -r num author title summary; do
+              [[ -z "$num" ]] && continue
+              t=$(printf '%s' "$title"   | html_escape)
+              s=$(printf '%s' "$summary" | html_escape)
+              MSG+="• #${num} <b>${t}</b> (@${author})"$'\n'
+              if [[ -n "$summary" ]]; then
+                MSG+="   ↳ <i>${s}</i>"$'\n'
+              fi
+            done <<< "$BUNDLED"
+          fi
+
+          MSG+="${URL}"
+
+          # Telegram hard limit is 4096 chars. If we're over, drop bullet
+          # summaries (keep title bullets) and append a (truncated) marker.
+          if (( ${#MSG} > 4096 )); then
+            MSG="📦 Merged to <code>main</code>: #${PR_NUMBER} <b>${T}</b>"$'\n'
+            MSG+="${BUNDLE_COUNT} ${NOUN} bundled:"$'\n'
+            dropped=0
+            while IFS=$'\t' read -r num author title summary; do
+              [[ -z "$num" ]] && continue
+              t=$(printf '%s' "$title" | html_escape)
+              candidate="• #${num} <b>${t}</b> (@${author})"$'\n'
+              if (( ${#MSG} + ${#candidate} + ${#URL} + 32 < 4096 )); then
+                MSG+="$candidate"
+              else
+                dropped=$((dropped + 1))
+              fi
+            done <<< "$BUNDLED"
+            (( dropped > 0 )) && MSG+="… (${dropped} PRs truncated)"$'\n'
+            MSG+="${URL}"
+          fi
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "── DRY RUN ── would send:"
+            printf '%s\n' "$MSG"
+            exit 0
+          fi
+
+          if [[ -z "${TELEGRAM_BOT_TOKEN}" || -z "${TELEGRAM_CHAT_ID}" ]]; then
+            echo "::notice::Telegram secrets unavailable — message not sent:"
+            printf '%s\n' "$MSG"
+            exit 0
+          fi
+
+          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MSG}" \
+            --data-urlencode "parse_mode=HTML" \
+            --data-urlencode "disable_web_page_preview=true"
