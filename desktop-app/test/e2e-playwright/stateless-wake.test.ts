@@ -7,6 +7,56 @@
 // handling, and composer recovery. The bash phase owns the Kubernetes
 // suspended-host precondition before Electron starts; this spec must run through
 // that combined gate rather than being reported as a standalone cold-start test.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// KNOWN RED in this repository (Scenarios 4 and 5), for a reason unrelated to
+// the wake/lifecycle behavior this spec exists to prove.
+//
+// This spec was brought over by migration commit e0014958c together with the
+// host-lifecycle work, but the renderer contracts it reads were NOT brought
+// over with it. This tree's `desktop-app/ui/` is byte-identical to its own dev
+// branch (`git diff` over `desktop-app/ui/` is empty for this branch), so this
+// is NOT a runtime regression introduced here — the DOM contracts simply never
+// existed in this lineage.
+//
+// Absent DOM contracts (used here / present in this tree's renderer):
+//   data-chat-id                          10 / 0
+//   aria-current on message-list           3 / 0
+//   region "Latest sessions for selected
+//     agent"                               2 / 0
+// `ChatThread.tsx` renders `message-list` with only `data-testid` + `className`.
+//
+// Observed failure: Scenario 4 fails in readActiveChatId() below — `aria-current`
+// resolved null across 123 attempts. Scenario 5 never ran as a consequence.
+//
+// Why this is NOT fixed by adding the attributes: the three contracts are the
+// visible surface of an entire un-ported renderer lineage, not a missing
+// attribute. The upstream sessions region is driven by a catalog-knowledge
+// recovery model that does not exist here at all — `catalogKnowledge` has 46
+// references upstream and 0 in this tree, and `ChatListContext` additionally
+// lacks `serverOnlySessionRecoveryBlocked`,
+// `acknowledgeServerOnlySessionRecovery`, and the `CatalogKnowledge` type. In
+// total 40 files diverge under `desktop-app/ui/src`, including 10 issue-791
+// renderer test files that are absent here (ChatThread.issue791,
+// useChatListController.issue791, useAgentChatController.issue791,
+// reconcileChat.remoteAbsent, sendAgentMessage.scope.issue791, and others).
+//
+// Concretely, this tree renders the skeleton whenever `chatListLoading` is set,
+// blanking every `button[data-chat-id]`, whereas upstream guards it with
+// `chatListLoading && !sortedChats.length` so cached sessions stay visible
+// during a post-wake catalog refresh — which is exactly what
+// readSessionButtonChatIds() (≥2 session buttons after a re-suspend) leans on.
+// Porting only the attributes would therefore add unpinned production code
+// while these scenarios stayed red. Closing this properly means porting the
+// issue-791 renderer lineage (ChatListContext + useChatListController +
+// reconcileChat + sessionFsm and their tests), not patching the DOM.
+//
+// DO NOT weaken, relax, or delete the assertions in readActiveChatId(),
+// expectSessionButtonVisible(), readSessionButtonChatIds(), or
+// openExistingSession() to make these scenarios go green. They encode the real
+// two-chat continuity contract. Port the renderer lineage, or assert on a
+// contract this tree actually exposes.
+// ─────────────────────────────────────────────────────────────────────────────
 import { expect, loginAs, test } from './fixtures.js'
 import { openAgentsPage } from './navigationHelpers.js'
 
@@ -639,6 +689,12 @@ async function openDedicatedAgentSessions(
 
 // The active chat's message-list carries aria-current='true' and a UUID
 // data-chat-id once a chat is selected (ChatThread.tsx). Returns that identity.
+//
+// KNOWN-RED SITE: this tree's ChatThread.tsx renders `message-list` with only
+// `data-testid` + `className`, so the `aria-current` expectation below is where
+// Scenario 4 fails. See the KNOWN RED block in this file's header for why the
+// fix is a renderer-lineage port and not a DOM patch. Do NOT relax these two
+// assertions to make the scenario pass.
 async function readActiveChatId(appPage: import('@playwright/test').Page): Promise<string> {
   const messageList = appPage.getByTestId('message-list')
   await expect(messageList).toHaveAttribute('aria-current', 'true', { timeout: TURN_TIMEOUT })
