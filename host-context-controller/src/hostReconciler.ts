@@ -3491,11 +3491,13 @@ export class HostReconciler {
   }
 
   private async reconcileCore(host: HostCRD): Promise<void> {
-    // Wake fast-path (Stage 4.3) BEFORE the heavy reconcile body: the Host
-    // watch callback is serial across the whole fleet, so a pending wake
-    // must not wait behind token issuance, NetworkPolicies or the
-    // channel-reader work below. The periodic resync funnels through this
-    // same method, so a watch event dropped on disconnect is recovered here.
+    // Wake fast-path (Stage 4.3) BEFORE the heavy reconcile body: reconciles
+    // are serialized PER HOST (serializeByHost), so a pending wake for THIS
+    // Host must not wait behind token issuance, NetworkPolicies or the
+    // channel-reader work below in this same chain. Other Hosts no longer gate
+    // it — the process-wide convergence tail was removed. The periodic resync
+    // funnels through this same method, so a watch event dropped on disconnect
+    // is recovered here.
     const forceFreshForWake = (await this.lifecycle.handleWakeFastPath(host)) === true
 
     // Track whether this host has desktop enabled
