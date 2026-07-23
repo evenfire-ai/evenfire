@@ -107,9 +107,10 @@ to its deep dive.
   connector registry, shared files, and cost accounting, all declared as
   configuration instead of assembled by hand.
 - **vs betting on one provider**: the same agents, tools, and configuration run
-  across a growing roster of providers, from frontier labs to local LLMs. Pick whichever model
-  sits on the cost/quality Pareto frontier for each job, and switch providers
-  without rebuilding, so your setup and data are never locked to a single vendor.
+  across a growing roster of providers, from frontier labs to local LLMs. Pick
+  whichever model gives the best cost/quality tradeoff for each job, and switch
+  providers without rebuilding, so your setup and data are never locked to a
+  single vendor.
 
 ---
 
@@ -119,8 +120,8 @@ We never fully trust the model. It can be steered, misled, or simply wrong, so
 four layers constrain what it can do:
 
 - **Risky actions wait for a human.** Commands, outbound HTTP, and browser
-  control are approval-gated: the task suspends (surviving pod restarts) until
-  someone approves from the channel, and callbacks are signature-verified.
+  control are approval-gated: the task suspends until someone approves from the
+  channel, and callbacks are signature-verified.
 - **Least privilege.** Each agent reaches only the connectors its `Context`
   grants, through short-lived, scope-narrowed tokens that can't widen
   themselves; container images must match a pinned digest and an allowlist.
