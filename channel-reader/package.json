@@ -1,6 +1,6 @@
 {
   "name": "clerum-channel-reader",
-  "version": "0.1.81",
+  "version": "0.1.82",
   "description": "Watches CommunicationChannel CRDs and fetches messages from Telegram, Email, and Slack",
   "main": "dist/main.js",
   "engines": {
@@ -31,7 +31,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
-    "@types/nodemailer": "^6.4.0",
+    "@types/nodemailer": "^8.0.1",
     "typescript": "^5.3.0",
     "vitest": "^4.1.0"
   }

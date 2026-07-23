@@ -168,6 +168,22 @@ describe('EmailAdapter — connect()', () => {
       adapter.connect({ emailUsername: TEST_USERNAME, emailPassword: TEST_PASSWORD })
     ).resolves.toBeUndefined()
   })
+
+  it('configures Nodemailer with the SMTP endpoint and supplied credentials', async () => {
+    const adapter = new EmailAdapter()
+    await adapter.connect({ emailUsername: TEST_USERNAME, emailPassword: TEST_PASSWORD })
+
+    const { createTransport } = await import('nodemailer')
+    expect(createTransport).toHaveBeenCalledWith({
+      host: 'smtp.example.com',
+      port: 587,
+      secure: false,
+      auth: {
+        user: TEST_USERNAME,
+        pass: TEST_PASSWORD,
+      },
+    })
+  })
 })
 
 // ── disconnect() ──────────────────────────────────────────────────────────────
@@ -320,6 +336,55 @@ describe('EmailAdapter — fetchMessages()', () => {
     expect(msg!.messageId).toBe('<unique-id-42@example.com>')
     expect(msg!.channelId).toBe('MyMailbox')
     expect(msg!.timestamp).toEqual(expectedDate)
+  })
+})
+
+// ── sendMessage() ─────────────────────────────────────────────────────────────
+
+describe('EmailAdapter — sendMessage()', () => {
+  async function receiveAllowedMessage(adapter: EmailAdapter): Promise<string> {
+    const messageId = '<reply-target@example.com>'
+    imapState.searchResults = [1]
+    imapState.fetchMessages = [
+      {
+        uid: 1,
+        envelope: {
+          messageId,
+          from: [{ address: 'sender@allowed.com' }],
+          subject: 'Question',
+        },
+        source: Buffer.from('Content-Type: text/plain\n\nCan you help?'),
+      },
+    ]
+    await adapter.fetchMessages('INBOX', new Set(['sender@allowed.com']))
+    return messageId
+  }
+
+  it('sends an SMTP reply to the sender of an allowed received message', async () => {
+    const adapter = new EmailAdapter()
+    await adapter.connect({ emailUsername: TEST_USERNAME, emailPassword: TEST_PASSWORD })
+    const messageId = await receiveAllowedMessage(adapter)
+
+    await adapter.sendMessage('INBOX', 'Here is the answer.', messageId)
+
+    expect(transporterState.sendMailFn).toHaveBeenCalledWith({
+      from: TEST_USERNAME,
+      to: 'sender@allowed.com',
+      subject: 'Re: Your message',
+      text: 'Here is the answer.',
+      inReplyTo: messageId,
+      references: messageId,
+    })
+  })
+
+  it('preserves Nodemailer authentication errors for the caller', async () => {
+    const adapter = new EmailAdapter()
+    await adapter.connect({ emailUsername: TEST_USERNAME, emailPassword: TEST_PASSWORD })
+    const messageId = await receiveAllowedMessage(adapter)
+    const authError = Object.assign(new Error('Missing credentials'), { code: 'ENOAUTH' })
+    transporterState.sendMailFn.mockRejectedValueOnce(authError)
+
+    await expect(adapter.sendMessage('INBOX', 'Reply', messageId)).rejects.toBe(authError)
   })
 })
 
