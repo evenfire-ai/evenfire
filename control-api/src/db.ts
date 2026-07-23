@@ -4747,6 +4747,18 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       `)
     },
   },
+  {
+    version: '0070_member_registration_runtime_delete_revoke',
+    apply: async db => {
+      // 0069 granted DELETE to the runtime role. Credential revocation is an
+      // UPDATE, so remove the unnecessary destructive privilege without
+      // rewriting a migration that may already be recorded in deployed DBs.
+      await db.query(`
+        REVOKE DELETE ON TABLE member_registration_credentials
+          FROM control_api_runtime;
+      `)
+    },
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {

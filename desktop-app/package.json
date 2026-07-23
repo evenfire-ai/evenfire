@@ -81,6 +81,6 @@
   "overrides": {
     "@tootallnate/once": "^3.0.1",
     "tmp": "^0.2.4",
-    "tar": "7.5.13"
+    "tar": "7.5.19"
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "clerum-rpc-proxy",
-  "version": "0.1.49",
+  "version": "0.1.50",
   "description": "External-facing RPC proxy for tenant-scoped MCP access",
   "main": "dist/main.js",
   "engines": {
@@ -29,7 +29,7 @@
     "@types/node": "^24.3.0",
     "@types/supertest": "^6.0.3",
     "supertest": "^7.1.4",
-    "tsx": "^4.21.0",
+    "tsx": "^4.23.1",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   }

@@ -1,6 +1,6 @@
 {
   "name": "@clerum/web-search-mcp",
-  "version": "1.0.3",
+  "version": "1.0.5",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -15,7 +15,10 @@
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.0",
-    "tsx": "^4.19.0",
+    "tsx": "^4.23.1",
     "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "@hono/node-server": "2.0.11"
   }
 }
