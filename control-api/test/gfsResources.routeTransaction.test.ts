@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const FILE = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-const SRC = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
 const OTHER = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
 
 const state = vi.hoisted(() => {
