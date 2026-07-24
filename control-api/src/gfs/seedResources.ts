@@ -87,7 +87,12 @@ export async function seedRootDirectories(
     pathCache: '/',
   })
 
-  const byPath: Record<string, string> = {}
+  // Null-prototype lookup: the keys are caller-supplied paths, so removing the
+  // prototype makes property injection structurally impossible instead of
+  // resting on the leading-slash invariant alone (defence in depth, and it
+  // clears CodeQL js/remote-property-injection). Serialization is unaffected —
+  // JSON.stringify, Object.keys and spread all behave identically.
+  const byPath: Record<string, string> = Object.create(null)
   for (const { path, segments } of normalizedPaths) {
     if (segments.length === 0) continue // '/' is the root itself, already ensured
     let parentResourceId = rootResourceId

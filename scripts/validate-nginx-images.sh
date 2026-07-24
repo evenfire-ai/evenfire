@@ -39,6 +39,16 @@ scan_paths=(
   "workflow-recipes/tests/fixtures/workflow/invalid-scheduling-no-steps.yaml"
 )
 
+# Keep only paths present in this checkout so the guard is portable across the
+# public repo (base + minikube, no gcp overlays) and the infra-assembled tree
+# (with gcp-dev/gcp-prod overlays). Missing paths are skipped, not errors — the
+# base manifests the overlays inherit from are always scanned.
+_present=()
+for _p in "${scan_paths[@]}"; do
+  [ -e "$PROJECT_DIR/$_p" ] && _present+=("$_p")
+done
+scan_paths=("${_present[@]}")
+
 require_text() {
   local path="$1"
   local text="$2"
