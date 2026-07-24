@@ -143,6 +143,31 @@ describe('messages', () => {
     expect(chat!.messageCount).toBe(2)
   })
 
+  it('persists activity aggregates in the chat index', async () => {
+    await store.createChat('agent-1', 'activity-1')
+    await store.saveMessages('agent-1', 'activity-1', [
+      { id: 'm1', role: 'user', content: 'a', timestamp: 1 },
+      {
+        id: 'm2',
+        role: 'assistant',
+        content: 'failed',
+        timestamp: 2,
+        isError: true,
+        toolSteps: [
+          { toolName: 'search', displayName: 'Search', state: 'completed' },
+          { toolName: 'write', displayName: 'Write', state: 'error' },
+        ],
+      },
+    ])
+
+    const chat = (await store.listChats('agent-1')).find(item => item.id === 'activity-1')
+    expect(chat).toMatchObject({
+      messageCount: 2,
+      errorCount: 1,
+      toolCallCount: 2,
+    })
+  })
+
   it('persists task_id and writes the v2 chat file (D.3)', async () => {
     await store.createChat('agent-1', 'v2-1')
     await store.saveMessages('agent-1', 'v2-1', [

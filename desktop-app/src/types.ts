@@ -789,6 +789,9 @@ export interface ChatMetadata {
   createdAt: string // ISO 8601
   updatedAt: string // ISO 8601
   messageCount: number
+  /** Persisted activity aggregates keep dashboards from opening complete chat files. */
+  errorCount?: number
+  toolCallCount?: number
   /** D.5: a task terminated while this chat was NOT the active view. Drives the
    * sidebar "completed_unread" badge; persisted so it survives an app restart. */
   unreadTerminal?: boolean

@@ -204,6 +204,11 @@ export class ChatStore {
       const chat = index.chats.find(c => c.id === chatId)
       if (chat) {
         chat.messageCount = messages.length
+        chat.errorCount = messages.reduce((total, message) => total + (message.isError ? 1 : 0), 0)
+        chat.toolCallCount = messages.reduce(
+          (total, message) => total + (message.toolSteps?.length ?? 0),
+          0
+        )
         chat.updatedAt = new Date().toISOString()
         await this.saveIndex(agentRef, index)
       }
