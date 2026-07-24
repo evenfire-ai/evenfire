@@ -278,26 +278,30 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
 
   const groupedWithKeys = useMemo(
     () =>
-      groupedMessages.map((group, groupIndex) => ({
-        ...group,
-        groupKey: `${group.role}-${groupIndex}`,
-        items: group.items.map((message, messageIndex) => ({
-          ...message,
-          messageKey: `${message.timestamp}-${groupIndex}-${messageIndex}`,
-        })),
-      })),
+      groupedMessages.map((group, groupIndex) => {
+        const first = group.items[0]
+        const last = group.items.at(-1)
+        const firstKey = first?.id ?? first?.timestamp ?? groupIndex
+        const lastKey = last?.id ?? last?.timestamp ?? groupIndex
+        return {
+          ...group,
+          groupKey: `${group.role}-${firstKey}-${lastKey}-${group.items.length}`,
+          items: group.items.map(message => ({
+            ...message,
+            messageKey: message.id,
+          })),
+        }
+      }),
     [groupedMessages]
   )
   const messageGroupChunks = useMemo(() => {
     const indexedGroups = groupedWithKeys.map((group, groupIndex) => ({ group, groupIndex }))
-    return Array.from(
-      { length: Math.ceil(indexedGroups.length / VIRTUAL_MESSAGE_GROUPS_PER_CHUNK) },
-      (_, chunkIndex) =>
-        indexedGroups.slice(
-          chunkIndex * VIRTUAL_MESSAGE_GROUPS_PER_CHUNK,
-          (chunkIndex + 1) * VIRTUAL_MESSAGE_GROUPS_PER_CHUNK
-        )
-    )
+    const chunks: (typeof indexedGroups)[] = []
+    for (let end = indexedGroups.length; end > 0; end -= VIRTUAL_MESSAGE_GROUPS_PER_CHUNK) {
+      const start = Math.max(0, end - VIRTUAL_MESSAGE_GROUPS_PER_CHUNK)
+      chunks.unshift(indexedGroups.slice(start, end))
+    }
+    return chunks
   }, [groupedWithKeys])
 
   const localMessageIds = useMemo(
@@ -543,7 +547,7 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
       {activeChatId &&
         messageGroupChunks.map((chunk, chunkIndex) => (
           <VirtualizedMessageChunk
-            key={chunk[0]?.group.groupKey ?? `chunk-${chunkIndex}`}
+            key={chunk.at(-1)?.group.groupKey ?? `chunk-${chunkIndex}`}
             estimatedHeight={Math.max(240, chunk.length * 180)}
             initiallyVisible={chunkIndex >= messageGroupChunks.length - 2}
             render={() =>

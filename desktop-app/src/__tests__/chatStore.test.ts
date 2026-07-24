@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChatStore } from '../chatStore.js'
+import type { ChatMessage } from '../types.js'
 
 let tempDir: string
 let store: ChatStore
@@ -15,6 +16,26 @@ beforeEach(async () => {
 afterEach(async () => {
   await fs.rm(tempDir, { recursive: true, force: true })
 })
+
+function agentPath(...segments: string[]): string {
+  return join(tempDir, 'agent-1', ...segments)
+}
+
+function chatCacheDir(chatId: string): string {
+  return agentPath('chats', chatId)
+}
+
+function chatMetaPath(chatId: string): string {
+  return join(chatCacheDir(chatId), 'meta.json')
+}
+
+function chatPagesDir(chatId: string): string {
+  return join(chatCacheDir(chatId), 'pages')
+}
+
+async function readJsonFile<T = Record<string, unknown>>(path: string): Promise<T> {
+  return JSON.parse(await fs.readFile(path, 'utf-8')) as T
+}
 
 // ── listChats ────────────────────────────────────────────────────────────────
 
@@ -71,7 +92,7 @@ describe('renameChat', () => {
 // ── deleteChat ───────────────────────────────────────────────────────────────
 
 describe('deleteChat', () => {
-  it('removes from index and deletes message file', async () => {
+  it('removes from index and deletes message cache', async () => {
     await store.createChat('agent-1', 'del-1')
     await store.saveMessages('agent-1', 'del-1', [
       { id: 'm1', role: 'user', content: 'hello', timestamp: Date.now() },
@@ -80,9 +101,8 @@ describe('deleteChat', () => {
     const chats = await store.listChats('agent-1')
     expect(chats).toHaveLength(0)
 
-    // message file should be gone
-    const filePath = join(tempDir, 'agent-1', 'del-1.json')
-    await expect(fs.access(filePath)).rejects.toThrow()
+    await expect(fs.access(join(tempDir, 'agent-1', 'del-1.json'))).rejects.toThrow()
+    await expect(fs.access(chatCacheDir('del-1'))).rejects.toThrow()
   })
 
   it('clears lastActiveChatId when deleting active chat', async () => {
@@ -132,6 +152,132 @@ describe('messages', () => {
     expect(offset2[2]!.content).toBe('msg-7')
   })
 
+  it('stores large chats in page files and reads windows across page boundaries', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 3,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await pagedStore.createChat('agent-1', 'paged-1')
+    const msgs = Array.from({ length: 10 }, (_, i) => ({
+      id: `m${i}`,
+      role: 'user' as const,
+      content: `msg-${i}`,
+      timestamp: i,
+    }))
+
+    await pagedStore.saveMessages('agent-1', 'paged-1', msgs)
+
+    expect(await fs.readdir(chatPagesDir('paged-1'))).toEqual([
+      '000001.json',
+      '000002.json',
+      '000003.json',
+      '000004.json',
+    ])
+    const meta = await readJsonFile<{ messageCount: number; localMessageCount: number }>(
+      chatMetaPath('paged-1')
+    )
+    expect(meta).toMatchObject({ messageCount: 10, localMessageCount: 10 })
+
+    const window = await pagedStore.loadMessages('agent-1', 'paged-1', 4, 2)
+    expect(window.map(message => message.content)).toEqual(['msg-4', 'msg-5', 'msg-6', 'msg-7'])
+  })
+
+  it('appends into the last page before creating another page', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await pagedStore.createChat('agent-1', 'append-pages')
+    await pagedStore.saveMessages('agent-1', 'append-pages', [
+      { id: 'm0', role: 'user', content: 'msg-0', timestamp: 0 },
+      { id: 'm1', role: 'user', content: 'msg-1', timestamp: 1 },
+      { id: 'm2', role: 'user', content: 'msg-2', timestamp: 2 },
+    ])
+
+    await pagedStore.appendMessages('agent-1', 'append-pages', [
+      { id: 'm3', role: 'user', content: 'msg-3', timestamp: 3 },
+      { id: 'm4', role: 'user', content: 'msg-4', timestamp: 4 },
+    ])
+
+    expect(await fs.readdir(chatPagesDir('append-pages'))).toEqual([
+      '000001.json',
+      '000002.json',
+      '000003.json',
+    ])
+    const secondPage = await readJsonFile<{ messages: ChatMessage[] }>(
+      join(chatPagesDir('append-pages'), '000002.json')
+    )
+    expect(secondPage.messages.map(message => message.id)).toEqual(['m2', 'm3'])
+
+    const messages = await pagedStore.loadMessages('agent-1', 'append-pages')
+    expect(messages.map(message => message.id)).toEqual(['m0', 'm1', 'm2', 'm3', 'm4'])
+  })
+
+  it('prunes only old pages whose messages are known to exist on the server', async () => {
+    const prunedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: 4,
+    })
+    await prunedStore.createChat('agent-1', 'pruned')
+    const msgs = Array.from({ length: 6 }, (_, i) => ({
+      id: `m${i}`,
+      role: 'user' as const,
+      content: `msg-${i}`,
+      timestamp: i,
+      serverTurnNumber: i + 1,
+    }))
+
+    await prunedStore.saveMessages('agent-1', 'pruned', msgs)
+
+    expect(await fs.readdir(chatPagesDir('pruned'))).toEqual(['000002.json', '000003.json'])
+    await expect(fs.access(join(chatPagesDir('pruned'), '000001.json'))).rejects.toThrow()
+    const meta = await readJsonFile<{
+      messageCount: number
+      localMessageCount: number
+      prunedBeforeCount: number
+      prunedThroughServerTurnNumber: number
+    }>(chatMetaPath('pruned'))
+    expect(meta).toMatchObject({
+      messageCount: 6,
+      localMessageCount: 4,
+      prunedBeforeCount: 2,
+      prunedThroughServerTurnNumber: 2,
+    })
+
+    const chat = (await prunedStore.listChats('agent-1')).find(item => item.id === 'pruned')
+    expect(chat?.messageCount).toBe(6)
+    const localMessages = await prunedStore.loadMessages('agent-1', 'pruned')
+    expect(localMessages.map(message => message.id)).toEqual(['m2', 'm3', 'm4', 'm5'])
+  })
+
+  it('does not prune pages containing local-only messages', async () => {
+    const prunedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: 4,
+    })
+    await prunedStore.createChat('agent-1', 'local-only')
+    const msgs = Array.from({ length: 6 }, (_, i) => ({
+      id: `m${i}`,
+      role: 'user' as const,
+      content: `msg-${i}`,
+      timestamp: i,
+      ...(i >= 2 ? { serverTurnNumber: i + 1 } : {}),
+    }))
+
+    await prunedStore.saveMessages('agent-1', 'local-only', msgs)
+
+    expect(await fs.readdir(chatPagesDir('local-only'))).toEqual([
+      '000001.json',
+      '000002.json',
+      '000003.json',
+    ])
+    const meta = await readJsonFile<{ localMessageCount: number; prunedBeforeCount?: number }>(
+      chatMetaPath('local-only')
+    )
+    expect(meta.localMessageCount).toBe(6)
+    expect(meta.prunedBeforeCount).toBeUndefined()
+  })
+
   it('updates messageCount in index after save', async () => {
     await store.createChat('agent-1', 'mc-1')
     await store.saveMessages('agent-1', 'mc-1', [
@@ -168,14 +314,22 @@ describe('messages', () => {
     })
   })
 
-  it('persists task_id and writes the v2 chat file (D.3)', async () => {
+  it('persists task_id and writes the paged chat cache', async () => {
     await store.createChat('agent-1', 'v2-1')
     await store.saveMessages('agent-1', 'v2-1', [
       { id: 'm1', role: 'user', content: 'hi', timestamp: 1, task_id: 'task-abc' },
     ])
-    const raw = await fs.readFile(join(tempDir, 'agent-1', 'v2-1.json'), 'utf-8')
-    const parsed = JSON.parse(raw)
-    expect(parsed.version).toBe(2)
+    const meta = await readJsonFile<{ version: number; pages: Array<{ file: string }> }>(
+      chatMetaPath('v2-1')
+    )
+    expect(meta.version).toBe(1)
+    expect(meta.pages.map(page => page.file)).toEqual(['000001.json'])
+    const page = await readJsonFile<{ messages: ChatMessage[] }>(
+      join(chatPagesDir('v2-1'), '000001.json')
+    )
+    expect(page.messages[0]!.task_id).toBe('task-abc')
+    await expect(fs.access(join(tempDir, 'agent-1', 'v2-1.json'))).rejects.toThrow()
+
     const messages = await store.loadMessages('agent-1', 'v2-1')
     expect(messages[0]!.task_id).toBe('task-abc')
   })
@@ -194,6 +348,8 @@ describe('messages', () => {
     const messages = await store.loadMessages('agent-1', 'legacy')
     expect(messages).toHaveLength(1)
     expect(messages[0]!.task_id).toBeUndefined()
+    await expect(fs.access(join(agentDir, 'legacy.json'))).rejects.toThrow()
+    await expect(fs.access(chatMetaPath('legacy'))).resolves.toBeUndefined()
   })
 })
 

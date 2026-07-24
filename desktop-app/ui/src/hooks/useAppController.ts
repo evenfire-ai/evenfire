@@ -46,6 +46,7 @@ import {
   type WorkflowSelectionState,
   createResetWorkflowSelection,
 } from './domain/useWorkflowController.types'
+import { scheduleAfterFirstPaint } from './scheduleAfterFirstPaint'
 
 const DENY_REASON_BY_SOURCE: Record<ApprovalDecisionTarget['source'], string> = {
   desktop_notification: 'Denied from desktop notification',
@@ -92,17 +93,6 @@ export async function loadWorkflowRunsWithArtifactsForApprovalRefresh(
     namespace: approval.recipeNamespace,
     name: approval.recipeName,
   })
-}
-
-export function scheduleAfterFirstPaint(task: () => Promise<unknown>): void {
-  const run = () => {
-    void task().catch(() => undefined)
-  }
-  if (typeof requestAnimationFrame === 'function') {
-    requestAnimationFrame(() => requestAnimationFrame(run))
-    return
-  }
-  setTimeout(run, 0)
 }
 
 export function useAppController() {

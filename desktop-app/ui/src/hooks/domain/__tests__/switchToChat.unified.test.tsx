@@ -254,6 +254,42 @@ describe('switchToChat (unified, D.4)', () => {
     )
   })
 
+  it('does not show older history for a complete exact-page-size local chat', async () => {
+    const cached = Array.from({ length: 40 }, (_, index) =>
+      turn(index + 1, `q${index + 1}`, `a${index + 1}`)
+    ).flatMap(t => [
+      { id: `turn-${t.number}-user`, role: 'user' as const, content: t.user_input, timestamp: 1 },
+      {
+        id: `turn-${t.number}-assistant`,
+        role: 'assistant' as const,
+        content: t.response!,
+        timestamp: 2,
+      },
+    ])
+    clerum.chat.loadMessages.mockImplementation(
+      async (_agentRef: string, _chatId: string, _limit?: number, offset?: number) =>
+        offset ? [] : cached
+    )
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'exact-page',
+      state: 'idle',
+      turns: [],
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'exact-page')
+    })
+
+    expect(clerum.chat.loadMessages).toHaveBeenCalledWith('agent-x', 'exact-page', 1, 80)
+    expect(result.current.chatMessages).toHaveLength(80)
+    expect(result.current.hasOlderMessages).toBe(false)
+  })
+
   it('adds a server-only chat to the sidebar when switched to directly (S4)', async () => {
     // chatList starts empty (default getIndex → no chats); simulate opening a
     // notification for a chat the local list doesn't know about.

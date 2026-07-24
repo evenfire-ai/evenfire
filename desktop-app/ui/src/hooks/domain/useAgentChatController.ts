@@ -107,6 +107,13 @@ function serverTurnNumber(message: AgentChatMessage): number | undefined {
   return match ? Number(match[1]) : undefined
 }
 
+function oldestServerTurnNumber(messages: AgentChatMessage[]): number | undefined {
+  return messages.reduce<number | undefined>((oldest, message) => {
+    const current = serverTurnNumber(message)
+    return current === undefined ? oldest : Math.min(oldest ?? current, current)
+  }, undefined)
+}
+
 function mergeUniqueMessages(
   existing: AgentChatMessage[],
   incoming: AgentChatMessage[],
@@ -667,9 +674,18 @@ export function useAgentChatController({
       const cached = await chatStore
         .loadMessages(agentRef, chatId, MESSAGE_PAGE_SIZE)
         .catch(() => [])
+      const oldestCachedTurn = oldestServerTurnNumber(cached as AgentChatMessage[])
+      const hasOlderServerMessages = Boolean(oldestCachedTurn && oldestCachedTurn > 1)
+      const hasOlderLocalMessages =
+        !hasOlderServerMessages &&
+        cached.length === MESSAGE_PAGE_SIZE &&
+        (await chatStore
+          .loadMessages(agentRef, chatId, 1, MESSAGE_PAGE_SIZE)
+          .then(messages => messages.length > 0)
+          .catch(() => false))
       if (!isStillActive()) return
       loadedLocalMessageCountRef.current = cached.length
-      setHasOlderMessages(cached.length === MESSAGE_PAGE_SIZE)
+      setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
       setChatMessages(cached as AgentChatMessage[])
       // Phase 1 rendered the cache → clear the blocking spinner. The reconcile
       // runs under the `syncing` indicator (RECONCILE_STARTED, dispatched by the
@@ -787,10 +803,7 @@ export function useAgentChatController({
         return
       }
 
-      const oldestTurn = chatMessages.reduce<number | undefined>((oldest, message) => {
-        const current = serverTurnNumber(message)
-        return current === undefined ? oldest : Math.min(oldest ?? current, current)
-      }, undefined)
+      const oldestTurn = oldestServerTurnNumber(chatMessages)
       if (oldestTurn === undefined || oldestTurn <= 1) {
         setHasOlderMessages(false)
         return

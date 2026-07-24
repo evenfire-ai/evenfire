@@ -1,19 +1,9 @@
 import { type MutableRefObject, useCallback, useEffect, useRef, useState } from 'react'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
 import type { ChatIndex, ChatMetadata, SessionsListResult } from '../../../../src/types'
+import { scheduleAfterFirstPaint } from '../scheduleAfterFirstPaint'
 import type { useChatStore } from '../useChatStore'
 import { type SessionFsmEvent, type SessionFsmStore, seedSessionSnapshots } from './sessionFsm'
-
-function scheduleAfterFirstPaint(task: () => Promise<unknown>): void {
-  const run = () => {
-    void task().catch(() => undefined)
-  }
-  if (typeof requestAnimationFrame === 'function') {
-    requestAnimationFrame(() => requestAnimationFrame(run))
-    return
-  }
-  setTimeout(run, 0)
-}
 
 /**
  * useChatListController (spec-v2 §4.4) — owns the whole sidebar chat-list

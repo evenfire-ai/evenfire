@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { scheduleAfterFirstPaint } from '../scheduleAfterFirstPaint'
 import {
   loadWorkflowRunsWithArtifactsForApprovalRefresh,
   loadWorkflowRunsWithArtifactsForWorkflowTarget,
-  scheduleAfterFirstPaint,
 } from '../useAppController'
 
 function installWorkflowHarness(runsResult: unknown) {
