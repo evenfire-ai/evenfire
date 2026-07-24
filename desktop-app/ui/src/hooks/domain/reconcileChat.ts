@@ -1,5 +1,5 @@
 import { parseTaskKey } from '@contexts/AgentTaskTrackerContext'
-import type { SessionMessagesResult } from '../../../../src/types'
+import type { SessionMessagesQuery, SessionMessagesResult } from '../../../../src/types'
 import type { SessionFsmStore } from './sessionFsm'
 
 /**
@@ -38,7 +38,11 @@ export type ReconcileOutcome =
 export interface ReconcileChatDeps {
   fsm: SessionFsmStore
   /** Fetch the durable server session state (turns + recovery fields). */
-  loadSessionMessages: (agentRef: string, chatId: string) => Promise<SessionMessagesResult>
+  loadSessionMessages: (
+    agentRef: string,
+    chatId: string,
+    query?: SessionMessagesQuery
+  ) => Promise<SessionMessagesResult>
   /**
    * Server reports a live (`processing`/`awaiting_approval`) task: seed the
    * snapshot and attach a stream via the coordinator. Returns the outcome
@@ -87,6 +91,8 @@ export interface ReconcileChatArgs {
   reason: string
   /** The task this reconcile is settling — drives the idle durable fallback. */
   taskIdHint?: string
+  /** Bounded page or delta request used by the authoritative transcript fetch. */
+  messagesQuery?: SessionMessagesQuery
   /**
    * Per-call relevance guard (in addition to the dep-level `isStillRelevant` and
    * the `reset()` generation). A `switchToChat`-initiated reconcile passes the
@@ -147,12 +153,13 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
   async function fetchWithRetry(
     agentRef: string,
     chatId: string,
-    stillRelevant: () => boolean
+    stillRelevant: () => boolean,
+    query?: SessionMessagesQuery
   ): Promise<SessionMessagesResult | undefined> {
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (!stillRelevant()) return undefined
       try {
-        return await deps.loadSessionMessages(agentRef, chatId)
+        return await deps.loadSessionMessages(agentRef, chatId, query)
       } catch (err) {
         // Non-network (404, etc.) rethrows to the branch handler; a network blip
         // is retried with backoff up to the cap (mirrors switchToChat P2-A).
@@ -179,7 +186,7 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
     deps.fsm.dispatch(chatKey, { type: 'RECONCILE_STARTED' })
     let outcome: ReconcileOutcome = 'noop'
     try {
-      const resp = await fetchWithRetry(agentRef, chatId, stillRelevant)
+      const resp = await fetchWithRetry(agentRef, chatId, stillRelevant, args.messagesQuery)
       if (!resp) {
         outcome = 'noop'
         return outcome

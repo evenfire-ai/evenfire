@@ -70,7 +70,13 @@ describe('useAgentChatController — characterization (D.0)', () => {
 
       expect(clerum.chat.setLastActive).toHaveBeenCalledWith('agent-x', 'chat-1')
       // Phase 2 now always reconciles with the server.
-      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1')
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+        'agent-x',
+        'agent-x',
+        'chat-1',
+        undefined,
+        { limit: 80 }
+      )
       // Cache was up to date → no overwrite, no rejoin.
       expect(clerum.chat.replaceMessages).not.toHaveBeenCalled()
       expect(result.current.chatMessages).toHaveLength(3)
@@ -100,7 +106,13 @@ describe('useAgentChatController — characterization (D.0)', () => {
         await result.current.switchToChat('agent-x', 'chat-2')
       })
 
-      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-2')
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+        'agent-x',
+        'agent-x',
+        'chat-2',
+        undefined,
+        { limit: 80 }
+      )
       expect(clerum.chat.create).toHaveBeenCalledWith('agent-x', 'chat-2')
       // Server is source of truth → replace, not append.
       expect(clerum.chat.replaceMessages).toHaveBeenCalled()
@@ -725,8 +737,8 @@ describe('useAgentChatController — characterization (D.0)', () => {
         })
       })
 
-      // The durable reply lands; no error/resend, no zombie blocking the replace.
-      await waitFor(() => expect(clerum.chat.replaceMessages).toHaveBeenCalled())
+      // The durable reply lands as a delta; no error/resend and no zombie block.
+      await waitFor(() => expect(clerum.chat.appendMessages).toHaveBeenCalled())
       expect(spies.pushToast).not.toHaveBeenCalledWith(expect.stringContaining('failed'), 'error')
       expect(result.current.failedAgentSend).toBeNull()
       await sendPromise

@@ -62,6 +62,8 @@ export type AgentChatMessage = {
   role: AgentChatRole
   content: string
   timestamp: number
+  /** Authoritative server turn ordinal used for delta reconciliation and paging. */
+  serverTurnNumber?: number
   /** mcp-host task that produced/owns this message — used to rejoin after reload (D.3, v2). */
   task_id?: string
   attachments?: ChatMessageAttachment[]

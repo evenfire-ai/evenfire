@@ -63,8 +63,14 @@ describe('switchToChat (unified, D.4)', () => {
       await result.current.switchToChat('agent-x', 'c1')
     })
 
-    expect(clerum.chat.loadMessages).toHaveBeenCalledWith('agent-x', 'c1', undefined, undefined)
-    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c1')
+    expect(clerum.chat.loadMessages).toHaveBeenCalledWith('agent-x', 'c1', 80, undefined)
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'agent-x',
+      'c1',
+      undefined,
+      { limit: 80, afterTurn: 1 }
+    )
     expect(clerum.chat.replaceMessages).not.toHaveBeenCalled()
     expect(result.current.chatMessages).toHaveLength(2)
   })
@@ -100,7 +106,7 @@ describe('switchToChat (unified, D.4)', () => {
     expect(result.current.chatMessages).toHaveLength(60)
   })
 
-  it('Phase 2 overwrites a stale cache when the server has more turns and persists via replace', async () => {
+  it('Phase 2 appends only the missing server delta to a durable-ID cache', async () => {
     clerum.chat.loadMessages.mockResolvedValue([
       { id: 'turn-1-user', role: 'user' as const, content: 'q1', timestamp: 1 },
     ])
@@ -118,10 +124,133 @@ describe('switchToChat (unified, D.4)', () => {
     })
 
     expect(result.current.chatMessages).toHaveLength(4)
-    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
+    expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
       'agent-x',
       'c2',
       expect.arrayContaining([expect.objectContaining({ id: 'turn-2-assistant' })])
+    )
+  })
+
+  it('follows server delta pages until the active chat reaches the latest revision', async () => {
+    clerum.chat.loadMessages.mockResolvedValue([
+      { id: 'turn-1-user', role: 'user' as const, content: 'q1', timestamp: 1 },
+      { id: 'turn-1-assistant', role: 'assistant' as const, content: 'a1', timestamp: 2 },
+    ])
+    clerum.rpc.loadSessionMessages
+      .mockResolvedValueOnce({
+        agent: 'agent-x',
+        chatId: 'delta-pages',
+        state: 'idle',
+        totalTurns: 3,
+        latestTurnNumber: 2,
+        hasMoreAfter: true,
+        turns: [turn(2, 'q2', 'a2')],
+      })
+      .mockResolvedValueOnce({
+        agent: 'agent-x',
+        chatId: 'delta-pages',
+        state: 'idle',
+        totalTurns: 3,
+        latestTurnNumber: 3,
+        hasMoreAfter: false,
+        turns: [turn(3, 'q3', 'a3')],
+      })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'delta-pages')
+    })
+
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenNthCalledWith(
+      1,
+      'agent-x',
+      'agent-x',
+      'delta-pages',
+      undefined,
+      { limit: 80, afterTurn: 1 }
+    )
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenNthCalledWith(
+      2,
+      'agent-x',
+      'agent-x',
+      'delta-pages',
+      undefined,
+      { limit: 80, afterTurn: 2 }
+    )
+    expect(result.current.chatMessages).toHaveLength(6)
+    expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'delta-pages',
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'turn-2-assistant' }),
+        expect.objectContaining({ id: 'turn-3-assistant' }),
+      ])
+    )
+  })
+
+  it('loads older history on demand and prepends it without blocking first render', async () => {
+    const newestLocalPage = Array.from({ length: 80 }, (_, index) => ({
+      id: `turn-${index + 21}-user`,
+      role: 'user' as const,
+      content: `q${index + 21}`,
+      timestamp: index + 21,
+    }))
+    clerum.chat.loadMessages.mockImplementation(
+      async (_agentRef: string, _chatId: string, _limit?: number, offset?: number) =>
+        offset ? [] : newestLocalPage
+    )
+    clerum.rpc.loadSessionMessages
+      .mockResolvedValueOnce({
+        agent: 'agent-x',
+        chatId: 'older-pages',
+        state: 'idle',
+        totalTurns: 100,
+        hasMoreBefore: true,
+        hasMoreAfter: false,
+        turns: [],
+      })
+      .mockResolvedValueOnce({
+        agent: 'agent-x',
+        chatId: 'older-pages',
+        state: 'idle',
+        totalTurns: 100,
+        oldestTurnNumber: 1,
+        latestTurnNumber: 20,
+        hasMoreBefore: false,
+        hasMoreAfter: true,
+        turns: Array.from({ length: 20 }, (_, index) =>
+          turn(index + 1, `q${index + 1}`, `a${index + 1}`)
+        ),
+      })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'older-pages')
+    })
+
+    expect(result.current.chatMessages).toHaveLength(80)
+    expect(result.current.hasOlderMessages).toBe(true)
+
+    await act(async () => {
+      await result.current.handleLoadOlderMessages()
+    })
+
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenLastCalledWith(
+      'agent-x',
+      'agent-x',
+      'older-pages',
+      undefined,
+      { limit: 80, beforeTurn: 21 }
+    )
+    expect(result.current.chatMessages).toHaveLength(120)
+    expect(result.current.chatMessages[0]?.id).toBe('turn-1-user')
+    expect(result.current.hasOlderMessages).toBe(false)
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'older-pages',
+      expect.arrayContaining([expect.objectContaining({ id: 'turn-1-assistant' })])
     )
   })
 
@@ -436,9 +565,9 @@ describe('switchToChat (unified, D.4)', () => {
       await result.current.switchToChat('agent-x', 'z1')
     })
 
-    // With the zombie acked, the replace lands and both messages render.
+    // With the zombie acked, the missing durable assistant message is appended.
     expect(result.current.chatMessages).toHaveLength(2)
-    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
+    expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
       'agent-x',
       'z1',
       expect.arrayContaining([expect.objectContaining({ id: 'turn-1-assistant' })])
@@ -527,9 +656,9 @@ describe('switchToChat (unified, D.4)', () => {
       await result.current.switchToChat('agent-x', 'pa')
     })
 
-    // The retry landed the durable reply: replace fired, zombie acked, NOT offline.
+    // The retry landed the durable reply: delta appended, zombie acked, NOT offline.
     expect(result.current.chatMessages).toHaveLength(2)
-    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
+    expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
       'agent-x',
       'pa',
       expect.arrayContaining([expect.objectContaining({ id: 'turn-1-assistant' })])
@@ -649,9 +778,9 @@ describe('switchToChat (unified, D.4)', () => {
       await sw
     })
 
-    // The residual (task-pb) was acked and the durable reply replaced the cache.
+    // The residual was acked and the durable reply was appended to the cache.
     expect(result.current.chatMessages).toHaveLength(2)
-    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
+    expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
       'agent-x',
       'pb',
       expect.arrayContaining([expect.objectContaining({ id: 'turn-1-assistant' })])

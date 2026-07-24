@@ -71,7 +71,13 @@ describe('pendingChatSelection effect', () => {
     })
 
     await waitFor(() => expect(result.current.activeChatId).toBe('c-latest'))
-    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-latest')
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'agent-x',
+      'c-latest',
+      undefined,
+      { limit: 80 }
+    )
   })
 
   it('latest → overrides an older visible chat when explicitly requested', async () => {
@@ -99,7 +105,13 @@ describe('pendingChatSelection effect', () => {
     })
 
     await waitFor(() => expect(result.current.activeChatId).toBe('c-newest'))
-    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-newest')
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'agent-x',
+      'c-newest',
+      undefined,
+      { limit: 80 }
+    )
   })
 
   it('latest → does not override a chat auto-created while the list load is in flight', async () => {
@@ -190,7 +202,9 @@ describe('pendingChatSelection effect', () => {
       expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
         'agent-x',
         'agent-x',
-        'c-specific'
+        'c-specific',
+        undefined,
+        { limit: 80 }
       )
     )
     await waitFor(() => expect(result.current.activeChatId).toBe('c-specific'))

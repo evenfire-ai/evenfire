@@ -27,6 +27,7 @@ export function turnsToChatMessages(turns: ServerTurn[]): ChatMessage[] {
       role: 'user',
       content: userDisplay.content,
       timestamp: Date.parse(t.started_at),
+      serverTurnNumber: t.number,
       ...(userDisplay.attachments.length ? { attachments: userDisplay.attachments } : {}),
     })
     if (t.response !== undefined) {
@@ -37,6 +38,7 @@ export function turnsToChatMessages(turns: ServerTurn[]): ChatMessage[] {
         role: 'assistant',
         content: t.response,
         timestamp: Date.parse(t.completed_at ?? t.started_at),
+        serverTurnNumber: t.number,
         ...(t.tokens ? { tokens: t.tokens } : {}),
         // #582: carry the turn's tools so the progress stepper's "N tools" view
         // survives a reload / cold-load (live SSE steps are renderer-only).

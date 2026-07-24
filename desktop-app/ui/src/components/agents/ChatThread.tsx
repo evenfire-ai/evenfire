@@ -180,6 +180,9 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
     activeMessages,
     groupedMessages,
     chatMessagesLoading,
+    hasOlderMessages,
+    olderMessagesLoading,
+    handleLoadOlderMessages,
     activeChatId,
     activityByMessageId,
     progressByMessageId,
@@ -448,6 +451,19 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
       data-testid="message-list"
       className={`chat-thread ${isDedicatedAgentView ? 'chat-thread-dedicated' : ''}`}
     >
+      {activeChatId && hasOlderMessages && (
+        <div className="chat-history-page-control">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={olderMessagesLoading}
+            onClick={() => void handleLoadOlderMessages()}
+          >
+            {olderMessagesLoading ? 'Loading older messages...' : 'Load older messages'}
+          </Button>
+        </div>
+      )}
       {activeChatId &&
         groupedWithKeys.map((group, groupIndex) => {
           const prevGroup = groupIndex > 0 ? groupedWithKeys[groupIndex - 1] : null
