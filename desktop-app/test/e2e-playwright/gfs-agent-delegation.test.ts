@@ -411,6 +411,67 @@ async function grantAgentAccessViaManageModal(
   ).toBeVisible({ timeout: 20_000 })
 }
 
+/**
+ * Bulk multi-agent grant — the #159 feature under test (`subjects[]`). Selects
+ * EVERY named agent so they are all pressed SIMULTANEOUSLY before a single
+ * "Grant agent access" press, which the UI turns into ONE atomic
+ * `ctrl.grant(subjects[], bits, inherit)` PUT. The plural toast ("Access
+ * granted to N agents") is only emitted when the whole batch succeeds as a
+ * unit, and list-after-write must then show a Revoke row for every grantee
+ * (the grants GET returned all N). Read-only + directory-default inherit ON,
+ * asserted, never toggled. Cardinality ≥2 is the whole point: at N=1 this path
+ * is indistinguishable from the pre-#159 one-PUT-per-subject behaviour.
+ */
+async function grantMultipleAgentsViaManageModal(
+  page: Page,
+  dialog: Locator,
+  opts: { agentNames: string[] }
+): Promise<void> {
+  if (opts.agentNames.length < 2) {
+    throw new Error('grantMultipleAgentsViaManageModal requires ≥2 agents to exercise subjects[]')
+  }
+  const agentSection = dialog.locator('.da-gfs-agent-access')
+  await expect(agentSection).toBeVisible({ timeout: 20_000 })
+  const agentGroup = agentSection.getByRole('group', { name: 'My agents' })
+  await expect(agentGroup).toBeVisible({ timeout: 20_000 })
+  // Select each agent; each toggle must stick without clearing the earlier ones.
+  for (const name of opts.agentNames) {
+    const target = agentGroup.getByRole('button', { name, exact: true })
+    await expect(target).toBeVisible({ timeout: 20_000 })
+    await target.click()
+    await expect(target).toHaveAttribute('aria-pressed', 'true')
+  }
+  // The load-bearing assertion for the bulk path: ALL selected agents remain
+  // pressed at the SAME time — that simultaneity is what makes the single Grant
+  // a subjects[] batch of N rather than N separate one-subject grants.
+  for (const name of opts.agentNames) {
+    await expect(agentGroup.getByRole('button', { name, exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
+  }
+  // Read-only default kept; directory inherit default ON, asserted not toggled.
+  await expect(agentSection.getByRole('button', { name: 'Read', exact: true })).toBeVisible()
+  await expect(
+    agentSection.getByRole('checkbox', { name: 'Include contents of this folder' })
+  ).toBeChecked()
+  // ONE press → one atomic PUT carrying subjects:[…N…].
+  await agentSection.getByRole('button', { name: 'Grant agent access', exact: true }).click()
+  // Plural toast proves the batch was accepted as a unit (singular would mean the
+  // multi-select collapsed to one subject — the exact regression this guards).
+  await expect(
+    page
+      .getByText(`Access granted to ${opts.agentNames.length} agents`, { exact: true })
+      .first()
+  ).toBeVisible({ timeout: 20_000 })
+  // list-after-write: every grantee now has a Revoke row (grants GET returned all N).
+  for (const name of opts.agentNames) {
+    await expect(
+      dialog.getByRole('button', { name: `Revoke access for ${name}`, exact: true })
+    ).toBeVisible({ timeout: 20_000 })
+  }
+}
+
 test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enforcement (Addendum 1)', () => {
   test.describe.configure({ mode: 'serial' })
   let fixtures: AgentGfsDelegationFixtures
@@ -654,6 +715,81 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
         const grantsB = getGfsHostGrantsUnderTree(fixtures.folder.resourceId, fixtures.agentB.subjectId)
         expect(grantsB).toHaveLength(1)
         expect(grantsB[0]!.permissions).toEqual(['read'])
+      })
+    } finally {
+      await app.close()
+    }
+  })
+})
+
+/**
+ * E2E — the #159 headline capability the journey above never exercises: an
+ * ATOMIC bulk grant to MULTIPLE agents in one request (`subjects[]`). The
+ * pre/post journey grants one agent at a time (cardinality 1), which is
+ * behaviourally identical to the pre-#159 one-PUT-per-subject path; a broken
+ * bulk aggregation would still let it pass. This suite drives the real
+ * multi-select UI (≥2 agents pressed simultaneously) into a single Grant and
+ * asserts business-truth from the database: exactly one read grant row per
+ * agent, both produced by the one action.
+ */
+test.describe('GFS per-agent delegation: atomic bulk grant to multiple agents (#159 subjects[])', () => {
+  test.describe.configure({ mode: 'serial' })
+  let fixtures: AgentGfsDelegationFixtures
+
+  test.beforeAll(() => {
+    // Fail-loud infra guard first, then a FRESH folder (its own uniqueGfsFixture
+    // name) with zero host grants so the bulk grant's DB truth is unambiguous.
+    assertGfsInfraHealthy()
+    fixtures = seedAgentGfsDelegationFixtures(OWNER_EMAIL)
+  })
+
+  test.afterAll(() => fixtures?.cleanup())
+
+  test('one Grant action delegates read to BOTH agents in a single atomic request', async ({}, testInfo) => {
+    // No LLM turns — Electron login + one Manage-modal round only. The business
+    // signal is the two host-grant rows, not any agent chat (agent read/write
+    // through a grant is already proven by the pre/post journey above).
+    testInfo.setTimeout(600_000)
+    // Precondition truth: neither agent holds a grant on the fresh folder, so
+    // the two rows asserted afterwards can only come from the bulk action.
+    expect(
+      getGfsHostGrantsUnderTree(fixtures.folder.resourceId, fixtures.agentA.subjectId)
+    ).toHaveLength(0)
+    expect(
+      getGfsHostGrantsUnderTree(fixtures.folder.resourceId, fixtures.agentB.subjectId)
+    ).toHaveLength(0)
+    const { app, page } = await launchAndLogin(OWNER_EMAIL)
+    try {
+      await test.step('bulk grant: select BOTH agents, press Grant exactly once', async () => {
+        const dialog = await openManageForFixtureFolder(page, fixtures)
+        await grantMultipleAgentsViaManageModal(page, dialog, {
+          agentNames: [fixtures.agentA.name, fixtures.agentB.name],
+        })
+        await closeManageDialog(page, dialog)
+      })
+
+      await test.step('business truth: one read grant per agent from the single request', async () => {
+        // The atomic subjects:[A,B] PUT must have produced EXACTLY one host grant
+        // row for EACH agent — read-only, inherit true, on the fixture folder. If
+        // the bulk collapsed to the first subject, agent B would have zero rows
+        // here and this fails; if it silently escalated the cap, permissions
+        // would not equal ['read'].
+        const grantsA = getGfsHostGrantsUnderTree(
+          fixtures.folder.resourceId,
+          fixtures.agentA.subjectId
+        )
+        const grantsB = getGfsHostGrantsUnderTree(
+          fixtures.folder.resourceId,
+          fixtures.agentB.subjectId
+        )
+        expect(grantsA).toHaveLength(1)
+        expect(grantsB).toHaveLength(1)
+        expect(grantsA[0]!.resourceId).toBe(fixtures.folder.resourceId)
+        expect(grantsB[0]!.resourceId).toBe(fixtures.folder.resourceId)
+        expect(grantsA[0]!.permissions).toEqual(['read'])
+        expect(grantsB[0]!.permissions).toEqual(['read'])
+        expect(grantsA[0]!.inherit).toBe(true)
+        expect(grantsB[0]!.inherit).toBe(true)
       })
     } finally {
       await app.close()
