@@ -128,11 +128,17 @@ describeRealPostgres('GFS blob reconciliation on real PostgreSQL + on-disk BlobS
     expect(existsSync(blobPath)).toBe(true)
     expect(await manifestExists(written.blobKey)).toBe(true)
 
-    const { metrics } = metricsStub()
-    const result = await reconcileExpiredBlobs(manifests, blobs, metrics, { olderThanMs: 1000, limit: 16 })
+    const recorder = metricsStub()
+    const result = await reconcileExpiredBlobs(manifests, blobs, recorder.metrics, {
+      olderThanMs: 1000,
+      limit: 16,
+    })
 
     expect(result.deleted).toBe(1)
     expect(result.failures).toBe(0)
+    // Read the recording stub too: the reconciler's failure metric must stay
+    // untouched, not just its returned tally.
+    expect(recorder.failures).toBe(0)
     // Business-truth: the bytes are gone from the PVC and the manifest row is gone.
     expect(existsSync(blobPath)).toBe(false)
     expect(await manifestExists(written.blobKey)).toBe(false)
@@ -164,13 +170,19 @@ describeRealPostgres('GFS blob reconciliation on real PostgreSQL + on-disk BlobS
     await ageCandidate(written.blobKey)
 
     const blobPath = resolveBlobKeyPath(blobRoot, written.blobKey)
-    const { metrics } = metricsStub()
-    const result = await reconcileExpiredBlobs(manifests, blobs, metrics, { olderThanMs: 1000, limit: 16 })
+    const recorder = metricsStub()
+    const result = await reconcileExpiredBlobs(manifests, blobs, recorder.metrics, {
+      olderThanMs: 1000,
+      limit: 16,
+    })
 
     // The real NOT EXISTS predicate must exclude the referenced blob from the
     // delete claim, so no bytes are deleted and the bytes survive on the PVC.
     expect(result.deleted).toBe(0)
     expect(result.failures).toBe(0)
+    // Read the recording stub too: the reconciler's failure metric must stay
+    // untouched, not just its returned tally.
+    expect(recorder.failures).toBe(0)
     // Business-truth that matters: the bytes are protected.
     expect(existsSync(blobPath)).toBe(true)
     // The now-redundant staged manifest IS metadata-GC'd by removeCommittedMetadata
@@ -198,11 +210,17 @@ describeRealPostgres('GFS blob reconciliation on real PostgreSQL + on-disk BlobS
     await ageCandidate(legacyBlobKey)
 
     expect(existsSync(legacyPath)).toBe(true)
-    const { metrics } = metricsStub()
-    const result = await reconcileExpiredBlobs(manifests, blobs, metrics, { olderThanMs: 1000, limit: 16 })
+    const recorder = metricsStub()
+    const result = await reconcileExpiredBlobs(manifests, blobs, recorder.metrics, {
+      olderThanMs: 1000,
+      limit: 16,
+    })
 
     expect(result.deleted).toBe(1)
     expect(result.failures).toBe(0)
+    // Read the recording stub too: the reconciler's failure metric must stay
+    // untouched, not just its returned tally.
+    expect(recorder.failures).toBe(0)
     // Business-truth: the flat legacy bytes are gone and the manifest row is gone.
     expect(existsSync(legacyPath)).toBe(false)
     expect(await manifestExists(legacyBlobKey)).toBe(false)
