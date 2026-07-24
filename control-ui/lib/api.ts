@@ -100,24 +100,24 @@ function formatApiError(res: Response, text: string): Error {
           ? 'This admin invitation is invalid or expired.'
           : detail === 'member password must be between 8 and 256 characters'
             ? 'Desktop App password must be between 8 and 256 characters.'
-              : detail === 'password must be between 8 and 256 characters'
-                ? 'Password must be between 8 and 256 characters.'
-                : detail === 'precondition_failed'
-                  ? 'This item changed since it was loaded. Reload the page, review the latest state, and try again.'
-                  : detail === 'agent_grant_precondition_required'
-                    ? 'Agent access could not be updated because the page did not include its current access state. Reload the page and try again.'
-                    : detail === 'deleted_agent_history_limit_exceeded'
-                      ? 'Agent access was not updated because the deleted-agent history limit was reached. No existing history was removed. Reload the page, review the current access, and try again.'
-                      : // Exact match is correct HERE: control-ui calls control-api directly,
-                // so a member-registration 503 arrives as the bare { error: '<code>' }
-                // body. profile-ui reaches these same codes through external-rest-api,
-                // whose error middleware wraps any 5xx into { message: '...: <code>' },
-                // so it must use .includes() instead — the two matchers differ on purpose.
-                detail === 'member_registration_unavailable'
-                ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
-                : detail === 'member_registration_misconfigured'
-                  ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
-                  : detail
+            : detail === 'password must be between 8 and 256 characters'
+              ? 'Password must be between 8 and 256 characters.'
+              : detail === 'precondition_failed'
+                ? 'This item changed since it was loaded. Reload the page, review the latest state, and try again.'
+                : detail === 'agent_grant_precondition_required'
+                  ? 'Agent access could not be updated because the page did not include its current access state. Reload the page and try again.'
+                  : detail === 'deleted_agent_history_limit_exceeded'
+                    ? 'Agent access was not updated because the deleted-agent history limit was reached. No existing history was removed. Reload the page, review the current access, and try again.'
+                    : // Exact match is correct HERE: control-ui calls control-api directly,
+                      // so a member-registration 503 arrives as the bare { error: '<code>' }
+                      // body. profile-ui reaches these same codes through external-rest-api,
+                      // whose error middleware wraps any 5xx into { message: '...: <code>' },
+                      // so it must use .includes() instead — the two matchers differ on purpose.
+                      detail === 'member_registration_unavailable'
+                        ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
+                        : detail === 'member_registration_misconfigured'
+                          ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
+                          : detail
   const error = new Error(`${res.status} ${res.statusText} - ${friendlyDetail}`)
   ;(error as Error & { status?: number }).status = res.status
   // Preserve the machine-readable error code and full JSON body so callers can
