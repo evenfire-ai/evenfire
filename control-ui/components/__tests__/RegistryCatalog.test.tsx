@@ -235,7 +235,12 @@ describe('RegistryCatalog expansion and actions', () => {
   it('installs a plugin from the plugins tab', async () => {
     navigation.pathname = '/marketplace/plugins'
     mockApiSuccess()
-    vi.mocked(api.installRecipeFromRegistry).mockResolvedValue({ installed: true })
+    vi.mocked(api.installRecipeFromRegistry).mockResolvedValue({
+      recipeName: 'market-report',
+      registryEntry: 'market-report',
+      registryVersion: '1.0.0',
+      correlationId: 'test-correlation',
+    })
     render(<RegistryCatalog />)
     const row = (await screen.findByText('market-report')).closest('tr')!
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Response as ExpressResponse } from 'express'
-import type { ResolvedServerConnection } from '../../types.js'
+import type { ResolvedServerConnection, RpcAccessClaims, RpcScope } from '../../types.js'
 import type { HostWakeApiResponse } from '../controlApiRestService.js'
 import {
   WakeAndHoldCoordinator,
@@ -33,18 +33,38 @@ function makeCoordinator(overrides?: Partial<WakeCoordinatorDeps>): {
     maxHoldMs: MAX_HOLD_MS,
     pollMs: POLL_MS,
     retriggerMs: RETRIGGER_MS,
-    maxTrackedHosts: 1_000,
+    maxTrackedCoordinations: 1_000,
     ...overrides,
   })
   return { coordinator, requestWake, probeReady }
 }
 
-function holdParams(overrides?: { hostRef?: string; tokenExpMs?: number }) {
+// Wake-capable by default (§11.2): the branch-matrix below asserts a wake IS
+// triggered, which now requires the caller to carry host:wake:write + the
+// target hostRef. `tokenExpMs` drives claims.exp so the token-TTL cases still
+// exercise the hold budget.
+function holdClaims(hostRef: string, tokenExpMs: number, scopes?: RpcScope[]): RpcAccessClaims {
   return {
-    hostRef: overrides?.hostRef ?? 'chatllm',
+    sub: 'user-1',
+    typ: 'user',
+    accessScope: 'team',
+    teamId: 'team-1',
+    scopes: scopes ?? ['host:wake:write', 'host:message:invoke'],
+    hostRefs: [hostRef],
+    jti: 'jti-1',
+    iat: 1,
+    exp: Math.floor(tokenExpMs / 1000),
+  }
+}
+
+function holdParams(overrides?: { hostRef?: string; tokenExpMs?: number; scopes?: RpcScope[] }) {
+  const hostRef = overrides?.hostRef ?? 'chatllm'
+  const tokenExpMs = overrides?.tokenExpMs ?? Date.now() + 3_600_000
+  return {
+    hostRef,
     host: HOST,
+    claims: holdClaims(hostRef, tokenExpMs, overrides?.scopes),
     rpcAccessToken: 'rpc-token',
-    tokenExpMs: overrides?.tokenExpMs ?? Date.now() + 3_600_000,
   }
 }
 
@@ -75,7 +95,7 @@ describe('WakeAndHoldCoordinator branch matrix', () => {
     expect(requestWake).toHaveBeenCalledTimes(1)
     expect(requestWake).toHaveBeenCalledWith('chatllm', 'rpc-token')
     expect(probeReady).not.toHaveBeenCalled()
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('200 active with wakeGeneration (drain-cancel) also resolves proceed immediately', async () => {
@@ -85,7 +105,7 @@ describe('WakeAndHoldCoordinator branch matrix', () => {
     const outcome = await coordinator.hold(holdParams())
 
     expect(outcome.kind).toBe('proceed')
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('202 wake-requested holds, polls readiness, and proceeds when the host is up', async () => {
@@ -96,13 +116,13 @@ describe('WakeAndHoldCoordinator branch matrix', () => {
     const pending = coordinator.hold(holdParams())
     await vi.advanceTimersByTimeAsync(POLL_MS) // first probe: not ready
     expect(probeReady).toHaveBeenCalledTimes(1)
-    expect(coordinator.trackedHostCount()).toBe(1)
+    expect(coordinator.trackedCoordinationCount()).toBe(1)
     await vi.advanceTimersByTimeAsync(POLL_MS) // second probe: ready
 
     const outcome = await pending
     expect(outcome).toEqual({ kind: 'proceed', lastKnownState: 'wake-requested' })
     expect(probeReady).toHaveBeenCalledTimes(2)
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('409 not-stateless resolves legacy (today error path)', async () => {
@@ -144,7 +164,7 @@ describe('WakeAndHoldCoordinator branch matrix', () => {
     const outcome = await coordinator.hold(holdParams())
 
     expect(outcome).toEqual({ kind: 'legacy', reason: 'wake-endpoint-unreachable' })
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 })
 
@@ -172,7 +192,7 @@ describe('bounded hold', () => {
       lastKnownState: 'wake-requested',
     })
     // Waiter release evicts the whole entry: no residual poll/retrigger/TTL timers.
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 })
 
@@ -188,7 +208,7 @@ describe('token TTL', () => {
 
     const outcome = await pending
     expect(outcome).toMatchObject({ kind: 'waking', reason: 'token-expiring' })
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('rejects an already-expiring token synchronously without calling the wake endpoint', async () => {
@@ -212,7 +232,7 @@ describe('local dedup', () => {
       coordinator.hold(holdParams()),
       coordinator.hold(holdParams()),
     ]
-    expect(coordinator.trackedHostCount()).toBe(1)
+    expect(coordinator.trackedCoordinationCount()).toBe(1)
 
     await vi.advanceTimersByTimeAsync(POLL_MS) // shared probe #1
     expect(probeReady).toHaveBeenCalledTimes(1)
@@ -224,11 +244,11 @@ describe('local dedup', () => {
     }
     expect(requestWake).toHaveBeenCalledTimes(1)
     expect(probeReady).toHaveBeenCalledTimes(2)
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('evicts the oldest host loudly when the tracked-host cap is exceeded', async () => {
-    const { coordinator, requestWake, probeReady } = makeCoordinator({ maxTrackedHosts: 2 })
+    const { coordinator, requestWake, probeReady } = makeCoordinator({ maxTrackedCoordinations: 2 })
     requestWake.mockResolvedValue({ kind: 'wake-requested', wakeGeneration: 1 })
     probeReady.mockResolvedValue(false)
 
@@ -236,19 +256,19 @@ describe('local dedup', () => {
     await vi.advanceTimersByTimeAsync(1)
     const second = coordinator.hold(holdParams({ hostRef: 'host-b' }))
     await vi.advanceTimersByTimeAsync(1)
-    expect(coordinator.trackedHostCount()).toBe(2)
+    expect(coordinator.trackedCoordinationCount()).toBe(2)
 
     const third = coordinator.hold(holdParams({ hostRef: 'host-c' }))
 
     const firstOutcome = await first
     expect(firstOutcome).toMatchObject({ kind: 'waking', reason: 'capacity-evicted' })
-    expect(coordinator.trackedHostCount()).toBe(2)
+    expect(coordinator.trackedCoordinationCount()).toBe(2)
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('wake-hold capacity exceeded'))
 
     // Release the survivors so afterEach can assert zero dangling timers.
     await vi.advanceTimersByTimeAsync(MAX_HOLD_MS)
     await Promise.all([second, third])
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('waiter-deadline expiry evicts an empty entry (TTL semantics), stopping all loops', async () => {
@@ -260,7 +280,7 @@ describe('local dedup', () => {
     await vi.advanceTimersByTimeAsync(MAX_HOLD_MS)
     await pending
 
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
     // Poll/retrigger loops stopped with the entry: advancing time makes no calls.
     const probeCalls = probeReady.mock.calls.length
     const wakeCalls = requestWake.mock.calls.length
@@ -284,6 +304,38 @@ describe('kill-switch and poll-source failure while held', () => {
     await pending
   })
 
+  it('skips a retrigger whose wake authorization has expired, keeps holding, and does not settle', async () => {
+    // Drive the guard through the class's OWN injectable clock (deps.now, read
+    // via this.now()) rather than mutating global time. That is how the rest of
+    // this suite controls time, and it keeps the guard's predicate observable
+    // without a wall-clock side effect.
+    let clockMs = Date.now()
+    const { coordinator, requestWake, probeReady } = makeCoordinator({ now: () => clockMs })
+    requestWake.mockResolvedValue({ kind: 'wake-requested', wakeGeneration: 1 })
+    probeReady.mockResolvedValue(false)
+
+    const tokenExpMs = clockMs + 60_000
+    const pending = coordinator.hold(holdParams({ tokenExpMs }))
+    expect(requestWake).toHaveBeenCalledTimes(1) // initial wake only
+
+    // Drive the guard's precondition: the retrigger tick lands AFTER the wake
+    // authorization expired. Advancing the injected clock without advancing the
+    // timer queue models a blocked event loop / scheduler delay — the entry is
+    // still unsettled and holding, but its token is now inside the safety margin.
+    clockMs = tokenExpMs - 1_000
+    await vi.advanceTimersByTimeAsync(RETRIGGER_MS)
+
+    // The doomed POST is NOT spent...
+    expect(requestWake).toHaveBeenCalledTimes(1)
+    // ...and the hold survives: the entry is still tracked, not settled, so the
+    // readiness poll can still release this waiter.
+    expect(coordinator.trackedCoordinationCount()).toBe(1)
+
+    // Drain: let the hold reach its deadline so the pending promise resolves.
+    await vi.advanceTimersByTimeAsync(MAX_HOLD_MS)
+    await pending
+  })
+
   it('releases held requests via the legacy path when the wake endpoint turns 409 mid-hold', async () => {
     const { coordinator, requestWake, probeReady } = makeCoordinator()
     requestWake
@@ -296,7 +348,7 @@ describe('kill-switch and poll-source failure while held', () => {
 
     const outcome = await pending
     expect(outcome).toEqual({ kind: 'legacy', reason: 'not-stateless' })
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('releases held requests when the host becomes ready mid-hold', async () => {
@@ -321,7 +373,7 @@ describe('kill-switch and poll-source failure while held', () => {
 
     const outcome = await pending
     expect(outcome).toMatchObject({ kind: 'waking', reason: 'max-hold-exceeded' })
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('a failing retrigger keeps the hold alive until the deadline instead of crashing it', async () => {
@@ -429,12 +481,13 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
       respondLegacy?: (error: unknown) => void
     }
   ) {
+    const hostRef = overrides?.hostRef ?? 'chatllm'
     return {
       res: res as unknown as ExpressResponse,
-      hostRef: overrides?.hostRef ?? 'chatllm',
+      hostRef,
       host: overrides?.host ?? HOST,
+      claims: holdClaims(hostRef, Date.now() + 3_600_000),
       rpcAccessToken: 'rpc-token',
-      tokenExpMs: Date.now() + 3_600_000,
       attemptUpstream,
       respondLegacy:
         overrides?.respondLegacy ??
@@ -460,7 +513,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     await pending
     expect(attemptUpstream).toHaveBeenCalledTimes(1)
     expect(res.statusCode).toBe(200)
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
 
     const wakeCalls = requestWake.mock.calls.length
     const probeCalls = probeReady.mock.calls.length
@@ -469,7 +522,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(attemptUpstream).toHaveBeenCalledTimes(1) // ZERO further upstream forwards
     expect(requestWake.mock.calls.length).toBe(wakeCalls)
     expect(probeReady.mock.calls.length).toBe(probeCalls)
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('(b) after a terminal (non-availability) failure resolves the request, no artifact re-forwards', async () => {
@@ -498,7 +551,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(attemptUpstream).toHaveBeenCalledTimes(1)
     expect(respondLegacy).toHaveBeenCalledTimes(1)
     expect(res.statusCode).toBe(502)
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
 
     const wakeCalls = requestWake.mock.calls.length
     await vi.advanceTimersByTimeAsync(MAX_HOLD_MS * 3)
@@ -524,7 +577,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     await pending
     expect(attemptUpstream).toHaveBeenCalledTimes(3) // pre-resolution retries are the feature
     expect(res.statusCode).toBe(200)
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('(d) two concurrent holds for different hosts do not cross-cancel each other', async () => {
@@ -567,7 +620,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     // B is untouched by A's resolution: still held, still polling/retriggering.
     expect(attemptB).not.toHaveBeenCalled()
     expect(resB.headersSent).toBe(false)
-    expect(coordinator.trackedHostCount()).toBe(1)
+    expect(coordinator.trackedCoordinationCount()).toBe(1)
 
     await vi.advanceTimersByTimeAsync(RETRIGGER_MS)
     const wakeCallsForB = requestWake.mock.calls.filter(call => call[0] === 'host-b').length
@@ -579,7 +632,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(attemptB).toHaveBeenCalledTimes(1)
     expect(resB.statusCode).toBe(200)
     expect(attemptA).toHaveBeenCalledTimes(1) // and B's resolution never re-forwarded A
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('incident shape: a wake-eligible error thrown AFTER the 200 was committed never re-forwards', async () => {
@@ -602,7 +655,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('wake-hold post-response failure suppressed')
     )
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('refuses to park a request whose response is already committed, loudly and without waking', async () => {
@@ -618,7 +671,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('wake-hold refused: response already committed')
     )
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
   it('a readiness probe landing after resolution no-ops loudly instead of re-settling', async () => {
@@ -645,7 +698,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     await pending
     expect(attemptUpstream).toHaveBeenCalledTimes(1)
     expect(res.statusCode).toBe(200)
-    expect(coordinator.trackedHostCount()).toBe(0)
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
 
     // The in-flight probe finally lands AFTER resolution: loud no-op, no re-forward.
     expect(resolveProbe).not.toBeNull()
