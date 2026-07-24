@@ -133,9 +133,9 @@ function AgentChatHarness() {
       <button type="button" onClick={() => void vm.handleSendAgentMessage('hello')}>
         Send message
       </button>
-      {vm.chatList.map((chat, index) => (
+      {vm.chatList.map(chat => (
         <button key={chat.id} type="button" onClick={() => void vm.handleSelectChat(chat.id)}>
-          Select chat {index + 1}
+          Select chat {chat.id}
         </button>
       ))}
     </div>
@@ -225,6 +225,8 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     await waitFor(() =>
       expect(screen.getByTestId('active-chat-id').textContent).not.toBe(firstChatId)
     )
+    const secondChatId = screen.getByTestId('active-chat-id').textContent || ''
+    expect(secondChatId).not.toBe('')
     expect(getDraftInputValue()).toBe('')
 
     fireEvent.change(screen.getByTestId('draft-input'), {
@@ -232,14 +234,12 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     })
     expect(getDraftInputValue()).toBe('draft for session B')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Select chat 1' }))
+    fireEvent.click(screen.getByRole('button', { name: `Select chat ${firstChatId}` }))
     await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).toBe(firstChatId))
     expect(getDraftInputValue()).toBe('draft for session A')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Select chat 2' }))
-    await waitFor(() =>
-      expect(screen.getByTestId('active-chat-id').textContent).not.toBe(firstChatId)
-    )
+    fireEvent.click(screen.getByRole('button', { name: `Select chat ${secondChatId}` }))
+    await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).toBe(secondChatId))
     expect(getDraftInputValue()).toBe('draft for session B')
   })
 })
