@@ -10,7 +10,10 @@ export const SelectableOption = forwardRef<HTMLButtonElement, SelectableOptionPr
     return (
       <button
         {...props}
-        aria-pressed={selected || props['aria-pressed']}
+        // A toggle button must announce BOTH states: an explicit aria-pressed
+        // override wins, otherwise reflect `selected` as a real boolean so an
+        // unselected option is "false", never an absent attribute.
+        aria-pressed={props['aria-pressed'] ?? selected}
         className={joinClasses(
           'ui-selectable-option',
           `ui-selectable-option--${size}`,
