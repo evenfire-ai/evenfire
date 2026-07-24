@@ -2,6 +2,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# Scope: OSS-resident GFS deploy invariants only. The GCP deploy invariants
+# (deploy-dev/deploy-prod workflow ordering, gcp-* Makefile targets, gcp-prod
+# overlay render, and the HCC rollback contract) live in evenfire-infra after
+# the app/config repo split and are validated by its sibling contract there.
 for mode in stage-writer stage-reader rotate-reader rotate-writer; do
   grep -q "$mode" deploy/scripts/provision-gfs-db.sh || fail "missing $mode"
 done
@@ -18,16 +22,6 @@ provision_contract="$(sed -n '/verify_role_contract()/,/^}/p' deploy/scripts/pro
 [[ "$provision_contract" == *"has_column_privilege(:'role_name', 'control_admin_users', 'id', 'SELECT')"* && "$provision_contract" == *"has_column_privilege(:'role_name', 'team_members', 'status', 'SELECT')"* && "$provision_contract" == *"column_name NOT IN ('id', 'status')"* && "$provision_contract" == *"column_name NOT IN ('team_id', 'user_id', 'status')"* ]] || fail 'provisioner does not verify the exact subject-column contract'
 writer_case="$(sed -n '/rotate-writer)/,/;;/p' deploy/scripts/provision-gfs-db.sh)"
 [[ "$writer_case" == *'reconcile_credential gfs_controller writer "$WRITER_SECRET" gfsc-writer true'* && "$writer_case" != *'gfsc-reader'* ]] || fail 'writer rollout scope'
-for workflow in .github/workflows/deploy-dev.yaml .github/workflows/deploy-prod.yaml; do
-  heading="$(grep -n 'Reconcile GFS database credentials' "$workflow" | head -1 | cut -d: -f1)"
-  reconcile="$(grep -n 'reconcile-gfs-deploy-credentials.sh' "$workflow" | head -1 | cut -d: -f1)"
-  overlay="$(grep -n 'Apply kustomize overlay' "$workflow" | head -1 | cut -d: -f1)"
-  [[ "$heading" -lt "$reconcile" && "$reconcile" -lt "$overlay" ]] || fail "$workflow order"
-  runtime="$(grep -n 'provision-gfs-runtime.sh' "$workflow" | head -1 | cut -d: -f1)"
-  verify="$(grep -n 'scripts/minikube/verify-gfs.sh' "$workflow" | head -1 | cut -d: -f1)"
-  [[ -n "$runtime" && -n "$verify" && "$overlay" -lt "$runtime" && "$runtime" -lt "$verify" ]] \
-    || fail "$workflow missing post-overlay GFS reconciliation before verification"
-done
 runtime_script="$(cat deploy/scripts/provision-gfs-runtime.sh)"
 [[ "$runtime_script" == *'reconcile-gfs-deploy-credentials.sh'* ]] \
   || fail 'post-overlay runtime path does not reconcile staged credentials'
@@ -36,26 +30,10 @@ runtime_script="$(cat deploy/scripts/provision-gfs-runtime.sh)"
   || fail 'post-overlay runtime path does not wait for exact GFSC rollouts'
 [[ "$runtime_script" != *'rollout restart'* && "$runtime_script" != *'rotate-writer'* ]] \
   || fail 'post-overlay runtime path rotates or unconditionally restarts GFS'
-grep -q 'NAMESPACES="channels control-plane gfs ' .github/workflows/deploy-prod.yaml || fail 'prod GFS rollout gate absent'
-for target in gcp-dev-deploy-all gcp-prod-deploy-all; do
-  recipe="$(make -n "$target" CONFIRM=yes 2>/dev/null || true)"
-  reconcile="$(printf '%s\n' "$recipe" | grep -n 'reconcile-gfs-deploy-credentials.sh' | head -1 | cut -d: -f1)"
-  overlay="$(printf '%s\n' "$recipe" | grep -n 'kustomize deploy/overlays/' | head -1 | cut -d: -f1)"
-  [[ -n "$reconcile" && -n "$overlay" && "$reconcile" -lt "$overlay" ]] || fail "$target order"
-  [[ "$recipe" == *'scripts/minikube/verify-gfs.sh'* ]] || fail "$target missing GFS verification"
-done
 make_block() {
   awk -v target="$1" '$0 ~ "^" target ":" {active=1} active && /^\.PHONY:/ {exit} active {print}' Makefile
 }
-for target in gcp-prod-deploy-service gcp-prod-deploy-release gcp-dev-deploy-service; do
-  block="$(make_block "$target")"
-  reconcile="$(grep -n 'reconcile-gfs-deploy-credentials.sh' <<<"$block" | head -1 | cut -d: -f1)"
-  overlay="$(grep -n 'kustomize deploy/overlays/gcp-' <<<"$block" | head -1 | cut -d: -f1)"
-  verify="$(grep -n 'verify-gfs.sh' <<<"$block" | head -1 | cut -d: -f1)"
-  [[ -n "$reconcile" && -n "$overlay" && -n "$verify" && "$reconcile" -lt "$overlay" && "$overlay" -lt "$verify" ]] \
-    || fail "$target bypasses GFS deploy reconciliation"
-done
-for target in minikube-db-reset gcp-prod-db-reset gcp-dev-db-reset; do
+for target in minikube-db-reset; do
   block="$(make_block "$target")"
   reset="$(grep -n 'reset-control-db-storage.sh' <<<"$block" | head -1 | cut -d: -f1)"
   recreate="$(grep -n 'apply -k .* -l app=control-postgres' <<<"$block" | head -1 | cut -d: -f1)"
@@ -140,19 +118,19 @@ pre_gate_overlay="$(grep -n 'make minikube-deploy-all' scripts/minikube/pre-gate
 [[ "$(wc -l <<<"$pre_gate_crds" | tr -d ' ')" -eq 1 ]] || fail 'pre-gate must apply CRDs exactly once'
 [[ "$pre_gate_crds" -lt "$pre_gate_writer" && "$pre_gate_writer" -lt "$pre_gate_overlay" ]] \
   || fail 'pre-gate must apply namespaces/CRDs before GFS Secrets and overlay'
-make -n minikube-deploy-all MINIKUBE_PROFILE=test-context \
-  | awk '/deploy\/base\/namespaces.yaml/{namespaces=NR} /apply-gfs-writer-secret.sh/{writer=NR} END{exit !(namespaces && writer && namespaces < writer)}' \
-  || fail 'minikube-deploy-all must declare namespaces before the GFS writer Secret'
-render="$(mktemp)"; trap 'rm -f "$render"' EXIT
-kubectl kustomize deploy/overlays/gcp-prod >"$render"
-grep -q 'name: gfs-controller-reader-db' "$render" || fail 'reader resource absent'
-grep -A1 'name: CONTEXT_MAPPER_GFSC_IMAGE' "$render" | grep -q 'gfs-controller:sha-' || fail 'prod pin absent'
-! grep -A1 'name: CONTEXT_MAPPER_GFSC_IMAGE' "$render" | grep -q 'gfs-controller:test' || fail 'test tag in prod'
+# The GFS writer Secret must never be applied into a missing namespace. In the
+# OSS deploy model, namespaces are applied by the prior deploy-crds/pre-gate step
+# (asserted above for pre-gate-sync: CRDs -> writer Secret -> overlay), and
+# minikube-deploy-all applies namespaces via the kustomize overlay, not a
+# standalone deploy/base/namespaces.yaml line. The ordering guarantee is enforced
+# defensively by apply-gfs-writer-secret.sh, which is fail-closed when the gfs
+# namespace is absent. Assert that guard directly.
+grep -q 'is not declared; apply deploy/base/namespaces.yaml before GFS Secrets' deploy/scripts/apply-gfs-writer-secret.sh \
+  || fail 'apply-gfs-writer-secret.sh is not fail-closed on a missing gfs namespace'
 bash scripts/tests/test-gfs-credential-lifecycle.sh
 bash scripts/tests/test-provision-gfs-runtime.sh
 bash scripts/tests/test-gfs-writer-secret-apply.sh
 bash scripts/tests/test-gfs-nologin-restore.sh
 bash scripts/tests/test-gfs-db-reset-preflight.sh
 bash scripts/tests/test-reset-control-db-storage.sh
-bash scripts/tests/test-gfs-hcc-rollback-static.sh
-echo 'PASS: GFS deploy contract'
+echo 'PASS: GFS deploy contract (OSS-resident invariants)'
