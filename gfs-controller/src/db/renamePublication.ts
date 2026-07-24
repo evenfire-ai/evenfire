@@ -207,6 +207,14 @@ export async function publishRename(tx: Transactor, input: RenameInput): Promise
   let expectedRoot: GfsResource | undefined;
   try {
     return await tx.transaction(async client => {
+      // Asymmetry with publishCopy (intentional): rename does NOT re-check the
+      // caller's permission epoch inside this transaction. publishCopy must,
+      // because it stages blob bytes asynchronously OUTSIDE its commit txn, so a
+      // revocation can land during that gap. Rename has no such gap — it
+      // authorizes, then runs only this single short structure transaction; the
+      // sole window is the txn itself (few ms under advisory lock + FOR UPDATE).
+      // If rename ever grows an async pre-commit phase, add the same epoch
+      // revalidate that publishCopy performs before its INSERT.
       await client.query(`SELECT pg_advisory_xact_lock(hashtext('gfs:structure:' || $1)::bigint)`, [input.drive]);
       const observed = await loadTree(client, input.drive, dbId(input.resourceId), loadLimit(input));
       assertWithinLimit(observed, input);

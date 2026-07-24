@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BlobStore, BlobVerificationError, BlobWriteCleanupError } from "../storage/blobStore";
 import { resolveBlobKeyPath } from "../storage/paths";
 import { PgBlobStagingStore, type ManifestQueryable, type PublishedTreeRef } from "./blobStaging";
@@ -189,6 +189,70 @@ describe("recursive copy blob staging", () => {
       expect(db.calls.some(call => call.sql.includes("DELETE FROM gfs_blob_manifests"))).toBe(false);
     }
   );
+
+  it("destroys a reopened legacy stream when writeImmutable throws before consuming it", async () => {
+    // reopen() succeeds (opens an fd), then writeImmutable throws BEFORE its
+    // pipeline() consumes the input — models its parent/symlink/O_EXCL guards or
+    // a deadline firing first. Without explicit cleanup the reopened legacy fd
+    // leaks (the generation path is owned by copyPublication, the legacy stream
+    // is owned here). The stage path must destroy it on error.
+    const db = new FakeDb();
+    const bytes = Buffer.from("legacy");
+    const reopened = Readable.from(bytes);
+    const destroySpy = vi.spyOn(reopened, "destroy");
+    const boom = Object.assign(new Error("destination exists"), { code: "EEXIST" });
+    const blobs = {
+      writeImmutable: async () => {
+        throw boom;
+      },
+      verify: async () => undefined,
+      deleteByKey: async () => undefined,
+      deleteLegacyFlat: async () => undefined,
+    };
+    await expect(
+      stageCopiedBlob(new PgBlobStagingStore(db), blobs, {
+        requestId: REQUEST,
+        destinationResourceId: RID1,
+        generation: GEN1,
+        source: { kind: "legacy_flat", reopen: async () => reopened },
+        expectedBytes: bytes.length,
+        expectedSha256: digest(bytes),
+        deadlineAtMs: Date.now() + 10_000,
+      })
+    ).rejects.toMatchObject({ code: "EEXIST" });
+    expect(destroySpy).toHaveBeenCalled();
+  });
+
+  it("does not destroy a generation stream the caller owns", async () => {
+    // Generation streams are owned by copyPublication (destroyed in its own
+    // catch). stageCopiedBlob must NOT double-manage them: it only owns the
+    // legacy stream it reopens itself.
+    const db = new FakeDb();
+    const bytes = Buffer.from("gen");
+    const callerStream = Readable.from(bytes);
+    const destroySpy = vi.spyOn(callerStream, "destroy");
+    const boom = Object.assign(new Error("destination exists"), { code: "EEXIST" });
+    const blobs = {
+      writeImmutable: async () => {
+        throw boom;
+      },
+      verify: async () => undefined,
+      deleteByKey: async () => undefined,
+      deleteLegacyFlat: async () => undefined,
+    };
+    await expect(
+      stageCopiedBlob(new PgBlobStagingStore(db), blobs, {
+        requestId: REQUEST,
+        destinationResourceId: RID1,
+        generation: GEN1,
+        source: { kind: "generation", stream: callerStream },
+        expectedBytes: bytes.length,
+        expectedSha256: digest(bytes),
+        deadlineAtMs: Date.now() + 10_000,
+      })
+    ).rejects.toMatchObject({ code: "EEXIST" });
+    expect(destroySpy).not.toHaveBeenCalled();
+  });
 
   it.each([false, true])(
     "durably handles an owned recursive copy candidate when cleanup failure is %s",
