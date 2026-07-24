@@ -72,7 +72,7 @@ async function main() {
 
   const appProcess = spawn(executable, [], {
     cwd: projectDirectory,
-    env: process.env,
+    env: { ...process.env, EVENFIRE_DESKTOP_DEV_PACKAGE: '1' },
     stdio: 'inherit',
   })
 

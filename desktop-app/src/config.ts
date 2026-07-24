@@ -337,9 +337,14 @@ function loadStoredProfilesSync(): {
 
 function configsMatch(a: DesktopRuntimeConfig, b: DesktopRuntimeConfig): boolean {
   return (
-    a.externalRestApiBaseUrl === b.externalRestApiBaseUrl &&
-    a.rpcProxyBaseUrl === b.rpcProxyBaseUrl &&
+    runtimeEndpointsMatch(a, b) &&
     (a.appName?.trim() || DEFAULT_APP_NAME) === (b.appName?.trim() || DEFAULT_APP_NAME)
+  )
+}
+
+function runtimeEndpointsMatch(a: DesktopRuntimeConfig, b: DesktopRuntimeConfig): boolean {
+  return (
+    a.externalRestApiBaseUrl === b.externalRestApiBaseUrl && a.rpcProxyBaseUrl === b.rpcProxyBaseUrl
   )
 }
 
@@ -407,6 +412,7 @@ function resolveActiveProfile(
   profiles: StoredRuntimeProfile[],
   activeProfileId: string | null
 ): StoredRuntimeProfile | null {
+  if (activeProfileId === LOCALHOST_OPTION_ID) return null
   if (activeProfileId) {
     const direct = profiles.find(profile => profile.id === activeProfileId)
     if (direct) return direct
@@ -475,25 +481,30 @@ const envRuntimeConfig = validateRuntimeConfig({
   rpcProxyBaseUrl: requiredOrDefault('RPC_PROXY_BASE_URL', LOCALHOST_RPC_PROXY_BASE_URL),
   appName: requiredOrDefault('DESKTOP_APP_NAME', DEFAULT_APP_NAME),
 })
+const desktopDevPackageRuntimeConfigEnabled =
+  process.env.EVENFIRE_DESKTOP_DEV_PACKAGE?.trim() === '1'
+const canUseEnvRuntimeConfig = !app?.isPackaged || desktopDevPackageRuntimeConfigEnabled
 const envRuntimeConfigured = Boolean(
-  !app?.isPackaged &&
+  canUseEnvRuntimeConfig &&
   process.env.EXTERNAL_REST_API_BASE_URL?.trim() &&
   process.env.RPC_PROXY_BASE_URL?.trim()
 )
-const envMatchesLocalhostOption = configsMatch(envRuntimeConfig, localhostRuntimeConfig)
+const envMatchesLocalhostOption = runtimeEndpointsMatch(envRuntimeConfig, localhostRuntimeConfig)
 
 function shouldPreferLocalhostByDefault(): boolean {
-  return (
-    !app?.isPackaged &&
-    Boolean(process.env.EVENFIRE_RENDERER_URL?.trim()) &&
-    envMatchesLocalhostOption
-  )
+  return canUseEnvRuntimeConfig && envRuntimeConfigured && envMatchesLocalhostOption
 }
 const loadedProfilesState = loadStoredProfilesSync()
 let storedProfiles = loadedProfilesState.profiles
-let activeRuntimeOptionId = loadedProfilesState.activeProfileId
-const activeStoredProfile = resolveActiveProfile(storedProfiles, activeRuntimeOptionId)
+const preferLocalhostRuntimeByDefault = shouldPreferLocalhostByDefault()
+let activeRuntimeOptionId = preferLocalhostRuntimeByDefault
+  ? LOCALHOST_OPTION_ID
+  : loadedProfilesState.activeProfileId
+const activeStoredProfile = preferLocalhostRuntimeByDefault
+  ? null
+  : resolveActiveProfile(storedProfiles, activeRuntimeOptionId)
 if (
+  !preferLocalhostRuntimeByDefault &&
   !activeStoredProfile &&
   activeRuntimeOptionId !== LOCALHOST_OPTION_ID &&
   envRuntimeConfigured &&
@@ -549,7 +560,12 @@ export function hydrateDesktopRuntimeConfig(): void {
 
   const loaded = loadStoredProfilesSync()
   storedProfiles = loaded.profiles
-  activeRuntimeOptionId = loaded.activeProfileId
+  const preserveLocalhostRuntime =
+    preferLocalhostRuntimeByDefault ||
+    (desktopDevPackageRuntimeConfigEnabled &&
+      envMatchesLocalhostOption &&
+      isLocalhostRuntimeConfig(currentRuntimeConfig()))
+  activeRuntimeOptionId = preserveLocalhostRuntime ? LOCALHOST_OPTION_ID : loaded.activeProfileId
 
   const selectedProfile = resolveActiveProfile(storedProfiles, activeRuntimeOptionId)
   if (selectedProfile) {

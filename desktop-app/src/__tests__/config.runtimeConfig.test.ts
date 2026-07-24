@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -8,7 +8,14 @@ describe('desktop runtime config', () => {
   const originalExternalRestApiBaseUrl = process.env.EXTERNAL_REST_API_BASE_URL
   const originalRpcProxyBaseUrl = process.env.RPC_PROXY_BASE_URL
   const originalDesktopAppName = process.env.DESKTOP_APP_NAME
+  const originalDesktopDevPackage = process.env.EVENFIRE_DESKTOP_DEV_PACKAGE
+  const originalRendererUrl = process.env.EVENFIRE_RENDERER_URL
   let tempUserDataDir: string | null = null
+
+  beforeEach(() => {
+    vi.doUnmock('electron')
+    vi.resetModules()
+  })
 
   afterEach(async () => {
     if (originalConfigPath === undefined) {
@@ -30,6 +37,16 @@ describe('desktop runtime config', () => {
       delete process.env.DESKTOP_APP_NAME
     } else {
       process.env.DESKTOP_APP_NAME = originalDesktopAppName
+    }
+    if (originalDesktopDevPackage === undefined) {
+      delete process.env.EVENFIRE_DESKTOP_DEV_PACKAGE
+    } else {
+      process.env.EVENFIRE_DESKTOP_DEV_PACKAGE = originalDesktopDevPackage
+    }
+    if (originalRendererUrl === undefined) {
+      delete process.env.EVENFIRE_RENDERER_URL
+    } else {
+      process.env.EVENFIRE_RENDERER_URL = originalRendererUrl
     }
 
     if (tempUserDataDir) {
@@ -83,6 +100,65 @@ describe('desktop runtime config', () => {
     })
     expect(config.externalRestApiBaseUrl).toBe('http://127.0.0.1:8091')
     expect(config.rpcProxyBaseUrl).toBe('http://127.0.0.1:8094')
+  })
+
+  it('selects localhost for the packaged development app used by npm run ui', async () => {
+    tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+    const runtimeConfigDir = path.join(tempUserDataDir, 'runtime-configs')
+    await fsp.mkdir(runtimeConfigDir, { recursive: true })
+    await fsp.writeFile(
+      path.join(runtimeConfigDir, 'index.json'),
+      JSON.stringify({
+        version: 1,
+        activeProfileId: 'prod',
+        profiles: [
+          {
+            id: 'prod',
+            appName: 'Production',
+            fileName: 'runtime-config-prod.json',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      })
+    )
+    await fsp.writeFile(
+      path.join(runtimeConfigDir, 'runtime-config-prod.json'),
+      JSON.stringify({
+        externalRestApiBaseUrl: 'https://api.example.com',
+        rpcProxyBaseUrl: 'https://rpc.example.com',
+        appName: 'Production',
+      })
+    )
+    delete process.env.CLERUM_DESKTOP_CONFIG_PATH
+    delete process.env.DESKTOP_APP_NAME
+    process.env.EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:8091'
+    process.env.RPC_PROXY_BASE_URL = 'http://127.0.0.1:8094'
+    process.env.EVENFIRE_RENDERER_URL = 'http://127.0.0.1:5173'
+    process.env.EVENFIRE_DESKTOP_DEV_PACKAGE = '1'
+
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: vi.fn((name: string) =>
+          name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+        ),
+        isPackaged: true,
+        isReady: vi.fn(() => true),
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+
+    const { config, getDesktopRuntimeConfigState } = await import('../config.js')
+
+    expect(config.externalRestApiBaseUrl).toBe('http://127.0.0.1:8091')
+    expect(config.rpcProxyBaseUrl).toBe('http://127.0.0.1:8094')
+
+    expect(getDesktopRuntimeConfigState()).toMatchObject({
+      configured: true,
+      isLocalhost: true,
+      activeOptionId: '__localhost__',
+    })
   })
 
   it('preserves env-provided localhost runtime ports without selecting the fixed localhost profile', async () => {

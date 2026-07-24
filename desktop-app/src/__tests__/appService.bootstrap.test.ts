@@ -312,6 +312,61 @@ describe('AppService invitation configuration lookup', () => {
     expect(clearSessionToken).toHaveBeenCalledWith(resolveEnvKey('https://api.example.com'))
   })
 
+  it('keeps a saved token when startup session restore is forbidden', async () => {
+    const configPath = path.join(
+      os.tmpdir(),
+      `clerum-desktop-restore-forbidden-${Date.now()}-${Math.random().toString(16).slice(2)}.json`
+    )
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({
+        externalRestApiBaseUrl: 'https://api.example.com',
+        rpcProxyBaseUrl: 'https://rpc.example.com',
+        appName: 'Example',
+      })
+    )
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = configPath
+    process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
+    process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
+    delete process.env.PROFILE_UI_BASE_URL
+    vi.resetModules()
+
+    const [{ AppService }, { ApiError }] = await Promise.all([
+      import('../appService.js'),
+      import('../httpClient.js'),
+    ])
+    const clearSessionToken = vi.fn().mockResolvedValue(undefined)
+    const service = new AppService() as unknown as {
+      authClient: { getMe: ReturnType<typeof vi.fn> }
+      tokenStore: {
+        getSessionToken: ReturnType<typeof vi.fn>
+        clearSessionToken: ReturnType<typeof vi.fn>
+      }
+      rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
+      initialize: () => Promise<unknown>
+    }
+
+    service.authClient = {
+      getMe: vi.fn().mockRejectedValue(new ApiError('403 Forbidden', 403, '')),
+    } as never
+    service.tokenStore = {
+      getSessionToken: vi.fn().mockResolvedValue('stored-token'),
+      clearSessionToken,
+    } as never
+    service.rpcTokenManager = {
+      clear: vi.fn(),
+    } as never
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+
+      expect(clearSessionToken).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('persists a manually saved runtime environment', async () => {
     const configPath = path.join(
       os.tmpdir(),
