@@ -434,7 +434,7 @@ runtime_access_contract_values() {
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF != 2 { exit 2 }
     $1 !~ /^[a-z][a-z0-9_]*$/ { exit 3 }
-    $2 !~ /^(legacy_dml|upsert|append|read)$/ { exit 4 }
+    $2 !~ /^(legacy_dml|upsert|append|read|none)$/ { exit 4 }
     seen[$1]++ { exit 5 }
     {
       count++
@@ -575,7 +575,7 @@ verify_runtime_access_contract() {
          JOIN actual_relations actual USING (relation_name)
          CROSS JOIN LATERAL (
            VALUES
-             ('SELECT', true),
+             ('SELECT', expected.access_profile != 'none'),
              ('INSERT', expected.access_profile IN ('legacy_dml', 'upsert', 'append')),
              ('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert')),
              ('DELETE', expected.access_profile = 'legacy_dml'),

@@ -39,6 +39,19 @@ export interface GfsConfig {
    * garbage values fail loud.
    */
   credentialProbeIntervalMs: number
+  blobCleanupSafetyWindowMs: number
+  blobCleanupIntervalMs: number
+  blobCleanupBatchSize: number
+  /** Maximum source objects admitted by one synchronous Copy request. */
+  syncCopyMaxObjects: number
+  /** Maximum observed source bytes admitted by one synchronous Copy request. */
+  syncCopyMaxBytes: number
+  /** End-to-end deadline for one synchronous Copy request. */
+  syncCopyTimeoutMs: number
+  /** Maximum live subtree objects admitted by one synchronous rename request. */
+  syncRenameMaxObjects: number
+  /** End-to-end deadline for one synchronous rename request. */
+  syncRenameTimeoutMs: number
   devMode: boolean
 }
 
@@ -59,19 +72,68 @@ function tuningMs(name: string, defaultMs: number): number {
   return value
 }
 
+function positiveInteger(name: string, defaultValue: number, maximum: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return defaultValue
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+    throw new Error(`[gfsc] ${name} must be an integer between 1 and ${maximum}, got: ${raw}`)
+  }
+  return value
+}
+
+/**
+ * Copy admission limits intentionally have no compiled product ceiling. Only
+ * an absent variable selects the documented default; an explicitly empty or
+ * non-canonical positive decimal fails startup instead of falling back.
+ */
+function syncCopyPositiveInteger(name: string, defaultValue: number): number {
+  const raw = process.env[name]
+  if (raw === undefined) return defaultValue
+  if (!/^[1-9]\d*$/.test(raw)) {
+    throw new Error(`[gfsc] ${name} must be a positive safe integer, got: ${JSON.stringify(raw)}`)
+  }
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`[gfsc] ${name} must be a positive safe integer, got: ${JSON.stringify(raw)}`)
+  }
+  return value
+}
+
+function storageRole(): GfsConfig['storageRole'] {
+  const value = process.env.GFS_STORAGE_ROLE
+  if (value === 'reader' || value === 'writer') return value
+  throw new Error(`[gfsc] GFS_STORAGE_ROLE must be explicitly set to 'reader' or 'writer', got: ${JSON.stringify(value)}`)
+}
+
 export function loadConfig(): GfsConfig {
   const devMode = process.env.GFS_DEV_MODE === 'true'
-  const storageRole = process.env.GFS_STORAGE_ROLE === 'reader' ? 'reader' : 'writer'
   return {
     port: Number(process.env.GFS_PORT || 8087),
     storageMountPath: required('GFS_STORAGE_PATH', devMode, '/tmp/gfs-data'),
-    storageRole,
+    storageRole: storageRole(),
     pgConnectionString: required('GFS_PG_CONNECTION_STRING', devMode, ''),
     tokenAudience: process.env.GFS_TOKEN_AUDIENCE || 'gfs-controller',
     publicKey: process.env.GFS_JWT_PUBLIC_KEY || '',
     driveName: process.env.GFS_DRIVE_NAME || 'main',
     decisionCacheTtlMs: Number(process.env.GFS_DECISION_CACHE_TTL_MS || 5000),
     credentialProbeIntervalMs: tuningMs('GFS_CREDENTIAL_PROBE_INTERVAL_MS', 60000),
+    blobCleanupSafetyWindowMs: positiveInteger(
+      'GFS_BLOB_CLEANUP_SAFETY_WINDOW_MS',
+      3600000,
+      31536000000
+    ),
+    blobCleanupIntervalMs: positiveInteger(
+      'GFS_BLOB_CLEANUP_INTERVAL_MS',
+      60000,
+      2147483647
+    ),
+    blobCleanupBatchSize: positiveInteger('GFS_BLOB_CLEANUP_BATCH_SIZE', 100, 10000),
+    syncCopyMaxObjects: syncCopyPositiveInteger('GFS_SYNC_COPY_MAX_OBJECTS', 1000),
+    syncCopyMaxBytes: syncCopyPositiveInteger('GFS_SYNC_COPY_MAX_BYTES', 1073741824),
+    syncCopyTimeoutMs: syncCopyPositiveInteger('GFS_SYNC_COPY_TIMEOUT_MS', 30000),
+    syncRenameMaxObjects: syncCopyPositiveInteger('GFS_SYNC_RENAME_MAX_OBJECTS', 1000),
+    syncRenameTimeoutMs: syncCopyPositiveInteger('GFS_SYNC_RENAME_TIMEOUT_MS', 30000),
     devMode,
   }
 }

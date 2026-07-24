@@ -1,6 +1,23 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { makeHostSubjectId } from '../src/gfs/hostSubject.js'
 import { parseSubject } from '../src/routes/gfs/grants.js'
+
+type HostSubjectVector = {
+  label: string
+  namespace: string
+  name: string
+  displayText: string
+  expectedSubjectId: string | null
+  expectedSubject: string | null
+}
+
+const vectors = JSON.parse(
+  readFileSync(
+    new URL('../../tests/contracts/gfs-host-subject-vectors.json', import.meta.url),
+    'utf8'
+  )
+) as HostSubjectVector[]
 
 describe('GFS host subjects', () => {
   it('accepts only canonical first- and third-party host subjects', () => {
@@ -26,8 +43,17 @@ describe('GFS host subjects', () => {
     }
   })
 
-  it('normalizes provisioner host subject ids through one helper', () => {
-    expect(makeHostSubjectId('1st', 'mcp-host', 'standalone')).toBe('1st:mcp-host/standalone')
+  it.each(vectors)('derives the canonical durable identity: $label', vector => {
+    const actual = makeHostSubjectId('1st', vector.namespace, vector.name)
+
+    expect(actual).toBe(vector.expectedSubjectId)
+    if (actual) {
+      expect(`host:${actual}`).toBe(vector.expectedSubject)
+      expect(actual).not.toContain(vector.displayText)
+    }
+  })
+
+  it('supports third-party provisioner subjects through the same helper', () => {
     expect(makeHostSubjectId('3rd', 'sandbox-recipes', 'daily-report')).toBe(
       '3rd:sandbox-recipes/daily-report'
     )

@@ -76,6 +76,8 @@ const FILE: GfsResource = {
   pathCache: "/docs/report.pdf",
   version: 2,
   bytes: 11,
+  blobKey: null,
+  contentSha256: null,
   deletedAt: null,
 };
 const DIR: GfsResource = {
@@ -93,6 +95,7 @@ function deps(over: Partial<ServingDeps> = {}): ServingDeps {
     verifyToken: () => CLAIMS,
     resolveContext: async () => CTX,
     authorize: async () => ({ allowed: true }),
+    audit: { record: async () => undefined },
     store: {
       getResource: async () => FILE,
       listChildren: async () => [FILE],
@@ -235,6 +238,20 @@ describe("GfsReadServer.tryHandle — served reads", () => {
     expect(res.body).toBe("hello world");
   });
 
+  it("destroys the blob stream when the client disconnects mid-download", async () => {
+    // fd-leak regression: pipe() does not propagate destination close to the
+    // source, so a client abort must destroy the blob stream explicitly.
+    const res = new FakeRes();
+    const source = new Readable({ read() {} });
+    source.push("partial");
+    const d = deps({ blobs: { read: async () => source } });
+    const handled = run(d, req(`/v1/resources/${RID}/content`, { auth: "Bearer t" }), res);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    res.emit("close");
+    await handled;
+    expect(source.destroyed).toBe(true);
+  });
+
   it("200 resolve maps a gfs:// uri (same drive) to its view", async () => {
     const res = new FakeRes();
     await run(deps(),
@@ -353,6 +370,35 @@ function writeDeps(over: Partial<ServingDeps> = {}): { d: ServingDeps; calls: Ar
 }
 
 describe("GfsServingHandler — write routes (governed mutation)", () => {
+  it("does not expose internal blob keys or physical paths in a failure response", async () => {
+    const res = new FakeRes();
+    const { d } = writeDeps({
+      writeService: {
+        create: async () => {
+          throw new Error(
+            "immutable blob failed: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/11111111-1111-4111-8111-111111111111 at /data/gfs/private"
+          );
+        },
+      } as unknown as ServingDeps["writeService"],
+    });
+    await run(
+      d,
+      reqBody(`/v1/resources/${RID}/children`, {
+        method: "POST",
+        auth: "Bearer t",
+        body: { name: "n.txt", content: "hi" },
+      }),
+      res
+    );
+    expect(res.statusCode).toBe(500);
+    expect(res.json).toEqual({
+      ok: false,
+      error: { code: "internal", message: "internal server error" },
+    });
+    expect(res.body).not.toContain("11111111-1111-4111-8111-111111111111");
+    expect(res.body).not.toContain("/data/gfs/private");
+  });
+
   it("201 create (POST children) authorizes WRITE on the parent and calls the write service", async () => {
     const res = new FakeRes();
     const { d, calls, authzOps } = writeDeps();

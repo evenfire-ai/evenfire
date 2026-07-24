@@ -12,7 +12,6 @@ import {
 import { resolveMcpServersForAgents } from '../../services/access/mcpInvocable.js'
 import {
   filterAccessValues,
-  listActiveAgentNames,
   listActiveContextIds,
 } from '../../services/directory/accessReconciliation.js'
 import {
@@ -130,35 +129,34 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
     async (req, res, next) => {
       try {
         const base = await getTeamAgents(req.params.teamId)
-        let active: Set<string> | null = null
-        try {
-          active = new Set(await listActiveAgentNames(gateway))
-        } catch (err) {
-          console.warn(
-            `[external/teams] agent reconciliation failed for ${req.params.teamId}:`,
-            err
-          )
-        }
-        const activeAgentNames = filterAccessValues(base.agentNames, active)
+        // getTeamAgents is the authorization boundary. Resolve only those
+        // exact names so hidden Hosts are never queried for DTO enrichment.
+        const authorizedAgentNames = filterAccessValues(base.agentNames, null)
         let agents: Awaited<ReturnType<typeof resolveMcpServersForAgents>> = []
+        let agentNames = authorizedAgentNames
         try {
-          // Authorization model: base.agentNames already reflects which agents
+          // Authorization model: authorizedAgentNames already reflects which agents
           // this team is allowed to use. resolveMcpServersForAgents treats
           // agent access as the gate — no context-level scoping needed.
           agents = await resolveMcpServersForAgents(gateway, {
             mcpServersNamespace: config.mcpServersNamespace,
             hostsNamespace: config.hostsNamespace,
-            agentNames: activeAgentNames,
+            agentNames: authorizedAgentNames,
           })
+          // A successful lookup can safely remove genuinely missing or invalid
+          // Hosts. Only the DTOs resolved from the authorized input are used.
+          agentNames = agents.map(agent => agent.name)
         } catch (err) {
-          // Spec §7.2: never fail the catalog purely because K8s listing failed.
+          // Spec §7.2: never fail the catalog purely because Kubernetes is
+          // unavailable. Preserve the names authorized by the directory DB;
+          // omit enriched DTOs because their live Host identity is unverified.
           console.warn(
             `[external/teams] MCP server enrichment failed for team ${req.params.teamId}:`,
             err
           )
           agents = []
         }
-        return res.status(200).json({ ...base, agentNames: activeAgentNames, agents })
+        return res.status(200).json({ ...base, agentNames, agents })
       } catch (error) {
         return next(error)
       }

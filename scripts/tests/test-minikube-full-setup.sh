@@ -241,18 +241,46 @@ assert_branch_scoped_minikube_context_is_supported() {
 }
 
 assert_gfs_provisioning_follows_migrations_and_core_readiness() {
-  local migration_line provision_line readiness_line core_block
+  local overlay_line ensure_line migration_line reconcile_after_migration control_ready_line core_block reset_block wal_block
+  local reset_boundary reset_overlay reset_pg_ready reset_converge
+  local wal_detect wal_error
+  overlay_line="$(grep -n 'Kustomize overlay applied' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+  ensure_line="$(grep -n 'ensure_control_postgres_ready' scripts/minikube/full-setup.sh | tail -1 | cut -d: -f1)"
   migration_line="$(grep -n 'deploy/scripts/run-control-api-db-migration.sh' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
-  provision_line="$(grep -n 'deploy/scripts/provision-gfs-db.sh' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
-  readiness_line="$(grep -n '^CORE_DEPLOYS=(' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+  reconcile_after_migration="$(grep -n 'reconcile-gfs-deploy-credentials.sh' scripts/minikube/full-setup.sh | tail -1 | cut -d: -f1)"
+  control_ready_line="$(grep -n 'rollout status deployment/control-api.*timeout=180s' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
   core_block="$(sed -n '/^CORE_DEPLOYS=(/,/^)/p' scripts/minikube/full-setup.sh)"
+  reset_block="$(sed -n '/# 6a. Optional DB reset/,/# 6c. Re-apply generated service tokens/p' scripts/minikube/full-setup.sh)"
+  wal_block="$(sed -n '/A stale or late corruption signature/,/err "${ns}\/\${name} NOT ready"/p' scripts/minikube/full-setup.sh)"
 
-  if [[ -n "$migration_line" && -n "$provision_line" && -n "$readiness_line" ]] && \
-     [[ "$migration_line" -lt "$readiness_line" && "$readiness_line" -lt "$provision_line" ]] && \
+  reset_boundary="$(grep -n 'reset-control-db-storage.sh' <<<"$reset_block" | head -1 | cut -d: -f1)"
+  reset_overlay="$(grep -n 'Kustomize overlay applied' <<<"$reset_block" | head -1 | cut -d: -f1)"
+  reset_pg_ready="$(grep -n 'rollout status deployment/control-postgres' <<<"$reset_block" | head -1 | cut -d: -f1)"
+  reset_converge="$(grep -n 'converge-control-db-after-reset.sh' <<<"$reset_block" | head -1 | cut -d: -f1)"
+
+  wal_detect="$(grep -n 'postgres_has_invalid_checkpoint' <<<"$wal_block" | head -1 | cut -d: -f1)"
+  wal_error="$(grep -n 'automatic destructive recovery is disabled' <<<"$wal_block" | head -1 | cut -d: -f1)"
+
+  if [[ -n "$overlay_line" && -n "$ensure_line" && -n "$migration_line" && -n "$reconcile_after_migration" && -n "$control_ready_line" ]] && \
+     [[ "$overlay_line" -lt "$ensure_line" && "$ensure_line" -lt "$migration_line" && "$migration_line" -lt "$control_ready_line" && "$control_ready_line" -lt "$reconcile_after_migration" ]] && \
+     ! grep -q 'provision-gfs-db.sh.*\(rotate\|stage\)-' scripts/minikube/full-setup.sh && \
+     grep -q 'Fresh bootstrap detected.*GFSC remains fail-closed' scripts/minikube/full-setup.sh && \
+     [[ "$reset_boundary" -lt "$reset_overlay" && "$reset_overlay" -lt "$reset_pg_ready" && "$reset_pg_ready" -lt "$reset_converge" ]] && \
+     [[ "$wal_detect" -lt "$wal_error" ]] && \
+     ! grep -q 'reset-control-db-storage.sh' <<<"$wal_block" && \
+     ! grep -q '^recover_control_postgres_wal()' scripts/minikube/full-setup.sh && \
+     grep -q 'CONTROL_DB_RESET_PVC_UID is required with --reset-db' scripts/minikube/full-setup.sh && \
+     grep -q 'RESET_STORAGE_ARGS.*--expected-pvc-uid' scripts/minikube/full-setup.sh && \
+     grep -q 'get configmap control-db-reset-state' <<<"$reset_block" && \
+     grep -q 'scale deployment/gfsc-writer --replicas="\$RESET_WRITER_REPLICAS"' <<<"$reset_block" && \
+     grep -q 'scale deployment/gfsc-reader --replicas="\$RESET_READER_REPLICAS"' <<<"$reset_block" && \
+     grep -q 'scale deployment/host-context-controller --replicas="\$RESET_HCC_REPLICAS"' <<<"$reset_block" && \
+     ! grep -q 'delete pvc control-postgres-data' scripts/minikube/full-setup.sh && \
+     ! grep -q 'GFS_RESTORE_ACTIVE_NOLOGIN=true' scripts/minikube/full-setup.sh && \
      [[ "$core_block" != *"gfs-controller"* ]]; then
-    pass "full-setup provisions GFS after migrations and the non-GFS core readiness gate"
+    pass "full-setup centralizes explicit UID-bound reset and never auto-deletes on WAL logs"
   else
-    fail "full-setup GFS provisioning order can run before migrations or deadlock on GFS readiness"
+    fail "full-setup GFS/reset ordering can leave partial roles or deadlock on GFS readiness"
   fi
 }
 
@@ -260,7 +288,7 @@ assert_full_setup_defaults_to_db_rebuild() {
   if grep -Eq '^RESET_DB=true$' scripts/minikube/full-setup.sh && \
      grep -Fq 'case "${REUSE_DB:-false}" in' scripts/minikube/full-setup.sh && \
      grep -Eq -- '--keep-db\)[[:space:]]+RESET_DB=false' scripts/minikube/full-setup.sh && \
-     grep -Fq 'delete pvc control-postgres-data' scripts/minikube/full-setup.sh; then
+     grep -Fq 'reset-control-db-storage.sh' scripts/minikube/full-setup.sh; then
     pass "full-setup rebuilds the DB by default with a REUSE_DB/--keep-db opt-out"
   else
     fail "full-setup does not default to a clean DB rebuild with a REUSE_DB/--keep-db opt-out"

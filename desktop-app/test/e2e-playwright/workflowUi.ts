@@ -594,14 +594,19 @@ export async function launchAndLogin(
       await emailInput.fill(email)
       await passwordInput.fill(E2E_DESKTOP_PASSWORD)
       const signInButton = page.getByRole('button', { name: /^Sign in$/ })
-      await expect(signInButton).toBeEnabled({ timeout: 10_000 })
-      await humanUiClick(signInButton)
+      // A restored session can race the form: the shell may replace the form
+      // between fill and click, making the button legitimately disappear.
+      // Accept either outcome — click when clickable, and only ever settle on
+      // the authenticated shell.
       await expect
         .poll(
           async () => {
             if (await authenticatedShell.isVisible().catch(() => false)) return 'authenticated'
             const errorToast = page.getByRole('alert').filter({ hasText: /login|password|failed/i })
             if (await errorToast.isVisible().catch(() => false)) return 'error'
+            if (await signInButton.isEnabled().catch(() => false)) {
+              await humanUiClick(signInButton).catch(() => undefined)
+            }
             return 'pending'
           },
           {
@@ -615,11 +620,31 @@ export async function launchAndLogin(
 
     await expect(authenticatedShell).toBeVisible({ timeout: 60_000 })
     await expect(settingsMenuButton).toBeVisible({ timeout: 20_000 })
-    await humanUiClick(settingsMenuButton)
+    // Session-list hydration storms can dismiss the account popover at any
+    // point of the check, so the whole open->verify sequence retries a bounded
+    // number of times. The final attempt performs the same hard assertions, so
+    // a genuinely missing identity still fails loudly.
     const signedInAccount = page.getByLabel('Signed in account')
-    await expect(signedInAccount).toBeVisible({ timeout: 20_000 })
-    await expect(userDisplayName).toBeVisible({ timeout: 20_000 })
-    await expect(signedInAccount).toContainText(email, { timeout: 20_000 })
+    const verifyIdentity = async (timeout: number) => {
+      await humanUiClick(settingsMenuButton)
+      await expect(signedInAccount).toBeVisible({ timeout })
+      await expect(userDisplayName).toBeVisible({ timeout })
+      await expect(signedInAccount).toContainText(email, { timeout })
+    }
+    let identityVerified = false
+    for (let attempt = 0; attempt < 4 && !identityVerified; attempt += 1) {
+      try {
+        await verifyIdentity(7_000)
+        identityVerified = true
+      } catch {
+        await page.keyboard.press('Escape')
+        await page.waitForTimeout(1_000)
+      }
+    }
+    // The account section inside the popover resolves from its own fetch,
+    // which can starve behind large session-list hydration; the final attempt
+    // gets the full budget and still hard-fails on a missing identity.
+    if (!identityVerified) await verifyIdentity(60_000)
     await page.keyboard.press('Escape')
   } catch (error) {
     const bodyText = await page
