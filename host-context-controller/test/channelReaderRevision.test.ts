@@ -21,6 +21,7 @@ vi.mock('../src/config', () => ({
     channelsNamespace: 'channels',
     channelReaderImage: 'clerum/channel-reader:test',
     channelReaderImagePullPolicy: 'IfNotPresent',
+    hostFullReconcileConcurrency: 2,
   },
 }))
 

@@ -200,7 +200,9 @@ describe('routes/profileAdmin', () => {
         return [{ metadata: { name: 'ctx-live' }, spec: { contextId: 'ctx-alias' } }]
       }
       if (plural === 'hosts') {
-        return [{ metadata: { name: 'agent-live' }, spec: { enabled: false } }]
+        return [
+          { metadata: { name: 'agent-live', namespace: 'mcp-host' }, spec: { enabled: true } },
+        ]
       }
       return []
     })
@@ -243,7 +245,9 @@ describe('routes/profileAdmin', () => {
         return [{ metadata: { name: 'ctx-live' }, spec: { contextId: 'ctx-alias' } }]
       }
       if (plural === 'hosts') {
-        return [{ metadata: { name: 'agent-live' }, spec: { enabled: false } }]
+        return [
+          { metadata: { name: 'agent-live', namespace: 'mcp-host' }, spec: { enabled: true } },
+        ]
       }
       return []
     })

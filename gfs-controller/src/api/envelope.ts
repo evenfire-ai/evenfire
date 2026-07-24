@@ -60,5 +60,8 @@ export function toResponse(error: unknown): { status: number; body: ErrEnvelope 
   if (code === "path_invalid") {
     return { status: 400, body: { ok: false, error: { code: "path_invalid", message } } };
   }
-  return { status: 500, body: { ok: false, error: { code: "internal", message } } };
+  return {
+    status: 500,
+    body: { ok: false, error: { code: "internal", message: "internal server error" } },
+  };
 }

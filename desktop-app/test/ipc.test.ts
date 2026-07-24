@@ -86,6 +86,9 @@ describe('ipc host status stream handlers', () => {
     listGfsChildren: vi.fn(),
     gfsAffordances: vi.fn(),
     grantGfs: vi.fn(),
+    listGfsGrants: vi.fn(),
+    revokeGfsGrant: vi.fn(),
+    listMyAgents: vi.fn(),
     createGfsShare: vi.fn(),
     setSandboxUiVisible: vi.fn(),
   }
@@ -311,18 +314,117 @@ describe('ipc host status stream handlers', () => {
     await Promise.resolve(
       handler?.(event, {
         resourceId: ' 11111111-1111-1111-1111-111111111111 ',
-        subjectKey: ' user:user-1 ',
+        subjectKeys: [' user:user-1 ', ' team:team-2 '],
         bits: [' read ', ' manage_acl '],
         drive: ' main ',
       })
     )
 
+    // The bulk subjects[] array is sanitized element-wise. No inherit in the
+    // payload → forwarded as undefined (the client's historical `false` default
+    // applies downstream).
     expect(service.grantGfs).toHaveBeenCalledWith(
       '11111111-1111-1111-1111-111111111111',
-      'user:user-1',
+      ['user:user-1', 'team:team-2'],
       ['read', 'manage_acl'],
+      'main',
+      undefined
+    )
+  })
+
+  it('rejects an empty or non-array subjectKeys payload before calling AppService', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:grant')
+
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          resourceId: '11111111-1111-1111-1111-111111111111',
+          subjectKeys: [],
+          bits: ['read'],
+          drive: 'main',
+        })
+      )
+    ).rejects.toThrow('subjectKeys must be a non-empty array')
+    expect(service.grantGfs).not.toHaveBeenCalled()
+  })
+
+  it('forwards a boolean inherit and rejects a non-boolean one', async () => {
+    service.grantGfs.mockResolvedValue(undefined)
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:grant')
+
+    await Promise.resolve(
+      handler?.(event, {
+        resourceId: '11111111-1111-1111-1111-111111111111',
+        subjectKeys: ['host:1st:mcp-host/chatllm'],
+        bits: ['read'],
+        drive: 'main',
+        inherit: true,
+      })
+    )
+    expect(service.grantGfs).toHaveBeenCalledWith(
+      '11111111-1111-1111-1111-111111111111',
+      ['host:1st:mcp-host/chatllm'],
+      ['read'],
+      'main',
+      true
+    )
+
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          resourceId: '11111111-1111-1111-1111-111111111111',
+          subjectKeys: ['host:1st:mcp-host/chatllm'],
+          bits: ['read'],
+          drive: 'main',
+          inherit: 'yes',
+        })
+      )
+    ).rejects.toThrow('inherit must be a boolean')
+  })
+
+  it('routes GFS grant list and revoke through trusted IPC with sanitized input', async () => {
+    service.listGfsGrants.mockResolvedValue([])
+    service.revokeGfsGrant.mockResolvedValue(undefined)
+    const { event } = makeTrustedEvent()
+
+    const listHandler = testState.handlers.get('gfs:listGrants')
+    await Promise.resolve(
+      listHandler?.(event, {
+        resourceId: ' 11111111-1111-1111-1111-111111111111 ',
+        drive: ' main ',
+      })
+    )
+    expect(service.listGfsGrants).toHaveBeenCalledWith(
+      '11111111-1111-1111-1111-111111111111',
       'main'
     )
+
+    const revokeHandler = testState.handlers.get('gfs:revokeGrant')
+    await Promise.resolve(
+      revokeHandler?.(event, { grantId: ' 22222222-2222-2222-2222-222222222222 ' })
+    )
+    expect(service.revokeGfsGrant).toHaveBeenCalledWith('22222222-2222-2222-2222-222222222222')
+  })
+
+  it('lists my agents through the dedicated channel (not the cached catalog)', async () => {
+    const agents = [
+      {
+        name: 'chatllm',
+        contextRef: 'engineering',
+        mcpServers: [{ name: 'mongodb' }],
+        gfsSubject: { type: 'host', id: '1st:mcp-host/chatllm' },
+      },
+    ]
+    service.listMyAgents.mockResolvedValue(agents)
+    const { event } = makeTrustedEvent()
+
+    const handler = testState.handlers.get('agents:listMine')
+    const result = await Promise.resolve(handler?.(event))
+
+    expect(service.listMyAgents).toHaveBeenCalledTimes(1)
+    expect(result).toEqual(agents)
   })
 
   it('propagates reserved GFS subject rejection from AppService', async () => {
@@ -334,12 +436,57 @@ describe('ipc host status stream handlers', () => {
       Promise.resolve(
         handler?.(event, {
           resourceId: '11111111-1111-1111-1111-111111111111',
-          subjectKey: 'host:mcp-host/standalone',
+          subjectKeys: ['host:mcp-host/standalone'],
           bits: ['read'],
           drive: 'main',
         })
       )
     ).rejects.toThrow('subject must be user:<id> or team:<id>')
+  })
+
+  it('rejects untrusted sender for GFS grant listing', async () => {
+    const handler = testState.handlers.get('gfs:listGrants')
+    await expect(
+      Promise.resolve(
+        handler?.(
+          {
+            senderFrame: { url: 'https://evil.example.com' },
+            sender: { id: 1, send: vi.fn(), once: vi.fn() },
+          },
+          { resourceId: '11111111-1111-1111-1111-111111111111', drive: 'main' }
+        )
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+    expect(service.listGfsGrants).not.toHaveBeenCalled()
+  })
+
+  it('rejects untrusted sender for GFS grant revocation', async () => {
+    const handler = testState.handlers.get('gfs:revokeGrant')
+    await expect(
+      Promise.resolve(
+        handler?.(
+          {
+            senderFrame: { url: 'https://evil.example.com' },
+            sender: { id: 1, send: vi.fn(), once: vi.fn() },
+          },
+          { grantId: '22222222-2222-2222-2222-222222222222' }
+        )
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+    expect(service.revokeGfsGrant).not.toHaveBeenCalled()
+  })
+
+  it('rejects untrusted sender for my agents listing', async () => {
+    const handler = testState.handlers.get('agents:listMine')
+    await expect(
+      Promise.resolve(
+        handler?.({
+          senderFrame: { url: 'https://evil.example.com' },
+          sender: { id: 1, send: vi.fn(), once: vi.fn() },
+        })
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+    expect(service.listMyAgents).not.toHaveBeenCalled()
   })
 
   it('routes host status read through getHostStatus handler', async () => {

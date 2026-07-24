@@ -208,6 +208,24 @@ export function createGfsRouter(): Router {
 
   // Delegation (folder-owner): grant/share as the user. control-api's
   // assertMayGrant enforces no-escalation against the user's own held bits.
+  // The grants list requires manage_acl on the resource (view-ACL = manage-ACL,
+  // enforced by control-api's handleGrantListForCaller); its item `id` is what
+  // powers per-row revoke in the Manage modal.
+  router.get('/me/gfs/grants', async (req: AuthedRequest, res, next) => {
+    try {
+      const data = await controlApiRequest('GET', '/external/gfs/grants', {
+        userSessionToken: extractAuthToken(req),
+        query: {
+          drive: typeof req.query.drive === 'string' ? req.query.drive : undefined,
+          resourceId: typeof req.query.resourceId === 'string' ? req.query.resourceId : undefined,
+        },
+      })
+      res.status(200).json(data)
+    } catch (error) {
+      forwardControlApiError(error, res, next)
+    }
+  })
+
   router.put('/me/gfs/grants', async (req: AuthedRequest, res, next) => {
     try {
       const data = await controlApiRequest('PUT', '/external/gfs/grants', {

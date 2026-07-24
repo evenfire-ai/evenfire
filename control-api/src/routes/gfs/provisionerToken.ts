@@ -22,6 +22,8 @@ import { requireInternalControlJwt } from '../../middleware/internalControlJwt.j
  */
 
 const DEFAULT_DRIVE = 'main'
+const LEGACY_STANDALONE_HCC_NAMESPACE = 'mcp-host'
+const LEGACY_STANDALONE_HCC_NAME = 'standalone'
 
 /** Validate requested scopes against GFS_SCOPES; default to read-only (P3). */
 function parseScopes(value: unknown): GfsScope[] {
@@ -74,6 +76,17 @@ export function registerGfsProvisionerTokenRoute(router: Router): void {
         .toLowerCase()
       if (!name || !namespace) {
         res.status(400).json({ error: 'subject_invalid' })
+        return
+      }
+      // `host:1st:mcp-host/standalone` is historical fleet-wide grant state,
+      // not an individual Host identity. Keep it readable for the bounded
+      // cleanup/migration flow, but never mint a new HCC credential for it.
+      if (
+        provisioner.iss === 'hcc' &&
+        namespace === LEGACY_STANDALONE_HCC_NAMESPACE &&
+        name === LEGACY_STANDALONE_HCC_NAME
+      ) {
+        res.status(409).json({ error: 'subject_reserved' })
         return
       }
       if (!config.allowedIssuanceNamespaces.includes(namespace)) {

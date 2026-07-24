@@ -90,11 +90,11 @@ vi.mock('../src/mcpHostRuntimeTokenIssuerClient', () => ({
 }))
 
 vi.mock('../src/gfsHostBinding', () => ({
-  mintHostGfsToken: vi.fn().mockResolvedValue({
+  mintHostGfsToken: vi.fn(async (namespace: string, name: string) => ({
     ['to' + 'ken']: 'gfs-runtime-value',
     expiresInSeconds: 600,
-    subject: 'host:1st:mcp-host/stateless-host',
-  }),
+    subject: `host:1st:${namespace}/${name}`,
+  })),
 }))
 
 function makeHost(overrides?: Partial<HostCRD>): HostCRD {
@@ -793,7 +793,8 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(writes[1].lifecycle).toEqual({
       state: 'active',
       wakeHandledGeneration: 5,
-      reason: '1 CommunicationChannel(s) reference this Host',
+      reason:
+        '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
     })
     expect(rejectedCondition(writes[1])).toMatchObject({
       status: 'True',
@@ -872,7 +873,8 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(writes[1].lifecycle).toEqual({
       state: 'active',
       wakeHandledGeneration: 6,
-      reason: '1 CommunicationChannel(s) reference this Host',
+      reason:
+        '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
     })
   })
 
@@ -988,7 +990,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     )
     const writes = lifecycleStatusWrites(customApi)
     expect(writes).toHaveLength(2)
-    expect(writes[1].lifecycle?.reason).toBe('1 CommunicationChannel(s) reference this Host')
+    expect(writes[1].lifecycle?.reason).toBe(
+      '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle'
+    )
   })
 
   it('does not repeat bootstrap provisioning when channel ingress already existed in spec', async () => {
@@ -1306,6 +1310,73 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(writes[0].lifecycle).toEqual({ state: 'suspended', wakeHandledGeneration: 4 })
     expect(rejectedCondition(writes[0]).status).toBe('False')
   })
+
+  it('hard-rejects on the FIRST stateless reconcile when a channel already exists (reverse arrival order)', async () => {
+    // Addendum 6 (order independence): the operator scenario is a STATEFUL Host
+    // with an active channel whose spec is then flipped to stateless:true. The
+    // decision is state-derived, not arrival-order-dependent — the confirmed
+    // channel must hard-reject from the very first stateless-requesting
+    // reconcile; stateless must never be transiently enabled.
+    const { reconciler, appsApi, customApi } = createReconciler({
+      countCommunicationChannels: () => 1,
+    })
+    // Prior stateful projection: the Host ran active with the channel and is
+    // now flipped to stateless:true. The AP-1 fresh read agrees with the cached
+    // snapshot — this scenario has no concurrent heartbeat transition, and the
+    // shared mock's default fresh object is a SUSPENDED host, which would
+    // otherwise inject an unrelated echo.
+    const host = makeStatelessHost({
+      status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
+    })
+    customApi.getNamespacedCustomObject.mockResolvedValue({
+      metadata: { name: host.name, namespace: host.namespace },
+      spec: host.spec,
+      status: host.status,
+    })
+
+    await reconciler.reconcile(host)
+
+    const writes = lifecycleStatusWrites(customApi)
+    // Never transiently enabled: EVERY status write carries the rejection and
+    // stays active. (This tree has no status.lifecycle.effectiveMode field, so
+    // the "never transiently stateless" invariant is asserted through the
+    // durable rejection condition + state, which is what it projects here.)
+    expect(writes.length).toBeGreaterThan(0)
+    for (const write of writes) {
+      expect(write.lifecycle?.state).toBe('active')
+      expect(rejectedCondition(write)).toMatchObject({
+        status: 'True',
+        reason: 'ActiveCommunicationChannels',
+      })
+    }
+    // The status reason is present immediately, naming the count + recovery.
+    expect(writes.at(-1)!.lifecycle?.reason).toBe(
+      '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle'
+    )
+    // Stateful active runtime (no lifecycle env).
+    expect(hostDeploymentBody(appsApi, host.name).spec?.replicas).toBe(1)
+    expect(containerEnv(hostDeploymentBody(appsApi, host.name)).map(e => e.name)).not.toContain(
+      'CLERUM_STATELESS_LIFECYCLE'
+    )
+  })
+
+  it('surfaces the disassociation recovery action in the StatelessEnableRejected condition message', async () => {
+    // Operator-visibility contract (control-ui renders condition.message
+    // verbatim): the recovery action MUST live in the condition message, not
+    // only in lifecycle.reason.
+    const { reconciler, customApi } = createReconciler({
+      countCommunicationChannels: () => 3,
+    })
+
+    await reconciler.reconcile(makeStatelessHost())
+
+    const condition = rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!)
+    expect(condition.status).toBe('True')
+    expect(condition.reason).toBe('ActiveCommunicationChannels')
+    expect(condition.message).toBe(
+      '3 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle'
+    )
+  })
 })
 
 describe('HostReconciler stateless lifecycle — kill-switches', () => {
@@ -1321,7 +1392,8 @@ describe('HostReconciler stateless lifecycle — kill-switches', () => {
     expect(writes[0].lifecycle).toEqual({
       state: 'active',
       wakeHandledGeneration: 3,
-      reason: '1 CommunicationChannel(s) reference this Host',
+      reason:
+        '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
     })
     expect(rejectedCondition(writes[0]).status).toBe('True')
   })
@@ -1535,7 +1607,8 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
     expect(writes.at(-1)?.lifecycle).toEqual({
       state: 'active',
       wakeHandledGeneration: 3,
-      reason: '1 CommunicationChannel(s) reference this Host',
+      reason:
+        '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
     })
   })
 
@@ -1563,7 +1636,8 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
     expect(writes.at(-1)?.lifecycle).toEqual({
       state: 'active',
       wakeHandledGeneration: 2,
-      reason: '1 CommunicationChannel(s) reference this Host',
+      reason:
+        '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
     })
   })
 
@@ -1589,7 +1663,8 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
     expect(writes.at(-1)?.lifecycle).toEqual({
       state: 'suspended',
       wakeHandledGeneration: 5,
-      reason: '1 CommunicationChannel(s) reference this Host',
+      reason:
+        '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
     })
   })
 
@@ -1630,7 +1705,8 @@ describe('HostReconciler stateless lifecycle — initContainer and mounts', () =
     expect(init.name).toBe('workspace-layout-init')
     expect(init.image).toBe('clerum/mcp-host:0.6.0')
     expect(init.command?.[0]).toBe('/bin/sh')
-    expect(init.command?.[2]).toContain('mkdir -p "$root/workspace" "$root/state"')
+    expect(init.command?.[2]).toContain('assert_managed_dir "$root/workspace" workspace')
+    expect(init.command?.[2]).toContain('directory is a symlink')
     expect(init.command?.[2]).toContain('state.db-wal')
     expect(init.volumeMounts).toEqual([{ name: 'workspace', mountPath: '/mnt/workspace-root' }])
     expect(init.securityContext).toEqual({

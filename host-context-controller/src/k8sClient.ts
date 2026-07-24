@@ -17,7 +17,12 @@ import { config } from './config'
 import { gfsDefaultFactoryConfig } from './gfsConfig'
 import { GfsReconciler } from './gfsReconciler'
 import { ControlApiGfsSeedClient } from './gfsSeedClient'
-import { HostFleetReconcileError, HostReconciler, type ResolvedSfsMount } from './hostReconciler'
+import {
+  HostFleetReconcileError,
+  type HostReconcileSource,
+  HostReconciler,
+  type ResolvedSfsMount,
+} from './hostReconciler'
 import {
   type InfrastructureTelemetryReporter,
   createInfrastructureTelemetryReporter,
@@ -25,6 +30,7 @@ import {
 import { K8sGfsApi } from './k8s/gfsK8sApi'
 import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
 import { pvcName as sfsPvcName } from './k8s/sharedFileSystemFactory'
+import { hostDeleteCleanupTotal, hostFleetRequestsTotal, hostWatchRecoverySeconds } from './metrics'
 import { NetworkPolicyReconciler } from './networkPolicyReconciler'
 import { McpServerReconciler } from './reconciler'
 import { SharedFileSystemReconciler } from './sharedFileSystemReconciler'
@@ -84,6 +90,9 @@ const COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS = 5000
 const COMMUNICATION_CHANNEL_FLEET_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 300000]
 const HOST_CACHE_RECOVERY_RETRY_MS = 5000
 const HOST_WATCH_RECONCILE_RETRY_DELAYS_MS = [5000, 15000, 30000]
+// Wake-pending Hosts get immediate per-Host admission after watch recovery
+// (§10.2 step 7) rather than waiting for the background fleet pass.
+const WAKE_REQUESTED_ANNOTATION = 'clerum.io/wake-requested'
 
 type CommunicationChannelSnapshot = {
   channels: CommunicationChannelCRD[]
@@ -289,6 +298,7 @@ async function listHostSnapshot(): Promise<HostSnapshot> {
         metadata: {
           name: string
           namespace?: string
+          uid?: string
           generation?: number
           resourceVersion?: string
           annotations?: Record<string, string>
@@ -301,6 +311,7 @@ async function listHostSnapshot(): Promise<HostSnapshot> {
     const hosts = list.items.map(item => ({
       name: item.metadata.name,
       namespace: item.metadata.namespace || config.hostNamespace,
+      uid: item.metadata.uid,
       generation: item.metadata.generation,
       resourceVersion: item.metadata.resourceVersion,
       annotations: item.metadata.annotations,
@@ -555,10 +566,11 @@ export class McpServerWatcher implements McpServerProvider {
   private readonly hostWatchRetryAttempts = new Map<string, number>()
   private hostCacheSynced = false
   private hostCacheRecoveryTimer: ReturnType<typeof setTimeout> | null = null
-  // Host events and inventory passes share one mutation tail. A watch paired
-  // with the LIST resourceVersion makes queued events causally newer than the
-  // immutable snapshot reconciled ahead of them.
-  private hostConvergenceTail: Promise<void> = Promise.resolve()
+  // Host watch LIST-to-WATCH recovery is a dedicated, deduplicated operation
+  // (§10.2). Concurrent recovery signals reuse the in-flight promise so exactly
+  // one LIST + WATCH is installed. Independent per-Host events no longer share a
+  // process-wide convergence tail — they enter the per-Host serializer directly.
+  private hostRecoveryInFlight: Promise<HostCRD[]> | null = null
   // B2: tracks whether the CC snapshot is paired with a continuing watch.
   // Set to true only while a complete snapshot is paired with a live watch;
   // used by HostReconciler to make fail-closed lifecycle decisions.
@@ -658,6 +670,17 @@ export class McpServerWatcher implements McpServerProvider {
     this.hostReconciler.setIsCommunicationChannelCacheSynced(() =>
       this.isCommunicationChannelCacheSynced()
     )
+    // A fleet worker resolves the freshest cached Host at execution (skipping
+    // entries a delete/newer event has since removed), and orphan cleanup
+    // compares candidates with the CURRENT inventory rather than a pass snapshot.
+    this.hostReconciler.setResolveCurrentHost(name => this.hosts.get(name))
+    // Orphan cleanup requires known watch authority and a stable watch
+    // generation; expose both so cleanup fail-closes while authority is unknown
+    // or the watch has been retired mid-pass.
+    this.hostReconciler.setHostWatchAuthority(() => ({
+      known: this.hostCacheSynced,
+      generation: this.hostWatchGeneration,
+    }))
     // Per-CC credentials Secret migration: HostReconciler computes the
     // channel-reader credentials-revision annotation by hashing the Secret(s)
     // referenced by all CCs of a host. Wire both finders so
@@ -833,47 +856,211 @@ export class McpServerWatcher implements McpServerProvider {
     for (const host of snapshot.hosts) this.hosts.set(host.name, host)
   }
 
-  private async recoverHostInventoryAndWatch(): Promise<HostCRD[]> {
+  /**
+   * Dedicated, deduplicated Host watch LIST-to-WATCH recovery (§10.2). Watch
+   * authority recovers independently of the background fleet convergence pass:
+   * concurrent recovery signals reuse the in-flight promise so exactly one LIST
+   * + WATCH is installed, and authority is declared known ONLY after the WATCH
+   * is established. On success it enqueues discovered new/changed/wake-pending
+   * Hosts through their per-Host chains (step 7) and requests — without awaiting
+   * — a coalesced background full pass (step 8).
+   */
+  private recoverHostInventoryAndWatch(): Promise<HostCRD[]> {
+    if (this.stopped) return Promise.resolve([])
+    if (this.hostRecoveryInFlight) return this.hostRecoveryInFlight
+    const recovery = this.performHostInventoryRecovery()
+    this.hostRecoveryInFlight = recovery
+    const clear = (): void => {
+      if (this.hostRecoveryInFlight === recovery) this.hostRecoveryInFlight = null
+    }
+    void recovery.then(clear, clear)
+    return recovery
+  }
+
+  private async performHostInventoryRecovery(): Promise<HostCRD[]> {
+    const startedAt = Date.now()
+    // Capture the pre-recovery inventory so step 7 can distinguish genuinely
+    // new/changed Hosts from ones the fleet pass will converge anyway.
+    const previousNames = new Set(this.hosts.keys())
+    const previousGenerations = new Map<string, number | undefined>(
+      [...this.hosts.values()].map(host => [host.name, host.generation])
+    )
+    // #827: capture identities so recovery can tell a same-name recreation from
+    // a genuine disappearance and reconcile the former rather than delete it.
+    const previousUids = new Map<string, string | undefined>(
+      [...this.hosts.values()].map(host => [host.name, host.uid])
+    )
     this.retireHostWatch()
-    const snapshot = await listHostSnapshot()
-    if (this.stopped) return []
-    if (!snapshot.resourceVersion) {
-      throw new Error('Host snapshot missing resourceVersion')
+    try {
+      const listStartedAt = Date.now()
+      const snapshot = await listHostSnapshot()
+      if (this.stopped) return []
+      if (!snapshot.resourceVersion) {
+        throw new Error('Host snapshot missing resourceVersion')
+      }
+      hostWatchRecoverySeconds.observe(
+        { phase: 'list', outcome: 'success' },
+        (Date.now() - listStartedAt) / 1000
+      )
+      this.installHostSnapshot(snapshot)
+      const watchStartedAt = Date.now()
+      const watchGeneration = await this.startHostWatch(snapshot.resourceVersion)
+      if (
+        this.stopped ||
+        watchGeneration !== this.hostWatchGeneration ||
+        this.hostWatchRequest === null
+      ) {
+        throw new Error('Host snapshot could not be paired with an active watch')
+      }
+      // Authority is known ONLY after the WATCH is installed.
+      this.hostCacheSynced = true
+      hostWatchRecoverySeconds.observe(
+        { phase: 'watch', outcome: 'success' },
+        (Date.now() - watchStartedAt) / 1000
+      )
+      hostWatchRecoverySeconds.observe(
+        { phase: 'total', outcome: 'success' },
+        (Date.now() - startedAt) / 1000
+      )
+      if (this.hostCacheRecoveryTimer) {
+        clearTimeout(this.hostCacheRecoveryTimer)
+        this.hostCacheRecoveryTimer = null
+      }
+      this.enqueueRecoveredUrgentHosts(
+        snapshot.hosts,
+        previousNames,
+        previousGenerations,
+        previousUids
+      )
+      // Addendum 4 (#827): a Host present before recovery and absent from the
+      // fresh authoritative snapshot genuinely disappeared. Enqueue an immediate
+      // per-Host delete cleanup so a DELETE lost to watch retirement is never
+      // silently dropped.
+      this.enqueueRecoveredHostDeletes(snapshot.hosts, previousNames)
+      // Request a coalesced background full pass, but do NOT await it before
+      // declaring watch recovery complete.
+      void this.requestHostFleetReconcile('Host watch recovery convergence', undefined, 'full')
+      return snapshot.hosts
+    } catch (error) {
+      // Keep authority unknown, record the failure, and use the existing
+      // bounded retry policy.
+      this.hostCacheSynced = false
+      hostWatchRecoverySeconds.observe(
+        { phase: 'total', outcome: 'failure' },
+        (Date.now() - startedAt) / 1000
+      )
+      if (!this.stopped) {
+        console.error('[K8s] Host watch recovery failed:', error)
+        this.scheduleHostCacheRecovery()
+      }
+      throw error
     }
+  }
 
-    this.installHostSnapshot(snapshot)
-    const watchGeneration = await this.startHostWatch(snapshot.resourceVersion)
-    if (
-      this.stopped ||
-      watchGeneration !== this.hostWatchGeneration ||
-      this.hostWatchRequest === null
-    ) {
-      throw new Error('Host snapshot could not be paired with an active watch')
+  /**
+   * §10.2 step 7: give genuinely new, changed, or wake-pending Hosts immediate
+   * per-Host admission after recovery rather than waiting for the background
+   * fleet pass. Each dispatch resolves the CURRENT cached Host at execution and
+   * enters that Host's serializer, so it is ordered against any concurrent watch
+   * event for the same Host.
+   */
+  private enqueueRecoveredUrgentHosts(
+    hosts: HostCRD[],
+    previousNames: Set<string>,
+    previousGenerations: Map<string, number | undefined>,
+    previousUids: Map<string, string | undefined>
+  ): void {
+    for (const host of hosts) {
+      const isNew = !previousNames.has(host.name)
+      const previousGeneration = previousGenerations.get(host.name)
+      const changed =
+        previousGeneration !== undefined &&
+        host.generation !== undefined &&
+        host.generation !== previousGeneration
+      // #827: a same-name Host recreated during the watch gap carries a fresh
+      // uid; its generation may even reset to 1 and look "unchanged", so an
+      // identity change is itself urgent work.
+      const previousUid = previousUids.get(host.name)
+      const recreated =
+        previousUid !== undefined && host.uid !== undefined && host.uid !== previousUid
+      const wakePending = host.annotations?.[WAKE_REQUESTED_ANNOTATION] !== undefined
+      if (!isNew && !changed && !recreated && !wakePending) continue
+      void this.dispatchUrgentHostReconcile(host.name)
     }
+  }
 
-    this.hostCacheSynced = true
-    if (this.hostCacheRecoveryTimer) {
-      clearTimeout(this.hostCacheRecoveryTimer)
-      this.hostCacheRecoveryTimer = null
+  private async dispatchUrgentHostReconcile(name: string): Promise<void> {
+    if (this.stopped) return
+    const host = this.hosts.get(name)
+    if (!host) return
+    try {
+      await this.hostReconciler.reconcile(host, 'urgent')
+    } catch (error) {
+      console.error(`[K8s] Urgent Host reconcile failed for "${name}":`, error)
     }
-    return snapshot.hosts
+  }
+
+  /**
+   * §10.2 + Addendum 4 (#827): a Host present in the pre-recovery inventory but
+   * ABSENT from the fresh authoritative snapshot has genuinely disappeared. An
+   * accepted DELETED event invalidated when the watch retired is thereby
+   * replaced by this authoritative absence check and never silently lost. Each
+   * confirmed deletion is dispatched IMMEDIATELY through its own per-Host chain
+   * (reconcileDelete serializes internally) — never queued behind other Hosts'
+   * convergence; the compensating full-pass sweep remains only a safety net. A
+   * same-name recreation is present in the snapshot by name and so is never in
+   * the disappeared set (it is reconciled by enqueueRecoveredUrgentHosts).
+   */
+  private enqueueRecoveredHostDeletes(hosts: HostCRD[], previousNames: Set<string>): void {
+    const snapshotNames = new Set(hosts.map(host => host.name))
+    for (const name of previousNames) {
+      if (snapshotNames.has(name)) continue // still present (or recreated) → not a disappearance
+      hostDeleteCleanupTotal.inc({ outcome: 'queued' })
+      void this.dispatchRecoveredHostDelete(name)
+    }
+  }
+
+  private async dispatchRecoveredHostDelete(name: string): Promise<void> {
+    if (this.stopped) return
+    // The fresh authoritative LIST already confirmed absence and the cache no
+    // longer holds this Host, so cleanup is authorized. Route it through the
+    // per-Host serializer (reconcileDelete → serializeByHost) so an older
+    // in-flight reconcile for the same Host cannot recreate its resources after
+    // cleanup.
+    hostDeleteCleanupTotal.inc({ outcome: 'confirmed' })
+    try {
+      // F2/#827 TOCTOU parity: absence was resolved at LIST time, but the
+      // recreation's ADDED can be delivered while the watch replays from the
+      // snapshot's resourceVersion — that callback sets `this.hosts`
+      // SYNCHRONOUSLY and enters this Host's chain FIRST, while this
+      // fire-and-forget dispatch queues the delete SECOND. serializeByHost is
+      // strict FIFO, so without this fence the rebuilt bundle (workspace PVC,
+      // per-Host RBAC, runtime-token Secret, channel-reader resources,
+      // NetworkPolicies) would be created and then wiped. Ownership labels
+      // cannot discriminate — the rebuilt bundle carries identical labels — and
+      // a name absent from the snapshot has no uid to compare, so live-cache
+      // presence AT ADMISSION is the fence, exactly as in the F2 orphan sweep.
+      await this.hostReconciler.reconcileDelete(name, config.hostNamespace, {
+        skipIf: () => this.hosts.has(name),
+      })
+      hostDeleteCleanupTotal.inc({ outcome: 'completed' })
+    } catch (error) {
+      hostDeleteCleanupTotal.inc({ outcome: 'retried' })
+      console.error(
+        `[K8s] Recovered Host delete cleanup failed for "${name}"; the safety-net sweep will retry:`,
+        error
+      )
+    }
   }
 
   private scheduleHostCacheRecovery(): void {
     if (this.stopped || this.hostCacheRecoveryTimer) return
     this.hostCacheRecoveryTimer = setTimeout(() => {
       this.hostCacheRecoveryTimer = null
-      void this.requestHostFleetReconcile('Host watch recovery', undefined, 'full')
+      // Watch recovery is an independent operation, no longer coupled to a full
+      // fleet pass. Recovery itself requests the background convergence pass.
+      void this.recoverHostInventoryAndWatch().catch(() => undefined)
     }, HOST_CACHE_RECOVERY_RETRY_MS)
-  }
-
-  private serializeHostConvergence<T>(work: () => Promise<T>): Promise<T> {
-    const result = this.hostConvergenceTail.then(work)
-    this.hostConvergenceTail = result.then(
-      () => undefined,
-      () => undefined
-    )
-    return result
   }
 
   private isCurrentHostWatchEvent(
@@ -885,6 +1072,14 @@ export class McpServerWatcher implements McpServerProvider {
     if (type === 'DELETED') return !this.hosts.has(host.name)
     const current = this.hosts.get(host.name)
     if (!current) return false
+    // #827 identity fence: a same-name Host that was deleted and recreated
+    // carries a fresh metadata.uid. If the cache already holds a DIFFERENT
+    // identity for this name, this event describes a superseded object and must
+    // not act on the current one. uid complements (never replaces) the
+    // generation fence below and the §10.5 fresh read on the cleanup path.
+    if (current.uid !== undefined && host.uid !== undefined && current.uid !== host.uid) {
+      return false
+    }
     if (current.generation === undefined || host.generation === undefined) return true
     return current.generation <= host.generation
   }
@@ -905,13 +1100,23 @@ export class McpServerWatcher implements McpServerProvider {
   private async reconcileHostWatchEvent(
     type: HostWatchEventType,
     host: HostCRD,
-    eventRevision: number
+    eventRevision: number,
+    source: HostReconcileSource = 'urgent'
   ): Promise<void> {
-    if (this.stopped || !this.isCurrentHostWatchEvent(type, host, eventRevision)) return
+    if (this.stopped) return
+    if (!this.isCurrentHostWatchEvent(type, host, eventRevision)) {
+      // #827: a DELETE that is no longer current because the cache now holds a
+      // (recreated) same-name Host is a superseded delete — record it and do
+      // NOT delete the new identity's resources.
+      if (type === 'DELETED' && this.hosts.has(host.name)) {
+        hostDeleteCleanupTotal.inc({ outcome: 'superseded' })
+      }
+      return
+    }
     if (type === 'DELETED') {
       await this.hostReconciler.reconcileDelete(host.name, host.namespace)
     } else {
-      await this.hostReconciler.reconcile(host)
+      await this.hostReconciler.reconcile(host, source)
     }
   }
 
@@ -959,9 +1164,9 @@ export class McpServerWatcher implements McpServerProvider {
       return
     }
     try {
-      await this.serializeHostConvergence(() =>
-        this.reconcileHostWatchEvent(type, host, eventRevision)
-      )
+      // F1: a retry is a distinct reconcile lane from first-attempt load — an
+      // operator must be able to tell a retry storm from fresh admission.
+      await this.reconcileHostWatchEvent(type, host, eventRevision, 'retry')
       this.completeHostWatchEvent(host.name, eventRevision)
     } catch (error) {
       console.error(`[K8s] Host watch reconciliation retry failed for ${host.name}:`, error)
@@ -970,7 +1175,7 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   private performHostFleetReconcile(request: HostFleetReconcileRequest): Promise<void> {
-    return this.serializeHostConvergence(() => this.performHostFleetReconcileOnce(request))
+    return this.performHostFleetReconcileOnce(request)
   }
 
   private async performHostFleetReconcileOnce(request: HostFleetReconcileRequest): Promise<void> {
@@ -984,19 +1189,23 @@ export class McpServerWatcher implements McpServerProvider {
       return
     }
     try {
-      let hosts: HostCRD[]
-      if (mode === 'full') {
-        hosts = await this.recoverHostInventoryAndWatch()
+      // Watch authority recovers as an independent, deduplicated operation. A
+      // fleet pass only needs to ensure the LIST -> WATCH is established when
+      // continuity was lost; it never drives the watch restart on every pass
+      // (that would re-LIST forever). Recovery, once synced, requests its own
+      // background convergence pass.
+      if (!this.hostCacheSynced) {
+        await this.recoverHostInventoryAndWatch()
         if (this.stopped) return
+      }
+      // Reconcile the CURRENT cache. Fleet workers dispatch Host keys and
+      // resolve the freshest cached spec at execution (see collectHostReconcile
+      // Failures); only fullReconcile runs the authority-gated orphan cleanup.
+      const hosts = [...this.hosts.values()]
+      if (mode === 'full') {
         console.log(`[K8s] Reconciling ${hosts.length} Host(s) after ${reason}`)
         await this.hostReconciler.fullReconcile(hosts)
       } else {
-        // Lifecycle convergence consumes the resourceVersion-continuing Host
-        // cache and never runs destructive orphan cleanup. If continuity was
-        // lost, rebuild LIST -> WATCH first so no Host can be missed.
-        hosts = this.hostCacheSynced
-          ? [...this.hosts.values()]
-          : await this.recoverHostInventoryAndWatch()
         if (
           this.stopped ||
           (ccLifecycleGeneration !== undefined &&
@@ -1014,6 +1223,7 @@ export class McpServerWatcher implements McpServerProvider {
         console.log(`[K8s] Completed Host reconciliation after ${reason}`)
       }
     } catch (error) {
+      hostFleetRequestsTotal.inc({ result: 'failed' })
       console.error(`[K8s] Host reconciliation after ${reason} failed:`, error)
       if (!this.stopped && ccLifecycleGeneration !== undefined) {
         if (error instanceof HostFleetReconcileError && error.hostFailures.length === 0) {
@@ -1068,9 +1278,11 @@ export class McpServerWatcher implements McpServerProvider {
     }
     const active = this.hostFleetReconcileInFlight
     if (!active) {
+      hostFleetRequestsTotal.inc({ result: 'started' })
       return this.waitForHostFleetOrShutdown(this.startHostFleetReconcile(request))
     }
     if (hostFleetRequestCovers(active, request)) {
+      hostFleetRequestsTotal.inc({ result: 'coalesced' })
       return this.waitForHostFleetOrShutdown(active.promise)
     }
 
@@ -1090,6 +1302,8 @@ export class McpServerWatcher implements McpServerProvider {
       this.hostFleetReconcilePending.mode = merged.mode
       this.hostFleetReconcilePending.ccLifecycleGeneration = merged.ccLifecycleGeneration
     }
+    // The request did not start its own pass; it is queued behind the active one.
+    hostFleetRequestsTotal.inc({ result: 'coalesced' })
     return this.waitForHostFleetOrShutdown(this.hostFleetReconcilePending.promise)
   }
 
@@ -1112,6 +1326,7 @@ export class McpServerWatcher implements McpServerProvider {
         pending.resolve()
         return
       }
+      hostFleetRequestsTotal.inc({ result: 'trailing' })
       const trailing = this.startHostFleetReconcile(pending)
       void trailing.then(pending.resolve, pending.resolve)
     }
@@ -2389,6 +2604,7 @@ export class McpServerWatcher implements McpServerProvider {
         metadata: {
           name: string
           namespace?: string
+          uid?: string
           generation?: number
           resourceVersion?: string
           annotations?: Record<string, string>
@@ -2401,6 +2617,7 @@ export class McpServerWatcher implements McpServerProvider {
       const host: HostCRD = {
         name: apiObj.metadata.name,
         namespace: apiObj.metadata.namespace || config.hostNamespace,
+        uid: apiObj.metadata.uid,
         generation: apiObj.metadata.generation,
         resourceVersion: apiObj.metadata.resourceVersion,
         annotations: apiObj.metadata.annotations,
@@ -2422,9 +2639,10 @@ export class McpServerWatcher implements McpServerProvider {
       }
 
       try {
-        await this.serializeHostConvergence(() =>
-          this.reconcileHostWatchEvent(eventType, host, eventRevision)
-        )
+        // Direct dispatch (§10.3): reconcileHostWatchEvent enters the per-Host
+        // serializer inside reconcile()/reconcileDelete(). The removed
+        // process-wide convergence tail no longer gates independent Hosts.
+        await this.reconcileHostWatchEvent(eventType, host, eventRevision)
         this.completeHostWatchEvent(host.name, eventRevision)
       } catch (error) {
         console.error(`[K8s] Host reconciliation failed for ${host.name}:`, error)

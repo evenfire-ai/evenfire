@@ -12,7 +12,7 @@
  *   - Lives in the `gfs` namespace (SFS lives in mcp-host).
  *   - Egress = DNS + Postgres: gfsc re-checks the permission store on every op
  *     and fails closed if it is unreachable (SFS egress is DNS-only).
- *   - The writer's init container only PREPARES the flat-blob storage prefix
+ *   - The writer's init container only PREPARES the opaque blob storage root
  *     (ownership). rootDirectories are materialized as gfs_resources rows by
  *     control-api (the governance plane owns the permission store), NOT here.
  *
@@ -42,7 +42,7 @@ export const DEFAULT_GFSC_PORT = 8087
 export const DEFAULT_READER_REPLICAS = 2
 export const DEFAULT_RUN_AS_UID = 1000
 export const DEFAULT_RUN_AS_GID = 1000
-/** Canonical mount path inside the gfsc container (the flat blob storage prefix). */
+/** Canonical opaque blob-storage root inside the gfsc container. */
 export const GFS_MOUNT_PATH = '/data/gfs'
 
 export type GfscRole = 'writer' | 'reader'
@@ -81,13 +81,20 @@ export interface GfsFactoryConfig {
   /** ConfigMap exposing the JWT public key gfsc verifies tokens with. */
   jwtPublicKeyConfigMapName: string
   jwtPublicKeyConfigMapKey: string
-  /** Secret holding the permission-store connection string for the gfs_controller role. */
+  /** Secret holding the permission-store connection string for the gfs_controller writer role. */
   pgSecretName: string
   pgSecretKey: string
+  /** Secret holding the permission-store connection string for the gfs_controller_reader role. */
+  readerPgSecretName: string
+  readerPgSecretKey: string
   /** Drive name this gfsc serves (singleton 'main' in the core). */
   driveName: string
   /** Expected audience on inbound gfs access tokens. */
   tokenAudience: string
+  /** Optional synchronous copy limits passed through verbatim to gfsc. */
+  syncCopyMaxObjects?: string
+  syncCopyMaxBytes?: string
+  syncCopyTimeoutMs?: string
   /** Optional kube-dns Service ClusterIP /32 for GKE NodeLocal DNS + Calico. */
   nodeLocalDnsCidr?: string
 }
@@ -249,6 +256,17 @@ export function buildPvc(
 }
 
 function gfscEnv(config: GfsFactoryConfig, role: GfscRole): k8s.V1EnvVar[] {
+  const pgSecretName = role === 'writer' ? config.pgSecretName : config.readerPgSecretName
+  const pgSecretKey = role === 'writer' ? config.pgSecretKey : config.readerPgSecretKey
+  const copyEnvEntries: ReadonlyArray<readonly [string, string | undefined]> = [
+    ['GFS_SYNC_COPY_MAX_OBJECTS', config.syncCopyMaxObjects],
+    ['GFS_SYNC_COPY_MAX_BYTES', config.syncCopyMaxBytes],
+    ['GFS_SYNC_COPY_TIMEOUT_MS', config.syncCopyTimeoutMs],
+  ]
+  const copyEnv = copyEnvEntries.flatMap(([name, value]): k8s.V1EnvVar[] =>
+    value === undefined ? [] : [{ name, value }]
+  )
+
   return [
     { name: 'GFS_PORT', value: String(config.gfscPort) },
     { name: 'GFS_STORAGE_PATH', value: GFS_MOUNT_PATH },
@@ -265,15 +283,16 @@ function gfscEnv(config: GfsFactoryConfig, role: GfscRole): k8s.V1EnvVar[] {
       },
     },
     {
-      // gfsc connects as the least-privilege gfs_controller role (S03).
+      // Keep the reader and writer on their distinct least-privilege roles.
       name: 'GFS_PG_CONNECTION_STRING',
       valueFrom: {
         secretKeyRef: {
-          name: config.pgSecretName,
-          key: config.pgSecretKey,
+          name: pgSecretName,
+          key: pgSecretKey,
         },
       },
     },
+    ...copyEnv,
   ]
 }
 
@@ -300,7 +319,8 @@ export function buildWriterInitArgs(gfs: GlobalFileSystemCRD): string {
  * keeps hostpath/minikube and CSI-backed RWO volumes writable by the non-root
  * serving container without adding a separate pod that could race the RWO mount.
  * `strategy: Recreate` matches the single RW writer under RWO (two RW mounts are
- * impossible); readers also use Recreate for simplicity in v1.
+ * impossible). Readers use a bounded RollingUpdate so a credential/image change
+ * does not deliberately remove every read endpoint at once.
  */
 export function buildDeployment(
   gfs: GlobalFileSystemCRD,
@@ -321,7 +341,9 @@ export function buildDeployment(
     metadata: { name, namespace: config.gfsNamespace, labels },
     spec: {
       replicas,
-      strategy: { type: 'Recreate' },
+      strategy: isWriter
+        ? { type: 'Recreate' }
+        : { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } },
       selector: { matchLabels: selector },
       template: {
         metadata: { labels: selector },

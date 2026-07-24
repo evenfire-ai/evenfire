@@ -113,6 +113,8 @@ SKIP_BUILD=false
 SKIP_UIS="${MINIKUBE_SKIP_UIS:-false}"
 RESET_DB=true
 FORCE_KEYS=false
+CONTROL_DB_RESET_PVC_UID="${CONTROL_DB_RESET_PVC_UID:-}"
+CONTROL_DB_RESET_RESUME="${CONTROL_DB_RESET_RESUME:-false}"
 
 case "${SKIP_UIS}" in
   true|1|yes) SKIP_UIS=true ;;
@@ -172,6 +174,11 @@ Environment:
   MINIKUBE_RECREATE_PROFILE
                          Set true to allow destructive broken-profile recreation
   CONFIRM_PROFILE        Must match MINIKUBE_PROFILE before any profile deletion
+  CONTROL_DB_RESET_PVC_UID
+                         Required with --reset-db: exact approved PVC UID, or
+                         "none" when no control-postgres-data PVC exists
+  CONTROL_DB_RESET_RESUME
+                         Set true only to resume the same interrupted reset
   BRANCH_PROFILE_DEPLOY_DIR
                          Optional deploy cache root; when set, kustomize uses
                          <dir>/overlays/minikube instead of PROJECT_DIR/deploy
@@ -315,6 +322,28 @@ maybe_exit_after_cluster_step() {
     log "MINIKUBE_SETUP_EXIT_AFTER_CLUSTER=true — stopping after cluster verification"
     exit 0
   fi
+}
+
+postgres_has_invalid_checkpoint() {
+  local pods pod logs
+  pods="$($KC get pods -n control-plane -l app=control-postgres -o name)" || return 1
+  pod="${pods%%$'\n'*}"
+  [ -n "$pod" ] || return 1
+  logs="$($KC logs "$pod" -n control-plane --tail=50)" || return 1
+  grep -q "invalid checkpoint record" <<<"$logs"
+}
+
+ensure_control_postgres_ready() {
+  if $KC rollout status deployment/control-postgres -n control-plane --timeout=180s >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! postgres_has_invalid_checkpoint; then
+    err "control-plane/control-postgres did not become Ready and no supported WAL recovery signature was found"
+    return 1
+  fi
+  err "Postgres reports an invalid checkpoint; automatic destructive recovery is disabled"
+  err "Re-run with --reset-db and CONTROL_DB_RESET_PVC_UID=<exact approved UID>"
+  return 1
 }
 
 # ======================================================================
@@ -613,32 +642,45 @@ fi
 step_header 6 $TOTAL_STEPS "Deploy"
 
 # 6a. Optional DB reset
-if [ "$RESET_DB" = true ]; then
-  log "Rebuilding postgres database from scratch (set REUSE_DB=true to keep it)..."
-  # Scale down to release PVC
-  $KC scale deployment/control-api -n control-plane --replicas=0 2>/dev/null || true
-  $KC scale deployment/control-postgres -n control-plane --replicas=0 2>/dev/null || true
-  # Wait for pods to terminate
-  sleep 3
-  # Delete PVC
-  $KC delete pvc control-postgres-data -n control-plane --ignore-not-found=true
-  # Delete any Released PVs matching control-postgres
-  RELEASED_PVS=$($KC get pv -o json 2>/dev/null | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for pv in data.get('items', []):
-    name = pv['metadata']['name']
-    phase = pv.get('status', {}).get('phase', '')
-    claim = pv.get('spec', {}).get('claimRef', {}).get('name', '')
-    if phase == 'Released' and 'control-postgres' in claim:
-        print(name)
-" 2>/dev/null || true)
-  if [ -n "$RELEASED_PVS" ]; then
-    for pv in $RELEASED_PVS; do
-      $KC delete pv "$pv" --ignore-not-found=true
-      ok "Deleted Released PV: $pv"
-    done
+if [ "$RESET_DB" = true ] && [ -z "$CONTROL_DB_RESET_PVC_UID" ]; then
+  # Never-bootstrapped auto-detect: with no control-postgres PVC AND no reset
+  # recovery state there is nothing a storage reset could destroy or resume,
+  # and the reset preflight (ready GFS secrets, running gfsc deployments)
+  # cannot succeed before the first deploy. Continue on the same path a
+  # REUSE_DB=true bootstrap takes. Any other combination keeps the hard-fail.
+  FRESH_PVC_UID="$($KC -n control-plane get pvc control-postgres-data \
+    -o 'jsonpath={.metadata.uid}' --ignore-not-found)"
+  FRESH_RESET_STATE="$($KC -n control-plane get configmap control-db-reset-state \
+    -o name --ignore-not-found)"
+  if [ -z "$FRESH_PVC_UID" ] && [ -z "$FRESH_RESET_STATE" ]; then
+    log "Fresh cluster: control DB was never bootstrapped; nothing to reset — continuing without a storage reset"
+    RESET_DB=false
   fi
+fi
+if [ "$RESET_DB" = true ]; then
+  [ -n "$CONTROL_DB_RESET_PVC_UID" ] \
+    || { err "CONTROL_DB_RESET_PVC_UID is required with --reset-db (pass the current control-postgres PVC UID, 'none' for a cluster without that PVC, or skip the reset with REUSE_DB=true/--keep-db). A cluster with no control-postgres PVC and no reset state is detected automatically and skips the reset."; exit 1; }
+  if [ "$CONTROL_DB_RESET_PVC_UID" = none ]; then
+    RESET_STORAGE_ARGS=(--expect-no-pvc)
+  else
+    RESET_STORAGE_ARGS=(--expected-pvc-uid "$CONTROL_DB_RESET_PVC_UID")
+  fi
+  case "$CONTROL_DB_RESET_RESUME" in
+    true|1|yes) RESET_STORAGE_ARGS+=(--resume) ;;
+  esac
+  log "Resetting postgres database (--reset-db)..."
+  CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reset-control-db-storage.sh" "${RESET_STORAGE_ARGS[@]}"
+  RESET_REPLICA_STATE="$($KC -n control-plane get configmap control-db-reset-state -o \
+    'jsonpath={.data.hccReplicas}{"|"}{.data.workflowReplicas}{"|"}{.data.traceReplicas}{"|"}{.data.writerReplicas}{"|"}{.data.readerReplicas}{"|"}{.data.controlApiReplicas}')"
+  IFS='|' read -r RESET_HCC_REPLICAS RESET_WORKFLOW_REPLICAS RESET_TRACE_REPLICAS \
+    RESET_WRITER_REPLICAS RESET_READER_REPLICAS RESET_CONTROL_API_REPLICAS <<<"$RESET_REPLICA_STATE"
+  [[ "$RESET_HCC_REPLICAS" =~ ^[0-9]+$ ]] \
+    && [[ "$RESET_WORKFLOW_REPLICAS" =~ ^[0-9]+$ ]] \
+    && [[ "$RESET_TRACE_REPLICAS" =~ ^[0-9]+$ ]] \
+    && [[ "$RESET_WRITER_REPLICAS" =~ ^[1-9][0-9]*$ ]] \
+    && [[ "$RESET_READER_REPLICAS" =~ ^[1-9][0-9]*$ ]] \
+    && [[ "$RESET_CONTROL_API_REPLICAS" =~ ^[1-9][0-9]*$ ]] \
+    || { err "Reset replica recovery state is invalid"; exit 1; }
   ok "Postgres PVCs deleted"
 fi
 
@@ -647,28 +689,85 @@ log "Refreshing minikube K8s API endpoint CIDRs..."
 CONTEXT="${PROFILE}" OVERLAY_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"
 ok "Minikube K8s API CIDRs refreshed"
 
+# Upgrade path: stage the additive reader credential before the full overlay
+# changes HCC. Fresh bootstrap has no ready control-api yet and remains
+# fail-closed until the post-migration branch immediately below.
+CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
+if [ "$RESET_DB" = true ]; then
+  log "Database reset path — HCC cutover deferred until post-convergence verification"
+else
+  writer_dsn="$($KC -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
+  if [ -n "${writer_dsn}" ]; then
+    if ! $KC rollout status deployment/control-api -n control-plane --timeout=5s >/dev/null 2>&1; then
+      err "Existing GFS writer detected but control-api is not Ready; refusing HCC cutover"
+      exit 1
+    fi
+    log "Existing GFS writer detected — reconciling credentials before overlay upgrade"
+    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+  else
+    log "Fresh bootstrap detected — reader staging deferred until migrations; GFSC remains fail-closed"
+  fi
+fi
+
 log "Applying kustomize overlay (${ACTIVE_MINIKUBE_RENDER_DIR})..."
-kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
+if [ "$RESET_DB" = true ]; then
+  # Keep control-api scaled to zero until migrations and role restoration are
+  # complete; applying the full overlay here would race it against a fresh DB.
+  $KC apply -k "$ACTIVE_MINIKUBE_RENDER_DIR" -l app=control-postgres
+else
+  kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
+fi
 ok "Kustomize overlay applied"
 
-# 6b-2. Control-api database migrations + runtime DB roles.
-# control-api, workflow-recipes, and trace-maintenance-worker mount
-# least-privilege runtime DB credentials from the *-postgres-runtime Secrets,
-# which ship empty. The governed-trace runtime-roles migration creates the fixed
-# roles; the provision script writes each role's connection-string into its
-# Secret. Until then those pods sit
-# in CreateContainerConfigError and recover automatically once the Secrets are
-# populated (Step 8 waits them out). Running the migration here (against the
-# control-postgres superuser) breaks the bootstrap cycle so the roles exist
-# before control-api needs its own runtime credential to start.
-log "Applying control-api database migrations and runtime roles..."
-$KC rollout status deployment/control-postgres -n control-plane --timeout=180s >/dev/null
-CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
-  bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
-  --overlay "$ACTIVE_MINIKUBE_RENDER_DIR"
-CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
-  bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
-ok "Control-api database migrations and runtime roles applied"
+if [ "$RESET_DB" = true ]; then
+  log "Rebuilding database contracts and restoring GFS roles after reset..."
+  $KC rollout status deployment/control-postgres -n control-plane --timeout=180s >/dev/null
+  CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/converge-control-db-after-reset.sh" \
+    --overlay "$ACTIVE_MINIKUBE_RENDER_DIR" \
+    --job-name control-api-db-migrate-reset
+  kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
+  # The overlay declares ordinary one-replica defaults. Reassert the exact
+  # pre-reset operating counts after applying it; credentials are verified and
+  # HCC is restored by convergence before this safe rollout boundary.
+  $KC -n gfs scale deployment/gfsc-writer --replicas="$RESET_WRITER_REPLICAS" >/dev/null
+  $KC -n gfs scale deployment/gfsc-reader --replicas="$RESET_READER_REPLICAS" >/dev/null
+  $KC -n control-plane scale deployment/control-api --replicas="$RESET_CONTROL_API_REPLICAS" >/dev/null
+  $KC -n control-plane scale deployment/workflow-recipes --replicas="$RESET_WORKFLOW_REPLICAS" >/dev/null
+  $KC -n control-plane scale deployment/trace-maintenance-worker --replicas="$RESET_TRACE_REPLICAS" >/dev/null
+  $KC -n control-plane scale deployment/host-context-controller --replicas="$RESET_HCC_REPLICAS" >/dev/null
+  $KC -n gfs rollout status deployment/gfsc-writer --timeout=180s >/dev/null
+  $KC -n gfs rollout status deployment/gfsc-reader --timeout=180s >/dev/null
+  if [ "$RESET_WORKFLOW_REPLICAS" -gt 0 ]; then
+    $KC -n control-plane rollout status deployment/workflow-recipes --timeout=180s >/dev/null
+  fi
+  if [ "$RESET_TRACE_REPLICAS" -gt 0 ]; then
+    $KC -n control-plane rollout status deployment/trace-maintenance-worker --timeout=180s >/dev/null
+  fi
+  if [ "$RESET_HCC_REPLICAS" -gt 0 ]; then
+    $KC -n control-plane rollout status deployment/host-context-controller --timeout=180s >/dev/null
+  fi
+  ok "Control-api database and GFS roles converged after reset"
+else
+  ensure_control_postgres_ready
+  log "Applying control-api database migrations and runtime roles..."
+  CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+    bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
+    --overlay "$ACTIVE_MINIKUBE_RENDER_DIR"
+  CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
+    ok "Control-api database migrations and runtime roles applied"
+
+    # The credential probe runs through control-api, so prove that deployment is
+    # live before normal staging on bootstrap or an idempotent upgrade.
+    $KC scale deployment/control-api -n control-plane --replicas=1 >/dev/null
+    $KC rollout status deployment/control-api -n control-plane --timeout=180s >/dev/null
+    # On the upgrade path the overlay above may still be cutting HCC over to
+    # the split writer/reader templates; reconciling before that lands leaves
+    # the staged reader credential rollout-pending and fails the final verify.
+    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/wait-gfsc-secret-references.sh"
+    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+    ok "GFS credentials reconciled and writer bootstrap verified"
+fi
 
 # 6c. Re-apply generated service tokens after kustomize.
 # Re-patch the generated inter-service tokens after every overlay apply so the
@@ -939,55 +1038,11 @@ for entry in "${CORE_DEPLOYS[@]}"; do
   else
     warn "${ns}/${name} not ready — checking for recovery..."
 
-    # Check for postgres WAL corruption (CrashLoopBackOff + invalid checkpoint)
-    if [ "$name" = "control-api" ] || [ "$name" = "control-postgres" ]; then
-      PG_POD=$($KC get pods -n control-plane -l app=control-postgres -o name 2>/dev/null | head -1)
-      if [ -n "$PG_POD" ]; then
-        PG_LOGS=$($KC logs "$PG_POD" -n control-plane --tail=50 2>/dev/null || true)
-        if echo "$PG_LOGS" | grep -q "invalid checkpoint record"; then
-          warn "Postgres WAL corruption detected — auto-recovering..."
-
-          # Scale down
-          $KC scale deployment/control-api -n control-plane --replicas=0 2>/dev/null || true
-          $KC scale deployment/control-postgres -n control-plane --replicas=0 2>/dev/null || true
-          sleep 5
-
-          # Delete PVC
-          $KC delete pvc control-postgres-data -n control-plane --ignore-not-found=true
-
-          # Delete Released PVs
-          RELEASED_PVS=$($KC get pv -o json 2>/dev/null | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for pv in data.get('items', []):
-    n = pv['metadata']['name']
-    phase = pv.get('status', {}).get('phase', '')
-    claim = pv.get('spec', {}).get('claimRef', {}).get('name', '')
-    if phase == 'Released' and 'control-postgres' in claim:
-        print(n)
-" 2>/dev/null || true)
-          for pv in $RELEASED_PVS; do
-            $KC delete pv "$pv" --ignore-not-found=true
-          done
-
-          # Re-apply kustomize to recreate PVC + deployments
-          log "Refreshing minikube K8s API endpoint CIDRs before recovery re-apply..."
-          CONTEXT="${PROFILE}" OVERLAY_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"
-          kubectl kustomize "$ACTIVE_MINIKUBE_RENDER_DIR" | $KC apply -f -
-          CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-inter-service-tokens.sh"
-
-          # Wait for postgres rollout
-          log "Waiting for postgres recovery (120s)..."
-          if $KC rollout status deployment/control-postgres -n control-plane --timeout=120s 2>/dev/null; then
-            ok "Postgres recovered"
-            # Now wait for control-api
-            if $KC rollout status deployment/control-api -n control-plane --timeout=120s 2>/dev/null; then
-              ok "control-api recovered after postgres fix"
-              continue
-            fi
-          fi
-        fi
-      fi
+    # A stale or late corruption signature is diagnostic evidence only. Storage
+    # deletion always requires a new explicit --reset-db invocation and UID.
+    if [ "$name" = "control-api" ] && postgres_has_invalid_checkpoint; then
+      err "Postgres reports an invalid checkpoint; automatic destructive recovery is disabled"
+      err "Re-run with --reset-db and CONTROL_DB_RESET_PVC_UID=<exact approved UID>"
     fi
 
     err "${ns}/${name} NOT ready"
@@ -1011,8 +1066,8 @@ if $KC get configmap gfs-config -n gfs &>/dev/null; then
     err "gfs public-key sync FAILED — gfsc cannot verify tokens. Fix and re-run."
     exit 1
   fi
-  if CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/provision-gfs-db.sh"; then
-    ok "gfs serving provisioned (gfsc can verify tokens + reach the permission store)"
+  if CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/scripts/minikube/verify-gfs.sh"; then
+    ok "gfs serving verified (reader/writer credentials and readiness)"
   else
     err "gfs DB provisioning FAILED — gfsc /readyz will fail closed and every GFS operation will 503. Fix and re-run."
     exit 1

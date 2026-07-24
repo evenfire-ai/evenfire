@@ -16,7 +16,10 @@ describe('provisionerScopesAllowed', () => {
     expect(provisionerScopesAllowed('3rd', ['gfs.share'])).toBe(false)
   })
 
-  it('leaves first-party host provisioners governed by the existing subject-class gate', () => {
-    expect(provisionerScopesAllowed('1st', ['gfs.read', 'gfs.write', 'gfs.delete'])).toBe(true)
+  it('limits first-party HCC provisioners to read and write', () => {
+    expect(provisionerScopesAllowed('1st', ['gfs.read', 'gfs.write'])).toBe(true)
+    expect(provisionerScopesAllowed('1st', ['gfs.delete'])).toBe(false)
+    expect(provisionerScopesAllowed('1st', ['gfs.manage_acl'])).toBe(false)
+    expect(provisionerScopesAllowed('1st', ['gfs.share'])).toBe(false)
   })
 })
