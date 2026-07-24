@@ -943,6 +943,23 @@ describe('useAgentChatController — characterization (D.0)', () => {
    * the D.3 reweave (the behaviors survive; only the lifecycle plumbing moves).
    */
   describe('dev behaviors (must survive the D.3 reweave)', () => {
+    it('defers cross-agent menu sessions until the first screen has painted', async () => {
+      const { rerender } = renderController({
+        selectedAgent: null,
+        loadMenuData: false,
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(clerum.chat.getIndex).not.toHaveBeenCalled()
+      expect(clerum.rpc.listSessions).not.toHaveBeenCalled()
+
+      rerender({ selectedAgent: null, loadMenuData: true })
+
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+    })
+
     it('GAP-D populates latestChatSessions from chat.getIndex on mount', async () => {
       clerum.chat.getIndex.mockResolvedValue({
         version: 1,

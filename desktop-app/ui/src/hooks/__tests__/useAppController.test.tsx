@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   loadWorkflowRunsWithArtifactsForApprovalRefresh,
   loadWorkflowRunsWithArtifactsForWorkflowTarget,
+  scheduleAfterFirstPaint,
 } from '../useAppController'
 
 function installWorkflowHarness(runsResult: unknown) {
@@ -117,5 +118,29 @@ describe('loadWorkflowRunsWithArtifactsForWorkflowTarget', () => {
       id: 'completed-run',
       artifacts: [{ filename: 'result.json', url: '/download/result.json' }],
     })
+  })
+})
+
+describe('scheduleAfterFirstPaint', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('waits for two animation frames before running deferred startup work', async () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    })
+    const task = vi.fn(async () => undefined)
+
+    scheduleAfterFirstPaint(task)
+    expect(task).not.toHaveBeenCalled()
+
+    frames.shift()?.(1)
+    expect(task).not.toHaveBeenCalled()
+
+    frames.shift()?.(2)
+    expect(task).toHaveBeenCalledTimes(1)
   })
 })

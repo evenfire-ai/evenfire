@@ -72,6 +72,7 @@ interface UseChatListControllerParams {
   selectedAgent: string | null
   agentNames: string[]
   isAuthenticated: boolean
+  loadMenuData: boolean
   chatStore: ReturnType<typeof useChatStore>
   fsm: SessionFsmStore
   host: MutableRefObject<ChatListControllerHost | null>
@@ -84,6 +85,7 @@ export function useChatListController({
   selectedAgent,
   agentNames,
   isAuthenticated,
+  loadMenuData,
   chatStore,
   fsm,
   host,
@@ -480,7 +482,7 @@ export function useChatListController({
   // ─── Cross-agent latest-sessions loader (seeds badges via SERVER_SNAPSHOT) ───
 
   useEffect(() => {
-    if (!isAuthenticated || !agentNames.length) {
+    if (!isAuthenticated || !loadMenuData || !agentNames.length) {
       setLatestChatSessions([])
       setLatestChatSessionsLoading(false)
       return
@@ -590,6 +592,7 @@ export function useChatListController({
     chatStore.getIndex,
     chatStore.listSessions,
     isAuthenticated,
+    loadMenuData,
     fsm,
     loadRemainingServerSessions,
   ])

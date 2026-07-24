@@ -198,6 +198,7 @@ interface UseAgentChatControllerParams {
   currentTeamId: string
   currentTeamName: string
   isAuthenticated: boolean
+  loadMenuData: boolean
   navItem: NavItem
   pushToast: (msg: string, tone: Tone) => void
   pushNotification: (n: PushNotificationInput) => void
@@ -220,6 +221,7 @@ export function useAgentChatController({
   currentTeamId,
   currentTeamName,
   isAuthenticated,
+  loadMenuData,
   navItem,
   pushToast,
   pushNotification,
@@ -253,6 +255,7 @@ export function useAgentChatController({
     selectedAgent,
     agentNames,
     isAuthenticated,
+    loadMenuData,
     chatStore,
     fsm,
     host: chatListHostRef,

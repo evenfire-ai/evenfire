@@ -6,6 +6,7 @@ import type { SidebarChatEntry } from './useAgentChatController'
 interface UseActivityControllerParams {
   selectedAgent: string | null
   isAuthenticated: boolean
+  loadMenuData: boolean
   chatList: SidebarChatEntry[]
   progressByAgentMessage: Record<string, Record<string, TaskProgress>>
   agentNames: string[]
@@ -14,6 +15,7 @@ interface UseActivityControllerParams {
 export function useActivityController({
   selectedAgent,
   isAuthenticated,
+  loadMenuData,
   chatList,
   progressByAgentMessage,
   agentNames,
@@ -80,7 +82,7 @@ export function useActivityController({
 
   // Compute agentLastActiveByAgent for all agents
   useEffect(() => {
-    if (!isAuthenticated || !agentNames.length) {
+    if (!isAuthenticated || !loadMenuData || !agentNames.length) {
       setAgentLastActiveByAgent({})
       return
     }
@@ -111,7 +113,7 @@ export function useActivityController({
     return () => {
       cancelled = true
     }
-  }, [agentNames, chatStore.getIndex, isAuthenticated])
+  }, [agentNames, chatStore.getIndex, isAuthenticated, loadMenuData])
 
   return {
     agentLastActiveByAgent,

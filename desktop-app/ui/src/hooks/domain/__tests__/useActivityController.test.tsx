@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { renderHook } from '@testing-library/react'
+import { renderHook, waitFor } from '@testing-library/react'
 import { useActivityController } from '../useActivityController'
 
 const AGENT_A = ['agent-a']
+const TWO_AGENTS = ['agent-a', 'agent-b']
+const EMPTY_CHAT_LIST: [] = []
 const EMPTY_PROGRESS = {}
 
 function installChatIndexMock() {
@@ -42,6 +44,7 @@ describe('useActivityController', () => {
       useActivityController({
         selectedAgent: 'agent-a',
         isAuthenticated: true,
+        loadMenuData: false,
         chatList: [
           {
             id: 'chat-1',
@@ -64,5 +67,27 @@ describe('useActivityController', () => {
       errors: 2,
       toolCalls: 4,
     })
+  })
+
+  it('waits until after first paint before loading agent menu metadata', async () => {
+    const getIndex = installChatIndexMock()
+    const initialProps = { loadMenuData: false }
+    const { rerender } = renderHook(
+      ({ loadMenuData }: typeof initialProps) =>
+        useActivityController({
+          selectedAgent: null,
+          isAuthenticated: true,
+          loadMenuData,
+          chatList: EMPTY_CHAT_LIST,
+          progressByAgentMessage: EMPTY_PROGRESS,
+          agentNames: TWO_AGENTS,
+        }),
+      { initialProps }
+    )
+
+    expect(getIndex).not.toHaveBeenCalled()
+    rerender({ loadMenuData: true })
+
+    await waitFor(() => expect(getIndex).toHaveBeenCalledTimes(2))
   })
 })

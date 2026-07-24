@@ -94,6 +94,17 @@ export async function loadWorkflowRunsWithArtifactsForApprovalRefresh(
   })
 }
 
+export function scheduleAfterFirstPaint(task: () => Promise<unknown>): void {
+  const run = () => {
+    void task().catch(() => undefined)
+  }
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => requestAnimationFrame(run))
+    return
+  }
+  setTimeout(run, 0)
+}
+
 export function useAppController() {
   const queryClient = useQueryClient()
 
@@ -104,6 +115,7 @@ export function useAppController() {
   // ─── Global status state (owned by coordinator, not auth) ───
   const [statusText, setStatusText] = useState('Ready.')
   const [statusTone, setStatusTone] = useState<Tone>('info')
+  const [postPaintDataReady, setPostPaintDataReady] = useState(false)
 
   // Build fullSetStatus using refs to avoid circular dependencies
   const setStatusTextRef = useRef(setStatusText)
@@ -231,6 +243,7 @@ export function useAppController() {
     currentTeamId,
     currentTeamName,
     isAuthenticated: auth.isAuthenticated,
+    loadMenuData: postPaintDataReady,
     navItem: nav.navItem,
     pushToast,
     pushNotification: notif.pushNotification,
@@ -291,7 +304,7 @@ export function useAppController() {
   // ─── Host pre-warm (authenticated catalog only — see the hook's anti-flapping doc) ───
   useHostPrewarmController({
     agentNames: agentsData.agentNames,
-    isAuthenticated: auth.isAuthenticated,
+    isAuthenticated: auth.isAuthenticated && postPaintDataReady,
   })
 
   // ─── Desktop ───
@@ -304,6 +317,7 @@ export function useAppController() {
   const activity = useActivityController({
     selectedAgent: nav.selectedAgent,
     isAuthenticated: auth.isAuthenticated,
+    loadMenuData: postPaintDataReady,
     chatList: chat.chatList,
     progressByAgentMessage: chat.progressByAgentMessage,
     agentNames: agentsData.agentNames,
@@ -357,6 +371,20 @@ export function useAppController() {
       const refreshTeams = options.initialLoad
         ? teamsData.refreshInitialDirectory
         : teamsData.refresh
+      if (options.initialLoad) {
+        await refreshAgentsData()
+        scheduleAfterFirstPaint(async () => {
+          setPostPaintDataReady(true)
+          await Promise.all([
+            refreshContextsData(),
+            refreshMcpServersData(),
+            refreshTeams(),
+            refreshWorkflowsData(),
+            notif.handleRefreshPendingApprovals({ silent: true }),
+          ])
+        })
+        return
+      }
       return Promise.all([
         refreshAgentsData(),
         refreshContextsData(),
@@ -372,6 +400,7 @@ export function useAppController() {
       refreshContextsData,
       refreshMcpServersData,
       refreshWorkflowsData,
+      setPostPaintDataReady,
       teamsData.refresh,
       teamsData.refreshInitialDirectory,
     ]
@@ -411,10 +440,8 @@ export function useAppController() {
             ? DESKTOP_ROUTES.teams
             : route
       const current = refreshers.find(entry => entry.route === activeRoute)
-      const remaining = refreshers.filter(entry => entry.route !== activeRoute)
 
       if (current) await current.refresh()
-      await Promise.all(remaining.map(entry => entry.refresh()))
     },
     [
       agentsData.refreshWithCatalog,
@@ -577,6 +604,7 @@ export function useAppController() {
         auth.setMe(sessionState.me)
 
         if (!authenticated || !sessionState.me) {
+          setPostPaintDataReady(false)
           auth.setDesktopReleaseStatus(null)
           await chat.stopAllActivityStreams()
           agentsData.reset()
@@ -597,6 +625,7 @@ export function useAppController() {
         void auth.refreshDesktopReleaseStatus()
         const sessionIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
         if (authenticatedSessionIdentityRef.current !== sessionIdentity) {
+          setPostPaintDataReady(false)
           authenticatedSessionIdentityRef.current = sessionIdentity
           await refreshAuthenticatedData({ initialLoad: true })
         }
@@ -628,6 +657,7 @@ export function useAppController() {
       queryClient,
       refreshAuthenticatedData,
       resetWorkflowsData,
+      setPostPaintDataReady,
       teamsData.reset,
     ]
   )
