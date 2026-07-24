@@ -4747,6 +4747,19 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       `)
     },
   },
+  {
+    version: '0070_member_registration_runtime_delete_revoke',
+    apply: async db => {
+      // 0069 granted control_api_runtime full DML (incl. DELETE) on
+      // member_registration_credentials. The runtime access contract classifies
+      // this table as `upsert` (SELECT/INSERT/UPDATE only), so revoke DELETE to
+      // match. Idempotent: REVOKE of an already-absent privilege is a no-op.
+      await db.query(`
+        REVOKE DELETE ON TABLE member_registration_credentials
+          FROM control_api_runtime;
+      `)
+    },
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
