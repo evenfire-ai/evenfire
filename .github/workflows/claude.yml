@@ -43,6 +43,10 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
+          # Use Opus 4.8 for deeper reviews (default is Sonnet).
+          claude_args: |
+            --model claude-opus-4-8
+
           # Allows Claude to read CI results on PRs
           additional_permissions: |
             actions: read
@@ -50,6 +54,3 @@ jobs:
           # Optional: Give a custom prompt to Claude. If not specified, Claude
           # follows the instructions in the comment that tagged it.
           # prompt: 'Review this PR for correctness, security, and tests.'
-
-          # Optional: customize behavior via claude_args
-          # claude_args: '--allowed-tools Bash(gh pr:*)'
