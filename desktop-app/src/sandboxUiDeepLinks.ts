@@ -140,6 +140,17 @@ export function parseSandboxUiDeepLink(rawUrl: string): SandboxUiDeepLinkTarget 
   }
 }
 
+export function sandboxUiDeepLinkTargetsEqual(
+  left: SandboxUiDeepLinkTarget,
+  right: SandboxUiDeepLinkTarget
+): boolean {
+  return (
+    left.appRef === right.appRef &&
+    left.path === right.path &&
+    (left.teamId || '') === (right.teamId || '')
+  )
+}
+
 export function extractSandboxUiViewRoute(input: SandboxUiViewRouteInput): string | null {
   let current: URL
   let proxy: URL

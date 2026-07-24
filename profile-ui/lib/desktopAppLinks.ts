@@ -3,6 +3,7 @@ const TEAM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
 const MAX_APP_SEGMENT_LENGTH = 253
 const MAX_APP_ROUTE_LENGTH = 4096
 const MAX_TEAM_ID_LENGTH = 255
+const SCRIPT_NONCE_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/
 
 export function buildEvenfireDesktopAppLink(parts: {
   recipeNs: string
@@ -62,12 +63,32 @@ function desktopAppDisplayName(parsed: URL): string {
   }
 }
 
-export function buildEvenfireDesktopAppRedirectDocument(deepLink: string): string {
+function normalizeScriptNonce(scriptNonce: string): string {
+  const nonce = String(scriptNonce || '').trim()
+  if (!nonce || nonce.length > 128 || !SCRIPT_NONCE_PATTERN.test(nonce)) {
+    throw new Error('Cannot build a desktop app redirect with an invalid script nonce')
+  }
+  return nonce
+}
+
+export function buildEvenfireDesktopAppContentSecurityPolicy(scriptNonce: string): string {
+  const nonce = normalizeScriptNonce(scriptNonce)
+  return (
+    `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; ` +
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+  )
+}
+
+export function buildEvenfireDesktopAppRedirectDocument(
+  deepLink: string,
+  scriptNonce: string
+): string {
   const parsed = new URL(deepLink)
   if (parsed.protocol !== 'evenfire:' || parsed.hostname !== 'app') {
     throw new Error('Cannot redirect to an invalid desktop app link')
   }
 
+  const nonce = normalizeScriptNonce(scriptNonce)
   const escapedLink = escapeHtml(deepLink)
   const escapedAppName = escapeHtml(desktopAppDisplayName(parsed))
   const scriptLink = JSON.stringify(deepLink).replaceAll('<', '\\u003c')
@@ -179,7 +200,7 @@ export function buildEvenfireDesktopAppRedirectDocument(deepLink: string): strin
       </p>
     </section>
   </main>
-  <script>window.location.replace(${scriptLink})</script>
+  <script nonce="${escapeHtml(nonce)}">window.location.replace(${scriptLink})</script>
 </body>
 </html>`
 }

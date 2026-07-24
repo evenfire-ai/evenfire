@@ -5,7 +5,11 @@ import { config } from './config.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator } from './mainWindowCoordinator.js'
 import { collectInitialProtocolUrls } from './protocolLaunchArgs.js'
-import { type SandboxUiDeepLinkEnvelope, parseSandboxUiDeepLink } from './sandboxUiDeepLinks.js'
+import {
+  type SandboxUiDeepLinkEnvelope,
+  parseSandboxUiDeepLink,
+  sandboxUiDeepLinkTargetsEqual,
+} from './sandboxUiDeepLinks.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
@@ -24,7 +28,6 @@ const appService = new AppService()
 const pendingEvenfireUrls: string[] = []
 const pendingSandboxUiDeepLinks: SandboxUiDeepLinkEnvelope[] = []
 let sandboxUiDeepLinkSequence = 0
-let lastSandboxUiDeepLink: { rawUrl: string; receivedAt: number } | null = null
 let mainWindowLifecycleReady = false
 
 function systemIconAssetsDirectory(): string {
@@ -132,12 +135,13 @@ function handleSandboxUiDeepLink(rawUrl: string): boolean {
   const target = parseSandboxUiDeepLink(rawUrl)
   if (!target) return false
 
-  const now = Date.now()
-  if (lastSandboxUiDeepLink?.rawUrl === rawUrl && now - lastSandboxUiDeepLink.receivedAt < 1_000) {
+  // Coalesce only while the same semantic target is awaiting renderer
+  // acknowledgement. Query-parameter order cannot bypass this check, and once
+  // acknowledged, an immediate user re-click creates a fresh envelope.
+  if (pendingSandboxUiDeepLinks.some(pending => sandboxUiDeepLinkTargetsEqual(pending, target))) {
     requestMainWindow()
     return true
   }
-  lastSandboxUiDeepLink = { rawUrl, receivedAt: now }
 
   const envelope: SandboxUiDeepLinkEnvelope = {
     id: (sandboxUiDeepLinkSequence += 1),

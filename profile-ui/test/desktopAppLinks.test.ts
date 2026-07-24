@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  buildEvenfireDesktopAppContentSecurityPolicy,
   buildEvenfireDesktopAppLink,
   buildEvenfireDesktopAppRedirectDocument,
 } from '../lib/desktopAppLinks'
@@ -32,10 +33,12 @@ test('buildEvenfireDesktopAppLink rejects unsafe routes', () => {
 test('buildEvenfireDesktopAppRedirectDocument creates an unauthenticated protocol handoff', () => {
   const deepLink =
     'evenfire://app/sandbox-recipes/agentic-task-board' + '?path=%2Ftasks%2Ftask-42&team=team-123'
-  const document = buildEvenfireDesktopAppRedirectDocument(deepLink)
+  const scriptNonce = 'dGVzdC1ub25jZQ=='
+  const document = buildEvenfireDesktopAppRedirectDocument(deepLink, scriptNonce)
 
   assert.match(document, /http-equiv="refresh"/)
   assert.match(document, /window\.location\.replace/)
+  assert.match(document, new RegExp(`<script nonce="${scriptNonce}">`))
   assert.match(document, /evenfire:\/\/app\/sandbox-recipes\/agentic-task-board/)
   assert.match(document, /<style>/)
   assert.match(document, /class="page-card"/)
@@ -44,9 +47,28 @@ test('buildEvenfireDesktopAppRedirectDocument creates an unauthenticated protoco
   assert.doesNotMatch(document, /login|authenticate|authorization/i)
 })
 
+test('buildEvenfireDesktopAppContentSecurityPolicy authorizes only the nonce-bearing script', () => {
+  const scriptNonce = 'dGVzdC1ub25jZQ=='
+  const policy = buildEvenfireDesktopAppContentSecurityPolicy(scriptNonce)
+
+  assert.match(policy, new RegExp(`script-src 'nonce-${scriptNonce}'`))
+  assert.doesNotMatch(policy, /script-src 'unsafe-inline'/)
+})
+
 test('buildEvenfireDesktopAppRedirectDocument rejects unrelated protocols', () => {
   assert.throws(
-    () => buildEvenfireDesktopAppRedirectDocument('https://example.com/app'),
+    () => buildEvenfireDesktopAppRedirectDocument('https://example.com/app', 'dGVzdC1ub25jZQ=='),
     /invalid desktop app link/
+  )
+})
+
+test('buildEvenfireDesktopAppRedirectDocument rejects an invalid script nonce', () => {
+  assert.throws(
+    () =>
+      buildEvenfireDesktopAppRedirectDocument(
+        'evenfire://app/sandbox-recipes/agentic-task-board?path=%2F',
+        '"><script>alert(1)</script>'
+      ),
+    /invalid script nonce/
   )
 })

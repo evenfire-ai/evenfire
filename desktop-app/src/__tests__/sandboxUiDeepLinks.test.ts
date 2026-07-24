@@ -4,6 +4,7 @@ import {
   buildSandboxUiWebLink,
   extractSandboxUiViewRoute,
   parseSandboxUiDeepLink,
+  sandboxUiDeepLinkTargetsEqual,
 } from '../sandboxUiDeepLinks.js'
 
 describe('sandbox UI deep links', () => {
@@ -88,5 +89,24 @@ describe('sandbox UI deep links', () => {
         recipeName: 'agentic-task-board',
       })
     ).toBeNull()
+  })
+
+  it('compares parsed targets instead of raw query parameter order', () => {
+    const first = parseSandboxUiDeepLink(
+      'evenfire://app/sandbox-recipes/agentic-task-board?path=%2Ftasks&team=team-123'
+    )
+    const reordered = parseSandboxUiDeepLink(
+      'evenfire://app/sandbox-recipes/agentic-task-board?team=team-123&path=%2Ftasks'
+    )
+
+    expect(first).not.toBeNull()
+    expect(reordered).not.toBeNull()
+    expect(sandboxUiDeepLinkTargetsEqual(first!, reordered!)).toBe(true)
+    expect(
+      sandboxUiDeepLinkTargetsEqual(first!, {
+        ...reordered!,
+        path: '/different',
+      })
+    ).toBe(false)
   })
 })
