@@ -558,8 +558,10 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
 
   it('returns 502 when upstream fetch rejects and the host is not stateless', async () => {
     authTokenMock.verifyRpcToken.mockReturnValue({
+      // §11.4: cancel is a wake-eligible finite operation, so its token carries
+      // host:wake:write; the wake plane is consulted on host-down.
       ...VALID_CLAIMS,
-      scopes: ['host:message:invoke'],
+      scopes: ['host:message:invoke', 'host:wake:write'],
     })
     serviceMock.forwardCancelToHost.mockRejectedValue(new Error('ECONNREFUSED'))
 

@@ -389,6 +389,16 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         proxy_ssl_verify on;
         proxy_ssl_server_name on;
         proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        # nginx defaults proxy_ssl_verify_depth to 1, which only admits a chain
+        # with a single untrusted intermediate. CAs mid-root-rollover serve a
+        # chain that reaches a trusted anchor through a cross-signed root, so the
+        # leaf sits two intermediates below the trust store: Let's Encrypt via
+        # "Root YE"/"Root YR" (cross-signed by ISRG Root X2/X1) and Microsoft via
+        # "Microsoft TLS ECC Root G2" (cross-signed by MS ECC Root 2017). At depth
+        # 1 nginx rejects those with "(20:unable to get local issuer certificate)"
+        # even though the CA bundle is complete — it looks like a missing root but
+        # is purely the depth cap. Raising the depth keeps verification fully on.
+        proxy_ssl_verify_depth 3;
     }
 
     # Health check endpoint

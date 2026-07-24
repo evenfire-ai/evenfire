@@ -11,12 +11,15 @@ const serviceMock = vi.hoisted(() => ({
 vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../services/mcpProxyService.js', () => serviceMock)
 
+// Issue #791 §11.4: session reads are wake-eligible finite operations, so the
+// Desktop-issued token carries host:wake:write alongside host:session:read.
+// The route scope guard (host:session:read) is unchanged.
 const VALID_CLAIMS = {
   sub: 'user-uuid-123',
   typ: 'user' as const,
   accessScope: 'team' as const,
   teamId: 'team-1',
-  scopes: ['host:session:read'],
+  scopes: ['host:session:read', 'host:wake:write'],
   hostRefs: ['chatllm'],
   jti: 'j1',
   iat: 1,

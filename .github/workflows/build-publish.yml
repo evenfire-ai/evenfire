@@ -16,7 +16,12 @@ name: Build & Publish
 
 on:
   push:
-    branches: [main]
+    # `dev` is the integration branch → drives the clerum-dev deploy (build →
+    # dispatch → infra mirror + apply). `main` is the release branch (→ clerum
+    # prod via a dev→main promotion) and does NOT build/dispatch here — prod
+    # promotes dev-proven digests, it never rebuilds. The main→prod trigger is
+    # added with the prod pipeline (see the cutover spec, Phase 2).
+    branches: [dev]
   workflow_dispatch:
     inputs:
       build_all:
@@ -24,9 +29,11 @@ on:
         type: boolean
         default: false
 
+# Least-privilege default: only build-push needs to write packages. detect (runs
+# the third-party paths-filter action) and notify-infra get read-only, so a
+# compromised action in those jobs cannot push images to ghcr.
 permissions:
   contents: read
-  packages: write
 
 env:
   REGISTRY: ghcr.io
@@ -88,6 +95,8 @@ jobs:
       - name: Detect changed paths
         id: filter
         if: steps.base.outputs.force_all != 'true'
+        # SHA-pinned (v4): third-party, individual-maintainer action — pin so a
+        # hijacked tag can't run arbitrary code in a job that has repo write.
         uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
         with:
           base: ${{ github.event.before }}
@@ -153,6 +162,9 @@ jobs:
     name: Build & push (${{ matrix.image }})
     runs-on: ubuntu-latest
     needs: detect
+    permissions:
+      contents: read
+      packages: write
     # Gate at step level: the `matrix` context is not available in a job-level
     # `if`, so each step checks whether this image changed (or a full build was
     # requested). Unchanged images spin an empty job and exit fast.

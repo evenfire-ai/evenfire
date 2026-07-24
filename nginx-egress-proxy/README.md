@@ -86,3 +86,5 @@ CI builds and publishes the image via
 into the deploy-time GCP Artifact Registry. There are no static manifests for
 this service: Deployments, ConfigMaps, and Services are created dynamically by
 host-context-controller — see its [README](../host-context-controller/README.md).
+
+<!-- auto-deploy proof: OSS dev → build → mirror → infra apply (2026-07-22) -->
