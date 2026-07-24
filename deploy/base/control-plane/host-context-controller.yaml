@@ -62,6 +62,12 @@ spec:
           value: "300"
         - name: HCC_HOST_K8S_REQUEST_TIMEOUT_MS
           value: "30000"
+        # Bounded cross-Host concurrency for a full/lifecycle Host fleet pass.
+        # Urgent per-Host events (ADDED/MODIFIED/DELETED/wake) are admitted
+        # outside this budget, so the low default optimizes for Kubernetes API
+        # stability rather than convergence speed (issue #791). Integer 1..8.
+        - name: HCC_HOST_FULL_RECONCILE_CONCURRENCY
+          value: "2"
         - name: CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE
           value: clerum/stdio-bridge:0.9.5
         # workspace-files-controller (per-SharedFileSystem) — see config.ts wfc*

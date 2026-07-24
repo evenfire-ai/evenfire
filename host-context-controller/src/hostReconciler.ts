@@ -20,6 +20,13 @@ import {
 import { hccLogger } from './logger'
 import { issueMcpHostRuntimeTokens } from './mcpHostRuntimeTokenIssuerClient'
 import {
+  hostCleanupDeferredTotal,
+  hostDeleteCleanupTotal,
+  hostReconcileDurationSeconds,
+  hostReconcileInFlight,
+  hostReconcileQueueWaitSeconds,
+} from './metrics'
+import {
   MCP_HOST_GFS_TOKEN_SECRET_KEY,
   MCP_HOST_RUNTIME_TOKEN_SECRET_ACCESS_KEY,
   MCP_HOST_RUNTIME_TOKEN_SECRET_CONTROL_KEY,
@@ -52,6 +59,79 @@ import {
 } from './utils'
 
 export type { EffectiveHostLifecycle } from './statelessLifecycle.types'
+
+const HOST_GROUP = 'clerum.io'
+const HOST_VERSION = 'v1alpha1'
+const HOST_PLURAL = 'hosts'
+
+/**
+ * Lane label for a Host reconcile, used only for low-cardinality telemetry:
+ * `urgent` (a direct watch ADDED/MODIFIED/DELETED/wake event), `retry` (a
+ * bounded watch-reconcile retry), or `fleet` (a bounded background full/
+ * lifecycle worker). Never a host name, user, or team.
+ */
+export type HostReconcileSource = 'urgent' | 'retry' | 'fleet'
+
+/** Immutable Host watch authority snapshot captured at a full-pass boundary. */
+export type HostWatchAuthoritySnapshot = { known: boolean; generation: number }
+
+/**
+ * The exact §13.2 destructive-cleanup predicate. Deletion of an orphan Host's
+ * owned bundle is permitted ONLY when watch authority is known, the watch
+ * generation captured at pass start still matches the current generation, the
+ * current cache omits the Host, AND a fresh authoritative read confirmed a 404.
+ * Any weaker evidence defers.
+ */
+export function destructiveCleanupAllowed(input: {
+  watchAuthorityKnown: boolean
+  capturedWatchGeneration: number
+  currentWatchGeneration: number
+  currentCacheOmitsHost: boolean
+  freshAuthoritativeRead: 'confirmed404' | 'present' | 'error'
+}): boolean {
+  return (
+    input.watchAuthorityKnown &&
+    input.capturedWatchGeneration === input.currentWatchGeneration &&
+    input.currentCacheOmitsHost &&
+    input.freshAuthoritativeRead === 'confirmed404'
+  )
+}
+
+/**
+ * Dependency-free bounded worker pool. Dispatches `keys` across at most
+ * `concurrency` lanes; each lane pulls the next key, runs `worker`, and
+ * collects (never swallows) failures so aggregation stays complete. Lane
+ * startup is ordered so the first `concurrency` keys begin in input order.
+ */
+async function runBoundedHostWorkers(
+  keys: string[],
+  concurrency: number,
+  worker: (key: string) => Promise<void>
+): Promise<unknown[]> {
+  const failures: unknown[] = []
+  if (keys.length === 0) return failures
+  let cursor = 0
+  const runLane = async (): Promise<void> => {
+    for (;;) {
+      const index = cursor
+      cursor += 1
+      if (index >= keys.length) return
+      try {
+        await worker(keys[index])
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+  }
+  const lanes = Math.max(1, Math.min(concurrency, keys.length))
+  const runners: Promise<void>[] = []
+  for (let i = 0; i < lanes; i += 1) runners.push(runLane())
+  await Promise.all(runners)
+  return failures
+}
+
+/** A managed resource considered for orphan cleanup, keyed by owning Host. */
+type CleanupCandidate = { owner: string | undefined; kind: string; name: string }
 
 /**
  * The workflow-control scopes a first-party Host's mcp-host control token needs
@@ -275,6 +355,23 @@ export class HostReconciler {
   // B2: whether the CC cache initial-list has completed. Defaults to false
   // (safe: preserves existing Deployment replicas until wired by McpServerWatcher).
   private ccCacheSyncedFn: () => boolean = () => false
+  /**
+   * Resolve the current cached Host object by name. Wired by McpServerWatcher
+   * from its live Host cache so a fleet worker reconciles the freshest spec and
+   * so orphan cleanup compares candidates with the CURRENT inventory rather than
+   * the pass snapshot. `null` (unwired) means callers fall back to the pass
+   * snapshot for reconcile, and cleanup stays fail-closed (authority unknown).
+   */
+  private resolveCurrentHost: ((name: string) => HostCRD | undefined) | null = null
+  /**
+   * Snapshot the current Host watch authority + generation. Wired by
+   * McpServerWatcher. Default is fail-closed (unknown) so orphan cleanup never
+   * runs until the real authority getter is installed.
+   */
+  private hostWatchAuthority: () => HostWatchAuthoritySnapshot = () => ({
+    known: false,
+    generation: 0,
+  })
 
   constructor(kc: k8s.KubeConfig, deps?: HostReconcilerDeps) {
     this.appsApi =
@@ -362,6 +459,25 @@ export class HostReconciler {
    */
   setIsCommunicationChannelCacheSynced(fn: () => boolean): void {
     this.ccCacheSyncedFn = fn
+  }
+
+  /**
+   * Late-bound setter for the live Host cache resolver. A fleet worker resolves
+   * the current cached Host at execution time (skipping absent/superseded
+   * entries), and orphan cleanup uses it to compare candidates with the CURRENT
+   * inventory. Wired by McpServerWatcher from its `hosts` cache.
+   */
+  setResolveCurrentHost(fn: (name: string) => HostCRD | undefined): void {
+    this.resolveCurrentHost = fn
+  }
+
+  /**
+   * Late-bound setter for the Host watch authority/generation snapshot. Wired by
+   * McpServerWatcher so orphan cleanup can require known authority and a stable
+   * watch generation before deleting anything.
+   */
+  setHostWatchAuthority(fn: () => HostWatchAuthoritySnapshot): void {
+    this.hostWatchAuthority = fn
   }
 
   /**
@@ -1979,9 +2095,19 @@ export class HostReconciler {
     if (affectedCCs.length === 0) return
 
     const affectedHosts = new Set<string>(affectedCCs.map(cc => cc.spec.hostRef))
-    for (const hostName of affectedHosts) {
-      await this.patchChannelReaderRevisionAnnotation(hostName)
-    }
+    // Addendum 2: each affected Host patches only its own `channel-reader-<host>`
+    // Deployment annotation — a disjoint, order-independent, idempotent write set
+    // per Host (§10.4 inventory). Fan out through the bounded worker pool
+    // (reusing HCC_HOST_FULL_RECONCILE_CONCURRENCY) so a shared credentials-Secret
+    // change touching many Hosts is not head-of-line blocked, while never issuing
+    // an unbounded burst at the K8s API. patchChannelReaderRevisionAnnotation
+    // still swallows its own per-Host errors, so this method continues not to
+    // throw (runBoundedHostWorkers never rethrows).
+    await runBoundedHostWorkers(
+      Array.from(affectedHosts),
+      config.hostFullReconcileConcurrency,
+      hostName => this.patchChannelReaderRevisionAnnotation(hostName)
+    )
   }
 
   buildDeployment(
@@ -3328,25 +3454,50 @@ export class HostReconciler {
     throwCleanupFailures(failures, `Failed to delete runtime resources for Host "${name}"`)
   }
 
-  async reconcile(host: HostCRD): Promise<void> {
+  async reconcile(host: HostCRD, source: HostReconcileSource = 'urgent'): Promise<void> {
+    const dispatchedAt = Date.now()
     return this.lifecycle.serializeByHost(host.name, async () => {
+      const admittedAt = Date.now()
+      hostReconcileInFlight.inc({ lane: source })
       try {
         await this.reconcileCore(host)
         this.enqueueReconcileOutcome(host)
+        this.observeReconcileLatency(source, 'success', dispatchedAt, admittedAt)
       } catch (error) {
         this.enqueueControllerError(host, 'reconcile_exception', error)
         this.enqueueReconcileOutcome(host)
+        this.observeReconcileLatency(source, 'error', dispatchedAt, admittedAt)
         throw error
+      } finally {
+        hostReconcileInFlight.dec({ lane: source })
       }
     })
   }
 
+  private observeReconcileLatency(
+    source: HostReconcileSource,
+    outcome: 'success' | 'error',
+    dispatchedAt: number,
+    admittedAt: number
+  ): void {
+    hostReconcileQueueWaitSeconds.observe(
+      { lane: source, outcome },
+      Math.max(0, admittedAt - dispatchedAt) / 1000
+    )
+    hostReconcileDurationSeconds.observe(
+      { source, outcome },
+      Math.max(0, Date.now() - admittedAt) / 1000
+    )
+  }
+
   private async reconcileCore(host: HostCRD): Promise<void> {
-    // Wake fast-path (Stage 4.3) BEFORE the heavy reconcile body: the Host
-    // watch callback is serial across the whole fleet, so a pending wake
-    // must not wait behind token issuance, NetworkPolicies or the
-    // channel-reader work below. The periodic resync funnels through this
-    // same method, so a watch event dropped on disconnect is recovered here.
+    // Wake fast-path (Stage 4.3) BEFORE the heavy reconcile body: reconciles
+    // are serialized PER HOST (serializeByHost), so a pending wake for THIS
+    // Host must not wait behind token issuance, NetworkPolicies or the
+    // channel-reader work below in this same chain. Other Hosts no longer gate
+    // it — the process-wide convergence tail was removed. The periodic resync
+    // funnels through this same method, so a watch event dropped on disconnect
+    // is recovered here.
     const forceFreshForWake = (await this.lifecycle.handleWakeFastPath(host)) === true
 
     // Track whether this host has desktop enabled
@@ -3643,72 +3794,379 @@ export class HostReconciler {
     )
   }
 
-  async reconcileDelete(name: string, namespace: string): Promise<void> {
-    await this.deleteHostRuntimeResources(name, namespace)
-    this.clearStatus(name)
-    this.desktopHosts.delete(name)
-  }
-
-  private async collectHostReconcileFailures(desiredHosts: HostCRD[]): Promise<unknown[]> {
-    const failures: unknown[] = []
-    for (const host of desiredHosts) {
-      try {
-        await this.reconcile(host)
-      } catch (error) {
-        console.error(`[HostReconciler] Fleet reconcile failed for Host "${host.name}":`, error)
-        failures.push(error)
+  /**
+   * Delete a Host's runtime bundle.
+   *
+   * `opts.skipIf` is an OPTIONAL fence evaluated INSIDE the per-Host serializer,
+   * immediately before anything destructive runs. Callers whose "this Host is
+   * gone" decision was made BEFORE admission (the watch-recovery diff, which
+   * compares LIST-time names) pass it so a same-name Host recreated during the
+   * admission window is not wiped: the recreation's ADDED sets the cache and
+   * enters this Host's chain FIRST, its reconcile rebuilds the bundle, and only
+   * then does the stale delete reach the front of the strict-FIFO queue.
+   * Ownership labels cannot discriminate here — the rebuilt bundle carries
+   * identical `clerum.io/host` + managed-by labels — and no uid is available on
+   * that path, so cache presence at admission is the correct fence. This
+   * mirrors the F2/#827 in-serializer re-check in collectHostCleanupFailures.
+   *
+   * Callers that omit `opts` keep the previous unconditional behavior exactly.
+   */
+  async reconcileDelete(
+    name: string,
+    namespace: string,
+    opts?: { skipIf?: () => boolean }
+  ): Promise<void> {
+    // A DELETED event must not race an in-flight create/update for the same
+    // Host: route it through the same per-Host serializer as reconcile(). The
+    // global convergence tail no longer provides this ordering.
+    await this.lifecycle.serializeByHost(name, async () => {
+      if (opts?.skipIf?.()) {
+        // Same vocabulary the watch path already reports for this condition
+        // (reconcileHostWatchEvent), so the skip is observable, not silent.
+        hostDeleteCleanupTotal.inc({ outcome: 'superseded' })
+        return
       }
-    }
-    return failures
+      await this.deleteHostRuntimeResources(name, namespace)
+      this.clearStatus(name)
+      this.desktopHosts.delete(name)
+    })
   }
 
-  private async collectHostCleanupFailures(desiredHosts: HostCRD[]): Promise<unknown[]> {
+  /**
+   * Reconcile the fleet with bounded cross-Host concurrency. Dispatches Host
+   * KEYS (not stale object snapshots): each worker resolves the CURRENT cached
+   * Host at execution time and skips entries the cache no longer holds
+   * (superseded by a delete/newer event). Failures are aggregated completely.
+   */
+  private async collectHostReconcileFailures(
+    desiredHosts: HostCRD[],
+    source: HostReconcileSource
+  ): Promise<unknown[]> {
+    const snapshotByName = new Map(desiredHosts.map(h => [h.name, h]))
+    const resolve = this.resolveCurrentHost ?? ((name: string) => snapshotByName.get(name))
+    const keys = desiredHosts.map(h => h.name)
+    return runBoundedHostWorkers(keys, config.hostFullReconcileConcurrency, async name => {
+      const host = resolve(name)
+      if (!host) return // absent/superseded since the pass captured its snapshot
+      try {
+        await this.reconcile(host, source)
+      } catch (error) {
+        console.error(`[HostReconciler] Fleet reconcile failed for Host "${name}":`, error)
+        throw error
+      }
+    })
+  }
+
+  /**
+   * Orphan cleanup with the §10.5 authority contract (replaces the accidental
+   * safety the removed global tail used to provide):
+   *  - runs only with known watch authority and the SAME generation captured at
+   *    pass start;
+   *  - compares candidates with the CURRENT cache, not the pass snapshot;
+   *  - groups candidates by owning logical Host from ownership labels; a
+   *    candidate with no derivable owner is NEVER deleted (deferred + recorded);
+   *  - performs ONE fresh authoritative Host read per orphan Host; a confirmed
+   *    404 (while authority stays valid) authorizes deleting that Host's entire
+   *    owned bundle INSIDE the Host's per-Host serializer;
+   *  - defers (with a bounded reason) on unknown authority, generation drift,
+   *    watch loss, a present read, or a failed read.
+   */
+  private async collectHostCleanupFailures(
+    capturedAuthority: HostWatchAuthoritySnapshot
+  ): Promise<unknown[]> {
     const failures: unknown[] = []
-    let existingDeployments: k8s.V1Deployment[] = []
-    try {
-      existingDeployments = await this.listManagedHostDeployments()
-    } catch (error) {
-      console.error('[HostReconciler] Failed to list managed host deployments:', error)
-      failures.push(error)
+    const authorityValid = (): boolean => {
+      const current = this.hostWatchAuthority()
+      return (
+        capturedAuthority.known &&
+        current.known &&
+        capturedAuthority.generation === current.generation
+      )
     }
-    const desiredNames = new Set(desiredHosts.map(h => h.name))
-    for (const deployment of existingDeployments) {
-      const name = deployment.metadata?.name || ''
-      const namespace = deployment.metadata?.namespace || config.hostNamespace
-      if (!desiredNames.has(name)) {
+
+    if (!authorityValid()) {
+      const current = this.hostWatchAuthority()
+      const reason =
+        !capturedAuthority.known || !current.known ? 'authority_unknown' : 'generation_changed'
+      hostCleanupDeferredTotal.inc({ reason })
+      console.warn(`[HostReconciler] Deferring orphan cleanup: ${reason}`)
+      return failures
+    }
+
+    let candidates: CleanupCandidate[]
+    try {
+      candidates = await this.gatherCleanupCandidates(failures)
+    } catch (error) {
+      failures.push(error)
+      return failures
+    }
+
+    const cacheHasHost = (name: string): boolean =>
+      this.resolveCurrentHost ? this.resolveCurrentHost(name) !== undefined : false
+
+    const orphanHosts = new Set<string>()
+    for (const candidate of candidates) {
+      if (!candidate.owner) {
+        // Never delete a resource whose owning Host cannot be derived.
+        hostCleanupDeferredTotal.inc({ reason: 'no_owner_label' })
+        console.warn(
+          `[HostReconciler] Deferring orphan candidate ${candidate.kind}/${candidate.name}: no derivable owning Host`
+        )
+        continue
+      }
+      if (cacheHasHost(candidate.owner)) continue // still present → retain
+      orphanHosts.add(candidate.owner)
+    }
+
+    // §10.5 destructive cleanup runs per orphan logical Host. Each Host's owned
+    // write set is disjoint (§10.4 inventory) and each destructive bundle runs
+    // inside that Host's own `serializeByHost` chain, so distinct orphan Hosts
+    // are provably independent. Addendum 2: dispatch them through the same
+    // bounded worker pool as the fleet (reusing HCC_HOST_FULL_RECONCILE_CONCURRENCY)
+    // instead of a serial `for … await` — never an unbounded fan-out at the K8s
+    // API. Same-Host ordering is still guaranteed by serializeByHost, and delete
+    // failures still aggregate completely because runBoundedHostWorkers collects
+    // every lane's throw.
+    const cleanupFailures = await runBoundedHostWorkers(
+      Array.from(orphanHosts),
+      config.hostFullReconcileConcurrency,
+      async hostName => {
+        if (!authorityValid()) {
+          hostCleanupDeferredTotal.inc({ reason: 'watch_lost' })
+          console.warn(
+            `[HostReconciler] Deferring orphan cleanup for "${hostName}": watch authority lost`
+          )
+          return
+        }
+        const presence = await this.readHostPresence(hostName)
+        if (presence === 'present') return // reappeared → retain
+        if (presence === 'error') {
+          hostCleanupDeferredTotal.inc({ reason: 'fresh_read_failed' })
+          return
+        }
+        if (
+          !destructiveCleanupAllowed({
+            watchAuthorityKnown: this.hostWatchAuthority().known,
+            capturedWatchGeneration: capturedAuthority.generation,
+            currentWatchGeneration: this.hostWatchAuthority().generation,
+            currentCacheOmitsHost: !cacheHasHost(hostName),
+            // Derived, not hardcoded. `presence` is provably 'absent' here (the
+            // 'present' and 'error' branches returned above), so this evaluates
+            // to the identical literal and the runtime behavior is unchanged.
+            // Deriving it makes the mapping total: if readHostPresence ever
+            // grows a fourth outcome, the else-branch type stops satisfying
+            // freshAuthoritativeRead's union and the compiler rejects it —
+            // instead of silently labelling a non-404 read as 'confirmed404'
+            // in a value that is DECISIONAL (a conjunct of
+            // destructiveCleanupAllowed, :94-95), not telemetry.
+            freshAuthoritativeRead: presence === 'absent' ? 'confirmed404' : presence,
+          })
+        ) {
+          hostCleanupDeferredTotal.inc({ reason: 'watch_lost' })
+          return
+        }
         try {
-          await this.deleteHostRuntimeResources(name, namespace)
+          await this.lifecycle.serializeByHost(hostName, async () => {
+            // F2 / #827 TOCTOU: a same-name Host recreated between the fresh read
+            // above and admission into this serializer updates the current cache
+            // (its ADDED event sets the cache before its reconcile runs, and that
+            // reconcile serializes ahead of this delete). Re-check the current
+            // cache INSIDE the serializer so a just-recreated Host's bundle is
+            // never deleted by this stale cleanup.
+            if (cacheHasHost(hostName)) {
+              hostCleanupDeferredTotal.inc({ reason: 'recreated' })
+              return
+            }
+            await this.deleteHostRuntimeResources(hostName, config.hostNamespace)
+          })
         } catch (error) {
-          console.error(`[HostReconciler] Fleet cleanup failed for orphan Host "${name}":`, error)
-          failures.push(error)
+          console.error(
+            `[HostReconciler] Fleet cleanup failed for orphan Host "${hostName}":`,
+            error
+          )
+          throw error
         }
       }
+    )
+    failures.push(...cleanupFailures)
+    return failures
+  }
+
+  /**
+   * List every managed resource that could be an orphan and derive its owning
+   * logical Host from ownership labels. List failures are collected into
+   * `listFailures` (reported by the caller) so a partial discovery still cleans
+   * what it could confidently attribute. Candidates never drive a delete on
+   * their own — the caller applies the fresh-read authority gate.
+   */
+  private async gatherCleanupCandidates(listFailures: unknown[]): Promise<CleanupCandidate[]> {
+    const candidates: CleanupCandidate[] = []
+    const pushOwner = (kind: string, name: string | undefined, owner: string | undefined): void => {
+      if (!name) return
+      candidates.push({ kind, name, owner })
     }
 
-    const knownHostNames = desiredHosts.map(h => h.name)
-    for (const sweep of [
-      () => this.sweepOrphanChannelReaderResources(knownHostNames),
-      () => this.sweepOrphanHostNetworkPolicies(knownHostNames),
-    ]) {
+    try {
+      for (const deployment of await this.listManagedHostDeployments()) {
+        pushOwner(
+          'Deployment',
+          deployment.metadata?.name,
+          deployment.metadata?.labels?.[HOST_LABEL]
+        )
+      }
+    } catch (error) {
+      console.error('[HostReconciler] Failed to list managed host deployments:', error)
+      listFailures.push(error)
+    }
+
+    const channelsNs = config.channelsNamespace
+    const managed = (labels: Record<string, string> | undefined): boolean =>
+      labels?.[MANAGED_BY_LABEL] === MANAGED_BY_VALUE
+    try {
+      const list = await this.appsApi.listNamespacedDeployment({ namespace: channelsNs })
+      for (const dep of list.items ?? []) {
+        const labels = dep.metadata?.labels
+        if (labels?.app !== 'channel-reader' || !managed(labels)) continue
+        pushOwner('ChannelReaderDeployment', dep.metadata?.name, labels[HOST_LABEL])
+      }
+    } catch (error) {
+      console.warn('[HostReconciler] channel-reader Deployment candidate list failed:', error)
+      listFailures.push(error)
+    }
+    try {
+      const list = await this.coreApi.listNamespacedService({ namespace: channelsNs })
+      for (const svc of list.items ?? []) {
+        const labels = svc.metadata?.labels
+        if (labels?.app !== 'channel-reader' || !managed(labels)) continue
+        pushOwner('ChannelReaderService', svc.metadata?.name, labels[HOST_LABEL])
+      }
+    } catch (error) {
+      console.warn('[HostReconciler] channel-reader Service candidate list failed:', error)
+      listFailures.push(error)
+    }
+    try {
+      const list = await this.coreApi.listNamespacedSecret({
+        namespace: channelsNs,
+        labelSelector: [
+          `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE}`,
+          'clerum.io/component=channel-reader',
+        ].join(','),
+      })
+      for (const sec of list.items ?? []) {
+        const labels = sec.metadata?.labels
+        if (!managed(labels) || labels?.['clerum.io/component'] !== 'channel-reader') continue
+        pushOwner('ChannelReaderSecret', sec.metadata?.name, labels[HOST_LABEL])
+      }
+    } catch (error) {
+      console.warn('[HostReconciler] channel-reader Secret candidate list failed:', error)
+      listFailures.push(error)
+    }
+
+    // #827 (Addendum 4 item 4): partial-leftover discovery. A bundle whose
+    // Deployment — and even its NetworkPolicies — are already gone must still be
+    // discovered from ANY surviving owned resource. List every owned kind HCC
+    // writes in the host namespace by ownership label and derive the owner from
+    // clerum.io/host; a candidate without a derivable owner is never deleted by
+    // the caller (§10.5).
+    const hostNs = config.hostNamespace
+    const managedSelector = `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE}`
+    const gatherOwnedKind = async (
+      kind: string,
+      list: () => Promise<{
+        items?: Array<{ metadata?: { name?: string; labels?: Record<string, string> } }>
+      }>
+    ): Promise<void> => {
       try {
-        await sweep()
+        const res = await list()
+        for (const item of res.items ?? []) {
+          if (!managed(item.metadata?.labels)) continue
+          pushOwner(kind, item.metadata?.name, item.metadata?.labels?.[HOST_LABEL])
+        }
       } catch (error) {
-        failures.push(error)
+        console.warn(`[HostReconciler] ${kind} candidate list failed in ${hostNs}:`, error)
+        listFailures.push(error)
       }
     }
-    return failures
+    await gatherOwnedKind('Service', () =>
+      this.coreApi.listNamespacedService({ namespace: hostNs, labelSelector: managedSelector })
+    )
+    await gatherOwnedKind('PersistentVolumeClaim', () =>
+      this.coreApi.listNamespacedPersistentVolumeClaim({
+        namespace: hostNs,
+        labelSelector: managedSelector,
+      })
+    )
+    await gatherOwnedKind('ServiceAccount', () =>
+      this.coreApi.listNamespacedServiceAccount({
+        namespace: hostNs,
+        labelSelector: managedSelector,
+      })
+    )
+    await gatherOwnedKind('Secret', () =>
+      this.coreApi.listNamespacedSecret({ namespace: hostNs, labelSelector: managedSelector })
+    )
+    await gatherOwnedKind('Role', () =>
+      this.rbacApi.listNamespacedRole({ namespace: hostNs, labelSelector: managedSelector })
+    )
+    await gatherOwnedKind('RoleBinding', () =>
+      this.rbacApi.listNamespacedRoleBinding({ namespace: hostNs, labelSelector: managedSelector })
+    )
+
+    for (const ns of [config.channelsNamespace, config.hostNamespace, config.rpcProxyNamespace]) {
+      try {
+        const list = await this.networkingApi.listNamespacedNetworkPolicy({
+          namespace: ns,
+          labelSelector: `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE}`,
+        })
+        for (const np of list.items ?? []) {
+          pushOwner('NetworkPolicy', np.metadata?.name, np.metadata?.labels?.[HOST_LABEL])
+        }
+      } catch (error) {
+        console.warn(`[HostReconciler] NetworkPolicy candidate list failed in ${ns}:`, error)
+        listFailures.push(error)
+      }
+    }
+
+    return candidates
+  }
+
+  /**
+   * One fresh authoritative Host read. `absent` is a confirmed 404 (the Host is
+   * genuinely gone). `present` means the Host reappeared. `error` (timeout,
+   * forbidden, 5xx) is deliberately NOT surfaced as a pass failure — the caller
+   * defers with a bounded reason, matching the §13.2 cleanup matrix.
+   */
+  private async readHostPresence(name: string): Promise<'absent' | 'present' | 'error'> {
+    try {
+      await this.customApi.getNamespacedCustomObject({
+        group: HOST_GROUP,
+        version: HOST_VERSION,
+        namespace: config.hostNamespace,
+        plural: HOST_PLURAL,
+        name,
+      })
+      return 'present'
+    } catch (error) {
+      if (getErrorCode(error) === 404) return 'absent'
+      console.warn(`[HostReconciler] Fresh authoritative read for orphan "${name}" failed:`, error)
+      return 'error'
+    }
   }
 
   async reconcileHosts(desiredHosts: HostCRD[]): Promise<void> {
-    const hostFailures = await this.collectHostReconcileFailures(desiredHosts)
+    const hostFailures = await this.collectHostReconcileFailures(desiredHosts, 'fleet')
     if (hostFailures.length > 0) {
       throw new HostFleetReconcileError(hostFailures, [])
     }
   }
 
   async fullReconcile(desiredHosts: HostCRD[]): Promise<void> {
-    const hostFailures = await this.collectHostReconcileFailures(desiredHosts)
-    const cleanupFailures = await this.collectHostCleanupFailures(desiredHosts)
+    // Capture watch authority + generation at pass start (§10.5 step 1) so
+    // cleanup can prove nothing shifted underneath it before deleting.
+    const capturedAuthority = this.hostWatchAuthority()
+    const hostFailures = await this.collectHostReconcileFailures(desiredHosts, 'fleet')
+    // Cleanup runs only after every fleet worker has settled.
+    const cleanupFailures = await this.collectHostCleanupFailures(capturedAuthority)
     if (hostFailures.length > 0 || cleanupFailures.length > 0) {
       throw new HostFleetReconcileError(hostFailures, cleanupFailures)
     }
@@ -3720,168 +4178,6 @@ export class HostReconciler {
       labelSelector: `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE}`,
     })
     return (response.items || []).filter(item => item.metadata?.labels?.[HOST_LABEL])
-  }
-
-  /**
-   * Sweep orphan channel-reader resources from the channels namespace.
-   * Lists Deployments and Secrets carrying our management labels, then
-   * deletes those whose clerum.io/host label points at a Host that no
-   * longer exists. Catches CRDs deleted while HCC was down (UI cascade
-   * may have been skipped or interrupted).
-   */
-  private async sweepOrphanChannelReaderResources(knownHosts: string[]): Promise<void> {
-    const known = new Set(knownHosts)
-    const ns = config.channelsNamespace
-    const failures: unknown[] = []
-
-    // Deployment sweep
-    try {
-      const list = await this.appsApi.listNamespacedDeployment({ namespace: ns })
-      for (const dep of list.items ?? []) {
-        const labels = dep.metadata?.labels ?? {}
-        if (labels.app !== 'channel-reader') continue
-        if (labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE) continue
-        const host = labels[HOST_LABEL]
-        if (!host || known.has(host)) continue
-        const name = dep.metadata?.name
-        if (!name) continue
-        try {
-          await this.appsApi.deleteNamespacedDeployment({
-            name,
-            namespace: ns,
-          })
-          console.log(`[HostReconciler] orphan sweep deleted Deployment ${name}`)
-        } catch (err) {
-          if (getErrorCode(err) !== 404) {
-            console.warn(`[HostReconciler] orphan Deployment delete failed:`, err)
-            failures.push(err)
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('[HostReconciler] orphan Deployment sweep list failed:', err)
-      failures.push(err)
-    }
-
-    // Service sweep
-    try {
-      const list = await this.coreApi.listNamespacedService({ namespace: ns })
-      for (const svc of list.items ?? []) {
-        const labels = svc.metadata?.labels ?? {}
-        if (labels.app !== 'channel-reader') continue
-        if (labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE) continue
-        const host = labels[HOST_LABEL]
-        if (!host || known.has(host)) continue
-        const name = svc.metadata?.name
-        if (!name) continue
-        try {
-          await this.coreApi.deleteNamespacedService({
-            name,
-            namespace: ns,
-          })
-          console.log(`[HostReconciler] orphan sweep deleted Service ${name}`)
-        } catch (err) {
-          if (getErrorCode(err) !== 404) {
-            console.warn(`[HostReconciler] orphan Service delete failed:`, err)
-            failures.push(err)
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('[HostReconciler] orphan Service sweep list failed:', err)
-      failures.push(err)
-    }
-
-    // Secret sweep — server-side label filter limits the list response to
-    // Secrets HCC created. The channels-namespace Role grants `secrets: delete`
-    // broadly because K8s RBAC has no resourceName wildcards, but the actual
-    // operation here only ever sees managed Secrets, and the in-loop label
-    // guard below is a defense-in-depth check against any future code path
-    // that drops the labelSelector.
-    const sweepLabelSelector = [
-      `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE}`,
-      'clerum.io/component=channel-reader',
-    ].join(',')
-    try {
-      const list = await this.coreApi.listNamespacedSecret({
-        namespace: ns,
-        labelSelector: sweepLabelSelector,
-      })
-      for (const sec of list.items ?? []) {
-        const labels = sec.metadata?.labels ?? {}
-        // Belt-and-suspenders: re-verify the managed-by + component labels
-        // even though the labelSelector should already have filtered them.
-        // If a future bug drops the selector, this prevents an unscoped
-        // delete sweep across the channels namespace.
-        if (labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE) continue
-        if (labels['clerum.io/component'] !== 'channel-reader') continue
-        const host = labels[HOST_LABEL]
-        if (!host || known.has(host)) continue
-        const name = sec.metadata?.name
-        if (!name) continue
-        try {
-          await this.coreApi.deleteNamespacedSecret({
-            name,
-            namespace: ns,
-          })
-          // Structured audit line — every Secret deletion HCC performs.
-          // Operators tail this to monitor unexpected deletes.
-          console.log(
-            `[HostReconciler] AUDIT: orphan sweep deleted Secret name=${name} ns=${ns} host=${host}`
-          )
-        } catch (err) {
-          if (getErrorCode(err) !== 404) {
-            console.warn(`[HostReconciler] orphan Secret delete failed:`, err)
-            failures.push(err)
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('[HostReconciler] orphan Secret sweep list failed:', err)
-      failures.push(err)
-    }
-    throwCleanupFailures(failures, 'Failed to sweep orphan channel-reader resources')
-  }
-
-  /**
-   * Sweep orphan per-Host NetworkPolicies in both `channels` and `mcp-host`
-   * namespaces. Lists NPs carrying our managed-by label, deletes those whose
-   * clerum.io/host points at a Host that no longer exists.
-   *
-   * Filter is `clerum.io/managed-by=host-context-controller` — leaves the
-   * static base policies (no managed-by label) untouched.
-   */
-  private async sweepOrphanHostNetworkPolicies(knownHosts: string[]): Promise<void> {
-    const known = new Set(knownHosts)
-    const failures: unknown[] = []
-    for (const ns of [config.channelsNamespace, config.hostNamespace, config.rpcProxyNamespace]) {
-      try {
-        const list = await this.networkingApi.listNamespacedNetworkPolicy({
-          namespace: ns,
-          labelSelector: `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE}`,
-        })
-        for (const np of list.items ?? []) {
-          const labels = np.metadata?.labels ?? {}
-          const host = labels[HOST_LABEL]
-          if (!host || known.has(host)) continue
-          const name = np.metadata?.name
-          if (!name) continue
-          try {
-            await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace: ns })
-            console.log(`[HostReconciler] orphan sweep deleted NetworkPolicy ${name} in ${ns}`)
-          } catch (err) {
-            if (getErrorCode(err) !== 404) {
-              console.warn(`[HostReconciler] orphan NP delete failed:`, err)
-              failures.push(err)
-            }
-          }
-        }
-      } catch (err) {
-        console.warn(`[HostReconciler] orphan NP sweep list failed in ${ns}:`, err)
-        failures.push(err)
-      }
-    }
-    throwCleanupFailures(failures, 'Failed to sweep orphan Host NetworkPolicies')
   }
 }
 

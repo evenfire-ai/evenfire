@@ -36,6 +36,8 @@ export type MockCoreApi = {
   createNamespacedServiceAccount: MockApiMethod
   readNamespacedServiceAccount: MockApiMethod
   deleteNamespacedServiceAccount: MockApiMethod
+  listNamespacedServiceAccount: MockApiMethod
+  listNamespacedPersistentVolumeClaim: MockApiMethod
   listNamespacedPod: MockApiMethod
 }
 
@@ -65,6 +67,8 @@ export type MockRbacApi = {
   createNamespacedRoleBinding: MockApiMethod
   readNamespacedRoleBinding: MockApiMethod
   deleteNamespacedRoleBinding: MockApiMethod
+  listNamespacedRole: MockApiMethod
+  listNamespacedRoleBinding: MockApiMethod
 }
 
 function hostNameFromResourceName(name = ''): string {
@@ -184,6 +188,9 @@ export function createMockCoreApi(): MockCoreApi {
       } as MockK8sResource)
     ),
     deleteNamespacedServiceAccount: vi.fn().mockResolvedValue({}),
+    // #827 partial-leftover discovery lists these owned kinds by ownership label.
+    listNamespacedServiceAccount: vi.fn().mockResolvedValue({ items: [] }),
+    listNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({ items: [] }),
     // wfc pod node-placement lookup for the stateless SFS co-location check.
     listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }),
   }
@@ -241,6 +248,9 @@ export function createMockRbacApi(): MockRbacApi {
       } as MockK8sResource)
     ),
     deleteNamespacedRoleBinding: vi.fn().mockResolvedValue({}),
+    // #827 partial-leftover discovery lists RBAC by ownership label.
+    listNamespacedRole: vi.fn().mockResolvedValue({ items: [] }),
+    listNamespacedRoleBinding: vi.fn().mockResolvedValue({ items: [] }),
   }
 }
 
