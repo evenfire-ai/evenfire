@@ -584,6 +584,12 @@ h3 {
   background: var(--surface-hover);
 }
 
+.notification-menu-item.is-clickable:focus-visible {
+  outline: none;
+  border-color: rgba(var(--focus-rgb), 0.6);
+  box-shadow: 0 0 0 var(--space-0-5) rgba(var(--focus-rgb), 0.24);
+}
+
 .notification-menu-item.unread {
   border-color: rgba(var(--accent-rgb), 0.42);
   background: var(--bg-elev-2);

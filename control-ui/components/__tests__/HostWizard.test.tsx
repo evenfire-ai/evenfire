@@ -466,6 +466,25 @@ describe('HostWizard — baseline render', () => {
     await renderWizard()
     expect(screen.getByPlaceholderText(/agent-name/i)).toBeInTheDocument()
   })
+
+  it('shows Default model without Allowed models in Model & Credentials', async () => {
+    await renderWizard()
+
+    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), {
+      target: { value: 'default-model-agent' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    fireEvent.click(screen.getByLabelText(/Create new context/i))
+    fireEvent.change(screen.getByPlaceholderText(/context-name/i), {
+      target: { value: 'ctx1' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    expect(
+      screen.getByLabelText('Default model', { selector: '#llm-primary-model' })
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/Allowed models/)).not.toBeInTheDocument()
+  })
 })
 
 describe('HostWizard — Agent type (stateless lifecycle)', () => {

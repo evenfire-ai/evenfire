@@ -34,13 +34,20 @@ export type LlmProviderConfigProps = {
   catalogLoading?: boolean
   catalogError?: string
 
+  // Copy and model-restriction controls vary by surface. The agent creation
+  // flow selects one default model without exposing per-host restrictions,
+  // while the edit surface retains the full allowed-models editor.
+  modelLabel?: string
+  showAllowedModels?: boolean
+  // Existing-agent layout: preserve the saved default model internally and
+  // put the primary provider's Allowed models control in the model field's
+  // place. Provider changes still resolve a valid default model automatically.
+  replacePrimaryModelWithAllowedModels?: boolean
+
   // Credential editing. Omit to render the model + fallback structure WITHOUT
   // credential inputs (create flow reusing an existing shared Secret, where the
   // wizard cannot introspect the Secret's keys).
   credentials?: LlmCredentialWiring
-  // Create-flow layout: place the primary credential beside Provider + Model.
-  // Edit screens leave this off and retain the full-width credential block.
-  inlinePrimaryCredential?: boolean
 
   // Data keys already present in the Host's own Secret — feeds the fallback
   // credentialSlot dropdown's extra keys (e.g. `claude-api-key-fb1`).

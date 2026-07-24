@@ -1,6 +1,7 @@
 'use client'
 
 import { Fragment, useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconStore } from '@components/Sidebar/icons'
@@ -380,7 +381,14 @@ export default function RegistryCatalog() {
                           />
                         </td>
                         <td>
-                          <div className="cu-registry-name">{entry.name}</div>
+                          <Link
+                            className="cu-registry-name cu-link"
+                            href={CONTROL_ROUTES.marketplace.entry(entry.name, entry.version)}
+                            onClick={event => event.stopPropagation()}
+                            onKeyDown={event => event.stopPropagation()}
+                          >
+                            {entry.name}
+                          </Link>
                           <div className="cu-registry-description" title={entry.description}>
                             {entry.description}
                           </div>

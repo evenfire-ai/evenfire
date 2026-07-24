@@ -1527,6 +1527,8 @@ export function HostWizard({
               catalog={allowedCatalog}
               catalogLoading={modelsLoading}
               catalogError={modelsError}
+              modelLabel="Default model"
+              showAllowedModels={false}
               credentials={
                 secretMode === 'new'
                   ? {
@@ -1536,7 +1538,6 @@ export function HostWizard({
                     }
                   : undefined
               }
-              inlinePrimaryCredential
               secretKeys={secretMode === 'new' ? llmSecretKeys : []}
               disabled={busy}
             />

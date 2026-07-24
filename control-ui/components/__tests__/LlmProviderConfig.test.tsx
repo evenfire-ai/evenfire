@@ -20,7 +20,7 @@ function Harness({
   initialAllowed = [],
   withCredentials = true,
   existingKeys,
-  inlinePrimaryCredential = false,
+  replacePrimaryModelWithAllowedModels = false,
 }: {
   initialProvider?: LlmProvider
   initialModel?: string
@@ -28,7 +28,7 @@ function Harness({
   initialAllowed?: HostAllowedModel[]
   withCredentials?: boolean
   existingKeys?: string[]
-  inlinePrimaryCredential?: boolean
+  replacePrimaryModelWithAllowedModels?: boolean
 }) {
   const [provider, setProvider] = useState<LlmProvider>(initialProvider)
   const [model, setModel] = useState(initialModel)
@@ -57,7 +57,7 @@ function Harness({
             }
           : undefined
       }
-      inlinePrimaryCredential={inlinePrimaryCredential}
+      replacePrimaryModelWithAllowedModels={replacePrimaryModelWithAllowedModels}
       secretKeys={existingKeys}
     />
   )
@@ -82,15 +82,48 @@ describe('LlmProviderConfig (spec Topic 1b — domain projection + usable gate)'
     expect(within(primary).queryByText(/Add the OpenAI credential/i)).not.toBeInTheDocument()
   })
 
-  it('places the primary credential beside Provider and Model in the create layout', () => {
-    render(<Harness inlinePrimaryCredential />)
+  it('keeps the primary credential below Provider, Model, and Allowed models', () => {
+    render(<Harness />)
 
     const row = screen
       .getByLabelText('Provider', { selector: '#llm-primary-provider' })
       .closest('.cu-llm-config__model-row')
     expect(row).not.toBeNull()
-    expect(row).toHaveClass('cu-llm-config__model-row--with-credential')
-    expect(within(row as HTMLElement).getByLabelText(/OpenAI API key/i)).toBeInTheDocument()
+    expect(within(row as HTMLElement).queryByLabelText(/OpenAI API key/i)).not.toBeInTheDocument()
+
+    const allowedModels = screen.getByText('Allowed models · OpenAI').closest('.cu-field')
+    const credentials = screen.getByLabelText('OpenAI credentials')
+    expect(allowedModels).not.toBeNull()
+    expect(allowedModels?.compareDocumentPosition(credentials)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    )
+  })
+
+  it('scopes the provider icon treatment to the provider selector', () => {
+    render(<Harness />)
+
+    const providerSelect = screen
+      .getByLabelText('Provider', { selector: '#llm-primary-provider' })
+      .closest('.cu-selection-dropdown')
+    const modelSelect = screen
+      .getByLabelText('Model', { selector: '#llm-primary-model' })
+      .closest('.cu-selection-dropdown')
+
+    expect(providerSelect).toHaveClass('cu-llm-config__provider-select')
+    expect(modelSelect).not.toHaveClass('cu-llm-config__provider-select')
+  })
+
+  it('replaces Model with Allowed models in the existing-agent layout', () => {
+    render(<Harness replacePrimaryModelWithAllowedModels />)
+
+    const row = screen
+      .getByLabelText('Provider', { selector: '#llm-primary-provider' })
+      .closest('.cu-llm-config__model-row')
+    expect(row).not.toBeNull()
+    expect(within(row as HTMLElement).getByText('Allowed models · OpenAI')).toBeInTheDocument()
+    expect(
+      screen.queryByLabelText('Model', { selector: '#llm-primary-model' })
+    ).not.toBeInTheDocument()
   })
 
   it('treats a stored key (existingKeys) as usable without re-entry (edit mode)', () => {

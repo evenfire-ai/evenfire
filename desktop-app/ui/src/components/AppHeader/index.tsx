@@ -197,17 +197,32 @@ export const AppHeader = React.memo(function AppHeader({
     void onOpenNotification(notification)
   }
 
+  const isNestedNotificationAction = (event: React.SyntheticEvent<HTMLDivElement>) => {
+    const target = event.target
+    if (!(target instanceof Element)) return false
+    const interactiveTarget = target.closest(
+      'button, a, input, select, textarea, [role="button"], [role="link"]'
+    )
+    return interactiveTarget !== null && interactiveTarget !== event.currentTarget
+  }
+
   const handleNotificationCardClick = (
     event: React.MouseEvent<HTMLDivElement>,
     notification: (typeof notifications)[number]
   ) => {
     if (notification.kind === 'approval_required') return
+    if (isNestedNotificationAction(event)) return
+    openNotification(notification)
+  }
 
-    const target = event.target as Element
-    if (target.closest('button, a, input, select, textarea, [role="button"], [role="link"]')) {
-      return
-    }
-
+  const handleNotificationCardKeyDown = (
+    event: React.KeyboardEvent<HTMLDivElement>,
+    notification: (typeof notifications)[number]
+  ) => {
+    if (notification.kind === 'approval_required') return
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    if (isNestedNotificationAction(event)) return
+    event.preventDefault()
     openNotification(notification)
   }
 
@@ -878,6 +893,9 @@ export const AppHeader = React.memo(function AppHeader({
                             notification.kind === 'approval_required' ? '' : ' is-clickable'
                           }${notification.read ? '' : ' unread'}`}
                           onClick={event => handleNotificationCardClick(event, notification)}
+                          onKeyDown={event => handleNotificationCardKeyDown(event, notification)}
+                          role={notification.kind === 'approval_required' ? undefined : 'button'}
+                          tabIndex={notification.kind === 'approval_required' ? undefined : 0}
                         >
                           <div className="notification-menu-item-header">
                             <p className="notification-menu-agent">{notification.agentName}</p>

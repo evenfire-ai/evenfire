@@ -2,19 +2,13 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type { AppNotification } from '@/uiTypes'
 import { AppHeader } from '../index'
 
 const notificationMocks = vi.hoisted(() => ({
   clear: vi.fn(),
   markRead: vi.fn(),
-  notifications: [] as Array<{
-    id: string
-    kind: 'assistant_reply'
-    agentName: string
-    text: string
-    timestamp: number
-    read: boolean
-  }>,
+  notifications: [] as AppNotification[],
   open: vi.fn(),
   remove: vi.fn(),
   refresh: vi.fn(async () => undefined),
@@ -100,6 +94,55 @@ describe('AppHeader notification tray presentation', () => {
 
     expect(notificationMocks.open).toHaveBeenCalledWith(notification)
     expect(screen.queryByRole('dialog', { name: 'Notifications and approvals' })).toBeNull()
+  })
+
+  it('opens a clickable notification card with the keyboard', () => {
+    const notification = {
+      id: 'notification-1',
+      kind: 'assistant_reply' as const,
+      agentName: 'Research agent',
+      text: 'Your answer is ready.',
+      timestamp: Date.now(),
+      read: true,
+    }
+    notificationMocks.notifications.push(notification)
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+    const card = screen.getByTestId('notification-menu-item')
+
+    expect(card.getAttribute('role')).toBe('button')
+    expect(card.getAttribute('tabindex')).toBe('0')
+    fireEvent.keyDown(card, { key: 'Enter' })
+
+    expect(notificationMocks.open).toHaveBeenCalledWith(notification)
+  })
+
+  it('keeps approval-required notification cards non-clickable', () => {
+    const notification = {
+      id: 'approval-1',
+      kind: 'approval_required' as const,
+      agentName: 'Workflow agent',
+      text: 'Deploy needs your approval.',
+      timestamp: Date.now(),
+      read: false,
+      approval: {
+        taskId: 'task-1',
+        requestId: 'request-1',
+        displayName: 'Deploy',
+      },
+    }
+    notificationMocks.notifications.push(notification)
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+    const card = screen.getByTestId('notification-menu-item')
+
+    expect(card.getAttribute('role')).toBeNull()
+    expect(card.getAttribute('tabindex')).toBeNull()
+    fireEvent.click(card)
+
+    expect(notificationMocks.open).not.toHaveBeenCalled()
   })
 
   it('does not open a notification when its delete button is clicked', () => {

@@ -74,19 +74,3 @@ export function notificationKindLabel(kind: AppNotificationKind): string {
   if (kind === 'sdk_notification') return 'Plugin notification'
   return 'Agent reply'
 }
-
-export function notificationInboxDescription(
-  hasPendingApprovals: boolean,
-  hasNotifications: boolean
-): string {
-  if (hasPendingApprovals && hasNotifications) {
-    return 'Pending approvals and updates from agents, workflows, and plugins.'
-  }
-  if (hasPendingApprovals) {
-    return 'Workflow requests that are waiting on you.'
-  }
-  if (hasNotifications) {
-    return 'Updates from agents, workflows, and plugins.'
-  }
-  return 'No notifications or pending approvals right now.'
-}

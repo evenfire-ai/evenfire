@@ -108,8 +108,10 @@ export function LlmProviderConfig({
   catalog,
   catalogLoading = false,
   catalogError,
+  modelLabel = 'Model',
+  showAllowedModels = true,
+  replacePrimaryModelWithAllowedModels = false,
   credentials,
-  inlinePrimaryCredential = false,
   secretKeys = [],
   disabled = false,
 }: LlmProviderConfigProps) {
@@ -163,6 +165,14 @@ export function LlmProviderConfig({
     const others = allowedModels.filter(entry => entry.provider !== providerId)
     const additions = models.map(nextModel => ({ provider: providerId, model: nextModel }))
     onAllowedModelsChange([...others, ...additions])
+    if (
+      replacePrimaryModelWithAllowedModels &&
+      providerId === provider &&
+      models.length > 0 &&
+      !models.includes(model)
+    ) {
+      onPrimaryChange({ provider, model: models[0] })
+    }
   }
 
   // The distinct fallback providers whose subset is NOT already curated by the
@@ -232,16 +242,11 @@ export function LlmProviderConfig({
           <span className="cu-llm-config__block-tag">Required</span>
         </div>
 
-        <div
-          className={cn(
-            'cu-llm-config__model-row',
-            credentials && inlinePrimaryCredential && 'cu-llm-config__model-row--with-credential'
-          )}
-        >
+        <div className="cu-llm-config__model-row">
           <Field htmlFor="llm-primary-provider" label="Provider">
             <SelectionDropdown
               id="llm-primary-provider"
-              className="cu-llm-config__primary-select"
+              className="cu-llm-config__primary-select cu-llm-config__provider-select"
               value={[provider]}
               options={primaryProviderOptions}
               placeholder="Select provider…"
@@ -268,39 +273,38 @@ export function LlmProviderConfig({
             />
           </Field>
 
-          <Field htmlFor="llm-primary-model" label="Model">
-            <SelectionDropdown
-              id="llm-primary-model"
-              className="cu-llm-config__primary-select"
-              value={model ? [model] : []}
-              options={primaryModelSelectOptions}
-              placeholder={primaryModelOptions.length === 0 ? 'No enabled models' : 'Select model…'}
-              searchPlaceholder="Search models…"
-              selectionLabel="model"
-              multiple={false}
-              showSelectedChips={false}
+          {replacePrimaryModelWithAllowedModels && showAllowedModels ? (
+            <AllowedModelsField
+              provider={provider}
+              catalog={catalog}
+              allowedModels={allowedModels}
+              onChange={handleProviderAllowedChange}
               disabled={disabled}
-              invalid={primaryModelOutOfAllowlist}
-              onChange={next => {
-                const nextModel = next[0]
-                if (!nextModel) return
-                onPrimaryChange({ provider, model: nextModel })
-              }}
             />
-          </Field>
-
-          {credentials && inlinePrimaryCredential ? (
-            <ProviderCredentialBlock
-              variant="primary"
-              group={primaryGroup}
-              slots={primaryGroup.slots}
-              idPrefix="llm-primary"
-              wiring={credentials}
-              present={present}
-              disabled={disabled}
-              inline
-            />
-          ) : null}
+          ) : (
+            <Field htmlFor="llm-primary-model" label={modelLabel}>
+              <SelectionDropdown
+                id="llm-primary-model"
+                className="cu-llm-config__primary-select"
+                value={model ? [model] : []}
+                options={primaryModelSelectOptions}
+                placeholder={
+                  primaryModelOptions.length === 0 ? 'No enabled models' : 'Select model…'
+                }
+                searchPlaceholder="Search models…"
+                selectionLabel="model"
+                multiple={false}
+                showSelectedChips={false}
+                disabled={disabled}
+                invalid={primaryModelOutOfAllowlist}
+                onChange={next => {
+                  const nextModel = next[0]
+                  if (!nextModel) return
+                  onPrimaryChange({ provider, model: nextModel })
+                }}
+              />
+            </Field>
+          )}
         </div>
 
         {catalogError ? (
@@ -311,7 +315,7 @@ export function LlmProviderConfig({
           </p>
         ) : null}
 
-        {primaryModelOutOfAllowlist ? (
+        {primaryModelOutOfAllowlist && !replacePrimaryModelWithAllowedModels ? (
           <p className="cu-llm-config__warn">
             {model} isn&apos;t in the models offered for {getProviderLabel(provider)} — end users
             won&apos;t be offered it. Pick a model from the list, or add it under Allowed models
@@ -319,15 +323,17 @@ export function LlmProviderConfig({
           </p>
         ) : null}
 
-        <AllowedModelsField
-          provider={provider}
-          catalog={catalog}
-          allowedModels={allowedModels}
-          onChange={handleProviderAllowedChange}
-          disabled={disabled}
-        />
+        {showAllowedModels && !replacePrimaryModelWithAllowedModels ? (
+          <AllowedModelsField
+            provider={provider}
+            catalog={catalog}
+            allowedModels={allowedModels}
+            onChange={handleProviderAllowedChange}
+            disabled={disabled}
+          />
+        ) : null}
 
-        {credentials && !inlinePrimaryCredential ? (
+        {credentials ? (
           <ProviderCredentialBlock
             variant="primary"
             group={primaryGroup}
@@ -356,7 +362,7 @@ export function LlmProviderConfig({
         />
       </div>
 
-      {fallbackAllowedProviders.length > 0 ? (
+      {showAllowedModels && fallbackAllowedProviders.length > 0 ? (
         <div className="cu-llm-config__block">
           <div className="cu-llm-config__block-head">
             <span className="cu-llm-config__block-title">Allowed models · fallback providers</span>
@@ -534,7 +540,6 @@ type ProviderCredentialBlockProps = {
   wiring: LlmCredentialWiring
   present: (dataKey: string) => boolean
   disabled: boolean
-  inline?: boolean
 }
 
 // One provider's credential block: the usable/partial/absent chip, its slot
@@ -550,7 +555,6 @@ function ProviderCredentialBlock({
   wiring,
   present,
   disabled,
-  inline = false,
 }: ProviderCredentialBlockProps) {
   const chip = describeLlmCompleteness(group, present)
   const providerLabel = getProviderLabel(group.provider)
@@ -563,22 +567,17 @@ function ProviderCredentialBlock({
   const usable = chip.state === 'present'
 
   return (
-    <section
-      className={cn('cu-llm-cred-group', inline && 'cu-llm-cred-group--inline')}
-      aria-label={`${group.label} credentials`}
-    >
-      {!inline ? (
-        <div className="cu-llm-cred-group__head">
-          <span className="cu-llm-cred-group__title">{group.label}</span>
-          <span
-            className={cn('cu-slot-chip', `cu-slot-chip--${chip.state}`)}
-            aria-label={`${group.label} credentials ${chip.text}`}
-          >
-            <span aria-hidden="true">{chip.symbol}</span>
-            {chip.text}
-          </span>
-        </div>
-      ) : null}
+    <section className="cu-llm-cred-group" aria-label={`${group.label} credentials`}>
+      <div className="cu-llm-cred-group__head">
+        <span className="cu-llm-cred-group__title">{group.label}</span>
+        <span
+          className={cn('cu-slot-chip', `cu-slot-chip--${chip.state}`)}
+          aria-label={`${group.label} credentials ${chip.text}`}
+        >
+          <span aria-hidden="true">{chip.symbol}</span>
+          {chip.text}
+        </span>
+      </div>
 
       {slots.map(slot => {
         const inputId = `${idPrefix}-${slot.dataKey}`

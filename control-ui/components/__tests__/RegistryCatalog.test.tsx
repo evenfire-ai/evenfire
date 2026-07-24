@@ -173,6 +173,16 @@ describe('RegistryCatalog tabs and columns', () => {
       '/marketplace/plugins'
     )
   })
+
+  it('links entry names to their shareable detail routes', async () => {
+    mockApiSuccess()
+    render(<RegistryCatalog />)
+
+    expect(await screen.findByRole('link', { name: 'brave-search' })).toHaveAttribute(
+      'href',
+      '/marketplace/entries/brave-search/1.0.0'
+    )
+  })
 })
 
 describe('RegistryCatalog expansion and actions', () => {
