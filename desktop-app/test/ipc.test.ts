@@ -314,21 +314,39 @@ describe('ipc host status stream handlers', () => {
     await Promise.resolve(
       handler?.(event, {
         resourceId: ' 11111111-1111-1111-1111-111111111111 ',
-        subjectKey: ' user:user-1 ',
+        subjectKeys: [' user:user-1 ', ' team:team-2 '],
         bits: [' read ', ' manage_acl '],
         drive: ' main ',
       })
     )
 
-    // No inherit in the payload → forwarded as undefined (the client's
-    // historical `false` default applies downstream).
+    // The bulk subjects[] array is sanitized element-wise. No inherit in the
+    // payload → forwarded as undefined (the client's historical `false` default
+    // applies downstream).
     expect(service.grantGfs).toHaveBeenCalledWith(
       '11111111-1111-1111-1111-111111111111',
-      'user:user-1',
+      ['user:user-1', 'team:team-2'],
       ['read', 'manage_acl'],
       'main',
       undefined
     )
+  })
+
+  it('rejects an empty or non-array subjectKeys payload before calling AppService', async () => {
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('gfs:grant')
+
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          resourceId: '11111111-1111-1111-1111-111111111111',
+          subjectKeys: [],
+          bits: ['read'],
+          drive: 'main',
+        })
+      )
+    ).rejects.toThrow('subjectKeys must be a non-empty array')
+    expect(service.grantGfs).not.toHaveBeenCalled()
   })
 
   it('forwards a boolean inherit and rejects a non-boolean one', async () => {
@@ -339,7 +357,7 @@ describe('ipc host status stream handlers', () => {
     await Promise.resolve(
       handler?.(event, {
         resourceId: '11111111-1111-1111-1111-111111111111',
-        subjectKey: 'host:1st:mcp-host/chatllm',
+        subjectKeys: ['host:1st:mcp-host/chatllm'],
         bits: ['read'],
         drive: 'main',
         inherit: true,
@@ -347,7 +365,7 @@ describe('ipc host status stream handlers', () => {
     )
     expect(service.grantGfs).toHaveBeenCalledWith(
       '11111111-1111-1111-1111-111111111111',
-      'host:1st:mcp-host/chatllm',
+      ['host:1st:mcp-host/chatllm'],
       ['read'],
       'main',
       true
@@ -357,7 +375,7 @@ describe('ipc host status stream handlers', () => {
       Promise.resolve(
         handler?.(event, {
           resourceId: '11111111-1111-1111-1111-111111111111',
-          subjectKey: 'host:1st:mcp-host/chatllm',
+          subjectKeys: ['host:1st:mcp-host/chatllm'],
           bits: ['read'],
           drive: 'main',
           inherit: 'yes',
@@ -418,7 +436,7 @@ describe('ipc host status stream handlers', () => {
       Promise.resolve(
         handler?.(event, {
           resourceId: '11111111-1111-1111-1111-111111111111',
-          subjectKey: 'host:mcp-host/standalone',
+          subjectKeys: ['host:mcp-host/standalone'],
           bits: ['read'],
           drive: 'main',
         })

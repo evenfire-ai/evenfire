@@ -602,10 +602,10 @@ function ManageProbe() {
       <button type="button" onClick={() => void ctrl.revokeGrant('grant-42')}>
         revoke grant
       </button>
-      <button type="button" onClick={() => void ctrl.grant('user:bob', ['read'], true)}>
+      <button type="button" onClick={() => void ctrl.grant(['user:bob'], ['read'], true)}>
         grant inherit true
       </button>
-      <button type="button" onClick={() => void ctrl.grant('team:qa', ['read'], false)}>
+      <button type="button" onClick={() => void ctrl.grant(['team:qa'], ['read'], false)}>
         grant inherit false
       </button>
     </>
@@ -807,14 +807,14 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       screen.getByRole('button', { name: 'grant inherit true' }).click()
     })
     await waitFor(() =>
-      expect(grant).toHaveBeenCalledWith('root', 'user:bob', ['read'], 'main', true)
+      expect(grant).toHaveBeenCalledWith('root', ['user:bob'], ['read'], 'main', true)
     )
 
     await act(async () => {
       screen.getByRole('button', { name: 'grant inherit false' }).click()
     })
     await waitFor(() =>
-      expect(grant).toHaveBeenCalledWith('root', 'team:qa', ['read'], 'main', false)
+      expect(grant).toHaveBeenCalledWith('root', ['team:qa'], ['read'], 'main', false)
     )
   })
 })

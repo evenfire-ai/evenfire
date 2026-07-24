@@ -4,6 +4,12 @@ import { describeGfsGrantError } from '../gfsGrantErrors'
 /**
  * Pure presentation map for GFS grant-plane server verdicts. Codes arrive
  * embedded in Electron IPC error messages, so matching is substring-based.
+ *
+ * `invalidIndexes` / `retryAfterSeconds` are SEPARATE response-body fields on the
+ * server; the desktop main process (uriHandler surfaceGfsGrantError) appends them
+ * to the error message as `invalidIndexes=[…]` / `retryAfterSeconds=…` BEFORE the
+ * IPC boundary drops `ApiError.bodyText`. These cases feed that real production
+ * message shape — not a JSON blob the wire never carries.
  */
 
 describe('describeGfsGrantError', () => {
@@ -47,8 +53,12 @@ describe('describeGfsGrantError', () => {
   })
 
   it('appends 1-based subject positions when subjects_invalid carries invalidIndexes', () => {
+    // The exact message the main process now produces: the ApiError message with
+    // the appended `invalidIndexes=[…]` the server sent as a separate body field.
     const presentation = describeGfsGrantError(
-      new Error('400 Bad Request: subjects_invalid {"invalidIndexes":[0, 2]}')
+      new Error(
+        "Error invoking remote method 'gfs:grant': Error: 400 Bad Request: subjects_invalid invalidIndexes=[0,2]"
+      )
     )
 
     expect(presentation).toEqual({
@@ -59,8 +69,12 @@ describe('describeGfsGrantError', () => {
   })
 
   it('maps 429 with retryAfterSeconds into the retry message', () => {
+    // rate-limit body is `{ error: 'Too Many Requests', retryAfterSeconds }`; the
+    // main process appends `retryAfterSeconds=…` from the dropped body field.
     const presentation = describeGfsGrantError(
-      new Error('429 Too Many Requests: {"error":"rate_limited","retryAfterSeconds":42}')
+      new Error(
+        "Error invoking remote method 'gfs:grant': Error: 429 Too Many Requests: Too Many Requests retryAfterSeconds=42"
+      )
     )
 
     expect(presentation).toEqual({

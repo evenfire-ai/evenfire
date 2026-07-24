@@ -856,20 +856,23 @@ export class AppService {
   }
 
   /**
-   * Delegate a grant (subjectKey → structured subject). No-escalation is
-   * server-side. `inherit` is renderer-driven (agent grants on directories
-   * default it ON so contained files are covered); omitted means the client's
-   * historical `false`.
+   * Delegate a grant to one or more subjects (each subjectKey → structured
+   * subject) in a single atomic bulk PUT. No-escalation is server-side.
+   * `inherit` is renderer-driven (agent grants on directories default it ON so
+   * contained files are covered); omitted means the client's historical `false`.
    */
   async grantGfs(
     resourceId: string,
-    subjectKey: string,
+    subjectKeys: string[],
     bits: string[],
     drive?: string,
     inherit?: boolean
   ) {
+    // One atomic bulk PUT for every selected subject (server caps at 100). Each
+    // key is parsed to its structured subject up front, so a single malformed
+    // key fails the whole call before any round-trip — never a partial write.
     await this.gfsClient.grant(
-      { resourceId, drive, subject: parseSubjectKey(subjectKey), permissions: bits, inherit },
+      { resourceId, drive, subjects: subjectKeys.map(parseSubjectKey), permissions: bits, inherit },
       this.requireSessionToken()
     )
   }
@@ -904,12 +907,12 @@ export class AppService {
    * shared capability); the no-escalation engine still requires the caller hold
    * read + share. includeDescendants so a folder share covers its subtree.
    */
-  async createGfsShare(resourceId: string, subjectKey: string, drive?: string) {
+  async createGfsShare(resourceId: string, subjectKeys: string[], drive?: string) {
     await this.gfsClient.createShare(
       {
         resourceId,
         drive,
-        subject: parseSubjectKey(subjectKey),
+        subjects: subjectKeys.map(parseSubjectKey),
         permissions: ['read'],
         includeDescendants: true,
       },

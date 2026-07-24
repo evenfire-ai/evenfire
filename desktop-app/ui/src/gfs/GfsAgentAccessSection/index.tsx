@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { Button, SelectableOption, StatusBanner } from '@components/Common'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
-import { GfsSubjectBatchError } from '@lib/gfsSubjectBatch'
 import { GfsPermissionDropdown } from '@/gfs/GfsPermissionDropdown'
 import { GFS_AGENT_GRANTABLE_PERMISSIONS, GFS_HOST_SUBJECT_KEY_PREFIX } from './constants'
 import type { GfsAgentAccessSectionProps } from './types'
@@ -47,17 +46,9 @@ export function GfsAgentAccessSection({
       )
       setSelectedIds([])
     } catch (grantError) {
-      // Keep only the failed agents selected so a retry targets exactly them.
-      if (grantError instanceof GfsSubjectBatchError) {
-        const failedIds = new Set(
-          grantError.failedSubjectKeys.map(key =>
-            key.startsWith(GFS_HOST_SUBJECT_KEY_PREFIX)
-              ? key.slice(GFS_HOST_SUBJECT_KEY_PREFIX.length)
-              : key
-          )
-        )
-        setSelectedIds(current => current.filter(id => failedIds.has(id)))
-      }
+      // The bulk grant is atomic — a failure means NONE of the selected agents
+      // were granted, so keep the whole selection for a retry. Surface the mapped
+      // server verdict (e.g. managed_agent_permission_forbidden) — never swallow.
       setError(describeGfsGrantError(grantError).message)
     } finally {
       setBusy(false)

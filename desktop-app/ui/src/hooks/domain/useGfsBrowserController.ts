@@ -347,17 +347,17 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // caller passes it explicitly (the agent section, directories only); the
   // user/team panel keeps today's inherit:false behavior by omitting it.
   const grant = useCallback(
-    (subjectKey: string, bits: string[], inherit?: boolean): Promise<void> => {
+    (subjectKeys: string[], bits: string[], inherit?: boolean): Promise<void> => {
       if (!current) return Promise.reject(new Error('No resource selected'))
-      return window.clerum.gfs.grant(current.resourceId, subjectKey, bits, DRIVE, inherit)
+      return window.clerum.gfs.grant(current.resourceId, subjectKeys, bits, DRIVE, inherit)
     },
     [current]
   )
 
   const createShare = useCallback(
-    (subjectKey: string): Promise<void> => {
+    (subjectKeys: string[]): Promise<void> => {
       if (!current) return Promise.reject(new Error('No resource selected'))
-      return window.clerum.gfs.createShare(current.resourceId, subjectKey, DRIVE)
+      return window.clerum.gfs.createShare(current.resourceId, subjectKeys, DRIVE)
     },
     [current]
   )

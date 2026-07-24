@@ -18,7 +18,6 @@ import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
-import { GfsSubjectBatchError, runGfsSubjectBatch } from '@lib/gfsSubjectBatch'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import {
   GfsDelegationPanel,
@@ -233,46 +232,23 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [manageOpen, openLinkOpen])
 
+  // One atomic bulk grant for every selected subject — the server grants all or
+  // none (a `subjects_invalid` rejects the whole request), so there is no
+  // partial-success outcome. A failure propagates to the panel's catch, which
+  // maps the server verdict via describeGfsGrantError. No inherit argument here:
+  // the user/team panel keeps inherit:false.
   const handleGrant = async (subjectKeys: string[], bits: string[]) => {
-    try {
-      await runGfsSubjectBatch('Grant access', subjectKeys, subjectKey =>
-        // No inherit argument here: the user/team panel keeps inherit:false.
-        ctrl.grant(subjectKey, bits)
-      )
-    } catch (error) {
-      if (error instanceof GfsSubjectBatchError && error.succeededSubjectKeys.length > 0) {
-        pushToast?.(
-          `Access granted to ${error.succeededSubjectKeys.length} of ${subjectKeys.length} subjects`,
-          'success'
-        )
-        // Some writes landed; the grants list (revoke-id source) must refetch.
-        await ctrl.refreshGrants()
-      }
-      throw error
-    }
+    await ctrl.grant(subjectKeys, bits)
     pushToast?.(
       `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'subject' : 'subjects'}`,
       'success'
     )
+    // The grant PUT returns no ids — list-after-write is the revoke-id source.
     await ctrl.refreshGrants()
   }
 
   const handleGrantAgents = async (subjectKeys: string[], bits: string[], inherit: boolean) => {
-    try {
-      await runGfsSubjectBatch('Grant agent access', subjectKeys, subjectKey =>
-        ctrl.grant(subjectKey, bits, inherit)
-      )
-    } catch (error) {
-      if (error instanceof GfsSubjectBatchError && error.succeededSubjectKeys.length > 0) {
-        pushToast?.(
-          `Access granted to ${error.succeededSubjectKeys.length} of ${subjectKeys.length} agents`,
-          'success'
-        )
-        // The grant PUT returns no ids — list-after-write is mandatory.
-        await ctrl.refreshGrants()
-      }
-      throw error
-    }
+    await ctrl.grant(subjectKeys, bits, inherit)
     pushToast?.(
       `Access granted to ${subjectKeys.length} ${subjectKeys.length === 1 ? 'agent' : 'agents'}`,
       'success'
@@ -290,19 +266,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
   }
 
   const handleCreateShare = async (subjectKeys: string[]) => {
-    try {
-      await runGfsSubjectBatch('Create share', subjectKeys, subjectKey =>
-        ctrl.createShare(subjectKey)
-      )
-    } catch (error) {
-      if (error instanceof GfsSubjectBatchError && error.succeededSubjectKeys.length > 0) {
-        pushToast?.(
-          `${error.succeededSubjectKeys.length} of ${subjectKeys.length} shares created`,
-          'success'
-        )
-      }
-      throw error
-    }
+    await ctrl.createShare(subjectKeys)
     pushToast?.(
       `${subjectKeys.length} ${subjectKeys.length === 1 ? 'share' : 'shares'} created`,
       'success'

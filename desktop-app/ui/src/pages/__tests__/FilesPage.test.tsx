@@ -810,7 +810,7 @@ describe('FilesPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Grant agent access' }))
 
     await waitFor(() =>
-      expect(grant).toHaveBeenCalledWith('host:1st:mcp-host/chatllm', ['read'], true)
+      expect(grant).toHaveBeenCalledWith(['host:1st:mcp-host/chatllm'], ['read'], true)
     )
     await waitFor(() => expect(refreshGrants).toHaveBeenCalledTimes(1))
     expect(pushToast).toHaveBeenCalledWith('Access granted to 1 agent', 'success')
@@ -875,12 +875,12 @@ describe('FilesPage', () => {
 
     // handleGrant issues the grant then MUST list-after-write (the grant PUT
     // returns no ids). Deleting `await ctrl.refreshGrants()` must fail here.
-    await waitFor(() => expect(grant).toHaveBeenCalledWith('user:user-2', ['read']))
+    await waitFor(() => expect(grant).toHaveBeenCalledWith(['user:user-2'], ['read']))
     await waitFor(() => expect(refreshGrants).toHaveBeenCalledTimes(1))
     expect(pushToast).toHaveBeenCalledWith('Access granted to 1 subject', 'success')
   })
 
-  it('refetches the grants list when a user or team grant partially succeeds', async () => {
+  it('issues ONE atomic bulk grant and does not refetch or toast when it is rejected', async () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -915,12 +915,9 @@ describe('FilesPage', () => {
         },
       },
     })
-    // First subject lands, second is rejected — the partial-success branch of
-    // handleGrant must still refetch the grants list before rethrowing.
-    const grant = vi
-      .fn()
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error('escalation_rejected'))
+    // The bulk grant is atomic: the whole request is rejected, so NOTHING landed.
+    // No success toast, and no list-after-write (there is nothing new to reveal).
+    const grant = vi.fn().mockRejectedValue(new Error('400 Bad Request: subjects_invalid'))
     const refreshGrants = vi.fn(async () => undefined)
     const pushToast = vi.fn()
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -950,9 +947,17 @@ describe('FilesPage', () => {
     fireEvent.click(await screen.findByRole('option', { name: /Test Three/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
 
-    await waitFor(() => expect(grant).toHaveBeenCalledTimes(2))
-    await waitFor(() => expect(refreshGrants).toHaveBeenCalledTimes(1))
-    expect(pushToast).toHaveBeenCalledWith('Access granted to 1 of 2 subjects', 'success')
+    await waitFor(() =>
+      expect(grant).toHaveBeenCalledWith(['user:user-2', 'user:user-3'], ['read'])
+    )
+    expect(grant).toHaveBeenCalledTimes(1)
+    // The panel maps the verdict; no partial-success toast, no list-after-write.
+    await screen.findByText('Some selected subjects are invalid and were rejected.')
+    expect(refreshGrants).not.toHaveBeenCalled()
+    expect(pushToast).not.toHaveBeenCalledWith(
+      expect.stringContaining('Access granted'),
+      'success'
+    )
   })
 
   it('revokes a grant from the who-has-access list and toasts the outcome', async () => {

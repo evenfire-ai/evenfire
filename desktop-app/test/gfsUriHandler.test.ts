@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../src/httpClient.js'
 import {
   GfsClient,
   type GfsTransport,
@@ -189,18 +190,29 @@ describe('GfsClient.affordances', () => {
 })
 
 describe('GfsClient.grant', () => {
-  it('PUTs the grant with the structured subject + permissions', async () => {
+  it('PUTs ONE bulk request with the subjects[] array + permissions', async () => {
     const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
     await new GfsClient(transport({ requestJson })).grant(
-      { resourceId: RID, subject: { type: 'user', id: 'u2' }, permissions: ['read', 'write'] },
+      {
+        resourceId: RID,
+        subjects: [
+          { type: 'user', id: 'u2' },
+          { type: 'team', id: 't1' },
+        ],
+        permissions: ['read', 'write'],
+      },
       'tok'
     )
+    expect(requestJson).toHaveBeenCalledTimes(1)
     expect(requestJson).toHaveBeenCalledWith('PUT', 'https://api.example/api/v1/me/gfs/grants', {
       token: 'tok',
       body: {
         drive: 'main',
         resourceId: RID,
-        subject: { type: 'user', id: 'u2' },
+        subjects: [
+          { type: 'user', id: 'u2' },
+          { type: 'team', id: 't1' },
+        ],
         permissions: ['read', 'write'],
         inherit: false,
       },
@@ -212,7 +224,7 @@ describe('GfsClient.grant', () => {
     await new GfsClient(transport({ requestJson })).grant(
       {
         resourceId: RID,
-        subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+        subjects: [{ type: 'host', id: '1st:mcp-host/chatllm' }],
         permissions: ['read'],
         inherit: true,
       },
@@ -223,11 +235,57 @@ describe('GfsClient.grant', () => {
       body: {
         drive: 'main',
         resourceId: RID,
-        subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+        subjects: [{ type: 'host', id: '1st:mcp-host/chatllm' }],
         permissions: ['read'],
         inherit: true,
       },
     })
+  })
+
+  // FIX B — the server reports `invalidIndexes` (subjects_invalid / foreign_agent)
+  // and `retryAfterSeconds` (429) as SEPARATE response-body fields. httpClient
+  // stashes the raw body on ApiError.bodyText, but only `.message` survives the
+  // Electron IPC boundary. GfsClient re-throws with those fields appended in the
+  // exact shape gfsGrantErrors.ts (renderer) parses, so they reach the user.
+  it('embeds invalidIndexes from the error body into the thrown message', async () => {
+    const requestJson = vi.fn(async () => {
+      throw new ApiError(
+        '400 Bad Request: subjects_invalid',
+        400,
+        JSON.stringify({ error: 'subjects_invalid', invalidIndexes: [0, 2] })
+      )
+    }) as GfsTransport['requestJson']
+    await expect(
+      new GfsClient(transport({ requestJson })).grant(
+        {
+          resourceId: RID,
+          subjects: [
+            { type: 'user', id: 'u2' },
+            { type: 'user', id: 'u3' },
+            { type: 'team', id: 't1' },
+          ],
+          permissions: ['read'],
+        },
+        'tok'
+      )
+    ).rejects.toThrow(/subjects_invalid invalidIndexes=\[0,2\]/)
+  })
+
+  it('leaves the original error untouched when the body carries no structured fields', async () => {
+    const original = new ApiError(
+      '403 Forbidden: escalation_rejected',
+      403,
+      JSON.stringify({ error: 'escalation_rejected' })
+    )
+    const requestJson = vi.fn(async () => {
+      throw original
+    }) as GfsTransport['requestJson']
+    await expect(
+      new GfsClient(transport({ requestJson })).grant(
+        { resourceId: RID, subjects: [{ type: 'user', id: 'u2' }], permissions: ['read'] },
+        'tok'
+      )
+    ).rejects.toBe(original)
   })
 })
 
@@ -278,6 +336,19 @@ describe('GfsClient.listGrants', () => {
       new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
     ).rejects.toBeInstanceOf(GfsUriError)
   })
+
+  it('embeds retryAfterSeconds from a 429 body so the retry hint reaches the renderer', async () => {
+    const requestJson = vi.fn(async () => {
+      throw new ApiError(
+        '429 Too Many Requests: Too Many Requests',
+        429,
+        JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 45 })
+      )
+    }) as GfsTransport['requestJson']
+    await expect(
+      new GfsClient(transport({ requestJson })).listGrants({ resourceId: RID }, 'tok')
+    ).rejects.toThrow(/429 .*retryAfterSeconds=45/)
+  })
 })
 
 describe('GfsClient.revokeGrant', () => {
@@ -303,18 +374,29 @@ describe('GfsClient.revokeGrant', () => {
 })
 
 describe('GfsClient.createShare', () => {
-  it('POSTs a read share covering descendants', async () => {
+  it('POSTs ONE bulk read share for the subjects[] array', async () => {
     const requestJson = vi.fn(async () => ({ ok: true })) as GfsTransport['requestJson']
     await new GfsClient(transport({ requestJson })).createShare(
-      { resourceId: RID, subject: { type: 'team', id: 't1' }, permissions: ['read'] },
+      {
+        resourceId: RID,
+        subjects: [
+          { type: 'team', id: 't1' },
+          { type: 'user', id: 'u2' },
+        ],
+        permissions: ['read'],
+      },
       'tok'
     )
+    expect(requestJson).toHaveBeenCalledTimes(1)
     expect(requestJson).toHaveBeenCalledWith('POST', 'https://api.example/api/v1/me/gfs/shares', {
       token: 'tok',
       body: {
         drive: 'main',
         resourceId: RID,
-        subject: { type: 'team', id: 't1' },
+        subjects: [
+          { type: 'team', id: 't1' },
+          { type: 'user', id: 'u2' },
+        ],
         permissions: ['read'],
         includeDescendants: false,
       },

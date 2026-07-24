@@ -134,7 +134,13 @@ export type GfsSubject =
 export interface GfsGrantInput {
   resourceId: string
   drive?: string
-  subject: GfsSubject
+  /**
+   * One or more grant subjects, sent as the server's bulk `subjects[]` array (up
+   * to 100) in a single atomic PUT. control-api rejects the whole request if any
+   * element is invalid (400 `subjects_invalid` + `invalidIndexes`), so there is
+   * no partial-success outcome — all subjects are granted or none are.
+   */
+  subjects: GfsSubject[]
   permissions: string[]
   inherit?: boolean
 }
@@ -142,7 +148,8 @@ export interface GfsGrantInput {
 export interface GfsShareInput {
   resourceId: string
   drive?: string
-  subject: GfsSubject
+  /** One or more share subjects, sent as the bulk `subjects[]` array (atomic). */
+  subjects: GfsSubject[]
   permissions: string[]
   includeDescendants?: boolean
 }
@@ -407,20 +414,24 @@ export class GfsClient {
    * API error here); the UI affordances only HIDE controls the caller can't use.
    */
   async grant(input: GfsGrantInput, token: string): Promise<void> {
-    await this.transport.requestJson(
-      'PUT',
-      joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/grants'),
-      {
-        token,
-        body: {
-          drive: input.drive ?? DEFAULT_DRIVE,
-          resourceId: input.resourceId,
-          subject: input.subject,
-          permissions: input.permissions,
-          inherit: input.inherit ?? false,
-        },
-      }
-    )
+    try {
+      await this.transport.requestJson(
+        'PUT',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/grants'),
+        {
+          token,
+          body: {
+            drive: input.drive ?? DEFAULT_DRIVE,
+            resourceId: input.resourceId,
+            subjects: input.subjects,
+            permissions: input.permissions,
+            inherit: input.inherit ?? false,
+          },
+        }
+      )
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
   /**
@@ -436,11 +447,16 @@ export class GfsClient {
     const q = new URLSearchParams()
     q.set('drive', input.drive ?? DEFAULT_DRIVE)
     q.set('resourceId', input.resourceId)
-    const payload = await this.transport.requestJson<{ items: GfsGrantListItem[] }>(
-      'GET',
-      joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/grants?' + q.toString()),
-      { token }
-    )
+    let payload: { items: GfsGrantListItem[] }
+    try {
+      payload = await this.transport.requestJson<{ items: GfsGrantListItem[] }>(
+        'GET',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/grants?' + q.toString()),
+        { token }
+      )
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
     if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) {
       throw new GfsUriError('unexpected gfs grants response: missing items array')
     }
@@ -463,22 +479,26 @@ export class GfsClient {
     )
   }
 
-  /** Create a URI share for a subject (same no-escalation engine, isShare=true). */
+  /** Create a URI share for subjects (same no-escalation engine, isShare=true). */
   async createShare(input: GfsShareInput, token: string): Promise<void> {
-    await this.transport.requestJson(
-      'POST',
-      joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/shares'),
-      {
-        token,
-        body: {
-          drive: input.drive ?? DEFAULT_DRIVE,
-          resourceId: input.resourceId,
-          subject: input.subject,
-          permissions: input.permissions,
-          includeDescendants: input.includeDescendants ?? false,
-        },
-      }
-    )
+    try {
+      await this.transport.requestJson(
+        'POST',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/shares'),
+        {
+          token,
+          body: {
+            drive: input.drive ?? DEFAULT_DRIVE,
+            resourceId: input.resourceId,
+            subjects: input.subjects,
+            permissions: input.permissions,
+            includeDescendants: input.includeDescendants ?? false,
+          },
+        }
+      )
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
   async createResource(input: GfsCreateInput, session: string): Promise<GfsResourceView> {
     return createGfsResource(this.transport, input, session)
@@ -536,4 +556,81 @@ export function parseSubjectKey(key: string): GfsSubject {
     )
   }
   return { type, id }
+}
+
+/**
+ * The structured verdict fields a bulk grant/share/list failure can carry.
+ * control-api reports them as SEPARATE response-body fields — `invalidIndexes`
+ * on a 400/403 (routes/gfs/grants.ts sendGfsGrantError) and `retryAfterSeconds`
+ * on a 429 (middleware/rateLimitMiddleware.ts) — not inside the human message.
+ */
+interface GfsGrantErrorFields {
+  invalidIndexes?: number[]
+  retryAfterSeconds?: number
+}
+
+/**
+ * Pull `invalidIndexes` / `retryAfterSeconds` out of an error response body.
+ *
+ * The body is an OPTIONAL, best-effort supplement: many failures (network,
+ * upstream proxy, plain-text errors) are not JSON, in which case there are
+ * simply no structured fields and the caller re-throws the ORIGINAL error
+ * untouched. This never swallows a failure — `surfaceGfsGrantError` always
+ * re-throws.
+ */
+function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(bodyText)
+  } catch {
+    return {}
+  }
+  if (!parsed || typeof parsed !== 'object') return {}
+  const record = parsed as { invalidIndexes?: unknown; retryAfterSeconds?: unknown }
+  const fields: GfsGrantErrorFields = {}
+  if (Array.isArray(record.invalidIndexes)) {
+    const indexes = record.invalidIndexes.filter(
+      (value): value is number => Number.isInteger(value) && (value as number) >= 0
+    )
+    if (indexes.length > 0) fields.invalidIndexes = indexes
+  }
+  if (Number.isInteger(record.retryAfterSeconds) && (record.retryAfterSeconds as number) >= 0) {
+    fields.retryAfterSeconds = record.retryAfterSeconds as number
+  }
+  return fields
+}
+
+/**
+ * Re-throw a grant/share/list failure with the server's structured verdict
+ * fields embedded in the message.
+ *
+ * The transport (httpClient) throws an `ApiError` that stashes the raw response
+ * body on `.bodyText`, but ONLY the `Error.message` survives the Electron IPC
+ * boundary on the way to the renderer — `.bodyText` is dropped. So a bulk
+ * `subjects_invalid` (which subject failed) or a 429 (`retryAfterSeconds`) would
+ * be invisible to `gfsGrantErrors.ts` in production. We append those fields to
+ * the message in the exact shape that module's regexes parse (`invalidIndexes=[…]`,
+ * `retryAfterSeconds=…`), keeping the original message — and therefore the server
+ * error CODE (`subjects_invalid`, `foreign_agent_forbidden`, `429`, …) — intact.
+ *
+ * When there is nothing structured to surface, the ORIGINAL error propagates
+ * unchanged (fail loud; never swallow the server's verdict).
+ */
+function surfaceGfsGrantError(error: unknown): unknown {
+  const bodyText =
+    error &&
+    typeof error === 'object' &&
+    typeof (error as { bodyText?: unknown }).bodyText === 'string'
+      ? (error as { bodyText: string }).bodyText
+      : ''
+  if (!bodyText) return error
+  const fields = parseGfsGrantErrorFields(bodyText)
+  const parts: string[] = []
+  if (fields.invalidIndexes) parts.push(`invalidIndexes=[${fields.invalidIndexes.join(',')}]`)
+  if (fields.retryAfterSeconds !== undefined) {
+    parts.push(`retryAfterSeconds=${fields.retryAfterSeconds}`)
+  }
+  if (parts.length === 0) return error
+  const baseMessage = error instanceof Error ? error.message : String(error ?? '')
+  return new GfsUriError(`${baseMessage} ${parts.join(' ')}`)
 }

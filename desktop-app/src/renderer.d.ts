@@ -228,7 +228,7 @@ declare global {
         ) => Promise<{ deleted: boolean; resourceId: string }>
         grant: (
           resourceId: string,
-          subjectKey: string,
+          subjectKeys: string[],
           bits: string[],
           drive?: string,
           inherit?: boolean
@@ -247,7 +247,7 @@ declare global {
           }>
         >
         revokeGrant: (grantId: string) => Promise<void>
-        createShare: (resourceId: string, subjectKey: string, drive?: string) => Promise<void>
+        createShare: (resourceId: string, subjectKeys: string[], drive?: string) => Promise<void>
       }
       agents: {
         listMine: () => Promise<AgentWithMcpServers[]>

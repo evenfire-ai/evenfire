@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { GfsSubjectBatchError } from '@lib/gfsSubjectBatch'
 import { GfsAgentAccessSection } from '../GfsAgentAccessSection'
 
 /**
@@ -87,21 +86,12 @@ describe('GfsAgentAccessSection', () => {
     )
   })
 
-  it('surfaces a mapped server verdict and keeps only failed agents selected', async () => {
+  it('surfaces a mapped server verdict and keeps ALL selected agents on an atomic failure', async () => {
+    // The bulk grant is all-or-nothing: a rejection means NO agent was granted,
+    // so every selected agent stays selected for a retry (no partial-success).
     const onGrantAgents = vi
       .fn()
-      .mockRejectedValue(
-        new GfsSubjectBatchError(
-          'Grant agent access',
-          ['host:1st:mcp-host/chatllm'],
-          [
-            {
-              subjectKey: 'host:1st:mcp-host/chatllm-stateless',
-              message: '403 Forbidden: managed_agent_permission_forbidden',
-            },
-          ]
-        )
-      )
+      .mockRejectedValue(new Error('403 Forbidden: managed_agent_permission_forbidden'))
     render(
       <GfsAgentAccessSection agents={agents} isDirectory onGrantAgents={onGrantAgents} />
     )
@@ -111,10 +101,16 @@ describe('GfsAgentAccessSection', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Grant agent access' }))
 
     await screen.findByText('Managed agents can only be granted read and write.')
-    // SelectableOption only sets aria-pressed="true" while selected.
+    expect(onGrantAgents).toHaveBeenCalledTimes(1)
+    expect(onGrantAgents).toHaveBeenCalledWith(
+      ['host:1st:mcp-host/chatllm', 'host:1st:mcp-host/chatllm-stateless'],
+      ['read'],
+      true
+    )
+    // SelectableOption only sets aria-pressed="true" while selected — both stay.
     expect(
       screen.getByRole('button', { name: 'chatllm' }).getAttribute('aria-pressed')
-    ).not.toBe('true')
+    ).toBe('true')
     expect(
       screen.getByRole('button', { name: 'chatllm-stateless' }).getAttribute('aria-pressed')
     ).toBe('true')
