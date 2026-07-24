@@ -24,9 +24,11 @@ import {
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
   RpcAllowedServersResult,
-  SessionLifecycleState,
+  SessionMessagesQuery,
+  SessionMessagesResult,
   SessionState,
-  SessionTokensLite,
+  SessionsListQuery,
+  SessionsListResult,
   SetHostModelResult,
   TaskProgressStreamEvent,
   TeamDirectoryResult,
@@ -378,41 +380,16 @@ declare global {
         ) => Promise<Buffer>
         listSessions: (
           hostRef: string,
-          hostRefs?: string[]
-        ) => Promise<{
-          items: Array<{
-            agent: string
-            chatId: string
-            turnCount: number
-            lastActivityAt: string
-            state?: SessionLifecycleState
-            activeTaskId?: string
-            pendingApproval?: PendingApprovalLite
-            tokens?: SessionTokensLite
-          }>
-        }>
+          hostRefs?: string[],
+          query?: SessionsListQuery
+        ) => Promise<SessionsListResult>
         loadSessionMessages: (
           hostRef: string,
           agent: string,
           chatId: string,
-          hostRefs?: string[]
-        ) => Promise<{
-          agent: string
-          chatId: string
-          state?: SessionLifecycleState
-          activeTaskId?: string
-          pendingApproval?: PendingApprovalLite
-          tokens?: SessionTokensLite
-          turns: Array<{
-            number: number
-            user_input: string
-            response?: string
-            started_at: string
-            completed_at?: string
-            tokens?: SessionTokensLite
-            tool_steps?: MessageToolStep[]
-          }>
-        }>
+          hostRefs?: string[],
+          query?: SessionMessagesQuery
+        ) => Promise<SessionMessagesResult>
         getContextBreakdown: (
           hostRef: string,
           agent: string,

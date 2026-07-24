@@ -546,7 +546,13 @@ export function createRpcRouter(): Router {
         }
         const baseUrl = host.url.replace(/\/+$/, '')
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=list-sessions`)
-        const response = await fetch(`${baseUrl}/v1/runtime/sessions`, {
+        const upstreamUrl = new URL(`${baseUrl}/v1/runtime/sessions`)
+        for (const key of ['limit', 'cursor'] as const) {
+          if (typeof req.query[key] === 'string') {
+            upstreamUrl.searchParams.set(key, req.query[key])
+          }
+        }
+        const response = await fetch(upstreamUrl, {
           method: 'GET',
           headers: { ...host.headers },
         })
@@ -588,10 +594,18 @@ export function createRpcRouter(): Router {
         console.info(
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-session-messages agent=${agent} chatId=${chatId}`
         )
-        const response = await fetch(
-          `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`,
-          { method: 'GET', headers: { ...host.headers } }
+        const upstreamUrl = new URL(
+          `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
         )
+        for (const key of ['limit', 'beforeTurn', 'afterTurn'] as const) {
+          if (typeof req.query[key] === 'string') {
+            upstreamUrl.searchParams.set(key, req.query[key])
+          }
+        }
+        const response = await fetch(upstreamUrl, {
+          method: 'GET',
+          headers: { ...host.headers },
+        })
         const body = await response.text()
         res
           .status(response.status)

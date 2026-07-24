@@ -491,9 +491,20 @@ export type SessionsListItem = {
   lastActivityAt: string
 } & SessionStateWire
 
+export type SessionsListQuery = {
+  limit?: number
+  cursor?: string
+}
+
+export type SessionsListResult = {
+  items: SessionsListItem[]
+  nextCursor?: string
+}
+
 export type SessionsListHandler = (
-  userSub: string
-) => { items: SessionsListItem[] } | Promise<{ items: SessionsListItem[] }>
+  userSub: string,
+  query: SessionsListQuery
+) => SessionsListResult | Promise<SessionsListResult>
 
 /**
  * A single tool call within a turn, projected for the desktop progress stepper
@@ -519,6 +530,12 @@ export type TurnToolStepWire = {
 export type SessionMessagesResult = {
   agent: string
   chatId: string
+  totalTurns: number
+  oldestTurnNumber?: number
+  latestTurnNumber?: number
+  hasMoreBefore: boolean
+  hasMoreAfter: boolean
+  revision: string
   turns: Array<{
     number: number
     user_input: string
@@ -532,10 +549,17 @@ export type SessionMessagesResult = {
   }>
 } & SessionStateWire
 
+export type SessionMessagesQuery = {
+  limit?: number
+  beforeTurn?: number
+  afterTurn?: number
+}
+
 export type SessionMessagesHandler = (
   userSub: string,
   agent: string,
-  chatId: string
+  chatId: string,
+  query: SessionMessagesQuery
 ) => SessionMessagesResult | null | Promise<SessionMessagesResult | null>
 
 /**

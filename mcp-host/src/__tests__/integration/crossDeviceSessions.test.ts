@@ -76,10 +76,11 @@ function makeApp(convManager: ConversationManager) {
 
   // Closures mirror main.ts — same prefix filter, same mapping shape.
   const handlers = makeHandlers({
-    sessionsListHandler: (userSub: string) => {
+    sessionsListHandler: (userSub: string, query) => {
       const entries = convManager.listSessionsForUser(`${userSub}:rpc:`)
+      const page = query.limit ? entries.slice(0, query.limit) : entries
       return {
-        items: entries.map(({ conversation, agent, chatId }) => ({
+        items: page.map(({ conversation, agent, chatId }) => ({
           agent,
           chatId,
           turnCount: conversation.turns.length,
@@ -88,16 +89,34 @@ function makeApp(convManager: ConversationManager) {
         })),
       }
     },
-    sessionMessagesHandler: (userSub: string, agentName: string, chatId: string) => {
+    sessionMessagesHandler: (userSub: string, agentName: string, chatId: string, query) => {
       // Direct O(1) key lookup — mirrors the main.ts fix.
       const key = `${userSub}:rpc:${agentName}:${chatId}`
       const conversation = convManager.getSessionByKey(key)
       if (!conversation) return null
+      const eligibleTurns =
+        query.afterTurn !== undefined
+          ? conversation.turns.filter(turn => turn.number > query.afterTurn!)
+          : query.beforeTurn !== undefined
+            ? conversation.turns.filter(turn => turn.number < query.beforeTurn!)
+            : conversation.turns
+      const turns =
+        query.limit === undefined
+          ? eligibleTurns
+          : query.afterTurn !== undefined
+            ? eligibleTurns.slice(0, query.limit)
+            : eligibleTurns.slice(-query.limit)
       return {
         agent: agentName,
         chatId,
         ...stateView(conversation),
-        turns: conversation.turns.map(t => ({
+        totalTurns: conversation.turns.length,
+        oldestTurnNumber: turns[0]?.number,
+        latestTurnNumber: turns.at(-1)?.number,
+        hasMoreBefore: Boolean(turns[0] && turns[0].number > 1),
+        hasMoreAfter: Boolean(turns.at(-1) && turns.at(-1)!.number < conversation.turns.length),
+        revision: `${conversation.turns.length}:${conversation.updated_at.getTime()}`,
+        turns: turns.map(t => ({
           number: t.number,
           user_input: t.user_input,
           response: t.response,

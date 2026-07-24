@@ -12,8 +12,11 @@ import {
   PendingApprovalLite,
   RpcAllowedServersResult,
   SessionLifecycleState,
+  SessionMessagesQuery,
   SessionMessagesResult,
   SessionTokensLite,
+  SessionsListQuery,
+  SessionsListResult,
   SetHostModelResult,
 } from './types.js'
 
@@ -544,23 +547,13 @@ export class RpcProxyClient {
 
   async listSessions(
     rpcToken: string,
-    hostRef: string
-  ): Promise<{
-    items: Array<{
-      agent: string
-      chatId: string
-      turnCount: number
-      lastActivityAt: string
-      // V5: the wire already carries these per-session recovery fields
-      // (mcp-host `main.ts` `...sessionStateView(conversation)`); only the TS
-      // return type used to omit them, hiding the batch badge seeding source.
-      state?: SessionLifecycleState
-      activeTaskId?: string
-      pendingApproval?: PendingApprovalLite
-      tokens?: SessionTokensLite
-    }>
-  }> {
-    const response = await fetch(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions`), {
+    hostRef: string,
+    query: SessionsListQuery = {}
+  ): Promise<SessionsListResult> {
+    const requestUrl = new URL(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions`))
+    if (query.limit !== undefined) requestUrl.searchParams.set('limit', String(query.limit))
+    if (query.cursor) requestUrl.searchParams.set('cursor', query.cursor)
+    const response = await fetch(requestUrl, {
       headers: { authorization: `Bearer ${rpcToken}` },
       signal: withTimeout(),
     })
@@ -572,32 +565,32 @@ export class RpcProxyClient {
         body
       )
     }
-    return response.json() as Promise<{
-      items: Array<{
-        agent: string
-        chatId: string
-        turnCount: number
-        lastActivityAt: string
-        state?: SessionLifecycleState
-        activeTaskId?: string
-        pendingApproval?: PendingApprovalLite
-        tokens?: SessionTokensLite
-      }>
-    }>
+    return response.json() as Promise<SessionsListResult>
   }
 
   async loadSessionMessages(
     rpcToken: string,
     hostRef: string,
     agent: string,
-    chatId: string
+    chatId: string,
+    query: SessionMessagesQuery = {}
   ): Promise<SessionMessagesResult> {
-    const response = await fetch(
+    const requestUrl = new URL(
       url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
-      ),
-      { headers: { authorization: `Bearer ${rpcToken}` }, signal: withTimeout() }
+      )
     )
+    if (query.limit !== undefined) requestUrl.searchParams.set('limit', String(query.limit))
+    if (query.beforeTurn !== undefined) {
+      requestUrl.searchParams.set('beforeTurn', String(query.beforeTurn))
+    }
+    if (query.afterTurn !== undefined) {
+      requestUrl.searchParams.set('afterTurn', String(query.afterTurn))
+    }
+    const response = await fetch(requestUrl, {
+      headers: { authorization: `Bearer ${rpcToken}` },
+      signal: withTimeout(),
+    })
     if (response.status === 404) {
       // Keep the '404' token in the message: the renderer's `isHttp404` matches on
       // it to evict a stale local chat.

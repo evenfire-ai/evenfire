@@ -308,10 +308,18 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('rpc:listArtifacts', { hostRef, hostRefs }),
     downloadArtifact: (hostRef: string, filename: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:downloadArtifact', { hostRef, filename, hostRefs }),
-    listSessions: (hostRef: string, hostRefs?: string[]) =>
-      ipcRenderer.invoke('rpc:listSessions', { hostRef, hostRefs }),
-    loadSessionMessages: (hostRef: string, agent: string, chatId: string, hostRefs?: string[]) =>
-      ipcRenderer.invoke('rpc:loadSessionMessages', { hostRef, agent, chatId, hostRefs }),
+    listSessions: (
+      hostRef: string,
+      hostRefs?: string[],
+      query?: import('./types.js').SessionsListQuery
+    ) => ipcRenderer.invoke('rpc:listSessions', { hostRef, hostRefs, query }),
+    loadSessionMessages: (
+      hostRef: string,
+      agent: string,
+      chatId: string,
+      hostRefs?: string[],
+      query?: import('./types.js').SessionMessagesQuery
+    ) => ipcRenderer.invoke('rpc:loadSessionMessages', { hostRef, agent, chatId, hostRefs, query }),
     getContextBreakdown: (hostRef: string, agent: string, chatId: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:getContextBreakdown', { hostRef, agent, chatId, hostRefs }),
     getHostModels: (hostRef: string, chatId: string, hostRefs?: string[]) =>

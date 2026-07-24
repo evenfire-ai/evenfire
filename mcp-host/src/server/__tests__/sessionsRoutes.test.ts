@@ -46,6 +46,7 @@ function makeRes(): CapturedRes {
 function makeReqWithAuth(sub: string): Request {
   return {
     runtimeCaller: { caller: 'rpc-proxy', hostRef: 'chatllm', userId: sub },
+    query: {},
   } as unknown as Request
 }
 
@@ -65,7 +66,31 @@ describe('handleSessionsListRoute', () => {
         { agent: 'chatllm', chatId: 'c1', turnCount: 3, lastActivityAt: '2026-04-22T00:00:00Z' },
       ],
     })
-    expect(sessionsListHandler).toHaveBeenCalledWith('user-1')
+    expect(sessionsListHandler).toHaveBeenCalledWith('user-1', {
+      limit: undefined,
+      cursor: undefined,
+    })
+  })
+
+  it('normalizes pagination query parameters before calling the handler', async () => {
+    const sessionsListHandler: SessionsListHandler = vi.fn().mockReturnValue({
+      items: [],
+      nextCursor: 'next-page',
+    })
+    const req = {
+      ...makeReqWithAuth('user-1'),
+      query: { limit: '500', cursor: 'current-page' },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler }))
+
+    expect(captured.statusCode).toBe(200)
+    expect(sessionsListHandler).toHaveBeenCalledWith('user-1', {
+      limit: 100,
+      cursor: 'current-page',
+    })
+    expect(captured.jsonBody).toEqual({ items: [], nextCursor: 'next-page' })
   })
 
   it('returns 501 when sessionsListHandler is not configured', async () => {
@@ -98,6 +123,7 @@ function makeReqWithParams(sub: string, agent: string, chatId: string): Request 
   return {
     runtimeCaller: { caller: 'rpc-proxy', hostRef: 'chatllm', userId: sub },
     params: { agent, chatId },
+    query: {},
   } as unknown as Request
 }
 
@@ -106,6 +132,12 @@ describe('handleSessionMessagesRoute', () => {
     const sessionMessagesHandler: SessionMessagesHandler = vi.fn().mockReturnValue({
       agent: 'chatllm',
       chatId: 'c1',
+      totalTurns: 1,
+      oldestTurnNumber: 1,
+      latestTurnNumber: 1,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+      revision: '1:1776816000000',
       turns: [
         { number: 1, user_input: 'hello', response: 'hi', started_at: '2026-04-22T00:00:00Z' },
       ],
@@ -117,11 +149,63 @@ describe('handleSessionMessagesRoute', () => {
     expect(captured.jsonBody).toEqual({
       agent: 'chatllm',
       chatId: 'c1',
+      totalTurns: 1,
+      oldestTurnNumber: 1,
+      latestTurnNumber: 1,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+      revision: '1:1776816000000',
       turns: [
         { number: 1, user_input: 'hello', response: 'hi', started_at: '2026-04-22T00:00:00Z' },
       ],
     })
-    expect(sessionMessagesHandler).toHaveBeenCalledWith('user-1', 'chatllm', 'c1')
+    expect(sessionMessagesHandler).toHaveBeenCalledWith('user-1', 'chatllm', 'c1', {
+      limit: undefined,
+      beforeTurn: undefined,
+      afterTurn: undefined,
+    })
+  })
+
+  it('normalizes bounded history pagination before calling the handler', async () => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn().mockReturnValue({
+      agent: 'chatllm',
+      chatId: 'c1',
+      totalTurns: 30,
+      oldestTurnNumber: 11,
+      latestTurnNumber: 20,
+      hasMoreBefore: true,
+      hasMoreAfter: true,
+      revision: '30:1776816000000',
+      turns: [],
+    })
+    const req = {
+      ...makeReqWithParams('user-1', 'chatllm', 'c1'),
+      query: { limit: '500', beforeTurn: '21' },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+
+    expect(captured.statusCode).toBe(200)
+    expect(sessionMessagesHandler).toHaveBeenCalledWith('user-1', 'chatllm', 'c1', {
+      limit: 200,
+      beforeTurn: 21,
+      afterTurn: undefined,
+    })
+  })
+
+  it('rejects simultaneous beforeTurn and afterTurn cursors', async () => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn()
+    const req = {
+      ...makeReqWithParams('user-1', 'chatllm', 'c1'),
+      query: { beforeTurn: '10', afterTurn: '20' },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+
+    expect(captured.statusCode).toBe(400)
+    expect(sessionMessagesHandler).not.toHaveBeenCalled()
   })
 
   it('returns 404 with the canonical body when the session does not exist', async () => {
@@ -149,6 +233,7 @@ describe('handleSessionMessagesRoute', () => {
     const req = {
       runtimeCaller: { caller: 'rpc-proxy', hostRef: 'chatllm', userId: 'user-1' },
       params: { agent: '', chatId: '' },
+      query: {},
     } as unknown as Request
     const captured = makeRes()
     await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
@@ -156,7 +241,7 @@ describe('handleSessionMessagesRoute', () => {
   })
 
   it('returns 401 if req.auth is missing', async () => {
-    const req = { params: { agent: 'chatllm', chatId: 'c1' } } as unknown as Request
+    const req = { params: { agent: 'chatllm', chatId: 'c1' }, query: {} } as unknown as Request
     const captured = makeRes()
     await handleSessionMessagesRoute(
       req,

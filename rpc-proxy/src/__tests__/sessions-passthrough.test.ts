@@ -76,6 +76,23 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
     expect((init as RequestInit).headers).toMatchObject(HOST_CONNECTION.headers)
   })
 
+  it('forwards only supported session pagination query parameters', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () => JSON.stringify({ items: [], nextCursor: 'next-page' }),
+    } as unknown as Response)
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions?limit=25&cursor=current&userId=other')
+      .set('authorization', 'Bearer user-token')
+      .expect(200)
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions?limit=25&cursor=current')
+  })
+
   it('returns 403 if the user cannot access the host', async () => {
     serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
     await request(makeApp())
@@ -120,6 +137,34 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
     expect(res.body).toEqual(upstream)
     const [url] = fetchMock.mock.calls[0]
     expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions/chatllm/c1/messages')
+  })
+
+  it('forwards only supported message pagination query parameters', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () =>
+        JSON.stringify({
+          agent: 'chatllm',
+          chatId: 'c1',
+          totalTurns: 10,
+          hasMoreBefore: true,
+          hasMoreAfter: false,
+          revision: '10:1',
+          turns: [],
+        }),
+    } as unknown as Response)
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions/chatllm/c1/messages?limit=5&beforeTurn=6&userId=other')
+      .set('authorization', 'Bearer user-token')
+      .expect(200)
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe(
+      'http://chatllm:8080/v1/runtime/sessions/chatllm/c1/messages?limit=5&beforeTurn=6'
+    )
   })
 
   it('returns 404 when the upstream returns 404', async () => {

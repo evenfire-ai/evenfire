@@ -876,11 +876,18 @@ export function registerIpcHandlers(service: AppService): void {
 
   ipcMain.handle(
     'rpc:listSessions',
-    async (event, payload: { hostRef: string; hostRefs?: string[] }) => {
+    async (
+      event,
+      payload: {
+        hostRef: string
+        hostRefs?: string[]
+        query?: import('./types.js').SessionsListQuery
+      }
+    ) => {
       assertTrustedSender(event)
       const hostRef = sanitizeString(payload?.hostRef)
       if (!hostRef) throw new Error('hostRef is required')
-      return service.listSessions(hostRef, payload?.hostRefs)
+      return service.listSessions(hostRef, payload?.hostRefs, payload?.query)
     }
   )
 
@@ -888,7 +895,13 @@ export function registerIpcHandlers(service: AppService): void {
     'rpc:loadSessionMessages',
     async (
       event,
-      payload: { hostRef: string; agent: string; chatId: string; hostRefs?: string[] }
+      payload: {
+        hostRef: string
+        agent: string
+        chatId: string
+        hostRefs?: string[]
+        query?: import('./types.js').SessionMessagesQuery
+      }
     ) => {
       assertTrustedSender(event)
       const hostRef = sanitizeString(payload?.hostRef)
@@ -897,7 +910,7 @@ export function registerIpcHandlers(service: AppService): void {
       if (!hostRef || !agent || !chatId) {
         throw new Error('hostRef, agent, and chatId are required')
       }
-      return service.loadSessionMessages(hostRef, agent, chatId, payload?.hostRefs)
+      return service.loadSessionMessages(hostRef, agent, chatId, payload?.hostRefs, payload?.query)
     }
   )
 

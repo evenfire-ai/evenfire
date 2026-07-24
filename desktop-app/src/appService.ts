@@ -50,9 +50,12 @@ import {
   RpcScope,
   SessionLifecycleState,
   SessionMe,
+  SessionMessagesQuery,
   SessionMessagesResult,
   SessionState,
   SessionTokensLite,
+  SessionsListQuery,
+  SessionsListResult,
   SetHostModelResult,
   TaskProgressStreamEvent,
   TeamDirectoryResult,
@@ -2432,25 +2435,15 @@ export class AppService {
 
   async listSessions(
     hostRef: string,
-    hostRefs?: string[]
-  ): Promise<{
-    items: Array<{
-      agent: string
-      chatId: string
-      turnCount: number
-      lastActivityAt: string
-      state?: SessionLifecycleState
-      activeTaskId?: string
-      pendingApproval?: PendingApprovalLite
-      tokens?: SessionTokensLite
-    }>
-  }> {
+    hostRefs?: string[],
+    query: SessionsListQuery = {}
+  ): Promise<SessionsListResult> {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef) throw new Error('hostRef is required')
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
     try {
-      return await this.rpcClient.listSessions(rpc.token, targetHostRef)
+      return await this.rpcClient.listSessions(rpc.token, targetHostRef, query)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (message.includes('401') && message.toLowerCase().includes('missing token')) {
@@ -2467,7 +2460,8 @@ export class AppService {
     hostRef: string,
     agent: string,
     chatId: string,
-    hostRefs?: string[]
+    hostRefs?: string[],
+    query: SessionMessagesQuery = {}
   ): Promise<SessionMessagesResult> {
     const targetHostRef = String(hostRef || '').trim()
     if (!targetHostRef || !agent || !chatId) {
@@ -2476,14 +2470,28 @@ export class AppService {
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
     try {
-      return await this.rpcClient.loadSessionMessages(rpc.token, targetHostRef, agent, chatId)
+      return await this.rpcClient.loadSessionMessages(
+        rpc.token,
+        targetHostRef,
+        agent,
+        chatId,
+        query
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (message.includes('401') && message.toLowerCase().includes('missing token')) {
         console.warn(
           '[AppService] Session messages unavailable because the runtime rejected the session token.'
         )
-        return { agent, chatId, turns: [] }
+        return {
+          agent,
+          chatId,
+          turns: [],
+          totalTurns: 0,
+          hasMoreBefore: false,
+          hasMoreAfter: false,
+          revision: '0:unavailable',
+        }
       }
       throw error
     }

@@ -844,6 +844,12 @@ export interface ApprovalDecisionResult {
 export interface SessionMessagesResult {
   agent: string
   chatId: string
+  totalTurns?: number
+  oldestTurnNumber?: number
+  latestTurnNumber?: number
+  hasMoreBefore?: boolean
+  hasMoreAfter?: boolean
+  revision?: string
   state?: SessionLifecycleState
   activeTaskId?: string
   pendingApproval?: PendingApprovalLite
@@ -857,6 +863,31 @@ export interface SessionMessagesResult {
     tokens?: SessionTokensLite
     tool_steps?: MessageToolStep[]
   }>
+}
+
+export interface SessionMessagesQuery {
+  limit?: number
+  beforeTurn?: number
+  afterTurn?: number
+}
+
+export interface SessionsListQuery {
+  limit?: number
+  cursor?: string
+}
+
+export interface SessionsListResult {
+  items: Array<{
+    agent: string
+    chatId: string
+    turnCount: number
+    lastActivityAt: string
+    state?: SessionLifecycleState
+    activeTaskId?: string
+    pendingApproval?: PendingApprovalLite
+    tokens?: SessionTokensLite
+  }>
+  nextCursor?: string
 }
 
 // F5 compile-time guard: `SessionMessagesResult` MUST keep carrying the recovery
@@ -978,6 +1009,8 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   timestamp: number
+  /** Authoritative server turn ordinal used for delta reconciliation and paging. */
+  serverTurnNumber?: number
   /** mcp-host task that produced/owns this message — used to rejoin after reload (D.3, v2). */
   task_id?: string
   attachments?: ChatMessageAttachment[]

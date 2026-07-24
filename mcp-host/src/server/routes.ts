@@ -1090,7 +1090,16 @@ export async function handleSessionsListRoute(
       json(res, 501, { error: 'Sessions handler not configured' })
       return
     }
-    const result = await handlers.sessionsListHandler(caller.userId)
+    const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
+    const limit =
+      rawLimit === undefined
+        ? undefined
+        : Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 50, 1), 100)
+    const cursor =
+      typeof req.query.cursor === 'string' && req.query.cursor.length <= 2048
+        ? req.query.cursor
+        : undefined
+    const result = await handlers.sessionsListHandler(caller.userId, { limit, cursor })
     json(res, 200, result)
   } catch (error) {
     console.error('[Server] Error listing sessions:', error)
@@ -1176,7 +1185,32 @@ export async function handleSessionMessagesRoute(
       json(res, 501, { error: 'Sessions handler not configured' })
       return
     }
-    const result = await handlers.sessionMessagesHandler(caller.userId, agent, chatId)
+    const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
+    const rawBeforeTurn =
+      typeof req.query.beforeTurn === 'string' ? Number(req.query.beforeTurn) : undefined
+    const rawAfterTurn =
+      typeof req.query.afterTurn === 'string' ? Number(req.query.afterTurn) : undefined
+    if (rawBeforeTurn !== undefined && rawAfterTurn !== undefined) {
+      badRequest(res, 'beforeTurn and afterTurn are mutually exclusive')
+      return
+    }
+    const limit =
+      rawLimit === undefined
+        ? undefined
+        : Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 50, 1), 200)
+    const beforeTurn =
+      rawBeforeTurn !== undefined && Number.isFinite(rawBeforeTurn)
+        ? Math.max(1, Math.floor(rawBeforeTurn))
+        : undefined
+    const afterTurn =
+      rawAfterTurn !== undefined && Number.isFinite(rawAfterTurn)
+        ? Math.max(0, Math.floor(rawAfterTurn))
+        : undefined
+    const result = await handlers.sessionMessagesHandler(caller.userId, agent, chatId, {
+      limit,
+      beforeTurn,
+      afterTurn,
+    })
     if (result === null) {
       // Same body regardless of "never existed" vs "belongs to someone else" — enumeration-defense.
       json(res, 404, { error: 'session not found' })

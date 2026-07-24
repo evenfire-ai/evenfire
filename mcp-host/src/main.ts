@@ -2051,31 +2051,114 @@ async function startRPCServer(): Promise<void> {
   const redactToolError = (toolName: string, rawError: string): string =>
     sanitizeError(toolErrorSafety.sanitizeOutput(toolName, rawError).content)
 
-  const handleSessionsList = async (userSub: string) => {
+  const decodeSessionsCursor = (
+    cursor: string | undefined
+  ): { updatedAt: string; key: string } | null => {
+    if (!cursor) return null
+    try {
+      const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
+        updatedAt?: unknown
+        key?: unknown
+      }
+      return typeof parsed.updatedAt === 'string' && typeof parsed.key === 'string'
+        ? { updatedAt: parsed.updatedAt, key: parsed.key }
+        : null
+    } catch {
+      return null
+    }
+  }
+
+  const encodeSessionsCursor = (updatedAt: string, key: string): string =>
+    Buffer.from(JSON.stringify({ updatedAt, key }), 'utf8').toString('base64url')
+
+  const handleSessionsList = async (
+    userSub: string,
+    query: { limit?: number; cursor?: string }
+  ) => {
     const convManager = agent!.getConversationManager()
-    const entries = await convManager.listSessionsForUserAsync(`${userSub}:rpc:`)
+    const entries = (await convManager.listSessionsForUserAsync(`${userSub}:rpc:`)).sort(
+      (left, right) => {
+        const byUpdated =
+          right.conversation.updated_at.getTime() - left.conversation.updated_at.getTime()
+        return byUpdated || left.key.localeCompare(right.key)
+      }
+    )
+    const cursor = decodeSessionsCursor(query.cursor)
+    const afterCursor = cursor
+      ? entries.filter(entry => {
+          const updatedAt = entry.conversation.updated_at.toISOString()
+          return (
+            updatedAt < cursor.updatedAt ||
+            (updatedAt === cursor.updatedAt && entry.key > cursor.key)
+          )
+        })
+      : entries
+    const page = query.limit ? afterCursor.slice(0, query.limit) : afterCursor
+    const hasMore = query.limit !== undefined && afterCursor.length > page.length
+    const last = page.at(-1)
     return {
-      items: entries.map(({ conversation, agent: agentName, chatId }) => ({
+      items: page.map(({ conversation, agent: agentName, chatId }) => ({
         agent: agentName,
         chatId,
         turnCount: conversation.turns.length,
         lastActivityAt: conversation.updated_at.toISOString(),
         ...sessionStateView(conversation),
       })),
+      ...(hasMore && last
+        ? {
+            nextCursor: encodeSessionsCursor(last.conversation.updated_at.toISOString(), last.key),
+          }
+        : {}),
     }
   }
 
-  const handleSessionMessages = async (userSub: string, agentName: string, chatId: string) => {
+  const handleSessionMessages = async (
+    userSub: string,
+    agentName: string,
+    chatId: string,
+    query: { limit?: number; beforeTurn?: number; afterTurn?: number }
+  ) => {
     const convManager = agent!.getConversationManager()
     // Direct O(1) key lookup — spec §2: `conversations.get(`${auth.sub}:rpc:${agent}:${chatId}`)`.
     const key = `${userSub}:rpc:${agentName}:${chatId}`
     const conversation = await convManager.getSessionByKeyAsync(key)
     if (!conversation) return null
+    const allTurns = conversation.turns
+    const eligibleTurns =
+      query.afterTurn !== undefined
+        ? allTurns.filter(turn => turn.number > query.afterTurn!)
+        : query.beforeTurn !== undefined
+          ? allTurns.filter(turn => turn.number < query.beforeTurn!)
+          : allTurns
+    const turns =
+      query.limit === undefined
+        ? eligibleTurns
+        : query.afterTurn !== undefined
+          ? eligibleTurns.slice(0, query.limit)
+          : eligibleTurns.slice(-query.limit)
+    const oldestTurnNumber = turns[0]?.number
+    const latestTurnNumber = turns.at(-1)?.number
+    const firstConversationTurn = allTurns[0]?.number
+    const lastConversationTurn = allTurns.at(-1)?.number
     return {
       agent: agentName,
       chatId,
       ...sessionStateView(conversation),
-      turns: conversation.turns.map(t => ({
+      totalTurns: allTurns.length,
+      oldestTurnNumber,
+      latestTurnNumber,
+      hasMoreBefore:
+        firstConversationTurn !== undefined &&
+        (oldestTurnNumber !== undefined
+          ? oldestTurnNumber > firstConversationTurn
+          : query.afterTurn !== undefined),
+      hasMoreAfter:
+        lastConversationTurn !== undefined &&
+        (latestTurnNumber !== undefined
+          ? latestTurnNumber < lastConversationTurn
+          : query.beforeTurn !== undefined),
+      revision: `${allTurns.length}:${conversation.updated_at.getTime()}`,
+      turns: turns.map(t => ({
         number: t.number,
         user_input: t.user_input,
         response: t.response,
