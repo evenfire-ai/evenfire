@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Button, StatusBanner } from '@components/Common'
-import { GfsSubjectBatchError } from '@lib/gfsSubjectBatch'
+import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { GfsPermissionDropdown } from '@/gfs/GfsPermissionDropdown'
 import { GfsSubjectPicker } from '@/gfs/GfsSubjectPicker'
 import type { GfsDelegationPanelProps } from './delegation.types'
@@ -48,9 +48,11 @@ export function GfsDelegationPanel({
       await action()
       setSubjectKeys([])
     } catch (e) {
-      // Surface the server's verdict (e.g. escalation_rejected) — never swallow.
-      if (e instanceof GfsSubjectBatchError) setSubjectKeys(e.failedSubjectKeys)
-      setError(e instanceof Error ? e.message : String(e))
+      // The bulk grant/share is atomic — a failure means NONE of the subjects
+      // landed, so keep the whole selection for a retry. Surface the server's
+      // verdict (escalation_rejected, subjects_invalid with 1-based positions, a
+      // rate-limit retry, …) via the shared presentation map — never swallow it.
+      setError(describeGfsGrantError(e).message)
     } finally {
       setBusy(false)
     }
@@ -101,7 +103,9 @@ export function GfsDelegationPanel({
 
 export type {
   DelegationAffordances,
+  GfsAgentSubjectOption,
   GfsDelegationPanelProps,
   GfsDelegationSubjectOption,
   GfsDelegationSubjectType,
+  GfsGrantListItem,
 } from './delegation.types'

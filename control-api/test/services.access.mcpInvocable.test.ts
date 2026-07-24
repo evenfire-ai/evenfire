@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { K8sGateway } from '../src/k8s.js'
 import {
+  isK8sResourceNotFound,
   resolveInvocableMcpServersForContexts,
   resolveMcpServersForAgents,
 } from '../src/services/access/mcpInvocable.js'
@@ -18,13 +19,24 @@ function gateway(resources: {
     if (plural === 'hosts') return resources.hosts ?? []
     return []
   })
+  const getResource = vi.fn(async (plural: string, name: string) => {
+    if (plural !== 'hosts') return undefined
+    const found = resources.hosts?.find(
+      resource => (resource.metadata as { name?: string } | undefined)?.name === name
+    )
+    if (!found) throw Object.assign(new Error('not-found'), { statusCode: 404 })
+    return found
+  })
   return {
     listResource,
-    getResource: vi.fn(),
+    getResource,
     createResource: vi.fn(),
     updateResource: vi.fn(),
     deleteResource: vi.fn(),
-  } as unknown as K8sGateway & { listResource: typeof listResource }
+  } as unknown as K8sGateway & {
+    listResource: typeof listResource
+    getResource: typeof getResource
+  }
 }
 
 const okServer = (name: string, url?: string) => ({
@@ -41,8 +53,16 @@ const ctx = (contextId: string, servers: string[]) => ({
 })
 
 const host = (name: string, contextRef: string | null) => ({
-  metadata: { name },
+  metadata: { name, namespace: 'mcp-host' },
   spec: contextRef ? { contextRef } : {},
+})
+
+const directoryFields = (name: string) => ({
+  name,
+  namespace: 'mcp-host',
+  displayName: name,
+  active: true,
+  gfsSubject: { type: 'host', id: `1st:mcp-host/${name}` },
 })
 
 describe('resolveInvocableMcpServersForContexts', () => {
@@ -167,12 +187,16 @@ describe('resolveMcpServersForAgents', () => {
       agentNames: ['trader', 'ops'],
     })
     expect(out).toEqual([
-      { name: 'trader', contextRef: 'trading', mcpServers: [{ name: 'mcp-a' }, { name: 'mcp-b' }] },
-      { name: 'ops', contextRef: 'business', mcpServers: [{ name: 'mcp-c' }] },
+      {
+        ...directoryFields('trader'),
+        contextRef: 'trading',
+        mcpServers: [{ name: 'mcp-a' }, { name: 'mcp-b' }],
+      },
+      { ...directoryFields('ops'), contextRef: 'business', mcpServers: [{ name: 'mcp-c' }] },
     ])
   })
 
-  it('returns null contextRef for agents whose Host CR is missing', async () => {
+  it('omits agents whose Host CR is missing', async () => {
     const g = gateway({
       contexts: [ctx('trading', ['mcp-a'])],
       mcpservers: [okServer('mcp-a')],
@@ -183,7 +207,28 @@ describe('resolveMcpServersForAgents', () => {
       hostsNamespace: 'mcp-host',
       agentNames: ['trader', 'ghost'],
     })
-    expect(out[1]).toEqual({ name: 'ghost', contextRef: null, mcpServers: [] })
+    expect(out).toEqual([
+      { ...directoryFields('trader'), contextRef: 'trading', mcpServers: [{ name: 'mcp-a' }] },
+    ])
+    expect(g.getResource.mock.calls.map(call => call[1])).toEqual(['trader', 'ghost'])
+  })
+
+  it('propagates RBAC and transport failures instead of treating an authorized Host as missing', async () => {
+    for (const error of [
+      Object.assign(new Error('forbidden'), { statusCode: 403 }),
+      Object.assign(new Error('socket closed'), { code: 'ECONNRESET' }),
+    ]) {
+      const g = gateway({ hosts: [host('trader', null)] })
+      g.getResource.mockRejectedValueOnce(error)
+
+      await expect(
+        resolveMcpServersForAgents(g, {
+          mcpServersNamespace: 'mcp-server',
+          hostsNamespace: 'mcp-host',
+          agentNames: ['trader'],
+        })
+      ).rejects.toBe(error)
+    }
   })
 
   it('preserves the input order of agentNames', async () => {
@@ -198,6 +243,21 @@ describe('resolveMcpServersForAgents', () => {
       agentNames: ['c1', 'a1', 'b1'],
     })
     expect(out.map(e => e.name)).toEqual(['c1', 'a1', 'b1'])
+  })
+
+  it('fetches only authorized names and preserves their order when hidden Hosts exist', async () => {
+    const g = gateway({
+      hosts: [host('visible-b', null), host('hidden', null), host('visible-a', null)],
+    })
+    const out = await resolveMcpServersForAgents(g, {
+      mcpServersNamespace: 'mcp-server',
+      hostsNamespace: 'mcp-host',
+      agentNames: ['visible-a', 'visible-b'],
+    })
+
+    expect(out.map(agent => agent.name)).toEqual(['visible-a', 'visible-b'])
+    expect(g.getResource.mock.calls.map(call => call[1])).toEqual(['visible-a', 'visible-b'])
+    expect(g.listResource).not.toHaveBeenCalledWith('hosts', expect.anything())
   })
 
   it('applies the same invocability filter as the RPC helper', async () => {
@@ -249,7 +309,24 @@ describe('resolveMcpServersForAgents', () => {
       hostsNamespace: 'mcp-host',
       agentNames: ['trader'],
     })
-    expect(out).toEqual([{ name: 'trader', contextRef: null, mcpServers: [] }])
+    expect(out).toEqual([])
+  })
+})
+
+describe('isK8sResourceNotFound', () => {
+  it('accepts Kubernetes and gateway 404 shapes', () => {
+    expect(isK8sResourceNotFound({ name: 'K8sNotFoundError' })).toBe(true)
+    expect(isK8sResourceNotFound({ statusCode: 404 })).toBe(true)
+    expect(isK8sResourceNotFound({ code: 404 })).toBe(true)
+    expect(isK8sResourceNotFound({ body: { code: 404 } })).toBe(true)
+    expect(isK8sResourceNotFound({ response: { status: 404 } })).toBe(true)
+    expect(isK8sResourceNotFound({ response: { body: { code: 404 } } })).toBe(true)
+  })
+
+  it('rejects RBAC, transport, and misleading text-only errors', () => {
+    expect(isK8sResourceNotFound({ statusCode: 403 })).toBe(false)
+    expect(isK8sResourceNotFound({ code: 'ECONNRESET' })).toBe(false)
+    expect(isK8sResourceNotFound(new Error('not found'))).toBe(false)
   })
 })
 

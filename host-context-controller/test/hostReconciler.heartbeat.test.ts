@@ -82,11 +82,11 @@ vi.mock('../src/mcpHostRuntimeTokenIssuerClient', () => ({
 }))
 
 vi.mock('../src/gfsHostBinding', () => ({
-  mintHostGfsToken: vi.fn().mockResolvedValue({
+  mintHostGfsToken: vi.fn(async (namespace: string, name: string) => ({
     ['to' + 'ken']: 'gfs-runtime-value',
     expiresInSeconds: 600,
-    subject: 'host:1st:mcp-host/stateless-host',
-  }),
+    subject: `host:1st:${namespace}/${name}`,
+  })),
 }))
 
 function makeStatelessHost(

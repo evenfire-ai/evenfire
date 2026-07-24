@@ -11,5 +11,6 @@ kind: Kustomization
 resources:
   - gfs-config.yaml
   - gfs-controller-db.yaml
+  - gfs-controller-reader-db.yaml
   - networkpolicies.yaml
   - rbac.yaml

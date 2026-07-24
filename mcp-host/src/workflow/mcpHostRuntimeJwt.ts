@@ -13,6 +13,24 @@ type RuntimeJwtClaims = {
   recipeName?: unknown
   exp?: unknown
   iat?: unknown
+  scopes?: unknown
+}
+
+/**
+ * Decode a runtime token's scope advertisement without treating it as an
+ * authorization decision. Callers use this only to hide tools the token can
+ * never invoke; the receiving service must still verify and authorize it.
+ */
+export function decodeRuntimeJwtScopes(token: string): string[] | null {
+  try {
+    const payload = decodeJwt(token) as RuntimeJwtClaims
+    if (!Array.isArray(payload.scopes) || !payload.scopes.every(scope => typeof scope === 'string')) {
+      return null
+    }
+    return payload.scopes
+  } catch {
+    return null
+  }
 }
 
 export type DecodedRuntimeJwtClaims = {

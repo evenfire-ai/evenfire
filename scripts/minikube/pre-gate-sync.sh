@@ -229,7 +229,7 @@ provision_gfs_serving() {
     # FAIL LOUD: with the GFS stack deployed, a broken gfs_controller credential
     # means every GFS operation 503s (issue #775). Continuing would burn the
     # whole gate run on a cluster that cannot pass.
-    if ! CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/provision-gfs-db.sh"; then
+    if ! CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
       log "ERROR: gfs DB provisioning FAILED — gfsc cannot authorize any operation. Aborting ${GATE_NAME} pre-gate sync."
       exit 1
     fi
@@ -327,13 +327,27 @@ run_if_changed desktop-app "npm test"
 
 if [[ "${cluster_changed}" == "true" ]]; then
   log "Cluster-relevant changes detected — rebuilding and redeploying before ${GATE_NAME}"
+  # Apply the canonical cluster bootstrap before any namespaced Secret work.
+  (
+    cd "${PROJECT_DIR}"
+    make minikube-deploy-crds
+  )
+  CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
+  writer_dsn="$(${KC} -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
+  if [[ -n "${writer_dsn}" ]]; then
+    if ! ${KC} -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1; then
+      err "Existing GFS writer detected but control-api is not Ready; refusing full overlay sync"
+      exit 1
+    fi
+    log "Upgrade path — reconciling GFS credentials before full overlay sync"
+    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+  else
+    log "Fresh bootstrap — reader staging deferred until post-migration convergence; GFSC remains fail-closed"
+  fi
   (
     cd "${PROJECT_DIR}"
     make minikube-build-images
     make minikube-verify-images
-    # CRD changes live outside the Kustomize overlay. Apply them before the
-    # service rollout so cluster-backed E2E sees the same schema as the branch.
-    make minikube-deploy-crds
     make minikube-apply-secrets
     make minikube-deploy-all
     if [[ "${infra_changed}" == "true" ]]; then

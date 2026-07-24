@@ -356,7 +356,7 @@ describe('assertMayGrantBatch — common grant authorization', () => {
     const targets = [
       { type: 'user', id: USER_ID },
       { type: 'team', id: TEAM_ID },
-      { type: 'host', id: '1st:mcp-host/standalone' },
+      { type: 'host', id: '1st:mcp-host/agent-a' },
     ] as const
 
     await expect(
@@ -373,7 +373,7 @@ describe('assertMayGrantBatch — common grant authorization', () => {
     expect(queries[0]?.values).toEqual(['main', R, ['user', 'team'], ['owner', 'owners']])
   })
 
-  it('keeps the existing operator host policy intact for bulk API grants', async () => {
+  it('keeps the existing operator host policy intact for bulk API grants to third-party hosts', async () => {
     const db = mockDb({})
     await expect(
       assertMayGrantBatch(
@@ -382,13 +382,65 @@ describe('assertMayGrantBatch — common grant authorization', () => {
         'main',
         R,
         perms('read', 'write', 'delete', 'manage_acl', 'share'),
-        [
-          { type: 'host', id: '1st:mcp-host/standalone' },
-          { type: 'host', id: '3rd:sandbox-recipes/daily-report' },
-        ],
+        [{ type: 'host', id: '3rd:sandbox-recipes/daily-report' }],
         { isShare: false }
       )
     ).resolves.toBeUndefined()
+  })
+
+  it('rejects the retired fleet-wide standalone subject in bulk grants', async () => {
+    const db = mockDb({})
+    await expect(
+      assertMayGrantBatch(
+        db,
+        operator,
+        'main',
+        R,
+        perms('read', 'write'),
+        [
+          { type: 'host', id: '1st:mcp-host/agent-a' },
+          { type: 'host', id: '1st:mcp-host/standalone' },
+        ],
+        { isShare: false }
+      )
+    ).rejects.toMatchObject({ status: 403, code: 'legacy_standalone_subject_reserved' })
+  })
+
+  it('caps managed first-party hosts to read/write in bulk grants', async () => {
+    const db = mockDb({})
+    await expect(
+      assertMayGrantBatch(
+        db,
+        operator,
+        'main',
+        R,
+        perms('read', 'write', 'delete'),
+        [{ type: 'host', id: '1st:mcp-host/agent-a' }],
+        { isShare: false }
+      )
+    ).rejects.toMatchObject({ status: 403, code: 'managed_agent_permission_forbidden' })
+  })
+
+  it('rejects the entire plural bulk grant when one managed first-party host exceeds read/write', async () => {
+    const queries: QueryCall[] = []
+    const db = mockDb({ queries })
+    await expect(
+      assertMayGrantBatch(
+        db,
+        operator,
+        'main',
+        R,
+        perms('read', 'write', 'share'),
+        [
+          { type: 'user', id: USER_ID },
+          { type: 'host', id: '1st:mcp-host/agent-a' },
+        ],
+        { isShare: false }
+      )
+    ).rejects.toMatchObject({ status: 403, code: 'managed_agent_permission_forbidden' })
+    // Target policy is fail-closed for the whole batch: no authority load, no
+    // grant written — not even for the otherwise-legitimate user target.
+    expect(queries).toHaveLength(0)
   })
 
   it('keeps the existing caller-dependent host restriction intact', async () => {
@@ -400,7 +452,7 @@ describe('assertMayGrantBatch — common grant authorization', () => {
         'main',
         R,
         perms('manage_acl'),
-        [{ type: 'host', id: '1st:mcp-host/standalone' }],
+        [{ type: 'host', id: '3rd:sandbox-recipes/daily-report' }],
         { isShare: false }
       )
     ).rejects.toMatchObject({ status: 403, code: 'agent_manager_forbidden' })
@@ -601,7 +653,7 @@ describe('assertMayGrant — agent (host) restrictions', () => {
     ).rejects.toMatchObject({ status: 403, code: 'operator_grant_forbidden' })
   })
 
-  it('forbids a folder owner from making an agent a manager (manage_acl)', async () => {
+  it('forbids any caller from giving a managed first-party agent non-data-plane bits', async () => {
     const db = mockDb({
       ancestors: { [R]: [R] },
       grants: [
@@ -614,17 +666,79 @@ describe('assertMayGrant — agent (host) restrictions', () => {
         },
       ],
     })
+    for (const permission of ['delete', 'manage_acl', 'share'] as const) {
+      await expect(
+        assertMayGrant(
+          db,
+          operator,
+          'main',
+          R,
+          perms(permission),
+          { type: 'host', id: '1st:mcp-host/agent-a' },
+          { isShare: false }
+        )
+      ).rejects.toMatchObject({ status: 403, code: 'managed_agent_permission_forbidden' })
+    }
+  })
+
+  it('reserves the legacy fleet-wide subject while allowing explicit retirement', async () => {
+    const target = { type: 'host' as const, id: '1st:mcp-host/standalone' }
+
+    await expect(
+      assertMayGrant(mockDb({}), operator, 'main', R, perms('read', 'write'), target, {
+        isShare: false,
+      })
+    ).rejects.toMatchObject({ status: 403, code: 'legacy_standalone_subject_reserved' })
+
     await expect(
       assertMayGrant(
-        db,
-        user('owner'),
+        mockDb({}),
+        operator,
         'main',
         R,
-        perms('manage_acl'),
-        { type: 'host', id: '1st:mcp-host/standalone' },
+        perms('read', 'write', 'delete', 'manage_acl', 'share'),
+        target,
+        {
+          isShare: false,
+          allowLegacyRetirement: true,
+        }
+      )
+    ).resolves.toBeUndefined()
+  })
+
+  it('lets revocation remove an over-privileged individual host grant', async () => {
+    // Rows stored before the managed-agent envelope existed (e.g. delete on a
+    // 1st-party host) must stay deletable: the revoke path re-runs the policy
+    // with the stored permissions and allowLegacyRetirement, which exempts the
+    // envelope without reopening sentinel creation.
+    const target = { type: 'host' as const, id: '1st:mcp-host/agent-a' }
+
+    await expect(
+      assertMayGrant(mockDb({}), operator, 'main', R, perms('read', 'write', 'delete'), target, {
+        isShare: false,
+        allowLegacyRetirement: true,
+      })
+    ).resolves.toBeUndefined()
+
+    await expect(
+      assertMayGrant(mockDb({}), operator, 'main', R, perms('read', 'write', 'delete'), target, {
+        isShare: false,
+      })
+    ).rejects.toMatchObject({ status: 403, code: 'managed_agent_permission_forbidden' })
+  })
+
+  it('does not reserve an individual Host named standalone in another namespace', async () => {
+    await expect(
+      assertMayGrant(
+        mockDb({}),
+        operator,
+        'main',
+        R,
+        perms('read', 'write'),
+        { type: 'host', id: '1st:custom-hosts/standalone' },
         { isShare: false }
       )
-    ).rejects.toMatchObject({ status: 403, code: 'agent_manager_forbidden' })
+    ).resolves.toBeUndefined()
   })
 
   it('lets the operator grant write to an agent (allowed)', async () => {
@@ -636,10 +750,49 @@ describe('assertMayGrant — agent (host) restrictions', () => {
         'main',
         R,
         perms('read', 'write'),
-        { type: 'host', id: '1st:mcp-host/standalone' },
+        { type: 'host', id: '1st:mcp-host/agent-a' },
         { isShare: false }
       )
     ).resolves.toBeUndefined()
+  })
+
+  it('preserves operator grant compatibility for third-party hosts', async () => {
+    await expect(
+      assertMayGrant(
+        mockDb({}),
+        operator,
+        'main',
+        R,
+        perms('delete', 'manage_acl', 'share'),
+        { type: 'host', id: '3rd:sandbox-recipes/plugin-a' },
+        { isShare: false }
+      )
+    ).resolves.toBeUndefined()
+  })
+
+  it('preserves the existing folder-owner manager restriction for third-party hosts', async () => {
+    const db = mockDb({
+      ancestors: { [R]: [R] },
+      grants: [{
+        subject_type: 'user',
+        subject_id: 'owner',
+        resource_id: R,
+        permissions: ['read', 'manage_acl'],
+        inherit: true,
+      }],
+    })
+
+    await expect(
+      assertMayGrant(
+        db,
+        user('owner'),
+        'main',
+        R,
+        perms('manage_acl'),
+        { type: 'host', id: '3rd:sandbox-recipes/plugin-a' },
+        { isShare: false }
+      )
+    ).rejects.toMatchObject({ status: 403, code: 'agent_manager_forbidden' })
   })
 
   it('forbids sharing to an agent (share targets users/teams only)', async () => {
@@ -662,7 +815,7 @@ describe('assertMayGrant — agent (host) restrictions', () => {
         'main',
         R,
         perms('read'),
-        { type: 'host', id: '1st:mcp-host/standalone' },
+        { type: 'host', id: '1st:mcp-host/agent-a' },
         { isShare: true }
       )
     ).rejects.toMatchObject({ status: 403, code: 'share_to_agent_forbidden' })

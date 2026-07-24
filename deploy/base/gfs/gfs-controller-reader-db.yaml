@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gfs-controller-reader-db
+  namespace: gfs
+  labels:
+    app.kubernetes.io/name: gfs-controller
+    app.kubernetes.io/part-of: clerum
+type: Opaque
+# Provisioning-owned. `stage-reader` adds connection-string before HCC cutover;
+# keeping the key out of last-applied configuration prevents overlay apply from
+# erasing an already valid credential.
