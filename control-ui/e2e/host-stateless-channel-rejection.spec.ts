@@ -37,7 +37,7 @@
  *      NOT chatllm-stateless (avoids colliding with the transient Test 2d window of
  *      scripts/e2e/e2e-stateless-suspend-wake.sh on a shared profile).
  *   4. E2E_KUBECONTEXT (or CONTEXT) — an allowed kubectl context (clerum-test /
- *      clerum-codex-* / gke_eventfire-*_clerum-dev). Passed to every kubectl call.
+ *      clerum-codex-* / gke_<project>_<zone>_<cluster>). Passed to every kubectl call.
  */
 import { execFileSync } from 'node:child_process'
 import { type Page, expect, test } from '@playwright/test'
