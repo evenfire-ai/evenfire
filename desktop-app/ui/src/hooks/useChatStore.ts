@@ -1,5 +1,11 @@
 import { useCallback } from 'react'
-import type { ChatMessage } from '../../../src/types'
+import type {
+  ChatMessage,
+  HostModelsResult,
+  SessionMessagesQuery,
+  SessionsListQuery,
+  SessionsListResult,
+} from '../../../src/types'
 
 // The session lifecycle types live in the shared `src/types` (they cross the
 // IPC bridge from the server). Re-exported here so existing UI imports from
@@ -44,6 +50,18 @@ const pendingModelByChat: Record<string, string> = {}
  * `pendingModelByChat`.
  */
 const preChatModelByAgent: Record<string, string> = {}
+const SESSION_CATALOG_TTL_MS = 5_000
+const HOST_MODELS_TTL_MS = 30_000
+
+type CachedRequest<T> = {
+  expiresAt: number
+  promise: Promise<T>
+}
+
+const sessionCatalogRequests = new Map<string, CachedRequest<SessionsListResult>>()
+const hostModelRequests = new Map<string, CachedRequest<HostModelsResult | null>>()
+let sessionCatalogSource: typeof window.clerum.rpc.listSessions | null = null
+let hostModelsSource: typeof window.clerum.rpc.getHostModels | null = null
 
 /** Composite key mirroring the session `chatKey` convention (`agentRef::chatId`). */
 function pendingModelKey(agentRef: string, chatId: string): string {
@@ -111,10 +129,36 @@ export function useChatStore() {
     []
   )
 
-  const listSessions = useCallback((hostRef: string) => window.clerum.rpc.listSessions(hostRef), [])
+  const listSessions = useCallback(
+    (
+      hostRef: string,
+      query: SessionsListQuery = { limit: 50 },
+      options: { force?: boolean } = {}
+    ) => {
+      const source = window.clerum.rpc.listSessions
+      if (sessionCatalogSource !== source) {
+        sessionCatalogRequests.clear()
+        sessionCatalogSource = source
+      }
+      const key = `${hostRef}:${query.limit ?? 'all'}:${query.cursor ?? ''}`
+      const cached = sessionCatalogRequests.get(key)
+      if (!options.force && cached && cached.expiresAt > Date.now()) return cached.promise
+
+      const promise = source(hostRef, undefined, query).catch(error => {
+        sessionCatalogRequests.delete(key)
+        throw error
+      })
+      sessionCatalogRequests.set(key, {
+        expiresAt: Date.now() + SESSION_CATALOG_TTL_MS,
+        promise,
+      })
+      return promise
+    },
+    []
+  )
   const loadSessionMessages = useCallback(
-    (hostRef: string, agent: string, chatId: string) =>
-      window.clerum.rpc.loadSessionMessages(hostRef, agent, chatId),
+    (hostRef: string, agent: string, chatId: string, query: SessionMessagesQuery = {}) =>
+      window.clerum.rpc.loadSessionMessages(hostRef, agent, chatId, undefined, query),
     []
   )
   const getContextBreakdown = useCallback(
@@ -122,15 +166,34 @@ export function useChatStore() {
       window.clerum.rpc.getContextBreakdown(hostRef, agent, chatId),
     []
   )
-  const getHostModels = useCallback(
-    (hostRef: string, chatId: string) => window.clerum.rpc.getHostModels(hostRef, chatId),
-    []
-  )
-  const setHostModel = useCallback(
-    (hostRef: string, chatId: string, model: string) =>
-      window.clerum.rpc.setHostModel(hostRef, chatId, model),
-    []
-  )
+  const getHostModels = useCallback((hostRef: string, chatId: string) => {
+    const source = window.clerum.rpc.getHostModels
+    if (hostModelsSource !== source) {
+      hostModelRequests.clear()
+      hostModelsSource = source
+    }
+    const key = `${hostRef}:${chatId}`
+    const cached = hostModelRequests.get(key)
+    if (cached && cached.expiresAt > Date.now()) return cached.promise
+
+    const promise = source(hostRef, chatId).catch(error => {
+      hostModelRequests.delete(key)
+      throw error
+    })
+    hostModelRequests.set(key, { expiresAt: Date.now() + HOST_MODELS_TTL_MS, promise })
+    return promise
+  }, [])
+  const setHostModel = useCallback(async (hostRef: string, chatId: string, model: string) => {
+    const result = await window.clerum.rpc.setHostModel(hostRef, chatId, model)
+    hostModelRequests.delete(`${hostRef}:${chatId}`)
+    return result
+  }, [])
+  const clearCachedRemoteData = useCallback(() => {
+    sessionCatalogRequests.clear()
+    hostModelRequests.clear()
+    sessionCatalogSource = null
+    hostModelsSource = null
+  }, [])
 
   // --- Pending (unpersisted) model selections — R2 "Option A" (see the
   // `pendingModelByChat` note above). Only UNPERSISTED selections are tracked:
@@ -187,6 +250,7 @@ export function useChatStore() {
     getContextBreakdown,
     getHostModels,
     setHostModel,
+    clearCachedRemoteData,
     setPendingModel,
     getPendingModel,
     clearPendingModel,

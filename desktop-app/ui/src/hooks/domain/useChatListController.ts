@@ -1,8 +1,19 @@
 import { type MutableRefObject, useCallback, useEffect, useRef, useState } from 'react'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
-import type { ChatIndex, ChatMetadata } from '../../../../src/types'
+import type { ChatIndex, ChatMetadata, SessionsListResult } from '../../../../src/types'
 import type { useChatStore } from '../useChatStore'
 import { type SessionFsmEvent, type SessionFsmStore, seedSessionSnapshots } from './sessionFsm'
+
+function scheduleAfterFirstPaint(task: () => Promise<unknown>): void {
+  const run = () => {
+    void task().catch(() => undefined)
+  }
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => requestAnimationFrame(run))
+    return
+  }
+  setTimeout(run, 0)
+}
 
 /**
  * useChatListController (spec-v2 §4.4) — owns the whole sidebar chat-list
@@ -93,7 +104,31 @@ export function useChatListController({
   const selectedAgentRef = useRef(selectedAgent)
   useEffect(() => {
     selectedAgentRef.current = selectedAgent
+    return () => {
+      if (selectedAgentRef.current === selectedAgent) {
+        selectedAgentRef.current = null
+      }
+    }
   }, [selectedAgent])
+
+  const loadRemainingServerSessions = useCallback(
+    async (
+      agentRef: string,
+      initialCursor: string | undefined
+    ): Promise<Awaited<ReturnType<typeof chatStore.listSessions>>['items']> => {
+      const items: Awaited<ReturnType<typeof chatStore.listSessions>>['items'] = []
+      const seenCursors = new Set<string>()
+      let cursor = initialCursor
+      while (cursor && !seenCursors.has(cursor)) {
+        seenCursors.add(cursor)
+        const page = await chatStore.listSessions(agentRef, { limit: 50, cursor })
+        items.push(...page.items)
+        cursor = page.nextCursor
+      }
+      return items
+    },
+    [chatStore.listSessions]
+  )
 
   // ─── Cross-agent latest-sessions mutators ───
 
@@ -117,9 +152,9 @@ export function useChatListController({
 
   const loadChatListOnce = useCallback(
     async (agentRef: string): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] }> => {
-      const [index, serverResult] = await Promise.all([
+      const [index, serverResult]: [ChatIndex, SessionsListResult] = await Promise.all([
         chatStore.getIndex(agentRef),
-        chatStore.listSessions(agentRef).catch(() => ({ items: [] })),
+        chatStore.listSessions(agentRef, { limit: 50 }).catch(() => ({ items: [] })),
       ])
 
       const localChats: SidebarChatEntry[] = index.chats
@@ -140,11 +175,40 @@ export function useChatListController({
           title: `Chat ${s.chatId.slice(0, 8)}`,
           createdAt: s.lastActivityAt,
           updatedAt: s.lastActivityAt,
-          messageCount: 0,
+          messageCount: s.turnCount * 2,
+          turnCount: s.turnCount,
         }))
 
       const merged = [...localChats, ...fromServerOnly].sort(byUpdatedDesc)
       setChatList(merged)
+
+      if (serverResult.nextCursor) {
+        scheduleAfterFirstPaint(async () => {
+          if (selectedAgentRef.current !== agentRef) return
+          const additionalItems = await loadRemainingServerSessions(
+            agentRef,
+            serverResult.nextCursor
+          )
+          const additionalSessions = additionalItems.filter(session => session.agent === agentRef)
+          if (!additionalSessions.length) return
+          seedSessionSnapshots(fsm, agentRef, additionalSessions)
+          if (selectedAgentRef.current !== agentRef) return
+          setChatList(previous => {
+            const knownIds = new Set(previous.map(chat => chat.id))
+            const additionalChats: SidebarChatEntry[] = additionalSessions
+              .filter(session => !knownIds.has(session.chatId))
+              .map(session => ({
+                id: session.chatId,
+                title: `Chat ${session.chatId.slice(0, 8)}`,
+                createdAt: session.lastActivityAt,
+                updatedAt: session.lastActivityAt,
+                messageCount: session.turnCount * 2,
+                turnCount: session.turnCount,
+              }))
+            return [...previous, ...additionalChats].sort(byUpdatedDesc)
+          })
+        })
+      }
 
       // Persist server freshness into the local index (spec §5.3): keeps the
       // durable sidebar order aligned with the source of truth. A pure tail
@@ -166,7 +230,13 @@ export function useChatListController({
 
       return { index, merged }
     },
-    [chatStore.getIndex, chatStore.listSessions, chatStore.reconcileServerSessions, fsm]
+    [
+      chatStore.getIndex,
+      chatStore.listSessions,
+      chatStore.reconcileServerSessions,
+      fsm,
+      loadRemainingServerSessions,
+    ]
   )
 
   const loadChatList = useCallback(
@@ -423,9 +493,9 @@ export function useChatListController({
         const sessionGroups = await Promise.all(
           agentNames.map(async agentRef => {
             try {
-              const [index, serverResult] = await Promise.all([
+              const [index, serverResult]: [ChatIndex, SessionsListResult] = await Promise.all([
                 chatStore.getIndex(agentRef),
-                chatStore.listSessions(agentRef).catch(() => ({ items: [] })),
+                chatStore.listSessions(agentRef, { limit: 50 }).catch(() => ({ items: [] })),
               ])
               const localChats: LatestSidebarChatEntry[] = index.chats.map(chat => ({
                 ...chat,
@@ -439,7 +509,7 @@ export function useChatListController({
                   title: `Remote · ${session.chatId.slice(0, 8)}`,
                   createdAt: session.lastActivityAt,
                   updatedAt: session.lastActivityAt,
-                  messageCount: 0,
+                  messageCount: session.turnCount * 2,
                   remote: true,
                   turnCount: session.turnCount,
                   agentRef,
@@ -450,12 +520,18 @@ export function useChatListController({
               // D4 (§4.1 R2): the "snapshot never degrades a live task" rule that
               // used to live in `mergeSeededSessionStates` is now the reducer's.
               const sessions = serverResult.items.filter(session => session.agent === agentRef)
-              return { agentRef, entries: [...localChats, ...remoteOnly], sessions }
+              return {
+                agentRef,
+                entries: [...localChats, ...remoteOnly],
+                sessions,
+                nextCursor: serverResult.nextCursor,
+              }
             } catch {
               return {
                 agentRef,
                 entries: [] as LatestSidebarChatEntry[],
                 sessions: [] as Awaited<ReturnType<typeof chatStore.listSessions>>['items'],
+                nextCursor: undefined,
               }
             }
           })
@@ -465,6 +541,40 @@ export function useChatListController({
         for (const group of sessionGroups) {
           seedSessionSnapshots(fsm, group.agentRef, group.sessions)
         }
+        void Promise.all(
+          sessionGroups.map(async group => ({
+            agentRef: group.agentRef,
+            sessions: await loadRemainingServerSessions(group.agentRef, group.nextCursor),
+          }))
+        )
+          .then(remainingGroups => {
+            if (cancelled) return
+            setLatestChatSessions(previous => {
+              const knownKeys = new Set(previous.map(item => `${item.agentRef}:${item.id}`))
+              const additional: LatestSidebarChatEntry[] = []
+              for (const group of remainingGroups) {
+                const sessions = group.sessions.filter(session => session.agent === group.agentRef)
+                seedSessionSnapshots(fsm, group.agentRef, sessions)
+                for (const session of sessions) {
+                  const key = `${group.agentRef}:${session.chatId}`
+                  if (knownKeys.has(key)) continue
+                  knownKeys.add(key)
+                  additional.push({
+                    id: session.chatId,
+                    title: `Chat ${session.chatId.slice(0, 8)}`,
+                    createdAt: session.lastActivityAt,
+                    updatedAt: session.lastActivityAt,
+                    messageCount: session.turnCount * 2,
+                    turnCount: session.turnCount,
+                    remote: true,
+                    agentRef: group.agentRef,
+                  })
+                }
+              }
+              return [...previous, ...additional].sort(byUpdatedDesc)
+            })
+          })
+          .catch(() => undefined)
       } finally {
         if (!cancelled) {
           setLatestChatSessionsLoading(false)
@@ -475,7 +585,14 @@ export function useChatListController({
     return () => {
       cancelled = true
     }
-  }, [agentNames, chatStore.getIndex, chatStore.listSessions, isAuthenticated, fsm])
+  }, [
+    agentNames,
+    chatStore.getIndex,
+    chatStore.listSessions,
+    isAuthenticated,
+    fsm,
+    loadRemainingServerSessions,
+  ])
 
   return {
     // State (public contract, re-exported unchanged by the parent).
