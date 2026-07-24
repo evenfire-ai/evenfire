@@ -290,6 +290,49 @@ describe('switchToChat (unified, D.4)', () => {
     expect(result.current.hasOlderMessages).toBe(false)
   })
 
+  it('does not keep older history visible after loading an exact multiple of local pages', async () => {
+    const allMessages = Array.from({ length: 160 }, (_, index) => ({
+      id: `turn-${index + 1}-user`,
+      role: 'user' as const,
+      content: `q${index + 1}`,
+      timestamp: index + 1,
+    }))
+    const firstVisiblePage = allMessages.slice(80)
+    const olderPage = allMessages.slice(0, 80)
+    clerum.chat.loadMessages.mockImplementation(
+      async (_agentRef: string, chatId: string, _limit?: number, offset?: number) => {
+        if (chatId !== 'exact-local-pages') return []
+        if (offset === undefined) return firstVisiblePage
+        if (offset === 80) return olderPage
+        return []
+      }
+    )
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'exact-local-pages',
+      state: 'idle',
+      turns: [],
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'exact-local-pages')
+    })
+    expect(result.current.hasOlderMessages).toBe(true)
+
+    await act(async () => {
+      await result.current.handleLoadOlderMessages()
+    })
+
+    expect(clerum.chat.loadMessages).toHaveBeenCalledWith('agent-x', 'exact-local-pages', 1, 160)
+    expect(result.current.chatMessages).toHaveLength(160)
+    expect(result.current.hasOlderMessages).toBe(false)
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(1)
+  })
+
   it('adds a server-only chat to the sidebar when switched to directly (S4)', async () => {
     // chatList starts empty (default getIndex → no chats); simulate opening a
     // notification for a chat the local list doesn't know about.

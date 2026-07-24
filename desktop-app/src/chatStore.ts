@@ -130,7 +130,9 @@ export class ChatStore {
    * agent terminating at once — a first-class case post-D.4 fire-and-forget)
    * could interleave getIndex→saveIndex and drop one update (e.g. an
    * `unreadTerminal` flag). Chaining per agentRef makes each RMW atomic w.r.t.
-   * the others. Reads (getIndex/loadMessages) are not serialized.
+   * the others. Plain index reads are not serialized. `loadMessages` is
+   * serialized because paged chat reads combine meta + page files and must not
+   * observe a partially-applied append/replace.
    */
   private indexChains = new Map<string, Promise<unknown>>()
 
@@ -389,18 +391,6 @@ export class ChatStore {
     return this.writePagedChatUnlocked(agentRef, chatId, legacyMessages, { removeLegacy: true })
   }
 
-  private async readOrMigratePagedChat(
-    agentRef: string,
-    chatId: string
-  ): Promise<PagedChatMeta | null> {
-    const paged = await this.readPagedMeta(agentRef, chatId)
-    if (paged) return paged
-
-    return this.serializeIndex(agentRef, async () =>
-      this.readOrMigratePagedChatUnlocked(agentRef, chatId)
-    )
-  }
-
   private async readMessagesFromPagedMeta(
     agentRef: string,
     chatId: string,
@@ -592,9 +582,11 @@ export class ChatStore {
     offset?: number
   ): Promise<ChatMessage[]> {
     try {
-      const meta = await this.readOrMigratePagedChat(agentRef, chatId)
-      if (!meta) return []
-      return this.readMessagesFromPagedMeta(agentRef, chatId, meta, limit, offset)
+      return await this.serializeIndex(agentRef, async () => {
+        const meta = await this.readOrMigratePagedChatUnlocked(agentRef, chatId)
+        if (!meta) return []
+        return this.readMessagesFromPagedMeta(agentRef, chatId, meta, limit, offset)
+      })
     } catch {
       return []
     }

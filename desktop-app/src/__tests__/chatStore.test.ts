@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,6 +14,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await fs.rm(tempDir, { recursive: true, force: true })
 })
 
@@ -211,6 +212,47 @@ describe('messages', () => {
 
     const messages = await pagedStore.loadMessages('agent-1', 'append-pages')
     expect(messages.map(message => message.id)).toEqual(['m0', 'm1', 'm2', 'm3', 'm4'])
+  })
+
+  it('serializes paged reads behind concurrent appends', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await pagedStore.createChat('agent-1', 'atomic-read')
+    await pagedStore.saveMessages('agent-1', 'atomic-read', [
+      { id: 'm0', role: 'user', content: 'msg-0', timestamp: 0 },
+      { id: 'm1', role: 'user', content: 'msg-1', timestamp: 1 },
+    ])
+
+    const originalWriteFile = fs.writeFile.bind(fs)
+    let releaseWrite: (() => void) | undefined
+    let delayedWrite = false
+    const appendWriteStarted = new Promise<void>(resolve => {
+      vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+        const filePath = String(args[0])
+        if (!delayedWrite && filePath.includes('atomic-read') && filePath.endsWith('.tmp')) {
+          delayedWrite = true
+          resolve()
+          await new Promise<void>(release => {
+            releaseWrite = release
+          })
+        }
+        return originalWriteFile(...(args as Parameters<typeof fs.writeFile>))
+      })
+    })
+
+    const append = pagedStore.appendMessages('agent-1', 'atomic-read', [
+      { id: 'm2', role: 'assistant', content: 'msg-2', timestamp: 2 },
+    ])
+    await appendWriteStarted
+
+    const loadedDuringAppend = pagedStore.loadMessages('agent-1', 'atomic-read')
+    await Promise.resolve()
+    releaseWrite?.()
+
+    const [messages] = await Promise.all([loadedDuringAppend, append.then(() => undefined)])
+    expect(messages.map(message => message.id)).toEqual(['m0', 'm1', 'm2'])
   })
 
   it('prunes only old pages whose messages are known to exist on the server', async () => {

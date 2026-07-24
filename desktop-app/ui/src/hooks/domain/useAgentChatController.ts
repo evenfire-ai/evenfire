@@ -114,6 +114,20 @@ function oldestServerTurnNumber(messages: AgentChatMessage[]): number | undefine
   }, undefined)
 }
 
+type ChatStoreClient = ReturnType<typeof useChatStore>
+
+async function hasLocalMessagesBeyond(
+  chatStore: ChatStoreClient,
+  agentRef: string,
+  chatId: string,
+  offset: number
+): Promise<boolean> {
+  return chatStore
+    .loadMessages(agentRef, chatId, 1, offset)
+    .then(messages => messages.length > 0)
+    .catch(() => false)
+}
+
 function mergeUniqueMessages(
   existing: AgentChatMessage[],
   incoming: AgentChatMessage[],
@@ -679,10 +693,7 @@ export function useAgentChatController({
       const hasOlderLocalMessages =
         !hasOlderServerMessages &&
         cached.length === MESSAGE_PAGE_SIZE &&
-        (await chatStore
-          .loadMessages(agentRef, chatId, 1, MESSAGE_PAGE_SIZE)
-          .then(messages => messages.length > 0)
-          .catch(() => false))
+        (await hasLocalMessagesBeyond(chatStore, agentRef, chatId, MESSAGE_PAGE_SIZE))
       if (!isStillActive()) return
       loadedLocalMessageCountRef.current = cached.length
       setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
@@ -797,9 +808,22 @@ export function useAgentChatController({
         .catch(() => [])) as AgentChatMessage[]
       const unseenLocal = localPage.filter(message => !visibleIds.has(message.id))
       if (unseenLocal.length) {
-        loadedLocalMessageCountRef.current += localPage.length
-        setChatMessages(previous => mergeUniqueMessages(previous, unseenLocal, 'before'))
-        setHasOlderMessages(localPage.length === MESSAGE_PAGE_SIZE)
+        const nextLoadedLocalMessageCount = loadedLocalMessageCountRef.current + localPage.length
+        const merged = mergeUniqueMessages(chatMessages, unseenLocal, 'before')
+        const oldestMergedTurn = oldestServerTurnNumber(merged)
+        const hasOlderServerMessages = Boolean(oldestMergedTurn && oldestMergedTurn > 1)
+        const hasOlderLocalMessages =
+          !hasOlderServerMessages &&
+          localPage.length === MESSAGE_PAGE_SIZE &&
+          (await hasLocalMessagesBeyond(
+            chatStore,
+            selectedAgent,
+            activeChatId,
+            nextLoadedLocalMessageCount
+          ))
+        loadedLocalMessageCountRef.current = nextLoadedLocalMessageCount
+        setChatMessages(merged)
+        setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
         return
       }
 
