@@ -3,10 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import { Button, Field, IconButton, MenuItem, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
-import {
-  LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
-  createLocalhostRuntimeConfigOption,
-} from '@constants/runtimeConfig'
+import { createLocalhostRuntimeConfigOption } from '@constants/runtimeConfig'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
 import type { DesktopRuntimeConfigOption } from '../../../../src/types'
 
@@ -31,14 +28,10 @@ export function AuthPage() {
     handleSaveRuntimeConfig,
     handleDeleteRuntimeConfig,
     handleSelectRuntimeConfig,
-    handleClearRuntimeConfigSelection,
   } = useAuthContext()
 
   const runtimeConfigOptions = runtimeConfigState?.options || []
   const activeRuntimeConfigId = runtimeConfigState?.activeOptionId ?? null
-  const selectedRuntimeConfig = runtimeConfigOptions.find(
-    option => option.id === activeRuntimeConfigId
-  )
   const hasPasswordLoginCredentials = Boolean(email.trim()) && Boolean(password)
   const [runtimeSetupVisible, setRuntimeSetupVisible] = useState(false)
   const hasRuntimeSetupValues =
@@ -101,12 +94,7 @@ export function AuthPage() {
 
   const handleRuntimeOptionSelect = (optionId: string) => {
     setRuntimeMenuOpen(false)
-    if (
-      optionId === activeRuntimeConfigId &&
-      (selectedRuntimeConfig?.source === 'localhost' ||
-        optionId === LOCALHOST_RUNTIME_CONFIG_OPTION_ID)
-    ) {
-      handleClearRuntimeConfigSelection()
+    if (optionId === activeRuntimeConfigId) {
       return
     }
     handleSelectRuntimeConfig(optionId)

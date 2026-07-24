@@ -328,6 +328,10 @@ export class AppService {
     )
   }
 
+  private static isRejectedStoredSessionError(error: unknown): boolean {
+    return error instanceof ApiError && (error.status === 401 || error.status === 403)
+  }
+
   /**
    * Maps rpc-proxy's structured host-availability 503s ({code:'host_waking'}
    * from the wake-and-hold subsystem, {code:'host_draining'} from the mcp-host
@@ -511,15 +515,31 @@ export class AppService {
     )
   }
 
-  async initialize(): Promise<SessionState> {
+  private clearAuthenticatedSessionState(): void {
+    this.stopAllStreams()
+    this.sessionToken = null
+    this.me = null
+    this.accessCatalog = null
+    this.teamDirectoryCache = null
+    this.workflowApprovalTeamById.clear()
+    this.workflowTeamByKey.clear()
+    this.rpcTokenManager.clear()
+    unbindChatStore()
+  }
+
+  private async restoreSavedSession(options: { runLaunchMaintenance?: boolean } = {}) {
     hydrateDesktopRuntimeConfig()
-    this.sessionToken = await this.tokenStore.getSessionToken(getActiveEnvKey())
-    if (!this.sessionToken) {
+    const envKey = getActiveEnvKey()
+    const token = await this.tokenStore.getSessionToken(envKey)
+    if (!token) {
+      this.clearAuthenticatedSessionState()
       return { authenticated: false, me: null }
     }
+
+    this.sessionToken = token
     try {
-      this.me = await this.authClient.getMe(this.sessionToken)
-      await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+      this.me = await this.authClient.getMe(token)
+      await bindChatStoreForUser(this.me.id, envKey)
       this.accessCatalog = null
       this.teamDirectoryCache = null
       this.workflowApprovalTeamById.clear()
@@ -527,12 +547,23 @@ export class AppService {
       // Launch-time sandbox-ui partition GC. Fire-and-forget: a failure
       // here must not block the user from logging in. Any network or fs
       // error is logged inside the module.
-      void this.runSandboxUiPartitionGcSafely()
+      if (options.runLaunchMaintenance) {
+        void this.runSandboxUiPartitionGcSafely()
+      }
       return { authenticated: true, me: this.me }
-    } catch {
-      await this.logout()
+    } catch (error) {
+      this.clearAuthenticatedSessionState()
+      if (AppService.isRejectedStoredSessionError(error)) {
+        await this.tokenStore.clearSessionToken(envKey)
+      } else {
+        console.warn('[AppService] Saved session restore failed; keeping token for retry:', error)
+      }
       return { authenticated: false, me: null }
     }
+  }
+
+  async initialize(): Promise<SessionState> {
+    return this.restoreSavedSession({ runLaunchMaintenance: true })
   }
 
   private async runSandboxUiPartitionGcSafely(): Promise<void> {
@@ -810,16 +841,8 @@ export class AppService {
   }
 
   async logout(): Promise<void> {
-    this.stopAllStreams()
-    this.sessionToken = null
-    this.me = null
-    this.accessCatalog = null
-    this.teamDirectoryCache = null
-    this.workflowApprovalTeamById.clear()
-    this.workflowTeamByKey.clear()
-    this.rpcTokenManager.clear()
+    this.clearAuthenticatedSessionState()
     await this.tokenStore.clearSessionToken(getActiveEnvKey())
-    unbindChatStore()
   }
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
@@ -923,7 +946,7 @@ export class AppService {
   }
 
   async getSessionState(): Promise<SessionState> {
-    if (!this.sessionToken || !this.me) return { authenticated: false, me: null }
+    if (!this.sessionToken || !this.me) return this.restoreSavedSession()
     return { authenticated: true, me: this.me }
   }
 
