@@ -1,4 +1,4 @@
-# Clerum Desktop App (Electron + React)
+# Evenfire Desktop App (Electron + React)
 
 Electron desktop client with a React renderer. The app authenticates through `external-rest-api`, obtains short-lived RPC access tokens, and invokes MCP servers and MCP hosts through `rpc-proxy`.
 
