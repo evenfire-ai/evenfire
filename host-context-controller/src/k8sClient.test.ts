@@ -268,6 +268,35 @@ describe('McpServerWatcher startup', () => {
     )
   })
 
+  it('preserves Host UID from the Kubernetes inventory boundary', async () => {
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'hosts') {
+        return {
+          items: [
+            {
+              metadata: {
+                name: 'uid-host',
+                namespace: 'mcp-host',
+                uid: '9f43826a-4031-4a31-93af-a3dd8fcfe805',
+                generation: 4,
+              },
+              spec: { host: 'uid-host', contextRef: 'context-a', secretRef: 'host-secret' },
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+
+    await expect(listAllHosts()).resolves.toEqual([
+      expect.objectContaining({
+        name: 'uid-host',
+        uid: '9f43826a-4031-4a31-93af-a3dd8fcfe805',
+        generation: 4,
+      }),
+    ])
+  })
+
   it('reconciles startup external egress before runtime full reconciliation', async () => {
     const eventLog: string[] = []
     const server = {
@@ -2935,10 +2964,11 @@ describe('McpServerWatcher Host watch generation', () => {
 
     await (watcher as any).requestHostFleetReconcile('Periodic resync', undefined, 'full')
     await callbacks[0]('MODIFIED', {
-      metadata: { name: 'retry-host', namespace: 'mcp-host', generation: 1 },
+      metadata: { name: 'retry-host', namespace: 'mcp-host', uid: 'retry-host-uid', generation: 1 },
       spec: { host: 'retry-host', lifecycle: { stateless: true } },
     })
     expect(reconcile).toHaveBeenCalledOnce()
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ uid: 'retry-host-uid' }), 'urgent')
     expect((watcher as any).hostWatchRetryTimers.size).toBe(1)
     expect((watcher as any).latestHostWatchEventRevisions.size).toBe(1)
 
@@ -2953,6 +2983,7 @@ describe('McpServerWatcher Host watch generation', () => {
     })
     expect(reconcile).toHaveBeenCalledOnce()
     expect((watcher as any).hosts.get('retry-host')).toMatchObject({
+      uid: 'retry-host-uid',
       generation: 1,
       spec: { lifecycle: { stateless: true } },
     })

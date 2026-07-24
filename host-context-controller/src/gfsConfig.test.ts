@@ -5,6 +5,9 @@ const GFS_ENV_KEYS = Object.keys(process.env).filter(k => k.startsWith('CONTEXT_
 
 afterEach(() => {
   for (const k of GFS_ENV_KEYS) delete process.env[k]
+  delete process.env.GFS_SYNC_COPY_MAX_OBJECTS
+  delete process.env.GFS_SYNC_COPY_MAX_BYTES
+  delete process.env.GFS_SYNC_COPY_TIMEOUT_MS
   delete process.env.CONTEXT_MAPPER_GFSC_IMAGE_PULL_POLICY
   delete process.env.CONTEXT_MAPPER_NODELOCAL_DNS_CIDR
 })
@@ -20,6 +23,22 @@ describe('gfsDefaultFactoryConfig', () => {
     expect(c.postgresPodLabels).toEqual({ app: 'control-postgres' })
     expect(c.gfscImagePullPolicy).toBe('IfNotPresent')
     expect(c.nodeLocalDnsCidr).toBe('')
+    expect(c.pgSecretName).toBe('gfs-controller-db')
+    expect(c.readerPgSecretName).toBe('gfs-controller-reader-db')
+    expect(c.syncCopyMaxObjects).toBeUndefined()
+    expect(c.syncCopyMaxBytes).toBeUndefined()
+    expect(c.syncCopyTimeoutMs).toBeUndefined()
+  })
+
+  it('passes synchronous copy limits through verbatim, including explicit empty values', () => {
+    process.env.GFS_SYNC_COPY_MAX_OBJECTS = '2500'
+    process.env.GFS_SYNC_COPY_MAX_BYTES = ''
+    process.env.GFS_SYNC_COPY_TIMEOUT_MS = '45000'
+
+    const c = gfsDefaultFactoryConfig()
+    expect(c.syncCopyMaxObjects).toBe('2500')
+    expect(c.syncCopyMaxBytes).toBe('')
+    expect(c.syncCopyTimeoutMs).toBe('45000')
   })
 
   it('fails loud on an invalid image pull policy (no silent default)', () => {

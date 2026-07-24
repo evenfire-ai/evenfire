@@ -3,7 +3,7 @@
 # ensure-pvcs.sh — Idempotent PVC size reconciliation
 # ======================================================================
 #
-# Checks each known PVC against the desired size in manifests.
+# Checks non-database workspace PVCs against the desired size in manifests.
 # If a PVC exists with the wrong size (Kubernetes forbids shrinking),
 # this script:
 #   1. Scales the owning Deployment to 0 replicas
@@ -13,8 +13,9 @@
 #
 # Called automatically by:
 #   - make minikube-deploy-mcp      (mcp-host-workspace)
-#   - make minikube-deploy-profiles (control-postgres-data)
-#   - make minikube-deploy-all      (both, via the above)
+#
+# control-postgres-data is deliberately excluded. Database storage recreation
+# requires the explicit, credential-safe `make minikube-db-reset` workflow.
 #
 # Usage:
 #   ./scripts/minikube/ensure-pvcs.sh
@@ -68,4 +69,3 @@ ensure_pvc() {
 # ── Known PVCs ────────────────────────────────────────────────────────
 # Size values must match the PVC specs in deploy/minikube/services/*/
 ensure_pvc "mcp-host-workspace"    "mcp-host"      "1Gi" "mcp-host"         "mcp-host"
-ensure_pvc "control-postgres-data" "control-plane" "1Gi" "control-postgres"  "control-plane"

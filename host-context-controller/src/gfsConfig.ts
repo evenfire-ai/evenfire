@@ -60,8 +60,16 @@ export function gfsDefaultFactoryConfig(): GfsFactoryConfig {
     jwtPublicKeyConfigMapKey: env('CONTEXT_MAPPER_GFS_JWT_CONFIGMAP_KEY', 'jwt-public-key'),
     pgSecretName: env('CONTEXT_MAPPER_GFS_PG_SECRET', 'gfs-controller-db'),
     pgSecretKey: env('CONTEXT_MAPPER_GFS_PG_SECRET_KEY', 'connection-string'),
+    readerPgSecretName: env(
+      'CONTEXT_MAPPER_GFS_READER_PG_SECRET',
+      'gfs-controller-reader-db'
+    ),
+    readerPgSecretKey: env('CONTEXT_MAPPER_GFS_READER_PG_SECRET_KEY', 'connection-string'),
     driveName: env('CONTEXT_MAPPER_GFS_DRIVE_NAME', 'main'),
     tokenAudience: env('CONTEXT_MAPPER_GFS_TOKEN_AUDIENCE', 'gfs-controller'),
+    syncCopyMaxObjects: process.env.GFS_SYNC_COPY_MAX_OBJECTS,
+    syncCopyMaxBytes: process.env.GFS_SYNC_COPY_MAX_BYTES,
+    syncCopyTimeoutMs: process.env.GFS_SYNC_COPY_TIMEOUT_MS,
     nodeLocalDnsCidr: parseNodeLocalDnsCidr(env('CONTEXT_MAPPER_NODELOCAL_DNS_CIDR', '')),
   }
 }

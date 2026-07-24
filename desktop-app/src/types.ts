@@ -364,6 +364,13 @@ export type AgentWithMcpServers = {
   contextRef: string | null
   provider?: string | null
   mcpServers: Array<{ name: string }>
+  /**
+   * Canonical GFS grant target for this agent (`1st:<ns>/<name>`), built by
+   * control-api's agent directory (accessReconciliation.buildAgentDirectoryEntry).
+   * Optional on the wire: servers predating per-agent GFS access omit it, and
+   * the Manage modal must skip such agents as grant targets.
+   */
+  gfsSubject?: { type: 'host'; id: string }
 }
 
 export type UserAgents = {

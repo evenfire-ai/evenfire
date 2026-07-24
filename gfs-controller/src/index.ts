@@ -12,6 +12,7 @@ import { resolveAuthzContext } from "./authz/subjectResolver";
 import { loadConfig } from "./config";
 import { PgResourceStore } from "./db/resourceStore";
 import { GfsWriteService, PgTransactor } from "./db/writeStore";
+import { PgBlobStagingStore, reconcileExpiredBlobs } from "./db/blobStaging";
 import { GfsMetrics } from "./metrics";
 import { GfsServer, ReadinessDeps } from "./server";
 import { BlobStore } from "./storage/blobStore";
@@ -97,6 +98,7 @@ async function main(): Promise<void> {
       pool,
       connectionString: config.pgConnectionString,
       intervalMs: config.credentialProbeIntervalMs,
+      storageRole: config.storageRole,
     }),
   };
 
@@ -107,6 +109,7 @@ async function main(): Promise<void> {
   const metrics = new GfsMetrics();
   let serving: GfsServingHandler | undefined;
   let invalidation: { stop: () => Promise<void> } | undefined;
+  let cleanupTimer: NodeJS.Timeout | undefined;
 
   if (config.publicKey.trim() !== "") {
     const verificationKey = loadVerificationKey(config.publicKey);
@@ -117,12 +120,38 @@ async function main(): Promise<void> {
     cache.setBypassed(true);
     invalidation = startInvalidation(config.pgConnectionString, cache);
 
-    const permissions = new PermissionClient(pool, new DbAuditSink(pool), cache);
+    const audit = new DbAuditSink(pool);
+    const permissions = new PermissionClient(pool, audit, cache);
     const accessible = new AccessibleResourceStore(pool);
     const store = new PgResourceStore(pool);
     const blobs = new BlobStore(config.storageMountPath, config.storageRole);
+    const blobManifests = config.storageRole === "writer" ? new PgBlobStagingStore(pool) : undefined;
     const writeService =
-      config.storageRole === "writer" ? new GfsWriteService(new PgTransactor(pool), blobs) : undefined;
+      config.storageRole === "writer"
+        ? new GfsWriteService(new PgTransactor(pool), blobs, blobManifests!)
+        : undefined;
+
+    if (config.storageRole === "writer") {
+      let cleanupRunning = false;
+      const cleanup = async (): Promise<void> => {
+        if (cleanupRunning) return;
+        cleanupRunning = true;
+        try {
+          await reconcileExpiredBlobs(blobManifests!, blobs, metrics, {
+            olderThanMs: config.blobCleanupSafetyWindowMs,
+            limit: config.blobCleanupBatchSize,
+          });
+        } catch (err) {
+          metrics.recordBlobCleanupFailure();
+          console.error(`[gfsc] blob reconciliation failed: ${errMsg(err)}`);
+        } finally {
+          cleanupRunning = false;
+        }
+      };
+      cleanupTimer = setInterval(() => void cleanup(), config.blobCleanupIntervalMs);
+      cleanupTimer.unref();
+      void cleanup();
+    }
 
     serving = new GfsServingHandler({
       verifyToken: (token) =>
@@ -133,6 +162,22 @@ async function main(): Promise<void> {
       store,
       blobs,
       ...(writeService ? { writeService } : {}),
+      ...(writeService ? { audit } : {}),
+      ...(writeService ? {
+        copy: {
+          authorizeMany: (ctx, requests, budget) => permissions.authorizeMany(ctx, requests, budget),
+          permissionEpoch: () => permissions.permissionEpoch(),
+          resources: store,
+          audit,
+          maxObjects: config.syncCopyMaxObjects,
+          maxBytes: config.syncCopyMaxBytes,
+          timeoutMs: config.syncCopyTimeoutMs,
+        },
+        rename: {
+          maxObjects: config.syncRenameMaxObjects,
+          timeoutMs: config.syncRenameTimeoutMs,
+        },
+      } : {}),
       metrics,
     });
   } else if (!config.devMode) {
@@ -152,6 +197,7 @@ async function main(): Promise<void> {
     console.log(`[gfsc] ${signal} received, shutting down`);
     await server.stop();
     if (invalidation) await invalidation.stop();
+    if (cleanupTimer) clearInterval(cleanupTimer);
     await pool.end();
     process.exit(0);
   };

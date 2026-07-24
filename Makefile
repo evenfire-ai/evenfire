@@ -186,6 +186,19 @@ minikube-detect-k8s-api-ip: ## Patch overlays/minikube/patches/k8s-api-ip.yaml w
 .PHONY: minikube-deploy-all
 minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@$(MAKE) --no-print-directory minikube-detect-k8s-api-ip
+	@CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-gfs-writer-secret.sh
+	@# Upgrade path: adopt/validate writer and stage reader before HCC cutover.
+	@writer_dsn="$$(kubectl --context=$(MINIKUBE_PROFILE) -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')" || { \
+		echo "[minikube-deploy-all] failed to classify the existing GFS writer Secret; refusing HCC cutover" >&2; exit 1; \
+	}; \
+	if [ -n "$$writer_dsn" ]; then \
+		kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1 || { \
+			echo "[minikube-deploy-all] existing GFS writer detected but control-api is not Ready; refusing HCC cutover" >&2; exit 1; \
+		}; \
+		CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/reconcile-gfs-deploy-credentials.sh; \
+	else \
+		echo "[minikube-deploy-all] fresh bootstrap: reader staging deferred until post-migration full-setup (GFSC fail-closed)"; \
+	fi
 	kubectl --context=$(MINIKUBE_PROFILE) kustomize deploy/overlays/minikube | kubectl --context=$(MINIKUBE_PROFILE) apply -f -
 	CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/apply-inter-service-tokens.sh
 	$(KC) apply -f deploy/overlays/minikube/instances/
@@ -194,9 +207,8 @@ minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@# rpc-proxy-secrets after each full overlay apply so Desktop/rpc-proxy/mcp-host
 	@# stay on the same JWT validation key.
 	@$(MAKE) --no-print-directory minikube-sync-auth-key
-	@# The overlay apply may recreate/replace the gfs-controller-db Secret (and
-	@# the one-time transition to the provisioning-owned connection-string key
-	@# removes the legacy empty key from last-applied). When the GFS stack is
+	@# The pre-overlay helper migrates legacy last-applied ownership without
+	@# removing the provisioning-owned connection-string. When the GFS stack is
 	@# deployed AND control-api is Ready (migration 0048 applied), re-provision
 	@# the gfs_controller DSN so gfsc never runs with an empty or stale
 	@# credential (issue #775). Fails loud if provisioning itself fails. When
@@ -205,7 +217,8 @@ minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@# it after control-api migrations.
 	@if kubectl --context=$(MINIKUBE_PROFILE) get configmap gfs-config -n gfs >/dev/null 2>&1; then \
 		if kubectl --context=$(MINIKUBE_PROFILE) -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1; then \
-			CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/provision-gfs-db.sh; \
+			CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/wait-gfsc-secret-references.sh; \
+			CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/reconcile-gfs-deploy-credentials.sh; \
 		else \
 			echo "[minikube-deploy-all] control-api not Ready — gfs DSN provisioning DEFERRED to full-setup/pre-gate-sync ordering (gfsc stays fail-closed until then)"; \
 		fi; \
@@ -663,21 +676,17 @@ minikube-logs: ## Show logs for a service (usage: make minikube-logs SVC=control
 
 .PHONY: minikube-db-reset
 minikube-db-reset: ## Reset control-api postgres (re-enables first-time admin setup)
-	@echo "Scaling down control-api and postgres..."
-	@$(KC) scale deploy/control-api --replicas=0 -n control-plane
-	@$(KC) scale deploy/control-postgres --replicas=0 -n control-plane
-	@echo "Waiting for pods to terminate..."
-	@sleep 6
-	@$(KC) delete pvc control-postgres-data -n control-plane --ignore-not-found --wait=true
-	@echo "Cleaning up Released PVs..."
-	@$(KC) get pv --no-headers 2>/dev/null | grep 'control-postgres' | awk '{print $$1}' | xargs -r $(KC) delete pv 2>/dev/null || true
-	@$(KC) apply -f deploy/base/control-plane/control-postgres.yaml
+	@if [ -z "$(CONTROL_DB_RESET_PVC_UID)" ]; then echo "ERROR: CONTROL_DB_RESET_PVC_UID=<approved UID|none> is required"; exit 1; fi
+	@reset_args="--expected-pvc-uid $(CONTROL_DB_RESET_PVC_UID)"; \
+	 if [ "$(CONTROL_DB_RESET_PVC_UID)" = "none" ]; then reset_args="--expect-no-pvc"; fi; \
+	 if [ "$(CONTROL_DB_RESET_RESUME)" = "true" ]; then reset_args="$$reset_args --resume"; fi; \
+	 CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/reset-control-db-storage.sh $$reset_args
+	@$(KC) apply -k deploy/overlays/minikube -l app=control-postgres
 	@echo "Scaling up postgres..."
 	@$(KC) scale deploy/control-postgres --replicas=1 -n control-plane
 	@$(KC) wait --for=condition=Available deploy/control-postgres -n control-plane --timeout=90s
-	@echo "Scaling up control-api..."
-	@$(KC) scale deploy/control-api --replicas=1 -n control-plane
-	@$(KC) wait --for=condition=Available deploy/control-api -n control-plane --timeout=90s
+	@CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/converge-control-db-after-reset.sh \
+	  --overlay deploy/overlays/minikube --job-name control-api-db-migrate-reset
 	@echo "DB reset complete. First-time admin setup is available again."
 
 .PHONY: minikube-seed-test-data
