@@ -9,6 +9,7 @@ control_admin_password_reset_requests	legacy_dml
 control_admin_revoked_tokens	legacy_dml
 control_admin_users	legacy_dml
 gfs_audit	legacy_dml
+gfs_blob_manifests	none
 gfs_grants	legacy_dml
 gfs_resources	legacy_dml
 gfs_shares	legacy_dml

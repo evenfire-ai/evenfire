@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -89,8 +91,10 @@ done
 # same override idiom the sibling scripts use (run-control-api-db-migration.sh,
 # scripts/e2e/seed-e2e-data.sh). A prod-looking context is hard-denied regardless.
 context_allowed_via_env() {
-  local c allowed
-  IFS=',' read -r -a allowed <<<"${ALLOWED_CONTEXTS:-}"
+  local c
+  [ -n "${ALLOWED_CONTEXTS:-}" ] || return 1
+  local -a allowed=()
+  IFS=',' read -r -a allowed <<<"${ALLOWED_CONTEXTS}"
   for c in "${allowed[@]}"; do
     [ -n "$c" ] && [ "$CONTEXT" = "$c" ] && return 0
   done
@@ -116,6 +120,71 @@ kctl() {
   kubectl --context "$CONTEXT" "$@"
 }
 
+deployment_references_secret() {
+  local deployment="$1" secret="$2" refs
+  if ! refs="$(kctl -n gfs get deployment "$deployment" -o \
+    'jsonpath={range .spec.template.spec.containers[*].env[*]}{.valueFrom.secretKeyRef.name}{"\n"}{end}' 2>&1)"; then
+    grep -qiE 'not ?found' <<<"$refs" && return 1
+    die "cannot inspect gfs/${deployment} Secret references: $refs"
+  fi
+  grep -Fxq "$secret" <<<"$refs"
+}
+
+wait_for_gfsc_secret_references() {
+  local deadline=$((SECONDS + 240))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if deployment_references_secret gfsc-writer gfs-controller-db && \
+       deployment_references_secret gfsc-reader gfs-controller-reader-db; then
+      return 0
+    fi
+    log "Waiting for HCC to publish writer/reader deployments with their dedicated Secrets"
+    sleep 5
+  done
+  kctl -n gfs get globalfilesystem gfs -o yaml || true
+  kctl -n gfs get deployments,pods -o wide || true
+  die "GFSC deployments did not adopt their dedicated Secrets before timeout"
+}
+
+wait_for_globalfilesystem_ready() {
+  local deadline=$((SECONDS + 240)) phase=""
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    phase="$(kctl -n gfs get globalfilesystem gfs -o 'jsonpath={.status.phase}' 2>/dev/null || true)"
+    if [ "$phase" = "Ready" ]; then
+      log "GlobalFileSystem/gfs is Ready"
+      return 0
+    fi
+    log "GlobalFileSystem/gfs phase=${phase:-<empty>}; waiting"
+    sleep 5
+  done
+  kctl -n gfs get globalfilesystem gfs -o yaml || true
+  kctl -n gfs get deploy,pods,pvc,svc,networkpolicy -o wide || true
+  die "GlobalFileSystem/gfs did not become Ready before timeout"
+}
+
+finalize_credentials_after_overlay() {
+  local out
+  if out="$(kctl -n gfs get globalfilesystem gfs -o name 2>&1)"; then
+    :
+  elif grep -qiE 'not ?found' <<<"$out"; then
+    log "GlobalFileSystem/gfs is not installed; leaving credentials staged for the future runtime"
+    return 0
+  else
+    die "cannot determine GlobalFileSystem/gfs presence: $out"
+  fi
+
+  log "Waiting for the post-overlay HCC rollout"
+  kctl -n control-plane rollout status deployment/host-context-controller --timeout=240s
+  wait_for_gfsc_secret_references
+
+  log "Finalizing staged GFS credentials after the overlay"
+  CONTEXT="$CONTEXT" bash "$ROOT/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+
+  log "Waiting for the exact GFSC writer and reader rollouts"
+  kctl -n gfs rollout status deployment/gfsc-writer --timeout=240s
+  kctl -n gfs rollout status deployment/gfsc-reader --timeout=240s
+  wait_for_globalfilesystem_ready
+}
+
 INSTANCES_DIR="$OVERLAY/instances"
 
 log "Checking required GFS platform resources"
@@ -131,46 +200,15 @@ else
   bash scripts/minikube/sync-auth-key.sh --context "$CONTEXT"
 fi
 
-log "Provisioning gfsc database access"
-CONTEXT="$CONTEXT" bash deploy/scripts/provision-gfs-db.sh
-
 if [ "$SKIP_INSTANCES" = "1" ]; then
-  # DB-credential heal ONLY: skip the instances apply AND the
-  # GlobalFileSystem-Ready wait below. provision-gfs-db.sh already rolled the
-  # gfsc deployments and waited for their rollout, which is exactly the
-  # surface this mode changes — entering the CR readiness gate here would
-  # couple every prod promotion to overall GFS health once the CR exists.
+  # Prod promotion does not manage CR instances here. Credential staging was
+  # already completed before overlay apply and never triggers a rollout.
   log "Skipping CRD instances apply and GlobalFileSystem readiness wait (--skip-instances)"
-  exit 0
-fi
-if [ -d "$INSTANCES_DIR" ]; then
+elif [ -d "$INSTANCES_DIR" ]; then
   log "Applying CRD instances from $INSTANCES_DIR"
   kctl apply -f "$INSTANCES_DIR"
 else
   log "No instances directory found at $INSTANCES_DIR"
-  exit 0
 fi
 
-if ! kctl -n gfs get globalfilesystem gfs >/dev/null 2>&1; then
-  log "GlobalFileSystem/gfs not present after instance apply; nothing to wait for"
-  exit 0
-fi
-
-log "Waiting for GlobalFileSystem/gfs status.phase=Ready"
-deadline=$((SECONDS + 240))
-while [ "$SECONDS" -lt "$deadline" ]; do
-  phase="$(kctl -n gfs get globalfilesystem gfs -o 'jsonpath={.status.phase}' 2>/dev/null || true)"
-  if [ "$phase" = "Ready" ]; then
-    log "GlobalFileSystem/gfs is Ready"
-    log "Waiting for gfsc writer and reader rollouts"
-    kctl -n gfs rollout status deployment/gfsc-writer --timeout=240s
-    kctl -n gfs rollout status deployment/gfsc-reader --timeout=240s
-    exit 0
-  fi
-  log "GlobalFileSystem/gfs phase=${phase:-<empty>}; waiting"
-  sleep 5
-done
-
-kctl -n gfs get globalfilesystem gfs -o yaml || true
-kctl -n gfs get deploy,pods,pvc,svc,networkpolicy -o wide || true
-die "GlobalFileSystem/gfs did not become Ready before timeout"
+finalize_credentials_after_overlay

@@ -2072,9 +2072,10 @@ async function applyUserNotificationPreferencesPreferredAccount(db: DbClient): P
 async function applyGfsPermissionStoreSchema(db: DbClient): Promise<void> {
   // Global File System (gfs) permission store — the governance plane's source
   // of truth for resource metadata, folder grants, URI-bound shares, and the
-  // append-only hash-chained audit log. File bytes live flat by resource_id in
-  // the gfsc-mounted volume; the human path is metadata here (path_cache),
-  // never mirrored on disk. There is deliberately NO tenant_id column —
+  // append-only hash-chained audit log. File bytes use opaque internal
+  // resource-generation keys in the gfsc-mounted volume; the human path is
+  // metadata here (path_cache), never mirrored on disk. There is deliberately
+  // NO tenant_id column —
   // multi-tenancy is the managed edition (P6), not the open core.
   await db.query(`
     CREATE EXTENSION IF NOT EXISTS "pgcrypto";
@@ -4759,6 +4760,270 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       `)
     },
   },
+  {
+    version: '0071_gfs_immutable_blob_generations',
+    apply: async db => {
+      await db.query(`
+        ALTER TABLE gfs_resources
+          ADD COLUMN IF NOT EXISTS blob_key TEXT NULL,
+          ADD COLUMN IF NOT EXISTS content_sha256 TEXT NULL;
+
+        DO $$ BEGIN
+          ALTER TABLE gfs_resources
+            ADD CONSTRAINT gfs_resources_blob_metadata_pair
+            CHECK ((blob_key IS NULL AND content_sha256 IS NULL)
+                OR (blob_key ~ '^[0-9a-f]{32}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    AND split_part(blob_key, '/', 1) = replace(resource_id::text, '-', '')
+                    AND content_sha256 ~ '^[0-9a-f]{64}$'));
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS gfs_resources_blob_key_uniq
+          ON gfs_resources (blob_key)
+          WHERE blob_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS gfs_blob_manifests (
+          blob_key TEXT PRIMARY KEY,
+          request_id UUID NOT NULL,
+          resource_id UUID NOT NULL,
+          candidate_kind TEXT NOT NULL DEFAULT 'generation'
+            CHECK (candidate_kind IN ('generation', 'legacy_flat')),
+          content_sha256 TEXT NULL,
+          bytes BIGINT NOT NULL CHECK (bytes >= 0),
+          state TEXT NOT NULL CHECK (state IN ('staged', 'committed', 'deleting')),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          CONSTRAINT gfs_blob_manifests_blob_key_valid CHECK (
+            (candidate_kind = 'generation'
+             AND blob_key ~ '^[0-9a-f]{32}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+             AND split_part(blob_key, '/', 1) = replace(resource_id::text, '-', '')
+             AND content_sha256 ~ '^[0-9a-f]{64}$')
+            OR
+            (candidate_kind = 'legacy_flat'
+             AND blob_key = replace(resource_id::text, '-', '')
+             AND content_sha256 IS NULL)
+          )
+        );
+
+        CREATE INDEX IF NOT EXISTS gfs_blob_manifests_cleanup_idx
+          ON gfs_blob_manifests (state, updated_at, blob_key);
+
+        DROP TRIGGER IF EXISTS gfs_resources_perm_invalidate ON gfs_resources;
+        CREATE TRIGGER gfs_resources_perm_invalidate
+          AFTER UPDATE OF parent_resource_id, name, path_cache, deleted_at
+          OR DELETE OR TRUNCATE ON gfs_resources
+          FOR EACH STATEMENT EXECUTE FUNCTION gfs_notify_perm_invalidate();
+
+        GRANT SELECT, INSERT, UPDATE, DELETE ON gfs_blob_manifests TO gfs_controller;
+        GRANT SELECT (blob_key, content_sha256) ON gfs_resources TO gfs_controller;
+      `)
+    },
+  },
+  {
+    version: '0072_gfs_reader_database_role',
+    apply: async db => {
+      await db.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gfs_controller_reader') THEN
+            CREATE ROLE gfs_controller_reader NOLOGIN;
+          END IF;
+        END
+        $$;
+
+        ALTER ROLE gfs_controller_reader
+          NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+
+        DO $$
+        DECLARE inherited_role RECORD;
+        BEGIN
+          FOR inherited_role IN
+            SELECT granted.rolname
+              FROM pg_auth_members membership
+              JOIN pg_roles granted ON granted.oid = membership.roleid
+              JOIN pg_roles member_role ON member_role.oid = membership.member
+             WHERE member_role.rolname = 'gfs_controller_reader'
+          LOOP
+            EXECUTE format('REVOKE %I FROM gfs_controller_reader', inherited_role.rolname);
+          END LOOP;
+        END
+        $$;
+
+        REVOKE ALL PRIVILEGES ON gfs_resources, gfs_grants, gfs_shares,
+          gfs_blob_manifests, gfs_audit FROM gfs_controller_reader;
+        REVOKE ALL PRIVILEGES ON SEQUENCE gfs_audit_sequence_no_seq FROM gfs_controller_reader;
+        REVOKE ALL PRIVILEGES ON control_admin_users, team_members FROM gfs_controller_reader;
+
+        GRANT SELECT ON gfs_resources, gfs_grants, gfs_shares TO gfs_controller_reader;
+        GRANT SELECT (id, status) ON control_admin_users TO gfs_controller_reader;
+        GRANT SELECT (team_id, user_id, status) ON team_members TO gfs_controller_reader;
+        GRANT INSERT ON gfs_audit TO gfs_controller_reader;
+        GRANT USAGE, SELECT ON SEQUENCE gfs_audit_sequence_no_seq TO gfs_controller_reader;
+
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON gfs_resources FROM gfs_controller_reader;
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON gfs_grants FROM gfs_controller_reader;
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON gfs_shares FROM gfs_controller_reader;
+        REVOKE ALL PRIVILEGES ON gfs_blob_manifests FROM gfs_controller_reader;
+        REVOKE UPDATE, DELETE, TRUNCATE ON gfs_audit FROM gfs_controller_reader;
+      `)
+    },
+  },
+  {
+    version: '0073_gfs_audit_decision_evidence',
+    apply: async db => {
+      await db.query(`
+        ALTER TABLE gfs_audit
+          ADD COLUMN IF NOT EXISTS record_type TEXT NOT NULL DEFAULT 'legacy',
+          ADD COLUMN IF NOT EXISTS matched_subject TEXT NULL,
+          ADD COLUMN IF NOT EXISTS authorization_source TEXT NULL,
+          ADD COLUMN IF NOT EXISTS cached_authorization_source TEXT NULL,
+          ADD COLUMN IF NOT EXISTS mutation_outcome TEXT NULL;
+
+        DO $$ BEGIN
+          ALTER TABLE gfs_audit
+            ADD CONSTRAINT gfs_audit_record_type_valid
+            CHECK (record_type IN ('legacy', 'authorization_decision', 'mutation_outcome'));
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        DO $$ BEGIN
+          ALTER TABLE gfs_audit
+            ADD CONSTRAINT gfs_audit_authorization_source_valid
+            CHECK (authorization_source IS NULL OR authorization_source IN (
+              'direct_grant', 'inherited_grant', 'direct_share',
+              'inherited_share', 'operator', 'cache'
+            ));
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        DO $$ BEGIN
+          ALTER TABLE gfs_audit
+            ADD CONSTRAINT gfs_audit_cached_authorization_source_valid
+            CHECK (
+              (authorization_source = 'cache'
+                AND cached_authorization_source IS NOT NULL
+                AND cached_authorization_source IN (
+                  'direct_grant', 'inherited_grant', 'direct_share',
+                  'inherited_share', 'operator'
+                ))
+              OR
+              (authorization_source IS DISTINCT FROM 'cache'
+                AND cached_authorization_source IS NULL)
+            );
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        DO $$ BEGIN
+          ALTER TABLE gfs_audit
+            ADD CONSTRAINT gfs_audit_mutation_outcome_valid
+            CHECK (mutation_outcome IS NULL OR mutation_outcome IN ('succeeded', 'failed'));
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        DO $$ BEGIN
+          ALTER TABLE gfs_audit
+            ADD CONSTRAINT gfs_audit_record_type_fields_valid
+            CHECK (
+              (record_type = 'legacy' AND mutation_outcome IS NULL)
+              OR
+              (record_type = 'authorization_decision' AND mutation_outcome IS NULL)
+              OR
+              (record_type = 'mutation_outcome' AND mutation_outcome IS NOT NULL)
+            );
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+
+        GRANT INSERT ON gfs_audit TO gfs_controller, gfs_controller_reader;
+        GRANT USAGE, SELECT ON SEQUENCE gfs_audit_sequence_no_seq
+          TO gfs_controller, gfs_controller_reader;
+        REVOKE UPDATE, DELETE, TRUNCATE ON gfs_audit
+          FROM gfs_controller, gfs_controller_reader;
+      `)
+    },
+  },
+  {
+    version: '0074_gfs_runtime_role_exact_contract',
+    apply: async db => {
+      await db.query(`
+        -- Reconcile existing clusters without changing credential state.
+        -- Deploy provisioning remains the sole credential-state owner.
+        ALTER ROLE gfs_controller
+          NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+        ALTER ROLE gfs_controller_reader
+          NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+
+        DO $$
+        DECLARE runtime_role TEXT;
+        DECLARE inherited_role RECORD;
+        BEGIN
+          FOREACH runtime_role IN ARRAY ARRAY['gfs_controller', 'gfs_controller_reader']
+          LOOP
+            FOR inherited_role IN
+              SELECT granted.rolname
+                FROM pg_auth_members membership
+                JOIN pg_roles granted ON granted.oid = membership.roleid
+                JOIN pg_roles member_role ON member_role.oid = membership.member
+               WHERE member_role.rolname = runtime_role
+            LOOP
+              EXECUTE format('REVOKE %I FROM %I', inherited_role.rolname, runtime_role);
+            END LOOP;
+          END LOOP;
+        END
+        $$;
+
+        -- Table-level REVOKE does not erase column ACLs in PostgreSQL. Clear
+        -- every column privilege explicitly before rebuilding the envelope.
+        DO $$
+        DECLARE protected_column RECORD;
+        BEGIN
+          FOR protected_column IN
+            SELECT table_name, column_name
+              FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = ANY(ARRAY[
+                 'gfs_resources', 'gfs_grants', 'gfs_shares',
+                 'gfs_blob_manifests', 'gfs_audit',
+                 'control_admin_users', 'team_members'
+               ])
+          LOOP
+            EXECUTE format(
+              'REVOKE SELECT (%1$I), INSERT (%1$I), UPDATE (%1$I), REFERENCES (%1$I) ON TABLE %2$I FROM gfs_controller, gfs_controller_reader, PUBLIC',
+              protected_column.column_name,
+              protected_column.table_name
+            );
+          END LOOP;
+        END
+        $$;
+
+        -- Remove historical or manually-added grants before rebuilding the
+        -- exact writer and reader envelopes. PUBLIC receives no GFS access.
+        REVOKE ALL PRIVILEGES ON gfs_resources, gfs_grants, gfs_shares,
+          gfs_blob_manifests, gfs_audit FROM gfs_controller, gfs_controller_reader, PUBLIC;
+        REVOKE ALL PRIVILEGES ON SEQUENCE gfs_audit_sequence_no_seq
+          FROM gfs_controller, gfs_controller_reader, PUBLIC;
+        REVOKE ALL PRIVILEGES ON control_admin_users, team_members
+          FROM gfs_controller, gfs_controller_reader;
+        REVOKE SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON control_admin_users, team_members
+          FROM PUBLIC;
+
+        GRANT SELECT, INSERT, UPDATE ON gfs_resources TO gfs_controller;
+        GRANT SELECT ON gfs_grants, gfs_shares TO gfs_controller;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON gfs_blob_manifests TO gfs_controller;
+        GRANT INSERT ON gfs_audit TO gfs_controller;
+        GRANT USAGE, SELECT ON SEQUENCE gfs_audit_sequence_no_seq TO gfs_controller;
+
+        GRANT SELECT ON gfs_resources, gfs_grants, gfs_shares TO gfs_controller_reader;
+        GRANT INSERT ON gfs_audit TO gfs_controller_reader;
+        GRANT USAGE, SELECT ON SEQUENCE gfs_audit_sequence_no_seq TO gfs_controller_reader;
+
+        -- Subject resolution is deliberately column-scoped for both roles.
+        GRANT SELECT (id, status) ON control_admin_users
+          TO gfs_controller, gfs_controller_reader;
+        GRANT SELECT (team_id, user_id, status) ON team_members
+          TO gfs_controller, gfs_controller_reader;
+      `)
+    },
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -4951,15 +5216,28 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
 
 export async function withTransaction<T>(work: (db: DbClient) => Promise<T>): Promise<T> {
   const client = (await pool.connect()) as PoolClient
+  let transactionStarted = false
+  let commitSent = false
+  let releaseError: Error | boolean | undefined
   try {
     await client.query('BEGIN')
+    transactionStarted = true
     const result = await work(client)
+    commitSent = true
     await client.query('COMMIT')
     return result
   } catch (error) {
-    await client.query('ROLLBACK')
+    if (commitSent || !transactionStarted) {
+      releaseError = error instanceof Error ? error : true
+    } else {
+      try {
+        await client.query('ROLLBACK')
+      } catch (rollbackError) {
+        releaseError = rollbackError instanceof Error ? rollbackError : true
+      }
+    }
     throw error
   } finally {
-    client.release()
+    client.release(releaseError)
   }
 }

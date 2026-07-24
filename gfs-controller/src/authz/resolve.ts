@@ -57,37 +57,81 @@ export interface Decision {
    * short-TTL decision cache (so the audit row records the cache hit honestly).
    */
   via: "operator" | "grant" | "share" | "cache" | null;
+  /** Canonical subject key that matched the effective grant/share. */
+  matchedSubject: string | null;
+  /**
+   * Effective authority behind the decision. Cache hits retain this underlying
+   * source while `via` reports that the result was served from cache.
+   */
+  authorizationSource:
+    | "operator"
+    | "direct_grant"
+    | "inherited_grant"
+    | "direct_share"
+    | "inherited_share"
+    | null;
 }
 
 export function resolveDecision(input: DecisionInput): Decision {
   // 1. Intrinsic operator authority — the root of trust, no grant required.
   if (input.isOperator) {
-    return { allowed: true, via: "operator" };
+    return {
+      allowed: true,
+      via: "operator",
+      matchedSubject: input.subjects.has("operator:") ? "operator:" : null,
+      authorizationSource: "operator",
+    };
   }
 
   const ancestorSet = new Set(input.ancestors);
+  const matchingGrants = input.grants
+    .filter((grant) => input.subjects.has(grant.subjectKey) && grant.permissions.includes(input.op))
+    .sort((a, b) => a.subjectKey.localeCompare(b.subjectKey) || a.resourceId.localeCompare(b.resourceId));
 
   // 2. Folder grant: on R itself (always), or on an ancestor ONLY if inherit.
-  for (const grant of input.grants) {
-    if (!input.subjects.has(grant.subjectKey) || !grant.permissions.includes(input.op)) continue;
-    if (grant.resourceId === input.resourceId) {
-      return { allowed: true, via: "grant" };
-    }
+  const directGrant = matchingGrants.find((grant) => grant.resourceId === input.resourceId);
+  if (directGrant) {
+    return {
+      allowed: true,
+      via: "grant",
+      matchedSubject: directGrant.subjectKey,
+      authorizationSource: "direct_grant",
+    };
+  }
+  for (const grant of matchingGrants) {
     if (grant.inherit && ancestorSet.has(grant.resourceId)) {
-      return { allowed: true, via: "grant" };
+      return {
+        allowed: true,
+        via: "grant",
+        matchedSubject: grant.subjectKey,
+        authorizationSource: "inherited_grant",
+      };
     }
   }
 
   // 3. URI share: on R itself, or on an ancestor with includeDescendants.
-  for (const share of input.shares) {
-    if (!input.subjects.has(share.subjectKey) || !share.permissions.includes(input.op)) continue;
-    if (share.resourceId === input.resourceId) {
-      return { allowed: true, via: "share" };
-    }
+  const matchingShares = input.shares
+    .filter((share) => input.subjects.has(share.subjectKey) && share.permissions.includes(input.op))
+    .sort((a, b) => a.subjectKey.localeCompare(b.subjectKey) || a.resourceId.localeCompare(b.resourceId));
+  const directShare = matchingShares.find((share) => share.resourceId === input.resourceId);
+  if (directShare) {
+    return {
+      allowed: true,
+      via: "share",
+      matchedSubject: directShare.subjectKey,
+      authorizationSource: "direct_share",
+    };
+  }
+  for (const share of matchingShares) {
     if (share.includeDescendants && ancestorSet.has(share.resourceId)) {
-      return { allowed: true, via: "share" };
+      return {
+        allowed: true,
+        via: "share",
+        matchedSubject: share.subjectKey,
+        authorizationSource: "inherited_share",
+      };
     }
   }
 
-  return { allowed: false, via: null };
+  return { allowed: false, via: null, matchedSubject: null, authorizationSource: null };
 }

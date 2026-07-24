@@ -1,4 +1,6 @@
 import { config } from './config'
+import { GFS_HOST_SCOPES } from './gfsHostPolicy'
+import { makeExpectedHostGfsSubject } from './gfsHostSubject'
 import { signInternalControlJwt } from './utils/internalControlSigner'
 
 /**
@@ -6,12 +8,13 @@ import { signInternalControlJwt } from './utils/internalControlSigner'
  * P3-S02). HCC asks control-api (the sole gfs token minter) for a host token and
  * mounts it on the Host's mcp-host pod.
  *
- * Each HCC-provisioned Host keeps its Kubernetes identity in the GFS subject.
+ * The Host's trusted Kubernetes namespace/name is the durable GFS principal.
  * For example, the `mcp-host/chatllm` Host receives
  * `host:1st:mcp-host/chatllm`; another Host is never authorized through the
- * same binding. The token ceiling permits the Control UI's supported Host
- * operations, read and write; resource grants still decide which concrete
- * resources the Host may access.
+ * same binding, and HCC validates that control-api returns that exact subject
+ * before exposing the credential to Kubernetes. The token ceiling permits the
+ * Control UI's supported Host operations, read and write; resource grants
+ * still decide which concrete resources the Host may access.
  */
 
 export interface GfsHostToken {
@@ -35,7 +38,9 @@ export interface GfsFirstPartyHostRef {
 
 export const GFS_HOST_TOKEN_REQUEST_TIMEOUT_MS = 10_000
 export const GFS_HOST_TOKEN_REQUEST_TIMEOUT_CODE = 'HCC_GFS_HOST_TOKEN_REQUEST_TIMEOUT'
-const GFS_HOST_TOKEN_SCOPES = ['gfs.read', 'gfs.write'] as const
+// Single source of truth: the capability ceiling shared with the reconciler's
+// drift metadata. Managed agents are never granted anything beyond read+write.
+const GFS_HOST_TOKEN_SCOPES = GFS_HOST_SCOPES
 
 function validateIssuedTokenClaims(
   token: unknown,
@@ -68,11 +73,14 @@ function validateIssuedTokenClaims(
     )
   }
 
+  // Compare as a set: the ceiling is exactly these scopes, but a benign
+  // ordering change in control-api's scope handling must not brick every
+  // Host reconcile fleet-wide.
   const scopes = payload.scopes
   if (
     !Array.isArray(scopes) ||
     scopes.length !== GFS_HOST_TOKEN_SCOPES.length ||
-    !GFS_HOST_TOKEN_SCOPES.every((scope, index) => scopes[index] === scope)
+    !GFS_HOST_TOKEN_SCOPES.every(scope => scopes.includes(scope))
   ) {
     throw new Error(
       `gfs host token claim scopes mismatch: expected ${JSON.stringify(GFS_HOST_TOKEN_SCOPES)}`
@@ -95,6 +103,13 @@ export class GfsHostTokenMintTimeoutError extends Error {
   }
 }
 
+export class GfsHostTokenValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'GfsHostTokenValidationError'
+  }
+}
+
 /**
  * Mint a 1st-party host gfs token via control-api's provisioner route. Fails
  * loud on any non-2xx — a host without a working gfs token must surface, never
@@ -104,11 +119,14 @@ export async function mintHostGfsToken(
   host: GfsFirstPartyHostRef,
   deps: GfsHostBindingDeps = {}
 ): Promise<GfsHostToken> {
+  const expectedSubject = makeExpectedHostGfsSubject(host.namespace, host.name)
+  if (!expectedSubject) {
+    throw new Error('gfs host token mint requires a trusted Kubernetes namespace and name')
+  }
   const baseUrl = deps.controlApiBaseUrl ?? config.controlApiBaseUrl
   const sign = deps.signToken ?? signInternalControlJwt
   const doFetch = deps.fetchFn ?? fetch
   const url = `${baseUrl}/api/v1/auth/gfs/${encodeURIComponent(host.name)}/tokens`
-  const expectedSubject = `host:1st:${host.namespace}/${host.name}`
   const timeoutError = new GfsHostTokenMintTimeoutError(GFS_HOST_TOKEN_REQUEST_TIMEOUT_MS)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(timeoutError), GFS_HOST_TOKEN_REQUEST_TIMEOUT_MS)
@@ -123,7 +141,7 @@ export async function mintHostGfsToken(
       },
       body: JSON.stringify({
         namespace: host.namespace,
-        scopes: GFS_HOST_TOKEN_SCOPES,
+        scopes: [...GFS_HOST_TOKEN_SCOPES],
       }),
       signal: controller.signal,
     })
@@ -131,15 +149,24 @@ export async function mintHostGfsToken(
     if (!response.ok) {
       throw new Error(`gfs host token mint failed: HTTP ${response.status}`)
     }
-    const body = (await response.json()) as GfsHostToken
+    const body = (await response.json()) as Partial<GfsHostToken>
     if (controller.signal.aborted) throw timeoutError
+    if (
+      typeof body.token !== 'string' ||
+      body.token.length === 0 ||
+      !Number.isSafeInteger(body.expiresInSeconds) ||
+      (body.expiresInSeconds ?? 0) <= 0 ||
+      typeof body.subject !== 'string'
+    ) {
+      throw new GfsHostTokenValidationError('gfs host token mint returned a malformed response')
+    }
     if (body.subject !== expectedSubject) {
-      throw new Error(
+      throw new GfsHostTokenValidationError(
         `gfs host token subject mismatch: expected ${expectedSubject}, received ${body.subject}`
       )
     }
     validateIssuedTokenClaims(body.token, expectedSubject)
-    return body
+    return body as GfsHostToken
   } catch (error) {
     if (error instanceof GfsHostTokenMintTimeoutError) throw error
     if (controller.signal.aborted) {

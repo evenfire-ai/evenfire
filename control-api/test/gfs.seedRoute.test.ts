@@ -5,6 +5,7 @@ import { seedRootDirectoriesToHttp } from '../src/routes/gfs/seed.js'
 class FakeStore implements SeedResourceStore {
   calls: { drive: string; parentResourceId: string | null; name: string }[] = []
   private seq = 0
+  async acquireStructureLock(): Promise<void> {}
   async ensureDirectory(input: {
     drive: string
     parentResourceId: string | null
@@ -37,6 +38,16 @@ describe('seedRootDirectoriesToHttp', () => {
         .status
     ).toBe(400)
   })
+
+  it.each(['relative', '/org//x', '/org/', '/./x', '/../x', '/e\u0301'])(
+    '400 invalid_rootDirectories for non-canonical path %j',
+    async path => {
+      const store = new FakeStore()
+      const out = await seedRootDirectoriesToHttp(store, { drive: 'main', rootDirectories: [path] })
+      expect(out).toEqual({ status: 400, body: { error: 'invalid_rootDirectories' } })
+      expect(store.calls).toEqual([])
+    }
+  )
 
   it('200 + seeds the root and the requested directories', async () => {
     const store = new FakeStore()

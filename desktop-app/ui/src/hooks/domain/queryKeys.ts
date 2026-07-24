@@ -4,6 +4,7 @@ export const desktopQueryKeys = {
   mcpServersPreview: (hostRefs: string[]) =>
     ['desktop-app', 'mcp-servers-preview', ...hostRefs] as const,
   teamsDirectory: ['desktop-app', 'teams-directory'] as const,
+  myAgents: ['desktop-app', 'my-agents'] as const,
   workflows: ['desktop-app', 'workflows'] as const,
   workflowSelection: ['desktop-app', 'workflow-selection'] as const,
   workflowDetail: (namespace: string, name: string) =>

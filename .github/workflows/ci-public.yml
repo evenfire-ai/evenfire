@@ -114,13 +114,19 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit
 
-  # ─── control-api real-Postgres migration ─────────────────────────────────
-  # Runs the DB migration against a real Postgres 16 — catches the exact class
-  # of failure (a config/env gap surfacing at migration time) that otherwise
+  # ─── real-Postgres integration suites ─────────────────────────────────────
+  # Runs EVERY *.realPostgres.integration suite against a real Postgres 16: the
+  # DB migration plus the GFS reader-role / blob-migration / blob-reconciler /
+  # audit-evidence / copy / readiness / structural-integrity suites in
+  # control-api, and the rename-publication concurrency suite in gfs-controller.
+  # All of them are gated on CONTROL_API_REAL_PG_ADMIN_URL and SKIP when it is
+  # unset, so the matrix `npm test` never exercises them — this job is the only
+  # place they actually run. Catches the exact class of failure (a config/env or
+  # role/credential gap surfacing at migration or query time) that otherwise
   # only appears at deploy. Runs unconditionally in the public repo (no
   # paths-filter): correctness over CI minutes on a low-volume repo.
   control-api-migration:
-    name: Control API migration (Postgres 16)
+    name: Real Postgres integration (Postgres 16)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -156,11 +162,27 @@ jobs:
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
-      - name: Run real Postgres migration integration
+      - name: Run control-api real Postgres suites (migration + GFS)
         working-directory: control-api
         env:
           CONTROL_API_REAL_PG_ADMIN_URL: postgresql://postgres@127.0.0.1:15433/postgres
-        run: npm test -- --run test/db.realPostgresMigration.integration.test.ts
+        # The `realPostgres` filter matches all 8 *.realPostgres.integration
+        # suites: the DB migration plus the 7 GFS suites (reader role, blob
+        # migration, blob reconciler, audit evidence, copy, readiness, structural
+        # integrity). The matrix `npm test` skips them for lack of the admin URL.
+        run: npm test -- --run realPostgres
+
+      - name: Install gfs-controller dependencies
+        working-directory: gfs-controller
+        run: npm ci
+
+      - name: Run gfs-controller real Postgres suites
+        working-directory: gfs-controller
+        env:
+          CONTROL_API_REAL_PG_ADMIN_URL: postgresql://postgres@127.0.0.1:15433/postgres
+        # rename-publication concurrency suite — also admin-URL-gated, so the
+        # gfs-controller matrix entry skips it.
+        run: npm test -- --run realPostgres
 
   # ─── control-ui build check ──────────────────────────────────────────────
   # control-ui is intentionally NOT in the build/test matrix: its vitest suite
