@@ -115,6 +115,7 @@ export default function UserDetailsPage() {
   const [selectedContextIdsToAdd, setSelectedContextIdsToAdd] = useState<string[]>([])
   const [hosts, setHosts] = useState<HostResource[]>([])
   const [assignedAgentNames, setAssignedAgentNames] = useState<string[]>([])
+  const [observedAgentNames, setObservedAgentNames] = useState<string[]>([])
   const [selectedAgentNamesToAdd, setSelectedAgentNamesToAdd] = useState<string[]>([])
   const [communicationChannels, setCommunicationChannels] = useState<CommunicationChannelItem[]>([])
 
@@ -265,7 +266,8 @@ export default function UserDetailsPage() {
       )
       const agentPartition = partitionVisibleAccess(
         Array.isArray(userAgentAccess.agentNames) ? userAgentAccess.agentNames : [],
-        hostNames
+        hostNames,
+        Array.isArray(userAgentAccess.deletedAgentNames) ? userAgentAccess.deletedAgentNames : []
       )
       setAssignedContextIds(contextPartition.active)
       setDeletedContextIds(contextPartition.deleted)
@@ -273,6 +275,10 @@ export default function UserDetailsPage() {
       setUserTeams(Array.isArray(userTeamsData.items) ? userTeamsData.items : [])
       setHosts(Array.isArray(hostsData.items) ? hostsData.items : [])
       setAssignedAgentNames(agentPartition.active)
+      setObservedAgentNames([
+        ...(userAgentAccess.agentNames || []),
+        ...(userAgentAccess.deletedAgentNames || []),
+      ])
       setCommunicationChannels(communicationChannelsData.items || [])
       setAvailableContextIds(ids)
     } catch (e) {
@@ -431,9 +437,14 @@ export default function UserDetailsPage() {
     setError('')
     try {
       const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
-      const updated = await updateAdminUserAgents(userId, normalized)
-      const partition = partitionVisibleAccess(updated.agentNames || [], hostNameOptions)
+      const updated = await updateAdminUserAgents(userId, normalized, observedAgentNames)
+      const partition = partitionVisibleAccess(
+        updated.agentNames || [],
+        hostNameOptions,
+        updated.deletedAgentNames || []
+      )
       setAssignedAgentNames(partition.active)
+      setObservedAgentNames([...(updated.agentNames || []), ...(updated.deletedAgentNames || [])])
       setSelectedAgentNamesToAdd([])
       showToast(message, { tone: 'success' })
     } catch (e) {

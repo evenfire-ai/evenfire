@@ -541,7 +541,10 @@ export default function HostDetailsPage() {
             const nextAgentNames = Array.from(
               new Set(previousAgentNames.map(name => (name === routeName ? nextHostName : name)))
             )
-            await updateAdminUserAgents(user.id, nextAgentNames)
+            await updateAdminUserAgents(user.id, nextAgentNames, [
+              ...(userAccess.agentNames || []),
+              ...(userAccess.deletedAgentNames || []),
+            ])
           }
 
           for (const team of teamsWithAccess) {
@@ -554,7 +557,10 @@ export default function HostDetailsPage() {
             const nextAgentNames = Array.from(
               new Set(previousAgentNames.map(name => (name === routeName ? nextHostName : name)))
             )
-            await updateAdminTeamAgents(team.id, nextAgentNames)
+            await updateAdminTeamAgents(team.id, nextAgentNames, [
+              ...(teamAccess.agentNames || []),
+              ...(teamAccess.deletedAgentNames || []),
+            ])
           }
 
           await apiSend('DELETE', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`)
@@ -568,7 +574,11 @@ export default function HostDetailsPage() {
               previousTeamAgentNamesById.entries()
             ).reverse()) {
               try {
-                await updateAdminTeamAgents(teamId, previousAgentNames)
+                const current = await getAdminTeamAgents(teamId)
+                await updateAdminTeamAgents(teamId, previousAgentNames, [
+                  ...(current.agentNames || []),
+                  ...(current.deletedAgentNames || []),
+                ])
               } catch (rollbackError) {
                 const rollbackMessage =
                   rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
@@ -579,7 +589,11 @@ export default function HostDetailsPage() {
               previousUserAgentNamesById.entries()
             ).reverse()) {
               try {
-                await updateAdminUserAgents(userId, previousAgentNames)
+                const current = await getAdminUserAgents(userId)
+                await updateAdminUserAgents(userId, previousAgentNames, [
+                  ...(current.agentNames || []),
+                  ...(current.deletedAgentNames || []),
+                ])
               } catch (rollbackError) {
                 const rollbackMessage =
                   rollbackError instanceof Error ? rollbackError.message : 'unknown rollback error'
@@ -705,7 +719,10 @@ export default function HostDetailsPage() {
         selectedUserIdsToGrant.map(async userId => {
           const current = await getAdminUserAgents(userId)
           const next = Array.from(new Set([...(current.agentNames || []), routeName]))
-          await updateAdminUserAgents(userId, next)
+          await updateAdminUserAgents(userId, next, [
+            ...(current.agentNames || []),
+            ...(current.deletedAgentNames || []),
+          ])
         })
       )
       const grantedUserIds = selectedUserIdsToGrant
@@ -742,7 +759,10 @@ export default function HostDetailsPage() {
     try {
       const current = await getAdminUserAgents(userId)
       const next = (current.agentNames || []).filter(name => name !== routeName)
-      await updateAdminUserAgents(userId, next)
+      await updateAdminUserAgents(userId, next, [
+        ...(current.agentNames || []),
+        ...(current.deletedAgentNames || []),
+      ])
       const removedUser = usersWithAccess.find(u => u.id === userId)
       setUsersWithAccess(prev => prev.filter(u => u.id !== userId))
       showToast(
@@ -765,7 +785,10 @@ export default function HostDetailsPage() {
         selectedTeamIdsToGrant.map(async teamId => {
           const current = await getAdminTeamAgents(teamId)
           const next = Array.from(new Set([...(current.agentNames || []), routeName]))
-          await updateAdminTeamAgents(teamId, next)
+          await updateAdminTeamAgents(teamId, next, [
+            ...(current.agentNames || []),
+            ...(current.deletedAgentNames || []),
+          ])
         })
       )
       const grantedTeamIds = selectedTeamIdsToGrant
@@ -802,7 +825,10 @@ export default function HostDetailsPage() {
     try {
       const current = await getAdminTeamAgents(teamId)
       const next = (current.agentNames || []).filter(name => name !== routeName)
-      await updateAdminTeamAgents(teamId, next)
+      await updateAdminTeamAgents(teamId, next, [
+        ...(current.agentNames || []),
+        ...(current.deletedAgentNames || []),
+      ])
       const removedTeam = teamsWithAccess.find(t => t.id === teamId)
       setTeamsWithAccess(prev => prev.filter(team => team.id !== teamId))
       showToast(`${removedTeam?.name || teamId} can no longer use this agent.`, {

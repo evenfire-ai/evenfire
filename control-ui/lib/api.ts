@@ -815,10 +815,14 @@ export type TeamContextAccess = {
 export type UserAgentAccess = {
   userId: string
   agentNames: string[]
+  deletedAgentNames: string[]
+  deletedHistoryLimit: number
 }
 export type TeamAgentAccess = {
   teamId: string
   agentNames: string[]
+  deletedAgentNames: string[]
+  deletedHistoryLimit: number
 }
 export type TeamMember = {
   id: string
@@ -1800,9 +1804,14 @@ export async function getAdminUserAgents(userId: string) {
   ) as Promise<UserAgentAccess>
 }
 
-export async function updateAdminUserAgents(userId: string, agentNames: string[]) {
+export async function updateAdminUserAgents(
+  userId: string,
+  agentNames: string[],
+  expectedCurrentAgentNames: string[]
+) {
   return apiSend('PUT', `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`, {
     agentNames,
+    expectedCurrentAgentNames,
   }) as Promise<UserAgentAccess>
 }
 
@@ -1842,9 +1851,14 @@ export async function getAdminTeamAgents(teamId: string) {
   ) as Promise<TeamAgentAccess>
 }
 
-export async function updateAdminTeamAgents(teamId: string, agentNames: string[]) {
+export async function updateAdminTeamAgents(
+  teamId: string,
+  agentNames: string[],
+  expectedCurrentAgentNames: string[]
+) {
   return apiSend('PUT', `/api/v1/admin/teams/${encodeURIComponent(teamId)}/agents`, {
     agentNames,
+    expectedCurrentAgentNames,
   }) as Promise<TeamAgentAccess>
 }
 
