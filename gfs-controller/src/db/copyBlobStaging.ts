@@ -54,11 +54,25 @@ export async function stageCopiedBlob(
     bytes: input.expectedBytes,
   }, budget);
   let physicalCandidateOwned = false;
+  // For a legacy_flat source we own the reopened stream. writeImmutable's
+  // pipeline() destroys its input once reached, but a throw BEFORE pipeline —
+  // the checkDeadline() below, or writeImmutable's own parent/symlink/O_EXCL
+  // guards and deadline checks firing before it pipes — would otherwise leak the
+  // reopened file descriptor. Generation streams stay owned by the caller
+  // (copyPublication destroys them), so only the reopened legacy stream is
+  // tracked here for destruction on error. destroy() is idempotent.
+  let ownedLegacyStream: Readable | undefined;
   try {
     checkDeadline();
     // Legacy rows have no committed digest. Their preflight must hash and close
     // one stream, then provide this explicit reopen callback for the copy pass.
-    const stream = input.source.kind === "generation" ? input.source.stream : await input.source.reopen();
+    let stream: Readable;
+    if (input.source.kind === "generation") {
+      stream = input.source.stream;
+    } else {
+      stream = await input.source.reopen();
+      ownedLegacyStream = stream;
+    }
     checkDeadline();
     const options = { signal: input.signal, checkDeadline };
     const written = await blobs.writeImmutable(input.destinationResourceId, input.generation, stream, options);
@@ -73,6 +87,9 @@ export async function stageCopiedBlob(
     await blobs.verify(blobKey, input.expectedBytes, input.expectedSha256, options);
     return written;
   } catch (err) {
+    // Destroy the reopened legacy stream if writeImmutable threw before its
+    // pipeline() consumed it; otherwise the reopened fd leaks. No-op once piped.
+    ownedLegacyStream?.destroy();
     // Reopen and write failures occur before ownership is established. Keep
     // the staged manifest for reconciliation rather than deleting a key that
     // may already belong to a committed request.
