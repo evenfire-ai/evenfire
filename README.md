@@ -3,7 +3,7 @@
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/assets/evenfire-logo-light.svg">
       <source media="(prefers-color-scheme: light)" srcset="docs/assets/evenfire-logo-dark.svg">
-      <img alt="evenfire" src="docs/assets/evenfire-logo-dark.svg" width="300">
+      <img alt="Evenfire" src="docs/assets/evenfire-logo-dark.svg" width="300">
     </picture>
   </a>
 </p>
@@ -24,7 +24,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
+  <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is Evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
 </p>
 
 <p align="center">
@@ -60,9 +60,9 @@ The full walkthrough (prerequisites, login, and the pure-API path) is in
 
 ---
 
-## What is evenfire
+## What is Evenfire
 
-evenfire is a complete platform for running LLM agents that take **real
+Evenfire is a complete platform for running LLM agents that take **real
 actions**, on **your** infrastructure. Agents converse across the native desktop app, Telegram,
 and Slack; call tools over the [Model Context Protocol](https://modelcontextprotocol.io) (MCP); compose
 multi-step workflows; and draw on teams, shared files, and cost budgets, while
@@ -70,13 +70,13 @@ risky actions pause for human review. Every piece of the fleet (agents,
 connectors, channels, workflows, policies) is a Kubernetes custom resource, so
 your platform is version-controlled, reviewable configuration. You bring your
 own model keys, so prompts and data flow only to the model provider you choose,
-not through any evenfire service.
+not through any Evenfire service.
 
 ---
 
 ## The platform
 
-evenfire is not just an agent runtime. It is nine first-class capabilities,
+Evenfire is not just an agent runtime. It is nine first-class capabilities,
 each backed by code in this repo and declared as configuration. Each row links
 to its deep dive.
 
@@ -94,9 +94,9 @@ to its deep dive.
 
 ---
 
-## Why evenfire
+## Why Evenfire
 
-- **vs a hosted assistant**: you own the data and the infrastructure. evenfire
+- **vs a hosted assistant**: you own the data and the infrastructure. Evenfire
   adds no vendor to the request path: with your own model keys, prompts and files
   go straight to the model provider you choose. Point an agent at a self-hosted
   or local model and nothing leaves your environment at all.
@@ -232,7 +232,7 @@ Ops & platform directories:
 
 ## Status
 
-evenfire is in **beta** and under active development. The whole platform runs
+Evenfire is in **beta** and under active development. The whole platform runs
 end to end and comes up locally with one command, but some APIs and CRDs may
 still change before a 1.0 release; pin a release tag if you need stability.
 
@@ -249,5 +249,5 @@ The code uses the internal name clerum for the same project (`clerum.io` CRDs,
 - **[GOVERNANCE.md](GOVERNANCE.md)**: project governance
 - **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)**: community standards
 
-evenfire is **open source** under the [Mozilla Public License 2.0](LICENSE)
+Evenfire is **open source** under the [Mozilla Public License 2.0](LICENSE)
 (MPL-2.0), an OSI-approved, file-level copyleft license. 
