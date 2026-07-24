@@ -25,14 +25,14 @@ describe('sandbox UI deep links', () => {
 
   it('builds a browser-safe HTTPS handoff link for messaging apps', () => {
     expect(
-      buildSandboxUiWebLink('https://profile.prod.evenfire.ai', {
+      buildSandboxUiWebLink('https://profile.example.com', {
         recipeNs: 'sandbox-recipes',
         recipeName: 'agentic-task-board',
         path: '/tasks/task-42?view=detail#activity',
         teamId: 'team-123',
       })
     ).toBe(
-      'https://profile.prod.evenfire.ai/open/apps/sandbox-recipes/agentic-task-board' +
+      'https://profile.example.com/open/apps/sandbox-recipes/agentic-task-board' +
         '?path=%2Ftasks%2Ftask-42%3Fview%3Ddetail%23activity&team=team-123'
     )
   })
