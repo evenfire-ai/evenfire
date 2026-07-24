@@ -34,8 +34,9 @@ runtime and multi-channel surfaces.
    servers; unlisted servers are unreachable via default-deny NetworkPolicies.
 3. **Declarative fleet** — Hosts, channels, connectors, and workflows are
    Kubernetes CRDs (`clerum.io`). Review them like any other infra change.
-4. **Model-neutral BYOK** — four providers behind one interface (OpenAI, Claude,
-   Z.AI, Bailian); switching is a config change.
+4. **Model-neutral BYOK** — one interface across a broad, growing roster of
+   providers (see [Supported LLM providers](../../README.md#supported-llm-providers));
+   switching is a config change.
 5. **Self-hosted data path** — prompts and tool traffic stay on your
    infrastructure.
 
@@ -62,7 +63,7 @@ See [When to use evenfire](when-to-use-evenfire.md) for category-level fit.
 | agent               | `Host` CRD + `mcp-host` runtime         |
 | governed connector  | `McpServer` scoped by `Context`         |
 | plugin / workflow   | `WorkflowRecipe` (+ registry client)    |
-| model-neutral, BYOK | four providers; keys in your Secret     |
+| model-neutral, BYOK | many providers, one interface; keys in your Secret |
 | shared files        | `SharedFileSystem` + `GlobalFileSystem` |
 
 ## Next

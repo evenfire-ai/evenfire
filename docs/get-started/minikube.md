@@ -10,7 +10,8 @@ single LLM key you set in `.env`.
 ## Prerequisites
 
 Docker Desktop with **≥10 GB RAM / 6 CPUs** · `minikube` v1.30+ · `kubectl` ·
-`python3` · Node.js 24+.
+`python3` · Node.js 24+ · `git` · `make` · `ruby` (renders the control-api DB
+migration overlay; ships with macOS, `apt-get install ruby` on Debian/Ubuntu).
 
 ## Bring the platform up
 
