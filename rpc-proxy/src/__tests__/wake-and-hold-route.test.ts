@@ -42,12 +42,15 @@ vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../services/mcpProxyService.js', () => serviceMock)
 vi.mock('../services/controlApiRestService.js', () => controlApiMock)
 
+// Issue #791 §11.4: a wake-eligible finite operation carries host:wake:write in
+// addition to its operation scope (Desktop adds it; the route scope guard is
+// unchanged). Without wake capability the coordinator no longer triggers a wake.
 const VALID_CLAIMS = {
   sub: 'user-uuid-123',
   typ: 'user' as const,
   accessScope: 'team' as const,
   teamId: 'team-1',
-  scopes: ['host:message:invoke'],
+  scopes: ['host:message:invoke', 'host:wake:write'],
   hostRefs: ['chatllm'],
   jti: 'j1',
   iat: 1,
@@ -312,7 +315,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
 
 describe('task result and cancel host-down paths', () => {
   it('GET task result triggers wake on host-down and forwards after active', async () => {
-    const claims = { ...VALID_CLAIMS, scopes: ['host:message:invoke'] }
+    const claims = { ...VALID_CLAIMS, scopes: ['host:message:invoke', 'host:wake:write'] }
     authTokenMock.verifyRpcToken.mockReturnValue(claims)
     serviceMock.forwardTaskResultFromHost
       .mockRejectedValueOnce(hostDownError())

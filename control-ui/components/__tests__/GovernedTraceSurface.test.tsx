@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
+  type InfrastructureCostScopeCatalog,
   getGovernedTraceEvents,
   getInfrastructureCostScopes,
   getInfrastructureTraceCosts,
@@ -203,7 +204,7 @@ function renderSurface(detail = false) {
   )
 }
 
-function renderInfrastructureSurface(catalog = COST_SCOPE_CATALOG) {
+function renderInfrastructureSurface(catalog: InfrastructureCostScopeCatalog = COST_SCOPE_CATALOG) {
   mockGetCostScopes.mockResolvedValue(catalog)
   return render(
     <GovernedTraceSurface
@@ -455,7 +456,7 @@ describe('GovernedTraceSurface', () => {
       scopes: [
         {
           ...COST_SCOPE_CATALOG.scopes[0],
-          availableValuations: ['estimated'] as const,
+          availableValuations: ['estimated' as const],
           billingExportWatermark: null,
           billingLagHours: null,
         },

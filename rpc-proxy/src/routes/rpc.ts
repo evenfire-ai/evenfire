@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import type { Response as ExpressResponse } from 'express'
+import type { Response as ExpressResponse, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
 import { config } from '../config.js'
 import {
@@ -32,13 +32,60 @@ import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 
-/** Pre-wake host error mapping: AbortError → 504, everything else → 502. */
-function respondUpstreamUnavailable(res: ExpressResponse, error: unknown): void {
+/**
+ * Pre-wake host error mapping: AbortError → 504, everything else → 502.
+ *
+ * Guards `res.headersSent` (§11.5): this is the terminal responder that
+ * route-level outer catches invoke after a held request may already have
+ * committed a response. A second write here is the ERR_HTTP_HEADERS_SENT /
+ * duplicate-terminal-response bug, so it becomes a loud no-op instead.
+ */
+export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown): void {
+  if (res.headersSent) {
+    console.warn(
+      `[RPC_PROXY] suppressing duplicate terminal response (upstream-unavailable): ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    )
+    return
+  }
   if (error instanceof Error && error.name === 'AbortError') {
     res.status(504).json({ error: 'Gateway Timeout' })
     return
   }
   res.status(502).json({ error: 'Upstream host unavailable' })
+}
+
+/**
+ * Guards a `next(error)` handoff against a committed response (§11.5). Express
+ * routes an error to the default handler which, when headers are already sent,
+ * aborts the socket; suppress it loudly instead so a held request that already
+ * wrote its terminal response is never double-terminated.
+ */
+function guardedNext(res: ExpressResponse, next: NextFunction, error: unknown): void {
+  if (res.headersSent) {
+    console.warn(
+      `[RPC_PROXY] suppressing post-response route error: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    )
+    return
+  }
+  next(error)
+}
+
+/**
+ * A 503 carrying mcp-host's `host_draining` fence is a wake-eligible upstream
+ * error, not a client-visible failure: convert it so the finite routes below
+ * can hand it to respondWithWakeAndHold.
+ */
+function sessionDrainingFence(response: Response, body: string): Error | null {
+  if (response.status !== 503 || !body.includes('host_draining')) return null
+  return Object.assign(new Error('Upstream host returned draining fence'), {
+    name: 'UpstreamHostError',
+    status: response.status,
+    bodySnippet: body,
+  })
 }
 
 function controlApiHostAccessRejectionStatus(error: unknown): 401 | 403 | 409 | null {
@@ -49,7 +96,16 @@ function controlApiHostAccessRejectionStatus(error: unknown): 401 | 403 | 409 | 
   return status === 401 || status === 403 || status === 409 ? status : null
 }
 
-function respondControlApiHostAccessRejection(res: ExpressResponse, status: 401 | 403 | 409): void {
+export function respondControlApiHostAccessRejection(
+  res: ExpressResponse,
+  status: 401 | 403 | 409
+): void {
+  if (res.headersSent) {
+    console.warn(
+      `[RPC_PROXY] suppressing duplicate terminal response (host-access-rejection ${status})`
+    )
+    return
+  }
   if (status === 401) {
     res.status(401).json({ error: 'Unauthorized' })
     return
@@ -178,7 +234,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/messages',
     requireRpcAuth,
     requireScope('host:message:invoke'),
-    async (req: AuthedRequest, res, next) => {
+    async (req: AuthedRequest, res) => {
       // Host runtime write path (REST-oriented):
       // - separate from read-only status stream
       // - explicitly scoped to host:message:invoke
@@ -311,8 +367,8 @@ export function createRpcRouter(): Router {
               res,
               hostRef,
               host,
+              claims: auth,
               rpcAccessToken,
-              tokenExpMs: auth.exp * 1000,
               attemptUpstream: async () => {
                 const retried = await forwardHostMessageToHost(host, forwardedBody, {
                   async: isAsync,
@@ -467,15 +523,37 @@ export function createRpcRouter(): Router {
           requestId: parsed.toolCallId || parsed.requestId,
           alwaysApprove: parsed.alwaysApprove || false,
         }
-        const response = await fetch(`${baseUrl}/v1/runtime/approvals/approve`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', ...host.headers },
-          body: JSON.stringify(upstreamBody),
-        })
-        const body = await response.text()
-        res.status(response.status).send(body)
+        // Wake-eligible finite operation (§11.4): the route scope stays
+        // host:approval:write; wake capability rides on the token. A suspended
+        // (network-down) or draining Host triggers a wake-and-hold instead of a
+        // bare next(error)/passthrough.
+        const attempt = async () => {
+          const response = await fetch(`${baseUrl}/v1/runtime/approvals/approve`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...host.headers },
+            body: JSON.stringify(upstreamBody),
+          })
+          const body = await response.text()
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          res.status(response.status).send(body)
+        }
+        try {
+          await attempt()
+        } catch (error) {
+          if (!isWakeEligibleHostError(error)) throw error
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            attemptUpstream: attempt,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
+        }
       } catch (error) {
-        next(error)
+        guardedNext(res, next, error)
       }
     }
   )
@@ -510,15 +588,34 @@ export function createRpcRouter(): Router {
           userId: auth.sub,
           requestId: parsed.toolCallId || parsed.requestId,
         }
-        const response = await fetch(`${baseUrl}/v1/runtime/approvals/deny`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', ...host.headers },
-          body: JSON.stringify(upstreamBody),
-        })
-        const body = await response.text()
-        res.status(response.status).send(body)
+        // Wake-eligible finite operation (§11.4): scope stays host:approval:write.
+        const attempt = async () => {
+          const response = await fetch(`${baseUrl}/v1/runtime/approvals/deny`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...host.headers },
+            body: JSON.stringify(upstreamBody),
+          })
+          const body = await response.text()
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          res.status(response.status).send(body)
+        }
+        try {
+          await attempt()
+        } catch (error) {
+          if (!isWakeEligibleHostError(error)) throw error
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            attemptUpstream: attempt,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
+        }
       } catch (error) {
-        next(error)
+        guardedNext(res, next, error)
       }
     }
   )
@@ -552,17 +649,45 @@ export function createRpcRouter(): Router {
             upstreamUrl.searchParams.set(key, req.query[key])
           }
         }
-        const response = await fetch(upstreamUrl, {
-          method: 'GET',
-          headers: { ...host.headers },
-        })
-        const body = await response.text()
-        res
-          .status(response.status)
-          .type(response.headers.get('content-type') || 'application/json')
-          .send(body)
+        // Wake-eligible finite operation (§11.4): the route scope stays
+        // host:session:read; wake capability rides on the token. A suspended
+        // (network-down) or draining Host triggers a wake-and-hold instead of a
+        // bare next(error)/passthrough.
+        const forwardSessionList = async () => {
+          const response = await fetch(upstreamUrl, {
+            method: 'GET',
+            headers: { ...host.headers },
+          })
+          const body = await response.text()
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          res
+            .status(response.status)
+            .type(response.headers.get('content-type') || 'application/json')
+            .send(body)
+        }
+        try {
+          await forwardSessionList()
+        } catch (error) {
+          // A sanitized session boundary can also wrap local response-body
+          // failures. Wake only when its retained cause proves the host is
+          // unavailable, or when the host explicitly returned the draining
+          // fence; otherwise preserve the ordinary sanitized error path.
+          if (!isWakeEligibleHostError(error)) {
+            throw error
+          }
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            attemptUpstream: forwardSessionList,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
+        }
       } catch (error) {
-        next(error)
+        guardedNext(res, next, error)
       }
     }
   )
@@ -602,17 +727,40 @@ export function createRpcRouter(): Router {
             upstreamUrl.searchParams.set(key, req.query[key])
           }
         }
-        const response = await fetch(upstreamUrl, {
-          method: 'GET',
-          headers: { ...host.headers },
-        })
-        const body = await response.text()
-        res
-          .status(response.status)
-          .type(response.headers.get('content-type') || 'application/json')
-          .send(body)
+        // Wake-eligible finite operation (§11.4): scope stays host:session:read.
+        const forwardTranscript = async () => {
+          const response = await fetch(upstreamUrl, {
+            method: 'GET',
+            headers: { ...host.headers },
+          })
+          const body = await response.text()
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          res
+            .status(response.status)
+            .type(response.headers.get('content-type') || 'application/json')
+            .send(body)
+        }
+        try {
+          await forwardTranscript()
+        } catch (error) {
+          // See the list route above: availability recovery is deliberately
+          // narrower than the generic sanitized upstream-error boundary.
+          if (!isWakeEligibleHostError(error)) {
+            throw error
+          }
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            attemptUpstream: forwardTranscript,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
+        }
       } catch (error) {
-        next(error)
+        guardedNext(res, next, error)
       }
     }
   )
@@ -647,17 +795,36 @@ export function createRpcRouter(): Router {
         console.info(
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-context-breakdown agent=${agent} chatId=${chatId}`
         )
-        const response = await fetch(
-          `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`,
-          { method: 'GET', headers: { ...host.headers } }
-        )
-        const body = await response.text()
-        res
-          .status(response.status)
-          .type(response.headers.get('content-type') || 'application/json')
-          .send(body)
+        // Wake-eligible finite operation (§11.4): scope stays host:session:read.
+        const attempt = async () => {
+          const response = await fetch(
+            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`,
+            { method: 'GET', headers: { ...host.headers } }
+          )
+          const body = await response.text()
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          res
+            .status(response.status)
+            .type(response.headers.get('content-type') || 'application/json')
+            .send(body)
+        }
+        try {
+          await attempt()
+        } catch (error) {
+          if (!isWakeEligibleHostError(error)) throw error
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            attemptUpstream: attempt,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
+        }
       } catch (error) {
-        next(error)
+        guardedNext(res, next, error)
       }
     }
   )
@@ -692,17 +859,36 @@ export function createRpcRouter(): Router {
           ? `${baseUrl}/v1/runtime/models?chatId=${encodeURIComponent(chatId)}`
           : `${baseUrl}/v1/runtime/models`
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=list-models`)
-        const response = await fetch(upstreamUrl, {
-          method: 'GET',
-          headers: { ...host.headers },
-        })
-        const body = await response.text()
-        res
-          .status(response.status)
-          .type(response.headers.get('content-type') || 'application/json')
-          .send(body)
+        // Wake-eligible finite operation (§11.4): scope stays host:session:read.
+        const attempt = async () => {
+          const response = await fetch(upstreamUrl, {
+            method: 'GET',
+            headers: { ...host.headers },
+          })
+          const body = await response.text()
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          res
+            .status(response.status)
+            .type(response.headers.get('content-type') || 'application/json')
+            .send(body)
+        }
+        try {
+          await attempt()
+        } catch (error) {
+          if (!isWakeEligibleHostError(error)) throw error
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            attemptUpstream: attempt,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
+        }
       } catch (error) {
-        next(error)
+        guardedNext(res, next, error)
       }
     }
   )
@@ -737,18 +923,37 @@ export function createRpcRouter(): Router {
         }
         const baseUrl = host.url.replace(/\/+$/, '')
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=set-model`)
-        const response = await fetch(`${baseUrl}/v1/runtime/model`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', ...host.headers },
-          body: JSON.stringify(body),
-        })
-        const upstreamBody = await response.text()
-        res
-          .status(response.status)
-          .type(response.headers.get('content-type') || 'application/json')
-          .send(upstreamBody)
+        // Wake-eligible finite operation (§11.4): scope stays host:model:write.
+        const attempt = async () => {
+          const response = await fetch(`${baseUrl}/v1/runtime/model`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...host.headers },
+            body: JSON.stringify(body),
+          })
+          const upstreamBody = await response.text()
+          const draining = sessionDrainingFence(response, upstreamBody)
+          if (draining) throw draining
+          res
+            .status(response.status)
+            .type(response.headers.get('content-type') || 'application/json')
+            .send(upstreamBody)
+        }
+        try {
+          await attempt()
+        } catch (error) {
+          if (!isWakeEligibleHostError(error)) throw error
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            attemptUpstream: attempt,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
+        }
       } catch (error) {
-        next(error)
+        guardedNext(res, next, error)
       }
     }
   )
@@ -757,7 +962,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/tasks/:taskId/result',
     requireRpcAuth,
     requireScope('host:message:invoke'),
-    async (req: AuthedRequest, res, next) => {
+    async (req: AuthedRequest, res) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
@@ -802,8 +1007,8 @@ export function createRpcRouter(): Router {
               res,
               hostRef,
               host,
+              claims: auth,
               rpcAccessToken,
-              tokenExpMs: auth.exp * 1000,
               attemptUpstream: attemptTaskResult,
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
             })
@@ -824,7 +1029,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/tasks/:taskId/cancel',
     requireRpcAuth,
     requireScope('host:message:invoke'),
-    async (req: AuthedRequest, res, next) => {
+    async (req: AuthedRequest, res) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
@@ -873,8 +1078,8 @@ export function createRpcRouter(): Router {
               res,
               hostRef,
               host,
+              claims: auth,
               rpcAccessToken,
-              tokenExpMs: auth.exp * 1000,
               attemptUpstream: attemptCancel,
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
             })
@@ -917,13 +1122,32 @@ export function createRpcRouter(): Router {
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
-        const response = await fetch(`${baseUrl}/v1/runtime/artifacts`, {
-          headers: { ...host.headers },
-        })
-        const body = await response.text()
-        res.status(response.status).send(body)
+        // Wake-eligible finite operation (§11.4): scope stays host:task:read.
+        const attempt = async () => {
+          const response = await fetch(`${baseUrl}/v1/runtime/artifacts`, {
+            headers: { ...host.headers },
+          })
+          const body = await response.text()
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          res.status(response.status).send(body)
+        }
+        try {
+          await attempt()
+        } catch (error) {
+          if (!isWakeEligibleHostError(error)) throw error
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            attemptUpstream: attempt,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
+        }
       } catch (error) {
-        next(error)
+        guardedNext(res, next, error)
       }
     }
   )
@@ -965,36 +1189,57 @@ export function createRpcRouter(): Router {
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
-        const response = await fetch(
-          `${baseUrl}/v1/runtime/artifacts/${encodeURIComponent(filename)}/download`,
-          {
-            headers: { ...host.headers },
-          }
-        )
-        if (!response.ok) {
-          const errBody = await response.text()
-          res.status(response.status).send(errBody)
-          return
-        }
-        const contentType = response.headers.get('content-type') || 'application/octet-stream'
-        const safeFilename = filename.replace(/[^a-zA-Z0-9_.-]/g, '_')
-        const redaction = response.headers.get('x-clerum-redaction')
-        let buffer: Buffer
-        try {
-          buffer = await readArtifactResponseBuffer(response)
-        } catch (error) {
-          if (error instanceof ProxyArtifactTooLargeError) {
-            res.status(413).json({ error: 'Artifact too large to download' })
+        // Wake-eligible finite operation (§11.4): scope stays host:task:read.
+        // The success path only commits (`res.send`) at the very end, so a
+        // wake retry before that point is safe from duplicate delivery.
+        const attemptDownload = async () => {
+          const response = await fetch(
+            `${baseUrl}/v1/runtime/artifacts/${encodeURIComponent(filename)}/download`,
+            {
+              headers: { ...host.headers },
+            }
+          )
+          if (!response.ok) {
+            const errBody = await response.text()
+            const draining = sessionDrainingFence(response, errBody)
+            if (draining) throw draining
+            res.status(response.status).send(errBody)
             return
           }
-          throw error
+          const contentType = response.headers.get('content-type') || 'application/octet-stream'
+          const safeFilename = filename.replace(/[^a-zA-Z0-9_.-]/g, '_')
+          const redaction = response.headers.get('x-clerum-redaction')
+          let buffer: Buffer
+          try {
+            buffer = await readArtifactResponseBuffer(response)
+          } catch (error) {
+            if (error instanceof ProxyArtifactTooLargeError) {
+              res.status(413).json({ error: 'Artifact too large to download' })
+              return
+            }
+            throw error
+          }
+          res.setHeader('Content-Type', contentType)
+          res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`)
+          if (redaction) res.setHeader('X-Clerum-Redaction', redaction)
+          res.send(buffer)
         }
-        res.setHeader('Content-Type', contentType)
-        res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`)
-        if (redaction) res.setHeader('X-Clerum-Redaction', redaction)
-        res.send(buffer)
+        try {
+          await attemptDownload()
+        } catch (error) {
+          if (!isWakeEligibleHostError(error)) throw error
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            attemptUpstream: attemptDownload,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
+        }
       } catch (error) {
-        next(error)
+        guardedNext(res, next, error)
       }
     }
   )

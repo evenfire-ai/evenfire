@@ -211,8 +211,15 @@ export class StatelessLifecycleExecutor {
     }
     const ccCount = this.countCommunicationChannels(hostName)
     if (ccCount > 0) {
+      // Addendum 6 (operator visibility): the rejection message names both the
+      // associated channel count AND the recovery action, because control-ui
+      // renders `condition.message` verbatim in the stateless-rejection banner.
+      // The rejection is state-derived, so disassociating the channels
+      // re-enables the requested stateless lifecycle on the next reconcile.
       reasons.push(ACTIVE_COMMUNICATION_CHANNELS_REASON)
-      messages.push(`${ccCount} CommunicationChannel(s) reference this Host`)
+      messages.push(
+        `${ccCount} CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle`
+      )
     }
     return { reasons, messages }
   }

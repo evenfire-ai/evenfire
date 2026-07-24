@@ -69,21 +69,65 @@ import {
   WorkflowRunArtifactsResult,
 } from './types.js'
 
-const HOST_WAKEABLE_OPERATION_SCOPES: RpcScope[] = [
-  'host:message:invoke',
-  'host:task:read',
-  'host:wake:write',
-]
-const HOST_STATUS_SCOPES: RpcScope[] = ['host:status:read']
-const HOST_ACTIVITY_SCOPES: RpcScope[] = ['host:activity:read']
-const HOST_SESSION_SCOPES: RpcScope[] = ['host:session:read']
-// R2 model selector: reading the model list reuses the session-read scope (GET
-// /models); writing the per-session selection (POST /model) is gated by the
-// dedicated write scope only — the swap's blast radius is the caller's own
-// session, so no broader grant is needed.
-const HOST_MODEL_SCOPES: RpcScope[] = ['host:model:write']
-const HOST_ARTIFACT_SCOPES: RpcScope[] = ['host:activity:read', 'host:task:read']
-const HOST_APPROVAL_SCOPES: RpcScope[] = ['host:approval:write']
+// The single wake scope. A finite (non-streaming) Host operation carries this
+// IN ADDITION to its functional scope so a suspended stateless Host wakes
+// bounded-and-once for that operation (issue #791). control-api intersects the
+// requested scopes against the caller's grants before issuance, so requesting
+// the wake scope never widens a caller who was not granted it.
+const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
+
+/**
+ * Finite-operation scope matrix — the single source of truth for the exact
+ * scope array each finite (single request/response) Host RPC operation requests,
+ * keyed by operation family (plan §11.4). EVERY entry carries HOST_WAKE_SCOPE:
+ * these are the on-demand, user-driven operations that may legitimately wake a
+ * suspended stateless Host. rpc-proxy still enforces each route's own functional
+ * `requireScope`; the wake scope here only lets that same operation pull a
+ * suspended Host back up.
+ *
+ * Streams and observability reads are DELIBERATELY absent (see
+ * HOST_OBSERVABILITY_SCOPES): they keep narrow read scopes with NO wake scope so
+ * background polling and SSE streams can never defeat scale-to-zero. Adding a
+ * family here is the ONLY place the wake grant is requested — never append
+ * HOST_WAKE_SCOPE at a call site.
+ *   - `model`: writing the per-session selection (POST /model) is gated by the
+ *     dedicated write scope (the swap's blast radius is the caller's own
+ *     session); wake is added so selecting a model on a suspended Host brings it
+ *     up. Reading the model list (GET /models) rides the `session` family.
+ *   - `approval`: the tool-call surface only (approveToolCall/denyToolCall).
+ *     `decideWorkflowApproval` (`host:workflow-approval:decide`) is a separate
+ *     surface and is intentionally NOT in this matrix.
+ */
+const HOST_FINITE_OPERATION_SCOPES: Record<
+  'message' | 'session' | 'model' | 'artifact' | 'approval',
+  RpcScope[]
+> = {
+  message: ['host:message:invoke', 'host:task:read', HOST_WAKE_SCOPE],
+  session: ['host:session:read', HOST_WAKE_SCOPE],
+  model: ['host:model:write', HOST_WAKE_SCOPE],
+  artifact: ['host:activity:read', 'host:task:read', HOST_WAKE_SCOPE],
+  approval: ['host:approval:write', HOST_WAKE_SCOPE],
+}
+
+/**
+ * Observability scope matrix — status/activity reads plus every SSE stream.
+ * DELIBERATELY never contains HOST_WAKE_SCOPE: a suspended stateless Host must
+ * stay suspended under polling/streaming, or observability would defeat
+ * scale-to-zero. The negative scope tests assert no entry here carries wake.
+ */
+const HOST_OBSERVABILITY_SCOPES: Record<'status' | 'activity', RpcScope[]> = {
+  status: ['host:status:read'],
+  activity: ['host:activity:read'],
+}
+
+// Named views onto the matrices so existing call sites stay byte-identical.
+const HOST_WAKEABLE_OPERATION_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.message
+const HOST_STATUS_SCOPES: RpcScope[] = HOST_OBSERVABILITY_SCOPES.status
+const HOST_ACTIVITY_SCOPES: RpcScope[] = HOST_OBSERVABILITY_SCOPES.activity
+const HOST_SESSION_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.session
+const HOST_MODEL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.model
+const HOST_ARTIFACT_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.artifact
+const HOST_APPROVAL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.approval
 const MCP_SERVERS_LIST_SCOPES: RpcScope[] = ['mcp:servers:list']
 const DESKTOP_VIEW_SCOPES: RpcScope[] = ['desktop:view']
 const SANDBOX_UI_VIEW_SCOPES: RpcScope[] = ['sandbox:ui:view']

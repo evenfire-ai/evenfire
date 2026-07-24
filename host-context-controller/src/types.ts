@@ -435,6 +435,14 @@ export interface HostCRD {
   namespace: string
   generation?: number
   /**
+   * metadata.uid — the Kubernetes-assigned stable identity of THIS Host object.
+   * A same-name Host deleted and recreated gets a fresh uid, so uid (not name or
+   * generation) is what distinguishes a genuine deletion from a same-name
+   * recreation on every destructive path (#827). Undefined for snapshots that
+   * predate uid capture; identity fences treat "unknown" conservatively.
+   */
+  uid?: string
+  /**
    * metadata.resourceVersion of the CR at the time it was read. Preserved by
    * readFreshHost so the heartbeat-path status writers can pass it back as an
    * optimistic-concurrency precondition: a stale write is rejected 409 and

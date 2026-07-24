@@ -160,6 +160,11 @@ export interface Config {
   // convergence path. Watches keep their independent long-lived lifecycle.
   hostK8sRequestTimeoutMs: number
 
+  // Bounded cross-Host concurrency for a full/lifecycle Host fleet pass. Urgent
+  // per-Host events (ADDED/MODIFIED/DELETED/wake) are admitted outside this
+  // budget. Integer 1..8, default 2 (see parseHostFullReconcileConcurrency).
+  hostFullReconcileConcurrency: number
+
   // Periodic SharedFileSystem fullReconcile interval (seconds). The SFS watch
   // fires only on SFS CRD changes, not on PVC binding / wfc pod readiness, so
   // this drives truthful-status auto-recovery (#592): a SharedFileSystem stuck
@@ -246,6 +251,25 @@ export function parseHostK8sRequestTimeoutMs(raw: string | undefined): number {
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(
       `HCC_HOST_K8S_REQUEST_TIMEOUT_MS must be a positive integer (milliseconds), got '${raw}'`
+    )
+  }
+  return parsed
+}
+
+/**
+ * HCC_HOST_FULL_RECONCILE_CONCURRENCY — bounded cross-Host concurrency for a
+ * full/lifecycle Host fleet pass. Urgent per-Host events are admitted OUTSIDE
+ * this budget, so a low default optimizes for Kubernetes API stability rather
+ * than convergence speed. Integer 1..8 (1 = diagnostic serial mode), default 2.
+ * Fails config load loudly on garbage: a silent default over a typo'd value
+ * would mask an operator's intended concurrency in production.
+ */
+export function parseHostFullReconcileConcurrency(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 2
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 8) {
+    throw new Error(
+      `HCC_HOST_FULL_RECONCILE_CONCURRENCY must be an integer from 1 through 8, got '${raw}'`
     )
   }
   return parsed
@@ -550,6 +574,9 @@ export const config: Config = {
   // Every finite Kubernetes request that can hold Host convergence gets its
   // own deadline. Watch streams are intentionally excluded.
   hostK8sRequestTimeoutMs: parseHostK8sRequestTimeoutMs(getEnv('HCC_HOST_K8S_REQUEST_TIMEOUT_MS')),
+  hostFullReconcileConcurrency: parseHostFullReconcileConcurrency(
+    getEnv('HCC_HOST_FULL_RECONCILE_CONCURRENCY')
+  ),
 
   // Periodic SharedFileSystem resync (default 60s). Re-evaluates PVC bind + wfc
   // readiness so a transient Initializing/Degraded converges to Ready (#592).
