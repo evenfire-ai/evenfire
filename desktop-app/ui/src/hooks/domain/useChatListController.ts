@@ -71,6 +71,15 @@ interface UseChatListControllerParams {
 const byUpdatedDesc = (a: { updatedAt: string }, b: { updatedAt: string }) =>
   new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
 
+function dedupeSidebarChats<T extends SidebarChatEntry>(chats: T[]): T[] {
+  const seen = new Set<string>()
+  return chats.filter(chat => {
+    if (seen.has(chat.id)) return false
+    seen.add(chat.id)
+    return true
+  })
+}
+
 export function useChatListController({
   selectedAgent,
   agentNames,
@@ -144,38 +153,44 @@ export function useChatListController({
 
   const loadChatListOnce = useCallback(
     async (agentRef: string): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] }> => {
-      const [index, serverResult]: [ChatIndex, SessionsListResult] = await Promise.all([
-        chatStore.getIndex(agentRef),
-        chatStore.listSessions(agentRef, { limit: 50 }).catch(() => ({ items: [] })),
-      ])
-
-      const localChats: SidebarChatEntry[] = index.chats
-      const localIds = new Set(localChats.map(c => c.id))
-      const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
-
-      // Seed sidebar session state (state/activeTaskId/pendingApproval/tokens) for
-      // badges via SERVER_SNAPSHOT (D4 / §4.1 R2 owns "never degrade a live task").
-      seedSessionSnapshots(fsm, agentRef, serverSessions)
-
-      // Chats the server knows but the local cache doesn't (e.g. created on
-      // another device). Post-§7.1 wipe these are normal entries — no "Remote ·"
-      // label, no isRemote branch; switchToChat's unified path hydrates them.
-      const fromServerOnly: SidebarChatEntry[] = serverSessions
-        .filter(s => !localIds.has(s.chatId))
-        .map(s => ({
-          id: s.chatId,
-          title: `Chat ${s.chatId.slice(0, 8)}`,
-          createdAt: s.lastActivityAt,
-          updatedAt: s.lastActivityAt,
-          messageCount: s.turnCount * 2,
-          turnCount: s.turnCount,
-        }))
-
-      const merged = [...localChats, ...fromServerOnly].sort(byUpdatedDesc)
+      const index = await chatStore.getIndex(agentRef)
+      const merged = [...index.chats].sort(byUpdatedDesc)
       setChatList(merged)
 
-      if (serverResult.nextCursor) {
-        scheduleAfterFirstPaint(async () => {
+      scheduleAfterFirstPaint(async () => {
+        const serverResult = await chatStore
+          .listSessions(agentRef, { limit: 50 })
+          .catch(() => ({ items: [] }))
+        if (selectedAgentRef.current !== agentRef) return
+
+        const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
+
+        // Seed sidebar session state (state/activeTaskId/pendingApproval/tokens)
+        // for badges via SERVER_SNAPSHOT (D4 / §4.1 R2 owns "never degrade a live
+        // task").
+        seedSessionSnapshots(fsm, agentRef, serverSessions)
+
+        // Chats the server knows but the local cache doesn't (e.g. created on
+        // another device). Post-§7.1 wipe these are normal entries — no
+        // "Remote ·" label, no isRemote branch; switchToChat's unified path
+        // hydrates them.
+        setChatList(previous => {
+          const dedupedPrevious = dedupeSidebarChats(previous)
+          const knownIds = new Set(dedupedPrevious.map(c => c.id))
+          const fromServerOnly: SidebarChatEntry[] = serverSessions
+            .filter(s => !knownIds.has(s.chatId))
+            .map(s => ({
+              id: s.chatId,
+              title: `Chat ${s.chatId.slice(0, 8)}`,
+              createdAt: s.lastActivityAt,
+              updatedAt: s.lastActivityAt,
+              messageCount: s.turnCount * 2,
+              turnCount: s.turnCount,
+            }))
+          return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
+        })
+
+        if (serverResult.nextCursor) {
           if (selectedAgentRef.current !== agentRef) return
           const additionalItems = await loadRemainingServerSessions(
             agentRef,
@@ -199,26 +214,22 @@ export function useChatListController({
               }))
             return [...previous, ...additionalChats].sort(byUpdatedDesc)
           })
-        })
-      }
+        }
 
-      // Persist server freshness into the local index (spec §5.3): keeps the
-      // durable sidebar order aligned with the source of truth. A pure tail
-      // effect that does NOT affect this render — the merge above sorts local
-      // chats by their (possibly stale) local `updatedAt`, so a chat whose
-      // server `lastActivityAt` is newer only re-sorts on the next cold start
-      // from this persisted reconcile. Best-effort: must never block or fail the
-      // load (fully swallowed).
-      try {
-        void chatStore
-          .reconcileServerSessions(
-            agentRef,
-            serverSessions.map(s => ({ chatId: s.chatId, lastActivityAt: s.lastActivityAt }))
-          )
-          .catch(() => undefined)
-      } catch {
-        // ignore — reconciliation is best-effort freshness only
-      }
+        // Persist server freshness into the local index (spec §5.3): keeps the
+        // durable sidebar order aligned with the source of truth. Best-effort:
+        // must never block or fail the visible local-cache render.
+        try {
+          void chatStore
+            .reconcileServerSessions(
+              agentRef,
+              serverSessions.map(s => ({ chatId: s.chatId, lastActivityAt: s.lastActivityAt }))
+            )
+            .catch(() => undefined)
+        } catch {
+          // ignore — reconciliation is best-effort freshness only
+        }
+      })
 
       return { index, merged }
     },
@@ -354,7 +365,10 @@ export function useChatListController({
   /** Append a freshly-created chat to both lists (create / send auto-create). */
   const appendNewEntry = useCallback(
     (agentRef: string, meta: ChatMetadata) => {
-      setChatList(prev => [...prev, meta])
+      setChatList(prev => {
+        const next = prev.some(chat => chat.id === meta.id) ? prev : [...prev, meta]
+        return dedupeSidebarChats(next)
+      })
       upsertLatestChatSession(agentRef, meta)
     },
     [upsertLatestChatSession]
@@ -482,57 +496,67 @@ export function useChatListController({
     setLatestChatSessionsLoading(true)
     ;(async () => {
       try {
-        const sessionGroups = await Promise.all(
+        const localGroups = await Promise.all(
           agentNames.map(async agentRef => {
             try {
-              const [index, serverResult]: [ChatIndex, SessionsListResult] = await Promise.all([
-                chatStore.getIndex(agentRef),
-                chatStore.listSessions(agentRef, { limit: 50 }).catch(() => ({ items: [] })),
-              ])
-              const localChats: LatestSidebarChatEntry[] = index.chats.map(chat => ({
-                ...chat,
-                agentRef,
-              }))
-              const localIds = new Set(localChats.map(chat => chat.id))
-              const remoteOnly: LatestSidebarChatEntry[] = serverResult.items
-                .filter(session => session.agent === agentRef && !localIds.has(session.chatId))
-                .map(session => ({
-                  id: session.chatId,
-                  title: `Remote · ${session.chatId.slice(0, 8)}`,
-                  createdAt: session.lastActivityAt,
-                  updatedAt: session.lastActivityAt,
-                  messageCount: session.turnCount * 2,
-                  remote: true,
-                  turnCount: session.turnCount,
-                  agentRef,
-                }))
-              // Seed this agent's session state from its server snapshot; the outer
-              // agentNames.map gives the cross-agent coverage the navbar badges
-              // (Running / Awaiting approval / Completed-unread) need.
-              // D4 (§4.1 R2): the "snapshot never degrades a live task" rule that
-              // used to live in `mergeSeededSessionStates` is now the reducer's.
-              const sessions = serverResult.items.filter(session => session.agent === agentRef)
+              const index = await chatStore.getIndex(agentRef)
               return {
                 agentRef,
-                entries: [...localChats, ...remoteOnly],
-                sessions,
-                nextCursor: serverResult.nextCursor,
+                entries: index.chats.map(chat => ({
+                  ...chat,
+                  agentRef,
+                })),
               }
             } catch {
               return {
                 agentRef,
                 entries: [] as LatestSidebarChatEntry[],
-                sessions: [] as Awaited<ReturnType<typeof chatStore.listSessions>>['items'],
-                nextCursor: undefined,
               }
             }
           })
         )
         if (cancelled) return
-        setLatestChatSessions(sessionGroups.flatMap(group => group.entries).sort(byUpdatedDesc))
+        setLatestChatSessions(localGroups.flatMap(group => group.entries).sort(byUpdatedDesc))
+        setLatestChatSessionsLoading(false)
+
+        const sessionGroups = await Promise.all(
+          agentNames.map(async agentRef => {
+            const serverResult: SessionsListResult = await chatStore
+              .listSessions(agentRef, { limit: 50 })
+              .catch(() => ({ items: [] }))
+            return {
+              agentRef,
+              sessions: serverResult.items.filter(session => session.agent === agentRef),
+              nextCursor: serverResult.nextCursor,
+            }
+          })
+        )
+        if (cancelled) return
         for (const group of sessionGroups) {
           seedSessionSnapshots(fsm, group.agentRef, group.sessions)
         }
+        setLatestChatSessions(previous => {
+          const knownKeys = new Set(previous.map(item => `${item.agentRef}:${item.id}`))
+          const remoteOnly: LatestSidebarChatEntry[] = []
+          for (const group of sessionGroups) {
+            for (const session of group.sessions) {
+              const key = `${group.agentRef}:${session.chatId}`
+              if (knownKeys.has(key)) continue
+              knownKeys.add(key)
+              remoteOnly.push({
+                id: session.chatId,
+                title: `Remote · ${session.chatId.slice(0, 8)}`,
+                createdAt: session.lastActivityAt,
+                updatedAt: session.lastActivityAt,
+                messageCount: session.turnCount * 2,
+                remote: true,
+                turnCount: session.turnCount,
+                agentRef: group.agentRef,
+              })
+            }
+          }
+          return [...previous, ...remoteOnly].sort(byUpdatedDesc)
+        })
         void Promise.all(
           sessionGroups.map(async group => ({
             agentRef: group.agentRef,

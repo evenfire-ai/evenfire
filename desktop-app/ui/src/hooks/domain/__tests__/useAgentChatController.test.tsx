@@ -981,6 +981,36 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(entry?.agentRef).toBe('agent-x')
     })
 
+    it('renders local sessions without waiting for remote listSessions', async () => {
+      clerum.chat.getIndex.mockResolvedValue({
+        version: 1,
+        lastActiveChatId: null,
+        onboardingDismissed: false,
+        chats: [
+          {
+            id: 'local-chat',
+            title: 'Local chat',
+            createdAt: '2026-05-01T00:00:00Z',
+            updatedAt: '2026-05-01T00:00:00Z',
+            messageCount: 2,
+          },
+        ],
+      })
+      clerum.rpc.listSessions.mockImplementation(() => new Promise(() => undefined))
+
+      const { result } = renderController()
+
+      await waitFor(() =>
+        expect(result.current.chatList.some(chat => chat.id === 'local-chat')).toBe(true)
+      )
+      expect(result.current.chatListLoading).toBe(false)
+
+      await waitFor(() =>
+        expect(result.current.latestChatSessions.some(chat => chat.id === 'local-chat')).toBe(true)
+      )
+      expect(result.current.latestChatSessionsLoading).toBe(false)
+    })
+
     it('GAP-A persists the outgoing user message to the chat store on send', async () => {
       // Eager user-message persistence (dev) → D.3 must keep persisting it
       // (post-D.3 it carries task_id; here we only pin that it IS persisted).
