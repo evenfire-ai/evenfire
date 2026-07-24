@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { updateAdminTeamAgents, updateAdminUserAgents } from '../api'
 
-function jsonResponse(body: unknown): Response {
+function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
     headers: { 'content-type': 'application/json' },
   })
 }
@@ -52,6 +52,20 @@ describe('agent grant replacement API helpers', () => {
     expect(JSON.parse(String(init.body))).toEqual({
       agentNames: ['active-agent'],
       expectedCurrentAgentNames: [],
+    })
+  })
+
+  it.each([
+    [412, 'precondition_failed', 'This item changed since it was loaded.'],
+    [409, 'deleted_agent_history_limit_exceeded', 'No existing history was removed.'],
+    [428, 'agent_grant_precondition_required', 'Reload the page and try again.'],
+  ])('keeps agent-grant conflicts actionable for status %i', async (status, code, message) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ error: code }, status))
+
+    await expect(updateAdminUserAgents('user-1', ['active-agent'], ['active-agent'])).rejects.toMatchObject({
+      status,
+      code,
+      message: expect.stringContaining(message),
     })
   })
 })
