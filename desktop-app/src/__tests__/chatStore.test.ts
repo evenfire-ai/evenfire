@@ -255,6 +255,59 @@ describe('messages', () => {
     expect(messages.map(message => message.id)).toEqual(['m0', 'm1', 'm2'])
   })
 
+  it('does not block paged reads behind writes to another chat', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await pagedStore.createChat('agent-1', 'busy-chat')
+    await pagedStore.createChat('agent-1', 'readable-chat')
+    await pagedStore.saveMessages('agent-1', 'busy-chat', [
+      { id: 'busy-0', role: 'user', content: 'busy', timestamp: 0 },
+    ])
+    await pagedStore.saveMessages('agent-1', 'readable-chat', [
+      { id: 'readable-0', role: 'user', content: 'readable', timestamp: 0 },
+    ])
+
+    const originalWriteFile = fs.writeFile.bind(fs)
+    const originalReadFile = fs.readFile.bind(fs)
+    let releaseWrite: (() => void) | undefined
+    let delayedWrite = false
+    let readableChatReadStarted = false
+    const busyWriteStarted = new Promise<void>(resolve => {
+      vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+        const filePath = String(args[0])
+        if (!delayedWrite && filePath.includes('busy-chat') && filePath.endsWith('.tmp')) {
+          delayedWrite = true
+          resolve()
+          await new Promise<void>(release => {
+            releaseWrite = release
+          })
+        }
+        return originalWriteFile(...(args as Parameters<typeof fs.writeFile>))
+      })
+    })
+    vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
+      if (String(args[0]).includes('readable-chat')) readableChatReadStarted = true
+      return originalReadFile(...(args as Parameters<typeof fs.readFile>))
+    })
+
+    const append = pagedStore.appendMessages('agent-1', 'busy-chat', [
+      { id: 'busy-1', role: 'assistant', content: 'still busy', timestamp: 1 },
+    ])
+    await busyWriteStarted
+
+    const readableMessages = pagedStore.loadMessages('agent-1', 'readable-chat')
+    try {
+      await vi.waitFor(() => expect(readableChatReadStarted).toBe(true))
+    } finally {
+      releaseWrite?.()
+    }
+
+    const [messages] = await Promise.all([readableMessages, append.then(() => undefined)])
+    expect(messages.map(message => message.id)).toEqual(['readable-0'])
+  })
+
   it('prunes only old pages whose messages are known to exist on the server', async () => {
     const prunedStore = new ChatStore(tempDir, {
       pageSize: 2,

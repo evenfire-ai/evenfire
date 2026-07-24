@@ -125,29 +125,38 @@ export class ChatStore {
   }
 
   /**
-   * Per-agent serialization of index read-modify-write sequences. The index is
-   * a single shared `index.json`, so concurrent mutators (e.g. two chats of one
-   * agent terminating at once — a first-class case post-D.4 fire-and-forget)
-   * could interleave getIndex→saveIndex and drop one update (e.g. an
-   * `unreadTerminal` flag). Chaining per agentRef makes each RMW atomic w.r.t.
-   * the others. Plain index reads are not serialized. `loadMessages` is
-   * serialized because paged chat reads combine meta + page files and must not
-   * observe a partially-applied append/replace.
+   * Index read-modify-write sequences are serialized per agent because every
+   * chat shares one `index.json`. Paged transcript operations use a separate
+   * per-chat chain so reads stay atomic with writes for the same chat without
+   * queuing behind unrelated chat activity.
    */
   private indexChains = new Map<string, Promise<unknown>>()
+  private chatChains = new Map<string, Promise<unknown>>()
+
+  private serialize<T>(
+    chains: Map<string, Promise<unknown>>,
+    key: string,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const prev = chains.get(key) ?? Promise.resolve()
+    const run = prev.then(fn, fn)
+    const settled = run.then(
+      () => undefined,
+      () => undefined
+    )
+    chains.set(key, settled)
+    void settled.then(() => {
+      if (chains.get(key) === settled) chains.delete(key)
+    })
+    return run
+  }
 
   private serializeIndex<T>(agentRef: string, fn: () => Promise<T>): Promise<T> {
-    const prev = this.indexChains.get(agentRef) ?? Promise.resolve()
-    const run = prev.then(fn, fn)
-    // Keep the chain alive regardless of individual outcomes.
-    this.indexChains.set(
-      agentRef,
-      run.then(
-        () => undefined,
-        () => undefined
-      )
-    )
-    return run
+    return this.serialize(this.indexChains, agentRef, fn)
+  }
+
+  private serializeChat<T>(agentRef: string, chatId: string, fn: () => Promise<T>): Promise<T> {
+    return this.serialize(this.chatChains, JSON.stringify([agentRef, chatId]), fn)
   }
 
   private agentDir(agentRef: string): string {
@@ -563,13 +572,15 @@ export class ChatStore {
   }
 
   async deleteChat(agentRef: string, chatId: string): Promise<void> {
-    return this.serializeIndex(agentRef, async () => {
-      const index = await this.getIndex(agentRef)
-      index.chats = index.chats.filter(c => c.id !== chatId)
-      if (index.lastActiveChatId === chatId) {
-        index.lastActiveChatId = null
-      }
-      await this.saveIndex(agentRef, index)
+    return this.serializeChat(agentRef, chatId, async () => {
+      await this.serializeIndex(agentRef, async () => {
+        const index = await this.getIndex(agentRef)
+        index.chats = index.chats.filter(c => c.id !== chatId)
+        if (index.lastActiveChatId === chatId) {
+          index.lastActiveChatId = null
+        }
+        await this.saveIndex(agentRef, index)
+      })
       await fs.rm(this.chatFilePath(agentRef, chatId), { force: true })
       await fs.rm(this.chatDirPath(agentRef, chatId), { recursive: true, force: true })
     })
@@ -582,7 +593,7 @@ export class ChatStore {
     offset?: number
   ): Promise<ChatMessage[]> {
     try {
-      return await this.serializeIndex(agentRef, async () => {
+      return await this.serializeChat(agentRef, chatId, async () => {
         const meta = await this.readOrMigratePagedChatUnlocked(agentRef, chatId)
         if (!meta) return []
         return this.readMessagesFromPagedMeta(agentRef, chatId, meta, limit, offset)
@@ -593,17 +604,19 @@ export class ChatStore {
   }
 
   async saveMessages(agentRef: string, chatId: string, messages: ChatMessage[]): Promise<void> {
-    return this.serializeIndex(agentRef, async () => {
+    return this.serializeChat(agentRef, chatId, async () => {
       await this.writePagedChatUnlocked(agentRef, chatId, messages, { removeLegacy: true })
 
-      const index = await this.getIndex(agentRef)
-      const chat = index.chats.find(c => c.id === chatId)
-      if (chat) {
-        chat.messageCount = messages.length
-        Object.assign(chat, aggregateMessages(messages))
-        chat.updatedAt = new Date().toISOString()
-        await this.saveIndex(agentRef, index)
-      }
+      await this.serializeIndex(agentRef, async () => {
+        const index = await this.getIndex(agentRef)
+        const chat = index.chats.find(c => c.id === chatId)
+        if (chat) {
+          chat.messageCount = messages.length
+          Object.assign(chat, aggregateMessages(messages))
+          chat.updatedAt = new Date().toISOString()
+          await this.saveIndex(agentRef, index)
+        }
+      })
     })
   }
 
@@ -612,22 +625,24 @@ export class ChatStore {
     chatId: string,
     newMessages: ChatMessage[]
   ): Promise<void> {
-    return this.serializeIndex(agentRef, async () => {
+    return this.serializeChat(agentRef, chatId, async () => {
       const existing =
         (await this.readOrMigratePagedChatUnlocked(agentRef, chatId)) ??
         (await this.writePagedChatUnlocked(agentRef, chatId, [], { removeLegacy: true }))
       const meta = await this.appendPagedMessagesUnlocked(agentRef, chatId, existing, newMessages)
 
-      const index = await this.getIndex(agentRef)
-      const chat = index.chats.find(c => c.id === chatId)
-      if (chat) {
-        const delta = aggregateMessages(newMessages)
-        chat.messageCount = meta.messageCount
-        chat.errorCount = (chat.errorCount ?? 0) + (delta.errorCount ?? 0)
-        chat.toolCallCount = (chat.toolCallCount ?? 0) + (delta.toolCallCount ?? 0)
-        chat.updatedAt = new Date().toISOString()
-        await this.saveIndex(agentRef, index)
-      }
+      await this.serializeIndex(agentRef, async () => {
+        const index = await this.getIndex(agentRef)
+        const chat = index.chats.find(c => c.id === chatId)
+        if (chat) {
+          const delta = aggregateMessages(newMessages)
+          chat.messageCount = meta.messageCount
+          chat.errorCount = (chat.errorCount ?? 0) + (delta.errorCount ?? 0)
+          chat.toolCallCount = (chat.toolCallCount ?? 0) + (delta.toolCallCount ?? 0)
+          chat.updatedAt = new Date().toISOString()
+          await this.saveIndex(agentRef, index)
+        }
+      })
     })
   }
 

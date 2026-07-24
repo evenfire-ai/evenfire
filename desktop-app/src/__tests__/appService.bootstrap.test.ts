@@ -16,6 +16,13 @@ describe('AppService invitation configuration lookup', () => {
   const originalExternalRestApiBaseUrl = process.env.EXTERNAL_REST_API_BASE_URL
   const originalRpcProxyBaseUrl = process.env.RPC_PROXY_BASE_URL
   const originalProfileUiBaseUrl = process.env.PROFILE_UI_BASE_URL
+  const tempDirs = new Set<string>()
+
+  async function createTempConfigPath(prefix: string): Promise<string> {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`))
+    tempDirs.add(tempDir)
+    return path.join(tempDir, 'config.json')
+  }
 
   afterEach(async () => {
     if (originalConfigPath === undefined) {
@@ -39,13 +46,14 @@ describe('AppService invitation configuration lookup', () => {
       process.env.PROFILE_UI_BASE_URL = originalProfileUiBaseUrl
     }
     vi.resetModules()
+    await Promise.all(
+      [...tempDirs].map(tempDir => fs.rm(tempDir, { recursive: true, force: true }))
+    )
+    tempDirs.clear()
   })
 
   it('persists runtime config when desktop setup is completed', async () => {
-    const configPath = path.join(
-      os.tmpdir(),
-      `clerum-desktop-config-${Date.now()}-${Math.random().toString(16).slice(2)}.json`
-    )
+    const configPath = await createTempConfigPath('clerum-desktop-config')
     process.env.CLERUM_DESKTOP_CONFIG_PATH = configPath
     delete process.env.EXTERNAL_REST_API_BASE_URL
     delete process.env.RPC_PROXY_BASE_URL
@@ -184,10 +192,7 @@ describe('AppService invitation configuration lookup', () => {
   })
 
   it('keeps a saved token when startup session restore has a transient failure', async () => {
-    const configPath = path.join(
-      os.tmpdir(),
-      `clerum-desktop-restore-local-${Date.now()}-${Math.random().toString(16).slice(2)}.json`
-    )
+    const configPath = await createTempConfigPath('clerum-desktop-restore-local')
     await fs.writeFile(
       configPath,
       JSON.stringify({
@@ -262,10 +267,7 @@ describe('AppService invitation configuration lookup', () => {
   })
 
   it('clears a saved token when startup session restore is rejected by the API', async () => {
-    const configPath = path.join(
-      os.tmpdir(),
-      `clerum-desktop-restore-api-${Date.now()}-${Math.random().toString(16).slice(2)}.json`
-    )
+    const configPath = await createTempConfigPath('clerum-desktop-restore-api')
     await fs.writeFile(
       configPath,
       JSON.stringify({
@@ -313,10 +315,7 @@ describe('AppService invitation configuration lookup', () => {
   })
 
   it('keeps a saved token when startup session restore is forbidden', async () => {
-    const configPath = path.join(
-      os.tmpdir(),
-      `clerum-desktop-restore-forbidden-${Date.now()}-${Math.random().toString(16).slice(2)}.json`
-    )
+    const configPath = await createTempConfigPath('clerum-desktop-restore-forbidden')
     await fs.writeFile(
       configPath,
       JSON.stringify({
@@ -368,10 +367,7 @@ describe('AppService invitation configuration lookup', () => {
   })
 
   it('persists a manually saved runtime environment', async () => {
-    const configPath = path.join(
-      os.tmpdir(),
-      `clerum-desktop-manual-config-${Date.now()}-${Math.random().toString(16).slice(2)}.json`
-    )
+    const configPath = await createTempConfigPath('clerum-desktop-manual-config')
     process.env.CLERUM_DESKTOP_CONFIG_PATH = configPath
     delete process.env.EXTERNAL_REST_API_BASE_URL
     delete process.env.RPC_PROXY_BASE_URL
