@@ -1,8 +1,11 @@
 name: Claude Code
 
-# On-demand Claude, triggered by an @claude mention in an issue, PR comment,
-# or PR review. This is the path external (fork) contributors can use, since the
-# automatic review in claude-code-review.yml skips fork PRs (no secret access).
+# On-demand Claude, triggered by an @claude mention in an issue, a PR comment,
+# or a PR review. Contributors comment "@claude ..." on a PR to request a review
+# or ask Claude to make a change. There is no automatic review on every PR.
+#
+# Mirrors keyper-labs/evenfire (the private repo); the only deltas are the
+# SHA-pinned actions required by this repo's action-pinning policy.
 
 on:
   issue_comment:
@@ -16,16 +19,16 @@ on:
 
 jobs:
   claude:
-    if: >-
+    if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
-      issues: write
+      contents: read
+      pull-requests: read
+      issues: read
       id-token: write
       actions: read # Required for Claude to read CI results on PRs
     steps:
@@ -39,3 +42,14 @@ jobs:
         uses: anthropics/claude-code-action@44423bdec74b97d67543eb16c110546762c110b2 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # Allows Claude to read CI results on PRs
+          additional_permissions: |
+            actions: read
+
+          # Optional: Give a custom prompt to Claude. If not specified, Claude
+          # follows the instructions in the comment that tagged it.
+          # prompt: 'Review this PR for correctness, security, and tests.'
+
+          # Optional: customize behavior via claude_args
+          # claude_args: '--allowed-tools Bash(gh pr:*)'
