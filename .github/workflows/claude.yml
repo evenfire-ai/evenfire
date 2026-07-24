@@ -1,11 +1,15 @@
 name: Claude Code
 
-# On-demand Claude, triggered by an @claude mention in an issue, a PR comment,
-# or a PR review. Contributors comment "@claude ..." on a PR to request a review
-# or ask Claude to make a change. There is no automatic review on every PR.
+# On-demand Claude, triggered by a mention in an issue, a PR comment, or a PR
+# review. Two models are available:
+#   @claude       -> Claude Sonnet 5  (fast, cheaper; the default)
+#   @claude-opus  -> Claude Opus 4.8  (deeper, pricier)
+# There is no automatic review on every PR.
 #
-# Mirrors keyper-labs/evenfire (the private repo); the only deltas are the
-# SHA-pinned actions required by this repo's action-pinning policy.
+# Mirrors keyper-labs/evenfire (the private repo), plus a second Opus job. Each
+# job pins its own model and its own trigger_phrase; the job-level `if` routes a
+# mention to exactly one job. The default job excludes `@claude-opus` so a single
+# comment never runs both. Actions are SHA-pinned per this repo's policy.
 
 on:
   issue_comment:
@@ -18,12 +22,13 @@ on:
     types: [submitted]
 
 jobs:
+  # @claude -> Sonnet 5 (default). Excludes @claude-opus so only one job fires.
   claude:
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') && !contains(github.event.comment.body, '@claude-opus')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') && !contains(github.event.comment.body, '@claude-opus')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') && !contains(github.event.review.body, '@claude-opus')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) && !(contains(github.event.issue.body, '@claude-opus') || contains(github.event.issue.title, '@claude-opus')))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -37,19 +42,42 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Run Claude Code
-        id: claude
+      - name: Run Claude Code (Sonnet)
         uses: anthropics/claude-code-action@44423bdec74b97d67543eb16c110546762c110b2 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-
-          # Allows Claude to read CI results on PRs
+          trigger_phrase: "@claude"
+          claude_args: |
+            --model claude-sonnet-5
           additional_permissions: |
             actions: read
 
-          # Optional: Give a custom prompt to Claude. If not specified, Claude
-          # follows the instructions in the comment that tagged it.
-          # prompt: 'Review this PR for correctness, security, and tests.'
+  # @claude-opus -> Opus 4.8 (deeper, opt-in).
+  claude-opus:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude-opus')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude-opus')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude-opus')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude-opus') || contains(github.event.issue.title, '@claude-opus')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+      actions: read # Required for Claude to read CI results on PRs
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
 
-          # Optional: customize behavior via claude_args
-          # claude_args: '--allowed-tools Bash(gh pr:*)'
+      - name: Run Claude Code (Opus)
+        uses: anthropics/claude-code-action@44423bdec74b97d67543eb16c110546762c110b2 # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          trigger_phrase: "@claude-opus"
+          claude_args: |
+            --model claude-opus-4-8
+          additional_permissions: |
+            actions: read
