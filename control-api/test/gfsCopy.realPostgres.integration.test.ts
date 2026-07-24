@@ -292,4 +292,83 @@ describeRealPostgres('GFS Copy publication on real PostgreSQL and filesystem blo
     expect(manifests.rows[0]?.count).toBe(0)
     expect(outcome.rows).toEqual([{ mutation_outcome: 'failed' }])
   })
+
+  // Concurrency — the optimistic If-Match path. replace() locks the row and
+  // re-checks the version inside the writer transaction; two replaces of the
+  // same file racing with the SAME If-Match can only be adjudicated by real row
+  // locks, so this belongs in the real-PG suite, not the scripted-client unit.
+  it('serializes two concurrent replaces of the same file: one version bump, the loser is precondition_failed', async () => {
+    const tree = await seedTree('race-replace')
+    // first.txt was seeded at version 1. Each replace runs on its own pooled
+    // connection: the writer that locks the row first bumps version 1->2 and
+    // commits; the other then sees version 2 != If-Match 1 and must fail.
+    const fileId = tree.firstFileId
+    const contentA = Buffer.from('replacement-A-payload')
+    const contentB = Buffer.from('replacement-B-different-length')
+    const attempt = (content: Buffer) =>
+      writes.replace({ drive: tree.drive, resourceId: fileId, ifMatch: 1, content })
+
+    const results = await Promise.allSettled([attempt(contentA), attempt(contentB)])
+    const fulfilled = results.filter(
+      (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof writes.replace>>> =>
+        r.status === 'fulfilled'
+    )
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0]!.reason).toMatchObject({ code: 'precondition_failed' })
+
+    // Business truth: version bumped exactly once (1->2), and the bytes served
+    // from the real blob store are the winner's — never a torn blend.
+    const row = await pool.query(
+      `SELECT version, bytes, blob_key FROM gfs_resources WHERE drive=$1 AND resource_id=$2`,
+      [tree.drive, fileId]
+    )
+    expect(Number(row.rows[0]?.version)).toBe(2)
+    const served = await readAll(await blobs.read(fileId, String(row.rows[0]?.blob_key)))
+    expect([contentA, contentB].some(candidate => candidate.equals(served))).toBe(true)
+    expect(Number(row.rows[0]?.bytes)).toBe(served.length)
+  })
+
+  // Concurrency — the per-drive advisory lock + destination re-check. Two copies
+  // into the SAME destination name, both passing preflight before either
+  // publishes, must not both land.
+  it('serializes two concurrent copies into the same destination name: one wins, the loser is already_exists', async () => {
+    const tree = await seedTree('race-copy')
+    // Independent frozen plans for the same '/archive/dup' name. Under the
+    // per-drive advisory lock the first copy inserts the subtree; the second
+    // re-checks the destination name inside the writer txn, finds it taken, and
+    // fails already_exists — the loser inserts nothing.
+    const planA = await planFor(tree, 'dup')
+    const planB = await planFor(tree, 'dup')
+    const attempt = (plan: Awaited<ReturnType<typeof planFor>>, tag: string) =>
+      writes.copy({
+        requestId: randomUUID(),
+        subject: `host:sandbox-recipes/copy-race-${tag}`,
+        audit,
+        drive: tree.drive,
+        destinationParentId: tree.destinationId,
+        plan: plan.plan,
+        destination: plan.destination,
+        deadlineAtMs: Date.now() + 30_000,
+      })
+
+    const results = await Promise.allSettled([attempt(planA, 'a'), attempt(planB, 'b')])
+    const fulfilled = results.filter(
+      (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof writes.copy>>> =>
+        r.status === 'fulfilled'
+    )
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0]!.reason).toMatchObject({ code: 'already_exists' })
+
+    // Business truth: exactly ONE copied subtree root exists at the contended
+    // destination name.
+    const roots = await pool.query(
+      `SELECT count(*)::integer AS n FROM gfs_resources WHERE drive=$1 AND path_cache='/archive/dup'`,
+      [tree.drive]
+    )
+    expect(roots.rows[0]?.n).toBe(1)
+  })
 })

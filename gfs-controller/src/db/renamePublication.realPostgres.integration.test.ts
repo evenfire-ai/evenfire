@@ -217,4 +217,69 @@ describeRealPostgres("renamePublication on real PostgreSQL", () => {
     );
     expect(after.rows[0]).toMatchObject({ name: "big" });
   });
+
+  // Concurrency: the served rename holds an advisory lock + `FOR UPDATE` and
+  // re-checks the If-Match version inside the transaction. Two renames of the
+  // same root racing with the SAME If-Match can ONLY be adjudicated by real
+  // PostgreSQL row locks — the scripted-client unit suite cannot observe the
+  // serialization, so this lives here.
+  it("serializes two concurrent renames of the same root: exactly one wins, the loser is precondition_failed", async () => {
+    const seeded = await pool.query(`
+      WITH drive_root AS (
+        INSERT INTO gfs_resources (drive, parent_resource_id, name, kind, path_cache)
+        VALUES ('race', NULL, '', 'directory', '/')
+        RETURNING resource_id
+      ),
+      root AS (
+        INSERT INTO gfs_resources (drive, parent_resource_id, name, kind, path_cache, version)
+        SELECT 'race', resource_id, 'contended', 'directory', '/contended', 7 FROM drive_root
+        RETURNING resource_id
+      )
+      SELECT root.resource_id::text AS root_id FROM root;
+    `);
+    const rootId = (seeded.rows[0] as { root_id: string }).root_id;
+
+    // Each attempt runs on its OWN real transactor (its own pooled connection),
+    // both launched together. Same If-Match=7: whichever transaction acquires
+    // the row lock first bumps the version 7->8 and commits; the other then sees
+    // version 8 != If-Match 7 and must fail precondition_failed. Deterministic —
+    // the lock decides the order, the If-Match decides that only one may win.
+    const attempt = (newName: string) =>
+      publishRename(new PgTransactor(pool), {
+        requestId: `req-rename-race-${newName}`,
+        subject: "host:1st:mcp-host/agent-a",
+        audit: noopAudit,
+        drive: "race",
+        resourceId: rootId,
+        newName,
+        ifMatch: 7,
+        maxObjects: 1000,
+        deadlineAtMs: Date.now() + 30_000,
+      });
+
+    const results = await Promise.allSettled([attempt("winner-a"), attempt("winner-b")]);
+    const fulfilled = results.filter(
+      (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof publishRename>>> =>
+        r.status === "fulfilled"
+    );
+    const rejected = results.filter(
+      (r): r is PromiseRejectedResult => r.status === "rejected"
+    );
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toMatchObject({ code: "precondition_failed" });
+
+    // Business truth: exactly one mutation landed — the version bumped once
+    // (7->8), and the persisted name/path is the winner's, never a blend of both.
+    const winnerName = fulfilled[0]!.value.name;
+    const after = await pool.query(
+      `SELECT name, path_cache, version FROM gfs_resources WHERE drive='race' AND resource_id=$1`,
+      [rootId]
+    );
+    expect(after.rows[0]).toMatchObject({
+      name: winnerName,
+      path_cache: `/${winnerName}`,
+      version: 8,
+    });
+  });
 });
