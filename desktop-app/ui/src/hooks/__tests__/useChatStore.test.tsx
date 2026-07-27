@@ -27,4 +27,30 @@ describe('useChatStore remote request cache', () => {
     await result.current.listSessions('cache-test-host', { limit: 50 })
     expect(listSessions).toHaveBeenCalledTimes(2)
   })
+
+  it('does not reuse remote session or model cache entries across cache scopes', async () => {
+    const listSessions = vi.fn(async () => ({ items: [] }))
+    const getHostModels = vi.fn(async () => ({ models: [] }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { rpc: { listSessions, getHostModels } },
+    })
+    const { result } = renderHook(() => useChatStore())
+
+    result.current.setRemoteCacheScope('authenticated:team-a')
+    await result.current.listSessions('cache-test-host', { limit: 50 })
+    await result.current.getHostModels('cache-test-host', 'chat-1')
+    await result.current.listSessions('cache-test-host', { limit: 50 })
+    await result.current.getHostModels('cache-test-host', 'chat-1')
+
+    expect(listSessions).toHaveBeenCalledTimes(1)
+    expect(getHostModels).toHaveBeenCalledTimes(1)
+
+    result.current.setRemoteCacheScope('authenticated:team-b')
+    await result.current.listSessions('cache-test-host', { limit: 50 })
+    await result.current.getHostModels('cache-test-host', 'chat-1')
+
+    expect(listSessions).toHaveBeenCalledTimes(2)
+    expect(getHostModels).toHaveBeenCalledTimes(2)
+  })
 })

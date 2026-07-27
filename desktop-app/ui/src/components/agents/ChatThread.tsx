@@ -58,6 +58,37 @@ type RenderableChatMessage = AgentChatMessage & {
 
 const VIRTUAL_MESSAGE_GROUPS_PER_CHUNK = 8
 
+type ChunkableMessageGroup = {
+  groupKey: string
+  items: Array<Pick<RenderableChatMessage, 'serverTurnNumber'>>
+}
+
+export function buildMessageGroupChunks<T extends ChunkableMessageGroup>(
+  groupedWithKeys: T[]
+): Array<{
+  chunkKey: string
+  groups: Array<{ group: T; groupIndex: number }>
+}> {
+  const chunks: Array<{
+    chunkKey: string
+    groups: Array<{ group: T; groupIndex: number }>
+  }> = []
+  for (const [groupIndex, group] of groupedWithKeys.entries()) {
+    const firstTurn = group.items[0]?.serverTurnNumber
+    const chunkKey =
+      firstTurn !== undefined
+        ? `server-turns-${Math.floor((firstTurn - 1) / (VIRTUAL_MESSAGE_GROUPS_PER_CHUNK / 2))}`
+        : `local-${group.groupKey}`
+    const current = chunks.at(-1)
+    if (current?.chunkKey === chunkKey) {
+      current.groups.push({ group, groupIndex })
+    } else {
+      chunks.push({ chunkKey, groups: [{ group, groupIndex }] })
+    }
+  }
+  return chunks
+}
+
 function VirtualizedMessageChunk({
   estimatedHeight,
   initiallyVisible,
@@ -301,26 +332,10 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
       }),
     [groupedMessages]
   )
-  const messageGroupChunks = useMemo(() => {
-    const chunks: Array<{
-      chunkKey: string
-      groups: Array<{ group: (typeof groupedWithKeys)[number]; groupIndex: number }>
-    }> = []
-    for (const [groupIndex, group] of groupedWithKeys.entries()) {
-      const firstTurn = group.items[0]?.serverTurnNumber
-      const chunkKey =
-        firstTurn !== undefined
-          ? `server-turns-${Math.floor((firstTurn - 1) / (VIRTUAL_MESSAGE_GROUPS_PER_CHUNK / 2))}`
-          : `local-${group.groupKey}`
-      const current = chunks.at(-1)
-      if (current?.chunkKey === chunkKey) {
-        current.groups.push({ group, groupIndex })
-      } else {
-        chunks.push({ chunkKey, groups: [{ group, groupIndex }] })
-      }
-    }
-    return chunks
-  }, [groupedWithKeys])
+  const messageGroupChunks = useMemo(
+    () => buildMessageGroupChunks(groupedWithKeys),
+    [groupedWithKeys]
+  )
 
   const localMessageIds = useMemo(
     () => new Set(activeMessages.map(message => message.id)),

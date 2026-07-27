@@ -67,7 +67,11 @@ describe('migration 008 — active trace context', () => {
     const result = runMigrations(db)
 
     expect(result).toEqual({
-      applied: ['007-sessions-model-selections', '008-active-trace-context'],
+      applied: [
+        '007-sessions-model-selections',
+        '008-active-trace-context',
+        '009-session-summary-indexes',
+      ],
       pending: [],
     })
     const sessionColumns = db.prepare('PRAGMA table_info(sessions)').all() as Array<{

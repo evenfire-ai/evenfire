@@ -676,6 +676,40 @@ describe('messages', () => {
     })
   })
 
+  it('preserves aggregate counters when replaceMessages writes a bounded server window', async () => {
+    await store.createChat('agent-1', 'bounded-replace')
+    await store.saveMessages('agent-1', 'bounded-replace', [
+      { id: 'm1', role: 'user', content: 'a', timestamp: 1 },
+      {
+        id: 'm2',
+        role: 'assistant',
+        content: 'failed',
+        timestamp: 2,
+        isError: true,
+        toolSteps: [
+          { toolName: 'search', displayName: 'Search', state: 'completed' },
+          { toolName: 'write', displayName: 'Write', state: 'error' },
+        ],
+      },
+      { id: 'm3', role: 'user', content: 'b', timestamp: 3 },
+    ])
+
+    await store.replaceMessages('agent-1', 'bounded-replace', [
+      { id: 'm3', role: 'user', content: 'b', timestamp: 3 },
+    ])
+
+    const chat = (await store.listChats('agent-1')).find(item => item.id === 'bounded-replace')
+    expect(chat).toMatchObject({
+      messageCount: 3,
+      errorCount: 1,
+      toolCallCount: 2,
+    })
+    const meta = await readJsonFile<{ messageCount: number; localMessageCount: number }>(
+      chatMetaPath('bounded-replace')
+    )
+    expect(meta).toMatchObject({ messageCount: 3, localMessageCount: 1 })
+  })
+
   it('persists task_id and writes the paged chat cache', async () => {
     await store.createChat('agent-1', 'v2-1')
     await store.saveMessages('agent-1', 'v2-1', [
@@ -712,6 +746,89 @@ describe('messages', () => {
     expect(messages[0]!.task_id).toBeUndefined()
     await expect(fs.access(join(agentDir, 'legacy.json'))).rejects.toThrow()
     await expect(fs.access(chatMetaPath('legacy'))).resolves.toBeUndefined()
+  })
+
+  it('backfills stale index counters while migrating a legacy chat file', async () => {
+    const agentDir = join(tempDir, 'agent-1')
+    await fs.mkdir(agentDir, { recursive: true })
+    await fs.writeFile(
+      agentPath('index.json'),
+      JSON.stringify({
+        version: 2,
+        lastActiveChatId: null,
+        onboardingDismissed: false,
+        chats: [
+          {
+            id: 'legacy-counters',
+            title: 'Legacy counters',
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+            messageCount: 0,
+            errorCount: 0,
+            toolCallCount: 0,
+          },
+        ],
+      })
+    )
+    await fs.writeFile(
+      join(agentDir, 'legacy-counters.json'),
+      JSON.stringify({
+        version: 1,
+        chatId: 'legacy-counters',
+        messages: [
+          { id: 'm1', role: 'user', content: 'old', timestamp: 1 },
+          {
+            id: 'm2',
+            role: 'assistant',
+            content: 'failed',
+            timestamp: 2,
+            isError: true,
+            toolSteps: [{ toolName: 'read', displayName: 'Read', state: 'completed' }],
+          },
+        ],
+      })
+    )
+
+    const messages = await store.loadMessages('agent-1', 'legacy-counters')
+
+    expect(messages).toHaveLength(2)
+    const chat = (await store.listChats('agent-1')).find(item => item.id === 'legacy-counters')
+    expect(chat).toMatchObject({
+      messageCount: 2,
+      errorCount: 1,
+      toolCallCount: 1,
+    })
+  })
+
+  it('does not hide a failed legacy migration as an empty chat', async () => {
+    const agentDir = join(tempDir, 'agent-1')
+    await fs.mkdir(agentDir, { recursive: true })
+    await fs.writeFile(
+      join(agentDir, 'migration-failure.json'),
+      JSON.stringify({
+        version: 1,
+        chatId: 'migration-failure',
+        messages: [{ id: 'm1', role: 'user', content: 'old', timestamp: 1 }],
+      })
+    )
+
+    const originalWriteFile = fs.writeFile.bind(fs)
+    let injected = false
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+      const filePath = String(args[0])
+      if (!injected && filePath.includes('migration-failure.next-')) {
+        injected = true
+        throw transientFileReadError('ENOSPC')
+      }
+      return originalWriteFile(...(args as Parameters<typeof fs.writeFile>))
+    })
+
+    await expect(store.loadMessages('agent-1', 'migration-failure')).rejects.toThrow()
+
+    vi.restoreAllMocks()
+    await expect(fs.access(join(agentDir, 'migration-failure.json'))).resolves.toBeUndefined()
+    const messages = await store.loadMessages('agent-1', 'migration-failure')
+    expect(messages.map(message => message.id)).toEqual(['m1'])
   })
 })
 

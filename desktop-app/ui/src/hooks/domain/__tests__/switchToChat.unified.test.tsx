@@ -189,6 +189,42 @@ describe('switchToChat (unified, D.4)', () => {
     )
   })
 
+  it('caps server delta pagination so reconcile cannot walk an unbounded cursor chain', async () => {
+    clerum.chat.loadMessages.mockResolvedValue([
+      { id: 'turn-1-user', role: 'user' as const, content: 'q1', timestamp: 1 },
+      { id: 'turn-1-assistant', role: 'assistant' as const, content: 'a1', timestamp: 2 },
+    ])
+    clerum.rpc.loadSessionMessages.mockImplementation(
+      async (_hostRef, _agent, chatId, _teamId, query?: { afterTurn?: number }) => {
+        const nextTurn = (query?.afterTurn ?? 1) + 1
+        return {
+          agent: 'agent-x',
+          chatId,
+          state: 'idle',
+          latestTurnNumber: nextTurn,
+          hasMoreAfter: true,
+          turns: [turn(nextTurn, `q${nextTurn}`, `a${nextTurn}`)],
+        }
+      }
+    )
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'delta-cap')
+    })
+
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(5)
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenLastCalledWith(
+      'agent-x',
+      'agent-x',
+      'delta-cap',
+      undefined,
+      { limit: 80, afterTurn: 5 }
+    )
+    expect(result.current.chatMessages).toHaveLength(12)
+  })
+
   it('loads older history on demand and prepends it without blocking first render', async () => {
     const newestLocalPage = Array.from({ length: 80 }, (_, index) => ({
       id: `turn-${index + 21}-user`,

@@ -1067,6 +1067,96 @@ describe('useAgentChatController — characterization (D.0)', () => {
       ).toBe(true)
     })
 
+    it('does not advance a session cursor from a stale load-more result', async () => {
+      let resolveStalePage:
+        | ((value: {
+            items: Array<{
+              agent: string
+              chatId: string
+              turnCount: number
+              lastActivityAt: string
+            }>
+            nextCursor?: string
+          }) => void)
+        | undefined
+      const stalePage = new Promise<{
+        items: Array<{
+          agent: string
+          chatId: string
+          turnCount: number
+          lastActivityAt: string
+        }>
+        nextCursor?: string
+      }>(resolve => {
+        resolveStalePage = resolve
+      })
+      let cursorTwoCalls = 0
+      clerum.rpc.listSessions.mockImplementation(
+        async (hostRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
+          if (hostRef === 'agent-y') return { items: [] }
+          if (query?.cursor === 'cursor-2') {
+            cursorTwoCalls += 1
+            if (cursorTwoCalls === 1) return stalePage
+            return {
+              items: [
+                {
+                  agent: 'agent-x',
+                  chatId: 'remote-page-2-retry',
+                  turnCount: 3,
+                  lastActivityAt: '2026-05-02T00:00:00Z',
+                },
+              ],
+            }
+          }
+          return {
+            items: [
+              {
+                agent: 'agent-x',
+                chatId: 'remote-page-1',
+                turnCount: 2,
+                lastActivityAt: '2026-05-03T00:00:00Z',
+              },
+            ],
+            nextCursor: 'cursor-2',
+          }
+        }
+      )
+
+      const { result, rerender } = renderController({ agentNames: ['agent-x', 'agent-y'] })
+      await waitFor(() =>
+        expect(result.current.chatList.some(chat => chat.id === 'remote-page-1')).toBe(true)
+      )
+
+      let pendingLoad: Promise<void> | undefined
+      await act(async () => {
+        pendingLoad = result.current.loadMoreChatSessions()
+        await Promise.resolve()
+      })
+      rerender({ selectedAgent: 'agent-y', agentNames: ['agent-x', 'agent-y'] })
+      resolveStalePage?.({
+        items: [
+          {
+            agent: 'agent-x',
+            chatId: 'stale-remote-page',
+            turnCount: 4,
+            lastActivityAt: '2026-05-04T00:00:00Z',
+          },
+        ],
+        nextCursor: 'cursor-3',
+      })
+      await act(async () => {
+        await pendingLoad
+      })
+
+      expect(cursorTwoCalls).toBe(1)
+      expect(
+        clerum.rpc.listSessions.mock.calls.some(
+          call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-3'
+        )
+      ).toBe(false)
+      expect(result.current.chatList.some(chat => chat.id === 'stale-remote-page')).toBe(false)
+    })
+
     it('GAP-A persists the outgoing user message to the chat store on send', async () => {
       // Eager user-message persistence (dev) → D.3 must keep persisting it
       // (post-D.3 it carries task_id; here we only pin that it IS persisted).
