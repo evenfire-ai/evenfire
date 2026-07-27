@@ -16,7 +16,6 @@ import {
   IconRobot,
   IconRunReplay,
   IconSettings,
-  IconSharedFiles,
   IconStore,
   IconTokenBudgets,
   IconTraceDashboard,
@@ -41,9 +40,9 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     icon: <IconUsage />,
     children: [
       {
-        label: 'LLM Prices',
-        href: CONTROL_ROUTES.costAndUsage.llmPrices,
-        icon: <IconLlmPrices />,
+        label: 'Usage',
+        href: CONTROL_ROUTES.costAndUsage.usage,
+        icon: <IconUsageHistory />,
       },
       {
         label: 'Token Budgets',
@@ -51,9 +50,9 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
         icon: <IconTokenBudgets />,
       },
       {
-        label: 'Usage',
-        href: CONTROL_ROUTES.costAndUsage.usage,
-        icon: <IconUsageHistory />,
+        label: 'LLM Prices',
+        href: CONTROL_ROUTES.costAndUsage.llmPrices,
+        icon: <IconLlmPrices />,
       },
     ],
   },
@@ -62,11 +61,6 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     href: CONTROL_ROUTES.agentFiles.root,
     icon: <IconPaperclip />,
     children: [
-      {
-        label: 'Agent Files',
-        href: CONTROL_ROUTES.agentFiles.root,
-        icon: <IconSharedFiles />,
-      },
       {
         label: 'Agent Outputs',
         href: CONTROL_ROUTES.agentOutputs.root,

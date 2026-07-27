@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  notificationInboxDescription,
   notificationKindLabel,
   notificationPreviewText,
   sanitizeNotificationSettings,
@@ -73,20 +72,5 @@ describe('notification settings helpers', () => {
     expect(notificationKindLabel('workflow_completed')).toBe('Workflow completed')
     expect(notificationKindLabel('sdk_notification')).toBe('Plugin notification')
     expect(notificationKindLabel('assistant_reply')).toBe('Agent reply')
-  })
-
-  it('describes the inbox content without exposing runtime jargon', () => {
-    expect(notificationInboxDescription(true, true)).toBe(
-      'Pending approvals and updates from agents, workflows, and plugins.'
-    )
-    expect(notificationInboxDescription(true, false)).toBe(
-      'Workflow requests that are waiting on you.'
-    )
-    expect(notificationInboxDescription(false, true)).toBe(
-      'Updates from agents, workflows, and plugins.'
-    )
-    expect(notificationInboxDescription(false, false)).toBe(
-      'No notifications or pending approvals right now.'
-    )
   })
 })
