@@ -232,6 +232,88 @@ describe('SqliteConversationStore — session token counters', () => {
   })
 })
 
+describe('SqliteConversationStore — session summary listing', () => {
+  it('pages summaries from durable rows without hydrating full transcripts', async () => {
+    const handle = await freshStore({ cacheSize: 8 })
+    try {
+      const manager = new ConversationManager(handle.store)
+      const sessions = [
+        { key: 'u-1:rpc:agent-x:chat-1', timestamp: 100 },
+        { key: 'u-1:rpc:agent-x:chat-2', timestamp: 200 },
+        { key: 'u-1:rpc:agent-y:chat-3', timestamp: 300, awaitingApproval: true },
+      ]
+
+      for (const session of sessions) {
+        const conv = await manager.getOrCreate(session.key)
+        await manager.startTurn(conv, `hello ${session.key}`, `task-${session.timestamp}`)
+        if (session.awaitingApproval) {
+          await manager.suspendForApproval(conv, {
+            request_id: 'req-chat-3',
+            tool_name: 'shell_exec',
+            tool_call_id: 'tc-chat-3',
+            parameters: {},
+            description: 'approve test',
+            context_snapshot: [],
+          })
+        } else {
+          manager.recordSessionUsage(conv, {
+            input_tokens: session.timestamp,
+            output_tokens: session.timestamp / 2,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+          })
+          await manager.completeTurn(conv, `done ${session.key}`)
+        }
+        await handle.persistQueue.drainSessionKey(session.key)
+        handle.worker.db
+          .prepare('UPDATE sessions SET started_at = ? WHERE id = ?')
+          .run(session.timestamp - 1, conv.id)
+        handle.worker.db
+          .prepare('UPDATE messages SET timestamp = ? WHERE session_id = ?')
+          .run(session.timestamp, conv.id)
+      }
+
+      handle.store['cache'].clear()
+      handle.store['ordinals'].clear()
+      handle.store['sessionKeyById'].clear()
+
+      const firstPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:', { limit: 2 })
+      expect(firstPage.map(session => session.chatId)).toEqual(['chat-3', 'chat-2'])
+      expect(firstPage[0]).toMatchObject({
+        agent: 'agent-y',
+        state: ConversationState.AwaitingApproval,
+        activeTaskId: 'task-300',
+        pendingApproval: {
+          request_id: 'req-chat-3',
+          tool_name: 'shell_exec',
+        },
+        turnCount: 1,
+      })
+      expect(firstPage[1]).toMatchObject({
+        agent: 'agent-x',
+        state: ConversationState.Idle,
+        turnCount: 1,
+        input_tokens: 200,
+        output_tokens: 100,
+        cacheTokensReported: true,
+      })
+      expect(handle.store['cache'].size()).toBe(0)
+
+      const secondPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:', {
+        limit: 2,
+        cursor: {
+          updatedAt: firstPage[1]!.lastActivityAt,
+          key: firstPage[1]!.key,
+        },
+      })
+      expect(secondPage.map(session => session.chatId)).toEqual(['chat-1'])
+      expect(handle.store['cache'].size()).toBe(0)
+    } finally {
+      await handle.shutdown()
+    }
+  })
+})
+
 describe('SqliteConversationStore — cold-start rehydration', () => {
   it('rehydrates an active session with pending_approval', async () => {
     const handle = await freshStore({ cacheSize: 4 })

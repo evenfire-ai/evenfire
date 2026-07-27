@@ -308,6 +308,60 @@ describe('messages', () => {
     expect(messages.map(message => message.id)).toEqual(['readable-0'])
   })
 
+  it('keeps the previous paged snapshot if a full rewrite fails while staged', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await pagedStore.createChat('agent-1', 'rewrite-failure')
+    const originalMessages = [
+      { id: 'old-0', role: 'user' as const, content: 'old-0', timestamp: 0 },
+      { id: 'old-1', role: 'assistant' as const, content: 'old-1', timestamp: 1 },
+      { id: 'old-2', role: 'user' as const, content: 'old-2', timestamp: 2 },
+      { id: 'old-3', role: 'assistant' as const, content: 'old-3', timestamp: 3 },
+    ]
+    await pagedStore.saveMessages('agent-1', 'rewrite-failure', originalMessages)
+
+    const originalWriteFile = fs.writeFile.bind(fs)
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+      const filePath = String(args[0])
+      if (filePath.includes('rewrite-failure.next-') && filePath.endsWith('000001.json.tmp')) {
+        throw new Error('injected page write failure')
+      }
+      return originalWriteFile(...(args as Parameters<typeof fs.writeFile>))
+    })
+
+    await expect(
+      pagedStore.saveMessages('agent-1', 'rewrite-failure', [
+        { id: 'new-0', role: 'user', content: 'new-0', timestamp: 4 },
+      ])
+    ).rejects.toThrow('injected page write failure')
+
+    const reloaded = await pagedStore.loadMessages('agent-1', 'rewrite-failure')
+    expect(reloaded.map(message => message.id)).toEqual(['old-0', 'old-1', 'old-2', 'old-3'])
+  })
+
+  it('recovers the previous paged snapshot after an interrupted directory switch', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await pagedStore.createChat('agent-1', 'switch-recovery')
+    await pagedStore.saveMessages('agent-1', 'switch-recovery', [
+      { id: 'm0', role: 'user', content: 'msg-0', timestamp: 0 },
+      { id: 'm1', role: 'assistant', content: 'msg-1', timestamp: 1 },
+    ])
+
+    await fs.rename(
+      chatCacheDir('switch-recovery'),
+      `${chatCacheDir('switch-recovery')}.previous-test`
+    )
+
+    const reloaded = await pagedStore.loadMessages('agent-1', 'switch-recovery')
+    expect(reloaded.map(message => message.id)).toEqual(['m0', 'm1'])
+    await expect(fs.access(chatMetaPath('switch-recovery'))).resolves.toBeUndefined()
+  })
+
   it('prunes only old pages whose messages are known to exist on the server', async () => {
     const prunedStore = new ChatStore(tempDir, {
       pageSize: 2,

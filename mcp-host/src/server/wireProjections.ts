@@ -6,6 +6,15 @@ import type { ContextBreakdownWire, SessionTokensWire, TurnToolStepWire } from '
 // by `/v1/runtime/sessions` and `/messages` (per-session + per-turn token
 // usage, and per-turn tool steps). Pure functions, unit-tested in isolation.
 
+type SessionTokenSource = Pick<
+  Conversation,
+  | 'input_tokens'
+  | 'output_tokens'
+  | 'cache_read_tokens'
+  | 'cache_write_tokens'
+  | 'cacheTokensReported'
+>
+
 /**
  * Project a Conversation's lifetime token mirror into the wire shape served by
  * `/v1/runtime/sessions` and `/messages`.
@@ -16,7 +25,9 @@ import type { ContextBreakdownWire, SessionTokensWire, TurnToolStepWire } from '
  * cache hit" (Anthropic) from "absent because the provider doesn't report
  * cache" (OpenAI / zai / bailian).
  */
-export function projectSessionTokens(conversation: Conversation): SessionTokensWire | undefined {
+export function projectSessionTokens(
+  conversation: SessionTokenSource
+): SessionTokensWire | undefined {
   const hasTokens =
     !!conversation.input_tokens ||
     !!conversation.output_tokens ||

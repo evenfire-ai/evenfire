@@ -1,5 +1,10 @@
 import type { ReapedSession } from '../../db/worker/protocol'
-import type { Conversation, PendingApproval, TurnToolCall } from '../types'
+import {
+  type Conversation,
+  ConversationState,
+  type PendingApproval,
+  type TurnToolCall,
+} from '../types'
 
 /**
  * Token usage from a SINGLE LLM call, accumulated additively into the durable
@@ -51,6 +56,63 @@ export interface PersistedSessionListing {
 
 export type EvictCallback = (sessionKey: string, conversation: Conversation) => void
 
+export interface SessionListCursor {
+  updatedAt: Date
+  key: string
+}
+
+export interface SessionListQuery {
+  limit?: number
+  cursor?: SessionListCursor
+}
+
+export interface ConversationSessionSummary {
+  key: string
+  agent: string
+  chatId: string
+  state: ConversationState
+  activeTaskId?: string
+  pendingApproval?: Pick<PendingApproval, 'request_id' | 'tool_name'>
+  turnCount: number
+  lastActivityAt: Date
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_tokens?: number
+  cache_write_tokens?: number
+  cacheTokensReported?: boolean
+}
+
+function sessionPartsFromKey(
+  key: string,
+  prefix: string
+): { agent: string; chatId: string } | null {
+  const rest = key.slice(prefix.length)
+  const colonIdx = rest.indexOf(':')
+  if (colonIdx < 0) return null
+  return {
+    agent: rest.slice(0, colonIdx),
+    chatId: rest.slice(colonIdx + 1),
+  }
+}
+
+function compareSessionSummaries(
+  left: Pick<ConversationSessionSummary, 'key' | 'lastActivityAt'>,
+  right: Pick<ConversationSessionSummary, 'key' | 'lastActivityAt'>
+): number {
+  const byUpdated = right.lastActivityAt.getTime() - left.lastActivityAt.getTime()
+  return byUpdated || left.key.localeCompare(right.key)
+}
+
+function afterSessionCursor(
+  summary: Pick<ConversationSessionSummary, 'key' | 'lastActivityAt'>,
+  cursor: SessionListCursor | undefined
+): boolean {
+  if (!cursor) return true
+  const updatedAt = summary.lastActivityAt.getTime()
+  const cursorUpdatedAt = cursor.updatedAt.getTime()
+  return updatedAt < cursorUpdatedAt || (updatedAt === cursorUpdatedAt && summary.key > cursor.key)
+}
+
 /**
  * Storage-level abstraction for the session-keyed conversation map.
  *
@@ -101,6 +163,15 @@ export interface ConversationStore {
   /** Prefetch every session whose sessionKey starts with `prefix`. Used by
    *  list endpoints. Idempotent per prefix. */
   prefetchUserSessions(prefix: string): Promise<void>
+
+  /**
+   * Return bounded session summaries without hydrating complete transcripts.
+   * Full turns are intentionally reserved for `getOrLoad` / message endpoints.
+   */
+  listSessionSummariesByPrefix(
+    prefix: string,
+    query?: SessionListQuery
+  ): Promise<ConversationSessionSummary[]>
 
   /** Cold-start sweep: load every session with a pending_approval row,
    *  pin them in cache, and return enough metadata for the
@@ -229,6 +300,42 @@ export class InMemoryConversationStore implements ConversationStore {
 
   async prefetchUserSessions(_prefix: string): Promise<void> {
     /* nothing to prefetch — everything that exists is already in RAM */
+  }
+
+  async listSessionSummariesByPrefix(
+    prefix: string,
+    query: SessionListQuery = {}
+  ): Promise<ConversationSessionSummary[]> {
+    const summaries: ConversationSessionSummary[] = []
+    for (const { key, conversation } of this.listByPrefix(prefix)) {
+      const parts = sessionPartsFromKey(key, prefix)
+      if (!parts) continue
+      summaries.push({
+        key,
+        agent: parts.agent,
+        chatId: parts.chatId,
+        state: conversation.state,
+        activeTaskId: conversation.activeTaskId,
+        pendingApproval: conversation.pending_approval
+          ? {
+              request_id: conversation.pending_approval.request_id,
+              tool_name: conversation.pending_approval.tool_name,
+            }
+          : undefined,
+        turnCount: conversation.turns.length,
+        lastActivityAt: conversation.updated_at,
+        input_tokens: conversation.input_tokens,
+        output_tokens: conversation.output_tokens,
+        cache_read_tokens: conversation.cache_read_tokens,
+        cache_write_tokens: conversation.cache_write_tokens,
+        cacheTokensReported: conversation.cacheTokensReported,
+      })
+    }
+
+    const filtered = summaries
+      .filter(summary => afterSessionCursor(summary, query.cursor))
+      .sort(compareSessionSummaries)
+    return query.limit === undefined ? filtered : filtered.slice(0, query.limit)
   }
 
   async loadAllPendingApprovals(): Promise<PersistedSessionListing[]> {

@@ -11,10 +11,12 @@ import { Counter } from 'prom-client'
 import type { ReapedSession } from '../../../db/worker/protocol'
 import type { Conversation, PendingApproval, TurnToolCall } from '../../types'
 import type {
+  ConversationSessionSummary,
   ConversationStore,
   EvictCallback,
   GetOrCreateOptions,
   PersistedSessionListing,
+  SessionListQuery,
   SessionTokenUsage,
 } from '../conversationStore'
 
@@ -123,6 +125,18 @@ export class DualConversationStore implements ConversationStore {
       this.memory.prefetchUserSessions(prefix),
       this.sqlite.prefetchUserSessions(prefix),
     ])
+  }
+
+  async listSessionSummariesByPrefix(
+    prefix: string,
+    query: SessionListQuery = {}
+  ): Promise<ConversationSessionSummary[]> {
+    const [memList, sqlList] = await Promise.all([
+      this.memory.listSessionSummariesByPrefix(prefix, query),
+      this.sqlite.listSessionSummariesByPrefix(prefix, query),
+    ])
+    this.recordParity('listSessionSummariesByPrefix', memList.length === sqlList.length)
+    return sqlList.length ? sqlList : memList
   }
 
   async loadAllPendingApprovals(): Promise<PersistedSessionListing[]> {

@@ -111,6 +111,13 @@ export interface PersistedSession {
   pending_approval: PendingApprovalRow | null
 }
 
+export interface PersistedSessionSummary {
+  session: SessionRow
+  last_activity_at: number
+  turn_count: number
+  pending_approval: Pick<PendingApprovalRow, 'request_id' | 'tool_name'> | null
+}
+
 export interface LoadAllPendingApprovalsRow {
   approval: PendingApprovalRow
   session_key: string
@@ -209,6 +216,13 @@ export type WorkerOp =
   | { kind: 'delete_pending_approval'; requestId: string }
   | { kind: 'load_active_session'; sessionKey: string }
   | { kind: 'list_sessions_by_prefix'; sessionKeyPrefix: string }
+  | {
+      kind: 'list_session_summaries_by_prefix'
+      sessionKeyPrefix: string
+      limit?: number
+      cursorUpdatedAt?: number
+      cursorKey?: string
+    }
   | { kind: 'load_all_pending_approvals' }
   | { kind: 'sweep_expired'; nowEpoch: number; ttlSeconds: number }
   | { kind: 'fts_search'; query: string; limit: number; userId?: string }

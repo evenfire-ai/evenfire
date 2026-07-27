@@ -18,16 +18,25 @@ import type {
   LoadAllPendingApprovalsRow,
   PendingApprovalRow,
   PersistedSession,
+  PersistedSessionSummary,
   ReapedSession,
   SessionRow,
 } from '../../../db/worker/protocol'
 import { parseSessionKey } from '../../../session/types'
-import type { ChatMessage, Conversation, PendingApproval, TurnToolCall } from '../../types'
 import {
+  type ChatMessage,
+  type Conversation,
+  ConversationState,
+  type PendingApproval,
+  type TurnToolCall,
+} from '../../types'
+import {
+  type ConversationSessionSummary,
   type ConversationStore,
   type EvictCallback,
   type GetOrCreateOptions,
   type PersistedSessionListing,
+  type SessionListQuery,
   type SessionTokenUsage,
 } from '../conversationStore'
 import type { PersistQueue } from './persistQueue'
@@ -325,6 +334,55 @@ export class SqliteConversationStore implements ConversationStore {
     }
     pinnedCountGauge?.set(this.cache.pinnedCount())
     this.prefetchedPrefixes.add(prefix)
+  }
+
+  async listSessionSummariesByPrefix(
+    prefix: string,
+    query: SessionListQuery = {}
+  ): Promise<ConversationSessionSummary[]> {
+    await this.persistQueue.drainPrefix(prefix)
+    const rows = await this.persistQueue.enqueueSync<PersistedSessionSummary[]>({
+      kind: 'list_session_summaries_by_prefix',
+      sessionKeyPrefix: prefix,
+      limit: query.limit,
+      cursorUpdatedAt: query.cursor ? query.cursor.updatedAt.getTime() / 1000 : undefined,
+      cursorKey: query.cursor?.key,
+    })
+
+    const out: ConversationSessionSummary[] = []
+    for (const row of rows) {
+      const key = row.session.session_key
+      const rest = key.slice(prefix.length)
+      const colonIdx = rest.indexOf(':')
+      if (colonIdx < 0) continue
+      const state =
+        row.session.state === ConversationState.Processing
+          ? ConversationState.Processing
+          : row.session.state === ConversationState.AwaitingApproval
+            ? ConversationState.AwaitingApproval
+            : ConversationState.Idle
+      out.push({
+        key,
+        agent: rest.slice(0, colonIdx),
+        chatId: rest.slice(colonIdx + 1),
+        state,
+        activeTaskId: row.session.active_task_id ?? undefined,
+        pendingApproval: row.pending_approval
+          ? {
+              request_id: row.pending_approval.request_id,
+              tool_name: row.pending_approval.tool_name,
+            }
+          : undefined,
+        turnCount: Math.max(0, Math.floor(row.turn_count ?? 0)),
+        lastActivityAt: new Date(row.last_activity_at * 1000),
+        input_tokens: row.session.input_tokens,
+        output_tokens: row.session.output_tokens,
+        cache_read_tokens: row.session.cache_read_tokens,
+        cache_write_tokens: row.session.cache_write_tokens,
+        cacheTokensReported: row.session.cache_tokens_reported === 1,
+      })
+    }
+    return out
   }
 
   async loadAllPendingApprovals(): Promise<PersistedSessionListing[]> {

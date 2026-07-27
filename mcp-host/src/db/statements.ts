@@ -25,6 +25,7 @@ export interface PreparedStatements {
   updateSessionModelSelections: Statement
   selectSessionBySessionKey: Statement
   selectSessionsByPrefix: Statement
+  selectSessionSummariesByPrefix: Statement
 
   insertMessage: Statement
   selectMessagesBySession: Statement
@@ -183,6 +184,43 @@ export function prepareStatements(db: Database): PreparedStatements {
     `),
     selectSessionsByPrefix: db.prepare(`
       SELECT * FROM sessions WHERE session_key LIKE ? ORDER BY started_at DESC
+    `),
+    selectSessionSummariesByPrefix: db.prepare(`
+      WITH session_summaries AS (
+        SELECT s.*,
+               COALESCE(
+                 (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id),
+                 s.started_at
+               ) AS last_activity_at,
+               COALESCE(
+                 (SELECT MAX(m.turn_number) FROM messages m WHERE m.session_id = s.id),
+                 0
+               ) AS turn_count,
+               (
+                 SELECT pa.request_id
+                   FROM pending_approvals pa
+                  WHERE pa.session_id = s.id
+                  LIMIT 1
+               ) AS pending_request_id,
+               (
+                 SELECT pa.tool_name
+                   FROM pending_approvals pa
+                  WHERE pa.session_id = s.id
+                  LIMIT 1
+               ) AS pending_tool_name
+          FROM sessions s
+         WHERE s.session_key LIKE @pattern
+      )
+      SELECT *
+        FROM session_summaries
+       WHERE @cursor_updated_at IS NULL
+          OR last_activity_at < @cursor_updated_at
+          OR (
+            last_activity_at = @cursor_updated_at
+            AND session_key > @cursor_key
+          )
+       ORDER BY last_activity_at DESC, session_key ASC
+       LIMIT @limit
     `),
 
     insertMessage: db.prepare(`

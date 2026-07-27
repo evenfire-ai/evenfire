@@ -33,6 +33,7 @@ import {
   resolveSessionModel,
 } from './config/modelResolution'
 import { ContextMapperClient, getContextMapperClient } from './contextMapperClient'
+import type { ConversationSessionSummary } from './core/conversation/conversationStore'
 import {
   type ConversationStoreHandle,
   SqliteColdStartLoader,
@@ -2020,25 +2021,29 @@ async function startRPCServer(): Promise<void> {
   // approve button without waiting for the SSE. `displayName` is derived
   // server-side (the `tool_name` itself is NOT leaked over the wire — security
   // patch P1-1).
-  const sessionStateView = (conversation: Conversation) => {
+  const sessionStateView = (session: Conversation | ConversationSessionSummary) => {
     const state =
-      conversation.state === ConversationState.Processing
+      session.state === ConversationState.Processing
         ? ('processing' as const)
-        : conversation.state === ConversationState.AwaitingApproval
+        : session.state === ConversationState.AwaitingApproval
           ? ('awaiting_approval' as const)
           : ('idle' as const)
-    const activeTaskId = state === 'idle' ? undefined : conversation.activeTaskId
+    const activeTaskId = state === 'idle' ? undefined : session.activeTaskId
+    const approval =
+      'pendingApproval' in session
+        ? session.pendingApproval
+        : (session as Conversation).pending_approval
     const pendingApproval =
-      conversation.state === ConversationState.AwaitingApproval && conversation.pending_approval
+      session.state === ConversationState.AwaitingApproval && approval
         ? {
-            requestId: conversation.pending_approval.request_id,
-            displayName: getDisplayName(conversation.pending_approval.tool_name),
+            requestId: approval.request_id,
+            displayName: getDisplayName(approval.tool_name),
           }
         : undefined
     // Lifetime token totals — projected to the wire shape (omitted until the
     // session has had an LLM call; cache breakdown included only when the model
     // reports it). See `projectSessionTokens`.
-    const tokens = projectSessionTokens(conversation)
+    const tokens = projectSessionTokens(session)
     return { state, activeTaskId, pendingApproval, tokens }
   }
 
@@ -2076,37 +2081,26 @@ async function startRPCServer(): Promise<void> {
     query: { limit?: number; cursor?: string }
   ) => {
     const convManager = agent!.getConversationManager()
-    const entries = (await convManager.listSessionsForUserAsync(`${userSub}:rpc:`)).sort(
-      (left, right) => {
-        const byUpdated =
-          right.conversation.updated_at.getTime() - left.conversation.updated_at.getTime()
-        return byUpdated || left.key.localeCompare(right.key)
-      }
-    )
+    const keyPrefix = `${userSub}:rpc:`
     const cursor = decodeSessionsCursor(query.cursor)
-    const afterCursor = cursor
-      ? entries.filter(entry => {
-          const updatedAt = entry.conversation.updated_at.toISOString()
-          return (
-            updatedAt < cursor.updatedAt ||
-            (updatedAt === cursor.updatedAt && entry.key > cursor.key)
-          )
-        })
-      : entries
-    const page = query.limit ? afterCursor.slice(0, query.limit) : afterCursor
-    const hasMore = query.limit !== undefined && afterCursor.length > page.length
+    const entries = await convManager.listSessionSummariesForUserAsync(keyPrefix, {
+      limit: query.limit === undefined ? undefined : query.limit + 1,
+      cursor: cursor ? { updatedAt: new Date(cursor.updatedAt), key: cursor.key } : undefined,
+    })
+    const page = query.limit ? entries.slice(0, query.limit) : entries
+    const hasMore = query.limit !== undefined && entries.length > page.length
     const last = page.at(-1)
     return {
-      items: page.map(({ conversation, agent: agentName, chatId }) => ({
-        agent: agentName,
-        chatId,
-        turnCount: conversation.turns.length,
-        lastActivityAt: conversation.updated_at.toISOString(),
-        ...sessionStateView(conversation),
+      items: page.map(summary => ({
+        agent: summary.agent,
+        chatId: summary.chatId,
+        turnCount: summary.turnCount,
+        lastActivityAt: summary.lastActivityAt.toISOString(),
+        ...sessionStateView(summary),
       })),
       ...(hasMore && last
         ? {
-            nextCursor: encodeSessionsCursor(last.conversation.updated_at.toISOString(), last.key),
+            nextCursor: encodeSessionsCursor(last.lastActivityAt.toISOString(), last.key),
           }
         : {}),
     }

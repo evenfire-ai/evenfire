@@ -4,6 +4,7 @@ import { scheduleAfterFirstPaint } from '../scheduleAfterFirstPaint'
 import {
   loadWorkflowRunsWithArtifactsForApprovalRefresh,
   loadWorkflowRunsWithArtifactsForWorkflowTarget,
+  scheduleAfterFirstPaintForSession,
 } from '../useAppController'
 
 function installWorkflowHarness(runsResult: unknown) {
@@ -124,6 +125,7 @@ describe('loadWorkflowRunsWithArtifactsForWorkflowTarget', () => {
 describe('scheduleAfterFirstPaint', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('waits for two animation frames before running deferred startup work', async () => {
@@ -142,5 +144,38 @@ describe('scheduleAfterFirstPaint', () => {
 
     frames.shift()?.(2)
     expect(task).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs session-bound deferred startup work when identity is unchanged', async () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    })
+    const identityRef = { current: 'user-1:team-1' }
+    const task = vi.fn(async () => undefined)
+
+    scheduleAfterFirstPaintForSession(identityRef, 'user-1:team-1', task)
+    frames.shift()?.(1)
+    frames.shift()?.(2)
+
+    expect(task).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips session-bound deferred startup work after logout or identity change', async () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    })
+    const identityRef = { current: 'user-1:team-1' }
+    const task = vi.fn(async () => undefined)
+
+    scheduleAfterFirstPaintForSession(identityRef, 'user-1:team-1', task)
+    identityRef.current = null
+    frames.shift()?.(1)
+    frames.shift()?.(2)
+
+    expect(task).not.toHaveBeenCalled()
   })
 })

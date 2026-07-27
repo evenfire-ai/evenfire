@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import type { ChatFile, ChatIndex, ChatMessage, ChatMetadata } from './types.js'
@@ -178,19 +179,41 @@ export class ChatStore {
     return join(this.agentDir(agentRef), 'chats', chatId)
   }
 
+  private chatSnapshotSiblingPath(
+    agentRef: string,
+    chatId: string,
+    kind: 'next' | 'previous',
+    token: string
+  ): string {
+    assertSafeSegment('chatId', chatId)
+    return join(this.agentDir(agentRef), 'chats', `${chatId}.${kind}-${token}`)
+  }
+
   private chatPagesDirPath(agentRef: string, chatId: string): string {
-    return join(this.chatDirPath(agentRef, chatId), 'pages')
+    return this.chatPagesDirFromChatDir(this.chatDirPath(agentRef, chatId))
   }
 
   private chatMetaPath(agentRef: string, chatId: string): string {
-    return join(this.chatDirPath(agentRef, chatId), 'meta.json')
+    return this.chatMetaPathFromChatDir(this.chatDirPath(agentRef, chatId))
   }
 
-  private chatPagePath(agentRef: string, chatId: string, fileName: string): string {
+  private chatPagesDirFromChatDir(chatDir: string): string {
+    return join(chatDir, 'pages')
+  }
+
+  private chatMetaPathFromChatDir(chatDir: string): string {
+    return join(chatDir, 'meta.json')
+  }
+
+  private chatPagePathFromPagesDir(pagesDir: string, fileName: string): string {
     if (!PAGE_FILE_PATTERN.test(fileName)) {
       throw new Error(`Invalid chat page: unsafe file name`)
     }
-    return join(this.chatPagesDirPath(agentRef, chatId), fileName)
+    return join(pagesDir, fileName)
+  }
+
+  private chatPagePath(agentRef: string, chatId: string, fileName: string): string {
+    return this.chatPagePathFromPagesDir(this.chatPagesDirPath(agentRef, chatId), fileName)
   }
 
   private async writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
@@ -218,8 +241,15 @@ export class ChatStore {
   }
 
   private async readPagedMeta(agentRef: string, chatId: string): Promise<PagedChatMeta | null> {
+    return this.readPagedMetaAtPath(this.chatMetaPath(agentRef, chatId), chatId)
+  }
+
+  private async readPagedMetaAtPath(
+    metaPath: string,
+    chatId: string
+  ): Promise<PagedChatMeta | null> {
     try {
-      const raw = await fs.readFile(this.chatMetaPath(agentRef, chatId), 'utf-8')
+      const raw = await fs.readFile(metaPath, 'utf-8')
       const parsed = JSON.parse(raw) as PagedChatMeta
       if (
         parsed?.version !== PAGED_CHAT_VERSION ||
@@ -281,6 +311,20 @@ export class ChatStore {
     pageNumber: number,
     messages: ChatMessage[]
   ): Promise<ChatPageEntry> {
+    return this.writePageMessagesToDir(
+      chatId,
+      this.chatPagesDirPath(agentRef, chatId),
+      pageNumber,
+      messages
+    )
+  }
+
+  private async writePageMessagesToDir(
+    chatId: string,
+    pagesDir: string,
+    pageNumber: number,
+    messages: ChatMessage[]
+  ): Promise<ChatPageEntry> {
     const file = pageFileName(pageNumber)
     const page: ChatPageFile = {
       version: PAGED_CHAT_VERSION,
@@ -288,7 +332,7 @@ export class ChatStore {
       pageNumber,
       messages,
     }
-    await this.writeJsonAtomic(this.chatPagePath(agentRef, chatId, file), page)
+    await this.writeJsonAtomic(this.chatPagePathFromPagesDir(pagesDir, file), page)
     return pageEntry(file, messages)
   }
 
@@ -297,13 +341,25 @@ export class ChatStore {
     chatId: string,
     meta: PagedChatMeta
   ): Promise<void> {
-    await this.writeJsonAtomic(this.chatMetaPath(agentRef, chatId), this.finalizePagedMeta(meta))
+    await this.writePagedMetaToDir(chatId, this.chatDirPath(agentRef, chatId), meta)
+  }
+
+  private async writePagedMetaToDir(
+    chatId: string,
+    chatDir: string,
+    meta: PagedChatMeta
+  ): Promise<void> {
+    await this.writeJsonAtomic(this.chatMetaPathFromChatDir(chatDir), {
+      ...this.finalizePagedMeta(meta),
+      chatId,
+    })
   }
 
   private async pruneSyncedPages(
     agentRef: string,
     chatId: string,
-    meta: PagedChatMeta
+    meta: PagedChatMeta,
+    options: { pagesDir?: string } = {}
   ): Promise<PagedChatMeta> {
     if (this.maxLocalSyncedMessages === Number.POSITIVE_INFINITY) {
       return this.finalizePagedMeta(meta)
@@ -320,7 +376,8 @@ export class ChatStore {
         pruning && page.serverSynced && localCount - page.count >= this.maxLocalSyncedMessages
 
       if (canPrunePage) {
-        await fs.rm(this.chatPagePath(agentRef, chatId, page.file), { force: true })
+        const pagesDir = options.pagesDir ?? this.chatPagesDirPath(agentRef, chatId)
+        await fs.rm(this.chatPagePathFromPagesDir(pagesDir, page.file), { force: true })
         localCount -= page.count
         prunedBeforeCount += page.count
         prunedThroughServerTurnNumber = page.lastServerTurnNumber ?? prunedThroughServerTurnNumber
@@ -339,6 +396,32 @@ export class ChatStore {
     })
   }
 
+  private async recoverPagedChatUnlocked(agentRef: string, chatId: string): Promise<void> {
+    const activeDir = this.chatDirPath(agentRef, chatId)
+    if (await this.readPagedMeta(agentRef, chatId)) return
+
+    let entries: Array<{ name: string; isDirectory: () => boolean }>
+    try {
+      entries = await fs.readdir(join(this.agentDir(agentRef), 'chats'), { withFileTypes: true })
+    } catch {
+      return
+    }
+
+    const backups = entries
+      .filter(entry => entry.isDirectory() && entry.name.startsWith(`${chatId}.previous-`))
+      .map(entry => join(this.agentDir(agentRef), 'chats', entry.name))
+      .sort()
+      .reverse()
+
+    for (const backupDir of backups) {
+      const meta = await this.readPagedMetaAtPath(this.chatMetaPathFromChatDir(backupDir), chatId)
+      if (!meta) continue
+      await fs.rm(activeDir, { recursive: true, force: true })
+      await fs.rename(backupDir, activeDir)
+      return
+    }
+  }
+
   private async writePagedChatUnlocked(
     agentRef: string,
     chatId: string,
@@ -346,51 +429,79 @@ export class ChatStore {
     options: { removeLegacy?: boolean } = {}
   ): Promise<PagedChatMeta> {
     const chatDir = this.chatDirPath(agentRef, chatId)
-    const pagesDir = this.chatPagesDirPath(agentRef, chatId)
-    await fs.rm(chatDir, { recursive: true, force: true })
+    const snapshotToken = randomUUID()
+    const stagingDir = this.chatSnapshotSiblingPath(agentRef, chatId, 'next', snapshotToken)
+    const backupDir = this.chatSnapshotSiblingPath(agentRef, chatId, 'previous', snapshotToken)
+    const pagesDir = this.chatPagesDirFromChatDir(stagingDir)
+    let movedExistingSnapshot = false
+
+    await fs.mkdir(join(this.agentDir(agentRef), 'chats'), { recursive: true })
+    await fs.rm(stagingDir, { recursive: true, force: true })
     await fs.mkdir(pagesDir, { recursive: true })
 
-    const pages: ChatPageEntry[] = []
-    for (
-      let start = 0, pageNumber = 1;
-      start < messages.length;
-      start += this.pageSize, pageNumber += 1
-    ) {
-      pages.push(
-        await this.writePageMessages(
-          agentRef,
-          chatId,
-          pageNumber,
-          messages.slice(start, start + this.pageSize)
+    try {
+      const pages: ChatPageEntry[] = []
+      for (
+        let start = 0, pageNumber = 1;
+        start < messages.length;
+        start += this.pageSize, pageNumber += 1
+      ) {
+        pages.push(
+          await this.writePageMessagesToDir(
+            chatId,
+            pagesDir,
+            pageNumber,
+            messages.slice(start, start + this.pageSize)
+          )
         )
-      )
-    }
+      }
 
-    const meta = await this.pruneSyncedPages(
-      agentRef,
-      chatId,
-      this.finalizePagedMeta({
-        version: PAGED_CHAT_VERSION,
+      const meta = await this.pruneSyncedPages(
+        agentRef,
         chatId,
-        pageSize: this.pageSize,
-        messageCount: messages.length,
-        localMessageCount: messages.length,
-        pages,
-      })
-    )
-    await this.writePagedMeta(agentRef, chatId, meta)
+        this.finalizePagedMeta({
+          version: PAGED_CHAT_VERSION,
+          chatId,
+          pageSize: this.pageSize,
+          messageCount: messages.length,
+          localMessageCount: messages.length,
+          pages,
+        }),
+        { pagesDir }
+      )
+      await this.writePagedMetaToDir(chatId, stagingDir, meta)
 
-    if (options.removeLegacy) {
-      await fs.rm(this.chatFilePath(agentRef, chatId), { force: true })
+      try {
+        await fs.rename(chatDir, backupDir)
+        movedExistingSnapshot = true
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+      }
+
+      await fs.rename(stagingDir, chatDir)
+      if (movedExistingSnapshot) {
+        await fs.rm(backupDir, { recursive: true, force: true }).catch(() => undefined)
+      }
+
+      if (options.removeLegacy) {
+        await fs.rm(this.chatFilePath(agentRef, chatId), { force: true })
+      }
+
+      return meta
+    } catch (err) {
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined)
+      if (movedExistingSnapshot) {
+        await fs.rename(backupDir, chatDir).catch(() => undefined)
+      }
+      throw err
     }
-
-    return meta
   }
 
   private async readOrMigratePagedChatUnlocked(
     agentRef: string,
     chatId: string
   ): Promise<PagedChatMeta | null> {
+    await this.recoverPagedChatUnlocked(agentRef, chatId)
     const paged = await this.readPagedMeta(agentRef, chatId)
     if (paged) return paged
 

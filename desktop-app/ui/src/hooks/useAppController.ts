@@ -95,6 +95,21 @@ export async function loadWorkflowRunsWithArtifactsForApprovalRefresh(
   })
 }
 
+interface SessionIdentityRef {
+  current: string | null
+}
+
+export function scheduleAfterFirstPaintForSession(
+  sessionIdentityRef: SessionIdentityRef,
+  expectedIdentity: string,
+  task: () => Promise<unknown>
+): void {
+  scheduleAfterFirstPaint(async () => {
+    if (sessionIdentityRef.current !== expectedIdentity) return
+    await task()
+  })
+}
+
 export function useAppController() {
   const queryClient = useQueryClient()
 
@@ -362,17 +377,25 @@ export function useAppController() {
         ? teamsData.refreshInitialDirectory
         : teamsData.refresh
       if (options.initialLoad) {
+        const scheduledIdentity = authenticatedSessionIdentityRef.current
         await refreshAgentsData()
-        scheduleAfterFirstPaint(async () => {
-          setPostPaintDataReady(true)
-          await Promise.all([
-            refreshContextsData(),
-            refreshMcpServersData(),
-            refreshTeams(),
-            refreshWorkflowsData(),
-            notif.handleRefreshPendingApprovals({ silent: true }),
-          ])
-        })
+        if (!scheduledIdentity || authenticatedSessionIdentityRef.current !== scheduledIdentity) {
+          return
+        }
+        scheduleAfterFirstPaintForSession(
+          authenticatedSessionIdentityRef,
+          scheduledIdentity,
+          async () => {
+            setPostPaintDataReady(true)
+            await Promise.all([
+              refreshContextsData(),
+              refreshMcpServersData(),
+              refreshTeams(),
+              refreshWorkflowsData(),
+              notif.handleRefreshPendingApprovals({ silent: true }),
+            ])
+          }
+        )
         return
       }
       return Promise.all([

@@ -12,6 +12,7 @@ import type {
   LoadAllPendingApprovalsRow,
   PendingApprovalRow,
   PersistedSession,
+  PersistedSessionSummary,
   ReapedSession,
   SessionRow,
   WorkerOp,
@@ -558,6 +559,36 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         })
       }
       return result
+    }
+
+    case 'list_session_summaries_by_prefix': {
+      const pattern = `${op.sessionKeyPrefix}%`
+      const rows = s.selectSessionSummariesByPrefix.all({
+        pattern,
+        limit: op.limit ?? -1,
+        cursor_updated_at: op.cursorUpdatedAt ?? null,
+        cursor_key: op.cursorKey ?? null,
+      }) as Array<
+        SessionRow & {
+          last_activity_at: number
+          turn_count: number
+          pending_request_id: string | null
+          pending_tool_name: string | null
+        }
+      >
+      return rows.map(row => {
+        const { last_activity_at, turn_count, pending_request_id, pending_tool_name, ...session } =
+          row
+        return {
+          session: session as SessionRow,
+          last_activity_at,
+          turn_count,
+          pending_approval:
+            pending_request_id && pending_tool_name
+              ? { request_id: pending_request_id, tool_name: pending_tool_name }
+              : null,
+        } satisfies PersistedSessionSummary
+      })
     }
 
     case 'load_all_pending_approvals': {

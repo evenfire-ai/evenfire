@@ -12,9 +12,11 @@ import {
 } from '../types'
 import type { SessionTokenUsage } from './conversationStore'
 import {
+  ConversationSessionSummary,
   ConversationStore,
   GetOrCreateOptions,
   InMemoryConversationStore,
+  SessionListQuery,
 } from './conversationStore'
 
 /**
@@ -142,6 +144,18 @@ export class ConversationManager {
   > {
     await this.store.prefetchUserSessions(keyPrefix)
     return this.listSessionsForUser(keyPrefix)
+  }
+
+  /**
+   * Summary-only listing for `/v1/runtime/sessions`. Durable stores implement
+   * this without loading transcript rows; full turn hydration stays on
+   * `getSessionByKeyAsync` and the messages endpoint.
+   */
+  async listSessionSummariesForUserAsync(
+    keyPrefix: string,
+    query: SessionListQuery = {}
+  ): Promise<ConversationSessionSummary[]> {
+    return this.store.listSessionSummariesByPrefix(keyPrefix, query)
   }
 
   /**
