@@ -539,9 +539,23 @@ export class TaskTracker implements AgentTaskTracker {
 
       case 'suspended': {
         const sd = event.data
+        // Stamp `pausedAt` ONLY on the TRANSITION into suspended (§AC3 freezes the
+        // D.5b tier timer at `pausedAt` so an approval wait can't escalate the
+        // nudges). This event is NOT once-per-suspension: mcp-host keeps the last
+        // `suspended` as a sticky event and replays it to every new subscriber, and
+        // the main-process bridge (`appService.startTaskProgressStream`) reconnects
+        // the SSE transparently whenever the 300s RPC token lapses mid-stream
+        // (`auth-expired`) — i.e. roughly every 5 min on a long approval wait. Each
+        // replay re-entering this branch used to re-stamp `pausedAt = now`, turning
+        // the "frozen" age (`pausedAt - startedAt`) back into full wall-clock and
+        // escalating the task to T3/T4/T5 while it sat suspended. Guarding on the
+        // PREVIOUS status keeps a genuine RE-suspension correct: a decided approval
+        // routes through `tool_start`/`llm_in_progress`, which set status back to
+        // 'streaming', so the next `suspended` is a real transition and re-stamps.
+        const wasSuspended = state.status === 'suspended'
         this.mutate(key, s => {
           s.status = 'suspended'
-          s.pausedAt = Date.now()
+          if (!wasSuspended) s.pausedAt = Date.now()
           s.pendingApproval = sd.requestId
             ? {
                 requestId: sd.requestId,

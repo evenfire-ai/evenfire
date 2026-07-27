@@ -243,6 +243,73 @@ describe('TaskTracker', () => {
     expect(onSuspended).toHaveBeenCalledTimes(1)
   })
 
+  it('a replayed suspended (already suspended) does NOT re-stamp pausedAt (§AC3)', async () => {
+    // Advance the clock WITHOUT fake timers: the 5s connect timeout and 30s idle
+    // watchdog are irrelevant to this invariant and would just fail the task.
+    let clock = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    tracker.setCallbacks({ onTerminal: vi.fn(), onSuspended: vi.fn() })
+    tracker.start(KEY, 'task-1', 'um-1')
+    const suspend = () =>
+      rpc.emit({
+        type: 'suspended',
+        data: {
+          taskId: 'task-1',
+          requestId: 'req-1',
+          displayName: 'Shell Execute',
+          reason: 'approval',
+        },
+      })
+    await suspend()
+    const firstPausedAt = tracker.get(KEY)?.pausedAt
+    expect(firstPausedAt).toBeTypeOf('number')
+
+    // The bridge reconnects (the 300s RPC token lapsed) and mcp-host replays its
+    // sticky `suspended` to the new subscriber. The freeze must survive it —
+    // otherwise the frozen age becomes full wall-clock and D.5b escalates the
+    // nudges to T3/T4/T5 while the task just sits at the approval gate.
+    clock += 600_000
+    await suspend()
+    clock += 600_000
+    await suspend()
+
+    expect(tracker.get(KEY)?.pausedAt).toBe(firstPausedAt)
+    expect(tracker.get(KEY)?.status).toBe('suspended')
+    expect(tracker.get(KEY)?.pendingApproval?.requestId).toBe('req-1')
+  })
+
+  it('a genuine re-suspension after a resume DOES re-stamp pausedAt', async () => {
+    let clock = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    tracker.setCallbacks({ onTerminal: vi.fn(), onSuspended: vi.fn() })
+    tracker.start(KEY, 'task-1', 'um-1')
+    await rpc.emit({
+      type: 'suspended',
+      data: { taskId: 'task-1', requestId: 'req-1', displayName: 'Shell', reason: 'approval' },
+    })
+    const firstPausedAt = tracker.get(KEY)?.pausedAt
+    expect(firstPausedAt).toBeTypeOf('number')
+
+    // Approval decided → execution resumes (status back to 'streaming').
+    clock += 60_000
+    await rpc.emit({
+      type: 'tool_start',
+      data: { taskId: 'task-1', toolCallId: 'tc-1', toolName: 'shell', iteration: 2 },
+    })
+    expect(tracker.get(KEY)?.status).toBe('streaming')
+    expect(tracker.get(KEY)?.pendingApproval).toBeUndefined()
+
+    // A SECOND tool needs approval → real transition, so the freeze point moves.
+    clock += 60_000
+    await rpc.emit({
+      type: 'suspended',
+      data: { taskId: 'task-1', requestId: 'req-2', displayName: 'Shell', reason: 'approval' },
+    })
+
+    expect(tracker.get(KEY)?.pausedAt).toBe(firstPausedAt! + 120_000)
+    expect(tracker.get(KEY)?.pendingApproval?.requestId).toBe('req-2')
+  })
+
   it('subscribe returns an unsubscribe that stops further notifications', async () => {
     const fn = vi.fn()
     const unsubscribe = tracker.subscribe(KEY, fn)

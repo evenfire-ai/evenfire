@@ -125,6 +125,20 @@ describe('NudgeArea (D.5b)', () => {
     expect(container.firstChild).toBeNull()
   })
 
+  it('renders nothing while suspended even if the computed tier is T3+', () => {
+    // Genuinely worked 2.5–16min BEFORE suspending (T3/T4/T5), so §AC3's freeze
+    // at `pausedAt` still lands on a nudge tier — but "your agent is still
+    // working" is false at an approval gate. The approval card is the
+    // affordance; the nudge stays out.
+    for (const ageMs of [150_000, 400_000, 1_000_000]) {
+      const { container, unmount } = renderNudge(
+        task(ageMs, { status: 'suspended', pausedAt: Date.now() })
+      )
+      expect(container.firstChild).toBeNull()
+      unmount()
+    }
+  })
+
   it('stops showing a nudge after switching to a chat with no task', () => {
     // Key-aware fake: agent-x::c1 has a long-running (T3) task; c2 has none.
     const byKey = new Map<string, TaskState>([['agent-x::c1', task(150_000)]])
