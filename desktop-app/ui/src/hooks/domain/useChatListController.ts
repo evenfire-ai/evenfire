@@ -5,6 +5,8 @@ import { scheduleAfterFirstPaint } from '../scheduleAfterFirstPaint'
 import type { useChatStore } from '../useChatStore'
 import { type SessionFsmEvent, type SessionFsmStore, seedSessionSnapshots } from './sessionFsm'
 
+const SESSION_CATALOG_PAGE_LIMIT = 50
+
 /**
  * useChatListController (spec-v2 §4.4) — owns the whole sidebar chat-list
  * subsystem extracted from the god-hook:
@@ -92,12 +94,16 @@ export function useChatListController({
   // Per-agent list for the SELECTED agent (the sidebar's chat list).
   const [chatList, setChatList] = useState<SidebarChatEntry[]>([])
   const [chatListLoading, setChatListLoading] = useState(false)
+  const [chatListMoreLoading, setChatListMoreLoading] = useState(false)
+  const [chatListHasMoreRemoteSessions, setChatListHasMoreRemoteSessions] = useState(false)
   // Cross-agent "Latest sessions" list (badges live in the FSM, seeded below).
   const [latestChatSessions, setLatestChatSessions] = useState<LatestSidebarChatEntry[]>([])
   const [latestChatSessionsLoading, setLatestChatSessionsLoading] = useState(false)
   // Selection requested for an agent before its chats have loaded, consumed by
   // the parent's agent-selection effect. Ref (not state): imperative, per-agent.
   const pendingChatSelectionByAgentRef = useRef<Record<string, PendingChatSelection>>({})
+  const chatListNextCursorByAgentRef = useRef<Record<string, string | null | undefined>>({})
+  const chatListLoadingMoreByAgentRef = useRef<Set<string>>(new Set())
 
   // Live `selectedAgent` for the stable callbacks below (they gate a chatList
   // write on "is this the selected agent"). A ref keeps the callbacks stable
@@ -105,6 +111,12 @@ export function useChatListController({
   const selectedAgentRef = useRef(selectedAgent)
   useEffect(() => {
     selectedAgentRef.current = selectedAgent
+    setChatListHasMoreRemoteSessions(
+      Boolean(selectedAgent && chatListNextCursorByAgentRef.current[selectedAgent])
+    )
+    setChatListMoreLoading(
+      Boolean(selectedAgent && chatListLoadingMoreByAgentRef.current.has(selectedAgent))
+    )
     return () => {
       if (selectedAgentRef.current === selectedAgent) {
         selectedAgentRef.current = null
@@ -140,11 +152,13 @@ export function useChatListController({
 
       scheduleAfterFirstPaint(async () => {
         const serverResult = await chatStore
-          .listSessions(agentRef, { limit: 50 })
-          .catch(() => ({ items: [] }))
+          .listSessions(agentRef, { limit: SESSION_CATALOG_PAGE_LIMIT })
+          .catch((): SessionsListResult => ({ items: [] }))
         if (selectedAgentRef.current !== agentRef) return
 
         const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
+        chatListNextCursorByAgentRef.current[agentRef] = serverResult.nextCursor ?? null
+        setChatListHasMoreRemoteSessions(Boolean(serverResult.nextCursor))
 
         // Seed sidebar session state (state/activeTaskId/pendingApproval/tokens)
         // for badges via SERVER_SNAPSHOT (D4 / §4.1 R2 owns "never degrade a live
@@ -191,6 +205,65 @@ export function useChatListController({
     [chatStore.getIndex, chatStore.listSessions, chatStore.reconcileServerSessions, fsm]
   )
 
+  const loadMoreChatSessions = useCallback(async () => {
+    const agentRef = selectedAgentRef.current
+    if (!agentRef) return
+
+    const cursor = chatListNextCursorByAgentRef.current[agentRef]
+    if (!cursor) {
+      setChatListHasMoreRemoteSessions(false)
+      return
+    }
+    if (chatListLoadingMoreByAgentRef.current.has(agentRef)) return
+
+    chatListLoadingMoreByAgentRef.current.add(agentRef)
+    setChatListMoreLoading(true)
+    try {
+      const serverResult = await chatStore
+        .listSessions(agentRef, { limit: SESSION_CATALOG_PAGE_LIMIT, cursor }, { force: true })
+        .catch(() => null)
+      if (!serverResult) return
+
+      const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
+      chatListNextCursorByAgentRef.current[agentRef] = serverResult.nextCursor ?? null
+      if (selectedAgentRef.current !== agentRef) return
+
+      setChatListHasMoreRemoteSessions(Boolean(serverResult.nextCursor))
+      seedSessionSnapshots(fsm, agentRef, serverSessions)
+      setChatList(previous => {
+        const dedupedPrevious = dedupeSidebarChats(previous)
+        const knownIds = new Set(dedupedPrevious.map(c => c.id))
+        const fromServerOnly: SidebarChatEntry[] = serverSessions
+          .filter(s => !knownIds.has(s.chatId))
+          .map(s => ({
+            id: s.chatId,
+            title: `Chat ${s.chatId.slice(0, 8)}`,
+            createdAt: s.lastActivityAt,
+            updatedAt: s.lastActivityAt,
+            messageCount: s.turnCount * 2,
+            turnCount: s.turnCount,
+          }))
+        return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
+      })
+
+      try {
+        void chatStore
+          .reconcileServerSessions(
+            agentRef,
+            serverSessions.map(s => ({ chatId: s.chatId, lastActivityAt: s.lastActivityAt }))
+          )
+          .catch(() => undefined)
+      } catch {
+        // ignore — reconciliation is best-effort freshness only
+      }
+    } finally {
+      chatListLoadingMoreByAgentRef.current.delete(agentRef)
+      if (selectedAgentRef.current === agentRef) {
+        setChatListMoreLoading(false)
+      }
+    }
+  }, [chatStore.listSessions, chatStore.reconcileServerSessions, fsm])
+
   const loadChatList = useCallback(
     async (agentRef: string): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] } | null> => {
       // One retry with a short backoff: during boot a concurrent team-switch /
@@ -218,7 +291,13 @@ export function useChatListController({
   // ─── Narrow chatList mutation API (called by the parent's remaining flows) ───
 
   /** Reset the selected agent's list (logout teardown / load failure). */
-  const clearList = useCallback(() => setChatList([]), [])
+  const clearList = useCallback(() => {
+    const agentRef = selectedAgentRef.current
+    if (agentRef) chatListNextCursorByAgentRef.current[agentRef] = null
+    setChatList([])
+    setChatListMoreLoading(false)
+    setChatListHasMoreRemoteSessions(false)
+  }, [])
 
   /** Sidebar badge mirror: mark/clear the `unreadTerminal` flag by chat id. */
   const markUnreadInList = useCallback((chatId: string) => {
@@ -470,9 +549,12 @@ export function useChatListController({
 
         const sessionGroups = await Promise.all(
           agentNames.map(async agentRef => {
+            // This feeds only the cross-agent sidebar preview. Do not follow
+            // cursors here; the selected-agent session list exposes explicit
+            // on-demand pagination through `loadMoreChatSessions`.
             const serverResult: SessionsListResult = await chatStore
-              .listSessions(agentRef, { limit: 50 })
-              .catch(() => ({ items: [] }))
+              .listSessions(agentRef, { limit: SESSION_CATALOG_PAGE_LIMIT })
+              .catch((): SessionsListResult => ({ items: [] }))
             return {
               agentRef,
               sessions: serverResult.items.filter(session => session.agent === agentRef),
@@ -521,6 +603,8 @@ export function useChatListController({
     // State (public contract, re-exported unchanged by the parent).
     chatList,
     chatListLoading,
+    chatListMoreLoading,
+    chatListHasMoreRemoteSessions,
     latestChatSessions,
     latestChatSessionsLoading,
     // CRUD (public contract).
@@ -531,6 +615,7 @@ export function useChatListController({
     handleDeleteChatForAgent,
     // Loader + list-loading control (parent agent-selection effect).
     loadChatList,
+    loadMoreChatSessions,
     setChatListLoading,
     clearList,
     // Narrow chatList ops (parent flows).

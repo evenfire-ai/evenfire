@@ -1011,6 +1011,62 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(result.current.latestChatSessionsLoading).toBe(false)
     })
 
+    it('loads the next remote session page only when requested', async () => {
+      clerum.rpc.listSessions.mockImplementation(
+        async (_hostRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
+          if (query?.cursor === 'cursor-2') {
+            return {
+              items: [
+                {
+                  agent: 'agent-x',
+                  chatId: 'remote-page-2',
+                  turnCount: 3,
+                  lastActivityAt: '2026-05-02T00:00:00Z',
+                },
+              ],
+            }
+          }
+          return {
+            items: [
+              {
+                agent: 'agent-x',
+                chatId: 'remote-page-1',
+                turnCount: 2,
+                lastActivityAt: '2026-05-03T00:00:00Z',
+              },
+            ],
+            nextCursor: 'cursor-2',
+          }
+        }
+      )
+
+      const { result } = renderController()
+
+      await waitFor(() =>
+        expect(result.current.chatList.some(chat => chat.id === 'remote-page-1')).toBe(true)
+      )
+      expect(result.current.chatListHasMoreRemoteSessions).toBe(true)
+      expect(
+        clerum.rpc.listSessions.mock.calls.some(
+          call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-2'
+        )
+      ).toBe(false)
+
+      await act(async () => {
+        await result.current.loadMoreChatSessions()
+      })
+
+      await waitFor(() =>
+        expect(result.current.chatList.some(chat => chat.id === 'remote-page-2')).toBe(true)
+      )
+      expect(result.current.chatListHasMoreRemoteSessions).toBe(false)
+      expect(
+        clerum.rpc.listSessions.mock.calls.some(
+          call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-2'
+        )
+      ).toBe(true)
+    })
+
     it('GAP-A persists the outgoing user message to the chat store on send', async () => {
       // Eager user-message persistence (dev) → D.3 must keep persisting it
       // (post-D.3 it carries task_id; here we only pin that it IS persisted).

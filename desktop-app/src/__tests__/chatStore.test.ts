@@ -38,6 +38,36 @@ async function readJsonFile<T = Record<string, unknown>>(path: string): Promise<
   return JSON.parse(await fs.readFile(path, 'utf-8')) as T
 }
 
+async function writePagedSnapshotDir(chatId: string, dir: string, messages: ChatMessage[]) {
+  await fs.mkdir(join(dir, 'pages'), { recursive: true })
+  await fs.writeFile(
+    join(dir, 'pages', '000001.json'),
+    JSON.stringify({
+      version: 1,
+      chatId,
+      pageNumber: 1,
+      messages,
+    })
+  )
+  await fs.writeFile(
+    join(dir, 'meta.json'),
+    JSON.stringify({
+      version: 1,
+      chatId,
+      pageSize: 100,
+      messageCount: messages.length,
+      localMessageCount: messages.length,
+      pages: [
+        {
+          file: '000001.json',
+          count: messages.length,
+          serverSynced: false,
+        },
+      ],
+    })
+  )
+}
+
 // ── listChats ────────────────────────────────────────────────────────────────
 
 describe('listChats', () => {
@@ -360,6 +390,48 @@ describe('messages', () => {
     const reloaded = await pagedStore.loadMessages('agent-1', 'switch-recovery')
     expect(reloaded.map(message => message.id)).toEqual(['m0', 'm1'])
     await expect(fs.access(chatMetaPath('switch-recovery'))).resolves.toBeUndefined()
+  })
+
+  it('completes recovery from a fully written next snapshot after a mid-swap crash', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await pagedStore.createChat('agent-1', 'next-recovery')
+    await pagedStore.saveMessages('agent-1', 'next-recovery', [
+      { id: 'old-0', role: 'user', content: 'old-0', timestamp: 0 },
+    ])
+
+    const nextDir = `${chatCacheDir('next-recovery')}.next-test`
+    await writePagedSnapshotDir('next-recovery', nextDir, [
+      { id: 'new-0', role: 'user', content: 'new-0', timestamp: 1 },
+      { id: 'new-1', role: 'assistant', content: 'new-1', timestamp: 2 },
+    ])
+    await fs.rename(chatCacheDir('next-recovery'), `${chatCacheDir('next-recovery')}.previous-test`)
+
+    const reloaded = await pagedStore.loadMessages('agent-1', 'next-recovery')
+    expect(reloaded.map(message => message.id)).toEqual(['new-0', 'new-1'])
+    await expect(fs.access(`${chatCacheDir('next-recovery')}.next-test`)).rejects.toThrow()
+    await expect(fs.access(`${chatCacheDir('next-recovery')}.previous-test`)).rejects.toThrow()
+  })
+
+  it('cleans stale snapshot siblings when the active paged snapshot is healthy', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await pagedStore.createChat('agent-1', 'stale-snapshots')
+    await pagedStore.saveMessages('agent-1', 'stale-snapshots', [
+      { id: 'm0', role: 'user', content: 'msg-0', timestamp: 0 },
+    ])
+
+    await fs.mkdir(`${chatCacheDir('stale-snapshots')}.next-stale`, { recursive: true })
+    await fs.mkdir(`${chatCacheDir('stale-snapshots')}.previous-stale`, { recursive: true })
+
+    const reloaded = await pagedStore.loadMessages('agent-1', 'stale-snapshots')
+    expect(reloaded.map(message => message.id)).toEqual(['m0'])
+    await expect(fs.access(`${chatCacheDir('stale-snapshots')}.next-stale`)).rejects.toThrow()
+    await expect(fs.access(`${chatCacheDir('stale-snapshots')}.previous-stale`)).rejects.toThrow()
   })
 
   it('prunes only old pages whose messages are known to exist on the server', async () => {

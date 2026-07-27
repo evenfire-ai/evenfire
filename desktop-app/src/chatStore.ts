@@ -398,28 +398,84 @@ export class ChatStore {
 
   private async recoverPagedChatUnlocked(agentRef: string, chatId: string): Promise<void> {
     const activeDir = this.chatDirPath(agentRef, chatId)
-    if (await this.readPagedMeta(agentRef, chatId)) return
+    const chatsDir = join(this.agentDir(agentRef), 'chats')
+    const activeMeta = await this.readPagedMeta(agentRef, chatId)
+
+    if (activeMeta) {
+      await this.removePagedChatSnapshotSiblings(chatsDir, chatId)
+      return
+    }
 
     let entries: Array<{ name: string; isDirectory: () => boolean }>
     try {
-      entries = await fs.readdir(join(this.agentDir(agentRef), 'chats'), { withFileTypes: true })
+      entries = await fs.readdir(chatsDir, { withFileTypes: true })
     } catch {
       return
     }
 
-    const backups = entries
-      .filter(entry => entry.isDirectory() && entry.name.startsWith(`${chatId}.previous-`))
-      .map(entry => join(this.agentDir(agentRef), 'chats', entry.name))
-      .sort()
-      .reverse()
+    const snapshots = await Promise.all(
+      entries
+        .filter(entry => entry.isDirectory())
+        .map(async entry => {
+          const kind = entry.name.startsWith(`${chatId}.next-`)
+            ? 'next'
+            : entry.name.startsWith(`${chatId}.previous-`)
+              ? 'previous'
+              : null
+          if (!kind) return null
+          const dir = join(chatsDir, entry.name)
+          const meta = await this.readPagedMetaAtPath(this.chatMetaPathFromChatDir(dir), chatId)
+          if (!meta) return null
+          const stat = await fs.stat(dir).catch(() => null)
+          return {
+            dir,
+            kind,
+            mtimeMs: stat?.mtimeMs ?? 0,
+          }
+        })
+    )
+    const validSnapshots = snapshots
+      .filter(
+        (snapshot): snapshot is { dir: string; kind: 'next' | 'previous'; mtimeMs: number } =>
+          snapshot !== null
+      )
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
 
-    for (const backupDir of backups) {
-      const meta = await this.readPagedMetaAtPath(this.chatMetaPathFromChatDir(backupDir), chatId)
-      if (!meta) continue
-      await fs.rm(activeDir, { recursive: true, force: true })
-      await fs.rename(backupDir, activeDir)
+    const candidates = [
+      ...validSnapshots.filter(snapshot => snapshot.kind === 'next'),
+      ...validSnapshots.filter(snapshot => snapshot.kind === 'previous'),
+    ]
+
+    for (const snapshot of candidates) {
+      try {
+        await fs.rm(activeDir, { recursive: true, force: true })
+        await fs.rename(snapshot.dir, activeDir)
+        await this.removePagedChatSnapshotSiblings(chatsDir, chatId)
+        return
+      } catch {
+        // Try the next complete snapshot, if one exists.
+      }
+    }
+  }
+
+  private async removePagedChatSnapshotSiblings(chatsDir: string, chatId: string): Promise<void> {
+    let entries: Array<{ name: string; isDirectory: () => boolean }>
+    try {
+      entries = await fs.readdir(chatsDir, { withFileTypes: true })
+    } catch {
       return
     }
+
+    await Promise.all(
+      entries
+        .filter(
+          entry =>
+            entry.isDirectory() &&
+            (entry.name.startsWith(`${chatId}.next-`) ||
+              entry.name.startsWith(`${chatId}.previous-`))
+        )
+        .map(entry => fs.rm(join(chatsDir, entry.name), { recursive: true, force: true }))
+    )
   }
 
   private async writePagedChatUnlocked(

@@ -252,7 +252,14 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
     activityByMessageId,
     progressByMessageId,
   } = useChatThreadStateContext()
-  const { chatList, chatListLoading, sessionStateByChatId } = useChatListContext()
+  const {
+    chatList,
+    chatListLoading,
+    chatListMoreLoading = false,
+    chatListHasMoreRemoteSessions = false,
+    loadMoreChatSessions,
+    sessionStateByChatId,
+  } = useChatListContext()
   const {
     chatEndRef,
     handleSelectChat: onSelectChat,
@@ -316,7 +323,8 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
       ),
     [chatList]
   )
-  const hasMoreSessions = sortedChats.length > SESSION_PREVIEW_LIMIT
+  const hasMoreSessions =
+    sortedChats.length > SESSION_PREVIEW_LIMIT || chatListHasMoreRemoteSessions
   const visibleChats = showAllSessions ? sortedChats : sortedChats.slice(0, SESSION_PREVIEW_LIMIT)
 
   const isDedicatedAgentView = !activeChatId
@@ -341,7 +349,11 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
   }, [])
 
   useEffect(() => {
-    if (chatList.length <= SESSION_PREVIEW_LIMIT && showAllSessions) {
+    if (
+      chatList.length <= SESSION_PREVIEW_LIMIT &&
+      !chatListHasMoreRemoteSessions &&
+      showAllSessions
+    ) {
       setShowAllSessions(false)
     }
     if (sessionMenuChatId && !chatList.some(chat => chat.id === sessionMenuChatId)) {
@@ -351,7 +363,13 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
       setRenamingSessionId(null)
       setSessionRenameValue('')
     }
-  }, [chatList, renamingSessionId, sessionMenuChatId, showAllSessions])
+  }, [
+    chatList,
+    chatListHasMoreRemoteSessions,
+    renamingSessionId,
+    sessionMenuChatId,
+    showAllSessions,
+  ])
 
   useEffect(() => {
     if (!sessionMenuChatId) return
@@ -907,14 +925,37 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
                 <span className="agent-dedicated-sessions-meta">
                   {sortedChats.length} {sortedChats.length === 1 ? 'session' : 'sessions'}
                 </span>
-                {hasMoreSessions && (
+                {hasMoreSessions && !showAllSessions && (
                   <Button
                     color="neutral"
-                    onClick={() => setShowAllSessions(previous => !previous)}
+                    onClick={() => setShowAllSessions(true)}
                     size="xs"
                     variant="text"
                   >
-                    {showAllSessions ? 'Show less' : 'Show more'}
+                    Show more
+                  </Button>
+                )}
+                {showAllSessions && sortedChats.length > SESSION_PREVIEW_LIMIT && (
+                  <Button
+                    color="neutral"
+                    onClick={() => setShowAllSessions(false)}
+                    size="xs"
+                    variant="text"
+                  >
+                    Show less
+                  </Button>
+                )}
+                {showAllSessions && chatListHasMoreRemoteSessions && loadMoreChatSessions && (
+                  <Button
+                    color="neutral"
+                    disabled={chatListMoreLoading}
+                    onClick={() => {
+                      void loadMoreChatSessions()
+                    }}
+                    size="xs"
+                    variant="text"
+                  >
+                    {chatListMoreLoading ? 'Loading…' : 'Load more'}
                   </Button>
                 )}
               </div>
