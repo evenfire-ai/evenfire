@@ -264,7 +264,7 @@ export default function HostDetailsPage() {
     }
   }, [])
 
-  async function loadData() {
+  async function loadData(resetDrafts: 'all' | 'overview' | 'model' | 'none' = 'all') {
     setBusy(true)
     setInitialLoading(true)
     setError('')
@@ -284,35 +284,41 @@ export default function HostDetailsPage() {
       // AP-6: remember the version of THIS read — the edit drafts below are
       // built from it, so it is the correct precondition for the eventual save.
       formResourceVersionRef.current = String(host.metadata?.resourceVersion || '')
-      setHostNameDraft(String(host.metadata?.name || routeName))
-      setHostDisplayDraft(String(spec.host || host.metadata?.name || routeName))
-      setContextRefDraft(String(spec.contextRef || ''))
+      if (resetDrafts === 'all' || resetDrafts === 'overview') {
+        setHostNameDraft(String(host.metadata?.name || routeName))
+        setHostDisplayDraft(String(spec.host || host.metadata?.name || routeName))
+        setContextRefDraft(String(spec.contextRef || ''))
+        setChannelsDraft(
+          Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : []
+        )
+        setStatelessDraft(spec.lifecycle?.stateless === true)
+      }
       const nextProvider = normalizeProvider(
         String((spec.model as { provider?: string } | undefined)?.provider || 'openai')
       )
-      setProviderDraft(nextProvider)
-      // Keep the host's saved model verbatim (preexisting resources are not
-      // interrupted); only fall back to a default when the host has no model.
-      const currentModel = String((spec.model as { name?: string } | undefined)?.name || '').trim()
-      setModelNameDraft(
-        currentModel ||
-          resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider))
-      )
-      setSecretRefDraft(String(spec.secretRef || ''))
-      setLlmPolicyDraft(normalizeLlmPolicy(spec.llmPolicy))
-      // Hydrate the per-host model subset from the saved spec (Topic 3a); absent
-      // → [] = unrestricted (offers the full global allowlist per provider).
-      setAllowedModelsDraft(normalizeAllowedModels(spec.allowedModels))
-      // Write-only surfaces reset on every load: never pre-fill stored keys.
-      setLlmKeyDraft({})
-      setRetireCandidates([])
-      setChannelsDraft(
-        Array.isArray(spec.channels) ? spec.channels.map(String).filter(Boolean) : []
-      )
+      if (resetDrafts === 'all' || resetDrafts === 'model') {
+        setProviderDraft(nextProvider)
+        // Keep the host's saved model verbatim (preexisting resources are not
+        // interrupted); only fall back to a default when the host has no model.
+        const currentModel = String(
+          (spec.model as { name?: string } | undefined)?.name || ''
+        ).trim()
+        setModelNameDraft(
+          currentModel ||
+            resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider))
+        )
+        setSecretRefDraft(String(spec.secretRef || ''))
+        setLlmPolicyDraft(normalizeLlmPolicy(spec.llmPolicy))
+        // Hydrate the per-host model subset from the saved spec (Topic 3a); absent
+        // → [] = unrestricted (offers the full global allowlist per provider).
+        setAllowedModelsDraft(normalizeAllowedModels(spec.allowedModels))
+        // Write-only surfaces reset only when this tab is reloaded or saved.
+        setLlmKeyDraft({})
+        setRetireCandidates([])
+      }
       const rawTools = (spec.approval as { tools?: Record<string, boolean> } | undefined)?.tools
       setApprovalToolsData(rawTools && typeof rawTools === 'object' ? rawTools : undefined)
       const specStateless = spec.lifecycle?.stateless === true
-      setStatelessDraft(specStateless)
       setSavedStateless(specStateless)
       setLifecycleState(String(host.status?.lifecycle?.state ?? ''))
       setLifecycleReason(String(host.status?.lifecycle?.reason ?? ''))
@@ -551,7 +557,9 @@ export default function HostDetailsPage() {
         ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
         spec: nextSpec,
       })
-      await loadData()
+      // Refresh server-backed state and this tab's saved values without
+      // clobbering a still-open draft in "Model & credentials".
+      await loadData('overview')
       showToast('Agent configuration saved.', { tone: 'success' })
       return true
     } catch (e) {
@@ -700,7 +708,9 @@ export default function HostDetailsPage() {
           ...(removeKeys.length > 0 ? { removeKeys } : {}),
         })
       }
-      await loadData()
+      // Refresh server-backed state and this tab's saved values without
+      // clobbering a still-open Overview draft.
+      await loadData('model')
       showToast('Model & credentials saved.', { tone: 'success' })
       return true
     } catch (e) {
@@ -735,8 +745,9 @@ export default function HostDetailsPage() {
         await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
           spec: nextSpec,
         })
-        // Reload so the section gets fresh initialTools on its next render
-        await loadData()
+        // Reload approval/server state while preserving any drafts left open
+        // in the Overview or Model tabs.
+        await loadData('none')
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to save approval tools')
         // Re-throw so HostApprovalSection.handleSave does NOT exit edit mode

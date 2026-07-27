@@ -1,8 +1,5 @@
+import { SHOW_AGENT_FILES_UI } from '@constants/agentFeatures'
 import type { AgentWorkspaceRoute } from '../../uiTypes'
-
-// Temporary UI-only gate. Restore every Agent Files entry point by flipping
-// this to true; the route, views, handlers, and APIs remain untouched.
-export const SHOW_AGENT_FILES_UI = false
 
 export const AGENT_ROUTE_LABELS: Record<AgentWorkspaceRoute, string> = {
   details: 'Details',

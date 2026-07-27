@@ -14,6 +14,10 @@ import {
   IconWorkflows,
 } from '@components/SidebarNav/icons'
 import {
+  SHOW_AGENT_FILES_UI,
+  SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM,
+} from '@constants/agentFeatures'
+import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
   COMPOSER_MAX_IMAGE_BYTES,
@@ -29,15 +33,11 @@ import { AnnotationCanvas } from './AnnotationCanvas'
 import { ComposerAgentFilesModal } from './ComposerAgentFilesModal'
 import { ComposerGlobalFilesModal } from './ComposerGlobalFilesModal'
 import { ModelSelector } from './ModelSelector'
-import { SHOW_AGENT_FILES_UI } from './agentRoutes'
 
 type ComposerPanelProps = {
   inline?: boolean
   agentSelector?: React.ReactNode
 }
-
-// UI-only composer gate; the Global File System feature remains available elsewhere.
-const SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM = false
 
 function getComposerReferenceTypeLabel(type: ComposerReferenceAttachment['type']): string {
   if (type === 'plugin') return 'Plugin'

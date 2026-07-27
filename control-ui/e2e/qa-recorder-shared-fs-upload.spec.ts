@@ -4,15 +4,13 @@
 // Provisions a SharedFileSystem, uploads a file through the detail browser,
 // then deletes the file. The SharedFileSystem is removed via Control API in finally.
 import { expect, test } from '@playwright/test'
-import * as fs from 'node:fs/promises'
-import * as os from 'node:os'
-import * as path from 'node:path'
 import {
   CONTROL_API_URL,
   CONTROL_UI_URL,
   adminCredentials,
   api,
   assertAllowedTarget,
+  createSecureTempFile,
   loginThroughUi,
   requireRecorderConfirm,
   screenshotAndLog,
@@ -36,7 +34,7 @@ test.describe('optional QA recorder: Control UI SharedFileSystem', () => {
     const sharedFsName = uniqueE2EName('qa-recorder-shared-fs')
     const seedFolder = 'qa-recorder-seed'
     const uploadName = 'qa-recorder-upload.txt'
-    let tempFilePath = ''
+    let tempFile: Awaited<ReturnType<typeof createSecureTempFile>> | undefined
 
     try {
       await loginThroughUi(page, credentials)
@@ -95,10 +93,9 @@ test.describe('optional QA recorder: Control UI SharedFileSystem', () => {
         timeout: 20_000,
       })
 
-      tempFilePath = path.join(os.tmpdir(), `qa-recorder-upload-${Date.now()}.txt`)
-      await fs.writeFile(tempFilePath, 'qa-recorder shared filesystem upload\n', 'utf8')
+      tempFile = await createSecureTempFile(uploadName, 'qa-recorder shared filesystem upload\n')
       await page.getByRole('button', { name: 'Upload file', exact: true }).click()
-      await page.getByLabel('Choose file to upload').setInputFiles(tempFilePath)
+      await page.getByLabel('Choose file to upload').setInputFiles(tempFile.filePath)
       await page.getByRole('button', { name: 'Upload', exact: true }).click()
 
       await expect(
@@ -119,7 +116,7 @@ test.describe('optional QA recorder: Control UI SharedFileSystem', () => {
 
       await screenshotAndLog(page, testInfo, 'control-ui-shared-fs-upload')
     } finally {
-      if (tempFilePath) await fs.rm(tempFilePath, { force: true }).catch(() => {})
+      await tempFile?.cleanup().catch(() => {})
       await api(page.request, 'DELETE', sharedFsDeletePath(sharedFsName))
     }
   })

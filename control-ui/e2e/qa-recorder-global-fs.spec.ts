@@ -4,15 +4,13 @@
 // Creates a folder, uploads a file, and renames it in the Global File System.
 // Best-effort cleanup deletes the file and folder through the Control API in finally.
 import { type APIRequestContext, expect, test } from '@playwright/test'
-import * as fs from 'node:fs/promises'
-import * as os from 'node:os'
-import * as path from 'node:path'
 import {
   CONTROL_API_URL,
   CONTROL_UI_URL,
   adminCredentials,
   api,
   assertAllowedTarget,
+  createSecureTempFile,
   loginThroughUi,
   requireRecorderConfirm,
   screenshotAndLog,
@@ -84,7 +82,7 @@ test.describe('optional QA recorder: Control UI Global File System', () => {
     const folderName = uniqueE2EName('qa-recorder-folder')
     const uploadName = `qa-recorder-file-${Date.now().toString(36)}.txt`
     const renamedUploadName = uploadName.replace(/\.txt$/, '-renamed.txt')
-    let tempFilePath = ''
+    let tempFile: Awaited<ReturnType<typeof createSecureTempFile>> | undefined
 
     try {
       await loginThroughUi(page, credentials)
@@ -110,10 +108,9 @@ test.describe('optional QA recorder: Control UI Global File System', () => {
         timeout: 20_000,
       })
 
-      tempFilePath = path.join(os.tmpdir(), `qa-recorder-gfs-${Date.now()}.txt`)
-      await fs.writeFile(tempFilePath, 'qa-recorder global file system upload\n', 'utf8')
+      tempFile = await createSecureTempFile(uploadName, 'qa-recorder global file system upload\n')
       await page.getByRole('button', { name: 'Upload file', exact: true }).click()
-      await page.getByLabel('Choose file to upload').setInputFiles(tempFilePath)
+      await page.getByLabel('Choose file to upload').setInputFiles(tempFile.filePath)
       await page.getByRole('button', { name: 'Upload', exact: true }).click()
 
       await expect(page.locator('.cu-gfs-list__row').filter({ hasText: uploadName })).toBeVisible({
@@ -131,7 +128,7 @@ test.describe('optional QA recorder: Control UI Global File System', () => {
 
       await screenshotAndLog(page, testInfo, 'control-ui-global-fs')
     } finally {
-      if (tempFilePath) await fs.rm(tempFilePath, { force: true }).catch(() => {})
+      await tempFile?.cleanup().catch(() => {})
       await cleanupGfsArtifacts(page.request, folderName, [uploadName, renamedUploadName])
     }
   })

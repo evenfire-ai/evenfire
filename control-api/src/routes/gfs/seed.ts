@@ -8,6 +8,7 @@ import {
 } from '../../gfs/seedResources.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireInternalControlJwt } from '../../middleware/internalControlJwt.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 
 export interface HttpResult {
   status: number
@@ -50,5 +51,15 @@ export async function handleSeed(req: Request, res: Response): Promise<void> {
 }
 
 export function registerGfsSeedRoute(router: Router): void {
-  router.post('/gfs/seed', requireInternalControlJwt, asyncHandler(handleSeed))
+  const seedRateLimit = rateLimitMiddleware({
+    bucketType: 'gfs_seed',
+    maxPerMinute: 30,
+    getBucketKey: req => {
+      const provisioner = req.internalControl
+      return provisioner
+        ? `gfsseed:${provisioner.iss}:${provisioner.sub}`
+        : 'gfsseed:unauthenticated'
+    },
+  })
+  router.post('/gfs/seed', requireInternalControlJwt, seedRateLimit, asyncHandler(handleSeed))
 }
