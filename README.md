@@ -28,10 +28,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/desktop-app-sandbox-ui.webp" alt="Desktop App: the LeadForge prospecting plugin rendered inside the app, with its own dashboard, outreach pipeline, approval queue, and charts" width="82%" />
+  <img src="docs/assets/control-ui-usage.webp" alt="Control UI: usage dashboard with charts of token consumption per model over time" width="82%" />
 </p>
 
-<p align="center"><sub>A plugin renders its own full UI (the LeadForge prospecting app, approval queue and all) inside the Desktop App. <a href="docs/surfaces/README.md">Tour all three UIs →</a></sub></p>
+<p align="center"><sub>The Control UI's usage dashboard: token consumption per model, over time. <a href="docs/surfaces/README.md">Tour all three UIs →</a></sub></p>
 
 ---
 
