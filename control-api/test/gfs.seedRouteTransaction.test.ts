@@ -42,10 +42,6 @@ vi.mock('../src/middleware/internalControlJwt.js', () => ({
   requireInternalControlJwt: (_req: unknown, _res: unknown, next: () => void) => next(),
 }))
 
-vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
-  rateLimitMiddleware: () => (_req: unknown, _res: unknown, next: () => void) => next(),
-}))
-
 function response() {
   return {
     code: 0,
