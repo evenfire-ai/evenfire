@@ -718,13 +718,12 @@ function WorkflowRecipeDetailContent() {
         activeTab={activeTab}
         backLabel="Back to plugins"
         contentMode="plain"
-        eyebrow={recipe?.metadata?.namespace ?? namespace}
         icon={<IconWorkflow />}
         notice={detailNotice}
         onBack={backToList}
         onTabChange={selectTab}
         overlays={detailOverlays}
-        subtitle="WorkflowRecipe details and runtime status."
+        subtitle="Plugin details and runtime status."
         tabAriaLabel="Plugin detail sections"
         tabClassName="cu-tabs--compact"
         tabs={detailTabs}

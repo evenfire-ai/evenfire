@@ -5,7 +5,8 @@ import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { LlmPolicyEditor } from '@/components/LlmPolicyEditor'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
-import { Button, Field, SelectInput, TextAreaInput, TextInput } from '@/components/ui'
+import type { SelectionDropdownOption } from '@/components/SelectionDropdown/types'
+import { Button, Field, TextAreaInput, TextInput } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import {
   LLM_PROVIDER_OPTIONS,
@@ -32,6 +33,22 @@ import type { LlmCredentialWiring, LlmProviderConfigProps } from './types'
 // AWS_REGION, AZURE_OPENAI_ENDPOINT) are configured — the credential block only
 // links to it, it never duplicates that editor (spec R4.5.4).
 const HOST_ENV_HREF = CONTROL_ROUTES.agents.root
+
+function LlmProviderIcon({ provider, label }: { provider: LlmProvider; label: string }) {
+  const [failed, setFailed] = React.useState(false)
+
+  React.useEffect(() => setFailed(false), [provider])
+
+  return (
+    <span className="cu-llm-provider-icon" aria-hidden="true" data-provider={provider}>
+      {failed ? (
+        <span>{label.slice(0, 1).toUpperCase()}</span>
+      ) : (
+        <img src={`/provider-icons/${provider}.svg`} alt="" onError={() => setFailed(true)} />
+      )}
+    </span>
+  )
+}
 
 // A synthetic slot definition for a fallback's chosen extra credentialSlot when
 // that key is NOT one of the provider's canonical registry slots (e.g.
@@ -91,6 +108,9 @@ export function LlmProviderConfig({
   catalog,
   catalogLoading = false,
   catalogError,
+  modelLabel = 'Model',
+  showAllowedModels = true,
+  replacePrimaryModelWithAllowedModels = false,
   credentials,
   secretKeys = [],
   disabled = false,
@@ -113,6 +133,30 @@ export function LlmProviderConfig({
     [catalog, allowedModels, provider]
   )
   const primaryModelOutOfAllowlist = Boolean(model) && !primaryModelOptions.includes(model)
+  const primaryProviderOptions = useMemo(
+    () =>
+      LLM_PROVIDER_OPTIONS.map(option => ({
+        ...option,
+        icon: <LlmProviderIcon provider={option.value} label={option.label} />,
+      })),
+    []
+  )
+  const primaryModelSelectOptions = useMemo(() => {
+    const options: SelectionDropdownOption[] = primaryModelOptions.map(option => ({
+      value: option,
+      label: option,
+      icon: <LlmProviderIcon provider={provider} label={getProviderLabel(provider)} />,
+    }))
+    if (primaryModelOutOfAllowlist) {
+      options.push({
+        value: model,
+        label: model,
+        icon: <LlmProviderIcon provider={provider} label={getProviderLabel(provider)} />,
+        badge: 'out of allowlist',
+      })
+    }
+    return options
+  }, [model, primaryModelOptions, primaryModelOutOfAllowlist, provider])
 
   // Replace every entry for one provider with the operator's new selection,
   // leaving the other providers' subsets untouched. Selecting none removes the
@@ -121,6 +165,14 @@ export function LlmProviderConfig({
     const others = allowedModels.filter(entry => entry.provider !== providerId)
     const additions = models.map(nextModel => ({ provider: providerId, model: nextModel }))
     onAllowedModelsChange([...others, ...additions])
+    if (
+      replacePrimaryModelWithAllowedModels &&
+      providerId === provider &&
+      models.length > 0 &&
+      !models.includes(model)
+    ) {
+      onPrimaryChange({ provider, model: models[0] })
+    }
   }
 
   // The distinct fallback providers whose subset is NOT already curated by the
@@ -192,12 +244,21 @@ export function LlmProviderConfig({
 
         <div className="cu-llm-config__model-row">
           <Field htmlFor="llm-primary-provider" label="Provider">
-            <SelectInput
+            <SelectionDropdown
               id="llm-primary-provider"
-              value={provider}
+              className="cu-llm-config__primary-select cu-llm-config__provider-select"
+              value={[provider]}
+              options={primaryProviderOptions}
+              placeholder="Select provider…"
+              searchPlaceholder="Search providers…"
+              selectionLabel="provider"
+              multiple={false}
+              showSelectedChips={false}
               disabled={disabled}
-              onChange={e => {
-                const nextProvider = normalizeProvider(e.target.value)
+              onChange={next => {
+                const nextProviderValue = next[0]
+                if (!nextProviderValue) return
+                const nextProvider = normalizeProvider(nextProviderValue)
                 // Default within this provider's per-host subset when it has one
                 // (matches the fallback rows), so switching to a provider that is
                 // already restricted never auto-selects an out-of-subset model.
@@ -209,38 +270,41 @@ export function LlmProviderConfig({
                   ),
                 })
               }}
-            >
-              {LLM_PROVIDER_OPTIONS.map(option => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </SelectInput>
+            />
           </Field>
 
-          <Field htmlFor="llm-primary-model" label="Model">
-            <SelectInput
-              id="llm-primary-model"
-              value={model}
+          {replacePrimaryModelWithAllowedModels && showAllowedModels ? (
+            <AllowedModelsField
+              provider={provider}
+              catalog={catalog}
+              allowedModels={allowedModels}
+              onChange={handleProviderAllowedChange}
               disabled={disabled}
-              invalid={primaryModelOutOfAllowlist}
-              onChange={e => onPrimaryChange({ provider, model: e.target.value })}
-            >
-              {!model ? (
-                <option value="">
-                  {primaryModelOptions.length === 0 ? 'No enabled models' : 'Select model…'}
-                </option>
-              ) : null}
-              {primaryModelOptions.map(option => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-              {primaryModelOutOfAllowlist ? (
-                <option value={model}>{model} (out of allowlist)</option>
-              ) : null}
-            </SelectInput>
-          </Field>
+            />
+          ) : (
+            <Field htmlFor="llm-primary-model" label={modelLabel}>
+              <SelectionDropdown
+                id="llm-primary-model"
+                className="cu-llm-config__primary-select"
+                value={model ? [model] : []}
+                options={primaryModelSelectOptions}
+                placeholder={
+                  primaryModelOptions.length === 0 ? 'No enabled models' : 'Select model…'
+                }
+                searchPlaceholder="Search models…"
+                selectionLabel="model"
+                multiple={false}
+                showSelectedChips={false}
+                disabled={disabled}
+                invalid={primaryModelOutOfAllowlist}
+                onChange={next => {
+                  const nextModel = next[0]
+                  if (!nextModel) return
+                  onPrimaryChange({ provider, model: nextModel })
+                }}
+              />
+            </Field>
+          )}
         </div>
 
         {catalogError ? (
@@ -251,7 +315,7 @@ export function LlmProviderConfig({
           </p>
         ) : null}
 
-        {primaryModelOutOfAllowlist ? (
+        {primaryModelOutOfAllowlist && !replacePrimaryModelWithAllowedModels ? (
           <p className="cu-llm-config__warn">
             {model} isn&apos;t in the models offered for {getProviderLabel(provider)} — end users
             won&apos;t be offered it. Pick a model from the list, or add it under Allowed models
@@ -259,13 +323,15 @@ export function LlmProviderConfig({
           </p>
         ) : null}
 
-        <AllowedModelsField
-          provider={provider}
-          catalog={catalog}
-          allowedModels={allowedModels}
-          onChange={handleProviderAllowedChange}
-          disabled={disabled}
-        />
+        {showAllowedModels && !replacePrimaryModelWithAllowedModels ? (
+          <AllowedModelsField
+            provider={provider}
+            catalog={catalog}
+            allowedModels={allowedModels}
+            onChange={handleProviderAllowedChange}
+            disabled={disabled}
+          />
+        ) : null}
 
         {credentials ? (
           <ProviderCredentialBlock
@@ -296,7 +362,7 @@ export function LlmProviderConfig({
         />
       </div>
 
-      {fallbackAllowedProviders.length > 0 ? (
+      {showAllowedModels && fallbackAllowedProviders.length > 0 ? (
         <div className="cu-llm-config__block">
           <div className="cu-llm-config__block-head">
             <span className="cu-llm-config__block-title">Allowed models · fallback providers</span>

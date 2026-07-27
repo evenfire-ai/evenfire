@@ -1,3 +1,4 @@
+import { SHOW_AGENT_FILES_UI } from '@constants/agentFeatures'
 import type { AgentWorkspaceRoute } from '../../uiTypes'
 
 export const AGENT_ROUTE_LABELS: Record<AgentWorkspaceRoute, string> = {
@@ -12,6 +13,6 @@ export const AGENT_ROUTE_OPTIONS: AgentWorkspaceRoute[] = [
   'details',
   'mcp-servers',
   'contexts',
-  'shared-files',
+  ...(SHOW_AGENT_FILES_UI ? (['shared-files'] as AgentWorkspaceRoute[]) : []),
   'activity',
 ]
