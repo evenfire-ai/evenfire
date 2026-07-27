@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { handleSeed } from '../src/routes/gfs/seed.js'
 
 const state = vi.hoisted(() => {
   const events: string[] = []
@@ -41,6 +40,8 @@ vi.mock('../src/db.js', () => ({
 vi.mock('../src/middleware/internalControlJwt.js', () => ({
   requireInternalControlJwt: (_req: unknown, _res: unknown, next: () => void) => next(),
 }))
+
+import { handleSeed } from '../src/routes/gfs/seed.js'
 
 function response() {
   return {

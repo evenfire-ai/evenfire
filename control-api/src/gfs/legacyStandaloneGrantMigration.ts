@@ -86,10 +86,7 @@ function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
   if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>
-    return `{${Object.keys(record)
-      .sort()
-      .map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
-      .join(',')}}`
+    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`
   }
   return JSON.stringify(value)
 }
@@ -113,14 +110,12 @@ export async function buildLegacyGrantMigrationReport(api: LegacyGrantMigrationA
     throw new Error('migration_inventory_limit_exceeded')
   }
 
-  const sourceGrants = legacy.grants
-    .map(normalizeGrant)
-    .sort(
-      (a, b) =>
-        a.drive.localeCompare(b.drive) ||
-        a.resourceId.localeCompare(b.resourceId) ||
-        a.id.localeCompare(b.id)
-    )
+  const sourceGrants = legacy.grants.map(normalizeGrant).sort(
+    (a, b) =>
+      a.drive.localeCompare(b.drive) ||
+      a.resourceId.localeCompare(b.resourceId) ||
+      a.id.localeCompare(b.id)
+  )
   const validIndividualHostCandidates = directory.agents
     .map(normalizeCandidate)
     .filter((candidate): candidate is TrustedHostCandidate => candidate !== null)
@@ -156,9 +151,7 @@ export function validateReviewedLegacyGrantMapping(
   if (!sameReviewedInventory(mapping.reviewedSourceGrants, report.sourceGrants)) {
     throw new Error('source_inventory_changed')
   }
-  if (
-    !sameReviewedInventory(mapping.reviewedHostCandidates, report.validIndividualHostCandidates)
-  ) {
+  if (!sameReviewedInventory(mapping.reviewedHostCandidates, report.validIndividualHostCandidates)) {
     throw new Error('trusted_host_directory_changed')
   }
   const grants = new Set(report.sourceGrants.map(grant => grant.id))

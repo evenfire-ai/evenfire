@@ -19,13 +19,13 @@ import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { formatSharedFileSize } from '@lib/sharedFiles'
-import { GfsAgentAccessSection } from '@/gfs/GfsAgentAccessSection'
-import { GfsGrantList } from '@/gfs/GfsGrantList'
 import {
-  type GfsAgentSubjectOption,
   GfsDelegationPanel,
+  type GfsAgentSubjectOption,
   type GfsDelegationSubjectOption,
 } from '@/gfs/delegation'
+import { GfsAgentAccessSection } from '@/gfs/GfsAgentAccessSection'
+import { GfsGrantList } from '@/gfs/GfsGrantList'
 import { GfsFilePicker } from '@/gfs/filePicker'
 import { normalizeGfsResourceName } from '@/gfs/resourceName'
 import type { TeamDirectoryResult } from '../../../src/types'
@@ -158,7 +158,10 @@ export function FilesPage({ pushToast }: FilesPageProps) {
     queryFn: () => window.clerum.agents.listMine(),
     enabled: manageOpen,
   })
-  const agentSubjects = useMemo(() => agentSubjectOptions(myAgentsQuery.data), [myAgentsQuery.data])
+  const agentSubjects = useMemo(
+    () => agentSubjectOptions(myAgentsQuery.data),
+    [myAgentsQuery.data]
+  )
   const grantsError = useMemo(
     () => (ctrl.grantsError ? describeGfsGrantError(ctrl.grantsError) : null),
     [ctrl.grantsError]
@@ -1006,9 +1009,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                 <div className="da-gfs-manage-section__header">
                   <div>
                     <h4>Who has access</h4>
-                    <p className="muted">
-                      Existing grants on this resource. Revoking is immediate.
-                    </p>
+                    <p className="muted">Existing grants on this resource. Revoking is immediate.</p>
                   </div>
                 </div>
                 <GfsGrantList

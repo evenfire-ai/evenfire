@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes } from 'node:crypto'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Pool, type PoolClient } from 'pg'
 import { CONTROL_API_MIGRATIONS, initDb } from '../src/db.js'
 
@@ -74,15 +74,13 @@ describeRealPostgres('GFS typed audit decision evidence', () => {
           AND table_name = 'gfs_audit'
           AND column_name = ANY($1::text[])
         ORDER BY column_name`,
-      [
-        [
-          'record_type',
-          'matched_subject',
-          'authorization_source',
-          'cached_authorization_source',
-          'mutation_outcome',
-        ],
-      ]
+      [[
+        'record_type',
+        'matched_subject',
+        'authorization_source',
+        'cached_authorization_source',
+        'mutation_outcome',
+      ]]
     )
     expect(columns.rows).toHaveLength(5)
     expect(columns.rows.find(row => row.column_name === 'record_type')).toMatchObject({

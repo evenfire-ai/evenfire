@@ -1,12 +1,12 @@
-import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { describe, expect, it } from 'vitest'
 
 describe('0071_gfs_immutable_blob_generations', () => {
   it('is one additive migration with generation pointers, cleanup state, and path invalidation', () => {
     const source = readFileSync(new URL('../src/db.ts', import.meta.url), 'utf8')
     expect(source.match(/version: '0071_gfs_immutable_blob_generations'/g)).toHaveLength(1)
     const start = source.indexOf("version: '0071_gfs_immutable_blob_generations'")
-    const sql = source.slice(start, source.indexOf('\n  },\n]', start))
+    const sql = source.slice(start, source.indexOf("\n  },\n]", start))
 
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS blob_key TEXT NULL')
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS content_sha256 TEXT NULL')

@@ -1,16 +1,16 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Pool } from 'pg'
-import { reconcileExpiredBlobs } from '../../gfs-controller/src/db/blobReconciliation.js'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { initDb } from '../src/db.js'
 import { PgBlobStagingStore } from '../../gfs-controller/src/db/blobStaging.js'
-import type { GfsMetrics } from '../../gfs-controller/src/metrics.js'
+import { reconcileExpiredBlobs } from '../../gfs-controller/src/db/blobReconciliation.js'
 import { BlobStore } from '../../gfs-controller/src/storage/blobStore.js'
 import { resolveBlobKeyPath, resolveBlobPath } from '../../gfs-controller/src/storage/paths.js'
-import { initDb } from '../src/db.js'
+import type { GfsMetrics } from '../../gfs-controller/src/metrics.js'
 
 // This suite closes the reconciler's HIGH coverage gap: reconcileExpiredBlobs is
 // the sole backstop for the write/copy paths' swallowed cleanup errors, yet its
@@ -52,10 +52,7 @@ function metricsStub(): { metrics: GfsMetrics; failures: number } {
 
 describeRealPostgres('GFS blob reconciliation on real PostgreSQL + on-disk BlobStore', () => {
   const database = `gfs_recon_${randomBytes(6).toString('hex')}`
-  const connectionString = databaseUrl(
-    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
-    database
-  )
+  const connectionString = databaseUrl(adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres', database)
   let adminPool: Pool
   let pool: Pool
   let blobRoot: string
@@ -77,9 +74,7 @@ describeRealPostgres('GFS blob reconciliation on real PostgreSQL + on-disk BlobS
   }
 
   async function manifestState(blobKey: string): Promise<string | null> {
-    const res = await pool.query('SELECT state FROM gfs_blob_manifests WHERE blob_key = $1', [
-      blobKey,
-    ])
+    const res = await pool.query('SELECT state FROM gfs_blob_manifests WHERE blob_key = $1', [blobKey])
     return res.rows[0]?.state ?? null
   }
 

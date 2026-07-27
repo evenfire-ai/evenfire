@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { describe, expect, it } from 'vitest'
 import { makeHostSubjectId } from '../src/gfs/hostSubject.js'
 import { parseSubject } from '../src/routes/gfs/grants.js'
 

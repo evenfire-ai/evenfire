@@ -3,13 +3,13 @@ import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { K8sGateway } from '../../k8s.js'
-import { buildAgentDirectoryEntry } from '../../services/directory/accessReconciliation.js'
 import {
   listAllTeams,
   listTeamsByAgent,
   listUsers,
   listUsersByAgent,
 } from '../../services/directory/index.js'
+import { buildAgentDirectoryEntry } from '../../services/directory/accessReconciliation.js'
 import { listHostSecrets } from './hostSecrets.js'
 
 export function createAdminHostsOverviewRouter(gateway: K8sGateway): Router {

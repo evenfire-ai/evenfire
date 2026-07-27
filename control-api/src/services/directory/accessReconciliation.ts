@@ -46,8 +46,10 @@ export function buildAgentDirectoryEntry(
   const name = typeof host.metadata?.name === 'string' ? host.metadata.name : ''
   const reportedNamespace = host.metadata?.namespace
 
-  if (!name || (trustedNamespace === 'mcp-host' && name === LEGACY_FLEET_WIDE_HOST_SENTINEL))
-    return null
+  if (
+    !name ||
+    (trustedNamespace === 'mcp-host' && name === LEGACY_FLEET_WIDE_HOST_SENTINEL)
+  ) return null
   if (reportedNamespace !== trustedNamespace) return null
   if (host.metadata?.deletionTimestamp) return null
   if (host.spec?.enabled === false) return null
@@ -55,7 +57,8 @@ export function buildAgentDirectoryEntry(
   const subjectId = makeHostSubjectId('1st', trustedNamespace, name)
   if (!subjectId) return null
 
-  const configuredDisplayName = typeof host.spec?.host === 'string' ? host.spec.host.trim() : ''
+  const configuredDisplayName =
+    typeof host.spec?.host === 'string' ? host.spec.host.trim() : ''
   return {
     name,
     namespace: trustedNamespace,

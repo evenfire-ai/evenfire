@@ -1,6 +1,5 @@
 import { Router } from 'express'
 import { registerGfsGrantRoutes } from './grants.js'
-import { registerLegacyStandaloneGrantReportRoute } from './legacyStandaloneGrants.js'
 import { registerGfsProvisionerTokenRoute } from './provisionerToken.js'
 import { registerGfsProxyRoute } from './proxy.js'
 import { registerGfsResolveRoutes } from './resolve.js'
@@ -9,6 +8,7 @@ import { registerGfsSeedRoute } from './seed.js'
 import { registerGfsShareRoutes } from './shares.js'
 import { registerGfsTokenRoute } from './token.js'
 import { registerGfsTreeRoutes } from './tree.js'
+import { registerLegacyStandaloneGrantReportRoute } from './legacyStandaloneGrants.js'
 
 /**
  * gfs (Global File System) router — mounted under /api/v1 BEFORE the internal

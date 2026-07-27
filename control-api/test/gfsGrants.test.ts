@@ -773,15 +773,13 @@ describe('assertMayGrant — agent (host) restrictions', () => {
   it('preserves the existing folder-owner manager restriction for third-party hosts', async () => {
     const db = mockDb({
       ancestors: { [R]: [R] },
-      grants: [
-        {
-          subject_type: 'user',
-          subject_id: 'owner',
-          resource_id: R,
-          permissions: ['read', 'manage_acl'],
-          inherit: true,
-        },
-      ],
+      grants: [{
+        subject_type: 'user',
+        subject_id: 'owner',
+        resource_id: R,
+        permissions: ['read', 'manage_acl'],
+        inherit: true,
+      }],
     })
 
     await expect(

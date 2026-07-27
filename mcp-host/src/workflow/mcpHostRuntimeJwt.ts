@@ -24,10 +24,7 @@ type RuntimeJwtClaims = {
 export function decodeRuntimeJwtScopes(token: string): string[] | null {
   try {
     const payload = decodeJwt(token) as RuntimeJwtClaims
-    if (
-      !Array.isArray(payload.scopes) ||
-      !payload.scopes.every(scope => typeof scope === 'string')
-    ) {
+    if (!Array.isArray(payload.scopes) || !payload.scopes.every(scope => typeof scope === 'string')) {
       return null
     }
     return payload.scopes

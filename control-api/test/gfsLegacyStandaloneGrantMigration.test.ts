@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
+import { describe, expect, it, vi } from 'vitest'
 import {
   LEGACY_STANDALONE_SUBJECT_KEY,
   applyReviewedLegacyGrantMigration,
@@ -59,7 +59,8 @@ describe('legacy standalone GFS grant migration', () => {
     }
     const registrations = router.stack.filter(
       layer =>
-        layer.route?.path === '/gfs/grants/legacy-standalone' && layer.route.methods.get === true
+        layer.route?.path === '/gfs/grants/legacy-standalone' &&
+        layer.route.methods.get === true
     )
 
     expect(registrations).toHaveLength(1)
@@ -85,10 +86,7 @@ describe('legacy standalone GFS grant migration', () => {
     const report = await buildLegacyGrantMigrationReport(api)
 
     expect(report.sourceGrants).toEqual([{ ...SOURCE_GRANT, permissions: ['read', 'write'] }])
-    expect(report.validIndividualHostCandidates.map(item => item.name)).toEqual([
-      'agent-a',
-      'agent-b',
-    ])
+    expect(report.validIndividualHostCandidates.map(item => item.name)).toEqual(['agent-a', 'agent-b'])
     expect(report.mappingTemplate.mappings).toEqual([{ sourceGrantId: SOURCE_ID, targets: [] }])
     expect(api.putGrant).not.toHaveBeenCalled()
   })
@@ -162,12 +160,10 @@ describe('legacy standalone GFS grant migration', () => {
     const report = await buildLegacyGrantMigrationReport(api)
     const duplicate = {
       ...report.mappingTemplate,
-      mappings: [
-        {
-          sourceGrantId: SOURCE_ID,
-          targets: ['host:1st:mcp-host/agent-a', 'host:1st:mcp-host/agent-a'],
-        },
-      ],
+      mappings: [{
+        sourceGrantId: SOURCE_ID,
+        targets: ['host:1st:mcp-host/agent-a', 'host:1st:mcp-host/agent-a'],
+      }],
     }
     expect(() => validateReviewedLegacyGrantMapping(report, duplicate)).toThrow(
       'mapping_target_duplicate'
@@ -178,27 +174,23 @@ describe('legacy standalone GFS grant migration', () => {
       'team:all-agents',
       'host:1st:mcp-host/all-agents',
     ]) {
-      expect(() =>
-        validateReviewedLegacyGrantMapping(report, {
-          ...report.mappingTemplate,
-          mappings: [{ sourceGrantId: SOURCE_ID, targets: [target] }],
-        })
-      ).toThrow('mapping_target_not_current_trusted_host')
+      expect(() => validateReviewedLegacyGrantMapping(report, {
+        ...report.mappingTemplate,
+        mappings: [{ sourceGrantId: SOURCE_ID, targets: [target] }],
+      })).toThrow('mapping_target_not_current_trusted_host')
     }
   })
 
   it('uses a bounded read-only query for inventory and no direct grant-row SQL in apply', async () => {
-    const query = vi.fn(async () => ({
-      rows: [
-        {
-          id: SOURCE_ID,
-          drive: 'main',
-          resource_id: RESOURCE_ID,
-          permissions: ['write', 'read'],
-          inherit: true,
-        },
-      ],
-    }))
+    const query = vi.fn(async () => ({ rows: [
+      {
+        id: SOURCE_ID,
+        drive: 'main',
+        resource_id: RESOURCE_ID,
+        permissions: ['write', 'read'],
+        inherit: true,
+      },
+    ] }))
     await expect(listLegacyStandaloneGrants({ query })).resolves.toEqual([
       { ...SOURCE_GRANT, permissions: ['read', 'write'] },
     ])
@@ -206,10 +198,7 @@ describe('legacy standalone GFS grant migration', () => {
     expect(query.mock.calls[0][0]).toContain('LIMIT $2')
     expect(query.mock.calls[0][1]).toEqual(['1st:mcp-host/standalone', 1001])
 
-    const script = await readFile(
-      new URL('../../scripts/gfs-legacy-standalone-grants.mjs', import.meta.url),
-      'utf8'
-    )
+    const script = await readFile(new URL('../../scripts/gfs-legacy-standalone-grants.mjs', import.meta.url), 'utf8')
     expect(script).not.toMatch(/INSERT\s+INTO|UPDATE\s+gfs_grants|DELETE\s+FROM/i)
     expect(script).toContain("'/api/v1/gfs/grants'")
   })

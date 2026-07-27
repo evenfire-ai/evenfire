@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { GfsGrantList } from '../GfsGrantList'
 import type { GfsGrantListItem } from '../delegation.types'
+import { GfsGrantList } from '../GfsGrantList'
 
 /**
  * "Who has access" list (Manage modal). Rows resolve host subjects to agent
@@ -88,7 +88,9 @@ describe('GfsGrantList', () => {
       />
     )
 
-    const banner = screen.getByText('Only people with manage access can view who has access here.')
+    const banner = screen.getByText(
+      'Only people with manage access can view who has access here.'
+    )
     expect(banner.closest('.status-banner')?.className).toContain('tone-info')
     expect(screen.queryByRole('list')).toBeNull()
     expect(screen.queryByRole('button', { name: /Revoke access for/ })).toBeNull()

@@ -5,8 +5,6 @@
  * fixture helper performs the agent mutations under test.
  */
 import { type Locator, type Page, expect, test } from '@playwright/test'
-import { exactNameFilter } from './helpers/agentLocators'
-import { getManagedAgentPodIdentity } from './helpers/gfsAgentDiscovery'
 import {
   type AgentGfsCopyFixtures,
   assertGfsInfraHealthy,
@@ -19,6 +17,8 @@ import {
   revokeGfsGrantViaControlApi,
   seedAgentGfsCopyFixtures,
 } from './helpers/gfsFixtures'
+import { exactNameFilter } from './helpers/agentLocators'
+import { getManagedAgentPodIdentity } from './helpers/gfsAgentDiscovery'
 import { openAgentsPage, openResourcesNavItem } from './navigationHelpers'
 import { launchAndLogin } from './workflowUi'
 
@@ -57,13 +57,7 @@ async function openExactAgent(
   const breadcrumb = page
     .getByRole('navigation', { name: 'Chat breadcrumb' })
     .getByText(agentName, { exact: true })
-  if (
-    !(await boundSwitcher
-      .or(breadcrumb)
-      .first()
-      .isVisible()
-      .catch(() => false))
-  ) {
+  if (!(await boundSwitcher.or(breadcrumb).first().isVisible().catch(() => false))) {
     await switcher.first().click()
     await page.getByRole('menuitem', { name: agentName, exact: true }).click()
   }
@@ -113,10 +107,12 @@ async function sendAgentTurn(page: Page, prompt: string): Promise<Locator> {
       console.warn(
         `[gfs-agent-copy] "Retry last send" pressed (attempt ${sendRetries}/3) for turn: ${turnLabel}`
       )
-      test.info().annotations.push({
-        type: 'retry-last-send',
-        description: `attempt ${sendRetries}/3 for turn: ${turnLabel}`,
-      })
+      test
+        .info()
+        .annotations.push({
+          type: 'retry-last-send',
+          description: `attempt ${sendRetries}/3 for turn: ${turnLabel}`,
+        })
       await retrySend.click()
       continue
     }
@@ -166,9 +162,7 @@ async function expectToolForbidden(stepper: Locator, name: string): Promise<void
   const row = toolRow(stepper, name)
   await expect(row).toBeVisible({ timeout: 15_000 })
   await expect(row.locator('.stepper-step-fn')).toContainText(name)
-  await expect(row.locator('.stepper-step-duration.state-error')).toContainText(
-    /gfsc 403.*forbidden/i
-  )
+  await expect(row.locator('.stepper-step-duration.state-error')).toContainText(/gfsc 403.*forbidden/i)
   await expect(row).not.toContainText(/gfsc 503|not_mounted/i)
   await expect(stepper).not.toContainText(SENSITIVE_OUTPUT)
 }
@@ -181,9 +175,7 @@ async function expectToolConflict(stepper: Locator, name: string): Promise<void>
   const row = toolRow(stepper, name)
   await expect(row).toBeVisible({ timeout: 15_000 })
   await expect(row.locator('.stepper-step-fn')).toContainText(name)
-  await expect(row.locator('.stepper-step-duration.state-error')).toContainText(
-    /gfsc 409.*conflict/i
-  )
+  await expect(row.locator('.stepper-step-duration.state-error')).toContainText(/gfsc 409.*conflict/i)
   await expect(row).not.toContainText(/gfsc 503|not_mounted/i)
   await expect(stepper).not.toContainText(SENSITIVE_OUTPUT)
 }
@@ -210,12 +202,7 @@ async function expectCopyPublicOutput(stepper: Locator): Promise<void> {
 }
 
 function comparableTree(root: ReturnType<typeof getGfsTreeSnapshot>) {
-  return root.map(({ relativePath, kind, bytes, content }) => ({
-    relativePath,
-    kind,
-    bytes,
-    content,
-  }))
+  return root.map(({ relativePath, kind, bytes, content }) => ({ relativePath, kind, bytes, content }))
 }
 
 async function openFilesBrowser(page: Page): Promise<Locator> {
@@ -240,9 +227,7 @@ async function browseSourceTree(page: Page, fixtures: AgentGfsCopyFixtures): Pro
 async function browseDestinationTree(page: Page, fixtures: AgentGfsCopyFixtures): Promise<void> {
   const browser = await openFilesBrowser(page)
   await browser.getByRole('button', { name: fixtures.tree.destinationName, exact: true }).click()
-  await expect(
-    browser.getByRole('button', { name: fixtures.fileCopyName, exact: true })
-  ).toBeVisible()
+  await expect(browser.getByRole('button', { name: fixtures.fileCopyName, exact: true })).toBeVisible()
   await browser.getByRole('button', { name: fixtures.renamedFolderName, exact: true }).click()
   await expect(browser.getByRole('button', { name: 'nested', exact: true })).toBeVisible()
   await browser.getByRole('button', { name: 'nested', exact: true }).click()
@@ -282,12 +267,11 @@ test.describe('GFS per-agent native Copy and immediate grant enforcement (issue 
     ).toHaveLength(1)
     expect(
       sourceAclShareRecords.filter(
-        record => record.kind === 'grant' && record.row.subject_id === fixtures.sourceShareSubjectId
+        record =>
+          record.kind === 'grant' && record.row.subject_id === fixtures.sourceShareSubjectId
       )
     ).toHaveLength(0)
-    expect(getGfsTreeAclShareCounts(fixtures.tree.sourceResourceId).shares).toBeGreaterThanOrEqual(
-      1
-    )
+    expect(getGfsTreeAclShareCounts(fixtures.tree.sourceResourceId).shares).toBeGreaterThanOrEqual(1)
     const { app, page } = await launchAndLogin(OWNER_EMAIL)
     try {
       await test.step('Agent A copies one file through the native tool', async () => {
@@ -310,16 +294,9 @@ test.describe('GFS per-agent native Copy and immediate grant enforcement (issue 
         expect(copied).not.toBeNull()
         expect(copied?.resourceId).not.toBe(fixtures.tree.standaloneFileResourceId)
         const copiedTree = getGfsTreeSnapshot(copied!.resourceId)
-        const sourceFile = sourceBefore.find(
-          node => node.resourceId === fixtures.tree.standaloneFileResourceId
-        )
+        const sourceFile = sourceBefore.find(node => node.resourceId === fixtures.tree.standaloneFileResourceId)
         expect(comparableTree(copiedTree)).toEqual([
-          {
-            relativePath: '.',
-            kind: 'file',
-            bytes: sourceFile!.bytes,
-            content: sourceFile!.content,
-          },
+          { relativePath: '.', kind: 'file', bytes: sourceFile!.bytes, content: sourceFile!.content },
         ])
         expect(getGfsTreeAclShareRows(fixtures.tree.sourceResourceId)).toEqual(sourceAclShareBefore)
         expect(getGfsTreeAclShareCounts(copied!.resourceId)).toEqual({ grants: 0, shares: 0 })

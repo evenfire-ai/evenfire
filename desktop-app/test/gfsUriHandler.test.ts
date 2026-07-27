@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../src/httpClient.js'
 import {
   GfsClient,
   type GfsTransport,
@@ -7,7 +8,6 @@ import {
   parseGfsUri,
   parseSubjectKey,
 } from '../src/gfs/uriHandler.js'
-import { ApiError } from '../src/httpClient.js'
 
 /**
  * P2-S06 — Desktop gfs:// resolve + read. Acceptance: a gfs://<drive>/<rid> link

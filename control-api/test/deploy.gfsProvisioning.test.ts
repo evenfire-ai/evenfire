@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 function read(relativeFromRepoRoot: string): string {
@@ -14,9 +14,7 @@ describe('deploy/scripts/provision-gfs-db.sh', () => {
   const transitions = read('../../deploy/scripts/lib/gfs-credential-secret.sh')
   const rollout = read('../../deploy/scripts/lib/gfs-credential-rollout.sh')
   const recovery = read('../../deploy/scripts/lib/gfs-credential-recovery.sh')
-  const probePath = fileURLToPath(
-    new URL('../../deploy/scripts/lib/gfs-dsn-probe.sh', import.meta.url)
-  )
+  const probePath = fileURLToPath(new URL('../../deploy/scripts/lib/gfs-dsn-probe.sh', import.meta.url))
   const role = 'gfs_controller'
   const host = 'control-postgres.control-plane.svc.cluster.local'
   const password = 'a'.repeat(48)
@@ -30,73 +28,40 @@ describe('deploy/scripts/provision-gfs-db.sh', () => {
   })
 
   it('keeps reader and writer rotations independent', () => {
-    const reader = script.slice(
-      script.lastIndexOf('rotate-reader)'),
-      script.lastIndexOf('rotate-writer)')
-    )
+    const reader = script.slice(script.lastIndexOf('rotate-reader)'), script.lastIndexOf('rotate-writer)'))
     const writer = script.slice(script.lastIndexOf('rotate-writer)'))
-    expect(reader).toContain(
-      'reconcile_credential gfs_controller_reader reader "$READER_SECRET" gfsc-reader true'
-    )
+    expect(reader).toContain('reconcile_credential gfs_controller_reader reader "$READER_SECRET" gfsc-reader true')
     expect(reader).not.toContain('gfsc-writer')
-    expect(writer).toContain(
-      'reconcile_credential gfs_controller writer "$WRITER_SECRET" gfsc-writer true'
-    )
+    expect(writer).toContain('reconcile_credential gfs_controller writer "$WRITER_SECRET" gfsc-writer true')
     expect(writer).not.toContain('gfsc-reader')
-    const reconciliation = script.slice(
-      script.indexOf('reconcile_credential()'),
-      script.lastIndexOf('case "$MODE"')
-    )
-    expect(reconciliation.indexOf('ensure_pending_candidate')).toBeLessThan(
-      reconciliation.indexOf('set_role_password')
-    )
-    expect(reconciliation.indexOf('claim_secret_candidate')).toBeLessThan(
-      reconciliation.indexOf('set_role_password')
-    )
-    expect(reconciliation.indexOf('set_role_password')).toBeLessThan(
-      reconciliation.indexOf('promote_candidate')
-    )
-    expect(reconciliation.indexOf('promote_candidate')).toBeLessThan(
-      reconciliation.lastIndexOf('complete_rollout')
-    )
+    const reconciliation = script.slice(script.indexOf('reconcile_credential()'), script.lastIndexOf('case "$MODE"'))
+    expect(reconciliation.indexOf('ensure_pending_candidate')).toBeLessThan(reconciliation.indexOf('set_role_password'))
+    expect(reconciliation.indexOf('claim_secret_candidate')).toBeLessThan(reconciliation.indexOf('set_role_password'))
+    expect(reconciliation.indexOf('set_role_password')).toBeLessThan(reconciliation.indexOf('promote_candidate'))
+    expect(reconciliation.indexOf('promote_candidate')).toBeLessThan(reconciliation.lastIndexOf('complete_rollout'))
   })
 
   it('adopts legacy writer state without rotating or restarting it', () => {
-    const adoption = script.slice(
-      script.indexOf('stage_writer()'),
-      script.lastIndexOf('case "$MODE"')
-    )
+    const adoption = script.slice(script.indexOf('stage_writer()'), script.lastIndexOf('case "$MODE"'))
     expect(adoption).toContain('load_secret_snapshot "$WRITER_SECRET"')
     expect(adoption).toContain('dsn_has_role "$GFS_SNAPSHOT_ACTIVE" gfs_controller')
-    expect(adoption).toContain(
-      'authenticate_or_restore_nologin gfs_controller writer "$GFS_SNAPSHOT_ACTIVE"'
-    )
+    expect(adoption).toContain('authenticate_or_restore_nologin gfs_controller writer "$GFS_SNAPSHOT_ACTIVE"')
     expect(adoption).toContain('verify_role_contract gfs_controller writer')
     expect(adoption).toContain('credential_adoption_timestamp gfsc-writer')
-    expect(adoption).toContain(
-      'adopt_legacy_secret_state "$WRITER_SECRET" "$GFS_SNAPSHOT_RV" "$GFS_SNAPSHOT_ANNOTATIONS"'
-    )
+    expect(adoption).toContain('adopt_legacy_secret_state "$WRITER_SECRET" "$GFS_SNAPSHOT_RV" "$GFS_SNAPSHOT_ANNOTATIONS"')
     expect(adoption).toContain('[ "$(secret_dsn "$WRITER_SECRET")" = "$GFS_SNAPSHOT_ACTIVE" ]')
     expect(adoption).not.toContain('set_role_password')
     expect(adoption).not.toContain('complete_rollout')
-    expect(transitions).toContain(
-      '{"op": "test", "path": "/metadata/resourceVersion", "value": rv}'
-    )
+    expect(transitions).toContain('{"op": "test", "path": "/metadata/resourceVersion", "value": rv}')
     expect(transitions).toContain('get secret "$secret" -o json')
     expect(transitions).toContain('GFS_SNAPSHOT_ROTATED_AT=')
     expect(rollout).toContain('input === process.env.GFS_PG_CONNECTION_STRING')
   })
 
   it('checks table, sequence, and membership boundaries explicitly', () => {
-    expect(script).toContain(
-      "has_sequence_privilege(:'role_name', 'gfs_audit_sequence_no_seq', 'USAGE')"
-    )
-    expect(script).toContain(
-      "has_sequence_privilege(:'role_name', 'gfs_audit_sequence_no_seq', 'SELECT')"
-    )
-    expect(script).toContain(
-      "NOT has_sequence_privilege(:'role_name', 'gfs_audit_sequence_no_seq', 'UPDATE')"
-    )
+    expect(script).toContain("has_sequence_privilege(:'role_name', 'gfs_audit_sequence_no_seq', 'USAGE')")
+    expect(script).toContain("has_sequence_privilege(:'role_name', 'gfs_audit_sequence_no_seq', 'SELECT')")
+    expect(script).toContain("NOT has_sequence_privilege(:'role_name', 'gfs_audit_sequence_no_seq', 'UPDATE')")
     expect(script).toContain('NOT rolinherit')
     expect(script).toContain('pg_auth_members')
     expect(script).toContain("has_table_privilege(:'role_name', 'gfs_resources', 'INSERT')")
@@ -120,30 +85,18 @@ describe('deploy/scripts/provision-gfs-db.sh', () => {
   })
 
   it('probes preserved reader authentication without exposing connection material', () => {
-    const stage = script.slice(
-      script.lastIndexOf('stage-reader)'),
-      script.lastIndexOf('rotate-reader)')
-    )
-    expect(stage).toContain(
-      'reconcile_credential gfs_controller_reader reader "$READER_SECRET" gfsc-reader false'
-    )
+    const stage = script.slice(script.lastIndexOf('stage-reader)'), script.lastIndexOf('rotate-reader)'))
+    expect(stage).toContain('reconcile_credential gfs_controller_reader reader "$READER_SECRET" gfsc-reader false')
     expect(script).toContain('gfs_dsn_authenticates_as "$1" "$2"')
     expect(probe).toContain('kc -n "$PG_NS" exec -i "$PG_PROBE_DEPLOY" -- node -e')
     expect(probe).toContain('await client.query("SELECT current_user")')
     expect(probe).toContain('[ "$actual" = "$expected_role" ]')
     expect(probe).toContain('error.code === "28P01" || error.code === "28000"')
     expect(probe).toContain('[ "$rc" -eq 41 ] && [ "$actual" = GFS_DSN_AUTH_REJECTED ]')
-    const roleCheck = script.slice(
-      script.indexOf('verify_role()'),
-      script.indexOf('set_role_password()')
-    )
+    const roleCheck = script.slice(script.indexOf('verify_role()'), script.indexOf('set_role_password()'))
     expect(roleCheck).toContain('persisted="$(secret_dsn "${!ref_name}")"')
-    expect(roleCheck.indexOf('dsn_has_role "$persisted"')).toBeLessThan(
-      roleCheck.indexOf('require_authenticated_dsn "$persisted"')
-    )
-    expect(roleCheck.indexOf('require_authenticated_dsn "$persisted"')).toBeLessThan(
-      roleCheck.indexOf('verify_role_contract "$role" "$kind"')
-    )
+    expect(roleCheck.indexOf('dsn_has_role "$persisted"')).toBeLessThan(roleCheck.indexOf('require_authenticated_dsn "$persisted"'))
+    expect(roleCheck.indexOf('require_authenticated_dsn "$persisted"')).toBeLessThan(roleCheck.indexOf('verify_role_contract "$role" "$kind"'))
     expect(recovery).toContain('die "$3 authentication probe unavailable"')
     expect(recovery).toContain('authentication probe unavailable; refusing credential mutation')
     expect(recovery).toContain('disable_role_login "$role"')
@@ -179,9 +132,7 @@ describe('deploy/scripts/provision-gfs-db.sh', () => {
     expect(transitions).toContain('{"op": "test", "path": state_path, "value": "pending"}')
     expect(transitions).toContain('{"op": "replace", "path": state_path, "value": "applying"}')
     expect(transitions).toContain('{"op": "test", "path": state_path, "value": "applying"}')
-    expect(transitions).toContain(
-      '{"op": "replace", "path": state_path, "value": "rollout-pending"}'
-    )
+    expect(transitions).toContain('{"op": "replace", "path": state_path, "value": "rollout-pending"}')
     expect(transitions).toContain('{"op": "test", "path": pending_path, "value": candidate}')
     expect(rollout).toContain('rollout-running')
     expect(script).not.toContain('\\quit 1')
@@ -189,19 +140,11 @@ describe('deploy/scripts/provision-gfs-db.sh', () => {
   })
 
   it('accepts only the exact persisted endpoint and rejects URI overrides', () => {
-    const run = (input: string) =>
-      spawnSync(
-        'bash',
-        [
-          '-c',
-          'source "$1"; gfs_dsn_validate "$2" "$3" 5432 profiles',
-          'bash',
-          probePath,
-          role,
-          host,
-        ],
-        { input, encoding: 'utf8' }
-      )
+    const run = (input: string) => spawnSync(
+      'bash',
+      ['-c', 'source "$1"; gfs_dsn_validate "$2" "$3" 5432 profiles', 'bash', probePath, role, host],
+      { input, encoding: 'utf8' }
+    )
     const accepted = run(uri(`@${host}:5432/profiles`))
     expect(accepted.status).toBe(0)
     expect(accepted.stdout).toBe('')

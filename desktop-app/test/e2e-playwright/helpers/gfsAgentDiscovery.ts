@@ -46,15 +46,11 @@ function discoverManagedGfsAgentCandidates(): {
   const output = kubectlOut(['get', 'secrets', '-A', '-o', `go-template=${template}`])
   const bySubject = new Map<string, ManagedGfsAgent>()
   const candidateErrors: CandidateError[] = []
-  for (const line of output
-    .split('\n')
-    .map(value => value.trim())
-    .filter(Boolean)) {
+  for (const line of output.split('\n').map(value => value.trim()).filter(Boolean)) {
     const [annotatedSubject, hostUid, hostGeneration] = line.split('\t')
-    const match =
-      /^host:1st:([a-z0-9](?:[-a-z0-9]*[a-z0-9])?)\/([a-z0-9](?:[-a-z0-9]*[a-z0-9])?)$/.exec(
-        annotatedSubject ?? ''
-      )
+    const match = /^host:1st:([a-z0-9](?:[-a-z0-9]*[a-z0-9])?)\/([a-z0-9](?:[-a-z0-9]*[a-z0-9])?)$/.exec(
+      annotatedSubject ?? ''
+    )
     if (!match || !hostUid || !/^\d+$/.test(hostGeneration ?? '')) continue
     const namespace = match[1]!
     const name = match[2]!
@@ -83,8 +79,7 @@ function discoverManagedGfsAgentCandidates(): {
       continue
     }
     const [activeUid, activeGeneration, deleting, disabled] = hostState.split('\t')
-    if (activeUid !== hostUid || activeGeneration !== hostGeneration || deleting || disabled)
-      continue
+    if (activeUid !== hostUid || activeGeneration !== hostGeneration || deleting || disabled) continue
     bySubject.set(subjectId, { name, namespace, subjectId })
   }
   if (bySubject.size === 0 && candidateErrors.length > 0) {

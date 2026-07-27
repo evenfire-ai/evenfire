@@ -256,7 +256,8 @@ export function buildPvc(
 }
 
 function gfscEnv(config: GfsFactoryConfig, role: GfscRole): k8s.V1EnvVar[] {
-  const pgSecretName = role === 'writer' ? config.pgSecretName : config.readerPgSecretName
+  const pgSecretName =
+    role === 'writer' ? config.pgSecretName : config.readerPgSecretName
   const pgSecretKey = role === 'writer' ? config.pgSecretKey : config.readerPgSecretKey
   const copyEnvEntries: ReadonlyArray<readonly [string, string | undefined]> = [
     ['GFS_SYNC_COPY_MAX_OBJECTS', config.syncCopyMaxObjects],

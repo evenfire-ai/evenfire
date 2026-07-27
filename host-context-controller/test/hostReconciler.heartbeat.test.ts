@@ -439,8 +439,7 @@ describe('HostReconciler.publishSuspendBlockedReason', () => {
         lifecycle: {
           state: 'active',
           wakeHandledGeneration: 0,
-          reason:
-            '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
+          reason: '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
         },
       },
     })
@@ -453,8 +452,7 @@ describe('HostReconciler.publishSuspendBlockedReason', () => {
       freshHostRead({
         state: 'active',
         wakeHandledGeneration: 0,
-        reason:
-          '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
+        reason: '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
       })
     )
 

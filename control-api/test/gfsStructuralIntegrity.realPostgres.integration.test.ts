@@ -2,15 +2,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { Readable } from 'node:stream'
 import { Pool, type PoolClient } from 'pg'
+import { initDb } from '../src/db.js'
+import { applyResourcePatch } from '../src/routes/gfs/resources.js'
+import type { GfsCaller } from '../src/routes/gfs/grants.js'
 import { PgBlobStagingStore } from '../../gfs-controller/src/db/blobStaging.js'
 import {
-  type BlobWriter,
   GfsWriteService,
+  type BlobWriter,
   type Transactor,
 } from '../../gfs-controller/src/db/writeStore.js'
-import { initDb } from '../src/db.js'
-import type { GfsCaller } from '../src/routes/gfs/grants.js'
-import { applyResourcePatch } from '../src/routes/gfs/resources.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -119,9 +119,7 @@ function writer(client: PoolClient, manifests = new PgBlobStagingStore(client)):
 }
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void
-  const promise = new Promise<void>(done => {
-    resolve = done
-  })
+  const promise = new Promise<void>(done => { resolve = done })
   return { promise, resolve }
 }
 async function expectNoLiveNodeBelowTombstone(pool: Pool): Promise<void> {
@@ -178,13 +176,11 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL integrity', () => {
         name: 'concurrent',
         kind: 'directory',
       })
-      const deletion = writer(deleter)
-        .delete({
-          drive: tree.drive,
-          resourceId: tree.destinationA,
-          ifMatch: 0,
-        })
-        .catch(error => error as { code?: string })
+      const deletion = writer(deleter).delete({
+        drive: tree.drive,
+        resourceId: tree.destinationA,
+        ifMatch: 0,
+      }).catch(error => error as { code?: string })
       await waitUntilBlocked(pool, deleterPid, creatorPid, 'create/delete')
       await creator.query('COMMIT')
       await expect(deletion).resolves.toMatchObject({ code: 'not_empty' })
@@ -205,13 +201,11 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL integrity', () => {
       const moverPid = Number((await mover.query('SELECT pg_backend_pid() pid')).rows[0]?.pid)
       const deleterPid = Number((await deleter.query('SELECT pg_backend_pid() pid')).rows[0]?.pid)
       expect(await move(mover, tree, tree.destinationA)).toBe(1)
-      const deletion = writer(deleter)
-        .delete({
-          drive: tree.drive,
-          resourceId: tree.destinationA,
-          ifMatch: 0,
-        })
-        .catch(error => error as { code?: string })
+      const deletion = writer(deleter).delete({
+        drive: tree.drive,
+        resourceId: tree.destinationA,
+        ifMatch: 0,
+      }).catch(error => error as { code?: string })
       await waitUntilBlocked(pool, deleterPid, moverPid, 'move/delete')
       await mover.query('COMMIT')
       await expect(deletion).resolves.toMatchObject({ code: 'not_empty' })
@@ -227,36 +221,23 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL integrity', () => {
   it('rejects moving a directory below its descendant', async () => {
     const tree = await seedTree(pool, 'cycle')
     const descendant = randomUUID()
-    await pool.query(
-      `INSERT INTO gfs_resources
+    await pool.query(`INSERT INTO gfs_resources
       (resource_id,drive,parent_resource_id,name,kind,path_cache,version,bytes)
       VALUES ($1,$2,$3,'descendant','directory','/source/descendant',0,0)`,
-      [descendant, tree.drive, tree.source]
-    )
+    [descendant, tree.drive, tree.source])
     const client = await pool.connect()
     try {
       await begin(client)
-      await expect(
-        applyResourcePatch(
-          client,
-          operator,
-          tree.drive,
-          tree.source,
-          { newParentId: descendant },
-          async () => undefined
-        )
-      ).rejects.toMatchObject({ code: 'path_invalid' })
+      await expect(applyResourcePatch(
+        client, operator, tree.drive, tree.source, { newParentId: descendant }, async () => undefined
+      )).rejects.toMatchObject({ code: 'path_invalid' })
     } finally {
       await client.query('ROLLBACK').catch(() => undefined)
       client.release()
     }
     const source = await pool.query(
-      'SELECT parent_resource_id,path_cache,version FROM gfs_resources WHERE resource_id=$1',
-      [tree.source]
-    )
-    expect(source.rows).toEqual([
-      { parent_resource_id: tree.root, path_cache: '/source', version: 0 },
-    ])
+      'SELECT parent_resource_id,path_cache,version FROM gfs_resources WHERE resource_id=$1', [tree.source])
+    expect(source.rows).toEqual([{ parent_resource_id: tree.root, path_cache: '/source', version: 0 }])
   })
 
   it('atomically refreshes path_cache for every node in a moved subtree', async () => {
@@ -273,34 +254,20 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL integrity', () => {
     try {
       await begin(client)
       await applyResourcePatch(
-        client,
-        operator,
-        tree.drive,
-        tree.source,
-        { newParentId: tree.destinationA },
-        async () => undefined
+        client, operator, tree.drive, tree.source, { newParentId: tree.destinationA }, async () => undefined
       )
-      const beforeCommit = await pool.query(
-        `SELECT path_cache FROM gfs_resources
-        WHERE resource_id=ANY($1::uuid[]) ORDER BY path_cache`,
-        [[tree.source, tree.child, nested, leaf]]
-      )
+      const beforeCommit = await pool.query(`SELECT path_cache FROM gfs_resources
+        WHERE resource_id=ANY($1::uuid[]) ORDER BY path_cache`, [[tree.source, tree.child, nested, leaf]])
       expect(beforeCommit.rows.map(row => row.path_cache)).toEqual([
-        '/source',
-        '/source/child.txt',
-        '/source/nested',
-        '/source/nested/leaf.txt',
+        '/source', '/source/child.txt', '/source/nested', '/source/nested/leaf.txt',
       ])
       await client.query('COMMIT')
     } finally {
       await client.query('ROLLBACK').catch(() => undefined)
       client.release()
     }
-    const paths = await pool.query(
-      `SELECT name,path_cache FROM gfs_resources
-      WHERE resource_id=ANY($1::uuid[]) ORDER BY path_cache`,
-      [[tree.source, tree.child, nested, leaf]]
-    )
+    const paths = await pool.query(`SELECT name,path_cache FROM gfs_resources
+      WHERE resource_id=ANY($1::uuid[]) ORDER BY path_cache`, [[tree.source, tree.child, nested, leaf]])
     expect(paths.rows).toEqual([
       { name: 'source', path_cache: '/destination-a/source' },
       { name: 'child.txt', path_cache: '/destination-a/source/child.txt' },
@@ -326,13 +293,11 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL integrity', () => {
         `SELECT parent_resource_id,path_cache,version FROM gfs_resources WHERE resource_id=$1`,
         [tree.child]
       )
-      expect(final.rows).toEqual([
-        {
-          parent_resource_id: tree.destinationB,
-          path_cache: '/destination-b/child.txt',
-          version: 2,
-        },
-      ])
+      expect(final.rows).toEqual([{
+        parent_resource_id: tree.destinationB,
+        path_cache: '/destination-b/child.txt',
+        version: 2,
+      }])
     } finally {
       await first.query('ROLLBACK').catch(() => undefined)
       await second.query('ROLLBACK').catch(() => undefined)

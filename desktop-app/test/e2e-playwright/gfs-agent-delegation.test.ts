@@ -38,15 +38,6 @@
  *  - Infra guard: gfsc unhealthy ⇒ the suite THROWS (never skips, never mocks).
  */
 import { type Locator, type Page, expect, test } from '@playwright/test'
-import { getGfsHostGrantsUnderTree } from '../../../tests/e2e/gfsCopyFixtures'
-import {
-  type GfsFileFixture,
-  cleanupGfsFixture,
-  getE2EUserId,
-  seedGfsFileFixture,
-  seedGfsGrant,
-  uniqueGfsFixtureName,
-} from '../../../tests/e2e/gfsUiFixtures'
 import { exactNameFilter } from './helpers/agentLocators'
 import { getManagedAgentPodIdentity } from './helpers/gfsAgentDiscovery'
 import {
@@ -56,6 +47,15 @@ import {
   getGfsTreeSnapshot,
   gfsGrantRevokeAuditCount,
 } from './helpers/gfsFixtures'
+import {
+  type GfsFileFixture,
+  cleanupGfsFixture,
+  getE2EUserId,
+  seedGfsFileFixture,
+  seedGfsGrant,
+  uniqueGfsFixtureName,
+} from '../../../tests/e2e/gfsUiFixtures'
+import { getGfsHostGrantsUnderTree } from '../../../tests/e2e/gfsCopyFixtures'
 import { openAgentsPage, openResourcesNavItem } from './navigationHelpers'
 import { launchAndLogin } from './workflowUi'
 
@@ -157,13 +157,7 @@ async function openExactAgent(
   const breadcrumb = page
     .getByRole('navigation', { name: 'Chat breadcrumb' })
     .getByText(agentName, { exact: true })
-  if (
-    !(await boundSwitcher
-      .or(breadcrumb)
-      .first()
-      .isVisible()
-      .catch(() => false))
-  ) {
+  if (!(await boundSwitcher.or(breadcrumb).first().isVisible().catch(() => false))) {
     await switcher.first().click()
     await page.getByRole('menuitem', { name: agentName, exact: true }).click()
   }
@@ -346,9 +340,7 @@ async function openManageForFixtureFolder(
   await expect(
     browser.getByRole('button', { name: fixtures.folder.fileName, exact: true })
   ).toBeVisible({ timeout: 20_000 })
-  await browser
-    .getByRole('button', { name: `Options for ${fixtures.folder.name}`, exact: true })
-    .click()
+  await browser.getByRole('button', { name: `Options for ${fixtures.folder.name}`, exact: true }).click()
   await browser.getByRole('menuitem', { name: 'Manage', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: `Manage folder ${fixtures.folder.name}` })
   await expect(dialog).toBeVisible({ timeout: 15_000 })
@@ -468,7 +460,9 @@ async function grantMultipleAgentsViaManageModal(
   // Plural toast proves the batch was accepted as a unit (singular would mean the
   // multi-select collapsed to one subject — the exact regression this guards).
   await expect(
-    page.getByText(`Access granted to ${opts.agentNames.length} agents`, { exact: true }).first()
+    page
+      .getByText(`Access granted to ${opts.agentNames.length} agents`, { exact: true })
+      .first()
   ).toBeVisible({ timeout: 20_000 })
   // list-after-write: every grantee now has a Revoke row (grants GET returned all N).
   for (const name of opts.agentNames) {
@@ -543,10 +537,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
         await closeManageDialog(page, dialog)
         // Business truth: exactly one host grant row for A on the folder,
         // read+write, inherit true — and still none for B.
-        const grantsA = getGfsHostGrantsUnderTree(
-          fixtures.folder.resourceId,
-          fixtures.agentA.subjectId
-        )
+        const grantsA = getGfsHostGrantsUnderTree(fixtures.folder.resourceId, fixtures.agentA.subjectId)
         expect(grantsA).toHaveLength(1)
         expect(grantsA[0]!.resourceId).toBe(fixtures.folder.resourceId)
         expect([...grantsA[0]!.permissions].sort()).toEqual(['read', 'write'])
@@ -631,19 +622,13 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
           includeWrite: false,
         })
         await closeManageDialog(page, dialog)
-        const grantsB = getGfsHostGrantsUnderTree(
-          fixtures.folder.resourceId,
-          fixtures.agentB.subjectId
-        )
+        const grantsB = getGfsHostGrantsUnderTree(fixtures.folder.resourceId, fixtures.agentB.subjectId)
         expect(grantsB).toHaveLength(1)
         expect(grantsB[0]!.resourceId).toBe(fixtures.folder.resourceId)
         expect(grantsB[0]!.permissions).toEqual(['read'])
         expect(grantsB[0]!.inherit).toBe(true)
         // A's Test-1 grant is untouched by B's grant.
-        const grantsA = getGfsHostGrantsUnderTree(
-          fixtures.folder.resourceId,
-          fixtures.agentA.subjectId
-        )
+        const grantsA = getGfsHostGrantsUnderTree(fixtures.folder.resourceId, fixtures.agentA.subjectId)
         expect(grantsA).toHaveLength(1)
         expect([...grantsA[0]!.permissions].sort()).toEqual(['read', 'write'])
       })
@@ -709,7 +694,10 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
             'verbatim. Do not answer from memory — attempt the read with your Clerum GFS ' +
             'tools even if the file is not in your listing.'
         )
-        await expectNoDisclosureDenial(turn, [fixtures.originalSentinel, fixtures.modifiedSentinel])
+        await expectNoDisclosureDenial(turn, [
+          fixtures.originalSentinel,
+          fixtures.modifiedSentinel,
+        ])
         // Same-runtime proof: pod UID + startTime are unchanged across the
         // revoke and the denied retry — live cache invalidation, not a restart.
         expect(getManagedAgentPodIdentity(fixtures.agentA)).toBe(runtimeBefore)
@@ -724,10 +712,7 @@ test.describe('GFS per-agent delegation: UI grant/revoke with full pre/post enfo
         )
         assertNoInfraFailureShape(turn.responseText)
         await expectReadWithSentinel(turn.stepper, fixtures.modifiedSentinel)
-        const grantsB = getGfsHostGrantsUnderTree(
-          fixtures.folder.resourceId,
-          fixtures.agentB.subjectId
-        )
+        const grantsB = getGfsHostGrantsUnderTree(fixtures.folder.resourceId, fixtures.agentB.subjectId)
         expect(grantsB).toHaveLength(1)
         expect(grantsB[0]!.permissions).toEqual(['read'])
       })

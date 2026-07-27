@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { describe, expect, it } from 'vitest'
 
 describe('0074_gfs_runtime_role_exact_contract', () => {
   it('normalizes both roles without changing credential state', () => {

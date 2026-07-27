@@ -40,9 +40,8 @@ describe('gfs runtime gfsc client', () => {
   })
 
   it('derives only recognized GFS tool scopes and fails closed', () => {
-    expect([
-      ...(getGfsToolScopes({ get: () => encodedClaims(['gfs.read', 'gfs.write']) }) ?? []),
-    ]).toEqual(['gfs.read', 'gfs.write'])
+    expect([...(getGfsToolScopes({ get: () => encodedClaims(['gfs.read', 'gfs.write']) }) ?? [])])
+      .toEqual(['gfs.read', 'gfs.write'])
     expect(getGfsToolScopes({ get: () => encodedClaims(['gfs.read', 'gfs.delete']) })).toBeNull()
     expect(getGfsToolScopes({ get: () => encodedClaims(['gfs.delete']) })).toBeNull()
     expect(getGfsToolScopes({ get: () => encodedClaims([]) })).toBeNull()
@@ -94,44 +93,35 @@ describe('gfs runtime gfsc client', () => {
       fetch: fetchFn,
     })
     await client.createFile({
-      drive: 'main',
-      parentResourceId: 'parent/id',
-      name: 'note.txt',
-      content: 'hello',
+      drive: 'main', parentResourceId: 'parent/id', name: 'note.txt', content: 'hello',
     })
     await client.createFolder({ drive: 'main', parentResourceId: 'parent/id', name: 'docs' })
     await client.rename({
-      drive: 'main',
-      resourceId: 'source/id',
-      newName: 'renamed.txt',
-      ifMatch: 4,
+      drive: 'main', resourceId: 'source/id', newName: 'renamed.txt', ifMatch: 4,
     })
     const copy = {
-      drive: 'main',
-      sourceResourceId: 'source',
-      destinationParentId: 'destination',
-      newName: 'source-copy',
-      ifMatch: 7,
+      drive: 'main', sourceResourceId: 'source', destinationParentId: 'destination',
+      newName: 'source-copy', ifMatch: 7,
     }
     await client.copy(copy)
 
     expect(fetchFn.mock.calls.map(call => [call[0], call[1]?.method, call[1]?.body])).toEqual([
       [
         'http://gfsc-writer.gfs.svc.cluster.local:8087/v1/resources/parent%2Fid/children?drive=main',
-        'POST',
-        JSON.stringify({ name: 'note.txt', kind: 'file', content: 'hello' }),
+        'POST', JSON.stringify({ name: 'note.txt', kind: 'file', content: 'hello' }),
       ],
       [
         'http://gfsc-writer.gfs.svc.cluster.local:8087/v1/resources/parent%2Fid/children?drive=main',
-        'POST',
-        JSON.stringify({ name: 'docs', kind: 'directory' }),
+        'POST', JSON.stringify({ name: 'docs', kind: 'directory' }),
       ],
       [
         'http://gfsc-writer.gfs.svc.cluster.local:8087/v1/resources/source%2Fid',
-        'PATCH',
-        JSON.stringify({ drive: 'main', newName: 'renamed.txt', ifMatch: 4 }),
+        'PATCH', JSON.stringify({ drive: 'main', newName: 'renamed.txt', ifMatch: 4 }),
       ],
-      ['http://gfsc-writer.gfs.svc.cluster.local:8087/v1/copy', 'POST', JSON.stringify(copy)],
+      [
+        'http://gfsc-writer.gfs.svc.cluster.local:8087/v1/copy',
+        'POST', JSON.stringify(copy),
+      ],
     ])
   })
 
