@@ -7,20 +7,21 @@ system. Please help us keep operators and end users safe.
 
 **Do not open a public GitHub issue for security reports.**
 
-Prefer, in order:
+Use either channel. Both reach the core maintainers.
 
-1. **GitHub Private Vulnerability Reporting** on this repository (Security →
-   Advisories / “Report a vulnerability”), if enabled for the repo.
-2. **Email:** `security@example.com`  
-   Include a clear description, impact, affected components/versions, and
-   reproduction steps when possible. Encrypt sensitive attachments if you can.
+1. **GitHub Private Vulnerability Reporting** (preferred):
+   [open a private report](https://github.com/evenfire-ai/evenfire/security/advisories/new).
+   It is enabled on this repository, keeps the report private until we publish
+   an advisory, and gives you a thread to track the fix.
+2. **Email:** `security@evenfire.ai`
+
+Include a clear description, impact, affected components/versions, and
+reproduction steps when possible. Encrypt sensitive attachments if you can.
 
 We aim to **acknowledge within 3 business days** and to keep you informed of
 the fix timeline. Please give us a reasonable window before any public
-disclosure.
-
-If `security@example.com` is unreachable, reach the core maintainers / GitHub
-org owners via a private channel (see [GOVERNANCE.md](GOVERNANCE.md)).
+disclosure. If you have had no acknowledgement after 3 business days, follow up
+on the other channel before considering public disclosure.
 
 ## Supported versions
 
