@@ -67,7 +67,8 @@ describe('stateless workspace layout migration', () => {
 
     expect(readFileSync(join(root, 'workspace', 'notes.md'), 'utf8')).toBe('workspace-data')
     expect(readFileSync(join(root, 'state', 'state.db'), 'utf8')).toBe('durable-db')
-  }, // runner budget above the generic 5s limit so CI process contention cannot // This is the only case that launches the migration shell twice. Keep its
+  }, // This is the only case that launches the migration shell twice. Keep its
+  // runner budget above the generic 5s limit so CI process contention cannot
   // turn a completed idempotency check into a harness timeout.
   15_000)
 
