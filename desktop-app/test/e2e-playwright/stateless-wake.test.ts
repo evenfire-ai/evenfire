@@ -774,7 +774,9 @@ async function expectAssistantMarkerRendered(
 // usable model list (ModelSelector returns null until data loads and renders a
 // non-interactive chip only when degraded), so a visible interactive picker with
 // selectable options is itself the proof.
-async function exerciseVisibleModelPicker(appPage: import('@playwright/test').Page): Promise<void> {
+async function exerciseVisibleModelPicker(
+  appPage: import('@playwright/test').Page
+): Promise<void> {
   const trigger = appPage.getByRole('button', { name: /^Model — / })
   await expect(
     trigger,
@@ -881,12 +883,13 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
   // exercise of the coordinator dedup (the Desktop mirror of bash Test 6). The
   // prewarm's status is the cold/warm oracle; the UI waking-state affordance is NOT
   // used for the mode because a transparent sub-hold-deadline wake never renders it.
-  const [prewarmDuringColdWake, sessionsDuringColdWake, modelsDuringColdWake] = await Promise.all([
-    probeStatelessPrewarm(appPage),
-    readStatelessSessionIds(appPage),
-    probeStatelessHostModels(appPage),
-    sendButton.click(),
-  ])
+  const [prewarmDuringColdWake, sessionsDuringColdWake, modelsDuringColdWake] =
+    await Promise.all([
+      probeStatelessPrewarm(appPage),
+      readStatelessSessionIds(appPage),
+      probeStatelessHostModels(appPage),
+      sendButton.click(),
+    ])
   expect(
     sessionsDuringColdWake.error,
     `[stateless-wake] concurrent listSessions during the COLD wake must not 403/fail — ${sessionsDuringColdWake.error}`
