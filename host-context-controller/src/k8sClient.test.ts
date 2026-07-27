@@ -2968,7 +2968,10 @@ describe('McpServerWatcher Host watch generation', () => {
       spec: { host: 'retry-host', lifecycle: { stateless: true } },
     })
     expect(reconcile).toHaveBeenCalledOnce()
-    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ uid: 'retry-host-uid' }), 'urgent')
+    expect(reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({ uid: 'retry-host-uid' }),
+      'urgent'
+    )
     expect((watcher as any).hostWatchRetryTimers.size).toBe(1)
     expect((watcher as any).latestHostWatchEventRevisions.size).toBe(1)
 

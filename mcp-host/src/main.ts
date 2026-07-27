@@ -33,7 +33,10 @@ import {
   resolveSessionModel,
 } from './config/modelResolution'
 import { ContextMapperClient, getContextMapperClient } from './contextMapperClient'
-import type { ConversationSessionSummary } from './core/conversation/conversationStore'
+import type {
+  ConversationSessionMessages,
+  ConversationSessionSummary,
+} from './core/conversation/conversationStore'
 import {
   type ConversationStoreHandle,
   SqliteColdStartLoader,
@@ -2021,7 +2024,9 @@ async function startRPCServer(): Promise<void> {
   // approve button without waiting for the SSE. `displayName` is derived
   // server-side (the `tool_name` itself is NOT leaked over the wire — security
   // patch P1-1).
-  const sessionStateView = (session: Conversation | ConversationSessionSummary) => {
+  const sessionStateView = (
+    session: Conversation | ConversationSessionSummary | ConversationSessionMessages
+  ) => {
     const state =
       session.state === ConversationState.Processing
         ? ('processing' as const)
@@ -2115,30 +2120,19 @@ async function startRPCServer(): Promise<void> {
     const convManager = agent!.getConversationManager()
     // Direct O(1) key lookup — spec §2: `conversations.get(`${auth.sub}:rpc:${agent}:${chatId}`)`.
     const key = `${userSub}:rpc:${agentName}:${chatId}`
-    const conversation = await convManager.getSessionByKeyAsync(key)
-    if (!conversation) return null
-    const allTurns = conversation.turns
-    const eligibleTurns =
-      query.afterTurn !== undefined
-        ? allTurns.filter(turn => turn.number > query.afterTurn!)
-        : query.beforeTurn !== undefined
-          ? allTurns.filter(turn => turn.number < query.beforeTurn!)
-          : allTurns
-    const turns =
-      query.limit === undefined
-        ? eligibleTurns
-        : query.afterTurn !== undefined
-          ? eligibleTurns.slice(0, query.limit)
-          : eligibleTurns.slice(-query.limit)
+    const keyPrefix = `${userSub}:rpc:`
+    const page = await convManager.getSessionMessagesByKeyAsync(key, keyPrefix, query)
+    if (!page) return null
+    const turns = page.turns
     const oldestTurnNumber = turns[0]?.number
     const latestTurnNumber = turns.at(-1)?.number
-    const firstConversationTurn = allTurns[0]?.number
-    const lastConversationTurn = allTurns.at(-1)?.number
+    const firstConversationTurn = page.firstTurnNumber
+    const lastConversationTurn = page.lastTurnNumber
     return {
       agent: agentName,
       chatId,
-      ...sessionStateView(conversation),
-      totalTurns: allTurns.length,
+      ...sessionStateView(page),
+      totalTurns: page.totalTurns,
       oldestTurnNumber,
       latestTurnNumber,
       hasMoreBefore:
@@ -2151,7 +2145,7 @@ async function startRPCServer(): Promise<void> {
         (latestTurnNumber !== undefined
           ? latestTurnNumber < lastConversationTurn
           : query.beforeTurn !== undefined),
-      revision: `${allTurns.length}:${conversation.updated_at.getTime()}`,
+      revision: `${page.totalTurns}:${page.updatedAt.getTime()}`,
       turns: turns.map(t => ({
         number: t.number,
         user_input: t.user_input,

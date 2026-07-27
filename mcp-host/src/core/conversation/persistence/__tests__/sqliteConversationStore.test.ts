@@ -312,6 +312,37 @@ describe('SqliteConversationStore — session summary listing', () => {
       await handle.shutdown()
     }
   })
+
+  it('loads a bounded message page without hydrating the full conversation cache', async () => {
+    const handle = await freshStore({ cacheSize: 4 })
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      for (let turn = 1; turn <= 5; turn += 1) {
+        await manager.startTurn(conv, `user ${turn}`, `task-${turn}`)
+        await manager.completeTurn(conv, `assistant ${turn}`)
+      }
+      await handle.persistQueue.drainSessionKey(SESSION_KEY)
+      handle.store['cache'].clear()
+      handle.store['ordinals'].clear()
+      handle.store['sessionKeyById'].clear()
+
+      const page = await handle.store.getSessionMessagesByKey(SESSION_KEY, 'u-1:rpc:', {
+        limit: 2,
+        beforeTurn: 5,
+      })
+
+      expect(page?.totalTurns).toBe(5)
+      expect(page?.firstTurnNumber).toBe(1)
+      expect(page?.lastTurnNumber).toBe(5)
+      expect(page?.turns.map(turn => turn.number)).toEqual([3, 4])
+      expect(page?.turns.map(turn => turn.user_input)).toEqual(['user 3', 'user 4'])
+      expect(page?.turns.map(turn => turn.response)).toEqual(['assistant 3', 'assistant 4'])
+      expect(handle.store['cache'].size()).toBe(0)
+    } finally {
+      await handle.shutdown()
+    }
+  })
 })
 
 describe('SqliteConversationStore — cold-start rehydration', () => {

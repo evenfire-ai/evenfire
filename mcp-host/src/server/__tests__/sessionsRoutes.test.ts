@@ -50,6 +50,10 @@ function makeReqWithAuth(sub: string): Request {
   } as unknown as Request
 }
 
+function encodeSessionsCursor(updatedAt: string, key: string): string {
+  return Buffer.from(JSON.stringify({ updatedAt, key }), 'utf8').toString('base64url')
+}
+
 describe('handleSessionsListRoute', () => {
   it('returns 200 with items array for the authenticated user', async () => {
     const sessionsListHandler: SessionsListHandler = vi.fn().mockReturnValue({
@@ -67,7 +71,7 @@ describe('handleSessionsListRoute', () => {
       ],
     })
     expect(sessionsListHandler).toHaveBeenCalledWith('user-1', {
-      limit: undefined,
+      limit: 50,
       cursor: undefined,
     })
   })
@@ -79,7 +83,7 @@ describe('handleSessionsListRoute', () => {
     })
     const req = {
       ...makeReqWithAuth('user-1'),
-      query: { limit: '500', cursor: 'current-page' },
+      query: { limit: '500', cursor: encodeSessionsCursor('2026-04-22T00:00:00.000Z', 'k1') },
     } as unknown as Request
     const captured = makeRes()
 
@@ -88,9 +92,23 @@ describe('handleSessionsListRoute', () => {
     expect(captured.statusCode).toBe(200)
     expect(sessionsListHandler).toHaveBeenCalledWith('user-1', {
       limit: 100,
-      cursor: 'current-page',
+      cursor: encodeSessionsCursor('2026-04-22T00:00:00.000Z', 'k1'),
     })
     expect(captured.jsonBody).toEqual({ items: [], nextCursor: 'next-page' })
+  })
+
+  it('rejects malformed session cursors instead of treating them as page one', async () => {
+    const sessionsListHandler: SessionsListHandler = vi.fn()
+    const req = {
+      ...makeReqWithAuth('user-1'),
+      query: { cursor: 'not-json' },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler }))
+
+    expect(captured.statusCode).toBe(400)
+    expect(sessionsListHandler).not.toHaveBeenCalled()
   })
 
   it('returns 501 when sessionsListHandler is not configured', async () => {
@@ -160,7 +178,7 @@ describe('handleSessionMessagesRoute', () => {
       ],
     })
     expect(sessionMessagesHandler).toHaveBeenCalledWith('user-1', 'chatllm', 'c1', {
-      limit: undefined,
+      limit: 80,
       beforeTurn: undefined,
       afterTurn: undefined,
     })

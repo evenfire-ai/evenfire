@@ -143,7 +143,7 @@ function mapState(raw: string): ConversationState {
   }
 }
 
-function groupMessagesIntoTurns(messages: MessageRow[]): Turn[] {
+export function groupMessagesIntoTurns(messages: MessageRow[]): Turn[] {
   const byTurn = new Map<number, Turn>()
   for (const m of messages) {
     const turnNum = m.turn_number ?? 0

@@ -63,6 +63,22 @@ export type RouteHandlers = {
   setModelHandler?: SetModelHandler | null
 }
 
+function parseSessionsCursorParam(cursor: unknown): string | undefined | null {
+  if (cursor === undefined) return undefined
+  if (typeof cursor !== 'string' || cursor.length > 2048) return null
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
+      updatedAt?: unknown
+      key?: unknown
+    }
+    if (typeof parsed.updatedAt !== 'string' || typeof parsed.key !== 'string') return null
+    if (!Number.isFinite(Date.parse(parsed.updatedAt))) return null
+    return cursor
+  } catch {
+    return null
+  }
+}
+
 function channelRuntimeSourceMismatch(
   caller: RuntimeCallerContext | undefined,
   source: { channelType?: string; channelId?: string; sender?: string }
@@ -1093,12 +1109,13 @@ export async function handleSessionsListRoute(
     const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
     const limit =
       rawLimit === undefined
-        ? undefined
+        ? 50
         : Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 50, 1), 100)
-    const cursor =
-      typeof req.query.cursor === 'string' && req.query.cursor.length <= 2048
-        ? req.query.cursor
-        : undefined
+    const cursor = parseSessionsCursorParam(req.query.cursor)
+    if (cursor === null) {
+      badRequest(res, 'Invalid sessions cursor')
+      return
+    }
     const result = await handlers.sessionsListHandler(caller.userId, { limit, cursor })
     json(res, 200, result)
   } catch (error) {
@@ -1196,8 +1213,8 @@ export async function handleSessionMessagesRoute(
     }
     const limit =
       rawLimit === undefined
-        ? undefined
-        : Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 50, 1), 200)
+        ? 80
+        : Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 80, 1), 200)
     const beforeTurn =
       rawBeforeTurn !== undefined && Number.isFinite(rawBeforeTurn)
         ? Math.max(1, Math.floor(rawBeforeTurn))

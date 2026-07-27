@@ -26,6 +26,10 @@ export interface PreparedStatements {
   selectSessionBySessionKey: Statement
   selectSessionsByPrefix: Statement
   selectSessionSummariesByPrefix: Statement
+  selectSessionTurnBounds: Statement
+  selectMessagesBySessionNewestTurns: Statement
+  selectMessagesBySessionTurnsBefore: Statement
+  selectMessagesBySessionTurnsAfter: Statement
 
   insertMessage: Statement
   selectMessagesBySession: Statement
@@ -209,7 +213,8 @@ export function prepareStatements(db: Database): PreparedStatements {
                   LIMIT 1
                ) AS pending_tool_name
           FROM sessions s
-         WHERE s.session_key LIKE @pattern
+         WHERE s.session_key >= @prefix_start
+           AND s.session_key < @prefix_end
       )
       SELECT *
         FROM session_summaries
@@ -219,8 +224,66 @@ export function prepareStatements(db: Database): PreparedStatements {
             last_activity_at = @cursor_updated_at
             AND session_key > @cursor_key
           )
-       ORDER BY last_activity_at DESC, session_key ASC
-       LIMIT @limit
+      ORDER BY last_activity_at DESC, session_key ASC
+      LIMIT @limit
+    `),
+    selectSessionTurnBounds: db.prepare(`
+      SELECT COUNT(DISTINCT COALESCE(turn_number, 0)) AS total_turns,
+             MIN(COALESCE(turn_number, 0))            AS first_turn_number,
+             MAX(COALESCE(turn_number, 0))            AS last_turn_number,
+             MAX(timestamp)                           AS last_activity_at
+        FROM messages
+       WHERE session_id = ?
+    `),
+    selectMessagesBySessionNewestTurns: db.prepare(`
+      WITH selected_turns AS (
+        SELECT COALESCE(turn_number, 0) AS turn_number
+          FROM messages
+         WHERE session_id = @session_id
+         GROUP BY COALESCE(turn_number, 0)
+         ORDER BY turn_number DESC
+         LIMIT @limit
+      )
+      SELECT m.*
+        FROM messages m
+        JOIN selected_turns st
+          ON COALESCE(m.turn_number, 0) = st.turn_number
+       WHERE m.session_id = @session_id
+       ORDER BY COALESCE(m.turn_number, 0) ASC, m.ordinal ASC
+    `),
+    selectMessagesBySessionTurnsBefore: db.prepare(`
+      WITH selected_turns AS (
+        SELECT COALESCE(turn_number, 0) AS turn_number
+          FROM messages
+         WHERE session_id = @session_id
+           AND COALESCE(turn_number, 0) < @before_turn
+         GROUP BY COALESCE(turn_number, 0)
+         ORDER BY turn_number DESC
+         LIMIT @limit
+      )
+      SELECT m.*
+        FROM messages m
+        JOIN selected_turns st
+          ON COALESCE(m.turn_number, 0) = st.turn_number
+       WHERE m.session_id = @session_id
+       ORDER BY COALESCE(m.turn_number, 0) ASC, m.ordinal ASC
+    `),
+    selectMessagesBySessionTurnsAfter: db.prepare(`
+      WITH selected_turns AS (
+        SELECT COALESCE(turn_number, 0) AS turn_number
+          FROM messages
+         WHERE session_id = @session_id
+           AND COALESCE(turn_number, 0) > @after_turn
+         GROUP BY COALESCE(turn_number, 0)
+         ORDER BY turn_number ASC
+         LIMIT @limit
+      )
+      SELECT m.*
+        FROM messages m
+        JOIN selected_turns st
+          ON COALESCE(m.turn_number, 0) = st.turn_number
+       WHERE m.session_id = @session_id
+       ORDER BY COALESCE(m.turn_number, 0) ASC, m.ordinal ASC
     `),
 
     insertMessage: db.prepare(`

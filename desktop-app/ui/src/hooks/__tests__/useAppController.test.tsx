@@ -146,6 +146,24 @@ describe('scheduleAfterFirstPaint', () => {
     expect(task).toHaveBeenCalledTimes(1)
   })
 
+  it('falls back to a timeout when animation frames are throttled', async () => {
+    vi.useFakeTimers()
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    })
+    const task = vi.fn(async () => undefined)
+
+    scheduleAfterFirstPaint(task)
+    expect(task).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(frames).toHaveLength(1)
+    expect(task).toHaveBeenCalledTimes(1)
+  })
+
   it('runs session-bound deferred startup work when identity is unchanged', async () => {
     const frames: FrameRequestCallback[] = []
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {

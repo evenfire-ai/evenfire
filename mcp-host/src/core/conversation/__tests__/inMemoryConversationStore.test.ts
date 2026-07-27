@@ -14,6 +14,17 @@ function makeConversation(userId: string): Conversation {
   }
 }
 
+function makeTurn(number: number) {
+  return {
+    number,
+    user_input: `user ${number}`,
+    response: `assistant ${number}`,
+    tool_calls: [],
+    started_at: new Date(`2026-01-01T00:00:0${number % 10}.000Z`),
+    completed_at: new Date(`2026-01-01T00:00:0${number % 10}.500Z`),
+  }
+}
+
 describe('InMemoryConversationStore', () => {
   let store: InMemoryConversationStore
 
@@ -101,6 +112,48 @@ describe('InMemoryConversationStore', () => {
     it('returns [] when no keys match', () => {
       store.set('u-1:rpc:agent-x:chat-1', makeConversation('u-1'))
       expect(store.listByPrefix('u-2:')).toEqual([])
+    })
+  })
+
+  describe('listSessionSummariesByPrefix', () => {
+    it('uses the same binary tie-breaker as session cursors', async () => {
+      const updatedAt = new Date('2026-01-01T00:00:00.000Z')
+      const upper = { ...makeConversation('u-1'), updated_at: updatedAt }
+      const lower = { ...makeConversation('u-1'), updated_at: updatedAt }
+      store.set('u-1:rpc:agent-x:B1', upper)
+      store.set('u-1:rpc:agent-x:a1', lower)
+
+      const first = await store.listSessionSummariesByPrefix('u-1:rpc:', { limit: 1 })
+      expect(first.map(session => session.chatId)).toEqual(['B1'])
+
+      const second = await store.listSessionSummariesByPrefix('u-1:rpc:', {
+        limit: 1,
+        cursor: {
+          updatedAt: first[0]!.lastActivityAt,
+          key: first[0]!.key,
+        },
+      })
+      expect(second.map(session => session.chatId)).toEqual(['a1'])
+    })
+  })
+
+  describe('getSessionMessagesByKey', () => {
+    it('returns only the requested turn window', async () => {
+      const conv = makeConversation('u-1')
+      conv.turns = [makeTurn(1), makeTurn(2), makeTurn(3), makeTurn(4)]
+      store.set('u-1:rpc:agent-x:chat-1', conv)
+
+      const page = await store.getSessionMessagesByKey('u-1:rpc:agent-x:chat-1', 'u-1:rpc:', {
+        limit: 2,
+        beforeTurn: 4,
+      })
+
+      expect(page?.agent).toBe('agent-x')
+      expect(page?.chatId).toBe('chat-1')
+      expect(page?.totalTurns).toBe(4)
+      expect(page?.firstTurnNumber).toBe(1)
+      expect(page?.lastTurnNumber).toBe(4)
+      expect(page?.turns.map(turn => turn.number)).toEqual([2, 3])
     })
   })
 })

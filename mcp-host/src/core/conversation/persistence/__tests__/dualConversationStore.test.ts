@@ -80,4 +80,20 @@ describe('DualConversationStore — dual-write parity', () => {
       await sqlite.shutdown()
     }
   })
+
+  it('returns the sqlite summary page instead of falling back to memory rows', async () => {
+    const sqlite = makeSqliteStore({ cacheSize: 4 })
+    try {
+      const memory = new InMemoryConversationStore()
+      const dual = new DualConversationStore(memory, sqlite.store)
+      const manager = new ConversationManager(memory)
+      const memoryOnly = await manager.getOrCreate('u-1:rpc:a:memory-only')
+      await manager.startTurn(memoryOnly, 'memory only', 'task-memory')
+      await manager.completeTurn(memoryOnly, 'done')
+
+      await expect(dual.listSessionSummariesByPrefix('u-1:rpc:', { limit: 1 })).resolves.toEqual([])
+    } finally {
+      await sqlite.shutdown()
+    }
+  })
 })

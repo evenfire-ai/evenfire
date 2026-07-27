@@ -302,11 +302,22 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
     [groupedMessages]
   )
   const messageGroupChunks = useMemo(() => {
-    const indexedGroups = groupedWithKeys.map((group, groupIndex) => ({ group, groupIndex }))
-    const chunks: (typeof indexedGroups)[] = []
-    for (let end = indexedGroups.length; end > 0; end -= VIRTUAL_MESSAGE_GROUPS_PER_CHUNK) {
-      const start = Math.max(0, end - VIRTUAL_MESSAGE_GROUPS_PER_CHUNK)
-      chunks.unshift(indexedGroups.slice(start, end))
+    const chunks: Array<{
+      chunkKey: string
+      groups: Array<{ group: (typeof groupedWithKeys)[number]; groupIndex: number }>
+    }> = []
+    for (const [groupIndex, group] of groupedWithKeys.entries()) {
+      const firstTurn = group.items[0]?.serverTurnNumber
+      const chunkKey =
+        firstTurn !== undefined
+          ? `server-turns-${Math.floor((firstTurn - 1) / (VIRTUAL_MESSAGE_GROUPS_PER_CHUNK / 2))}`
+          : `local-${group.groupKey}`
+      const current = chunks.at(-1)
+      if (current?.chunkKey === chunkKey) {
+        current.groups.push({ group, groupIndex })
+      } else {
+        chunks.push({ chunkKey, groups: [{ group, groupIndex }] })
+      }
     }
     return chunks
   }, [groupedWithKeys])
@@ -565,11 +576,11 @@ export function ChatThread({ showAgentLabel = false }: ChatThreadProps) {
       {activeChatId &&
         messageGroupChunks.map((chunk, chunkIndex) => (
           <VirtualizedMessageChunk
-            key={chunk.at(-1)?.group.groupKey ?? `chunk-${chunkIndex}`}
-            estimatedHeight={Math.max(240, chunk.length * 180)}
+            key={chunk.chunkKey}
+            estimatedHeight={Math.max(240, chunk.groups.length * 180)}
             initiallyVisible={chunkIndex >= messageGroupChunks.length - 2}
             render={() =>
-              chunk.map(({ group, groupIndex }) => {
+              chunk.groups.map(({ group, groupIndex }) => {
                 const prevGroup = groupIndex > 0 ? groupedWithKeys[groupIndex - 1] : null
 
                 return (

@@ -62,6 +62,7 @@ const sessionCatalogRequests = new Map<string, CachedRequest<SessionsListResult>
 const hostModelRequests = new Map<string, CachedRequest<HostModelsResult | null>>()
 let sessionCatalogSource: typeof window.clerum.rpc.listSessions | null = null
 let hostModelsSource: typeof window.clerum.rpc.getHostModels | null = null
+let remoteCacheScope = 'unknown'
 
 /** Composite key mirroring the session `chatKey` convention (`agentRef::chatId`). */
 function pendingModelKey(agentRef: string, chatId: string): string {
@@ -140,7 +141,7 @@ export function useChatStore() {
         sessionCatalogRequests.clear()
         sessionCatalogSource = source
       }
-      const key = `${hostRef}:${query.limit ?? 'all'}:${query.cursor ?? ''}`
+      const key = `${remoteCacheScope}:${hostRef}:${query.limit ?? 'all'}:${query.cursor ?? ''}`
       const cached = sessionCatalogRequests.get(key)
       if (!options.force && cached && cached.expiresAt > Date.now()) return cached.promise
 
@@ -172,7 +173,7 @@ export function useChatStore() {
       hostModelRequests.clear()
       hostModelsSource = source
     }
-    const key = `${hostRef}:${chatId}`
+    const key = `${remoteCacheScope}:${hostRef}:${chatId}`
     const cached = hostModelRequests.get(key)
     if (cached && cached.expiresAt > Date.now()) return cached.promise
 
@@ -193,6 +194,12 @@ export function useChatStore() {
     hostModelRequests.clear()
     sessionCatalogSource = null
     hostModelsSource = null
+  }, [])
+  const setRemoteCacheScope = useCallback((scope: string) => {
+    if (remoteCacheScope === scope) return
+    remoteCacheScope = scope
+    sessionCatalogRequests.clear()
+    hostModelRequests.clear()
   }, [])
 
   // --- Pending (unpersisted) model selections — R2 "Option A" (see the
@@ -251,6 +258,7 @@ export function useChatStore() {
     getHostModels,
     setHostModel,
     clearCachedRemoteData,
+    setRemoteCacheScope,
     setPendingModel,
     getPendingModel,
     clearPendingModel,

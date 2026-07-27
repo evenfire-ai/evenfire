@@ -146,6 +146,11 @@ export function useChatListController({
 
   const loadChatListOnce = useCallback(
     async (agentRef: string): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] }> => {
+      chatListNextCursorByAgentRef.current[agentRef] = null
+      if (selectedAgentRef.current === agentRef) {
+        setChatListHasMoreRemoteSessions(false)
+        setChatListMoreLoading(false)
+      }
       const index = await chatStore.getIndex(agentRef)
       const merged = [...index.chats].sort(byUpdatedDesc)
       setChatList(merged)
@@ -225,9 +230,9 @@ export function useChatListController({
       if (!serverResult) return
 
       const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
-      chatListNextCursorByAgentRef.current[agentRef] = serverResult.nextCursor ?? null
       if (selectedAgentRef.current !== agentRef) return
 
+      chatListNextCursorByAgentRef.current[agentRef] = serverResult.nextCursor ?? null
       setChatListHasMoreRemoteSessions(Boolean(serverResult.nextCursor))
       seedSessionSnapshots(fsm, agentRef, serverSessions)
       setChatList(previous => {
@@ -292,8 +297,8 @@ export function useChatListController({
 
   /** Reset the selected agent's list (logout teardown / load failure). */
   const clearList = useCallback(() => {
-    const agentRef = selectedAgentRef.current
-    if (agentRef) chatListNextCursorByAgentRef.current[agentRef] = null
+    chatListNextCursorByAgentRef.current = {}
+    chatListLoadingMoreByAgentRef.current.clear()
     setChatList([])
     setChatListMoreLoading(false)
     setChatListHasMoreRemoteSessions(false)

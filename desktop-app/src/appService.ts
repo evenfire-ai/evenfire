@@ -330,7 +330,10 @@ export class AppService {
   }
 
   private static isRejectedStoredSessionError(error: unknown): boolean {
-    return error instanceof ApiError && error.status === 401
+    return (
+      error instanceof ApiError &&
+      (error.status === 401 || error.status === 403 || error.status === 410)
+    )
   }
 
   /**

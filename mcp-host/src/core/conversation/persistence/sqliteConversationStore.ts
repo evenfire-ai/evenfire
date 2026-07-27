@@ -18,6 +18,7 @@ import type {
   LoadAllPendingApprovalsRow,
   PendingApprovalRow,
   PersistedSession,
+  PersistedSessionMessagePage,
   PersistedSessionSummary,
   ReapedSession,
   SessionRow,
@@ -31,17 +32,23 @@ import {
   type TurnToolCall,
 } from '../../types'
 import {
+  type ConversationSessionMessages,
   type ConversationSessionSummary,
   type ConversationStore,
   type EvictCallback,
   type GetOrCreateOptions,
   type PersistedSessionListing,
   type SessionListQuery,
+  type SessionMessagesQuery,
   type SessionTokenUsage,
 } from '../conversationStore'
 import type { PersistQueue } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
-import { reconstructConversation, reconstructPendingApproval } from './reconstruct'
+import {
+  groupMessagesIntoTurns,
+  reconstructConversation,
+  reconstructPendingApproval,
+} from './reconstruct'
 
 const cacheHitsCounter = (() => {
   try {
@@ -162,6 +169,22 @@ const DEFAULT_PENDING_APPROVAL_TTL_MS = 7 * 24 * 3600 * 1000
 interface SessionOrdinalState {
   nextOrdinal: number
   nextTurnNumber: number
+}
+
+function sessionPartsFromPrefix(key: string, prefix: string): { agent: string; chatId: string } {
+  const rest = key.startsWith(prefix) ? key.slice(prefix.length) : key
+  const colonIdx = rest.indexOf(':')
+  return colonIdx >= 0
+    ? { agent: rest.slice(0, colonIdx), chatId: rest.slice(colonIdx + 1) }
+    : { agent: '', chatId: '' }
+}
+
+function conversationStateFromRow(state: string): ConversationState {
+  return state === ConversationState.Processing
+    ? ConversationState.Processing
+    : state === ConversationState.AwaitingApproval
+      ? ConversationState.AwaitingApproval
+      : ConversationState.Idle
 }
 
 export class SqliteConversationStore implements ConversationStore {
@@ -383,6 +406,88 @@ export class SqliteConversationStore implements ConversationStore {
       })
     }
     return out
+  }
+
+  async getSessionMessagesByKey(
+    sessionKey: string,
+    prefix: string,
+    query: SessionMessagesQuery = {}
+  ): Promise<ConversationSessionMessages | undefined> {
+    const cached = this.cache.get(sessionKey)
+    const parts = sessionPartsFromPrefix(sessionKey, prefix)
+    if (cached) {
+      const eligibleTurns =
+        query.afterTurn !== undefined
+          ? cached.turns.filter(turn => turn.number > query.afterTurn!)
+          : query.beforeTurn !== undefined
+            ? cached.turns.filter(turn => turn.number < query.beforeTurn!)
+            : cached.turns
+      const turns =
+        query.limit === undefined
+          ? eligibleTurns
+          : query.afterTurn !== undefined
+            ? eligibleTurns.slice(0, query.limit)
+            : eligibleTurns.slice(-query.limit)
+      return {
+        key: sessionKey,
+        agent: parts.agent,
+        chatId: parts.chatId,
+        state: cached.state,
+        activeTaskId: cached.activeTaskId,
+        pendingApproval: cached.pending_approval
+          ? {
+              request_id: cached.pending_approval.request_id,
+              tool_name: cached.pending_approval.tool_name,
+            }
+          : undefined,
+        turns,
+        totalTurns: cached.turns.length,
+        firstTurnNumber: cached.turns[0]?.number,
+        lastTurnNumber: cached.turns.at(-1)?.number,
+        updatedAt: cached.updated_at,
+        input_tokens: cached.input_tokens,
+        output_tokens: cached.output_tokens,
+        cache_read_tokens: cached.cache_read_tokens,
+        cache_write_tokens: cached.cache_write_tokens,
+        cacheTokensReported: cached.cacheTokensReported,
+      }
+    }
+
+    const page = await this.persistQueue.enqueueSync<PersistedSessionMessagePage | null>(
+      {
+        kind: 'load_session_message_page',
+        sessionKey,
+        limit: query.limit,
+        beforeTurn: query.beforeTurn,
+        afterTurn: query.afterTurn,
+      },
+      sessionKey
+    )
+    if (!page) return undefined
+
+    return {
+      key: sessionKey,
+      agent: parts.agent,
+      chatId: parts.chatId,
+      state: conversationStateFromRow(page.session.state),
+      activeTaskId: page.session.active_task_id ?? undefined,
+      pendingApproval: page.pending_approval
+        ? {
+            request_id: page.pending_approval.request_id,
+            tool_name: page.pending_approval.tool_name,
+          }
+        : undefined,
+      turns: groupMessagesIntoTurns(page.messages),
+      totalTurns: Math.max(0, Math.floor(page.total_turns ?? 0)),
+      firstTurnNumber: page.first_turn_number ?? undefined,
+      lastTurnNumber: page.last_turn_number ?? undefined,
+      updatedAt: new Date(page.last_activity_at * 1000),
+      input_tokens: page.session.input_tokens,
+      output_tokens: page.session.output_tokens,
+      cache_read_tokens: page.session.cache_read_tokens,
+      cache_write_tokens: page.session.cache_write_tokens,
+      cacheTokensReported: page.session.cache_tokens_reported === 1,
+    }
   }
 
   async loadAllPendingApprovals(): Promise<PersistedSessionListing[]> {

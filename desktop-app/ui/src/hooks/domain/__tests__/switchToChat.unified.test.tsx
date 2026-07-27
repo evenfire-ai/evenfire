@@ -106,7 +106,7 @@ describe('switchToChat (unified, D.4)', () => {
     expect(result.current.chatMessages).toHaveLength(60)
   })
 
-  it('Phase 2 appends only the missing server delta to a durable-ID cache', async () => {
+  it('Phase 2 persists the merged server delta to a durable-ID cache', async () => {
     clerum.chat.loadMessages.mockResolvedValue([
       { id: 'turn-1-user', role: 'user' as const, content: 'q1', timestamp: 1 },
     ])
@@ -124,7 +124,7 @@ describe('switchToChat (unified, D.4)', () => {
     })
 
     expect(result.current.chatMessages).toHaveLength(4)
-    expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
       'agent-x',
       'c2',
       expect.arrayContaining([expect.objectContaining({ id: 'turn-2-assistant' })])
@@ -179,7 +179,7 @@ describe('switchToChat (unified, D.4)', () => {
       { limit: 80, afterTurn: 2 }
     )
     expect(result.current.chatMessages).toHaveLength(6)
-    expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
       'agent-x',
       'delta-pages',
       expect.arrayContaining([
@@ -644,9 +644,9 @@ describe('switchToChat (unified, D.4)', () => {
       await result.current.switchToChat('agent-x', 'z1')
     })
 
-    // With the zombie acked, the missing durable assistant message is appended.
+    // With the zombie acked, the missing durable assistant message is persisted.
     expect(result.current.chatMessages).toHaveLength(2)
-    expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
       'agent-x',
       'z1',
       expect.arrayContaining([expect.objectContaining({ id: 'turn-1-assistant' })])
@@ -735,9 +735,9 @@ describe('switchToChat (unified, D.4)', () => {
       await result.current.switchToChat('agent-x', 'pa')
     })
 
-    // The retry landed the durable reply: delta appended, zombie acked, NOT offline.
+    // The retry landed the durable reply: merged window persisted, zombie acked, NOT offline.
     expect(result.current.chatMessages).toHaveLength(2)
-    expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
       'agent-x',
       'pa',
       expect.arrayContaining([expect.objectContaining({ id: 'turn-1-assistant' })])
@@ -857,9 +857,9 @@ describe('switchToChat (unified, D.4)', () => {
       await sw
     })
 
-    // The residual was acked and the durable reply was appended to the cache.
+    // The residual was acked and the durable reply was persisted to the cache.
     expect(result.current.chatMessages).toHaveLength(2)
-    expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
       'agent-x',
       'pb',
       expect.arrayContaining([expect.objectContaining({ id: 'turn-1-assistant' })])

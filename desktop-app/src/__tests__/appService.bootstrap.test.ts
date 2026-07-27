@@ -314,7 +314,7 @@ describe('AppService invitation configuration lookup', () => {
     expect(clearSessionToken).toHaveBeenCalledWith(resolveEnvKey('https://api.example.com'))
   })
 
-  it('keeps a saved token when startup session restore is forbidden', async () => {
+  it('clears a saved token when startup session restore is forbidden', async () => {
     const configPath = await createTempConfigPath('clerum-desktop-restore-forbidden')
     await fs.writeFile(
       configPath,
@@ -356,14 +356,9 @@ describe('AppService invitation configuration lookup', () => {
       clear: vi.fn(),
     } as never
 
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    try {
-      await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
 
-      expect(clearSessionToken).not.toHaveBeenCalled()
-    } finally {
-      warn.mockRestore()
-    }
+    expect(clearSessionToken).toHaveBeenCalled()
   })
 
   it('persists a manually saved runtime environment', async () => {

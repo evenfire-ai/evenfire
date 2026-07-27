@@ -17,6 +17,7 @@ import {
   GetOrCreateOptions,
   InMemoryConversationStore,
   SessionListQuery,
+  SessionMessagesQuery,
 } from './conversationStore'
 
 /**
@@ -156,6 +157,19 @@ export class ConversationManager {
     query: SessionListQuery = {}
   ): Promise<ConversationSessionSummary[]> {
     return this.store.listSessionSummariesByPrefix(keyPrefix, query)
+  }
+
+  /**
+   * Summary-preserving, bounded transcript window for `/messages`.
+   * Durable stores can fetch only the requested turns instead of hydrating
+   * the whole persisted conversation before slicing.
+   */
+  async getSessionMessagesByKeyAsync(
+    key: string,
+    keyPrefix: string,
+    query: SessionMessagesQuery = {}
+  ) {
+    return this.store.getSessionMessagesByKey(key, keyPrefix, query)
   }
 
   /**

@@ -118,6 +118,16 @@ export interface PersistedSessionSummary {
   pending_approval: Pick<PendingApprovalRow, 'request_id' | 'tool_name'> | null
 }
 
+export interface PersistedSessionMessagePage {
+  session: SessionRow
+  messages: MessageRow[]
+  pending_approval: Pick<PendingApprovalRow, 'request_id' | 'tool_name'> | null
+  total_turns: number
+  first_turn_number: number | null
+  last_turn_number: number | null
+  last_activity_at: number
+}
+
 export interface LoadAllPendingApprovalsRow {
   approval: PendingApprovalRow
   session_key: string
@@ -215,6 +225,13 @@ export type WorkerOp =
   | { kind: 'insert_pending_approval'; payload: PendingApprovalRow }
   | { kind: 'delete_pending_approval'; requestId: string }
   | { kind: 'load_active_session'; sessionKey: string }
+  | {
+      kind: 'load_session_message_page'
+      sessionKey: string
+      limit?: number
+      beforeTurn?: number
+      afterTurn?: number
+    }
   | { kind: 'list_sessions_by_prefix'; sessionKeyPrefix: string }
   | {
       kind: 'list_session_summaries_by_prefix'

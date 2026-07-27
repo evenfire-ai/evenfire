@@ -1,7 +1,8 @@
 /**
  * `DualConversationStore` — shadow-write to two stores for canary validation.
  *
- * Reads come from `memory` (the canonical store during validation).
+ * Hot reads come from `memory`; durable-listing reads return SQLite pages so
+ * pagination cannot switch sources mid-flow during validation.
  * Writes apply to both; parity is recorded via the optional metrics callback.
  * Used when `CLERUM_SESSION_STORE=dual` to validate that the SQLite store
  * produces the same observable behavior as the in-memory store before we
@@ -11,12 +12,14 @@ import { Counter } from 'prom-client'
 import type { ReapedSession } from '../../../db/worker/protocol'
 import type { Conversation, PendingApproval, TurnToolCall } from '../../types'
 import type {
+  ConversationSessionMessages,
   ConversationSessionSummary,
   ConversationStore,
   EvictCallback,
   GetOrCreateOptions,
   PersistedSessionListing,
   SessionListQuery,
+  SessionMessagesQuery,
   SessionTokenUsage,
 } from '../conversationStore'
 
@@ -136,7 +139,23 @@ export class DualConversationStore implements ConversationStore {
       this.sqlite.listSessionSummariesByPrefix(prefix, query),
     ])
     this.recordParity('listSessionSummariesByPrefix', memList.length === sqlList.length)
-    return sqlList.length ? sqlList : memList
+    return sqlList
+  }
+
+  async getSessionMessagesByKey(
+    key: string,
+    prefix: string,
+    query: SessionMessagesQuery = {}
+  ): Promise<ConversationSessionMessages | undefined> {
+    const [memPage, sqlPage] = await Promise.all([
+      this.memory.getSessionMessagesByKey(key, prefix, query),
+      this.sqlite.getSessionMessagesByKey(key, prefix, query),
+    ])
+    this.recordParity(
+      'getSessionMessagesByKey',
+      memPage === undefined ? sqlPage === undefined : sqlPage !== undefined
+    )
+    return sqlPage
   }
 
   async loadAllPendingApprovals(): Promise<PersistedSessionListing[]> {

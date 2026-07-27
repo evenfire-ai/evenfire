@@ -12,6 +12,7 @@ import type {
   LoadAllPendingApprovalsRow,
   PendingApprovalRow,
   PersistedSession,
+  PersistedSessionMessagePage,
   PersistedSessionSummary,
   ReapedSession,
   SessionRow,
@@ -545,6 +546,51 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       return persisted
     }
 
+    case 'load_session_message_page': {
+      const sessionRow = s.selectSessionBySessionKey.get(op.sessionKey) as SessionRow | undefined
+      if (!sessionRow) return null
+      const limit = op.limit ?? -1
+      const messageRows =
+        op.afterTurn !== undefined
+          ? s.selectMessagesBySessionTurnsAfter.all({
+              session_id: sessionRow.id,
+              after_turn: op.afterTurn,
+              limit,
+            })
+          : op.beforeTurn !== undefined
+            ? s.selectMessagesBySessionTurnsBefore.all({
+                session_id: sessionRow.id,
+                before_turn: op.beforeTurn,
+                limit,
+              })
+            : s.selectMessagesBySessionNewestTurns.all({
+                session_id: sessionRow.id,
+                limit,
+              })
+      const bounds = s.selectSessionTurnBounds.get(sessionRow.id) as
+        | {
+            total_turns: number
+            first_turn_number: number | null
+            last_turn_number: number | null
+            last_activity_at: number | null
+          }
+        | undefined
+      const pendingRow = s.selectPendingApprovalBySession.get(sessionRow.id) as
+        | PendingApprovalRow
+        | undefined
+      return {
+        session: sessionRow,
+        messages: messageRows as PersistedSessionMessagePage['messages'],
+        pending_approval: pendingRow
+          ? { request_id: pendingRow.request_id, tool_name: pendingRow.tool_name }
+          : null,
+        total_turns: bounds?.total_turns ?? 0,
+        first_turn_number: bounds?.first_turn_number ?? null,
+        last_turn_number: bounds?.last_turn_number ?? null,
+        last_activity_at: bounds?.last_activity_at ?? sessionRow.started_at,
+      } satisfies PersistedSessionMessagePage
+    }
+
     case 'list_sessions_by_prefix': {
       const pattern = `${op.sessionKeyPrefix}%`
       const sessionRows = s.selectSessionsByPrefix.all(pattern) as SessionRow[]
@@ -562,9 +608,11 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     }
 
     case 'list_session_summaries_by_prefix': {
-      const pattern = `${op.sessionKeyPrefix}%`
+      const prefixStart = op.sessionKeyPrefix
+      const prefixEnd = `${op.sessionKeyPrefix}\uffff`
       const rows = s.selectSessionSummariesByPrefix.all({
-        pattern,
+        prefix_start: prefixStart,
+        prefix_end: prefixEnd,
         limit: op.limit ?? -1,
         cursor_updated_at: op.cursorUpdatedAt ?? null,
         cursor_key: op.cursorKey ?? null,
