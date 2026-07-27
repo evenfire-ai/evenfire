@@ -168,7 +168,9 @@ environment variable; setup infers the matching provider).
 
 Most providers are OpenAI-compatible and plug in as config with no custom code;
 only a few (`claude`, `vertex`, `bedrock`, `azure`) need a dedicated integration.
-Adding one: [docs/llm-providers/adding-a-provider.md](docs/llm-providers/adding-a-provider.md).
+Overview: [docs/llm-providers/README.md](docs/llm-providers/README.md) ·
+Configure: [docs/deploy/llm-providers.md](docs/deploy/llm-providers.md) ·
+Add one: [docs/llm-providers/adding-a-provider.md](docs/llm-providers/adding-a-provider.md) ·
 Details: [mcp-host/README.md](mcp-host/README.md).
 
 ---

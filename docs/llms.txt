@@ -32,6 +32,9 @@
 - Connect Telegram: how-to/connect-telegram.md
 - Configure approvals: how-to/configure-approvals.md
 - Add MCP server: how-to/add-mcp-server.md
+- LLM providers overview (the 21 providers, mental model, support matrix): llm-providers/README.md
+- Configure LLM providers (credentials, model allowlist, session selector): deploy/llm-providers.md
+- Add an LLM provider (data-only vs driver-based integration): llm-providers/adding-a-provider.md
 - Desktop setup & updates (environments, invitation, updates): how-to/desktop-setup-and-updates.md
 - Member invitations on self-hosted (hosted mode vs your own service): how-to/member-invitations-self-hosted.md
 - Track usage & set token budgets: how-to/token-budgets-and-usage.md
