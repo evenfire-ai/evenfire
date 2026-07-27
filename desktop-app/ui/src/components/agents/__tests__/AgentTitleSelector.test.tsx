@@ -120,6 +120,15 @@ describe('AgentTitleSelector', () => {
     expect(onOpenRoute).toHaveBeenCalledWith('beta', 'mcp-servers' as AgentWorkspaceRoute)
   })
 
+  it('temporarily hides Agent Files from the sections sub-menu', () => {
+    renderSelector()
+    openMenu()
+
+    fireEvent.click(findDotsItem('Beta'))
+
+    expect(screen.queryByRole('menuitem', { name: 'Agent Files' })).toBeNull()
+  })
+
   it('toggles the sections sub-menu off when the dots are clicked again', () => {
     renderSelector()
     openMenu()

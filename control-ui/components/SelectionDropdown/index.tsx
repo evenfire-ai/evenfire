@@ -14,10 +14,12 @@ function optionMatches(option: SelectionDropdownOption, query: string): boolean 
 }
 
 export function SelectionDropdown({
+  className,
   disabled = false,
   emptyLabel = 'No options available.',
   id,
   inline = false,
+  invalid = false,
   multiple = true,
   onChange,
   onSearchQueryChange,
@@ -85,7 +87,7 @@ export function SelectionDropdown({
       )
       return
     }
-    onChange(selectedSet.has(optionValue) ? [] : [optionValue])
+    onChange([optionValue])
     if (!inline) setOpen(false)
   }
 
@@ -102,7 +104,7 @@ export function SelectionDropdown({
 
   return (
     <div
-      className={cn('cu-selection-dropdown', inline && 'cu-selection-dropdown--inline')}
+      className={cn('cu-selection-dropdown', inline && 'cu-selection-dropdown--inline', className)}
       ref={rootRef}
     >
       {inline ? null : (
@@ -115,10 +117,14 @@ export function SelectionDropdown({
           )}
           aria-expanded={open}
           aria-haspopup="listbox"
+          aria-invalid={invalid || undefined}
           disabled={disabled}
           onClick={() => setOpen(current => !current)}
         >
-          <span className="cu-selection-dropdown__button-copy">{buttonLabel}</span>
+          <span className="cu-selection-dropdown__button-value">
+            {selectedOptions.length === 1 ? selectedOptions[0]?.icon : null}
+            <span className="cu-selection-dropdown__button-copy">{buttonLabel}</span>
+          </span>
           <span className="cu-selection-dropdown__chevron" aria-hidden="true" />
         </button>
       )}
@@ -127,6 +133,7 @@ export function SelectionDropdown({
         <div className="cu-selection-dropdown__chips" aria-label={selectionLabel}>
           {selectedOptions.map(option => (
             <span className="cu-selection-dropdown__chip" key={option.value}>
+              {option.icon}
               <span className="cu-selection-dropdown__chip-label">{option.label}</span>
               <button
                 type="button"
@@ -179,8 +186,11 @@ export function SelectionDropdown({
                     data-selected={selected ? 'true' : undefined}
                     onClick={() => toggleOption(option.value)}
                   >
-                    <span className="cu-selection-dropdown__check" aria-hidden="true">
-                      {selected ? <IconCheck width={14} height={14} /> : null}
+                    <span className="cu-selection-dropdown__option-leading" aria-hidden="true">
+                      <span className="cu-selection-dropdown__check">
+                        {selected ? <IconCheck width={14} height={14} /> : null}
+                      </span>
+                      {option.icon}
                     </span>
                     <span className="cu-selection-dropdown__option-copy">
                       <span className="cu-selection-dropdown__option-label">{option.label}</span>

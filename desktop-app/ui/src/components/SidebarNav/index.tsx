@@ -178,7 +178,7 @@ export function SidebarNav({
       },
       {
         id: DESKTOP_ROUTES.files,
-        label: 'Files',
+        label: 'Global File System',
         testId: 'nav-files',
         icon: <IconAttachFile />,
       },
