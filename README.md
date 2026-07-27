@@ -88,9 +88,9 @@ to its deep dive.
 | **Workflows** | Declarative multi-workload `WorkflowRecipe`s with a lifecycle: risk-based approval, shadow testing, rollback | [workflowrecipe](docs/crds/workflowrecipe.md) |
 | **Plugins & registry** | Author, publish, and install connectors and recipes through a governed, trust-rated registry | [workflow-sdk](packages/workflow-sdk/README.md) |
 | **Teams & access** | Profiles, teams, roles (admin / inviter / member), invitations, and session → scoped-RPC token brokerage | [external-rest-api](external-rest-api/README.md) |
-| **Files** | `SharedFileSystem` team workspaces (read-only to agents) and a brokered, audited `GlobalFileSystem` drive | [gfs-controller](gfs-controller/README.md) |
+| **Files** | Read-only team workspaces agents can draw on, plus a brokered, audited shared drive where every read and write is checked and logged | [gfs-controller](gfs-controller/README.md) |
 | **Cost & governance** | Token budgets per scope (block/warn), usage and LLM-price accounting, and a connector-image allowlist | [token budgets](docs/how-to/token-budgets-and-usage.md) |
-| **Config as code** | The whole fleet as eight `clerum.io` CRDs: version-controlled, reviewable, GitOps-friendly | [crds](docs/crds/README.md) |
+| **Config as code** | The whole fleet as eight `clerum.io` ([why that name?](docs/concepts/code-names.md)) CRDs: version-controlled, reviewable, GitOps-friendly | [crds](docs/crds/README.md) |
 
 ---
 
@@ -168,7 +168,9 @@ environment variable; setup infers the matching provider).
 
 Most providers are OpenAI-compatible and plug in as config with no custom code;
 only a few (`claude`, `vertex`, `bedrock`, `azure`) need a dedicated integration.
-Adding one: [docs/llm-providers/adding-a-provider.md](docs/llm-providers/adding-a-provider.md).
+Overview: [docs/llm-providers/README.md](docs/llm-providers/README.md) ·
+Configure: [docs/deploy/llm-providers.md](docs/deploy/llm-providers.md) ·
+Add one: [docs/llm-providers/adding-a-provider.md](docs/llm-providers/adding-a-provider.md) ·
 Details: [mcp-host/README.md](mcp-host/README.md).
 
 ---
