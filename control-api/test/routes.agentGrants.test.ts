@@ -185,12 +185,18 @@ describe('routes/admin agent grants', () => {
       ['/admin/teams/t1/agents', svc.getTeamAgents, svc.setTeamAgents, 'teamId'],
     ]) {
       let current = stale
-      getCurrent.mockImplementation(async () => ({ [identity]: path.includes('/users/') ? 'u1' : 't1', agentNames: current }))
-      replace.mockImplementation(async (_id: string, replacement: string[], _operator: string, expected: string[]) => {
-        if (!accessSetsEqual(expected, current)) throw new serviceErrors.AgentGrantPreconditionError()
-        current = replacement
-        return { [identity]: path.includes('/users/') ? 'u1' : 't1', agentNames: replacement }
-      })
+      getCurrent.mockImplementation(async () => ({
+        [identity]: path.includes('/users/') ? 'u1' : 't1',
+        agentNames: current,
+      }))
+      replace.mockImplementation(
+        async (_id: string, replacement: string[], _operator: string, expected: string[]) => {
+          if (!accessSetsEqual(expected, current))
+            throw new serviceErrors.AgentGrantPreconditionError()
+          current = replacement
+          return { [identity]: path.includes('/users/') ? 'u1' : 't1', agentNames: replacement }
+        }
+      )
 
       const responses = await Promise.all([
         request(app).put(path).send({ agentNames: [], expectedCurrentAgentNames: stale }),

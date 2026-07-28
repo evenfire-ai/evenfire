@@ -35,10 +35,17 @@ export function classifyTier(
 }
 
 /**
- * Tier of a task based on observed wall-clock age since `startedAt`. Recomputes
- * every 5s (the user can't perceive sub-5s tier boundaries — §6.2). A suspended
- * task freezes its timer at `pausedAt` so an approval wait doesn't escalate the
- * nudges (§AC3).
+ * Tier of a task based on its ACTIVE age — how long the agent has been working,
+ * not how long the user has been waiting. Recomputes every 5s (the user can't
+ * perceive sub-5s tier boundaries — §6.2).
+ *
+ * Approval waits are excluded from the age in two complementary ways (§AC3),
+ * because every T3+ nudge asserts the agent is busy:
+ *  - the OPEN pause segment: while `status === 'suspended'` the clock freezes at
+ *    `pausedAt`, so sitting at the gate never escalates the tier;
+ *  - CLOSED segments: `pausedMs` (accumulated by the tracker on resume) is
+ *    subtracted, so approving after a 10min wait resumes at the tier the work
+ *    actually earned instead of jumping straight to T4/T5.
  */
 export function useTaskTier(
   taskState: TaskState | undefined,
@@ -65,6 +72,6 @@ export function useTaskTier(
 
   const effectiveNow =
     taskState.status === 'suspended' && taskState.pausedAt ? taskState.pausedAt : now
-  const age = Math.max(0, effectiveNow - taskState.startedAt)
+  const age = Math.max(0, effectiveNow - taskState.startedAt - (taskState.pausedMs ?? 0))
   return classifyTier(age, thresholds)
 }

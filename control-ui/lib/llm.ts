@@ -579,6 +579,30 @@ export function getCredentialSlotOptions(
   return Array.from(new Set([...registrySlots, ...extras]))
 }
 
+// Derive the provider that owns a Secret dataKey, or null for a stray key
+// (additive LLM secrets editor, spec B1). Prefix-aware — matching only
+// canonical slots would lose operator-minted EXTRA slots (`claude-api-key-fb1`
+// from mintFallbackSlot, or the secrets form's "Add credential slot"), making
+// a Secret that holds ONLY an extra slot of a provider render that provider
+// as absent. Mirrors the extra-key matching in getCredentialSlotOptions:
+//   1. an exact canonical (registry) slot dataKey → its provider;
+//   2. otherwise, a key carrying a provider's `${provider}-` prefix or
+//      extending one of its canonical slot keys (the suggested `<slot>-fbN`
+//      naming; covers Bedrock's `aws-…` extras) → that provider. A canonical
+//      key of ANOTHER provider can never fall here — rule 1 already claimed
+//      every key in ALL_REGISTRY_SLOT_KEYS;
+//   3. otherwise → null (the editor ignores the key).
+export function providerForDataKey(dataKey: string): LlmProvider | null {
+  for (const group of LLM_CREDENTIAL_GROUPS) {
+    if (group.slots.some(slot => slot.dataKey === dataKey)) return group.provider
+  }
+  for (const group of LLM_CREDENTIAL_GROUPS) {
+    const prefixes = [...group.slots.map(slot => slot.dataKey), `${group.provider}-`]
+    if (prefixes.some(prefix => dataKey.startsWith(prefix))) return group.provider
+  }
+  return null
+}
+
 // Client-side mirror of control-api's write gate (hostSpecValidation.ts): every
 // fallback entry must name a known provider and a model that is ENABLED in the
 // operator allowlist for that provider; cooldown must be a non-negative integer;
