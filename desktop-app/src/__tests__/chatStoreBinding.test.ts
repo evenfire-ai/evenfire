@@ -154,7 +154,7 @@ describe('chatStoreBinding', () => {
       expect(await exists(path.join(tmpBase, ENV_A, 'user-broken', 'agent-y'))).toBe(false)
     })
 
-    it('preserves a v2 agent dir and marks it as v3 for downgrade safety', async () => {
+    it('preserves the downgrade-compatible v2 agent index', async () => {
       const v2Index = JSON.stringify({
         version: 2,
         chats: [{ id: 'keep', title: 'Keep', createdAt: 'x', updatedAt: 'x', messageCount: 1 }],
@@ -171,13 +171,37 @@ describe('chatStoreBinding', () => {
       expect(
         (await requireChatStore().listChats('agent-x')).find(c => c.id === 'keep')
       ).toBeDefined()
-      const migrated = JSON.parse(
+      const preserved = JSON.parse(
         await fs.readFile(
           path.join(tmpBase, ENV_A, 'user-current', 'agent-x', 'index.json'),
           'utf-8'
         )
       ) as { version: number }
-      expect(migrated.version).toBe(3)
+      expect(preserved.version).toBe(2)
+    })
+
+    it('normalizes an earlier paging v3 index back to downgrade-compatible v2', async () => {
+      const v3Index = JSON.stringify({
+        version: 3,
+        chats: [{ id: 'keep', title: 'Keep', createdAt: 'x', updatedAt: 'x', messageCount: 1 }],
+        lastActiveChatId: 'keep',
+        onboardingDismissed: false,
+      })
+      await seedAgentDir(ENV_A, 'user-v3', 'agent-x', v3Index, {
+        'keep.json': JSON.stringify({
+          version: 2,
+          chatId: 'keep',
+          messages: [{ id: 'm1', role: 'user', content: 'keep me', timestamp: 1 }],
+        }),
+      })
+
+      await bindChatStoreForUser('user-v3', ENV_A)
+
+      const normalized = JSON.parse(
+        await fs.readFile(path.join(tmpBase, ENV_A, 'user-v3', 'agent-x', 'index.json'), 'utf-8')
+      ) as { version: number }
+      expect(normalized.version).toBe(2)
+      expect(await exists(path.join(tmpBase, ENV_A, 'user-v3', 'agent-x', 'keep.json'))).toBe(true)
     })
 
     it('is a no-op when the user has no cache directory yet', async () => {

@@ -761,7 +761,7 @@ describe('messages', () => {
     ).toEqual(['turn-1-user', 'local-only', 'turn-2-user', 'turn-2-assistant'])
   })
 
-  it('repairs a missing page from the surviving page files instead of returning an empty chat', async () => {
+  it('repairs a missing page from surviving pages and the compatibility snapshot', async () => {
     const pagedStore = new ChatStore(tempDir, {
       pageSize: 2,
       maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
@@ -782,11 +782,11 @@ describe('messages', () => {
 
     const recovered = await pagedStore.loadMessages('agent-1', 'missing-page')
 
-    expect(recovered.map(message => message.id)).toEqual(['m0', 'm1', 'm4', 'm5'])
+    expect(recovered.map(message => message.id)).toEqual(['m0', 'm1', 'm2', 'm3', 'm4', 'm5'])
     const repairedMeta = await readJsonFile<{ localMessageCount: number }>(
       chatMetaPath('missing-page')
     )
-    expect(repairedMeta.localMessageCount).toBe(4)
+    expect(repairedMeta.localMessageCount).toBe(6)
   })
 
   it('adopts a fully written orphan page left by an interrupted append', async () => {
@@ -833,7 +833,11 @@ describe('messages', () => {
       join(chatPagesDir('v2-1'), '000001.json')
     )
     expect(page.messages[0]!.task_id).toBe('task-abc')
-    await expect(fs.access(join(tempDir, 'agent-1', 'v2-1.json'))).rejects.toThrow()
+    const compatibility = await readJsonFile<{ version: number; messages: ChatMessage[] }>(
+      join(tempDir, 'agent-1', 'v2-1.json')
+    )
+    expect(compatibility.version).toBe(2)
+    expect(compatibility.messages[0]!.task_id).toBe('task-abc')
 
     const messages = await store.loadMessages('agent-1', 'v2-1')
     expect(messages[0]!.task_id).toBe('task-abc')
@@ -853,7 +857,7 @@ describe('messages', () => {
     const messages = await store.loadMessages('agent-1', 'legacy')
     expect(messages).toHaveLength(1)
     expect(messages[0]!.task_id).toBeUndefined()
-    await expect(fs.access(join(agentDir, 'legacy.json'))).rejects.toThrow()
+    await expect(fs.access(join(agentDir, 'legacy.json'))).resolves.toBeUndefined()
     await expect(fs.access(chatMetaPath('legacy'))).resolves.toBeUndefined()
   })
 
@@ -908,7 +912,83 @@ describe('messages', () => {
       toolCallCount: 1,
     })
     const migratedIndex = await readJsonFile<{ version: number }>(agentPath('index.json'))
-    expect(migratedIndex.version).toBe(3)
+    expect(migratedIndex.version).toBe(2)
+  })
+
+  it('keeps the downgrade snapshot bounded and current after appends', async () => {
+    await store.createChat('agent-1', 'downgrade-window')
+    const messages = Array.from({ length: 105 }, (_, index) => ({
+      id: `m${index}`,
+      role: 'user' as const,
+      content: `message-${index}`,
+      timestamp: index,
+    }))
+
+    await store.saveMessages('agent-1', 'downgrade-window', messages)
+
+    const initial = await readJsonFile<{ version: number; messages: ChatMessage[] }>(
+      agentPath('downgrade-window.json')
+    )
+    expect(initial.version).toBe(2)
+    expect(initial.messages).toHaveLength(100)
+    expect(initial.messages[0]!.id).toBe('m5')
+    expect(initial.messages.at(-1)!.id).toBe('m104')
+
+    await store.appendMessages('agent-1', 'downgrade-window', [
+      { id: 'm105', role: 'assistant', content: 'message-105', timestamp: 105 },
+    ])
+
+    const appended = await readJsonFile<{ messages: ChatMessage[] }>(
+      agentPath('downgrade-window.json')
+    )
+    expect(appended.messages).toHaveLength(100)
+    expect(appended.messages[0]!.id).toBe('m6')
+    expect(appended.messages.at(-1)!.id).toBe('m105')
+  })
+
+  it('imports local messages written by a downgraded desktop build', async () => {
+    await store.createChat('agent-1', 'downgraded-write')
+    const original = { id: 'm1', role: 'user' as const, content: 'original', timestamp: 1 }
+    await store.saveMessages('agent-1', 'downgraded-write', [original])
+
+    const downgradedMessage = {
+      id: 'm2',
+      role: 'user' as const,
+      content: 'written while downgraded',
+      timestamp: 2,
+    }
+    await fs.writeFile(
+      agentPath('downgraded-write.json'),
+      JSON.stringify({
+        version: 2,
+        chatId: 'downgraded-write',
+        messages: [original, downgradedMessage],
+      })
+    )
+
+    const recovered = await store.loadMessages('agent-1', 'downgraded-write')
+
+    expect(recovered.map(message => message.id)).toEqual(['m1', 'm2'])
+    const compatibility = await readJsonFile<{ messages: ChatMessage[] }>(
+      agentPath('downgraded-write.json')
+    )
+    expect(compatibility.messages.map(message => message.id)).toEqual(['m1', 'm2'])
+  })
+
+  it('repairs a corrupt downgrade snapshot from the valid paged history', async () => {
+    await store.createChat('agent-1', 'corrupt-downgrade-snapshot')
+    await store.saveMessages('agent-1', 'corrupt-downgrade-snapshot', [
+      { id: 'm1', role: 'user', content: 'still durable', timestamp: 1 },
+    ])
+    await fs.writeFile(agentPath('corrupt-downgrade-snapshot.json'), 'not json{')
+
+    const recovered = await store.loadMessages('agent-1', 'corrupt-downgrade-snapshot')
+
+    expect(recovered.map(message => message.id)).toEqual(['m1'])
+    const compatibility = await readJsonFile<{ messages: ChatMessage[] }>(
+      agentPath('corrupt-downgrade-snapshot.json')
+    )
+    expect(compatibility.messages.map(message => message.id)).toEqual(['m1'])
   })
 
   it('does not hide a failed legacy migration as an empty chat', async () => {
@@ -982,7 +1062,7 @@ describe('corrupt/missing files', () => {
     await fs.mkdir(agentDir, { recursive: true })
     await fs.writeFile(join(agentDir, 'index.json'), 'NOT VALID JSON{{{')
     const index = await store.getIndex('agent-1')
-    expect(index.version).toBe(3) // empty index is created at the current schema (D.4)
+    expect(index.version).toBe(2) // v2 remains readable by pre-paging desktop builds
     expect(index.chats).toEqual([])
   })
 
