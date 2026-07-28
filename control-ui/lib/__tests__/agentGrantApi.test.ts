@@ -62,7 +62,9 @@ describe('agent grant replacement API helpers', () => {
   ])('keeps agent-grant conflicts actionable for status %i', async (status, code, message) => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ error: code }, status))
 
-    await expect(updateAdminUserAgents('user-1', ['active-agent'], ['active-agent'])).rejects.toMatchObject({
+    await expect(
+      updateAdminUserAgents('user-1', ['active-agent'], ['active-agent'])
+    ).rejects.toMatchObject({
       status,
       code,
       message: expect.stringContaining(message),

@@ -5,7 +5,12 @@ import {
   mergeActiveUpdateWithDeletedHistory,
   partitionAccessValues,
 } from '../../services/directory/accessReconciliation.js'
-import { getTeamAgents, getTeamContexts, setTeamAgents, setTeamContexts } from '../../services/directory/index.js'
+import {
+  getTeamAgents,
+  getTeamContexts,
+  setTeamAgents,
+  setTeamContexts,
+} from '../../services/directory/index.js'
 import {
   loadAdminActiveContextIds,
   sendAdminAccessReconciliationError,
@@ -16,8 +21,13 @@ export function registerAdminTeamAccessRoutes(router: Router, gateway: K8sGatewa
   router.get('/admin/teams/:teamId/contexts', async (req, res, next) => {
     try {
       const base = await getTeamContexts(req.params.teamId)
-      const partition = partitionAccessValues(base.contextIds, await loadAdminActiveContextIds(gateway))
-      res.status(200).json({ ...base, contextIds: partition.active, deletedContextIds: partition.deleted })
+      const partition = partitionAccessValues(
+        base.contextIds,
+        await loadAdminActiveContextIds(gateway)
+      )
+      res
+        .status(200)
+        .json({ ...base, contextIds: partition.active, deletedContextIds: partition.deleted })
     } catch (error) {
       if (sendAdminAccessReconciliationError(res, error)) return
       next(error)
@@ -41,7 +51,9 @@ export function registerAdminTeamAccessRoutes(router: Router, gateway: K8sGatewa
         (req as UiAuthedRequest).adminAuth!.sub
       )
       const partition = partitionAccessValues(updated.contextIds, activeContextIds)
-      res.status(200).json({ ...updated, contextIds: partition.active, deletedContextIds: partition.deleted })
+      res
+        .status(200)
+        .json({ ...updated, contextIds: partition.active, deletedContextIds: partition.deleted })
     } catch (error) {
       if (sendAdminAccessReconciliationError(res, error)) return
       next(error)

@@ -14,11 +14,15 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
 
-async function findExistingMemberByEmail(email: string): Promise<{ id: string; email: string } | null> {
+async function findExistingMemberByEmail(
+  email: string
+): Promise<{ id: string; email: string } | null> {
   const normalizedEmail = email.trim().toLowerCase()
   if (!normalizedEmail) return null
   const matches = await listUsers(normalizedEmail)
-  return matches.find(member => String(member.email || '').toLowerCase() === normalizedEmail) || null
+  return (
+    matches.find(member => String(member.email || '').toLowerCase() === normalizedEmail) || null
+  )
 }
 
 function sendExistingMemberConflict(res: Response, member: { id: string; email: string }): void {
@@ -35,7 +39,9 @@ export function registerAdminTeamInvitationRoutes(router: Router): void {
   router.post('/admin/invitations', async (req, res, next) => {
     try {
       const name = String(req.body?.name || '').trim()
-      const email = String(req.body?.email || '').trim().toLowerCase()
+      const email = String(req.body?.email || '')
+        .trim()
+        .toLowerCase()
       const fallbackRole = normalizeTeamRoleInput(req.body?.role) || 'member'
       const teamsInput: unknown[] = Array.isArray(req.body?.teams) ? req.body.teams : []
       const teamAssignments = teamsInput
@@ -45,7 +51,9 @@ export function registerAdminTeamInvitationRoutes(router: Router): void {
           const role = normalizeTeamRoleInput(row.role) || fallbackRole
           return teamId ? { teamId, role } : null
         })
-        .filter((item): item is { teamId: string; role: 'admin' | 'inviter' | 'member' } => Boolean(item))
+        .filter((item): item is { teamId: string; role: 'admin' | 'inviter' | 'member' } =>
+          Boolean(item)
+        )
       if (!name || !email) {
         res.status(400).json({ error: 'invalid invitation payload' })
         return
@@ -69,7 +77,8 @@ export function registerAdminTeamInvitationRoutes(router: Router): void {
   router.post('/admin/invitations/:invitationId/resend', async (req, res, next) => {
     try {
       const invitationId = String(req.params.invitationId || '').trim()
-      if (!isUuid(invitationId)) return void res.status(400).json({ error: 'invalid_invitation_id' })
+      if (!isUuid(invitationId))
+        return void res.status(400).json({ error: 'invalid_invitation_id' })
       const resent = await resendInvitation(null, invitationId)
       if (!resent) return void res.status(404).json({ error: 'not_found' })
       res.status(200).json({ sent: true, id: resent.id, email: resent.email })
@@ -81,7 +90,8 @@ export function registerAdminTeamInvitationRoutes(router: Router): void {
   router.delete('/admin/invitations/:invitationId', async (req, res, next) => {
     try {
       const invitationId = String(req.params.invitationId || '').trim()
-      if (!isUuid(invitationId)) return void res.status(400).json({ error: 'invalid_invitation_id' })
+      if (!isUuid(invitationId))
+        return void res.status(400).json({ error: 'invalid_invitation_id' })
       const revoked = await revokePendingInvitation(null, invitationId)
       if (!revoked) return void res.status(404).json({ error: 'not_found' })
       res.status(200).json({ revoked: true, id: revoked.id, email: revoked.email })
@@ -92,7 +102,8 @@ export function registerAdminTeamInvitationRoutes(router: Router): void {
 
   router.get('/admin/teams/:teamId/invitations', async (req, res, next) => {
     try {
-      if (!(await getTeamById(req.params.teamId))) return void res.status(404).json({ error: 'not_found' })
+      if (!(await getTeamById(req.params.teamId)))
+        return void res.status(404).json({ error: 'not_found' })
       res.status(200).json({ items: await listPendingInvitationsForTeam(req.params.teamId) })
     } catch (error) {
       next(error)
@@ -102,9 +113,12 @@ export function registerAdminTeamInvitationRoutes(router: Router): void {
   router.post('/admin/teams/:teamId/invitations', async (req, res, next) => {
     try {
       const name = String(req.body?.name || '').trim()
-      const email = String(req.body?.email || '').trim().toLowerCase()
+      const email = String(req.body?.email || '')
+        .trim()
+        .toLowerCase()
       const role = normalizeTeamRoleInput(req.body?.role)
-      if (!name || !email || !role) return void res.status(400).json({ error: 'invalid invitation payload' })
+      if (!name || !email || !role)
+        return void res.status(400).json({ error: 'invalid invitation payload' })
       const existingMember = await findExistingMemberByEmail(email)
       if (existingMember) return sendExistingMemberConflict(res, existingMember)
       res.status(200).json(await createInvitation(req.params.teamId, name, email, role))

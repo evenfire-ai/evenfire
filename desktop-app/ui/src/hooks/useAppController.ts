@@ -708,7 +708,20 @@ export function useAppController() {
     ) => {
       if (!agentName) return
       const targetChatId = String(options.chatId || '').trim()
-      if (targetChatId && nav.selectedAgent === agentName) {
+      // Fast path — ONLY when we are already on the chat route. `switchToChat`
+      // sets the active chat imperatively and leaves no pending selection behind,
+      // which is safe exactly while the agent-selection effect
+      // (useAgentChatController, deps [currentTeamId, navItem, selectedAgent])
+      // is NOT about to re-run. Coming from any other route the `setNavItem`
+      // below flips `navItem`, that effect re-runs, finds no pending selection
+      // and takes its reset branch (activeChatId -> null) — which would blank the
+      // just-opened session into the "new chat" empty state for a frame and then
+      // auto-select the most recent chat instead of the requested one. So from
+      // another route (Apps embed, agent workspace, settings…) we fall through to
+      // the pending-selection path below, which is designed to survive a route
+      // change: it sets the active chat synchronously AND records the selection
+      // the effect replays.
+      if (targetChatId && nav.selectedAgent === agentName && nav.navItem === DESKTOP_ROUTES.chat) {
         // D.4: switchToChat is now a single unified path (no isRemote) — the
         // server is the source of truth and hydrates server-only chats itself.
         void chat.switchToChat(agentName, targetChatId)
@@ -740,6 +753,7 @@ export function useAppController() {
       chat.clearActiveChat,
       chat.setPendingChatSelection,
       chat.switchToChat,
+      nav.navItem,
       nav.selectedAgent,
       nav.setNavItem,
       nav.setSelectedAgent,
@@ -780,7 +794,21 @@ export function useAppController() {
           await ensureNotificationTeamContext({ teamId: targetTeamId })
         }
 
-        if (targetChatId && !requiresTeamSwitch && nav.selectedAgent === targetAgent) {
+        // Same imperative-fast-path guard as handleSelectChatAgent: `switchToChat`
+        // leaves no pending selection, so it only survives while the route (and
+        // hence the agent-selection effect's deps) does not change. Opening a
+        // notification from the Apps embed / a workspace / settings flips
+        // `navItem` below, re-running that effect into its reset branch — the
+        // conversation would blank to the "new chat" empty state and then land on
+        // the most recent chat instead of the notification's. From another route
+        // we fall through to the pending-selection path, which replays the
+        // requested chat across the re-run.
+        if (
+          targetChatId &&
+          !requiresTeamSwitch &&
+          nav.selectedAgent === targetAgent &&
+          nav.navItem === DESKTOP_ROUTES.chat
+        ) {
           try {
             await chat.switchToChat(targetAgent, targetChatId)
             nav.setNavItem(DESKTOP_ROUTES.chat)
@@ -805,6 +833,7 @@ export function useAppController() {
       chat.switchToChat,
       ensureNotificationTeamContext,
       fullSetStatus,
+      nav.navItem,
       nav.selectedAgent,
       nav.setNavItem,
       nav.setSelectedAgent,

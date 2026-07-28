@@ -9,7 +9,10 @@ import {
   partitionAccessValues,
 } from '../../services/directory/accessReconciliation.js'
 import { AgentGrantPreconditionError } from '../../services/directory/index.js'
-import { loadAdminActiveAgentNames, sendAdminAccessReconciliationError } from './accessReconciliationResponse.js'
+import {
+  loadAdminActiveAgentNames,
+  sendAdminAccessReconciliationError,
+} from './accessReconciliationResponse.js'
 
 type AgentGrantSnapshot = { agentNames: string[] } & Record<string, unknown>
 
@@ -25,9 +28,12 @@ export type AgentGrantRouteDefinition = {
   ) => Promise<AgentGrantSnapshot>
 }
 
-function readGrantRequest(body: unknown): { agentNames: string[]; expectedCurrent: string[] } | null {
+function readGrantRequest(
+  body: unknown
+): { agentNames: string[]; expectedCurrent: string[] } | null {
   const value = body && typeof body === 'object' ? (body as Record<string, unknown>) : null
-  if (!value || !Object.prototype.hasOwnProperty.call(value, 'expectedCurrentAgentNames')) return null
+  if (!value || !Object.prototype.hasOwnProperty.call(value, 'expectedCurrentAgentNames'))
+    return null
   if (
     !Array.isArray(value.agentNames) ||
     !Array.isArray(value.expectedCurrentAgentNames) ||
@@ -44,12 +50,16 @@ export function registerAdminAgentGrantRoutes(
   gateway: K8sGateway,
   definition: AgentGrantRouteDefinition
 ): void {
-  const getId = (params: Record<string, string | undefined>) => String(params[definition.idParameter] || '')
+  const getId = (params: Record<string, string | undefined>) =>
+    String(params[definition.idParameter] || '')
 
   router.get(definition.path, async (req, res, next) => {
     try {
       const base = await definition.getCurrent(getId(req.params))
-      const partition = partitionAccessValues(base.agentNames, await loadAdminActiveAgentNames(gateway))
+      const partition = partitionAccessValues(
+        base.agentNames,
+        await loadAdminActiveAgentNames(gateway)
+      )
       res.status(200).json({
         ...base,
         agentNames: partition.active,
