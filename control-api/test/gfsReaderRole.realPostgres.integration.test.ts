@@ -1,8 +1,8 @@
-import { randomBytes } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
-import { CONTROL_API_MIGRATIONS, initDb } from '../src/db.js'
 import { createPermissionStoreProbe } from '../../gfs-controller/src/authz/storeProbe.js'
+import { CONTROL_API_MIGRATIONS, initDb } from '../src/db.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -54,7 +54,9 @@ describeRealPostgres('GFS reader and writer login isolation', () => {
     // authenticate directly with independent secrets. NOINHERIT prevents an
     // accidental membership from widening either direct-login envelope.
     await pool.query(`ALTER ROLE gfs_controller LOGIN NOINHERIT PASSWORD '${writerPassword}'`)
-    await pool.query(`ALTER ROLE gfs_controller_reader LOGIN NOINHERIT PASSWORD '${readerPassword}'`)
+    await pool.query(
+      `ALTER ROLE gfs_controller_reader LOGIN NOINHERIT PASSWORD '${readerPassword}'`
+    )
     writerPool = new Pool({ connectionString: writerUrl })
     readerPool = new Pool({ connectionString: readerUrl })
   }, 60_000)
@@ -170,14 +172,24 @@ describeRealPostgres('GFS reader and writer login isolation', () => {
   })
 
   it('passes reader readiness without any manifest privilege and passes writer readiness with it', async () => {
-    await expect(readerPool.query('SELECT 1 FROM gfs_blob_manifests')).rejects.toMatchObject({ code: '42501' })
+    await expect(readerPool.query('SELECT 1 FROM gfs_blob_manifests')).rejects.toMatchObject({
+      code: '42501',
+    })
     await expect(readiness(readerPool, readerUrl, 'reader')()).resolves.toBeUndefined()
     await expect(readiness(writerPool, writerUrl, 'writer')()).resolves.toBeUndefined()
   })
 
   it.each([
-    ['SELECT on resources', 'REVOKE SELECT ON gfs_resources FROM gfs_controller_reader', 'GRANT SELECT ON gfs_resources TO gfs_controller_reader'],
-    ['INSERT on audit', 'REVOKE INSERT ON gfs_audit FROM gfs_controller_reader', 'GRANT INSERT ON gfs_audit TO gfs_controller_reader'],
+    [
+      'SELECT on resources',
+      'REVOKE SELECT ON gfs_resources FROM gfs_controller_reader',
+      'GRANT SELECT ON gfs_resources TO gfs_controller_reader',
+    ],
+    [
+      'INSERT on audit',
+      'REVOKE INSERT ON gfs_audit FROM gfs_controller_reader',
+      'GRANT INSERT ON gfs_audit TO gfs_controller_reader',
+    ],
   ])('fails reader readiness after revoking %s', async (_label, revokeSql, restoreSql) => {
     await pool.query(revokeSql)
     try {
@@ -238,18 +250,18 @@ describeRealPostgres('GFS reader and writer login isolation', () => {
     await expect(
       runtimePool().query('UPDATE control_admin_users SET status = status WHERE false')
     ).rejects.toMatchObject({ code: '42501' })
-    await expect(
-      runtimePool().query('DELETE FROM team_members WHERE false')
-    ).rejects.toMatchObject({ code: '42501' })
+    await expect(runtimePool().query('DELETE FROM team_members WHERE false')).rejects.toMatchObject(
+      { code: '42501' }
+    )
   })
 
   it('preserves required writer mutation privileges but denies hard deletion', async () => {
     await expect(
       writerPool.query('UPDATE gfs_resources SET bytes = bytes WHERE false')
     ).resolves.toMatchObject({ rowCount: 0 })
-    await expect(
-      writerPool.query('DELETE FROM gfs_resources WHERE false')
-    ).rejects.toMatchObject({ code: '42501' })
+    await expect(writerPool.query('DELETE FROM gfs_resources WHERE false')).rejects.toMatchObject({
+      code: '42501',
+    })
     await expect(
       writerPool.query('UPDATE gfs_blob_manifests SET updated_at = updated_at WHERE false')
     ).resolves.toMatchObject({ rowCount: 0 })

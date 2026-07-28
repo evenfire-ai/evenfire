@@ -954,10 +954,7 @@ describe('FilesPage', () => {
     // The panel maps the verdict; no partial-success toast, no list-after-write.
     await screen.findByText('Some selected subjects are invalid and were rejected.')
     expect(refreshGrants).not.toHaveBeenCalled()
-    expect(pushToast).not.toHaveBeenCalledWith(
-      expect.stringContaining('Access granted'),
-      'success'
-    )
+    expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Access granted'), 'success')
   })
 
   it('revokes a grant from the who-has-access list and toasts the outcome', async () => {

@@ -158,14 +158,8 @@ describe('buildGfsWriteTools (P4)', () => {
   })
 
   it.each([
-    [
-      'clerum__gfs_write',
-      { drive: 'main', resourceId: 'abc', content: 'hi' },
-    ],
-    [
-      'clerum__gfs_rename',
-      { drive: 'main', resourceId: 'abc', newName: 'renamed.txt' },
-    ],
+    ['clerum__gfs_write', { drive: 'main', resourceId: 'abc', content: 'hi' }],
+    ['clerum__gfs_rename', { drive: 'main', resourceId: 'abc', newName: 'renamed.txt' }],
     [
       'clerum__gfs_copy',
       { drive: 'main', sourceResourceId: 'source', destinationParentId: 'destination' },
@@ -188,26 +182,34 @@ describe('buildGfsWriteTools (P4)', () => {
   it('passes create and rename payloads without exposing move fields', async () => {
     const c = writeClient()
     const tools = new Map(buildGfsWriteTools(c).map(tool => [tool.name, tool]))
-    await tools.get('clerum__gfs_create_file')!.execute(
-      { drive: 'main', parentResourceId: 'parent', name: 'note.txt', content: 'hello' },
-      ''
-    )
-    await tools.get('clerum__gfs_create_folder')!.execute(
-      { drive: 'main', parentResourceId: 'parent', name: 'docs' },
-      ''
-    )
-    await tools.get('clerum__gfs_rename')!.execute(
-      { drive: 'main', resourceId: 'abc', newName: 'renamed.txt', ifMatch: 4 },
-      ''
-    )
+    await tools
+      .get('clerum__gfs_create_file')!
+      .execute(
+        { drive: 'main', parentResourceId: 'parent', name: 'note.txt', content: 'hello' },
+        ''
+      )
+    await tools
+      .get('clerum__gfs_create_folder')!
+      .execute({ drive: 'main', parentResourceId: 'parent', name: 'docs' }, '')
+    await tools
+      .get('clerum__gfs_rename')!
+      .execute({ drive: 'main', resourceId: 'abc', newName: 'renamed.txt', ifMatch: 4 }, '')
     expect(c.createFile).toHaveBeenCalledWith({
-      drive: 'main', parentResourceId: 'parent', name: 'note.txt', content: 'hello',
+      drive: 'main',
+      parentResourceId: 'parent',
+      name: 'note.txt',
+      content: 'hello',
     })
     expect(c.createFolder).toHaveBeenCalledWith({
-      drive: 'main', parentResourceId: 'parent', name: 'docs',
+      drive: 'main',
+      parentResourceId: 'parent',
+      name: 'docs',
     })
     expect(c.rename).toHaveBeenCalledWith({
-      drive: 'main', resourceId: 'abc', newName: 'renamed.txt', ifMatch: 4,
+      drive: 'main',
+      resourceId: 'abc',
+      newName: 'renamed.txt',
+      ifMatch: 4,
     })
     expect(tools.has('clerum__gfs_move')).toBe(false)
     expect(tools.has('clerum__gfs_delete')).toBe(false)
@@ -219,8 +221,11 @@ describe('buildGfsWriteTools (P4)', () => {
     expect(tool.description).toContain('The original remains at the source')
     expect(tool.description).toContain('never deletes it')
     const args = {
-      drive: 'main', sourceResourceId: 'source', destinationParentId: 'destination',
-      newName: 'source-copy', ifMatch: 7,
+      drive: 'main',
+      sourceResourceId: 'source',
+      destinationParentId: 'destination',
+      newName: 'source-copy',
+      ifMatch: 7,
     }
     const result = await tool.execute(args, '')
     expect(result.success).toBe(true)
@@ -232,7 +237,9 @@ describe('buildGfsWriteTools (P4)', () => {
 
   it('does not expose backend paths or keys in mutation failures', async () => {
     const c = writeClient({
-      copy: vi.fn(async () => { throw new Error('failed at /mnt/gfs/private/blob-key') }),
+      copy: vi.fn(async () => {
+        throw new Error('failed at /mnt/gfs/private/blob-key')
+      }),
     })
     const result = await buildGfsCopyTools(c)[0]!.execute(
       { drive: 'main', sourceResourceId: 'source', destinationParentId: 'destination', ifMatch: 7 },

@@ -1,9 +1,9 @@
+import type { GfsGrantErrorPresentation } from '@lib/gfsGrantErrors'
 import type {
   GfsAgentSubjectOption,
   GfsDelegationSubjectOption,
   GfsGrantListItem,
 } from '@/gfs/delegation.types'
-import type { GfsGrantErrorPresentation } from '@lib/gfsGrantErrors'
 
 export interface GfsGrantListProps {
   items: GfsGrantListItem[]

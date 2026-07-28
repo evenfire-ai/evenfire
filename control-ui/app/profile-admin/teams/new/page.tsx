@@ -240,7 +240,7 @@ export default function CreateTeamPage() {
           ? updateAdminTeamContexts(teamId, selectedContextValues)
           : Promise.resolve(),
         selectedAgentValues.length > 0
-          ? updateAdminTeamAgents(teamId, selectedAgentValues)
+          ? updateAdminTeamAgents(teamId, selectedAgentValues, [])
           : Promise.resolve(),
       ])
       showToast('Team created.', { tone: 'success' })

@@ -182,6 +182,7 @@ export default function TeamDetailsPage() {
   const [selectedContextIdsToAdd, setSelectedContextIdsToAdd] = useState<string[]>([])
   const [hosts, setHosts] = useState<HostResource[]>([])
   const [assignedAgentNames, setAssignedAgentNames] = useState<string[]>([])
+  const [observedAgentNames, setObservedAgentNames] = useState<string[]>([])
   const [selectedAgentNamesToAdd, setSelectedAgentNamesToAdd] = useState<string[]>([])
 
   const existingMemberIds = useMemo(() => new Set(members.map(m => m.id)), [members])
@@ -231,11 +232,16 @@ export default function TeamDetailsPage() {
     )
     const agentPartition = partitionVisibleAccess(
       Array.isArray(teamAgents.agentNames) ? teamAgents.agentNames : [],
-      visibleAgentNames
+      visibleAgentNames,
+      Array.isArray(teamAgents.deletedAgentNames) ? teamAgents.deletedAgentNames : []
     )
     setAssignedContextIds(contextPartition.active)
     setDeletedContextIds(contextPartition.deleted)
     setAssignedAgentNames(agentPartition.active)
+    setObservedAgentNames([
+      ...(teamAgents.agentNames || []),
+      ...(teamAgents.deletedAgentNames || []),
+    ])
   }
 
   useEffect(() => {
@@ -500,9 +506,14 @@ export default function TeamDetailsPage() {
     setError('')
     try {
       const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
-      const updated = await updateAdminTeamAgents(teamId, normalized)
-      const partition = partitionVisibleAccess(updated.agentNames || [], hostNameOptions)
+      const updated = await updateAdminTeamAgents(teamId, normalized, observedAgentNames)
+      const partition = partitionVisibleAccess(
+        updated.agentNames || [],
+        hostNameOptions,
+        updated.deletedAgentNames || []
+      )
       setAssignedAgentNames(partition.active)
+      setObservedAgentNames([...(updated.agentNames || []), ...(updated.deletedAgentNames || [])])
       setSelectedAgentNamesToAdd([])
       showToast(message, { tone: 'success' })
     } catch (e) {

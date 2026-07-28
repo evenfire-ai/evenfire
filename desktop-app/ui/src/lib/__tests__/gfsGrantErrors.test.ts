@@ -14,14 +14,8 @@ import { describeGfsGrantError } from '../gfsGrantErrors'
 
 describe('describeGfsGrantError', () => {
   it.each([
-    [
-      'agent_manager_forbidden',
-      "Agents can't be given manage or share access.",
-    ],
-    [
-      'managed_agent_permission_forbidden',
-      'Managed agents can only be granted read and write.',
-    ],
+    ['agent_manager_forbidden', "Agents can't be given manage or share access."],
+    ['managed_agent_permission_forbidden', 'Managed agents can only be granted read and write.'],
     ['foreign_agent_forbidden', 'You can only grant access to your own agents.'],
     ['escalation_rejected', 'You can only grant permissions you already hold here.'],
   ])('maps %s to its human message with error severity', (code, message) => {
@@ -34,7 +28,9 @@ describe('describeGfsGrantError', () => {
 
   it('maps manage_acl_required to a quiet banner, never an error toast', () => {
     const presentation = describeGfsGrantError(
-      new Error("Error invoking remote method 'gfs:listGrants': Error: 403 Forbidden: manage_acl_required")
+      new Error(
+        "Error invoking remote method 'gfs:listGrants': Error: 403 Forbidden: manage_acl_required"
+      )
     )
 
     expect(presentation).toEqual({

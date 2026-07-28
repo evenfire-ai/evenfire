@@ -11,7 +11,6 @@ WORKTREE_ID="$(printf '%s' "${PROJECT_DIR}" | shasum | awk '{print $1}')"
 STATE_ROOT="${TMPDIR:-/tmp}/clerum-pre-gate-sync"
 STATE_DIR="${STATE_ROOT}/${WORKTREE_ID}"
 CLUSTER_SYNC_STATE_CONFIGMAP="${CLERUM_PRE_GATE_SYNC_CONFIGMAP:-clerum-pre-gate-sync-state}"
-
 mkdir -p "${STATE_DIR}"
 
 GATE_NAME="pre-gate"
@@ -47,6 +46,11 @@ done
 log() {
   printf '[pre-gate-sync] %s\n' "$*"
 }
+
+# shellcheck source=scripts/minikube/pre-gate-runtime.sh
+source "${SCRIPT_DIR}/pre-gate-runtime.sh"
+# shellcheck source=scripts/minikube/pre-gate-incremental.sh
+source "${SCRIPT_DIR}/pre-gate-incremental.sh"
 
 fingerprint_dir() {
   local dir="$1"
@@ -99,13 +103,17 @@ persist_state() {
 cluster_marker_matches() {
   local expected_cluster_fingerprint="$1"
   local expected_worktree_id="$2"
-  local actual_cluster_fingerprint actual_worktree_id
+  local expected_git_head actual_cluster_fingerprint actual_worktree_id actual_git_head
+
+  expected_git_head="$(git -C "${PROJECT_DIR}" rev-parse --verify HEAD 2>/dev/null || true)"
 
   actual_cluster_fingerprint="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.clusterFingerprint}' 2>/dev/null || true)"
   actual_worktree_id="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.worktreeId}' 2>/dev/null || true)"
+  actual_git_head="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane -o jsonpath='{.data.gitHead}' 2>/dev/null || true)"
 
   [[ "${actual_cluster_fingerprint}" == "${expected_cluster_fingerprint}" ]] &&
-    [[ "${actual_worktree_id}" == "${expected_worktree_id}" ]]
+    [[ "${actual_worktree_id}" == "${expected_worktree_id}" ]] &&
+    [[ -n "${expected_git_head}" && "${actual_git_head}" == "${expected_git_head}" ]]
 }
 
 persist_cluster_marker() {
@@ -161,54 +169,6 @@ ensure_artifact() {
   )
 }
 
-rollout_if_present() {
-  local namespace="$1"
-  local deployment="$2"
-
-  if ${KC} get deployment "${deployment}" -n "${namespace}" >/dev/null 2>&1; then
-    log "Waiting for rollout: ${namespace}/${deployment}"
-    ${KC} rollout status "deployment/${deployment}" -n "${namespace}" --timeout=120s >/dev/null
-  fi
-}
-
-rollout_restart_with_retry() {
-  local namespace="$1"
-  local deployment="$2"
-  local attempt
-  local output
-
-  for attempt in 1 2 3; do
-    if output="$(${KC} rollout restart "deployment/${deployment}" -n "${namespace}" 2>&1)"; then
-      [[ -n "${output}" ]] && printf '%s\n' "${output}"
-      return 0
-    fi
-
-    if [[ "${output}" == *"within the past second"* && "${attempt}" != "3" ]]; then
-      log "Retrying rollout restart for ${namespace}/${deployment} after recent restart"
-      sleep 2
-      continue
-    fi
-
-    printf '%s\n' "${output}" >&2
-    return 1
-  done
-}
-
-rollout_namespace_deployments() {
-  local namespace="$1"
-  local names
-
-  names="$(${KC} get deployment -n "${namespace}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
-  if [[ -z "${names}" ]]; then
-    return 0
-  fi
-
-  while IFS= read -r deployment; do
-    [[ -z "${deployment}" ]] && continue
-    rollout_if_present "${namespace}" "${deployment}"
-  done <<<"${names}"
-}
-
 sync_mcp_host_auth_key() {
   if ! ${KC} get secret rpc-proxy-secrets -n rpc-proxy >/dev/null 2>&1; then
     log "Skipping mcp-host auth key sync (rpc-proxy-secrets not found)"
@@ -240,35 +200,8 @@ provision_gfs_serving() {
   sync_mcp_host_auth_key
 }
 
-gate_needs_registry() {
-  case "${GATE_NAME}" in
-    *registry*|*marketplace*|*plugin-workload-sdk*)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-ensure_evenfire_registry() {
-  if ! gate_needs_registry; then
-    log "Skipping evenfire-registry before ${GATE_NAME}; this gate does not require the sibling service"
-    return 0
-  fi
-
-  log "Ensuring evenfire-registry and minikube registry egress policies before ${GATE_NAME}"
-  (
-    cd "${PROJECT_DIR}"
-    if ${KC} -n registry get deployment registry-api >/dev/null 2>&1; then
-      MINIKUBE_PROFILE="${PROFILE}" SKIP_BUILD=1 make minikube-deploy-evenfire-registry
-    else
-      MINIKUBE_PROFILE="${PROFILE}" make minikube-deploy-evenfire-registry
-    fi
-  )
-}
-
 log "Evaluating sync requirements for ${GATE_NAME}"
+preflight_host_lifecycle_probe
 
 cluster_fingerprint="$(
   {
@@ -326,50 +259,61 @@ run_if_changed control-ui "npm test"
 run_if_changed desktop-app "npm test"
 
 if [[ "${cluster_changed}" == "true" ]]; then
-  log "Cluster-relevant changes detected — rebuilding and redeploying before ${GATE_NAME}"
-  # Apply the canonical cluster bootstrap before any namespaced Secret work.
-  (
-    cd "${PROJECT_DIR}"
-    make minikube-deploy-crds
-  )
-  CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
-  writer_dsn="$(${KC} -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
-  if [[ -n "${writer_dsn}" ]]; then
-    if ! ${KC} -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1; then
-      err "Existing GFS writer detected but control-api is not Ready; refusing full overlay sync"
-      exit 1
-    fi
-    log "Upgrade path — reconciling GFS credentials before full overlay sync"
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
-  else
-    log "Fresh bootstrap — reader staging deferred until post-migration convergence; GFSC remains fail-closed"
-  fi
-  (
-    cd "${PROJECT_DIR}"
-    make minikube-build-images
-    make minikube-verify-images
-    make minikube-apply-secrets
-    make minikube-deploy-all
-    if [[ "${infra_changed}" == "true" ]]; then
-      make minikube-restart-all
-    fi
-  )
+  incremental_plan
+  log "Cluster sync plan before ${GATE_NAME}: images=$(incremental_target_summary), full-image-build=${INCREMENTAL_FULL_IMAGE_BUILD}, full-deployment=${INCREMENTAL_FULL_DEPLOYMENT}"
 
-  rollout_if_present control-plane control-postgres
-  CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
-    bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
-    --overlay "${PROJECT_DIR}/deploy/overlays/minikube"
-  CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
-    bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
-  rollout_if_present control-plane control-api
-  # The base manifest no longer declares connection-string (provisioning-owned
-  # key), so deploy-all cannot clobber it. Provisioning must still run AFTER
-  # control-api migrations (0048 creates the least-privilege gfs_controller
-  # role) for fresh profiles and to converge any stale credential before the
-  # rest of the gate observes service readiness.
-  provision_gfs_serving
+  if [[ "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ||
+        "${INCREMENTAL_FULL_DEPLOYMENT}" == "true" ]]; then
+    (
+      cd "${PROJECT_DIR}"
+      make minikube-deploy-crds
+    )
+    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
+    writer_dsn="$(${KC} -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
+    if [[ -n "${writer_dsn}" ]]; then
+      if ! ${KC} -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1; then
+        log "ERROR: existing GFS writer detected but control-api is not Ready; refusing full overlay sync"
+        exit 1
+      fi
+      log "Upgrade path — reconciling GFS credentials before full overlay sync"
+      CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+    else
+      log "Fresh bootstrap — reader staging deferred until post-migration convergence; GFSC remains fail-closed"
+    fi
+  fi
+
+  incremental_build_images
+
+  if [[ "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ||
+        "${INCREMENTAL_FULL_DEPLOYMENT}" == "true" ]]; then
+    (
+      cd "${PROJECT_DIR}"
+      make minikube-apply-secrets
+      make minikube-deploy-all
+      if [[ "${FORCE_RESTART}" == "true" || "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ]]; then
+        make minikube-restart-all
+      fi
+    )
+  fi
+
+  if incremental_requires_database_reconcile; then
+    rollout_if_present control-plane control-postgres
+    CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/run-control-api-db-migration.sh" \
+      --overlay "${PROJECT_DIR}/deploy/overlays/minikube"
+    CONTEXT="${PROFILE}" ALLOWED_CONTEXTS="${PROFILE}" \
+      bash "${PROJECT_DIR}/deploy/scripts/provision-control-api-runtime-roles.sh"
+    rollout_if_present control-plane control-api
+    # The base manifest no longer declares connection-string (provisioning-owned
+    # key), so deploy-all cannot clobber it. Provisioning must still run AFTER
+    # control-api migrations (0048 creates the least-privilege gfs_controller
+    # role) for fresh profiles and to converge any stale credential before the
+    # rest of the gate observes service readiness.
+    provision_gfs_serving
+  fi
 
   ensure_evenfire_registry
+  incremental_restart_targets
 
   rollout_if_present control-plane host-context-controller
   rollout_if_present control-plane workflow-recipes
@@ -383,18 +327,7 @@ if [[ "${cluster_changed}" == "true" ]]; then
     rollout_if_present registry registry-api
   fi
 
-  # gfsc health is part of a clean baseline for GFS-backed gates: prove the
-  # permission-store wiring (Secret populated, pods postdate the rotation,
-  # /readyz green) once the rollouts settle. Gated on the deployments existing
-  # because a brand-new profile may not have reconciled gfsc yet; the strict
-  # fail-loud checks live in verify-gfs.sh.
-  if ${KC} get configmap gfs-config -n gfs >/dev/null 2>&1 \
-     && ${KC} -n gfs get deployment -l clerum.io/managed-by=host-context-controller -o name 2>/dev/null | grep -q .; then
-    log "Verifying gfs permission-store wiring"
-    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/scripts/minikube/verify-gfs.sh"
-  else
-    log "SKIPPING gfs permission-store verification (gfs-config or gfsc deployments not present yet) — GFS-backed gates on this profile are NOT proven"
-  fi
+  incremental_verify_gfs_if_required
 
   log "Cluster status after sync"
   ${KC} get deploy -A --no-headers 2>/dev/null | grep -v kube-system || true

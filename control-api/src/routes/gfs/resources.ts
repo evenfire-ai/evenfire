@@ -59,7 +59,11 @@ interface ResourceRow {
   deleted_at: string | null
 }
 
-export interface ResourcePatch { newName?: unknown; newParentId?: unknown; ifMatch?: unknown }
+export interface ResourcePatch {
+  newName?: unknown
+  newParentId?: unknown
+  ifMatch?: unknown
+}
 
 async function loadResource(db: GrantsDb, resourceId: string): Promise<ResourceRow | null> {
   const res = await db.query(
@@ -70,7 +74,9 @@ async function loadResource(db: GrantsDb, resourceId: string): Promise<ResourceR
   return (res.rows[0] as ResourceRow | undefined) ?? null
 }
 
-interface AncestorRow extends ResourceRow { cycle: boolean }
+interface AncestorRow extends ResourceRow {
+  cycle: boolean
+}
 async function acquireStructureLock(db: GrantsDb, drive: string): Promise<void> {
   await db.query(`SELECT pg_advisory_xact_lock(hashtext('gfs:structure:' || $1)::bigint)`, [drive])
 }
@@ -110,8 +116,8 @@ async function loadAncestorChain(db: GrantsDb, resourceId: string): Promise<Ance
 function assertLiveDirectoryChain(rows: AncestorRow[], drive: string): void {
   if (
     rows.length === 0 ||
-    rows.some(row =>
-      row.cycle || row.deleted_at !== null || row.drive !== drive || row.kind !== 'directory'
+    rows.some(
+      row => row.cycle || row.deleted_at !== null || row.drive !== drive || row.kind !== 'directory'
     ) ||
     rows.at(-1)?.parent_resource_id !== null
   ) {
@@ -120,10 +126,14 @@ function assertLiveDirectoryChain(rows: AncestorRow[], drive: string): void {
 }
 
 function directoryPath(rows: AncestorRow[]): string {
-  const names = rows.slice(0, -1).map(row => row.name).reverse()
+  const names = rows
+    .slice(0, -1)
+    .map(row => row.name)
+    .reverse()
   return names.length === 0 ? '/' : `/${names.join('/')}`
 }
-const sameChain = (a: AncestorRow[], b: AncestorRow[]) => a.length === b.length && a.every((row, i) => row.resource_id === b[i]?.resource_id)
+const sameChain = (a: AncestorRow[], b: AncestorRow[]) =>
+  a.length === b.length && a.every((row, i) => row.resource_id === b[i]?.resource_id)
 async function refreshSubtreePaths(
   db: GrantsDb,
   drive: string,
@@ -204,11 +214,20 @@ export async function applyResourcePatch(
   if (wantsMove && !UUID_RE.test(requestedDestination!))
     throw new ResourcePatchError(400, 'path_invalid')
 
-  const observedDestination = requestedDestination ? await loadResource(db, requestedDestination) : null
+  const observedDestination = requestedDestination
+    ? await loadResource(db, requestedDestination)
+    : null
   if (requestedDestination && (!observedDestination || observedDestination.deleted_at !== null))
     throw new ResourcePatchError(404, 'not_found')
   if (requestedDestination && observedDestination?.drive !== drive) {
-    await audit({ actorKey: caller.actorKey, targetKey: caller.actorKey, op, drive, resourceId, outcome: 'denied' })
+    await audit({
+      actorKey: caller.actorKey,
+      targetKey: caller.actorKey,
+      op,
+      drive,
+      resourceId,
+      outcome: 'denied',
+    })
     throw new ResourcePatchError(403, 'cross_boundary')
   }
   if (requestedDestination && observedDestination?.kind !== 'directory')
@@ -242,7 +261,8 @@ export async function applyResourcePatch(
 
   const sourceChain = await loadAncestorChain(db, resource.parent_resource_id)
   assertLiveDirectoryChain(sourceChain, drive)
-  if (!sameChain(sourceChain, initialChains[0])) throw new ResourcePatchError(412, 'precondition_failed')
+  if (!sameChain(sourceChain, initialChains[0]))
+    throw new ResourcePatchError(412, 'precondition_failed')
   const name = wantsRename ? requestedName : resource.name
   let newParentId: string | null = resource.parent_resource_id
   let parentChain = sourceChain
@@ -252,7 +272,14 @@ export async function applyResourcePatch(
     rid: string
   ): Promise<void> => {
     if (!(await checkAccess(db, caller, drive, rid, bit))) {
-      await audit({ actorKey: caller.actorKey, targetKey: caller.actorKey, op, drive, resourceId, outcome: 'denied' })
+      await audit({
+        actorKey: caller.actorKey,
+        targetKey: caller.actorKey,
+        op,
+        drive,
+        resourceId,
+        outcome: 'denied',
+      })
       throw new ResourcePatchError(403, 'forbidden')
     }
   }
@@ -272,10 +299,12 @@ export async function applyResourcePatch(
       destRow.kind !== observedDest.kind ||
       destRow.parent_resource_id !== observedDest.parent_resource_id ||
       destRow.version !== observedDest.version
-    ) throw new ResourcePatchError(412, 'precondition_failed')
+    )
+      throw new ResourcePatchError(412, 'precondition_failed')
     const destinationChain = await loadAncestorChain(db, dest)
     assertLiveDirectoryChain(destinationChain, drive)
-    if (!sameChain(destinationChain, initialChains[1])) throw new ResourcePatchError(412, 'precondition_failed')
+    if (!sameChain(destinationChain, initialChains[1]))
+      throw new ResourcePatchError(412, 'precondition_failed')
     if (dest === resourceId || destinationChain.some(row => row.resource_id === resourceId)) {
       throw new ResourcePatchError(400, 'path_invalid')
     }
@@ -306,7 +335,14 @@ export async function applyResourcePatch(
   const parentPath = directoryPath(parentChain)
   const rootPath = parentPath === '/' ? `/${name}` : `${parentPath}/${name}`
   await refreshSubtreePaths(db, drive, resourceId, rootPath)
-  await audit({ actorKey: caller.actorKey, targetKey: caller.actorKey, op, drive, resourceId, outcome: 'allowed' })
+  await audit({
+    actorKey: caller.actorKey,
+    targetKey: caller.actorKey,
+    op,
+    drive,
+    resourceId,
+    outcome: 'allowed',
+  })
   return { version }
 }
 
@@ -319,7 +355,9 @@ export async function handlePatch(req: Request, res: Response): Promise<void> {
     const caller = resolveCaller(req)
     const id = String(req.params.id)
     if (!UUID_RE.test(id)) {
-      res.status(400).json({ ok: false, error: { code: 'path_invalid', message: 'invalid resource id' } })
+      res
+        .status(400)
+        .json({ ok: false, error: { code: 'path_invalid', message: 'invalid resource id' } })
       return
     }
     const body = (req.body ?? {}) as ResourcePatch

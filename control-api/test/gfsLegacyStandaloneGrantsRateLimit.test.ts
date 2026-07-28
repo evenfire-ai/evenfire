@@ -63,9 +63,8 @@ function denied() {
 }
 
 async function buildApp() {
-  const { registerLegacyStandaloneGrantReportRoute } = await import(
-    '../src/routes/gfs/legacyStandaloneGrants.js'
-  )
+  const { registerLegacyStandaloneGrantReportRoute } =
+    await import('../src/routes/gfs/legacyStandaloneGrants.js')
   const router = express.Router()
   registerLegacyStandaloneGrantReportRoute(router)
   const app = express()
