@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createRequire } from 'node:module'
 
-const require = createRequire(import.meta.url)
 const forgeConfig = require('../../forge.config.js') as {
   packagerConfig?: { asar?: boolean; derefSymlinks?: boolean }
 }
