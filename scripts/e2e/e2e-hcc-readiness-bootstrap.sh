@@ -47,6 +47,10 @@ HCC_MUTATED=0
 BLOCKER_CREATED=0
 
 die() {
+  if [ -n "${new_hcc_pod:-}" ]; then
+    echo "Recent HCC logs from ${new_hcc_pod}:" >&2
+    kctl logs "pod/${new_hcc_pod}" -n "$HCC_NS" -c host-context-controller --tail=300 >&2 || true
+  fi
   fail "$*"
   exit 1
 }
