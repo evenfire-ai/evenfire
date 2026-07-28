@@ -78,10 +78,39 @@ describe('useTaskTier', () => {
   it('unfreezes once no longer suspended (stale pausedAt is ignored)', () => {
     const now = Date.now()
     // Ran 150s ago, suspended at the 50s mark, but has since resumed (streaming).
+    // (A streaming state with `pausedAt` still set violates the §AC3 invariant —
+    // the tracker closes the segment on resume — so this is a defensive case.)
     const tier = renderHook(() =>
       useTaskTier(task({ status: 'streaming', startedAt: now - 150_000, pausedAt: now - 100_000 }))
     ).result.current
     expect(tier).toBe('T3') // age = 150s from startedAt, NOT frozen at pausedAt's 50s
+  })
+
+  it('subtracts pausedMs so a resumed task is tiered on ACTIVE time (§AC3)', () => {
+    const now = Date.now()
+    // The reported bug: 10min parked on an approval + ~20s of real work. Without
+    // the accumulator the resume lands on T4 ("still working, safe to close").
+    const tier = renderHook(() =>
+      useTaskTier(task({ status: 'streaming', startedAt: now - 620_000, pausedMs: 600_000 }))
+    ).result.current
+    expect(tier).toBe('T1') // active age = 20s
+  })
+
+  it('combines the closed accumulator with the open-segment freeze', () => {
+    const now = Date.now()
+    // 10min of earlier waits already closed, 20s of work, now parked again for
+    // another 10min: both waits must stay out of the age.
+    const tier = renderHook(() =>
+      useTaskTier(
+        task({
+          status: 'suspended',
+          startedAt: now - 1_220_000,
+          pausedMs: 600_000,
+          pausedAt: now - 600_000,
+        })
+      )
+    ).result.current
+    expect(tier).toBe('T1') // active age = 1_220_000 - 600_000 (open) - 600_000 = 20s
   })
 
   it('recomputes every 5s without a manual rerender', () => {
