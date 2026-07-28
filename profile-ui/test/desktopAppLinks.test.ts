@@ -28,6 +28,24 @@ test('buildEvenfireDesktopAppLink rejects unsafe routes', () => {
     }),
     null
   )
+  assert.equal(
+    buildEvenfireDesktopAppLink({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'agentic-task-board',
+      path: '/safe/%2e%2e/admin',
+    }),
+    null
+  )
+})
+
+test('buildEvenfireDesktopAppLink leaves an omitted route to the recipe default', () => {
+  assert.equal(
+    buildEvenfireDesktopAppLink({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'agentic-task-board',
+    }),
+    'evenfire://app/sandbox-recipes/agentic-task-board'
+  )
 })
 
 test('buildEvenfireDesktopAppRedirectDocument creates an unauthenticated protocol handoff', () => {
@@ -40,9 +58,11 @@ test('buildEvenfireDesktopAppRedirectDocument creates an unauthenticated protoco
   assert.match(document, /window\.location\.replace/)
   assert.match(document, new RegExp(`<script nonce="${scriptNonce}">`))
   assert.match(document, /evenfire:\/\/app\/sandbox-recipes\/agentic-task-board/)
-  assert.match(document, /<style>/)
+  assert.match(document, new RegExp(`<style nonce="${scriptNonce}">`))
   assert.match(document, /class="page-card"/)
-  assert.match(document, /<h1>Open agentic-task-board<\/h1>/)
+  assert.match(document, /<h1>Open app in Evenfire<\/h1>/)
+  assert.doesNotMatch(document, /agentic-task-board<\/h1>/)
+  assert.match(document, /install or update to the latest Evenfire Desktop/)
   assert.match(document, /class="open-button"/)
   assert.doesNotMatch(document, /login|authenticate|authorization/i)
 })
@@ -52,7 +72,9 @@ test('buildEvenfireDesktopAppContentSecurityPolicy authorizes only the nonce-bea
   const policy = buildEvenfireDesktopAppContentSecurityPolicy(scriptNonce)
 
   assert.match(policy, new RegExp(`script-src 'nonce-${scriptNonce}'`))
+  assert.match(policy, new RegExp(`style-src 'nonce-${scriptNonce}'`))
   assert.doesNotMatch(policy, /script-src 'unsafe-inline'/)
+  assert.doesNotMatch(policy, /style-src 'unsafe-inline'/)
 })
 
 test('buildEvenfireDesktopAppRedirectDocument rejects unrelated protocols', () => {

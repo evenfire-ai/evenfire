@@ -1,43 +1,18 @@
-const APP_SEGMENT_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
-const TEAM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
-const MAX_APP_SEGMENT_LENGTH = 253
-const MAX_APP_ROUTE_LENGTH = 4096
-const MAX_TEAM_ID_LENGTH = 255
+import { buildSandboxUiDeepLink } from '@clerum/desktop-app-links'
+
 const SCRIPT_NONCE_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/
 
 export function buildEvenfireDesktopAppLink(parts: {
   recipeNs: string
   recipeName: string
-  path: string
+  path?: string
   teamId?: string
 }): string | null {
-  const recipeNs = String(parts.recipeNs || '').trim()
-  const recipeName = String(parts.recipeName || '').trim()
-  const path = String(parts.path || '').trim()
-  const teamId = String(parts.teamId || '').trim()
-  const validSegment = (value: string) =>
-    value.length > 0 && value.length <= MAX_APP_SEGMENT_LENGTH && APP_SEGMENT_PATTERN.test(value)
-
-  if (
-    !validSegment(recipeNs) ||
-    !validSegment(recipeName) ||
-    !path ||
-    path.length > MAX_APP_ROUTE_LENGTH ||
-    !path.startsWith('/') ||
-    path.startsWith('//') ||
-    path.includes('\\') ||
-    /[\u0000-\u001f\u007f]/.test(path) ||
-    (teamId && (teamId.length > MAX_TEAM_ID_LENGTH || !TEAM_ID_PATTERN.test(teamId)))
-  ) {
+  try {
+    return buildSandboxUiDeepLink(parts)
+  } catch {
     return null
   }
-
-  const url = new URL(
-    `evenfire://app/${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}`
-  )
-  url.searchParams.set('path', path)
-  if (teamId) url.searchParams.set('team', teamId)
-  return url.toString()
 }
 
 function escapeHtml(value: string): string {
@@ -47,20 +22,6 @@ function escapeHtml(value: string): string {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;')
-}
-
-function desktopAppDisplayName(parsed: URL): string {
-  const encodedRecipeName = parsed.pathname.split('/').filter(Boolean)[1]
-  if (!encodedRecipeName) return 'this app'
-
-  try {
-    const recipeName = decodeURIComponent(encodedRecipeName)
-    return recipeName.length <= MAX_APP_SEGMENT_LENGTH && APP_SEGMENT_PATTERN.test(recipeName)
-      ? recipeName
-      : 'this app'
-  } catch {
-    return 'this app'
-  }
 }
 
 function normalizeScriptNonce(scriptNonce: string): string {
@@ -74,7 +35,7 @@ function normalizeScriptNonce(scriptNonce: string): string {
 export function buildEvenfireDesktopAppContentSecurityPolicy(scriptNonce: string): string {
   const nonce = normalizeScriptNonce(scriptNonce)
   return (
-    `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; ` +
+    `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; ` +
     "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
   )
 }
@@ -90,7 +51,6 @@ export function buildEvenfireDesktopAppRedirectDocument(
 
   const nonce = normalizeScriptNonce(scriptNonce)
   const escapedLink = escapeHtml(deepLink)
-  const escapedAppName = escapeHtml(desktopAppDisplayName(parsed))
   const scriptLink = JSON.stringify(deepLink).replaceAll('<', '\\u003c')
   return `<!doctype html>
 <html lang="en">
@@ -98,8 +58,8 @@ export function buildEvenfireDesktopAppRedirectDocument(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="refresh" content="0;url=${escapedLink}">
-  <title>Open ${escapedAppName} in Evenfire</title>
-  <style>
+  <title>Open app in Evenfire</title>
+  <style nonce="${escapeHtml(nonce)}">
     :root {
       color-scheme: dark;
       font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -188,7 +148,7 @@ export function buildEvenfireDesktopAppRedirectDocument(
     <section class="page-card">
       <div class="stack-tight">
         <p class="eyebrow">Evenfire Desktop</p>
-        <h1>Open ${escapedAppName}</h1>
+        <h1>Open app in Evenfire</h1>
         <p class="body-copy">
           Evenfire should open this app automatically. Use the button if your browser asks for
           confirmation.
@@ -196,7 +156,7 @@ export function buildEvenfireDesktopAppRedirectDocument(
       </div>
       <a class="open-button" href="${escapedLink}">Open in Evenfire</a>
       <p class="body-copy">
-        If nothing happens, make sure the Evenfire desktop app is installed and try again.
+        If nothing happens, install or update to the latest Evenfire Desktop, then try again.
       </p>
     </section>
   </main>

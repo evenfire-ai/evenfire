@@ -90,6 +90,18 @@ describe('SandboxUiPage', () => {
     expect(screen.getAllByRole('button', { name: /^Open / })).toHaveLength(2)
   })
 
+  it('does not let an old unmount timer close an immediate replacement page', async () => {
+    sandboxUi.listApps.mockResolvedValue({ apps: [] })
+    sandboxUi.close.mockResolvedValue(undefined)
+    const first = render(<SandboxUiPage />)
+
+    first.unmount()
+    render(<SandboxUiPage />)
+    await new Promise(resolve => window.setTimeout(resolve, 0))
+
+    expect(sandboxUi.close).not.toHaveBeenCalled()
+  })
+
   it('renders the empty apps page with calm centered guidance', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({ apps: [] })
 
@@ -155,6 +167,7 @@ describe('SandboxUiPage', () => {
   it('opens a deep-linked app at its stable entry point before handing off the client route', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({ apps: [] })
     sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onEmbeddedAppOpening = vi.fn()
 
     render(
       <SandboxUiPage
@@ -165,6 +178,7 @@ describe('SandboxUiPage', () => {
           routePath: '/tasks/task-42?panel=details',
         }}
         shortcutOpenRequestId={1}
+        onEmbeddedAppOpening={onEmbeddedAppOpening}
       />
     )
 
@@ -182,6 +196,12 @@ describe('SandboxUiPage', () => {
           dpr: expect.any(Number),
         },
       })
+    })
+    expect(onEmbeddedAppOpening).toHaveBeenCalledWith({
+      appRef: 'sandbox-recipes/task-board',
+      label: 'Agentic Task Board',
+      defaultPath: '/',
+      routePath: '/tasks/task-42?panel=details',
     })
   })
 

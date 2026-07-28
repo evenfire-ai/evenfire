@@ -1,11 +1,11 @@
 export type InitialProtocolUrls = {
   evenfireUrls: string[]
-  clerumUrl?: string
+  clerumUrls: string[]
 }
 
 export function collectInitialProtocolUrls(argv: string[]): InitialProtocolUrls {
   return {
-    evenfireUrls: [...new Set(argv.filter(argument => argument.startsWith('evenfire://')))],
-    clerumUrl: argv.find(argument => argument.startsWith('clerum://')),
+    evenfireUrls: [...new Set(argv.filter(argument => argument.startsWith('evenfire:')))],
+    clerumUrls: [...new Set(argv.filter(argument => argument.startsWith('clerum:')))],
   }
 }

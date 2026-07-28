@@ -183,3 +183,26 @@ describe('AppService.openForgotPassword', () => {
     })
   })
 })
+
+describe('AppService profile UI link authority', () => {
+  it('uses the authenticated invitation profile instead of guessing a tenant hostname', async () => {
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      resolveProfileUiBaseUrl: () => Promise<string>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.memberRegistrationServiceClient = {
+      getInvitationProfile: vi.fn().mockResolvedValue({
+        profileUiBaseUrl: 'https://accounts.tenant.example/profile',
+      }),
+    }
+
+    await expect(service.resolveProfileUiBaseUrl()).resolves.toBe(
+      'https://accounts.tenant.example/profile'
+    )
+    expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledWith(
+      'user@tenant.example'
+    )
+  })
+})

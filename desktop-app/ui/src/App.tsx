@@ -27,6 +27,7 @@ import {
   getConversationOriginForAppLaunch,
   getConversationOriginForNavigation,
 } from '@lib/sandboxUiConversationOrigin'
+import { shouldPurgeSandboxUiDeepLinks } from '@lib/sandboxUiDeepLinkState'
 import { AgentsPage } from '@pages/AgentsPage'
 import { AuthPage } from '@pages/AuthPage'
 import { ChatPage } from '@pages/ChatPage'
@@ -149,6 +150,8 @@ export function App() {
   const contentPanelRef = React.useRef<HTMLElement | null>(null)
   const activeConversationOriginRef = React.useRef<SandboxUiConversationOrigin | null>(null)
   const processingSandboxUiDeepLinkIdRef = React.useRef<number | null>(null)
+  const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
+  const sandboxUiDeepLinkGenerationRef = React.useRef(0)
   const isAgentChatView =
     (vm.navItem === DESKTOP_ROUTES.agents && Boolean(vm.selectedAgent)) ||
     (vm.navItem === DESKTOP_ROUTES.chat && Boolean(vm.selectedAgent))
@@ -201,11 +204,6 @@ export function App() {
       setAvailableSandboxUiApps([])
       setActiveSandboxUiApp(null)
       setSandboxUiConversationOrigin(null)
-      setPendingSandboxUiDeepLinks(current =>
-        current.map(item =>
-          item.conversationOrigin ? { ...item, conversationOrigin: null } : item
-        )
-      )
       return
     }
 
@@ -231,6 +229,22 @@ export function App() {
       window.clearInterval(intervalId)
     }
   }, [vm.currentTeamId, vm.isAuthenticated])
+
+  React.useEffect(() => {
+    const identity =
+      vm.isAuthenticated && vm.me ? `${vm.me.id}:${String(vm.me.email || '').toLowerCase()}` : null
+    const previousIdentity = sandboxUiDeepLinkIdentityRef.current
+    sandboxUiDeepLinkIdentityRef.current = identity
+    if (!shouldPurgeSandboxUiDeepLinks(previousIdentity, identity)) return
+
+    setPendingSandboxUiDeepLinks([])
+    processingSandboxUiDeepLinkIdRef.current = null
+    sandboxUiDeepLinkGenerationRef.current += 1
+    const clearPendingDeepLinks = window.clerum.sandboxUi.clearPendingDeepLinks
+    if (typeof clearPendingDeepLinks === 'function') {
+      void clearPendingDeepLinks().catch(() => undefined)
+    }
+  }, [vm.isAuthenticated, vm.me])
 
   const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp) => {
     setActiveSandboxUiApp(app)
@@ -299,11 +313,15 @@ export function App() {
   const handleSidebarNavSelect = React.useCallback(
     (item: NavItem) => {
       setSandboxUiConversationOrigin(
-        getConversationOriginForNavigation(item, activeConversationOrigin)
+        getConversationOriginForNavigation(
+          item,
+          activeConversationOrigin,
+          sandboxUiConversationOrigin
+        )
       )
       vm.handleNavSelect(item)
     },
-    [activeConversationOrigin, vm.handleNavSelect]
+    [activeConversationOrigin, sandboxUiConversationOrigin, vm.handleNavSelect]
   )
 
   const handleOpenSandboxUiApp = React.useCallback(
@@ -352,13 +370,16 @@ export function App() {
     const pending = pendingSandboxUiDeepLinks[0]
     if (!pending || processingSandboxUiDeepLinkIdRef.current !== null) return
     processingSandboxUiDeepLinkIdRef.current = pending.link.id
+    const processingGeneration = sandboxUiDeepLinkGenerationRef.current
 
     void (async () => {
       try {
         if (pending.link.teamId && pending.link.teamId !== vm.currentTeamId) {
           await vm.handleEnsureTeamContext({ teamId: pending.link.teamId })
         }
+        if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
         const result = await window.clerum.sandboxUi.listApps()
+        if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
         const availableApps = toActiveSandboxUiApps(result.apps)
         setAvailableSandboxUiApps(availableApps)
         const resolution = resolveSandboxUiDeepLinkApp(result.apps, pending.link.appRef)
@@ -373,19 +394,28 @@ export function App() {
         launchSandboxUiApp(
           {
             ...resolution.app,
-            routePath: pending.link.path,
+            ...(pending.link.path ? { routePath: pending.link.path } : {}),
           },
-          pending.conversationOrigin
+          pending.conversationOrigin ?? sandboxUiConversationOrigin
         )
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         vm.pushToast(`Could not open app link: ${message}`, 'error')
       } finally {
-        await window.clerum.sandboxUi.acknowledgeDeepLink(pending.link.id).catch(() => undefined)
+        if (
+          processingGeneration !== sandboxUiDeepLinkGenerationRef.current ||
+          processingSandboxUiDeepLinkIdRef.current !== pending.link.id
+        ) {
+          return
+        }
         setPendingSandboxUiDeepLinks(current =>
           current.filter(item => item.link.id !== pending.link.id)
         )
         processingSandboxUiDeepLinkIdRef.current = null
+        const acknowledgeDeepLink = window.clerum.sandboxUi.acknowledgeDeepLink
+        if (typeof acknowledgeDeepLink === 'function') {
+          await acknowledgeDeepLink(pending.link.id).catch(() => undefined)
+        }
       }
     })()
   }, [
@@ -396,6 +426,7 @@ export function App() {
     vm.handleEnsureTeamContext,
     vm.isAuthenticated,
     vm.pushToast,
+    sandboxUiConversationOrigin,
   ])
 
   React.useEffect(() => {

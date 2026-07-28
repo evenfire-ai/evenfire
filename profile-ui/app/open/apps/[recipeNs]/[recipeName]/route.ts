@@ -3,7 +3,7 @@ import {
   buildEvenfireDesktopAppContentSecurityPolicy,
   buildEvenfireDesktopAppLink,
   buildEvenfireDesktopAppRedirectDocument,
-} from '@lib/desktopAppLinks'
+} from '../../../../../lib/desktopAppLinks'
 
 export const dynamic = 'force-dynamic'
 
@@ -16,7 +16,7 @@ export async function GET(
   const deepLink = buildEvenfireDesktopAppLink({
     recipeNs: params.recipeNs,
     recipeName: params.recipeName,
-    path: requestUrl.searchParams.get('path') || '/',
+    path: requestUrl.searchParams.get('path') || undefined,
     teamId: requestUrl.searchParams.get('team') || undefined,
   })
 
@@ -26,6 +26,8 @@ export async function GET(
       headers: {
         'Cache-Control': 'no-store',
         'Content-Type': 'text/plain; charset=utf-8',
+        'Referrer-Policy': 'no-referrer',
+        'X-Content-Type-Options': 'nosniff',
       },
     })
   }

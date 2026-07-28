@@ -149,6 +149,7 @@ function useEmbedBounds(
 }
 
 const APP_PAGE_SIZE = 6
+let pendingSandboxUiUnmountCleanup: number | null = null
 
 export function SandboxUiPage({
   boundsRefreshKey = 0,
@@ -174,7 +175,6 @@ export function SandboxUiPage({
   const [embedPreviewDataUrl, setEmbedPreviewDataUrl] = useState<string | null>(null)
   const embedSlotRef = useRef<HTMLDivElement>(null)
   const lastShortcutOpenRequestIdRef = useRef(0)
-  const pendingUnmountCleanupRef = useRef<number | null>(null)
   const shellOverlayOpen =
     headerShellOverlayOpen || sidebarShellOverlayOpen || toastShellOverlayOpen
 
@@ -219,14 +219,14 @@ export function SandboxUiPage({
   }, [])
 
   // Tear down the embed when this page unmounts (user navigates away).
-  useEffect(() => {
-    if (pendingUnmountCleanupRef.current !== null) {
-      window.clearTimeout(pendingUnmountCleanupRef.current)
-      pendingUnmountCleanupRef.current = null
+  useLayoutEffect(() => {
+    if (pendingSandboxUiUnmountCleanup !== null) {
+      window.clearTimeout(pendingSandboxUiUnmountCleanup)
+      pendingSandboxUiUnmountCleanup = null
     }
     return () => {
-      pendingUnmountCleanupRef.current = window.setTimeout(() => {
-        pendingUnmountCleanupRef.current = null
+      pendingSandboxUiUnmountCleanup = window.setTimeout(() => {
+        pendingSandboxUiUnmountCleanup = null
         void window.clerum.sandboxUi.close()
         onEmbeddedAppBack?.()
       }, 0)
@@ -256,6 +256,7 @@ export function SandboxUiPage({
         label: app.label,
         icon: app.icon,
         defaultPath: app.defaultPath,
+        ...(app.routePath ? { routePath: app.routePath } : {}),
       })
       try {
         const rect = await waitForEmbedSlotRect(embedSlotRef)

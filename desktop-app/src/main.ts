@@ -5,11 +5,8 @@ import { config } from './config.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator } from './mainWindowCoordinator.js'
 import { collectInitialProtocolUrls } from './protocolLaunchArgs.js'
-import {
-  type SandboxUiDeepLinkEnvelope,
-  parseSandboxUiDeepLink,
-  sandboxUiDeepLinkTargetsEqual,
-} from './sandboxUiDeepLinks.js'
+import { SandboxUiDeepLinkQueue } from './sandboxUiDeepLinkQueue.js'
+import { parseSandboxUiDeepLink } from './sandboxUiDeepLinks.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
@@ -26,8 +23,7 @@ process.stderr?.on?.('error', () => {})
 let mainWindow: BrowserWindow | null = null
 const appService = new AppService()
 const pendingEvenfireUrls: string[] = []
-const pendingSandboxUiDeepLinks: SandboxUiDeepLinkEnvelope[] = []
-let sandboxUiDeepLinkSequence = 0
+const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 let mainWindowLifecycleReady = false
 
 function systemIconAssetsDirectory(): string {
@@ -98,15 +94,19 @@ ipcMain.handle('window:getVisibility', event => {
 
 ipcMain.handle('sandboxUi:listPendingDeepLinks', event => {
   assertTrustedSender(event)
-  return { links: [...pendingSandboxUiDeepLinks] }
+  return { links: sandboxUiDeepLinkQueue.list() }
+})
+
+ipcMain.handle('sandboxUi:clearPendingDeepLinks', event => {
+  assertTrustedSender(event)
+  sandboxUiDeepLinkQueue.clear()
 })
 
 ipcMain.handle('sandboxUi:acknowledgeDeepLink', (event, payload: { id?: unknown }) => {
   assertTrustedSender(event)
   const id = Number(payload?.id)
   if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid app deep-link id')
-  const index = pendingSandboxUiDeepLinks.findIndex(link => link.id === id)
-  if (index >= 0) pendingSandboxUiDeepLinks.splice(index, 1)
+  sandboxUiDeepLinkQueue.acknowledge(id)
 })
 const DESKTOP_SETUP_PROTOCOL = 'evenfire'
 const CLERUM_PROTOCOL = 'clerum'
@@ -138,17 +138,11 @@ function handleSandboxUiDeepLink(rawUrl: string): boolean {
   // Coalesce only while the same semantic target is awaiting renderer
   // acknowledgement. Query-parameter order cannot bypass this check, and once
   // acknowledged, an immediate user re-click creates a fresh envelope.
-  if (pendingSandboxUiDeepLinks.some(pending => sandboxUiDeepLinkTargetsEqual(pending, target))) {
+  const envelope = sandboxUiDeepLinkQueue.enqueue(target)
+  if (!envelope) {
     requestMainWindow()
     return true
   }
-
-  const envelope: SandboxUiDeepLinkEnvelope = {
-    id: (sandboxUiDeepLinkSequence += 1),
-    ...target,
-  }
-  pendingSandboxUiDeepLinks.push(envelope)
-  if (pendingSandboxUiDeepLinks.length > 20) pendingSandboxUiDeepLinks.shift()
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('sandboxUi:deepLink', envelope)
   }
@@ -182,7 +176,7 @@ function handleEvenfireUrl(rawUrl: string): void {
   }
 
   if (parsed.hostname === 'app') {
-    handleSandboxUiDeepLink(rawUrl)
+    if (!handleSandboxUiDeepLink(rawUrl)) requestMainWindow()
     return
   }
 
@@ -205,8 +199,7 @@ function handleEvenfireUrl(rawUrl: string): void {
     if (!externalRestApiBaseUrl) return
 
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show()
-      mainWindow.focus()
+      focusMainWindow()
       mainWindow.webContents.send('auth:desktopEnvironmentSetup', {
         externalRestApiBaseUrl,
         appName,
@@ -225,8 +218,7 @@ function handleEvenfireUrl(rawUrl: string): void {
   if (!email || !authorizationToken) return
 
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.show()
-    mainWindow.focus()
+    focusMainWindow()
     mainWindow.webContents.send('auth:desktopSetupToken', { email, authorizationToken })
   } else {
     pendingEvenfireUrls.push(rawUrl)
@@ -262,11 +254,7 @@ function handleClerumUrl(rawUrl: string): void {
     driver.dispatchSandboxUiOauthCompleted({ oauthClientId, provider })
   })()
 
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    if (mainWindow.isMinimized()) mainWindow.restore()
-    mainWindow.show()
-    mainWindow.focus()
-  }
+  focusMainWindow()
 }
 
 registerCustomProtocols()
@@ -276,10 +264,9 @@ if (!gotSingleInstanceLock) {
   app.quit()
 } else {
   app.on('second-instance', (_event, argv) => {
-    const desktopSetupLink = argv.find(arg => arg.startsWith(`${DESKTOP_SETUP_PROTOCOL}://`))
-    if (desktopSetupLink) handleEvenfireUrl(desktopSetupLink)
-    const clerumLink = argv.find(arg => arg.startsWith(`${CLERUM_PROTOCOL}://`))
-    if (clerumLink) handleClerumUrl(clerumLink)
+    const protocolUrls = collectInitialProtocolUrls(argv)
+    protocolUrls.evenfireUrls.forEach(handleEvenfireUrl)
+    protocolUrls.clerumUrls.forEach(handleClerumUrl)
     requestMainWindow()
   })
 }
@@ -363,8 +350,8 @@ if (gotSingleInstanceLock) {
     const initialProtocolUrls = collectInitialProtocolUrls(process.argv)
     pendingEvenfireUrls.push(...initialProtocolUrls.evenfireUrls)
     await mainWindowCoordinator.ensureWindow()
-    if (process.platform !== 'darwin' && initialProtocolUrls.clerumUrl) {
-      handleClerumUrl(initialProtocolUrls.clerumUrl)
+    if (process.platform !== 'darwin') {
+      initialProtocolUrls.clerumUrls.forEach(handleClerumUrl)
     }
     wirePowerMonitor()
 

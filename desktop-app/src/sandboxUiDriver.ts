@@ -122,6 +122,7 @@ export function getActiveSandboxUiLocation(): {
   path: string
 } | null {
   if (!active) return null
+  if (active.view.webContents.isDestroyed()) return null
   const currentPath = extractSandboxUiViewRoute({
     currentUrl: active.view.webContents.getURL(),
     rpcProxyOrigin: active.rpcProxyOrigin,
@@ -380,12 +381,43 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     const clientRouteUrl =
       `${proxyOriginUrl}/api/v1/sandbox-ui/` +
       `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${clientRoutePath}`
-    view.webContents.once('did-finish-load', () => {
-      if (!active || active.view !== view || view.webContents.isDestroyed()) return
-      void applySandboxUiClientRoute(view.webContents, clientRouteUrl).catch(err => {
-        console.warn('[SandboxUI] client route handoff failed:', err)
-      })
-    })
+    let lastNavigation = { url: '', status: 0 }
+    const cleanupClientRouteHandoff = () => {
+      view.webContents.removeListener('did-navigate', onDidNavigate)
+      view.webContents.removeListener('did-finish-load', onDidFinishLoad)
+    }
+    const onDidNavigate = (
+      _event: Electron.Event,
+      navigatedUrl: string,
+      httpResponseCode: number
+    ) => {
+      lastNavigation = { url: navigatedUrl, status: httpResponseCode }
+    }
+    const onDidFinishLoad = () => {
+      if (!active || active.view !== view || view.webContents.isDestroyed()) {
+        cleanupClientRouteHandoff()
+        return
+      }
+      if (
+        !canApplySandboxUiClientRoute({
+          expectedUrl: url,
+          currentUrl: view.webContents.getURL(),
+          navigatedUrl: lastNavigation.url,
+          httpResponseCode: lastNavigation.status,
+        })
+      ) {
+        return
+      }
+      void applySandboxUiClientRoute(view.webContents, clientRouteUrl)
+        .then(applied => {
+          if (applied) cleanupClientRouteHandoff()
+        })
+        .catch(err => {
+          console.warn('[SandboxUI] client route handoff failed:', err)
+        })
+    }
+    view.webContents.on('did-navigate', onDidNavigate)
+    view.webContents.on('did-finish-load', onDidFinishLoad)
   }
   // Drop the HTTP cache on every open so a stale entry from a prior
   // broken pod can't keep painting after the recipe is healthy. The
@@ -427,6 +459,20 @@ export async function applySandboxUiClientRoute(
       }
       return window.location.href === targetUrl;
     })()`)
+  )
+}
+
+export function canApplySandboxUiClientRoute(input: {
+  expectedUrl: string
+  currentUrl: string
+  navigatedUrl: string
+  httpResponseCode: number
+}): boolean {
+  return (
+    input.currentUrl === input.expectedUrl &&
+    input.navigatedUrl === input.expectedUrl &&
+    input.httpResponseCode >= 200 &&
+    input.httpResponseCode < 400
   )
 }
 

@@ -60,6 +60,7 @@ jobs:
           - workflow-approval-request-reader
           - stdio-bridge
           - external-rest-api
+          - profile-ui
           - desktop-app
           - mcp-servers
           - packages/workflow-runtime-core

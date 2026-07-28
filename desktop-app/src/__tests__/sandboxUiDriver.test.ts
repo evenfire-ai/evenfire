@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   SANDBOX_UI_COOKIE_NAME,
   applySandboxUiClientRoute,
+  canApplySandboxUiClientRoute,
   extractSandboxUiCookie,
   extractSandboxUiPath,
   partitionFor,
@@ -33,6 +34,40 @@ describe('applySandboxUiClientRoute', () => {
       )
     ).resolves.toBe(false)
     expect(executeJavaScript).not.toHaveBeenCalled()
+  })
+})
+
+describe('canApplySandboxUiClientRoute', () => {
+  const expectedUrl = 'https://rpc.example/api/v1/sandbox-ui/ns/app/view/'
+
+  it('waits through a 503 interstitial before handing off the client route', () => {
+    expect(
+      canApplySandboxUiClientRoute({
+        expectedUrl,
+        currentUrl: expectedUrl,
+        navigatedUrl: expectedUrl,
+        httpResponseCode: 503,
+      })
+    ).toBe(false)
+  })
+
+  it('accepts only a successful load of the expected server route', () => {
+    expect(
+      canApplySandboxUiClientRoute({
+        expectedUrl,
+        currentUrl: expectedUrl,
+        navigatedUrl: expectedUrl,
+        httpResponseCode: 200,
+      })
+    ).toBe(true)
+    expect(
+      canApplySandboxUiClientRoute({
+        expectedUrl,
+        currentUrl: `${expectedUrl}unexpected`,
+        navigatedUrl: expectedUrl,
+        httpResponseCode: 200,
+      })
+    ).toBe(false)
   })
 })
 

@@ -16,12 +16,17 @@ describe('collectInitialProtocolUrls', () => {
       'Evenfire',
       'evenfire://app/sandbox-recipes/task-board?path=%2Ftasks',
       'clerum://oauth-completed?clientId=github&provider=github',
+      'clerum://oauth-completed?clientId=slack&provider=slack',
+      'clerum://oauth-completed?clientId=github&provider=github',
       '--unrelated',
     ])
 
     expect(result).toEqual({
       evenfireUrls: ['evenfire://app/sandbox-recipes/task-board?path=%2Ftasks'],
-      clerumUrl: 'clerum://oauth-completed?clientId=github&provider=github',
+      clerumUrls: [
+        'clerum://oauth-completed?clientId=github&provider=github',
+        'clerum://oauth-completed?clientId=slack&provider=slack',
+      ],
     })
   })
 })

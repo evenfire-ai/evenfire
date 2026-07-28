@@ -556,6 +556,7 @@ declare global {
         reload: () => Promise<void>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
         listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
+        clearPendingDeepLinks?: () => Promise<void>
         acknowledgeDeepLink: (id: number) => Promise<void>
         setBounds: (bounds: {
           x: number

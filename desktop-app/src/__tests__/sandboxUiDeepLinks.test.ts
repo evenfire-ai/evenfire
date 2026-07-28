@@ -37,6 +37,26 @@ describe('sandbox UI deep links', () => {
     )
   })
 
+  it('preserves a profile UI base-path prefix', () => {
+    expect(
+      buildSandboxUiWebLink('https://tenant.example.com/profile/', {
+        recipeNs: 'sandbox-recipes',
+        recipeName: 'agentic-task-board',
+      })
+    ).toBe('https://tenant.example.com/profile/open/apps/sandbox-recipes/agentic-task-board')
+  })
+
+  it('keeps an omitted path optional so the recipe default route wins', () => {
+    const url = buildSandboxUiDeepLink({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'agentic-task-board',
+    })
+    expect(url).not.toContain('path=')
+    expect(parseSandboxUiDeepLink(url)).toEqual({
+      appRef: 'sandbox-recipes/agentic-task-board',
+    })
+  })
+
   it('rejects a non-web handoff origin', () => {
     expect(() =>
       buildSandboxUiWebLink('javascript:alert(1)', {
@@ -63,6 +83,16 @@ describe('sandbox UI deep links', () => {
       parseSandboxUiDeepLink('evenfire://app/sandbox-recipes/agentic-task-board?team=team%2Fother')
     ).toBeNull()
     expect(parseSandboxUiDeepLink('https://example.com/app')).toBeNull()
+    expect(
+      parseSandboxUiDeepLink(
+        'evenfire://app/sandbox-recipes/agentic-task-board?path=%2Fsafe%2F..%2Fadmin'
+      )
+    ).toBeNull()
+    expect(
+      parseSandboxUiDeepLink(
+        'evenfire://app/sandbox-recipes/agentic-task-board?path=%2Fsafe%2F%252e%252e%2Fadmin'
+      )
+    ).toBeNull()
   })
 
   it('extracts the current route from the active embedded app URL', () => {

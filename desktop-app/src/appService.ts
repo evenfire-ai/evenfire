@@ -693,16 +693,7 @@ export class AppService {
     options: ProfileSettingsOpenOptions = {}
   ): Promise<{ profileUiUrl: string }> {
     const normalizedEmail = email.trim().toLowerCase()
-    let profileUiBaseUrl = config.desktopProfileUiBaseUrl
-    if (normalizedEmail) {
-      try {
-        const activation =
-          await this.memberRegistrationServiceClient.getInvitationProfile(normalizedEmail)
-        profileUiBaseUrl = activation.profileUiBaseUrl
-      } catch {
-        profileUiBaseUrl = config.desktopProfileUiBaseUrl
-      }
-    }
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(normalizedEmail)
 
     const network = String(options.network || '')
       .trim()
@@ -716,6 +707,20 @@ export class AppService {
     const { shell } = await import('electron')
     await shell.openExternal(profileUiUrl.toString())
     return { profileUiUrl: profileUiUrl.toString() }
+  }
+
+  private async resolveProfileUiBaseUrl(email?: string): Promise<string> {
+    const normalizedEmail = String(email || this.me?.email || '')
+      .trim()
+      .toLowerCase()
+    if (!normalizedEmail) return config.desktopProfileUiBaseUrl
+    try {
+      const activation =
+        await this.memberRegistrationServiceClient.getInvitationProfile(normalizedEmail)
+      return activation.profileUiBaseUrl
+    } catch {
+      return config.desktopProfileUiBaseUrl
+    }
   }
 
   async completeDesktopSetup(email: string, authorizationToken: string) {
@@ -2921,8 +2926,9 @@ export class AppService {
     const { buildSandboxUiWebLink } = await import('./sandboxUiDeepLinks.js')
     const location = driver.getActiveSandboxUiLocation()
     if (!location) throw new Error('No app is currently open')
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl()
     return {
-      url: buildSandboxUiWebLink(config.desktopProfileUiBaseUrl, {
+      url: buildSandboxUiWebLink(profileUiBaseUrl, {
         ...location,
         teamId: String(teamId || '').trim() || undefined,
       }),

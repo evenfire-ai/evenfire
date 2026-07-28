@@ -41,6 +41,7 @@ SERVICES := \
 	webhook-proxy \
 	webhook-gateway \
 	stdio-bridge \
+	profile-ui \
 	desktop-app \
 	mcp-servers \
 	packages/workflow-runtime-core \
@@ -59,6 +60,7 @@ TEST_SERVICES := \
 	webhook-proxy \
 	webhook-gateway \
 	stdio-bridge \
+	profile-ui \
 	desktop-app \
 	mcp-servers \
 	packages/workflow-runtime-core \

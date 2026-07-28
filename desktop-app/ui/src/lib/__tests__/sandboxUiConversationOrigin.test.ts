@@ -13,15 +13,21 @@ const conversationOrigin = {
 
 describe('sandbox UI conversation origin', () => {
   it('preserves an active conversation while navigating to the Apps picker', () => {
-    expect(getConversationOriginForNavigation(DESKTOP_ROUTES.apps, conversationOrigin)).toEqual(
-      conversationOrigin
-    )
+    expect(
+      getConversationOriginForNavigation(DESKTOP_ROUTES.apps, conversationOrigin, null)
+    ).toEqual(conversationOrigin)
   })
 
   it('clears the preserved conversation when navigating elsewhere', () => {
-    expect(getConversationOriginForNavigation(DESKTOP_ROUTES.settings, conversationOrigin)).toBe(
-      null
-    )
+    expect(
+      getConversationOriginForNavigation(DESKTOP_ROUTES.settings, conversationOrigin, null)
+    ).toBe(null)
+  })
+
+  it('keeps the preserved origin when Apps is selected again', () => {
+    expect(
+      getConversationOriginForNavigation(DESKTOP_ROUTES.apps, null, conversationOrigin)
+    ).toEqual(conversationOrigin)
   })
 
   it('uses the preserved conversation when launching from the Apps picker', () => {
