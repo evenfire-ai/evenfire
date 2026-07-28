@@ -6852,6 +6852,30 @@ textarea.cu-input {
   margin: 0;
 }
 
+/* Stored keys queued for retirement. The deletion lands on SAVE, so this is
+   the only signal between the click and the write — warning tone, not the
+   muted hint color it inherits from .cu-field__hint. The element stays mounted
+   as a live region even with nothing queued, so :empty (never whitespace — it
+   renders no children at all) takes it out of the flow instead of leaving the
+   editor's column gap around a blank line. */
+.cu-llm-cred-removed {
+  margin: 0;
+  color: var(--cu-warning);
+}
+
+.cu-llm-cred-removed:empty {
+  display: none;
+}
+
+/* Match the monospace key-name inputs the listed keys were typed into (same
+   stack as .cu-input--monospace — the codebase has no mono font token). */
+.cu-llm-cred-removed code {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+  font-size: 0.95em;
+}
+
 /* The "Add provider" picker of the additive editor (a SelectionDropdown, so
    the width cap lands on its root element, not on a native <select>). The cap
    also bounds the popover menu, so it stays wide enough for the longest

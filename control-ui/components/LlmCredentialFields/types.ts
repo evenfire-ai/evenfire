@@ -27,6 +27,13 @@ export type LlmCredentialFieldsProps = {
   // Keys already stored in the Secret (edit mode) — light up the present chips
   // without ever exposing a value. Create flows omit it.
   existingKeys?: string[]
+  // Stored keys (a subset of `existingKeys`) the operator retired in this
+  // session: removed with the slot's X, or renamed away with a valid
+  // replacement typed under the new name. Reported on every change so the
+  // parent can send them as `removeKeys` on save — without this channel the
+  // draft alone can never express a deletion (it is write-only, and blanking a
+  // value is explicitly NOT deletion server-side). Create flows omit it.
+  onRemovedKeysChange?: (keys: string[]) => void
   // Render the "Add provider" picker as an always-open inline list instead of a
   // popover. Scroll-clipped surfaces (the update modal) must set it — an
   // absolute-positioned menu would open below the modal's visible fold.

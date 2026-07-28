@@ -12,9 +12,11 @@ afterEach(cleanup)
 function Harness({
   existingKeys,
   onDraftChange,
+  onRemovedKeysChange,
 }: {
   existingKeys?: string[]
   onDraftChange?: (dataKey: string, value: string) => void
+  onRemovedKeysChange?: (keys: string[]) => void
 }) {
   const [draft, setDraft] = useState<Record<string, string>>({})
   return (
@@ -25,6 +27,7 @@ function Harness({
         setDraft(prev => ({ ...prev, [dataKey]: value }))
       }}
       existingKeys={existingKeys}
+      onRemovedKeysChange={onRemovedKeysChange}
     />
   )
 }
@@ -184,7 +187,8 @@ describe('LlmCredentialFields (additive provider editor)', () => {
 
   it('offers no remove control for a stored provider or one holding a typed value', () => {
     render(<Harness existingKeys={['zai-api-key']} />)
-    // Stored in the Secret → deletion stays on removeSecretKey, never here.
+    // Stored in the Secret → retiring it is the per-slot X, never the
+    // section-level remove control.
     expect(screen.queryByRole('button', { name: 'Remove Z.AI provider' })).toBeNull()
 
     addProvider('openai')
@@ -297,6 +301,211 @@ describe('LlmCredentialFields (additive provider editor)', () => {
     // The real OpenAI credential is untouched; the collision is flagged.
     expect(openai.value).toBe('sk-real')
     expect(within(openaiGroup).getByText(/already exists as a provider slot/i)).toBeInTheDocument()
+  })
+})
+
+// Removing or renaming a STORED extra slot has to travel out of the component
+// as an explicit retirement: the draft is write-only, and a blank value is not
+// a deletion server-side, so without this channel the row would disappear from
+// the form while the key stayed in the Kubernetes Secret forever.
+describe('LlmCredentialFields — retiring stored extra slots', () => {
+  const removeSlotButton = (group: HTMLElement) =>
+    within(group).getByRole('button', { name: 'Remove extra credential slot' })
+
+  // The queued-removal hint is a permanently mounted live region (empty when
+  // nothing is queued), and its keys are wrapped in <code>, so it is read as
+  // one element's text rather than matched with getByText.
+  const removalHint = () => document.querySelector('.cu-llm-cred-removed') as HTMLElement
+
+  it('reports the stored key when its seeded slot is removed', () => {
+    const onRemovedKeysChange = vi.fn()
+    render(
+      <Harness existingKeys={['claude-api-key-fb1']} onRemovedKeysChange={onRemovedKeysChange} />
+    )
+    // Nothing is pending until the operator acts, but the live region is
+    // already mounted so its first announcement is not missed.
+    expect(onRemovedKeysChange).toHaveBeenLastCalledWith([])
+    expect(removalHint()).toBeEmptyDOMElement()
+
+    fireEvent.click(removeSlotButton(sectionOf('Anthropic')))
+
+    expect(onRemovedKeysChange).toHaveBeenLastCalledWith(['claude-api-key-fb1'])
+    // The row is gone, exactly as before — the hint is what makes the queued
+    // deletion visible before it is written.
+    expect(screen.queryByLabelText(/Extra credential slot key name/i)).toBeNull()
+    expect(removalHint()).toHaveTextContent(
+      'Will be removed from the stored secret on save: claude-api-key-fb1.'
+    )
+  })
+
+  it('reports the original key when a seeded slot is renamed with a value', () => {
+    const onRemovedKeysChange = vi.fn()
+    render(
+      <Harness existingKeys={['claude-api-key-fb1']} onRemovedKeysChange={onRemovedKeysChange} />
+    )
+    const group = sectionOf('Anthropic')
+    const name = within(group).getByLabelText(/Extra credential slot key name/i)
+    const value = within(group).getByLabelText(/Extra credential slot value/i)
+
+    fireEvent.change(name, { target: { value: 'claude-api-key-fb2' } })
+    // Renamed but nothing typed yet: the rename writes no replacement, so
+    // retiring the stored key would delete the credential instead of moving it.
+    expect(onRemovedKeysChange).toHaveBeenLastCalledWith([])
+
+    fireEvent.change(value, { target: { value: 'sk-ant-new' } })
+    expect(onRemovedKeysChange).toHaveBeenLastCalledWith(['claude-api-key-fb1'])
+
+    // Renaming back to the stored name un-queues it — the write now targets the
+    // very key that was pending retirement, and "retirement wins" server-side
+    // would have dropped the new value.
+    fireEvent.change(name, { target: { value: 'claude-api-key-fb1' } })
+    expect(onRemovedKeysChange).toHaveBeenLastCalledWith([])
+    expect(removalHint()).toBeEmptyDOMElement()
+  })
+
+  it('reports nothing when an invalid rename never commits a replacement', () => {
+    const onRemovedKeysChange = vi.fn()
+    render(
+      <Harness existingKeys={['claude-api-key-fb1']} onRemovedKeysChange={onRemovedKeysChange} />
+    )
+    const group = sectionOf('Anthropic')
+    fireEvent.change(within(group).getByLabelText(/Extra credential slot key name/i), {
+      target: { value: 'claude-api-key' },
+    })
+    fireEvent.change(within(group).getByLabelText(/Extra credential slot value/i), {
+      target: { value: 'sk-ant-new' },
+    })
+    // The name collides with the canonical Anthropic slot, so nothing is
+    // committed — and an uncommitted rename must not retire anything.
+    expect(within(group).getByText(/already exists as a provider slot/i)).toBeInTheDocument()
+    expect(onRemovedKeysChange).toHaveBeenLastCalledWith([])
+  })
+
+  it('reports nothing when a slot created in this session is removed', () => {
+    const onRemovedKeysChange = vi.fn()
+    render(<Harness onRemovedKeysChange={onRemovedKeysChange} />)
+    addProvider('zai')
+    const group = sectionOf('Z.AI')
+    fireEvent.click(within(group).getByRole('button', { name: /Add credential slot/i }))
+    fireEvent.change(within(group).getByLabelText(/Extra credential slot value/i), {
+      target: { value: 'zai-fallback' },
+    })
+    fireEvent.click(removeSlotButton(group))
+
+    // No stored key was ever behind this row — clearing the draft is the whole
+    // removal.
+    expect(onRemovedKeysChange).toHaveBeenLastCalledWith([])
+    expect(removalHint()).toBeEmptyDOMElement()
+  })
+
+  it('un-retires a stored key re-created under the same name (no silent delete)', () => {
+    // Repro of the delete-then-recreate hole: X the seeded row, add a fresh
+    // slot, type the SAME key name back with a value. If the name kept
+    // colliding with `knownKeys` it would never commit, the value would never
+    // reach the draft, and the queued retirement would still ship — deleting
+    // the key and throwing away the credential typed for it.
+    const onDraftChange = vi.fn()
+    const onRemovedKeysChange = vi.fn()
+    render(
+      <Harness
+        existingKeys={['claude-api-key-fb1']}
+        onDraftChange={onDraftChange}
+        onRemovedKeysChange={onRemovedKeysChange}
+      />
+    )
+    fireEvent.click(removeSlotButton(sectionOf('Anthropic')))
+    expect(onRemovedKeysChange).toHaveBeenLastCalledWith(['claude-api-key-fb1'])
+
+    const group = sectionOf('Anthropic')
+    fireEvent.click(within(group).getByRole('button', { name: /Add credential slot/i }))
+    fireEvent.change(within(group).getByLabelText(/Extra credential slot key name/i), {
+      target: { value: 'claude-api-key-fb1' },
+    })
+
+    // A key on its way out is not a collision — re-typing it takes the removal
+    // back, and the row becomes an ordinary seeded row again.
+    expect(within(group).queryByText(/already exists as a provider slot/i)).toBeNull()
+    expect(onRemovedKeysChange).toHaveBeenLastCalledWith([])
+    expect(removalHint()).toBeEmptyDOMElement()
+
+    fireEvent.change(within(group).getByLabelText(/Extra credential slot value/i), {
+      target: { value: 'sk-ant-new' },
+    })
+    expect(onDraftChange).toHaveBeenLastCalledWith('claude-api-key-fb1', 'sk-ant-new')
+    expect(onRemovedKeysChange).toHaveBeenLastCalledWith([])
+  })
+
+  it('re-creating a retired key with no value neither writes nor retires it', () => {
+    const onRemovedKeysChange = vi.fn()
+    render(
+      <Harness existingKeys={['claude-api-key-fb1']} onRemovedKeysChange={onRemovedKeysChange} />
+    )
+    fireEvent.click(removeSlotButton(sectionOf('Anthropic')))
+    const group = sectionOf('Anthropic')
+    fireEvent.click(within(group).getByRole('button', { name: /Add credential slot/i }))
+    fireEvent.change(within(group).getByLabelText(/Extra credential slot key name/i), {
+      target: { value: 'claude-api-key-fb1' },
+    })
+
+    // Nothing queued: the stored key simply survives untouched.
+    expect(onRemovedKeysChange).toHaveBeenLastCalledWith([])
+    // And the row is a seeded row again, so it is not flagged as an incomplete
+    // rename either.
+    expect(within(group).queryByText(/Type a value to complete the rename/i)).toBeNull()
+  })
+
+  it('flags a seeded slot renamed without a value as an incomplete rename', () => {
+    render(<Harness existingKeys={['claude-api-key-fb1']} />)
+    const group = sectionOf('Anthropic')
+    const name = within(group).getByLabelText(/Extra credential slot key name/i)
+
+    expect(within(group).queryByText(/Type a value to complete the rename/i)).toBeNull()
+    fireEvent.change(name, { target: { value: 'claude-api-key-fb2' } })
+    // Mute state made audible: the rename writes nothing, so the stored key
+    // keeps its old name and saving does nothing to this row.
+    expect(
+      within(group).getByText(/Type a value to complete the rename.*claude-api-key-fb1/i)
+    ).toBeInTheDocument()
+
+    fireEvent.change(within(group).getByLabelText(/Extra credential slot value/i), {
+      target: { value: 'sk-ant-new' },
+    })
+    expect(within(group).queryByText(/Type a value to complete the rename/i)).toBeNull()
+  })
+
+  it('does not re-report while unrelated canonical slots are typed', () => {
+    const onRemovedKeysChange = vi.fn()
+    render(<Harness existingKeys={['openai-api-key']} onRemovedKeysChange={onRemovedKeysChange} />)
+    // One report on mount, establishing the (empty) live region.
+    expect(onRemovedKeysChange.mock.calls).toHaveLength(1)
+
+    const input = screen.getByLabelText(/^OpenAI API key/i)
+    for (const value of ['s', 'sk', 'sk-', 'sk-l']) {
+      fireEvent.change(input, { target: { value } })
+    }
+    // The effect keys off the retirement signature, not the draft — keystrokes
+    // that retire nothing must not churn the parent's state.
+    expect(onRemovedKeysChange.mock.calls).toHaveLength(1)
+  })
+
+  it('lists every queued key in one hint, deduplicated and ordered', () => {
+    const onRemovedKeysChange = vi.fn()
+    render(
+      <Harness
+        existingKeys={['openai-api-key-fb2', 'claude-api-key-fb1']}
+        onRemovedKeysChange={onRemovedKeysChange}
+      />
+    )
+    fireEvent.click(removeSlotButton(sectionOf('OpenAI')))
+    fireEvent.click(removeSlotButton(sectionOf('Anthropic')))
+
+    expect(onRemovedKeysChange).toHaveBeenLastCalledWith([
+      'claude-api-key-fb1',
+      'openai-api-key-fb2',
+    ])
+    expect(removalHint()).toHaveTextContent(
+      'Will be removed from the stored secret on save: claude-api-key-fb1, openai-api-key-fb2.'
+    )
   })
 })
 

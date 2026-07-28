@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { LlmProviderIcon } from '@/components/LlmProviderIcon'
@@ -92,11 +92,17 @@ export function LlmCredentialFields({
   onChange,
   disabled = false,
   existingKeys,
+  onRemovedKeysChange,
   pickerInline = false,
 }: LlmCredentialFieldsProps) {
   const [extraSlots, setExtraSlots] = useState<ExtraSlot[]>(() =>
     seedExistingExtraSlots(existingKeys)
   )
+  // Stored keys whose seeded ROW was deleted with the X. Rename-driven
+  // retirement is NOT tracked here — it is derived from `extraSlots` below, so
+  // renaming back to the original name un-retires the key without any undo
+  // bookkeeping (one source of truth per retirement cause).
+  const [removedSeededKeys, setRemovedSeededKeys] = useState<ReadonlySet<string>>(() => new Set())
   // Providers the operator surfaced with "＋ Add provider" this session. Resets
   // with the mount (the update modal mounts fresh per row; the create flow
   // remounts per step) — a remount is auto-cured by the draft term below.
@@ -154,13 +160,56 @@ export function LlmCredentialFields({
     return keys
   }, [existingKeySet])
 
+  // Stored keys pending retirement on save. Two causes, one derivation:
+  //   - REMOVED: the seeded row was deleted with its X (`removedSeededKeys`).
+  //   - RENAMED: a seeded row still on screen whose committed key differs from
+  //     the stored one AND carries a typed value. The value term matters — a
+  //     rename with no value writes nothing, so retiring the old key would
+  //     delete the credential outright instead of replacing it. Renaming back
+  //     to `existingKey` naturally drops out of this set.
+  // Finally, a key the draft is currently writing is never retired: the server
+  // resolves "in data AND in removeKeys" as retirement-wins, which would throw
+  // away the value the operator just typed.
+  const removedKeys = useMemo(() => {
+    const keys = new Set<string>(removedSeededKeys)
+    for (const slot of extraSlots) {
+      if (!slot.existingKey) continue
+      if (!slot.committedKey || slot.committedKey === slot.existingKey) continue
+      if (slot.value.trim().length === 0) continue
+      keys.add(slot.existingKey)
+    }
+    return Array.from(keys)
+      .filter(key => (draft[key] ?? '').trim().length === 0)
+      .sort((a, b) => a.localeCompare(b))
+  }, [draft, extraSlots, removedSeededKeys])
+
+  // Report only on real change. `removedKeys` is a fresh array every render, so
+  // the SIGNATURE is the effect's dependency (a k8s data key cannot contain a
+  // newline, so the join is unambiguous). The callback reaches the effect
+  // through a ref latch rather than the dependency array: parents pass an
+  // inline closure, and depending on that identity would re-fire the effect on
+  // every render the report itself causes.
+  const notifyRemovedKeys = useRef(onRemovedKeysChange)
+  notifyRemovedKeys.current = onRemovedKeysChange
+  const removedKeysSignature = removedKeys.join('\n')
+  useEffect(() => {
+    notifyRemovedKeys.current?.(
+      removedKeysSignature.length > 0 ? removedKeysSignature.split('\n') : []
+    )
+  }, [removedKeysSignature])
+
   function extraSlotError(slot: ExtraSlot, nameInput: string): string | null {
     const trimmed = nameInput.trim()
     if (!trimmed) return 'Key name is required.'
     if (!DATA_KEY_PATTERN.test(trimmed)) return 'Use lowercase letters, numbers, and - . _'
     // A slot seeded from a stored key may keep (and rewrite) its own name; any
-    // OTHER known key is still a collision.
-    if (knownKeys.has(trimmed) && trimmed !== slot.existingKey) {
+    // OTHER known key is still a collision — EXCEPT one queued for retirement.
+    // That key is on its way out, so re-typing it is not a collision, it is the
+    // operator taking the removal back (see commitExtraSlot). Without this
+    // exemption the name would never commit, the value would never reach the
+    // draft, and the save would still carry the retirement — deleting the key
+    // and silently discarding the credential just typed under it.
+    if (knownKeys.has(trimmed) && trimmed !== slot.existingKey && !removedSeededKeys.has(trimmed)) {
       return 'This key already exists as a provider slot.'
     }
     if (extraSlots.some(item => item.id !== slot.id && item.nameInput.trim() === trimmed)) {
@@ -178,10 +227,30 @@ export function LlmCredentialFields({
       onChange(slot.committedKey, '')
     }
     if (nextCommitted) onChange(nextCommitted, nextValue)
+    // Committing a key that was queued for retirement takes the removal back:
+    // this row is once again the editor's representation of that STORED key, so
+    // it re-adopts it as `existingKey` (becoming an ordinary seeded row) and the
+    // key leaves the removal set. With no value typed the key simply survives
+    // untouched; with a value it is rewritten through the normal merge.
+    const unretiredKey =
+      nextCommitted !== null && removedSeededKeys.has(nextCommitted) ? nextCommitted : null
+    if (unretiredKey) {
+      setRemovedSeededKeys(prev => {
+        const next = new Set(prev)
+        next.delete(unretiredKey)
+        return next
+      })
+    }
     setExtraSlots(prev =>
       prev.map(item =>
         item.id === slot.id
-          ? { ...item, nameInput: nextName, value: nextValue, committedKey: nextCommitted }
+          ? {
+              ...item,
+              nameInput: nextName,
+              value: nextValue,
+              committedKey: nextCommitted,
+              existingKey: unretiredKey ?? item.existingKey,
+            }
           : item
       )
     )
@@ -207,6 +276,14 @@ export function LlmCredentialFields({
     const slot = extraSlots.find(item => item.id === id)
     if (!slot) return
     if (slot.committedKey) onChange(slot.committedKey, '')
+    // A slot seeded from the Secret leaves a STORED key behind: dropping the
+    // row only hides it, so the key is queued for retirement on save. A slot
+    // created in this session has nothing stored — clearing the draft above is
+    // the whole removal.
+    if (slot.existingKey) {
+      const retired = slot.existingKey
+      setRemovedSeededKeys(prev => new Set(prev).add(retired))
+    }
     setExtraSlots(prev => prev.filter(item => item.id !== id))
   }
 
@@ -225,8 +302,9 @@ export function LlmCredentialFields({
   //     `team1.key`) commits to the draft under a key providerForDataKey can't
   //     attribute, so the slot's own committedKey/value must gate too.
   // A provider with a stored key never reaches `manuallyAdded` — it is already
-  // visible, so "＋ Add provider" never offers it. Deleting a stored key stays
-  // on removeSecretKey, not here.
+  // visible, so "＋ Add provider" never offers it. Retiring a stored key is the
+  // per-slot X (which queues it into `removedKeys`), never this section-level
+  // control.
   function isProviderRemovable(provider: LlmProvider): boolean {
     if (!manuallyAdded.has(provider)) return false
     const hasDraftValue = Object.entries(draft).some(
@@ -255,6 +333,28 @@ export function LlmCredentialFields({
 
   return (
     <div className="cu-llm-cred-groups">
+      {/* Retirement is applied on SAVE, not on click — a row vanishing is not by
+          itself proof anything will be deleted, so the queued keys are named.
+          First child, above the provider sections: in the scroll-clipped update
+          modal anything after them lands below the fold. Always mounted (empty
+          when nothing is queued, and hidden by :empty) so the live region is
+          present before the first announcement — a region inserted together
+          with its text is not reliably announced. */}
+      <p className="cu-field__hint cu-llm-cred-removed" role="status">
+        {removedKeys.length > 0 ? (
+          <>
+            Will be removed from the stored secret on save:{' '}
+            {removedKeys.map((key, index) => (
+              <React.Fragment key={key}>
+                {index > 0 ? ', ' : null}
+                <code>{key}</code>
+              </React.Fragment>
+            ))}
+            .
+          </>
+        ) : null}
+      </p>
+
       {visibleGroups.length === 0 ? (
         <p className="cu-field__hint cu-llm-cred-empty">
           No providers added yet — add a provider below to enter its credentials.
@@ -352,11 +452,26 @@ export function LlmCredentialFields({
             {providerExtras.map(slot => {
               const inputId = `${ID_PREFIX}-extra-${slot.id}`
               const error = extraSlotError(slot, slot.nameInput)
+              // A seeded slot renamed but left valueless is a MUTE state: the
+              // rename writes nothing, so the old key is deliberately not
+              // retired (see `removedKeys`) and saving does nothing at all to
+              // this row. Say so, instead of letting the operator believe the
+              // rename landed.
+              const renameNeedsValue =
+                slot.existingKey !== null &&
+                slot.committedKey !== null &&
+                slot.committedKey !== slot.existingKey &&
+                slot.value.trim().length === 0
               return (
                 <Field
                   key={slot.id}
                   htmlFor={inputId}
                   label={`Additional credential slot`}
+                  description={
+                    renameNeedsValue
+                      ? `Type a value to complete the rename — the stored key keeps its old name (${slot.existingKey}) until then.`
+                      : undefined
+                  }
                   error={error ?? undefined}
                 >
                   <div className="cu-llm-cred-extra">
