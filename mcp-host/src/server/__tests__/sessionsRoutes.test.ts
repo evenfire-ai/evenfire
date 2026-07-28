@@ -71,7 +71,7 @@ describe('handleSessionsListRoute', () => {
       ],
     })
     expect(sessionsListHandler).toHaveBeenCalledWith('user-1', {
-      limit: 50,
+      limit: undefined,
       cursor: undefined,
     })
   })
@@ -102,6 +102,20 @@ describe('handleSessionsListRoute', () => {
     const req = {
       ...makeReqWithAuth('user-1'),
       query: { cursor: 'not-json' },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler }))
+
+    expect(captured.statusCode).toBe(400)
+    expect(sessionsListHandler).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed limits instead of silently changing the request', async () => {
+    const sessionsListHandler: SessionsListHandler = vi.fn()
+    const req = {
+      ...makeReqWithAuth('user-1'),
+      query: { limit: 'not-a-number' },
     } as unknown as Request
     const captured = makeRes()
 
@@ -155,7 +169,6 @@ describe('handleSessionMessagesRoute', () => {
       latestTurnNumber: 1,
       hasMoreBefore: false,
       hasMoreAfter: false,
-      revision: '1:1776816000000',
       turns: [
         { number: 1, user_input: 'hello', response: 'hi', started_at: '2026-04-22T00:00:00Z' },
       ],
@@ -172,13 +185,12 @@ describe('handleSessionMessagesRoute', () => {
       latestTurnNumber: 1,
       hasMoreBefore: false,
       hasMoreAfter: false,
-      revision: '1:1776816000000',
       turns: [
         { number: 1, user_input: 'hello', response: 'hi', started_at: '2026-04-22T00:00:00Z' },
       ],
     })
     expect(sessionMessagesHandler).toHaveBeenCalledWith('user-1', 'chatllm', 'c1', {
-      limit: 80,
+      limit: undefined,
       beforeTurn: undefined,
       afterTurn: undefined,
     })
@@ -193,7 +205,6 @@ describe('handleSessionMessagesRoute', () => {
       latestTurnNumber: 20,
       hasMoreBefore: true,
       hasMoreAfter: true,
-      revision: '30:1776816000000',
       turns: [],
     })
     const req = {
@@ -217,6 +228,25 @@ describe('handleSessionMessagesRoute', () => {
     const req = {
       ...makeReqWithParams('user-1', 'chatllm', 'c1'),
       query: { beforeTurn: '10', afterTurn: '20' },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+
+    expect(captured.statusCode).toBe(400)
+    expect(sessionMessagesHandler).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['beforeTurn', 'abc'],
+    ['beforeTurn', '0'],
+    ['afterTurn', 'abc'],
+    ['afterTurn', '-1'],
+  ])('rejects malformed %s cursors', async (name, value) => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn()
+    const req = {
+      ...makeReqWithParams('user-1', 'chatllm', 'c1'),
+      query: { [name]: value },
     } as unknown as Request
     const captured = makeRes()
 

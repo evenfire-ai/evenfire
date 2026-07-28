@@ -153,7 +153,6 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
           totalTurns: 10,
           hasMoreBefore: true,
           hasMoreAfter: false,
-          revision: '10:1',
           turns: [],
         }),
     } as unknown as Response)

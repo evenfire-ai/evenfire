@@ -154,7 +154,7 @@ describe('chatStoreBinding', () => {
       expect(await exists(path.join(tmpBase, ENV_A, 'user-broken', 'agent-y'))).toBe(false)
     })
 
-    it('preserves a v2 agent dir', async () => {
+    it('preserves a v2 agent dir and marks it as v3 for downgrade safety', async () => {
       const v2Index = JSON.stringify({
         version: 2,
         chats: [{ id: 'keep', title: 'Keep', createdAt: 'x', updatedAt: 'x', messageCount: 1 }],
@@ -171,6 +171,13 @@ describe('chatStoreBinding', () => {
       expect(
         (await requireChatStore().listChats('agent-x')).find(c => c.id === 'keep')
       ).toBeDefined()
+      const migrated = JSON.parse(
+        await fs.readFile(
+          path.join(tmpBase, ENV_A, 'user-current', 'agent-x', 'index.json'),
+          'utf-8'
+        )
+      ) as { version: number }
+      expect(migrated.version).toBe(3)
     })
 
     it('is a no-op when the user has no cache directory yet', async () => {

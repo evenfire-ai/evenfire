@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import type { ChatFile, ChatIndex, ChatMessage, ChatMetadata } from './types.js'
 
-const INDEX_VERSION = 2
+const INDEX_VERSION = 3
 const PAGED_CHAT_VERSION = 1
 const DEFAULT_PAGE_SIZE = 100
 const DEFAULT_MAX_LOCAL_SYNCED_MESSAGES = 1000
@@ -80,6 +80,10 @@ function isNotFoundError(err: unknown): boolean {
   return (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
 }
 
+function isRawFilesystemError(err: unknown): boolean {
+  return typeof (err as NodeJS.ErrnoException | undefined)?.code === 'string'
+}
+
 function isUnsafeSegmentError(err: unknown): boolean {
   return err instanceof Error && /unsafe path segment/.test(err.message)
 }
@@ -114,9 +118,77 @@ function pageEntry(file: string, messages: ChatMessage[]): ChatPageEntry {
  * so we guard centrally where the on-disk path is built.
  */
 function assertSafeSegment(label: string, value: string): void {
-  if (!value || value === '.' || value === '..' || /[/\\\0]/.test(value)) {
+  const collidesWithSnapshotNamespace =
+    label === 'chatId' && /\.(?:next|previous|corrupt)-/.test(value)
+  if (
+    !value ||
+    value === '.' ||
+    value === '..' ||
+    /[/\\\0]/.test(value) ||
+    collidesWithSnapshotNamespace
+  ) {
     throw new Error(`Invalid ${label}: unsafe path segment`)
   }
+}
+
+function sameReconciledMessage(local: ChatMessage, server: ChatMessage): boolean {
+  if (local.id === server.id) return true
+  const localTurn = serverTurnNumber(local)
+  const serverTurn = serverTurnNumber(server)
+  if (
+    localTurn !== undefined &&
+    serverTurn !== undefined &&
+    localTurn === serverTurn &&
+    local.role === server.role
+  ) {
+    return true
+  }
+  if (
+    localTurn === undefined &&
+    serverTurn !== undefined &&
+    local.role === server.role &&
+    ((local.task_id && server.task_id && local.task_id === server.task_id) ||
+      (local.content.trim() === server.content.trim() &&
+        Math.abs(local.timestamp - server.timestamp) <= 60_000))
+  ) {
+    return true
+  }
+  return false
+}
+
+function reconciledMessageRoleRank(message: ChatMessage): number {
+  return message.role === 'user' ? 0 : message.role === 'assistant' ? 1 : 2
+}
+
+function mergeReconciledMessages(existing: ChatMessage[], incoming: ChatMessage[]): ChatMessage[] {
+  const merged = [...existing]
+  for (const serverMessage of incoming) {
+    const matchIndex = merged.findIndex(message => sameReconciledMessage(message, serverMessage))
+    if (matchIndex >= 0) {
+      merged[matchIndex] = {
+        ...serverMessage,
+        task_id: merged[matchIndex]?.task_id ?? serverMessage.task_id,
+      }
+      continue
+    }
+
+    const serverTurn = serverTurnNumber(serverMessage)
+    const insertionIndex =
+      serverTurn === undefined
+        ? -1
+        : merged.findIndex(message => {
+            const messageTurn = serverTurnNumber(message)
+            if (messageTurn === undefined) return false
+            return (
+              messageTurn > serverTurn ||
+              (messageTurn === serverTurn &&
+                reconciledMessageRoleRank(message) > reconciledMessageRoleRank(serverMessage))
+            )
+          })
+    if (insertionIndex < 0) merged.push(serverMessage)
+    else merged.splice(insertionIndex, 0, serverMessage)
+  }
+  return merged
 }
 
 function emptyIndex(): ChatIndex {
@@ -413,19 +485,17 @@ export class ChatStore {
   }
 
   private async pruneSyncedPages(
-    agentRef: string,
-    chatId: string,
-    meta: PagedChatMeta,
-    options: { pagesDir?: string } = {}
-  ): Promise<PagedChatMeta> {
+    meta: PagedChatMeta
+  ): Promise<{ meta: PagedChatMeta; removedFiles: string[] }> {
     if (this.maxLocalSyncedMessages === Number.POSITIVE_INFINITY) {
-      return this.finalizePagedMeta(meta)
+      return { meta: this.finalizePagedMeta(meta), removedFiles: [] }
     }
 
     let localCount = meta.pages.reduce((total, page) => total + page.count, 0)
     let prunedBeforeCount = meta.prunedBeforeCount ?? 0
     let prunedThroughServerTurnNumber = meta.prunedThroughServerTurnNumber
     const retained: ChatPageEntry[] = []
+    const removedFiles: string[] = []
     let pruning = true
 
     for (const page of meta.pages) {
@@ -433,8 +503,7 @@ export class ChatStore {
         pruning && page.serverSynced && localCount - page.count >= this.maxLocalSyncedMessages
 
       if (canPrunePage) {
-        const pagesDir = options.pagesDir ?? this.chatPagesDirPath(agentRef, chatId)
-        await fs.rm(this.chatPagePathFromPagesDir(pagesDir, page.file), { force: true })
+        removedFiles.push(page.file)
         localCount -= page.count
         prunedBeforeCount += page.count
         prunedThroughServerTurnNumber = page.lastServerTurnNumber ?? prunedThroughServerTurnNumber
@@ -445,12 +514,128 @@ export class ChatStore {
       retained.push(page)
     }
 
-    return this.finalizePagedMeta({
+    return {
+      meta: this.finalizePagedMeta({
+        ...meta,
+        pages: retained,
+        prunedBeforeCount: prunedBeforeCount > 0 ? prunedBeforeCount : undefined,
+        prunedThroughServerTurnNumber,
+      }),
+      removedFiles,
+    }
+  }
+
+  /**
+   * Finish page writes that reached disk before their metadata update.
+   *
+   * Existing pages may contain a durable append beyond the count recorded in
+   * meta.json, and newly-created pages may exist after the last referenced page.
+   * Both are safe to adopt because page files are themselves written atomically.
+   */
+  private async adoptDurablePageWritesUnlocked(
+    agentRef: string,
+    chatId: string,
+    meta: PagedChatMeta
+  ): Promise<PagedChatMeta | null> {
+    const pagesDir = this.chatPagesDirPath(agentRef, chatId)
+    const repairedPages: ChatPageEntry[] = []
+    let changed = false
+
+    for (const [index, page] of meta.pages.entries()) {
+      let messages: ChatMessage[]
+      try {
+        messages = await this.readPageMessages(agentRef, chatId, page)
+      } catch (error) {
+        if (isRawFilesystemError(error) && !isNotFoundError(error)) throw error
+        return null
+      }
+      if (messages.length < page.count) return null
+      if (messages.length > page.count && index !== meta.pages.length - 1) return null
+      const repaired = pageEntry(page.file, messages)
+      repairedPages.push(repaired)
+      changed ||= repaired.count !== page.count
+    }
+
+    const referenced = new Set(repairedPages.map(page => page.file))
+    const lastReferencedNumber = pageNumberFromFileName(repairedPages.at(-1)?.file ?? '')
+    const entries = await fs.readdir(pagesDir).catch(() => [])
+    const durableOrphans = entries
+      .filter(
+        file =>
+          PAGE_FILE_PATTERN.test(file) &&
+          !referenced.has(file) &&
+          pageNumberFromFileName(file) > lastReferencedNumber
+      )
+      .sort((a, b) => pageNumberFromFileName(a) - pageNumberFromFileName(b))
+
+    for (const file of durableOrphans) {
+      try {
+        const messages = await this.readPageMessagesAtPath(
+          chatId,
+          pageNumberFromFileName(file),
+          this.chatPagePathFromPagesDir(pagesDir, file)
+        )
+        if (!messages.length) continue
+        repairedPages.push(pageEntry(file, messages))
+        referenced.add(file)
+        changed = true
+      } catch (error) {
+        if (isRawFilesystemError(error) && !isNotFoundError(error)) throw error
+        // Leave an invalid orphan untouched. It is not referenced by metadata,
+        // so it cannot break reads and may still be useful for manual recovery.
+      }
+    }
+
+    if (!changed) return meta
+    const previousLocalCount = meta.pages.reduce((total, page) => total + page.count, 0)
+    const nextLocalCount = repairedPages.reduce((total, page) => total + page.count, 0)
+    const repaired = this.finalizePagedMeta({
       ...meta,
-      pages: retained,
-      prunedBeforeCount: prunedBeforeCount > 0 ? prunedBeforeCount : undefined,
-      prunedThroughServerTurnNumber,
+      messageCount: Math.max(
+        meta.messageCount + Math.max(0, nextLocalCount - previousLocalCount),
+        nextLocalCount + (meta.prunedBeforeCount ?? 0)
+      ),
+      pages: repairedPages,
     })
+    await this.writePagedMeta(agentRef, chatId, repaired)
+    return repaired
+  }
+
+  private async rebuildPagedChatFromSurvivingFilesUnlocked(
+    agentRef: string,
+    chatId: string
+  ): Promise<boolean> {
+    const pagesDir = this.chatPagesDirPath(agentRef, chatId)
+    const entries = await fs.readdir(pagesDir).catch(() => [])
+    const surviving: ChatMessage[] = []
+    for (const file of entries
+      .filter(candidate => PAGE_FILE_PATTERN.test(candidate))
+      .sort((a, b) => pageNumberFromFileName(a) - pageNumberFromFileName(b))) {
+      try {
+        surviving.push(
+          ...(await this.readPageMessagesAtPath(
+            chatId,
+            pageNumberFromFileName(file),
+            this.chatPagePathFromPagesDir(pagesDir, file)
+          ))
+        )
+      } catch (error) {
+        if (isRawFilesystemError(error) && !isNotFoundError(error)) throw error
+        // Skip only the unreadable page; readable siblings are still valuable.
+      }
+    }
+
+    const legacy = await this.readLegacyMessages(agentRef, chatId).catch(error => {
+      if (isRawFilesystemError(error) && !isNotFoundError(error)) throw error
+      return null
+    })
+    const recovered = mergeReconciledMessages(surviving, legacy ?? [])
+    if (!recovered.length) return false
+    await this.writePagedChatUnlocked(agentRef, chatId, recovered, {
+      removeLegacy: true,
+      messageCount: recovered.length,
+    })
+    return true
   }
 
   private async recoverPagedChatUnlocked(agentRef: string, chatId: string): Promise<void> {
@@ -463,14 +648,20 @@ export class ChatStore {
     try {
       activeMeta = await this.readPagedMeta(agentRef, chatId)
     } catch (err) {
+      if (isRawFilesystemError(err) && !isNotFoundError(err)) throw err
       activeReadError = err
     }
 
     if (activeMeta) {
-      if (this.cleanedSnapshotSiblingKeys.has(cleanupKey)) return
-      await this.removePagedChatSnapshotSiblings(chatsDir, chatId)
-      this.cleanedSnapshotSiblingKeys.add(cleanupKey)
-      return
+      const repaired = await this.adoptDurablePageWritesUnlocked(agentRef, chatId, activeMeta)
+      if (repaired) {
+        if (this.cleanedSnapshotSiblingKeys.has(cleanupKey)) return
+        await this.removePagedChatSnapshotSiblings(chatsDir, chatId)
+        this.cleanedSnapshotSiblingKeys.add(cleanupKey)
+        return
+      }
+      activeReadError = new Error(`Paged chat snapshot is incomplete for ${chatId}`)
+      activeMeta = null
     }
 
     if (!activeReadError) {
@@ -564,6 +755,7 @@ export class ChatStore {
       }
     }
 
+    if (await this.rebuildPagedChatFromSurvivingFilesUnlocked(agentRef, chatId)) return
     if (activeReadError) throw activeReadError
   }
 
@@ -643,9 +835,7 @@ export class ChatStore {
         )
       }
 
-      const meta = await this.pruneSyncedPages(
-        agentRef,
-        chatId,
+      const pruned = await this.pruneSyncedPages(
         this.finalizePagedMeta({
           version: PAGED_CHAT_VERSION,
           chatId,
@@ -653,10 +843,14 @@ export class ChatStore {
           messageCount: Math.max(messages.length, options.messageCount ?? 0),
           localMessageCount: messages.length,
           pages,
-        }),
-        { pagesDir }
+        })
       )
-      await this.writePagedMetaToDir(chatId, stagingDir, meta)
+      await this.writePagedMetaToDir(chatId, stagingDir, pruned.meta)
+      await Promise.all(
+        pruned.removedFiles.map(file =>
+          fs.rm(this.chatPagePathFromPagesDir(pagesDir, file), { force: true })
+        )
+      )
 
       try {
         await fs.rename(chatDir, backupDir)
@@ -674,7 +868,7 @@ export class ChatStore {
         await fs.rm(this.chatFilePath(agentRef, chatId), { force: true })
       }
 
-      return meta
+      return pruned.meta
     } catch (err) {
       await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined)
       if (movedExistingSnapshot) {
@@ -776,23 +970,28 @@ export class ChatStore {
 
     const messageCount =
       Math.max(meta.messageCount, meta.localMessageCount ?? 0) + newMessages.length
-    const pruned = await this.pruneSyncedPages(agentRef, chatId, {
+    const pruned = await this.pruneSyncedPages({
       ...meta,
       messageCount,
       pages,
     })
-    await this.writePagedMeta(agentRef, chatId, pruned)
+    await this.writePagedMeta(agentRef, chatId, pruned.meta)
+    await Promise.all(
+      pruned.removedFiles.map(file =>
+        fs.rm(this.chatPagePath(agentRef, chatId, file), { force: true })
+      )
+    )
     await fs.rm(this.chatFilePath(agentRef, chatId), { force: true })
-    return pruned
+    return pruned.meta
   }
 
   async getIndex(agentRef: string): Promise<ChatIndex> {
     try {
       const raw = await fs.readFile(this.indexPath(agentRef), 'utf-8')
       const parsed = JSON.parse(raw) as ChatIndex
-      // Version-agnostic read: legacy (v1) dirs are removed at bind time by the
-      // bootstrap wipe (chatStoreBinding), so any index we read here is current;
-      // saveIndex normalizes the stored version to v2 on the next write.
+      // Version-agnostic read: legacy directories are handled at bind time by
+      // chatStoreBinding, so any index we read here is safe to normalize;
+      // saveIndex writes the current v3 marker on the next update.
       if (parsed && Array.isArray(parsed.chats)) {
         return parsed
       }
@@ -809,7 +1008,7 @@ export class ChatStore {
     const normalized: ChatIndex = { ...index, version: INDEX_VERSION }
     // Atomic write (temp + rename): a crash mid-write must never leave a
     // truncated index.json, because the bootstrap wipe treats an unparseable
-    // index as legacy and would delete live v2 chats.
+    // index as legacy and would delete live v3 chats.
     const target = this.indexPath(agentRef)
     const tmp = `${target}.tmp`
     await fs.writeFile(tmp, JSON.stringify(normalized, null, 2), { mode: 0o600 })
@@ -903,7 +1102,7 @@ export class ChatStore {
         return this.readMessagesFromPagedMeta(agentRef, chatId, meta, limit, offset)
       })
     } catch (err) {
-      if (isUnsafeSegmentError(err) || isNotFoundError(err)) return []
+      if (isUnsafeSegmentError(err)) return []
       throw err
     }
   }
@@ -968,15 +1167,29 @@ export class ChatStore {
   }
 
   /**
-   * Overwrite a chat's cached history with a server reconciliation window.
+   * Upsert a server reconciliation window without truncating unseen history.
    *
-   * The message array may be bounded to the most recent page, so preserve
-   * persisted aggregate counters when the window is smaller than the full
-   * conversation. The server remains the source of truth for message contents;
-   * the index counters remain cumulative sidebar/activity metadata.
+   * Reconciliation is intentionally bounded, while the local store may contain
+   * older pages or optimistic messages that are not present in that window.
+   * Merge the window into the complete local snapshot before publishing a new
+   * generation so a background reconcile cannot discard either category.
    */
   async replaceMessages(agentRef: string, chatId: string, messages: ChatMessage[]): Promise<void> {
-    await this.saveMessagesInternal(agentRef, chatId, messages, { preserveExistingTotals: true })
+    await this.serializeChat(agentRef, chatId, async () => {
+      const existingMeta = await this.readOrMigratePagedChatUnlocked(agentRef, chatId)
+      const existingMessages = existingMeta
+        ? await this.readMessagesFromPagedMeta(agentRef, chatId, existingMeta)
+        : []
+      const merged = mergeReconciledMessages(existingMessages, messages)
+      const indexedCount = await this.indexedMessageCount(agentRef, chatId)
+      await this.writePagedChatUnlocked(agentRef, chatId, merged, {
+        removeLegacy: true,
+        messageCount: Math.max(merged.length, indexedCount ?? 0),
+      })
+      await this.updateChatIndexFromMessages(agentRef, chatId, merged, {
+        preserveExistingTotals: true,
+      })
+    })
   }
 
   async appendMessages(

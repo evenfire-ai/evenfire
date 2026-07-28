@@ -482,7 +482,8 @@ const envRuntimeConfig = validateRuntimeConfig({
   appName: requiredOrDefault('DESKTOP_APP_NAME', DEFAULT_APP_NAME),
 })
 const desktopDevPackageRuntimeConfigEnabled =
-  process.env.EVENFIRE_DESKTOP_DEV_PACKAGE?.trim() === '1'
+  process.env.EVENFIRE_DESKTOP_DEV_PACKAGE?.trim() === '1' &&
+  isLocalhostRuntimeConfig(envRuntimeConfig)
 const canUseEnvRuntimeConfig = !app?.isPackaged || desktopDevPackageRuntimeConfigEnabled
 const envRuntimeConfigured = Boolean(
   canUseEnvRuntimeConfig &&

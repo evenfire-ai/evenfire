@@ -8,6 +8,7 @@
  * registered progress handler for the task is the observable proof of rejoin.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { act, waitFor } from '@testing-library/react'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
@@ -131,7 +132,7 @@ describe('switchToChat (unified, D.4)', () => {
     )
   })
 
-  it('follows server delta pages until the active chat reaches the latest revision', async () => {
+  it('follows server delta pages until the active chat reaches the latest turn', async () => {
     clerum.chat.loadMessages.mockResolvedValue([
       { id: 'turn-1-user', role: 'user' as const, content: 'q1', timestamp: 1 },
       { id: 'turn-1-assistant', role: 'assistant' as const, content: 'a1', timestamp: 2 },
@@ -189,6 +190,68 @@ describe('switchToChat (unified, D.4)', () => {
     )
   })
 
+  it('keeps durable local bubbles in place and deduplicates trimmed server echoes', async () => {
+    const turnTwoStartedAt = Date.parse('2026-05-28T10:02:00Z')
+    clerum.chat.loadMessages.mockResolvedValue([
+      {
+        id: 'turn-1-user',
+        role: 'user' as const,
+        content: 'q1',
+        timestamp: 1,
+        serverTurnNumber: 1,
+      },
+      {
+        id: 'turn-1-assistant',
+        role: 'assistant' as const,
+        content: 'a1',
+        timestamp: 2,
+        serverTurnNumber: 1,
+      },
+      {
+        id: 'durable-error',
+        role: 'assistant' as const,
+        content: 'Recovered warning',
+        timestamp: 3,
+        isError: true,
+      },
+      {
+        id: 'local-turn-2-user',
+        role: 'user' as const,
+        content: 'q2',
+        timestamp: turnTwoStartedAt,
+      },
+      {
+        id: 'local-turn-2-assistant',
+        role: 'assistant' as const,
+        content: 'a2 ',
+        timestamp: turnTwoStartedAt + 5_000,
+      },
+    ])
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'stable-local-order',
+      state: 'idle',
+      totalTurns: 2,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+      turns: [turn(2, 'q2', 'a2')],
+    })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'stable-local-order')
+    })
+
+    expect(result.current.chatMessages.map(message => message.id)).toEqual([
+      'turn-1-user',
+      'turn-1-assistant',
+      'durable-error',
+      'turn-2-user',
+      'turn-2-assistant',
+    ])
+  })
+
   it('caps server delta pagination so reconcile cannot walk an unbounded cursor chain', async () => {
     clerum.chat.loadMessages.mockResolvedValue([
       { id: 'turn-1-user', role: 'user' as const, content: 'q1', timestamp: 1 },
@@ -196,6 +259,17 @@ describe('switchToChat (unified, D.4)', () => {
     ])
     clerum.rpc.loadSessionMessages.mockImplementation(
       async (_hostRef, _agent, chatId, _teamId, query?: { afterTurn?: number }) => {
+        if (query?.afterTurn === undefined) {
+          return {
+            agent: 'agent-x',
+            chatId,
+            state: 'idle',
+            latestTurnNumber: 999,
+            hasMoreBefore: true,
+            hasMoreAfter: false,
+            turns: [turn(999, 'newest question', 'newest answer')],
+          }
+        }
         const nextTurn = (query?.afterTurn ?? 1) + 1
         return {
           agent: 'agent-x',
@@ -214,15 +288,20 @@ describe('switchToChat (unified, D.4)', () => {
       await result.current.switchToChat('agent-x', 'delta-cap')
     })
 
-    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(5)
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(6)
     expect(clerum.rpc.loadSessionMessages).toHaveBeenLastCalledWith(
       'agent-x',
       'agent-x',
       'delta-cap',
       undefined,
-      { limit: 80, afterTurn: 5 }
+      { limit: 80 }
     )
-    expect(result.current.chatMessages).toHaveLength(12)
+    expect(result.current.chatMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'turn-1-user' }),
+        expect.objectContaining({ id: 'turn-999-assistant' }),
+      ])
+    )
   })
 
   it('loads older history on demand and prepends it without blocking first render', async () => {
@@ -288,6 +367,26 @@ describe('switchToChat (unified, D.4)', () => {
       'older-pages',
       expect.arrayContaining([expect.objectContaining({ id: 'turn-1-assistant' })])
     )
+
+    clerum.rpc.loadSessionMessages.mockResolvedValueOnce({
+      agent: 'agent-x',
+      chatId: 'older-pages',
+      state: 'idle',
+      totalTurns: 101,
+      oldestTurnNumber: 101,
+      latestTurnNumber: 101,
+      hasMoreBefore: true,
+      hasMoreAfter: false,
+      turns: [turn(101, 'q101', 'a101')],
+    })
+    await act(async () => {
+      await result.current.reconcileChat(makeTaskKey('agent-x', 'older-pages'), {
+        reason: 'system_resume',
+      })
+    })
+
+    expect(result.current.chatMessages[0]?.id).toBe('turn-1-user')
+    expect(result.current.chatMessages.at(-1)?.id).toBe('turn-101-assistant')
   })
 
   it('does not show older history for a complete exact-page-size local chat', async () => {
@@ -367,6 +466,60 @@ describe('switchToChat (unified, D.4)', () => {
     expect(result.current.chatMessages).toHaveLength(160)
     expect(result.current.hasOlderMessages).toBe(false)
     expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels an in-flight older-page request when switching chats', async () => {
+    let resolveOlder!: (messages: unknown[]) => void
+    const olderPage = new Promise<unknown[]>(resolve => {
+      resolveOlder = resolve
+    })
+    clerum.chat.loadMessages.mockImplementation(
+      async (_agentRef: string, chatId: string, _limit?: number, offset?: number) => {
+        if (chatId === 'chat-a' && offset === 1) return olderPage
+        if (chatId === 'chat-a') {
+          return [
+            {
+              id: 'turn-10-user',
+              role: 'user' as const,
+              content: 'q10',
+              timestamp: 10,
+              serverTurnNumber: 10,
+            },
+          ]
+        }
+        return []
+      }
+    )
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'chat-a',
+      state: 'idle',
+      turns: [],
+      hasMoreBefore: true,
+      hasMoreAfter: false,
+    })
+    const { result } = renderController()
+    await settleMount()
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'chat-a')
+    })
+
+    let pendingOlder!: Promise<void>
+    act(() => {
+      pendingOlder = result.current.handleLoadOlderMessages()
+    })
+    await waitFor(() => expect(result.current.olderMessagesLoading).toBe(true))
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'chat-b')
+    })
+    expect(result.current.olderMessagesLoading).toBe(false)
+
+    resolveOlder([])
+    await act(async () => {
+      await pendingOlder
+    })
+    expect(result.current.olderMessagesLoading).toBe(false)
   })
 
   it('adds a server-only chat to the sidebar when switched to directly (S4)', async () => {

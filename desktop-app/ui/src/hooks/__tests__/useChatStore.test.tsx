@@ -53,4 +53,22 @@ describe('useChatStore remote request cache', () => {
     expect(listSessions).toHaveBeenCalledTimes(2)
     expect(getHostModels).toHaveBeenCalledTimes(2)
   })
+
+  it('invalidates the scoped host-model cache after changing a model', async () => {
+    const getHostModels = vi.fn(async () => ({ models: [] }))
+    const setHostModel = vi.fn(async () => ({ success: true }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { rpc: { getHostModels, setHostModel } },
+    })
+    const { result } = renderHook(() => useChatStore())
+
+    result.current.setRemoteCacheScope('authenticated:team-a')
+    await result.current.getHostModels('cache-test-host', 'chat-1')
+    await result.current.setHostModel('cache-test-host', 'chat-1', 'model-b')
+    await result.current.getHostModels('cache-test-host', 'chat-1')
+
+    expect(setHostModel).toHaveBeenCalledTimes(1)
+    expect(getHostModels).toHaveBeenCalledTimes(2)
+  })
 })

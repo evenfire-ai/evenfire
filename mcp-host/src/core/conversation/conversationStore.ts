@@ -81,6 +81,7 @@ export interface ConversationSessionSummary {
   activeTaskId?: string
   pendingApproval?: Pick<PendingApproval, 'request_id' | 'tool_name'>
   turnCount: number
+  messageCount: number
   lastActivityAt: Date
   input_tokens?: number
   output_tokens?: number
@@ -91,7 +92,7 @@ export interface ConversationSessionSummary {
 
 export interface ConversationSessionMessages extends Omit<
   ConversationSessionSummary,
-  'lastActivityAt' | 'turnCount'
+  'lastActivityAt' | 'turnCount' | 'messageCount'
 > {
   turns: Turn[]
   totalTurns: number
@@ -400,6 +401,11 @@ export class InMemoryConversationStore implements ConversationStore {
             }
           : undefined,
         turnCount: conversation.turns.length,
+        messageCount: conversation.turns.reduce(
+          (total, turn) =>
+            total + 1 + (turn.response === undefined ? 0 : 1) + turn.tool_calls.length,
+          0
+        ),
         lastActivityAt: conversation.updated_at,
         input_tokens: conversation.input_tokens,
         output_tokens: conversation.output_tokens,

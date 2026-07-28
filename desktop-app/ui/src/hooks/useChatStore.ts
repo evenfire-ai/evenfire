@@ -69,6 +69,10 @@ function pendingModelKey(agentRef: string, chatId: string): string {
   return `${agentRef}::${chatId}`
 }
 
+function hostModelKey(hostRef: string, chatId: string): string {
+  return `${remoteCacheScope}:${hostRef}:${chatId}`
+}
+
 /**
  * Hook providing typed access to the chat persistence IPC layer.
  * All methods are stable (useCallback) and safe to use in dependency arrays.
@@ -173,7 +177,7 @@ export function useChatStore() {
       hostModelRequests.clear()
       hostModelsSource = source
     }
-    const key = `${remoteCacheScope}:${hostRef}:${chatId}`
+    const key = hostModelKey(hostRef, chatId)
     const cached = hostModelRequests.get(key)
     if (cached && cached.expiresAt > Date.now()) return cached.promise
 
@@ -186,7 +190,7 @@ export function useChatStore() {
   }, [])
   const setHostModel = useCallback(async (hostRef: string, chatId: string, model: string) => {
     const result = await window.clerum.rpc.setHostModel(hostRef, chatId, model)
-    hostModelRequests.delete(`${hostRef}:${chatId}`)
+    hostModelRequests.delete(hostModelKey(hostRef, chatId))
     return result
   }, [])
   const clearCachedRemoteData = useCallback(() => {

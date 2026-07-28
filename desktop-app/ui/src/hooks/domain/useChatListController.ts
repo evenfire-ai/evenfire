@@ -58,6 +58,7 @@ export interface ChatListControllerHost {
   dispatchSession: (chatKey: string, event: SessionFsmEvent) => void
   clearComposerDraft: (chatId: string) => void
   getActiveChatId: () => string | null
+  shouldAutoSelectLatest: () => boolean
 }
 
 interface UseChatListControllerParams {
@@ -102,6 +103,7 @@ export function useChatListController({
   // Selection requested for an agent before its chats have loaded, consumed by
   // the parent's agent-selection effect. Ref (not state): imperative, per-agent.
   const pendingChatSelectionByAgentRef = useRef<Record<string, PendingChatSelection>>({})
+  const suppressAutoSelectionByAgentRef = useRef<Set<string>>(new Set())
   const chatListNextCursorByAgentRef = useRef<Record<string, string | null | undefined>>({})
   const chatListLoadingMoreByAgentRef = useRef<Set<string>>(new Set())
 
@@ -184,11 +186,21 @@ export function useChatListController({
               title: `Chat ${s.chatId.slice(0, 8)}`,
               createdAt: s.lastActivityAt,
               updatedAt: s.lastActivityAt,
-              messageCount: s.turnCount * 2,
+              messageCount: s.messageCount ?? s.turnCount * 2,
               turnCount: s.turnCount,
             }))
           return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
         })
+
+        const latestServerSession = serverSessions[0]
+        if (
+          latestServerSession &&
+          host.current?.getActiveChatId() === null &&
+          host.current.shouldAutoSelectLatest() &&
+          !suppressAutoSelectionByAgentRef.current.has(agentRef)
+        ) {
+          void host.current.switchToChat(agentRef, latestServerSession.chatId)
+        }
 
         // Persist server freshness into the local index (spec §5.3): keeps the
         // durable sidebar order aligned with the source of truth. Best-effort:
@@ -245,7 +257,7 @@ export function useChatListController({
             title: `Chat ${s.chatId.slice(0, 8)}`,
             createdAt: s.lastActivityAt,
             updatedAt: s.lastActivityAt,
-            messageCount: s.turnCount * 2,
+            messageCount: s.messageCount ?? s.turnCount * 2,
             turnCount: s.turnCount,
           }))
         return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
@@ -299,6 +311,7 @@ export function useChatListController({
   const clearList = useCallback(() => {
     chatListNextCursorByAgentRef.current = {}
     chatListLoadingMoreByAgentRef.current.clear()
+    suppressAutoSelectionByAgentRef.current.clear()
     setChatList([])
     setChatListMoreLoading(false)
     setChatListHasMoreRemoteSessions(false)
@@ -417,6 +430,8 @@ export function useChatListController({
   const writePendingSelection = useCallback(
     (agentName: string, selection: PendingChatSelection) => {
       pendingChatSelectionByAgentRef.current[agentName] = selection
+      if (selection.mode === 'none') suppressAutoSelectionByAgentRef.current.add(agentName)
+      else suppressAutoSelectionByAgentRef.current.delete(agentName)
     },
     []
   )
@@ -583,7 +598,7 @@ export function useChatListController({
                 title: `Remote · ${session.chatId.slice(0, 8)}`,
                 createdAt: session.lastActivityAt,
                 updatedAt: session.lastActivityAt,
-                messageCount: session.turnCount * 2,
+                messageCount: session.messageCount ?? session.turnCount * 2,
                 remote: true,
                 turnCount: session.turnCount,
                 agentRef: group.agentRef,

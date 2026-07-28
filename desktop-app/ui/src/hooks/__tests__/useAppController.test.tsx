@@ -170,7 +170,7 @@ describe('scheduleAfterFirstPaint', () => {
       frames.push(callback)
       return frames.length
     })
-    const identityRef = { current: 'user-1:team-1' }
+    const identityRef: { current: string | null } = { current: 'user-1:team-1' }
     const task = vi.fn(async () => undefined)
 
     scheduleAfterFirstPaintForSession(identityRef, 'user-1:team-1', task)
@@ -186,7 +186,7 @@ describe('scheduleAfterFirstPaint', () => {
       frames.push(callback)
       return frames.length
     })
-    const identityRef = { current: 'user-1:team-1' }
+    const identityRef: { current: string | null } = { current: 'user-1:team-1' }
     const task = vi.fn(async () => undefined)
 
     scheduleAfterFirstPaintForSession(identityRef, 'user-1:team-1', task)

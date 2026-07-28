@@ -115,7 +115,6 @@ function makeApp(convManager: ConversationManager) {
         latestTurnNumber: turns.at(-1)?.number,
         hasMoreBefore: Boolean(turns[0] && turns[0].number > 1),
         hasMoreAfter: Boolean(turns.at(-1) && turns.at(-1)!.number < conversation.turns.length),
-        revision: `${conversation.turns.length}:${conversation.updated_at.getTime()}`,
         turns: turns.map(t => ({
           number: t.number,
           user_input: t.user_input,

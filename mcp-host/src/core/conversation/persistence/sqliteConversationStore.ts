@@ -375,11 +375,13 @@ export class SqliteConversationStore implements ConversationStore {
     const out: ConversationSessionSummary[] = []
     for (const row of rows) {
       const key = row.session.session_key
+      const cached = this.cache.get(key)
       const rest = key.slice(prefix.length)
       const colonIdx = rest.indexOf(':')
       if (colonIdx < 0) continue
-      const state =
-        row.session.state === ConversationState.Processing
+      const state = cached
+        ? cached.state
+        : row.session.state === ConversationState.Processing
           ? ConversationState.Processing
           : row.session.state === ConversationState.AwaitingApproval
             ? ConversationState.AwaitingApproval
@@ -389,14 +391,22 @@ export class SqliteConversationStore implements ConversationStore {
         agent: rest.slice(0, colonIdx),
         chatId: rest.slice(colonIdx + 1),
         state,
-        activeTaskId: row.session.active_task_id ?? undefined,
-        pendingApproval: row.pending_approval
-          ? {
-              request_id: row.pending_approval.request_id,
-              tool_name: row.pending_approval.tool_name,
-            }
-          : undefined,
+        activeTaskId: cached ? cached.activeTaskId : (row.session.active_task_id ?? undefined),
+        pendingApproval: cached
+          ? cached.pending_approval
+            ? {
+                request_id: cached.pending_approval.request_id,
+                tool_name: cached.pending_approval.tool_name,
+              }
+            : undefined
+          : row.pending_approval
+            ? {
+                request_id: row.pending_approval.request_id,
+                tool_name: row.pending_approval.tool_name,
+              }
+            : undefined,
         turnCount: Math.max(0, Math.floor(row.turn_count ?? 0)),
+        messageCount: Math.max(0, Math.floor(row.session.message_count ?? 0)),
         lastActivityAt: new Date(row.last_activity_at * 1000),
         input_tokens: row.session.input_tokens,
         output_tokens: row.session.output_tokens,
@@ -831,6 +841,8 @@ export class SqliteConversationStore implements ConversationStore {
       },
       sessionKey
     )
+    const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
+    state.nextTurnNumber += 1
   }
 
   persistToolCall(conv: Conversation, toolCall: TurnToolCall): void {

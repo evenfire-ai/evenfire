@@ -52,6 +52,30 @@ function deferred<T>() {
 }
 
 describe('pendingChatSelection effect', () => {
+  it('opens the newest server session after first paint when the local index is empty', async () => {
+    clerum.chat.getIndex.mockResolvedValue({
+      version: 3,
+      lastActiveChatId: null,
+      onboardingDismissed: false,
+      chats: [],
+    })
+    clerum.rpc.listSessions.mockResolvedValue({
+      items: [
+        {
+          agent: 'agent-x',
+          chatId: 'server-latest',
+          turnCount: 2,
+          messageCount: 4,
+          lastActivityAt: '2026-05-01T00:00:00Z',
+        },
+      ],
+    })
+
+    const { result } = renderController({ navItem: 'chat' })
+
+    await waitFor(() => expect(result.current.activeChatId).toBe('server-latest'))
+  })
+
   it('latest → switches to the most recent chat', async () => {
     clerum.chat.getIndex.mockResolvedValue({
       version: 1,

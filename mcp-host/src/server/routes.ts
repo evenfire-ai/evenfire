@@ -1106,16 +1106,21 @@ export async function handleSessionsListRoute(
       json(res, 501, { error: 'Sessions handler not configured' })
       return
     }
-    const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
-    const limit =
-      rawLimit === undefined
-        ? 50
-        : Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 50, 1), 100)
     const cursor = parseSessionsCursorParam(req.query.cursor)
     if (cursor === null) {
       badRequest(res, 'Invalid sessions cursor')
       return
     }
+    const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
+    if (
+      req.query.limit !== undefined &&
+      (!Number.isFinite(rawLimit) || Math.floor(rawLimit!) < 1)
+    ) {
+      badRequest(res, 'limit must be a positive integer')
+      return
+    }
+    const limit =
+      rawLimit === undefined ? (cursor ? 50 : undefined) : Math.min(Math.floor(rawLimit), 100)
     const result = await handlers.sessionsListHandler(caller.userId, { limit, cursor })
     json(res, 200, result)
   } catch (error) {
@@ -1207,22 +1212,39 @@ export async function handleSessionMessagesRoute(
       typeof req.query.beforeTurn === 'string' ? Number(req.query.beforeTurn) : undefined
     const rawAfterTurn =
       typeof req.query.afterTurn === 'string' ? Number(req.query.afterTurn) : undefined
+    if (
+      req.query.beforeTurn !== undefined &&
+      (!Number.isFinite(rawBeforeTurn) || Math.floor(rawBeforeTurn!) < 1)
+    ) {
+      badRequest(res, 'beforeTurn must be a positive integer')
+      return
+    }
+    if (
+      req.query.afterTurn !== undefined &&
+      (!Number.isFinite(rawAfterTurn) || Math.floor(rawAfterTurn!) < 0)
+    ) {
+      badRequest(res, 'afterTurn must be a non-negative integer')
+      return
+    }
     if (rawBeforeTurn !== undefined && rawAfterTurn !== undefined) {
       badRequest(res, 'beforeTurn and afterTurn are mutually exclusive')
       return
     }
+    if (
+      req.query.limit !== undefined &&
+      (!Number.isFinite(rawLimit) || Math.floor(rawLimit!) < 1)
+    ) {
+      badRequest(res, 'limit must be a positive integer')
+      return
+    }
     const limit =
       rawLimit === undefined
-        ? 80
-        : Math.min(Math.max(Number.isFinite(rawLimit) ? Math.floor(rawLimit) : 80, 1), 200)
-    const beforeTurn =
-      rawBeforeTurn !== undefined && Number.isFinite(rawBeforeTurn)
-        ? Math.max(1, Math.floor(rawBeforeTurn))
-        : undefined
-    const afterTurn =
-      rawAfterTurn !== undefined && Number.isFinite(rawAfterTurn)
-        ? Math.max(0, Math.floor(rawAfterTurn))
-        : undefined
+        ? rawBeforeTurn !== undefined || rawAfterTurn !== undefined
+          ? 80
+          : undefined
+        : Math.min(Math.floor(rawLimit), 200)
+    const beforeTurn = rawBeforeTurn !== undefined ? Math.floor(rawBeforeTurn) : undefined
+    const afterTurn = rawAfterTurn !== undefined ? Math.floor(rawAfterTurn) : undefined
     const result = await handlers.sessionMessagesHandler(caller.userId, agent, chatId, {
       limit,
       beforeTurn,

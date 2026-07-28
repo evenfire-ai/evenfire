@@ -151,19 +151,21 @@ function mergeUniqueMessages(
 }
 
 function sameLocalServerMessage(local: AgentChatMessage, server: AgentChatMessage): boolean {
+  const sameTask =
+    Boolean(local.task_id) && Boolean(server.task_id) && local.task_id === server.task_id
+  const sameNearbyContent =
+    local.content.trim() === server.content.trim() &&
+    Math.abs(local.timestamp - server.timestamp) <= 60_000
   return (
     serverTurnNumber(local) === undefined &&
     serverTurnNumber(server) !== undefined &&
     local.role === server.role &&
-    local.content === server.content
+    (sameTask || sameNearbyContent)
   )
 }
 
-function messageSortRank(message: AgentChatMessage, fallbackIndex: number): number {
-  const turnNumber = serverTurnNumber(message)
-  if (turnNumber === undefined) return 1_000_000_000 + fallbackIndex
-  const roleRank = message.role === 'user' ? 0 : message.role === 'assistant' ? 1 : 2
-  return turnNumber * 10 + roleRank
+function messageRoleRank(message: AgentChatMessage): number {
+  return message.role === 'user' ? 0 : message.role === 'assistant' ? 1 : 2
 }
 
 function mergeServerMessages(
@@ -206,13 +208,23 @@ function mergeServerMessages(
       continue
     }
 
-    merged.push(serverMessage)
+    const insertionIndex =
+      serverTurn === undefined
+        ? -1
+        : merged.findIndex(message => {
+            const messageTurn = serverTurnNumber(message)
+            if (messageTurn === undefined) return false
+            return (
+              messageTurn > serverTurn ||
+              (messageTurn === serverTurn &&
+                messageRoleRank(message) > messageRoleRank(serverMessage))
+            )
+          })
+    if (insertionIndex < 0) merged.push(serverMessage)
+    else merged.splice(insertionIndex, 0, serverMessage)
   }
 
   return merged
-    .map((message, index) => ({ message, index }))
-    .sort((a, b) => messageSortRank(a.message, a.index) - messageSortRank(b.message, b.index))
-    .map(item => item.message)
 }
 
 function sameMessageSequence(a: AgentChatMessage[], b: AgentChatMessage[]): boolean {
@@ -402,6 +414,12 @@ export function useAgentChatController({
   const [olderMessagesLoading, setOlderMessagesLoading] = useState(false)
   const chatMessagesRef = useRef<AgentChatMessage[]>([])
   const loadedLocalMessageCountRef = useRef(0)
+  const olderMessagesRequestRef = useRef<symbol | null>(null)
+
+  const cancelOlderMessagesLoad = useCallback(() => {
+    olderMessagesRequestRef.current = null
+    setOlderMessagesLoading(false)
+  }, [])
 
   const [activityByAgentMessage, setActivityByAgentMessage] = useState<
     Record<string, Record<string, AgentMessageActivity>>
@@ -734,7 +752,7 @@ export function useAgentChatController({
     setChatMessages([])
     setChatMessagesLoading(false)
     setHasOlderMessages(false)
-    setOlderMessagesLoading(false)
+    cancelOlderMessagesLoad()
     loadedLocalMessageCountRef.current = 0
     // The error/resend banner is per-chat view state — drop it when the active
     // chat is torn down (logout / unauth boot) so it can't survive into the next.
@@ -747,6 +765,7 @@ export function useAgentChatController({
     fsm,
     resetReplyNotificationDedupe,
     chatStore.clearCachedRemoteData,
+    cancelOlderMessagesLoad,
   ])
 
   // Unified switch (post-D.4): cache-first render → server reconcile → tracker
@@ -764,6 +783,7 @@ export function useAgentChatController({
       setChatMessages([])
       setChatMessagesLoading(true)
       setHasOlderMessages(false)
+      cancelOlderMessagesLoad()
       loadedLocalMessageCountRef.current = 0
       // The error/resend banner is per-chat view state, not global: clear it on
       // every chat switch (same-agent switches don't trip the selectedAgent
@@ -784,15 +804,11 @@ export function useAgentChatController({
 
       // PHASE 1 — render only the newest local page. The authoritative reconcile
       // below requests a delta after the newest cached server turn.
-      let cached: Awaited<ReturnType<typeof chatStore.loadMessages>>
+      let cached: Awaited<ReturnType<typeof chatStore.loadMessages>> = []
       try {
         cached = await chatStore.loadMessages(agentRef, chatId, MESSAGE_PAGE_SIZE)
       } catch (error) {
         console.warn('[chat-history] failed to load local messages', { agentRef, chatId, error })
-        if (isStillActive()) {
-          setChatMessagesLoading(false)
-        }
-        return
       }
       const oldestCachedTurn = oldestServerTurnNumber(cached as AgentChatMessage[])
       const hasOlderServerMessages = Boolean(oldestCachedTurn && oldestCachedTurn > 1)
@@ -860,6 +876,7 @@ export function useAgentChatController({
       reconcileChat,
       scrollChatToBottom,
       clearUnreadInList,
+      cancelOlderMessagesLoad,
       chatStore.setLastActive,
       chatStore.loadMessages,
       chatStore.clearUnreadTerminal,
@@ -885,6 +902,7 @@ export function useAgentChatController({
       dispatchSession,
       clearComposerDraft,
       getActiveChatId: () => activeChatId,
+      shouldAutoSelectLatest: () => navItem === DESKTOP_ROUTES.chat,
     }
   })
 
@@ -897,9 +915,11 @@ export function useAgentChatController({
   )
 
   const handleLoadOlderMessages = useCallback(async () => {
-    if (!selectedAgent || !activeChatId || olderMessagesLoading) return
+    if (!selectedAgent || !activeChatId || olderMessagesRequestRef.current) return
     const requestAgent = selectedAgent
     const requestChatId = activeChatId
+    const requestToken = Symbol(`${requestAgent}:${requestChatId}`)
+    olderMessagesRequestRef.current = requestToken
     const isStillRelevant = () => {
       const visible = activeChatVisibilityRef.current
       return visible.selectedAgent === requestAgent && visible.activeChatId === requestChatId
@@ -960,6 +980,7 @@ export function useAgentChatController({
       setChatMessages(merged)
       if (!isStillRelevant()) return
       await chatStore.replaceMessages(requestAgent, requestChatId, merged)
+      if (!isStillRelevant()) return
       loadedLocalMessageCountRef.current = merged.length
       setHasOlderMessages(Boolean(response.hasMoreBefore))
     } catch (error) {
@@ -969,7 +990,8 @@ export function useAgentChatController({
         error,
       })
     } finally {
-      if (isStillRelevant()) {
+      if (olderMessagesRequestRef.current === requestToken) {
+        olderMessagesRequestRef.current = null
         setOlderMessagesLoading(false)
       }
     }
@@ -979,7 +1001,6 @@ export function useAgentChatController({
     chatStore.loadMessages,
     chatStore.loadSessionMessages,
     chatStore.replaceMessages,
-    olderMessagesLoading,
     selectedAgent,
   ])
 
@@ -998,6 +1019,7 @@ export function useAgentChatController({
       setChatMessages([])
       setChatMessagesLoading(false)
       setHasOlderMessages(false)
+      cancelOlderMessagesLoad()
       loadedLocalMessageCountRef.current = 0
       return
     }
@@ -1015,6 +1037,7 @@ export function useAgentChatController({
       setChatMessages([])
       setChatMessagesLoading(true)
       setHasOlderMessages(false)
+      cancelOlderMessagesLoad()
       loadedLocalMessageCountRef.current = 0
       if (requestedSelection.title) {
         upsertProvisionalEntry(
@@ -1034,6 +1057,7 @@ export function useAgentChatController({
       setChatMessages([])
       setChatMessagesLoading(false)
       setHasOlderMessages(false)
+      cancelOlderMessagesLoad()
       loadedLocalMessageCountRef.current = 0
     }
     setChatListLoading(true)
@@ -1106,7 +1130,7 @@ export function useAgentChatController({
     return () => {
       cancelled = true
     }
-  }, [currentTeamId, navItem, selectedAgent])
+  }, [cancelOlderMessagesLoad, currentTeamId, navItem, selectedAgent])
 
   const mapComposerAttachmentsToHostRequest = (
     attachments: ComposerImageAttachment[]
@@ -1331,44 +1355,61 @@ export function useAgentChatController({
         const v = activeChatVisibilityRef.current
         return v.selectedAgent === agentRef && v.activeChatId === chatId
       }
-      const cached = (await chatStore.loadMessages(
-        agentRef,
-        chatId,
-        MESSAGE_PAGE_SIZE
-      )) as AgentChatMessage[]
-      if (!isActive() || tracker.get(chatKey)) return { rendered: cached, replaced: false, cached }
+      const cached = (await chatStore
+        .loadMessages(agentRef, chatId, MESSAGE_PAGE_SIZE)
+        .catch(error => {
+          console.warn('[chat-history] failed to read local reconciliation window', {
+            agentRef,
+            chatId,
+            error,
+          })
+          return []
+        })) as AgentChatMessage[]
+      const visible = isActive() ? chatMessagesRef.current : []
+      const localMessages = mergeUniqueMessages(visible, cached)
+      if (!isActive() || tracker.get(chatKey)) {
+        return { rendered: localMessages, replaced: false, cached: localMessages }
+      }
       const hydrated = turnsToChatMessages(resp.turns) as AgentChatMessage[]
-      if (!hydrated.length) return { rendered: cached, replaced: false, cached }
-      const cachedHasServerTurns = cached.some(message => serverTurnNumber(message) !== undefined)
-      if (!cachedHasServerTurns) {
+      if (!hydrated.length) {
+        return { rendered: localMessages, replaced: false, cached: localMessages }
+      }
+      const localHasServerTurns = localMessages.some(
+        message => serverTurnNumber(message) !== undefined
+      )
+      if (!localHasServerTurns) {
         setHasOlderMessages(previous => previous || Boolean(resp.hasMoreBefore))
       }
-      if (!cachedHasServerTurns && cached.length > 0) {
+      if (!localHasServerTurns && localMessages.length > 0) {
         const responseContainsAllTurns =
           resp.totalTurns === undefined || resp.totalTurns === resp.turns.length
-        if (responseContainsAllTurns && hydrated.length <= cached.length) {
-          return { rendered: cached, replaced: false, cached }
+        if (responseContainsAllTurns && hydrated.length <= localMessages.length) {
+          return { rendered: localMessages, replaced: false, cached: localMessages }
         }
       }
       const hydratedWithAttachments = withResponseFileAttachments(
         hydrated,
         taskIdHint ? await loadTaskResultResponseFileAttachments(agentRef, taskIdHint) : []
       )
-      if (!isActive() || tracker.get(chatKey)) return { rendered: cached, replaced: false, cached }
-      const rendered = cachedHasServerTurns
-        ? mergeServerMessages(cached, hydratedWithAttachments)
-        : hydratedWithAttachments
-      if (sameMessageSequence(rendered, cached)) {
-        return { rendered: cached, replaced: false, cached }
+      if (!isActive() || tracker.get(chatKey)) {
+        return { rendered: localMessages, replaced: false, cached: localMessages }
       }
+      const rendered = localHasServerTurns
+        ? mergeServerMessages(localMessages, hydratedWithAttachments)
+        : hydratedWithAttachments
+      if (sameMessageSequence(rendered, localMessages)) {
+        return { rendered: localMessages, replaced: false, cached: localMessages }
+      }
+      chatMessagesRef.current = rendered
       setChatMessages(rendered)
       const meta = await chatStore.createChat(agentRef, chatId)
       await chatStore.replaceMessages(agentRef, chatId, rendered)
+      if (!isActive()) return { rendered, replaced: true, cached: localMessages }
       loadedLocalMessageCountRef.current = rendered.length
       // Auto-title a fresh hydration (empty cache) from the first user turn, so a
       // server-only chat doesn't keep its "Chat <id>" placeholder (A.4.4 / S4).
       let title = meta.title
-      if (cached.length === 0 && (resp.oldestTurnNumber ?? resp.turns[0]?.number) === 1) {
+      if (localMessages.length === 0 && (resp.oldestTurnNumber ?? resp.turns[0]?.number) === 1) {
         const firstUserInput = resp.turns.find(t => t.user_input?.trim())?.user_input?.trim() || ''
         const hydratedTitle =
           firstUserInput.length > 60
@@ -1383,7 +1424,7 @@ export function useAgentChatController({
       // S4: upsert into the sidebar. A chat opened via a notification for the
       // already-selected agent may not be in chatList yet; a bare `.map` drops it.
       upsertHydratedEntry(meta, title)
-      return { rendered, replaced: true, cached }
+      return { rendered, replaced: true, cached: localMessages }
     },
     [
       tracker,
@@ -1572,11 +1613,16 @@ export function useAgentChatController({
       loadSessionMessages: async (agentRef, chatId, query) => {
         let requestedQuery = query ?? { limit: MESSAGE_PAGE_SIZE }
         if (requestedQuery.beforeTurn === undefined && requestedQuery.afterTurn === undefined) {
-          const cached = (await chatStore.loadMessages(
-            agentRef,
-            chatId,
-            MESSAGE_PAGE_SIZE
-          )) as AgentChatMessage[]
+          const cached = (await chatStore
+            .loadMessages(agentRef, chatId, MESSAGE_PAGE_SIZE)
+            .catch(error => {
+              console.warn('[chat-history] failed to read local delta cursor', {
+                agentRef,
+                chatId,
+                error,
+              })
+              return []
+            })) as AgentChatMessage[]
           const latestCachedTurn = latestServerTurnNumber(cached)
           requestedQuery = {
             ...requestedQuery,
@@ -1612,12 +1658,17 @@ export function useAgentChatController({
           cursor = response.latestTurnNumber ?? response.turns.at(-1)?.number
           pagesLoaded += 1
         }
+        if (response.hasMoreAfter) {
+          return chatStore.loadSessionMessages(agentRef, agentRef, chatId, {
+            limit: requestedQuery.limit ?? MESSAGE_PAGE_SIZE,
+          })
+        }
         return {
           ...response,
           turns,
           oldestTurnNumber: turns[0]?.number,
           latestTurnNumber: turns.at(-1)?.number,
-          hasMoreAfter: Boolean(response.hasMoreAfter && pagesLoaded >= MAX_RECONCILE_DELTA_PAGES),
+          hasMoreAfter: false,
         }
       },
       attachLiveTask: reconcileAttachLiveTask,
@@ -2622,12 +2673,13 @@ export function useAgentChatController({
       setChatMessages([])
       setChatMessagesLoading(true)
       setHasOlderMessages(false)
+      cancelOlderMessagesLoad()
       loadedLocalMessageCountRef.current = 0
       if (options.title) {
         upsertProvisionalEntry(chatId, options.title, options.isRemote === true)
       }
     },
-    [currentTeamId, writePendingSelection, upsertProvisionalEntry]
+    [cancelOlderMessagesLoad, currentTeamId, writePendingSelection, upsertProvisionalEntry]
   )
 
   const clearActiveChat = useCallback(() => {
@@ -2639,12 +2691,13 @@ export function useAgentChatController({
     setChatMessages([])
     setChatMessagesLoading(false)
     setHasOlderMessages(false)
+    cancelOlderMessagesLoad()
     loadedLocalMessageCountRef.current = 0
     // Deselecting the active chat (e.g. team switch) must also drop its per-chat
     // error/resend banner so it doesn't bleed into the next active chat.
     setAgentError(null)
     setFailedAgentSend(null)
-  }, [])
+  }, [cancelOlderMessagesLoad])
 
   const groupedMessages = useMemo(() => {
     const groups: Array<{ role: 'user' | 'assistant' | 'system'; items: AgentChatMessage[] }> = []

@@ -90,4 +90,55 @@ describe('useActivityController', () => {
 
     await waitFor(() => expect(getIndex).toHaveBeenCalledTimes(2))
   })
+
+  it('backfills missing activity counters for chats created before metadata counters existed', async () => {
+    const getIndex = vi.fn(async () => ({
+      version: 3,
+      lastActiveChatId: null,
+      onboardingDismissed: false,
+      chats: [],
+    }))
+    const loadMessages = vi.fn(async () => [
+      { id: 'm1', role: 'user', content: 'hello', timestamp: 1 },
+      {
+        id: 'm2',
+        role: 'assistant',
+        content: 'failed',
+        timestamp: 2,
+        isError: true,
+        toolSteps: [{ toolName: 'read', displayName: 'Read', state: 'completed' }],
+      },
+    ])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { chat: { getIndex, loadMessages } },
+    })
+
+    const { result } = renderHook(() =>
+      useActivityController({
+        selectedAgent: 'agent-a',
+        isAuthenticated: true,
+        loadMenuData: true,
+        chatList: [
+          {
+            id: 'legacy-chat',
+            title: 'Legacy',
+            createdAt: '2026-07-22T00:00:00.000Z',
+            updatedAt: '2026-07-22T00:00:00.000Z',
+            messageCount: 2,
+          },
+        ],
+        progressByAgentMessage: EMPTY_PROGRESS,
+        agentNames: AGENT_A,
+      })
+    )
+
+    await waitFor(() =>
+      expect(result.current.selectedAgentActivitySummary).toMatchObject({
+        errors: 1,
+        toolCalls: 1,
+      })
+    )
+    expect(loadMessages).toHaveBeenCalledWith('agent-a', 'legacy-chat', undefined, undefined)
+  })
 })

@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { ChatStore } from './chatStore.js'
 
 /** Current persisted chat schema. Anything older is wiped on bind (§7.1). */
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
+const PAGED_V2_SCHEMA_VERSION = 2
 
 // Default base dir derived from Electron's userData path. Tests override via
 // __setChatStoreBaseDirForTests to point at a tmpdir, which means the
@@ -177,7 +178,18 @@ async function maybeWipeLegacyCache(userDir: string): Promise<void> {
     try {
       const raw = await fs.readFile(indexPath, 'utf-8')
       const parsed = JSON.parse(raw) as { version?: number }
-      isLegacy = parsed.version !== SCHEMA_VERSION
+      if (parsed.version === PAGED_V2_SCHEMA_VERSION) {
+        const migratedIndexPath = `${indexPath}.v3.tmp`
+        await fs.writeFile(
+          migratedIndexPath,
+          JSON.stringify({ ...parsed, version: SCHEMA_VERSION }, null, 2),
+          { mode: 0o600 }
+        )
+        await fs.rename(migratedIndexPath, indexPath)
+        isLegacy = false
+      } else {
+        isLegacy = parsed.version !== SCHEMA_VERSION
+      }
     } catch {
       // index.json missing or unparseable → treat as legacy
       isLegacy = true

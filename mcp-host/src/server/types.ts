@@ -488,6 +488,7 @@ export type SessionsListItem = {
   agent: string
   chatId: string
   turnCount: number
+  messageCount?: number
   lastActivityAt: string
 } & SessionStateWire
 
@@ -535,7 +536,6 @@ export type SessionMessagesResult = {
   latestTurnNumber?: number
   hasMoreBefore: boolean
   hasMoreAfter: boolean
-  revision: string
   turns: Array<{
     number: number
     user_input: string

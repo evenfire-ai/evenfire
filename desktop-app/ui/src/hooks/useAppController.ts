@@ -153,6 +153,7 @@ export function useAppController() {
   // Use a ref so the stable onSessionNeedsLoad callback can call the real loadSession
   // without creating a circular dependency (loadSession is defined after auth+session).
   const loadSessionRef = useRef(async (_options?: { preserveNav?: boolean }) => {})
+  const activeAuthenticatedSessionIdentityRef = useRef<string | null>(null)
   const authenticatedSessionIdentityRef = useRef<string | null>(null)
   const catalogRefreshPromiseRef = useRef<Promise<AccessCatalog> | null>(null)
 
@@ -372,31 +373,36 @@ export function useAppController() {
   }, [queryClient])
 
   const refreshAuthenticatedData = useCallback(
-    async (options: { initialLoad?: boolean } = {}) => {
+    async (options: { initialLoad?: boolean; sessionIdentity?: string } = {}) => {
       const refreshTeams = options.initialLoad
         ? teamsData.refreshInitialDirectory
         : teamsData.refresh
       if (options.initialLoad) {
-        const scheduledIdentity = authenticatedSessionIdentityRef.current
-        await refreshAgentsData()
-        if (!scheduledIdentity || authenticatedSessionIdentityRef.current !== scheduledIdentity) {
-          return
+        const scheduledIdentity = options.sessionIdentity
+        if (!scheduledIdentity) return false
+        let agentsLoaded = false
+        try {
+          await refreshAgentsData()
+          agentsLoaded = true
+        } catch (error) {
+          console.warn('[startup] failed to load the initial agent catalog', error)
+        } finally {
+          scheduleAfterFirstPaintForSession(
+            activeAuthenticatedSessionIdentityRef,
+            scheduledIdentity,
+            async () => {
+              setPostPaintDataReady(true)
+              await Promise.all([
+                refreshContextsData(),
+                refreshMcpServersData(),
+                refreshTeams(),
+                refreshWorkflowsData(),
+                notif.handleRefreshPendingApprovals({ silent: true }),
+              ])
+            }
+          )
         }
-        scheduleAfterFirstPaintForSession(
-          authenticatedSessionIdentityRef,
-          scheduledIdentity,
-          async () => {
-            setPostPaintDataReady(true)
-            await Promise.all([
-              refreshContextsData(),
-              refreshMcpServersData(),
-              refreshTeams(),
-              refreshWorkflowsData(),
-              notif.handleRefreshPendingApprovals({ silent: true }),
-            ])
-          }
-        )
-        return
+        return agentsLoaded
       }
       return Promise.all([
         refreshAgentsData(),
@@ -536,7 +542,9 @@ export function useAppController() {
         auth.setMe(sessionState.me)
         auth.setEmail(sessionState.me.email || '')
         currentTeamIdRef.current = sessionState.me.teamId || teamId
-        authenticatedSessionIdentityRef.current = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+        const switchedIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+        activeAuthenticatedSessionIdentityRef.current = switchedIdentity
+        authenticatedSessionIdentityRef.current = switchedIdentity
         await refreshAuthenticatedData()
         if (announce) {
           const teamName =
@@ -628,6 +636,7 @@ export function useAppController() {
           queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
           chat.resetChat()
           notif.resetNotifications()
+          activeAuthenticatedSessionIdentityRef.current = null
           authenticatedSessionIdentityRef.current = null
           if (!preserveNav) nav.handleNavSelect(DESKTOP_ROUTES.chat)
           return
@@ -637,10 +646,16 @@ export function useAppController() {
         auth.setEmail(sessionState.me.email || '')
         void auth.refreshDesktopReleaseStatus()
         const sessionIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+        activeAuthenticatedSessionIdentityRef.current = sessionIdentity
         if (authenticatedSessionIdentityRef.current !== sessionIdentity) {
           setPostPaintDataReady(false)
-          authenticatedSessionIdentityRef.current = sessionIdentity
-          await refreshAuthenticatedData({ initialLoad: true })
+          const loaded = await refreshAuthenticatedData({
+            initialLoad: true,
+            sessionIdentity,
+          })
+          if (loaded && activeAuthenticatedSessionIdentityRef.current === sessionIdentity) {
+            authenticatedSessionIdentityRef.current = sessionIdentity
+          }
         }
         if (!preserveNav) {
           nav.handleNavSelect(DESKTOP_ROUTES.chat)
@@ -695,6 +710,7 @@ export function useAppController() {
       // in cache would otherwise bleed into the next login (possibly a different
       // environment, since the env is chosen pre-login).
       queryClient.clear()
+      activeAuthenticatedSessionIdentityRef.current = null
       authenticatedSessionIdentityRef.current = null
       await window.clerum.auth.logout()
       chat.resetChat()

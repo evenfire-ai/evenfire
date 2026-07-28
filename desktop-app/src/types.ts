@@ -807,8 +807,8 @@ export interface ChatMetadata {
 }
 
 export interface ChatIndex {
-  /** v2 aligns with ChatFile v2; bootstrap wipes any v1/missing-version dir (D.4 §7.1). */
-  version: 1 | 2
+  /** v3 marks paged chat caches so older builds wipe rather than mix storage formats. */
+  version: 1 | 2 | 3
   lastActiveChatId: string | null
   onboardingDismissed: boolean
   chats: ChatMetadata[]
@@ -856,7 +856,6 @@ export interface SessionMessagesResult {
   latestTurnNumber?: number
   hasMoreBefore?: boolean
   hasMoreAfter?: boolean
-  revision?: string
   state?: SessionLifecycleState
   activeTaskId?: string
   pendingApproval?: PendingApprovalLite
@@ -888,6 +887,7 @@ export interface SessionsListResult {
     agent: string
     chatId: string
     turnCount: number
+    messageCount?: number
     lastActivityAt: string
     state?: SessionLifecycleState
     activeTaskId?: string

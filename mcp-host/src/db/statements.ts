@@ -202,14 +202,16 @@ export function prepareStatements(db: Database): PreparedStatements {
                ) AS turn_count,
                (
                  SELECT pa.request_id
-                   FROM pending_approvals pa
+                 FROM pending_approvals pa
                   WHERE pa.session_id = s.id
+                  ORDER BY pa.registered_at ASC, pa.request_id ASC
                   LIMIT 1
                ) AS pending_request_id,
                (
                  SELECT pa.tool_name
-                   FROM pending_approvals pa
+                 FROM pending_approvals pa
                   WHERE pa.session_id = s.id
+                  ORDER BY pa.registered_at ASC, pa.request_id ASC
                   LIMIT 1
                ) AS pending_tool_name
           FROM sessions s
@@ -228,7 +230,7 @@ export function prepareStatements(db: Database): PreparedStatements {
       LIMIT @limit
     `),
     selectSessionTurnBounds: db.prepare(`
-      SELECT COUNT(DISTINCT COALESCE(turn_number, 0)) AS total_turns,
+      SELECT MAX(COALESCE(turn_number, 0))            AS total_turns,
              MIN(COALESCE(turn_number, 0))            AS first_turn_number,
              MAX(COALESCE(turn_number, 0))            AS last_turn_number,
              MAX(timestamp)                           AS last_activity_at

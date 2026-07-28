@@ -648,6 +648,37 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
     }
   })
 
+  it('advances durable turn numbering after a failed turn', async () => {
+    const handle = await freshStore()
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'first', 'task-1')
+      await manager.completeTurn(conv, 'done')
+      await manager.startTurn(conv, 'failed', 'task-2')
+      await manager.failTurn(conv)
+      await manager.startTurn(conv, 'retry', 'task-3')
+      await manager.completeTurn(conv, 'recovered')
+      await handle.persistQueue.drainSessionKey(SESSION_KEY)
+
+      const turnNumbers = handle.worker.db
+        .prepare(
+          'SELECT DISTINCT turn_number FROM messages WHERE session_id = ? ORDER BY turn_number'
+        )
+        .all(conv.id) as Array<{ turn_number: number }>
+      expect(turnNumbers.map(row => row.turn_number)).toEqual([1, 2, 3])
+
+      handle.store['cache'].clear()
+      const summaries = await handle.store.listSessionSummariesByPrefix('u-1:rpc:')
+      expect(summaries[0]?.turnCount).toBe(3)
+      const messages = await handle.store.getSessionMessagesByKey(SESSION_KEY, 'u-1:rpc:')
+      expect(messages?.totalTurns).toBe(3)
+      expect(messages?.turns.map(turn => turn.number)).toEqual([1, 2, 3])
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
   it('suspendForApproval preserves active_task_id (same task across approval)', async () => {
     const handle = await freshStore()
     try {

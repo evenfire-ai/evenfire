@@ -2100,6 +2100,7 @@ async function startRPCServer(): Promise<void> {
         agent: summary.agent,
         chatId: summary.chatId,
         turnCount: summary.turnCount,
+        messageCount: summary.messageCount,
         lastActivityAt: summary.lastActivityAt.toISOString(),
         ...sessionStateView(summary),
       })),
@@ -2145,7 +2146,6 @@ async function startRPCServer(): Promise<void> {
         (latestTurnNumber !== undefined
           ? latestTurnNumber < lastConversationTurn
           : query.beforeTurn !== undefined),
-      revision: `${page.totalTurns}:${page.updatedAt.getTime()}`,
       turns: turns.map(t => ({
         number: t.number,
         user_input: t.user_input,

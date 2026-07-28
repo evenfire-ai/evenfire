@@ -707,7 +707,116 @@ describe('messages', () => {
     const meta = await readJsonFile<{ messageCount: number; localMessageCount: number }>(
       chatMetaPath('bounded-replace')
     )
-    expect(meta).toMatchObject({ messageCount: 3, localMessageCount: 1 })
+    expect(meta).toMatchObject({ messageCount: 3, localMessageCount: 3 })
+    expect(
+      (await store.loadMessages('agent-1', 'bounded-replace')).map(message => message.id)
+    ).toEqual(['m1', 'm2', 'm3'])
+  })
+
+  it('keeps unseen and local-only messages when reconciling a bounded server window', async () => {
+    await store.createChat('agent-1', 'reconcile-upsert')
+    await store.saveMessages('agent-1', 'reconcile-upsert', [
+      {
+        id: 'turn-1-user',
+        role: 'user',
+        content: 'old',
+        timestamp: 1,
+        serverTurnNumber: 1,
+      },
+      {
+        id: 'local-only',
+        role: 'assistant',
+        content: 'not on the server',
+        timestamp: 2,
+        task_id: 'local-task',
+      },
+      {
+        id: 'turn-2-user',
+        role: 'user',
+        content: 'new',
+        timestamp: 3,
+        serverTurnNumber: 2,
+      },
+    ])
+
+    await store.replaceMessages('agent-1', 'reconcile-upsert', [
+      {
+        id: 'turn-2-user',
+        role: 'user',
+        content: 'new',
+        timestamp: 3,
+        serverTurnNumber: 2,
+      },
+      {
+        id: 'turn-2-assistant',
+        role: 'assistant',
+        content: 'reply',
+        timestamp: 4,
+        serverTurnNumber: 2,
+      },
+    ])
+
+    expect(
+      (await store.loadMessages('agent-1', 'reconcile-upsert')).map(message => message.id)
+    ).toEqual(['turn-1-user', 'local-only', 'turn-2-user', 'turn-2-assistant'])
+  })
+
+  it('repairs a missing page from the surviving page files instead of returning an empty chat', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await pagedStore.createChat('agent-1', 'missing-page')
+    await pagedStore.saveMessages(
+      'agent-1',
+      'missing-page',
+      Array.from({ length: 6 }, (_, index) => ({
+        id: `m${index}`,
+        role: 'user' as const,
+        content: `message-${index}`,
+        timestamp: index,
+        serverTurnNumber: index + 1,
+      }))
+    )
+    await fs.rm(join(chatPagesDir('missing-page'), '000002.json'))
+
+    const recovered = await pagedStore.loadMessages('agent-1', 'missing-page')
+
+    expect(recovered.map(message => message.id)).toEqual(['m0', 'm1', 'm4', 'm5'])
+    const repairedMeta = await readJsonFile<{ localMessageCount: number }>(
+      chatMetaPath('missing-page')
+    )
+    expect(repairedMeta.localMessageCount).toBe(4)
+  })
+
+  it('adopts a fully written orphan page left by an interrupted append', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await pagedStore.createChat('agent-1', 'orphan-append')
+    await pagedStore.saveMessages('agent-1', 'orphan-append', [
+      { id: 'm0', role: 'user', content: 'zero', timestamp: 0 },
+      { id: 'm1', role: 'assistant', content: 'one', timestamp: 1 },
+    ])
+    await fs.writeFile(
+      join(chatPagesDir('orphan-append'), '000002.json'),
+      JSON.stringify({
+        version: 1,
+        chatId: 'orphan-append',
+        pageNumber: 2,
+        messages: [{ id: 'm2', role: 'user', content: 'durable local', timestamp: 2 }],
+      })
+    )
+
+    const recovered = await pagedStore.loadMessages('agent-1', 'orphan-append')
+
+    expect(recovered.map(message => message.id)).toEqual(['m0', 'm1', 'm2'])
+    const repairedMeta = await readJsonFile<{ localMessageCount: number; pages: unknown[] }>(
+      chatMetaPath('orphan-append')
+    )
+    expect(repairedMeta).toMatchObject({ localMessageCount: 3 })
+    expect(repairedMeta.pages).toHaveLength(2)
   })
 
   it('persists task_id and writes the paged chat cache', async () => {
@@ -871,7 +980,7 @@ describe('corrupt/missing files', () => {
     await fs.mkdir(agentDir, { recursive: true })
     await fs.writeFile(join(agentDir, 'index.json'), 'NOT VALID JSON{{{')
     const index = await store.getIndex('agent-1')
-    expect(index.version).toBe(2) // empty index is created at the current schema (D.4)
+    expect(index.version).toBe(3) // empty index is created at the current schema (D.4)
     expect(index.chats).toEqual([])
   })
 
@@ -946,6 +1055,9 @@ describe('path-segment validation', () => {
       /unsafe path segment/
     )
     await expect(store.saveMessages('agent-1', 'a/b', [])).rejects.toThrow(/unsafe path segment/)
+    await expect(store.saveMessages('agent-1', 'other.next-shadow', [])).rejects.toThrow(
+      /unsafe path segment/
+    )
   })
 
   // Read verbs are tolerant-by-contract (return empty on any failure) — the key

@@ -609,7 +609,14 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
 
     case 'list_session_summaries_by_prefix': {
       const prefixStart = op.sessionKeyPrefix
-      const prefixEnd = `${op.sessionKeyPrefix}\uffff`
+      const finalCodePoint = op.sessionKeyPrefix.codePointAt(op.sessionKeyPrefix.length - 1)
+      if (finalCodePoint === undefined || finalCodePoint >= 0x10ffff) {
+        throw new Error('Session key prefix must have a finite lexicographic upper bound')
+      }
+      const prefixEnd = `${op.sessionKeyPrefix.slice(
+        0,
+        op.sessionKeyPrefix.length - (finalCodePoint > 0xffff ? 2 : 1)
+      )}${String.fromCodePoint(finalCodePoint + 1)}`
       const rows = s.selectSessionSummariesByPrefix.all({
         prefix_start: prefixStart,
         prefix_end: prefixEnd,

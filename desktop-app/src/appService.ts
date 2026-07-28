@@ -269,6 +269,7 @@ export class AppService {
   private accessCatalog: AccessCatalog | null = null
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
+  private restoreSavedSessionInFlight: Promise<SessionState> | null = null
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
   private readonly prewarmAttemptAtByHostRef = new Map<string, number>()
@@ -532,6 +533,19 @@ export class AppService {
   }
 
   private async restoreSavedSession(options: { runLaunchMaintenance?: boolean } = {}) {
+    if (this.restoreSavedSessionInFlight) return this.restoreSavedSessionInFlight
+    const restore = this.restoreSavedSessionOnce(options)
+    this.restoreSavedSessionInFlight = restore
+    try {
+      return await restore
+    } finally {
+      if (this.restoreSavedSessionInFlight === restore) {
+        this.restoreSavedSessionInFlight = null
+      }
+    }
+  }
+
+  private async restoreSavedSessionOnce(options: { runLaunchMaintenance?: boolean } = {}) {
     hydrateDesktopRuntimeConfig()
     const envKey = getActiveEnvKey()
     const token = await this.tokenStore.getSessionToken(envKey)
@@ -2600,7 +2614,6 @@ export class AppService {
           totalTurns: 0,
           hasMoreBefore: false,
           hasMoreAfter: false,
-          revision: '0:unavailable',
         }
       }
       throw error

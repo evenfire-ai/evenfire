@@ -12,6 +12,10 @@ interface UseActivityControllerParams {
   agentNames: string[]
 }
 
+function activityCounterKey(agentRef: string, chatId: string): string {
+  return `${agentRef}\u0000${chatId}`
+}
+
 export function useActivityController({
   selectedAgent,
   isAuthenticated,
@@ -24,6 +28,9 @@ export function useActivityController({
 
   const [agentLastActiveByAgent, setAgentLastActiveByAgent] = useState<
     Record<string, string | null>
+  >({})
+  const [backfilledCountersByChat, setBackfilledCountersByChat] = useState<
+    Record<string, { errors: number; toolCalls: number }>
   >({})
   const selectedAgentActivitySummary = useMemo(() => {
     if (!selectedAgent) {
@@ -50,9 +57,11 @@ export function useActivityController({
     let persistedToolCalls = 0
 
     for (const chat of chatList) {
+      const backfilledCounters =
+        backfilledCountersByChat[activityCounterKey(selectedAgent, chat.id)]
       totalMessages += chat.messageCount || 0
-      totalErrors += chat.errorCount || 0
-      persistedToolCalls += chat.toolCallCount || 0
+      totalErrors += chat.errorCount ?? backfilledCounters?.errors ?? 0
+      persistedToolCalls += chat.toolCallCount ?? backfilledCounters?.toolCalls ?? 0
 
       const chatTimestamp = Date.parse(chat.updatedAt)
       if (Number.isNaN(chatTimestamp)) continue
@@ -78,7 +87,45 @@ export function useActivityController({
         count,
       })),
     }
-  }, [chatList, progressByAgentMessage, selectedAgent])
+  }, [backfilledCountersByChat, chatList, progressByAgentMessage, selectedAgent])
+
+  const missingCounterChatIds = JSON.stringify(
+    chatList
+      .filter(chat => chat.errorCount === undefined || chat.toolCallCount === undefined)
+      .map(chat => chat.id)
+  )
+
+  useEffect(() => {
+    if (!isAuthenticated || !loadMenuData || !selectedAgent) {
+      setBackfilledCountersByChat({})
+      return
+    }
+    const chatIds = JSON.parse(missingCounterChatIds) as string[]
+    if (!chatIds.length) return
+
+    let cancelled = false
+    void Promise.all(
+      chatIds.map(async chatId => {
+        const messages = await chatStore.loadMessages(selectedAgent, chatId).catch(() => [])
+        return [
+          activityCounterKey(selectedAgent, chatId),
+          {
+            errors: messages.reduce((total, message) => total + (message.isError ? 1 : 0), 0),
+            toolCalls: messages.reduce(
+              (total, message) => total + (message.toolSteps?.length ?? 0),
+              0
+            ),
+          },
+        ] as const
+      })
+    ).then(entries => {
+      if (!cancelled) setBackfilledCountersByChat(Object.fromEntries(entries))
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [chatStore.loadMessages, isAuthenticated, loadMenuData, missingCounterChatIds, selectedAgent])
 
   // Compute agentLastActiveByAgent for all agents
   useEffect(() => {

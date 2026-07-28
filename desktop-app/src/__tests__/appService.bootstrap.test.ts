@@ -9,6 +9,7 @@ import path from 'node:path'
 vi.mock('../chatStoreBinding.js', () => ({
   bindChatStoreForUser: vi.fn(),
   unbindChatStore: vi.fn(),
+  __setChatStoreBaseDirForTests: vi.fn(),
 }))
 
 describe('AppService invitation configuration lookup', () => {
@@ -264,6 +265,79 @@ describe('AppService invitation configuration lookup', () => {
     } finally {
       warn.mockRestore()
     }
+  })
+
+  it('shares one saved-session restore across concurrent session-state requests', async () => {
+    const configPath = await createTempConfigPath('clerum-desktop-restore-single-flight')
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({
+        externalRestApiBaseUrl: 'http://127.0.0.1:8091',
+        rpcProxyBaseUrl: 'http://127.0.0.1:8094',
+        appName: 'Localhost',
+      })
+    )
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = configPath
+    process.env.EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:8091'
+    process.env.RPC_PROXY_BASE_URL = 'http://127.0.0.1:8094'
+    vi.resetModules()
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: vi.fn(() => path.dirname(configPath)),
+        isPackaged: false,
+        isReady: vi.fn(() => true),
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+
+    const [{ AppService }, chatStoreBinding] = await Promise.all([
+      import('../appService.js'),
+      import('../chatStoreBinding.js'),
+    ])
+    chatStoreBinding.__setChatStoreBaseDirForTests(path.dirname(configPath))
+    const me = {
+      id: 'user-1',
+      email: 'user@example.com',
+      name: null,
+      picture: null,
+      teamId: 'team-1',
+      teamName: 'Marketing',
+      role: 'member',
+    }
+    let resolveMe!: (value: typeof me) => void
+    const pendingMe = new Promise<typeof me>(resolve => {
+      resolveMe = resolve
+    })
+    const getSessionToken = vi.fn().mockResolvedValue('stored-token')
+    const getMe = vi.fn().mockReturnValue(pendingMe)
+    const service = new AppService() as unknown as {
+      authClient: { getMe: ReturnType<typeof vi.fn> }
+      tokenStore: {
+        getSessionToken: ReturnType<typeof vi.fn>
+        clearSessionToken: ReturnType<typeof vi.fn>
+      }
+      rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
+      initialize: () => Promise<unknown>
+      getSessionState: () => Promise<unknown>
+    }
+    service.authClient = { getMe } as never
+    service.tokenStore = {
+      getSessionToken,
+      clearSessionToken: vi.fn(),
+    } as never
+    service.rpcTokenManager = { clear: vi.fn() } as never
+
+    const first = service.initialize()
+    const second = service.getSessionState()
+    resolveMe(me)
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { authenticated: true, me },
+      { authenticated: true, me },
+    ])
+    expect(getSessionToken).toHaveBeenCalledTimes(1)
+    expect(getMe).toHaveBeenCalledTimes(1)
   })
 
   it('clears a saved token when startup session restore is rejected by the API', async () => {
