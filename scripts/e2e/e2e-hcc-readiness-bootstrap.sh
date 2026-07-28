@@ -36,6 +36,7 @@ HCC_DEPLOY="${HCC_DEPLOY:-host-context-controller}"
 HOST_NS="${MCP_HOST_NS:-mcp-host}"
 RUN_ID="$(date +%s)-$$"
 BLOCKER_NAME="$(truncate_rfc1123 "e2e-hcc-readiness-blocker-${RUN_ID}")"
+BLOCKER_EGRESS_POLICY_NAME="$(truncate_rfc1123 "${BLOCKER_NAME}-egress")"
 START_MARKER='Starting initial Host background convergence'
 COMPLETE_MARKER='Completed Host reconciliation after initial Host reconciliation'
 FAIL_MARKER='Host reconciliation after initial Host reconciliation failed'
@@ -117,6 +118,9 @@ cleanup() {
   fi
 
   if [ "$BLOCKER_CREATED" = 1 ]; then
+    kctl delete networkpolicy "$BLOCKER_EGRESS_POLICY_NAME" -n "$HCC_NS" \
+      --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 ||
+      cleanup_failed=1
     kctl delete networkpolicy "$BLOCKER_NAME" -n "$HCC_NS" \
       --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 ||
       cleanup_failed=1
@@ -238,7 +242,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: ${BLOCKER_NAME}
+  name: ${BLOCKER_EGRESS_POLICY_NAME}
   namespace: ${HCC_NS}
   labels:
     e2e.clerum.io/hcc-readiness: "${RUN_ID}"
@@ -252,6 +256,27 @@ spec:
     - podSelector:
         matchLabels:
           e2e.clerum.io/hcc-readiness: "${RUN_ID}"
+    ports:
+    - protocol: TCP
+      port: 8090
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ${BLOCKER_NAME}
+  namespace: ${HCC_NS}
+  labels:
+    e2e.clerum.io/hcc-readiness: "${RUN_ID}"
+spec:
+  podSelector:
+    matchLabels:
+      e2e.clerum.io/hcc-readiness: "${RUN_ID}"
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: ${HCC_DEPLOY}
     ports:
     - protocol: TCP
       port: 8090
