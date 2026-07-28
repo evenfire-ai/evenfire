@@ -87,6 +87,12 @@ blocker_holds_token_request() {
     grep -Fq 'holding POST /api/v1/auth/mcp-host/'
 }
 
+control_api_service_excludes_blocker() {
+  kctl get endpointslice -n "$HCC_NS" -l 'kubernetes.io/service-name=control-api' -o json |
+    jq -e --arg blocker "$BLOCKER_NAME" \
+      'all(.items[]?.endpoints[]?; .targetRef.name != $blocker)' >/dev/null
+}
+
 secret_restored() {
   kctl get secret "$RUNTIME_SECRET" -n "$HOST_NS" >/dev/null 2>&1
 }
@@ -111,6 +117,9 @@ cleanup() {
   fi
 
   if [ "$BLOCKER_CREATED" = 1 ]; then
+    kctl delete networkpolicy "$BLOCKER_NAME" -n "$HCC_NS" \
+      --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 ||
+      cleanup_failed=1
     kctl delete service "$BLOCKER_NAME" -n "$HCC_NS" \
       --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 ||
       cleanup_failed=1
@@ -172,7 +181,6 @@ metadata:
   name: ${BLOCKER_NAME}
   namespace: ${HCC_NS}
   labels:
-    app: control-api
     e2e.clerum.io/hcc-readiness: "${RUN_ID}"
 spec:
   replicas: 1
@@ -182,7 +190,6 @@ spec:
   template:
     metadata:
       labels:
-        app: control-api
         e2e.clerum.io/hcc-readiness: "${RUN_ID}"
     spec:
       automountServiceAccountToken: false
@@ -227,9 +234,32 @@ spec:
   - name: http
     port: 8090
     targetPort: 8090
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ${BLOCKER_NAME}
+  namespace: ${HCC_NS}
+  labels:
+    e2e.clerum.io/hcc-readiness: "${RUN_ID}"
+spec:
+  podSelector:
+    matchLabels:
+      app: ${HCC_DEPLOY}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          e2e.clerum.io/hcc-readiness: "${RUN_ID}"
+    ports:
+    - protocol: TCP
+      port: 8090
 EOF
 kctl rollout status deployment "$BLOCKER_NAME" -n "$HCC_NS" --timeout=90s >/dev/null ||
   die "isolated token-issuance blocker did not become ready"
+control_api_service_excludes_blocker ||
+  die "isolated blocker was selected by the real control-api Service"
 ok "isolated in-cluster blocker is ready"
 
 HCC_MUTATED=1

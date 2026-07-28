@@ -349,6 +349,81 @@ describe('McpServerWatcher startup', () => {
     }
   })
 
+  it('starts every initial background convergence lane from the caches current after watches', async () => {
+    const staleServer = {
+      metadata: { name: 'stale-server', namespace: 'mcp-server' },
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/stale-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    }
+    const currentServer = {
+      name: 'current-server',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/current-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    }
+    const staleContext = {
+      metadata: { name: 'stale-context', namespace: 'mcp-server' },
+      spec: { contextId: 'stale-context', mcpServers: [] },
+    }
+    const currentContext = {
+      name: 'current-context',
+      namespace: 'mcp-server',
+      spec: { contextId: 'current-context', mcpServers: [] },
+    }
+    const staleSfs = { metadata: { name: 'stale-sfs', namespace: 'mcp-host' }, spec: {} }
+    const currentSfs = { name: 'current-sfs', namespace: 'mcp-host', spec: {} }
+    const staleGfs = { metadata: { name: 'stale-gfs', namespace: 'mcp-host' }, spec: {} }
+    const currentGfs = { name: 'current-gfs', namespace: 'mcp-host', spec: {} }
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'mcpservers') return { items: [staleServer] }
+      if (plural === 'contexts') return { items: [staleContext] }
+      if (plural === 'sharedfilesystems') return { items: [staleSfs] }
+      if (plural === 'globalfilesystems') return { items: [staleGfs] }
+      if (plural === 'communicationchannels') {
+        return { metadata: { resourceVersion: 'current-cache-rv' }, items: [] }
+      }
+      return { items: [] }
+    })
+    const watcher = new McpServerWatcher()
+    vi.spyOn(watcher as any, 'startMcpServerWatch').mockImplementation(async () => {
+      ;(watcher as any).servers.clear()
+      ;(watcher as any).servers.set(currentServer.name, currentServer)
+    })
+    vi.spyOn(watcher as any, 'startContextWatch').mockImplementation(async () => {
+      ;(watcher as any).contexts.clear()
+      ;(watcher as any).contexts.set(currentContext.name, currentContext)
+    })
+    vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockImplementation(async () => {
+      ;(watcher as any).sharedFileSystems.clear()
+      ;(watcher as any).sharedFileSystems.set(currentSfs.name, currentSfs)
+    })
+    vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockImplementation(async () => {
+      ;(watcher as any).globalFileSystems.clear()
+      ;(watcher as any).globalFileSystems.set(currentGfs.name, currentGfs)
+    })
+    const gfsFullReconcile = vi.spyOn((watcher as any).gfsReconciler, 'fullReconcile')
+
+    await watcher.start()
+
+    await vi.waitFor(() => {
+      expect(mocks.serverFullReconcile).toHaveBeenCalledWith([currentServer])
+      expect(mocks.netPolFullReconcile).toHaveBeenCalledWith([currentContext], [currentServer], {
+        serverInventoryComplete: true,
+        ensureDefaults: false,
+      })
+      expect(mocks.sfsFullReconcile).toHaveBeenCalledWith([currentSfs])
+      expect(gfsFullReconcile).toHaveBeenCalledWith([currentGfs])
+    })
+
+    watcher.stop()
+  })
+
   it('retries failed initial McpServer convergence without delaying safe bootstrap', async () => {
     vi.useFakeTimers()
     const server = {

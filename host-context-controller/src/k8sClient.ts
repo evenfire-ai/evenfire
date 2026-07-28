@@ -558,6 +558,7 @@ export class McpServerWatcher implements McpServerProvider {
   private hosts: Map<string, HostCRD> = new Map()
   private contexts: Map<string, ContextCRD> = new Map()
   private sharedFileSystems: Map<string, SharedFileSystemCRD> = new Map()
+  private globalFileSystems: Map<string, GlobalFileSystemCRD> = new Map()
   private communicationChannels: Map<string, CommunicationChannelCRD> = new Map()
   // A watch callback can still settle after its stream reports completion.
   // Host reconciles change the mcp-host pod template, so stale callbacks must
@@ -1765,6 +1766,9 @@ export class McpServerWatcher implements McpServerProvider {
     try {
       initialGfses = await listAllGlobalFileSystems()
       gfsInventoryComplete = true
+      for (const gfs of initialGfses) {
+        this.globalFileSystems.set(gfs.name, gfs)
+      }
     } catch (error) {
       console.error(
         '[K8s] Skipping initial GlobalFileSystem background convergence because discovery failed:',
@@ -1841,28 +1845,26 @@ export class McpServerWatcher implements McpServerProvider {
 
     // Full convergence is observable and retains each lane's existing retry or
     // periodic-resync contract, but it no longer extends provider.start() or
-    // the readiness probe. Calls are launched only after cache/watch bootstrap
-    // above so live events remain authoritative while these passes run.
+    // the readiness probe. Each lane snapshots its cache only after cache/watch
+    // bootstrap above, so a watch event accepted during startup is not undone by
+    // a pre-watch inventory snapshot.
     if (serverInventoryComplete) {
-      void this.runInitialMcpServerConvergence(initialServers)
+      void this.runInitialMcpServerConvergence()
     }
     if (contextInventoryComplete) {
-      void this.runInitialNetworkPolicyConvergence(
-        initialContexts,
-        initialServers,
-        serverInventoryComplete
-      )
+      void this.runInitialNetworkPolicyConvergence(serverInventoryComplete)
     }
     if (sfsInventoryComplete) {
-      void this.runInitialSharedFileSystemConvergence(initialSfses)
+      void this.runInitialSharedFileSystemConvergence()
     }
     if (gfsInventoryComplete) {
-      void this.runInitialGlobalFileSystemConvergence(initialGfses)
+      void this.runInitialGlobalFileSystemConvergence()
     }
   }
 
-  private async runInitialMcpServerConvergence(initialServers: McpServerCRD[]): Promise<void> {
+  private async runInitialMcpServerConvergence(): Promise<void> {
     try {
+      const initialServers = [...this.servers.values()]
       const initialExternalEgressFailures =
         await this.reconcileInitialExternalEgressBeforeRuntime(initialServers)
       if (this.stopped) return
@@ -1881,11 +1883,11 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   private async runInitialNetworkPolicyConvergence(
-    initialContexts: ContextCRD[],
-    initialServers: McpServerCRD[],
     serverInventoryComplete: boolean
   ): Promise<void> {
     try {
+      const initialContexts = [...this.contexts.values()]
+      const initialServers = [...this.servers.values()]
       console.log('[K8s] Running initial NetworkPolicy background reconciliation...')
       await this.netPolReconciler.fullReconcile(initialContexts, initialServers, {
         serverInventoryComplete,
@@ -1924,22 +1926,17 @@ export class McpServerWatcher implements McpServerProvider {
       this.initialConvergenceRetryTimers.delete(lane)
       if (this.stopped) return
       if (lane === 'McpServer') {
-        void this.runInitialMcpServerConvergence([...this.servers.values()])
+        void this.runInitialMcpServerConvergence()
         return
       }
-      void this.runInitialNetworkPolicyConvergence(
-        [...this.contexts.values()],
-        [...this.servers.values()],
-        true
-      )
+      void this.runInitialNetworkPolicyConvergence(true)
     }, delayMs)
     this.initialConvergenceRetryTimers.set(lane, timer)
   }
 
-  private async runInitialSharedFileSystemConvergence(
-    initialSfses: SharedFileSystemCRD[]
-  ): Promise<void> {
+  private async runInitialSharedFileSystemConvergence(): Promise<void> {
     try {
+      const initialSfses = [...this.sharedFileSystems.values()]
       console.log('[K8s] Running initial SharedFileSystem background reconciliation...')
       await this.sharedFileSystemReconciler.fullReconcile(initialSfses)
     } catch (error) {
@@ -1947,10 +1944,9 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
-  private async runInitialGlobalFileSystemConvergence(
-    initialGfses: GlobalFileSystemCRD[]
-  ): Promise<void> {
+  private async runInitialGlobalFileSystemConvergence(): Promise<void> {
     try {
+      const initialGfses = [...this.globalFileSystems.values()]
       console.log('[K8s] Running initial GlobalFileSystem background reconciliation...')
       await this.gfsReconciler.fullReconcile(initialGfses)
     } catch (error) {
@@ -2041,8 +2037,10 @@ export class McpServerWatcher implements McpServerProvider {
       console.log(`[K8s] GlobalFileSystem watch event: ${type} for ${gfs.name}`)
       try {
         if (type === 'ADDED' || type === 'MODIFIED') {
+          this.globalFileSystems.set(gfs.name, gfs)
           await this.gfsReconciler.reconcile(gfs)
         } else if (type === 'DELETED') {
+          this.globalFileSystems.delete(gfs.name)
           await this.gfsReconciler.reconcileDelete(gfs)
         }
       } catch (error) {
@@ -2278,6 +2276,8 @@ export class McpServerWatcher implements McpServerProvider {
     if (this.stopped) return
     try {
       const gfses = await listAllGlobalFileSystems()
+      this.globalFileSystems.clear()
+      for (const gfs of gfses) this.globalFileSystems.set(gfs.name, gfs)
       await this.gfsReconciler.fullReconcile(gfses)
     } catch (err) {
       console.error(
