@@ -173,7 +173,7 @@ finalize_credentials_after_overlay() {
   fi
 
   log "Waiting for the post-overlay HCC rollout"
-  kctl -n control-plane rollout status deployment/host-context-controller --timeout=240s
+  kctl -n control-plane rollout status deployment/host-context-controller --timeout=480s
   wait_for_gfsc_secret_references
 
   log "Finalizing staged GFS credentials after the overlay"
