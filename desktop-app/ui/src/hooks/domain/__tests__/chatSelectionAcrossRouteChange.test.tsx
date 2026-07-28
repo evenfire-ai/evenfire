@@ -20,6 +20,13 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
+import { DESKTOP_ROUTES } from '@constants/navigation'
+import type { AppNotification } from '../../../uiTypes'
+import {
+  HARNESS_ME,
+  extendMockClerumForAppController,
+  renderAppController,
+} from './__fixtures__/appControllerHarness'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -63,6 +70,40 @@ const indexWith = (chats: ReturnType<typeof chatMeta>[]) => ({
   chats,
 })
 
+/**
+ * Freezes the chat-list reload: `chat.getIndex` never settles until the returned
+ * release runs, so `loadChatList` — and therefore the `switchToChat` the
+ * agent-selection effect replays a pending selection through — cannot complete.
+ * That is what makes the two selection paths distinguishable: while the index is
+ * stalled, a `chat.setLastActive` call can ONLY have come from an imperative
+ * `switchToChat` (the fast path).
+ */
+function stallChatIndex() {
+  let release!: () => void
+  clerum.chat.getIndex.mockReturnValue(
+    new Promise(resolve => {
+      release = () => resolve(indexWith(TWO_CHATS))
+    })
+  )
+  return () => release()
+}
+
+/**
+ * Drains pending microtasks AND the macrotask queue inside `act`, so a negative
+ * assertion is made after everything that could have run has run. Without this a
+ * "did not happen" assertion only means "had not happened yet on this tick",
+ * which is what makes such assertions flaky under CPU contention.
+ */
+async function settle() {
+  await act(async () => {
+    await Promise.resolve()
+    await new Promise(resolve => setTimeout(resolve, 0))
+  })
+}
+
+/** Contention headroom: the default 1s can expire on a cold/loaded machine. */
+const SLOW = { timeout: 5000 } as const
+
 describe('selecting a chat session across a route change', () => {
   it('app -> session never renders the new-chat empty state and opens the requested chat', async () => {
     clerum.chat.getIndex.mockResolvedValue(indexWith(TWO_CHATS))
@@ -83,12 +124,7 @@ describe('selecting a chat session across a route change', () => {
 
     // Stall the chat-list reload so the render that follows the route change is
     // observable instead of being immediately overwritten by the list load.
-    let releaseIndex!: () => void
-    clerum.chat.getIndex.mockReturnValue(
-      new Promise(resolve => {
-        releaseIndex = () => resolve(indexWith(TWO_CHATS))
-      })
-    )
+    const releaseIndex = stallChatIndex()
 
     // The user clicks the OLDER session in the sidebar. Post-fix the selector
     // records a pending selection before flipping the route back to chat.
@@ -189,5 +225,217 @@ describe('selecting a chat session across a route change', () => {
     // The effect re-ran, found no pending selection, wiped the imperative
     // selection and auto-selected the most recent chat instead.
     await waitFor(() => expect(result.current.activeChatId).toBe('c-newest'))
+  })
+})
+
+/**
+ * The tests above pin the MECHANISM (they call `setPendingChatSelection`
+ * themselves). These drive the real entry points on the coordinator, so the
+ * `navItem === DESKTOP_ROUTES.chat` guards in `useAppController`
+ * (`handleSelectChatAgent`, `openAgentConversationTarget`) are the thing under
+ * test — nobody was checking that they pick the right branch.
+ *
+ * How the branch is observed: only the imperative fast path runs `switchToChat`,
+ * and `switchToChat` is the only caller of `chatStore.setLastActive`
+ * (→ `clerum.chat.setLastActive`), which it invokes synchronously. The pending
+ * path sets `activeChatId` synchronously too, but reaches `switchToChat` only
+ * once the chat list resolves — so with `stallChatIndex()` holding the list open,
+ * a `setLastActive(agent, chatId)` call can only mean the fast path ran.
+ *
+ * Determinism: every assertion is either preceded by `settle()` (negatives — so
+ * "did not happen" is not merely "has not happened yet on this tick") or wrapped
+ * in `waitFor` (positives), and every action is preceded by a `waitFor` on the
+ * exact precondition it needs rather than assuming the boot has quiesced.
+ */
+describe('chat-route guard on the real selection entry points', () => {
+  // The coordinator owns SSE subscriptions and timers, so each mount is torn
+  // down before the outer hook deletes `window.clerum` (nested afterEach hooks
+  // run first) — otherwise a surviving effect would fire against a dead bridge.
+  let unmountApp: (() => void) | null = null
+
+  afterEach(() => {
+    unmountApp?.()
+    unmountApp = null
+  })
+
+  /** Boots the coordinator authenticated, on the chat route, with `c-newest` open. */
+  async function bootOnChatRoute() {
+    clerum.chat.getIndex.mockResolvedValue(indexWith(TWO_CHATS))
+    extendMockClerumForAppController(clerum)
+
+    const app = renderAppController()
+    unmountApp = app.unmount
+    await waitFor(() => expect(app.result.current.booting).toBe(false), SLOW)
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true), SLOW)
+    // The access catalog must be in cache before an agent can be selected: the
+    // coordinator nulls `selectedAgent` whenever it isn't in `agentNames`
+    // (useAppController.ts). `initialExperienceLoading` flips to false exactly
+    // when the catalog lands, so this is the honest barrier — waiting on
+    // `navItem === chat` was tautological (useNavigationController starts there).
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false), SLOW)
+
+    // Entering the chat route selects the agent and opens its latest chat, the
+    // same way `handleNavSelect(chat)` does in the app.
+    await act(async () => {
+      app.result.current.handleSelectChatAgent('agent-x')
+    })
+    // `switchToChat` runs on well past the point where `activeChatId` flips
+    // (cache read → unread clear → reconcile). Waiting only for `activeChatId`
+    // let that tail land in the middle of the test below, which is precisely
+    // what made these assertions load-sensitive. Wait for the whole boot
+    // selection to go quiet instead, then drain what is left.
+    await waitFor(() => {
+      expect(app.result.current.selectedAgent).toBe('agent-x')
+      expect(app.result.current.activeChatId).toBe('c-newest')
+      expect(app.result.current.chatMessagesLoading).toBe(false)
+    }, SLOW)
+    await settle()
+    return app
+  }
+
+  it('handleSelectChatAgent from another route defers to the pending selection', async () => {
+    const { result } = await bootOnChatRoute()
+
+    // The user leaves for the Apps embed. `selectedAgent` survives (the raw nav
+    // handler only clears it for the agents/chat routes).
+    await act(async () => {
+      result.current.handleNavSelect(DESKTOP_ROUTES.apps)
+    })
+    await waitFor(() => {
+      expect(result.current.navItem).toBe(DESKTOP_ROUTES.apps)
+      expect(result.current.selectedAgent).toBe('agent-x')
+    }, SLOW)
+    await settle()
+
+    clerum.chat.setLastActive.mockClear()
+    clerum.rpc.loadSessionMessages.mockClear()
+    const releaseIndex = stallChatIndex()
+
+    // Clicking a session in the sidebar while off the chat route.
+    act(() => {
+      result.current.handleSelectChatAgent('agent-x', { chatId: 'c-old', title: 'Old chat' })
+    })
+    // Give the fast path every chance to fire before claiming it did not: with
+    // the index stalled the pending path still cannot reach `switchToChat`, so
+    // draining here only strengthens the negative below.
+    await settle()
+
+    // The guard rejected the fast path — no imperative `switchToChat` for the
+    // requested chat. Scoped to the arguments so unrelated residue (a late
+    // `c-newest` tail) can never decide this assertion.
+    expect(clerum.chat.setLastActive).not.toHaveBeenCalledWith('agent-x', 'c-old')
+    // …but the requested chat is already the active one, so `AgentWorkspace`
+    // renders the thread instead of the "New chat with <agent>" empty state.
+    expect(result.current.activeChatId).toBe('c-old')
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+
+    // Once the list lands, the pending selection is replayed onto the requested chat.
+    await act(async () => {
+      releaseIndex()
+    })
+    await waitFor(
+      () => expect(clerum.chat.setLastActive).toHaveBeenCalledWith('agent-x', 'c-old'),
+      SLOW
+    )
+    await waitFor(
+      () =>
+        expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-old'),
+      SLOW
+    )
+    expect(result.current.activeChatId).toBe('c-old')
+    // Never the most recently updated chat.
+    expect(clerum.chat.setLastActive).not.toHaveBeenCalledWith('agent-x', 'c-newest')
+  })
+
+  it('handleSelectChatAgent on the chat route keeps the imperative fast path', async () => {
+    const { result } = await bootOnChatRoute()
+
+    await waitFor(() => {
+      expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+      expect(result.current.selectedAgent).toBe('agent-x')
+    }, SLOW)
+
+    clerum.chat.setLastActive.mockClear()
+    // The index stays stalled for the whole test: on the fast path `switchToChat`
+    // owns the transition end to end, so the switch below must happen without the
+    // chat list ever resolving. That also keeps the assertion strict — a stalled
+    // list makes the pending path incapable of producing this call.
+    void stallChatIndex()
+
+    act(() => {
+      result.current.handleSelectChatAgent('agent-x', { chatId: 'c-old', title: 'Old chat' })
+    })
+
+    await waitFor(
+      () => expect(clerum.chat.setLastActive).toHaveBeenCalledWith('agent-x', 'c-old'),
+      SLOW
+    )
+    await waitFor(() => {
+      expect(result.current.activeChatId).toBe('c-old')
+      expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+    }, SLOW)
+
+    await waitFor(
+      () =>
+        expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-old'),
+      SLOW
+    )
+    expect(result.current.activeChatId).toBe('c-old')
+  })
+
+  it('a notification opened from another route defers to the pending selection', async () => {
+    // Post-merge the whole notification card in `AppHeader` is clickable, so this
+    // deep link (`handleOpenNotification` → `openAgentConversationTarget`) is the
+    // second entry point behind the same guard. Same team → no team switch, so
+    // the fast path is the only thing the guard can still reject.
+    const { result } = await bootOnChatRoute()
+
+    await act(async () => {
+      result.current.handleNavSelect(DESKTOP_ROUTES.settings)
+    })
+    await waitFor(() => {
+      expect(result.current.navItem).toBe(DESKTOP_ROUTES.settings)
+      expect(result.current.selectedAgent).toBe('agent-x')
+    }, SLOW)
+    await settle()
+
+    clerum.chat.setLastActive.mockClear()
+    clerum.rpc.loadSessionMessages.mockClear()
+    const releaseIndex = stallChatIndex()
+
+    const notification: AppNotification = {
+      id: 'notif-1',
+      kind: 'assistant_reply',
+      agentName: 'agent-x',
+      chatId: 'c-old',
+      teamId: HARNESS_ME.teamId,
+      text: 'Agent replied',
+      timestamp: Date.now(),
+      read: false,
+    }
+
+    await act(async () => {
+      await result.current.handleOpenNotification(notification)
+    })
+    await settle()
+
+    expect(clerum.chat.setLastActive).not.toHaveBeenCalledWith('agent-x', 'c-old')
+    expect(result.current.activeChatId).toBe('c-old')
+    expect(result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+
+    await act(async () => {
+      releaseIndex()
+    })
+    await waitFor(
+      () => expect(clerum.chat.setLastActive).toHaveBeenCalledWith('agent-x', 'c-old'),
+      SLOW
+    )
+    await waitFor(
+      () =>
+        expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-old'),
+      SLOW
+    )
+    expect(result.current.activeChatId).toBe('c-old')
+    expect(clerum.chat.setLastActive).not.toHaveBeenCalledWith('agent-x', 'c-newest')
   })
 })
