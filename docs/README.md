@@ -22,42 +22,45 @@ Use this index for long-form docs.
 
 ## Concepts
 
-| Doc                                                      | Description                                                          |
-| -------------------------------------------------------- | -------------------------------------------------------------------- |
-| [Why evenfire](concepts/why-evenfire.md)                 | Problem, audience, design intent                                     |
-| [When to use evenfire](concepts/when-to-use-evenfire.md) | Fit vs personal assistants / in-process frameworks (categories only) |
-| [Open core: self-host vs hosted](concepts/open-core-and-hosted.md) | What's in this repo vs the managed evenfire hosted service |
-| [Code names](concepts/code-names.md)                     | evenfire vs clerum                                                   |
-| [Architecture overview](architecture/overview.md)        | Services, CRDs, message lifecycle, NetworkPolicy model               |
-| [Platform topology](architecture/platform-topology.md)   | Namespaces, controller split, deny-all baseline                      |
-| [Non-MCP services](architecture/non-mcp-services.md)     | Namespace splitting and L0–L3 policy layers                          |
-| [Diagrams](architecture/diagrams/)                       | Excalidraw sources                                                   |
+| Doc                                                                | Description                                                          |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| [Why evenfire](concepts/why-evenfire.md)                           | Problem, audience, design intent                                     |
+| [When to use evenfire](concepts/when-to-use-evenfire.md)           | Fit vs personal assistants / in-process frameworks (categories only) |
+| [Open core: self-host vs hosted](concepts/open-core-and-hosted.md) | What's in this repo vs the managed evenfire hosted service           |
+| [Code names](concepts/code-names.md)                               | evenfire vs clerum                                                   |
+| [Architecture overview](architecture/overview.md)                  | Services, CRDs, message lifecycle, NetworkPolicy model               |
+| [Platform topology](architecture/platform-topology.md)             | Namespaces, controller split, deny-all baseline                      |
+| [Non-MCP services](architecture/non-mcp-services.md)               | Namespace splitting and L0–L3 policy layers                          |
+| [Diagrams](architecture/diagrams/)                                 | Excalidraw sources                                                   |
 
 ## Surfaces (the UIs)
 
-| Doc                                     | Description                                                                |
-| ---------------------------------------- | ---------------------------------------------------------------------------- |
-| [Surfaces index](surfaces/README.md)   | Which UI is for whom, and what each may reach                             |
-| [Control UI](surfaces/control-ui.md)   | Admin console: usage, budgets, approvals, egress, registry                |
+| Doc                                    | Description                                                                |
+| -------------------------------------- | -------------------------------------------------------------------------- |
+| [Surfaces index](surfaces/README.md)   | Which UI is for whom, and what each may reach                              |
+| [Control UI](surfaces/control-ui.md)   | Admin console: usage, budgets, approvals, egress, registry                 |
 | [Desktop App](surfaces/desktop-app.md) | End-user client: chat, live activity, approvals, artifacts; how to ship it |
-| [Profile UI](surfaces/profile-ui.md)   | Member front door: invitation, password, desktop handoff                  |
+| [Profile UI](surfaces/profile-ui.md)   | Member front door: invitation, password, desktop handoff                   |
 
 ## How-to guides
 
-| Doc                                                            | Description                         |
-| -------------------------------------------------------------- | ----------------------------------- |
-| [Connect Telegram](how-to/connect-telegram.md)                 | Minikube env or CRD channel path    |
-| [Configure approvals](how-to/configure-approvals.md)           | Human-in-the-loop tool gates        |
-| [Add an MCP server](how-to/add-mcp-server.md)                  | Dev-mode JSON or CRD allowlist path |
-| [Desktop setup & updates](how-to/desktop-setup-and-updates.md) | Environments, invitation setup, updates |
+| Doc                                                                           | Description                                                |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| [Connect Telegram](how-to/connect-telegram.md)                                | Minikube env or CRD channel path                           |
+| [Configure approvals](how-to/configure-approvals.md)                          | Human-in-the-loop tool gates                               |
+| [Add an MCP server](how-to/add-mcp-server.md)                                 | Dev-mode JSON or CRD allowlist path                        |
+| [LLM providers overview](llm-providers/README.md)                             | Which providers are supported and how they fit together    |
+| [Configure LLM providers](deploy/llm-providers.md)                            | Credentials, model allowlist, per-session selector         |
+| [Add an LLM provider](llm-providers/adding-a-provider.md)                     | Data-only vs driver-based integration paths                |
+| [Desktop setup & updates](how-to/desktop-setup-and-updates.md)                | Environments, invitation setup, updates                    |
 | [Member invitations on self-hosted](how-to/member-invitations-self-hosted.md) | Hosted mode zero-config emails vs running your own service |
-| [Track usage & set budgets](how-to/token-budgets-and-usage.md) | Enable budgets, scope, block vs warn |
-| [Connect to the registry](how-to/connect-to-registry.md)       | Self-hosted registry connect flow   |
-| [Publish a plugin](how-to/publish-plugin-to-registry.md)       | Publish under your org with an `efrk_` key |
-| [Shared & global files](how-to/shared-and-global-files.md)     | Team workspaces (SFS) and the brokered drive (GFS) |
-| [Minikube full stack](deploy/minikube.md)                      | Local Kubernetes platform           |
-| [Production notes](deploy/production.md)                       | Checklist and in-repo deploy assets |
-| [WorkflowRecipes operations](deploy/workflow-recipes-guide.md) | Recipe ops, RBAC, debugging         |
+| [Track usage & set budgets](how-to/token-budgets-and-usage.md)                | Enable budgets, scope, block vs warn                       |
+| [Connect to the registry](how-to/connect-to-registry.md)                      | Self-hosted registry connect flow                          |
+| [Publish a plugin](how-to/publish-plugin-to-registry.md)                      | Publish under your org with an `efrk_` key                 |
+| [Shared & global files](how-to/shared-and-global-files.md)                    | Team workspaces (SFS) and the brokered drive (GFS)         |
+| [Minikube full stack](deploy/minikube.md)                                     | Local Kubernetes platform                                  |
+| [Production notes](deploy/production.md)                                      | Checklist and in-repo deploy assets                        |
+| [WorkflowRecipes operations](deploy/workflow-recipes-guide.md)                | Recipe ops, RBAC, debugging                                |
 
 ## Reference
 
@@ -78,11 +81,11 @@ Use this index for long-form docs.
 
 ## For coding agents
 
-| Doc                                                             | Description                   |
-| --------------------------------------------------------------- | ----------------------------- |
-| [WorkflowRecipe guide](agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md)  | Authoring recipes, for agents |
+| Doc                                                             | Description                                                |
+| --------------------------------------------------------------- | ---------------------------------------------------------- |
+| [WorkflowRecipe guide](agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md)  | Authoring recipes, for agents                              |
 | [Frontend style rules](agents/frontend-style-rules.md)          | CSS tokens, page shells, component rules for the three UIs |
-| [WorkflowRecipe naming](architecture/workflow-recipe-naming.md) | Generated resource-name rules |
+| [WorkflowRecipe naming](architecture/workflow-recipe-naming.md) | Generated resource-name rules                              |
 
 ## Community & trust
 
@@ -103,12 +106,13 @@ Use this index for long-form docs.
 | Understand why this exists           | [Why evenfire](concepts/why-evenfire.md)                 |
 | Decide if evenfire fits my use case  | [When to use evenfire](concepts/when-to-use-evenfire.md) |
 | Configure Host / Context / McpServer | [CRD index](crds/README.md)                              |
+| Pick or configure an LLM provider    | [LLM providers overview](llm-providers/README.md)        |
 | Run the full stack locally           | [Minikube](deploy/minikube.md)                           |
 | Ship to a real cluster               | [Production notes](deploy/production.md)                 |
 | Debug E2E                            | [E2E guide](testing/e2e-guide.md)                        |
 | Feed docs to an LLM                  | [llms.txt](llms.txt)                                     |
-| Use the admin console               | [Control UI](surfaces/control-ui.md)                     |
-| Chat with an agent from the desktop | [Desktop App](surfaces/desktop-app.md)                   |
+| Use the admin console                | [Control UI](surfaces/control-ui.md)                     |
+| Chat with an agent from the desktop  | [Desktop App](surfaces/desktop-app.md)                   |
 
 > **Note:** Contributor-local working artifacts live under `docs/superpowers/`
 > on each checkout. They are git-ignored and intentionally not part of the repo.
