@@ -6852,9 +6852,26 @@ textarea.cu-input {
   margin: 0;
 }
 
-/* The "＋ Add provider" picker of the additive editor. */
-select.cu-input.cu-llm-cred-add {
-  max-width: 14rem;
+/* The "Add provider" picker of the additive editor (a SelectionDropdown, so
+   the width cap lands on its root element, not on a native <select>). The cap
+   also bounds the popover menu, so it stays wide enough for the longest
+   provider labels; inline mode (update modal) keeps the surface's full width. */
+.cu-selection-dropdown.cu-llm-cred-add:not(.cu-selection-dropdown--inline) {
+  max-width: 16rem;
+}
+
+/* The picker is a MENU (value is always empty): entries mount a provider
+   section and vanish from the list, so the never-filled selection squares
+   would read as 21 uncheckable checkboxes. */
+.cu-llm-cred-add .cu-selection-dropdown__check {
+  display: none;
+}
+
+/* The picker's Field is the last child of the editor's flex column, which
+   already spaces children with its gap — drop the Field's own trailing
+   margin so the editor doesn't end in dead space (visible in the modal). */
+.cu-llm-cred-groups > .cu-field:last-child {
+  margin-bottom: 0;
 }
 
 /* ── Host LLM config surface (spec Topic 1b, jury design C) ───────────────── */
@@ -6951,8 +6968,13 @@ select.cu-input.cu-llm-cred-add {
   filter: brightness(0);
 }
 
+/* OpenAI ships a white-on-transparent mark, so on light surfaces it needs to be
+   knocked back to black. Scoped to the PROVIDER pickers only (the agents LLM
+   provider select and the secrets "＋ Add provider" picker) — the model
+   dropdown reuses the same icon on a different treatment and must not inherit
+   this. */
 :root[data-theme='light']
-  .cu-llm-config__provider-select
+  :is(.cu-llm-config__provider-select, .cu-llm-cred-add)
   .cu-llm-provider-icon[data-provider='openai']
   img {
   filter: brightness(0);

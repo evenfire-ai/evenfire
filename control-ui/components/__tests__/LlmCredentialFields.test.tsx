@@ -29,10 +29,24 @@ function Harness({
   )
 }
 
-const addProviderSelect = () => screen.getByLabelText('Add provider') as HTMLSelectElement
+// The "＋ Add provider" picker is a SelectionDropdown: its <Field> label names
+// the trigger button, and the options only exist in the DOM while the menu is
+// open (single-select closes it again as soon as one is picked).
+const addProviderTrigger = () => screen.getByLabelText('Add provider')
+
+function openAddProvider() {
+  fireEvent.click(addProviderTrigger())
+}
+
+function providerLabel(provider: string): string {
+  const group = LLM_CREDENTIAL_GROUPS.find(item => item.provider === provider)
+  if (!group) throw new Error(`unknown provider in test: ${provider}`)
+  return group.label
+}
 
 function addProvider(provider: string) {
-  fireEvent.change(addProviderSelect(), { target: { value: provider } })
+  openAddProvider()
+  fireEvent.click(screen.getByRole('option', { name: providerLabel(provider) }))
 }
 
 // Provider sections are the only elements using this title class; option
@@ -48,9 +62,18 @@ describe('LlmCredentialFields (additive provider editor)', () => {
     const { container } = render(<Harness />)
     expect(container.querySelectorAll('.cu-llm-cred-group')).toHaveLength(0)
     expect(screen.getByText(/No providers added yet/i)).toBeInTheDocument()
-    // Placeholder option + one option per provider in the shared package.
-    const options = within(addProviderSelect()).getAllByRole('option')
-    expect(options).toHaveLength(LLM_CREDENTIAL_GROUPS.length + 1)
+    // One option per provider in the shared package (the dropdown has no
+    // placeholder entry — the placeholder lives on the trigger button).
+    openAddProvider()
+    const options = screen.getAllByRole('option')
+    expect(options).toHaveLength(LLM_CREDENTIAL_GROUPS.length)
+    // Every entry carries its provider brand mark, keyed to the provider id.
+    for (const group of LLM_CREDENTIAL_GROUPS) {
+      const option = screen.getByRole('option', { name: group.label })
+      expect(
+        option.querySelector(`.cu-llm-provider-icon[data-provider="${group.provider}"]`)
+      ).not.toBeNull()
+    }
   })
 
   it('edit mode renders only the providers that already have a stored key', () => {
@@ -65,7 +88,9 @@ describe('LlmCredentialFields (additive provider editor)', () => {
     render(<Harness />)
     addProvider('openai')
     expect(sectionTitle('OpenAI')).toBeInTheDocument()
-    expect(within(addProviderSelect()).queryByRole('option', { name: 'OpenAI' })).toBeNull()
+    openAddProvider()
+    expect(screen.queryByRole('option', { name: 'OpenAI' })).toBeNull()
+    expect(screen.getByRole('option', { name: 'Anthropic' })).toBeInTheDocument()
     // The rest stays hidden.
     expect(sectionTitle('Anthropic')).toBeNull()
   })
@@ -153,7 +178,8 @@ describe('LlmCredentialFields (additive provider editor)', () => {
     addProvider('openai')
     fireEvent.click(screen.getByRole('button', { name: 'Remove OpenAI provider' }))
     expect(sectionTitle('OpenAI')).toBeNull()
-    expect(within(addProviderSelect()).getByRole('option', { name: 'OpenAI' })).toBeInTheDocument()
+    openAddProvider()
+    expect(screen.getByRole('option', { name: 'OpenAI' })).toBeInTheDocument()
   })
 
   it('offers no remove control for a stored provider or one holding a typed value', () => {

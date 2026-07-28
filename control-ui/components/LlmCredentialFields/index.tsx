@@ -3,8 +3,11 @@
 import React, { useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { LlmProviderIcon } from '@/components/LlmProviderIcon'
+import { SelectionDropdown } from '@/components/SelectionDropdown'
+import type { SelectionDropdownOption } from '@/components/SelectionDropdown/types'
 import { IconX } from '@/components/icons'
-import { Button, Field, SelectInput, TextAreaInput, TextInput } from '@/components/ui'
+import { Button, Field, TextAreaInput, TextInput } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import {
   LLM_CREDENTIAL_GROUPS,
@@ -31,6 +34,10 @@ const DATA_KEY_PATTERN = /^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$/
 // Input-id prefix. Only one LlmCredentialFields renders per page and every slot
 // id already ends in a unique dataKey/slot id, so this is a fixed constant.
 const ID_PREFIX = 'llm-secret'
+
+// Stable id for the "＋ Add provider" picker so its <Field> label points at the
+// dropdown's trigger button.
+const ADD_PROVIDER_ID = `${ID_PREFIX}-add-provider`
 
 // Every canonical (registry) slot dataKey across providers. An existing Secret
 // key outside this set is an operator-minted extra slot (`claude-api-key-fb1`).
@@ -85,6 +92,7 @@ export function LlmCredentialFields({
   onChange,
   disabled = false,
   existingKeys,
+  pickerInline = false,
 }: LlmCredentialFieldsProps) {
   const [extraSlots, setExtraSlots] = useState<ExtraSlot[]>(() =>
     seedExistingExtraSlots(existingKeys)
@@ -125,6 +133,15 @@ export function LlmCredentialFields({
   // canonical package order regardless of the order providers were added.
   const visibleGroups = LLM_CREDENTIAL_GROUPS.filter(group => visibleProviders.has(group.provider))
   const addableGroups = LLM_CREDENTIAL_GROUPS.filter(group => !visibleProviders.has(group.provider))
+
+  // The picker is a MENU, not a selection: it never holds a value (see the
+  // `value={[]}` below), so each addable provider is just an entry with its
+  // brand mark, mirroring the agents LLM provider selector.
+  const addProviderOptions: SelectionDropdownOption[] = addableGroups.map(group => ({
+    value: group.provider,
+    label: group.label,
+    icon: <LlmProviderIcon provider={group.provider} label={group.label} />,
+  }))
 
   // The full set of keys the form already knows (package slots + created extra
   // slots) — used to flag duplicate extra-slot names.
@@ -391,20 +408,27 @@ export function LlmCredentialFields({
       })}
 
       {addableGroups.length > 0 ? (
-        <SelectInput
-          className="cu-llm-cred-add"
-          value=""
-          onChange={event => addProvider(event.target.value)}
-          disabled={disabled}
-          aria-label="Add provider"
-        >
-          <option value="">＋ Add provider…</option>
-          {addableGroups.map(group => (
-            <option key={group.provider} value={group.provider}>
-              {group.label}
-            </option>
-          ))}
-        </SelectInput>
+        <Field htmlFor={ADD_PROVIDER_ID} label="Add provider">
+          <SelectionDropdown
+            id={ADD_PROVIDER_ID}
+            className="cu-llm-cred-add"
+            inline={pickerInline}
+            // Always empty: picking a provider MOUNTS its section, it does not
+            // leave the picker "holding" that provider — the entry disappears
+            // from the options instead. Single-select closes the menu itself.
+            value={[]}
+            options={addProviderOptions}
+            placeholder="Select a provider…"
+            searchPlaceholder="Search providers…"
+            selectionLabel="provider"
+            multiple={false}
+            showSelectedChips={false}
+            disabled={disabled}
+            onChange={next => {
+              if (next[0]) addProvider(next[0])
+            }}
+          />
+        </Field>
       ) : null}
     </div>
   )

@@ -27,4 +27,8 @@ export type LlmCredentialFieldsProps = {
   // Keys already stored in the Secret (edit mode) — light up the present chips
   // without ever exposing a value. Create flows omit it.
   existingKeys?: string[]
+  // Render the "Add provider" picker as an always-open inline list instead of a
+  // popover. Scroll-clipped surfaces (the update modal) must set it — an
+  // absolute-positioned menu would open below the modal's visible fold.
+  pickerInline?: boolean
 }

@@ -920,6 +920,7 @@ export function SecretsTable({
                 onChange={(dataKey, value) => setKeyDraft(prev => ({ ...prev, [dataKey]: value }))}
                 existingKeys={editingKeys}
                 disabled={saving}
+                pickerInline
               />
             </div>
 
