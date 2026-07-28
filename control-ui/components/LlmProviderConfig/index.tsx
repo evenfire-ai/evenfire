@@ -1,9 +1,10 @@
 'use client'
 
-import React, { useMemo } from 'react'
+import { useMemo } from 'react'
 import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { LlmPolicyEditor } from '@/components/LlmPolicyEditor'
+import { LlmProviderIcon } from '@/components/LlmProviderIcon'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
 import type { SelectionDropdownOption } from '@/components/SelectionDropdown/types'
 import { Button, Field, TextAreaInput, TextInput } from '@/components/ui'
@@ -33,22 +34,6 @@ import type { LlmCredentialWiring, LlmProviderConfigProps } from './types'
 // AWS_REGION, AZURE_OPENAI_ENDPOINT) are configured — the credential block only
 // links to it, it never duplicates that editor (spec R4.5.4).
 const HOST_ENV_HREF = CONTROL_ROUTES.agents.root
-
-function LlmProviderIcon({ provider, label }: { provider: LlmProvider; label: string }) {
-  const [failed, setFailed] = React.useState(false)
-
-  React.useEffect(() => setFailed(false), [provider])
-
-  return (
-    <span className="cu-llm-provider-icon" aria-hidden="true" data-provider={provider}>
-      {failed ? (
-        <span>{label.slice(0, 1).toUpperCase()}</span>
-      ) : (
-        <img src={`/provider-icons/${provider}.svg`} alt="" onError={() => setFailed(true)} />
-      )}
-    </span>
-  )
-}
 
 // A synthetic slot definition for a fallback's chosen extra credentialSlot when
 // that key is NOT one of the provider's canonical registry slots (e.g.
