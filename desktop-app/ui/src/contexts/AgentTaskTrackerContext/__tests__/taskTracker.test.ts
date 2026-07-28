@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { classifyTier } from '@hooks/useTaskTier'
 import { TaskTracker } from '../taskTracker'
 import { type TaskKey, type TaskState, makeTaskKey } from '../types'
 
@@ -276,6 +277,9 @@ describe('TaskTracker', () => {
     expect(tracker.get(KEY)?.pausedAt).toBe(firstPausedAt)
     expect(tracker.get(KEY)?.status).toBe('suspended')
     expect(tracker.get(KEY)?.pendingApproval?.requestId).toBe('req-1')
+    // The other half of the invariant: a replay must not CLOSE (or double-count)
+    // the open segment either — the accumulator stays untouched.
+    expect(tracker.get(KEY)?.pausedMs).toBeUndefined()
   })
 
   it('a genuine re-suspension after a resume DOES re-stamp pausedAt', async () => {
@@ -308,6 +312,124 @@ describe('TaskTracker', () => {
 
     expect(tracker.get(KEY)?.pausedAt).toBe(firstPausedAt! + 120_000)
     expect(tracker.get(KEY)?.pendingApproval?.requestId).toBe('req-2')
+    // The first wait (60s) closed into the accumulator when `tool_start` resumed.
+    expect(tracker.get(KEY)?.pausedMs).toBe(60_000)
+  })
+
+  it('resuming closes the pause segment so the tier stays on ACTIVE time (§AC3)', async () => {
+    // THE reported bug: approve after 10min at the gate and the task resumed
+    // straight into T4 ("your agent is still working, safe to close this window"),
+    // because the age went back to `now - startedAt` — human wait included.
+    let clock = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    tracker.setCallbacks({ onTerminal: vi.fn(), onSuspended: vi.fn(), onResumed: vi.fn() })
+    tracker.start(KEY, 'task-1', 'um-1')
+    const startedAt = tracker.get(KEY)!.startedAt
+
+    clock += 20_000 // 20s of real agent work before the gate
+    await rpc.emit({
+      type: 'suspended',
+      data: { taskId: 'task-1', requestId: 'req-1', displayName: 'Shell', reason: 'approval' },
+    })
+    clock += 600_000 // the user thinks about it for 10 minutes
+    await rpc.emit({
+      type: 'tool_start',
+      data: { taskId: 'task-1', toolCallId: 'tc-1', toolName: 'shell', iteration: 2 },
+    })
+
+    const state = tracker.get(KEY)!
+    expect(state.pausedMs).toBe(600_000)
+    expect(state.pausedAt).toBeUndefined() // invariant: no OPEN segment while running
+    expect(classifyTier(clock - startedAt - (state.pausedMs ?? 0))).toBe('T1')
+  })
+
+  it('accumulates pausedMs across two suspend/resume cycles', async () => {
+    let clock = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    tracker.setCallbacks({ onTerminal: vi.fn(), onSuspended: vi.fn(), onResumed: vi.fn() })
+    tracker.start(KEY, 'task-1', 'um-1')
+    const startedAt = tracker.get(KEY)!.startedAt
+
+    const suspend = (requestId: string) =>
+      rpc.emit({
+        type: 'suspended',
+        data: { taskId: 'task-1', requestId, displayName: 'Shell', reason: 'approval' },
+      })
+    const resumeViaTool = (toolCallId: string) =>
+      rpc.emit({
+        type: 'tool_start',
+        data: { taskId: 'task-1', toolCallId, toolName: 'shell', iteration: 2 },
+      })
+
+    clock += 10_000 // active
+    await suspend('req-1')
+    clock += 300_000 // paused
+    await resumeViaTool('tc-1')
+    clock += 15_000 // active
+    await suspend('req-2')
+    clock += 600_000 // paused
+    await resumeViaTool('tc-2')
+    clock += 5_000 // active
+
+    const state = tracker.get(KEY)!
+    expect(state.pausedMs).toBe(900_000)
+    expect(state.pausedAt).toBeUndefined()
+    // 30s of active work across the two gates — nowhere near the 15min wall-clock.
+    expect(clock - startedAt - state.pausedMs!).toBe(30_000)
+  })
+
+  it('resuming via llm_in_progress also closes the pause segment', async () => {
+    let clock = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    tracker.setCallbacks({ onTerminal: vi.fn(), onSuspended: vi.fn(), onResumed: vi.fn() })
+    tracker.start(KEY, 'task-1', 'um-1')
+    await rpc.emit({
+      type: 'suspended',
+      data: { taskId: 'task-1', requestId: 'req-1', displayName: 'Shell', reason: 'approval' },
+    })
+    clock += 420_000
+    await rpc.emit({
+      type: 'llm_in_progress',
+      data: { taskId: 'task-1', elapsedMs: 1_200, iteration: 3 },
+    })
+
+    const state = tracker.get(KEY)!
+    expect(state.status).toBe('streaming')
+    expect(state.pausedMs).toBe(420_000)
+    expect(state.pausedAt).toBeUndefined()
+    expect(state.pendingApproval).toBeUndefined()
+  })
+
+  it('a terminal reached with the pause segment still OPEN reports active_ms (deny path)', async () => {
+    // A denied approval can end the run straight from `suspended` — no resume
+    // event ever closes the segment, so `fireTerminal` has to.
+    let clock = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    const logs: unknown[][] = []
+    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      logs.push(args)
+    })
+    tracker.setCallbacks({ onTerminal: vi.fn(), onSuspended: vi.fn() })
+    tracker.start(KEY, 'task-1', 'um-1')
+    clock += 20_000
+    await rpc.emit({
+      type: 'suspended',
+      data: { taskId: 'task-1', requestId: 'req-1', displayName: 'Shell', reason: 'approval' },
+    })
+    clock += 900_000 // 15min at the gate, then the user denies
+    await rpc.emit({
+      type: 'terminal',
+      data: { taskId: 'task-1', status: 'cancelled', reason: 'denied' },
+    })
+
+    const telemetry = logs.find(([label]) => label === '[telemetry] task_duration_seconds')
+    expect(telemetry?.[1]).toMatchObject({
+      duration_ms: 920_000, // wall-clock, unchanged
+      paused_ms: 900_000,
+      active_ms: 20_000,
+      status: 'cancelled',
+      tier_at_terminal: 'T1', // classified off active_ms, not the 15min wait
+    })
   })
 
   it('subscribe returns an unsubscribe that stops further notifications', async () => {

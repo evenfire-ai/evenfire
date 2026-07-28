@@ -139,6 +139,15 @@ describe('NudgeArea (D.5b)', () => {
     }
   })
 
+  it('renders nothing right after an approval when the active age is short', () => {
+    // The reported symptom, at the surface the user sees: approving after a
+    // 10min gate wait leaves a wall-clock age of ~620s (T4 territory), but the
+    // agent only worked ~20s. `useTaskTier` deducts the accumulated `pausedMs`,
+    // so no "still working" nudge fires on resume.
+    const { container } = renderNudge(task(620_000, { pausedMs: 600_000 }))
+    expect(container.firstChild).toBeNull()
+  })
+
   it('stops showing a nudge after switching to a chat with no task', () => {
     // Key-aware fake: agent-x::c1 has a long-running (T3) task; c2 has none.
     const byKey = new Map<string, TaskState>([['agent-x::c1', task(150_000)]])
