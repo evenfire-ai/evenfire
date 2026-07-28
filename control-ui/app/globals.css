@@ -6840,6 +6840,64 @@ textarea.cu-input {
   align-items: center;
 }
 
+/* Chip + optional remove icon-button on the right side of a group head. */
+.cu-llm-cred-group__head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Empty state of the additive editor (no provider sections mounted yet). */
+.cu-llm-cred-empty {
+  margin: 0;
+}
+
+/* Stored keys queued for retirement. The deletion lands on SAVE, so this is
+   the only signal between the click and the write — warning tone, not the
+   muted hint color it inherits from .cu-field__hint. The element stays mounted
+   as a live region even with nothing queued, so :empty (never whitespace — it
+   renders no children at all) takes it out of the flow instead of leaving the
+   editor's column gap around a blank line. */
+.cu-llm-cred-removed {
+  margin: 0;
+  color: var(--cu-warning);
+}
+
+.cu-llm-cred-removed:empty {
+  display: none;
+}
+
+/* Match the monospace key-name inputs the listed keys were typed into (same
+   stack as .cu-input--monospace — the codebase has no mono font token). */
+.cu-llm-cred-removed code {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+  font-size: 0.95em;
+}
+
+/* The "Add provider" picker of the additive editor (a SelectionDropdown, so
+   the width cap lands on its root element, not on a native <select>). The cap
+   also bounds the popover menu, so it stays wide enough for the longest
+   provider labels; inline mode (update modal) keeps the surface's full width. */
+.cu-selection-dropdown.cu-llm-cred-add:not(.cu-selection-dropdown--inline) {
+  max-width: 16rem;
+}
+
+/* The picker is a MENU (value is always empty): entries mount a provider
+   section and vanish from the list, so the never-filled selection squares
+   would read as 21 uncheckable checkboxes. */
+.cu-llm-cred-add .cu-selection-dropdown__check {
+  display: none;
+}
+
+/* The picker's Field is the last child of the editor's flex column, which
+   already spaces children with its gap — drop the Field's own trailing
+   margin so the editor doesn't end in dead space (visible in the modal). */
+.cu-llm-cred-groups > .cu-field:last-child {
+  margin-bottom: 0;
+}
+
 /* ── Host LLM config surface (spec Topic 1b, jury design C) ───────────────── */
 .cu-llm-config {
   display: flex;
@@ -6934,8 +6992,13 @@ textarea.cu-input {
   filter: brightness(0);
 }
 
+/* OpenAI ships a white-on-transparent mark, so on light surfaces it needs to be
+   knocked back to black. Scoped to the PROVIDER pickers only (the agents LLM
+   provider select and the secrets "＋ Add provider" picker) — the model
+   dropdown reuses the same icon on a different treatment and must not inherit
+   this. */
 :root[data-theme='light']
-  .cu-llm-config__provider-select
+  :is(.cu-llm-config__provider-select, .cu-llm-cred-add)
   .cu-llm-provider-icon[data-provider='openai']
   img {
   filter: brightness(0);
