@@ -37,7 +37,14 @@ const svc = vi.hoisted(() => ({
   updateMemberRole: vi.fn(),
 }))
 
-vi.mock('../src/services/directory/index.js', () => svc)
+const serviceErrors = vi.hoisted(() => ({
+  AgentGrantPreconditionError: class AgentGrantPreconditionError extends Error {},
+}))
+
+vi.mock('../src/services/directory/index.js', () => ({
+  ...svc,
+  AgentGrantPreconditionError: serviceErrors.AgentGrantPreconditionError,
+}))
 
 const TEST_ADMIN_SUB = '11111111-1111-4111-8111-111111111111'
 
@@ -94,12 +101,8 @@ describe('routes/profileAdmin', () => {
     svc.listUsers.mockResolvedValue([{ id: 'u1' }])
     svc.setUserContexts.mockResolvedValue({ userId: 'u1', contextIds: ['ctx-a'] })
     svc.getUserContexts.mockResolvedValue({ userId: 'u1', contextIds: ['ctx-a'] })
-    svc.setUserAgents.mockResolvedValue({ userId: 'u1', agentNames: ['agent-a'] })
-    svc.getUserAgents.mockResolvedValue({ userId: 'u1', agentNames: ['agent-a'] })
     svc.setTeamContexts.mockResolvedValue({ teamId: 't1', contextIds: ['ctx-a'] })
     svc.getTeamContexts.mockResolvedValue({ teamId: 't1', contextIds: ['ctx-a'] })
-    svc.setTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-a'] })
-    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-a'] })
     svc.createInvitation.mockResolvedValue({ id: 'inv1' })
     svc.createInvitationForTeams.mockResolvedValue({ id: 'inv1' })
     svc.listUsersByContext.mockResolvedValue([{ id: 'u1', email: 'u@example.com' }])
@@ -118,20 +121,10 @@ describe('routes/profileAdmin', () => {
       .expect(200)
     await request(app).get('/admin/users/u1/contexts').expect(200)
     await request(app)
-      .put('/admin/users/u1/agents')
-      .send({ agentNames: ['agent-a'] })
-      .expect(200)
-    await request(app).get('/admin/users/u1/agents').expect(200)
-    await request(app)
       .put('/admin/teams/t1/contexts')
       .send({ contextIds: ['ctx-a'] })
       .expect(200)
     await request(app).get('/admin/teams/t1/contexts').expect(200)
-    await request(app)
-      .put('/admin/teams/t1/agents')
-      .send({ agentNames: ['agent-a'] })
-      .expect(200)
-    await request(app).get('/admin/teams/t1/agents').expect(200)
     svc.getTeamById.mockResolvedValue({ id: 't1', name: 'team-1' })
     svc.listPendingInvitationsForTeam.mockResolvedValue([
       {
@@ -194,26 +187,15 @@ describe('routes/profileAdmin', () => {
     expect(svc.createInvitationForTeams).not.toHaveBeenCalled()
   })
 
-  it('returns deleted context history but active-only agent grants for admin user/team views', async () => {
+  it('returns deleted context history for admin user and team views', async () => {
     ;(gatewayStub.listResource as any).mockImplementation(async (plural: string) => {
       if (plural === 'contexts') {
         return [{ metadata: { name: 'ctx-live' }, spec: { contextId: 'ctx-alias' } }]
       }
-      if (plural === 'hosts') {
-        return [{ metadata: { name: 'agent-live', namespace: 'mcp-host' }, spec: { enabled: true } }]
-      }
       return []
     })
     svc.getUserContexts.mockResolvedValue({ userId: 'u1', contextIds: ['ctx-live', 'ctx-old'] })
-    svc.getUserAgents.mockResolvedValue({
-      userId: 'u1',
-      agentNames: ['agent-live', 'agent-old'],
-    })
     svc.getTeamContexts.mockResolvedValue({ teamId: 't1', contextIds: ['ctx-live', 'ctx-old'] })
-    svc.getTeamAgents.mockResolvedValue({
-      teamId: 't1',
-      agentNames: ['agent-live', 'agent-old'],
-    })
 
     const app = express()
     app.use(express.json())
@@ -224,39 +206,20 @@ describe('routes/profileAdmin', () => {
       .expect(200)
       .expect({ userId: 'u1', contextIds: ['ctx-live'], deletedContextIds: ['ctx-old'] })
     await request(app)
-      .get('/admin/users/u1/agents')
-      .expect(200)
-      .expect({ userId: 'u1', agentNames: ['agent-live'] })
-    await request(app)
       .get('/admin/teams/t1/contexts')
       .expect(200)
       .expect({ teamId: 't1', contextIds: ['ctx-live'], deletedContextIds: ['ctx-old'] })
-    await request(app)
-      .get('/admin/teams/t1/agents')
-      .expect(200)
-      .expect({ teamId: 't1', agentNames: ['agent-live'] })
   })
 
-  it('preserves deleted context history but drops stale agent grants on admin updates', async () => {
+  it('preserves deleted context history on admin updates', async () => {
     ;(gatewayStub.listResource as any).mockImplementation(async (plural: string) => {
       if (plural === 'contexts') {
         return [{ metadata: { name: 'ctx-live' }, spec: { contextId: 'ctx-alias' } }]
-      }
-      if (plural === 'hosts') {
-        return [{ metadata: { name: 'agent-live', namespace: 'mcp-host' }, spec: { enabled: true } }]
       }
       return []
     })
     svc.getUserContexts.mockResolvedValue({ userId: 'u1', contextIds: ['ctx-old'] })
     svc.setUserContexts.mockResolvedValue({ userId: 'u1', contextIds: ['ctx-live', 'ctx-old'] })
-    svc.setUserAgents.mockResolvedValue({
-      userId: 'u1',
-      agentNames: ['agent-live'],
-    })
-    svc.setTeamAgents.mockResolvedValue({
-      teamId: 't1',
-      agentNames: ['agent-live'],
-    })
 
     const app = express()
     app.use(express.json())
@@ -268,26 +231,11 @@ describe('routes/profileAdmin', () => {
       .expect(200)
       .expect({ userId: 'u1', contextIds: ['ctx-live'], deletedContextIds: ['ctx-old'] })
     expect(svc.setUserContexts).toHaveBeenCalledWith('u1', ['ctx-live', 'ctx-old'], TEST_ADMIN_SUB)
-
-    await request(app)
-      .put('/admin/users/u1/agents')
-      .send({ agentNames: ['agent-live', 'agent-stale-submit'] })
-      .expect(200)
-      .expect({ userId: 'u1', agentNames: ['agent-live'] })
-    expect(svc.setUserAgents).toHaveBeenCalledWith('u1', ['agent-live'], TEST_ADMIN_SUB)
-
-    await request(app)
-      .put('/admin/teams/t1/agents')
-      .send({ agentNames: ['agent-live', 'agent-stale-submit'] })
-      .expect(200)
-      .expect({ teamId: 't1', agentNames: ['agent-live'] })
-    expect(svc.setTeamAgents).toHaveBeenCalledWith('t1', ['agent-live'], TEST_ADMIN_SUB)
   })
 
-  it('returns structured 503s when admin access reconciliation is unavailable', async () => {
+  it('returns a structured 503 when context reconciliation is unavailable', async () => {
     ;(gatewayStub.listResource as any).mockRejectedValue(new Error('k8s unavailable'))
     svc.getUserContexts.mockResolvedValue({ userId: 'u1', contextIds: ['ctx-live'] })
-    svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-live'] })
 
     const app = express()
     app.use(express.json())
@@ -297,11 +245,6 @@ describe('routes/profileAdmin', () => {
       .get('/admin/users/u1/contexts')
       .expect(503)
       .expect({ error: 'context_reconciliation_unavailable' })
-    await request(app)
-      .put('/admin/teams/t1/agents')
-      .send({ agentNames: ['agent-live'] })
-      .expect(503)
-      .expect({ error: 'agent_reconciliation_unavailable' })
   })
 
   it('handles invalid payloads and not-found branches', async () => {

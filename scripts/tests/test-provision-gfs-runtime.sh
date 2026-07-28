@@ -48,8 +48,8 @@ reconcile="$ROOT/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
   echo 'FAIL: post-overlay credential reconciliation did not run once per deploy' >&2
   exit 1
 }
-[ "$(grep -Fc 'rollout status deployment/host-context-controller --timeout=240s' "$CALL_LOG")" -eq 3 ] || {
-  echo 'FAIL: HCC was not awaited before every post-overlay reconciliation' >&2
+[ "$(grep -Fc 'rollout status deployment/host-context-controller --timeout=480s' "$CALL_LOG")" -eq 3 ] || {
+  echo 'FAIL: HCC post-overlay rollout did not use its dedicated 480s timeout' >&2
   exit 1
 }
 for deployment in gfsc-writer gfsc-reader; do

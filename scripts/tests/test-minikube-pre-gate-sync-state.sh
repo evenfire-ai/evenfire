@@ -3,6 +3,8 @@ set -u
 
 FAIL=0
 SCRIPT="scripts/minikube/pre-gate-sync.sh"
+RUNTIME_SCRIPT="scripts/minikube/pre-gate-runtime.sh"
+INCREMENTAL_SCRIPT="scripts/minikube/pre-gate-incremental.sh"
 REGISTRY_SCRIPT="scripts/minikube/deploy-evenfire-registry.sh"
 
 pass() { echo "PASS: $1"; }
@@ -15,6 +17,14 @@ contains() {
   grep -Fq -- "$1" "$SCRIPT"
 }
 
+runtime_contains() {
+  grep -Fq -- "$1" "$RUNTIME_SCRIPT"
+}
+
+incremental_contains() {
+  grep -Fq -- "$1" "$INCREMENTAL_SCRIPT"
+}
+
 not_contains() {
   ! grep -Fq -- "$1" "$SCRIPT"
 }
@@ -23,6 +33,12 @@ if bash -n "$SCRIPT"; then
   pass "pre-gate sync script has valid bash syntax"
 else
   fail "pre-gate sync script has invalid bash syntax"
+fi
+
+if bash -n "$INCREMENTAL_SCRIPT"; then
+  pass "incremental pre-gate helper has valid bash syntax"
+else
+  fail "incremental pre-gate helper has invalid bash syntax"
 fi
 
 if bash -n "scripts/minikube/sync-auth-key.sh"; then
@@ -49,10 +65,12 @@ if contains 'cluster_marker_matches()' &&
    contains 'persist_cluster_marker()' &&
    contains '--from-literal=clusterFingerprint=' &&
    contains '--from-literal=worktreeId=' &&
+   contains "-o jsonpath='{.data.gitHead}'" &&
+   contains 'actual_git_head' &&
    not_contains '--from-literal=worktreePath='; then
-  pass "pre-gate sync records a non-sensitive cluster marker"
+  pass "pre-gate sync records and verifies a non-sensitive cluster marker"
 else
-  fail "pre-gate sync cluster marker is missing or stores local paths"
+  fail "pre-gate sync cluster marker is incomplete or stores local paths"
 fi
 
 if contains 'elif ! cluster_marker_matches "${cluster_fingerprint}" "${WORKTREE_ID}"; then' &&
@@ -60,6 +78,34 @@ if contains 'elif ! cluster_marker_matches "${cluster_fingerprint}" "${WORKTREE_
   pass "pre-gate sync detects cluster drift from another worktree"
 else
   fail "pre-gate sync does not detect cluster drift from another worktree"
+fi
+
+if incremental_contains 'git -C "${PROJECT_DIR}" diff --name-only "${marker_git_head}" HEAD' &&
+   incremental_contains 'git -C "${PROJECT_DIR}" diff --name-only HEAD' &&
+   incremental_contains 'git -C "${PROJECT_DIR}" ls-files --others --exclude-standard'; then
+  pass "incremental sync compares deployed, working-tree, and untracked paths"
+else
+  fail "incremental sync cannot derive a safe delta from the deployed marker"
+fi
+
+if incremental_contains 'control-api/*) incremental_add_target control-api control-plane control-api' &&
+   incremental_contains 'rpc-proxy/*) incremental_add_target rpc-proxy rpc-proxy rpc-proxy' &&
+   incremental_contains 'host-context-controller/*) incremental_add_target host-context-controller control-plane host-context-controller' &&
+   incremental_contains 'control-ui/*) incremental_add_target control-ui control-plane control-ui'; then
+  pass "incremental sync maps known runtime paths to their own images and deployments"
+else
+  fail "incremental sync does not map known runtime paths precisely"
+fi
+
+if contains 'incremental_plan' &&
+   contains 'incremental_build_images' &&
+   contains 'incremental_restart_targets' &&
+   not_contains 'make minikube-build-images' &&
+   incremental_contains 'bash "${PROJECT_DIR}/scripts/minikube/build-images.sh" "--only=${selector}"' &&
+   incremental_contains 'make minikube-build-images'; then
+  pass "pre-gate sync builds targeted images and retains a fail-closed full-build fallback"
+else
+  fail "pre-gate sync still performs an unconditional all-image build"
 fi
 
 if contains 'scripts/minikube/sync-auth-key.sh' &&
@@ -104,8 +150,8 @@ else
   fail "evenfire registry deploy helper does not patch minikube PVC ownership"
 fi
 
-if contains 'if ! gate_needs_registry; then' &&
-   contains 'this gate does not require the sibling service' &&
+if runtime_contains 'if ! gate_needs_registry; then' &&
+   runtime_contains 'this gate does not require the sibling service' &&
    contains 'if gate_needs_registry; then' &&
    contains 'rollout_if_present registry registry-api'; then
   pass "pre-gate sync keeps the sibling registry scoped to registry-backed gates"

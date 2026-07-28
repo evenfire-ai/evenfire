@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import type { GfscWriteClient } from './gfs'
 import { decodeRuntimeJwtScopes } from '../workflow/mcpHostRuntimeJwt'
+import type { GfscWriteClient } from './gfs'
 
 const DIRECT_KEY = 'MCP_HOST_GFS_TOKEN'
 const FILE_KEY = 'MCP_HOST_GFS_TOKEN_FILE'
