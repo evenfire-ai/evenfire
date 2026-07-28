@@ -184,6 +184,33 @@ describe('desktop runtime config', () => {
     })
   })
 
+  it('does not let the packaged-development escape hatch select arbitrary loopback ports', async () => {
+    tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+    delete process.env.CLERUM_DESKTOP_CONFIG_PATH
+    process.env.EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:21770'
+    process.env.RPC_PROXY_BASE_URL = 'http://127.0.0.1:21773'
+    process.argv.push('--evenfire-desktop-dev-package')
+
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: vi.fn((name: string) =>
+          name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+        ),
+        isPackaged: true,
+        isReady: vi.fn(() => true),
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+
+    const { getDesktopRuntimeConfigState } = await import('../config.js')
+
+    expect(getDesktopRuntimeConfigState()).toMatchObject({
+      configured: false,
+      activeOptionId: null,
+    })
+  })
+
   it('preserves env-provided localhost runtime ports without selecting the fixed localhost profile', async () => {
     tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
     delete process.env.CLERUM_DESKTOP_CONFIG_PATH

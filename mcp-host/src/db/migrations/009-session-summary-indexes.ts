@@ -15,6 +15,7 @@ export function up(db: Database): void {
       ON messages(session_id, timestamp);
     CREATE INDEX IF NOT EXISTS idx_messages_session_turn_ordinal
       ON messages(session_id, turn_number, ordinal);
+    DROP INDEX IF EXISTS idx_messages_turn;
   `)
 }
 
@@ -22,5 +23,7 @@ export function down(db: Database): void {
   db.exec(`
     DROP INDEX IF EXISTS idx_messages_session_timestamp;
     DROP INDEX IF EXISTS idx_messages_session_turn_ordinal;
+    CREATE INDEX IF NOT EXISTS idx_messages_turn
+      ON messages(session_id, turn_number);
   `)
 }

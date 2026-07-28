@@ -96,6 +96,24 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
     expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions?limit=25&cursor=current')
   })
 
+  it('bounds and scopes session pagination before forwarding upstream', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ items: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions?agent=chatllm&limit=500')
+      .set('authorization', 'Bearer user-token')
+      .expect(200)
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions?agent=chatllm&limit=100')
+  })
+
   it('returns 403 if the user cannot access the host', async () => {
     serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
     await request(makeApp())
@@ -166,6 +184,26 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
     const [url] = fetchMock.mock.calls[0]
     expect(String(url)).toBe(
       'http://chatllm:8080/v1/runtime/sessions/chatllm/c1/messages?limit=5&beforeTurn=6'
+    )
+  })
+
+  it('clamps transcript limits before forwarding upstream', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ agent: 'chatllm', chatId: 'c1', turns: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions/chatllm/c1/messages?limit=999')
+      .set('authorization', 'Bearer user-token')
+      .expect(200)
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe(
+      'http://chatllm:8080/v1/runtime/sessions/chatllm/c1/messages?limit=200'
     )
   })
 

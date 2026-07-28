@@ -2066,25 +2066,26 @@ async function startRPCServer(): Promise<void> {
 
   const handleSessionsList = async (
     userSub: string,
-    query: { limit?: number; cursor?: string }
+    query: { agent?: string; limit?: number; cursor?: string }
   ) => {
     const convManager = agent!.getConversationManager()
-    const keyPrefix = `${userSub}:rpc:`
+    const keyPrefix = query.agent ? `${userSub}:rpc:${query.agent}:` : `${userSub}:rpc:`
     const cursor = decodeSessionsCursor(query.cursor)
     const entries = await convManager.listSessionSummariesForUserAsync(keyPrefix, {
       limit: query.limit === undefined ? undefined : query.limit + 1,
-      cursor: cursor ? { updatedAt: new Date(cursor.updatedAt), key: cursor.key } : undefined,
+      cursor: cursor
+        ? { updatedAt: new Date(cursor.updatedAt), key: `${keyPrefix}${cursor.key}` }
+        : undefined,
     })
-    const { page, nextCursor } = paginateSessionSummaries(entries, query.limit)
+    const { page, nextCursor } = paginateSessionSummaries(entries, query.limit, key =>
+      key.slice(keyPrefix.length)
+    )
     return {
       items: page.map(summary => ({
         agent: summary.agent,
         chatId: summary.chatId,
         turnCount: summary.turnCount,
-        // A message is one renderable user/assistant part. Derive from logical
-        // turns so in-memory and SQLite stores report the same unit regardless
-        // of persisted tool-call rows.
-        messageCount: summary.turnCount * 2,
+        messageCount: summary.messageCount,
         lastActivityAt: summary.lastActivityAt.toISOString(),
         ...sessionStateView(summary),
       })),

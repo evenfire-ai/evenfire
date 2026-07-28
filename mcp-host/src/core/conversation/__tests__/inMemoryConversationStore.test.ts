@@ -135,6 +135,17 @@ describe('InMemoryConversationStore', () => {
       })
       expect(second.map(session => session.chatId)).toEqual(['a1'])
     })
+
+    it('projects agent and chat ids from an agent-scoped prefix', async () => {
+      store.set('u-1:rpc:agent-x:chat-1', makeConversation('u-1'))
+      store.set('u-1:rpc:agent-y:chat-2', makeConversation('u-1'))
+
+      const summaries = await store.listSessionSummariesByPrefix('u-1:rpc:agent-x:')
+
+      expect(summaries.map(session => [session.agent, session.chatId])).toEqual([
+        ['agent-x', 'chat-1'],
+      ])
+    })
   })
 
   describe('getSessionMessagesByKey', () => {

@@ -644,11 +644,23 @@ export function createRpcRouter(): Router {
         const baseUrl = host.url.replace(/\/+$/, '')
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=list-sessions`)
         const upstreamUrl = new URL(`${baseUrl}/v1/runtime/sessions`)
-        for (const key of ['limit', 'cursor'] as const) {
-          if (typeof req.query[key] === 'string') {
-            upstreamUrl.searchParams.set(key, req.query[key])
-          }
+        const sessionAgent = typeof req.query.agent === 'string' ? req.query.agent.trim() : ''
+        const sessionCursor = typeof req.query.cursor === 'string' ? req.query.cursor : ''
+        const sessionLimit =
+          typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
+        if (
+          (sessionAgent && (sessionAgent.length > 200 || sessionAgent.includes(':'))) ||
+          sessionCursor.length > 2048 ||
+          (sessionLimit !== undefined && (!Number.isInteger(sessionLimit) || sessionLimit < 1))
+        ) {
+          res.status(400).json({ error: 'Invalid session pagination query' })
+          return
         }
+        if (sessionAgent) upstreamUrl.searchParams.set('agent', sessionAgent)
+        if (sessionLimit !== undefined) {
+          upstreamUrl.searchParams.set('limit', String(Math.min(sessionLimit, 100)))
+        }
+        if (sessionCursor) upstreamUrl.searchParams.set('cursor', sessionCursor)
         // Wake-eligible finite operation (§11.4): the route scope stays
         // host:session:read; wake capability rides on the token. A suspended
         // (network-down) or draining Host triggers a wake-and-hold instead of a
@@ -722,11 +734,27 @@ export function createRpcRouter(): Router {
         const upstreamUrl = new URL(
           `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
         )
-        for (const key of ['limit', 'beforeTurn', 'afterTurn'] as const) {
-          if (typeof req.query[key] === 'string') {
-            upstreamUrl.searchParams.set(key, req.query[key])
-          }
+        const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
+        const beforeTurn =
+          typeof req.query.beforeTurn === 'string' ? Number(req.query.beforeTurn) : undefined
+        const afterTurn =
+          typeof req.query.afterTurn === 'string' ? Number(req.query.afterTurn) : undefined
+        if (
+          (rawLimit !== undefined && (!Number.isInteger(rawLimit) || rawLimit < 1)) ||
+          (beforeTurn !== undefined && (!Number.isInteger(beforeTurn) || beforeTurn < 1)) ||
+          (afterTurn !== undefined && (!Number.isInteger(afterTurn) || afterTurn < 0)) ||
+          (beforeTurn !== undefined && afterTurn !== undefined)
+        ) {
+          res.status(400).json({ error: 'Invalid session messages pagination query' })
+          return
         }
+        if (rawLimit !== undefined) {
+          upstreamUrl.searchParams.set('limit', String(Math.min(rawLimit, 200)))
+        }
+        if (beforeTurn !== undefined) {
+          upstreamUrl.searchParams.set('beforeTurn', String(beforeTurn))
+        }
+        if (afterTurn !== undefined) upstreamUrl.searchParams.set('afterTurn', String(afterTurn))
         // Wake-eligible finite operation (§11.4): scope stays host:session:read.
         const forwardTranscript = async () => {
           const response = await fetch(upstreamUrl, {

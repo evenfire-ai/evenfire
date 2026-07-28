@@ -41,6 +41,7 @@ import {
   type SessionListQuery,
   type SessionMessagesQuery,
   type SessionTokenUsage,
+  boundedTurns,
 } from '../conversationStore'
 import type { PersistQueue } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
@@ -171,12 +172,19 @@ interface SessionOrdinalState {
   nextTurnNumber: number
 }
 
-function sessionPartsFromPrefix(key: string, prefix: string): { agent: string; chatId: string } {
+function sessionPartsFromPrefix(
+  key: string,
+  prefix: string
+): { agent: string; chatId: string } | null {
   const rest = key.startsWith(prefix) ? key.slice(prefix.length) : key
   const colonIdx = rest.indexOf(':')
-  return colonIdx >= 0
-    ? { agent: rest.slice(0, colonIdx), chatId: rest.slice(colonIdx + 1) }
-    : { agent: '', chatId: '' }
+  if (colonIdx >= 0) {
+    return { agent: rest.slice(0, colonIdx), chatId: rest.slice(colonIdx + 1) }
+  }
+  const rpcPrefixIndex = prefix.lastIndexOf(':rpc:')
+  const scopedAgent =
+    rpcPrefixIndex >= 0 ? prefix.slice(rpcPrefixIndex + ':rpc:'.length).replace(/:$/, '') : ''
+  return scopedAgent && rest ? { agent: scopedAgent, chatId: rest } : null
 }
 
 function conversationStateFromRow(state: string): ConversationState {
@@ -376,20 +384,13 @@ export class SqliteConversationStore implements ConversationStore {
     for (const row of rows) {
       const key = row.session.session_key
       const cached = this.cache.get(key)
-      const rest = key.slice(prefix.length)
-      const colonIdx = rest.indexOf(':')
-      if (colonIdx < 0) continue
-      const state = cached
-        ? cached.state
-        : row.session.state === ConversationState.Processing
-          ? ConversationState.Processing
-          : row.session.state === ConversationState.AwaitingApproval
-            ? ConversationState.AwaitingApproval
-            : ConversationState.Idle
+      const parts = sessionPartsFromPrefix(key, prefix)
+      if (!parts) continue
+      const state = cached ? cached.state : conversationStateFromRow(row.session.state)
       out.push({
         key,
-        agent: rest.slice(0, colonIdx),
-        chatId: rest.slice(colonIdx + 1),
+        agent: parts.agent,
+        chatId: parts.chatId,
         state,
         activeTaskId: cached ? cached.activeTaskId : (row.session.active_task_id ?? undefined),
         pendingApproval: cached
@@ -425,19 +426,9 @@ export class SqliteConversationStore implements ConversationStore {
   ): Promise<ConversationSessionMessages | undefined> {
     const cached = this.cache.get(sessionKey)
     const parts = sessionPartsFromPrefix(sessionKey, prefix)
+    if (!parts) return undefined
     if (cached) {
-      const eligibleTurns =
-        query.afterTurn !== undefined
-          ? cached.turns.filter(turn => turn.number > query.afterTurn!)
-          : query.beforeTurn !== undefined
-            ? cached.turns.filter(turn => turn.number < query.beforeTurn!)
-            : cached.turns
-      const turns =
-        query.limit === undefined
-          ? eligibleTurns
-          : query.afterTurn !== undefined
-            ? eligibleTurns.slice(0, query.limit)
-            : eligibleTurns.slice(-query.limit)
+      const turns = boundedTurns(cached.turns, query)
       return {
         key: sessionKey,
         agent: parts.agent,
@@ -778,6 +769,11 @@ export class SqliteConversationStore implements ConversationStore {
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
     const ordinal = state.nextOrdinal++
     const turnNumber = state.nextTurnNumber
+    // cancelTurn() intentionally remains synchronous/fire-and-forget at the
+    // ConversationManager boundary. Reserve the next turn number before the
+    // first await so an immediate follow-up startTurn cannot reuse this
+    // cancelled turn's number while the durable boundary is still queued.
+    state.nextTurnNumber += 1
     // Stamp the partial per-turn total accumulated before cancellation.
     const turn = conv.turns[conv.turns.length - 1]
     // ATOMIC boundary (matches persistTurnComplete): the cancel message insert
@@ -816,7 +812,6 @@ export class SqliteConversationStore implements ConversationStore {
       },
       sessionKey
     )
-    state.nextTurnNumber += 1
   }
 
   /**

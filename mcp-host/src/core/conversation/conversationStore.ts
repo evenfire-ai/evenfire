@@ -107,7 +107,12 @@ function sessionPartsFromKey(
 ): { agent: string; chatId: string } | null {
   const rest = key.slice(prefix.length)
   const colonIdx = rest.indexOf(':')
-  if (colonIdx < 0) return null
+  if (colonIdx < 0) {
+    const rpcPrefixIndex = prefix.lastIndexOf(':rpc:')
+    const scopedAgent =
+      rpcPrefixIndex >= 0 ? prefix.slice(rpcPrefixIndex + ':rpc:'.length).replace(/:$/, '') : ''
+    return scopedAgent && rest ? { agent: scopedAgent, chatId: rest } : null
+  }
   return {
     agent: rest.slice(0, colonIdx),
     chatId: rest.slice(colonIdx + 1),
@@ -133,7 +138,7 @@ function afterSessionCursor(
   return updatedAt < cursorUpdatedAt || (updatedAt === cursorUpdatedAt && summary.key > cursor.key)
 }
 
-function boundedTurns(turns: Turn[], query: SessionMessagesQuery = {}): Turn[] {
+export function boundedTurns(turns: Turn[], query: SessionMessagesQuery = {}): Turn[] {
   const eligibleTurns =
     query.afterTurn !== undefined
       ? turns.filter(turn => turn.number > query.afterTurn!)

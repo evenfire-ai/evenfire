@@ -241,6 +241,9 @@ describe('SqliteConversationStore — session summary listing', () => {
         { key: 'u-1:rpc:agent-x:chat-1', timestamp: 100 },
         { key: 'u-1:rpc:agent-x:chat-2', timestamp: 200 },
         { key: 'u-1:rpc:agent-y:chat-3', timestamp: 300, awaitingApproval: true },
+        // Invalid legacy key: it must be removed before LIMIT so it cannot
+        // consume the pagination probe row and end the catalog early.
+        { key: 'u-1:rpc:malformed', timestamp: 400 },
       ]
 
       for (const session of sessions) {
@@ -298,6 +301,14 @@ describe('SqliteConversationStore — session summary listing', () => {
         cacheTokensReported: true,
       })
       expect(handle.store['cache'].size()).toBe(0)
+
+      const agentPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:agent-x:', {
+        limit: 2,
+      })
+      expect(agentPage.map(session => [session.agent, session.chatId])).toEqual([
+        ['agent-x', 'chat-2'],
+        ['agent-x', 'chat-1'],
+      ])
 
       const secondPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:', {
         limit: 2,
@@ -621,6 +632,43 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
       } finally {
         await handle.shutdown()
       }
+    }
+  })
+
+  it('reserves a distinct durable turn number before an async cancel write completes', async () => {
+    const handle = await freshStore()
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+
+      await manager.startTurn(conv, 'first', 'task-cancelled')
+      manager.cancelTurn(conv)
+      // Deliberately do not drain or await the fire-and-forget cancel write.
+      await manager.startTurn(conv, 'second', 'task-next')
+      await manager.completeTurn(conv, 'second response')
+      await handle.persistQueue.drainSessionKey(SESSION_KEY)
+
+      const rows = handle.worker.db
+        .prepare(
+          'SELECT role, content, turn_number FROM messages WHERE session_id = ? ORDER BY ordinal'
+        )
+        .all(conv.id) as Array<{ role: string; content: string; turn_number: number }>
+
+      expect(rows.map(row => [row.role, row.content, row.turn_number])).toEqual([
+        ['user', 'first', 1],
+        ['assistant', '[Task cancelled by user before completion]', 1],
+        ['user', 'second', 2],
+        ['assistant', 'second response', 2],
+      ])
+
+      handle.store['cache'].clear()
+      const messages = await handle.store.getSessionMessagesByKey(SESSION_KEY, 'u-1:rpc:')
+      expect(messages?.turns.map(turn => [turn.number, turn.user_input, turn.response])).toEqual([
+        [1, 'first', '[Task cancelled by user before completion]'],
+        [2, 'second', 'second response'],
+      ])
+    } finally {
+      await handle.shutdown()
     }
   })
 

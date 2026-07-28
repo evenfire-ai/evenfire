@@ -35,6 +35,7 @@ import type {
   WorkflowApprovalNotificationTerminalHandler,
 } from './types'
 import type { RuntimeCallerContext } from './types'
+import { decodeSessionsCursor } from './wireProjections'
 
 export type RouteHandlers = {
   messageHandler: MessageHandler | null
@@ -66,17 +67,7 @@ export type RouteHandlers = {
 function parseSessionsCursorParam(cursor: unknown): string | undefined | null {
   if (cursor === undefined) return undefined
   if (typeof cursor !== 'string' || cursor.length > 2048) return null
-  try {
-    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
-      updatedAt?: unknown
-      key?: unknown
-    }
-    if (typeof parsed.updatedAt !== 'string' || typeof parsed.key !== 'string') return null
-    if (!Number.isFinite(Date.parse(parsed.updatedAt))) return null
-    return cursor
-  } catch {
-    return null
-  }
+  return decodeSessionsCursor(cursor) ? cursor : null
 }
 
 function channelRuntimeSourceMismatch(
@@ -1106,6 +1097,11 @@ export async function handleSessionsListRoute(
       json(res, 501, { error: 'Sessions handler not configured' })
       return
     }
+    const agent = typeof req.query.agent === 'string' ? req.query.agent.trim() : undefined
+    if (agent !== undefined && (!agent || agent.length > 200 || agent.includes(':'))) {
+      badRequest(res, 'Invalid session agent')
+      return
+    }
     const cursor = parseSessionsCursorParam(req.query.cursor)
     if (cursor === null) {
       badRequest(res, 'Invalid sessions cursor')
@@ -1121,7 +1117,7 @@ export async function handleSessionsListRoute(
     }
     const limit =
       rawLimit === undefined ? (cursor ? 50 : undefined) : Math.min(Math.floor(rawLimit), 100)
-    const result = await handlers.sessionsListHandler(caller.userId, { limit, cursor })
+    const result = await handlers.sessionsListHandler(caller.userId, { agent, limit, cursor })
     json(res, 200, result)
   } catch (error) {
     console.error('[Server] Error listing sessions:', error)

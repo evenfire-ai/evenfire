@@ -158,7 +158,7 @@ describe('AuthPage', () => {
     expect(handleSelectRuntimeConfig).toHaveBeenCalledWith(LOCALHOST_RUNTIME_CONFIG_OPTION_ID)
   })
 
-  it('does not clear the selected localhost environment when clicked again', async () => {
+  it('clears the selected localhost environment when clicked again', async () => {
     const user = userEvent.setup()
     const handleSelectRuntimeConfig = vi.fn()
     const handleClearRuntimeConfigSelection = vi.fn()
@@ -191,6 +191,6 @@ describe('AuthPage', () => {
     await user.click(screen.getByRole('button', { name: 'Localhost' }))
 
     expect(handleSelectRuntimeConfig).not.toHaveBeenCalled()
-    expect(handleClearRuntimeConfigSelection).not.toHaveBeenCalled()
+    expect(handleClearRuntimeConfigSelection).toHaveBeenCalledTimes(1)
   })
 })

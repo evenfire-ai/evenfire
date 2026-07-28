@@ -23,6 +23,7 @@ let activeChatStore: ChatStore | null = null
 let activeUserId: string | null = null
 let activeEnvKey: string | null = null
 let bindInFlight: { key: string; promise: Promise<void> } | null = null
+let bindingGeneration = 0
 
 /** Marker file (per base dir) that records the pre-`envKey` legacy wipe ran. */
 const PRE_ENV_MIGRATION_MARKER = '.env-scoped'
@@ -58,6 +59,7 @@ export async function bindChatStoreForUser(userId: string, envKey: string): Prom
   if (activeChatStore && activeUserId === userId && activeEnvKey === envKey) return
   const bindKey = `${envKey}::${userId}`
   if (bindInFlight?.key === bindKey) return bindInFlight.promise
+  const generation = ++bindingGeneration
 
   const promise = (async () => {
     // bind is async (it awaits a directory wipe); until it completes,
@@ -71,6 +73,7 @@ export async function bindChatStoreForUser(userId: string, envKey: string): Prom
     await maybeWipePreEnvLegacyCache(baseDir)
     const userDir = join(baseDir, envKey, userId)
     await maybeWipeLegacyCache(userDir)
+    if (generation !== bindingGeneration) return
     activeChatStore = new ChatStore(userDir)
     activeUserId = userId
     activeEnvKey = envKey
@@ -217,6 +220,7 @@ async function maybeWipeLegacyCache(userDir: string): Promise<void> {
 }
 
 export function unbindChatStore(): void {
+  bindingGeneration += 1
   activeChatStore = null
   activeUserId = null
   activeEnvKey = null

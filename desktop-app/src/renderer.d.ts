@@ -494,6 +494,11 @@ declare global {
           chatId: string,
           messages: ChatMessage[]
         ) => Promise<void>
+        backfillCounters: (
+          agentRef: string,
+          chatId: string,
+          messages: ChatMessage[]
+        ) => Promise<void>
         getLastActive: (agentRef: string) => Promise<string | null>
         setLastActive: (agentRef: string, chatId: string) => Promise<void>
         getIndex: (agentRef: string) => Promise<ChatIndex>

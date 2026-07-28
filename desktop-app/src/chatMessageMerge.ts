@@ -99,15 +99,30 @@ export function mergeAuthoritativeServerMessages(
     entries.push(message)
     availableByRole.set(message.role, entries)
   }
-  const replacements = authoritative.map(message => {
-    const sameTurn = removed.find(
-      local =>
-        messageServerTurnNumber(local) === messageServerTurnNumber(message) &&
-        local.role === message.role
+  const retainedActiveTaskRoles = new Set(
+    kept
+      .filter(
+        message =>
+          message.task_id !== undefined &&
+          options.activeTaskIds?.has(message.task_id) === true &&
+          (message.role === 'user' || message.role === 'assistant')
+      )
+      .map(message => `${message.task_id}\u0000${message.role}`)
+  )
+  const replacements = authoritative
+    .filter(
+      message =>
+        !(message.task_id && retainedActiveTaskRoles.has(`${message.task_id}\u0000${message.role}`))
     )
-    const local = sameTurn ?? availableByRole.get(message.role)?.shift()
-    return preferredServerMessage(message, local)
-  })
+    .map(message => {
+      const sameTurn = removed.find(
+        local =>
+          messageServerTurnNumber(local) === messageServerTurnNumber(message) &&
+          local.role === message.role
+      )
+      const local = sameTurn ?? availableByRole.get(message.role)?.shift()
+      return preferredServerMessage(message, local)
+    })
 
   kept.splice(insertionIndex, 0, ...replacements)
   return kept

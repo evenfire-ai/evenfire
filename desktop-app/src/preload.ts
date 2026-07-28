@@ -402,6 +402,8 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('chat:appendMessages', { agentRef, chatId, messages }),
     replaceMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
       ipcRenderer.invoke('chat:replaceMessages', { agentRef, chatId, messages }),
+    backfillCounters: (agentRef: string, chatId: string, messages: unknown[]) =>
+      ipcRenderer.invoke('chat:backfillCounters', { agentRef, chatId, messages }),
     markUnreadTerminal: (agentRef: string, chatId: string) =>
       ipcRenderer.invoke('chat:markUnreadTerminal', { agentRef, chatId }),
     clearUnreadTerminal: (agentRef: string, chatId: string) =>

@@ -551,6 +551,7 @@ export class RpcProxyClient {
     query: SessionsListQuery = {}
   ): Promise<SessionsListResult> {
     const requestUrl = new URL(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions`))
+    if (query.agent) requestUrl.searchParams.set('agent', query.agent)
     if (query.limit !== undefined) requestUrl.searchParams.set('limit', String(query.limit))
     if (query.cursor) requestUrl.searchParams.set('cursor', query.cursor)
     const response = await fetch(requestUrl, {

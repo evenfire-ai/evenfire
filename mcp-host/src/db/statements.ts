@@ -190,37 +190,50 @@ export function prepareStatements(db: Database): PreparedStatements {
       SELECT * FROM sessions WHERE session_key LIKE ? ORDER BY started_at DESC
     `),
     selectSessionSummariesByPrefix: db.prepare(`
-      WITH session_summaries AS (
+      WITH scoped_sessions AS (
+        SELECT *
+         FROM sessions
+         WHERE session_key >= @prefix_start
+           AND session_key < @prefix_end
+           AND (
+             (@agent_scoped = 1 AND length(session_key) > length(@prefix_start))
+             OR
+             (
+               @agent_scoped = 0
+               AND instr(substr(session_key, length(@prefix_start) + 1), ':') > 0
+             )
+           )
+      ),
+      message_summaries AS (
+        SELECT m.session_id,
+               MAX(m.timestamp) AS last_activity_at,
+               COUNT(DISTINCT COALESCE(m.turn_number, 0)) AS turn_count
+          FROM messages m
+          JOIN scoped_sessions s ON s.id = m.session_id
+         GROUP BY m.session_id
+      ),
+      ranked_approvals AS (
+        SELECT pa.session_id,
+               pa.request_id,
+               pa.tool_name,
+               ROW_NUMBER() OVER (
+                 PARTITION BY pa.session_id
+                 ORDER BY pa.registered_at ASC, pa.request_id ASC
+               ) AS approval_rank
+          FROM pending_approvals pa
+          JOIN scoped_sessions s ON s.id = pa.session_id
+      ),
+      session_summaries AS (
         SELECT s.*,
-               COALESCE(
-                 (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id),
-                 s.started_at
-               ) AS last_activity_at,
-               COALESCE(
-                 (
-                   SELECT COUNT(DISTINCT COALESCE(m.turn_number, 0))
-                     FROM messages m
-                    WHERE m.session_id = s.id
-                 ),
-                 0
-               ) AS turn_count,
-               (
-                 SELECT pa.request_id
-                 FROM pending_approvals pa
-                  WHERE pa.session_id = s.id
-                  ORDER BY pa.registered_at ASC, pa.request_id ASC
-                  LIMIT 1
-               ) AS pending_request_id,
-               (
-                 SELECT pa.tool_name
-                 FROM pending_approvals pa
-                  WHERE pa.session_id = s.id
-                  ORDER BY pa.registered_at ASC, pa.request_id ASC
-                  LIMIT 1
-               ) AS pending_tool_name
-          FROM sessions s
-         WHERE s.session_key >= @prefix_start
-           AND s.session_key < @prefix_end
+               COALESCE(ms.last_activity_at, s.started_at) AS last_activity_at,
+               COALESCE(ms.turn_count, 0) AS turn_count,
+               pa.request_id AS pending_request_id,
+               pa.tool_name AS pending_tool_name
+          FROM scoped_sessions s
+          LEFT JOIN message_summaries ms ON ms.session_id = s.id
+          LEFT JOIN ranked_approvals pa
+            ON pa.session_id = s.id
+           AND pa.approval_rank = 1
       )
       SELECT *
         FROM session_summaries
@@ -235,8 +248,8 @@ export function prepareStatements(db: Database): PreparedStatements {
     `),
     selectSessionTurnBounds: db.prepare(`
       SELECT COUNT(DISTINCT COALESCE(turn_number, 0)) AS total_turns,
-             MIN(turn_number)                         AS first_turn_number,
-             MAX(turn_number)                         AS last_turn_number,
+             MIN(COALESCE(turn_number, 0))             AS first_turn_number,
+             MAX(COALESCE(turn_number, 0))             AS last_turn_number,
              MAX(timestamp)                           AS last_activity_at
         FROM messages
        WHERE session_id = ?

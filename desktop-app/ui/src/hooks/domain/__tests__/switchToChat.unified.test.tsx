@@ -296,12 +296,11 @@ describe('switchToChat (unified, D.4)', () => {
       undefined,
       { limit: 80 }
     )
-    expect(result.current.chatMessages).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ id: 'turn-1-user' }),
-        expect.objectContaining({ id: 'turn-999-assistant' }),
-      ])
-    )
+    expect(result.current.chatMessages.map(message => message.id)).toEqual([
+      'turn-999-user',
+      'turn-999-assistant',
+    ])
+    expect(result.current.hasOlderMessages).toBe(true)
   })
 
   it('loads older history on demand and prepends it without blocking first render', async () => {

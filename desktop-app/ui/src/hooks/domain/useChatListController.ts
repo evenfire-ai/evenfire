@@ -58,6 +58,8 @@ export interface ChatListControllerHost {
   dispatchSession: (chatKey: string, event: SessionFsmEvent) => void
   clearComposerDraft: (chatId: string) => void
   getActiveChatId: () => string | null
+  getAutoSelectedChatId: () => string | null
+  markAutoSelectedChat: (chatId: string | null) => void
   shouldAutoSelectLatest: () => boolean
 }
 
@@ -172,7 +174,7 @@ export function useChatListController({
       const requestGeneration = requestGenerationRef.current
       scheduleAfterFirstPaint(async () => {
         const serverResult = await chatStore
-          .listSessions(agentRef, { limit: SESSION_CATALOG_PAGE_LIMIT })
+          .listSessions(agentRef, { agent: agentRef, limit: SESSION_CATALOG_PAGE_LIMIT })
           .catch((): SessionsListResult => ({ items: [] }))
         if (
           selectedAgentRef.current !== agentRef ||
@@ -218,12 +220,16 @@ export function useChatListController({
         // it here, after the post-paint continuation reaches the auto-select gate,
         // instead of clearing it with the synchronous local-index selection.
         const suppressAutoSelection = suppressAutoSelectionByAgentRef.current.delete(agentRef)
+        const activeChatId = host.current?.getActiveChatId() ?? null
+        const autoSelectedChatId = host.current?.getAutoSelectedChatId() ?? null
         if (
           latestServerSession &&
-          host.current?.getActiveChatId() === null &&
+          (activeChatId === null || activeChatId === autoSelectedChatId) &&
+          activeChatId !== latestServerSession.chatId &&
           host.current.shouldAutoSelectLatest() &&
           !suppressAutoSelection
         ) {
+          host.current.markAutoSelectedChat(latestServerSession.chatId)
           void host.current.switchToChat(agentRef, latestServerSession.chatId)
         }
 
@@ -263,7 +269,11 @@ export function useChatListController({
     setChatListMoreLoading(true)
     try {
       const serverResult = await chatStore
-        .listSessions(agentRef, { limit: SESSION_CATALOG_PAGE_LIMIT, cursor }, { force: true })
+        .listSessions(
+          agentRef,
+          { agent: agentRef, limit: SESSION_CATALOG_PAGE_LIMIT, cursor },
+          { force: true }
+        )
         .catch(() => null)
       if (!serverResult || requestGenerationRef.current !== requestGeneration) return
 
@@ -472,7 +482,9 @@ export function useChatListController({
     if (!agentRef) return
     const chatId = crypto.randomUUID()
     const meta = await chatStore.createChat(agentRef, chatId)
+    chatStore.clearCachedRemoteData()
     appendNewEntry(agentRef, meta)
+    host.current?.markAutoSelectedChat(null)
     await host.current?.switchToChat(agentRef, chatId)
     host.current?.scrollChatToBottom()
   }, [chatStore, appendNewEntry, host])
@@ -522,6 +534,7 @@ export function useChatListController({
       // FIRST (before the delete), preserving the ack-before-delete ordering.
       host.current?.dispatchSession(deletedKey, { type: 'CHAT_DELETED' })
       await chatStore.deleteChat(agentRef, chatId)
+      chatStore.clearCachedRemoteData()
       host.current?.clearComposerDraft(chatId)
       removeLatestChatSession(agentRef, chatId)
       // Post-await guards read the LIVE committed values (selectedAgentRef /
@@ -599,7 +612,10 @@ export function useChatListController({
             // cursors here; the selected-agent session list exposes explicit
             // on-demand pagination through `loadMoreChatSessions`.
             const serverResult: SessionsListResult = await chatStore
-              .listSessions(agentRef, { limit: SESSION_CATALOG_PAGE_LIMIT })
+              .listSessions(agentRef, {
+                agent: agentRef,
+                limit: SESSION_CATALOG_PAGE_LIMIT,
+              })
               .catch((): SessionsListResult => ({ items: [] }))
             return {
               agentRef,

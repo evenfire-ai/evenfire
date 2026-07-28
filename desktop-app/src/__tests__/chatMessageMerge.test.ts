@@ -74,6 +74,40 @@ describe('mergeAuthoritativeServerMessages', () => {
     expect(merged.map(message => message.id)).toEqual(['turn-3-user', 'pending'])
   })
 
+  it('does not duplicate an active optimistic message when the server returns its turn', () => {
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'turn-1-user',
+          role: 'user',
+          content: 'first',
+          timestamp: 1,
+          serverTurnNumber: 1,
+        },
+        {
+          id: 'optimistic-task-2',
+          role: 'user',
+          content: 'second',
+          timestamp: 2,
+          task_id: 'task-2',
+        },
+      ],
+      [
+        {
+          id: 'turn-2-user',
+          role: 'user',
+          content: 'second',
+          timestamp: 3,
+          serverTurnNumber: 2,
+          task_id: 'task-2',
+        },
+      ],
+      { activeTaskIds: new Set(['task-2']) }
+    )
+
+    expect(merged.map(message => message.id)).toEqual(['turn-1-user', 'optimistic-task-2'])
+  })
+
   it('replaces completed task-backed echoes inside their authoritative turn', () => {
     const merged = mergeAuthoritativeServerMessages(
       [

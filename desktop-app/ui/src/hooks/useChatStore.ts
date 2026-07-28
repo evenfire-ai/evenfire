@@ -102,6 +102,15 @@ export function useChatStore() {
       window.clerum.chat.appendMessages(agentRef, chatId, messages),
     []
   )
+  const backfillCounters = useCallback(
+    (agentRef: string, chatId: string, messages: ChatMessage[]) => {
+      const backfill = window.clerum.chat.backfillCounters
+      return typeof backfill === 'function'
+        ? backfill(agentRef, chatId, messages)
+        : Promise.resolve()
+    },
+    []
+  )
   const replaceMessages = useCallback(
     (agentRef: string, chatId: string, messages: ChatMessage[]) =>
       window.clerum.chat.replaceMessages(agentRef, chatId, messages),
@@ -145,7 +154,13 @@ export function useChatStore() {
         sessionCatalogRequests.clear()
         sessionCatalogSource = source
       }
-      const key = `${remoteCacheScope}:${hostRef}:${query.limit ?? 'all'}:${query.cursor ?? ''}`
+      const key = [
+        remoteCacheScope,
+        hostRef,
+        query.agent ?? '',
+        query.limit ?? 'all',
+        query.cursor ?? '',
+      ].join(':')
       const cached = sessionCatalogRequests.get(key)
       if (!options.force && cached && cached.expiresAt > Date.now()) return cached.promise
 
@@ -249,6 +264,7 @@ export function useChatStore() {
     loadMessages,
     appendMessages,
     replaceMessages,
+    backfillCounters,
     markUnreadTerminal,
     clearUnreadTerminal,
     getLastActive,

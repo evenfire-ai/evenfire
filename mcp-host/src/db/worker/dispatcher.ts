@@ -617,9 +617,14 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         0,
         op.sessionKeyPrefix.length - (finalCodePoint > 0xffff ? 2 : 1)
       )}${String.fromCodePoint(finalCodePoint + 1)}`
+      const rpcPrefixIndex = op.sessionKeyPrefix.lastIndexOf(':rpc:')
+      const agentScoped =
+        rpcPrefixIndex >= 0 &&
+        op.sessionKeyPrefix.slice(rpcPrefixIndex + ':rpc:'.length).replace(/:$/, '').length > 0
       const rows = s.selectSessionSummariesByPrefix.all({
         prefix_start: prefixStart,
         prefix_end: prefixEnd,
+        agent_scoped: agentScoped ? 1 : 0,
         limit: op.limit ?? -1,
         cursor_updated_at: op.cursorUpdatedAt ?? null,
         cursor_key: op.cursorKey ?? null,

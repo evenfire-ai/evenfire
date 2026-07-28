@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
-import { mergeAuthoritativeServerMessages } from './chatMessageMerge.js'
+import { mergeAuthoritativeServerMessages, messageServerTurnNumber } from './chatMessageMerge.js'
 import type { ChatFile, ChatIndex, ChatMessage, ChatMetadata } from './types.js'
 
 // Keep the catalog at v2 while paged transcripts are dual-readable by the
@@ -9,6 +9,7 @@ import type { ChatFile, ChatIndex, ChatMessage, ChatMetadata } from './types.js'
 const INDEX_VERSION = 2
 const PAGED_CHAT_VERSION = 1
 const DEFAULT_PAGE_SIZE = 100
+const MAX_COMPATIBILITY_WINDOWS = 100
 const DEFAULT_MAX_LOCAL_SYNCED_MESSAGES = 1000
 const LEGACY_COMPATIBILITY_MESSAGE_LIMIT = 100
 const PAGE_FILE_PATTERN = /^\d{6}\.json$/
@@ -33,9 +34,6 @@ interface PagedChatMeta {
   messageCount: number
   localMessageCount: number
   prunedBeforeCount?: number
-  prunedThroughServerTurnNumber?: number
-  oldestLocalServerTurnNumber?: number
-  latestServerTurnNumber?: number
   legacyCompatibilitySignature?: string
   pages: ChatPageEntry[]
 }
@@ -77,10 +75,6 @@ function pageNumberFromFileName(fileName: string): number {
   return Number(fileName.slice(0, 6))
 }
 
-function serverTurnNumber(message: ChatMessage): number | undefined {
-  return Number.isFinite(message.serverTurnNumber) ? message.serverTurnNumber : undefined
-}
-
 function isNotFoundError(err: unknown): boolean {
   return (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
 }
@@ -104,7 +98,7 @@ function aggregateMessages(
 
 function pageEntry(file: string, messages: ChatMessage[]): ChatPageEntry {
   const serverTurns = messages
-    .map(serverTurnNumber)
+    .map(messageServerTurnNumber)
     .filter((turn): turn is number => turn !== undefined)
   return {
     file,
@@ -123,23 +117,15 @@ function pageEntry(file: string, messages: ChatMessage[]): ChatPageEntry {
  * so we guard centrally where the on-disk path is built.
  */
 function assertSafeSegment(label: string, value: string): void {
-  const collidesWithSnapshotNamespace =
-    label === 'chatId' && /\.(?:next|previous|corrupt)-/.test(value)
-  if (
-    !value ||
-    value === '.' ||
-    value === '..' ||
-    /[/\\\0]/.test(value) ||
-    collidesWithSnapshotNamespace
-  ) {
+  if (!value || value === '.' || value === '..' || /[/\\\0]/.test(value)) {
     throw new Error(`Invalid ${label}: unsafe path segment`)
   }
 }
 
 function sameReconciledMessage(local: ChatMessage, server: ChatMessage): boolean {
   if (local.id === server.id) return true
-  const localTurn = serverTurnNumber(local)
-  const serverTurn = serverTurnNumber(server)
+  const localTurn = messageServerTurnNumber(local)
+  const serverTurn = messageServerTurnNumber(server)
   if (
     localTurn !== undefined &&
     serverTurn !== undefined &&
@@ -177,12 +163,12 @@ function mergeReconciledMessages(existing: ChatMessage[], incoming: ChatMessage[
       continue
     }
 
-    const serverTurn = serverTurnNumber(serverMessage)
+    const serverTurn = messageServerTurnNumber(serverMessage)
     const insertionIndex =
       serverTurn === undefined
         ? -1
         : merged.findIndex(message => {
-            const messageTurn = serverTurnNumber(message)
+            const messageTurn = messageServerTurnNumber(message)
             if (messageTurn === undefined) return false
             return (
               messageTurn > serverTurn ||
@@ -228,6 +214,16 @@ export class ChatStore {
   private cleanedSnapshotSiblingKeys = new Set<string>()
   private compatibilityCheckedKeys = new Set<string>()
   private compatibilityWindows = new Map<string, ChatMessage[]>()
+
+  private cacheCompatibilityWindow(key: string, messages: ChatMessage[]): void {
+    this.compatibilityWindows.delete(key)
+    this.compatibilityWindows.set(key, [...messages])
+    while (this.compatibilityWindows.size > MAX_COMPATIBILITY_WINDOWS) {
+      const oldestKey = this.compatibilityWindows.keys().next().value
+      if (typeof oldestKey !== 'string') break
+      this.compatibilityWindows.delete(oldestKey)
+    }
+  }
 
   private serialize<T>(
     chains: Map<string, Promise<unknown>>,
@@ -278,6 +274,12 @@ export class ChatStore {
     return join(this.agentDir(agentRef), `${chatId}.compat`)
   }
 
+  private corruptLegacyChatFilePath(agentRef: string, chatId: string): string {
+    assertSafeSegment('chatId', chatId)
+    const encodedChatId = Buffer.from(chatId, 'utf8').toString('base64url')
+    return join(this.agentDir(agentRef), '.corrupt', `${encodedChatId}-${randomUUID()}.json`)
+  }
+
   private chatDirPath(agentRef: string, chatId: string): string {
     assertSafeSegment('chatId', chatId)
     return join(this.agentDir(agentRef), 'chats', chatId)
@@ -290,7 +292,14 @@ export class ChatStore {
     token: string
   ): string {
     assertSafeSegment('chatId', chatId)
-    return join(this.agentDir(agentRef), 'chats', `${chatId}.${kind}-${token}`)
+    const encodedChatId = Buffer.from(chatId, 'utf8').toString('base64url')
+    return join(this.agentDir(agentRef), 'chats', '.snapshots', encodedChatId, `${kind}-${token}`)
+  }
+
+  private chatSnapshotRootPath(agentRef: string, chatId: string): string {
+    assertSafeSegment('chatId', chatId)
+    const encodedChatId = Buffer.from(chatId, 'utf8').toString('base64url')
+    return join(this.agentDir(agentRef), 'chats', '.snapshots', encodedChatId)
   }
 
   private chatPagesDirPath(agentRef: string, chatId: string): string {
@@ -328,19 +337,11 @@ export class ChatStore {
 
   private finalizePagedMeta(meta: PagedChatMeta): PagedChatMeta {
     const localMessageCount = meta.pages.reduce((total, page) => total + page.count, 0)
-    const oldestLocalServerTurnNumber = meta.pages.find(
-      page => page.firstServerTurnNumber !== undefined
-    )?.firstServerTurnNumber
-    const latestServerTurnNumber = [...meta.pages]
-      .reverse()
-      .find(page => page.lastServerTurnNumber !== undefined)?.lastServerTurnNumber
 
     return {
       ...meta,
       pageSize: this.pageSize,
       localMessageCount,
-      oldestLocalServerTurnNumber,
-      latestServerTurnNumber,
     }
   }
 
@@ -402,7 +403,16 @@ export class ChatStore {
       }
       return file.messages
     } catch (err) {
-      throw new Error(`Unable to read legacy chat file for ${chatId}`, { cause: err })
+      // Old flat chat files were written in place, so a crash could leave
+      // truncated JSON. Quarantine only malformed content; filesystem errors
+      // above still propagate. Returning "no legacy snapshot" lets the server
+      // rehydrate the chat and makes subsequent appends writable again.
+      await fs.mkdir(join(this.agentDir(agentRef), '.corrupt'), { recursive: true })
+      await fs.rename(
+        this.chatFilePath(agentRef, chatId),
+        this.corruptLegacyChatFilePath(agentRef, chatId)
+      )
+      return null
     }
   }
 
@@ -439,7 +449,7 @@ export class ChatStore {
     await this.writeJsonAtomic(this.chatCompatibilitySignaturePath(agentRef, chatId), {
       signature,
     })
-    this.compatibilityWindows.set(this.chatSnapshotCleanupKey(agentRef, chatId), [...file.messages])
+    this.cacheCompatibilityWindow(this.chatSnapshotCleanupKey(agentRef, chatId), file.messages)
     return signature
   }
 
@@ -514,7 +524,7 @@ export class ChatStore {
       this.compatibilityCheckedKeys.add(compatibilityKey)
       return refreshed
     }
-    this.compatibilityWindows.set(compatibilityKey, [...legacyMessages])
+    this.cacheCompatibilityWindow(compatibilityKey, legacyMessages)
 
     const legacySignature = this.legacyCompatibilitySnapshot(chatId, legacyMessages).signature
     if (legacySignature === meta.legacyCompatibilitySignature) {
@@ -662,7 +672,6 @@ export class ChatStore {
 
     let localCount = meta.pages.reduce((total, page) => total + page.count, 0)
     let prunedBeforeCount = meta.prunedBeforeCount ?? 0
-    let prunedThroughServerTurnNumber = meta.prunedThroughServerTurnNumber
     const retained: ChatPageEntry[] = []
     const removedFiles: string[] = []
     for (const page of meta.pages) {
@@ -673,14 +682,15 @@ export class ChatStore {
         removedFiles.push(page.file)
         localCount -= page.count
         prunedBeforeCount += page.count
-        prunedThroughServerTurnNumber = Math.max(
-          prunedThroughServerTurnNumber ?? 0,
-          page.lastServerTurnNumber ?? 0
-        )
         continue
       }
 
       retained.push(page)
+      // Pruning must remove only a contiguous prefix. Once a legacy/local-only
+      // page is retained, deleting a later synced page would punch a permanent
+      // hole in the middle of the transcript and make load-older cursors lie.
+      retained.push(...meta.pages.slice(retained.length + removedFiles.length))
+      break
     }
 
     return {
@@ -688,7 +698,6 @@ export class ChatStore {
         ...meta,
         pages: retained,
         prunedBeforeCount: prunedBeforeCount > 0 ? prunedBeforeCount : undefined,
-        prunedThroughServerTurnNumber,
       }),
       removedFiles,
     }
@@ -827,7 +836,7 @@ export class ChatStore {
     chatId: string
   ): Promise<PagedChatMeta | null> {
     const activeDir = this.chatDirPath(agentRef, chatId)
-    const chatsDir = join(this.agentDir(agentRef), 'chats')
+    const snapshotRoot = this.chatSnapshotRootPath(agentRef, chatId)
     const cleanupKey = this.chatSnapshotCleanupKey(agentRef, chatId)
     let activeMeta: PagedChatMeta | null = null
     let activeReadError: unknown
@@ -843,7 +852,7 @@ export class ChatStore {
       if (this.cleanedSnapshotSiblingKeys.has(cleanupKey)) return activeMeta
       const repaired = await this.adoptDurablePageWritesUnlocked(agentRef, chatId, activeMeta)
       if (repaired) {
-        await this.removePagedChatSnapshotSiblings(chatsDir, chatId)
+        await this.removePagedChatSnapshotSiblings(agentRef, chatId)
         this.cleanedSnapshotSiblingKeys.add(cleanupKey)
         return repaired
       }
@@ -860,17 +869,18 @@ export class ChatStore {
 
     let entries: Array<{ name: string; isDirectory: () => boolean }>
     try {
-      entries = await fs.readdir(chatsDir, { withFileTypes: true })
+      entries = await fs.readdir(snapshotRoot, { withFileTypes: true })
     } catch {
-      return null
+      entries = []
     }
+    if (!activeReadError && entries.length === 0) return null
 
     const snapshots = await Promise.all(
       entries
         .filter(entry => entry.isDirectory())
         .map(async entry => {
-          const nextPrefix = `${chatId}.next-`
-          const previousPrefix = `${chatId}.previous-`
+          const nextPrefix = 'next-'
+          const previousPrefix = 'previous-'
           const kind = entry.name.startsWith(nextPrefix)
             ? 'next'
             : entry.name.startsWith(previousPrefix)
@@ -882,7 +892,7 @@ export class ChatStore {
               ? entry.name.slice(nextPrefix.length)
               : entry.name.slice(previousPrefix.length)
           if (!token) return null
-          const dir = join(chatsDir, entry.name)
+          const dir = join(snapshotRoot, entry.name)
           const meta = await this.readPagedMetaAtPath(
             this.chatMetaPathFromChatDir(dir),
             chatId
@@ -928,7 +938,7 @@ export class ChatStore {
           await fs.rm(activeDir, { recursive: true, force: true })
         }
         await fs.rename(snapshot.dir, activeDir)
-        await this.removePagedChatSnapshotSiblings(chatsDir, chatId)
+        await this.removePagedChatSnapshotSiblings(agentRef, chatId)
         if (corruptDir) {
           await fs.rm(corruptDir, { recursive: true, force: true }).catch(() => undefined)
         }
@@ -950,24 +960,11 @@ export class ChatStore {
     return null
   }
 
-  private async removePagedChatSnapshotSiblings(chatsDir: string, chatId: string): Promise<void> {
-    let entries: Array<{ name: string; isDirectory: () => boolean }>
-    try {
-      entries = await fs.readdir(chatsDir, { withFileTypes: true })
-    } catch {
-      return
-    }
-
-    await Promise.all(
-      entries
-        .filter(
-          entry =>
-            entry.isDirectory() &&
-            (entry.name.startsWith(`${chatId}.next-`) ||
-              entry.name.startsWith(`${chatId}.previous-`))
-        )
-        .map(entry => fs.rm(join(chatsDir, entry.name), { recursive: true, force: true }))
-    )
+  private async removePagedChatSnapshotSiblings(agentRef: string, chatId: string): Promise<void> {
+    await fs.rm(this.chatSnapshotRootPath(agentRef, chatId), {
+      recursive: true,
+      force: true,
+    })
   }
 
   private async isCompletePagedSnapshot(
@@ -1300,7 +1297,7 @@ export class ChatStore {
       await fs.rm(this.chatFilePath(agentRef, chatId), { force: true })
       await fs.rm(this.chatCompatibilitySignaturePath(agentRef, chatId), { force: true })
       await fs.rm(this.chatDirPath(agentRef, chatId), { recursive: true, force: true })
-      await this.removePagedChatSnapshotSiblings(join(this.agentDir(agentRef), 'chats'), chatId)
+      await this.removePagedChatSnapshotSiblings(agentRef, chatId)
       const cacheKey = this.chatSnapshotCleanupKey(agentRef, chatId)
       this.cleanedSnapshotSiblingKeys.delete(cacheKey)
       this.compatibilityCheckedKeys.delete(cacheKey)
@@ -1408,6 +1405,17 @@ export class ChatStore {
       await this.updateChatIndexFromMessages(agentRef, chatId, merged, {
         preserveExistingTotals: true,
       })
+    })
+  }
+
+  async backfillChatCounters(
+    agentRef: string,
+    chatId: string,
+    messages: ChatMessage[]
+  ): Promise<void> {
+    await this.updateChatIndexFromMessages(agentRef, chatId, messages, {
+      preserveExistingTotals: true,
+      touchUpdatedAt: false,
     })
   }
 

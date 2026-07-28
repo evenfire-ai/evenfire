@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { ChatStore } from '../chatStore.js'
 import type { ChatMessage } from '../types.js'
 
@@ -32,6 +32,19 @@ function chatMetaPath(chatId: string): string {
 
 function chatPagesDir(chatId: string): string {
   return join(chatCacheDir(chatId), 'pages')
+}
+
+function chatSnapshotDir(
+  chatId: string,
+  kind: 'next' | 'previous' | 'corrupt',
+  token: string
+): string {
+  return agentPath(
+    'chats',
+    '.snapshots',
+    Buffer.from(chatId, 'utf8').toString('base64url'),
+    `${kind}-${token}`
+  )
 }
 
 function transientFileReadError(code = 'EMFILE'): NodeJS.ErrnoException {
@@ -361,7 +374,13 @@ describe('messages', () => {
     const originalWriteFile = fs.writeFile.bind(fs)
     vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
       const filePath = String(args[0])
-      if (filePath.includes('rewrite-failure.next-') && filePath.endsWith('000001.json.tmp')) {
+      if (
+        filePath.includes(
+          join('.snapshots', Buffer.from('rewrite-failure').toString('base64url'))
+        ) &&
+        filePath.includes('next-') &&
+        filePath.endsWith('000001.json.tmp')
+      ) {
         throw new Error('injected page write failure')
       }
       return originalWriteFile(...(args as Parameters<typeof fs.writeFile>))
@@ -457,10 +476,9 @@ describe('messages', () => {
       { id: 'm1', role: 'assistant', content: 'msg-1', timestamp: 1 },
     ])
 
-    await fs.rename(
-      chatCacheDir('switch-recovery'),
-      `${chatCacheDir('switch-recovery')}.previous-test`
-    )
+    const previousSnapshot = chatSnapshotDir('switch-recovery', 'previous', 'test')
+    await fs.mkdir(dirname(previousSnapshot), { recursive: true })
+    await fs.rename(chatCacheDir('switch-recovery'), previousSnapshot)
 
     const reloaded = await pagedStore.loadMessages('agent-1', 'switch-recovery')
     expect(reloaded.map(message => message.id)).toEqual(['m0', 'm1'])
@@ -477,17 +495,20 @@ describe('messages', () => {
       { id: 'old-0', role: 'user', content: 'old-0', timestamp: 0 },
     ])
 
-    const nextDir = `${chatCacheDir('next-recovery')}.next-test`
+    const nextDir = chatSnapshotDir('next-recovery', 'next', 'test')
     await writePagedSnapshotDir('next-recovery', nextDir, [
       { id: 'new-0', role: 'user', content: 'new-0', timestamp: 1 },
       { id: 'new-1', role: 'assistant', content: 'new-1', timestamp: 2 },
     ])
-    await fs.rename(chatCacheDir('next-recovery'), `${chatCacheDir('next-recovery')}.previous-test`)
+    await fs.rename(
+      chatCacheDir('next-recovery'),
+      chatSnapshotDir('next-recovery', 'previous', 'test')
+    )
 
     const reloaded = await pagedStore.loadMessages('agent-1', 'next-recovery')
     expect(reloaded.map(message => message.id)).toEqual(['new-0', 'new-1'])
-    await expect(fs.access(`${chatCacheDir('next-recovery')}.next-test`)).rejects.toThrow()
-    await expect(fs.access(`${chatCacheDir('next-recovery')}.previous-test`)).rejects.toThrow()
+    await expect(fs.access(chatSnapshotDir('next-recovery', 'next', 'test'))).rejects.toThrow()
+    await expect(fs.access(chatSnapshotDir('next-recovery', 'previous', 'test'))).rejects.toThrow()
   })
 
   it('uses the newest valid snapshot group instead of preferring stale next snapshots', async () => {
@@ -500,8 +521,8 @@ describe('messages', () => {
       { id: 'active-0', role: 'user', content: 'active-0', timestamp: 0 },
     ])
 
-    const staleNext = `${chatCacheDir('snapshot-order')}.next-old`
-    const freshPrevious = `${chatCacheDir('snapshot-order')}.previous-new`
+    const staleNext = chatSnapshotDir('snapshot-order', 'next', 'old')
+    const freshPrevious = chatSnapshotDir('snapshot-order', 'previous', 'new')
     await writePagedSnapshotDir('snapshot-order', staleNext, [
       { id: 'stale-0', role: 'user', content: 'stale-0', timestamp: 1 },
     ])
@@ -524,7 +545,7 @@ describe('messages', () => {
       maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
     })
     await pagedStore.createChat('agent-1', 'incomplete-snapshot')
-    const incomplete = `${chatCacheDir('incomplete-snapshot')}.previous-test`
+    const incomplete = chatSnapshotDir('incomplete-snapshot', 'previous', 'test')
     await writePagedSnapshotDir('incomplete-snapshot', incomplete, [
       { id: 'backup-0', role: 'user', content: 'backup-0', timestamp: 0 },
     ])
@@ -545,8 +566,8 @@ describe('messages', () => {
       { id: 'm0', role: 'user', content: 'msg-0', timestamp: 0 },
     ])
 
-    await fs.mkdir(`${chatCacheDir('stale-snapshots')}.next-stale`, { recursive: true })
-    await fs.mkdir(`${chatCacheDir('stale-snapshots')}.previous-stale`, { recursive: true })
+    await fs.mkdir(chatSnapshotDir('stale-snapshots', 'next', 'stale'), { recursive: true })
+    await fs.mkdir(chatSnapshotDir('stale-snapshots', 'previous', 'stale'), { recursive: true })
 
     const restartedStore = new ChatStore(tempDir, {
       pageSize: 2,
@@ -554,8 +575,10 @@ describe('messages', () => {
     })
     const reloaded = await restartedStore.loadMessages('agent-1', 'stale-snapshots')
     expect(reloaded.map(message => message.id)).toEqual(['m0'])
-    await expect(fs.access(`${chatCacheDir('stale-snapshots')}.next-stale`)).rejects.toThrow()
-    await expect(fs.access(`${chatCacheDir('stale-snapshots')}.previous-stale`)).rejects.toThrow()
+    await expect(fs.access(chatSnapshotDir('stale-snapshots', 'next', 'stale'))).rejects.toThrow()
+    await expect(
+      fs.access(chatSnapshotDir('stale-snapshots', 'previous', 'stale'))
+    ).rejects.toThrow()
   })
 
   it('deletes snapshot siblings so removed chats cannot be recovered later', async () => {
@@ -569,14 +592,16 @@ describe('messages', () => {
     ])
     await writePagedSnapshotDir(
       'delete-siblings',
-      `${chatCacheDir('delete-siblings')}.previous-test`,
+      chatSnapshotDir('delete-siblings', 'previous', 'test'),
       [{ id: 'backup-0', role: 'user', content: 'backup-0', timestamp: 1 }]
     )
 
     await pagedStore.deleteChat('agent-1', 'delete-siblings')
 
     expect(await pagedStore.loadMessages('agent-1', 'delete-siblings')).toEqual([])
-    await expect(fs.access(`${chatCacheDir('delete-siblings')}.previous-test`)).rejects.toThrow()
+    await expect(
+      fs.access(chatSnapshotDir('delete-siblings', 'previous', 'test'))
+    ).rejects.toThrow()
   })
 
   it('prunes only old pages whose messages are known to exist on the server', async () => {
@@ -601,13 +626,11 @@ describe('messages', () => {
       messageCount: number
       localMessageCount: number
       prunedBeforeCount: number
-      prunedThroughServerTurnNumber: number
     }>(chatMetaPath('pruned'))
     expect(meta).toMatchObject({
       messageCount: 6,
       localMessageCount: 4,
       prunedBeforeCount: 2,
-      prunedThroughServerTurnNumber: 2,
     })
 
     const chat = (await prunedStore.listChats('agent-1')).find(item => item.id === 'pruned')
@@ -616,7 +639,7 @@ describe('messages', () => {
     expect(localMessages.map(message => message.id)).toEqual(['m2', 'm3', 'm4', 'm5'])
   })
 
-  it('keeps local-only pages while pruning later fully synced pages', async () => {
+  it('keeps a contiguous transcript when an older local-only page blocks pruning', async () => {
     const prunedStore = new ChatStore(tempDir, {
       pageSize: 2,
       maxLocalSyncedMessages: 4,
@@ -632,12 +655,40 @@ describe('messages', () => {
 
     await prunedStore.saveMessages('agent-1', 'local-only', msgs)
 
-    expect(await fs.readdir(chatPagesDir('local-only'))).toEqual(['000001.json', '000003.json'])
+    expect(await fs.readdir(chatPagesDir('local-only'))).toEqual([
+      '000001.json',
+      '000002.json',
+      '000003.json',
+    ])
     const meta = await readJsonFile<{ localMessageCount: number; prunedBeforeCount?: number }>(
       chatMetaPath('local-only')
     )
-    expect(meta.localMessageCount).toBe(4)
-    expect(meta.prunedBeforeCount).toBe(2)
+    expect(meta.localMessageCount).toBe(6)
+    expect(meta.prunedBeforeCount).toBeUndefined()
+    expect(
+      (await prunedStore.loadMessages('agent-1', 'local-only')).map(message => message.id)
+    ).toEqual(msgs.map(message => message.id))
+  })
+
+  it('recognizes legacy turn-N-role ids as server-synced for safe prefix pruning', async () => {
+    const prunedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: 2,
+    })
+    await prunedStore.createChat('agent-1', 'legacy-turn-ids')
+    const msgs = [
+      { id: 'turn-1-user', role: 'user' as const, content: 'q1', timestamp: 1 },
+      { id: 'turn-1-assistant', role: 'assistant' as const, content: 'a1', timestamp: 2 },
+      { id: 'turn-2-user', role: 'user' as const, content: 'q2', timestamp: 3 },
+      { id: 'turn-2-assistant', role: 'assistant' as const, content: 'a2', timestamp: 4 },
+    ]
+
+    await prunedStore.saveMessages('agent-1', 'legacy-turn-ids', msgs)
+
+    expect(await fs.readdir(chatPagesDir('legacy-turn-ids'))).toEqual(['000002.json'])
+    expect(
+      (await prunedStore.loadMessages('agent-1', 'legacy-turn-ids')).map(message => message.id)
+    ).toEqual(['turn-2-user', 'turn-2-assistant'])
   })
 
   it('updates messageCount in index after save', async () => {
@@ -1058,7 +1109,13 @@ describe('messages', () => {
     let injected = false
     vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
       const filePath = String(args[0])
-      if (!injected && filePath.includes('migration-failure.next-')) {
+      if (
+        !injected &&
+        filePath.includes(
+          join('.snapshots', Buffer.from('migration-failure').toString('base64url'))
+        ) &&
+        filePath.includes('next-')
+      ) {
         injected = true
         throw transientFileReadError('ENOSPC')
       }
@@ -1120,6 +1177,26 @@ describe('corrupt/missing files', () => {
   it('returns empty messages for missing chat file', async () => {
     const messages = await store.loadMessages('agent-1', 'nonexistent')
     expect(messages).toEqual([])
+  })
+
+  it('quarantines a corrupt legacy chat and allows it to become writable again', async () => {
+    const chatId = 'corrupt-legacy'
+    await store.createChat('agent-1', chatId)
+    await fs.writeFile(agentPath(`${chatId}.json`), '{"version":2,"messages":[')
+
+    await expect(store.loadMessages('agent-1', chatId)).resolves.toEqual([])
+    const quarantined = await fs.readdir(agentPath('.corrupt'))
+    expect(quarantined).toHaveLength(1)
+    await expect(fs.stat(agentPath(`${chatId}.json`))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const replacement = {
+      id: 'turn-1-user',
+      role: 'user' as const,
+      content: 'rehydrated',
+      timestamp: 1,
+    }
+    await store.appendMessages('agent-1', chatId, [replacement])
+    await expect(store.loadMessages('agent-1', chatId)).resolves.toEqual([replacement])
   })
 })
 
@@ -1188,9 +1265,7 @@ describe('path-segment validation', () => {
       /unsafe path segment/
     )
     await expect(store.saveMessages('agent-1', 'a/b', [])).rejects.toThrow(/unsafe path segment/)
-    await expect(store.saveMessages('agent-1', 'other.next-shadow', [])).rejects.toThrow(
-      /unsafe path segment/
-    )
+    await expect(store.saveMessages('agent-1', 'other.next-shadow', [])).resolves.toBeUndefined()
   })
 
   // Read verbs are tolerant-by-contract (return empty on any failure) — the key

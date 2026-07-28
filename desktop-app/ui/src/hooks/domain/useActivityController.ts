@@ -114,6 +114,12 @@ export function useActivityController({
         const messages = await chatStore
           .loadMessages(selectedAgent, chatId, ACTIVITY_SUMMARY_MESSAGE_SCAN_LIMIT)
           .catch(() => [])
+        try {
+          await chatStore.backfillCounters(selectedAgent, chatId, messages)
+        } catch {
+          // Older preload bridges cannot persist the backfill; keep the computed
+          // renderer value for this session and retry after the app upgrades.
+        }
         return [
           activityCounterKey(selectedAgent, chatId),
           {
@@ -132,7 +138,14 @@ export function useActivityController({
     return () => {
       cancelled = true
     }
-  }, [chatStore.loadMessages, isAuthenticated, loadMenuData, missingCounterChatIds, selectedAgent])
+  }, [
+    chatStore.backfillCounters,
+    chatStore.loadMessages,
+    isAuthenticated,
+    loadMenuData,
+    missingCounterChatIds,
+    selectedAgent,
+  ])
 
   // Compute agentLastActiveByAgent for all agents
   useEffect(() => {

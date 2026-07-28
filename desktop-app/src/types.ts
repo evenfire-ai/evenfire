@@ -878,6 +878,7 @@ export interface SessionMessagesQuery {
 }
 
 export interface SessionsListQuery {
+  agent?: string
   limit?: number
   cursor?: string
 }

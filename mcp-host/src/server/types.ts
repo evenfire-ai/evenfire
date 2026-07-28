@@ -493,6 +493,7 @@ export type SessionsListItem = {
 } & SessionStateWire
 
 export type SessionsListQuery = {
+  agent?: string
   limit?: number
   cursor?: string
 }

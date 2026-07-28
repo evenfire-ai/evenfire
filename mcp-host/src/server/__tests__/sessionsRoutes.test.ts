@@ -71,6 +71,7 @@ describe('handleSessionsListRoute', () => {
       ],
     })
     expect(sessionsListHandler).toHaveBeenCalledWith('user-1', {
+      agent: undefined,
       limit: undefined,
       cursor: undefined,
     })
@@ -91,10 +92,29 @@ describe('handleSessionsListRoute', () => {
 
     expect(captured.statusCode).toBe(200)
     expect(sessionsListHandler).toHaveBeenCalledWith('user-1', {
+      agent: undefined,
       limit: 100,
       cursor: encodeSessionsCursor('2026-04-22T00:00:00.000Z', 'k1'),
     })
     expect(captured.jsonBody).toEqual({ items: [], nextCursor: 'next-page' })
+  })
+
+  it('passes a validated agent scope to the catalog handler before pagination', async () => {
+    const sessionsListHandler: SessionsListHandler = vi.fn().mockReturnValue({ items: [] })
+    const req = {
+      ...makeReqWithAuth('user-1'),
+      query: { agent: 'chatllm', limit: '25' },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler }))
+
+    expect(captured.statusCode).toBe(200)
+    expect(sessionsListHandler).toHaveBeenCalledWith('user-1', {
+      agent: 'chatllm',
+      limit: 25,
+      cursor: undefined,
+    })
   })
 
   it('rejects malformed session cursors instead of treating them as page one', async () => {

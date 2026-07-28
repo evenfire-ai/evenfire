@@ -546,6 +546,9 @@ export function useAppController() {
         const switchedIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
         activeAuthenticatedSessionIdentityRef.current = switchedIdentity
         authenticatedSessionIdentityRef.current = switchedIdentity
+        // Team switching owns a complete foreground refresh. If it invalidated
+        // the login-time post-paint callback, re-enable deferred menu data here.
+        setPostPaintDataReady(true)
         await refreshAuthenticatedData()
         if (announce) {
           const teamName =
@@ -566,6 +569,7 @@ export function useAppController() {
       chat.resetChat,
       fullSetStatus,
       refreshAuthenticatedData,
+      setPostPaintDataReady,
       teamsData.teams,
     ]
   )
@@ -657,6 +661,10 @@ export function useAppController() {
           if (loaded && activeAuthenticatedSessionIdentityRef.current === sessionIdentity) {
             authenticatedSessionIdentityRef.current = sessionIdentity
           }
+        } else {
+          // A prior post-paint callback may have been invalidated by an identity
+          // transition. An already-initialized matching session is ready now.
+          setPostPaintDataReady(true)
         }
         if (!preserveNav) {
           nav.handleNavSelect(DESKTOP_ROUTES.chat)

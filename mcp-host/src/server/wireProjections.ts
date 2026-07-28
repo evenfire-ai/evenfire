@@ -46,7 +46,8 @@ export function encodeSessionsCursor(updatedAt: string, key: string): string {
 
 export function paginateSessionSummaries<T extends { key: string; lastActivityAt: Date }>(
   entries: T[],
-  limit: number | undefined
+  limit: number | undefined,
+  encodeKey: (key: string) => string = key => key
 ): { page: T[]; nextCursor?: string } {
   if (limit === undefined) return { page: entries }
   const page = entries.slice(0, limit)
@@ -54,7 +55,9 @@ export function paginateSessionSummaries<T extends { key: string; lastActivityAt
   return {
     page,
     ...(entries.length > page.length && last
-      ? { nextCursor: encodeSessionsCursor(last.lastActivityAt.toISOString(), last.key) }
+      ? {
+          nextCursor: encodeSessionsCursor(last.lastActivityAt.toISOString(), encodeKey(last.key)),
+        }
       : {}),
   }
 }

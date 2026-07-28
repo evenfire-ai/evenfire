@@ -105,6 +105,10 @@ const MAX_ACTIVITY_EVENTS_PER_MESSAGE = 100
 const MAX_MESSAGES_WITH_ACTIVITY_PER_AGENT = 50
 const MESSAGE_PAGE_SIZE = 80
 const MAX_RECONCILE_DELTA_PAGES = 5
+const REPLACE_LOCAL_RECONCILIATION_WINDOW = Symbol('replace-local-reconciliation-window')
+type ReconciliationMessagesResult = SessionMessagesResult & {
+  [REPLACE_LOCAL_RECONCILIATION_WINDOW]?: true
+}
 
 function serverTurnNumber(message: AgentChatMessage): number | undefined {
   return messageServerTurnNumber(message)
@@ -313,6 +317,7 @@ export function useAgentChatController({
   // activeChatId) are injected through `chatListHostRef`, filled each render once
   // those parent callbacks are defined (created here so the hook can receive it).
   const chatListHostRef = useRef<ChatListControllerHost | null>(null)
+  const autoSelectedChatIdRef = useRef<string | null>(null)
   const chatListCtl = useChatListController({
     selectedAgent,
     agentNames,
@@ -671,6 +676,7 @@ export function useAgentChatController({
       ...activeChatVisibilityRef.current,
       activeChatId: null,
     }
+    autoSelectedChatIdRef.current = null
     setActiveChatId(null)
     clearList()
     // R-F13 renderer half (spec §4.5-3): tear down EVERY tracked task so a late
@@ -841,6 +847,10 @@ export function useAgentChatController({
       dispatchSession,
       clearComposerDraft,
       getActiveChatId: () => activeChatId,
+      getAutoSelectedChatId: () => autoSelectedChatIdRef.current,
+      markAutoSelectedChat: chatId => {
+        autoSelectedChatIdRef.current = chatId
+      },
       shouldAutoSelectLatest: () => navItem === DESKTOP_ROUTES.chat,
     }
   })
@@ -848,6 +858,7 @@ export function useAgentChatController({
   const handleSelectChat = useCallback(
     async (chatId: string) => {
       if (!selectedAgent) return
+      autoSelectedChatIdRef.current = null
       await switchToChat(selectedAgent, chatId)
     },
     [selectedAgent, switchToChat]
@@ -952,6 +963,7 @@ export function useAgentChatController({
   // Agent selection → load chats
   useEffect(() => {
     if (!selectedAgent) {
+      autoSelectedChatIdRef.current = null
       activeChatVisibilityRef.current = {
         ...activeChatVisibilityRef.current,
         activeChatId: null,
@@ -1045,12 +1057,14 @@ export function useAgentChatController({
       if (requestedSelection?.mode === 'latest') {
         const latest = merged[0]
         if (latest) {
+          autoSelectedChatIdRef.current = latest.id
           await switchToChat(selectedAgent, latest.id)
         }
         setChatMessagesLoading(false)
         return
       }
       if (requestedSelection?.mode === 'specific') {
+        autoSelectedChatIdRef.current = null
         const requested = merged.find(chat => chat.id === requestedSelection.chatId)
         if (requested) {
           await switchToChat(selectedAgent, requestedSelection.chatId)
@@ -1066,6 +1080,7 @@ export function useAgentChatController({
       if (navItem === DESKTOP_ROUTES.chat) {
         const latest = merged[0]
         if (latest) {
+          autoSelectedChatIdRef.current = latest.id
           await switchToChat(selectedAgent, latest.id)
         }
       }
@@ -1311,7 +1326,9 @@ export function useAgentChatController({
           return []
         })) as AgentChatMessage[]
       const visible = isActive() ? chatMessagesRef.current : []
-      const localMessages = mergeUniqueMessages(visible, cached)
+      const replaceLocalWindow =
+        (resp as ReconciliationMessagesResult)[REPLACE_LOCAL_RECONCILIATION_WINDOW] === true
+      const localMessages = replaceLocalWindow ? [] : mergeUniqueMessages(visible, cached)
       if (!isActive() || tracker.get(chatKey)) {
         return { rendered: localMessages, replaced: false, cached: localMessages }
       }
@@ -1322,7 +1339,9 @@ export function useAgentChatController({
       const localHasServerTurns = localMessages.some(
         message => serverTurnNumber(message) !== undefined
       )
-      if (!localHasServerTurns) {
+      if (replaceLocalWindow) {
+        setHasOlderMessages(Boolean(resp.hasMoreBefore))
+      } else if (!localHasServerTurns) {
         setHasOlderMessages(previous => previous || Boolean(resp.hasMoreBefore))
       }
       if (!localHasServerTurns && localMessages.length > 0) {
@@ -1546,6 +1565,7 @@ export function useAgentChatController({
       })
       tracker.release(chatKey as TaskKey)
       await chatStore.deleteChat(agentRef, chatId).catch(() => undefined)
+      chatStore.clearCachedRemoteData()
       removeFromList(chatId)
       const view = activeChatVisibilityRef.current
       if (view.selectedAgent === agentRef && view.activeChatId === chatId) {
@@ -1554,7 +1574,7 @@ export function useAgentChatController({
         setChatMessages([])
       }
     },
-    [tracker, chatStore.deleteChat, removeFromList]
+    [tracker, chatStore.deleteChat, chatStore.clearCachedRemoteData, removeFromList]
   )
 
   useEffect(() => {
@@ -1608,9 +1628,13 @@ export function useAgentChatController({
           pagesLoaded += 1
         }
         if (response.hasMoreAfter) {
-          return chatStore.loadSessionMessages(agentRef, agentRef, chatId, {
+          const latest = await chatStore.loadSessionMessages(agentRef, agentRef, chatId, {
             limit: requestedQuery.limit ?? MESSAGE_PAGE_SIZE,
           })
+          return {
+            ...latest,
+            [REPLACE_LOCAL_RECONCILIATION_WINDOW]: true,
+          } satisfies ReconciliationMessagesResult
         }
         return {
           ...response,
@@ -2187,6 +2211,7 @@ export function useAgentChatController({
         try {
           const chatId = crypto.randomUUID()
           const meta = await chatStore.createChat(sendAgent, chatId)
+          chatStore.clearCachedRemoteData()
           autoCreatedMeta = meta
           appendNewEntry(sendAgent, meta)
           sendChatId = chatId
@@ -2323,6 +2348,9 @@ export function useAgentChatController({
             async: true,
           }
         )
+        // A successful send creates or updates the durable server session. Do not
+        // let the short-lived sidebar cache hide that new catalog state.
+        chatStore.clearCachedRemoteData()
         // The runtime accepted the POST (sync reply or async task) — it received
         // the piggybacked model, so drop the pending entry. A thrown POST skips
         // this (the catch below leaves it set) so the next attempt retries it.
@@ -2636,6 +2664,7 @@ export function useAgentChatController({
       ...activeChatVisibilityRef.current,
       activeChatId: null,
     }
+    autoSelectedChatIdRef.current = null
     setActiveChatId(null)
     setChatMessages([])
     setChatMessagesLoading(false)

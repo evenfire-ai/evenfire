@@ -28,6 +28,7 @@ export function AuthPage() {
     handleSaveRuntimeConfig,
     handleDeleteRuntimeConfig,
     handleSelectRuntimeConfig,
+    handleClearRuntimeConfigSelection,
   } = useAuthContext()
 
   const runtimeConfigOptions = runtimeConfigState?.options || []
@@ -95,6 +96,7 @@ export function AuthPage() {
   const handleRuntimeOptionSelect = (optionId: string) => {
     setRuntimeMenuOpen(false)
     if (optionId === activeRuntimeConfigId) {
+      handleClearRuntimeConfigSelection()
       return
     }
     handleSelectRuntimeConfig(optionId)

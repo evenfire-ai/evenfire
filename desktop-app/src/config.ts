@@ -483,7 +483,7 @@ const envRuntimeConfig = validateRuntimeConfig({
 })
 const desktopDevPackageRuntimeConfigEnabled =
   process.argv.includes('--evenfire-desktop-dev-package') &&
-  isLocalhostRuntimeConfig(envRuntimeConfig)
+  runtimeEndpointsMatch(envRuntimeConfig, localhostRuntimeConfig)
 const canUseEnvRuntimeConfig = !app?.isPackaged || desktopDevPackageRuntimeConfigEnabled
 const envRuntimeConfigured = Boolean(
   canUseEnvRuntimeConfig &&

@@ -66,16 +66,10 @@ export function up(db: Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_messages_session
       ON messages(session_id, ordinal);
-    CREATE INDEX IF NOT EXISTS idx_messages_turn
-      ON messages(session_id, turn_number);
     CREATE INDEX IF NOT EXISTS idx_messages_spillover
       ON messages(spillover_ref) WHERE spillover_ref IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_messages_timestamp
       ON messages(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_messages_session_timestamp
-      ON messages(session_id, timestamp);
-    CREATE INDEX IF NOT EXISTS idx_messages_session_turn_ordinal
-      ON messages(session_id, turn_number, ordinal);
 
     CREATE TABLE IF NOT EXISTS pending_approvals (
       request_id        TEXT PRIMARY KEY,

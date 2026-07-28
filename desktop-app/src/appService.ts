@@ -270,6 +270,7 @@ export class AppService {
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
+  private logoutInProgress = false
   private sessionGeneration = 0
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
@@ -551,10 +552,12 @@ export class AppService {
   }
 
   private async restoreSavedSessionOnce(options: { runLaunchMaintenance?: boolean } = {}) {
+    if (this.logoutInProgress) return { authenticated: false, me: null }
     const restoreGeneration = this.sessionGeneration
     hydrateDesktopRuntimeConfig()
     const envKey = getActiveEnvKey()
     const token = await this.tokenStore.getSessionToken(envKey)
+    if (this.logoutInProgress) return { authenticated: false, me: null }
     if (!token) {
       if (this.sessionGeneration === restoreGeneration) {
         this.clearAuthenticatedSessionState()
@@ -571,14 +574,16 @@ export class AppService {
       if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
         return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
       }
-      this.me = restoredMe
       await bindChatStoreForUser(restoredMe.id, envKey)
       if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
         if (this.me) {
           await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+        } else {
+          unbindChatStore()
         }
         return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
       }
+      this.me = restoredMe
       this.accessCatalog = null
       this.teamDirectoryCache = null
       this.workflowApprovalTeamById.clear()
@@ -630,6 +635,7 @@ export class AppService {
 
   private async completePasswordLogin(email: string, password: string): Promise<SessionState> {
     const result = await this.authClient.passwordLogin(email, password)
+    this.logoutInProgress = false
     this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
@@ -700,6 +706,7 @@ export class AppService {
 
   async googleLogin(idToken: string): Promise<SessionState> {
     const result = await this.authClient.googleLogin(idToken)
+    this.logoutInProgress = false
     this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
@@ -885,8 +892,10 @@ export class AppService {
   }
 
   async logout(): Promise<void> {
+    this.logoutInProgress = true
     this.clearAuthenticatedSessionState()
     await this.tokenStore.clearSessionToken(getActiveEnvKey())
+    this.logoutInProgress = false
   }
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
