@@ -7,6 +7,10 @@ export type SandboxUiConversationOrigin = {
   teamId?: string
 }
 
+export type SandboxUiLaunchApp = ActiveSandboxUiApp & {
+  ready?: boolean
+}
+
 export type SandboxUiPageProps = {
   boundsRefreshKey?: string | number
   conversationOrigin?: SandboxUiConversationOrigin | null

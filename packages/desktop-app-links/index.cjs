@@ -75,7 +75,6 @@ function buildSandboxUiDeepLink(parts) {
 function buildSandboxUiWebLink(profileUiBaseUrl, parts) {
   const valid = validateParts(parts)
   if (!valid) throw new Error('Cannot create a deep link for this app route')
-  const deepLink = new URL(buildSandboxUiDeepLink(valid))
   let baseUrl
   try {
     baseUrl = new URL(profileUiBaseUrl)
@@ -86,13 +85,15 @@ function buildSandboxUiWebLink(profileUiBaseUrl, parts) {
     throw new Error('Cannot create a shareable link for this desktop environment')
   }
 
-  baseUrl.search = ''
   baseUrl.hash = ''
   const basePath = baseUrl.pathname.replace(/\/+$/, '')
   baseUrl.pathname =
     `${basePath}${SANDBOX_UI_WEB_LINK_PATH}/${encodeURIComponent(valid.recipeNs)}/` +
     encodeURIComponent(valid.recipeName)
-  baseUrl.search = deepLink.search
+  const search = new URLSearchParams()
+  if (valid.path) search.set('path', valid.path)
+  if (valid.teamId) search.set('team', valid.teamId)
+  baseUrl.search = search.toString()
   return baseUrl.toString()
 }
 
@@ -105,18 +106,19 @@ function parseSandboxUiDeepLink(rawUrl) {
   }
   if (
     parsed.protocol !== SANDBOX_UI_DEEP_LINK_PROTOCOL ||
-    parsed.hostname !== SANDBOX_UI_DEEP_LINK_HOST
+    parsed.hostname !== SANDBOX_UI_DEEP_LINK_HOST ||
+    parsed.port
   ) {
     return null
   }
 
-  const segments = parsed.pathname.split('/').filter(Boolean)
-  if (segments.length !== 2) return null
+  const segments = parsed.pathname.split('/')
+  if (segments.length !== 3 || segments[0] !== '' || !segments[1] || !segments[2]) return null
   let recipeNs
   let recipeName
   try {
-    recipeNs = decodeURIComponent(segments[0] || '')
-    recipeName = decodeURIComponent(segments[1] || '')
+    recipeNs = decodeURIComponent(segments[1] || '')
+    recipeName = decodeURIComponent(segments[2] || '')
   } catch {
     return null
   }
@@ -136,7 +138,7 @@ function parseSandboxUiDeepLink(rawUrl) {
 
 function sandboxUiDeepLinkTargetsEqual(left, right) {
   return (
-    left.appRef === right.appRef &&
+    left.appRef.toLowerCase() === right.appRef.toLowerCase() &&
     (left.path || '') === (right.path || '') &&
     (left.teamId || '') === (right.teamId || '')
   )

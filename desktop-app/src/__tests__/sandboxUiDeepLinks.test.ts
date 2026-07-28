@@ -93,9 +93,13 @@ describe('sandbox UI deep links', () => {
         'evenfire://app/sandbox-recipes/agentic-task-board?path=%2Fsafe%2F%252e%252e%2Fadmin'
       )
     ).toBeNull()
+    expect(parseSandboxUiDeepLink('evenfire://app/sandbox-recipes/agentic-task-board/')).toBeNull()
+    expect(
+      parseSandboxUiDeepLink('evenfire://app:444/sandbox-recipes/agentic-task-board')
+    ).toBeNull()
   })
 
-  it('extracts the current route from the active embedded app URL', () => {
+  it('extracts the current route without copying a potentially sensitive fragment', () => {
     expect(
       extractSandboxUiViewRoute({
         currentUrl:
@@ -105,7 +109,7 @@ describe('sandbox UI deep links', () => {
         recipeNs: 'sandbox-recipes',
         recipeName: 'agentic-task-board',
       })
-    ).toBe('/tasks/task-42?panel=comments#latest')
+    ).toBe('/tasks/task-42?panel=comments')
   })
 
   it('does not extract routes from another origin or recipe', () => {

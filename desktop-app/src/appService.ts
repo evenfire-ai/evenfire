@@ -263,6 +263,7 @@ export class AppService {
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
+  private profileUiBaseUrlCache: { key: string; value: string } | null = null
   private accessCatalog: AccessCatalog | null = null
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
@@ -377,6 +378,7 @@ export class AppService {
     this.sessionToken = token
     if (tokenChanged) {
       this.rpcTokenManager.clear()
+      this.profileUiBaseUrlCache = null
       this.accessCatalog = null
       await this.tokenStore.setSessionToken(token, getActiveEnvKey())
     }
@@ -709,17 +711,33 @@ export class AppService {
     return { profileUiUrl: profileUiUrl.toString() }
   }
 
-  private async resolveProfileUiBaseUrl(email?: string): Promise<string> {
+  private async resolveProfileUiBaseUrl(
+    email?: string,
+    options: { fallbackOnLookupError?: boolean } = {}
+  ): Promise<string> {
+    const { fallbackOnLookupError = true } = options
     const normalizedEmail = String(email || this.me?.email || '')
       .trim()
       .toLowerCase()
-    if (!normalizedEmail) return config.desktopProfileUiBaseUrl
+    if (!normalizedEmail) {
+      if (fallbackOnLookupError) return config.desktopProfileUiBaseUrl
+      throw new Error('Cannot resolve the Profile UI for this desktop session')
+    }
+    const cacheKey = `${getActiveEnvKey()}:${this.me?.id || ''}:${normalizedEmail}`
+    if (this.profileUiBaseUrlCache?.key === cacheKey) {
+      return this.profileUiBaseUrlCache.value
+    }
     try {
       const activation =
         await this.memberRegistrationServiceClient.getInvitationProfile(normalizedEmail)
-      return activation.profileUiBaseUrl
-    } catch {
-      return config.desktopProfileUiBaseUrl
+      const profileUiBaseUrl =
+        String(activation.profileUiBaseUrl || '').trim() || config.desktopProfileUiBaseUrl
+      this.profileUiBaseUrlCache = { key: cacheKey, value: profileUiBaseUrl }
+      return profileUiBaseUrl
+    } catch (error) {
+      if (fallbackOnLookupError) return config.desktopProfileUiBaseUrl
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`Cannot resolve a shareable Profile UI link: ${message}`)
     }
   }
 
@@ -816,6 +834,7 @@ export class AppService {
     this.stopAllStreams()
     this.sessionToken = null
     this.me = null
+    this.profileUiBaseUrlCache = null
     this.accessCatalog = null
     this.teamDirectoryCache = null
     this.workflowApprovalTeamById.clear()
@@ -2926,7 +2945,9 @@ export class AppService {
     const { buildSandboxUiWebLink } = await import('./sandboxUiDeepLinks.js')
     const location = driver.getActiveSandboxUiLocation()
     if (!location) throw new Error('No app is currently open')
-    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl()
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
+      fallbackOnLookupError: false,
+    })
     return {
       url: buildSandboxUiWebLink(profileUiBaseUrl, {
         ...location,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type {
   AccessCatalog,
@@ -136,7 +136,7 @@ export function useAppController() {
   // Use a ref so the stable onSessionNeedsLoad callback can call the real loadSession
   // without creating a circular dependency (loadSession is defined after auth+session).
   const loadSessionRef = useRef(async (_options?: { preserveNav?: boolean }) => {})
-  const authenticatedSessionIdentityRef = useRef<string | null>(null)
+  const authenticatedWorkspaceIdentityRef = useRef<string | null>(null)
   const catalogRefreshPromiseRef = useRef<Promise<AccessCatalog> | null>(null)
 
   const onSessionNeedsLoad = useCallback(async (options?: { preserveNav?: boolean }) => {
@@ -155,6 +155,13 @@ export function useAppController() {
   const mcpServersData = useMcpServersDataController()
   const teamsData = useTeamsDataController()
   const currentTeamId = teamsData.currentTeamId || auth.me?.teamId || ''
+  const availableTeamIds = useMemo(() => teamsData.teams.map(team => team.id), [teamsData.teams])
+  const authenticatedPrincipalIdentity =
+    auth.isAuthenticated && auth.me
+      ? `${auth.me.id}:${String(auth.me.email || '')
+          .trim()
+          .toLowerCase()}`
+      : null
   const currentTeamName =
     teamsData.teams.find(team => team.id === currentTeamId)?.name || auth.me?.teamName || ''
   const currentTeamIdRef = useRef(currentTeamId)
@@ -496,7 +503,7 @@ export function useAppController() {
         auth.setMe(sessionState.me)
         auth.setEmail(sessionState.me.email || '')
         currentTeamIdRef.current = sessionState.me.teamId || teamId
-        authenticatedSessionIdentityRef.current = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+        authenticatedWorkspaceIdentityRef.current = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
         await refreshAuthenticatedData()
         if (announce) {
           const teamName =
@@ -522,7 +529,7 @@ export function useAppController() {
   )
 
   const ensureTeamContext = useCallback(
-    async (target: { teamId?: string }) => {
+    async (target: { teamId?: string; announce?: boolean }) => {
       const targetTeamId = String(target.teamId || '').trim()
       if (!targetTeamId) return
 
@@ -531,7 +538,7 @@ export function useAppController() {
         if (targetTeamId === activeTeamId) return
 
         chat.clearActiveChat()
-        await switchTeamForWorkspace(targetTeamId, { announce: false })
+        await switchTeamForWorkspace(targetTeamId, { announce: target.announce ?? false })
       })
       notificationTeamContextQueueRef.current = queuedSwitch.catch(() => undefined)
       await queuedSwitch
@@ -574,6 +581,7 @@ export function useAppController() {
           .then(auth.setDependencyHealth)
           .catch(error => {
             console.warn('[Desktop] Could not refresh dependency health:', error)
+            auth.setDependencyHealth(null)
           })
         const sessionState = await window.clerum.auth.getSessionState()
         const authenticated = Boolean(sessionState.authenticated && sessionState.me)
@@ -591,7 +599,7 @@ export function useAppController() {
           queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
           chat.resetChat()
           notif.resetNotifications()
-          authenticatedSessionIdentityRef.current = null
+          authenticatedWorkspaceIdentityRef.current = null
           if (!preserveNav) nav.handleNavSelect(DESKTOP_ROUTES.chat)
           return
         }
@@ -600,8 +608,8 @@ export function useAppController() {
         auth.setEmail(sessionState.me.email || '')
         void auth.refreshDesktopReleaseStatus()
         const sessionIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
-        if (authenticatedSessionIdentityRef.current !== sessionIdentity) {
-          authenticatedSessionIdentityRef.current = sessionIdentity
+        if (authenticatedWorkspaceIdentityRef.current !== sessionIdentity) {
+          authenticatedWorkspaceIdentityRef.current = sessionIdentity
           await refreshAuthenticatedData({ initialLoad: true })
         }
         if (!preserveNav) {
@@ -656,7 +664,7 @@ export function useAppController() {
       // in cache would otherwise bleed into the next login (possibly a different
       // environment, since the env is chosen pre-login).
       queryClient.clear()
-      authenticatedSessionIdentityRef.current = null
+      authenticatedWorkspaceIdentityRef.current = null
       await window.clerum.auth.logout()
       chat.resetChat()
       notif.resetNotifications()
@@ -1003,6 +1011,9 @@ export function useAppController() {
     isAuthenticated: auth.isAuthenticated,
     me: auth.me,
     currentTeamId,
+    availableTeamIds,
+    teamDirectoryHydrated: teamsData.teamDirectoryHydrated,
+    authenticatedPrincipalIdentity,
     email: auth.email,
     password: auth.password,
     desktopSetupAuthorizationToken: auth.desktopSetupAuthorizationToken,

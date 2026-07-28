@@ -44,10 +44,11 @@ SERVICES := \
 	profile-ui \
 	desktop-app \
 	mcp-servers \
+	packages/desktop-app-links \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk
 
-# Services that have unit tests (vitest)
+# Services that have unit tests
 TEST_SERVICES := \
 	workflow-approval-request-reader \
 	mcp-host \
@@ -63,6 +64,7 @@ TEST_SERVICES := \
 	profile-ui \
 	desktop-app \
 	mcp-servers \
+	packages/desktop-app-links \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk
 
@@ -943,4 +945,3 @@ run-platform-security-gates: ## Execute the revised platform security gate runne
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
-

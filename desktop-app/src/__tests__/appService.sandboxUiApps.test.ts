@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppService } from '../appService.js'
 import { ApiError } from '../httpClient.js'
 
+const { mockGetActiveSandboxUiLocation } = vi.hoisted(() => ({
+  mockGetActiveSandboxUiLocation: vi.fn(),
+}))
+
 vi.mock('electron', () => ({
   app: {
     getPath: vi.fn(() => '/tmp/clerum-desktop-test'),
@@ -16,7 +20,12 @@ vi.mock('electron', () => ({
   },
 }))
 
+vi.mock('../sandboxUiDriver.js', () => ({
+  getActiveSandboxUiLocation: mockGetActiveSandboxUiLocation,
+}))
+
 vi.mock('../config.js', () => ({
+  getActiveEnvKey: () => 'test-env',
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',
@@ -185,24 +194,55 @@ describe('AppService.openForgotPassword', () => {
 })
 
 describe('AppService profile UI link authority', () => {
-  it('uses the authenticated invitation profile instead of guessing a tenant hostname', async () => {
+  it('uses and memoizes the authenticated invitation profile for shareable links', async () => {
     const service = makeService() as unknown as {
       me: { id: string; email: string }
       memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
       resolveProfileUiBaseUrl: () => Promise<string>
+      createSandboxUiDeepLink: (teamId?: string) => Promise<{ url: string }>
     }
     service.me = { id: 'user-1', email: 'user@tenant.example' }
     service.memberRegistrationServiceClient = {
       getInvitationProfile: vi.fn().mockResolvedValue({
-        profileUiBaseUrl: 'https://accounts.tenant.example/profile',
+        profileUiBaseUrl: 'https://profile.tenant.example',
       }),
     }
+    mockGetActiveSandboxUiLocation.mockReturnValue({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'task-board',
+      path: '/tasks/42',
+    })
 
-    await expect(service.resolveProfileUiBaseUrl()).resolves.toBe(
-      'https://accounts.tenant.example/profile'
-    )
+    await expect(service.resolveProfileUiBaseUrl()).resolves.toBe('https://profile.tenant.example')
+    await expect(service.createSandboxUiDeepLink('team-1')).resolves.toEqual({
+      url:
+        'https://profile.tenant.example/open/apps/sandbox-recipes/task-board' +
+        '?path=%2Ftasks%2F42&team=team-1',
+    })
+    expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledTimes(1)
     expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledWith(
       'user@tenant.example'
+    )
+  })
+
+  it('fails visibly instead of copying a localhost fallback after a lookup error', async () => {
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      createSandboxUiDeepLink: () => Promise<{ url: string }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.memberRegistrationServiceClient = {
+      getInvitationProfile: vi.fn().mockRejectedValue(new Error('network unavailable')),
+    }
+    mockGetActiveSandboxUiLocation.mockReturnValue({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'task-board',
+      path: '/',
+    })
+
+    await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
+      'Cannot resolve a shareable Profile UI link'
     )
   })
 })

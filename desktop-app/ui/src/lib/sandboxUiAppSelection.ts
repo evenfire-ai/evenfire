@@ -29,7 +29,8 @@ export function resolveSandboxUiDeepLinkApp(
   apps: SandboxUiAppListing[],
   appRef: string
 ): SandboxUiDeepLinkAppResolution {
-  const match = apps.find(app => app.appRef === appRef)
+  const normalizedAppRef = appRef.toLowerCase()
+  const match = apps.find(app => app.appRef.toLowerCase() === normalizedAppRef)
   if (!match) return { status: 'unavailable' }
   if (!match.ready) {
     return {

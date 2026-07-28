@@ -36,6 +36,7 @@ import {
  */
 
 export const SANDBOX_UI_COOKIE_NAME = 'clerum_sandbox_ui_session'
+const CLIENT_ROUTE_HANDOFF_TIMEOUT_MS = 30_000
 
 export type SandboxUiBounds = {
   x: number
@@ -283,7 +284,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
 
   const partition = partitionFor(getActiveEnvKey(), recipeNs, recipeName)
   const proxyOriginUrl = new URL(rpcProxyUrl).toString().replace(/\/+$/, '')
-  const viewPath = normalizeSandboxUiRoute(defaultPath || '/') || '/'
+  const viewPath = resolveSandboxUiDefaultPath(defaultPath)
   const clientRoutePath = normalizeSandboxUiRoute(routePath || '')
   const allowedNavigationPrefix =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
@@ -382,7 +383,12 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
       `${proxyOriginUrl}/api/v1/sandbox-ui/` +
       `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view${clientRoutePath}`
     let lastNavigation = { url: '', status: 0 }
+    let handoffFinished = false
+    let handoffTimeout: NodeJS.Timeout | null = null
     const cleanupClientRouteHandoff = () => {
+      if (handoffFinished) return
+      handoffFinished = true
+      if (handoffTimeout) clearTimeout(handoffTimeout)
       view.webContents.removeListener('did-navigate', onDidNavigate)
       view.webContents.removeListener('did-finish-load', onDidFinishLoad)
     }
@@ -400,24 +406,43 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
       }
       if (
         !canApplySandboxUiClientRoute({
-          expectedUrl: url,
+          allowedNavigationPrefix,
           currentUrl: view.webContents.getURL(),
           navigatedUrl: lastNavigation.url,
           httpResponseCode: lastNavigation.status,
         })
       ) {
+        if (
+          lastNavigation.status >= 200 &&
+          lastNavigation.status < 400 &&
+          !isSandboxUiNavigationWithinPrefix(view.webContents.getURL(), allowedNavigationPrefix)
+        ) {
+          console.warn(
+            '[SandboxUI] client route handoff abandoned after navigation left the app prefix:',
+            view.webContents.getURL()
+          )
+          cleanupClientRouteHandoff()
+        }
         return
       }
       void applySandboxUiClientRoute(view.webContents, clientRouteUrl)
         .then(applied => {
-          if (applied) cleanupClientRouteHandoff()
+          if (!applied) {
+            console.warn('[SandboxUI] client route handoff did not update the app URL')
+          }
+          cleanupClientRouteHandoff()
         })
         .catch(err => {
           console.warn('[SandboxUI] client route handoff failed:', err)
+          cleanupClientRouteHandoff()
         })
     }
     view.webContents.on('did-navigate', onDidNavigate)
     view.webContents.on('did-finish-load', onDidFinishLoad)
+    handoffTimeout = setTimeout(() => {
+      console.warn('[SandboxUI] client route handoff timed out before the app became ready')
+      cleanupClientRouteHandoff()
+    }, CLIENT_ROUTE_HANDOFF_TIMEOUT_MS)
   }
   // Drop the HTTP cache on every open so a stale entry from a prior
   // broken pod can't keep painting after the recipe is healthy. The
@@ -446,9 +471,9 @@ export async function applySandboxUiClientRoute(
   const serializedTarget = JSON.stringify(targetUrl)
   return Boolean(
     await webContents.executeJavaScript(`(() => {
-      const targetUrl = ${serializedTarget};
+      const targetUrl = new URL(${serializedTarget}).href;
       const previousUrl = window.location.href;
-      if (previousUrl === targetUrl) return true;
+      if (new URL(previousUrl).href === targetUrl) return true;
       window.history.replaceState(window.history.state, '', targetUrl);
       window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }));
       if (new URL(previousUrl).hash !== new URL(targetUrl).hash) {
@@ -457,20 +482,40 @@ export async function applySandboxUiClientRoute(
           newURL: targetUrl,
         }));
       }
-      return window.location.href === targetUrl;
+      return new URL(window.location.href).href === targetUrl;
     })()`)
   )
 }
 
+export function resolveSandboxUiDefaultPath(defaultPath?: string): string {
+  const rawDefaultPath = String(defaultPath || '').trim()
+  if (!rawDefaultPath) return '/'
+  const normalized = normalizeSandboxUiRoute(rawDefaultPath)
+  if (normalized) return normalized
+  console.warn('[SandboxUI] Invalid recipe defaultPath; falling back to "/":', rawDefaultPath)
+  return '/'
+}
+
+export function isSandboxUiNavigationWithinPrefix(
+  navigationUrl: string,
+  allowedNavigationPrefix: string
+): boolean {
+  try {
+    return new URL(navigationUrl).href.startsWith(new URL(allowedNavigationPrefix).href)
+  } catch {
+    return false
+  }
+}
+
 export function canApplySandboxUiClientRoute(input: {
-  expectedUrl: string
+  allowedNavigationPrefix: string
   currentUrl: string
   navigatedUrl: string
   httpResponseCode: number
 }): boolean {
   return (
-    input.currentUrl === input.expectedUrl &&
-    input.navigatedUrl === input.expectedUrl &&
+    isSandboxUiNavigationWithinPrefix(input.currentUrl, input.allowedNavigationPrefix) &&
+    isSandboxUiNavigationWithinPrefix(input.navigatedUrl, input.allowedNavigationPrefix) &&
     input.httpResponseCode >= 200 &&
     input.httpResponseCode < 400
   )

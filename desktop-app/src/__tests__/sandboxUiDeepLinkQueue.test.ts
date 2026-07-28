@@ -5,9 +5,9 @@ describe('SandboxUiDeepLinkQueue', () => {
   it('deduplicates semantic targets and acknowledges the matching envelope', () => {
     const queue = new SandboxUiDeepLinkQueue()
     const first = queue.enqueue({ appRef: 'ns/app', path: '/inbox', teamId: 'team-1' })
-    expect(first?.id).toBe(1)
-    expect(queue.enqueue({ appRef: 'ns/app', path: '/inbox', teamId: 'team-1' })).toBeNull()
-    queue.acknowledge(first!.id)
+    expect(first.id).toBe(1)
+    expect(queue.enqueue({ appRef: 'NS/APP', path: '/inbox', teamId: 'team-1' })).toEqual(first)
+    queue.acknowledge(first.id)
     expect(queue.list()).toEqual([])
   })
 
@@ -16,7 +16,7 @@ describe('SandboxUiDeepLinkQueue', () => {
     queue.enqueue({ appRef: 'ns/app' })
     queue.clear()
     expect(queue.list()).toEqual([])
-    expect(queue.enqueue({ appRef: 'ns/app' })?.id).toBe(2)
+    expect(queue.enqueue({ appRef: 'ns/app' }).id).toBe(2)
   })
 
   it('keeps the newest bounded set of links', () => {
@@ -25,5 +25,14 @@ describe('SandboxUiDeepLinkQueue', () => {
     queue.enqueue({ appRef: 'ns/two' })
     queue.enqueue({ appRef: 'ns/three' })
     expect(queue.list().map(item => item.appRef)).toEqual(['ns/two', 'ns/three'])
+  })
+
+  it('moves a repeated unacknowledged target to the newest queue position', () => {
+    const queue = new SandboxUiDeepLinkQueue(3)
+    const first = queue.enqueue({ appRef: 'ns/one' })
+    queue.enqueue({ appRef: 'ns/two' })
+
+    expect(queue.enqueue({ appRef: 'ns/one' })).toEqual(first)
+    expect(queue.list().map(item => item.appRef)).toEqual(['ns/two', 'ns/one'])
   })
 })

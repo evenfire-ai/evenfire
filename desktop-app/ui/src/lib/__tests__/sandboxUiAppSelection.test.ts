@@ -50,7 +50,7 @@ describe('sandbox UI app selection', () => {
   })
 
   it('returns a launchable app when the deep-link target is ready', () => {
-    expect(resolveSandboxUiDeepLinkApp(apps, 'sandbox-recipes/ready-app')).toEqual({
+    expect(resolveSandboxUiDeepLinkApp(apps, 'SANDBOX-RECIPES/READY-APP')).toEqual({
       status: 'ready',
       app: {
         appRef: 'sandbox-recipes/ready-app',

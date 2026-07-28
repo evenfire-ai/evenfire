@@ -1,4 +1,8 @@
-import { buildSandboxUiDeepLink } from '@clerum/desktop-app-links'
+import {
+  SANDBOX_UI_DEEP_LINK_HOST,
+  SANDBOX_UI_DEEP_LINK_PROTOCOL,
+  buildSandboxUiDeepLink,
+} from '@clerum/desktop-app-links'
 
 const SCRIPT_NONCE_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/
 
@@ -45,7 +49,10 @@ export function buildEvenfireDesktopAppRedirectDocument(
   scriptNonce: string
 ): string {
   const parsed = new URL(deepLink)
-  if (parsed.protocol !== 'evenfire:' || parsed.hostname !== 'app') {
+  if (
+    parsed.protocol !== SANDBOX_UI_DEEP_LINK_PROTOCOL ||
+    parsed.hostname !== SANDBOX_UI_DEEP_LINK_HOST
+  ) {
     throw new Error('Cannot redirect to an invalid desktop app link')
   }
 
@@ -59,7 +66,7 @@ export function buildEvenfireDesktopAppRedirectDocument(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="refresh" content="0;url=${escapedLink}">
   <title>Open app in Evenfire</title>
-  <style nonce="${escapeHtml(nonce)}">
+  <style nonce="${nonce}">
     :root {
       color-scheme: dark;
       font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -160,7 +167,7 @@ export function buildEvenfireDesktopAppRedirectDocument(
       </p>
     </section>
   </main>
-  <script nonce="${escapeHtml(nonce)}">window.location.replace(${scriptLink})</script>
+  <script nonce="${nonce}">window.location.replace(${scriptLink})</script>
 </body>
 </html>`
 }

@@ -2,11 +2,12 @@
 #
 # Several images build from the REPO ROOT context (`docker build -f <svc>/Dockerfile .`)
 # because they COPY shared packages/ alongside the service: workflow-recipes,
-# control-api, control-ui, host-context-controller, packages/workflow-sdk and
-# (since R4/B2) mcp-host. Docker only honors the .dockerignore at the CONTEXT
-# root, so the per-service .dockerignore files are inert for those builds —
-# this file restores their exclusions globally. Keep it in sync with the
-# per-service files (which still apply to any image built from its own dir).
+# control-api, control-ui, profile-ui, host-context-controller,
+# packages/workflow-sdk and (since R4/B2) mcp-host. Docker only honors the
+# .dockerignore at the CONTEXT root, so the per-service .dockerignore files are
+# inert for those builds — this file restores their exclusions globally. Keep
+# it in sync with the per-service files (which still apply to any image built
+# from its own dir).
 #
 # SECURITY: without this file the entire monorepo — including real .env files
 # and .git history — is shipped to the Docker daemon as build context on every

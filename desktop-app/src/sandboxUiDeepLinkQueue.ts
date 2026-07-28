@@ -11,8 +11,15 @@ export class SandboxUiDeepLinkQueue {
     return [...this.pending]
   }
 
-  enqueue(target: SandboxUiDeepLinkTarget): SandboxUiDeepLinkEnvelope | null {
-    if (this.pending.some(item => sandboxUiDeepLinkTargetsEqual(item, target))) return null
+  enqueue(target: SandboxUiDeepLinkTarget): SandboxUiDeepLinkEnvelope {
+    const existingIndex = this.pending.findIndex(item =>
+      sandboxUiDeepLinkTargetsEqual(item, target)
+    )
+    if (existingIndex >= 0) {
+      const [existing] = this.pending.splice(existingIndex, 1)
+      this.pending.push(existing!)
+      return existing!
+    }
     const envelope = { id: (this.sequence += 1), ...target }
     this.pending.push(envelope)
     if (this.pending.length > this.maxSize) this.pending.shift()

@@ -5,8 +5,10 @@ import {
   canApplySandboxUiClientRoute,
   extractSandboxUiCookie,
   extractSandboxUiPath,
+  isSandboxUiNavigationWithinPrefix,
   partitionFor,
   reloadSandboxUiWebContents,
+  resolveSandboxUiDefaultPath,
 } from '../sandboxUiDriver.js'
 
 describe('applySandboxUiClientRoute', () => {
@@ -38,36 +40,56 @@ describe('applySandboxUiClientRoute', () => {
 })
 
 describe('canApplySandboxUiClientRoute', () => {
-  const expectedUrl = 'https://rpc.example/api/v1/sandbox-ui/ns/app/view/'
+  const allowedNavigationPrefix = 'https://rpc.example/api/v1/sandbox-ui/ns/app/view/'
 
   it('waits through a 503 interstitial before handing off the client route', () => {
     expect(
       canApplySandboxUiClientRoute({
-        expectedUrl,
-        currentUrl: expectedUrl,
-        navigatedUrl: expectedUrl,
+        allowedNavigationPrefix,
+        currentUrl: allowedNavigationPrefix,
+        navigatedUrl: allowedNavigationPrefix,
         httpResponseCode: 503,
       })
     ).toBe(false)
   })
 
-  it('accepts only a successful load of the expected server route', () => {
+  it('accepts canonicalized paths and redirects within the recipe view prefix', () => {
     expect(
       canApplySandboxUiClientRoute({
-        expectedUrl,
-        currentUrl: expectedUrl,
-        navigatedUrl: expectedUrl,
+        allowedNavigationPrefix,
+        currentUrl: `${allowedNavigationPrefix}a%20b`,
+        navigatedUrl: `${allowedNavigationPrefix}index.html`,
         httpResponseCode: 200,
       })
     ).toBe(true)
     expect(
       canApplySandboxUiClientRoute({
-        expectedUrl,
-        currentUrl: `${expectedUrl}unexpected`,
-        navigatedUrl: expectedUrl,
+        allowedNavigationPrefix,
+        currentUrl: 'https://rpc.example/api/v1/sandbox-ui/ns/other/view/',
+        navigatedUrl: allowedNavigationPrefix,
         httpResponseCode: 200,
       })
     ).toBe(false)
+  })
+})
+
+describe('sandbox UI route normalization', () => {
+  it('recognizes canonicalized URLs within the allowed recipe prefix', () => {
+    expect(
+      isSandboxUiNavigationWithinPrefix(
+        'https://rpc.example/api/v1/sandbox-ui/ns/app/view/a%20b',
+        'https://rpc.example/api/v1/sandbox-ui/ns/app/view/'
+      )
+    ).toBe(true)
+  })
+
+  it('uses valid defaults and warns before falling back from an invalid default', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    expect(resolveSandboxUiDefaultPath('/accounts')).toBe('/accounts')
+    expect(resolveSandboxUiDefaultPath(undefined)).toBe('/')
+    expect(resolveSandboxUiDefaultPath('/safe/../admin')).toBe('/')
+    expect(warn).toHaveBeenCalledOnce()
+    warn.mockRestore()
   })
 })
 

@@ -40,5 +40,7 @@ export function extractSandboxUiViewRoute(input: SandboxUiViewRouteInput): strin
   if (current.pathname !== prefix && !current.pathname.startsWith(`${prefix}/`)) return null
 
   const pathname = current.pathname.slice(prefix.length) || '/'
-  return normalizeSandboxUiRoute(`${pathname}${current.search}${current.hash}`) ?? null
+  // Fragments commonly contain ephemeral OAuth/access tokens and never reach
+  // the server. Do not copy them into a public Profile UI handoff URL.
+  return normalizeSandboxUiRoute(`${pathname}${current.search}`) ?? null
 }

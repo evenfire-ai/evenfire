@@ -351,6 +351,7 @@ const clerum = Object.freeze({
   },
   app: {
     openUrl: (url: string) => ipcRenderer.invoke('app:openUrl', { url }),
+    rendererReady: () => ipcRenderer.invoke('app:rendererReady'),
   },
   window: {
     getVisibility: () => ipcRenderer.invoke('window:getVisibility'),

@@ -8,18 +8,8 @@ import {
   IconSandboxUi,
 } from '../components/SidebarNav/icons'
 import { clickableRowProps } from '../lib/clickableRowProps'
-import type { SandboxUiPageProps } from './SandboxUiPage.types'
-
-type App = {
-  appRef: string
-  title?: string
-  description?: string
-  icon?: string
-  defaultPath: string
-  ready: boolean
-  phase: string | null
-  updatedAt: string | null
-}
+import type { SandboxUiAppListing } from '../lib/sandboxUiAppSelection.types'
+import type { SandboxUiLaunchApp, SandboxUiPageProps } from './SandboxUiPage.types'
 
 type PhasePillTone = 'allowed' | 'warning' | 'denied' | 'info' | 'muted'
 
@@ -68,7 +58,7 @@ function statusFromError(err: unknown): { status: number | null; message: string
   return { status: m ? Number(m[1] ?? m[2]) : null, message }
 }
 
-function appLabel(app: App): string {
+function appLabel(app: SandboxUiAppListing): string {
   if (app.title && app.title.trim().length > 0) return app.title.trim()
   return app.appRef
 }
@@ -167,7 +157,7 @@ export function SandboxUiPage({
   onEmbedBoundsApplied,
   onNotify,
 }: SandboxUiPageProps = {}) {
-  const [apps, setApps] = useState<App[] | null>(null)
+  const [apps, setApps] = useState<SandboxUiAppListing[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [launch, setLaunch] = useState<LaunchState>({ kind: 'idle' })
   const [refreshError, setRefreshError] = useState<{ appRef: string; message: string } | null>(null)
@@ -234,14 +224,7 @@ export function SandboxUiPage({
   }, [onEmbeddedAppBack])
 
   const openApp = useCallback(
-    async (app: {
-      appRef: string
-      label: string
-      icon?: string
-      defaultPath: string
-      routePath?: string
-      ready?: boolean
-    }) => {
+    async (app: SandboxUiLaunchApp) => {
       if (app.ready === false) return
       const [recipeNs, recipeName] = app.appRef.split('/', 2)
       if (!recipeNs || !recipeName) return
@@ -290,7 +273,7 @@ export function SandboxUiPage({
   )
 
   const onOpen = useCallback(
-    async (app: App) => {
+    async (app: SandboxUiAppListing) => {
       await openApp({
         appRef: app.appRef,
         label: appLabel(app),
@@ -320,8 +303,8 @@ export function SandboxUiPage({
 
   const handleBackToConversation = useCallback(async () => {
     if (!conversationOrigin || !onBackToConversation) return
-    await closeEmbed()
     await onBackToConversation()
+    await closeEmbed()
   }, [closeEmbed, conversationOrigin, onBackToConversation])
 
   // In-place hard-reload of the embedded app — fetches freshly-arrived
@@ -563,11 +546,11 @@ export function SandboxUiPage({
     )
   }
 
-  const appIcon = (app: App) =>
+  const appIcon = (app: SandboxUiAppListing) =>
     app.icon ? <img src={app.icon} alt="" width={20} height={20} /> : <IconSandboxUi />
 
-  const appStatusPill = (app: App) => {
-    const pill = phasePill(app.phase)
+  const appStatusPill = (app: SandboxUiAppListing) => {
+    const pill = phasePill(app.phase ?? null)
     return <span className={`apps-status-pill apps-status-pill--${pill.tone}`}>{pill.label}</span>
   }
 
@@ -581,7 +564,7 @@ export function SandboxUiPage({
   )
   const showAppPagination = totalAppPages > 1
 
-  const gridCardProps = (app: App, activatable: boolean, activate: () => void) => {
+  const gridCardProps = (app: SandboxUiAppListing, activatable: boolean, activate: () => void) => {
     if (!activatable) return {}
     return clickableRowProps(activate, { ariaLabel: `Open ${appLabel(app)}` })
   }
@@ -628,7 +611,9 @@ export function SandboxUiPage({
                 </span>
                 <span className="apps-grid__card-title">{appLabel(app)}</span>
                 {appStatusPill(app)}
-                <span className="apps-card-meta__updated">{formatLastUpdated(app.updatedAt)}</span>
+                <span className="apps-card-meta__updated">
+                  {formatLastUpdated(app.updatedAt ?? null)}
+                </span>
                 {app.description ? (
                   <span className="apps-grid__card-desc">{app.description}</span>
                 ) : null}

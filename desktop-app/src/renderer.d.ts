@@ -463,6 +463,7 @@ declare global {
       }
       app: {
         openUrl: (url: string) => Promise<void>
+        rendererReady: () => Promise<void>
       }
       window: {
         getVisibility: () => Promise<{ visible: boolean }>
@@ -556,7 +557,7 @@ declare global {
         reload: () => Promise<void>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
         listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
-        clearPendingDeepLinks?: () => Promise<void>
+        clearPendingDeepLinks: () => Promise<void>
         acknowledgeDeepLink: (id: number) => Promise<void>
         setBounds: (bounds: {
           x: number

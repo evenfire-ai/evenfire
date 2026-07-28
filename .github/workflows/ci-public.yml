@@ -63,6 +63,7 @@ jobs:
           - profile-ui
           - desktop-app
           - mcp-servers
+          - packages/desktop-app-links
           - packages/workflow-runtime-core
           - packages/workflow-sdk
 
@@ -111,7 +112,7 @@ jobs:
       # ~10 pre-existing type errors in its __tests__ — worth fixing, but as its own
       # change rather than smuggled into a CI-coverage PR.
       - name: Typecheck (tsc --noEmit)
-        if: matrix.service != 'mcp-servers'
+        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links'
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit
 
