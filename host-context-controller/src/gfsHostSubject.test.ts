@@ -1,6 +1,6 @@
+import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
 import { makeExpectedHostGfsSubject } from './gfsHostSubject'
 
 type HostSubjectVector = {
@@ -13,10 +13,7 @@ type HostSubjectVector = {
 }
 
 const vectors = JSON.parse(
-  readFileSync(
-    path.join(__dirname, '../../tests/contracts/gfs-host-subject-vectors.json'),
-    'utf8'
-  )
+  readFileSync(path.join(__dirname, '../../tests/contracts/gfs-host-subject-vectors.json'), 'utf8')
 ) as HostSubjectVector[]
 
 describe('makeExpectedHostGfsSubject', () => {

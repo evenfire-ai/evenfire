@@ -50,9 +50,5 @@ export async function handleSeed(req: Request, res: Response): Promise<void> {
 }
 
 export function registerGfsSeedRoute(router: Router): void {
-  router.post(
-    '/gfs/seed',
-    requireInternalControlJwt,
-    asyncHandler(handleSeed)
-  )
+  router.post('/gfs/seed', requireInternalControlJwt, asyncHandler(handleSeed))
 }

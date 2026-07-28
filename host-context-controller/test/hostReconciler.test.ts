@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcomeReporter'
+import { mintHostGfsToken } from '../src/gfsHostBinding'
 import {
   DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES,
   HostReconciler,
   resolveWorkflowControlScopes,
 } from '../src/hostReconciler'
 import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
-import { mintHostGfsToken } from '../src/gfsHostBinding'
 import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClient'
 import { HostCRD, type HostWorkflowControlScope } from '../src/types'
 import {
