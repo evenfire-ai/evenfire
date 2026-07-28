@@ -36,4 +36,15 @@ describe('buildMessageGroupChunks', () => {
       before[1]?.groups.map(({ group }) => group.groupKey)
     )
   })
+
+  it('suffixes repeated server buckets separated by a local-only group', () => {
+    const local = { groupKey: 'local-message', items: [{}] }
+    const chunks = buildMessageGroupChunks([group(1, 'user'), local, group(2, 'assistant')])
+
+    expect(chunks.map(chunk => chunk.chunkKey)).toEqual([
+      'server-turns-0',
+      'local-local-message',
+      'server-turns-0#2',
+    ])
+  })
 })

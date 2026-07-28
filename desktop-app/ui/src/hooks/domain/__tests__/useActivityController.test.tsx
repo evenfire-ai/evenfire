@@ -139,6 +139,6 @@ describe('useActivityController', () => {
         toolCalls: 1,
       })
     )
-    expect(loadMessages).toHaveBeenCalledWith('agent-a', 'legacy-chat', undefined, undefined)
+    expect(loadMessages).toHaveBeenCalledWith('agent-a', 'legacy-chat', 1000, undefined)
   })
 })

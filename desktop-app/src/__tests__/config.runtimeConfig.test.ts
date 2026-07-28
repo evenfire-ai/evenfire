@@ -8,7 +8,7 @@ describe('desktop runtime config', () => {
   const originalExternalRestApiBaseUrl = process.env.EXTERNAL_REST_API_BASE_URL
   const originalRpcProxyBaseUrl = process.env.RPC_PROXY_BASE_URL
   const originalDesktopAppName = process.env.DESKTOP_APP_NAME
-  const originalDesktopDevPackage = process.env.EVENFIRE_DESKTOP_DEV_PACKAGE
+  const originalArgv = [...process.argv]
   const originalRendererUrl = process.env.EVENFIRE_RENDERER_URL
   let tempUserDataDir: string | null = null
 
@@ -38,11 +38,7 @@ describe('desktop runtime config', () => {
     } else {
       process.env.DESKTOP_APP_NAME = originalDesktopAppName
     }
-    if (originalDesktopDevPackage === undefined) {
-      delete process.env.EVENFIRE_DESKTOP_DEV_PACKAGE
-    } else {
-      process.env.EVENFIRE_DESKTOP_DEV_PACKAGE = originalDesktopDevPackage
-    }
+    process.argv.splice(0, process.argv.length, ...originalArgv)
     if (originalRendererUrl === undefined) {
       delete process.env.EVENFIRE_RENDERER_URL
     } else {
@@ -135,7 +131,7 @@ describe('desktop runtime config', () => {
     process.env.EXTERNAL_REST_API_BASE_URL = 'http://127.0.0.1:8091'
     process.env.RPC_PROXY_BASE_URL = 'http://127.0.0.1:8094'
     process.env.EVENFIRE_RENDERER_URL = 'http://127.0.0.1:5173'
-    process.env.EVENFIRE_DESKTOP_DEV_PACKAGE = '1'
+    process.argv.push('--evenfire-desktop-dev-package')
 
     vi.doMock('electron', () => ({
       app: {
@@ -166,7 +162,7 @@ describe('desktop runtime config', () => {
     delete process.env.CLERUM_DESKTOP_CONFIG_PATH
     process.env.EXTERNAL_REST_API_BASE_URL = 'https://attacker.example.com'
     process.env.RPC_PROXY_BASE_URL = 'https://rpc.attacker.example.com'
-    process.env.EVENFIRE_DESKTOP_DEV_PACKAGE = '1'
+    process.argv.push('--evenfire-desktop-dev-package')
 
     vi.doMock('electron', () => ({
       app: {

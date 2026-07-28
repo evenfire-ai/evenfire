@@ -197,7 +197,11 @@ export function prepareStatements(db: Database): PreparedStatements {
                  s.started_at
                ) AS last_activity_at,
                COALESCE(
-                 (SELECT MAX(m.turn_number) FROM messages m WHERE m.session_id = s.id),
+                 (
+                   SELECT COUNT(DISTINCT COALESCE(m.turn_number, 0))
+                     FROM messages m
+                    WHERE m.session_id = s.id
+                 ),
                  0
                ) AS turn_count,
                (
@@ -230,9 +234,9 @@ export function prepareStatements(db: Database): PreparedStatements {
       LIMIT @limit
     `),
     selectSessionTurnBounds: db.prepare(`
-      SELECT MAX(COALESCE(turn_number, 0))            AS total_turns,
-             MIN(COALESCE(turn_number, 0))            AS first_turn_number,
-             MAX(COALESCE(turn_number, 0))            AS last_turn_number,
+      SELECT COUNT(DISTINCT COALESCE(turn_number, 0)) AS total_turns,
+             MIN(turn_number)                         AS first_turn_number,
+             MAX(turn_number)                         AS last_turn_number,
              MAX(timestamp)                           AS last_activity_at
         FROM messages
        WHERE session_id = ?

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -202,6 +202,41 @@ describe('chatStoreBinding', () => {
       ) as { version: number }
       expect(normalized.version).toBe(2)
       expect(await exists(path.join(tmpBase, ENV_A, 'user-v3', 'agent-x', 'keep.json'))).toBe(true)
+    })
+
+    it('preserves a valid v3 cache when its index normalization cannot be renamed', async () => {
+      const v3Index = JSON.stringify({
+        version: 3,
+        chats: [{ id: 'keep', title: 'Keep', createdAt: 'x', updatedAt: 'x', messageCount: 1 }],
+        lastActiveChatId: 'keep',
+        onboardingDismissed: false,
+      })
+      await seedAgentDir(ENV_A, 'user-v3-failure', 'agent-x', v3Index, {
+        'keep.json': '{"version":2,"chatId":"keep","messages":[]}',
+      })
+      const originalRename = fs.rename.bind(fs)
+      vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+        if (String(from).endsWith('index.json.v2.tmp')) {
+          const error = new Error('read only') as NodeJS.ErrnoException
+          error.code = 'EACCES'
+          throw error
+        }
+        return originalRename(from, to)
+      })
+
+      await bindChatStoreForUser('user-v3-failure', ENV_A)
+
+      expect(
+        await exists(path.join(tmpBase, ENV_A, 'user-v3-failure', 'agent-x', 'keep.json'))
+      ).toBe(true)
+      expect(
+        JSON.parse(
+          await fs.readFile(
+            path.join(tmpBase, ENV_A, 'user-v3-failure', 'agent-x', 'index.json'),
+            'utf-8'
+          )
+        ).version
+      ).toBe(3)
     })
 
     it('is a no-op when the user has no cache directory yet', async () => {

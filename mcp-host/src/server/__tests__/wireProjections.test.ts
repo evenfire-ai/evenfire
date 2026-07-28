@@ -6,11 +6,53 @@ import {
   type Turn,
 } from '../../core/types'
 import {
+  decodeSessionsCursor,
+  paginateSessionSummaries,
   projectContextBreakdown,
+  projectMessageWindowBounds,
   projectSessionTokens,
   projectTurnTokens,
   projectTurnToolSteps,
 } from '../wireProjections'
+
+describe('session pagination projections', () => {
+  it('rejects malformed and invalid-date cursors', () => {
+    expect(decodeSessionsCursor('not-base64-json')).toBeNull()
+    const invalidDate = Buffer.from(
+      JSON.stringify({ updatedAt: 'not-a-date', key: 'session-1' })
+    ).toString('base64url')
+    expect(decodeSessionsCursor(invalidDate)).toBeNull()
+  })
+
+  it('returns a cursor only when another summary page exists', () => {
+    const entries = [
+      { key: 'a', lastActivityAt: new Date('2026-01-03T00:00:00Z') },
+      { key: 'b', lastActivityAt: new Date('2026-01-02T00:00:00Z') },
+    ]
+    const result = paginateSessionSummaries(entries, 1)
+    expect(result.page).toEqual([entries[0]])
+    expect(decodeSessionsCursor(result.nextCursor)).toEqual({
+      updatedAt: '2026-01-03T00:00:00.000Z',
+      key: 'a',
+    })
+    expect(paginateSessionSummaries(entries, 2).nextCursor).toBeUndefined()
+  })
+
+  it('projects bounded message-window navigation consistently', () => {
+    expect(
+      projectMessageWindowBounds(
+        [{ number: 3 }, { number: 4 }],
+        { firstTurnNumber: 1, lastTurnNumber: 6 },
+        {}
+      )
+    ).toEqual({
+      oldestTurnNumber: 3,
+      latestTurnNumber: 4,
+      hasMoreBefore: true,
+      hasMoreAfter: true,
+    })
+  })
+})
 
 function makeConversation(overrides: Partial<Conversation> = {}): Conversation {
   return {

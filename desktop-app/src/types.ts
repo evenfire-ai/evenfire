@@ -807,7 +807,7 @@ export interface ChatMetadata {
 }
 
 export interface ChatIndex {
-  /** v3 marks paged chat caches so older builds wipe rather than mix storage formats. */
+  /** v2 remains readable by pre-paging builds; v3 is accepted and normalized for compatibility. */
   version: 1 | 2 | 3
   lastActiveChatId: string | null
   onboardingDismissed: boolean

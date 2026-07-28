@@ -734,7 +734,6 @@ export class SqliteConversationStore implements ConversationStore {
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
     const ordinal = state.nextOrdinal++
     const turnNumber = state.nextTurnNumber
-    state.nextTurnNumber += 1
     // Stamp the per-turn token total onto the final assistant message (the turn
     // accumulated it in RAM via recordSessionUsage). reconstruct sums these back
     // onto the Turn on cold-load.
@@ -769,6 +768,7 @@ export class SqliteConversationStore implements ConversationStore {
       },
       sessionKey
     )
+    state.nextTurnNumber += 1
   }
 
   async persistTurnCancel(conv: Conversation): Promise<void> {
@@ -778,7 +778,6 @@ export class SqliteConversationStore implements ConversationStore {
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
     const ordinal = state.nextOrdinal++
     const turnNumber = state.nextTurnNumber
-    state.nextTurnNumber += 1
     // Stamp the partial per-turn total accumulated before cancellation.
     const turn = conv.turns[conv.turns.length - 1]
     // ATOMIC boundary (matches persistTurnComplete): the cancel message insert
@@ -817,6 +816,7 @@ export class SqliteConversationStore implements ConversationStore {
       },
       sessionKey
     )
+    state.nextTurnNumber += 1
   }
 
   /**

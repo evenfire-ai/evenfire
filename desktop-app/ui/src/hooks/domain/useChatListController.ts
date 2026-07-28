@@ -65,6 +65,7 @@ interface UseChatListControllerParams {
   selectedAgent: string | null
   agentNames: string[]
   isAuthenticated: boolean
+  scopeKey: string
   loadMenuData: boolean
   chatStore: ReturnType<typeof useChatStore>
   fsm: SessionFsmStore
@@ -92,6 +93,7 @@ export function useChatListController({
   selectedAgent,
   agentNames,
   isAuthenticated,
+  scopeKey,
   loadMenuData,
   chatStore,
   fsm,
@@ -111,6 +113,11 @@ export function useChatListController({
   const suppressAutoSelectionByAgentRef = useRef<Set<string>>(new Set())
   const chatListNextCursorByAgentRef = useRef<Record<string, string | null | undefined>>({})
   const chatListLoadingMoreByAgentRef = useRef<Set<string>>(new Set())
+  const requestGenerationRef = useRef(0)
+
+  useEffect(() => {
+    requestGenerationRef.current += 1
+  }, [isAuthenticated, scopeKey])
 
   // Live `selectedAgent` for the stable callbacks below (they gate a chatList
   // write on "is this the selected agent"). A ref keeps the callbacks stable
@@ -162,11 +169,17 @@ export function useChatListController({
       const merged = [...index.chats].sort(byUpdatedDesc)
       setChatList(merged)
 
+      const requestGeneration = requestGenerationRef.current
       scheduleAfterFirstPaint(async () => {
         const serverResult = await chatStore
           .listSessions(agentRef, { limit: SESSION_CATALOG_PAGE_LIMIT })
           .catch((): SessionsListResult => ({ items: [] }))
-        if (selectedAgentRef.current !== agentRef) return
+        if (
+          selectedAgentRef.current !== agentRef ||
+          requestGenerationRef.current !== requestGeneration
+        ) {
+          return
+        }
 
         const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
         chatListNextCursorByAgentRef.current[agentRef] = serverResult.nextCursor ?? null
@@ -242,12 +255,13 @@ export function useChatListController({
     if (chatListLoadingMoreByAgentRef.current.has(agentRef)) return
 
     chatListLoadingMoreByAgentRef.current.add(agentRef)
+    const requestGeneration = requestGenerationRef.current
     setChatListMoreLoading(true)
     try {
       const serverResult = await chatStore
         .listSessions(agentRef, { limit: SESSION_CATALOG_PAGE_LIMIT, cursor }, { force: true })
         .catch(() => null)
-      if (!serverResult) return
+      if (!serverResult || requestGenerationRef.current !== requestGeneration) return
 
       const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
       if (selectedAgentRef.current !== agentRef) return
@@ -445,6 +459,7 @@ export function useChatListController({
   )
   const clearPendingSelection = useCallback((agentName: string) => {
     delete pendingChatSelectionByAgentRef.current[agentName]
+    suppressAutoSelectionByAgentRef.current.delete(agentName)
   }, [])
 
   // ─── Chat CRUD ───
@@ -625,7 +640,15 @@ export function useChatListController({
     return () => {
       cancelled = true
     }
-  }, [agentNames, chatStore.getIndex, chatStore.listSessions, isAuthenticated, loadMenuData, fsm])
+  }, [
+    agentNames,
+    chatStore.getIndex,
+    chatStore.listSessions,
+    isAuthenticated,
+    loadMenuData,
+    scopeKey,
+    fsm,
+  ])
 
   return {
     // State (public contract, re-exported unchanged by the parent).

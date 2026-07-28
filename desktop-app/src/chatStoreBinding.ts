@@ -182,14 +182,24 @@ async function maybeWipeLegacyCache(userDir: string): Promise<void> {
       const raw = await fs.readFile(indexPath, 'utf-8')
       const parsed = JSON.parse(raw) as { version?: number }
       if (parsed.version === PREVIOUS_PAGED_INDEX_VERSION) {
-        const migratedIndexPath = `${indexPath}.v2.tmp`
-        await fs.writeFile(
-          migratedIndexPath,
-          JSON.stringify({ ...parsed, version: SCHEMA_VERSION }, null, 2),
-          { mode: 0o600 }
-        )
-        await fs.rename(migratedIndexPath, indexPath)
+        // A parsed v3 catalog is valid even if the compatibility-marker rewrite
+        // fails. Keep the cache and retry the atomic normalization next launch.
         isLegacy = false
+        const migratedIndexPath = `${indexPath}.v2.tmp`
+        try {
+          await fs.writeFile(
+            migratedIndexPath,
+            JSON.stringify({ ...parsed, version: SCHEMA_VERSION }, null, 2),
+            { mode: 0o600 }
+          )
+          await fs.rename(migratedIndexPath, indexPath)
+        } catch (error) {
+          await fs.rm(migratedIndexPath, { force: true }).catch(() => undefined)
+          console.warn(
+            `[chatStore] Failed to normalize v3 index for "${entry.name}"; retrying next launch`,
+            error
+          )
+        }
       } else {
         isLegacy = parsed.version !== SCHEMA_VERSION
       }

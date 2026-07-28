@@ -98,7 +98,10 @@ import {
   WorkflowApprovalNotificationTerminal,
 } from './server'
 import {
+  decodeSessionsCursor,
+  paginateSessionSummaries,
   projectContextBreakdown,
+  projectMessageWindowBounds,
   projectSessionTokens,
   projectTurnTokens,
   projectTurnToolSteps,
@@ -2061,26 +2064,6 @@ async function startRPCServer(): Promise<void> {
   const redactToolError = (toolName: string, rawError: string): string =>
     sanitizeError(toolErrorSafety.sanitizeOutput(toolName, rawError).content)
 
-  const decodeSessionsCursor = (
-    cursor: string | undefined
-  ): { updatedAt: string; key: string } | null => {
-    if (!cursor) return null
-    try {
-      const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
-        updatedAt?: unknown
-        key?: unknown
-      }
-      return typeof parsed.updatedAt === 'string' && typeof parsed.key === 'string'
-        ? { updatedAt: parsed.updatedAt, key: parsed.key }
-        : null
-    } catch {
-      return null
-    }
-  }
-
-  const encodeSessionsCursor = (updatedAt: string, key: string): string =>
-    Buffer.from(JSON.stringify({ updatedAt, key }), 'utf8').toString('base64url')
-
   const handleSessionsList = async (
     userSub: string,
     query: { limit?: number; cursor?: string }
@@ -2092,23 +2075,20 @@ async function startRPCServer(): Promise<void> {
       limit: query.limit === undefined ? undefined : query.limit + 1,
       cursor: cursor ? { updatedAt: new Date(cursor.updatedAt), key: cursor.key } : undefined,
     })
-    const page = query.limit ? entries.slice(0, query.limit) : entries
-    const hasMore = query.limit !== undefined && entries.length > page.length
-    const last = page.at(-1)
+    const { page, nextCursor } = paginateSessionSummaries(entries, query.limit)
     return {
       items: page.map(summary => ({
         agent: summary.agent,
         chatId: summary.chatId,
         turnCount: summary.turnCount,
-        messageCount: summary.messageCount,
+        // A message is one renderable user/assistant part. Derive from logical
+        // turns so in-memory and SQLite stores report the same unit regardless
+        // of persisted tool-call rows.
+        messageCount: summary.turnCount * 2,
         lastActivityAt: summary.lastActivityAt.toISOString(),
         ...sessionStateView(summary),
       })),
-      ...(hasMore && last
-        ? {
-            nextCursor: encodeSessionsCursor(last.lastActivityAt.toISOString(), last.key),
-          }
-        : {}),
+      ...(nextCursor ? { nextCursor } : {}),
     }
   }
 
@@ -2125,27 +2105,20 @@ async function startRPCServer(): Promise<void> {
     const page = await convManager.getSessionMessagesByKeyAsync(key, keyPrefix, query)
     if (!page) return null
     const turns = page.turns
-    const oldestTurnNumber = turns[0]?.number
-    const latestTurnNumber = turns.at(-1)?.number
-    const firstConversationTurn = page.firstTurnNumber
-    const lastConversationTurn = page.lastTurnNumber
+    const windowBounds = projectMessageWindowBounds(
+      turns,
+      {
+        firstTurnNumber: page.firstTurnNumber,
+        lastTurnNumber: page.lastTurnNumber,
+      },
+      query
+    )
     return {
       agent: agentName,
       chatId,
       ...sessionStateView(page),
       totalTurns: page.totalTurns,
-      oldestTurnNumber,
-      latestTurnNumber,
-      hasMoreBefore:
-        firstConversationTurn !== undefined &&
-        (oldestTurnNumber !== undefined
-          ? oldestTurnNumber > firstConversationTurn
-          : query.afterTurn !== undefined),
-      hasMoreAfter:
-        lastConversationTurn !== undefined &&
-        (latestTurnNumber !== undefined
-          ? latestTurnNumber < lastConversationTurn
-          : query.beforeTurn !== undefined),
+      ...windowBounds,
       turns: turns.map(t => ({
         number: t.number,
         user_input: t.user_input,

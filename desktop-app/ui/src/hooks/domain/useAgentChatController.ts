@@ -11,6 +11,10 @@ import {
   buildResponseFileAttachments,
 } from '@lib/chatMessageAttachments'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
+import {
+  mergeAuthoritativeServerMessages,
+  messageServerTurnNumber,
+} from '../../../../src/chatMessageMerge'
 import type {
   ChatMessageAttachment,
   HostActivityEvent,
@@ -103,9 +107,7 @@ const MESSAGE_PAGE_SIZE = 80
 const MAX_RECONCILE_DELTA_PAGES = 5
 
 function serverTurnNumber(message: AgentChatMessage): number | undefined {
-  if (message.serverTurnNumber !== undefined) return message.serverTurnNumber
-  const match = /^turn-(\d+)-(?:user|assistant)$/.exec(message.id)
-  return match ? Number(match[1]) : undefined
+  return messageServerTurnNumber(message)
 }
 
 function oldestServerTurnNumber(messages: AgentChatMessage[]): number | undefined {
@@ -150,81 +152,11 @@ function mergeUniqueMessages(
   })
 }
 
-function sameLocalServerMessage(local: AgentChatMessage, server: AgentChatMessage): boolean {
-  const sameTask =
-    Boolean(local.task_id) && Boolean(server.task_id) && local.task_id === server.task_id
-  const sameNearbyContent =
-    local.content.trim() === server.content.trim() &&
-    Math.abs(local.timestamp - server.timestamp) <= 60_000
-  return (
-    serverTurnNumber(local) === undefined &&
-    serverTurnNumber(server) !== undefined &&
-    local.role === server.role &&
-    (sameTask || sameNearbyContent)
-  )
-}
-
-function messageRoleRank(message: AgentChatMessage): number {
-  return message.role === 'user' ? 0 : message.role === 'assistant' ? 1 : 2
-}
-
 function mergeServerMessages(
   existing: AgentChatMessage[],
   incoming: AgentChatMessage[]
 ): AgentChatMessage[] {
-  const merged = [...existing]
-  const replacedIndexes = new Set<number>()
-
-  for (const serverMessage of incoming) {
-    if (merged.some(message => message.id === serverMessage.id)) continue
-
-    const serverTurn = serverTurnNumber(serverMessage)
-    const sameTurnIndex =
-      serverTurn === undefined
-        ? -1
-        : merged.findIndex(
-            message =>
-              serverTurnNumber(message) === serverTurn && message.role === serverMessage.role
-          )
-    if (sameTurnIndex >= 0) {
-      merged[sameTurnIndex] = {
-        ...serverMessage,
-        task_id: merged[sameTurnIndex]?.task_id ?? serverMessage.task_id,
-      }
-      replacedIndexes.add(sameTurnIndex)
-      continue
-    }
-
-    const localEchoIndex = merged.findIndex(
-      (message, index) =>
-        !replacedIndexes.has(index) && sameLocalServerMessage(message, serverMessage)
-    )
-    if (localEchoIndex >= 0) {
-      merged[localEchoIndex] = {
-        ...serverMessage,
-        task_id: merged[localEchoIndex]?.task_id ?? serverMessage.task_id,
-      }
-      replacedIndexes.add(localEchoIndex)
-      continue
-    }
-
-    const insertionIndex =
-      serverTurn === undefined
-        ? -1
-        : merged.findIndex(message => {
-            const messageTurn = serverTurnNumber(message)
-            if (messageTurn === undefined) return false
-            return (
-              messageTurn > serverTurn ||
-              (messageTurn === serverTurn &&
-                messageRoleRank(message) > messageRoleRank(serverMessage))
-            )
-          })
-    if (insertionIndex < 0) merged.push(serverMessage)
-    else merged.splice(insertionIndex, 0, serverMessage)
-  }
-
-  return merged
+  return mergeAuthoritativeServerMessages(existing, incoming)
 }
 
 function sameMessageSequence(a: AgentChatMessage[], b: AgentChatMessage[]): boolean {
@@ -315,6 +247,7 @@ const EMPTY_PROGRESS_MAP: Record<string, TaskProgress> = Object.freeze({})
 interface UseAgentChatControllerParams {
   selectedAgent: string | null
   agentNames: string[]
+  currentUserId?: string
   currentTeamId: string
   currentTeamName: string
   isAuthenticated: boolean
@@ -338,6 +271,7 @@ interface UseAgentChatControllerParams {
 export function useAgentChatController({
   selectedAgent,
   agentNames,
+  currentUserId,
   currentTeamId,
   currentTeamName,
   isAuthenticated,
@@ -351,10 +285,13 @@ export function useAgentChatController({
   decideApprovalFromNotification,
 }: UseAgentChatControllerParams) {
   const chatStore = useChatStore()
+  const authenticatedScope = `${currentUserId ?? 'unknown-user'}:${currentTeamId}`
 
   useEffect(() => {
-    chatStore.setRemoteCacheScope(isAuthenticated ? `authenticated:${currentTeamId}` : 'signed-out')
-  }, [chatStore.setRemoteCacheScope, currentTeamId, isAuthenticated])
+    chatStore.setRemoteCacheScope(
+      isAuthenticated ? `authenticated:${authenticatedScope}` : 'signed-out'
+    )
+  }, [authenticatedScope, chatStore.setRemoteCacheScope, isAuthenticated])
   const tracker = useAgentTaskTracker()
 
   const [activeChatId, setActiveChatId] = useState<string | null>(null)
@@ -379,6 +316,7 @@ export function useAgentChatController({
     selectedAgent,
     agentNames,
     isAuthenticated,
+    scopeKey: authenticatedScope,
     loadMenuData,
     chatStore,
     fsm,

@@ -246,6 +246,7 @@ export function useAppController() {
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
     agentNames: agentsData.agentNames,
+    currentUserId: auth.me?.id,
     currentTeamId,
     currentTeamName,
     isAuthenticated: auth.isAuthenticated,

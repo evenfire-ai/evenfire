@@ -270,6 +270,7 @@ export class AppService {
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
+  private sessionGeneration = 0
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
   private readonly prewarmAttemptAtByHostRef = new Map<string, number>()
@@ -385,6 +386,7 @@ export class AppService {
     options: { refreshMe?: boolean } = {}
   ): Promise<void> {
     const tokenChanged = token !== this.sessionToken
+    if (tokenChanged) this.sessionGeneration += 1
     this.sessionToken = token
     if (tokenChanged) {
       this.rpcTokenManager.clear()
@@ -521,6 +523,7 @@ export class AppService {
   }
 
   private clearAuthenticatedSessionState(): void {
+    this.sessionGeneration += 1
     this.stopAllStreams()
     this.sessionToken = null
     this.me = null
@@ -548,18 +551,34 @@ export class AppService {
   }
 
   private async restoreSavedSessionOnce(options: { runLaunchMaintenance?: boolean } = {}) {
+    const restoreGeneration = this.sessionGeneration
     hydrateDesktopRuntimeConfig()
     const envKey = getActiveEnvKey()
     const token = await this.tokenStore.getSessionToken(envKey)
     if (!token) {
-      this.clearAuthenticatedSessionState()
+      if (this.sessionGeneration === restoreGeneration) {
+        this.clearAuthenticatedSessionState()
+      }
       return { authenticated: false, me: null }
     }
 
+    if (this.sessionGeneration !== restoreGeneration) {
+      return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+    }
     this.sessionToken = token
     try {
-      this.me = await this.authClient.getMe(token)
-      await bindChatStoreForUser(this.me.id, envKey)
+      const restoredMe = await this.authClient.getMe(token)
+      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
+        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+      }
+      this.me = restoredMe
+      await bindChatStoreForUser(restoredMe.id, envKey)
+      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
+        if (this.me) {
+          await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+        }
+        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+      }
       this.accessCatalog = null
       this.teamDirectoryCache = null
       this.workflowApprovalTeamById.clear()
@@ -572,6 +591,9 @@ export class AppService {
       }
       return { authenticated: true, me: this.me }
     } catch (error) {
+      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
+        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
+      }
       this.clearAuthenticatedSessionState()
       if (AppService.isRejectedStoredSessionError(error)) {
         await this.tokenStore.clearSessionToken(envKey)
@@ -608,6 +630,7 @@ export class AppService {
 
   private async completePasswordLogin(email: string, password: string): Promise<SessionState> {
     const result = await this.authClient.passwordLogin(email, password)
+    this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
     await bindChatStoreForUser(result.me.id, getActiveEnvKey())
@@ -677,6 +700,7 @@ export class AppService {
 
   async googleLogin(idToken: string): Promise<SessionState> {
     const result = await this.authClient.googleLogin(idToken)
+    this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
     await bindChatStoreForUser(result.me.id, getActiveEnvKey())

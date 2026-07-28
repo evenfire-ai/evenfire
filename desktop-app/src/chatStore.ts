@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
+import { mergeAuthoritativeServerMessages } from './chatMessageMerge.js'
 import type { ChatFile, ChatIndex, ChatMessage, ChatMetadata } from './types.js'
 
 // Keep the catalog at v2 while paged transcripts are dual-readable by the
@@ -225,6 +226,8 @@ export class ChatStore {
   private indexChains = new Map<string, Promise<unknown>>()
   private chatChains = new Map<string, Promise<unknown>>()
   private cleanedSnapshotSiblingKeys = new Set<string>()
+  private compatibilityCheckedKeys = new Set<string>()
+  private compatibilityWindows = new Map<string, ChatMessage[]>()
 
   private serialize<T>(
     chains: Map<string, Promise<unknown>>,
@@ -436,6 +439,7 @@ export class ChatStore {
     await this.writeJsonAtomic(this.chatCompatibilitySignaturePath(agentRef, chatId), {
       signature,
     })
+    this.compatibilityWindows.set(this.chatSnapshotCleanupKey(agentRef, chatId), [...file.messages])
     return signature
   }
 
@@ -483,22 +487,42 @@ export class ChatStore {
     chatId: string,
     meta: PagedChatMeta
   ): Promise<PagedChatMeta> {
+    const compatibilityKey = this.chatSnapshotCleanupKey(agentRef, chatId)
     let legacyMessages: ChatMessage[] | null
     try {
       legacyMessages = await this.readLegacyMessages(agentRef, chatId)
     } catch (error) {
-      if (isRawFilesystemError(error)) throw error
+      if (isRawFilesystemError(error)) {
+        console.warn(`[chatStore] Downgrade snapshot unavailable for ${chatId}:`, error)
+        return meta
+      }
       return this.refreshLegacyCompatibilitySnapshotUnlocked(agentRef, chatId, meta)
     }
     if (!legacyMessages) {
-      return this.refreshLegacyCompatibilitySnapshotUnlocked(agentRef, chatId, meta)
+      const refreshed = await this.refreshLegacyCompatibilitySnapshotUnlocked(
+        agentRef,
+        chatId,
+        meta
+      )
+      this.compatibilityCheckedKeys.add(compatibilityKey)
+      return refreshed
     }
+    this.compatibilityWindows.set(compatibilityKey, [...legacyMessages])
 
     const legacySignature = this.legacyCompatibilitySnapshot(chatId, legacyMessages).signature
-    if (legacySignature === meta.legacyCompatibilitySignature) return meta
+    if (legacySignature === meta.legacyCompatibilitySignature) {
+      this.compatibilityCheckedKeys.add(compatibilityKey)
+      return meta
+    }
     const recordedSignature = await this.readLegacyCompatibilitySignature(agentRef, chatId)
     if (legacySignature === recordedSignature) {
-      return this.refreshLegacyCompatibilitySnapshotUnlocked(agentRef, chatId, meta)
+      const refreshed = await this.refreshLegacyCompatibilitySnapshotUnlocked(
+        agentRef,
+        chatId,
+        meta
+      )
+      this.compatibilityCheckedKeys.add(compatibilityKey)
+      return refreshed
     }
 
     const existing = await this.readMessagesFromPagedMeta(agentRef, chatId, meta)
@@ -510,7 +534,13 @@ export class ChatStore {
         )
     )
     if (!missing.length) {
-      return this.refreshLegacyCompatibilitySnapshotUnlocked(agentRef, chatId, meta)
+      const refreshed = await this.refreshLegacyCompatibilitySnapshotUnlocked(
+        agentRef,
+        chatId,
+        meta
+      )
+      this.compatibilityCheckedKeys.add(compatibilityKey)
+      return refreshed
     }
 
     const merged = mergeReconciledMessages(existing, missing)
@@ -520,7 +550,9 @@ export class ChatStore {
     })
     await this.updateChatIndexFromMessages(agentRef, chatId, merged, {
       preserveExistingTotals: true,
+      touchUpdatedAt: false,
     })
+    this.compatibilityCheckedKeys.add(compatibilityKey)
     return imported
   }
 
@@ -626,21 +658,21 @@ export class ChatStore {
     let prunedThroughServerTurnNumber = meta.prunedThroughServerTurnNumber
     const retained: ChatPageEntry[] = []
     const removedFiles: string[] = []
-    let pruning = true
-
     for (const page of meta.pages) {
       const canPrunePage =
-        pruning && page.serverSynced && localCount - page.count >= this.maxLocalSyncedMessages
+        page.serverSynced && localCount - page.count >= this.maxLocalSyncedMessages
 
       if (canPrunePage) {
         removedFiles.push(page.file)
         localCount -= page.count
         prunedBeforeCount += page.count
-        prunedThroughServerTurnNumber = page.lastServerTurnNumber ?? prunedThroughServerTurnNumber
+        prunedThroughServerTurnNumber = Math.max(
+          prunedThroughServerTurnNumber ?? 0,
+          page.lastServerTurnNumber ?? 0
+        )
         continue
       }
 
-      pruning = false
       retained.push(page)
     }
 
@@ -728,7 +760,22 @@ export class ChatStore {
       pages: repairedPages,
     })
     await this.writePagedMeta(agentRef, chatId, repaired)
+    await this.updateIndexedMessageCount(agentRef, chatId, repaired.messageCount)
     return repaired
+  }
+
+  private async updateIndexedMessageCount(
+    agentRef: string,
+    chatId: string,
+    messageCount: number
+  ): Promise<void> {
+    await this.serializeIndex(agentRef, async () => {
+      const index = await this.getIndex(agentRef)
+      const chat = index.chats.find(candidate => candidate.id === chatId)
+      if (!chat || chat.messageCount >= messageCount) return
+      chat.messageCount = messageCount
+      await this.saveIndex(agentRef, index)
+    })
   }
 
   private async rebuildPagedChatFromSurvivingFilesUnlocked(
@@ -767,7 +814,10 @@ export class ChatStore {
     return true
   }
 
-  private async recoverPagedChatUnlocked(agentRef: string, chatId: string): Promise<void> {
+  private async recoverPagedChatUnlocked(
+    agentRef: string,
+    chatId: string
+  ): Promise<PagedChatMeta | null> {
     const activeDir = this.chatDirPath(agentRef, chatId)
     const chatsDir = join(this.agentDir(agentRef), 'chats')
     const cleanupKey = this.chatSnapshotCleanupKey(agentRef, chatId)
@@ -782,12 +832,12 @@ export class ChatStore {
     }
 
     if (activeMeta) {
+      if (this.cleanedSnapshotSiblingKeys.has(cleanupKey)) return activeMeta
       const repaired = await this.adoptDurablePageWritesUnlocked(agentRef, chatId, activeMeta)
       if (repaired) {
-        if (this.cleanedSnapshotSiblingKeys.has(cleanupKey)) return
         await this.removePagedChatSnapshotSiblings(chatsDir, chatId)
         this.cleanedSnapshotSiblingKeys.add(cleanupKey)
-        return
+        return repaired
       }
       activeReadError = new Error(`Paged chat snapshot is incomplete for ${chatId}`)
       activeMeta = null
@@ -804,7 +854,7 @@ export class ChatStore {
     try {
       entries = await fs.readdir(chatsDir, { withFileTypes: true })
     } catch {
-      return
+      return null
     }
 
     const snapshots = await Promise.all(
@@ -875,7 +925,7 @@ export class ChatStore {
           await fs.rm(corruptDir, { recursive: true, force: true }).catch(() => undefined)
         }
         this.cleanedSnapshotSiblingKeys.add(cleanupKey)
-        return
+        return await this.readPagedMeta(agentRef, chatId)
       } catch (err) {
         if (corruptDir) {
           await fs.rename(corruptDir, activeDir).catch(() => undefined)
@@ -884,8 +934,12 @@ export class ChatStore {
       }
     }
 
-    if (await this.rebuildPagedChatFromSurvivingFilesUnlocked(agentRef, chatId)) return
+    if (await this.rebuildPagedChatFromSurvivingFilesUnlocked(agentRef, chatId)) {
+      this.cleanedSnapshotSiblingKeys.add(cleanupKey)
+      return await this.readPagedMeta(agentRef, chatId)
+    }
     if (activeReadError) throw activeReadError
+    return null
   }
 
   private async removePagedChatSnapshotSiblings(chatsDir: string, chatId: string): Promise<void> {
@@ -995,6 +1049,9 @@ export class ChatStore {
         await fs.rm(backupDir, { recursive: true, force: true }).catch(() => undefined)
       }
       await this.writeLegacyCompatibilitySnapshot(agentRef, chatId, messages)
+      const cacheKey = this.chatSnapshotCleanupKey(agentRef, chatId)
+      this.cleanedSnapshotSiblingKeys.add(cacheKey)
+      this.compatibilityCheckedKeys.add(cacheKey)
 
       return pruned.meta
     } catch (err) {
@@ -1010,9 +1067,11 @@ export class ChatStore {
     agentRef: string,
     chatId: string
   ): Promise<PagedChatMeta | null> {
-    await this.recoverPagedChatUnlocked(agentRef, chatId)
-    const paged = await this.readPagedMeta(agentRef, chatId)
+    const paged = await this.recoverPagedChatUnlocked(agentRef, chatId)
     if (paged) {
+      if (this.compatibilityCheckedKeys.has(this.chatSnapshotCleanupKey(agentRef, chatId))) {
+        return paged
+      }
       return this.importDowngradedLocalMessagesUnlocked(agentRef, chatId, paged)
     }
 
@@ -1020,7 +1079,9 @@ export class ChatStore {
     if (!legacyMessages) return null
 
     const migrated = await this.writePagedChatUnlocked(agentRef, chatId, legacyMessages)
-    await this.updateChatIndexFromMessages(agentRef, chatId, legacyMessages)
+    await this.updateChatIndexFromMessages(agentRef, chatId, legacyMessages, {
+      touchUpdatedAt: false,
+    })
     return migrated
   }
 
@@ -1069,6 +1130,8 @@ export class ChatStore {
   ): Promise<PagedChatMeta> {
     if (!newMessages.length) return meta
 
+    const cacheKey = this.chatSnapshotCleanupKey(agentRef, chatId)
+    this.cleanedSnapshotSiblingKeys.delete(cacheKey)
     const pages = [...meta.pages]
     let remaining = [...newMessages]
 
@@ -1103,12 +1166,15 @@ export class ChatStore {
       messageCount,
       pages,
     })
-    const compatibilityMessages = await this.readMessagesFromPagedMeta(
-      agentRef,
-      chatId,
-      pruned.meta,
-      LEGACY_COMPATIBILITY_MESSAGE_LIMIT
-    )
+    const cachedCompatibilityMessages = this.compatibilityWindows.get(cacheKey)
+    const compatibilityMessages = cachedCompatibilityMessages
+      ? [...cachedCompatibilityMessages, ...newMessages].slice(-LEGACY_COMPATIBILITY_MESSAGE_LIMIT)
+      : await this.readMessagesFromPagedMeta(
+          agentRef,
+          chatId,
+          pruned.meta,
+          LEGACY_COMPATIBILITY_MESSAGE_LIMIT
+        )
     const compatibility = this.legacyCompatibilitySnapshot(chatId, compatibilityMessages)
     pruned.meta.legacyCompatibilitySignature = compatibility.signature
     await this.writePagedMeta(agentRef, chatId, pruned.meta)
@@ -1117,7 +1183,11 @@ export class ChatStore {
         fs.rm(this.chatPagePath(agentRef, chatId, file), { force: true })
       )
     )
-    await this.writeLegacyCompatibilitySnapshot(agentRef, chatId, compatibilityMessages)
+    if (compatibility.signature !== meta.legacyCompatibilitySignature) {
+      await this.writeLegacyCompatibilitySnapshot(agentRef, chatId, compatibilityMessages)
+    }
+    this.cleanedSnapshotSiblingKeys.add(cacheKey)
+    this.compatibilityCheckedKeys.add(cacheKey)
     return pruned.meta
   }
 
@@ -1223,7 +1293,10 @@ export class ChatStore {
       await fs.rm(this.chatCompatibilitySignaturePath(agentRef, chatId), { force: true })
       await fs.rm(this.chatDirPath(agentRef, chatId), { recursive: true, force: true })
       await this.removePagedChatSnapshotSiblings(join(this.agentDir(agentRef), 'chats'), chatId)
-      this.cleanedSnapshotSiblingKeys.delete(this.chatSnapshotCleanupKey(agentRef, chatId))
+      const cacheKey = this.chatSnapshotCleanupKey(agentRef, chatId)
+      this.cleanedSnapshotSiblingKeys.delete(cacheKey)
+      this.compatibilityCheckedKeys.delete(cacheKey)
+      this.compatibilityWindows.delete(cacheKey)
     })
   }
 
@@ -1249,7 +1322,7 @@ export class ChatStore {
     agentRef: string,
     chatId: string,
     messages: ChatMessage[],
-    options: { preserveExistingTotals?: boolean } = {}
+    options: { preserveExistingTotals?: boolean; touchUpdatedAt?: boolean } = {}
   ): Promise<void> {
     await this.serializeIndex(agentRef, async () => {
       const index = await this.getIndex(agentRef)
@@ -1265,7 +1338,9 @@ export class ChatStore {
         chat.messageCount = messages.length
         Object.assign(chat, aggregate)
       }
-      chat.updatedAt = new Date().toISOString()
+      if (options.touchUpdatedAt !== false) {
+        chat.updatedAt = new Date().toISOString()
+      }
       await this.saveIndex(agentRef, index)
     })
   }
@@ -1317,7 +1392,7 @@ export class ChatStore {
       const existingMessages = existingMeta
         ? await this.readMessagesFromPagedMeta(agentRef, chatId, existingMeta)
         : []
-      const merged = mergeReconciledMessages(existingMessages, messages)
+      const merged = mergeAuthoritativeServerMessages(existingMessages, messages)
       const indexedCount = await this.indexedMessageCount(agentRef, chatId)
       await this.writePagedChatUnlocked(agentRef, chatId, merged, {
         messageCount: Math.max(merged.length, indexedCount ?? 0),

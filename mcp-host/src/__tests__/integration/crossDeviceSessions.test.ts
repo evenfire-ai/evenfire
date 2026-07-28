@@ -29,6 +29,11 @@ import { ConversationState } from '../../core/types'
 import { getDisplayName } from '../../progress/intentExtraction'
 import { makeHandlers } from '../../server/__tests__/testHelpers'
 import { handleSessionMessagesRoute, handleSessionsListRoute } from '../../server/routes'
+import {
+  decodeSessionsCursor,
+  paginateSessionSummaries,
+  projectMessageWindowBounds,
+} from '../../server/wireProjections'
 
 // D.1 — mirrors main.ts `sessionStateView`: expose state/activeTaskId/pendingApproval.
 function stateView(conversation: Conversation) {
@@ -77,8 +82,22 @@ function makeApp(convManager: ConversationManager) {
   // Closures mirror main.ts — same prefix filter, same mapping shape.
   const handlers = makeHandlers({
     sessionsListHandler: (userSub: string, query) => {
-      const entries = convManager.listSessionsForUser(`${userSub}:rpc:`)
-      const page = query.limit ? entries.slice(0, query.limit) : entries
+      const cursor = decodeSessionsCursor(query.cursor)
+      const entries = convManager
+        .listSessionsForUser(`${userSub}:rpc:`)
+        .map(entry => ({ ...entry, lastActivityAt: entry.conversation.updated_at }))
+        .filter(
+          entry =>
+            !cursor ||
+            entry.lastActivityAt.toISOString() < cursor.updatedAt ||
+            (entry.lastActivityAt.toISOString() === cursor.updatedAt && entry.key > cursor.key)
+        )
+        .sort(
+          (left, right) =>
+            right.lastActivityAt.getTime() - left.lastActivityAt.getTime() ||
+            left.key.localeCompare(right.key)
+        )
+      const { page, nextCursor } = paginateSessionSummaries(entries, query.limit)
       return {
         items: page.map(({ conversation, agent, chatId }) => ({
           agent,
@@ -87,6 +106,7 @@ function makeApp(convManager: ConversationManager) {
           lastActivityAt: conversation.updated_at.toISOString(),
           ...stateView(conversation),
         })),
+        ...(nextCursor ? { nextCursor } : {}),
       }
     },
     sessionMessagesHandler: (userSub: string, agentName: string, chatId: string, query) => {
@@ -106,15 +126,20 @@ function makeApp(convManager: ConversationManager) {
           : query.afterTurn !== undefined
             ? eligibleTurns.slice(0, query.limit)
             : eligibleTurns.slice(-query.limit)
+      const windowBounds = projectMessageWindowBounds(
+        turns,
+        {
+          firstTurnNumber: conversation.turns[0]?.number,
+          lastTurnNumber: conversation.turns.at(-1)?.number,
+        },
+        query
+      )
       return {
         agent: agentName,
         chatId,
         ...stateView(conversation),
         totalTurns: conversation.turns.length,
-        oldestTurnNumber: turns[0]?.number,
-        latestTurnNumber: turns.at(-1)?.number,
-        hasMoreBefore: Boolean(turns[0] && turns[0].number > 1),
-        hasMoreAfter: Boolean(turns.at(-1) && turns.at(-1)!.number < conversation.turns.length),
+        ...windowBounds,
         turns: turns.map(t => ({
           number: t.number,
           user_input: t.user_input,

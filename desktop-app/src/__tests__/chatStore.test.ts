@@ -548,7 +548,11 @@ describe('messages', () => {
     await fs.mkdir(`${chatCacheDir('stale-snapshots')}.next-stale`, { recursive: true })
     await fs.mkdir(`${chatCacheDir('stale-snapshots')}.previous-stale`, { recursive: true })
 
-    const reloaded = await pagedStore.loadMessages('agent-1', 'stale-snapshots')
+    const restartedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    const reloaded = await restartedStore.loadMessages('agent-1', 'stale-snapshots')
     expect(reloaded.map(message => message.id)).toEqual(['m0'])
     await expect(fs.access(`${chatCacheDir('stale-snapshots')}.next-stale`)).rejects.toThrow()
     await expect(fs.access(`${chatCacheDir('stale-snapshots')}.previous-stale`)).rejects.toThrow()
@@ -612,7 +616,7 @@ describe('messages', () => {
     expect(localMessages.map(message => message.id)).toEqual(['m2', 'm3', 'm4', 'm5'])
   })
 
-  it('does not prune pages containing local-only messages', async () => {
+  it('keeps local-only pages while pruning later fully synced pages', async () => {
     const prunedStore = new ChatStore(tempDir, {
       pageSize: 2,
       maxLocalSyncedMessages: 4,
@@ -628,16 +632,12 @@ describe('messages', () => {
 
     await prunedStore.saveMessages('agent-1', 'local-only', msgs)
 
-    expect(await fs.readdir(chatPagesDir('local-only'))).toEqual([
-      '000001.json',
-      '000002.json',
-      '000003.json',
-    ])
+    expect(await fs.readdir(chatPagesDir('local-only'))).toEqual(['000001.json', '000003.json'])
     const meta = await readJsonFile<{ localMessageCount: number; prunedBeforeCount?: number }>(
       chatMetaPath('local-only')
     )
-    expect(meta.localMessageCount).toBe(6)
-    expect(meta.prunedBeforeCount).toBeUndefined()
+    expect(meta.localMessageCount).toBe(4)
+    expect(meta.prunedBeforeCount).toBe(2)
   })
 
   it('updates messageCount in index after save', async () => {
@@ -780,7 +780,11 @@ describe('messages', () => {
     )
     await fs.rm(join(chatPagesDir('missing-page'), '000002.json'))
 
-    const recovered = await pagedStore.loadMessages('agent-1', 'missing-page')
+    const restartedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    const recovered = await restartedStore.loadMessages('agent-1', 'missing-page')
 
     expect(recovered.map(message => message.id)).toEqual(['m0', 'm1', 'm2', 'm3', 'm4', 'm5'])
     const repairedMeta = await readJsonFile<{ localMessageCount: number }>(
@@ -809,7 +813,11 @@ describe('messages', () => {
       })
     )
 
-    const recovered = await pagedStore.loadMessages('agent-1', 'orphan-append')
+    const restartedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    const recovered = await restartedStore.loadMessages('agent-1', 'orphan-append')
 
     expect(recovered.map(message => message.id)).toEqual(['m0', 'm1', 'm2'])
     const repairedMeta = await readJsonFile<{ localMessageCount: number; pages: unknown[] }>(
@@ -817,6 +825,10 @@ describe('messages', () => {
     )
     expect(repairedMeta).toMatchObject({ localMessageCount: 3 })
     expect(repairedMeta.pages).toHaveLength(2)
+    expect(
+      (await restartedStore.listChats('agent-1')).find(chat => chat.id === 'orphan-append')
+        ?.messageCount
+    ).toBe(3)
   })
 
   it('persists task_id and writes the paged chat cache', async () => {
@@ -966,7 +978,8 @@ describe('messages', () => {
       })
     )
 
-    const recovered = await store.loadMessages('agent-1', 'downgraded-write')
+    const restartedStore = new ChatStore(tempDir)
+    const recovered = await restartedStore.loadMessages('agent-1', 'downgraded-write')
 
     expect(recovered.map(message => message.id)).toEqual(['m1', 'm2'])
     const compatibility = await readJsonFile<{ messages: ChatMessage[] }>(
@@ -982,7 +995,8 @@ describe('messages', () => {
     ])
     await fs.writeFile(agentPath('corrupt-downgrade-snapshot.json'), 'not json{')
 
-    const recovered = await store.loadMessages('agent-1', 'corrupt-downgrade-snapshot')
+    const restartedStore = new ChatStore(tempDir)
+    const recovered = await restartedStore.loadMessages('agent-1', 'corrupt-downgrade-snapshot')
 
     expect(recovered.map(message => message.id)).toEqual(['m1'])
     const compatibility = await readJsonFile<{ messages: ChatMessage[] }>(

@@ -12,6 +12,9 @@ interface UseActivityControllerParams {
   agentNames: string[]
 }
 
+const ACTIVITY_SUMMARY_CHAT_SCAN_LIMIT = 20
+const ACTIVITY_SUMMARY_MESSAGE_SCAN_LIMIT = 1000
+
 function activityCounterKey(agentRef: string, chatId: string): string {
   return `${agentRef}\u0000${chatId}`
 }
@@ -92,6 +95,8 @@ export function useActivityController({
   const missingCounterChatIds = JSON.stringify(
     chatList
       .filter(chat => chat.errorCount === undefined || chat.toolCallCount === undefined)
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+      .slice(0, ACTIVITY_SUMMARY_CHAT_SCAN_LIMIT)
       .map(chat => chat.id)
   )
 
@@ -106,7 +111,9 @@ export function useActivityController({
     let cancelled = false
     void Promise.all(
       chatIds.map(async chatId => {
-        const messages = await chatStore.loadMessages(selectedAgent, chatId).catch(() => [])
+        const messages = await chatStore
+          .loadMessages(selectedAgent, chatId, ACTIVITY_SUMMARY_MESSAGE_SCAN_LIMIT)
+          .catch(() => [])
         return [
           activityCounterKey(selectedAgent, chatId),
           {

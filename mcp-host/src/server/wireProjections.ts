@@ -15,6 +15,73 @@ type SessionTokenSource = Pick<
   | 'cacheTokensReported'
 >
 
+export interface SessionsCursor {
+  updatedAt: string
+  key: string
+}
+
+export function decodeSessionsCursor(cursor: string | undefined): SessionsCursor | null {
+  if (!cursor) return null
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
+      updatedAt?: unknown
+      key?: unknown
+    }
+    if (
+      typeof parsed.updatedAt !== 'string' ||
+      typeof parsed.key !== 'string' ||
+      !Number.isFinite(Date.parse(parsed.updatedAt))
+    ) {
+      return null
+    }
+    return { updatedAt: parsed.updatedAt, key: parsed.key }
+  } catch {
+    return null
+  }
+}
+
+export function encodeSessionsCursor(updatedAt: string, key: string): string {
+  return Buffer.from(JSON.stringify({ updatedAt, key }), 'utf8').toString('base64url')
+}
+
+export function paginateSessionSummaries<T extends { key: string; lastActivityAt: Date }>(
+  entries: T[],
+  limit: number | undefined
+): { page: T[]; nextCursor?: string } {
+  if (limit === undefined) return { page: entries }
+  const page = entries.slice(0, limit)
+  const last = page.at(-1)
+  return {
+    page,
+    ...(entries.length > page.length && last
+      ? { nextCursor: encodeSessionsCursor(last.lastActivityAt.toISOString(), last.key) }
+      : {}),
+  }
+}
+
+export function projectMessageWindowBounds(
+  turns: Array<{ number: number }>,
+  bounds: { firstTurnNumber?: number; lastTurnNumber?: number },
+  query: { beforeTurn?: number; afterTurn?: number }
+) {
+  const oldestTurnNumber = turns[0]?.number
+  const latestTurnNumber = turns.at(-1)?.number
+  return {
+    oldestTurnNumber,
+    latestTurnNumber,
+    hasMoreBefore:
+      bounds.firstTurnNumber !== undefined &&
+      (oldestTurnNumber !== undefined
+        ? oldestTurnNumber > bounds.firstTurnNumber
+        : query.afterTurn !== undefined),
+    hasMoreAfter:
+      bounds.lastTurnNumber !== undefined &&
+      (latestTurnNumber !== undefined
+        ? latestTurnNumber < bounds.lastTurnNumber
+        : query.beforeTurn !== undefined),
+  }
+}
+
 /**
  * Project a Conversation's lifetime token mirror into the wire shape served by
  * `/v1/runtime/sessions` and `/messages`.
