@@ -349,6 +349,87 @@ describe('McpServerWatcher startup', () => {
     }
   })
 
+  it('retries failed initial McpServer convergence without delaying safe bootstrap', async () => {
+    vi.useFakeTimers()
+    const server = {
+      metadata: { name: 'initial-runtime', namespace: 'mcp-server' },
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/initial-runtime:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    }
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'mcpservers') return { items: [server] }
+      if (plural === 'contexts') return { items: [] }
+      if (plural === 'communicationchannels') {
+        return { metadata: { resourceVersion: 'mcp-retry-rv' }, items: [] }
+      }
+      return { items: [] }
+    })
+    mocks.serverFullReconcile
+      .mockRejectedValueOnce(new Error('initial runtime reconciliation failed'))
+      .mockResolvedValueOnce(undefined)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const watcher = new McpServerWatcher()
+    vi.spyOn(watcher as any, 'startMcpServerWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startContextWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
+
+    await watcher.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mocks.serverFullReconcile).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(mocks.serverFullReconcile).toHaveBeenCalledTimes(2)
+
+    watcher.stop()
+    errorSpy.mockRestore()
+  })
+
+  it('retries failed initial NetworkPolicy convergence from the current caches', async () => {
+    vi.useFakeTimers()
+    const context = {
+      metadata: { name: 'initial-context', namespace: 'mcp-server' },
+      spec: { contextId: 'initial-context', mcpServers: [] },
+    }
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'mcpservers') return { items: [] }
+      if (plural === 'contexts') return { items: [context] }
+      if (plural === 'communicationchannels') {
+        return { metadata: { resourceVersion: 'netpol-retry-rv' }, items: [] }
+      }
+      return { items: [] }
+    })
+    mocks.netPolFullReconcile
+      .mockRejectedValueOnce(new Error('initial NetworkPolicy reconciliation failed'))
+      .mockResolvedValueOnce(undefined)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const watcher = new McpServerWatcher()
+    vi.spyOn(watcher as any, 'startMcpServerWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startContextWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
+
+    await watcher.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2)
+    expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
+      [expect.objectContaining({ name: 'initial-context' })],
+      [],
+      { serverInventoryComplete: true, ensureDefaults: false }
+    )
+
+    watcher.stop()
+    errorSpy.mockRestore()
+  })
+
   it('rejects safe bootstrap when the McpServer watch cannot be established', async () => {
     const watcher = new McpServerWatcher()
     vi.spyOn(watcher as any, 'startMcpServerWatch').mockRejectedValue(

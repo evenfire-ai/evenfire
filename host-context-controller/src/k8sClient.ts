@@ -86,6 +86,10 @@ const PLURAL_COMMUNICATIONCHANNELS = 'communicationchannels'
 const EXTERNAL_EGRESS_RETRY_DELAYS_MS = [5000, 15000, 30000]
 const EXTERNAL_EGRESS_RESYNC_MAX_CONCURRENCY = 10
 const EXTERNAL_EGRESS_RESYNC_JITTER_MS = 5000
+// Before readiness was decoupled, a failed initial McpServer or NetworkPolicy
+// sweep made provider.start() fail and Kubernetes restarted HCC. These retries
+// retain that convergence guarantee now that the sweeps run in the background.
+const INITIAL_CONVERGENCE_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 300000]
 const COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS = 5000
 const COMMUNICATION_CHANNEL_FLEET_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 300000]
 const HOST_CACHE_RECOVERY_RETRY_MS = 5000
@@ -106,6 +110,7 @@ type HostSnapshot = {
 
 type HostFleetReconcileMode = 'full' | 'lifecycle'
 type HostWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
+type InitialConvergenceLane = 'McpServer' | 'NetworkPolicy'
 
 type HostFleetReconcileRequest = {
   reason: string
@@ -602,6 +607,11 @@ export class McpServerWatcher implements McpServerProvider {
   private readonly externalEgressRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly externalEgressRetryAttempts = new Map<string, number>()
   private readonly externalEgressInFlight = new Map<string, Promise<void>>()
+  private readonly initialConvergenceRetryTimers = new Map<
+    InitialConvergenceLane,
+    ReturnType<typeof setTimeout>
+  >()
+  private readonly initialConvergenceRetryAttempts = new Map<InitialConvergenceLane, number>()
   // Periodic resync timer: K8s watches can drop events on long disconnects;
   // running fullReconcile every N minutes guarantees mcp-host-runtime-token Secret
   // rotation eventually catches up even after a missed MODIFIED event.
@@ -1863,8 +1873,10 @@ export class McpServerWatcher implements McpServerProvider {
       )
       console.log('[K8s] Running initial McpServer background reconciliation...')
       await this.reconciler.fullReconcile(runtimeServers)
+      this.clearInitialConvergenceRetry('McpServer')
     } catch (error) {
       console.error('[K8s] Initial McpServer background reconciliation failed:', error)
+      this.scheduleInitialConvergenceRetry('McpServer')
     }
   }
 
@@ -1879,9 +1891,49 @@ export class McpServerWatcher implements McpServerProvider {
         serverInventoryComplete,
         ensureDefaults: false,
       })
+      this.clearInitialConvergenceRetry('NetworkPolicy')
     } catch (error) {
       console.error('[K8s] Initial NetworkPolicy background reconciliation failed:', error)
+      this.scheduleInitialConvergenceRetry('NetworkPolicy')
     }
+  }
+
+  private clearInitialConvergenceRetry(lane: InitialConvergenceLane): void {
+    const timer = this.initialConvergenceRetryTimers.get(lane)
+    if (timer) {
+      clearTimeout(timer)
+      this.initialConvergenceRetryTimers.delete(lane)
+    }
+    this.initialConvergenceRetryAttempts.delete(lane)
+  }
+
+  private scheduleInitialConvergenceRetry(lane: InitialConvergenceLane): void {
+    if (this.stopped || this.initialConvergenceRetryTimers.has(lane)) return
+
+    const attempt = (this.initialConvergenceRetryAttempts.get(lane) ?? 0) + 1
+    const delayMs =
+      INITIAL_CONVERGENCE_RETRY_DELAYS_MS[
+        Math.min(attempt - 1, INITIAL_CONVERGENCE_RETRY_DELAYS_MS.length - 1)
+      ]
+    this.initialConvergenceRetryAttempts.set(lane, attempt)
+    console.warn(
+      `[K8s] Scheduling initial ${lane} background convergence retry ${attempt} in ${delayMs}ms`
+    )
+
+    const timer = setTimeout(() => {
+      this.initialConvergenceRetryTimers.delete(lane)
+      if (this.stopped) return
+      if (lane === 'McpServer') {
+        void this.runInitialMcpServerConvergence([...this.servers.values()])
+        return
+      }
+      void this.runInitialNetworkPolicyConvergence(
+        [...this.contexts.values()],
+        [...this.servers.values()],
+        true
+      )
+    }, delayMs)
+    this.initialConvergenceRetryTimers.set(lane, timer)
   }
 
   private async runInitialSharedFileSystemConvergence(
@@ -2792,6 +2844,11 @@ export class McpServerWatcher implements McpServerProvider {
     this.externalEgressRetryTimers.clear()
     this.externalEgressRetryAttempts.clear()
     this.externalEgressInFlight.clear()
+    for (const timer of this.initialConvergenceRetryTimers.values()) {
+      clearTimeout(timer)
+    }
+    this.initialConvergenceRetryTimers.clear()
+    this.initialConvergenceRetryAttempts.clear()
     if (this.mcpWatchRequest) {
       console.log('[K8s] Stopping McpServer watch')
       this.mcpWatchRequest.abort()
