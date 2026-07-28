@@ -533,15 +533,17 @@ export class AppService {
   }
 
   private async restoreSavedSession(options: { runLaunchMaintenance?: boolean } = {}) {
-    if (this.restoreSavedSessionInFlight) return this.restoreSavedSessionInFlight
+    if (this.restoreSavedSessionInFlight) {
+      return await this.restoreSavedSessionInFlight
+    }
     const restore = this.restoreSavedSessionOnce(options)
     this.restoreSavedSessionInFlight = restore
     try {
       return await restore
     } finally {
-      if (this.restoreSavedSessionInFlight === restore) {
-        this.restoreSavedSessionInFlight = null
-      }
+      // No newer restore can start while this promise is installed, so the
+      // single-flight slot can be cleared unconditionally after it settles.
+      this.restoreSavedSessionInFlight = null
     }
   }
 

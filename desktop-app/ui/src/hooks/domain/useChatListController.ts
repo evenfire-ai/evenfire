@@ -83,6 +83,11 @@ function dedupeSidebarChats<T extends SidebarChatEntry>(chats: T[]): T[] {
   })
 }
 
+function knownServerMessageCount(session: SessionsListResult['items'][number]): number {
+  const count = session.messageCount
+  return typeof count === 'number' && Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0
+}
+
 export function useChatListController({
   selectedAgent,
   agentNames,
@@ -186,7 +191,10 @@ export function useChatListController({
               title: `Chat ${s.chatId.slice(0, 8)}`,
               createdAt: s.lastActivityAt,
               updatedAt: s.lastActivityAt,
-              messageCount: s.messageCount ?? s.turnCount * 2,
+              // Older hosts omit messageCount. Keep that unknown value at zero
+              // instead of fabricating two messages per turn and overstating
+              // Activity totals when tool/system messages vary by session.
+              messageCount: knownServerMessageCount(s),
               turnCount: s.turnCount,
             }))
           return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
@@ -257,7 +265,7 @@ export function useChatListController({
             title: `Chat ${s.chatId.slice(0, 8)}`,
             createdAt: s.lastActivityAt,
             updatedAt: s.lastActivityAt,
-            messageCount: s.messageCount ?? s.turnCount * 2,
+            messageCount: knownServerMessageCount(s),
             turnCount: s.turnCount,
           }))
         return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
@@ -598,7 +606,7 @@ export function useChatListController({
                 title: `Remote · ${session.chatId.slice(0, 8)}`,
                 createdAt: session.lastActivityAt,
                 updatedAt: session.lastActivityAt,
-                messageCount: session.messageCount ?? session.turnCount * 2,
+                messageCount: knownServerMessageCount(session),
                 remote: true,
                 turnCount: session.turnCount,
                 agentRef: group.agentRef,

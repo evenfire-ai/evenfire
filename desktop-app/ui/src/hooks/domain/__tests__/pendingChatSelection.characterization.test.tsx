@@ -76,6 +76,39 @@ describe('pendingChatSelection effect', () => {
     await waitFor(() => expect(result.current.activeChatId).toBe('server-latest'))
   })
 
+  it('does not fabricate message totals for summaries from older servers', async () => {
+    clerum.chat.getIndex.mockResolvedValue({
+      version: 3,
+      lastActiveChatId: null,
+      onboardingDismissed: false,
+      chats: [],
+    })
+    clerum.rpc.listSessions.mockResolvedValue({
+      items: [
+        {
+          agent: 'agent-x',
+          chatId: 'legacy-summary',
+          turnCount: 7,
+          lastActivityAt: '2026-05-01T00:00:00Z',
+        },
+      ],
+    })
+
+    const { result } = renderController({ navItem: 'chat' })
+
+    await waitFor(() =>
+      expect(result.current.chatList).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'legacy-summary',
+            messageCount: 0,
+            turnCount: 7,
+          }),
+        ])
+      )
+    )
+  })
+
   it('latest → switches to the most recent chat', async () => {
     clerum.chat.getIndex.mockResolvedValue({
       version: 1,

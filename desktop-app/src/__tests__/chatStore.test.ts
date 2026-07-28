@@ -907,6 +907,8 @@ describe('messages', () => {
       errorCount: 1,
       toolCallCount: 1,
     })
+    const migratedIndex = await readJsonFile<{ version: number }>(agentPath('index.json'))
+    expect(migratedIndex.version).toBe(3)
   })
 
   it('does not hide a failed legacy migration as an empty chat', async () => {
