@@ -14,6 +14,10 @@ import {
   IconWorkflows,
 } from '@components/SidebarNav/icons'
 import {
+  SHOW_AGENT_FILES_UI,
+  SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM,
+} from '@constants/agentFeatures'
+import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
   COMPOSER_MAX_IMAGE_BYTES,
@@ -624,31 +628,37 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                     >
                       Connectors
                     </MenuItem>
-                    <MenuItem
-                      aria-disabled={agentFilesDisabled}
-                      className={
-                        agentFilesDisabled ? 'composer-reference-menu-item-disabled' : undefined
-                      }
-                      leadingIcon={<IconContexts />}
-                      onClick={agentFilesDisabled ? undefined : openAgentFilesModal}
-                      onFocus={() => setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)}
-                      onMouseEnter={() =>
-                        setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
-                      }
-                      role="menuitem"
-                      trailingIcon={
-                        agentFilesDisabled ? <span aria-hidden="true">&gt;</span> : undefined
-                      }
-                    >
-                      Agent Files
-                    </MenuItem>
-                    <MenuItem
-                      leadingIcon={<IconAttachFile />}
-                      onClick={openGlobalFilesModal}
-                      role="menuitem"
-                    >
-                      Global File System
-                    </MenuItem>
+                    {SHOW_AGENT_FILES_UI ? (
+                      <MenuItem
+                        aria-disabled={agentFilesDisabled}
+                        className={
+                          agentFilesDisabled ? 'composer-reference-menu-item-disabled' : undefined
+                        }
+                        leadingIcon={<IconContexts />}
+                        onClick={agentFilesDisabled ? undefined : openAgentFilesModal}
+                        onFocus={() =>
+                          setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
+                        }
+                        onMouseEnter={() =>
+                          setComposerSubmenu(agentFilesDisabled ? 'agent-files' : null)
+                        }
+                        role="menuitem"
+                        trailingIcon={
+                          agentFilesDisabled ? <span aria-hidden="true">&gt;</span> : undefined
+                        }
+                      >
+                        Agent Files
+                      </MenuItem>
+                    ) : null}
+                    {SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM ? (
+                      <MenuItem
+                        leadingIcon={<IconAttachFile />}
+                        onClick={openGlobalFilesModal}
+                        role="menuitem"
+                      >
+                        Global File System
+                      </MenuItem>
+                    ) : null}
                     <MenuItem
                       leadingIcon={<IconUpload />}
                       onClick={openUploadPicker}
@@ -718,7 +728,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                       )}
                     </span>
                   ) : null}
-                  {composerSubmenu === 'agent-files' ? (
+                  {SHOW_AGENT_FILES_UI && composerSubmenu === 'agent-files' ? (
                     <span
                       className="composer-reference-submenu composer-reference-submenu--agent-files"
                       role="menu"

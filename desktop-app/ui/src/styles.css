@@ -421,7 +421,7 @@ h3 {
   max-height: min(70vh, 560px);
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 0;
   border: 1px solid rgba(var(--edge-rgb), 0.38);
   border-radius: var(--radius-lg);
@@ -436,15 +436,6 @@ h3 {
   bottom: var(--space-4);
   width: var(--app-notification-drawer-width);
   max-height: none;
-}
-
-.notification-menu-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-1-5);
-  padding: var(--space-2) var(--space-2-5);
-  border-bottom: 1px solid rgba(var(--edge-rgb), 0.22);
 }
 
 .notification-menu-title-row {
@@ -579,6 +570,24 @@ h3 {
   display: grid;
   gap: 5px;
   cursor: default;
+}
+
+.notification-menu-item.is-clickable {
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.notification-menu-item.is-clickable:hover {
+  border-color: rgba(var(--accent-rgb), 0.48);
+  background: var(--surface-hover);
+}
+
+.notification-menu-item.is-clickable:focus-visible {
+  outline: none;
+  border-color: rgba(var(--focus-rgb), 0.6);
+  box-shadow: 0 0 0 var(--space-0-5) rgba(var(--focus-rgb), 0.24);
 }
 
 .notification-menu-item.unread {
@@ -2498,6 +2507,11 @@ h3 {
 
 .settings-account-summary {
   max-width: 520px;
+}
+
+.settings-actions.settings-account-actions {
+  max-width: 520px;
+  justify-content: flex-start;
 }
 
 .settings-readonly-row {

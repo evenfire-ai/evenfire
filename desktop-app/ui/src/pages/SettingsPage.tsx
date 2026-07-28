@@ -570,23 +570,6 @@ export function SettingsPage({
                     <p className="muted">Manage your Evenfire account details in Profile UI.</p>
                   </div>
                 </div>
-                <div className="settings-actions">
-                  <Button
-                    type="button"
-                    color="neutral"
-                    onClick={() =>
-                      void handleOpenProfileSettings({ section: 'profile', action: 'password' })
-                    }
-                  >
-                    Update password
-                  </Button>
-                  <Button
-                    type="button"
-                    onClick={() => void handleOpenProfileSettings({ section: 'profile' })}
-                  >
-                    Edit
-                  </Button>
-                </div>
               </div>
               <div className="settings-form settings-account-summary">
                 <div className="settings-readonly-row">
@@ -597,6 +580,23 @@ export function SettingsPage({
                   <span className="settings-readonly-label">Email</span>
                   <span>{me?.email || email || 'No email'}</span>
                 </div>
+              </div>
+              <div className="settings-actions settings-account-actions">
+                <Button
+                  type="button"
+                  color="neutral"
+                  onClick={() =>
+                    void handleOpenProfileSettings({ section: 'profile', action: 'password' })
+                  }
+                >
+                  Update password
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => void handleOpenProfileSettings({ section: 'profile' })}
+                >
+                  Edit
+                </Button>
               </div>
             </section>
           </section>
