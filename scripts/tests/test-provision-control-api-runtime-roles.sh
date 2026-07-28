@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$ROOT_DIR/deploy/scripts/provision-control-api-runtime-roles.sh"
 TEST_CONTEXT="clerum-runtime-role-test"
+CASE_CONTEXT="$TEST_CONTEXT"
 PASSWORD_A="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 PASSWORD_B="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
@@ -34,22 +35,31 @@ fi
 
 if [[ "${1:-}" == "-n" && "${3:-}" == "get" && "${4:-}" == "secret" ]]; then
   secret_name="${5:-}"
-  if [[ "$TEST_MODE" == "generate" ]]; then
+  if [[ "$TEST_MODE" == "api-failure" ]]; then
     exit 1
   fi
-  if [[ "$*" == *" -o go-template="* ]]; then
-    if [[ "$TEST_MODE" == "empty" ]]; then
-      exit 0
-    fi
-    if [[ "$TEST_MODE" == "invalid" ]]; then
-      printf 'postgresql://wrong-role:not-valid@wrong-host:5432/wrong-db'
-    elif [[ "$secret_name" == "control-api-postgres-runtime" ]]; then
-      printf 'postgresql://control_api_runtime:%s@control-postgres.control-plane.svc.cluster.local:5432/profiles' "$PASSWORD_A"
-    else
-      printf 'postgresql://trace_maintenance_runtime:%s@control-postgres.control-plane.svc.cluster.local:5432/profiles' "$PASSWORD_B"
-    fi
+  if [[ "$TEST_MODE" == "generate" ]]; then
+    exit 0
   fi
-  exit 0
+  if [[ "$*" == *" -o name --ignore-not-found"* ]]; then
+    printf 'secret/%s\n' "$secret_name"
+    exit 0
+  fi
+  if [[ "$*" == *" -o json --ignore-not-found"* ]]; then
+    dsn=''
+    if [[ "$TEST_MODE" == "invalid" ]]; then
+      dsn='postgresql://wrong-role:not-valid@wrong-host:5432/wrong-db'
+    elif [[ "$TEST_MODE" == "empty" ]]; then
+      dsn=''
+    elif [[ "$secret_name" == "control-api-postgres-runtime" ]]; then
+      dsn="postgresql://control_api_runtime:${PASSWORD_A}@control-postgres.control-plane.svc.cluster.local:5432/profiles"
+    else
+      dsn="postgresql://trace_maintenance_runtime:${PASSWORD_B}@control-postgres.control-plane.svc.cluster.local:5432/profiles"
+    fi
+    encoded="$(printf '%s' "$dsn" | base64 | tr -d '\n')"
+    printf '{"metadata":{"name":"%s"},"data":{"connection-string":"%s"}}\n' "$secret_name" "$encoded"
+    exit 0
+  fi
 fi
 
 if [[ "${1:-}" == "-n" && "${3:-}" == "create" && "${4:-}" == "secret" ]]; then
@@ -103,8 +113,8 @@ run_case() {
   : >"$TMP_DIR/sql-$mode.log"
   : >"$TMP_DIR/patches-$mode.jsonl"
   rm -f "$TMP_DIR/openssl-$mode.count"
-  TEST_MODE="$mode" \
-    TEST_CONTEXT="$TEST_CONTEXT" \
+  if ! TEST_MODE="$mode" \
+    TEST_CONTEXT="$CASE_CONTEXT" \
     TEST_LOG="$TMP_DIR/kubectl-$mode.log" \
     TEST_SQL="$TMP_DIR/sql-$mode.log" \
     TEST_PATCHES="$TMP_DIR/patches-$mode.jsonl" \
@@ -112,10 +122,13 @@ run_case() {
     PASSWORD_A="$PASSWORD_A" \
     PASSWORD_B="$PASSWORD_B" \
     PATH="$TMP_DIR:$PATH" \
-    CONTEXT="$TEST_CONTEXT" \
-    ALLOWED_CONTEXTS="$TEST_CONTEXT" \
+    CONTEXT="$CASE_CONTEXT" \
+    ALLOWED_CONTEXTS="$CASE_CONTEXT" \
     PROVISION_WORKFLOW_RECIPES_RUNTIME=false \
-    bash "$SCRIPT" >"$output_file" 2>&1
+    bash "$SCRIPT" >"$output_file" 2>&1; then
+    cat "$output_file" >&2
+    fail "runtime role provisioning case failed: $mode"
+  fi
 }
 
 if CONTEXT=blocked ALLOWED_CONTEXTS="$TEST_CONTEXT" PATH="$TMP_DIR:$PATH" \
@@ -157,7 +170,7 @@ fi
 pass "valid runtime DSNs are reused without rotation"
 
 if TEST_MODE=invalid \
-  TEST_CONTEXT="$TEST_CONTEXT" \
+  TEST_CONTEXT="$CASE_CONTEXT" \
   TEST_LOG="$TMP_DIR/kubectl-invalid.log" \
   TEST_SQL="$TMP_DIR/sql-invalid.log" \
   TEST_PATCHES="$TMP_DIR/patches-invalid.jsonl" \
@@ -165,8 +178,8 @@ if TEST_MODE=invalid \
   PASSWORD_A="$PASSWORD_A" \
   PASSWORD_B="$PASSWORD_B" \
   PATH="$TMP_DIR:$PATH" \
-  CONTEXT="$TEST_CONTEXT" \
-  ALLOWED_CONTEXTS="$TEST_CONTEXT" \
+  CONTEXT="$CASE_CONTEXT" \
+  ALLOWED_CONTEXTS="$CASE_CONTEXT" \
   PROVISION_WORKFLOW_RECIPES_RUNTIME=false \
   bash "$SCRIPT" >"$TMP_DIR/output-invalid" 2>&1; then
   fail "invalid existing runtime DSN was accepted"
@@ -176,6 +189,33 @@ grep -q 'contains an invalid runtime DSN' "$TMP_DIR/output-invalid" || \
 [[ ! -s "$TMP_DIR/sql-invalid.log" ]] || fail "invalid DSN reached Postgres"
 [[ ! -s "$TMP_DIR/patches-invalid.jsonl" ]] || fail "invalid DSN patched a Secret"
 pass "invalid existing runtime DSN fails closed before mutation"
+
+: >"$TMP_DIR/kubectl-api-failure.log"
+: >"$TMP_DIR/sql-api-failure.log"
+: >"$TMP_DIR/patches-api-failure.jsonl"
+if TEST_MODE=api-failure \
+  TEST_CONTEXT="$CASE_CONTEXT" \
+  TEST_LOG="$TMP_DIR/kubectl-api-failure.log" \
+  TEST_SQL="$TMP_DIR/sql-api-failure.log" \
+  TEST_PATCHES="$TMP_DIR/patches-api-failure.jsonl" \
+  TEST_OPENSSL_COUNT="$TMP_DIR/openssl-api-failure.count" \
+  PASSWORD_A="$PASSWORD_A" \
+  PASSWORD_B="$PASSWORD_B" \
+  PATH="$TMP_DIR:$PATH" \
+  CONTEXT="$CASE_CONTEXT" \
+  ALLOWED_CONTEXTS="$CASE_CONTEXT" \
+  PROVISION_WORKFLOW_RECIPES_RUNTIME=false \
+  bash "$SCRIPT" >"$TMP_DIR/output-api-failure" 2>&1; then
+  fail "Kubernetes Secret read failure was treated as absence"
+fi
+[[ ! -e "$TMP_DIR/openssl-api-failure.count" ]] || fail "API failure generated a credential"
+[[ ! -s "$TMP_DIR/sql-api-failure.log" ]] || fail "API failure reached Postgres"
+[[ ! -s "$TMP_DIR/patches-api-failure.jsonl" ]] || fail "API failure patched a Secret"
+pass "Kubernetes API and RBAC failures abort before credential mutation"
+
+! grep -q 'DSN=' "$SCRIPT" || fail "runtime DSN is exposed through a child environment"
+grep -q 'sys.stdin.read()' "$SCRIPT" || fail "runtime DSN parser does not consume stdin"
+pass "runtime DSNs are parsed through stdin, not child environments"
 
 if grep -v -- "--context=$TEST_CONTEXT" "$TMP_DIR/kubectl-generate.log" | grep -q .; then
   fail "a kubectl invocation omitted the explicit context"

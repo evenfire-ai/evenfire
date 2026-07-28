@@ -10,11 +10,7 @@ import { useContextsDataController } from '@hooks/domain/useContextsDataControll
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
-import {
-  notificationInboxDescription,
-  notificationKindLabel,
-  notificationPreviewText,
-} from '@/lib/notifications'
+import { notificationKindLabel, notificationPreviewText } from '@/lib/notifications'
 import type { AppNotificationKind } from '@/uiTypes'
 import type {
   AppHeaderProps,
@@ -194,6 +190,40 @@ export const AppHeader = React.memo(function AppHeader({
     if (elapsedMs < 3_600_000) return `${Math.floor(elapsedMs / 60_000)}m ago`
     if (elapsedMs < 86_400_000) return `${Math.floor(elapsedMs / 3_600_000)}h ago`
     return `${Math.floor(elapsedMs / 86_400_000)}d ago`
+  }
+
+  const openNotification = (notification: (typeof notifications)[number]) => {
+    setNotificationsOpen(false)
+    void onOpenNotification(notification)
+  }
+
+  const isNestedNotificationAction = (event: React.SyntheticEvent<HTMLDivElement>) => {
+    const target = event.target
+    if (!(target instanceof Element)) return false
+    const interactiveTarget = target.closest(
+      'button, a, input, select, textarea, [role="button"], [role="link"]'
+    )
+    return interactiveTarget !== null && interactiveTarget !== event.currentTarget
+  }
+
+  const handleNotificationCardClick = (
+    event: React.MouseEvent<HTMLDivElement>,
+    notification: (typeof notifications)[number]
+  ) => {
+    if (notification.kind === 'approval_required') return
+    if (isNestedNotificationAction(event)) return
+    openNotification(notification)
+  }
+
+  const handleNotificationCardKeyDown = (
+    event: React.KeyboardEvent<HTMLDivElement>,
+    notification: (typeof notifications)[number]
+  ) => {
+    if (notification.kind === 'approval_required') return
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    if (isNestedNotificationAction(event)) return
+    event.preventDefault()
+    openNotification(notification)
   }
 
   const selectedTeamMembers = useMemo<SearchMemberResult[]>(() => {
@@ -448,7 +478,6 @@ export const AppHeader = React.memo(function AppHeader({
   const pendingApprovalsCount = pendingApprovals.length
   const inboxNotificationCount = notifications.length
   const totalAttentionCount = pendingApprovalsCount + unreadNotificationCount
-  const totalInboxCount = pendingApprovalsCount + inboxNotificationCount
   const notificationButtonLabel =
     totalAttentionCount === 0
       ? 'Inbox'
@@ -719,34 +748,6 @@ export const AppHeader = React.memo(function AppHeader({
               role="dialog"
               aria-label="Notifications and approvals"
             >
-              <div className="notification-menu-header">
-                <div className="notification-menu-title-row">
-                  <strong>
-                    {totalInboxCount} item{totalInboxCount === 1 ? '' : 's'}
-                  </strong>
-                  <span className="notification-menu-section-meta">
-                    {notificationInboxDescription(
-                      pendingApprovalsCount > 0,
-                      inboxNotificationCount > 0
-                    )}
-                  </span>
-                  {pendingApprovalsLoading && (
-                    <span className="notification-inline-spinner" aria-label="Refreshing inbox" />
-                  )}
-                </div>
-                <div className="notification-menu-header-actions">
-                  <Button
-                    className="notification-clear-btn"
-                    color="neutral"
-                    onClick={onClearNotifications}
-                    disabled={!notifications.length}
-                    size="sm"
-                    variant="soft"
-                  >
-                    Clear
-                  </Button>
-                </div>
-              </div>
               <div className="notification-menu-body">
                 {pendingApprovalsCount > 0 && (
                   <section className="notification-menu-section">
@@ -858,10 +859,29 @@ export const AppHeader = React.memo(function AppHeader({
                   <section className="notification-menu-section">
                     <div className="notification-menu-section-header">
                       <div className="notification-menu-section-heading">
-                        <strong>Inbox</strong>
+                        <div className="notification-menu-title-row">
+                          <strong>Inbox ({inboxNotificationCount})</strong>
+                          {pendingApprovalsLoading && (
+                            <span
+                              className="notification-inline-spinner"
+                              aria-label="Refreshing inbox"
+                            />
+                          )}
+                        </div>
                         <span className="notification-menu-section-meta">
                           Updates from agents, workflows, and plugins.
                         </span>
+                      </div>
+                      <div className="notification-menu-header-actions">
+                        <Button
+                          className="notification-clear-btn"
+                          color="neutral"
+                          onClick={onClearNotifications}
+                          size="sm"
+                          variant="soft"
+                        >
+                          Clear
+                        </Button>
                       </div>
                     </div>
                     <div className="notification-menu-list">
@@ -869,7 +889,13 @@ export const AppHeader = React.memo(function AppHeader({
                         <div
                           key={notification.id}
                           data-testid="notification-menu-item"
-                          className={`notification-menu-item${notification.read ? '' : ' unread'}`}
+                          className={`notification-menu-item${
+                            notification.kind === 'approval_required' ? '' : ' is-clickable'
+                          }${notification.read ? '' : ' unread'}`}
+                          onClick={event => handleNotificationCardClick(event, notification)}
+                          onKeyDown={event => handleNotificationCardKeyDown(event, notification)}
+                          role={notification.kind === 'approval_required' ? undefined : 'button'}
+                          tabIndex={notification.kind === 'approval_required' ? undefined : 0}
                         >
                           <div className="notification-menu-item-header">
                             <p className="notification-menu-agent">{notification.agentName}</p>
@@ -919,10 +945,7 @@ export const AppHeader = React.memo(function AppHeader({
                                 <Button
                                   className="notification-open-btn"
                                   color="primary"
-                                  onClick={() => {
-                                    setNotificationsOpen(false)
-                                    void onOpenNotification(notification)
-                                  }}
+                                  onClick={() => openNotification(notification)}
                                   size="xs"
                                   variant="soft"
                                 >

@@ -104,6 +104,15 @@ describe('SidebarNav logo', () => {
     expect(container.querySelector('.sidebar-logo-text')).toBeNull()
     expect(container.querySelector('.sidebar-logo-copy')).toBeNull()
   })
+
+  it('labels the Files destination as Global File System in Resources', () => {
+    render(<SidebarNav {...baseProps()} />)
+
+    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+
+    expect(screen.getByTestId('nav-files').textContent).toContain('Global File System')
+    expect(screen.queryByRole('menuitem', { name: 'Files' })).toBeNull()
+  })
 })
 
 describe('SidebarNav new-chat affordance', () => {

@@ -123,6 +123,10 @@ describe('routes/profile', () => {
   }
 
   function accessCatalogGateway() {
+    const hosts = [
+      { metadata: { name: 'agent-a', namespace: 'mcp-host' }, spec: { enabled: true } },
+      { metadata: { name: 'agent-b', namespace: 'mcp-host' }, spec: { enabled: true } },
+    ]
     return {
       listResource: vi.fn(async (plural: string) => {
         if (plural === 'contexts') {
@@ -132,12 +136,17 @@ describe('routes/profile', () => {
           ]
         }
         if (plural === 'hosts') {
-          return [
-            { metadata: { name: 'agent-a' }, spec: { enabled: true } },
-            { metadata: { name: 'agent-b' }, spec: { enabled: true } },
-          ]
+          return hosts
         }
         return []
+      }),
+      getResource: vi.fn(async (plural: string, name: string) => {
+        if (plural !== 'hosts') {
+          throw Object.assign(new Error('not-found'), { statusCode: 404 })
+        }
+        const host = hosts.find(candidate => candidate.metadata.name === name)
+        if (!host) throw Object.assign(new Error('not-found'), { statusCode: 404 })
+        return host
       }),
     }
   }
@@ -510,7 +519,17 @@ describe('routes/profile', () => {
       .expect({
         userId: 'u1',
         agentNames: ['agent-a'],
-        agents: [{ name: 'agent-a', contextRef: null, mcpServers: [] }],
+        agents: [
+          {
+            name: 'agent-a',
+            namespace: 'mcp-host',
+            displayName: 'agent-a',
+            active: true,
+            gfsSubject: { type: 'host', id: '1st:mcp-host/agent-a' },
+            contextRef: null,
+            mcpServers: [],
+          },
+        ],
       })
 
     await withInternalServiceAuthAndUserSession(request(app).get('/external/teams/t1/contexts'))
@@ -523,10 +542,68 @@ describe('routes/profile', () => {
         teamId: 't1',
         agentNames: ['agent-a', 'agent-b'],
         agents: [
-          { name: 'agent-a', contextRef: null, mcpServers: [] },
-          { name: 'agent-b', contextRef: null, mcpServers: [] },
+          {
+            name: 'agent-a',
+            namespace: 'mcp-host',
+            displayName: 'agent-a',
+            active: true,
+            gfsSubject: { type: 'host', id: '1st:mcp-host/agent-a' },
+            contextRef: null,
+            mcpServers: [],
+          },
+          {
+            name: 'agent-b',
+            namespace: 'mcp-host',
+            displayName: 'agent-b',
+            active: true,
+            gfsSubject: { type: 'host', id: '1st:mcp-host/agent-b' },
+            contextRef: null,
+            mcpServers: [],
+          },
         ],
       })
+  })
+
+  it('preserves user and team names-only access when Host enrichment has a transient failure', async () => {
+    svc.getUserAgents.mockResolvedValue({
+      userId: 'u1',
+      agentNames: ['agent-a', 'agent-stale'],
+    })
+    svc.getTeamAgents.mockResolvedValue({
+      teamId: 't1',
+      agentNames: ['agent-b'],
+    })
+    const transientError = Object.assign(new Error('Kubernetes API unavailable'), {
+      statusCode: 503,
+    })
+    const gateway = accessCatalogGateway()
+    gateway.getResource.mockRejectedValue(transientError)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, gateway)
+
+    await withInternalServiceAuthAndUserSession(request(app).get('/external/users/u1/agents'))
+      .expect(200)
+      .expect({
+        userId: 'u1',
+        agentNames: ['agent-a', 'agent-stale'],
+        agents: [],
+      })
+
+    await withInternalServiceAuthAndUserSession(request(app).get('/external/teams/t1/agents'))
+      .expect(200)
+      .expect({ teamId: 't1', agentNames: ['agent-b'], agents: [] })
+
+    expect(gateway.listResource).not.toHaveBeenCalledWith('hosts', 'mcp-host')
+    expect(gateway.getResource.mock.calls.map(call => call[1])).toEqual([
+      'agent-a',
+      'agent-stale',
+      'agent-b',
+    ])
+    expect(warn).toHaveBeenCalledTimes(2)
+    warn.mockRestore()
   })
 
   it('verifies session token server-side for rpc token issuance', async () => {

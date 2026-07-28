@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { GfsSubjectBatchError } from '@lib/gfsSubjectBatch'
 import { GfsDelegationPanel } from '../delegation'
 
 /**
@@ -68,8 +67,8 @@ describe('GfsDelegationPanel', () => {
     expect(screen.getByRole('button', { name: 'Create share' })).toBeTruthy()
   })
 
-  it('surfaces a server no-escalation rejection (fail-loud, not swallowed)', async () => {
-    const onGrant = vi.fn().mockRejectedValue(new Error('escalation_rejected'))
+  it('surfaces a server no-escalation rejection mapped to its human message (fail-loud)', async () => {
+    const onGrant = vi.fn().mockRejectedValue(new Error('403 Forbidden: escalation_rejected'))
     render(
       <GfsDelegationPanel
         affordances={{ canDelegate: true, grantableBits: ['read'], canCreateShare: false }}
@@ -83,7 +82,8 @@ describe('GfsDelegationPanel', () => {
     fireEvent.click(screen.getByRole('option', { name: /Delegate User/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
 
-    const alert = await screen.findByText(/escalation_rejected/)
+    // The panel maps the server code via describeGfsGrantError — never the raw code.
+    const alert = await screen.findByText('You can only grant permissions you already hold here.')
     expect(alert).toBeTruthy()
   })
 
@@ -124,16 +124,10 @@ describe('GfsDelegationPanel', () => {
     expect(screen.queryByText('Context')).toBeNull()
   })
 
-  it('retains only failed subjects when a batch partially succeeds', async () => {
-    const onGrant = vi
-      .fn()
-      .mockRejectedValue(
-        new GfsSubjectBatchError(
-          'Grant access',
-          ['user:successful'],
-          [{ subjectKey: 'team:blocked', message: 'escalation_rejected' }]
-        )
-      )
+  it('keeps the whole selection when the atomic bulk grant is rejected', async () => {
+    // The bulk grant is all-or-nothing: a rejection means NOTHING landed, so
+    // every selected subject stays selected for a retry (no partial-success).
+    const onGrant = vi.fn().mockRejectedValue(new Error('400 Bad Request: subjects_invalid'))
     render(
       <GfsDelegationPanel
         affordances={{ canDelegate: true, grantableBits: ['read'], canCreateShare: false }}
@@ -151,8 +145,10 @@ describe('GfsDelegationPanel', () => {
     fireEvent.click(screen.getByRole('option', { name: /Blocked Team/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
 
-    await screen.findByText(/team:blocked \(escalation_rejected\)/)
-    expect(screen.queryByRole('button', { name: 'Remove Successful User' })).toBeNull()
+    await screen.findByText('Some selected subjects are invalid and were rejected.')
+    expect(onGrant).toHaveBeenCalledTimes(1)
+    expect(onGrant).toHaveBeenCalledWith(['user:successful', 'team:blocked'], ['read'])
+    expect(screen.getByRole('button', { name: 'Remove Successful User' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Remove Blocked Team' })).toBeTruthy()
   })
 })

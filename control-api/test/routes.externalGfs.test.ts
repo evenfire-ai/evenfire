@@ -30,6 +30,8 @@ vi.mock('../src/config.js', () => ({
   config: {
     gfscBaseUrl: 'http://gfsc.gfs.svc:8087',
     gfscWriteBaseUrl: 'http://gfsc-writer.gfs.svc:8087',
+    // The eligibility guard maps caller agent names to 1st:<hostsNamespace>/<name>.
+    hostsNamespace: 'mcp-host',
   },
 }))
 vi.mock('../src/db.js', () => ({
@@ -53,7 +55,7 @@ const U1 = '11111111-aaaa-4aaa-8aaa-111111111111'
 const U2 = '22222222-bbbb-4bbb-8bbb-222222222222'
 const T1 = '33333333-cccc-4ccc-8ccc-333333333333'
 const T2 = '44444444-dddd-4ddd-8ddd-444444444444'
-const H1 = '1st:mcp-host/standalone'
+const H1 = '1st:mcp-host/agent-a'
 const CORRELATION_ID = '55555555-eeee-4eee-8eee-555555555555'
 const SESSION = {
   userId: U1,
@@ -88,6 +90,24 @@ async function buildOperatorShareApp() {
   })
   const router = express.Router()
   registerGfsShareRoutes(router)
+  app.use(router)
+  return app
+}
+
+// Admin (Control UI) grants plane — the SAME grant surface the external plane
+// reuses, but mounted behind its OWN operator rate limiter (bucketType
+// `gfs_grants`, key `gfsgrants:<sub>`). Used to prove the two planes never share
+// a rate-limit bucket for the same subject id.
+async function buildAdminGrantsApp(sub: string) {
+  const { registerGfsGrantRoutes } = await import('../src/routes/gfs/grants.js')
+  const app = express()
+  app.use(express.json())
+  app.use((req, _res, next) => {
+    ;(req as typeof req & { adminAuth: { sub: string } }).adminAuth = { sub }
+    next()
+  })
+  const router = express.Router()
+  registerGfsGrantRoutes(router)
   app.use(router)
   return app
 }
@@ -130,8 +150,28 @@ function combinedAuthorityRow(
 }
 
 /** Route the grant engine's queries by SQL shape. */
-function dbReturning(grants: Record<string, unknown>[]) {
+function dbReturning(
+  grants: Record<string, unknown>[],
+  opts: {
+    callerAgentNames?: string[]
+    grantListRows?: Record<string, unknown>[]
+    rateLimitCount?: number
+  } = {}
+) {
+  // The external-plane eligibility guard resolves the caller's own agents via
+  // getUserAgents (user_agents table). Default matches H1's name so existing
+  // host-grant fixtures represent an in-directory agent.
+  const callerAgentNames = opts.callerAgentNames ?? ['agent-a']
   mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
+    if (text.includes('FROM user_agents')) {
+      return { rows: callerAgentNames.map(name => ({ agent_name: name })) }
+    }
+    if (text.includes('rate_limit_buckets')) {
+      return { rows: [{ count: opts.rateLimitCount ?? 1 }] }
+    }
+    if (text.includes('ORDER BY created_at ASC, id ASC')) {
+      return { rows: opts.grantListRows ?? [] }
+    }
     if (text.includes('authority_grants AS') && text.includes('authority_shares AS')) {
       return combinedAuthorityRow(grants, values)
     }
@@ -814,6 +854,33 @@ describe('authenticated bulk grant/share transport', () => {
     ])
   })
 
+  it('denies an entire plural grant batch when a managed first-party host exceeds read/write', async () => {
+    auth()
+    // The caller holds every requested bit, so the only thing standing between
+    // this batch and a mutation is the managed first-party host permission cap.
+    authority(['manage_acl', 'read', 'delete'])
+    const app = await buildApp()
+
+    const res = await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .set('x-correlation-id', CORRELATION_ID)
+      .send({
+        resourceId: R,
+        subjects: [
+          { type: 'user', id: U2 },
+          { type: 'host', id: H1 },
+        ],
+        permissions: ['read', 'delete'],
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('managed_agent_permission_forbidden')
+    expect(
+      mockQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO gfs_grants'))
+    ).toBe(false)
+  })
+
   it('does not publish staged mutation or audit effects when event persistence fails', async () => {
     auth()
     authority(['manage_acl', 'read'])
@@ -1061,5 +1128,192 @@ describe('GET /external/gfs/resources', () => {
         coversDescendants: false,
       }),
     ])
+  })
+})
+
+describe('per-agent delegation surface (guard + list + rate limit)', () => {
+  const authority = (permissions: string[], opts: Parameters<typeof dbReturning>[1] = {}) =>
+    dbReturning(
+      [
+        {
+          subject_type: 'user',
+          subject_id: U1,
+          resource_id: R,
+          permissions,
+          inherit: false,
+        },
+      ],
+      opts
+    )
+  const putGrants = (app: express.Express, body: Record<string, unknown>) =>
+    request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .send({ resourceId: R, permissions: ['read'], inherit: true, ...body })
+
+  it('rejects a single valid-but-foreign host without indexes and writes nothing', async () => {
+    auth()
+    authority(['manage_acl', 'read'], { callerAgentNames: ['other-agent'] })
+    const app = await buildApp()
+    const res = await putGrants(app, { subject: { type: 'host', id: H1 } })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('foreign_agent_forbidden')
+    expect(res.body.invalidIndexes).toBeUndefined()
+    expect(
+      mockQuery.mock.calls.filter(call => String(call[0]).includes('INSERT INTO gfs_grants'))
+    ).toHaveLength(0)
+  })
+
+  it('rejects a plural body with the foreign host indexes and writes nothing', async () => {
+    auth()
+    authority(['manage_acl', 'read'], { callerAgentNames: ['agent-b'] })
+    const app = await buildApp()
+    const res = await putGrants(app, {
+      subjects: [
+        { type: 'user', id: U2 },
+        { type: 'host', id: H1 },
+        { type: 'host', id: '1st:mcp-host/agent-b' },
+      ],
+    })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('foreign_agent_forbidden')
+    expect(res.body.invalidIndexes).toEqual([1])
+    expect(
+      mockQuery.mock.calls.filter(call => String(call[0]).includes('INSERT INTO gfs_grants'))
+    ).toHaveLength(0)
+  })
+
+  it('leaves malformed host ids to the subjects_invalid contract', async () => {
+    auth()
+    authority(['manage_acl', 'read'], { callerAgentNames: [] })
+    const app = await buildApp()
+    const res = await putGrants(app, { subjects: [{ type: 'host', id: 'not-a-host' }] })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('subjects_invalid')
+  })
+
+  it('lists id-bearing grant rows for a manage_acl holder', async () => {
+    auth()
+    authority(['manage_acl'], {
+      grantListRows: [
+        {
+          id: 'aaaa1111-0000-4000-8000-000000000001',
+          drive: 'main',
+          resource_id: R,
+          subject_type: 'host',
+          subject_id: H1,
+          permissions: ['read', 'write'],
+          inherit: true,
+        },
+      ],
+    })
+    const app = await buildApp()
+    const res = await request(app)
+      .get('/external/gfs/grants')
+      .query({ drive: 'main', resourceId: R })
+      .set('x-user-session-token', 'sess')
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      items: [
+        {
+          id: 'aaaa1111-0000-4000-8000-000000000001',
+          drive: 'main',
+          resourceId: R,
+          subject: { type: 'host', id: H1 },
+          permissions: ['read', 'write'],
+          inherit: true,
+        },
+      ],
+    })
+  })
+
+  it('denies the grants list to a caller without manage_acl', async () => {
+    auth()
+    authority(['read', 'write'])
+    const app = await buildApp()
+    const res = await request(app)
+      .get('/external/gfs/grants')
+      .query({ drive: 'main', resourceId: R })
+      .set('x-user-session-token', 'sess')
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('manage_acl_required')
+  })
+
+  it('answers an unknown resource with the same 403 (no existence oracle)', async () => {
+    auth()
+    dbReturning([])
+    const app = await buildApp()
+    const res = await request(app)
+      .get('/external/gfs/grants')
+      .query({ drive: 'main', resourceId: R2 })
+      .set('x-user-session-token', 'sess')
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('manage_acl_required')
+  })
+
+  it('rate limits the delegation plane per user with retryAfterSeconds', async () => {
+    auth()
+    authority(['manage_acl', 'read'], { rateLimitCount: 31 })
+    const app = await buildApp()
+    const res = await putGrants(app, { subject: { type: 'user', id: U2 } })
+    expect(res.status).toBe(429)
+    expect(res.body.error).toBe('Too Many Requests')
+    expect(res.body.retryAfterSeconds).toBeGreaterThanOrEqual(1)
+    const bucketCall = mockQuery.mock.calls.find(call =>
+      String(call[0]).includes('rate_limit_buckets')
+    )
+    expect(bucketCall?.[1]?.[0]).toBe(`gfsgrants-ext:${U1}`)
+  })
+
+  it('keys the external delegation plane in a bucket DISTINCT from the admin plane for the same subject', async () => {
+    // Same subject id (U1) is driven through BOTH planes; each plane's own
+    // production getBucketKey closure runs and its bucket key is captured from
+    // the rate_limit_buckets INSERT ([bucketKey, windowStartMs] → values[0]).
+    // The PK of rate_limit_buckets is (bucket_key, window_start_ms), so distinct
+    // keys are distinct token buckets — exhausting one can never throttle the
+    // other for the same subject.
+    auth()
+    authority(['manage_acl', 'read'])
+    const externalApp = await buildApp()
+    await putGrants(externalApp, { subject: { type: 'user', id: U2 } })
+    const externalKey = mockQuery.mock.calls.find(call =>
+      String(call[0]).includes('rate_limit_buckets')
+    )?.[1]?.[0]
+
+    // Admin (operator) grants plane keyed off adminAuth.sub === U1 (same id).
+    mockQuery.mockClear()
+    const adminApp = await buildAdminGrantsApp(U1)
+    await request(adminApp).get('/gfs/grants').query({ drive: 'main', resourceId: R })
+    const adminKey = mockQuery.mock.calls.find(call =>
+      String(call[0]).includes('rate_limit_buckets')
+    )?.[1]?.[0]
+
+    // Both planes emitted a bucket key for the same subject…
+    expect(externalKey).toBe(`gfsgrants-ext:${U1}`)
+    expect(adminKey).toBe(`gfsgrants:${U1}`)
+    // …and they are DISTINCT buckets (never collide). The `-ext` separator means
+    // the external key does not fall under the admin `gfsgrants:` namespace.
+    expect(externalKey).not.toBe(adminKey)
+    expect(String(externalKey).startsWith('gfsgrants-ext:')).toBe(true)
+    expect(String(adminKey).startsWith('gfsgrants-ext:')).toBe(false)
+    expect(String(adminKey).startsWith('gfsgrants:')).toBe(true)
+  })
+
+  it('adjudicates only well-formed foreign hosts in foreignHostSubjectIndexes', async () => {
+    const { foreignHostSubjectIndexes } = await import('../src/routes/external/gfs.js')
+    const allowed = new Set([H1])
+    expect(
+      foreignHostSubjectIndexes(
+        [
+          { type: 'host', id: H1 },
+          { type: 'host', id: '3rd:sandbox-recipes/tool' },
+          { type: 'host', id: '1st:mcp-host/standalone' },
+          { type: 'user', id: U2 },
+          { type: 'host', id: 'garbage' },
+          null,
+        ],
+        allowed
+      )
+    ).toEqual([1, 2])
   })
 })

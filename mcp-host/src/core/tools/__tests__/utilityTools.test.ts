@@ -6,6 +6,12 @@ import { DefaultPromptBuilder, TOOL_DISCOVERY_TEXT } from '../../reasoning/promp
 import { JsonTransformTool } from '../jsonTransform'
 import { NativeToolRegistry } from '../nativeToolRegistry'
 
+function encodedClaims(scopes: unknown): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url')
+  const payload = Buffer.from(JSON.stringify({ scopes })).toString('base64url')
+  return `${header}.${payload}.sig`
+}
+
 describe('JsonTransformTool', () => {
   const tool = new JsonTransformTool()
 
@@ -110,13 +116,14 @@ describe('NativeToolRegistry', () => {
   it('registers GFS tools only when runtime GFS access is present', () => {
     const key = 'MCP_HOST_GFS_TOKEN'
     const prev = process.env[key]
-    process.env[key] = 'gfs-access'
+    process.env[key] = encodedClaims(['gfs.read', 'gfs.write'])
     try {
       const names = new NativeToolRegistry(config, 'test-conv').listDefinitions().map(d => d.name)
       expect(names).toContain('clerum__gfs_accessible')
       expect(names).toContain('clerum__gfs_list')
       expect(names).toContain('clerum__gfs_read')
       expect(names).toContain('clerum__gfs_write')
+      expect(names).toContain('clerum__gfs_copy')
     } finally {
       if (prev === undefined) delete process.env[key]
       else process.env[key] = prev

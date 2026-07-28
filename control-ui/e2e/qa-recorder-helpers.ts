@@ -9,6 +9,10 @@
 // the loopback target guard, opt-in confirmations, and named screenshot/video
 // proof capture. Journey-specific interactions stay inside their own specs.
 import { type APIRequestContext, type Page, type TestInfo, expect } from '@playwright/test'
+import { randomBytes } from 'node:crypto'
+import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
+import * as path from 'node:path'
 
 export const CONTROL_UI_URL = process.env.CONTROL_UI_URL || 'http://127.0.0.1:3000'
 export const CONTROL_API_URL = process.env.CONTROL_API_URL || 'http://127.0.0.1:8090'
@@ -87,13 +91,43 @@ export function adminCredentials(): { username: string; password: string } {
 
 /** Unique lowercase k8s-name-safe identifier for temporary resources. */
 export function uniqueE2EName(base: string): string {
-  // Date.now()/Math.random() are fine here — this runs at test runtime in Node,
-  // not inside a Workflow script.
-  return `${base}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+  const suffix = `${Date.now().toString(36)}-${randomBytes(8).toString('hex')}`
+  const safeBase =
+    base
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/^-+|-+$/g, '') || 'qa-recorder'
+  return `${safeBase.slice(0, 62 - suffix.length)}-${suffix}`
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, '-')
     .slice(0, 63)
     .replace(/-$/, '')
+}
+
+/** Create a private, exclusively-written upload fixture and remove its directory after use. */
+export async function createSecureTempFile(fileName: string, contents: string) {
+  const safeFileName = path.basename(fileName)
+  if (!safeFileName || safeFileName !== fileName) {
+    throw new Error(`Temporary upload filename must be a basename; received "${fileName}".`)
+  }
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qa-recorder-upload-'))
+  const filePath = path.join(tempDir, safeFileName)
+  try {
+    await fs.writeFile(filePath, contents, {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    })
+  } catch (error) {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {})
+    throw error
+  }
+
+  return {
+    filePath,
+    cleanup: () => fs.rm(tempDir, { recursive: true, force: true }),
+  }
 }
 
 /**

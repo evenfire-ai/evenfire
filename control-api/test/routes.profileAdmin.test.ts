@@ -187,6 +187,66 @@ describe('routes/profileAdmin', () => {
     expect(svc.createInvitationForTeams).not.toHaveBeenCalled()
   })
 
+  it('returns deleted context history for admin user and team views', async () => {
+    ;(gatewayStub.listResource as any).mockImplementation(async (plural: string) => {
+      if (plural === 'contexts') {
+        return [{ metadata: { name: 'ctx-live' }, spec: { contextId: 'ctx-alias' } }]
+      }
+      return []
+    })
+    svc.getUserContexts.mockResolvedValue({ userId: 'u1', contextIds: ['ctx-live', 'ctx-old'] })
+    svc.getTeamContexts.mockResolvedValue({ teamId: 't1', contextIds: ['ctx-live', 'ctx-old'] })
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
+
+    await request(app)
+      .get('/admin/users/u1/contexts')
+      .expect(200)
+      .expect({ userId: 'u1', contextIds: ['ctx-live'], deletedContextIds: ['ctx-old'] })
+    await request(app)
+      .get('/admin/teams/t1/contexts')
+      .expect(200)
+      .expect({ teamId: 't1', contextIds: ['ctx-live'], deletedContextIds: ['ctx-old'] })
+  })
+
+  it('preserves deleted context history on admin updates', async () => {
+    ;(gatewayStub.listResource as any).mockImplementation(async (plural: string) => {
+      if (plural === 'contexts') {
+        return [{ metadata: { name: 'ctx-live' }, spec: { contextId: 'ctx-alias' } }]
+      }
+      return []
+    })
+    svc.getUserContexts.mockResolvedValue({ userId: 'u1', contextIds: ['ctx-old'] })
+    svc.setUserContexts.mockResolvedValue({ userId: 'u1', contextIds: ['ctx-live', 'ctx-old'] })
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
+
+    await request(app)
+      .put('/admin/users/u1/contexts')
+      .send({ contextIds: ['ctx-live', 'ctx-stale-submit'] })
+      .expect(200)
+      .expect({ userId: 'u1', contextIds: ['ctx-live'], deletedContextIds: ['ctx-old'] })
+    expect(svc.setUserContexts).toHaveBeenCalledWith('u1', ['ctx-live', 'ctx-old'], TEST_ADMIN_SUB)
+  })
+
+  it('returns a structured 503 when context reconciliation is unavailable', async () => {
+    ;(gatewayStub.listResource as any).mockRejectedValue(new Error('k8s unavailable'))
+    svc.getUserContexts.mockResolvedValue({ userId: 'u1', contextIds: ['ctx-live'] })
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
+
+    await request(app)
+      .get('/admin/users/u1/contexts')
+      .expect(503)
+      .expect({ error: 'context_reconciliation_unavailable' })
+  })
+
   it('handles invalid payloads and not-found branches', async () => {
     svc.renameTeam.mockResolvedValue(null)
     svc.updateAdminUserContext.mockResolvedValue(null)

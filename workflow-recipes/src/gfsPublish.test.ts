@@ -28,7 +28,7 @@ describe('planPublish', () => {
     ).toThrow(PublishError)
   })
 
-  it('rejects an invalid name (slash and control chars — no drift vs move/resources)', () => {
+  it('rejects an invalid name (slash and control chars — no drift vs GFS resource names)', () => {
     expect(() =>
       planPublish({
         drive: 'main',
@@ -37,8 +37,8 @@ describe('planPublish', () => {
         artifactRef: 'artifact://x',
       })
     ).toThrow(/path_invalid|invalid name/i)
-    // control chars (e.g. tab/NUL) must be rejected here too — the review found
-    // this validator had drifted from move.ts / resources.ts.
+    // Control chars (e.g. tab/NUL) must be rejected here too so publishing
+    // remains aligned with the canonical GFS resource-name contract.
     expect(() =>
       planPublish({
         drive: 'main',

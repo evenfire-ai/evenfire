@@ -82,11 +82,11 @@ vi.mock('../src/mcpHostRuntimeTokenIssuerClient', () => ({
 }))
 
 vi.mock('../src/gfsHostBinding', () => ({
-  mintHostGfsToken: vi.fn().mockResolvedValue({
+  mintHostGfsToken: vi.fn(async (namespace: string, name: string) => ({
     ['to' + 'ken']: 'gfs-runtime-value',
     expiresInSeconds: 600,
-    subject: 'host:1st:mcp-host/stateless-host',
-  }),
+    subject: `host:1st:${namespace}/${name}`,
+  })),
 }))
 
 function makeStatelessHost(
@@ -439,7 +439,8 @@ describe('HostReconciler.publishSuspendBlockedReason', () => {
         lifecycle: {
           state: 'active',
           wakeHandledGeneration: 0,
-          reason: '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
+          reason:
+            '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
         },
       },
     })
@@ -452,7 +453,8 @@ describe('HostReconciler.publishSuspendBlockedReason', () => {
       freshHostRead({
         state: 'active',
         wakeHandledGeneration: 0,
-        reason: '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
+        reason:
+          '1 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
       })
     )
 

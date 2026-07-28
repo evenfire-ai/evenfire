@@ -5,11 +5,15 @@ credentials (including the multi-slot providers **Google Vertex AI** and
 **Amazon Bedrock**), how to manage the operator-declared model allowlist, and how
 the per-session model selector behaves in the desktop app.
 
-The canonical provider set — `openai`, `claude` (Anthropic), `zai`, `bailian`,
-`vertex`, `bedrock` — and their credential slots live in the shared
-`@clerum/llm-providers` package, which the Control UI, control-api, mcp-host, and
-the workflow runtime all consume. A Host is bound to **one** provider
-(`spec.model.provider`); the allowlist and selector operate within that provider.
+The canonical provider set — **21 providers**, from `openai`, `claude`
+(Anthropic), `zai` and `bailian` through the own-SDK `vertex` / `bedrock` to the
+OpenAI-compatible additions and `azure` — and their credential slots live in the
+shared `@clerum/llm-providers` package, which the Control UI, control-api,
+mcp-host, and the workflow runtime all consume. See the
+[providers overview](../llm-providers/README.md) for the full list and the
+per-surface support matrix (`bedrock` and `azure` are host-only). A Host is bound
+to **one** provider (`spec.model.provider`); the allowlist and selector operate
+within that provider.
 
 ## 1. Where credentials and non-secret config live
 
@@ -31,6 +35,12 @@ secrets form only shows a hint linking there; it does not duplicate the editor.
 | Bailian                     | `bailian-api-key`                             | —                                                 |
 | Google Vertex AI (`vertex`) | `vertex-service-account-json`                 | `VERTEX_PROJECT_ID` (required), `VERTEX_LOCATION` |
 | Amazon Bedrock (`bedrock`)  | `aws-access-key-id` + `aws-secret-access-key` | `AWS_REGION` (required)                           |
+| Azure OpenAI (`azure`)      | `azure-openai-api-key`                        | `AZURE_OPENAI_ENDPOINT` (required), `AZURE_OPENAI_API_VERSION` |
+
+Every other provider (the OpenAI-compatible additions — `openrouter`, `gemini`,
+`deepseek`, `groq`, `together`, `fireworks`, `mistral`, `xai`, `cerebras`,
+`deepinfra`, `perplexity`, `moonshot`, `nebius`, `novita`) uses a single
+`<id>-api-key` slot and needs no non-secret env.
 
 The secrets form is **write-only**: existing values are never displayed (the API
 returns key names only). To rotate a key, re-enter it.
@@ -69,18 +79,21 @@ returns key names only). To rotate a key, re-enter it.
    allowlist. Bedrock model ids are runtime-qualified, e.g.
    `anthropic.claude-sonnet-4-6-v1:0`.
 
-### Bedrock limitation in workflows
+### Bedrock and Azure in workflows
 
-The per-provider fallback engine and the runtime model selector target the
-interactive agent first. Multi-credential providers such as Bedrock are fully
-supported for interactive Hosts; **workflow steps** that pin a Bedrock model
-follow the workflow's own model-configuration path and do not yet participate in
-the runtime selector. Configure workflow-step models explicitly in the recipe.
+`bedrock` and `azure` are **not admissible in WorkflowRecipe steps**: they are
+deliberately absent from the recipe CRD's provider enum, so a recipe pinning
+either is rejected at admission. The workflow `configure` transport carries a
+single credential string, which can deliver neither Bedrock's key pair nor
+Azure's required endpoint. Both remain fully supported for interactive Hosts;
+the other 19 providers are admissible in recipes — see the
+[providers overview](../llm-providers/README.md) for the per-surface matrix and
+the `clerum-model-secret-mapping` caveat.
 
 > **Dev-mode note.** When mcp-host runs in dev mode with no explicit
 > `spec.model`, it auto-detects the provider from whichever credential env vars
-> are present, in priority order (`openai` → `claude` → `zai` → `bailian` →
-> `vertex` → `bedrock`). Because Bedrock's slots are the standard AWS variables
+> are present, in canonical id order (`openai` → `claude` → `zai` → `bailian` →
+> `vertex` → `bedrock` → the rest). Because Bedrock's slots are the standard AWS variables
 > (`aws-access-key-id` / `aws-secret-access-key`), a shell that already exports
 > generic AWS credentials — with `AWS_REGION` also set — can auto-select
 > `bedrock` when no higher-priority provider key is exported. Set `spec.model`
@@ -91,8 +104,9 @@ the runtime selector. Configure workflow-step models explicitly in the recipe.
 Each provider group in the secrets form has an **Add credential slot** action.
 It creates an additional key in the **same** LLM Secret with a suggested name
 like `openai-api-key-fb1` (editable, validated as a Kubernetes data key). These
-extra keys are how a future fallback policy references a second credential of the
-same provider (e.g. a backup Anthropic key). Because the listing enumerates the
+extra keys are how a Host's fallback policy (`spec.llmPolicy.fallbacks[]` with a
+pinned `credentialSlot`) references a second credential of the same provider
+(e.g. a backup Anthropic key). Because the listing enumerates the
 Secret's real key names, extra slots simply appear with their own present/absent
 status — there is no parallel registry to maintain.
 

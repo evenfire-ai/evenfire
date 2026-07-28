@@ -98,11 +98,12 @@ describe('HostDetailsPage identity integration', () => {
 
   it('renders the Identity section tab with the current host name', async () => {
     mockParams = { name: 'foo', tab: 'identity' }
-    render(<HostDetailsPage />)
+    const { container } = render(<HostDetailsPage />)
     expect(await screen.findByTestId('identity-tab')).toHaveTextContent('Identity editor for foo')
+    expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
   })
 
-  it('places Identity as the second agent detail tab', async () => {
+  it('renders the agent detail tabs in order', async () => {
     render(<HostDetailsPage />)
 
     const tabs = await screen.findAllByRole('tab')
@@ -110,26 +111,72 @@ describe('HostDetailsPage identity integration', () => {
     expect(tabs.map(tab => tab.textContent)).toEqual([
       'Overview',
       'Identity',
-      'Contexts',
-      'Env vars',
+      'Models & creds',
+      'Context',
       'Member access',
       'Team access',
+      'Per-tool approval',
+      'Env vars',
     ])
   })
 
-  it('preserves personalization when saving overview changes', async () => {
-    render(<HostDetailsPage />)
+  it('puts Allowed models in place of Model name and spells out Secret reference', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    const { container } = render(<HostDetailsPage />)
+
+    expect(await screen.findByText('Allowed models')).toBeInTheDocument()
+    expect(screen.queryByText('Model name')).not.toBeInTheDocument()
+    expect(screen.getByText('Secret reference')).toBeInTheDocument()
+    expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
+    expect(container.querySelector('.cu-agent-detail-heading')).not.toBeNull()
+    expect(container.querySelector('.cu-agent-detail-toolbar')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+
+    expect(
+      screen.getByLabelText('Allowed models · OpenAI', { selector: '#llm-allowed-openai' })
+    ).toBeInTheDocument()
+    expect(screen.queryByLabelText('Model', { selector: '#llm-primary-model' })).toBeNull()
+    expect(screen.getByLabelText('Secret reference')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Save' }).closest('.cu-agent-detail-toolbar')
+    ).not.toBeNull()
+    expect(container.querySelector('.cu-agent-detail-card .cu-agent-detail-scroll')).not.toBeNull()
+  })
+
+  it('keeps Per-tool approval actions in the top toolbar without a duplicate title', async () => {
+    mockParams = { name: 'foo', tab: 'approvals' }
+    const { container } = render(<HostDetailsPage />)
+
+    expect(await screen.findByLabelText('http_request')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Save' }).closest('.cu-host-approval-section__actions')
+    ).not.toBeNull()
+    expect(container.querySelector('.cu-host-approval-section .cu-section-title')).toBeNull()
+  })
+
+  it('shows editable Name and Type in Overview without Display ID and preserves personalization', async () => {
+    const { container } = render(<HostDetailsPage />)
+    expect(await screen.findByText('Name')).toBeInTheDocument()
+    expect(await screen.findByText('Type')).toBeInTheDocument()
+    expect(screen.queryByText('Display ID')).not.toBeInTheDocument()
+    expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
+    expect(container.querySelector('.cu-agent-detail-heading')).not.toBeNull()
+    expect(container.querySelector('.cu-agent-detail-toolbar')).toBeNull()
+
     const [overviewEditButton] = await screen.findAllByRole('button', { name: 'Edit' })
     await waitFor(() => expect(overviewEditButton).toBeEnabled())
     fireEvent.click(overviewEditButton)
-    fireEvent.change(screen.getByLabelText('Display ID'), { target: { value: 'foo-updated' } })
+    expect(screen.getByLabelText('Name')).toHaveValue('foo')
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'foo' } })
+    fireEvent.change(screen.getByLabelText('Type'), { target: { value: 'stateless' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
       expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', expect.any(Object))
     )
     const payload = (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2]
-    expect(payload.spec.host).toBe('foo-updated')
+    expect(payload.spec.lifecycle).toEqual({ stateless: true })
     expect(payload.spec.personalization).toEqual(host.spec.personalization)
     expect(payload.spec.approval).toEqual(host.spec.approval)
   })

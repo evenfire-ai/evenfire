@@ -6,7 +6,11 @@ import {
   mintHostGfsToken,
 } from './gfsHostBinding'
 
-/** P3-S02 — first-party tokens preserve the concrete Host identity. */
+/**
+ * P3-S02 — HCC 1st-party host GFS token mint. Kubernetes namespace/name is the
+ * trusted binding: tokens preserve the concrete Host identity and the returned
+ * subject must match it exactly.
+ */
 
 function okResponse(body: unknown): Response {
   return { ok: true, status: 200, json: async () => body } as Response
@@ -47,6 +51,58 @@ describe('mintHostGfsToken', () => {
       namespace: 'mcp-host',
       scopes: ['gfs.read', 'gfs.write'],
     })
+  })
+
+  it.each([
+    { token: '', expiresInSeconds: 300, subject: 'host:1st:mcp-host/chatllm' },
+    { token: 'tok', subject: 'host:1st:mcp-host/chatllm' },
+    { token: 'tok', expiresInSeconds: 300 },
+    { token: 'tok', expiresInSeconds: 0, subject: 'host:1st:mcp-host/chatllm' },
+  ])('rejects a malformed successful response before returning credentials', async body => {
+    const fetchFn = vi.fn(async () => okResponse(body)) as unknown as typeof fetch
+    await expect(
+      mintHostGfsToken(
+        { name: 'chatllm', namespace: 'mcp-host' },
+        { controlApiBaseUrl: 'http://x', signToken: () => 'j', fetchFn }
+      )
+    ).rejects.toThrow(/malformed response/)
+  })
+
+  it('rejects a subject mismatch', async () => {
+    const fetchFn = vi.fn(async () =>
+      okResponse({ token: 'tok', expiresInSeconds: 300, subject: 'host:1st:mcp-host/other' })
+    ) as unknown as typeof fetch
+    await expect(
+      mintHostGfsToken(
+        { name: 'chatllm', namespace: 'mcp-host' },
+        { controlApiBaseUrl: 'http://x', signToken: () => 'j', fetchFn }
+      )
+    ).rejects.toThrow(/subject mismatch/)
+  })
+
+  it('rejects untrusted Kubernetes identity inputs before making a request', async () => {
+    const fetchFn = vi.fn() as unknown as typeof fetch
+    await expect(
+      mintHostGfsToken(
+        { name: '../chatllm', namespace: 'mcp-host' },
+        { controlApiBaseUrl: 'http://x', signToken: () => 'j', fetchFn }
+      )
+    ).rejects.toThrow(/trusted Kubernetes namespace and name/)
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('rejects the reserved legacy standalone identity before signing or making a request', async () => {
+    const signToken = vi.fn(() => 'j')
+    const fetchFn = vi.fn() as unknown as typeof fetch
+
+    await expect(
+      mintHostGfsToken(
+        { name: 'standalone', namespace: 'mcp-host' },
+        { controlApiBaseUrl: 'http://x', signToken, fetchFn }
+      )
+    ).rejects.toThrow(/trusted Kubernetes namespace and name/)
+    expect(signToken).not.toHaveBeenCalled()
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 
   it('fails loud on a non-2xx response (never silently degrades)', async () => {
@@ -126,7 +182,7 @@ describe('mintHostGfsToken', () => {
   it.each([
     ['missing', undefined],
     ['read-only', ['gfs.read']],
-    ['reordered', ['gfs.write', 'gfs.read']],
+    ['duplicated', ['gfs.read', 'gfs.read']],
     ['expanded', ['gfs.read', 'gfs.write', 'gfs.delete']],
   ])('rejects %s JWT scopes', async (_case, scopes) => {
     const subject = 'host:1st:mcp-host/chatllm'
@@ -140,6 +196,26 @@ describe('mintHostGfsToken', () => {
         { controlApiBaseUrl: 'http://x', signToken: () => 'j', fetchFn }
       )
     ).rejects.toThrow('gfs host token claim scopes mismatch: expected ["gfs.read","gfs.write"]')
+  })
+
+  it('accepts reordered JWT scopes with the identical ceiling', async () => {
+    // The ceiling is a set: a benign ordering change in control-api's scope
+    // handling must not brick every Host reconcile fleet-wide.
+    const subject = 'host:1st:mcp-host/chatllm'
+    const fetchFn = vi.fn(async () =>
+      okResponse({
+        token: jwt({ sub: subject, scopes: ['gfs.write', 'gfs.read'] }),
+        expiresInSeconds: 300,
+        subject,
+      })
+    ) as unknown as typeof fetch
+
+    await expect(
+      mintHostGfsToken(
+        { name: 'chatllm', namespace: 'mcp-host' },
+        { controlApiBaseUrl: 'http://x', signToken: () => 'j', fetchFn }
+      )
+    ).resolves.toMatchObject({ subject })
   })
 
   it('aborts a hung request and waits for the transport to reject', async () => {

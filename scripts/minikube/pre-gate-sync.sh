@@ -189,7 +189,7 @@ provision_gfs_serving() {
     # FAIL LOUD: with the GFS stack deployed, a broken gfs_controller credential
     # means every GFS operation 503s (issue #775). Continuing would burn the
     # whole gate run on a cluster that cannot pass.
-    if ! CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/provision-gfs-db.sh"; then
+    if ! CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"; then
       log "ERROR: gfs DB provisioning FAILED — gfsc cannot authorize any operation. Aborting ${GATE_NAME} pre-gate sync."
       exit 1
     fi
@@ -261,22 +261,40 @@ run_if_changed desktop-app "npm test"
 if [[ "${cluster_changed}" == "true" ]]; then
   incremental_plan
   log "Cluster sync plan before ${GATE_NAME}: images=$(incremental_target_summary), full-image-build=${INCREMENTAL_FULL_IMAGE_BUILD}, full-deployment=${INCREMENTAL_FULL_DEPLOYMENT}"
-  incremental_build_images
-  (
-    cd "${PROJECT_DIR}"
-    # CRD changes live outside the Kustomize overlay. Apply them before the
-    # service rollout when a fresh baseline or chart change requires it.
-    if [[ "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" || "${INCREMENTAL_CRDS_CHANGED}" == "true" ]]; then
+
+  if [[ "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ||
+        "${INCREMENTAL_FULL_DEPLOYMENT}" == "true" ]]; then
+    (
+      cd "${PROJECT_DIR}"
       make minikube-deploy-crds
+    )
+    CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
+    writer_dsn="$(${KC} -n gfs get secret gfs-controller-db -o 'jsonpath={.data.connection-string}')"
+    if [[ -n "${writer_dsn}" ]]; then
+      if ! ${KC} -n control-plane rollout status deployment/control-api --timeout=5s >/dev/null 2>&1; then
+        log "ERROR: existing GFS writer detected but control-api is not Ready; refusing full overlay sync"
+        exit 1
+      fi
+      log "Upgrade path — reconciling GFS credentials before full overlay sync"
+      CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+    else
+      log "Fresh bootstrap — reader staging deferred until post-migration convergence; GFSC remains fail-closed"
     fi
-    if [[ "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" || "${INCREMENTAL_FULL_DEPLOYMENT}" == "true" ]]; then
-    make minikube-apply-secrets
-    make minikube-deploy-all
-    fi
-    if [[ "${FORCE_RESTART}" == "true" || "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ]]; then
-      make minikube-restart-all
-    fi
-  )
+  fi
+
+  incremental_build_images
+
+  if [[ "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ||
+        "${INCREMENTAL_FULL_DEPLOYMENT}" == "true" ]]; then
+    (
+      cd "${PROJECT_DIR}"
+      make minikube-apply-secrets
+      make minikube-deploy-all
+      if [[ "${FORCE_RESTART}" == "true" || "${INCREMENTAL_FULL_IMAGE_BUILD}" == "true" ]]; then
+        make minikube-restart-all
+      fi
+    )
+  fi
 
   if incremental_requires_database_reconcile; then
     rollout_if_present control-plane control-postgres

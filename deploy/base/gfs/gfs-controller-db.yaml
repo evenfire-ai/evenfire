@@ -8,12 +8,15 @@ metadata:
     app.kubernetes.io/part-of: clerum
 type: Opaque
 # The connection-string key is intentionally NOT declared in this manifest. It
-# is OWNED by deploy/scripts/provision-gfs-db.sh, which grants LOGIN + password
+# is OWNED by the explicit `rotate-writer` mode of
+# deploy/scripts/provision-gfs-db.sh, which grants LOGIN + password
 # to the least-privilege gfs_controller role (created NOLOGIN by control-api
-# migration 0048; SELECT on resource/grant/share, INSERT-only on gfs_audit —
-# never write on grants) and patches the real DSN into this Secret. Because the
+# migrations; resource/manifest writes required by GFSC, authorization reads,
+# append-only audit, and never grant/share writes) and patches the real DSN
+# into this Secret. Because the
 # key is absent here, `kubectl apply` of the overlay can never clobber a
 # provisioned DSN: the three-way merge only prunes keys present in
 # last-applied-configuration, and the provisioning patch never lands there
 # (issue #775). Fresh clusters fail loud instead: gfsc pods sit in
-# CreateContainerConfigError (missing Secret key) until provisioning runs.
+# CreateContainerConfigError (missing Secret key) until the explicit bootstrap
+# rotation runs. Normal deploys never rotate this compatibility credential.

@@ -1,5 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
-import { DEFAULT_GFS_ACCESS_FILE, createGfscClient, hasGfsRuntimeAccess } from './gfsClient'
+import {
+  DEFAULT_GFS_ACCESS_FILE,
+  createGfscClient,
+  getGfsToolScopes,
+  hasGfsRuntimeAccess,
+} from './gfsClient'
+
+function encodedClaims(scopes: unknown): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url')
+  const payload = Buffer.from(JSON.stringify({ scopes })).toString('base64url')
+  return `${header}.${payload}.sig`
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -26,6 +37,17 @@ describe('gfs runtime gfsc client', () => {
         fileExists: () => false,
       })
     ).toBe(false)
+  })
+
+  it('derives only recognized GFS tool scopes and fails closed', () => {
+    expect([
+      ...(getGfsToolScopes({ get: () => encodedClaims(['gfs.read', 'gfs.write']) }) ?? []),
+    ]).toEqual(['gfs.read', 'gfs.write'])
+    expect(getGfsToolScopes({ get: () => encodedClaims(['gfs.read', 'gfs.delete']) })).toBeNull()
+    expect(getGfsToolScopes({ get: () => encodedClaims(['gfs.delete']) })).toBeNull()
+    expect(getGfsToolScopes({ get: () => encodedClaims([]) })).toBeNull()
+    expect(getGfsToolScopes({ get: () => encodedClaims('gfs.read') })).toBeNull()
+    expect(getGfsToolScopes({ get: () => 'malformed' })).toBeNull()
   })
 
   it('calls gfsc accessible with runtime bearer auth', async () => {
@@ -61,6 +83,56 @@ describe('gfs runtime gfsc client', () => {
       method: 'PUT',
       body: JSON.stringify({ content: 'new', ifMatch: 2 }),
     })
+  })
+
+  it('uses exact writer routes and bodies for create, rename, and copy', async () => {
+    const fetchFn = vi.fn(async (_input: string, _init?: RequestInit) =>
+      jsonResponse({ ok: true, data: {} })
+    )
+    const client = createGfscClient({
+      get: key => (key === 'MCP_HOST_GFS_TOKEN' ? 'gfs-access' : undefined),
+      fetch: fetchFn,
+    })
+    await client.createFile({
+      drive: 'main',
+      parentResourceId: 'parent/id',
+      name: 'note.txt',
+      content: 'hello',
+    })
+    await client.createFolder({ drive: 'main', parentResourceId: 'parent/id', name: 'docs' })
+    await client.rename({
+      drive: 'main',
+      resourceId: 'source/id',
+      newName: 'renamed.txt',
+      ifMatch: 4,
+    })
+    const copy = {
+      drive: 'main',
+      sourceResourceId: 'source',
+      destinationParentId: 'destination',
+      newName: 'source-copy',
+      ifMatch: 7,
+    }
+    await client.copy(copy)
+
+    expect(fetchFn.mock.calls.map(call => [call[0], call[1]?.method, call[1]?.body])).toEqual([
+      [
+        'http://gfsc-writer.gfs.svc.cluster.local:8087/v1/resources/parent%2Fid/children?drive=main',
+        'POST',
+        JSON.stringify({ name: 'note.txt', kind: 'file', content: 'hello' }),
+      ],
+      [
+        'http://gfsc-writer.gfs.svc.cluster.local:8087/v1/resources/parent%2Fid/children?drive=main',
+        'POST',
+        JSON.stringify({ name: 'docs', kind: 'directory' }),
+      ],
+      [
+        'http://gfsc-writer.gfs.svc.cluster.local:8087/v1/resources/source%2Fid',
+        'PATCH',
+        JSON.stringify({ drive: 'main', newName: 'renamed.txt', ifMatch: 4 }),
+      ],
+      ['http://gfsc-writer.gfs.svc.cluster.local:8087/v1/copy', 'POST', JSON.stringify(copy)],
+    ])
   })
 
   it('fails loud when the mounted runtime token file is empty', async () => {

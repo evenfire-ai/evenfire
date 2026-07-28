@@ -1,9 +1,14 @@
 import { config } from '../../config.js'
+import { makeHostSubjectId } from '../../gfs/hostSubject.js'
 import type { K8sGateway } from '../../k8s.js'
 
 type HostResource = {
-  metadata?: { name?: string }
-  spec?: { enabled?: boolean }
+  metadata?: {
+    name?: string
+    namespace?: string
+    deletionTimestamp?: string | null
+  }
+  spec?: { enabled?: boolean; host?: string }
 }
 
 type ContextResource = {
@@ -14,6 +19,50 @@ type ContextResource = {
 export type AccessPartition = {
   active: string[]
   deleted: string[]
+}
+
+export type AgentDirectoryEntry = {
+  name: string
+  namespace: string
+  displayName: string
+  active: true
+  gfsSubject: {
+    type: 'host'
+    id: string
+  }
+}
+
+// The legacy shared credential was never an individual Host identity. Keeping
+// it out of the directory prevents callers from turning fleet-wide history into
+// a selectable per-agent grant target.
+const LEGACY_FLEET_WIDE_HOST_SENTINEL = 'standalone'
+
+export function buildAgentDirectoryEntry(
+  value: unknown,
+  trustedNamespace: string
+): AgentDirectoryEntry | null {
+  if (!value || typeof value !== 'object') return null
+  const host = value as HostResource
+  const name = typeof host.metadata?.name === 'string' ? host.metadata.name : ''
+  const reportedNamespace = host.metadata?.namespace
+
+  if (!name || (trustedNamespace === 'mcp-host' && name === LEGACY_FLEET_WIDE_HOST_SENTINEL))
+    return null
+  if (reportedNamespace !== trustedNamespace) return null
+  if (host.metadata?.deletionTimestamp) return null
+  if (host.spec?.enabled === false) return null
+
+  const subjectId = makeHostSubjectId('1st', trustedNamespace, name)
+  if (!subjectId) return null
+
+  const configuredDisplayName = typeof host.spec?.host === 'string' ? host.spec.host.trim() : ''
+  return {
+    name,
+    namespace: trustedNamespace,
+    displayName: configuredDisplayName || name,
+    active: true,
+    gfsSubject: { type: 'host', id: subjectId },
+  }
 }
 
 export const MAX_DELETED_ACCESS_HISTORY = 200
@@ -101,12 +150,29 @@ export function mergeActiveAgentUpdateWithDeletedHistory(
   return normalizeUnique([...activeRequested, ...retainedDeletedHistory])
 }
 
+// A namespace-scoped list query already guarantees every returned Host lives
+// in the queried namespace, so a resource that omits `metadata.namespace` is
+// still first-party. Default it to the scoped namespace before running the
+// strict directory-entry filter. buildAgentDirectoryEntry itself stays strict
+// (an absent namespace is rejected) for callers that resolve a single Host
+// from a broader or untrusted source.
+function withScopedNamespace(host: HostResource, scopedNamespace: string): HostResource {
+  if (host?.metadata?.namespace) return host
+  return { ...host, metadata: { ...host?.metadata, namespace: scopedNamespace } }
+}
+
 export async function listActiveAgentNames(gateway: K8sGateway): Promise<string[]> {
   const listed = await gateway.listResource('hosts', config.hostsNamespace)
   const hosts = Array.isArray(listed) ? (listed as HostResource[]) : []
   return normalizeUnique(
     hosts
-      .map(host => host?.metadata?.name)
+      .map(
+        host =>
+          buildAgentDirectoryEntry(
+            withScopedNamespace(host, config.hostsNamespace),
+            config.hostsNamespace
+          )?.name
+      )
       .filter((value): value is string => typeof value === 'string')
   )
 }

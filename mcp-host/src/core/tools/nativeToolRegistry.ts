@@ -5,12 +5,12 @@ import {
   createToolDescribeTool,
   createToolSearchTool,
 } from '../../capabilities/toolCatalogTools'
-import { buildGfsReadTools, buildGfsWriteTools } from '../../internalTools/gfs'
-import { createGfscClient, hasGfsRuntimeAccess } from '../../internalTools/gfsClient'
+import { buildGfsCopyTools, buildGfsReadTools, buildGfsWriteTools } from '../../internalTools/gfs'
+import { createGfscClient, getGfsToolScopes } from '../../internalTools/gfsClient'
 import type { LlmProvider } from '../../llm/registryCore'
 import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
-import { INTERNAL_TOOLS, getOutputDir, resolveInternalTools } from '../../workflow/internalTools'
+import { getOutputDir, resolveInternalTools } from '../../workflow/internalTools'
 import type { InternalToolDefinition } from '../../workflow/types'
 import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
@@ -208,9 +208,17 @@ export class NativeToolRegistry implements ToolRegistry {
     const gfsEnv = {
       get: (key: string): string | undefined => process.env[key],
     }
-    if (hasGfsRuntimeAccess(gfsEnv)) {
+    const gfsScopes = getGfsToolScopes(gfsEnv)
+    if (gfsScopes && gfsScopes.size > 0) {
       const gfsClient = createGfscClient(gfsEnv)
-      for (const tool of [...buildGfsReadTools(gfsClient), ...buildGfsWriteTools(gfsClient)]) {
+      const gfsTools = [
+        ...(gfsScopes.has('gfs.read') ? buildGfsReadTools(gfsClient) : []),
+        ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
+        ...(gfsScopes.has('gfs.read') && gfsScopes.has('gfs.write')
+          ? buildGfsCopyTools(gfsClient)
+          : []),
+      ]
+      for (const tool of gfsTools) {
         this.register(new InternalToolAdapter(tool, getOutputDir(), { maxBytes: 52_428_800 }))
       }
     }
