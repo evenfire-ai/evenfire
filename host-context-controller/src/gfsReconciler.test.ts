@@ -21,6 +21,8 @@ const config: GfsFactoryConfig = {
   jwtPublicKeyConfigMapKey: 'jwt-public-key',
   pgSecretName: 'gfs-controller-db',
   pgSecretKey: 'connection-string',
+  readerPgSecretName: 'gfs-controller-reader-db',
+  readerPgSecretKey: 'connection-string',
   driveName: 'main',
   tokenAudience: 'gfs-controller',
 }
@@ -34,6 +36,7 @@ const gfs: GlobalFileSystemCRD = {
 class FakeApi implements GfsK8sApi {
   operations: string[] = []
   deployments: string[] = []
+  deploymentManifests: k8s.V1Deployment[] = []
   pdbs: string[] = []
   services: string[] = []
   netpols: string[] = []
@@ -59,6 +62,7 @@ class FakeApi implements GfsK8sApi {
   async applyDeployment(dep: k8s.V1Deployment): Promise<void> {
     const name = dep.metadata?.name ?? ''
     this.deployments.push(name)
+    this.deploymentManifests.push(dep)
     this.operations.push(`deploy/${name}`)
   }
   async applyPodDisruptionBudget(pdb: k8s.V1PodDisruptionBudget): Promise<void> {
@@ -122,6 +126,19 @@ describe('GfsReconciler.reconcile', () => {
     expect(api.pdbs).toEqual(['gfsc-writer-pdb'])
     expect(api.services).toEqual(['gfsc', 'gfsc-writer'])
     expect(api.netpols).toEqual(['gfsc-ingress', 'gfsc-egress'])
+    const writer = api.deploymentManifests.find(d => d.metadata?.name === 'gfsc-writer')
+    const reader = api.deploymentManifests.find(d => d.metadata?.name === 'gfsc-reader')
+    const pgRef = (dep: k8s.V1Deployment | undefined) =>
+      dep?.spec?.template.spec?.containers[0].env?.find(variable =>
+        Boolean(variable.valueFrom?.secretKeyRef)
+      )?.valueFrom?.secretKeyRef?.name
+    expect(pgRef(writer)).toBe('gfs-controller-db')
+    expect(pgRef(reader)).toBe('gfs-controller-reader-db')
+    expect(writer?.spec?.strategy).toEqual({ type: 'Recreate' })
+    expect(reader?.spec?.strategy).toEqual({
+      type: 'RollingUpdate',
+      rollingUpdate: { maxUnavailable: 0, maxSurge: 1 },
+    })
   })
 
   it('does not scale readers down when the writer template is already current', async () => {

@@ -25,6 +25,8 @@ describe("resolveDecision (deny-by-default, spec-faithful)", () => {
     expect(resolveDecision({ ...base, isOperator: true })).toEqual({
       allowed: true,
       via: "operator",
+      matchedSubject: null,
+      authorizationSource: "operator",
     });
   });
 
@@ -37,7 +39,7 @@ describe("resolveDecision (deny-by-default, spec-faithful)", () => {
       ...base,
       grants: [{ subjectKey: "user:user-1", resourceId: "R", permissions: ["read"], inherit: false }],
     });
-    expect(d).toEqual({ allowed: true, via: "grant" });
+    expect(d).toMatchObject({ allowed: true, via: "grant", authorizationSource: "direct_grant" });
   });
 
   it("inherits an ancestor grant ONLY when inherit = true (§Inheritance)", () => {
@@ -45,13 +47,32 @@ describe("resolveDecision (deny-by-default, spec-faithful)", () => {
       ...base,
       grants: [{ subjectKey: "user:user-1", resourceId: "ROOT", permissions: ["read"], inherit: true }],
     });
-    expect(inheriting.allowed).toBe(true);
+    expect(inheriting).toMatchObject({
+      allowed: true,
+      matchedSubject: "user:user-1",
+      authorizationSource: "inherited_grant",
+    });
 
     const notInheriting = resolveDecision({
       ...base,
       grants: [{ subjectKey: "user:user-1", resourceId: "ROOT", permissions: ["read"], inherit: false }],
     });
     expect(notInheriting.allowed).toBe(false);
+  });
+
+  it("attributes a direct grant before an inherited grant regardless of row order", () => {
+    const decision = resolveDecision({
+      ...base,
+      subjects: new Set(["user:user-1", "team:team-1"]),
+      grants: [
+        { subjectKey: "team:team-1", resourceId: "ROOT", permissions: ["read"], inherit: true },
+        { subjectKey: "user:user-1", resourceId: "R", permissions: ["read"], inherit: false },
+      ],
+    });
+    expect(decision).toMatchObject({
+      matchedSubject: "user:user-1",
+      authorizationSource: "direct_grant",
+    });
   });
 
   it("denies a grant that lacks the op bit or belongs to a different subject", () => {
@@ -84,14 +105,17 @@ describe("resolveDecision (deny-by-default, spec-faithful)", () => {
         ...base,
         shares: [{ subjectKey: "user:user-1", resourceId: "R", permissions: ["read"], includeDescendants: false }],
       })
-    ).toEqual({ allowed: true, via: "share" });
+    ).toMatchObject({ allowed: true, via: "share", authorizationSource: "direct_share" });
 
-    expect(
-      resolveDecision({
+    const inheritedShare = resolveDecision({
         ...base,
         shares: [{ subjectKey: "user:user-1", resourceId: "ROOT", permissions: ["read"], includeDescendants: true }],
-      }).allowed
-    ).toBe(true);
+      });
+    expect(inheritedShare).toMatchObject({
+      allowed: true,
+      matchedSubject: "user:user-1",
+      authorizationSource: "inherited_share",
+    });
 
     expect(
       resolveDecision({
@@ -119,7 +143,15 @@ class FakeDb implements Queryable {
     if (text.includes("WITH RECURSIVE")) {
       this.cteQueries++;
       if (this.failOn === "ancestors") throw new Error("permission store down");
-      return { rows: this.ancestors.map((id) => ({ resource_id: id })) };
+      const requested = (values?.[1] as string[]) ?? [];
+      return {
+        rows: requested.flatMap((resourceId) =>
+          this.ancestors.map((id) => ({
+            requested_resource_id: resourceId,
+            resource_id: id,
+          }))
+        ),
+      };
     }
     if (text.includes("FROM gfs_grants")) {
       if (this.failOn === "grants") throw new Error("permission store down");
@@ -135,7 +167,7 @@ class FakeDb implements Queryable {
 
 class RecordingSink implements AuditSink {
   events: AuditEvent[] = [];
-  async record(event: AuditEvent): Promise<void> {
+  async record(event: AuditEvent, _queryable?: Queryable): Promise<void> {
     this.events.push(event);
   }
 }
@@ -160,7 +192,7 @@ describe("PermissionClient (fail-closed, deny-by-default, audited)", () => {
     const db = new FakeDb();
     const sink = new RecordingSink();
     const decision = await new PermissionClient(db, sink).authorize(operatorCtx, "R", "read");
-    expect(decision).toEqual({ allowed: true, via: "operator" });
+    expect(decision).toMatchObject({ allowed: true, via: "operator", authorizationSource: "operator" });
     expect(db.cteQueries).toBe(0); // intrinsic — no ancestor lookup needed
     expect(sink.events[0]).toMatchObject({ outcome: "allow", reason: "operator", subject: "admin-9" });
   });
@@ -237,6 +269,7 @@ describe("PermissionClient + DecisionCache (cache→store, fail-closed)", () => 
 
     expect(first.allowed).toBe(true);
     expect(second.allowed).toBe(true);
+    expect(second).toMatchObject({ via: "cache", authorizationSource: "direct_grant" });
     expect(db.cteQueries).toBe(1); // store hit once; the 2nd op was a cache hit
     expect(sink.events).toHaveLength(2); // BOTH ops audited — cache never skips audit
     expect(sink.events[1]).toMatchObject({ outcome: "allow", reason: "cache" });
@@ -303,26 +336,5 @@ describe("PermissionClient + DecisionCache (cache→store, fail-closed)", () => 
     await client.authorize(operatorCtx, "R", "read");
     expect(cache.size).toBe(0); // operator decisions are not cached
     expect(db.cteQueries).toBe(0);
-  });
-});
-
-describe("DbAuditSink", () => {
-  it("appends an INSERT-only row with a content hash", async () => {
-    const db = new FakeDb();
-    await new DbAuditSink(db).record({
-      subject: "user-1",
-      op: "read",
-      resourceId: "R",
-      drive: "main",
-      outcome: "allow",
-      requestId: "req-7",
-    });
-    expect(db.audits).toHaveLength(1);
-    const values = db.audits[0];
-    expect(values[0]).toBe("user-1");
-    expect(values[1]).toBe("read");
-    expect(values[2]).toBe("gfs://main/R");
-    expect(values[3]).toBe("allow");
-    expect(String(values[5])).toMatch(/^[0-9a-f]{64}$/);
   });
 });

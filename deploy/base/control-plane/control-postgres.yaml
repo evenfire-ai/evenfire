@@ -3,6 +3,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: control-postgres-data
   namespace: control-plane
+  labels:
+    app: control-postgres
 spec:
   accessModes:
   - ReadWriteOnce
@@ -89,6 +91,8 @@ kind: Service
 metadata:
   name: control-postgres
   namespace: control-plane
+  labels:
+    app: control-postgres
 spec:
   type: ClusterIP
   selector:

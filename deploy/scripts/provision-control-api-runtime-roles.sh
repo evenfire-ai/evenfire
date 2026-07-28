@@ -45,30 +45,39 @@ context_is_allowed() {
 }
 
 read_existing_dsn() {
-  local secret_name="$1"
-  if ! kctl -n "$PG_NAMESPACE" get secret "$secret_name" >/dev/null 2>&1; then
+  local secret_name="$1" snapshot
+  if ! snapshot="$(kctl -n "$PG_NAMESPACE" get secret "$secret_name" -o json --ignore-not-found)"; then
+    die "cannot inspect $PG_NAMESPACE/$secret_name"
+  fi
+  if [ -z "$snapshot" ]; then
     return 0
   fi
-  kctl -n "$PG_NAMESPACE" get secret "$secret_name" \
-    -o 'go-template={{with .data}}{{with index . "connection-string"}}{{. | base64decode}}{{end}}{{end}}'
+  printf '%s' "$snapshot" | python3 -c '
+import base64
+import json
+import sys
+
+obj = json.load(sys.stdin)
+value = ((obj.get("data") or {}).get("connection-string") or "")
+if value:
+    sys.stdout.buffer.write(base64.b64decode(value, validate=True))
+'
 }
 
 password_from_valid_dsn() {
   local expected_role="$1"
-  local dsn="$2"
-  EXPECTED_ROLE="$expected_role" EXPECTED_HOST="$PG_HOST" EXPECTED_PORT="$PG_PORT" \
-    EXPECTED_DATABASE="$PG_DATABASE" DSN="$dsn" python3 - <<'PY'
-import os
+  python3 -c '
 import re
 import sys
 from urllib.parse import unquote, urlparse
 
-parsed = urlparse(os.environ["DSN"])
+expected_role, expected_host, expected_port, expected_database = sys.argv[1:]
+parsed = urlparse(sys.stdin.read())
 expected = {
-    "role": os.environ["EXPECTED_ROLE"],
-    "host": os.environ["EXPECTED_HOST"],
-    "port": int(os.environ["EXPECTED_PORT"]),
-    "database": os.environ["EXPECTED_DATABASE"],
+    "role": expected_role,
+    "host": expected_host,
+    "port": int(expected_port),
+    "database": expected_database,
 }
 password = unquote(parsed.password or "")
 valid = (
@@ -76,13 +85,13 @@ valid = (
     and unquote(parsed.username or "") == expected["role"]
     and parsed.hostname == expected["host"]
     and parsed.port == expected["port"]
-    and parsed.path == f"/{expected['database']}"
+    and parsed.path == "/" + expected_database
     and re.fullmatch(r"[0-9a-f]{64}", password) is not None
 )
 if not valid:
     sys.exit(1)
 sys.stdout.write(password)
-PY
+' "$expected_role" "$PG_HOST" "$PG_PORT" "$PG_DATABASE"
 }
 
 resolve_password() {
@@ -91,7 +100,7 @@ resolve_password() {
   local existing_dsn password
   existing_dsn="$(read_existing_dsn "$secret_name")"
   if [ -n "$existing_dsn" ]; then
-    if ! password="$(password_from_valid_dsn "$role_name" "$existing_dsn")"; then
+    if ! password="$(printf '%s' "$existing_dsn" | password_from_valid_dsn "$role_name")"; then
       die "$PG_NAMESPACE/$secret_name contains an invalid runtime DSN; refusing to rotate implicitly"
     fi
     printf '%s' "$password"
@@ -101,8 +110,11 @@ resolve_password() {
 }
 
 ensure_secret_exists() {
-  local secret_name="$1"
-  if kctl -n "$PG_NAMESPACE" get secret "$secret_name" >/dev/null 2>&1; then
+  local secret_name="$1" existing
+  if ! existing="$(kctl -n "$PG_NAMESPACE" get secret "$secret_name" -o name --ignore-not-found)"; then
+    die "cannot determine whether $PG_NAMESPACE/$secret_name exists"
+  fi
+  if [ -n "$existing" ]; then
     return 0
   fi
   kctl -n "$PG_NAMESPACE" create secret generic "$secret_name" \
@@ -148,9 +160,9 @@ reconcile_role() {
   local role_name="$1"
   local secret_name="$2"
   local password dsn
+  ensure_secret_exists "$secret_name"
   password="$(resolve_password "$role_name" "$secret_name")"
   apply_role_password "$role_name" "$password"
-  ensure_secret_exists "$secret_name"
   dsn="postgresql://${role_name}:${password}@${PG_HOST}:${PG_PORT}/${PG_DATABASE}"
   patch_connection_string "$secret_name" "$dsn"
   password=''

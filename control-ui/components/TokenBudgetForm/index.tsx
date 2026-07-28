@@ -108,15 +108,22 @@ export function TokenBudgetForm({
         )
       }
       if (hosts.status === 'fulfilled') {
-        setHostOptions(
-          (hosts.value.items ?? [])
-            .map(h => h.metadata?.name)
-            .filter((n): n is string => Boolean(n))
-            .map(n => ({ value: n, label: n }))
-        )
+        const hostNames = [
+          ...new Set(
+            (hosts.value.items ?? [])
+              .map(h => h.metadata?.name)
+              .filter((n): n is string => Boolean(n))
+          ),
+        ]
+        setHostOptions(hostNames.map(n => ({ value: n, label: n })))
       }
       if (secrets.status === 'fulfilled') {
-        setSecretOptions((secrets.value.items ?? []).map(s => ({ value: s.name, label: s.name })))
+        const secretNames = [
+          ...new Set(
+            (secrets.value.items ?? []).map(s => s.name).filter((n): n is string => Boolean(n))
+          ),
+        ]
+        setSecretOptions(secretNames.map(n => ({ value: n, label: n })))
       }
     }
     void loadOptions()

@@ -1,6 +1,7 @@
 'use client'
 
 import { Fragment, useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconStore } from '@components/Sidebar/icons'
@@ -38,7 +39,6 @@ const REGISTRY_COLUMNS: TableHeaderColumn[] = [
   { key: 'version', label: 'Version' },
   { key: 'visibility', label: 'Visibility' },
   { key: 'downloads', label: 'Downloads' },
-  { key: 'details', align: 'right', ariaLabel: 'View details' },
   { key: 'install', align: 'right', ariaLabel: 'Installation' },
   { key: 'actions', align: 'right', ariaLabel: 'Edit or remove' },
 ]
@@ -199,10 +199,6 @@ export default function RegistryCatalog() {
       else next.add(key)
       return next
     })
-  }
-
-  function entryDetailHref(entry: RegistryEntry): string {
-    return CONTROL_ROUTES.marketplace.entry(entry.name, entry.version)
   }
 
   const showConnectBanner =
@@ -385,7 +381,14 @@ export default function RegistryCatalog() {
                           />
                         </td>
                         <td>
-                          <div className="cu-registry-name">{entry.name}</div>
+                          <Link
+                            className="cu-registry-name cu-link"
+                            href={CONTROL_ROUTES.marketplace.entry(entry.name, entry.version)}
+                            onClick={event => event.stopPropagation()}
+                            onKeyDown={event => event.stopPropagation()}
+                          >
+                            {entry.name}
+                          </Link>
                           <div className="cu-registry-description" title={entry.description}>
                             {entry.description}
                           </div>
@@ -403,19 +406,6 @@ export default function RegistryCatalog() {
                           )}
                         </td>
                         <td>{entry.downloads}</td>
-                        <td
-                          className="cu-table__cell-actions cu-marketplace-action-cell"
-                          onClick={event => event.stopPropagation()}
-                          onKeyDown={event => event.stopPropagation()}
-                        >
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--sm cu-btn--secondary"
-                            onClick={() => router.push(entryDetailHref(entry))}
-                          >
-                            View details
-                          </button>
-                        </td>
                         <td
                           className="cu-table__cell-actions cu-marketplace-action-cell"
                           onClick={event => event.stopPropagation()}
@@ -504,9 +494,6 @@ export default function RegistryCatalog() {
                           <td colSpan={REGISTRY_COLUMNS.length}>
                             <div className="cu-expandable-detail cu-marketplace-row-detail">
                               <div className="cu-expandable-detail__fields">
-                                <div className="cu-expandable-field">
-                                  <span>{entry.category || 'Uncategorized'}</span>
-                                </div>
                                 <div className="cu-expandable-field">
                                   <span className="cu-expandable-field__label">Type</span>
                                   <span className="cu-registry-type-meta">{typeMeta}</span>

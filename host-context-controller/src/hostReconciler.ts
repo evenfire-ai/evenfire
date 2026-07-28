@@ -6,6 +6,8 @@ import type { AdministrativeOutcomeReporter } from './administrativeOutcomeRepor
 import { config } from './config'
 import { HOST_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE } from './constants'
 import { mintHostGfsToken } from './gfsHostBinding'
+import { GFS_HOST_SCOPES } from './gfsHostPolicy'
+import { makeExpectedHostGfsSubject } from './gfsHostSubject'
 import type {
   HccInfrastructureTelemetryPayload,
   InfrastructureTelemetryReporter,
@@ -197,6 +199,10 @@ const RUNTIME_TOKEN_REFRESH_EXPIRES_AT_ANNOTATION = 'clerum.io/runtime-token-ref
 const RUNTIME_TOKEN_REFRESH_BEFORE_ANNOTATION = 'clerum.io/runtime-token-refresh-before'
 const GFS_TOKEN_EXPIRES_AT_ANNOTATION = 'clerum.io/gfs-token-expires-at'
 const GFS_TOKEN_REFRESH_BEFORE_ANNOTATION = 'clerum.io/gfs-token-refresh-before'
+const GFS_TOKEN_EXPECTED_SUBJECT_ANNOTATION = 'clerum.io/gfs-token-expected-subject'
+const GFS_TOKEN_CAPABILITY_SET_HASH_ANNOTATION = 'clerum.io/gfs-token-capability-set-hash'
+const GFS_TOKEN_HOST_UID_ANNOTATION = 'clerum.io/gfs-token-host-uid'
+const GFS_TOKEN_HOST_GENERATION_ANNOTATION = 'clerum.io/gfs-token-host-generation'
 const RUNTIME_TOKEN_HOST_BINDING_HASH_ANNOTATION = 'clerum.io/runtime-token-host-binding-hash'
 const RUNTIME_TOKEN_SCOPE_HASH_ANNOTATION = 'clerum.io/runtime-token-scope-hash'
 const RUNTIME_TOKEN_ISSUER_ANNOTATION = 'clerum.io/runtime-token-issuer'
@@ -309,6 +315,13 @@ type RuntimeTokenProvision = {
   scopeHash: string
 }
 
+type GfsTokenLifecycleEvidence = {
+  gfs_subject: string
+  gfs_outcome: 'minted' | 'rotated' | 'reused' | 'failed'
+  gfs_old_host_uid?: string
+  gfs_new_host_uid?: string
+}
+
 type DeploymentMutationState = {
   lifecycle: EffectiveHostLifecycle
   runtimeTokenRevision: string
@@ -352,6 +365,7 @@ export class HostReconciler {
   ) => CommunicationChannelCRD[]
   private readonly infrastructureTelemetryReporter?: InfrastructureTelemetryReporter
   private readonly administrativeOutcomeReporter?: AdministrativeOutcomeReporter
+  private readonly gfsTokenLifecycleEvidence = new Map<string, GfsTokenLifecycleEvidence>()
   // B2: whether the CC cache initial-list has completed. Defaults to false
   // (safe: preserves existing Deployment replicas until wired by McpServerWatcher).
   private ccCacheSyncedFn: () => boolean = () => false
@@ -792,6 +806,14 @@ export class HostReconciler {
     )
   }
 
+  private static gfsCapabilitySetHash(): string {
+    return HostReconciler.shortHash([...GFS_HOST_SCOPES].sort())
+  }
+
+  private static gfsLifecycleEvidenceKey(host: Pick<HostCRD, 'namespace' | 'name'>): string {
+    return `${host.namespace}/${host.name}`
+  }
+
   private static effectiveBootstrapRefreshBeforeSec(refreshTtlSec: number): number {
     const configured = Math.max(0, config.mcpHostBootstrapRefreshBeforeSec ?? 0)
     const resyncFloor = Math.max(0, config.hostResyncIntervalSec ?? 0) * 3
@@ -806,7 +828,8 @@ export class HostReconciler {
     secretRevision: string,
     nowMs: number,
     gfsTokenTtlSec: number,
-    hasChannelIngress = false
+    hasChannelIngress = false,
+    preservedHostUid?: string
   ): Record<string, string> {
     const refreshTtlSec = Number.isFinite(tokens.refreshExpiresInSeconds)
       ? Math.max(0, tokens.refreshExpiresInSeconds)
@@ -828,6 +851,14 @@ export class HostReconciler {
       [RUNTIME_TOKEN_ISSUER_ANNOTATION]: RUNTIME_TOKEN_ISSUER,
       [RUNTIME_TOKEN_AUDIENCE_ANNOTATION]: RUNTIME_TOKEN_AUDIENCE,
       [RUNTIME_TOKEN_SCHEMA_VERSION_ANNOTATION]: RUNTIME_TOKEN_SCHEMA_VERSION,
+      [GFS_TOKEN_EXPECTED_SUBJECT_ANNOTATION]:
+        makeExpectedHostGfsSubject(host.namespace, host.name) ?? '',
+      [GFS_TOKEN_CAPABILITY_SET_HASH_ANNOTATION]: HostReconciler.gfsCapabilitySetHash(),
+    }
+    const hostUid = host.uid ?? preservedHostUid
+    if (hostUid) annotations[GFS_TOKEN_HOST_UID_ANNOTATION] = hostUid
+    if (host.generation !== undefined) {
+      annotations[GFS_TOKEN_HOST_GENERATION_ANNOTATION] = String(host.generation)
     }
     const gfsTtlSec = Number.isFinite(gfsTokenTtlSec) ? Math.max(0, gfsTokenTtlSec) : 0
     if (gfsTtlSec > 0) {
@@ -878,6 +909,23 @@ export class HostReconciler {
       annotations[RUNTIME_TOKEN_SCHEMA_VERSION_ANNOTATION] !== RUNTIME_TOKEN_SCHEMA_VERSION
     if (contractChanged) {
       return { refresh: true, rolloutRequired: true, reason: 'contract_changed' }
+    }
+
+    const expectedGfsSubject = makeExpectedHostGfsSubject(host.namespace, host.name)
+    if (!expectedGfsSubject) {
+      return { refresh: true, rolloutRequired: true, reason: 'invalid_gfs_subject' }
+    }
+    if (annotations[GFS_TOKEN_EXPECTED_SUBJECT_ANNOTATION] !== expectedGfsSubject) {
+      return { refresh: true, rolloutRequired: true, reason: 'gfs_subject_changed' }
+    }
+    if (
+      annotations[GFS_TOKEN_CAPABILITY_SET_HASH_ANNOTATION] !==
+      HostReconciler.gfsCapabilitySetHash()
+    ) {
+      return { refresh: true, rolloutRequired: true, reason: 'gfs_capability_set_changed' }
+    }
+    if (host.uid && annotations[GFS_TOKEN_HOST_UID_ANNOTATION] !== host.uid) {
+      return { refresh: true, rolloutRequired: true, reason: 'gfs_host_uid_changed' }
     }
 
     // Scheduling cross-check against the refresh token's REAL expiry. The
@@ -1052,6 +1100,10 @@ export class HostReconciler {
     let lastErr: unknown = null
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
+        const expectedGfsSubject = makeExpectedHostGfsSubject(host.namespace, host.name)
+        if (!expectedGfsSubject) {
+          throw new Error('Host GFS token provisioning requires a trusted namespace and name')
+        }
         const name = mcpHostRuntimeTokenSecretName(host)
         let existing: k8s.V1Secret | null = null
         try {
@@ -1131,11 +1183,24 @@ export class HostReconciler {
               bootstrapIsFresh &&
               deploymentRevision !== '' &&
               deploymentRevision !== existingRevision)
+          const annotationUpdates: Record<string, string> = {}
+          if (
+            host.generation !== undefined &&
+            existing.metadata?.annotations?.[GFS_TOKEN_HOST_GENERATION_ANNOTATION] !==
+              String(host.generation)
+          ) {
+            annotationUpdates[GFS_TOKEN_HOST_GENERATION_ANNOTATION] = String(host.generation)
+          }
           if (
             bootstrapIsFresh &&
             HostReconciler.deploymentReady(deployment) &&
             deploymentRevision === existingRevision
           ) {
+            annotationUpdates[RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION] =
+              RUNTIME_TOKEN_BOOTSTRAP_STATE_CONSUMED
+            annotationUpdates[RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION] = 'false'
+          }
+          if (Object.keys(annotationUpdates).length > 0) {
             await this.coreApi.replaceNamespacedSecret({
               name,
               namespace: host.namespace,
@@ -1145,9 +1210,7 @@ export class HostReconciler {
                   ...existing.metadata,
                   annotations: {
                     ...(existing.metadata?.annotations ?? {}),
-                    [RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION]:
-                      RUNTIME_TOKEN_BOOTSTRAP_STATE_CONSUMED,
-                    [RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION]: 'false',
+                    ...annotationUpdates,
                   },
                 },
               },
@@ -1162,6 +1225,11 @@ export class HostReconciler {
             namespace: host.namespace,
             resourceName: name,
             refreshExpInHours,
+          })
+          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
+            gfs_subject: expectedGfsSubject,
+            gfs_outcome: 'reused',
+            ...(host.uid ? { gfs_new_host_uid: host.uid } : {}),
           })
           const selectedRevision =
             rolloutPending || HostReconciler.shouldRollForRuntimeSecret(deployment, false)
@@ -1226,7 +1294,8 @@ export class HostReconciler {
               revision,
               nowMs,
               gfs.expiresInSeconds,
-              hasChannelIngress
+              hasChannelIngress,
+              existing?.metadata?.annotations?.[GFS_TOKEN_HOST_UID_ANNOTATION]
             ),
             [RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION]: RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH,
             [RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION]: rolloutRequired ? 'true' : 'false',
@@ -1235,6 +1304,11 @@ export class HostReconciler {
 
         if (!existing) {
           await this.coreApi.createNamespacedSecret({ namespace: host.namespace, body })
+          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
+            gfs_subject: expectedGfsSubject,
+            gfs_outcome: 'minted',
+            ...(host.uid ? { gfs_new_host_uid: host.uid } : {}),
+          })
           log.info('created mcp-host-runtime-token Secret', {
             host: host.name,
             namespace: host.namespace,
@@ -1256,6 +1330,13 @@ export class HostReconciler {
           namespace: host.namespace,
           body: replaceBody,
         })
+        const oldHostUid = existing.metadata?.annotations?.[GFS_TOKEN_HOST_UID_ANNOTATION]
+        this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
+          gfs_subject: expectedGfsSubject,
+          gfs_outcome: 'rotated',
+          ...(oldHostUid ? { gfs_old_host_uid: oldHostUid } : {}),
+          ...(host.uid ? { gfs_new_host_uid: host.uid } : {}),
+        })
         log.info('rotated mcp-host-runtime-token Secret', {
           host: host.name,
           namespace: host.namespace,
@@ -1271,6 +1352,15 @@ export class HostReconciler {
         }
       } catch (err) {
         lastErr = err
+        const subject = makeExpectedHostGfsSubject(host.namespace, host.name)
+        if (subject) {
+          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
+            gfs_subject: subject,
+            gfs_outcome: 'failed',
+            ...(host.uid ? { gfs_new_host_uid: host.uid } : {}),
+          })
+        }
+        if (err instanceof Error && err.name === 'GfsHostTokenValidationError') break
         const delayMs = 1000 * Math.pow(2, attempt - 1)
         log.error('mcp-host-runtime-token Secret attempt failed', {
           host: host.name,
@@ -1499,7 +1589,9 @@ export class HostReconciler {
       status: succeeded ? 'succeeded' : 'failed',
       phase: status.deployed ? 'deployed' : 'not_deployed',
       state: status.ready ? 'ready' : 'not_ready',
+      ...(this.gfsTokenLifecycleEvidence.get(HostReconciler.gfsLifecycleEvidenceKey(host)) ?? {}),
     })
+    this.gfsTokenLifecycleEvidence.delete(HostReconciler.gfsLifecycleEvidenceKey(host))
     if (succeeded) this.enqueueAdministrativeOutcome(host, 'succeeded', 'reconciled')
   }
 

@@ -1,6 +1,13 @@
+const path = require('path')
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Keep Turbopack rooted at the monorepo so it can resolve the linked
+  // @clerum packages without guessing from whichever lockfile it finds first.
+  turbopack: {
+    root: path.join(__dirname, '..'),
+  },
   async rewrites() {
     const controlApiDestination = process.env.CONTROL_API_INTERNAL_URL || 'http://127.0.0.1:8090'
     return [

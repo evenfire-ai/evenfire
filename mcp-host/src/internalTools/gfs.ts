@@ -20,8 +20,16 @@ export interface GfscReadClient {
 function ok(content: unknown): InternalToolResult {
   return { success: true, content: typeof content === 'string' ? content : JSON.stringify(content) }
 }
+// Read failures get the same redaction floor as mutations (see mutationFail):
+// only gfsc's HTTP status and a coarse public category may reach the model —
+// never the response body, which could carry paths or server internals.
 function fail(error: unknown): InternalToolResult {
-  return { success: false, error: error instanceof Error ? error.message : String(error) }
+  return redactedFail('GFS read failed', error)
+}
+// Locally-authored argument-validation messages carry no server data and must
+// reach the model verbatim so the agent can correct its call.
+function invalidArgs(message: string): InternalToolResult {
+  return { success: false, error: message }
 }
 
 const driveResourceParams = {
@@ -33,7 +41,7 @@ const driveResourceParams = {
   },
 } as const
 
-/** The four read tools, bound to a gfsc client. */
+/** The five read tools, bound to a gfsc client. */
 export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinition[] {
   return [
     {
@@ -128,6 +136,65 @@ export interface GfscWriteClient extends GfscReadClient {
     content: string
     ifMatch: number
   }): Promise<unknown>
+  createFile(args: {
+    drive: string
+    parentResourceId: string
+    name: string
+    content: string
+  }): Promise<unknown>
+  createFolder(args: { drive: string; parentResourceId: string; name: string }): Promise<unknown>
+  rename(args: {
+    drive: string
+    resourceId: string
+    newName: string
+    ifMatch: number
+  }): Promise<unknown>
+  copy(args: {
+    drive: string
+    sourceResourceId: string
+    destinationParentId: string
+    newName?: string
+    ifMatch: number
+  }): Promise<unknown>
+}
+
+// Preserve only GFSC's HTTP status and a coarse public category. The server
+// keeps the detailed correlated evidence; paths, blob keys, SQL details and
+// response bodies must not cross into the model-visible tool result. Keeping
+// 403 distinguishable is required for immediate-revocation and isolation
+// journeys, while still making every failure safe to display.
+function redactedFail(label: string, error: unknown): InternalToolResult {
+  const message = error instanceof Error ? error.message : String(error)
+  const match = /\bgfsc\s+(\d{3})\b/i.exec(message)
+  if (!match) return { success: false, error: label }
+  const status = Number(match[1])
+  const category =
+    status === 400
+      ? 'invalid_request'
+      : status === 401
+        ? 'unauthenticated'
+        : status === 403
+          ? 'forbidden'
+          : status === 404
+            ? 'not_found'
+            : status === 409
+              ? 'conflict'
+              : status === 412
+                ? 'precondition_failed'
+                : status === 413
+                  ? 'limit_exceeded'
+                  : status >= 500
+                    ? 'unavailable'
+                    : 'failed'
+  return { success: false, error: `${label} (gfsc ${status}: ${category})` }
+}
+
+function mutationFail(error: unknown): InternalToolResult {
+  return redactedFail('GFS mutation failed', error)
+}
+
+function isValidIfMatch(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0
 }
 
 /**
@@ -141,7 +208,7 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
     {
       name: 'clerum__gfs_write',
       description:
-        'Replace a gfs file. Requires If-Match (the current version) — writer-routed optimistic concurrency.',
+        'Conditionally replace the complete content of an existing gfs file. Requires If-Match (the current version).',
       parameters: {
         type: 'object',
         required: ['drive', 'resourceId', 'content', 'ifMatch'],
@@ -153,8 +220,8 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
         },
       },
       execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
-        if (typeof args.ifMatch !== 'number') {
-          return fail('clerum__gfs_write requires a numeric If-Match (current version)')
+        if (!isValidIfMatch(args.ifMatch)) {
+          return invalidArgs('clerum__gfs_write requires a non-negative safe-integer If-Match')
         }
         try {
           return ok(
@@ -163,7 +230,127 @@ export function buildGfsWriteTools(client: GfscWriteClient): InternalToolDefinit
             )
           )
         } catch (err) {
-          return fail(err)
+          return mutationFail(err)
+        }
+      },
+    },
+    {
+      name: 'clerum__gfs_create_file',
+      description: 'Create one file under an existing gfs folder.',
+      parameters: {
+        type: 'object',
+        required: ['drive', 'parentResourceId', 'name', 'content'],
+        properties: {
+          drive: { type: 'string', description: 'gfs drive name.' },
+          parentResourceId: { type: 'string', description: 'Destination folder resource id.' },
+          name: { type: 'string', description: 'New file name.' },
+          content: { type: 'string', description: 'Initial file content.' },
+        },
+      },
+      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+        try {
+          return ok(
+            await client.createFile(
+              args as { drive: string; parentResourceId: string; name: string; content: string }
+            )
+          )
+        } catch (err) {
+          return mutationFail(err)
+        }
+      },
+    },
+    {
+      name: 'clerum__gfs_create_folder',
+      description: 'Create one folder under an existing gfs folder.',
+      parameters: {
+        type: 'object',
+        required: ['drive', 'parentResourceId', 'name'],
+        properties: {
+          drive: { type: 'string', description: 'gfs drive name.' },
+          parentResourceId: { type: 'string', description: 'Destination folder resource id.' },
+          name: { type: 'string', description: 'New folder name.' },
+        },
+      },
+      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+        try {
+          return ok(
+            await client.createFolder(
+              args as { drive: string; parentResourceId: string; name: string }
+            )
+          )
+        } catch (err) {
+          return mutationFail(err)
+        }
+      },
+    },
+    {
+      name: 'clerum__gfs_rename',
+      description:
+        'Rename one gfs resource without moving it. Requires If-Match (the current resource version).',
+      parameters: {
+        type: 'object',
+        required: ['drive', 'resourceId', 'newName', 'ifMatch'],
+        properties: {
+          drive: { type: 'string', description: 'gfs drive name.' },
+          resourceId: { type: 'string', description: 'Resource id to rename.' },
+          newName: { type: 'string', description: 'New file or folder name.' },
+          ifMatch: { type: 'number', description: 'The observed resource version.' },
+        },
+      },
+      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+        if (!isValidIfMatch(args.ifMatch)) {
+          return invalidArgs('clerum__gfs_rename requires a non-negative safe-integer If-Match')
+        }
+        try {
+          return ok(
+            await client.rename(
+              args as { drive: string; resourceId: string; newName: string; ifMatch: number }
+            )
+          )
+        } catch (err) {
+          return mutationFail(err)
+        }
+      },
+    },
+  ]
+}
+
+/** Recursive copy is advertised only when both read and write scopes exist. */
+export function buildGfsCopyTools(client: GfscWriteClient): InternalToolDefinition[] {
+  return [
+    {
+      name: 'clerum__gfs_copy',
+      description:
+        'Copy one gfs file or folder tree into a destination folder. The original remains at the source; Copy never deletes it. Requires the observed source-root If-Match; file content remains server-side.',
+      parameters: {
+        type: 'object',
+        required: ['drive', 'sourceResourceId', 'destinationParentId', 'ifMatch'],
+        properties: {
+          drive: { type: 'string', description: 'gfs drive name.' },
+          sourceResourceId: { type: 'string', description: 'Source file or folder resource id.' },
+          destinationParentId: { type: 'string', description: 'Destination folder resource id.' },
+          newName: { type: 'string', description: 'Optional explicit name for the copied root.' },
+          ifMatch: { type: 'number', description: 'The observed source-root version.' },
+        },
+      },
+      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+        if (!isValidIfMatch(args.ifMatch)) {
+          return invalidArgs('clerum__gfs_copy requires a non-negative safe-integer If-Match')
+        }
+        try {
+          return ok(
+            await client.copy(
+              args as {
+                drive: string
+                sourceResourceId: string
+                destinationParentId: string
+                newName?: string
+                ifMatch: number
+              }
+            )
+          )
+        } catch (err) {
+          return mutationFail(err)
         }
       },
     },

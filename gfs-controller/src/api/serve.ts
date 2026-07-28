@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { GfsMetrics } from "../metrics";
 import type { AuthzContext } from "../authz/permissionClient";
+import type { AuditSink } from "../authz/audit";
 import type { AccessibleResourcePage } from "../authz/accessibleStore";
 import type { GfsPermission } from "../authz/resolve";
 import { checkTokenCeiling } from "../authz/tokenCeiling";
@@ -16,8 +18,10 @@ import {
   toView,
 } from "./read";
 import { ok, toResponse } from "./envelope";
+import { executeCopyRoute, type CopyRouteDeps } from "./copyRoute";
+import { executeRenameRoute } from "./renameRoute";
 import { GfsError } from "./errors";
-import { MoveError, normalizeName } from "./move";
+import { normalizeResourceName, ResourceNameError } from "./resourceName";
 import { planWrite, WriteError } from "./write";
 
 /**
@@ -58,6 +62,10 @@ export interface ServingDeps {
   /** The transactional write data plane. Absent on a read-only replica — write
    * routes then respond 404 (the verb is not served), never a silent no-op. */
   writeService?: GfsWriteService;
+  audit?: AuditSink;
+  copy?: Omit<CopyRouteDeps, "writes">;
+  /** Admission limits for the synchronous rename mutation; PATCH is not served without them. */
+  rename?: { maxObjects: number; timeoutMs: number };
   metrics?: GfsMetrics;
   /** Injectable clock for deterministic latency tests; defaults to Date.now. */
   now?: () => number;
@@ -65,6 +73,46 @@ export interface ServingDeps {
 
 /** Largest mutation body gfsc accepts before failing loud with payload_too_large. */
 const MAX_WRITE_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_NODE_TIMER_DELAY_MS = 2_147_483_647;
+const NANOSECONDS_PER_MILLISECOND = 1_000_000n;
+
+/**
+ * Node clamps larger timer delays to 1 ms. Re-arm the copy deadline in bounded
+ * chunks so the full positive safe-integer ENV contract remains meaningful.
+ * Each callback recomputes its remaining budget against an absolute monotonic
+ * deadline: event-loop stalls and machine suspension must not extend the copy.
+ */
+function armCopyAbortTimer(controller: AbortController, timeoutMs: number): () => void {
+  const deadlineNs = process.hrtime.bigint() + BigInt(timeoutMs) * NANOSECONDS_PER_MILLISECOND;
+  let timer: NodeJS.Timeout | undefined;
+  let cancelled = false;
+
+  const armNextChunk = (): void => {
+    const remainingNs = deadlineNs - process.hrtime.bigint();
+    if (remainingNs <= 0n) {
+      controller.abort(new GfsError("precondition_failed", "synchronous copy deadline exceeded"));
+      return;
+    }
+    // Round up so an early timer callback cannot expire the request before its
+    // monotonic deadline. The next callback recomputes rather than subtracting
+    // this nominal delay, which also handles delayed callbacks correctly.
+    const remainingMs = Number(
+      (remainingNs + NANOSECONDS_PER_MILLISECOND - 1n) / NANOSECONDS_PER_MILLISECOND
+    );
+    const delayMs = Math.min(remainingMs, MAX_NODE_TIMER_DELAY_MS);
+    timer = setTimeout(() => {
+      if (cancelled) return;
+      armNextChunk();
+    }, delayMs);
+    timer.unref();
+  };
+
+  armNextChunk();
+  return () => {
+    cancelled = true;
+    if (timer) clearTimeout(timer);
+  };
+}
 
 /** A host principal (`sub` starts with `host:`) is an AGENT — write invariants
  * (mandatory If-Match on replace/delete) apply only to agents. */
@@ -75,6 +123,7 @@ function isAgentSub(sub: string): boolean {
 const RESOURCE_RE = /^\/v1\/resources\/([^/]+)(?:\/(children|content))?$/;
 const RESOLVE_RE = /^\/v1\/resolve$/;
 const ACCESSIBLE_RE = /^\/v1\/accessible$/;
+const COPY_RE = /^\/v1\/copy$/;
 const GFS_URI_RE = /^gfs:\/\/([^/]+)\/([^/?#]+)$/;
 
 function bearerToken(req: IncomingMessage): string {
@@ -121,31 +170,50 @@ export class GfsServingHandler {
     const resourceMatch = RESOURCE_RE.exec(url.pathname);
     const resolveMatch = RESOLVE_RE.exec(url.pathname);
     const accessibleMatch = ACCESSIBLE_RE.exec(url.pathname);
-    if (!resourceMatch && !resolveMatch && !accessibleMatch) return false;
+    const copyMatch = COPY_RE.exec(url.pathname);
+    if (!resourceMatch && !resolveMatch && !accessibleMatch && !copyMatch) return false;
 
     const method = req.method ?? "GET";
-    const isWrite = method === "POST" || method === "PUT" || method === "DELETE";
-    if (method !== "GET" && !(isWrite && this.deps.writeService && resourceMatch)) {
+    const isWrite = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+    const copyWrite = method === "POST" && copyMatch && this.deps.writeService && this.deps.copy;
+    const renameWrite = method === "PATCH" && resourceMatch?.[2] === undefined
+      && this.deps.writeService && this.deps.audit && this.deps.rename;
+    const resourceWrite = isWrite && this.deps.writeService && resourceMatch
+      && (method === "DELETE" || Boolean(this.deps.audit));
+    if ((copyMatch && !copyWrite) || (method === "PATCH" && !renameWrite) || (method !== "GET" && !resourceWrite && !copyWrite)) {
       sendJson(res, 404, { ok: false, error: { code: "not_found", message: "not found" } });
       return true;
     }
 
     const started = this.clock();
+    const copyAbort = copyWrite ? new AbortController() : undefined;
+    const cancelCopyTimer = copyAbort
+      ? armCopyAbortTimer(copyAbort, this.deps.copy!.timeoutMs)
+      : undefined;
     try {
       const claims = this.deps.verifyToken(bearerToken(req));
-      const ctx = await this.authContext(claims, req);
+      const needsMutationRequestId = Boolean(copyMatch) || Boolean(renameWrite)
+        || Boolean(resourceMatch && ((method === "POST" && resourceMatch[2] === "children") || (method === "PUT" && resourceMatch[2] === "content")));
+      const requestId = needsMutationRequestId ? requireRequestId(req) : undefined;
+      const ctx = await this.authContext(claims, req, requestId);
+      copyAbort?.signal.throwIfAborted();
 
       if (method === "GET") {
         await this.handleRead(res, claims, ctx, url, resourceMatch, resolveMatch, accessibleMatch);
         this.deps.metrics?.recordRead(this.clock() - started);
+      } else if (copyMatch) {
+        await this.serveCopy(req, res, claims, ctx, requestId!, started, copyAbort!.signal);
+        this.deps.metrics?.recordWrite(this.clock() - started);
       } else {
-        await this.handleWrite(req, res, claims, ctx, method, resourceMatch!);
+        await this.handleWrite(req, res, claims, ctx, method, resourceMatch!, requestId);
         this.deps.metrics?.recordWrite(this.clock() - started);
       }
     } catch (err) {
       const { status, body } = toResponse(err);
       if (!res.headersSent) sendJson(res, status, body);
       else res.end(); // a content stream already started; just terminate
+    } finally {
+      cancelCopyTimer?.();
     }
     return true;
   }
@@ -193,14 +261,17 @@ export class GfsServingHandler {
     claims: GfsVerifiedClaims,
     ctx: AuthzContext,
     method: string,
-    resourceMatch: RegExpExecArray
+    resourceMatch: RegExpExecArray,
+    requestId?: string
   ): Promise<void> {
     const rid = requireRid(resourceMatch[1]);
     const sub = resourceMatch[2]; // undefined | "children" | "content"
     if (method === "POST" && sub === "children") {
-      await this.serveCreate(req, res, claims, ctx, rid);
+      await this.serveCreate(req, res, claims, ctx, rid, requestId!);
     } else if (method === "PUT" && sub === "content") {
-      await this.serveReplace(req, res, claims, ctx, rid);
+      await this.serveReplace(req, res, claims, ctx, rid, requestId!);
+    } else if (method === "PATCH" && sub === undefined) {
+      await this.serveRename(req, res, claims, ctx, rid, requestId!);
     } else if (method === "DELETE" && sub === undefined) {
       await this.serveDelete(req, res, claims, ctx, rid);
     } else {
@@ -209,8 +280,8 @@ export class GfsServingHandler {
   }
 
   /** Resolve the principal to its subject set; a store failure is fail-closed 503. */
-  private async authContext(claims: GfsVerifiedClaims, req: IncomingMessage): Promise<AuthzContext> {
-    const requestId = headerValue(req, "x-request-id");
+  private async authContext(claims: GfsVerifiedClaims, req: IncomingMessage, admittedRequestId?: string): Promise<AuthzContext> {
+    const requestId = admittedRequestId ?? headerValue(req, "x-request-id");
     try {
       return await this.deps.resolveContext({ sub: claims.sub, drive: claims.drive }, requestId);
     } catch (err) {
@@ -322,10 +393,15 @@ export class GfsServingHandler {
     });
     stream.pipe(res);
     // Surface a mid-stream read error instead of silently truncating the body.
+    // pipe() does not propagate destination close back to the source, so a
+    // client abort must destroy the blob stream or its fd stays open.
     await new Promise<void>((resolve, reject) => {
       stream.on("end", resolve);
       stream.on("error", reject);
-      res.on("close", resolve);
+      res.on("close", () => {
+        stream.destroy();
+        resolve();
+      });
     });
   }
 
@@ -353,12 +429,30 @@ export class GfsServingHandler {
 
   // ── Write routes ────────────────────────────────────────────────────────────
 
+  private async serveCopy(
+    req: IncomingMessage,
+    res: ServerResponse,
+    claims: GfsVerifiedClaims,
+    ctx: AuthzContext,
+    requestId: string,
+    admittedAtMs: number,
+    signal: AbortSignal
+  ): Promise<void> {
+    const body = await readJsonBody(req, { signal });
+    const data = await executeCopyRoute({
+      body, claims, context: ctx, requestId, admittedAtMs, signal, now: () => this.clock(),
+      deps: { ...this.deps.copy!, writes: this.deps.writeService! },
+    });
+    sendJson(res, 201, ok(data));
+  }
+
   private async serveCreate(
     req: IncomingMessage,
     res: ServerResponse,
     claims: GfsVerifiedClaims,
     ctx: AuthzContext,
-    parentId: string
+    parentId: string,
+    requestId: string
   ): Promise<void> {
     const body = await readJsonBody(req);
     const name = requireName(body, "name");
@@ -372,7 +466,10 @@ export class GfsServingHandler {
     );
     await this.authorizeChecks(claims, ctx, plan.checks);
 
-    const created = await this.deps.writeService!.create({ drive: claims.drive, parentId, name, kind, content });
+    const created = await this.deps.writeService!.create({
+      drive: claims.drive, parentId, name, kind, content,
+      mutation: { subject: ctx.primarySubject, requestId, audit: this.deps.audit! },
+    });
     sendJson(res, 201, ok(toView(created)));
   }
 
@@ -381,7 +478,8 @@ export class GfsServingHandler {
     res: ServerResponse,
     claims: GfsVerifiedClaims,
     ctx: AuthzContext,
-    resourceId: string
+    resourceId: string,
+    requestId: string
   ): Promise<void> {
     const body = await readJsonBody(req);
     const content = readContentBuffer(body);
@@ -392,8 +490,25 @@ export class GfsServingHandler {
     );
     await this.authorizeChecks(claims, ctx, plan.checks);
 
-    const updated = await this.deps.writeService!.replace({ drive: claims.drive, resourceId, ifMatch, content });
+    const updated = await this.deps.writeService!.replace({
+      drive: claims.drive, resourceId, ifMatch, content,
+      mutation: { subject: ctx.primarySubject, requestId, audit: this.deps.audit! },
+    });
     sendJson(res, 200, ok(toView(updated)));
+  }
+
+  private async serveRename(
+    req: IncomingMessage, res: ServerResponse, claims: GfsVerifiedClaims,
+    ctx: AuthzContext, resourceId: string, requestId: string
+  ): Promise<void> {
+    const body = await readJsonBody(req);
+    const data = await executeRenameRoute({
+      body, claims, context: ctx, resourceId, requestId, audit: this.deps.audit!,
+      authorizeWrite: () => this.authorizeOp(claims, ctx, resourceId, "write"),
+      writes: this.deps.writeService!,
+      limits: this.deps.rename!,
+    });
+    sendJson(res, 200, ok(data));
   }
 
   private async serveDelete(
@@ -426,6 +541,13 @@ export class GfsServingHandler {
       await this.authorizeOp(claims, ctx, requireRid(check.resourceId), check.op);
     }
   }
+}
+
+function requireRequestId(req: IncomingMessage): string {
+  const supplied = headerValue(req, "x-request-id");
+  if (supplied === undefined) return randomUUID();
+  const normalized = requireRid(supplied);
+  return [normalized.slice(0, 8), normalized.slice(8, 12), normalized.slice(12, 16), normalized.slice(16, 20), normalized.slice(20)].join("-");
 }
 
 function headerValue(req: IncomingMessage, name: string): string | undefined {
@@ -479,9 +601,9 @@ function decodeBase64Content(encoded: string): Buffer {
 
 function requireName(body: Record<string, unknown>, key: string): string {
   try {
-    return normalizeName(requireString(body, key));
+    return normalizeResourceName(requireString(body, key));
   } catch (err) {
-    if (err instanceof MoveError) throw new GfsError("path_invalid", err.message);
+    if (err instanceof ResourceNameError) throw new GfsError("path_invalid", err.message);
     throw err;
   }
 }
@@ -502,18 +624,31 @@ function optionalNumber(body: Record<string, unknown>, key: string): number | un
  */
 async function readJsonBody(
   req: IncomingMessage,
-  opts: { allowEmpty?: boolean } = {}
+  opts: { allowEmpty?: boolean; signal?: AbortSignal } = {}
 ): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let total = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    total += buf.length;
-    if (total > MAX_WRITE_BODY_BYTES) {
-      throw new GfsError("payload_too_large", `request body exceeds ${MAX_WRITE_BODY_BYTES} bytes`);
+  const abort = (): void => {
+    req.destroy(opts.signal?.reason instanceof Error
+      ? opts.signal.reason
+      : new GfsError("precondition_failed", "synchronous copy deadline exceeded"));
+  };
+  opts.signal?.throwIfAborted();
+  opts.signal?.addEventListener("abort", abort, { once: true });
+  try {
+    for await (const chunk of req) {
+      opts.signal?.throwIfAborted();
+      const buf = chunk as Buffer;
+      total += buf.length;
+      if (total > MAX_WRITE_BODY_BYTES) {
+        throw new GfsError("payload_too_large", `request body exceeds ${MAX_WRITE_BODY_BYTES} bytes`);
+      }
+      chunks.push(buf);
     }
-    chunks.push(buf);
+  } finally {
+    opts.signal?.removeEventListener("abort", abort);
   }
+  opts.signal?.throwIfAborted();
   const raw = Buffer.concat(chunks).toString("utf8").trim();
   if (raw === "") {
     if (opts.allowEmpty) return {};

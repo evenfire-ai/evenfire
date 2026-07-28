@@ -13,18 +13,22 @@
  *       - `spec.enabled !== false`
  *       - `spec.auth.type` is absent or equals `"none"`
  *       - `spec.transport.url` is a non-empty string
- *   - Session catalog returns **names only**; RPC catalog additionally returns
- *     the transport URL.
+ *   - Session catalog preserves names-only compatibility while enriching each
+ *     authorized agent with its canonical directory identity; RPC catalog
+ *     additionally returns the transport URL.
  */
 import type { K8sGateway } from '../../k8s.js'
+import {
+  buildAgentDirectoryEntry,
+  type AgentDirectoryEntry,
+} from '../directory/accessReconciliation.js'
 
 export interface InvocableMcpServer {
   name: string
   url: string
 }
 
-export interface AgentWithMcpServers {
-  name: string
+export interface AgentWithMcpServers extends AgentDirectoryEntry {
   contextRef: string | null
   mcpServers: Array<{ name: string }>
 }
@@ -43,8 +47,39 @@ interface McpServerCR {
 }
 
 interface HostCR {
-  metadata?: { name?: string }
-  spec?: { contextRef?: string }
+  metadata?: {
+    name?: string
+    namespace?: string
+    deletionTimestamp?: string | null
+  }
+  spec?: { contextRef?: string; enabled?: boolean; host?: string }
+}
+
+/**
+ * Recognize the stable Kubernetes "resource does not exist" signal without
+ * confusing RBAC, API availability, or transport failures with deletion.
+ * The client and gateway wrappers used by Control API expose 404 in several
+ * compatible shapes, so classification must inspect the status fields rather
+ * than error text.
+ */
+export function isK8sResourceNotFound(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const candidate = error as {
+    name?: unknown
+    statusCode?: unknown
+    code?: unknown
+    body?: { code?: unknown }
+    response?: { status?: unknown; statusCode?: unknown; body?: { code?: unknown } }
+  }
+  return (
+    candidate.name === 'K8sNotFoundError' ||
+    candidate.statusCode === 404 ||
+    candidate.code === 404 ||
+    candidate.body?.code === 404 ||
+    candidate.response?.status === 404 ||
+    candidate.response?.statusCode === 404 ||
+    candidate.response?.body?.code === 404
+  )
 }
 
 function asArray<T>(value: unknown): T[] {
@@ -172,7 +207,9 @@ export async function resolveInvocableMcpServersForContexts(
  * is required. Passing an unauthorized agentName leaks that agent's MCP
  * server names.
  *
- * Returns one entry per input `agentNames` in the same order.
+ * Returns valid, active entries in the same order as `agentNames`. Each Host is
+ * fetched by its already-authorized name; this resolver never lists or
+ * serializes Hosts outside the caller's authorization result.
  */
 export async function resolveMcpServersForAgents(
   gateway: K8sGateway,
@@ -185,44 +222,88 @@ export async function resolveMcpServersForAgents(
   const { mcpServersNamespace, hostsNamespace, agentNames } = opts
   if (agentNames.length === 0) return []
 
-  const [hosts, mcpServers] = await Promise.all([
-    gateway.listResource('hosts', hostsNamespace),
-    gateway.listResource('mcpservers', mcpServersNamespace),
-  ])
-  const hostList = asArray<HostCR>(hosts)
-  const serverList = asArray<McpServerCR>(mcpServers)
+  const resolvedHosts = await Promise.all(
+    agentNames.map(async requestedName => {
+      try {
+        const host = (await gateway.getResource(
+          'hosts',
+          requestedName,
+          hostsNamespace
+        )) as HostCR
+        const directoryEntry = buildAgentDirectoryEntry(host, hostsNamespace)
+        if (!directoryEntry || directoryEntry.name !== requestedName) return null
+        return { host, directoryEntry }
+      } catch (error) {
+        if (isK8sResourceNotFound(error)) return null
+        // A non-404 failure says nothing about whether this already-authorized
+        // Host still exists. Propagate it so callers can preserve their
+        // names-only compatibility field instead of silently revoking access.
+        throw error
+      }
+    })
+  )
 
-  const hostByName = new Map<string, HostCR>()
-  for (const h of hostList) {
-    const n = h.metadata?.name
-    if (n) hostByName.set(n, h)
+  let serverList: McpServerCR[] = []
+  try {
+    serverList = asArray<McpServerCR>(
+      await gateway.listResource('mcpservers', mcpServersNamespace)
+    )
+  } catch (err) {
+    // Directory identity remains useful when optional MCP catalog enrichment
+    // is temporarily unavailable — but the degradation must be observable, or
+    // a broken mcpservers list path reads as "this agent has no tools".
+    console.error(
+      '[mcpInvocable] mcpservers list failed; directory served without MCP catalog:',
+      err instanceof Error ? err.message : String(err)
+    )
   }
 
+  const visibleHosts = resolvedHosts.filter(
+    (
+      item
+    ): item is {
+      host: HostCR
+      directoryEntry: AgentDirectoryEntry
+    } => item !== null
+  )
+
   const scopedContextIds = new Set<string>()
-  for (const agentName of agentNames) {
-    const contextRef = hostByName.get(agentName)?.spec?.contextRef
+  for (const { host } of visibleHosts) {
+    const contextRef = host.spec?.contextRef
     if (contextRef) scopedContextIds.add(contextRef)
   }
 
-  const allowedByContext =
-    scopedContextIds.size === 0
-      ? new Map<string, Set<string>>()
-      : await loadAllowedNamesByContext(gateway, mcpServersNamespace, scopedContextIds)
+  let allowedByContext = new Map<string, Set<string>>()
+  if (scopedContextIds.size > 0) {
+    try {
+      allowedByContext = await loadAllowedNamesByContext(
+        gateway,
+        mcpServersNamespace,
+        scopedContextIds
+      )
+    } catch (err) {
+      // Preserve the authorized directory DTOs with an empty tool catalog —
+      // loudly, so a Context-read outage is distinguishable from "no tools".
+      console.error(
+        '[mcpInvocable] context allowlist load failed; directory served with empty tool catalogs:',
+        err instanceof Error ? err.message : String(err)
+      )
+    }
+  }
 
-  return agentNames.map(agentName => {
-    const host = hostByName.get(agentName)
+  return visibleHosts.map(({ host, directoryEntry }) => {
     const contextRef = host?.spec?.contextRef ?? null
     if (!contextRef) {
-      return { name: agentName, contextRef, mcpServers: [] }
+      return { ...directoryEntry, contextRef, mcpServers: [] }
     }
     const allowed = allowedByContext.get(contextRef)
     if (!allowed || allowed.size === 0) {
-      return { name: agentName, contextRef, mcpServers: [] }
+      return { ...directoryEntry, contextRef, mcpServers: [] }
     }
     const invocable = filterInvocable(allowed, serverList, mcpServersNamespace)
     const names = [...invocable].sort((a, b) => a.localeCompare(b))
     return {
-      name: agentName,
+      ...directoryEntry,
       contextRef,
       mcpServers: names.map(name => ({ name })),
     }
