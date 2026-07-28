@@ -91,9 +91,9 @@ describe('AppService GFS delegation subject boundary', () => {
     async subjectKey => {
       const service = gfsService()
 
-      await expect(
-        service.grantGfs(RESOURCE_ID, [subjectKey], ['read'], 'main')
-      ).rejects.toThrow('subject must be user:<id>, team:<id>, or host:<party>:<ns>/<name>')
+      await expect(service.grantGfs(RESOURCE_ID, [subjectKey], ['read'], 'main')).rejects.toThrow(
+        'subject must be user:<id>, team:<id>, or host:<party>:<ns>/<name>'
+      )
       await expect(service.createGfsShare(RESOURCE_ID, [subjectKey], 'main')).rejects.toThrow(
         'subject must be user:<id>, team:<id>, or host:<party>:<ns>/<name>'
       )

@@ -5,6 +5,7 @@ import {
   ResourcePatchError,
   applyResourcePatch,
 } from '../src/routes/gfs/resources.js'
+
 const FILE = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 const SRC = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
 const DEST = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
@@ -271,9 +272,16 @@ describe('applyResourcePatch — concurrency + guards', () => {
   })
 
   it('rejects destination live/kind/parent/version changes while acquiring row locks', async () => {
-    const mutations = [(r: Record<string, ResRow>) => (r[DEST].version += 1), (r: Record<string, ResRow>) => (r[DEST].kind = 'file'), (r: Record<string, ResRow>) => (r[DEST].parent_resource_id = SRC), (r: Record<string, ResRow>) => (r[DEST].deleted_at = '2026-07-17')]
+    const mutations = [
+      (r: Record<string, ResRow>) => (r[DEST].version += 1),
+      (r: Record<string, ResRow>) => (r[DEST].kind = 'file'),
+      (r: Record<string, ResRow>) => (r[DEST].parent_resource_id = SRC),
+      (r: Record<string, ResRow>) => (r[DEST].deleted_at = '2026-07-17'),
+    ]
     for (const afterLock of mutations) {
-      await expect(patch(mockDb({ afterLock }), operator, FILE, { newParentId: DEST })).rejects.toMatchObject({
+      await expect(
+        patch(mockDb({ afterLock }), operator, FILE, { newParentId: DEST })
+      ).rejects.toMatchObject({
         status: 412,
         code: 'precondition_failed',
       })
@@ -293,7 +301,9 @@ describe('applyResourcePatch — concurrency + guards', () => {
     const db = mockDb()
     await patch(db, operator, FILE, { newParentId: DEST })
     const advisory = db.queries.findIndex(query => query.text.includes('pg_advisory_xact_lock'))
-    const rows = db.queries.findIndex(query => query.text.includes('ORDER BY resource_id') && query.text.includes('FOR UPDATE'))
+    const rows = db.queries.findIndex(
+      query => query.text.includes('ORDER BY resource_id') && query.text.includes('FOR UPDATE')
+    )
     expect(advisory).toBeGreaterThanOrEqual(0)
     expect(rows).toBeGreaterThan(advisory)
     expect(db.queries[rows].values?.[0]).toEqual([FILE, SRC, DEST].sort())

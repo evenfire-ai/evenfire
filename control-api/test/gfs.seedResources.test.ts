@@ -189,7 +189,13 @@ describe('DbSeedResourceStore.ensureDirectory (idempotent upsert)', () => {
 
   it('fails loud if neither insert nor select yields a row (no silent empty id)', async () => {
     const db = new FakeDb()
-    db.responses = [{ rows: [root] }, { rows: [root] }, { rows: [root] }, { rows: [] }, { rows: [] }]
+    db.responses = [
+      { rows: [root] },
+      { rows: [root] },
+      { rows: [root] },
+      { rows: [] },
+      { rows: [] },
+    ]
     await expect(
       new DbSeedResourceStore(db).ensureDirectory({
         drive: 'main',

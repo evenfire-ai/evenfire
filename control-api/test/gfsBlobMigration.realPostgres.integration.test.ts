@@ -1,5 +1,5 @@
-import { randomBytes, randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 
@@ -59,8 +59,15 @@ describeRealPostgres('GFS immutable blob migration on real PostgreSQL', () => {
         ORDER BY ordinal_position`
     )
     expect(columns.rows.map(row => row.column_name)).toEqual([
-      'blob_key', 'request_id', 'resource_id', 'candidate_kind', 'content_sha256',
-      'bytes', 'state', 'created_at', 'updated_at',
+      'blob_key',
+      'request_id',
+      'resource_id',
+      'candidate_kind',
+      'content_sha256',
+      'bytes',
+      'state',
+      'created_at',
+      'updated_at',
     ])
     expect(columns.rows.find(row => row.column_name === 'content_sha256')?.is_nullable).toBe('YES')
 
@@ -71,7 +78,8 @@ describeRealPostgres('GFS immutable blob migration on real PostgreSQL', () => {
         ORDER BY conname`
     )
     expect(constraints.rows.map(row => row.conname)).toEqual([
-      'gfs_blob_manifests_blob_key_valid', 'gfs_resources_blob_metadata_pair',
+      'gfs_blob_manifests_blob_key_valid',
+      'gfs_resources_blob_metadata_pair',
     ])
     expect(constraints.rows.map(row => row.definition).join(' ')).toMatch(
       /generation.*legacy_flat.*content_sha256 IS NULL/s
@@ -83,7 +91,8 @@ describeRealPostgres('GFS immutable blob migration on real PostgreSQL', () => {
         ORDER BY indexname`
     )
     expect(indexes.rows.map(row => row.indexname)).toEqual([
-      'gfs_blob_manifests_cleanup_idx', 'gfs_resources_blob_key_uniq',
+      'gfs_blob_manifests_cleanup_idx',
+      'gfs_resources_blob_key_uniq',
     ])
     expect(indexes.rows[0]?.indexdef).toContain('(state, updated_at, blob_key)')
     expect(indexes.rows[1]?.indexdef).toContain('WHERE (blob_key IS NOT NULL)')
@@ -98,8 +107,14 @@ describeRealPostgres('GFS immutable blob migration on real PostgreSQL', () => {
              has_table_privilege('gfs_controller','gfs_blob_manifests','UPDATE') AS manifest_update,
              has_table_privilege('gfs_controller','gfs_blob_manifests','DELETE') AS manifest_delete`)
     expect(acl.rows[0]).toEqual({
-      resource_read: true, resource_insert: true, resource_update: true, resource_delete: false,
-      manifest_read: true, manifest_insert: true, manifest_update: true, manifest_delete: true,
+      resource_read: true,
+      resource_insert: true,
+      resource_update: true,
+      resource_delete: false,
+      manifest_read: true,
+      manifest_insert: true,
+      manifest_update: true,
+      manifest_delete: true,
     })
   })
 
@@ -118,10 +133,13 @@ describeRealPostgres('GFS immutable blob migration on real PostgreSQL', () => {
       `UPDATE gfs_resources SET blob_key=$2,content_sha256=$3 WHERE resource_id=$1`,
       [resourceId, generationKey, 'a'.repeat(64)]
     )
-    await expect(pool.query(
-      `UPDATE gfs_resources SET blob_key=$2,content_sha256=$3 WHERE resource_id=$1`,
-      [resourceId, `${rootId.replaceAll('-', '')}/${randomUUID()}`, 'a'.repeat(64)]
-    )).rejects.toMatchObject({ code: '23514' })
+    await expect(
+      pool.query(`UPDATE gfs_resources SET blob_key=$2,content_sha256=$3 WHERE resource_id=$1`, [
+        resourceId,
+        `${rootId.replaceAll('-', '')}/${randomUUID()}`,
+        'a'.repeat(64),
+      ])
+    ).rejects.toMatchObject({ code: '23514' })
     await pool.query(
       `INSERT INTO gfs_blob_manifests
          (blob_key,request_id,resource_id,candidate_kind,content_sha256,bytes,state)
@@ -129,11 +147,13 @@ describeRealPostgres('GFS immutable blob migration on real PostgreSQL', () => {
               ($5,$6,$3,'legacy_flat',NULL,1,'deleting')`,
       [generationKey, randomUUID(), resourceId, 'a'.repeat(64), compactId, randomUUID()]
     )
-    await expect(pool.query(
-      `INSERT INTO gfs_blob_manifests
+    await expect(
+      pool.query(
+        `INSERT INTO gfs_blob_manifests
          (blob_key,request_id,resource_id,candidate_kind,content_sha256,bytes,state)
        VALUES ($1,$2,$3,'legacy_flat',$4,1,'deleting')`,
-      [rootId.replaceAll('-', ''), randomUUID(), rootId, 'b'.repeat(64)]
-    )).rejects.toMatchObject({ code: '23514' })
+        [rootId.replaceAll('-', ''), randomUUID(), rootId, 'b'.repeat(64)]
+      )
+    ).rejects.toMatchObject({ code: '23514' })
   })
 })
