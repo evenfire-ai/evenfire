@@ -19,15 +19,10 @@ import { GfsReconciler } from './gfsReconciler'
 import { ControlApiGfsSeedClient } from './gfsSeedClient'
 import {
   HostFleetReconcileError,
-  HostReconciler,
   type HostReconcileSource,
+  HostReconciler,
   type ResolvedSfsMount,
 } from './hostReconciler'
-import {
-  hostDeleteCleanupTotal,
-  hostFleetRequestsTotal,
-  hostWatchRecoverySeconds,
-} from './metrics'
 import {
   type InfrastructureTelemetryReporter,
   createInfrastructureTelemetryReporter,
@@ -35,6 +30,7 @@ import {
 import { K8sGfsApi } from './k8s/gfsK8sApi'
 import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
 import { pvcName as sfsPvcName } from './k8s/sharedFileSystemFactory'
+import { hostDeleteCleanupTotal, hostFleetRequestsTotal, hostWatchRecoverySeconds } from './metrics'
 import { NetworkPolicyReconciler } from './networkPolicyReconciler'
 import { McpServerReconciler } from './reconciler'
 import { SharedFileSystemReconciler } from './sharedFileSystemReconciler'
@@ -1752,7 +1748,12 @@ export class McpServerWatcher implements McpServerProvider {
       this.ccLifecycleGeneration === 0
         ? this.beginCommunicationChannelLifecycleTransition()
         : this.ccLifecycleGeneration
-    await this.requestHostFleetReconcile(
+    // Bootstrap owns cache/watch continuity and the safe CC lifecycle boundary;
+    // full Host convergence can then proceed independently. Waiting for every
+    // Host to settle here made the HCC readiness probe proportional to fleet
+    // size, even though urgent Host watch events retain their own per-Host
+    // serialization and the fleet request carries its established retry path.
+    void this.requestHostFleetReconcile(
       'initial Host reconciliation',
       initialLifecycleGeneration,
       'full'

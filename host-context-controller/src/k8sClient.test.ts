@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as http from 'http'
 import { HostFleetReconcileError } from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
 import { McpServerWatcher, listAllCommunicationChannels, listAllHosts } from './k8sClient'
+import { ContextMapperServer } from './server'
 import type { HostCRD } from './types'
 
 function deferred<T = void>(): {
@@ -16,6 +18,32 @@ function deferred<T = void>(): {
     reject = rej
   })
   return { promise, resolve, reject }
+}
+
+async function requestReadyOverHttp(server: ContextMapperServer): Promise<{
+  statusCode: number | undefined
+  body: string
+}> {
+  const listener = (server as unknown as { server: http.Server | null }).server
+  const address = listener?.address()
+  if (!address || typeof address === 'string') {
+    throw new Error('HCC readiness listener did not bind a TCP port')
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = http.get(
+      { host: '127.0.0.1', port: address.port, path: '/ready' },
+      response => {
+        let body = ''
+        response.setEncoding('utf8')
+        response.on('data', chunk => {
+          body += chunk
+        })
+        response.on('end', () => resolve({ statusCode: response.statusCode, body }))
+      }
+    )
+    request.once('error', reject)
+  })
 }
 
 const mocks = vi.hoisted(() => {
@@ -250,6 +278,69 @@ describe('McpServerWatcher startup', () => {
     expect(mocks.serverFullReconcile).toHaveBeenCalledWith([])
     expect(mocks.hostFullReconcile).toHaveBeenCalledWith([])
     expect(mocks.sfsFullReconcile).toHaveBeenCalledWith([])
+  })
+
+  it('completes safe bootstrap while the initial Host fleet reconciliation continues in background', async () => {
+    const initialFleet = deferred()
+    mocks.hostFullReconcile.mockImplementationOnce(() => initialFleet.promise)
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'communicationchannels') {
+        return { metadata: { resourceVersion: 'safe-bootstrap-rv' }, items: [] }
+      }
+      return { items: [] }
+    })
+    const watcher = new McpServerWatcher()
+    const startMcpServerWatch = vi
+      .spyOn(watcher as any, 'startMcpServerWatch')
+      .mockResolvedValue(undefined)
+    const startContextWatch = vi
+      .spyOn(watcher as any, 'startContextWatch')
+      .mockResolvedValue(undefined)
+    const startSharedFileSystemWatch = vi
+      .spyOn(watcher as any, 'startSharedFileSystemWatch')
+      .mockResolvedValue(undefined)
+    const startGlobalFileSystemWatch = vi
+      .spyOn(watcher as any, 'startGlobalFileSystemWatch')
+      .mockResolvedValue(undefined)
+
+    const server = new ContextMapperServer(watcher, 0)
+    await server.start()
+    const bootstrap = watcher.start()
+
+    try {
+      await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledOnce())
+
+      await expect(bootstrap).resolves.toBeUndefined()
+      server.setReady(true)
+      const ready = await requestReadyOverHttp(server)
+
+      expect(ready.statusCode).toBe(200)
+      expect(JSON.parse(ready.body)).toEqual({ status: 'ready', ready: true })
+      expect(startMcpServerWatch).toHaveBeenCalledOnce()
+      expect(startContextWatch).toHaveBeenCalledOnce()
+      expect(startSharedFileSystemWatch).toHaveBeenCalledOnce()
+      expect(startGlobalFileSystemWatch).toHaveBeenCalledOnce()
+      expect(watcher.isCommunicationChannelCacheSynced()).toBe(true)
+    } finally {
+      initialFleet.resolve(undefined)
+      await bootstrap.catch(() => undefined)
+      await server.stop()
+      watcher.stop()
+    }
+  })
+
+  it('rejects safe bootstrap when the McpServer watch cannot be established', async () => {
+    const watcher = new McpServerWatcher()
+    vi.spyOn(watcher as any, 'startMcpServerWatch').mockRejectedValue(
+      new Error('watch unavailable')
+    )
+    vi.spyOn(watcher as any, 'startContextWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
+
+    await expect(watcher.start()).rejects.toThrow('watch unavailable')
+    watcher.stop()
   })
 
   it('applies the request deadline wrapper to the finite Host inventory LIST', async () => {
@@ -1704,8 +1795,11 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       expect(mocks.hostReconcileHosts).not.toHaveBeenCalled()
       expect(maxActivePasses).toBe(1)
 
-      initialPass.resolve(undefined)
+      // Startup now resolves after safe bootstrap; the serialized fleet tail
+      // keeps running independently and must still drain the queued lifecycle pass.
       await start
+      initialPass.resolve(undefined)
+      await vi.waitFor(() => expect(mocks.hostReconcileHosts).toHaveBeenCalledOnce())
 
       expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
       expect(mocks.hostReconcileHosts).toHaveBeenCalledOnce()
