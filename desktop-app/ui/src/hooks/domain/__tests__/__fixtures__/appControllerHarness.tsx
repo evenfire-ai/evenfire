@@ -4,25 +4,28 @@ import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderHook } from '@testing-library/react'
 import { useAppController } from '../../../useAppController'
-import type { MockClerum } from './mockClerum'
+import { type MockClerum, installMockClerum } from './mockClerum'
 
 /**
- * Mounts the REAL coordinator (`useAppController`) instead of a single domain
- * controller, so tests can drive its cross-domain entry points
- * (`handleSelectChatAgent`, `handleOpenNotification` → `openAgentConversationTarget`)
- * and observe the navigation + chat controllers reacting to each other.
+ * The single `window.clerum` bridge for tests that boot the REAL coordinator
+ * (`useAppController`), plus a `renderHook` mount for the ones that drive it
+ * through its return value rather than through rendered UI.
+ *
+ * Two suites share it — `hooks/domain/__tests__/chatSelectionAcrossRouteChange`
+ * and `hooks/__tests__/useWorkspaceController` (whose hook is a deprecated
+ * re-export of `useAppController`, so both boot the same thing). It lives in this
+ * folder because the repo keeps ONE `__fixtures__` directory for the hooks tests
+ * and because it is built on top of `mockClerum` — splitting it away from its own
+ * base would cost more than the cross-folder import it saves.
  *
  * `controllerHarness.renderController` stays the right tool when a test only
  * needs `useAgentChatController` — it drives `navItem` as a prop. The guards in
  * `useAppController` read `nav.navItem` from the navigation controller it owns,
  * which no prop can stand in for, hence this second harness.
  *
- * The `window.clerum` surface here EXTENDS `installMockClerum()` (chat + rpc)
- * with the namespaces the coordinator touches on mount. It mirrors
- * `hooks/__tests__/useWorkspaceController.test.tsx`'s `installClerumHarness` —
- * the established way to boot the coordinator in a test — but keeps the chat/rpc
- * mocks from `mockClerum` so chat assertions read the same as in the rest of
- * this folder.
+ * The bridge EXTENDS `installMockClerum()` (chat + rpc) with the namespaces the
+ * coordinator touches on mount. Everything that differs between the two suites
+ * is an option — never a duplicated bridge.
  */
 
 export const HARNESS_ME = {
@@ -31,6 +34,27 @@ export const HARNESS_ME = {
   name: 'Test User',
   teamId: 'team-1',
   teamName: 'Team 1',
+}
+
+type Fn = ReturnType<typeof vi.fn>
+
+interface Deferred<T> {
+  promise: Promise<T>
+  resolve: (value: T) => void
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(res => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
+function createSessionState(authenticated: boolean) {
+  return authenticated
+    ? { authenticated: true, me: HARNESS_ME }
+    : { authenticated: false, me: null }
 }
 
 function createCatalog(agentNames: string[]) {
@@ -49,17 +73,84 @@ function createCatalog(agentNames: string[]) {
   }
 }
 
+const DEFAULT_DESKTOP_RELEASE_STATUS = {
+  checked: true,
+  currentVersion: '0.1.250',
+  latestVersion: '0.1.250',
+  minimumVersion: '0.1.250',
+  updateRequired: false,
+  releaseUrl: '',
+}
+
+export interface AppControllerClerumOptions {
+  /** Access-catalog agents. Empty means "authenticated user with no agents". */
+  agentNames?: string[]
+  /** Boot already signed in (default). `false` boots at the login screen. */
+  startAuthenticated?: boolean
+  /**
+   * Hold `team.directory`, `access.refreshCatalog` and `approvals.listPending`
+   * open once authenticated, until `resolveAuthenticatedLoad()` runs — lets a
+   * test observe the window between login and workspace hydration.
+   */
+  delayAuthenticatedLoad?: boolean
+  /** Make `auth.passwordLogin` reject with this instead of signing in. */
+  passwordLoginError?: unknown
+  /** Payload for `auth.getDesktopReleaseStatus`. */
+  desktopReleaseStatus?: typeof DEFAULT_DESKTOP_RELEASE_STATUS
+  /** Payload for `team.directory` / `team.initialDirectory` / `team.list`. */
+  teamDirectory?: { items: unknown[]; currentTeamId: string }
+}
+
+export interface AppControllerClerumHandle {
+  getSessionState: Fn
+  passwordLogin: Fn
+  getDesktopReleaseStatus: Fn
+  teamDirectory: Fn
+  refreshCatalog: Fn
+  listPending: Fn
+  /** Settles whatever `delayAuthenticatedLoad` is holding open. */
+  resolveAuthenticatedLoad: () => void
+}
+
 /**
  * Adds the auth/team/access/notifications/... namespaces the coordinator needs
  * on top of an installed `MockClerum`. Call it AFTER `installMockClerum()` and
- * BEFORE `renderAppController()`.
+ * BEFORE mounting. Use `installAppControllerClerum` when the suite has no
+ * `installMockClerum()` of its own.
  */
 export function extendMockClerumForAppController(
   clerum: MockClerum,
-  options: { agentNames?: string[] } = {}
-): void {
+  options: AppControllerClerumOptions = {}
+): AppControllerClerumHandle {
   const agentNames = options.agentNames ?? ['agent-x']
   const bridge = clerum as unknown as Record<string, unknown>
+
+  let authenticated = options.startAuthenticated ?? true
+  const teamDirectoryPayload = options.teamDirectory ?? {
+    items: [],
+    currentTeamId: HARNESS_ME.teamId,
+  }
+  const teamDirectoryDeferred = createDeferred<typeof teamDirectoryPayload>()
+  const catalogDeferred = createDeferred<ReturnType<typeof createCatalog>>()
+  const approvalsDeferred = createDeferred<unknown[]>()
+  const held = () => Boolean(options.delayAuthenticatedLoad) && authenticated
+
+  const getSessionState = vi.fn(async () => createSessionState(authenticated))
+  const passwordLogin = vi.fn(async () => {
+    if (options.passwordLoginError) throw options.passwordLoginError
+    authenticated = true
+    return createSessionState(true)
+  })
+  const getDesktopReleaseStatus = vi.fn(
+    async () => options.desktopReleaseStatus ?? DEFAULT_DESKTOP_RELEASE_STATUS
+  )
+  const teamDirectory = vi.fn(async () =>
+    held() ? teamDirectoryDeferred.promise : teamDirectoryPayload
+  )
+  const refreshCatalog = vi.fn(async () =>
+    held() ? catalogDeferred.promise : createCatalog(agentNames)
+  )
+  const listPending = vi.fn(async () => (held() ? approvalsDeferred.promise : []))
 
   Object.assign(bridge.rpc as object, {
     listServers: vi.fn(async () => ({ servers: [] })),
@@ -68,46 +159,39 @@ export function extendMockClerumForAppController(
     denyToolCall: vi.fn(async () => undefined),
   })
 
-  const teamDirectory = vi.fn(async () => ({ items: [], currentTeamId: HARNESS_ME.teamId }))
-
   Object.assign(bridge, {
     auth: {
       getDependenciesHealth: vi.fn(async () => ({
         externalRestApi: { ok: true },
         rpcProxy: { ok: true },
       })),
-      getSessionState: vi.fn(async () => ({ authenticated: true, me: HARNESS_ME })),
+      getSessionState,
       getRuntimeConfigState: vi.fn(async () => ({
         activeProfileId: null,
         configured: true,
         isPackaged: false,
         options: [],
       })),
-      getDesktopReleaseStatus: vi.fn(async () => ({
-        checked: true,
-        currentVersion: '0.1.250',
-        latestVersion: '0.1.250',
-        minimumVersion: '0.1.250',
-        updateRequired: false,
-        releaseUrl: '',
-      })),
+      getDesktopReleaseStatus,
       openDesktopRelease: vi.fn(async () => undefined),
-      passwordLogin: vi.fn(async () => ({ authenticated: true, me: HARNESS_ME })),
+      passwordLogin,
       logout: vi.fn(async () => undefined),
       onDesktopSetupToken: vi.fn(() => () => undefined),
       onDesktopEnvironmentSetup: vi.fn(() => () => undefined),
       onExternalLogout: vi.fn(() => () => undefined),
     },
     team: {
+      list: vi.fn(async () => teamDirectoryPayload),
+      members: vi.fn(async () => []),
       directory: teamDirectory,
       initialDirectory: teamDirectory,
-      switch: vi.fn(async () => ({ authenticated: true, me: HARNESS_ME })),
+      switch: vi.fn(async () => createSessionState(true)),
     },
     access: {
-      refreshCatalog: vi.fn(async () => createCatalog(agentNames)),
+      refreshCatalog,
     },
     approvals: {
-      listPending: vi.fn(async () => []),
+      listPending,
       decide: vi.fn(async () => ({ ok: true })),
     },
     notifications: {
@@ -142,7 +226,10 @@ export function extendMockClerumForAppController(
         channelFallbackEnabled: true,
         verifiedMedia: [],
       })),
-      update: vi.fn(async () => ({ verifiedMedia: [] })),
+      update: vi.fn(async (next: unknown) => ({
+        ...(next && typeof next === 'object' ? next : {}),
+        verifiedMedia: [],
+      })),
     },
     desktop: {
       getStatus: vi.fn(async () => ({ status: 'inactive' })),
@@ -157,6 +244,29 @@ export function extendMockClerumForAppController(
       trigger: vi.fn(async () => undefined),
     },
   })
+
+  return {
+    getSessionState,
+    passwordLogin,
+    getDesktopReleaseStatus,
+    teamDirectory,
+    refreshCatalog,
+    listPending,
+    resolveAuthenticatedLoad() {
+      teamDirectoryDeferred.resolve(teamDirectoryPayload)
+      catalogDeferred.resolve(createCatalog(agentNames))
+      approvalsDeferred.resolve([])
+    },
+  }
+}
+
+/** `installMockClerum()` + `extendMockClerumForAppController()` in one call. */
+export function installAppControllerClerum(options: AppControllerClerumOptions = {}): {
+  clerum: MockClerum
+  handle: AppControllerClerumHandle
+} {
+  const clerum = installMockClerum()
+  return { clerum, handle: extendMockClerumForAppController(clerum, options) }
 }
 
 export interface RenderAppControllerResult {
