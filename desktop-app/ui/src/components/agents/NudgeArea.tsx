@@ -30,6 +30,16 @@ function MiniSummary({ steps }: { steps: ProgressStep[] }) {
  * step away — closing the "fire & forget + come back" loop. Renders nothing for
  * T1/T2 (short waits) and for no/terminal task. Covers both locally-started and
  * rejoined tasks (rendered as a sibling of the thread, not inside the placeholder).
+ *
+ * Suspended tasks render NO nudge at all. Every T3+ nudge asserts the agent is
+ * working ("still working", "taking longer than usual", "might be stuck") — all
+ * false while the task is parked on an approval gate, where the blocker is the
+ * user, not the agent. §AC3 freezes the tier timer at `pausedAt` so the wait
+ * itself can't escalate, but a task that genuinely ran >2min BEFORE suspending
+ * still enters the gate already at T3/T4/T5, so the freeze alone can't suppress
+ * the misleading copy — this guard does. No replacement "waiting for your
+ * approval" banner: the approval card rendered above is already that affordance,
+ * and duplicating it would just add noise under it.
  */
 export function NudgeArea({ agentRef, chatId, onStartNewChat, onRefreshState }: Props) {
   const tracker = useAgentTaskTracker()
@@ -50,6 +60,12 @@ export function NudgeArea({ agentRef, chatId, onStartNewChat, onRefreshState }: 
   if (!state) return null
   if (state.status === 'completed' || state.status === 'cancelled' || state.status === 'failed')
     return null
+  // Approval gate open → the approval card owns the surface (see the block
+  // above). Also guard on `pendingApproval` alone: after a rejoin the FSM
+  // projection can paint the gate before the sticky `suspended` replay flips
+  // this tracker entry's status, and the nudge must stay out through that
+  // window too.
+  if (state.status === 'suspended' || state.pendingApproval) return null
   if (tier === 'T1' || tier === 'T2') return null
 
   if (tier === 'T3') {
