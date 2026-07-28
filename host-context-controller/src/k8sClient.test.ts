@@ -280,9 +280,16 @@ describe('McpServerWatcher startup', () => {
     expect(mocks.sfsFullReconcile).toHaveBeenCalledWith([])
   })
 
-  it('completes safe bootstrap while the initial Host fleet reconciliation continues in background', async () => {
-    const initialFleet = deferred()
-    mocks.hostFullReconcile.mockImplementationOnce(() => initialFleet.promise)
+  it('completes safe bootstrap while every initial convergence lane continues in background', async () => {
+    const initialServerFleet = deferred()
+    const initialNetworkPolicies = deferred()
+    const initialHostFleet = deferred()
+    const initialSfsFleet = deferred()
+    const initialGfsFleet = deferred()
+    mocks.serverFullReconcile.mockImplementationOnce(() => initialServerFleet.promise)
+    mocks.netPolFullReconcile.mockImplementationOnce(() => initialNetworkPolicies.promise)
+    mocks.hostFullReconcile.mockImplementationOnce(() => initialHostFleet.promise)
+    mocks.sfsFullReconcile.mockImplementationOnce(() => initialSfsFleet.promise)
     mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
       if (plural === 'communicationchannels') {
         return { metadata: { resourceVersion: 'safe-bootstrap-rv' }, items: [] }
@@ -302,13 +309,22 @@ describe('McpServerWatcher startup', () => {
     const startGlobalFileSystemWatch = vi
       .spyOn(watcher as any, 'startGlobalFileSystemWatch')
       .mockResolvedValue(undefined)
+    const gfsFullReconcile = vi
+      .spyOn((watcher as any).gfsReconciler, 'fullReconcile')
+      .mockImplementationOnce(() => initialGfsFleet.promise)
 
     const server = new ContextMapperServer(watcher, 0)
     await server.start()
     const bootstrap = watcher.start()
 
     try {
-      await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledOnce())
+      await vi.waitFor(() => {
+        expect(mocks.serverFullReconcile).toHaveBeenCalledOnce()
+        expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
+        expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
+        expect(mocks.sfsFullReconcile).toHaveBeenCalledOnce()
+        expect(gfsFullReconcile).toHaveBeenCalledOnce()
+      })
 
       await expect(bootstrap).resolves.toBeUndefined()
       server.setReady(true)
@@ -322,7 +338,11 @@ describe('McpServerWatcher startup', () => {
       expect(startGlobalFileSystemWatch).toHaveBeenCalledOnce()
       expect(watcher.isCommunicationChannelCacheSynced()).toBe(true)
     } finally {
-      initialFleet.resolve(undefined)
+      initialServerFleet.resolve(undefined)
+      initialNetworkPolicies.resolve(undefined)
+      initialHostFleet.resolve(undefined)
+      initialSfsFleet.resolve(undefined)
+      initialGfsFleet.resolve(undefined)
       await bootstrap.catch(() => undefined)
       await server.stop()
       watcher.stop()
@@ -431,6 +451,7 @@ describe('McpServerWatcher startup', () => {
 
     await watcher.start()
 
+    await vi.waitFor(() => expect(mocks.serverFullReconcile).toHaveBeenCalledOnce())
     expect(eventLog.slice(0, 3)).toEqual(['defaults', 'egress', 'runtime'])
     expect(mocks.serverFullReconcile).toHaveBeenCalledWith([
       expect.objectContaining({ name: 'web-search' }),
@@ -476,6 +497,7 @@ describe('McpServerWatcher startup', () => {
 
     await watcher.start()
 
+    await vi.waitFor(() => expect(mocks.serverFullReconcile).toHaveBeenCalledOnce())
     expect(mocks.serverFullReconcile).toHaveBeenCalledWith([])
     expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(1)
 

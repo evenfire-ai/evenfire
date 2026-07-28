@@ -865,10 +865,13 @@ export class McpServerWatcher implements McpServerProvider {
    * Hosts through their per-Host chains (step 7) and requests — without awaiting
    * — a coalesced background full pass (step 8).
    */
-  private recoverHostInventoryAndWatch(): Promise<HostCRD[]> {
+  private recoverHostInventoryAndWatch(
+    convergenceReason = 'Host watch recovery convergence',
+    ccLifecycleGeneration?: number
+  ): Promise<HostCRD[]> {
     if (this.stopped) return Promise.resolve([])
     if (this.hostRecoveryInFlight) return this.hostRecoveryInFlight
-    const recovery = this.performHostInventoryRecovery()
+    const recovery = this.performHostInventoryRecovery(convergenceReason, ccLifecycleGeneration)
     this.hostRecoveryInFlight = recovery
     const clear = (): void => {
       if (this.hostRecoveryInFlight === recovery) this.hostRecoveryInFlight = null
@@ -877,7 +880,10 @@ export class McpServerWatcher implements McpServerProvider {
     return recovery
   }
 
-  private async performHostInventoryRecovery(): Promise<HostCRD[]> {
+  private async performHostInventoryRecovery(
+    convergenceReason: string,
+    ccLifecycleGeneration?: number
+  ): Promise<HostCRD[]> {
     const startedAt = Date.now()
     // Capture the pre-recovery inventory so step 7 can distinguish genuinely
     // new/changed Hosts from ones the fleet pass will converge anyway.
@@ -939,7 +945,7 @@ export class McpServerWatcher implements McpServerProvider {
       this.enqueueRecoveredHostDeletes(snapshot.hosts, previousNames)
       // Request a coalesced background full pass, but do NOT await it before
       // declaring watch recovery complete.
-      void this.requestHostFleetReconcile('Host watch recovery convergence', undefined, 'full')
+      void this.requestHostFleetReconcile(convergenceReason, ccLifecycleGeneration, 'full')
       return snapshot.hosts
     } catch (error) {
       // Keep authority unknown, record the failure, and use the existing
@@ -1661,36 +1667,17 @@ export class McpServerWatcher implements McpServerProvider {
       console.error('[K8s] Failed to ensure default NetworkPolicies before startup:', error)
     }
 
-    let initialExternalEgressFailures = new Set<string>()
-    if (serverInventoryComplete) {
-      initialExternalEgressFailures =
-        await this.reconcileInitialExternalEgressBeforeRuntime(initialServers)
-    }
-
-    // Full McpServer reconciliation (Deployments + Services). Servers with
-    // egressBindings are reconciled only after their external egress policies
-    // have converged, matching the ADDED/MODIFIED watch-event contract.
-    if (serverInventoryComplete) {
-      const runtimeServers = initialServers.filter(
-        server => !initialExternalEgressFailures.has(this.externalEgressRetryKey(server))
-      )
-      console.log('[K8s] Running initial full reconciliation...')
-      await this.reconciler.fullReconcile(runtimeServers)
-    }
-
+    let initialContexts: ContextCRD[] = []
+    let contextInventoryComplete = false
     try {
-      const initialContexts = await listAllContexts()
+      initialContexts = await listAllContexts()
+      contextInventoryComplete = true
       for (const context of initialContexts) {
         this.contexts.set(context.name, context)
       }
-      console.log('[K8s] Running initial NetworkPolicy reconciliation...')
-      await this.netPolReconciler.fullReconcile(initialContexts, initialServers, {
-        serverInventoryComplete,
-        ensureDefaults: false,
-      })
     } catch (error) {
       console.error(
-        '[K8s] Skipping initial NetworkPolicy reconciliation because context discovery failed:',
+        '[K8s] Skipping initial NetworkPolicy background convergence because context discovery failed:',
         error
       )
     }
@@ -1741,59 +1728,60 @@ export class McpServerWatcher implements McpServerProvider {
       this.scheduleCommunicationChannelCacheRecovery()
     }
 
+    // ── SharedFileSystem initial inventory ──
+    let initialSfses: SharedFileSystemCRD[] = []
+    let sfsInventoryComplete = false
+    try {
+      initialSfses = await listAllSharedFileSystems()
+      sfsInventoryComplete = true
+      for (const sfs of initialSfses) {
+        this.sharedFileSystems.set(sfs.name, sfs)
+      }
+    } catch (error) {
+      console.error(
+        '[K8s] Skipping initial SharedFileSystem background convergence because discovery failed:',
+        error
+      )
+    }
+
+    // ── GlobalFileSystem (gfs) initial inventory ──
+    // gfs is a cluster singleton (DISTINCT from SharedFileSystem). A failed
+    // discovery (e.g. the CRD not installed yet) is skipped, not fatal — the
+    // next HCC restart / resync retries. Live updates land via the watch
+    // and the periodic resync; the deploy applies the singleton before HCC
+    // reconciles it.
+    let initialGfses: GlobalFileSystemCRD[] = []
+    let gfsInventoryComplete = false
+    try {
+      initialGfses = await listAllGlobalFileSystems()
+      gfsInventoryComplete = true
+    } catch (error) {
+      console.error(
+        '[K8s] Skipping initial GlobalFileSystem background convergence because discovery failed:',
+        error
+      )
+    }
+
+    // Safety-critical bootstrap ends only after every ordinary watch is
+    // established and the Host snapshot is paired with its resourceVersion-
+    // continuing watch. The full reconciliation work launched below is
+    // deliberately not part of readiness.
+    await this.startMcpServerWatch()
+    await this.startContextWatch()
+    await this.startSharedFileSystemWatch()
+    await this.startGlobalFileSystemWatch()
+
     console.log(
-      `[K8s] Running initial Host reconciliation... (ccCacheSynced=${this.ccCacheSynced})`
+      `[K8s] Starting initial Host background convergence... (ccCacheSynced=${this.ccCacheSynced})`
     )
     const initialLifecycleGeneration =
       this.ccLifecycleGeneration === 0
         ? this.beginCommunicationChannelLifecycleTransition()
         : this.ccLifecycleGeneration
-    // Bootstrap owns cache/watch continuity and the safe CC lifecycle boundary;
-    // full Host convergence can then proceed independently. Waiting for every
-    // Host to settle here made the HCC readiness probe proportional to fleet
-    // size, even though urgent Host watch events retain their own per-Host
-    // serialization and the fleet request carries its established retry path.
-    void this.requestHostFleetReconcile(
+    await this.recoverHostInventoryAndWatch(
       'initial Host reconciliation',
-      initialLifecycleGeneration,
-      'full'
+      initialLifecycleGeneration
     )
-
-    // ── SharedFileSystem initial load + reconciliation ──
-    try {
-      const initialSfses = await listAllSharedFileSystems()
-      for (const sfs of initialSfses) {
-        this.sharedFileSystems.set(sfs.name, sfs)
-      }
-      console.log('[K8s] Running initial SharedFileSystem reconciliation...')
-      await this.sharedFileSystemReconciler.fullReconcile(initialSfses)
-    } catch (error) {
-      console.error(
-        '[K8s] Skipping initial SharedFileSystem reconciliation because discovery failed:',
-        error
-      )
-    }
-
-    // ── GlobalFileSystem (gfs) initial load + reconciliation ──
-    // gfs is a cluster singleton (DISTINCT from SharedFileSystem). A failed
-    // discovery (e.g. the CRD not installed yet) is skipped, not fatal — the
-    // next HCC restart / resync retries. Live updates land via the watch
-    // (follow-up); the deploy applies the singleton before HCC reconciles it.
-    try {
-      const initialGfses = await listAllGlobalFileSystems()
-      console.log('[K8s] Running initial GlobalFileSystem reconciliation...')
-      await this.gfsReconciler.fullReconcile(initialGfses)
-    } catch (error) {
-      console.error(
-        '[K8s] Skipping initial GlobalFileSystem reconciliation because discovery failed:',
-        error
-      )
-    }
-
-    await this.startMcpServerWatch()
-    await this.startContextWatch()
-    await this.startSharedFileSystemWatch()
-    await this.startGlobalFileSystemWatch()
 
     const resyncSec = config.hostResyncIntervalSec
     if (resyncSec > 0) {
@@ -1839,6 +1827,82 @@ export class McpServerWatcher implements McpServerProvider {
       console.log(
         `[K8s] External egress periodic DNS resync enabled (every ${externalEgressResyncSec}s)`
       )
+    }
+
+    // Full convergence is observable and retains each lane's existing retry or
+    // periodic-resync contract, but it no longer extends provider.start() or
+    // the readiness probe. Calls are launched only after cache/watch bootstrap
+    // above so live events remain authoritative while these passes run.
+    if (serverInventoryComplete) {
+      void this.runInitialMcpServerConvergence(initialServers)
+    }
+    if (contextInventoryComplete) {
+      void this.runInitialNetworkPolicyConvergence(
+        initialContexts,
+        initialServers,
+        serverInventoryComplete
+      )
+    }
+    if (sfsInventoryComplete) {
+      void this.runInitialSharedFileSystemConvergence(initialSfses)
+    }
+    if (gfsInventoryComplete) {
+      void this.runInitialGlobalFileSystemConvergence(initialGfses)
+    }
+  }
+
+  private async runInitialMcpServerConvergence(initialServers: McpServerCRD[]): Promise<void> {
+    try {
+      const initialExternalEgressFailures =
+        await this.reconcileInitialExternalEgressBeforeRuntime(initialServers)
+      if (this.stopped) return
+      // Servers with egressBindings reconcile only after their external egress
+      // policies have converged, matching the ADDED/MODIFIED watch contract.
+      const runtimeServers = initialServers.filter(
+        server => !initialExternalEgressFailures.has(this.externalEgressRetryKey(server))
+      )
+      console.log('[K8s] Running initial McpServer background reconciliation...')
+      await this.reconciler.fullReconcile(runtimeServers)
+    } catch (error) {
+      console.error('[K8s] Initial McpServer background reconciliation failed:', error)
+    }
+  }
+
+  private async runInitialNetworkPolicyConvergence(
+    initialContexts: ContextCRD[],
+    initialServers: McpServerCRD[],
+    serverInventoryComplete: boolean
+  ): Promise<void> {
+    try {
+      console.log('[K8s] Running initial NetworkPolicy background reconciliation...')
+      await this.netPolReconciler.fullReconcile(initialContexts, initialServers, {
+        serverInventoryComplete,
+        ensureDefaults: false,
+      })
+    } catch (error) {
+      console.error('[K8s] Initial NetworkPolicy background reconciliation failed:', error)
+    }
+  }
+
+  private async runInitialSharedFileSystemConvergence(
+    initialSfses: SharedFileSystemCRD[]
+  ): Promise<void> {
+    try {
+      console.log('[K8s] Running initial SharedFileSystem background reconciliation...')
+      await this.sharedFileSystemReconciler.fullReconcile(initialSfses)
+    } catch (error) {
+      console.error('[K8s] Initial SharedFileSystem background reconciliation failed:', error)
+    }
+  }
+
+  private async runInitialGlobalFileSystemConvergence(
+    initialGfses: GlobalFileSystemCRD[]
+  ): Promise<void> {
+    try {
+      console.log('[K8s] Running initial GlobalFileSystem background reconciliation...')
+      await this.gfsReconciler.fullReconcile(initialGfses)
+    } catch (error) {
+      console.error('[K8s] Initial GlobalFileSystem background reconciliation failed:', error)
     }
   }
 
