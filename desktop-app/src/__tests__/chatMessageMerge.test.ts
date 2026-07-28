@@ -67,9 +67,94 @@ describe('mergeAuthoritativeServerMessages', () => {
           timestamp: 100,
           serverTurnNumber: 3,
         },
-      ]
+      ],
+      { activeTaskIds: new Set(['task-1']) }
     )
 
     expect(merged.map(message => message.id)).toEqual(['turn-3-user', 'pending'])
+  })
+
+  it('replaces completed task-backed echoes inside their authoritative turn', () => {
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'optimistic-user',
+          role: 'user',
+          content: 'hello',
+          timestamp: 1,
+          task_id: 'completed-task',
+        },
+        {
+          id: 'optimistic-assistant',
+          role: 'assistant',
+          content: 'done',
+          timestamp: 2,
+          task_id: 'completed-task',
+        },
+      ],
+      [
+        {
+          id: 'turn-4-user',
+          role: 'user',
+          content: 'hello',
+          timestamp: 100,
+          serverTurnNumber: 4,
+        },
+        {
+          id: 'turn-4-assistant',
+          role: 'assistant',
+          content: 'done',
+          timestamp: 101,
+          serverTurnNumber: 4,
+        },
+      ]
+    )
+
+    expect(merged.map(message => message.id)).toEqual(['turn-4-user', 'turn-4-assistant'])
+    expect(merged.every(message => message.task_id === 'completed-task')).toBe(true)
+  })
+
+  it('preserves turnless system messages inside an authoritative range', () => {
+    const system: ChatMessage = {
+      id: 'system-note',
+      role: 'system',
+      content: 'local diagnostic',
+      timestamp: 2,
+    }
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'turn-1-assistant',
+          role: 'assistant',
+          content: 'first',
+          timestamp: 1,
+          serverTurnNumber: 1,
+        },
+        system,
+        {
+          id: 'turn-3-user',
+          role: 'user',
+          content: 'third',
+          timestamp: 3,
+          serverTurnNumber: 3,
+        },
+      ],
+      [
+        {
+          id: 'turn-2-user',
+          role: 'user',
+          content: 'second',
+          timestamp: 20,
+          serverTurnNumber: 2,
+        },
+      ]
+    )
+
+    expect(merged.map(message => message.id)).toEqual([
+      'turn-1-assistant',
+      'system-note',
+      'turn-2-user',
+      'turn-3-user',
+    ])
   })
 })

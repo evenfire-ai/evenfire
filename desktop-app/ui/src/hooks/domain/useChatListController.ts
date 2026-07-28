@@ -214,11 +214,15 @@ export function useChatListController({
         })
 
         const latestServerSession = serverSessions[0]
+        // A mode:none request suppresses this one deferred catalog result. Consume
+        // it here, after the post-paint continuation reaches the auto-select gate,
+        // instead of clearing it with the synchronous local-index selection.
+        const suppressAutoSelection = suppressAutoSelectionByAgentRef.current.delete(agentRef)
         if (
           latestServerSession &&
           host.current?.getActiveChatId() === null &&
           host.current.shouldAutoSelectLatest() &&
-          !suppressAutoSelectionByAgentRef.current.has(agentRef)
+          !suppressAutoSelection
         ) {
           void host.current.switchToChat(agentRef, latestServerSession.chatId)
         }
@@ -459,7 +463,6 @@ export function useChatListController({
   )
   const clearPendingSelection = useCallback((agentName: string) => {
     delete pendingChatSelectionByAgentRef.current[agentName]
-    suppressAutoSelectionByAgentRef.current.delete(agentName)
   }, [])
 
   // ─── Chat CRUD ───

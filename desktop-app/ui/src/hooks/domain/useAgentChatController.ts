@@ -154,9 +154,10 @@ function mergeUniqueMessages(
 
 function mergeServerMessages(
   existing: AgentChatMessage[],
-  incoming: AgentChatMessage[]
+  incoming: AgentChatMessage[],
+  activeTaskIds?: ReadonlySet<string>
 ): AgentChatMessage[] {
-  return mergeAuthoritativeServerMessages(existing, incoming)
+  return mergeAuthoritativeServerMessages(existing, incoming, { activeTaskIds })
 }
 
 function sameMessageSequence(a: AgentChatMessage[], b: AgentChatMessage[]): boolean {
@@ -913,7 +914,12 @@ export function useAgentChatController({
       )
       if (!isStillRelevant()) return
       const older = turnsToChatMessages(response.turns) as AgentChatMessage[]
-      const merged = mergeServerMessages(chatMessagesRef.current, older)
+      const activeTaskId = tracker.get(makeTaskKey(requestAgent, requestChatId))?.taskId
+      const merged = mergeServerMessages(
+        chatMessagesRef.current,
+        older,
+        activeTaskId ? new Set([activeTaskId]) : undefined
+      )
       chatMessagesRef.current = merged
       setChatMessages(merged)
       if (!isStillRelevant()) return
@@ -940,6 +946,7 @@ export function useAgentChatController({
     chatStore.loadSessionMessages,
     chatStore.replaceMessages,
     selectedAgent,
+    tracker,
   ])
 
   // Agent selection → load chats
@@ -1333,7 +1340,11 @@ export function useAgentChatController({
         return { rendered: localMessages, replaced: false, cached: localMessages }
       }
       const rendered = localHasServerTurns
-        ? mergeServerMessages(localMessages, hydratedWithAttachments)
+        ? mergeServerMessages(
+            localMessages,
+            hydratedWithAttachments,
+            resp.activeTaskId ? new Set([resp.activeTaskId]) : undefined
+          )
         : hydratedWithAttachments
       if (sameMessageSequence(rendered, localMessages)) {
         return { rendered: localMessages, replaced: false, cached: localMessages }

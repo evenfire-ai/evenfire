@@ -36,6 +36,7 @@ describe('session pagination projections', () => {
       key: 'a',
     })
     expect(paginateSessionSummaries(entries, 2).nextCursor).toBeUndefined()
+    expect(paginateSessionSummaries(entries, undefined)).toEqual({ page: entries })
   })
 
   it('projects bounded message-window navigation consistently', () => {
@@ -50,6 +51,27 @@ describe('session pagination projections', () => {
       latestTurnNumber: 4,
       hasMoreBefore: true,
       hasMoreAfter: true,
+    })
+  })
+
+  it('reports closed boundaries and empty windows without false pagination affordances', () => {
+    expect(
+      projectMessageWindowBounds(
+        [{ number: 1 }, { number: 6 }],
+        { firstTurnNumber: 1, lastTurnNumber: 6 },
+        {}
+      )
+    ).toEqual({
+      oldestTurnNumber: 1,
+      latestTurnNumber: 6,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    })
+    expect(projectMessageWindowBounds([], {}, {})).toEqual({
+      oldestTurnNumber: undefined,
+      latestTurnNumber: undefined,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
     })
   })
 })

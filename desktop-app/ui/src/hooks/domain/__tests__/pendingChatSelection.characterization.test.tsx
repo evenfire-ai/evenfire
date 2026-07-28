@@ -224,6 +224,17 @@ describe('pendingChatSelection effect', () => {
   })
 
   it('none → selects nothing and clears the spinner', async () => {
+    clerum.rpc.listSessions.mockResolvedValue({
+      items: [
+        {
+          agent: 'agent-x',
+          chatId: 'must-not-auto-select',
+          turnCount: 1,
+          messageCount: 2,
+          lastActivityAt: '2026-05-01T00:00:00Z',
+        },
+      ],
+    })
     const { result, rerender } = renderController({ navItem: 'agents' })
     await settleMount()
 
@@ -235,6 +246,7 @@ describe('pendingChatSelection effect', () => {
     })
 
     await waitFor(() => expect(result.current.chatMessagesLoading).toBe(false))
+    await waitFor(() => expect(clerum.rpc.listSessions).toHaveBeenCalled())
     expect(result.current.activeChatId).toBeNull()
   })
 

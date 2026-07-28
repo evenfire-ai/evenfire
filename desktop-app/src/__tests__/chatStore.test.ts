@@ -713,7 +713,7 @@ describe('messages', () => {
     ).toEqual(['m1', 'm2', 'm3'])
   })
 
-  it('keeps unseen and local-only messages when reconciling a bounded server window', async () => {
+  it('keeps unseen numbered history while replacing completed local-only echoes', async () => {
     await store.createChat('agent-1', 'reconcile-upsert')
     await store.saveMessages('agent-1', 'reconcile-upsert', [
       {
@@ -758,7 +758,7 @@ describe('messages', () => {
 
     expect(
       (await store.loadMessages('agent-1', 'reconcile-upsert')).map(message => message.id)
-    ).toEqual(['turn-1-user', 'local-only', 'turn-2-user', 'turn-2-assistant'])
+    ).toEqual(['turn-1-user', 'turn-2-user', 'turn-2-assistant'])
   })
 
   it('repairs a missing page from surviving pages and the compatibility snapshot', async () => {
@@ -779,6 +779,11 @@ describe('messages', () => {
       }))
     )
     await fs.rm(join(chatPagesDir('missing-page'), '000002.json'))
+    const staleIndex = await readJsonFile<{
+      chats: Array<{ id: string; messageCount: number }>
+    }>(agentPath('index.json'))
+    staleIndex.chats.find(chat => chat.id === 'missing-page')!.messageCount = 1
+    await fs.writeFile(agentPath('index.json'), JSON.stringify(staleIndex))
 
     const restartedStore = new ChatStore(tempDir, {
       pageSize: 2,
@@ -791,6 +796,10 @@ describe('messages', () => {
       chatMetaPath('missing-page')
     )
     expect(repairedMeta.localMessageCount).toBe(6)
+    expect(
+      (await restartedStore.listChats('agent-1')).find(chat => chat.id === 'missing-page')
+        ?.messageCount
+    ).toBe(6)
   })
 
   it('adopts a fully written orphan page left by an interrupted append', async () => {
@@ -1003,6 +1012,34 @@ describe('messages', () => {
       agentPath('corrupt-downgrade-snapshot.json')
     )
     expect(compatibility.messages.map(message => message.id)).toEqual(['m1'])
+  })
+
+  it('does not retry an unreadable auxiliary downgrade snapshot on every hot read', async () => {
+    await store.createChat('agent-1', 'unreadable-downgrade-snapshot')
+    await store.saveMessages('agent-1', 'unreadable-downgrade-snapshot', [
+      { id: 'm1', role: 'user', content: 'still durable', timestamp: 1 },
+    ])
+    const restartedStore = new ChatStore(tempDir)
+    const originalReadFile = fs.readFile.bind(fs)
+    let compatibilityReadAttempts = 0
+    vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
+      if (String(args[0]) === agentPath('unreadable-downgrade-snapshot.json')) {
+        compatibilityReadAttempts += 1
+        const error = new Error('permission denied') as NodeJS.ErrnoException
+        error.code = 'EACCES'
+        throw error
+      }
+      return originalReadFile(...(args as Parameters<typeof fs.readFile>))
+    })
+
+    await expect(
+      restartedStore.loadMessages('agent-1', 'unreadable-downgrade-snapshot')
+    ).resolves.toHaveLength(1)
+    await expect(
+      restartedStore.loadMessages('agent-1', 'unreadable-downgrade-snapshot')
+    ).resolves.toHaveLength(1)
+
+    expect(compatibilityReadAttempts).toBe(1)
   })
 
   it('does not hide a failed legacy migration as an empty chat', async () => {

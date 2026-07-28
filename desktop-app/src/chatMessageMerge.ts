@@ -23,12 +23,15 @@ function preferredServerMessage(server: ChatMessage, local: ChatMessage | undefi
  * Replace the authoritative server-turn range as a unit.
  *
  * Turnless optimistic messages positioned inside that range are paired by role
- * and replaced even when content or clocks differ. Unmatched in-flight messages
- * remain, while orphaned optimistic messages are evicted.
+ * and replaced even when content or clocks differ. Only task IDs explicitly
+ * reported as active remain; a persisted task_id alone does not prove liveness
+ * because completed local echoes retain it. Orphaned optimistic messages are
+ * evicted, while non-turn roles and durable errors remain untouched.
  */
 export function mergeAuthoritativeServerMessages(
   existing: ChatMessage[],
-  incoming: ChatMessage[]
+  incoming: ChatMessage[],
+  options: { activeTaskIds?: ReadonlySet<string> } = {}
 ): ChatMessage[] {
   const authoritative = incoming
     .filter(message => messageServerTurnNumber(message) !== undefined)
@@ -68,8 +71,12 @@ export function mergeAuthoritativeServerMessages(
       turn === undefined &&
       (previousTurns[index] ?? Number.NEGATIVE_INFINITY) < firstTurn &&
       (nextTurns[index] ?? Number.POSITIVE_INFINITY) >= firstTurn
+    const replaceableTurnRole = message.role === 'user' || message.role === 'assistant'
+    const belongsToActiveTask =
+      message.task_id !== undefined && options.activeTaskIds?.has(message.task_id) === true
     const shouldReplace =
-      numberedInRange || (turnlessInRange && !message.task_id && !message.isError)
+      numberedInRange ||
+      (turnlessInRange && replaceableTurnRole && !message.isError && !belongsToActiveTask)
     if (shouldReplace) {
       insertionIndex ??= kept.length
       removed.push(message)

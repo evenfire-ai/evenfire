@@ -494,9 +494,16 @@ export class ChatStore {
     } catch (error) {
       if (isRawFilesystemError(error)) {
         console.warn(`[chatStore] Downgrade snapshot unavailable for ${chatId}:`, error)
+        this.compatibilityCheckedKeys.add(compatibilityKey)
         return meta
       }
-      return this.refreshLegacyCompatibilitySnapshotUnlocked(agentRef, chatId, meta)
+      const refreshed = await this.refreshLegacyCompatibilitySnapshotUnlocked(
+        agentRef,
+        chatId,
+        meta
+      )
+      this.compatibilityCheckedKeys.add(compatibilityKey)
+      return refreshed
     }
     if (!legacyMessages) {
       const refreshed = await this.refreshLegacyCompatibilitySnapshotUnlocked(
@@ -811,6 +818,7 @@ export class ChatStore {
     await this.writePagedChatUnlocked(agentRef, chatId, recovered, {
       messageCount: recovered.length,
     })
+    await this.updateIndexedMessageCount(agentRef, chatId, recovered.length)
     return true
   }
 
