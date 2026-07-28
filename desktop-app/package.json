@@ -1,7 +1,7 @@
 {
   "name": "evenfire",
   "productName": "Evenfire",
-  "version": "0.1.313",
+  "version": "0.1.318",
   "private": true,
   "license": "MPL-2.0",
   "description": "Evenfire desktop client for secure agent and workflow access",
@@ -81,6 +81,6 @@
   "overrides": {
     "@tootallnate/once": "^3.0.1",
     "tmp": "^0.2.4",
-    "tar": "7.5.13"
+    "tar": "7.5.19"
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@clerum/mock-secrets-server",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Mock HTTP server for providing test secrets in E2E tests",
   "type": "module",
   "main": "index.ts",
@@ -24,7 +24,7 @@
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^20.10.0",
-    "tsx": "^4.7.0",
+    "tsx": "^4.23.1",
     "typescript": "^5.3.0",
     "vitest": "^4.0.18"
   }

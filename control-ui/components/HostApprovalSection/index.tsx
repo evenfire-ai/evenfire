@@ -34,8 +34,9 @@ export function HostApprovalSection({
   onSave,
   busy,
   canWrite,
+  defaultEditing = false,
 }: HostApprovalSectionProps) {
-  const [editing, setEditing] = useState(false)
+  const [editing, setEditing] = useState(defaultEditing)
   const draftAPI = useApprovalToolsDraft(initialTools)
 
   // Build a sorted view that pairs each known-tool meta with its current state.
@@ -70,13 +71,13 @@ export function HostApprovalSection({
 
   function handleCancel() {
     draftAPI.reset()
-    setEditing(false)
+    setEditing(defaultEditing)
   }
 
   async function handleSave() {
     try {
       await onSave(draftAPI.toToolsMap())
-      setEditing(false)
+      setEditing(defaultEditing)
     } catch {
       // Parent surfaced an error banner. Stay in edit mode so the operator's
       // draft survives the failure and they can retry or Cancel.
@@ -84,18 +85,57 @@ export function HostApprovalSection({
   }
 
   return (
-    <div
-      style={{
-        marginTop: '2rem',
-        paddingTop: '1.25rem',
-        borderTop: '1px solid var(--cu-border)',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-        <p className="cu-section-title" style={{ marginBottom: '0.5rem' }}>
-          Per-tool approval
-        </p>
-        {!editing && canWrite && (
+    <div className="cu-host-approval-section">
+      <p className="cu-muted cu-host-approval-section__description">
+        Skip or require approval for individual tools when an agent calls them. Defaults to the
+        safest setting per tool. Changes apply to the next task.
+      </p>
+
+      <div className="cu-host-approval-section__content">
+        {!editing ? (
+          readOnlyRows.length === 0 ? (
+            <div className="cu-empty">
+              No per-tool overrides configured. All tools use their built-in approval defaults.
+            </div>
+          ) : (
+            <div>
+              {readOnlyRows.map(row => (
+                <ReadOnlyRow
+                  key={row.name}
+                  name={row.name}
+                  state={row.state}
+                  riskHint={row.meta?.riskHint}
+                  codeDefault={row.meta?.codeDefault}
+                />
+              ))}
+            </div>
+          )
+        ) : (
+          <EditMode knownRows={knownRows} draftAPI={draftAPI} busy={busy} />
+        )}
+      </div>
+
+      <div className="cu-host-approval-section__actions">
+        {editing ? (
+          <>
+            <button
+              type="button"
+              className="cu-btn cu-btn--ghost cu-btn--sm"
+              onClick={handleCancel}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary"
+              onClick={handleSave}
+              disabled={busy || !draftAPI.isDirty}
+            >
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </>
+        ) : canWrite ? (
           <button
             type="button"
             className="cu-btn cu-btn--ghost cu-btn--sm"
@@ -104,41 +144,8 @@ export function HostApprovalSection({
           >
             Edit
           </button>
-        )}
+        ) : null}
       </div>
-
-      <p className="cu-muted" style={{ fontSize: '0.8125rem', marginBottom: '0.75rem' }}>
-        Skip or require approval for individual tools when an agent calls them. Defaults to the
-        safest setting per tool. Changes apply to the next task.
-      </p>
-
-      {!editing ? (
-        readOnlyRows.length === 0 ? (
-          <div className="cu-empty">
-            No per-tool overrides configured. All tools use their built-in approval defaults.
-          </div>
-        ) : (
-          <div>
-            {readOnlyRows.map(row => (
-              <ReadOnlyRow
-                key={row.name}
-                name={row.name}
-                state={row.state}
-                riskHint={row.meta?.riskHint}
-                codeDefault={row.meta?.codeDefault}
-              />
-            ))}
-          </div>
-        )
-      ) : (
-        <EditMode
-          knownRows={knownRows}
-          draftAPI={draftAPI}
-          busy={busy}
-          onCancel={handleCancel}
-          onSave={handleSave}
-        />
-      )}
     </div>
   )
 }
@@ -174,11 +181,9 @@ interface EditModeProps {
   knownRows: Array<{ meta: (typeof NATIVE_TOOLS)[number]; state: RowState }>
   draftAPI: ReturnType<typeof useApprovalToolsDraft>
   busy: boolean
-  onCancel: () => void
-  onSave: () => void
 }
 
-function EditMode({ knownRows, draftAPI, busy, onCancel, onSave }: EditModeProps) {
+function EditMode({ knownRows, draftAPI, busy }: EditModeProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [customName, setCustomName] = useState('')
   const [customState, setCustomState] = useState<Exclude<RowState, 'default'>>('required')
@@ -320,25 +325,6 @@ function EditMode({ knownRows, draftAPI, busy, onCancel, onSave }: EditModeProps
             )}
           </div>
         )}
-      </div>
-
-      <div className="cu-save-bar">
-        <button
-          type="button"
-          className="cu-btn cu-btn--ghost cu-btn--sm"
-          onClick={onCancel}
-          disabled={busy}
-        >
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="cu-btn cu-btn--primary"
-          onClick={onSave}
-          disabled={busy || !draftAPI.isDirty}
-        >
-          {busy ? 'Saving…' : 'Save'}
-        </button>
       </div>
     </>
   )

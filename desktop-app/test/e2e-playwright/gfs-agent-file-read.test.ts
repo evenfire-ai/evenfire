@@ -19,12 +19,13 @@
  *  - Infra guard: gfsc unhealthy ⇒ the suite THROWS (never skips, never mocks).
  */
 import { expect, test } from '@playwright/test'
+import { exactNameFilter } from './helpers/agentLocators'
 import {
   type AgentGfsFixtures,
   assertGfsInfraHealthy,
   seedAgentGfsFixtures,
 } from './helpers/gfsFixtures'
-import { openResourcesNavItem } from './navigationHelpers'
+import { openAgentsPage, openResourcesNavItem } from './navigationHelpers'
 import { launchAndLogin } from './workflowUi'
 
 const OWNER_EMAIL = 'test@clerum.io'
@@ -35,17 +36,46 @@ const PROGRESS_TIMEOUT_MS = 30_000
 
 type Page = import('@playwright/test').Page
 
-async function enterAgentChat(page: Page): Promise<void> {
-  // The agents TABLE row opens the workspace in 'details' view (FleetBoard
-  // wires onOpenAgentWorkspace(agent, 'details')) — the chat lives under the
-  // primary nav-chat item. With the single seeded agent the chat home renders
-  // "New chat with <agent>" and the ComposerPanel textarea directly; a cold
-  // Electron renderer can take a while, so the wait mirrors the 45s entry
-  // budget of workflowUi's login poll.
+async function enterAgentChat(page: Page, agentName: string): Promise<void> {
+  // The agents TABLE row opens the workspace in 'details' view — navigating
+  // to details does not rebind the composer (only the "Switch chat agent"
+  // dropdown does), and the chat lives under the primary nav-chat item. With
+  // the single seeded agent the chat home renders "New chat with <agent>" and
+  // the ComposerPanel textarea directly; a cold Electron renderer can take a
+  // while, so the wait mirrors the 45s entry budget of workflowUi's login
+  // poll.
+  await openAgentsPage(page)
+  const exactAgent = page.getByLabel(`Open details for ${agentName}`, { exact: true })
+  await expect(exactAgent).toBeVisible({ timeout: 30_000 })
+  await exactAgent.click()
+  await expect(page.getByText(agentName, { exact: true }).first()).toBeVisible()
   const chatInput = page.locator('[data-testid="chat-input"]')
-  if (await chatInput.isVisible().catch(() => false)) return
   await page.getByTestId('nav-chat').click()
   await chatInput.waitFor({ state: 'visible', timeout: 45_000 })
+  // In the two-agent #797 topology a denial from the WRONG agent must not be
+  // able to satisfy this suite: assert the composer is bound to the exact
+  // agent before any turn is sent (same contract as the copy suite).
+  const selectedAgentInNewChat = page
+    .getByRole('button', { name: 'Switch chat agent' })
+    .filter(exactNameFilter(agentName))
+  const selectedAgentInThread = page
+    .getByRole('navigation', { name: 'Chat breadcrumb' })
+    .getByText(agentName, { exact: true })
+  // The chat view can restore whichever agent was last used; the product's
+  // way to rebind is the "Switch chat agent" selector.
+  if (
+    !(await selectedAgentInNewChat
+      .or(selectedAgentInThread)
+      .first()
+      .isVisible()
+      .catch(() => false))
+  ) {
+    await page.getByRole('button', { name: 'Switch chat agent' }).first().click()
+    await page.getByRole('menuitem', { name: agentName, exact: true }).click()
+  }
+  await expect(selectedAgentInNewChat.or(selectedAgentInThread).first()).toBeVisible({
+    timeout: 15_000,
+  })
 }
 
 async function startFreshThread(page: Page): Promise<void> {
@@ -89,14 +119,19 @@ async function sendGfsTask(
     if (remaining <= 0) {
       throw new Error('Timed out waiting for approval prompt or agent response')
     }
-    const firstVisible = await Promise.race([
-      nextApproval
-        .waitFor({ state: 'visible', timeout: remaining })
-        .then(() => 'approval' as const),
-      newResponse.waitFor({ state: 'visible', timeout: remaining }).then(() => 'response' as const),
-    ]).catch(() => {
+    const approvalWait = nextApproval
+      .waitFor({ state: 'visible', timeout: remaining })
+      .then(() => 'approval' as const)
+    const responseWait = newResponse
+      .waitFor({ state: 'visible', timeout: remaining })
+      .then(() => 'response' as const)
+    const firstVisible = await Promise.race([approvalWait, responseWait]).catch(() => {
       throw new Error('Timed out waiting for approval prompt or agent response')
     })
+    // Silence the losing waitFor so its later rejection cannot surface as an
+    // unhandled "Target closed" failure after the turn already settled.
+    void approvalWait.catch(() => undefined)
+    void responseWait.catch(() => undefined)
     if (firstVisible === 'response') break
     await nextApproval.click()
     approvalsSeen += 1
@@ -154,12 +189,16 @@ test.describe('GFS agent file read (issue #775)', () => {
       let expandBtn: import('@playwright/test').Locator
       let response = ''
       await test.step('agent resolves and reads the gfs:// URI', async () => {
-        await enterAgentChat(page)
+        await enterAgentChat(page, fixtures.agent.name)
         await startFreshThread(page)
+        // The user drives with the path they just saw in the Files browser —
+        // never with resource UUIDs or gfs:// URIs, which are internal
+        // storage identifiers a real user does not know.
         const result = await sendGfsTask(
           page,
-          `Resolve and read this GFS file and quote its contents verbatim: ${fixtures.granted.fileUri}. ` +
-            'Use the clerum gfs tools (gfs_resolve first, then gfs_read). Do not answer from memory.'
+          `Read the file at path "/${fixtures.granted.name}/${fixtures.granted.fileName}" in GFS ` +
+            'drive main and quote its contents verbatim. Use your Clerum GFS tools; do not answer ' +
+            'from memory.'
         )
         expandBtn = result.expandBtn
         response = result.response
@@ -173,10 +212,9 @@ test.describe('GFS agent file read (issue #775)', () => {
       await test.step('tool details prove the real read (business signal)', async () => {
         await expandBtn.click()
 
-        const resolveRow = toolStepRow(page, 'gfs_resolve')
-        await expect(resolveRow).toBeVisible({ timeout: 10_000 })
-        await expect(resolveRow.locator('.stepper-step-duration.state-error')).toHaveCount(0)
-
+        // Which discovery tool the agent picks for a path (resolve vs list) is
+        // its own business; the required proof is the successful read whose
+        // output carries the run-unique sentinel served from the real PVC.
         const readRow = toolStepRow(page, 'gfs_read')
         await expect(readRow).toBeVisible({ timeout: 10_000 })
         await expect(readRow.locator('.stepper-step-duration.state-error')).toHaveCount(0)
@@ -202,12 +240,13 @@ test.describe('GFS agent file read (issue #775)', () => {
     const { app, page } = await launchAndLogin(OWNER_EMAIL)
     try {
       await test.step('agent attempts to read the ungranted gfs:// URI', async () => {
-        await enterAgentChat(page)
+        await enterAgentChat(page, fixtures.agent.name)
         await startFreshThread(page)
         const { response, expandBtn } = await sendGfsTask(
           page,
-          `Resolve and read this GFS file and quote its contents verbatim: ${fixtures.ungranted.fileUri}. ` +
-            'Use the clerum gfs tools (gfs_resolve first, then gfs_read). Do not answer from memory.'
+          `Read the file at path "/${fixtures.ungranted.name}/${fixtures.ungranted.fileName}" in ` +
+            'GFS drive main and quote its contents verbatim. Do not answer from memory — attempt ' +
+            'the read with your Clerum GFS tools even if the file is not in your listing.'
         )
         // Credential repair must be distinguishable from resource
         // authorization: the store is healthy, so the ONLY acceptable failure
@@ -224,14 +263,19 @@ test.describe('GFS agent file read (issue #775)', () => {
           .filter({ has: page.locator('.stepper-step-fn', { hasText: /gfs_/ }) })
         await expect(gfsSteps.first()).toBeVisible({ timeout: 10_000 })
 
-        // At least one gfs step must surface the clean authorization denial.
-        // Short error summaries (<=60 chars, like `gfsc 403: not authorized…`)
-        // render inline in the error badge; only long ones (like the 503
-        // not_mounted envelope) get a separate .stepper-step-error-detail.
+        // Under human name/path driving a denied file is deliberately
+        // indistinguishable from an absent one (no-disclosure): the agent
+        // cannot reach a direct 403 without legitimately holding the resource
+        // id, so the contract here is that NO gfs_read ever succeeds, nothing
+        // leaks the sentinel content, and no infra 503/not_mounted shape
+        // appears. The deterministic gfsc-403 badge contract is proven by the
+        // issue #797 copy journey, where the agent owns its discovered ids.
+        const successfulRead = page
+          .locator('.stepper-step')
+          .filter({ has: page.locator('.stepper-step-fn', { hasText: 'gfs_read' }) })
+          .filter({ hasNot: page.locator('.stepper-step-duration.state-error') })
+        await expect(successfulRead).toHaveCount(0)
         const errorBadges = page.locator('.stepper-step-duration.state-error')
-        await expect(errorBadges.filter({ hasText: /gfsc 403/ }).first()).toBeVisible({
-          timeout: 10_000,
-        })
         await expect(errorBadges.filter({ hasText: /not_mounted|gfsc 503/ })).toHaveCount(0)
         await expect(
           page.locator('.stepper-step-error-detail').filter({ hasText: /not_mounted|gfsc 503/ })

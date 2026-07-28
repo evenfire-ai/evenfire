@@ -1,6 +1,7 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import type { GfscWriteClient } from './gfs'
+import { decodeRuntimeJwtScopes } from '../workflow/mcpHostRuntimeJwt'
 
 const DIRECT_KEY = 'MCP_HOST_GFS_TOKEN'
 const FILE_KEY = 'MCP_HOST_GFS_TOKEN_FILE'
@@ -13,9 +14,40 @@ export const DEFAULT_GFSC_WRITE_BASE_URL = 'http://gfsc-writer.gfs.svc.cluster.l
 
 export interface GfsRuntimeEnv {
   get(key: string): string | undefined
-  fileExists?(path: string): boolean
   readFile?(path: string): Promise<string>
+  readFileSync?(path: string): string
+  fileExists?(path: string): boolean
   fetch?(input: string, init?: RequestInit): Promise<Response>
+}
+
+export type GfsToolScope = 'gfs.read' | 'gfs.write'
+
+/**
+ * Read the mounted token only to advertise its supported native tools. This is
+ * deliberately fail-closed and is not an authorization boundary: gfsc still
+ * verifies the same bearer token and evaluates the permission store.
+ */
+export function getGfsToolScopes(env: GfsRuntimeEnv): ReadonlySet<GfsToolScope> | null {
+  try {
+    const direct = envValue(env, DIRECT_KEY)
+    const token = direct
+      ? direct
+      : (env.readFileSync ?? ((path: string) => readFileSync(path, 'utf8')))(
+          envValue(env, FILE_KEY, DEFAULT_GFS_ACCESS_FILE)
+        ).trim()
+    if (!token) return null
+    const scopes = decodeRuntimeJwtScopes(token)
+    if (
+      !scopes ||
+      scopes.length === 0 ||
+      !scopes.every((scope): scope is GfsToolScope => scope === 'gfs.read' || scope === 'gfs.write')
+    ) {
+      return null
+    }
+    return new Set(scopes)
+  } catch {
+    return null
+  }
 }
 
 function envValue(env: GfsRuntimeEnv, key: string, fallback = ''): string {
@@ -100,5 +132,37 @@ export function createGfscClient(env: GfsRuntimeEnv): GfscWriteClient {
           body: JSON.stringify({ content, ifMatch }),
         }
       ),
+    createFile: ({ drive, parentResourceId, name, content }) =>
+      request(
+        writerBase,
+        `/v1/resources/${encodeURIComponent(parentResourceId)}/children?drive=${encodeURIComponent(drive)}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name, kind: 'file', content }),
+        }
+      ),
+    createFolder: ({ drive, parentResourceId, name }) =>
+      request(
+        writerBase,
+        `/v1/resources/${encodeURIComponent(parentResourceId)}/children?drive=${encodeURIComponent(drive)}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name, kind: 'directory' }),
+        }
+      ),
+    rename: ({ drive, resourceId, newName, ifMatch }) =>
+      request(writerBase, `/v1/resources/${encodeURIComponent(resourceId)}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ drive, newName, ifMatch }),
+      }),
+    copy: args =>
+      request(writerBase, '/v1/copy', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(args),
+      }),
   }
 }

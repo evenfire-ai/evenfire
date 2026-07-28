@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
+import type { GfsGrantListItem } from '@/gfs/delegation.types'
 import { desktopQueryKeys } from './queryKeys'
 
 /**
@@ -57,6 +58,14 @@ export interface GfsBrowserAffordances {
   canCreateShare: boolean
 }
 
+export interface GfsBrowserControllerOptions {
+  /**
+   * Enables the grants listing for the current resource. The Manage dialog is
+   * the only consumer, so the query runs only while it is open.
+   */
+  grantsListEnabled?: boolean
+}
+
 function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -69,7 +78,8 @@ function isResourceDiscoveryUnavailable(message: string): boolean {
   )
 }
 
-export function useGfsBrowserController() {
+export function useGfsBrowserController(options: GfsBrowserControllerOptions = {}) {
+  const { grantsListEnabled = false } = options
   const queryClient = useQueryClient()
   const { isAuthenticated, me, runtimeConfigState } = useAuthContext()
   const [crumbs, setCrumbs] = useState<GfsCrumb[]>([])
@@ -145,6 +155,25 @@ export function useGfsBrowserController() {
       refetchType: 'active',
     })
   }, [current?.resourceId, queryClient, sessionScope])
+  // The grants listing is the revoke-id source (the grant PUT returns no ids),
+  // so writes must refetch it. Enabled only while the Manage dialog is open.
+  const grantsQuery = useQuery({
+    queryKey: ['gfs', DRIVE, current?.resourceId ?? '', 'grants'],
+    queryFn: () => window.clerum.gfs.listGrants(current!.resourceId, DRIVE),
+    enabled: Boolean(sessionScope) && Boolean(current) && grantsListEnabled,
+  })
+  const refreshGrants = useCallback(async () => {
+    const resourceId = current?.resourceId
+    if (!resourceId) return
+    await queryClient.invalidateQueries({
+      exact: true,
+      queryKey: ['gfs', DRIVE, resourceId, 'grants'],
+    })
+  }, [current?.resourceId, queryClient])
+  const revokeGrantMutation = useMutation({
+    mutationFn: (grantId: string) => window.clerum.gfs.revokeGrant(grantId),
+    onSuccess: refreshGrants,
+  })
   const refreshGfs = useCallback(async () => {
     await queryClient.invalidateQueries({
       queryKey: desktopQueryKeys.gfsRoot,
@@ -211,6 +240,7 @@ export function useGfsBrowserController() {
     () => (accessibleQuery.data?.pages ?? []).flatMap(page => page.items),
     [accessibleQuery.data]
   )
+  const grants = useMemo<GfsGrantListItem[]>(() => grantsQuery.data ?? [], [grantsQuery.data])
   const accessibleErrorMessage = accessibleQuery.error ? toMessage(accessibleQuery.error) : null
   const accessibleNotice =
     sessionScope && !canListAccessibleResources
@@ -230,7 +260,9 @@ export function useGfsBrowserController() {
         name: resource.name,
         kind: resource.kind === 'directory' ? 'directory' : 'file',
         version: resource.version ?? 0,
-        bytes: resource.bytes,
+        // `resolve` may omit bytes (older servers) — crumbs display 0 then,
+        // matching the `version ?? 0` handling above.
+        bytes: resource.bytes ?? 0,
       }
       const ancestors: GfsCrumb[] = []
       const seenResourceIds = new Set([resource.resourceId])
@@ -250,7 +282,7 @@ export function useGfsBrowserController() {
               name: parent.name,
               kind: 'directory',
               version: parent.version ?? 0,
-              bytes: parent.bytes,
+              bytes: parent.bytes ?? 0,
             })
           }
           parentResourceId = parent.parentResourceId
@@ -311,19 +343,21 @@ export function useGfsBrowserController() {
   }, [queryClient])
 
   // Delegation actions throw on server rejection (e.g. 403 escalation_rejected);
-  // the caller surfaces that — never swallow it.
+  // the caller surfaces that — never swallow it. `inherit` is only sent when a
+  // caller passes it explicitly (the agent section, directories only); the
+  // user/team panel keeps today's inherit:false behavior by omitting it.
   const grant = useCallback(
-    (subjectKey: string, bits: string[]): Promise<void> => {
+    (subjectKeys: string[], bits: string[], inherit?: boolean): Promise<void> => {
       if (!current) return Promise.reject(new Error('No resource selected'))
-      return window.clerum.gfs.grant(current.resourceId, subjectKey, bits, DRIVE)
+      return window.clerum.gfs.grant(current.resourceId, subjectKeys, bits, DRIVE, inherit)
     },
     [current]
   )
 
   const createShare = useCallback(
-    (subjectKey: string): Promise<void> => {
+    (subjectKeys: string[]): Promise<void> => {
       if (!current) return Promise.reject(new Error('No resource selected'))
-      return window.clerum.gfs.createShare(current.resourceId, subjectKey, DRIVE)
+      return window.clerum.gfs.createShare(current.resourceId, subjectKeys, DRIVE)
     },
     [current]
   )
@@ -362,6 +396,14 @@ export function useGfsBrowserController() {
     reset,
     refreshAffordances,
     grant,
+    grants,
+    // Raw error (not toMessage) so FilesPage can map server codes — e.g. a
+    // manage_acl_required 403 renders as a quiet banner, not an error.
+    grantsError: grantsQuery.error,
+    loadingGrants: grantsQuery.isFetching,
+    refreshGrants,
+    revokeGrant: (grantId: string) => revokeGrantMutation.mutateAsync(grantId),
+    revoking: revokeGrantMutation.isPending,
     createShare,
     createFolder: (name: string) => createFolderMutation.mutateAsync(name),
     createFile: (parentResourceId: string, name: string, encodedData: string) =>

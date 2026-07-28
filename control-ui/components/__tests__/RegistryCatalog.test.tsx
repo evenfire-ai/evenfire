@@ -150,9 +150,10 @@ describe('RegistryCatalog tabs and columns', () => {
     for (const heading of ['Name', 'Version', 'Visibility', 'Downloads']) {
       expect(screen.getByRole('columnheader', { name: heading })).toBeInTheDocument()
     }
-    for (const actionHeading of ['View details', 'Installation', 'Edit or remove']) {
+    for (const actionHeading of ['Installation', 'Edit or remove']) {
       expect(screen.getByRole('columnheader', { name: actionHeading })).toBeInTheDocument()
     }
+    expect(screen.queryByRole('columnheader', { name: 'View details' })).not.toBeInTheDocument()
     for (const removed of ['Type', 'Category', 'Trust', 'Quality']) {
       expect(screen.queryByRole('columnheader', { name: removed })).not.toBeInTheDocument()
     }
@@ -172,22 +173,30 @@ describe('RegistryCatalog tabs and columns', () => {
       '/marketplace/plugins'
     )
   })
+
+  it('links entry names to their shareable detail routes', async () => {
+    mockApiSuccess()
+    render(<RegistryCatalog />)
+
+    expect(await screen.findByRole('link', { name: 'brave-search' })).toHaveAttribute(
+      'href',
+      '/marketplace/entries/brave-search/1.0.0'
+    )
+  })
 })
 
 describe('RegistryCatalog expansion and actions', () => {
-  it('keeps details, installation, and metadata actions in separate columns', async () => {
+  it('keeps installation and metadata actions in separate columns', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     const row = (await screen.findByText('brave-search')).closest('tr')!
-    const detailsCell = within(row).getByRole('button', { name: 'View details' }).closest('td')
     const installCell = within(row).getByRole('button', { name: 'Install' }).closest('td')
     const editCell = within(row)
       .getByRole('button', { name: 'Edit Marketplace metadata for brave-search v1.0.0' })
       .closest('td')
 
-    expect(detailsCell).not.toBe(installCell)
     expect(installCell).not.toBe(editCell)
-    expect(detailsCell).not.toBe(editCell)
+    expect(within(row).queryByRole('button', { name: 'View details' })).not.toBeInTheDocument()
   })
 
   it('reveals metadata only after the full row is expanded', async () => {
@@ -200,23 +209,12 @@ describe('RegistryCatalog expansion and actions', () => {
 
     expect(screen.getByText('Type')).toBeInTheDocument()
     const detailRow = screen.getByText('Type').closest('tr')!
-    expect(within(detailRow).getAllByText('search')).toHaveLength(2)
+    expect(within(detailRow).getAllByText('search')).toHaveLength(1)
     expect(screen.getByText('HIGH')).toBeInTheDocument()
     expect(screen.getByText('verified')).toBeInTheDocument()
     expect(screen.getByText('web')).toBeInTheDocument()
     expect(screen.getByText('local / streamableHttp')).toBeInTheDocument()
     expect(row).toHaveAttribute('aria-expanded', 'true')
-  })
-
-  it('opens details explicitly without expanding the row', async () => {
-    mockApiSuccess()
-    render(<RegistryCatalog />)
-    const row = (await screen.findByText('brave-search')).closest('tr')!
-
-    fireEvent.click(within(row).getByRole('button', { name: 'View details' }))
-
-    expect(navigation.push).toHaveBeenCalledWith('/marketplace/entries/brave-search/1.0.0')
-    expect(row).toHaveAttribute('aria-expanded', 'false')
   })
 
   it('opens the connector install flow without expanding the row', async () => {
@@ -235,7 +233,12 @@ describe('RegistryCatalog expansion and actions', () => {
   it('installs a plugin from the plugins tab', async () => {
     navigation.pathname = '/marketplace/plugins'
     mockApiSuccess()
-    vi.mocked(api.installRecipeFromRegistry).mockResolvedValue({ installed: true })
+    vi.mocked(api.installRecipeFromRegistry).mockResolvedValue({
+      recipeName: 'market-report',
+      registryEntry: 'market-report',
+      registryVersion: '1.0.0',
+      correlationId: 'test-correlation',
+    })
     render(<RegistryCatalog />)
     const row = (await screen.findByText('market-report')).closest('tr')!
 
@@ -331,11 +334,11 @@ describe('RegistryCatalog controls', () => {
 })
 
 describe('RegistryCatalog state handling', () => {
-  it('renders forty skeleton cells for the eight-column table', () => {
+  it('renders thirty-five skeleton cells for the seven-column table', () => {
     vi.mocked(api.getRegistryCatalog).mockReturnValue(new Promise(() => {}))
     const { container } = render(<RegistryCatalog />)
 
-    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(40)
+    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(35)
     expect(screen.getByPlaceholderText('Search connectors...')).toBeDisabled()
   })
 

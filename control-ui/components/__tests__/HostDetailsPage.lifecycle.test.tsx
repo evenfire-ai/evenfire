@@ -90,6 +90,42 @@ const rejectedHost: TestHost = {
   },
 }
 
+// Addendum 6 (issue #791): a CONFIRMED CommunicationChannel association hard-rejects
+// the requested stateless lifecycle. HCC selects the stateful template at replicas 1
+// and writes a StatelessEnableRejected condition whose message names the channel
+// count AND the disassociation recovery action. control-ui renders that condition
+// message verbatim in the warning banner.
+const channelHardRejectedHost: TestHost = {
+  metadata: { name: 'foo' },
+  spec: { ...baseSpec, lifecycle: { stateless: true } },
+  status: {
+    lifecycle: {
+      state: 'active',
+      reason:
+        '2 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
+    },
+    conditions: [
+      {
+        type: 'StatelessEnableRejected',
+        status: 'True',
+        reason: 'ActiveCommunicationChannels',
+        message:
+          '2 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle',
+      },
+    ],
+  },
+}
+
+// The same Host after the operator disassociates the channels: HCC clears the
+// rejection and activates the requested stateless mode on the next reconcile.
+const disassociatedStatelessHost: TestHost = {
+  metadata: { name: 'foo' },
+  spec: { ...baseSpec, lifecycle: { stateless: true } },
+  status: {
+    lifecycle: { state: 'active' },
+  },
+}
+
 function setupApiMocks(host: TestHost) {
   ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
     host,
@@ -144,7 +180,7 @@ describe('HostDetailsPage stateless lifecycle', () => {
     expect(screen.queryByText(/^Lifecycle:/)).not.toBeInTheDocument()
   })
 
-  it('loads spec.lifecycle.stateless=true into the Agent type field', async () => {
+  it('loads spec.lifecycle.stateless=true into the Type field', async () => {
     setupApiMocks(statelessHost)
     render(<HostDetailsPage />)
 
@@ -178,15 +214,14 @@ describe('HostDetailsPage stateless lifecycle', () => {
     expect(screen.queryByText(/SuspendBlocked: activeCronSchedules/)).not.toBeInTheDocument()
   })
 
-  it('echoes spec.lifecycle when saving an unrelated field (full-replace safety)', async () => {
+  it('echoes spec.lifecycle when saving Overview unchanged (full-replace safety)', async () => {
     setupApiMocks(statelessHost)
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.change(screen.getByLabelText('Display ID'), { target: { value: 'foo-updated' } })
     const payload = await saveOverviewAndGetPayload()
 
-    expect(payload.spec.host).toBe('foo-updated')
+    expect(payload.spec.host).toBe('foo-display')
     expect(payload.spec.lifecycle).toEqual({ stateless: true })
     expect(payload.spec.approval).toEqual(baseSpec.approval)
   })
@@ -196,7 +231,6 @@ describe('HostDetailsPage stateless lifecycle', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.change(screen.getByLabelText('Display ID'), { target: { value: 'foo-updated' } })
     const payload = await saveOverviewAndGetPayload()
 
     expect('lifecycle' in payload.spec).toBe(false)
@@ -210,7 +244,6 @@ describe('HostDetailsPage stateless lifecycle', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.change(screen.getByLabelText('Display ID'), { target: { value: 'foo-updated' } })
     const payload = await saveOverviewAndGetPayload()
 
     expect(payload.spec.workflowControl).toEqual({
@@ -229,7 +262,7 @@ describe('HostDetailsPage stateless lifecycle', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.change(screen.getByLabelText('Agent type'), { target: { value: 'stateless' } })
+    fireEvent.change(screen.getByLabelText('Type'), { target: { value: 'stateless' } })
     const payload = await saveOverviewAndGetPayload()
 
     expect(payload.spec.lifecycle).toEqual({ stateless: true })
@@ -240,7 +273,7 @@ describe('HostDetailsPage stateless lifecycle', () => {
     render(<HostDetailsPage />)
     await openOverviewEdit()
 
-    fireEvent.change(screen.getByLabelText('Agent type'), { target: { value: 'stateful' } })
+    fireEvent.change(screen.getByLabelText('Type'), { target: { value: 'stateful' } })
     const payload = await saveOverviewAndGetPayload()
 
     expect(payload.spec.lifecycle).toEqual({ stateless: false })
@@ -252,6 +285,60 @@ describe('HostDetailsPage stateless lifecycle', () => {
 
     expect(await screen.findByText('Stateless mode rejected:')).toBeInTheDocument()
     expect(screen.getByText(/Host has active communication channels\./)).toBeInTheDocument()
+  })
+
+  it('renders the CommunicationChannel hard-rejection banner with the disassociation recovery action verbatim (Addendum 6)', async () => {
+    setupApiMocks(channelHardRejectedHost)
+    render(<HostDetailsPage />)
+
+    // Prominent warning banner on the (default) details view.
+    const bannerLabel = await screen.findByText('Stateless mode rejected:')
+    const banner = bannerLabel.closest('.cu-banner')
+    expect(banner).not.toBeNull()
+    // The banner surfaces the status condition message VERBATIM: the channel
+    // count (the reason) AND the operator recovery action (disassociate).
+    expect(banner).toHaveTextContent(
+      '2 CommunicationChannel(s) reference this Host; disassociate them to enable the requested stateless lifecycle'
+    )
+  })
+
+  it('clears the hard-rejection banner after the operator disassociates the channels and the view reloads', async () => {
+    // First load: hard-rejected (channels still associated). After the operator
+    // removes the channels, the overview save reloads the Host, which now reports
+    // stateless-active with no StatelessEnableRejected condition.
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        host: channelHardRejectedHost,
+        contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+        secrets: [{ name: 'openai-secret' }],
+        users: [],
+        teams: [],
+        agentUsers: [],
+        agentTeams: [],
+      })
+      .mockResolvedValue({
+        host: disassociatedStatelessHost,
+        contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+        secrets: [{ name: 'openai-secret' }],
+        users: [],
+        teams: [],
+        agentUsers: [],
+        agentTeams: [],
+      })
+    ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(channelHardRejectedHost)
+    ;(api.apiSend as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({})
+
+    render(<HostDetailsPage />)
+
+    expect(await screen.findByText('Stateless mode rejected:')).toBeInTheDocument()
+
+    await openOverviewEdit()
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(screen.queryByText('Stateless mode rejected:')).not.toBeInTheDocument()
+    )
+    expect(screen.queryByText(/disassociate them to enable/)).not.toBeInTheDocument()
   })
 
   it('does not render the rejection banner when no condition is present', async () => {

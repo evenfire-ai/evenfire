@@ -176,6 +176,7 @@ describe('HostApprovalSection — component', () => {
       )
       expect(screen.getByText(/no per-tool overrides configured/i)).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /edit/i })).toBeInTheDocument()
+      expect(screen.queryByText('Per-tool approval')).not.toBeInTheDocument()
     })
 
     it('hides the Edit button when canWrite=false', () => {
@@ -300,6 +301,9 @@ describe('HostApprovalSection — component', () => {
       fireEvent.click(screen.getByRole('button', { name: /edit/i }))
       const saveBtn = screen.getByRole('button', { name: /^save/i })
       expect(saveBtn).toBeDisabled()
+      const actions = saveBtn.closest('.cu-host-approval-section__actions')
+      expect(actions).not.toBeNull()
+      expect(actions?.previousElementSibling).toHaveClass('cu-host-approval-section__content')
 
       // Change http_request to Skip
       const httpSelect = screen.getByLabelText(/http_request/i) as HTMLSelectElement
@@ -400,7 +404,7 @@ describe('HostApprovalSection — component', () => {
       expect(failingSave).toHaveBeenCalled()
       const httpSelect = screen.getByLabelText(/http_request/i) as HTMLSelectElement
       expect(httpSelect.value).toBe('skip')
-      // Save / Cancel bar still present (still in edit mode).
+      // Sticky Save / Cancel toolbar remains present (still in edit mode).
       expect(screen.getByRole('button', { name: /^save/i })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument()
     })

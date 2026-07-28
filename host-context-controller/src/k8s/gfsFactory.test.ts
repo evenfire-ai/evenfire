@@ -35,6 +35,8 @@ const config: GfsFactoryConfig = {
   jwtPublicKeyConfigMapKey: 'jwt-public-key',
   pgSecretName: 'gfs-controller-db',
   pgSecretKey: 'connection-string',
+  readerPgSecretName: 'gfs-controller-reader-db',
+  readerPgSecretKey: 'connection-string',
   driveName: 'main',
   tokenAudience: 'gfs-controller',
 }
@@ -145,6 +147,27 @@ describe('gfsFactory writer Deployment', () => {
       'gfs-controller-db'
     )
     expect(byName('GFS_JWT_PUBLIC_KEY')?.valueFrom?.configMapKeyRef?.name).toBe('gfs-config')
+    expect(byName('GFS_SYNC_COPY_MAX_OBJECTS')).toBeUndefined()
+    expect(byName('GFS_SYNC_COPY_MAX_BYTES')).toBeUndefined()
+    expect(byName('GFS_SYNC_COPY_TIMEOUT_MS')).toBeUndefined()
+  })
+
+  it('passes configured synchronous copy limits verbatim to writer and reader', () => {
+    const configured = {
+      ...config,
+      syncCopyMaxObjects: '2500',
+      syncCopyMaxBytes: '',
+      syncCopyTimeoutMs: '45000',
+    }
+
+    for (const role of ['writer', 'reader'] as const) {
+      const env =
+        buildDeployment(gfs(), configured, role).spec?.template.spec?.containers[0].env ?? []
+      const byName = (name: string) => env.find(item => item.name === name)
+      expect(byName('GFS_SYNC_COPY_MAX_OBJECTS')?.value).toBe('2500')
+      expect(byName('GFS_SYNC_COPY_MAX_BYTES')?.value).toBe('')
+      expect(byName('GFS_SYNC_COPY_TIMEOUT_MS')?.value).toBe('45000')
+    }
   })
 
   it('runs non-root, drops all caps, read-only rootfs (reconciler owns securityContext)', () => {
@@ -199,6 +222,13 @@ describe('gfsFactory reader Deployment', () => {
     expect(mount?.readOnly).toBe(true)
     const env = dep.spec?.template.spec?.containers[0].env ?? []
     expect(env.find(e => e.name === 'GFS_STORAGE_ROLE')?.value).toBe('reader')
+    expect(env.find(e => e.valueFrom?.secretKeyRef)?.valueFrom?.secretKeyRef?.name).toBe(
+      'gfs-controller-reader-db'
+    )
+    expect(dep.spec?.strategy).toEqual({
+      type: 'RollingUpdate',
+      rollingUpdate: { maxUnavailable: 0, maxSurge: 1 },
+    })
   })
 
   it('requires same-node scheduling with the writer under standard-rwo', () => {

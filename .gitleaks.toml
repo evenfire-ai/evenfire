@@ -21,6 +21,22 @@ paths = [
   '''^\.env\.test$''',
   '''^\.env\..*\.example$''',
   '''^\.env\.example$''',
+  # Test + fixture surface — fake credentials by design (unit tests, e2e
+  # helpers, example manifests). Verified 2026-07-24: every flagged value here
+  # is a deliberately-fake fixture key.
+  '''\.test\.(ts|tsx|js|jsx|mjs|cjs)$''',
+  '''(^|/)__tests__/''',
+  '''(^|/)tests?/''',
+  '''(^|/)e2e/''',
+  '''(^|/)fixtures?/''',
+  '''(^|/)examples?/''',
+  # Documented CLERUM_DEV_MODE fallback JWT keys (DEV_*_JWT_PRIVATE_KEY) and the
+  # production boot-guard that fingerprints them to REFUSE dev keys in prod.
+  # Throwaway keys, not real secrets. See the file for the guard.
+  '''^control-api/src/config\.ts$''',
+  # `export const deriveOAuthEncryptionKey = deriveAes256GcmKey` — a function
+  # alias the generic-api-key entropy heuristic mis-reads as a secret.
+  '''^control-api/src/oauth/encryption\.ts$''',
 ]
 
 regexes = [

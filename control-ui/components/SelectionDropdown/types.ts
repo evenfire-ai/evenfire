@@ -3,11 +3,13 @@ import type { ReactNode } from 'react'
 export type SelectionDropdownOption = {
   value: string
   label: string
+  icon?: ReactNode
   description?: string
   badge?: string
 }
 
 export type SelectionDropdownProps = {
+  className?: string
   id?: string
   options: SelectionDropdownOption[]
   value: string[]
@@ -20,5 +22,6 @@ export type SelectionDropdownProps = {
   selectionLabel?: string
   multiple?: boolean
   inline?: boolean
+  invalid?: boolean
   showSelectedChips?: boolean
 }

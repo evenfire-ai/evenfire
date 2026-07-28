@@ -10,9 +10,17 @@ name: CodeQL
 
 on:
   push:
-    branches: [main]
+    # dev is the integration branch where feature PRs land first; without it,
+    # code merged to dev goes unscanned until it reaches main, and PRs targeting
+    # dev never get a CodeQL run at all (their alerts freeze the moment a PR is
+    # retargeted away from main).
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
+  # Manual re-run: lets a maintainer re-scan a branch after a fix without
+  # waiting for the weekly schedule (e.g. to clear an alert whose PR was
+  # retargeted from main to dev mid-review).
+  workflow_dispatch:
   schedule:
     # Weekly, so newly-published CodeQL queries reach the default branch even in
     # a quiet week. Monday 07:00 UTC.

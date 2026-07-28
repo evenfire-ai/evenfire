@@ -573,3 +573,248 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('accessible-count').textContent).toBe('0')
   })
 })
+
+// The grants listing is gated by the `grantsListEnabled` hook option (the Manage
+// dialog is the only consumer, so the query runs only while it is open). This
+// probe drives that option through local state so a test can flip Manage
+// open/closed, and it reuses the real QueryClient from `Harness` so invalidation
+// genuinely refetches — mocking the client would hide the load-after-write wiring
+// this block exists to protect.
+function ManageProbe() {
+  const [manageOpen, setManageOpen] = useState(false)
+  const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
+  return (
+    <>
+      <div data-testid="current">{ctrl.current?.resourceId ?? 'none'}</div>
+      <div data-testid="grants-count">{ctrl.grants.length}</div>
+      <button type="button" onClick={() => void ctrl.openUri('gfs://main/root')}>
+        open root
+      </button>
+      <button type="button" onClick={() => setManageOpen(true)}>
+        open manage
+      </button>
+      <button type="button" onClick={() => setManageOpen(false)}>
+        close manage
+      </button>
+      <button type="button" onClick={() => void ctrl.refreshGrants()}>
+        refresh grants
+      </button>
+      <button type="button" onClick={() => void ctrl.revokeGrant('grant-42')}>
+        revoke grant
+      </button>
+      <button type="button" onClick={() => void ctrl.grant(['user:bob'], ['read'], true)}>
+        grant inherit true
+      </button>
+      <button type="button" onClick={() => void ctrl.grant(['team:qa'], ['read'], false)}>
+        grant inherit false
+      </button>
+    </>
+  )
+}
+
+describe('useGfsBrowserController — grants list / revoke / inherit (#826)', () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  it('does not list grants while Manage is closed and lists them once it opens', async () => {
+    const affordances = vi.fn(async () => ({
+      held: ['read', 'manage_acl'],
+      canDelegate: true,
+      grantableBits: ['read'],
+      canCreateShare: false,
+    }))
+    const listGrants = vi.fn(async () => [
+      {
+        id: 'grant-42',
+        drive: 'main',
+        resourceId: 'root',
+        subject: { type: 'user', id: 'bob' },
+        permissions: ['read'],
+        inherit: false,
+      },
+    ])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances,
+          listGrants,
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    // The open cycle has run (affordances fetched), so any grants fetch would have
+    // fired by now — but Manage is closed, so the grants list must stay dormant.
+    await waitFor(() => expect(affordances).toHaveBeenCalled())
+    expect(listGrants).not.toHaveBeenCalled()
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() => expect(listGrants).toHaveBeenCalledTimes(1))
+    expect(listGrants).toHaveBeenCalledWith('root', 'main')
+    await waitFor(() => expect(screen.getByTestId('grants-count').textContent).toBe('1'))
+  })
+
+  it('refetches the grants list when refreshGrants runs', async () => {
+    const listGrants = vi.fn(async () => [])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: false,
+          })),
+          listGrants,
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() => expect(listGrants).toHaveBeenCalledTimes(1))
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'refresh grants' }).click()
+    })
+
+    await waitFor(() => expect(listGrants).toHaveBeenCalledTimes(2))
+  })
+
+  it('revokes a grant by id and refetches the grants list on success', async () => {
+    const revokeGrant = vi.fn(async () => undefined)
+    const listGrants = vi.fn(async () => [
+      {
+        id: 'grant-42',
+        drive: 'main',
+        resourceId: 'root',
+        subject: { type: 'user', id: 'bob' },
+        permissions: ['read'],
+        inherit: false,
+      },
+    ])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: false,
+          })),
+          listGrants,
+          revokeGrant,
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() => expect(listGrants).toHaveBeenCalledTimes(1))
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'revoke grant' }).click()
+    })
+
+    await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('grant-42'))
+    // onSuccess: refreshGrants invalidates the exact grants key → active refetch.
+    await waitFor(() => expect(listGrants).toHaveBeenCalledTimes(2))
+  })
+
+  it('forwards the inherit flag (true and false) to window.clerum.gfs.grant', async () => {
+    const grant = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: false,
+          })),
+          grant,
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'grant inherit true' }).click()
+    })
+    await waitFor(() =>
+      expect(grant).toHaveBeenCalledWith('root', ['user:bob'], ['read'], 'main', true)
+    )
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'grant inherit false' }).click()
+    })
+    await waitFor(() =>
+      expect(grant).toHaveBeenCalledWith('root', ['team:qa'], ['read'], 'main', false)
+    )
+  })
+})

@@ -44,7 +44,7 @@ const mockGetPromptHistory = vi.mocked(getGovernedApprovalPromptHistory)
 const SESSION = {
   hostRef: 'chatllm',
   sessionId: 'session-42',
-  origins: ['direct_chat'] as const,
+  origins: ['direct_chat' as const],
   firstOccurredAt: '2026-07-14T10:00:00.000Z',
   lastOccurredAt: '2026-07-14T10:05:00.000Z',
   runCount: 2,

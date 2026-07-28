@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HostFleetReconcileError } from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
 import { McpServerWatcher, listAllCommunicationChannels, listAllHosts } from './k8sClient'
+import type { HostCRD } from './types'
 
 function deferred<T = void>(): {
   promise: Promise<T>
@@ -141,6 +142,10 @@ vi.mock('./hostReconciler', () => ({
     reconcile = vi.fn()
     reconcileDelete = vi.fn()
     setResolveContextMounts = vi.fn()
+    // §10.4/§10.5 wiring: McpServerWatcher injects the live Host-cache resolver
+    // and the watch-authority snapshot into HostReconciler at construction.
+    setResolveCurrentHost = vi.fn()
+    setHostWatchAuthority = vi.fn()
     // Stores the injected callback so tests can invoke it directly.
     _countCommunicationChannelsFn: ((host: string) => number) | null = null
     setCountCommunicationChannels = vi.fn().mockImplementation(function (
@@ -261,6 +266,35 @@ describe('McpServerWatcher startup', () => {
         middlewareMergeStrategy: 'append',
       })
     )
+  })
+
+  it('preserves Host UID from the Kubernetes inventory boundary', async () => {
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'hosts') {
+        return {
+          items: [
+            {
+              metadata: {
+                name: 'uid-host',
+                namespace: 'mcp-host',
+                uid: '9f43826a-4031-4a31-93af-a3dd8fcfe805',
+                generation: 4,
+              },
+              spec: { host: 'uid-host', contextRef: 'context-a', secretRef: 'host-secret' },
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+
+    await expect(listAllHosts()).resolves.toEqual([
+      expect.objectContaining({
+        name: 'uid-host',
+        uid: '9f43826a-4031-4a31-93af-a3dd8fcfe805',
+        generation: 4,
+      }),
+    ])
   })
 
   it('reconciles startup external egress before runtime full reconciliation', async () => {
@@ -1035,7 +1069,15 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
 
       firstFleetPass.resolve(undefined)
       await failClosedPass
-      await vi.waitFor(() => expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(2))
+      // Post §10.2: the first lifecycle pass drove Host watch recovery (cache
+      // was unsynced), which requested a background full pass (step 8). The
+      // successful CC-recovery lifecycle requests merged into that single
+      // trailing pass (full wins the merge), so exactly ONE trailing pass runs
+      // — now a full pass. This test protects the CC-recovery dedup semantic:
+      // concurrent recoveries collapse to one LIST, failed recoveries queue no
+      // pass, and a successful recovery queues exactly one trailing pass.
+      await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(1))
+      expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(1)
       expect(
         mocks.listNamespacedCustomObject.mock.calls.filter(
           ([request]) => request.plural === 'communicationchannels'
@@ -1230,12 +1272,19 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
 
       await (watcher as any).performHostResync()
       expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(2)
-      expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
+      // Two full passes: the first is the background pass Host watch recovery
+      // requested (§10.2 step 8) when the first lifecycle pass synced the cache;
+      // the second is the periodic resync. The protected semantic — a successful
+      // resync consumes the pending lifecycle retry rather than running it as a
+      // third lifecycle pass — is asserted by hostReconcileHosts staying at 2.
+      expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(2)
       expect((watcher as any).ccAppliedLifecycleGeneration).toBe(lifecycleGeneration)
 
       await vi.advanceTimersByTimeAsync(300000)
       expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(2)
-      expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
+      // Still two full passes after the retry window elapses — no additional
+      // lifecycle retry was queued (it was consumed by the resync above).
+      expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(2)
     } finally {
       errorSpy.mockRestore()
       watcher.stop()
@@ -1915,13 +1964,20 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     finishActivePass()
     await Promise.all([first, second, third])
 
-    expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(2)
+    // One active lifecycle pass (fleetV1) plus exactly ONE trailing pass — the
+    // coalescing semantic this test protects. The two later lifecycle requests
+    // did not each spawn a pass; they merged into a single trailing pass. That
+    // trailing pass is now a FULL pass because the first lifecycle pass drove
+    // Host watch recovery on the unsynced cache, which requested a background
+    // full pass (§10.2 step 8) that wins the merge over lifecycle. It reconciles
+    // the newest cache (fleetV2), and never overlaps the active pass.
+    expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(1)
     expect(mocks.hostReconcileHosts).toHaveBeenNthCalledWith(
       1,
       fleetV1.map(host => expect.objectContaining({ name: host.metadata.name }))
     )
-    expect(mocks.hostReconcileHosts).toHaveBeenNthCalledWith(
-      2,
+    expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(1)
+    expect(mocks.hostFullReconcile).toHaveBeenCalledWith(
       fleetV2.map(host => expect.objectContaining({ name: host.metadata.name }))
     )
     expect(listCount).toBe(1)
@@ -2015,9 +2071,15 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
 
     expect(mocks.hostReconcileHosts).toHaveBeenCalledOnce()
     expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
+    // Protected semantic: a full request is NOT covered by active lifecycle-only
+    // work and queues a separate trailing full pass (one lifecycle + one full
+    // pass above). The hosts LIST happens exactly ONCE now: §10.2 decouples
+    // watch recovery from the fleet pass, so the trailing full pass reconciles
+    // the already-synced cache instead of re-LISTing (the old contract LISTed
+    // per pass).
     expect(
       mocks.listNamespacedCustomObject.mock.calls.filter(([request]) => request.plural === 'hosts')
-    ).toHaveLength(2)
+    ).toHaveLength(1)
     watcher.stop()
   })
 
@@ -2054,9 +2116,15 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
 
     expect(mocks.hostReconcileHosts).toHaveBeenCalledOnce()
     expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
+    // Protected semantic: a full request is NOT covered by active lifecycle-only
+    // work and queues a separate trailing full pass (one lifecycle + one full
+    // pass above). The hosts LIST happens exactly ONCE now: §10.2 decouples
+    // watch recovery from the fleet pass, so the trailing full pass reconciles
+    // the already-synced cache instead of re-LISTing (the old contract LISTed
+    // per pass).
     expect(
       mocks.listNamespacedCustomObject.mock.calls.filter(([request]) => request.plural === 'hosts')
-    ).toHaveLength(2)
+    ).toHaveLength(1)
     watcher.stop()
   })
 
@@ -2097,11 +2165,17 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     finishLifecyclePass()
     await Promise.all([active, pendingFull, latestLifecycle])
 
+    // Protected semantic: a newer lifecycle generation arriving while a full
+    // pass is pending does NOT displace the full coverage — it merges in (full
+    // wins), so exactly one lifecycle + one full pass run and the newest
+    // generation is applied. The hosts LIST happens once now (§10.2 decouples
+    // recovery from the fleet pass; the trailing full pass reuses the synced
+    // cache rather than re-LISTing).
     expect(mocks.hostReconcileHosts).toHaveBeenCalledOnce()
     expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
     expect(
       mocks.listNamespacedCustomObject.mock.calls.filter(([request]) => request.plural === 'hosts')
-    ).toHaveLength(2)
+    ).toHaveLength(1)
     expect((watcher as any).ccAppliedLifecycleGeneration).toBe(secondGeneration)
     watcher.stop()
   })
@@ -2210,7 +2284,16 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       generation: 2,
       spec: { lifecycle: { stateless: true } },
     })
-    expect(watcher.getHostReconciler().reconcile).not.toHaveBeenCalled()
+    // Generation fence (the protected semantic): the retired-stream callback
+    // (canonical-host generation 1) must never drive a reconcile. Under §10.2
+    // recovery step 7 the freshly-LISTed canonical-host IS urgently reconciled —
+    // but only at generation 2, never the stale generation-1 payload from the
+    // retired stream. Assert every reconcile call carried the fresh generation.
+    const reconcile = watcher.getHostReconciler().reconcile as unknown as ReturnType<typeof vi.fn>
+    expect(reconcile).toHaveBeenCalled()
+    for (const [host] of reconcile.mock.calls) {
+      expect(host).toMatchObject({ name: 'canonical-host', generation: 2 })
+    }
     watcher.stop()
   })
 
@@ -2263,14 +2346,27 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     expect((watcher as any).hostWatchRetryTimers.size).toBe(0)
     expect((watcher as any).latestHostWatchEventRevisions.size).toBe(0)
     await vi.advanceTimersByTimeAsync(5000)
-    expect(reconcile).toHaveBeenCalledTimes(1)
+    // Protected semantic: the pending retry for the failed gen-1 event is
+    // CANCELLED when the full snapshot retires the stream — it must not fire
+    // after its 5s delay. The gen-1 event is therefore reconciled exactly once
+    // (the original failed attempt, never re-run by the retry). Under §10.2
+    // recovery step 7 the freshly-LISTed gen-2 host is separately reconciled;
+    // that is new, legitimate work, not the cancelled retry.
+    const gen1Calls = reconcile.mock.calls.filter(([host]) => host?.generation === 1)
+    const gen2Calls = reconcile.mock.calls.filter(([host]) => host?.generation === 2)
+    expect(gen1Calls).toHaveLength(1)
+    expect(gen2Calls).toHaveLength(1)
     expect(mocks.hostFullReconcile).toHaveBeenCalledWith([
       expect.objectContaining({ name: 'retry-before-list', generation: 2 }),
     ])
     watcher.stop()
   })
 
-  it('orders Host watch mutations after an active full pass once LIST has completed', async () => {
+  // §10.3 replaces the old global-tail head-of-line contract (independent Host
+  // events waited behind an active full pass). The two tests below assert the
+  // new contract: an independent Host is admitted immediately during a blocked
+  // pass, and same-Host events still reach the per-Host chain in causal order.
+  it('admits an independent Host watch event while a full pass is blocked', async () => {
     vi.clearAllMocks()
     const fullReconcile = deferred()
     const order: string[] = []
@@ -2290,18 +2386,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     )
     mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
       if (plural !== 'hosts') return { items: [] }
-      return {
-        items: [
-          {
-            metadata: { name: 'updated-host', namespace: 'mcp-host', generation: 1 },
-            spec: { host: 'updated-host', lifecycle: { stateless: false } },
-          },
-          {
-            metadata: { name: 'deleted-host', namespace: 'mcp-host', generation: 1 },
-            spec: { host: 'deleted-host' },
-          },
-        ],
-      }
+      return { metadata: { resourceVersion: 'blocked-pass-rv' }, items: [] }
     })
     mocks.hostFullReconcile.mockImplementation(async () => {
       order.push('full:start')
@@ -2313,13 +2398,11 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     const reconcile = vi.spyOn(hostReconciler, 'reconcile').mockImplementation(async host => {
       order.push(`watch:${host.name}:${host.generation}`)
     })
-    const reconcileDelete = vi
-      .spyOn(hostReconciler, 'reconcileDelete')
-      .mockImplementation(async name => {
-        order.push(`delete:${name}`)
-      })
     await (watcher as any).startHostWatch('test-host-rv')
     if (!hostWatchCallback) throw new Error('Host watch callback was not installed')
+    // Cache already synced: the full pass blocks purely on the mocked
+    // fullReconcile and does not drive recovery, isolating admission behavior.
+    ;(watcher as any).hostCacheSynced = true
 
     const full = (watcher as any).requestHostFleetReconcile(
       'Periodic resync',
@@ -2327,22 +2410,77 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       'full'
     ) as Promise<void>
     await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledOnce())
-    const modified = hostWatchCallback('MODIFIED', {
-      metadata: { name: 'updated-host', namespace: 'mcp-host', generation: 2 },
-      spec: { host: 'updated-host', lifecycle: { stateless: true } },
-    })
-    const deleted = hostWatchCallback('DELETED', {
-      metadata: { name: 'deleted-host', namespace: 'mcp-host', generation: 2 },
-      spec: { host: 'deleted-host' },
-    })
 
-    await Promise.resolve()
-    expect(reconcile).not.toHaveBeenCalled()
-    expect(reconcileDelete).not.toHaveBeenCalled()
+    // A watch event for an INDEPENDENT Host must reconcile without waiting for
+    // the blocked full pass — the removed global tail no longer gates it.
+    const independent = hostWatchCallback('MODIFIED', {
+      metadata: { name: 'independent-host', namespace: 'mcp-host', generation: 5 },
+      spec: { host: 'independent-host', lifecycle: { stateless: true } },
+    })
+    await vi.waitFor(() =>
+      expect(reconcile).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'independent-host', generation: 5 }),
+        'urgent' // direct watch admission reconciles on the urgent lane (F1)
+      )
+    )
+    // Independent Host progressed while the full pass is still blocked.
+    expect(order).toContain('watch:independent-host:5')
+    expect(order).not.toContain('full:end')
+
     fullReconcile.resolve()
-    await Promise.all([full, modified, deleted])
+    await Promise.all([full, independent])
+    expect(order).toContain('full:end')
+    watcher.stop()
+  })
 
-    expect(order).toEqual(['full:start', 'full:end', 'watch:updated-host:2', 'delete:deleted-host'])
+  it('dispatches same-Host watch events to the per-Host chain in causal order', async () => {
+    vi.clearAllMocks()
+    const order: string[] = []
+    type HostWatchCallback = (type: string, host: unknown) => Promise<void>
+    let hostWatchCallback: HostWatchCallback | undefined
+    mocks.watch.mockImplementation(
+      async (path: string, _query: unknown, callback: HostWatchCallback) => {
+        if (path.endsWith('/hosts')) hostWatchCallback = callback
+        return { abort: vi.fn() }
+      }
+    )
+    mocks.listNamespacedCustomObject.mockImplementation(async () => ({ items: [] }))
+    const watcher = new McpServerWatcher()
+    const hostReconciler = watcher.getHostReconciler()
+    // The reconcile()/reconcileDelete() spies stand in for the per-Host chain;
+    // the actual serializeByHost non-overlap guarantee is proven in
+    // hostReconciler.test.ts (delete serialization). Here we assert the
+    // k8sClient dispatch order for the SAME Host is causal and the final cache
+    // state belongs to the newest event (§13.1: N+1 follows the same chain).
+    vi.spyOn(hostReconciler, 'reconcile').mockImplementation(async (host: HostCRD) => {
+      order.push(`reconcile:${host.name}:${host.generation}`)
+    })
+    vi.spyOn(hostReconciler, 'reconcileDelete').mockImplementation(async (name: string) => {
+      order.push(`delete:${name}`)
+    })
+    await (watcher as any).startHostWatch('same-host-rv')
+    if (!hostWatchCallback) throw new Error('Host watch callback was not installed')
+    ;(watcher as any).hostCacheSynced = true
+
+    await hostWatchCallback('MODIFIED', {
+      metadata: { name: 'same-host', namespace: 'mcp-host', generation: 1 },
+      spec: { host: 'same-host', lifecycle: { stateless: false } },
+    })
+    await hostWatchCallback('MODIFIED', {
+      metadata: { name: 'same-host', namespace: 'mcp-host', generation: 2 },
+      spec: { host: 'same-host', lifecycle: { stateless: true } },
+    })
+    await hostWatchCallback('DELETED', {
+      metadata: { name: 'same-host', namespace: 'mcp-host', generation: 3 },
+      spec: { host: 'same-host' },
+    })
+
+    expect(order).toEqual([
+      'reconcile:same-host:1',
+      'reconcile:same-host:2',
+      'delete:same-host',
+    ])
+    expect((watcher as any).hosts.has('same-host')).toBe(false)
     watcher.stop()
   })
 
@@ -2391,9 +2529,8 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     watcher.stop()
   })
 
-  it('drops a Host event that is still queued when the watcher stops', async () => {
+  it('drops a Host event that arrives after the watcher stops', async () => {
     vi.clearAllMocks()
-    const fullReconcile = deferred()
     let hostWatchCallback: ((type: string, apiObj: any) => Promise<void>) | undefined
     mocks.watch.mockImplementation(
       async (
@@ -2409,32 +2546,28 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       if (plural === 'hosts') return { items: [] }
       return { items: [] }
     })
-    mocks.hostFullReconcile.mockImplementation(() => fullReconcile.promise)
     const watcher = new McpServerWatcher()
     const reconcile = vi
       .spyOn(watcher.getHostReconciler(), 'reconcile')
       .mockResolvedValue(undefined)
     await (watcher as any).startHostWatch('test-host-rv')
     if (!hostWatchCallback) throw new Error('Host watch callback was not installed')
+    ;(watcher as any).hostCacheSynced = true
 
-    const full = (watcher as any).requestHostFleetReconcile(
-      'Periodic resync',
-      undefined,
-      'full'
-    ) as Promise<void>
-    await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledOnce())
-    const queuedEvent = hostWatchCallback('ADDED', {
+    // §10.3 removes the global tail, so independent Host events dispatch
+    // immediately rather than queuing behind a pass. The drop-on-stop guarantee
+    // is now the stopped-guard: a watch event that arrives AFTER the watcher has
+    // stopped must not start any reconcile work. Asserted deterministically by
+    // awaiting the callback then flushing a microtask — no wait-on-absence.
+    watcher.stop()
+    const lateEvent = hostWatchCallback('ADDED', {
       metadata: { name: 'stopped-host', namespace: 'mcp-host', generation: 1 },
       spec: { host: 'stopped-host', lifecycle: { stateless: true } },
     })
+    await lateEvent
     await Promise.resolve()
     expect(reconcile).not.toHaveBeenCalled()
-
-    watcher.stop()
-    fullReconcile.resolve()
-    await Promise.all([full, queuedEvent])
-
-    expect(reconcile).not.toHaveBeenCalled()
+    expect((watcher as any).hosts.has('stopped-host')).toBe(false)
   })
 
   it('settles the active caller and lets shutdown unblock a promoted trailing pass', async () => {
@@ -2455,10 +2588,13 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     const trailingPass = new Promise<void>(resolve => {
       resolveTrailingPass = resolve
     })
-    mocks.hostReconcileHosts
-      .mockReset()
-      .mockImplementationOnce(() => activePass)
-      .mockImplementationOnce(() => trailingPass)
+    mocks.hostReconcileHosts.mockReset().mockImplementationOnce(() => activePass)
+    // The trailing pass is a FULL pass now: the active lifecycle pass drove Host
+    // watch recovery on the unsynced cache, which requested a background full
+    // pass (§10.2 step 8) that the later lifecycle request merged into (full
+    // wins). Block that full pass so it stays running until shutdown unblocks
+    // the promoted trailing waiter — the semantic this test protects.
+    mocks.hostFullReconcile.mockReset().mockImplementation(() => trailingPass)
     const watcher = new McpServerWatcher()
     const activeGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
     const activeRequest = (watcher as any).requestHostFleetReconcile(
@@ -2480,7 +2616,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     try {
       resolveActivePass()
       await activeRequest
-      await vi.waitFor(() => expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(2))
+      await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(1))
       expect(trailingSettled).toBe(false)
 
       watcher.stop()
@@ -2561,8 +2697,15 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     await Promise.all([staleRequest, currentRequest])
 
     expect(hostListCount).toBe(1)
-    expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(1)
-    expect(mocks.hostReconcileHosts).toHaveBeenCalledWith([
+    // Protected semantic: the stale-generation lifecycle pass is ABANDONED (its
+    // generation no longer matches the current one), so no lifecycle pass runs
+    // its work; only the latest work applies, to the freshly-LISTed canonical
+    // cache. That latest work now runs as a FULL pass, because Host watch
+    // recovery (driven by the first pass) requested a background full pass
+    // (§10.2 step 8) into which the current lifecycle request merged (full wins).
+    expect(mocks.hostReconcileHosts).not.toHaveBeenCalled()
+    expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(1)
+    expect(mocks.hostFullReconcile).toHaveBeenCalledWith([
       expect.objectContaining({ name: 'canonical-host' }),
     ])
     expect((watcher as any).hosts.get('canonical-host')).toMatchObject({
@@ -2824,10 +2967,11 @@ describe('McpServerWatcher Host watch generation', () => {
 
     await (watcher as any).requestHostFleetReconcile('Periodic resync', undefined, 'full')
     await callbacks[0]('MODIFIED', {
-      metadata: { name: 'retry-host', namespace: 'mcp-host', generation: 1 },
+      metadata: { name: 'retry-host', namespace: 'mcp-host', uid: 'retry-host-uid', generation: 1 },
       spec: { host: 'retry-host', lifecycle: { stateless: true } },
     })
     expect(reconcile).toHaveBeenCalledOnce()
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ uid: 'retry-host-uid' }), 'urgent')
     expect((watcher as any).hostWatchRetryTimers.size).toBe(1)
     expect((watcher as any).latestHostWatchEventRevisions.size).toBe(1)
 
@@ -2842,6 +2986,7 @@ describe('McpServerWatcher Host watch generation', () => {
     })
     expect(reconcile).toHaveBeenCalledOnce()
     expect((watcher as any).hosts.get('retry-host')).toMatchObject({
+      uid: 'retry-host-uid',
       generation: 1,
       spec: { lifecycle: { stateless: true } },
     })
@@ -2857,7 +3002,7 @@ describe('McpServerWatcher Host watch generation', () => {
     watcher.stop()
   })
 
-  it('re-arms recovery when a closed watch recovery request is covered by its active full pass', async () => {
+  it('recovers a closed watch independently of an active full pass', async () => {
     vi.useFakeTimers()
     const firstFullReconcile = deferred()
     let snapshotSequence = 0
@@ -2895,25 +3040,37 @@ describe('McpServerWatcher Host watch generation', () => {
       'full'
     ) as Promise<void>
 
+    // The first full pass drives watch recovery: LIST #1 + watch from host-rv-1,
+    // then blocks inside the (mocked) fullReconcile.
     await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledOnce())
+    expect(snapshotSequence).toBe(1)
+
+    // The watch closes while the full pass is still blocked.
     doneCallbacks[0](null)
     expect((watcher as any).hostCacheSynced).toBe(false)
-
-    await vi.advanceTimersByTimeAsync(5000)
-    expect(snapshotSequence).toBe(1)
-    expect((watcher as any).hostCacheRecoveryTimer).toBeNull()
-
-    firstFullReconcile.resolve(undefined)
-    await full
     expect((watcher as any).hostCacheRecoveryTimer).not.toBeNull()
 
+    // §10.2 decouples watch recovery from the fleet pass. Under the OLD contract
+    // the closed-watch recovery request was COVERED (deferred) by the active
+    // full pass, so no re-LIST happened until the pass finished. Now recovery is
+    // an independent, deduplicated operation: when its retry timer fires it
+    // re-establishes LIST -> WATCH immediately (snapshot #2, fresh watch from the
+    // new resourceVersion) WITHOUT waiting for the still-blocked full pass, and
+    // marks authority known again. This test protects that independence plus the
+    // re-arm-on-close semantic.
     await vi.advanceTimersByTimeAsync(5000)
-    await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(2))
     expect(snapshotSequence).toBe(2)
+    expect((watcher as any).hostCacheSynced).toBe(true)
     expect(watchQueries).toEqual([
       { resourceVersion: 'host-rv-1' },
       { resourceVersion: 'host-rv-2' },
     ])
+    expect((watcher as any).hostCacheRecoveryTimer).toBeNull()
+
+    // The still-blocked original full pass resolving afterward does not disturb
+    // the independently recovered watch authority.
+    firstFullReconcile.resolve(undefined)
+    await full
     expect((watcher as any).hostCacheSynced).toBe(true)
     watcher.stop()
   })
@@ -2996,7 +3153,15 @@ describe('McpServerWatcher Host watch generation', () => {
     })
 
     expect(callbacks).toHaveLength(2)
-    expect(reconcile).not.toHaveBeenCalled()
+    // Generation fence (the protected semantic): the delayed MODIFIED delivered
+    // on the retired stream (transition-host generation 1) is ignored — it must
+    // never drive a reconcile and must not overwrite the cache. Under §10.2
+    // recovery step 7 the freshly-LISTed transition-host IS urgently reconciled,
+    // but only at generation 2, never the stale generation-1 payload.
+    expect(reconcile).toHaveBeenCalled()
+    for (const [host] of reconcile.mock.calls) {
+      expect(host).toMatchObject({ name: 'transition-host', generation: 2 })
+    }
     expect((watcher as any).hosts.get('transition-host')).toMatchObject({
       generation: 2,
       spec: { lifecycle: { stateless: true } },
@@ -3047,6 +3212,251 @@ describe('McpServerWatcher Host watch generation', () => {
       spec: { lifecycle: { stateless: true } },
     })
     watcher.stop()
+  })
+
+  it('recovery diff enqueues an immediate per-Host delete for a disappeared Host (#827 item 1)', async () => {
+    vi.clearAllMocks()
+    const watcher = new McpServerWatcher()
+    const reconcileDelete = vi
+      .spyOn(watcher.getHostReconciler(), 'reconcileDelete')
+      .mockResolvedValue(undefined)
+    // Fresh authoritative snapshot holds only "live-host"; "gone-host" was in the
+    // pre-recovery inventory (previousNames) and has genuinely disappeared.
+    ;(watcher as any).enqueueRecoveredHostDeletes(
+      [{ name: 'live-host', namespace: 'mcp-host', uid: 'u1', spec: { host: 'live-host' } }],
+      new Set(['live-host', 'gone-host'])
+    )
+    await vi.waitFor(() =>
+      expect(reconcileDelete).toHaveBeenCalledWith('gone-host', 'mcp-host', expect.anything())
+    )
+    // A Host still present in the fresh snapshot is never deleted.
+    expect(reconcileDelete).not.toHaveBeenCalledWith(
+      'live-host',
+      'mcp-host',
+      expect.anything()
+    )
+    watcher.stop()
+  })
+
+  // The recovery diff resolves absence at LIST time. Between that diff and the
+  // moment the delete is admitted to the per-Host serializer, the recreation's
+  // ADDED can land: the watch callback sets `this.hosts` SYNCHRONOUSLY and
+  // enters the per-Host chain FIRST, while the fire-and-forget dispatch queues
+  // the delete SECOND. serializeByHost is strict FIFO, so without a fence the
+  // new bundle is created and then wiped. The fence must therefore read the
+  // LIVE cache at admission, not a value captured at enqueue time.
+  //
+  // This is the case the sibling recreation test does NOT cover: there the
+  // recreated Host is present in the snapshot, so enqueueRecoveredHostDeletes
+  // short-circuits on snapshotNames.has(name) and never dispatches at all.
+  it('recovery delete carries a live-cache fence for a Host recreated during admission (#827 F2 parity)', async () => {
+    vi.clearAllMocks()
+    const watcher = new McpServerWatcher()
+    const reconcileDelete = vi
+      .spyOn(watcher.getHostReconciler(), 'reconcileDelete')
+      .mockResolvedValue(undefined)
+    // "ghost" is absent from the fresh authoritative snapshot → genuinely
+    // disappeared → dispatched for delete.
+    ;(watcher as any).enqueueRecoveredHostDeletes([], new Set(['ghost']))
+    await vi.waitFor(() => expect(reconcileDelete).toHaveBeenCalled())
+
+    const [, , opts] = reconcileDelete.mock.calls[0] as [
+      string,
+      string,
+      { skipIf?: () => boolean } | undefined,
+    ]
+    expect(opts?.skipIf, 'the recovery delete must carry a skipIf fence').toBeTypeOf('function')
+
+    // Cache does not hold the name → the Host really is gone → do NOT skip.
+    expect(opts!.skipIf!()).toBe(false)
+
+    // The recreation lands in the live cache during the admission window.
+    ;(watcher as any).hosts.set('ghost', {
+      name: 'ghost',
+      namespace: 'mcp-host',
+      uid: 'uid-recreated',
+      generation: 1,
+      spec: { host: 'ghost' },
+    })
+    // Same fence, re-evaluated at admission → skip the destructive delete.
+    expect(opts!.skipIf!()).toBe(true)
+    watcher.stop()
+  })
+
+  it('recovery diff reconciles (does NOT delete) a same-name Host recreated with a new uid (#827 items 1+2)', async () => {
+    vi.clearAllMocks()
+    const watcher = new McpServerWatcher()
+    const reconcile = vi
+      .spyOn(watcher.getHostReconciler(), 'reconcile')
+      .mockResolvedValue(undefined)
+    const reconcileDelete = vi
+      .spyOn(watcher.getHostReconciler(), 'reconcileDelete')
+      .mockResolvedValue(undefined)
+    // The recreated Host is the CURRENT cache entry the urgent dispatch resolves.
+    ;(watcher as any).hosts.set('x', {
+      name: 'x',
+      namespace: 'mcp-host',
+      uid: 'uid-B',
+      generation: 1,
+      spec: { host: 'x' },
+    })
+    // Same name, same generation (reset to 1), but a DIFFERENT uid than before.
+    ;(watcher as any).enqueueRecoveredUrgentHosts(
+      [{ name: 'x', namespace: 'mcp-host', uid: 'uid-B', generation: 1, spec: { host: 'x' } }],
+      new Set(['x']),
+      new Map([['x', 1]]),
+      new Map([['x', 'uid-A']])
+    )
+    // The snapshot still contains "x" by name, so the recovery-delete diff never
+    // treats it as a disappearance.
+    ;(watcher as any).enqueueRecoveredHostDeletes(
+      [{ name: 'x', namespace: 'mcp-host', uid: 'uid-B', generation: 1, spec: { host: 'x' } }],
+      new Set(['x'])
+    )
+    await vi.waitFor(() =>
+      expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ name: 'x' }), 'urgent')
+    )
+    expect(reconcileDelete).not.toHaveBeenCalled()
+    watcher.stop()
+  })
+
+  it('suppresses a watch event whose identity (uid) differs from the cached Host (#827 item 2)', () => {
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).hosts.set('x', { name: 'x', namespace: 'mcp-host', uid: 'uid-B', generation: 3 })
+    ;(watcher as any).latestHostWatchEventRevisions.set('x', 7)
+    // A stale MODIFIED carrying the OLD identity must not act on the recreated one.
+    expect(
+      (watcher as any).isCurrentHostWatchEvent(
+        'MODIFIED',
+        { name: 'x', namespace: 'mcp-host', uid: 'uid-A', generation: 3 },
+        7
+      )
+    ).toBe(false)
+    // The current identity is admitted.
+    expect(
+      (watcher as any).isCurrentHostWatchEvent(
+        'MODIFIED',
+        { name: 'x', namespace: 'mcp-host', uid: 'uid-B', generation: 3 },
+        7
+      )
+    ).toBe(true)
+    watcher.stop()
+  })
+
+  it('recovery urgently admits a wake-pending Host that is otherwise unchanged (§10.2 step 7 wake branch)', async () => {
+    vi.clearAllMocks()
+    const watcher = new McpServerWatcher()
+    const reconcile = vi
+      .spyOn(watcher.getHostReconciler(), 'reconcile')
+      .mockResolvedValue(undefined)
+    // A Host unchanged by name, generation AND uid but carrying a pending wake
+    // annotation must still be admitted on the urgent lane after recovery, so a
+    // wake discovered during the LIST→WATCH gap is not deferred to the slow
+    // background fleet pass (A3: 2m47s admission vs 3s execution). This closes
+    // the recovery-time wake branch that the watch-time admission test does not
+    // exercise: deleting `|| wakePending` from enqueueRecoveredUrgentHosts()
+    // would make this assertion fail.
+    ;(watcher as any).hosts.set('waker', {
+      name: 'waker',
+      namespace: 'mcp-host',
+      uid: 'u1',
+      generation: 4,
+      annotations: { 'clerum.io/wake-requested': '7' },
+      spec: { host: 'waker' },
+    })
+    ;(watcher as any).enqueueRecoveredUrgentHosts(
+      [
+        {
+          name: 'waker',
+          namespace: 'mcp-host',
+          uid: 'u1',
+          generation: 4,
+          annotations: { 'clerum.io/wake-requested': '7' },
+          spec: { host: 'waker' },
+        },
+      ],
+      new Set(['waker']), // NOT new
+      new Map([['waker', 4]]), // NOT changed (same generation)
+      new Map([['waker', 'u1']]) // NOT recreated (same uid)
+    )
+    await vi.waitFor(() =>
+      expect(reconcile).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'waker' }),
+        'urgent'
+      )
+    )
+    watcher.stop()
+  })
+
+  it('recovery does NOT urgently dispatch a fully-unchanged Host with no wake annotation', async () => {
+    vi.clearAllMocks()
+    const watcher = new McpServerWatcher()
+    const reconcile = vi
+      .spyOn(watcher.getHostReconciler(), 'reconcile')
+      .mockResolvedValue(undefined)
+    // Same name, generation and uid as before recovery and no wake pending: the
+    // background fleet pass already covers it, so recovery must NOT enqueue a
+    // redundant urgent reconcile (guards the negative side of the predicate).
+    ;(watcher as any).hosts.set('steady', {
+      name: 'steady',
+      namespace: 'mcp-host',
+      uid: 'u1',
+      generation: 4,
+      spec: { host: 'steady' },
+    })
+    ;(watcher as any).enqueueRecoveredUrgentHosts(
+      [{ name: 'steady', namespace: 'mcp-host', uid: 'u1', generation: 4, spec: { host: 'steady' } }],
+      new Set(['steady']),
+      new Map([['steady', 4]]),
+      new Map([['steady', 'u1']])
+    )
+    // Let any erroneously-scheduled async dispatch run before asserting absence.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(reconcile).not.toHaveBeenCalled()
+    watcher.stop()
+  })
+
+  it('reconciles a retried Host watch event on the "retry" lane, not "urgent" (F1)', async () => {
+    vi.useFakeTimers()
+    let hostWatchCallback: ((type: string, apiObj: any) => Promise<void>) | undefined
+    mocks.watch.mockImplementation(
+      async (
+        _path: string,
+        _params: object,
+        callback: (type: string, apiObj: any) => Promise<void>
+      ) => {
+        hostWatchCallback = callback
+        return { abort: vi.fn() }
+      }
+    )
+    const watcher = new McpServerWatcher()
+    const reconcile = vi
+      .spyOn(watcher.getHostReconciler(), 'reconcile')
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockResolvedValue(undefined)
+    await (watcher as any).startHostWatch('test-host-rv')
+    if (!hostWatchCallback) throw new Error('Host watch callback was not installed')
+
+    await hostWatchCallback('MODIFIED', {
+      metadata: { name: 'retry-lane-host', namespace: 'mcp-host', generation: 2 },
+      spec: { host: 'retry-lane-host', lifecycle: { stateless: true } },
+    })
+    // First attempt is the direct/urgent admission.
+    expect(reconcile).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ name: 'retry-lane-host' }),
+      'urgent'
+    )
+    await vi.advanceTimersByTimeAsync(5000)
+    // The retry attempt populates the distinct "retry" lane.
+    expect(reconcile).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ name: 'retry-lane-host' }),
+      'retry'
+    )
+    watcher.stop()
+    vi.useRealTimers()
   })
 
   it('automatically retries a transient Host watch reconciliation failure', async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   type GfscReadClient,
   type GfscWriteClient,
+  buildGfsCopyTools,
   buildGfsReadTools,
   buildGfsWriteTools,
 } from './gfs'
@@ -68,17 +69,32 @@ describe('buildGfsReadTools', () => {
     expect(c.resolve).toHaveBeenCalledWith({ uri: 'gfs://main/abc' })
   })
 
-  it('surfaces a gfsc error as a failed result (fail-loud, e.g. a revoked grant)', async () => {
+  it('surfaces a gfsc error as a redacted failed result (fail-loud, e.g. a revoked grant)', async () => {
     const c = client({
       read: vi.fn(async () => {
-        throw new Error('forbidden')
+        throw new Error('gfsc 403: grant revoked for /internal/server/path with blob blob/key')
       }),
     })
     const r = await toolMap(c)
       .get('clerum__gfs_read')!
       .execute({ drive: 'main', resourceId: 'abc' }, '')
     expect(r.success).toBe(false)
-    expect(r.error).toContain('forbidden')
+    expect(r.error).toBe('GFS read failed (gfsc 403: forbidden)')
+    expect(r.error).not.toContain('/internal/server/path')
+    expect(r.error).not.toContain('blob/key')
+  })
+
+  it('strips a non-gfsc-shaped read error down to the generic label', async () => {
+    const c = client({
+      read: vi.fn(async () => {
+        throw new Error('connect ECONNREFUSED 10.96.0.7:8087')
+      }),
+    })
+    const r = await toolMap(c)
+      .get('clerum__gfs_read')!
+      .execute({ drive: 'main', resourceId: 'abc' }, '')
+    expect(r.success).toBe(false)
+    expect(r.error).toBe('GFS read failed')
   })
 })
 
@@ -91,12 +107,29 @@ describe('buildGfsWriteTools (P4)', () => {
       stat: vi.fn(),
       resolve: vi.fn(),
       write: vi.fn(async () => ({ gfsUri: 'gfs://main/abc', version: 4 })),
+      createFile: vi.fn(async () => ({ resourceId: 'file' })),
+      createFolder: vi.fn(async () => ({ resourceId: 'folder' })),
+      rename: vi.fn(async () => ({ resourceId: 'abc', version: 5 })),
+      copy: vi.fn(async () => ({
+        resourceId: 'copy',
+        gfsUri: 'gfs://main/copy',
+        objectCount: 3,
+        fileCount: 2,
+        folderCount: 1,
+        totalBytes: 8,
+        requestId: 'request-1',
+      })),
       ...overrides,
     } as GfscWriteClient
   }
 
-  it('exposes clerum__gfs_write', () => {
-    expect(buildGfsWriteTools(writeClient()).map(t => t.name)).toEqual(['clerum__gfs_write'])
+  it('exposes only the narrowly named non-destructive write tools', () => {
+    expect(buildGfsWriteTools(writeClient()).map(t => t.name)).toEqual([
+      'clerum__gfs_write',
+      'clerum__gfs_create_file',
+      'clerum__gfs_create_folder',
+      'clerum__gfs_rename',
+    ])
   })
 
   it('writes with a numeric If-Match and returns the result', async () => {
@@ -122,5 +155,115 @@ describe('buildGfsWriteTools (P4)', () => {
     expect(r.success).toBe(false)
     expect(r.error).toMatch(/If-Match/i)
     expect(c.write).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [
+      'clerum__gfs_write',
+      { drive: 'main', resourceId: 'abc', content: 'hi' },
+    ],
+    [
+      'clerum__gfs_rename',
+      { drive: 'main', resourceId: 'abc', newName: 'renamed.txt' },
+    ],
+    [
+      'clerum__gfs_copy',
+      { drive: 'main', sourceResourceId: 'source', destinationParentId: 'destination' },
+    ],
+  ])('rejects invalid If-Match values before %s reaches gfsc', async (name, baseArgs) => {
+    for (const ifMatch of [Number.NaN, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const c = writeClient()
+      const tools = new Map(
+        [...buildGfsWriteTools(c), ...buildGfsCopyTools(c)].map(tool => [tool.name, tool])
+      )
+      const result = await tools.get(name)!.execute({ ...baseArgs, ifMatch }, '')
+      expect(result.success).toBe(false)
+      expect(result.error).toMatch(/non-negative safe-integer If-Match/)
+      expect(c.write).not.toHaveBeenCalled()
+      expect(c.rename).not.toHaveBeenCalled()
+      expect(c.copy).not.toHaveBeenCalled()
+    }
+  })
+
+  it('passes create and rename payloads without exposing move fields', async () => {
+    const c = writeClient()
+    const tools = new Map(buildGfsWriteTools(c).map(tool => [tool.name, tool]))
+    await tools.get('clerum__gfs_create_file')!.execute(
+      { drive: 'main', parentResourceId: 'parent', name: 'note.txt', content: 'hello' },
+      ''
+    )
+    await tools.get('clerum__gfs_create_folder')!.execute(
+      { drive: 'main', parentResourceId: 'parent', name: 'docs' },
+      ''
+    )
+    await tools.get('clerum__gfs_rename')!.execute(
+      { drive: 'main', resourceId: 'abc', newName: 'renamed.txt', ifMatch: 4 },
+      ''
+    )
+    expect(c.createFile).toHaveBeenCalledWith({
+      drive: 'main', parentResourceId: 'parent', name: 'note.txt', content: 'hello',
+    })
+    expect(c.createFolder).toHaveBeenCalledWith({
+      drive: 'main', parentResourceId: 'parent', name: 'docs',
+    })
+    expect(c.rename).toHaveBeenCalledWith({
+      drive: 'main', resourceId: 'abc', newName: 'renamed.txt', ifMatch: 4,
+    })
+    expect(tools.has('clerum__gfs_move')).toBe(false)
+    expect(tools.has('clerum__gfs_delete')).toBe(false)
+  })
+
+  it('copies through one server-side call with the exact root contract', async () => {
+    const c = writeClient()
+    const tool = buildGfsCopyTools(c)[0]!
+    expect(tool.description).toContain('The original remains at the source')
+    expect(tool.description).toContain('never deletes it')
+    const args = {
+      drive: 'main', sourceResourceId: 'source', destinationParentId: 'destination',
+      newName: 'source-copy', ifMatch: 7,
+    }
+    const result = await tool.execute(args, '')
+    expect(result.success).toBe(true)
+    expect(c.copy).toHaveBeenCalledTimes(1)
+    expect(c.copy).toHaveBeenCalledWith(args)
+    expect(c.read).not.toHaveBeenCalled()
+    expect(c.write).not.toHaveBeenCalled()
+  })
+
+  it('does not expose backend paths or keys in mutation failures', async () => {
+    const c = writeClient({
+      copy: vi.fn(async () => { throw new Error('failed at /mnt/gfs/private/blob-key') }),
+    })
+    const result = await buildGfsCopyTools(c)[0]!.execute(
+      { drive: 'main', sourceResourceId: 'source', destinationParentId: 'destination', ifMatch: 7 },
+      ''
+    )
+    expect(result).toEqual({ success: false, error: 'GFS mutation failed' })
+  })
+
+  it.each([
+    [403, 'forbidden'],
+    [409, 'conflict'],
+    [412, 'precondition_failed'],
+    [413, 'limit_exceeded'],
+    [503, 'unavailable'],
+  ])('preserves safe gfsc status/category for mutation failure %s', async (status, category) => {
+    const c = writeClient({
+      copy: vi.fn(async () => {
+        throw new Error(
+          `gfsc ${status}: private path=/data/gfs/.generations/secret sql=do-not-expose`
+        )
+      }),
+    })
+    const result = await buildGfsCopyTools(c)[0]!.execute(
+      { drive: 'main', sourceResourceId: 'source', destinationParentId: 'destination', ifMatch: 7 },
+      ''
+    )
+    expect(result).toEqual({
+      success: false,
+      error: `GFS mutation failed (gfsc ${status}: ${category})`,
+    })
+    expect(result.error).not.toContain('/data/')
+    expect(result.error).not.toContain('sql=')
   })
 })

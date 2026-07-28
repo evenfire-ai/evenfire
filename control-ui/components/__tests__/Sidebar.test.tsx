@@ -102,7 +102,6 @@ describe('Sidebar publisher gating', () => {
   })
 
   it.each([
-    ['/agent-files/example', 'Agent Files', '/agent-files'],
     ['/agent-outputs/recipe-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
     ['/agent-outputs/desktop-app-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
     ['/global-file-system', 'Global File System', '/global-file-system'],
@@ -123,10 +122,19 @@ describe('Sidebar publisher gating', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
     render(<Sidebar currentTab="directories" />)
 
-    for (const label of ['Agent Files', 'Agent Outputs', 'Global File System']) {
+    for (const label of ['Agent Outputs', 'Global File System']) {
       const child = screen.getByRole('link', { name: label })
       expect(child.querySelector('.cu-sidebar__subitem-icon svg')).toBeInTheDocument()
     }
+  })
+
+  it('hides Agent Files from the sidebar without changing its route', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    navigationState.pathname = '/agent-files/example'
+    render(<Sidebar currentTab="directories" />)
+
+    expect(screen.queryByRole('link', { name: 'Agent Files' })).not.toBeInTheDocument()
+    expect(SIDEBAR_TABS.directories.href).toBe('/agent-files')
   })
 
   it('uses the shared Desktop paperclip glyph for Global File System', () => {
@@ -147,11 +155,18 @@ describe('Sidebar publisher gating', () => {
     }
   })
 
-  it('sorts every sidebar group by the displayed child label', () => {
-    for (const item of Object.values(SIDEBAR_TABS)) {
+  it('sorts standard sidebar groups by the displayed child label', () => {
+    for (const [tab, item] of Object.entries(SIDEBAR_TABS)) {
+      if (tab === 'cost') continue
       const labels = item.children?.map(child => child.label) ?? []
       expect(labels).toEqual([...labels].sort((first, second) => first.localeCompare(second)))
     }
+
+    expect(SIDEBAR_TABS.cost.children?.map(child => child.label)).toEqual([
+      'Usage',
+      'Token Budgets',
+      'LLM Prices',
+    ])
   })
 
   it('selects hidden Trace children by their nested routes', () => {
