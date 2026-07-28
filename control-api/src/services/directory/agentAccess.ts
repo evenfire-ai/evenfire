@@ -25,14 +25,22 @@ async function appendAgentAccessChanges(
   })
 }
 
-export async function setUserAgents(userId: string, agentNames: string[], operatorSub: string) {
+export { LinkedItemsPreconditionError as AgentGrantPreconditionError } from '../../shared/generics.js'
+
+export async function setUserAgents(
+  userId: string,
+  agentNames: string[],
+  operatorSub: string,
+  expectedCurrentAgentNames?: string[]
+) {
   const result = await bulkSetLinkedItems(
     'user_agents',
     'user_id',
     userId,
     'agent_name',
     agentNames,
-    (db, change) => appendAgentAccessChanges(db, operatorSub, { kind: 'user', id: userId }, change)
+    (db, change) => appendAgentAccessChanges(db, operatorSub, { kind: 'user', id: userId }, change),
+    { expectedItems: expectedCurrentAgentNames }
   )
   return { userId, agentNames: result.items }
 }
@@ -108,14 +116,20 @@ export async function listUsersByAgent(agentName: string) {
   }))
 }
 
-export async function setTeamAgents(teamId: string, agentNames: string[], operatorSub: string) {
+export async function setTeamAgents(
+  teamId: string,
+  agentNames: string[],
+  operatorSub: string,
+  expectedCurrentAgentNames?: string[]
+) {
   const result = await bulkSetLinkedItems(
     'team_agents',
     'team_id',
     teamId,
     'agent_name',
     agentNames,
-    (db, change) => appendAgentAccessChanges(db, operatorSub, { kind: 'team', id: teamId }, change)
+    (db, change) => appendAgentAccessChanges(db, operatorSub, { kind: 'team', id: teamId }, change),
+    { expectedItems: expectedCurrentAgentNames }
   )
   return { teamId, agentNames: result.items }
 }

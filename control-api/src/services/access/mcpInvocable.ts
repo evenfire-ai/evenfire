@@ -19,8 +19,8 @@
  */
 import type { K8sGateway } from '../../k8s.js'
 import {
-  buildAgentDirectoryEntry,
   type AgentDirectoryEntry,
+  buildAgentDirectoryEntry,
 } from '../directory/accessReconciliation.js'
 
 export interface InvocableMcpServer {
@@ -225,11 +225,7 @@ export async function resolveMcpServersForAgents(
   const resolvedHosts = await Promise.all(
     agentNames.map(async requestedName => {
       try {
-        const host = (await gateway.getResource(
-          'hosts',
-          requestedName,
-          hostsNamespace
-        )) as HostCR
+        const host = (await gateway.getResource('hosts', requestedName, hostsNamespace)) as HostCR
         const directoryEntry = buildAgentDirectoryEntry(host, hostsNamespace)
         if (!directoryEntry || directoryEntry.name !== requestedName) return null
         return { host, directoryEntry }
@@ -245,9 +241,7 @@ export async function resolveMcpServersForAgents(
 
   let serverList: McpServerCR[] = []
   try {
-    serverList = asArray<McpServerCR>(
-      await gateway.listResource('mcpservers', mcpServersNamespace)
-    )
+    serverList = asArray<McpServerCR>(await gateway.listResource('mcpservers', mcpServersNamespace))
   } catch (err) {
     // Directory identity remains useful when optional MCP catalog enrichment
     // is temporarily unavailable — but the degradation must be observable, or

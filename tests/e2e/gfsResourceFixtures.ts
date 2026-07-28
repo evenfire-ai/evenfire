@@ -50,10 +50,7 @@ function cleanupGfsBlob(resourceId: string, blobKey?: string | null): void {
         return `/data/gfs/.generations/${blobKey}`
       })()
     : `/data/gfs/${ridOf(resourceId)}`
-  kubectlOut(
-    ['-n', 'gfs', 'exec', gfsWriterPod(), '--', 'rm', '-f', physicalPath],
-    20_000
-  )
+  kubectlOut(['-n', 'gfs', 'exec', gfsWriterPod(), '--', 'rm', '-f', physicalPath], 20_000)
 }
 
 export function seedGfsDirectoryFixture(name: string): GfsDirectoryFixture {
@@ -195,7 +192,8 @@ export function seedGfsGrant(input: {
     throw new Error(`subjectId is required for ${input.subjectType} GFS grants`)
   }
   const permissions = `ARRAY[${input.permissions.map(sqlLiteral).join(', ')}]::text[]`
-  const grantId = firstDataLine(runControlPostgresSql(`
+  const grantId = firstDataLine(
+    runControlPostgresSql(`
     INSERT INTO gfs_grants (
       drive, resource_id, subject_type, subject_id, permissions, inherit, granted_by
     )
@@ -215,7 +213,8 @@ export function seedGfsGrant(input: {
       granted_by = EXCLUDED.granted_by,
       updated_at = now()
     RETURNING id::text;
-  `))
+  `)
+  )
   if (!UUID_RE.test(grantId)) throw new Error(`failed to seed GFS grant: ${grantId}`)
   return grantId
 }
@@ -347,8 +346,8 @@ export function cleanupGfsFixture(name: string): void {
     .map(line => line.trim())
     .filter(Boolean)
     .map(splitSqlRow)
-    .filter((parts): parts is [string, string] =>
-      parts.length === 2 && UUID_RE.test(parts[0] ?? '')
+    .filter(
+      (parts): parts is [string, string] => parts.length === 2 && UUID_RE.test(parts[0] ?? '')
     )
   const cleanupErrors: unknown[] = []
   for (const [resourceId, blobKey] of resources) {

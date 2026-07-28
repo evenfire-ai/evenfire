@@ -22,6 +22,13 @@ import {
 import { hccLogger } from './logger'
 import { issueMcpHostRuntimeTokens } from './mcpHostRuntimeTokenIssuerClient'
 import {
+  hostCleanupDeferredTotal,
+  hostDeleteCleanupTotal,
+  hostReconcileDurationSeconds,
+  hostReconcileInFlight,
+  hostReconcileQueueWaitSeconds,
+} from './metrics'
+import {
   MCP_HOST_GFS_TOKEN_SECRET_KEY,
   MCP_HOST_RUNTIME_TOKEN_SECRET_ACCESS_KEY,
   MCP_HOST_RUNTIME_TOKEN_SECRET_CONTROL_KEY,
@@ -52,13 +59,6 @@ import {
   preserveServiceAssignedFields,
   replaceWithConflictRetry,
 } from './utils'
-import {
-  hostCleanupDeferredTotal,
-  hostDeleteCleanupTotal,
-  hostReconcileDurationSeconds,
-  hostReconcileInFlight,
-  hostReconcileQueueWaitSeconds,
-} from './metrics'
 
 export type { EffectiveHostLifecycle } from './statelessLifecycle.types'
 
@@ -3978,7 +3978,8 @@ export class HostReconciler {
 
     if (!authorityValid()) {
       const current = this.hostWatchAuthority()
-      const reason = !capturedAuthority.known || !current.known ? 'authority_unknown' : 'generation_changed'
+      const reason =
+        !capturedAuthority.known || !current.known ? 'authority_unknown' : 'generation_changed'
       hostCleanupDeferredTotal.inc({ reason })
       console.warn(`[HostReconciler] Deferring orphan cleanup: ${reason}`)
       return failures
@@ -4138,7 +4139,10 @@ export class HostReconciler {
     try {
       const list = await this.coreApi.listNamespacedSecret({
         namespace: channelsNs,
-        labelSelector: [`${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE}`, 'clerum.io/component=channel-reader'].join(','),
+        labelSelector: [
+          `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE}`,
+          'clerum.io/component=channel-reader',
+        ].join(','),
       })
       for (const sec of list.items ?? []) {
         const labels = sec.metadata?.labels
@@ -4267,7 +4271,6 @@ export class HostReconciler {
     })
     return (response.items || []).filter(item => item.metadata?.labels?.[HOST_LABEL])
   }
-
 }
 
 function canonicalStringify(obj: Record<string, unknown>): string {

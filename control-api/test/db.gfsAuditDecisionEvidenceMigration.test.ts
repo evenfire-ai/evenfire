@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 
 describe('0073_gfs_audit_decision_evidence', () => {
   it('adds constrained decision evidence without rewriting existing audit rows', () => {

@@ -19,9 +19,7 @@ const agents = [
 
 describe('GfsAgentAccessSection', () => {
   it('offers ONLY read and write permissions for agents', () => {
-    render(
-      <GfsAgentAccessSection agents={agents} isDirectory onGrantAgents={vi.fn()} />
-    )
+    render(<GfsAgentAccessSection agents={agents} isDirectory onGrantAgents={vi.fn()} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Read' }))
     expect(screen.getByRole('menuitemcheckbox', { name: 'Read' })).toBeTruthy()
@@ -33,9 +31,7 @@ describe('GfsAgentAccessSection', () => {
 
   it('emits host:-prefixed subject keys for the selected agents', async () => {
     const onGrantAgents = vi.fn().mockResolvedValue(undefined)
-    render(
-      <GfsAgentAccessSection agents={agents} isDirectory onGrantAgents={onGrantAgents} />
-    )
+    render(<GfsAgentAccessSection agents={agents} isDirectory onGrantAgents={onGrantAgents} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'chatllm' }))
     fireEvent.click(screen.getByRole('button', { name: 'chatllm-stateless' }))
@@ -52,9 +48,7 @@ describe('GfsAgentAccessSection', () => {
 
   it('defaults the inherit toggle ON for directories and honors turning it off', async () => {
     const onGrantAgents = vi.fn().mockResolvedValue(undefined)
-    render(
-      <GfsAgentAccessSection agents={agents} isDirectory onGrantAgents={onGrantAgents} />
-    )
+    render(<GfsAgentAccessSection agents={agents} isDirectory onGrantAgents={onGrantAgents} />)
 
     const inherit = screen.getByRole('checkbox', { name: 'Include contents of this folder' })
     expect(inherit).toHaveProperty('checked', true)
@@ -74,9 +68,7 @@ describe('GfsAgentAccessSection', () => {
       <GfsAgentAccessSection agents={agents} isDirectory={false} onGrantAgents={onGrantAgents} />
     )
 
-    expect(
-      screen.queryByRole('checkbox', { name: 'Include contents of this folder' })
-    ).toBeNull()
+    expect(screen.queryByRole('checkbox', { name: 'Include contents of this folder' })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'chatllm' }))
     fireEvent.click(screen.getByRole('button', { name: 'Grant agent access' }))
@@ -92,9 +84,7 @@ describe('GfsAgentAccessSection', () => {
     const onGrantAgents = vi
       .fn()
       .mockRejectedValue(new Error('403 Forbidden: managed_agent_permission_forbidden'))
-    render(
-      <GfsAgentAccessSection agents={agents} isDirectory onGrantAgents={onGrantAgents} />
-    )
+    render(<GfsAgentAccessSection agents={agents} isDirectory onGrantAgents={onGrantAgents} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'chatllm' }))
     fireEvent.click(screen.getByRole('button', { name: 'chatllm-stateless' }))
@@ -108,9 +98,9 @@ describe('GfsAgentAccessSection', () => {
       true
     )
     // SelectableOption only sets aria-pressed="true" while selected — both stay.
-    expect(
-      screen.getByRole('button', { name: 'chatllm' }).getAttribute('aria-pressed')
-    ).toBe('true')
+    expect(screen.getByRole('button', { name: 'chatllm' }).getAttribute('aria-pressed')).toBe(
+      'true'
+    )
     expect(
       screen.getByRole('button', { name: 'chatllm-stateless' }).getAttribute('aria-pressed')
     ).toBe('true')

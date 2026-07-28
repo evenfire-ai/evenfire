@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 
 describe('0072_gfs_reader_database_role', () => {
   it('adds a NOLOGIN least-privilege reader after immutable blob generations', () => {
@@ -18,7 +18,7 @@ describe('0072_gfs_reader_database_role', () => {
       'NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
     )
     expect(sql).toContain("WHERE member_role.rolname = 'gfs_controller_reader'")
-    expect(sql).toContain("REVOKE %I FROM gfs_controller_reader")
+    expect(sql).toContain('REVOKE %I FROM gfs_controller_reader')
     expect(sql).toContain(
       'GRANT SELECT ON gfs_resources, gfs_grants, gfs_shares TO gfs_controller_reader'
     )

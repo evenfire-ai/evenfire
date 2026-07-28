@@ -1,16 +1,16 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
-import { initDb } from '../src/db.js'
 import { preflightCopy } from '../../gfs-controller/src/api/copy.js'
 import { DbAuditSink } from '../../gfs-controller/src/authz/audit.js'
 import { PgBlobStagingStore } from '../../gfs-controller/src/db/blobStaging.js'
 import { PgResourceStore } from '../../gfs-controller/src/db/resourceStore.js'
 import { GfsWriteService, PgTransactor } from '../../gfs-controller/src/db/writeStore.js'
 import { BlobStore } from '../../gfs-controller/src/storage/blobStore.js'
+import { initDb } from '../src/db.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -74,8 +74,16 @@ describeRealPostgres('GFS Copy publication on real PostgreSQL and filesystem blo
         ['second', Buffer.from(`second-${label}-payload`)],
       ]),
     }
-    const firstBlob = await blobs.writeImmutable(tree.firstFileId, randomUUID(), tree.files.get('first')!)
-    const secondBlob = await blobs.writeImmutable(tree.secondFileId, randomUUID(), tree.files.get('second')!)
+    const firstBlob = await blobs.writeImmutable(
+      tree.firstFileId,
+      randomUUID(),
+      tree.files.get('first')!
+    )
+    const secondBlob = await blobs.writeImmutable(
+      tree.secondFileId,
+      randomUUID(),
+      tree.files.get('second')!
+    )
     await pool.query(
       `INSERT INTO gfs_resources
          (resource_id, drive, parent_resource_id, name, kind, path_cache, version,
@@ -109,7 +117,11 @@ describeRealPostgres('GFS Copy publication on real PostgreSQL and filesystem blo
   async function planFor(tree: SeededTree, newName?: string) {
     const snapshot = await resources.loadCopySnapshot(tree.drive, tree.sourceId, 1_001n)
     const rootName = newName ?? snapshot.find(node => node.depth === 0)!.name
-    const destination = await resources.loadCopyDestination(tree.drive, tree.destinationId, rootName)
+    const destination = await resources.loadCopyDestination(
+      tree.drive,
+      tree.destinationId,
+      rootName
+    )
     return {
       snapshot,
       destination,
@@ -197,15 +209,22 @@ describeRealPostgres('GFS Copy publication on real PostgreSQL and filesystem blo
       '/archive/source-copy/nested',
       '/archive/source-copy/nested/second.txt',
     ])
-    const sourceIds = new Set([tree.sourceId, tree.nestedId, tree.firstFileId, tree.secondFileId].map(compact))
-    expect(copied.rows.every(row => !sourceIds.has(compact(String(row.resource_id))))).toBe(true)
-    expect(copied.rows.filter(row => row.kind === 'file').map(row => Number(row.bytes)).sort((a, b) => a - b)).toEqual(
-      [...tree.files.values()].map(value => value.length).sort((a, b) => a - b)
+    const sourceIds = new Set(
+      [tree.sourceId, tree.nestedId, tree.firstFileId, tree.secondFileId].map(compact)
     )
+    expect(copied.rows.every(row => !sourceIds.has(compact(String(row.resource_id))))).toBe(true)
+    expect(
+      copied.rows
+        .filter(row => row.kind === 'file')
+        .map(row => Number(row.bytes))
+        .sort((a, b) => a - b)
+    ).toEqual([...tree.files.values()].map(value => value.length).sort((a, b) => a - b))
 
     const copiedFiles = copied.rows.filter(row => row.kind === 'file')
     const copiedPayloads = await Promise.all(
-      copiedFiles.map(async row => readAll(await blobs.read(String(row.resource_id), String(row.blob_key))))
+      copiedFiles.map(async row =>
+        readAll(await blobs.read(String(row.resource_id), String(row.blob_key)))
+      )
     )
     expect(copiedPayloads.map(value => value.toString()).sort()).toEqual(
       [...tree.files.values()].map(value => value.toString()).sort()
@@ -233,22 +252,34 @@ describeRealPostgres('GFS Copy publication on real PostgreSQL and filesystem blo
        VALUES ($1,$2,$3,'source','directory','/archive/source',0,0)`,
       [randomUUID(), tree.drive, tree.destinationId]
     )
-    const before = await pool.query(`SELECT count(*)::integer AS count FROM gfs_resources WHERE drive=$1`, [tree.drive])
+    const before = await pool.query(
+      `SELECT count(*)::integer AS count FROM gfs_resources WHERE drive=$1`,
+      [tree.drive]
+    )
     const snapshot = await resources.loadCopySnapshot(tree.drive, tree.sourceId, 1_001n)
-    const destination = await resources.loadCopyDestination(tree.drive, tree.destinationId, 'source')
-    expect(() => preflightCopy({
-      drive: tree.drive,
-      sourceResourceId: tree.sourceId,
-      destinationParentId: tree.destinationId,
-      ifMatch: 3,
-      snapshot,
-      destination,
-      maxObjects: 1_000,
-      maxBytes: 1_073_741_824,
-      deadlineAtMs: Date.now() + 30_000,
-      nowMs: Date.now(),
-    })).toThrow(expect.objectContaining({ code: 'already_exists' }))
-    const after = await pool.query(`SELECT count(*)::integer AS count FROM gfs_resources WHERE drive=$1`, [tree.drive])
+    const destination = await resources.loadCopyDestination(
+      tree.drive,
+      tree.destinationId,
+      'source'
+    )
+    expect(() =>
+      preflightCopy({
+        drive: tree.drive,
+        sourceResourceId: tree.sourceId,
+        destinationParentId: tree.destinationId,
+        ifMatch: 3,
+        snapshot,
+        destination,
+        maxObjects: 1_000,
+        maxBytes: 1_073_741_824,
+        deadlineAtMs: Date.now() + 30_000,
+        nowMs: Date.now(),
+      })
+    ).toThrow(expect.objectContaining({ code: 'already_exists' }))
+    const after = await pool.query(
+      `SELECT count(*)::integer AS count FROM gfs_resources WHERE drive=$1`,
+      [tree.drive]
+    )
     const manifests = await pool.query(
       `SELECT count(*)::integer AS count FROM gfs_blob_manifests WHERE resource_id IN
        (SELECT resource_id FROM gfs_resources WHERE drive=$1)`,
@@ -262,18 +293,22 @@ describeRealPostgres('GFS Copy publication on real PostgreSQL and filesystem blo
     const tree = await seedTree('version-change')
     const frozen = await planFor(tree, 'stale-copy')
     const requestId = randomUUID()
-    await pool.query('UPDATE gfs_resources SET version=version+1 WHERE resource_id=$1', [tree.secondFileId])
+    await pool.query('UPDATE gfs_resources SET version=version+1 WHERE resource_id=$1', [
+      tree.secondFileId,
+    ])
 
-    await expect(writes.copy({
-      requestId,
-      subject: 'host:sandbox-recipes/copy-real-pg',
-      audit,
-      drive: tree.drive,
-      destinationParentId: tree.destinationId,
-      plan: frozen.plan,
-      destination: frozen.destination,
-      deadlineAtMs: Date.now() + 30_000,
-    })).rejects.toMatchObject({ code: 'precondition_failed' })
+    await expect(
+      writes.copy({
+        requestId,
+        subject: 'host:sandbox-recipes/copy-real-pg',
+        audit,
+        drive: tree.drive,
+        destinationParentId: tree.destinationId,
+        plan: frozen.plan,
+        destination: frozen.destination,
+        deadlineAtMs: Date.now() + 30_000,
+      })
+    ).rejects.toMatchObject({ code: 'precondition_failed' })
 
     const copied = await pool.query(
       `SELECT count(*)::integer AS count FROM gfs_resources
@@ -284,10 +319,9 @@ describeRealPostgres('GFS Copy publication on real PostgreSQL and filesystem blo
       `SELECT count(*)::integer AS count FROM gfs_blob_manifests WHERE request_id=$1`,
       [requestId]
     )
-    const outcome = await pool.query(
-      `SELECT mutation_outcome FROM gfs_audit WHERE request_id=$1`,
-      [requestId]
-    )
+    const outcome = await pool.query(`SELECT mutation_outcome FROM gfs_audit WHERE request_id=$1`, [
+      requestId,
+    ])
     expect(copied.rows[0]?.count).toBe(0)
     expect(manifests.rows[0]?.count).toBe(0)
     expect(outcome.rows).toEqual([{ mutation_outcome: 'failed' }])

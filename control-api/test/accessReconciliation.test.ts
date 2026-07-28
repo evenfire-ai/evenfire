@@ -36,6 +36,13 @@ describe('access reconciliation helpers', () => {
     expect(merged).not.toContain(`deleted-${MAX_DELETED_ACCESS_HISTORY + 1}`)
   })
 
+  it('compares complete snapshots as normalized sets', () => {
+    expect(accessValueSetsEqual([' agent-a ', 'agent-b', 'agent-a'], ['agent-b', 'agent-a'])).toBe(
+      true
+    )
+    expect(accessValueSetsEqual(['agent-a'], ['agent-b'])).toBe(false)
+  })
+
   it('builds the opaque subject from trusted metadata, never display text', () => {
     expect(
       buildAgentDirectoryEntry(
