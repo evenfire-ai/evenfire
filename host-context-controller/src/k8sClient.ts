@@ -112,6 +112,26 @@ type HostFleetReconcileMode = 'full' | 'lifecycle'
 type HostWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
 type InitialConvergenceLane = 'McpServer' | 'NetworkPolicy'
 
+/**
+ * Serializes a reconciliation domain without turning a rejected operation into
+ * a permanent queue failure. Kubernetes Watch invokes async callbacks without
+ * awaiting the preceding callback, while a full reconciliation can delete
+ * orphaned resources owned by the same domain. A single ordered effect stream
+ * therefore makes a later watch event the final writer after an older sweep.
+ */
+class SerializedReconciliationQueue {
+  private tail: Promise<void> = Promise.resolve()
+
+  enqueue(work: () => Promise<void>): Promise<void> {
+    const result = this.tail.then(work)
+    this.tail = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
+  }
+}
+
 type HostFleetReconcileRequest = {
   reason: string
   mode: HostFleetReconcileMode
@@ -613,6 +633,18 @@ export class McpServerWatcher implements McpServerProvider {
     ReturnType<typeof setTimeout>
   >()
   private readonly initialConvergenceRetryAttempts = new Map<InitialConvergenceLane, number>()
+  // An incomplete McpServer inventory must remain non-authoritative across a
+  // retry: promoting it would allow the NetworkPolicy full pass to delete
+  // external-egress policies for servers HCC has not successfully listed.
+  private initialNetworkPolicyRetryServerInventoryComplete: boolean | undefined
+  // Full reconciles in these domains perform fleet-wide orphan cleanup. Watch
+  // events and periodic resyncs therefore share an ordered effect stream with
+  // their initial pass; otherwise an older sweep could win after a newer event.
+  private readonly controlPlaneReconciliationQueue = new SerializedReconciliationQueue()
+  private readonly sharedFileSystemReconciliationQueue = new SerializedReconciliationQueue()
+  private readonly globalFileSystemReconciliationQueue = new SerializedReconciliationQueue()
+  private sharedFileSystemCacheRevision = 0
+  private globalFileSystemCacheRevision = 0
   // Periodic resync timer: K8s watches can drop events on long disconnects;
   // running fullReconcile every N minutes guarantees mcp-host-runtime-token Secret
   // rotation eventually catches up even after a missed MODIFIED event.
@@ -718,6 +750,27 @@ export class McpServerWatcher implements McpServerProvider {
    */
   isCommunicationChannelCacheSynced(): boolean {
     return this.ccCacheSynced
+  }
+
+  private enqueueControlPlaneReconciliation(work: () => Promise<void>): Promise<void> {
+    return this.controlPlaneReconciliationQueue.enqueue(async () => {
+      if (this.stopped) return
+      await work()
+    })
+  }
+
+  private enqueueSharedFileSystemReconciliation(work: () => Promise<void>): Promise<void> {
+    return this.sharedFileSystemReconciliationQueue.enqueue(async () => {
+      if (this.stopped) return
+      await work()
+    })
+  }
+
+  private enqueueGlobalFileSystemReconciliation(work: () => Promise<void>): Promise<void> {
+    return this.globalFileSystemReconciliationQueue.enqueue(async () => {
+      if (this.stopped) return
+      await work()
+    })
   }
 
   private installCommunicationChannelSnapshot(snapshot: CommunicationChannelSnapshot): void {
@@ -1408,7 +1461,16 @@ export class McpServerWatcher implements McpServerProvider {
     return out
   }
 
-  private async reconcileSharedFileSystemsReferencedByContext(
+  private reconcileSharedFileSystemsReferencedByContext(
+    prevContext: ContextCRD | undefined,
+    nextContext: ContextCRD | undefined
+  ): Promise<void> {
+    return this.enqueueSharedFileSystemReconciliation(() =>
+      this.reconcileSharedFileSystemsReferencedByContextCore(prevContext, nextContext)
+    )
+  }
+
+  private async reconcileSharedFileSystemsReferencedByContextCore(
     prevContext: ContextCRD | undefined,
     nextContext: ContextCRD | undefined
   ): Promise<void> {
@@ -1562,18 +1624,20 @@ export class McpServerWatcher implements McpServerProvider {
    * event.
    */
   async reconcileByEnvSecret(secretName: string, secretNamespace: string): Promise<void> {
-    for (const server of this.servers.values()) {
-      if (server.namespace !== secretNamespace) continue
-      if (server.spec.envSecret?.name !== secretName) continue
-      try {
-        console.log(
-          `[K8s] Re-reconciling McpServer "${server.name}" after Secret "${secretName}" change`
-        )
-        await this.reconciler.reconcile(server)
-      } catch (err) {
-        console.error(`[K8s] Secret-triggered reconcile failed for "${server.name}":`, err)
+    await this.enqueueControlPlaneReconciliation(async () => {
+      for (const server of this.servers.values()) {
+        if (server.namespace !== secretNamespace) continue
+        if (server.spec.envSecret?.name !== secretName) continue
+        try {
+          console.log(
+            `[K8s] Re-reconciling McpServer "${server.name}" after Secret "${secretName}" change`
+          )
+          await this.reconciler.reconcile(server)
+        } catch (err) {
+          console.error(`[K8s] Secret-triggered reconcile failed for "${server.name}":`, err)
+        }
       }
-    }
+    })
   }
 
   /**
@@ -1673,7 +1737,9 @@ export class McpServerWatcher implements McpServerProvider {
 
     // Ensure baseline network policies exist even if initial Context discovery fails.
     try {
-      await this.netPolReconciler.ensureDefaultPolicies()
+      await this.enqueueControlPlaneReconciliation(() =>
+        this.netPolReconciler.ensureDefaultPolicies()
+      )
     } catch (error) {
       console.error('[K8s] Failed to ensure default NetworkPolicies before startup:', error)
     }
@@ -1862,7 +1928,11 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
-  private async runInitialMcpServerConvergence(): Promise<void> {
+  private runInitialMcpServerConvergence(): Promise<void> {
+    return this.enqueueControlPlaneReconciliation(() => this.runInitialMcpServerConvergenceCore())
+  }
+
+  private async runInitialMcpServerConvergenceCore(): Promise<void> {
     try {
       const initialServers = [...this.servers.values()]
       const initialExternalEgressFailures =
@@ -1882,7 +1952,13 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
-  private async runInitialNetworkPolicyConvergence(
+  private runInitialNetworkPolicyConvergence(serverInventoryComplete: boolean): Promise<void> {
+    return this.enqueueControlPlaneReconciliation(() =>
+      this.runInitialNetworkPolicyConvergenceCore(serverInventoryComplete)
+    )
+  }
+
+  private async runInitialNetworkPolicyConvergenceCore(
     serverInventoryComplete: boolean
   ): Promise<void> {
     try {
@@ -1896,7 +1972,7 @@ export class McpServerWatcher implements McpServerProvider {
       this.clearInitialConvergenceRetry('NetworkPolicy')
     } catch (error) {
       console.error('[K8s] Initial NetworkPolicy background reconciliation failed:', error)
-      this.scheduleInitialConvergenceRetry('NetworkPolicy')
+      this.scheduleInitialConvergenceRetry('NetworkPolicy', serverInventoryComplete)
     }
   }
 
@@ -1907,9 +1983,19 @@ export class McpServerWatcher implements McpServerProvider {
       this.initialConvergenceRetryTimers.delete(lane)
     }
     this.initialConvergenceRetryAttempts.delete(lane)
+    if (lane === 'NetworkPolicy') {
+      this.initialNetworkPolicyRetryServerInventoryComplete = undefined
+    }
   }
 
-  private scheduleInitialConvergenceRetry(lane: InitialConvergenceLane): void {
+  private scheduleInitialConvergenceRetry(
+    lane: InitialConvergenceLane,
+    serverInventoryComplete?: boolean
+  ): void {
+    if (lane === 'NetworkPolicy' && serverInventoryComplete !== undefined) {
+      this.initialNetworkPolicyRetryServerInventoryComplete =
+        (this.initialNetworkPolicyRetryServerInventoryComplete ?? true) && serverInventoryComplete
+    }
     if (this.stopped || this.initialConvergenceRetryTimers.has(lane)) return
 
     const attempt = (this.initialConvergenceRetryAttempts.get(lane) ?? 0) + 1
@@ -1929,12 +2015,20 @@ export class McpServerWatcher implements McpServerProvider {
         void this.runInitialMcpServerConvergence()
         return
       }
-      void this.runInitialNetworkPolicyConvergence(true)
+      void this.runInitialNetworkPolicyConvergence(
+        this.initialNetworkPolicyRetryServerInventoryComplete ?? false
+      )
     }, delayMs)
     this.initialConvergenceRetryTimers.set(lane, timer)
   }
 
-  private async runInitialSharedFileSystemConvergence(): Promise<void> {
+  private runInitialSharedFileSystemConvergence(): Promise<void> {
+    return this.enqueueSharedFileSystemReconciliation(() =>
+      this.runInitialSharedFileSystemConvergenceCore()
+    )
+  }
+
+  private async runInitialSharedFileSystemConvergenceCore(): Promise<void> {
     try {
       const initialSfses = [...this.sharedFileSystems.values()]
       console.log('[K8s] Running initial SharedFileSystem background reconciliation...')
@@ -1944,7 +2038,13 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
-  private async runInitialGlobalFileSystemConvergence(): Promise<void> {
+  private runInitialGlobalFileSystemConvergence(): Promise<void> {
+    return this.enqueueGlobalFileSystemReconciliation(() =>
+      this.runInitialGlobalFileSystemConvergenceCore()
+    )
+  }
+
+  private async runInitialGlobalFileSystemConvergenceCore(): Promise<void> {
     try {
       const initialGfses = [...this.globalFileSystems.values()]
       console.log('[K8s] Running initial GlobalFileSystem background reconciliation...')
@@ -1978,28 +2078,31 @@ export class McpServerWatcher implements McpServerProvider {
       } else if (type === 'DELETED') {
         this.sharedFileSystems.delete(sfs.name)
       }
+      this.sharedFileSystemCacheRevision += 1
 
-      try {
-        if (type === 'ADDED' || type === 'MODIFIED') {
-          await this.sharedFileSystemReconciler.reconcile(sfs)
-        } else if (type === 'DELETED') {
-          await this.sharedFileSystemReconciler.reconcileDelete(sfs.name, sfs.namespace, sfs.spec)
+      await this.enqueueSharedFileSystemReconciliation(async () => {
+        try {
+          if (type === 'ADDED' || type === 'MODIFIED') {
+            await this.sharedFileSystemReconciler.reconcile(sfs)
+          } else if (type === 'DELETED') {
+            await this.sharedFileSystemReconciler.reconcileDelete(sfs.name, sfs.namespace, sfs.spec)
+          }
+        } catch (error) {
+          console.error(`[K8s] SharedFileSystem reconciliation failed for ${sfs.name}:`, error)
         }
-      } catch (error) {
-        console.error(`[K8s] SharedFileSystem reconciliation failed for ${sfs.name}:`, error)
-      }
 
-      // Re-reconcile any Host whose Context references this SharedFileSystem.
-      // ADDED/MODIFIED: pick up the now-resolvable mount; DELETED: drop it on
-      // the next mcp-host pod template diff so the pod stops failing to mount.
-      try {
-        await this.reconcileHostsReferencingSfs(sfs.name)
-      } catch (error) {
-        console.error(
-          `[K8s] Failed to re-reconcile Hosts referencing SharedFileSystem ${sfs.name}:`,
-          error
-        )
-      }
+        // Re-reconcile any Host whose Context references this SharedFileSystem.
+        // ADDED/MODIFIED: pick up the now-resolvable mount; DELETED: drop it on
+        // the next mcp-host pod template diff so the pod stops failing to mount.
+        try {
+          await this.reconcileHostsReferencingSfs(sfs.name)
+        } catch (error) {
+          console.error(
+            `[K8s] Failed to re-reconcile Hosts referencing SharedFileSystem ${sfs.name}:`,
+            error
+          )
+        }
+      })
     }
 
     const doneCallback = (err: Error | null) => {
@@ -2035,17 +2138,23 @@ export class McpServerWatcher implements McpServerProvider {
         spec: apiObj.spec,
       }
       console.log(`[K8s] GlobalFileSystem watch event: ${type} for ${gfs.name}`)
-      try {
-        if (type === 'ADDED' || type === 'MODIFIED') {
-          this.globalFileSystems.set(gfs.name, gfs)
-          await this.gfsReconciler.reconcile(gfs)
-        } else if (type === 'DELETED') {
-          this.globalFileSystems.delete(gfs.name)
-          await this.gfsReconciler.reconcileDelete(gfs)
-        }
-      } catch (error) {
-        console.error(`[K8s] GlobalFileSystem reconciliation failed for ${gfs.name}:`, error)
+      if (type === 'ADDED' || type === 'MODIFIED') {
+        this.globalFileSystems.set(gfs.name, gfs)
+      } else if (type === 'DELETED') {
+        this.globalFileSystems.delete(gfs.name)
       }
+      this.globalFileSystemCacheRevision += 1
+      await this.enqueueGlobalFileSystemReconciliation(async () => {
+        try {
+          if (type === 'ADDED' || type === 'MODIFIED') {
+            await this.gfsReconciler.reconcile(gfs)
+          } else if (type === 'DELETED') {
+            await this.gfsReconciler.reconcileDelete(gfs)
+          }
+        } catch (error) {
+          console.error(`[K8s] GlobalFileSystem reconciliation failed for ${gfs.name}:`, error)
+        }
+      })
     }
 
     const doneCallback = (err: Error | null) => {
@@ -2272,12 +2381,19 @@ export class McpServerWatcher implements McpServerProvider {
    * one-time root-directory seed once the writer is up. Idempotent; per-item
    * failures are logged by fullReconcile, never thrown.
    */
-  private async runGfsResync(): Promise<void> {
+  private runGfsResync(): Promise<void> {
+    return this.enqueueGlobalFileSystemReconciliation(() => this.runGfsResyncCore())
+  }
+
+  private async runGfsResyncCore(): Promise<void> {
     if (this.stopped) return
     try {
+      const cacheRevisionAtListStart = this.globalFileSystemCacheRevision
       const gfses = await listAllGlobalFileSystems()
-      this.globalFileSystems.clear()
-      for (const gfs of gfses) this.globalFileSystems.set(gfs.name, gfs)
+      if (cacheRevisionAtListStart === this.globalFileSystemCacheRevision) {
+        this.globalFileSystems.clear()
+        for (const gfs of gfses) this.globalFileSystems.set(gfs.name, gfs)
+      }
       await this.gfsReconciler.fullReconcile(gfses)
     } catch (err) {
       console.error(
@@ -2288,12 +2404,19 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
-  private async runSfsResync(): Promise<void> {
+  private runSfsResync(): Promise<void> {
+    return this.enqueueSharedFileSystemReconciliation(() => this.runSfsResyncCore())
+  }
+
+  private async runSfsResyncCore(): Promise<void> {
     if (this.stopped) return
     try {
+      const cacheRevisionAtListStart = this.sharedFileSystemCacheRevision
       const sfses = await listAllSharedFileSystems()
-      this.sharedFileSystems.clear()
-      for (const sfs of sfses) this.sharedFileSystems.set(sfs.name, sfs)
+      if (cacheRevisionAtListStart === this.sharedFileSystemCacheRevision) {
+        this.sharedFileSystems.clear()
+        for (const sfs of sfses) this.sharedFileSystems.set(sfs.name, sfs)
+      }
 
       // Capture each SFS's mountability (PVC Bound) BEFORE reconciling so we can
       // detect a flip. resolveContextMounts() injects the RO mount + podAffinity
@@ -2327,7 +2450,11 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
-  private async runExternalEgressResync(): Promise<void> {
+  private runExternalEgressResync(): Promise<void> {
+    return this.enqueueControlPlaneReconciliation(() => this.runExternalEgressResyncCore())
+  }
+
+  private async runExternalEgressResyncCore(): Promise<void> {
     if (this.stopped) return
     const servers = [...this.servers.values()]
       .filter(server => (server.spec.egressBindings?.length ?? 0) > 0)
@@ -2427,81 +2554,83 @@ export class McpServerWatcher implements McpServerProvider {
         this.servers.delete(server.name)
       }
 
-      // External egress is part of the workload's pre-start contract. Reconcile
-      // it before HCC creates or updates any managed runtime Deployment so a
-      // stdio MCP with egressBindings cannot start before ExternalEgressReady.
-      if (type === 'ADDED' || type === 'MODIFIED') {
-        try {
-          await this.runExternalEgressOnce(type, server)
-        } catch (error) {
-          console.error(
-            `[K8s] External egress reconciliation failed for ${server.name}; runtime reconciliation blocked:`,
-            error
-          )
-          this.scheduleExternalEgressRetry(type, server)
-          this.changeCallback?.()
-          return
-        }
-      }
-
-      // Trigger deployment reconciliation
-      try {
-        if (type === 'ADDED' || type === 'MODIFIED') {
-          await this.reconciler.reconcile(server)
-        } else if (type === 'DELETED') {
-          await this.reconciler.reconcileDelete(server.name, server.namespace)
-        }
-      } catch (error) {
-        console.error(`[K8s] Reconciliation failed for ${server.name}:`, error)
-        if (
-          (type === 'ADDED' || type === 'MODIFIED') &&
-          (server.spec.egressBindings?.length ?? 0) > 0
-        ) {
-          this.scheduleExternalEgressRetry(type, server)
-        }
-      }
-
-      // Trigger binding policy reconciliation (L3 ingress/egress)
-      try {
-        if (type === 'ADDED' || type === 'MODIFIED') {
-          const bindingsJson = server.annotations?.['clerum.io/recipe-bindings']
-          if (bindingsJson) {
-            const bindings: BindingDef[] = JSON.parse(bindingsJson)
-            const recipeName = server.labels?.['clerum.io/recipe'] ?? server.name
-            const mcpWorkloadName = server.labels?.['clerum.io/workload'] ?? server.name
-            await this.bindingReconciler.reconcileBindings(
-              recipeName,
-              bindings,
-              mcpWorkloadName,
-              server.name
-            )
-          }
-          // Re-reconcile any cached Context that references this server.
-          // Fixes race condition where Context MODIFIED arrives before
-          // the McpServer ADDED event populates the cache.
-          for (const ctx of this.contexts.values()) {
-            if (ctx.spec.mcpServers?.includes(server.name)) {
-              console.log(
-                `[K8s] Re-reconciling context "${ctx.name}" after McpServer "${server.name}" cached`
-              )
-              await this.netPolReconciler.reconcileContext(ctx)
-            }
-          }
-        } else if (type === 'DELETED') {
-          const recipeName = server.labels?.['clerum.io/recipe'] ?? server.name
-          await this.bindingReconciler.cleanupBindings(recipeName)
-          await this.runExternalEgressOnce(type, server)
-        }
-      } catch (error) {
-        console.error(`[K8s] Binding/egress reconciliation failed for ${server.name}:`, error)
-        if (type === 'ADDED' || type === 'MODIFIED' || type === 'DELETED') {
-          this.scheduleExternalEgressRetry(type, server)
-        }
-      }
-
-      // Notify listeners
-      this.changeCallback?.()
+      await this.enqueueControlPlaneReconciliation(() =>
+        this.reconcileMcpServerWatchEvent(type, server)
+      )
     }
+  }
+
+  private async reconcileMcpServerWatchEvent(type: string, server: McpServerCRD): Promise<void> {
+    // External egress is part of the workload's pre-start contract. Reconcile
+    // it before HCC creates or updates any managed runtime Deployment so a
+    // stdio MCP with egressBindings cannot start before ExternalEgressReady.
+    if (type === 'ADDED' || type === 'MODIFIED') {
+      try {
+        await this.runExternalEgressOnce(type, server)
+      } catch (error) {
+        console.error(
+          `[K8s] External egress reconciliation failed for ${server.name}; runtime reconciliation blocked:`,
+          error
+        )
+        this.scheduleExternalEgressRetry(type, server)
+        this.changeCallback?.()
+        return
+      }
+    }
+
+    // Trigger deployment reconciliation.
+    try {
+      if (type === 'ADDED' || type === 'MODIFIED') {
+        await this.reconciler.reconcile(server)
+      } else if (type === 'DELETED') {
+        await this.reconciler.reconcileDelete(server.name, server.namespace)
+      }
+    } catch (error) {
+      console.error(`[K8s] Reconciliation failed for ${server.name}:`, error)
+      if (
+        (type === 'ADDED' || type === 'MODIFIED') &&
+        (server.spec.egressBindings?.length ?? 0) > 0
+      ) {
+        this.scheduleExternalEgressRetry(type, server)
+      }
+    }
+
+    // Trigger binding policy reconciliation (L3 ingress/egress).
+    try {
+      if (type === 'ADDED' || type === 'MODIFIED') {
+        const bindingsJson = server.annotations?.['clerum.io/recipe-bindings']
+        if (bindingsJson) {
+          const bindings: BindingDef[] = JSON.parse(bindingsJson)
+          const recipeName = server.labels?.['clerum.io/recipe'] ?? server.name
+          const mcpWorkloadName = server.labels?.['clerum.io/workload'] ?? server.name
+          await this.bindingReconciler.reconcileBindings(
+            recipeName,
+            bindings,
+            mcpWorkloadName,
+            server.name
+          )
+        }
+        // Re-reconcile cached Contexts after the server cache is populated.
+        for (const ctx of this.contexts.values()) {
+          if (!ctx.spec.mcpServers?.includes(server.name)) continue
+          console.log(
+            `[K8s] Re-reconciling context "${ctx.name}" after McpServer "${server.name}" cached`
+          )
+          await this.netPolReconciler.reconcileContext(ctx)
+        }
+      } else if (type === 'DELETED') {
+        const recipeName = server.labels?.['clerum.io/recipe'] ?? server.name
+        await this.bindingReconciler.cleanupBindings(recipeName)
+        await this.runExternalEgressOnce(type, server)
+      }
+    } catch (error) {
+      console.error(`[K8s] Binding/egress reconciliation failed for ${server.name}:`, error)
+      if (type === 'ADDED' || type === 'MODIFIED' || type === 'DELETED') {
+        this.scheduleExternalEgressRetry(type, server)
+      }
+    }
+
+    this.changeCallback?.()
   }
 
   private async startMcpServerWatch(): Promise<void> {
@@ -2598,7 +2727,11 @@ export class McpServerWatcher implements McpServerProvider {
     this.externalEgressRetryTimers.set(key, timer)
   }
 
-  private async retryExternalEgress(type: string, server: McpServerCRD): Promise<void> {
+  private retryExternalEgress(type: string, server: McpServerCRD): Promise<void> {
+    return this.enqueueControlPlaneReconciliation(() => this.retryExternalEgressCore(type, server))
+  }
+
+  private async retryExternalEgressCore(type: string, server: McpServerCRD): Promise<void> {
     if (this.stopped) return
     try {
       if (type === 'DELETED') {
@@ -2663,32 +2796,34 @@ export class McpServerWatcher implements McpServerProvider {
       const nextForSfs = type === 'DELETED' ? undefined : context
       void this.reconcileSharedFileSystemsReferencedByContext(previous, nextForSfs)
 
-      try {
-        if (type === 'ADDED' || type === 'MODIFIED') {
-          await this.netPolReconciler.reconcileContext(context)
-        } else if (type === 'DELETED') {
-          await this.netPolReconciler.reconcileDeleteContext(context.spec.contextId)
+      await this.enqueueControlPlaneReconciliation(async () => {
+        try {
+          if (type === 'ADDED' || type === 'MODIFIED') {
+            await this.netPolReconciler.reconcileContext(context)
+          } else if (type === 'DELETED') {
+            await this.netPolReconciler.reconcileDeleteContext(context.spec.contextId)
+          }
+        } catch (error) {
+          console.error(
+            `[K8s] NetworkPolicy reconciliation failed for context ${context.name}:`,
+            error
+          )
         }
-      } catch (error) {
-        console.error(
-          `[K8s] NetworkPolicy reconciliation failed for context ${context.name}:`,
-          error
-        )
-      }
 
-      // Re-reconcile any Host that points at this Context so that changes to
-      // spec.sharedFileSystems[] propagate into the mcp-host pod template.
-      try {
-        for (const host of this.hosts.values()) {
-          if (host.spec.contextRef !== context.name) continue
-          await this.hostReconciler.reconcile(host)
+        // Re-reconcile any Host that points at this Context so that changes to
+        // spec.sharedFileSystems[] propagate into the mcp-host pod template.
+        try {
+          for (const host of this.hosts.values()) {
+            if (host.spec.contextRef !== context.name) continue
+            await this.hostReconciler.reconcile(host)
+          }
+        } catch (error) {
+          console.error(
+            `[K8s] Host re-reconcile after Context "${context.name}" change failed:`,
+            error
+          )
         }
-      } catch (error) {
-        console.error(
-          `[K8s] Host re-reconcile after Context "${context.name}" change failed:`,
-          error
-        )
-      }
+      })
     }
 
     const doneCallback = (err: Error | null) => {

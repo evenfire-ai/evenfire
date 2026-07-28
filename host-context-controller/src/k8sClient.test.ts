@@ -20,6 +20,12 @@ function deferred<T = void>(): {
   return { promise, resolve, reject }
 }
 
+async function flushMicrotasks(turns = 8): Promise<void> {
+  for (let turn = 0; turn < turns; turn += 1) {
+    await Promise.resolve()
+  }
+}
+
 async function requestReadyOverHttp(server: ContextMapperServer): Promise<{
   statusCode: number | undefined
   body: string
@@ -275,7 +281,7 @@ describe('McpServerWatcher startup', () => {
 
     expect(mocks.ensureDefaultPolicies).toHaveBeenCalledTimes(1)
     expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
-    expect(mocks.serverFullReconcile).toHaveBeenCalledWith([])
+    await vi.waitFor(() => expect(mocks.serverFullReconcile).toHaveBeenCalledWith([]))
     expect(mocks.hostFullReconcile).toHaveBeenCalledWith([])
     expect(mocks.sfsFullReconcile).toHaveBeenCalledWith([])
   })
@@ -320,7 +326,6 @@ describe('McpServerWatcher startup', () => {
     try {
       await vi.waitFor(() => {
         expect(mocks.serverFullReconcile).toHaveBeenCalledOnce()
-        expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
         expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
         expect(mocks.sfsFullReconcile).toHaveBeenCalledOnce()
         expect(gfsFullReconcile).toHaveBeenCalledOnce()
@@ -337,6 +342,12 @@ describe('McpServerWatcher startup', () => {
       expect(startSharedFileSystemWatch).toHaveBeenCalledOnce()
       expect(startGlobalFileSystemWatch).toHaveBeenCalledOnce()
       expect(watcher.isCommunicationChannelCacheSynced()).toBe(true)
+
+      // The control-plane lane is serial by design: NetworkPolicy full
+      // reconciliation cannot overlap the older McpServer fleet pass and
+      // therefore cannot run stale orphan cleanup after it.
+      initialServerFleet.resolve(undefined)
+      await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce())
     } finally {
       initialServerFleet.resolve(undefined)
       initialNetworkPolicies.resolve(undefined)
@@ -422,6 +433,296 @@ describe('McpServerWatcher startup', () => {
     })
 
     watcher.stop()
+  })
+
+  it('queues a McpServer watch reconciliation behind an in-flight initial fleet pass', async () => {
+    const staleServer = {
+      name: 'stale-server',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/stale-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        egressBindings: [{ dns: 'stale.example', port: 443 }],
+      },
+    }
+    const currentServer = {
+      metadata: { name: 'current-server', namespace: 'mcp-server' },
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/current-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    }
+    const egressStarted = deferred()
+    const releaseEgress = deferred()
+    const reconciliationOrder: string[] = []
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).servers.set(staleServer.name, staleServer)
+    const netPol = (watcher as any).netPolReconciler
+    netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
+      egressStarted.resolve(undefined)
+      await releaseEgress.promise
+    })
+    mocks.serverFullReconcile.mockImplementationOnce(async () => {
+      reconciliationOrder.push('initial')
+    })
+    const reconciler = (watcher as any).reconciler
+    reconciler.reconcile.mockImplementationOnce(async () => {
+      reconciliationOrder.push('watch')
+    })
+
+    const convergence = (watcher as any).runInitialMcpServerConvergence()
+    await egressStarted.promise
+    const watchConvergence = (watcher as any).getMcpServerWatchCallback()('MODIFIED', currentServer)
+
+    await flushMicrotasks()
+    expect(reconciler.reconcile).not.toHaveBeenCalled()
+
+    releaseEgress.resolve(undefined)
+    await Promise.all([convergence, watchConvergence])
+
+    expect(reconciliationOrder).toEqual(['initial', 'watch'])
+    expect(reconciler.reconcile).toHaveBeenLastCalledWith(
+      expect.objectContaining({ name: 'current-server' })
+    )
+    await watcher.stop()
+  })
+
+  it('queues a Context watch reconciliation behind an in-flight initial policy pass', async () => {
+    const staleContext = {
+      name: 'stale-context',
+      namespace: 'mcp-server',
+      spec: { contextId: 'stale-context', mcpServers: [] },
+    }
+    const currentContext = {
+      metadata: { name: 'current-context', namespace: 'mcp-server' },
+      spec: { contextId: 'current-context', mcpServers: [] },
+    }
+    const fullReconcileStarted = deferred()
+    const releaseFullReconcile = deferred()
+    const reconciliationOrder: string[] = []
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contexts.set(staleContext.name, staleContext)
+    mocks.netPolFullReconcile.mockImplementationOnce(async () => {
+      fullReconcileStarted.resolve(undefined)
+      await releaseFullReconcile.promise
+      reconciliationOrder.push('initial')
+    })
+    const netPol = (watcher as any).netPolReconciler
+    netPol.reconcileContext.mockImplementationOnce(async () => {
+      reconciliationOrder.push('watch')
+    })
+    let contextWatchCallback:
+      | ((type: string, apiObj: typeof currentContext) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback) => {
+      contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    await (watcher as any).startContextWatch()
+
+    const convergence = (watcher as any).runInitialNetworkPolicyConvergence(true)
+    await fullReconcileStarted.promise
+    const watchConvergence = contextWatchCallback!('MODIFIED', currentContext)
+
+    await flushMicrotasks()
+    expect(netPol.reconcileContext).not.toHaveBeenCalled()
+
+    releaseFullReconcile.resolve(undefined)
+    await Promise.all([convergence, watchConvergence])
+
+    expect(reconciliationOrder).toEqual(['initial', 'watch'])
+    expect(netPol.reconcileContext).toHaveBeenLastCalledWith(
+      expect.objectContaining({ name: 'current-context' })
+    )
+    await watcher.stop()
+  })
+
+  it('queues SharedFileSystem and GlobalFileSystem watch effects behind their initial passes', async () => {
+    const staleSfs = { name: 'stale-sfs', namespace: 'mcp-host', spec: {} }
+    const currentSfs = { metadata: { name: 'current-sfs', namespace: 'mcp-host' }, spec: {} }
+    const staleGfs = { name: 'stale-gfs', namespace: 'mcp-host', spec: {} }
+    const currentGfs = { metadata: { name: 'current-gfs', namespace: 'mcp-host' }, spec: {} }
+    const sfsInitialStarted = deferred()
+    const releaseSfsInitial = deferred()
+    const gfsInitialStarted = deferred()
+    const releaseGfsInitial = deferred()
+    const sfsOrder: string[] = []
+    const gfsOrder: string[] = []
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).sharedFileSystems.set(staleSfs.name, staleSfs)
+    ;(watcher as any).globalFileSystems.set(staleGfs.name, staleGfs)
+
+    mocks.sfsFullReconcile.mockImplementationOnce(async () => {
+      sfsInitialStarted.resolve(undefined)
+      await releaseSfsInitial.promise
+      sfsOrder.push('initial')
+    })
+    const sfsReconciler = (watcher as any).sharedFileSystemReconciler
+    sfsReconciler.reconcile.mockImplementationOnce(async () => {
+      sfsOrder.push('watch')
+    })
+    const gfsReconciler = (watcher as any).gfsReconciler
+    vi.spyOn(gfsReconciler, 'fullReconcile').mockImplementationOnce(async () => {
+      gfsInitialStarted.resolve(undefined)
+      await releaseGfsInitial.promise
+      gfsOrder.push('initial')
+    })
+    const gfsReconcile = vi.spyOn(gfsReconciler, 'reconcile').mockImplementationOnce(async () => {
+      gfsOrder.push('watch')
+    })
+
+    let sfsWatchCallback: ((type: string, apiObj: typeof currentSfs) => Promise<void>) | undefined
+    let gfsWatchCallback: ((type: string, apiObj: typeof currentGfs) => Promise<void>) | undefined
+    mocks.watch
+      .mockImplementationOnce(async (_path, _options, callback) => {
+        sfsWatchCallback = callback
+        return { abort: vi.fn() }
+      })
+      .mockImplementationOnce(async (_path, _options, callback) => {
+        gfsWatchCallback = callback
+        return { abort: vi.fn() }
+      })
+    await (watcher as any).startSharedFileSystemWatch()
+    await (watcher as any).startGlobalFileSystemWatch()
+
+    const sfsInitial = (watcher as any).runInitialSharedFileSystemConvergence()
+    const gfsInitial = (watcher as any).runInitialGlobalFileSystemConvergence()
+    await Promise.all([sfsInitialStarted.promise, gfsInitialStarted.promise])
+    const sfsWatch = sfsWatchCallback!('MODIFIED', currentSfs)
+    const gfsWatch = gfsWatchCallback!('MODIFIED', currentGfs)
+
+    await flushMicrotasks()
+    expect(sfsReconciler.reconcile).not.toHaveBeenCalled()
+    expect(gfsReconcile).not.toHaveBeenCalled()
+
+    releaseSfsInitial.resolve(undefined)
+    releaseGfsInitial.resolve(undefined)
+    await Promise.all([sfsInitial, gfsInitial, sfsWatch, gfsWatch])
+
+    expect(sfsOrder).toEqual(['initial', 'watch'])
+    expect(gfsOrder).toEqual(['initial', 'watch'])
+    await watcher.stop()
+  })
+
+  it('does not let a periodic SFS or GFS inventory overwrite a newer watch cache entry', async () => {
+    const staleSfs = { metadata: { name: 'stale-sfs', namespace: 'mcp-host' }, spec: {} }
+    const currentSfs = { metadata: { name: 'current-sfs', namespace: 'mcp-host' }, spec: {} }
+    const staleGfs = { metadata: { name: 'stale-gfs', namespace: 'mcp-host' }, spec: {} }
+    const currentGfs = { metadata: { name: 'current-gfs', namespace: 'mcp-host' }, spec: {} }
+    const sfsListStarted = deferred()
+    const releaseSfsList = deferred<unknown>()
+    const gfsListStarted = deferred()
+    const releaseGfsList = deferred<unknown>()
+    const watcher = new McpServerWatcher()
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'sharedfilesystems') {
+        sfsListStarted.resolve(undefined)
+        return releaseSfsList.promise
+      }
+      if (plural === 'globalfilesystems') {
+        gfsListStarted.resolve(undefined)
+        return releaseGfsList.promise
+      }
+      return { items: [] }
+    })
+    const gfsReconciler = (watcher as any).gfsReconciler
+    vi.spyOn(gfsReconciler, 'fullReconcile').mockResolvedValue(undefined)
+
+    let sfsWatchCallback: ((type: string, apiObj: typeof currentSfs) => Promise<void>) | undefined
+    let gfsWatchCallback: ((type: string, apiObj: typeof currentGfs) => Promise<void>) | undefined
+    mocks.watch
+      .mockImplementationOnce(async (_path, _options, callback) => {
+        sfsWatchCallback = callback
+        return { abort: vi.fn() }
+      })
+      .mockImplementationOnce(async (_path, _options, callback) => {
+        gfsWatchCallback = callback
+        return { abort: vi.fn() }
+      })
+    await (watcher as any).startSharedFileSystemWatch()
+    await (watcher as any).startGlobalFileSystemWatch()
+
+    const sfsResync = (watcher as any).runSfsResync()
+    const gfsResync = (watcher as any).runGfsResync()
+    await Promise.all([sfsListStarted.promise, gfsListStarted.promise])
+    const sfsWatch = sfsWatchCallback!('MODIFIED', currentSfs)
+    const gfsWatch = gfsWatchCallback!('MODIFIED', currentGfs)
+    releaseSfsList.resolve({ items: [staleSfs] })
+    releaseGfsList.resolve({ items: [staleGfs] })
+    await Promise.all([sfsResync, gfsResync, sfsWatch, gfsWatch])
+
+    expect((watcher as any).sharedFileSystems.get('current-sfs')).toEqual(
+      expect.objectContaining({ name: 'current-sfs' })
+    )
+    expect((watcher as any).sharedFileSystems.has('stale-sfs')).toBe(false)
+    expect((watcher as any).globalFileSystems.get('current-gfs')).toEqual(
+      expect.objectContaining({ name: 'current-gfs' })
+    )
+    expect((watcher as any).globalFileSystems.has('stale-gfs')).toBe(false)
+    await watcher.stop()
+  })
+
+  it('does not run queued fleet effects after the watcher stops', async () => {
+    const initialServer = {
+      name: 'initial-server',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/initial-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        egressBindings: [{ dns: 'initial.example', port: 443 }],
+      },
+    }
+    const queuedServer = {
+      metadata: { name: 'queued-server', namespace: 'mcp-server' },
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/queued-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    }
+    const egressStarted = deferred()
+    const releaseEgress = deferred()
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).servers.set(initialServer.name, initialServer)
+    const netPol = (watcher as any).netPolReconciler
+    netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
+      egressStarted.resolve(undefined)
+      await releaseEgress.promise
+    })
+    const reconciler = (watcher as any).reconciler
+
+    const initial = (watcher as any).runInitialMcpServerConvergence()
+    await egressStarted.promise
+    const queuedWatch = (watcher as any).getMcpServerWatchCallback()('MODIFIED', queuedServer)
+
+    await watcher.stop()
+    releaseEgress.resolve(undefined)
+    await Promise.all([initial, queuedWatch])
+
+    expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
+    expect(reconciler.reconcile).not.toHaveBeenCalled()
+  })
+
+  it('keeps an incomplete McpServer inventory non-authoritative across NetworkPolicy retries', async () => {
+    vi.useFakeTimers()
+    const watcher = new McpServerWatcher()
+    mocks.netPolFullReconcile
+      .mockRejectedValueOnce(new Error('initial NetworkPolicy reconciliation failed'))
+      .mockResolvedValueOnce(undefined)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await (watcher as any).runInitialNetworkPolicyConvergence(false)
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith([], [], {
+      serverInventoryComplete: false,
+      ensureDefaults: false,
+    })
+    await watcher.stop()
+    errorSpy.mockRestore()
   })
 
   it('retries failed initial McpServer convergence without delaying safe bootstrap', async () => {
