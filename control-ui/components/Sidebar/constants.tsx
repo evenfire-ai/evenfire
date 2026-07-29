@@ -8,8 +8,6 @@ import {
   IconInfrastructureTrace,
   IconKey,
   IconLlmPrices,
-  IconModelCatalog,
-  IconModelDiscovery,
   IconModels,
   IconOutputs,
   IconPublish,
@@ -83,18 +81,6 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     label: 'LLM Models',
     href: CONTROL_ROUTES.llmModels.root,
     icon: <IconModels />,
-    children: [
-      {
-        label: 'Catalog',
-        href: CONTROL_ROUTES.llmModels.root,
-        icon: <IconModelCatalog />,
-      },
-      {
-        label: 'Discovery',
-        href: CONTROL_ROUTES.llmModels.discovery,
-        icon: <IconModelDiscovery />,
-      },
-    ],
   },
   'registry-catalog': {
     label: 'Marketplace',

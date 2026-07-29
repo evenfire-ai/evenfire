@@ -6,6 +6,7 @@ import { useAuth } from '@components/AuthContext'
 import { AuthGate } from '@components/AuthGate'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DashboardLayout } from '@components/DashboardLayout'
+import { LlmDiscoveryPanel } from '@components/LlmDiscoveryPanel'
 import { LlmModelTable } from '@components/LlmModelTable'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -103,12 +104,27 @@ function LlmModelsContent() {
   }, [authState.isLoggedIn, authState.isLoading])
 
   return (
-    <>
+    <div className="cu-llm-models-layout">
       {error ? (
         <div className="cu-banner cu-banner--error" role="alert">
           {error}
         </div>
       ) : null}
+      <section className="cu-llm-models-lifecycle" aria-label="Model lifecycle">
+        <strong>One inventory, explicit provenance and lifecycle</strong>
+        <span className="cu-llm-models-lifecycle__item">
+          <span className="cu-px-badge cu-px-badge--off">Manual</span>
+          Added and maintained by an operator
+        </span>
+        <span className="cu-llm-models-lifecycle__item">
+          <span className="cu-px-badge cu-px-badge--info">Discovered</span>
+          Synced into review and disabled by default
+        </span>
+        <span className="cu-llm-models-lifecycle__item">
+          <span className="cu-px-badge cu-px-badge--warn">Stale</span>
+          Missing from the latest live catalog, never auto-removed
+        </span>
+      </section>
       <LlmModelTable
         items={models}
         unpricedKeys={unpricedKeys}
@@ -120,8 +136,13 @@ function LlmModelsContent() {
         refreshing={loading}
         loading={loading && models.length === 0}
       />
+      <LlmDiscoveryPanel
+        items={models}
+        loading={loading && models.length === 0}
+        onRefresh={loadAll}
+      />
       {confirmDialog}
-    </>
+    </div>
   )
 }
 

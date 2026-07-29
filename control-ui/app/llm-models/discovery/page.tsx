@@ -1,13 +1,6 @@
-import { AuthGate } from '@components/AuthGate'
-import { DashboardLayout } from '@components/DashboardLayout'
-import { LlmDiscoveryPanel } from '@components/LlmDiscoveryPanel'
+import { redirect } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 
 export default function LlmModelsDiscoveryPage() {
-  return (
-    <AuthGate>
-      <DashboardLayout>
-        <LlmDiscoveryPanel />
-      </DashboardLayout>
-    </AuthGate>
-  )
+  redirect(CONTROL_ROUTES.llmModels.root)
 }

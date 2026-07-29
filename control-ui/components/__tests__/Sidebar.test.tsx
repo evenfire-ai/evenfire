@@ -87,19 +87,19 @@ describe('Sidebar publisher gating', () => {
     expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings/ui')
   })
 
-  it.each([
-    ['/llm-models', 'Catalog'],
-    ['/llm-models/model-id/edit', 'Catalog'],
-    ['/llm-models/discovery', 'Discovery'],
-  ])('keeps the matching LLM Models child selected for %s', (pathname, label) => {
-    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
-    navigationState.pathname = pathname
-    render(<Sidebar currentTab="llm-models" />)
+  it.each(['/llm-models', '/llm-models/model-id/edit', '/llm-models/discovery'])(
+    'keeps the merged LLM Models entry selected for %s',
+    pathname => {
+      vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+      navigationState.pathname = pathname
+      render(<Sidebar currentTab="llm-models" />)
 
-    const child = screen.getByRole('link', { name: label })
-    expect(child).toHaveAttribute('data-active', 'true')
-    expect(child).toHaveAttribute('aria-current', 'page')
-  })
+      const entry = screen.getByRole('link', { name: 'LLM Models' })
+      expect(entry).toHaveAttribute('href', '/llm-models')
+      expect(entry).toHaveAttribute('data-active', 'true')
+      expect(entry).toHaveAttribute('aria-current', 'page')
+    }
+  )
 
   it.each([
     ['/agent-outputs/recipe-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],

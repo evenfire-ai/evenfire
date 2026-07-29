@@ -8777,7 +8777,8 @@ textarea.cu-input {
 
 .cu-app-layout .cu-main:has(> .cu-card--viewport-fill),
 .cu-app-layout .cu-main:has(> .cu-registry-layout),
-.cu-app-layout .cu-main:has(> .cu-cost-layout) {
+.cu-app-layout .cu-main:has(> .cu-cost-layout),
+.cu-app-layout .cu-main:has(> .cu-llm-models-layout) {
   padding-bottom: 0;
 }
 
@@ -8790,7 +8791,8 @@ textarea.cu-input {
 }
 
 .cu-app-layout .cu-main:has(> .cu-registry-layout),
-.cu-app-layout .cu-main:has(> .cu-cost-layout) {
+.cu-app-layout .cu-main:has(> .cu-cost-layout),
+.cu-app-layout .cu-main:has(> .cu-llm-models-layout) {
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -8804,7 +8806,8 @@ textarea.cu-input {
 }
 
 .cu-app-layout .cu-main > .cu-registry-layout,
-.cu-app-layout .cu-main > .cu-cost-layout {
+.cu-app-layout .cu-main > .cu-cost-layout,
+.cu-app-layout .cu-main > .cu-llm-models-layout {
   flex: 1;
   min-height: 0;
 }
@@ -9170,6 +9173,58 @@ textarea.cu-input {
   table-layout: fixed;
 }
 
+.cu-llm-models-layout {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--cu-space-3);
+  overflow-y: auto;
+  padding: var(--cu-space-3) var(--cu-space-3) var(--cu-space-3) 0;
+}
+
+.cu-llm-models-layout > .cu-section-card {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+}
+
+.cu-llm-models-lifecycle {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--cu-space-3);
+  padding: var(--cu-space-3) var(--cu-space-4);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius);
+  background: var(--cu-bg-elevated);
+  color: var(--cu-text-soft);
+  font-size: 0.8125rem;
+}
+
+.cu-llm-models-lifecycle > strong {
+  color: var(--cu-text);
+}
+
+.cu-llm-models-lifecycle__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-llm-review-table,
+.cu-llm-stale-table {
+  min-width: 48rem;
+  table-layout: fixed;
+}
+
+.cu-llm-review-table .cu-llm-model-row > td:first-child {
+  padding-left: 0.85rem;
+}
+
+.cu-llm-models-error {
+  flex: 0 0 auto;
+}
+
 .cu-agent-select.cu-llm-provider-filter {
   width: 12rem;
   flex: 0 0 12rem;
@@ -9401,9 +9456,20 @@ textarea.cu-input {
 /* Discovery: persistent "last synced" line under the panel header. */
 .cu-discovery-status {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--cu-space-2);
   padding: var(--cu-space-3) 1rem 0;
   font-size: 0.8125rem;
   color: var(--cu-text-muted);
+}
+
+.cu-discovery-status__facts {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--cu-space-2);
 }
 
 /* Discovery: bulk-enable toolbar shown when review rows are selected. */

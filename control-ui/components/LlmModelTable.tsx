@@ -155,15 +155,15 @@ export function LlmModelTable({
   }
 
   return (
-    <div className="cu-card cu-card--viewport-fill cu-section-card">
+    <div className="cu-card cu-section-card">
       <TablePanelHeader
         title={
           <>
             <IconModels />
-            {isInitialLoad ? 'LLM Models' : `LLM Models (${filteredItems.length})`}
+            {isInitialLoad ? 'Model catalog' : `Model catalog (${filteredItems.length})`}
           </>
         }
-        subtitle="Operator-declared allowlist of usable models per provider. Only enabled models can be selected for agents and runtime."
+        subtitle="The authoritative allowlist of manual and discovered models. Only enabled rows can be selected for agents and runtime."
         actions={
           <>
             {providerOptions.length > 1 ? (
@@ -228,7 +228,7 @@ export function LlmModelTable({
         }
       />
       {isInitialLoad ? (
-        <div className="cu-table-wrap">
+        <div className="cu-table-wrap cu-table-wrap--sticky-header">
           <table className="cu-table cu-table--header-band cu-llm-model-table">
             <thead>
               <TableHeaderRow columns={MODEL_COLUMNS} />
@@ -245,7 +245,7 @@ export function LlmModelTable({
             : 'No models in the allowlist yet. Add one to let agents and runtime use it.'}
         </div>
       ) : (
-        <div className="cu-table-wrap">
+        <div className="cu-table-wrap cu-table-wrap--sticky-header">
           <table className="cu-table cu-table--header-band cu-llm-model-table">
             <thead>
               <TableHeaderRow columns={MODEL_COLUMNS} />
