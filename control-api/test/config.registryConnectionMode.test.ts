@@ -133,6 +133,20 @@ describe('boot validation — URL allowlist re-gating', () => {
     await expect(import('../src/config.js')).resolves.toBeDefined()
   })
 
+  // The mutation-killer: the previous test's URL happens to be on the
+  // hardcoded allowlist, so it cannot distinguish the correct gate from the
+  // rejected `config.registryUrl !== ''` alone (which would run the allowlist
+  // here too and still pass by coincidence). An UNLISTED URL is required to
+  // prove the self-hosted disjunct — not just the auth disjunct — is what
+  // keeps this case from running the allowlist at all.
+  it('managed-by-default + UNLISTED url + auth off still boots', { retry: 0 }, async () => {
+    vi.resetModules()
+    delete process.env.REGISTRY_CONNECTION_MODE
+    process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'false'
+    process.env.CLERUM_REGISTRY_URL = 'https://not-on-the-list.example.net'
+    await expect(import('../src/config.js')).resolves.toBeDefined()
+  })
+
   // The new explicit check. Today an empty URL with auth on throws via the
   // allowlist (allowed.includes('') is never true). The new allowlist block is
   // preconditioned on registryUrl !== '', which would skip it — so this needs

@@ -833,9 +833,12 @@ if (config.registryAuthEnabled && config.registryUrl === '') {
 // this list. `example.com` is the reserved-domain fixture used across the
 // test suite — inert (no real registry) and kept so tests need no churn.
 //
-// Reads process.env directly, NOT config.registryConnectionMode: the mode
-// PARSER defaults to 'managed' when unset, so gating on the parsed value would
-// newly break managed deployments that rely on that default.
+// The gate must never be `config.registryUrl !== ''` alone — dropping the
+// self-hosted disjunct is exactly the rejected design that broke managed mode
+// (see the regression test below). Reading process.env directly here is
+// defensive against a future change to the parser's default; for today's
+// parser it is equivalent to config.registryConnectionMode, not itself
+// load-bearing.
 if (
   config.registryUrl !== '' &&
   (process.env.REGISTRY_CONNECTION_MODE === 'self-hosted' || config.registryAuthEnabled)
