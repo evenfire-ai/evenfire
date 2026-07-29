@@ -4,7 +4,7 @@
  * Verifies that the manager emits the right tracker events on the full
  * lifecycle (disabled, not-ready, connecting, connected, failed, refresh).
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { McpServerInfo } from '../../types'
 import { McpManager } from '../manager'
 import { MCP_INIT_AUTH_FAILED_MESSAGE, MCP_NOT_READY_MESSAGE } from '../serverStatus'
@@ -46,18 +46,53 @@ describe('McpManager status tracking — disabled / not-ready paths', () => {
     const s = m.status.get('svc')!
     expect(s.message).toBe(MCP_NOT_READY_MESSAGE)
   })
+
+  it('does not connect when readiness is explicitly non-authoritative', async () => {
+    const { McpClient } = await import('../client')
+    const connect = vi.spyOn(McpClient.prototype, 'connect')
+    const m = new McpManager()
+
+    await m.addServer(
+      serverInfo({
+        status: {
+          deployed: true,
+          ready: true,
+          authoritative: false,
+          message: 'Deployment status unknown',
+        },
+      })
+    )
+
+    expect(connect).not.toHaveBeenCalled()
+    expect(m.status.get('svc')).toMatchObject({
+      state: 'failed',
+      reason: 'not_ready',
+      message: 'Deployment status unknown',
+    })
+  })
+
+  it.each([
+    ['disabled', serverInfo({ enabled: false })],
+    ['not-ready', serverInfo({ status: { deployed: true, ready: false } })],
+  ])(
+    'removeServer cleans %s inventory and status even without a client',
+    async (_label, server) => {
+      const m = new McpManager()
+      await m.addServer(server)
+      expect(m.status.get(server.name)).toBeDefined()
+      expect((m as any).serverInfos.has(server.name)).toBe(true)
+      expect(m.getConnectedServers()).toEqual([])
+
+      await m.removeServer(server.name)
+
+      expect(m.status.get(server.name)).toBeUndefined()
+      expect((m as any).serverInfos.has(server.name)).toBe(false)
+    }
+  )
 })
 
 describe('McpManager status tracking — connect success/failure', () => {
-  const originalConnect = vi.hoisted(() => vi.fn())
-  let unmockConnect: (() => void) | null = null
-
-  beforeEach(() => {
-    unmockConnect = null
-  })
-
   afterEach(() => {
-    if (unmockConnect) unmockConnect()
     vi.restoreAllMocks()
   })
 
@@ -91,11 +126,71 @@ describe('McpManager status tracking — connect success/failure', () => {
     })
 
     const m = new McpManager()
-    await m.addServer(serverInfo())
+    await expect(m.addServer(serverInfo())).rejects.toMatchObject({
+      message: 'Unauthorized',
+      code: 401,
+    })
     const s = m.status.get('svc')!
     expect(s.state).toBe('failed')
     expect(s.reason).toBe('auth_failed')
     expect(s.message).toBe(MCP_INIT_AUTH_FAILED_MESSAGE)
+    expect(m.getConnectedServers()).toEqual([])
+  })
+
+  it('replaceServer keeps the previous connected revision when the candidate fails', async () => {
+    const { McpClient } = await import('../client')
+    const connect = vi
+      .spyOn(McpClient.prototype, 'connect')
+      .mockImplementationOnce(async function (this: any) {
+        this.connected = true
+        this.tools = [{ name: 'old-tool', inputSchema: {}, serverName: 'svc' }]
+      })
+      .mockRejectedValueOnce(new Error('replacement connect failed'))
+    vi.spyOn(McpClient.prototype, 'disconnect').mockResolvedValue(undefined)
+    const previous = serverInfo()
+    const replacement = serverInfo({
+      transport: { type: 'streamableHttp', url: 'http://replacement/mcp' },
+    })
+    const m = new McpManager()
+    await m.addServer(previous)
+
+    await expect(m.replaceServer(replacement)).rejects.toThrow('replacement connect failed')
+
+    expect(connect).toHaveBeenCalledTimes(2)
+    expect(m.getConnectedServers()).toEqual(['svc'])
+    expect(m.status.get('svc')).toMatchObject({ state: 'connected', toolCount: 1 })
+    expect((m as any).serverInfos.get('svc')).toEqual(previous)
+    expect(m.getAllTools().map(tool => tool.name)).toEqual(['svc__old-tool'])
+  })
+
+  it('replaceServer connects the candidate before retiring the previous client', async () => {
+    const effects: string[] = []
+    const { McpClient } = await import('../client')
+    vi.spyOn(McpClient.prototype, 'connect')
+      .mockImplementationOnce(async function (this: any) {
+        this.connected = true
+        this.tools = [{ name: 'old-tool', inputSchema: {}, serverName: 'svc' }]
+      })
+      .mockImplementationOnce(async function (this: any) {
+        effects.push('connect-candidate')
+        this.connected = true
+        this.tools = [{ name: 'new-tool', inputSchema: {}, serverName: 'svc' }]
+      })
+    vi.spyOn(McpClient.prototype, 'disconnect').mockImplementation(async () => {
+      effects.push('disconnect-previous')
+    })
+    const previous = serverInfo()
+    const replacement = serverInfo({
+      transport: { type: 'streamableHttp', url: 'http://replacement/mcp' },
+    })
+    const m = new McpManager()
+    await m.addServer(previous)
+
+    await m.replaceServer(replacement)
+
+    expect(effects).toEqual(['connect-candidate', 'disconnect-previous'])
+    expect((m as any).serverInfos.get('svc')).toEqual(replacement)
+    expect(m.getAllTools().map(tool => tool.name)).toEqual(['svc__new-tool'])
   })
 })
 

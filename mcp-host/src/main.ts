@@ -154,6 +154,7 @@ let failoverEngine: FailoverEngine | null = null
 let bootFallbackEntry: FallbackEntry | null = null
 let hostWatcher: HostWatcher | null = null
 let contextMapperPollTimer: ReturnType<typeof setInterval> | null = null
+let contextMapperPollRunner: { trigger(): void; stop(): void } | null = null
 let mcpStatusHeartbeatTimer: ReturnType<typeof setInterval> | null = null
 let lastServerState: Map<string, string> = new Map()
 let rpcServer: RPCServer | null = null
@@ -742,51 +743,320 @@ async function initializeProvider(
 /**
  * Initialize MCP servers for the host's context using skill-mapper.
  */
+export async function runAuthoritativeMcpInitialization(options: {
+  contextRef: string
+  client: Pick<ContextMapperClient, 'healthCheck' | 'listServersByContext'>
+  replaceFleet: (servers: McpServerInfo[]) => Promise<void>
+  sleep?: (milliseconds: number) => Promise<void>
+  maxRetries?: number
+}): Promise<void> {
+  const maxRetries = options.maxRetries ?? 5
+  const sleep =
+    options.sleep ??
+    ((milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds)))
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const ready = await options.client.healthCheck()
+    if (ready) {
+      const servers = await options.client.listServersByContext(options.contextRef)
+      await options.replaceFleet(servers)
+      return
+    }
+
+    console.log(`[Main] Waiting for Context Mapper... (${attempt}/${maxRetries})`)
+    if (attempt < maxRetries) {
+      await sleep(2000)
+    }
+  }
+
+  throw new Error(`Context Mapper was not ready after ${maxRetries} attempts`)
+}
+
+interface AuthoritativeMcpFleetManager {
+  addServer(server: McpServerInfo, authToken?: string): Promise<void>
+  disconnectAll(): Promise<void>
+  recordAdmissionFailure(server: McpServerInfo, error: unknown): void
+}
+
+async function resolveRequiredMcpAuthToken(
+  server: McpServerInfo,
+  getAuthToken: (serverName: string) => Promise<string | undefined>
+): Promise<string | undefined> {
+  if (
+    !server.enabled ||
+    !server.status?.ready ||
+    server.status.authoritative === false ||
+    !server.auth?.secretRef
+  ) {
+    return undefined
+  }
+
+  const authToken = await getAuthToken(server.name)
+  if (!authToken) {
+    throw new Error(`Required auth token is unavailable for MCP server ${server.name}`)
+  }
+  return authToken
+}
+
+/**
+ * Apply an authoritative MCP fleet snapshot with per-server admission.
+ *
+ * On cold start, healthy and intentionally skipped servers are published
+ * immediately while failed revisions remain retryable. When a prior manager
+ * exists, replacement remains atomic: any admission failure rejects and
+ * cleans up the candidate without retiring the live fleet.
+ */
+export async function replaceAuthoritativeMcpFleet<
+  TManager extends AuthoritativeMcpFleetManager,
+>(options: {
+  servers: McpServerInfo[]
+  previousManager: { disconnectAll(): Promise<void> } | null
+  createManager: () => TManager
+  getAuthToken: (serverName: string) => Promise<string | undefined>
+  installFleet: (manager: TManager, serverState: Map<string, string>) => void
+}): Promise<void> {
+  const nextManager = options.createManager()
+  const nextServerState = new Map<string, string>()
+  const admissionFailures: unknown[] = []
+
+  try {
+    for (const server of options.servers) {
+      if (server.status?.authoritative === false) {
+        nextServerState.set(server.name, JSON.stringify(server))
+        continue
+      }
+
+      let authToken: string | undefined
+      try {
+        authToken = await resolveRequiredMcpAuthToken(server, options.getAuthToken)
+      } catch (error) {
+        // Auth discovery fails before addServer can own the status transition.
+        nextManager.recordAdmissionFailure(server, error)
+        admissionFailures.push(error)
+        console.error(`[Main] MCP server admission failed; will retry: ${server.name}`, error)
+        continue
+      }
+
+      try {
+        await nextManager.addServer(server, authToken)
+        nextServerState.set(server.name, JSON.stringify(server))
+      } catch (error) {
+        // addServer owns connection-failure status. Avoid recording the same
+        // transition twice while keeping the desired revision retryable.
+        admissionFailures.push(error)
+        console.error(`[Main] MCP server admission failed; will retry: ${server.name}`, error)
+      }
+    }
+
+    // Cold start may publish healthy peers so HCC readiness is independent of
+    // full-fleet convergence. A live prior fleet is safer to preserve
+    // atomically until its complete replacement candidate is admitted.
+    if (options.previousManager && admissionFailures.length > 0) {
+      throw admissionFailures[0]
+    }
+
+    options.installFleet(nextManager, nextServerState)
+  } catch (error) {
+    try {
+      await nextManager.disconnectAll()
+    } catch (cleanupError) {
+      console.error('[Main] Failed to clean up rejected MCP fleet candidate:', cleanupError)
+    }
+    throw error
+  }
+
+  // installFleet is the commit point. Once the accepted candidate is visible,
+  // failure to retire stale connections must not invalidate or retry the
+  // already-committed authoritative fleet.
+  if (options.previousManager && options.previousManager !== nextManager) {
+    try {
+      await options.previousManager.disconnectAll()
+    } catch (cleanupError) {
+      console.error('[Main] Failed to retire previous MCP fleet after replacement:', cleanupError)
+    }
+  }
+}
+
+interface AuthoritativeMcpSnapshotManager {
+  addServer(server: McpServerInfo, authToken?: string): Promise<void>
+  replaceServer(server: McpServerInfo, authToken?: string): Promise<void>
+  removeServer(serverName: string): Promise<void>
+  getConnectedServers(): string[]
+  recordAdmissionFailure(server: McpServerInfo, error: unknown): void
+}
+
+function mcpServerDesiredRevision(server: McpServerInfo): string {
+  const { status: _observedStatus, ...desired } = server
+  return JSON.stringify(desired)
+}
+
+/**
+ * Apply one authoritative inventory snapshot without confusing transient
+ * observed readiness with a desired server revision.
+ */
+export async function reconcileAuthoritativeMcpSnapshot(options: {
+  servers: McpServerInfo[]
+  manager: AuthoritativeMcpSnapshotManager
+  serverState: Map<string, string>
+  getAuthToken: (serverName: string) => Promise<string | undefined>
+}): Promise<void> {
+  const currentNames = new Set(options.servers.map(server => server.name))
+  const previousNames = new Set(options.serverState.keys())
+  const connectedNames = new Set(options.manager.getConnectedServers())
+
+  const resolveAuthToken = async (server: McpServerInfo): Promise<string | undefined> => {
+    try {
+      return await resolveRequiredMcpAuthToken(server, options.getAuthToken)
+    } catch (error) {
+      // Auth discovery fails before manager admission. Preserve a live
+      // connection's status during replacement; otherwise publish the
+      // admission failure exactly once.
+      if (!connectedNames.has(server.name)) {
+        options.manager.recordAdmissionFailure(server, error)
+      }
+      throw error
+    }
+  }
+
+  const reconcileServer = async (server: McpServerInfo): Promise<void> => {
+    const previousState = options.serverState.get(server.name)
+    const currentState = JSON.stringify(server)
+
+    if (!previousState) {
+      if (server.status?.authoritative === false) {
+        options.serverState.set(server.name, currentState)
+        return
+      }
+
+      const authToken = await resolveAuthToken(server)
+      await options.manager.addServer(server, authToken)
+      options.serverState.set(server.name, currentState)
+      return
+    }
+
+    const previousServer = JSON.parse(previousState) as McpServerInfo
+    const desiredChanged =
+      mcpServerDesiredRevision(previousServer) !== mcpServerDesiredRevision(server)
+
+    if (desiredChanged) {
+      if (server.status?.authoritative === false) {
+        await options.manager.removeServer(server.name)
+        options.serverState.set(server.name, currentState)
+        return
+      }
+
+      if (!server.enabled || !server.status?.ready) {
+        await options.manager.removeServer(server.name)
+        await options.manager.addServer(server, undefined)
+        options.serverState.set(server.name, currentState)
+        return
+      }
+
+      // A ready authoritative desired revision is connected before commit.
+      // Failure leaves the previous connection and recorded revision intact,
+      // so an identical later snapshot retries it.
+      const authToken = await resolveAuthToken(server)
+      await options.manager.replaceServer(server, authToken)
+      options.serverState.set(server.name, currentState)
+      return
+    }
+
+    if (server.status?.authoritative === false) {
+      // The producer explicitly could not establish status authority. Record
+      // the snapshot, but never use it to open a connection. An existing live
+      // connection remains valid until authoritative status or desired/delete
+      // state says otherwise.
+      options.serverState.set(server.name, currentState)
+      return
+    }
+
+    if (!server.status?.ready) {
+      // An authoritative ready=false, and a legacy ready=false with no
+      // authority marker, retain the existing fail-closed behavior. Re-adding
+      // a not-ready server does not connect; it updates observed status.
+      if (connectedNames.has(server.name)) {
+        await options.manager.removeServer(server.name)
+      }
+      await options.manager.addServer(server, undefined)
+      options.serverState.set(server.name, currentState)
+      return
+    }
+
+    // A previously not-ready server was intentionally recorded without a
+    // connection. Admit it once the authoritative snapshot reports it ready.
+    if (!connectedNames.has(server.name) && server.enabled) {
+      const authToken = await resolveAuthToken(server)
+      await options.manager.addServer(server, authToken)
+    }
+
+    // Status-only degradation is still an authoritative observation, but it
+    // must not tear down a live connection that may remain healthy.
+    options.serverState.set(server.name, currentState)
+  }
+
+  for (const server of options.servers) {
+    try {
+      await reconcileServer(server)
+    } catch (error) {
+      console.error(`[Main] MCP server reconciliation failed; will retry: ${server.name}`, error)
+    }
+  }
+
+  for (const name of previousNames) {
+    if (!currentNames.has(name)) {
+      try {
+        await options.manager.removeServer(name)
+        options.serverState.delete(name)
+      } catch (error) {
+        console.error(`[Main] MCP server deletion failed; will retry: ${name}`, error)
+      }
+    }
+  }
+}
+
 async function initializeMcpServers(contextRef: string): Promise<void> {
   console.log(`[Main] Initializing MCP servers for context: ${contextRef}`)
 
-  // Clean up existing manager
-  if (mcpManager) {
-    await mcpManager.disconnectAll()
+  const replaceFleet = async (servers: McpServerInfo[]): Promise<void> => {
+    await replaceAuthoritativeMcpFleet({
+      servers,
+      previousManager: mcpManager,
+      createManager: () => new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined),
+      getAuthToken: async serverName => {
+        if (!contextMapperClient) {
+          throw new Error('Context Mapper client is required to fetch MCP server auth')
+        }
+        return contextMapperClient.getAuthToken(serverName)
+      },
+      installFleet: (nextManager, nextServerState) => {
+        mcpManager = nextManager
+        lastServerState = nextServerState
+        agent?.setMcpManager(nextManager)
+      },
+    })
   }
-  mcpManager = new McpManager(config.mcpProxyEnabled ? config.mcpProxyUrl : undefined)
-  lastServerState.clear()
 
-  // In production mode, fetch from context-mapper
+  // In production mode, fetch an authoritative snapshot before replacing the
+  // current fleet. An unavailable Context Mapper leaves the prior state intact.
   if (!config.devMode) {
     if (!contextMapperClient) {
       contextMapperClient = getContextMapperClient()
     }
 
-    // Wait for context-mapper to be available
-    const maxRetries = 5
-    let retries = 0
-    while (retries < maxRetries) {
-      const healthy = await contextMapperClient.healthCheck()
-      if (healthy) {
-        console.log('[Main] Context Mapper is available')
-        break
-      }
-      retries++
-      console.log(`[Main] Waiting for Context Mapper... (${retries}/${maxRetries})`)
-      await new Promise(resolve => setTimeout(resolve, 2000))
-    }
-
-    const servers = await contextMapperClient.listServersByContext(contextRef)
-
-    for (const server of servers) {
-      let authToken: string | undefined
-
-      // Get auth token if configured
-      if (server.auth?.secretRef) {
-        authToken = await contextMapperClient.getAuthToken(server.name)
-      }
-
-      await mcpManager.addServer(server, authToken)
-      lastServerState.set(server.name, JSON.stringify(server))
-    }
+    await runAuthoritativeMcpInitialization({
+      contextRef,
+      client: contextMapperClient,
+      replaceFleet,
+    })
+  } else {
+    await replaceFleet([])
   }
 
+  // Successful discovery always installs a manager, including an
+  // authoritative HTTP 200 empty snapshot.
+  if (!mcpManager) {
+    throw new Error('MCP manager was not installed after authoritative discovery')
+  }
   const connectedServers = mcpManager.getConnectedServers()
   console.log(`[Main] Connected to ${connectedServers.length} MCP server(s)`)
 
@@ -805,71 +1075,101 @@ async function initializeMcpServers(contextRef: string): Promise<void> {
  * Poll context-mapper for McpServer changes.
  */
 async function pollContextMapper(contextRef: string): Promise<void> {
-  if (!contextMapperClient || !mcpManager) return
+  if (!contextMapperClient) return
 
   try {
+    // Cold-start discovery failures intentionally leave the manager unset.
+    // Retry the authoritative initialization instead of declaring an empty
+    // fleet or permanently no-oping every reconciliation tick.
+    if (!mcpManager) {
+      await initializeMcpServers(contextRef)
+      return
+    }
+
     const { servers } = await contextMapperClient.pollServers(contextRef)
-    const currentNames = new Set(servers.map(s => s.name))
-    const previousNames = new Set(lastServerState.keys())
-
-    // Detect added or modified servers
-    for (const server of servers) {
-      const previousState = lastServerState.get(server.name)
-      const currentState = JSON.stringify(server)
-
-      if (!previousState) {
-        console.log(`[Main] MCP server added: ${server.name}`)
-        const authToken = server.auth?.secretRef
-          ? await contextMapperClient.getAuthToken(server.name)
-          : undefined
-        await mcpManager.addServer(server, authToken)
-        lastServerState.set(server.name, currentState)
-      } else if (previousState !== currentState) {
-        console.log(`[Main] MCP server modified: ${server.name}`)
-        await mcpManager.removeServer(server.name)
-        const authToken = server.auth?.secretRef
-          ? await contextMapperClient.getAuthToken(server.name)
-          : undefined
-        await mcpManager.addServer(server, authToken)
-        lastServerState.set(server.name, currentState)
-      }
-    }
-
-    // Detect deleted servers
-    for (const name of previousNames) {
-      if (!currentNames.has(name)) {
-        console.log(`[Main] MCP server deleted: ${name}`)
-        await mcpManager.removeServer(name)
-        lastServerState.delete(name)
-      }
-    }
+    await reconcileAuthoritativeMcpSnapshot({
+      servers,
+      manager: mcpManager,
+      serverState: lastServerState,
+      getAuthToken: serverName => contextMapperClient!.getAuthToken(serverName),
+    })
   } catch (error) {
     console.error('[Main] Error polling skill-mapper:', error)
   }
 }
 
 /**
+ * Serialize periodic polling while coalescing any number of overlapping ticks
+ * into at most one trailing run. This keeps reconciliation bounded without
+ * losing the latest post-flight snapshot opportunity.
+ */
+export function createCoalescedPollRunner(poll: () => Promise<void>): {
+  trigger(): void
+  stop(): void
+} {
+  let inFlight = false
+  let trailing = false
+  let stopped = false
+
+  const trigger = (): void => {
+    if (stopped) return
+    if (inFlight) {
+      trailing = true
+      return
+    }
+
+    inFlight = true
+    void poll()
+      .catch(error => {
+        console.error('[Main] Context Mapper poll runner failed:', error)
+      })
+      .finally(() => {
+        inFlight = false
+        if (trailing && !stopped) {
+          trailing = false
+          trigger()
+        }
+      })
+  }
+
+  return {
+    trigger,
+    stop: () => {
+      stopped = true
+      trailing = false
+    },
+  }
+}
+
+/**
  * Start polling context-mapper for McpServer changes.
  */
-function startContextMapperPolling(contextRef: string): void {
+export function startContextMapperPolling(contextRef: string): void {
+  // Re-entry replaces the complete producer/runner pair. Stopping only the
+  // runner would leave the previous interval dispatching into the new runner.
+  stopContextMapperPolling()
+
   console.log(
     `[Main] Starting context-mapper polling (interval: ${config.contextMapperPollInterval}ms)`
   )
 
+  contextMapperPollRunner = createCoalescedPollRunner(() => pollContextMapper(contextRef))
   contextMapperPollTimer = setInterval(() => {
-    pollContextMapper(contextRef)
+    contextMapperPollRunner?.trigger()
   }, config.contextMapperPollInterval)
 }
 
 /**
  * Stop polling context-mapper.
  */
-function stopContextMapperPolling(): void {
+export function stopContextMapperPolling(): void {
   if (contextMapperPollTimer) {
     console.log('[Main] Stopping context-mapper polling')
     clearInterval(contextMapperPollTimer)
     contextMapperPollTimer = null
   }
+  contextMapperPollRunner?.stop()
+  contextMapperPollRunner = null
 }
 
 /**
@@ -2838,11 +3138,15 @@ async function main(): Promise<void> {
   }
 }
 
-// Run main
-main().catch(error => {
-  console.error('[Main] Fatal error:', error)
-  process.exit(1)
-})
+// Run main only when this module is the executable entry point. Keeping imports
+// side-effect free allows the authoritative initialization contract to be
+// regression-tested without starting the service.
+if (require.main === module) {
+  main().catch(error => {
+    console.error('[Main] Fatal error:', error)
+    process.exit(1)
+  })
+}
 
 // Export for external access
 export { messageQueue, agent, cronScheduler }

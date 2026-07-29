@@ -28,6 +28,36 @@ export class McpManager {
     return this.statusTracker
   }
 
+  private clearToolMappings(serverName: string): void {
+    for (const [toolName, server] of this.toolToServerMap.entries()) {
+      if (server === serverName) {
+        this.toolToServerMap.delete(toolName)
+      }
+    }
+  }
+
+  private installConnectedClient(serverConfig: McpServerInfo, client: McpClient): void {
+    this.clearToolMappings(serverConfig.name)
+    this.clients.set(serverConfig.name, client)
+    this.serverInfos.set(serverConfig.name, serverConfig)
+
+    for (const tool of client.availableTools) {
+      const fullToolName = `${serverConfig.name}__${tool.name}`
+      this.toolToServerMap.set(fullToolName, serverConfig.name)
+    }
+
+    this.statusTracker.markConnected(serverConfig.name, client.availableTools.length)
+  }
+
+  /**
+   * Retain an admission failure for inventory/status reporting when failure
+   * occurs before McpClient.connect (for example, auth-token discovery).
+   */
+  recordAdmissionFailure(serverConfig: McpServerInfo, error: unknown): void {
+    this.serverInfos.set(serverConfig.name, serverConfig)
+    this.statusTracker.markFailed(serverConfig.name, error)
+  }
+
   /**
    * Add and connect to an MCP server.
    */
@@ -35,7 +65,19 @@ export class McpManager {
     // Skip disabled servers — operator intent, not infra failure.
     if (!serverConfig.enabled) {
       console.log(`[McpManager] Skipping disabled server: ${serverConfig.name}`)
+      this.serverInfos.set(serverConfig.name, serverConfig)
       this.statusTracker.markDisabled(serverConfig.name)
+      return
+    }
+
+    // Explicitly non-authoritative readiness is a fail-closed admission
+    // signal, not permission to open a new connection.
+    if (serverConfig.status?.authoritative === false) {
+      console.log(
+        `[McpManager] Skipping server with non-authoritative readiness: ${serverConfig.name}`
+      )
+      this.serverInfos.set(serverConfig.name, serverConfig)
+      this.statusTracker.markNotReady(serverConfig.name, serverConfig.status?.message)
       return
     }
 
@@ -44,6 +86,7 @@ export class McpManager {
       console.log(
         `[McpManager] Skipping server not ready: ${serverConfig.name} (${serverConfig.status?.message || 'unknown'})`
       )
+      this.serverInfos.set(serverConfig.name, serverConfig)
       this.statusTracker.markNotReady(serverConfig.name, serverConfig.status?.message)
       return
     }
@@ -59,23 +102,50 @@ export class McpManager {
 
     try {
       await client.connect()
-      this.clients.set(serverConfig.name, client)
-      this.serverInfos.set(serverConfig.name, serverConfig)
-
-      // Register tools from this server
-      for (const tool of client.availableTools) {
-        const fullToolName = `${serverConfig.name}__${tool.name}`
-        this.toolToServerMap.set(fullToolName, serverConfig.name)
-      }
-
-      // tools/list has succeeded at least once → state becomes connected (spec §4.4).
-      this.statusTracker.markConnected(serverConfig.name, client.availableTools.length)
+      this.installConnectedClient(serverConfig, client)
       console.log(`[McpManager] Added server: ${serverConfig.name}`)
     } catch (error) {
       console.error(`[McpManager] Failed to add server ${serverConfig.name}:`, error)
-      this.statusTracker.markFailed(serverConfig.name, error)
-      // Don't throw - allow other servers to connect
+      this.recordAdmissionFailure(serverConfig, error)
+      // Surface the failed admission so callers can leave this server's
+      // revision retryable while continuing to publish healthy peers.
+      throw error
     }
+  }
+
+  /**
+   * Connect a ready desired revision before committing it over the current
+   * connection. A candidate failure leaves the previous client, tools,
+   * serverInfo, and connected status untouched.
+   */
+  async replaceServer(serverConfig: McpServerInfo, authToken?: string): Promise<void> {
+    const previousClient = this.clients.get(serverConfig.name)
+    if (!previousClient) {
+      await this.addServer(serverConfig, authToken)
+      return
+    }
+
+    const candidate = new McpClient(serverConfig, authToken, this.proxyUrl)
+    try {
+      await candidate.connect()
+    } catch (error) {
+      await candidate.disconnect().catch(() => undefined)
+      throw error
+    }
+
+    // Commit is synchronous: readers see either the complete previous
+    // revision or the complete connected candidate, never a missing server.
+    this.installConnectedClient(serverConfig, candidate)
+
+    try {
+      await previousClient.disconnect()
+    } catch (cleanupError) {
+      console.error(
+        `[McpManager] Failed to retire previous server ${serverConfig.name}:`,
+        cleanupError
+      )
+    }
+    console.log(`[McpManager] Replaced server: ${serverConfig.name}`)
   }
 
   /**
@@ -83,22 +153,25 @@ export class McpManager {
    */
   async removeServer(serverName: string): Promise<void> {
     const client = this.clients.get(serverName)
-    if (!client) {
-      return
+    let disconnectError: unknown
+    let disconnectFailed = false
+
+    this.clearToolMappings(serverName)
+    try {
+      await client?.disconnect()
+    } catch (error) {
+      disconnectFailed = true
+      disconnectError = error
+    } finally {
+      this.clients.delete(serverName)
+      this.serverInfos.delete(serverName)
+      this.statusTracker.remove(serverName)
     }
 
-    // Remove tool mappings
-    for (const [toolName, server] of this.toolToServerMap.entries()) {
-      if (server === serverName) {
-        this.toolToServerMap.delete(toolName)
-      }
-    }
-
-    await client.disconnect()
-    this.clients.delete(serverName)
-    this.serverInfos.delete(serverName)
-    this.statusTracker.remove(serverName)
     console.log(`[McpManager] Removed server: ${serverName}`)
+    if (disconnectFailed) {
+      throw disconnectError
+    }
   }
 
   /**
