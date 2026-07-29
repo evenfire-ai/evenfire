@@ -316,7 +316,11 @@ describe('RegistryConnectPanel', () => {
     expect(await screen.findByText(/Connected to the Evenfire Registry.*@acme/)).toBeInTheDocument()
   })
 
-  it('shows a retry message when recovery is not yet finished', async () => {
+  // Renamed from the original "shows a retry message when recovery is not yet
+  // finished" — that name was misleading. This drives a REJECTION (the
+  // client_unavailable catch arm), not a resolved-but-not-connected response.
+  // The resolved-but-not-connected case is covered separately below.
+  it('shows contact-support copy when recovery reports client_unavailable', async () => {
     vi.mocked(api.getRegistryConnection).mockResolvedValue({
       state: 'connecting',
       deploymentId: 'dep-1',
@@ -329,6 +333,106 @@ describe('RegistryConnectPanel', () => {
     await userEvent.click(await screen.findByRole('button', { name: /finish connecting/i }))
     expect(
       await screen.findByText(/can no longer authenticate. Contact support/i)
+    ).toBeInTheDocument()
+  })
+
+  // IMPORTANT-1 fix: handleRequest's direct `connecting` branch (:129-136) had
+  // zero coverage — every other connecting-view test reached that state via
+  // GET/load(), never via requestRegistryConnection() itself resolving
+  // 'connecting'. Without this test, collapsing that branch into the final
+  // `else` (rendering `pending` + the "must approve it" toast) would leave the
+  // suite green while telling an auto-approved-but-unclaimed user to wait for
+  // an operator who will never act.
+  it('lands on the connecting view directly when the request resolves connecting', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'disconnected' })
+    vi.mocked(api.requestRegistryConnection).mockResolvedValue({
+      state: 'connecting',
+      deploymentId: 'dep-1',
+      requestedOrgName: 'acme',
+    })
+    render(<RegistryConnectPanel />)
+    await userEvent.type(await screen.findByLabelText(/organization/i), 'acme')
+    await userEvent.type(screen.getByLabelText(/email/i), 'a@x.io')
+    await userEvent.click(screen.getByRole('button', { name: /request registration/i }))
+    expect(await screen.findByRole('button', { name: /finish connecting/i })).toBeInTheDocument()
+    expect(screen.getByText(/Registered — finishing the connection\./i)).toBeInTheDocument()
+    // Toast is a separate mutation from the view — same hazard as the
+    // connected-view test above, now for the connecting case.
+    expect(screen.queryByText(/must approve it/i)).toBeNull()
+  })
+
+  // IMPORTANT-2 fix: the remaining four of handleRecover's six outcome
+  // branches (:211-213 resolved-non-connected, :221 deployment_suspended,
+  // :225 not_recoverable, :226 the generic catch-all) had no coverage.
+
+  it('re-syncs and shows a still-finishing message when recover resolves without connecting', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'connecting',
+      deploymentId: 'dep-1',
+      requestedOrgName: 'acme',
+    })
+    vi.mocked(api.recoverRegistryConnection).mockResolvedValue({
+      state: 'connecting',
+      deploymentId: 'dep-1',
+      requestedOrgName: 'acme',
+    })
+    render(<RegistryConnectPanel />)
+    await userEvent.click(await screen.findByRole('button', { name: /finish connecting/i }))
+    expect(
+      await screen.findByText(/Still finishing the connection\. Try again in a moment\./i)
+    ).toBeInTheDocument()
+    // Proves the `await load()` re-sync actually ran, not just that some
+    // message appeared — the GET mock is hit once on mount and once here.
+    expect(api.getRegistryConnection).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows suspended copy when recovery reports deployment_suspended', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'connecting',
+      deploymentId: 'dep-1',
+      requestedOrgName: 'acme',
+    })
+    vi.mocked(api.recoverRegistryConnection).mockRejectedValue(
+      Object.assign(new Error('x'), { code: 'deployment_suspended' })
+    )
+    render(<RegistryConnectPanel />)
+    await userEvent.click(await screen.findByRole('button', { name: /finish connecting/i }))
+    expect(
+      await screen.findByText(/This deployment has been suspended by Evenfire\. Contact support\./i)
+    ).toBeInTheDocument()
+  })
+
+  it('re-syncs without an error message when recovery reports not_recoverable', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'connecting',
+      deploymentId: 'dep-1',
+      requestedOrgName: 'acme',
+    })
+    vi.mocked(api.recoverRegistryConnection).mockRejectedValue(
+      Object.assign(new Error('x'), { code: 'not_recoverable' })
+    )
+    render(<RegistryConnectPanel />)
+    await userEvent.click(await screen.findByRole('button', { name: /finish connecting/i }))
+    await waitFor(() => expect(api.getRegistryConnection).toHaveBeenCalledTimes(2))
+    // Distinguishes the silent re-sync from the generic catch-all, which DOES
+    // set a formError.
+    expect(screen.queryByText(/Could not finish connecting/i)).toBeNull()
+    expect(screen.getByRole('button', { name: /finish connecting/i })).toBeInTheDocument()
+  })
+
+  it('falls back to the generic finish-connecting error for an unmapped recover code', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'connecting',
+      deploymentId: 'dep-1',
+      requestedOrgName: 'acme',
+    })
+    vi.mocked(api.recoverRegistryConnection).mockRejectedValue(
+      Object.assign(new Error('x'), { code: 'something_unmapped' })
+    )
+    render(<RegistryConnectPanel />)
+    await userEvent.click(await screen.findByRole('button', { name: /finish connecting/i }))
+    expect(
+      await screen.findByText(/Could not finish connecting\. Try again shortly\./i)
     ).toBeInTheDocument()
   })
 
