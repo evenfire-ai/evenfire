@@ -49,6 +49,14 @@ type NetworkPolicyMutationOptions = {
   isCurrent?: () => boolean
 }
 
+function sameContextDesiredRevision(expected: ContextCRD, current: ContextCRD): boolean {
+  return (
+    expected.name === current.name &&
+    expected.namespace === current.namespace &&
+    JSON.stringify(expected.spec) === JSON.stringify(current.spec)
+  )
+}
+
 const GROUP = 'clerum.io'
 const VERSION = 'v1alpha1'
 const PLURAL_MCPSERVERS = 'mcpservers'
@@ -489,12 +497,6 @@ export class NetworkPolicyReconciler {
       `[NetPol] Reconciling context "${contextId}" — allowed servers: [${allowedServers.join(', ')}]`
     )
 
-    // Build desired policy names
-    const desiredNames = new Set(
-      allowedServers.map(serverName => this.policyName(contextId, serverName))
-    )
-
-    // Get existing policies for this context
     const existingPolicies = await this.listPoliciesForContext(contextId)
     if (!isCurrent()) return
 
@@ -644,9 +646,36 @@ export class NetworkPolicyReconciler {
       await this.ensureRpcProxyEgress(contextId, serverName, port, isCurrent)
     }
 
-    // Delete policies for servers no longer in the context
+    await this.revokeStaleContextAllows(context, isCurrent, { context: existingPolicies })
+  }
+
+  private async revokeStaleContextAllows(
+    context: ContextCRD,
+    isCurrent: () => boolean,
+    listedPolicies?: {
+      context?: k8s.V1NetworkPolicy[]
+      hostEgress?: k8s.V1NetworkPolicy[]
+      rpcProxyEgress?: k8s.V1NetworkPolicy[]
+    }
+  ): Promise<boolean> {
+    if (!isCurrent()) return false
+    const contextId = context.spec.contextId
+    const allowedServers = context.spec.mcpServers || []
+    const desiredNames = new Set(
+      allowedServers.map(serverName => this.policyName(contextId, serverName))
+    )
+    const desiredEgressNames = new Set(
+      allowedServers.map(serverName => `${this.policyName(contextId, serverName)}-egress`)
+    )
+    const desiredRpcProxyNames = new Set(
+      allowedServers.map(serverName => `rpc-egress-${contextId}-${serverName}`)
+    )
+
+    const existingPolicies =
+      listedPolicies?.context ?? (await this.listPoliciesForContext(contextId))
+    if (!isCurrent()) return false
     for (const existing of existingPolicies) {
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       const existingName = existing.metadata?.name || ''
       if (!desiredNames.has(existingName)) {
         console.log(`[NetPol] Deleting orphaned policy "${existingName}"`)
@@ -654,14 +683,11 @@ export class NetworkPolicyReconciler {
       }
     }
 
-    // Delete orphaned L2 egress counterparts in mcp-host namespace
-    const existingEgressPolicies = await this.listEgressPoliciesForContext(contextId)
-    if (!isCurrent()) return
-    const desiredEgressNames = new Set(
-      allowedServers.map(serverName => `${this.policyName(contextId, serverName)}-egress`)
-    )
+    const existingEgressPolicies =
+      listedPolicies?.hostEgress ?? (await this.listEgressPoliciesForContext(contextId))
+    if (!isCurrent()) return false
     for (const existing of existingEgressPolicies) {
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       const existingName = existing.metadata?.name || ''
       if (!desiredEgressNames.has(existingName)) {
         console.log(`[NetPol] Deleting orphaned L2 egress policy "${existingName}"`)
@@ -669,21 +695,19 @@ export class NetworkPolicyReconciler {
       }
     }
 
-    // Delete orphaned rpc-proxy egress counterparts. Keeping these after a
-    // server is removed from a Context would preserve an old in-cluster route.
-    const existingRpcProxyPolicies = await this.listRpcProxyEgressPoliciesForContext(contextId)
-    if (!isCurrent()) return
-    const desiredRpcProxyNames = new Set(
-      allowedServers.map(serverName => `rpc-egress-${contextId}-${serverName}`)
-    )
+    const existingRpcProxyPolicies =
+      listedPolicies?.rpcProxyEgress ?? (await this.listRpcProxyEgressPoliciesForContext(contextId))
+    if (!isCurrent()) return false
     for (const existing of existingRpcProxyPolicies) {
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       const existingName = existing.metadata?.name || ''
       if (!desiredRpcProxyNames.has(existingName)) {
         console.log(`[NetPol] Deleting orphaned rpc-proxy egress policy "${existingName}"`)
         await this.deletePolicyInNamespace(config.rpcProxyNamespace, existingName, isCurrent)
       }
     }
+
+    return isCurrent()
   }
 
   /**
@@ -758,14 +782,32 @@ export class NetworkPolicyReconciler {
       return !contextAuthorityLost
     }
 
+    let serverAuthorityLost = false
+    let serverAuthorityWarningLogged = false
+    const serverCleanupAuthoritative = (): boolean => {
+      if (
+        !serverAuthorityLost &&
+        options.serverInventoryAuthoritative &&
+        !options.serverInventoryAuthoritative()
+      ) {
+        serverAuthorityLost = true
+      }
+      if (serverAuthorityLost && !serverAuthorityWarningLogged) {
+        serverAuthorityWarningLogged = true
+        console.warn(
+          '[NetPol] Skipping remaining external egress orphan cleanup because McpServer inventory authority was lost'
+        )
+      }
+      return !serverAuthorityLost
+    }
+
     const desiredContextIds = new Set(contexts.map(c => c.spec.contextId))
     const cleanupOrphanedContextPolicies = async (
-      listPolicies: () => Promise<k8s.V1NetworkPolicy[]>,
+      policies: k8s.V1NetworkPolicy[],
       deletePolicy: (name: string) => Promise<void>,
       describePolicy: (name: string, contextId: string) => string
     ): Promise<void> => {
       if (!contextCleanupAuthoritative()) return
-      const policies = await listPolicies()
       for (const policy of policies) {
         const contextId = policy.metadata?.labels?.[CONTEXT_LABEL]
         if (contextId && !desiredContextIds.has(contextId)) {
@@ -787,49 +829,71 @@ export class NetworkPolicyReconciler {
       }
     }
 
+    const allContextPolicies = contextCleanupAuthoritative()
+      ? await this.listAllContextPolicies()
+      : []
+    const allContextEgressPolicies = contextCleanupAuthoritative()
+      ? await this.listAllContextEgressPolicies()
+      : []
+    const allRpcProxyEgressPolicies = contextCleanupAuthoritative()
+      ? await this.listAllRpcProxyEgressPolicies()
+      : []
+
     // Delete orphaned Context policies across every L2 lane. Each lane uses
     // the canonical contextId effect key and rechecks authority plus live CRD
     // presence immediately before its delete.
     await cleanupOrphanedContextPolicies(
-      () => this.listAllContextPolicies(),
+      allContextPolicies,
       name => this.deletePolicy(name),
       (name, contextId) =>
         `[NetPol] Deleting orphaned policy "${name}" (context "${contextId}" no longer exists)`
     )
     await cleanupOrphanedContextPolicies(
-      () => this.listAllContextEgressPolicies(),
+      allContextEgressPolicies,
       name => this.deleteEgressPolicy(name),
       name => `[NetPol] Deleting orphaned L2 egress policy "${name}"`
     )
     await cleanupOrphanedContextPolicies(
-      () => this.listAllRpcProxyEgressPolicies(),
+      allRpcProxyEgressPolicies,
       name => this.deletePolicyInNamespace(config.rpcProxyNamespace, name),
       name => `[NetPol] Deleting orphaned rpc-proxy egress policy "${name}"`
     )
 
-    let serverAuthorityLost = false
-    let serverAuthorityWarningLogged = false
-    const serverCleanupAuthoritative = (): boolean => {
-      if (
-        !serverAuthorityLost &&
-        options.serverInventoryAuthoritative &&
-        !options.serverInventoryAuthoritative()
-      ) {
-        serverAuthorityLost = true
-      }
-      if (serverAuthorityLost && !serverAuthorityWarningLogged) {
-        serverAuthorityWarningLogged = true
-        console.warn(
-          '[NetPol] Skipping remaining external egress orphan cleanup because McpServer inventory authority was lost'
-        )
-      }
-      return !serverAuthorityLost
+    let liveDesiredRevisionChanged = false
+    for (const context of contexts) {
+      const contextId = context.spec.contextId
+      await runContextEffect(contextId, async () => {
+        const current = options.resolveCurrentContext
+          ? options.resolveCurrentContext(context.name)
+          : context
+        if (!current || current.spec.contextId !== contextId) {
+          liveDesiredRevisionChanged = true
+          return
+        }
+        const contextEffectIsCurrent = (): boolean => {
+          if (!contextCleanupAuthoritative() || !serverCleanupAuthoritative()) return false
+          if (!options.resolveCurrentContext) return true
+          const latest = options.resolveCurrentContext(current.name)
+          return latest !== undefined && sameContextDesiredRevision(current, latest)
+        }
+        const forContext = (policy: k8s.V1NetworkPolicy): boolean =>
+          policy.metadata?.labels?.[CONTEXT_LABEL] === contextId
+        const completed = await this.revokeStaleContextAllows(current, contextEffectIsCurrent, {
+          context: allContextPolicies.filter(forContext),
+          hostEgress: allContextEgressPolicies.filter(forContext),
+          rpcProxyEgress: allRpcProxyEgressPolicies.filter(forContext),
+        })
+        if (!completed && contextCleanupAuthoritative() && serverCleanupAuthoritative()) {
+          liveDesiredRevisionChanged = true
+        }
+      })
     }
 
+    let allExternalPolicies: k8s.V1NetworkPolicy[] = []
     // Clean up external egress policies for servers that no longer exist.
     if (options.serverInventoryComplete !== false && serverCleanupAuthoritative()) {
       const desiredServerNames = new Set(servers.map(s => s.name))
-      const allExternalPolicies = await this.listAllExternalEgressPolicies()
+      allExternalPolicies = await this.listAllExternalEgressPolicies()
       for (const policy of allExternalPolicies) {
         const serverName = policy.metadata?.labels?.[MCPSERVER_LABEL]
         if (serverName && !desiredServerNames.has(serverName)) {
@@ -862,6 +926,44 @@ export class NetworkPolicyReconciler {
       )
     }
 
+    if (options.serverInventoryComplete !== false) {
+      for (const server of servers) {
+        await runServerEffect(server.name, async () => {
+          const current = options.resolveCurrentServer
+            ? options.resolveCurrentServer(server.name)
+            : server
+          if (!current) {
+            liveDesiredRevisionChanged = true
+            return
+          }
+          const serverEffectIsCurrent = (): boolean => {
+            if (!serverCleanupAuthoritative()) return false
+            if (!options.resolveCurrentServer) return true
+            const latest = options.resolveCurrentServer(current.name)
+            return latest !== undefined && sameMcpServerDesiredRevision(current, latest)
+          }
+          const completed = await this.revokeStaleExternalEgress(
+            current,
+            serverEffectIsCurrent,
+            allExternalPolicies.filter(
+              policy => policy.metadata?.labels?.[MCPSERVER_LABEL] === server.name
+            )
+          )
+          if (!completed && serverCleanupAuthoritative()) {
+            liveDesiredRevisionChanged = true
+          }
+        })
+      }
+    }
+
+    if (
+      liveDesiredRevisionChanged &&
+      contextCleanupAuthoritative() &&
+      serverCleanupAuthoritative()
+    ) {
+      throw new Error('Desired NetworkPolicy inventory changed during authoritative revocation')
+    }
+
     if (
       options.serverInventoryComplete !== false &&
       contextCleanupAuthoritative() &&
@@ -881,10 +983,12 @@ export class NetworkPolicyReconciler {
           ? options.resolveCurrentContext(context.name)
           : context
         if (!current || current.spec.contextId !== contextId) return
-        const contextEffectIsCurrent = (): boolean =>
-          contextInventoryIsCurrent() &&
-          (!options.resolveCurrentContext ||
-            options.resolveCurrentContext(current.name) === current)
+        const contextEffectIsCurrent = (): boolean => {
+          if (!contextInventoryIsCurrent()) return false
+          if (!options.resolveCurrentContext) return true
+          const latest = options.resolveCurrentContext(current.name)
+          return latest !== undefined && sameContextDesiredRevision(current, latest)
+        }
         await this.reconcileContext(current, { isCurrent: contextEffectIsCurrent })
       })
     }
@@ -929,6 +1033,38 @@ export class NetworkPolicyReconciler {
   }
 
   // ─── L3 External Egress ────────────────────────────────────────────
+
+  private desiredExternalEgressPolicyNames(server: McpServerCRD): Set<string> {
+    const desired = new Set<string>()
+    for (const binding of server.spec.egressBindings ?? []) {
+      const name = this.externalEgressPolicyName(server.name, binding)
+      if (name) desired.add(name)
+    }
+    return desired
+  }
+
+  private async revokeStaleExternalEgress(
+    server: McpServerCRD,
+    isCurrent: () => boolean,
+    listedPolicies?: k8s.V1NetworkPolicy[]
+  ): Promise<boolean> {
+    if (!isCurrent()) return false
+    const existingPolicies =
+      listedPolicies ??
+      (await this.listExternalEgressPoliciesForServer(server.name, server.namespace))
+    if (!isCurrent()) return false
+    const desiredPolicyNames = this.desiredExternalEgressPolicyNames(server)
+    await this.cleanupExternalEgress(
+      server.name,
+      server.namespace,
+      existingPolicies.filter(policy => {
+        const name = policy.metadata?.name
+        return Boolean(name) && !desiredPolicyNames.has(name!)
+      }),
+      async () => isCurrent()
+    )
+    return isCurrent()
+  }
 
   /**
    * Reconcile external egress policies for an McpServer with egressBindings.

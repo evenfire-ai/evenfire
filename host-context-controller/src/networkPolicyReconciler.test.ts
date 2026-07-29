@@ -1569,7 +1569,7 @@ describe('NetworkPolicyReconciler', () => {
         },
       })
 
-      expect(effectKeys).toEqual(['captured-context'])
+      expect(effectKeys).toEqual(['captured-context', 'captured-context'])
       expect(reconcileContext).not.toHaveBeenCalled()
     })
 
@@ -1771,7 +1771,12 @@ describe('NetworkPolicyReconciler', () => {
         },
       })
 
-      expect(effectKeys).toEqual(['orphan-context', 'orphan-context', 'desired-context'])
+      expect(effectKeys).toEqual([
+        'orphan-context',
+        'orphan-context',
+        'desired-context',
+        'desired-context',
+      ])
     })
 
     it('revokes every orphan allow lane before a slow additive Context effect', async () => {
@@ -1862,6 +1867,277 @@ describe('NetworkPolicyReconciler', () => {
         expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
           name: 'ext-egress-orphan-server-old.example',
           namespace: 'mcp-server',
+        })
+      } finally {
+        releaseAdditive.resolve(undefined)
+        await fullPass
+      }
+    })
+
+    it('revokes every stale allow lane for a live Context before signaling authoritative revocation', async () => {
+      const liveContext: ContextCRD = {
+        name: 'live-context-resource',
+        namespace: 'mcp-server',
+        spec: { contextId: 'live-context', mcpServers: [] },
+      }
+      const additiveStarted = deferred()
+      const releaseAdditive = deferred()
+      vi.spyOn(reconciler, 'reconcileContext').mockImplementationOnce(async () => {
+        additiveStarted.resolve(undefined)
+        await releaseAdditive.promise
+      })
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
+          if (namespace === 'mcp-server' && labelSelector?.includes('context-allow')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ctx-live-context-removed-server',
+                    labels: { 'clerum.io/context': 'live-context' },
+                  },
+                },
+              ],
+            }
+          }
+          if (namespace === 'mcp-host' && labelSelector?.includes('context-allow')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ctx-live-context-removed-server-egress',
+                    labels: { 'clerum.io/context': 'live-context' },
+                  },
+                },
+              ],
+            }
+          }
+          if (namespace === 'rpc-proxy' && labelSelector?.includes('rpc-proxy-egress')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'rpc-egress-live-context-removed-server',
+                    labels: { 'clerum.io/context': 'live-context' },
+                  },
+                },
+              ],
+            }
+          }
+          return { items: [] }
+        }
+      )
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      const fullPass = reconciler.fullReconcile([liveContext], [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+        onAuthoritativeRevocationComplete,
+      })
+
+      await additiveStarted.promise
+      try {
+        expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+          name: 'ctx-live-context-removed-server',
+          namespace: 'mcp-server',
+        })
+        expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+          name: 'ctx-live-context-removed-server-egress',
+          namespace: 'mcp-host',
+        })
+        expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+          name: 'rpc-egress-live-context-removed-server',
+          namespace: 'rpc-proxy',
+        })
+        expect(onAuthoritativeRevocationComplete).toHaveBeenCalledOnce()
+      } finally {
+        releaseAdditive.resolve(undefined)
+        await fullPass
+      }
+    })
+
+    it('revokes stale external egress for a live McpServer before additive convergence', async () => {
+      const liveServer: McpServerCRD = {
+        name: 'live-server',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'default',
+          image: 'live:latest',
+          transport: { type: 'streamableHttp', port: 3000 },
+          egressBindings: [],
+        },
+      }
+      const additiveStarted = deferred()
+      const releaseAdditive = deferred()
+      vi.spyOn(reconciler, 'reconcileExternalEgress').mockImplementationOnce(async () => {
+        additiveStarted.resolve(undefined)
+        await releaseAdditive.promise
+      })
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
+          if (namespace === 'mcp-server' && labelSelector?.includes('external-egress')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ext-egress-live-server-old.example-443',
+                    labels: { 'clerum.io/mcpserver': 'live-server' },
+                  },
+                },
+              ],
+            }
+          }
+          return { items: [] }
+        }
+      )
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      const fullPass = reconciler.fullReconcile([], [liveServer], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+        onAuthoritativeRevocationComplete,
+      })
+
+      await additiveStarted.promise
+      try {
+        expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+          name: 'ext-egress-live-server-old.example-443',
+          namespace: 'mcp-server',
+        })
+        expect(onAuthoritativeRevocationComplete).toHaveBeenCalledOnce()
+      } finally {
+        releaseAdditive.resolve(undefined)
+        await fullPass
+      }
+    })
+
+    it('does not signal authoritative revocation when a live-owner delete fails', async () => {
+      const liveContext: ContextCRD = {
+        name: 'live-context-resource',
+        namespace: 'mcp-server',
+        spec: { contextId: 'live-context', mcpServers: [] },
+      }
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
+          if (namespace === 'mcp-server' && labelSelector?.includes('context-allow')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ctx-live-context-removed-server',
+                    labels: { 'clerum.io/context': 'live-context' },
+                  },
+                },
+              ],
+            }
+          }
+          return { items: [] }
+        }
+      )
+      mockApi.deleteNamespacedNetworkPolicy.mockRejectedValueOnce(
+        new Error('policy delete unavailable')
+      )
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      await expect(
+        reconciler.fullReconcile([liveContext], [], {
+          ensureDefaults: false,
+          contextInventoryAuthoritative: () => true,
+          serverInventoryAuthoritative: () => true,
+          onAuthoritativeRevocationComplete,
+        })
+      ).rejects.toThrow('policy delete unavailable')
+      expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
+    })
+
+    it('does not delete or signal revocation after live Context authority is lost', async () => {
+      const liveContext: ContextCRD = {
+        name: 'live-context-resource',
+        namespace: 'mcp-server',
+        spec: { contextId: 'live-context', mcpServers: [] },
+      }
+      let authoritative = true
+      const inventoryListed = deferred()
+      const releaseInventory = deferred<{ items: k8s.V1NetworkPolicy[] }>()
+      mockApi.listNamespacedNetworkPolicy.mockImplementationOnce(async () => {
+        inventoryListed.resolve(undefined)
+        return releaseInventory.promise
+      })
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      const fullPass = reconciler.fullReconcile([liveContext], [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => authoritative,
+        serverInventoryAuthoritative: () => true,
+        onAuthoritativeRevocationComplete,
+      })
+      await inventoryListed.promise
+      authoritative = false
+      releaseInventory.resolve({
+        items: [
+          {
+            metadata: {
+              name: 'ctx-live-context-removed-server',
+              labels: { 'clerum.io/context': 'live-context' },
+            },
+          },
+        ],
+      })
+
+      await fullPass
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
+    })
+
+    it('uses one global inventory LIST per policy lane before additive fleet convergence', async () => {
+      const contexts: ContextCRD[] = ['alpha', 'beta', 'gamma'].map(contextId => ({
+        name: `${contextId}-resource`,
+        namespace: 'mcp-server',
+        spec: { contextId, mcpServers: [] },
+      }))
+      const servers: McpServerCRD[] = ['one', 'two'].map(name => ({
+        name,
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'default',
+          image: `${name}:latest`,
+          transport: { type: 'streamableHttp', port: 3000 },
+        },
+      }))
+      const additiveStarted = deferred()
+      const releaseAdditive = deferred()
+      vi.spyOn(reconciler, 'reconcileContext').mockImplementationOnce(async () => {
+        additiveStarted.resolve(undefined)
+        await releaseAdditive.promise
+      })
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+
+      const fullPass = reconciler.fullReconcile(contexts, servers, {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+      })
+
+      await additiveStarted.promise
+      try {
+        expect(mockApi.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(4)
+        expect(mockApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+          namespace: 'mcp-server',
+          labelSelector: expect.stringContaining('policy-type=context-allow'),
+        })
+        expect(mockApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+          namespace: 'mcp-host',
+          labelSelector: expect.stringContaining('policy-type=context-allow'),
+        })
+        expect(mockApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+          namespace: 'rpc-proxy',
+          labelSelector: expect.stringContaining('policy-type=rpc-proxy-egress'),
+        })
+        expect(mockApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+          namespace: 'mcp-server',
+          labelSelector: expect.stringContaining('policy-type=external-egress'),
         })
       } finally {
         releaseAdditive.resolve(undefined)
@@ -2000,7 +2276,7 @@ describe('NetworkPolicyReconciler', () => {
       expect(reconcileContext).toHaveBeenCalledWith(desiredContext, {
         isCurrent: expect.any(Function),
       })
-      expect(contextInventoryAuthoritative).toHaveBeenCalledTimes(2)
+      expect(contextInventoryAuthoritative).toHaveBeenCalled()
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
         name: 'ctx-deleted-context-old-server',
         namespace: 'mcp-server',
@@ -2059,7 +2335,7 @@ describe('NetworkPolicyReconciler', () => {
       expect(reconcileExternalEgress).toHaveBeenCalledWith(desiredServer, {
         isCurrent: expect.any(Function),
       })
-      expect(serverInventoryAuthoritative).toHaveBeenCalledTimes(2)
+      expect(serverInventoryAuthoritative).toHaveBeenCalled()
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
         name: 'ext-egress-deleted-server-api-example-com-443',
         namespace: 'mcp-server',
