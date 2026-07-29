@@ -183,6 +183,9 @@ export function useChatListController({
           return
         }
 
+        // New hosts scope the page server-side. Keep this boundary check for
+        // older hosts and malformed proxy responses so another agent's catalog
+        // entry can never leak into the selected agent's sidebar.
         const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
         chatListNextCursorByAgentRef.current[agentRef] = serverResult.nextCursor ?? null
         setChatListHasMoreRemoteSessions(Boolean(serverResult.nextCursor))
@@ -211,6 +214,7 @@ export function useChatListController({
               // Activity totals when tool/system messages vary by session.
               messageCount: knownServerMessageCount(s),
               turnCount: s.turnCount,
+              remote: true,
             }))
           return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
         })
@@ -220,17 +224,27 @@ export function useChatListController({
         // it here, after the post-paint continuation reaches the auto-select gate,
         // instead of clearing it with the synchronous local-index selection.
         const suppressAutoSelection = suppressAutoSelectionByAgentRef.current.delete(agentRef)
-        const activeChatId = host.current?.getActiveChatId() ?? null
-        const autoSelectedChatId = host.current?.getAutoSelectedChatId() ?? null
+        const currentHost = host.current
+        const activeChatId = currentHost?.getActiveChatId() ?? null
+        const autoSelectedChatId = currentHost?.getAutoSelectedChatId() ?? null
+        const selectedLocalChat = activeChatId
+          ? merged.find(chat => chat.id === activeChatId)
+          : undefined
+        const serverIsNewerThanSelection =
+          !selectedLocalChat ||
+          Date.parse(latestServerSession?.lastActivityAt ?? '') >
+            Date.parse(selectedLocalChat.updatedAt)
         if (
+          currentHost &&
           latestServerSession &&
           (activeChatId === null || activeChatId === autoSelectedChatId) &&
           activeChatId !== latestServerSession.chatId &&
-          host.current.shouldAutoSelectLatest() &&
+          serverIsNewerThanSelection &&
+          currentHost.shouldAutoSelectLatest() &&
           !suppressAutoSelection
         ) {
-          host.current.markAutoSelectedChat(latestServerSession.chatId)
-          void host.current.switchToChat(agentRef, latestServerSession.chatId)
+          currentHost.markAutoSelectedChat(latestServerSession.chatId)
+          void currentHost.switchToChat(agentRef, latestServerSession.chatId)
         }
 
         // Persist server freshness into the local index (spec §5.3): keeps the
@@ -412,7 +426,7 @@ export function useChatListController({
   const upsertHydratedEntry = useCallback((meta: ChatMetadata, title: string) => {
     setChatList(prev =>
       prev.some(c => c.id === meta.id)
-        ? prev.map(c => (c.id === meta.id ? { ...c, title } : c))
+        ? prev.map(c => (c.id === meta.id ? { ...c, ...meta, title, remote: false } : c))
         : [...prev, { ...meta, title }]
     )
   }, [])

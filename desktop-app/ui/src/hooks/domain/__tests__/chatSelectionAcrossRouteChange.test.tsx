@@ -148,7 +148,7 @@ describe('selecting a chat session across a route change', () => {
         'agent-x',
         'c-old',
         undefined,
-        { limit: 80 }
+        { limit: 40 }
       )
     )
     expect(result.current.activeChatId).toBe('c-old')
@@ -158,7 +158,7 @@ describe('selecting a chat session across a route change', () => {
       'agent-x',
       'c-newest',
       undefined,
-      { limit: 80 }
+      { limit: 40 }
     )
   })
 
@@ -182,7 +182,7 @@ describe('selecting a chat session across a route change', () => {
       'agent-x',
       'c-old',
       undefined,
-      { limit: 80 }
+      { limit: 40 }
     )
   })
 
@@ -213,7 +213,7 @@ describe('selecting a chat session across a route change', () => {
         'agent-x',
         'c-old',
         undefined,
-        { limit: 80 }
+        { limit: 40 }
       )
     )
     expect(result.current.activeChatId).toBe('c-old')
@@ -222,7 +222,7 @@ describe('selecting a chat session across a route change', () => {
       'agent-x',
       'c-newest',
       undefined,
-      { limit: 80 }
+      { limit: 40 }
     )
   })
 
@@ -366,7 +366,7 @@ describe('chat-route guard on the real selection entry points', () => {
           'agent-x',
           'c-old',
           undefined,
-          { limit: 80 }
+          { limit: 40 }
         ),
       SLOW
     )
@@ -410,7 +410,7 @@ describe('chat-route guard on the real selection entry points', () => {
           'agent-x',
           'c-old',
           undefined,
-          { limit: 80 }
+          { limit: 40 }
         ),
       SLOW
     )
@@ -471,7 +471,7 @@ describe('chat-route guard on the real selection entry points', () => {
           'agent-x',
           'c-old',
           undefined,
-          { limit: 80 }
+          { limit: 40 }
         ),
       SLOW
     )

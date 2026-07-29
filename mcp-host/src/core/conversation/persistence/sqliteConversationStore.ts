@@ -43,6 +43,7 @@ import {
   type SessionTokenUsage,
   boundedTurns,
 } from '../conversationStore'
+import { sessionPartsFromPrefixedKey } from '../sessionKeyParts'
 import type { PersistQueue } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
 import {
@@ -170,21 +171,6 @@ const DEFAULT_PENDING_APPROVAL_TTL_MS = 7 * 24 * 3600 * 1000
 interface SessionOrdinalState {
   nextOrdinal: number
   nextTurnNumber: number
-}
-
-function sessionPartsFromPrefix(
-  key: string,
-  prefix: string
-): { agent: string; chatId: string } | null {
-  const rest = key.startsWith(prefix) ? key.slice(prefix.length) : key
-  const colonIdx = rest.indexOf(':')
-  if (colonIdx >= 0) {
-    return { agent: rest.slice(0, colonIdx), chatId: rest.slice(colonIdx + 1) }
-  }
-  const rpcPrefixIndex = prefix.lastIndexOf(':rpc:')
-  const scopedAgent =
-    rpcPrefixIndex >= 0 ? prefix.slice(rpcPrefixIndex + ':rpc:'.length).replace(/:$/, '') : ''
-  return scopedAgent && rest ? { agent: scopedAgent, chatId: rest } : null
 }
 
 function conversationStateFromRow(state: string): ConversationState {
@@ -384,7 +370,7 @@ export class SqliteConversationStore implements ConversationStore {
     for (const row of rows) {
       const key = row.session.session_key
       const cached = this.cache.get(key)
-      const parts = sessionPartsFromPrefix(key, prefix)
+      const parts = sessionPartsFromPrefixedKey(key, prefix)
       if (!parts) continue
       const state = cached ? cached.state : conversationStateFromRow(row.session.state)
       out.push({
@@ -425,7 +411,7 @@ export class SqliteConversationStore implements ConversationStore {
     query: SessionMessagesQuery = {}
   ): Promise<ConversationSessionMessages | undefined> {
     const cached = this.cache.get(sessionKey)
-    const parts = sessionPartsFromPrefix(sessionKey, prefix)
+    const parts = sessionPartsFromPrefixedKey(sessionKey, prefix)
     if (!parts) return undefined
     if (cached) {
       const turns = boundedTurns(cached.turns, query)
@@ -725,41 +711,51 @@ export class SqliteConversationStore implements ConversationStore {
     const state = this.ordinals.get(conv.id) ?? this.initOrdinalState(conv.id)
     const ordinal = state.nextOrdinal++
     const turnNumber = state.nextTurnNumber
+    // Reserve before the durability await so an immediate follow-up turn cannot
+    // reuse this number while the completion boundary is still queued.
+    state.nextTurnNumber += 1
     // Stamp the per-turn token total onto the final assistant message (the turn
     // accumulated it in RAM via recordSessionUsage). reconstruct sums these back
     // onto the Turn on cold-load.
     const turn = conv.turns[conv.turns.length - 1]
-    await this.persistQueue.enqueueSync(
-      {
-        kind: 'persist_turn_boundary',
-        message: {
-          session_id: conv.id,
-          ordinal,
-          role: 'assistant',
-          content: response,
-          content_parts: null,
-          tool_call_id: null,
-          tool_calls: null,
-          tool_name: null,
-          timestamp: Date.now() / 1000,
-          token_count: null,
-          finish_reason: 'stop',
-          spillover_ref: null,
-          is_error: 0,
-          turn_number: turnNumber,
-          input_tokens: turn?.input_tokens ?? null,
-          output_tokens: turn?.output_tokens ?? null,
-          cache_read_tokens: turn?.cache_read_tokens ?? null,
-          cache_write_tokens: turn?.cache_write_tokens ?? null,
+    try {
+      await this.persistQueue.enqueueSync(
+        {
+          kind: 'persist_turn_boundary',
+          message: {
+            session_id: conv.id,
+            ordinal,
+            role: 'assistant',
+            content: response,
+            content_parts: null,
+            tool_call_id: null,
+            tool_calls: null,
+            tool_name: null,
+            timestamp: Date.now() / 1000,
+            token_count: null,
+            finish_reason: 'stop',
+            spillover_ref: null,
+            is_error: 0,
+            turn_number: turnNumber,
+            input_tokens: turn?.input_tokens ?? null,
+            output_tokens: turn?.output_tokens ?? null,
+            cache_read_tokens: turn?.cache_read_tokens ?? null,
+            cache_write_tokens: turn?.cache_write_tokens ?? null,
+          },
+          sessionId: conv.id,
+          state: conv.state,
+          activeTaskId: null, // D.1 — turn complete clears the in-flight task
+          activeTraceContext: null,
         },
-        sessionId: conv.id,
-        state: conv.state,
-        activeTaskId: null, // D.1 — turn complete clears the in-flight task
-        activeTraceContext: null,
-      },
-      sessionKey
-    )
-    state.nextTurnNumber += 1
+        sessionKey
+      )
+    } catch (error) {
+      // Roll back only if no later turn has advanced the same state meanwhile.
+      if (state.nextTurnNumber === turnNumber + 1) {
+        state.nextTurnNumber = turnNumber
+      }
+      throw error
+    }
   }
 
   async persistTurnCancel(conv: Conversation): Promise<void> {

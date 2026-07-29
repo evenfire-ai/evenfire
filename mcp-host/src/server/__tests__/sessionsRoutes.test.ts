@@ -6,6 +6,7 @@ import {
   handleSessionsListRoute,
 } from '../routes'
 import type { ContextBreakdownHandler, SessionMessagesHandler, SessionsListHandler } from '../types'
+import { encodeSessionsCursor, sessionsCursorScope } from '../wireProjections'
 import { makeHandlers } from './testHelpers'
 
 interface CapturedRes {
@@ -50,10 +51,6 @@ function makeReqWithAuth(sub: string): Request {
   } as unknown as Request
 }
 
-function encodeSessionsCursor(updatedAt: string, key: string): string {
-  return Buffer.from(JSON.stringify({ updatedAt, key }), 'utf8').toString('base64url')
-}
-
 describe('handleSessionsListRoute', () => {
   it('returns 200 with items array for the authenticated user', async () => {
     const sessionsListHandler: SessionsListHandler = vi.fn().mockReturnValue({
@@ -84,7 +81,14 @@ describe('handleSessionsListRoute', () => {
     })
     const req = {
       ...makeReqWithAuth('user-1'),
-      query: { limit: '500', cursor: encodeSessionsCursor('2026-04-22T00:00:00.000Z', 'k1') },
+      query: {
+        limit: '500',
+        cursor: encodeSessionsCursor(
+          '2026-04-22T00:00:00.000Z',
+          'k1',
+          sessionsCursorScope('user-1')
+        ),
+      },
     } as unknown as Request
     const captured = makeRes()
 
@@ -94,7 +98,7 @@ describe('handleSessionsListRoute', () => {
     expect(sessionsListHandler).toHaveBeenCalledWith('user-1', {
       agent: undefined,
       limit: 100,
-      cursor: encodeSessionsCursor('2026-04-22T00:00:00.000Z', 'k1'),
+      cursor: encodeSessionsCursor('2026-04-22T00:00:00.000Z', 'k1', sessionsCursorScope('user-1')),
     })
     expect(captured.jsonBody).toEqual({ items: [], nextCursor: 'next-page' })
   })
@@ -117,6 +121,27 @@ describe('handleSessionsListRoute', () => {
     })
   })
 
+  it('rejects a cursor issued for another agent scope', async () => {
+    const sessionsListHandler: SessionsListHandler = vi.fn().mockReturnValue({ items: [] })
+    const req = {
+      ...makeReqWithAuth('user-1'),
+      query: {
+        agent: 'agent-b',
+        cursor: encodeSessionsCursor(
+          '2026-04-22T00:00:00.000Z',
+          'chat-1',
+          sessionsCursorScope('user-1', 'agent-a')
+        ),
+      },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler }))
+
+    expect(captured.statusCode).toBe(400)
+    expect(sessionsListHandler).not.toHaveBeenCalled()
+  })
+
   it('rejects malformed session cursors instead of treating them as page one', async () => {
     const sessionsListHandler: SessionsListHandler = vi.fn()
     const req = {
@@ -136,6 +161,27 @@ describe('handleSessionsListRoute', () => {
     const req = {
       ...makeReqWithAuth('user-1'),
       query: { limit: 'not-a-number' },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler }))
+
+    expect(captured.statusCode).toBe(400)
+    expect(sessionsListHandler).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['fractional limit', { limit: '1.5' }],
+    ['repeated limit', { limit: ['1', '2'] }],
+    ['repeated cursor', { cursor: ['one', 'two'] }],
+    ['repeated agent', { agent: ['agent-a', 'agent-b'] }],
+    ['dot agent', { agent: '.' }],
+    ['colon-bearing agent', { agent: 'agent:other' }],
+  ])('rejects %s query input', async (_label, query) => {
+    const sessionsListHandler: SessionsListHandler = vi.fn()
+    const req = {
+      ...makeReqWithAuth('user-1'),
+      query,
     } as unknown as Request
     const captured = makeRes()
 
@@ -260,14 +306,46 @@ describe('handleSessionMessagesRoute', () => {
   it.each([
     ['beforeTurn', 'abc'],
     ['beforeTurn', '0'],
+    ['beforeTurn', '1.5'],
     ['afterTurn', 'abc'],
     ['afterTurn', '-1'],
+    ['afterTurn', '1.5'],
+    ['limit', '1.5'],
   ])('rejects malformed %s cursors', async (name, value) => {
     const sessionMessagesHandler: SessionMessagesHandler = vi.fn()
     const req = {
       ...makeReqWithParams('user-1', 'chatllm', 'c1'),
       query: { [name]: value },
     } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+
+    expect(captured.statusCode).toBe(400)
+    expect(sessionMessagesHandler).not.toHaveBeenCalled()
+  })
+
+  it('rejects repeated message pagination parameters', async () => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn()
+    const req = {
+      ...makeReqWithParams('user-1', 'chatllm', 'c1'),
+      query: { limit: ['1', '2'] },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+
+    expect(captured.statusCode).toBe(400)
+    expect(sessionMessagesHandler).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['dot agent', '.', 'chat-1'],
+    ['dot-dot chat id', 'agent', '..'],
+    ['separator-bearing chat id', 'agent', 'nested/chat'],
+  ])('rejects unsafe %s route segments', async (_label, agent, chatId) => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn()
+    const req = makeReqWithParams('user-1', agent, chatId)
     const captured = makeRes()
 
     await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))

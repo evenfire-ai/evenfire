@@ -94,7 +94,14 @@ export function useActivityController({
 
   const missingCounterChatIds = JSON.stringify(
     chatList
-      .filter(chat => chat.errorCount === undefined || chat.toolCallCount === undefined)
+      .filter(chat => {
+        const key = selectedAgent ? activityCounterKey(selectedAgent, chat.id) : ''
+        return (
+          !chat.remote &&
+          backfilledCountersByChat[key] === undefined &&
+          (chat.errorCount === undefined || chat.toolCallCount === undefined)
+        )
+      })
       .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
       .slice(0, ACTIVITY_SUMMARY_CHAT_SCAN_LIMIT)
       .map(chat => chat.id)
@@ -132,7 +139,12 @@ export function useActivityController({
         ] as const
       })
     ).then(entries => {
-      if (!cancelled) setBackfilledCountersByChat(Object.fromEntries(entries))
+      if (!cancelled) {
+        setBackfilledCountersByChat(previous => ({
+          ...previous,
+          ...Object.fromEntries(entries),
+        }))
+      }
     })
 
     return () => {

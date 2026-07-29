@@ -2,7 +2,13 @@ import { createHash, randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { mergeAuthoritativeServerMessages, messageServerTurnNumber } from './chatMessageMerge.js'
-import type { ChatFile, ChatIndex, ChatMessage, ChatMetadata } from './types.js'
+import type {
+  ChatFile,
+  ChatIndex,
+  ChatMessage,
+  ChatMetadata,
+  ReplaceChatMessagesOptions,
+} from './types.js'
 
 // Keep the catalog at v2 while paged transcripts are dual-readable by the
 // pre-paging desktop build. The page layout has its own versioned metadata.
@@ -10,6 +16,7 @@ const INDEX_VERSION = 2
 const PAGED_CHAT_VERSION = 1
 const DEFAULT_PAGE_SIZE = 100
 const MAX_COMPATIBILITY_WINDOWS = 100
+const MAX_COMPATIBILITY_WINDOW_BYTES = 8 * 1024 * 1024
 const DEFAULT_MAX_LOCAL_SYNCED_MESSAGES = 1000
 const LEGACY_COMPATIBILITY_MESSAGE_LIMIT = 100
 const PAGE_FILE_PATTERN = /^\d{6}\.json$/
@@ -96,6 +103,13 @@ function aggregateMessages(
   }
 }
 
+function visibleMessageCount(messages: ChatMessage[]): number {
+  return messages.reduce(
+    (total, message) => total + (message.role === 'user' || message.role === 'assistant' ? 1 : 0),
+    0
+  )
+}
+
 function pageEntry(file: string, messages: ChatMessage[]): ChatPageEntry {
   const serverTurns = messages
     .map(messageServerTurnNumber)
@@ -117,7 +131,8 @@ function pageEntry(file: string, messages: ChatMessage[]): ChatPageEntry {
  * so we guard centrally where the on-disk path is built.
  */
 function assertSafeSegment(label: string, value: string): void {
-  if (!value || value === '.' || value === '..' || /[/\\\0]/.test(value)) {
+  const reservedChatId = label === 'chatId' && (value.startsWith('.') || value === 'index')
+  if (!value || value === '.' || value === '..' || reservedChatId || /[/\\\0]/.test(value)) {
     throw new Error(`Invalid ${label}: unsafe path segment`)
   }
 }
@@ -214,14 +229,28 @@ export class ChatStore {
   private cleanedSnapshotSiblingKeys = new Set<string>()
   private compatibilityCheckedKeys = new Set<string>()
   private compatibilityWindows = new Map<string, ChatMessage[]>()
+  private compatibilityWindowBytes = new Map<string, number>()
+  private compatibilityWindowsTotalBytes = 0
+
+  private dropCompatibilityWindow(key: string): void {
+    this.compatibilityWindows.delete(key)
+    this.compatibilityWindowsTotalBytes -= this.compatibilityWindowBytes.get(key) ?? 0
+    this.compatibilityWindowBytes.delete(key)
+  }
 
   private cacheCompatibilityWindow(key: string, messages: ChatMessage[]): void {
-    this.compatibilityWindows.delete(key)
+    this.dropCompatibilityWindow(key)
+    const sizeBytes = Buffer.byteLength(JSON.stringify(messages), 'utf8')
     this.compatibilityWindows.set(key, [...messages])
-    while (this.compatibilityWindows.size > MAX_COMPATIBILITY_WINDOWS) {
+    this.compatibilityWindowBytes.set(key, sizeBytes)
+    this.compatibilityWindowsTotalBytes += sizeBytes
+    while (
+      this.compatibilityWindows.size > MAX_COMPATIBILITY_WINDOWS ||
+      this.compatibilityWindowsTotalBytes > MAX_COMPATIBILITY_WINDOW_BYTES
+    ) {
       const oldestKey = this.compatibilityWindows.keys().next().value
       if (typeof oldestKey !== 'string') break
-      this.compatibilityWindows.delete(oldestKey)
+      this.dropCompatibilityWindow(oldestKey)
     }
   }
 
@@ -407,7 +436,10 @@ export class ChatStore {
       // truncated JSON. Quarantine only malformed content; filesystem errors
       // above still propagate. Returning "no legacy snapshot" lets the server
       // rehydrate the chat and makes subsequent appends writable again.
-      await fs.mkdir(join(this.agentDir(agentRef), '.corrupt'), { recursive: true })
+      await fs.mkdir(join(this.agentDir(agentRef), '.corrupt'), {
+        recursive: true,
+        mode: 0o700,
+      })
       await fs.rename(
         this.chatFilePath(agentRef, chatId),
         this.corruptLegacyChatFilePath(agentRef, chatId)
@@ -956,7 +988,18 @@ export class ChatStore {
       this.cleanedSnapshotSiblingKeys.add(cleanupKey)
       return await this.readPagedMeta(agentRef, chatId)
     }
-    if (activeReadError) throw activeReadError
+    if (activeReadError) {
+      const corruptDir = this.chatSnapshotSiblingPath(agentRef, chatId, 'corrupt', randomUUID())
+      await fs.mkdir(this.chatSnapshotRootPath(agentRef, chatId), {
+        recursive: true,
+        mode: 0o700,
+      })
+      await fs.rename(activeDir, corruptDir).catch(err => {
+        if (!isNotFoundError(err)) throw err
+      })
+      console.warn(`[chatStore] Quarantined unreadable paged cache for "${chatId}"`)
+      return null
+    }
     return null
   }
 
@@ -1002,9 +1045,9 @@ export class ChatStore {
     let movedExistingSnapshot = false
 
     this.cleanedSnapshotSiblingKeys.delete(this.chatSnapshotCleanupKey(agentRef, chatId))
-    await fs.mkdir(join(this.agentDir(agentRef), 'chats'), { recursive: true })
+    await fs.mkdir(join(this.agentDir(agentRef), 'chats'), { recursive: true, mode: 0o700 })
     await fs.rm(stagingDir, { recursive: true, force: true })
-    await fs.mkdir(pagesDir, { recursive: true })
+    await fs.mkdir(pagesDir, { recursive: true, mode: 0o700 })
 
     try {
       const pages: ChatPageEntry[] = []
@@ -1214,7 +1257,7 @@ export class ChatStore {
 
   private async saveIndex(agentRef: string, index: ChatIndex): Promise<void> {
     const dir = this.agentDir(agentRef)
-    await fs.mkdir(dir, { recursive: true })
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 })
     // Keep the index readable by the pre-paging desktop while the transcript
     // files are maintained in both paged and bounded v2-compatible forms.
     const normalized: ChatIndex = { ...index, version: INDEX_VERSION }
@@ -1295,13 +1338,21 @@ export class ChatStore {
         await this.saveIndex(agentRef, index)
       })
       await fs.rm(this.chatFilePath(agentRef, chatId), { force: true })
+      const encodedChatId = Buffer.from(chatId, 'utf8').toString('base64url')
+      const corruptLegacyDir = join(this.agentDir(agentRef), '.corrupt')
+      const corruptLegacyEntries = await fs.readdir(corruptLegacyDir).catch(() => [])
+      await Promise.all(
+        corruptLegacyEntries
+          .filter(name => name.startsWith(`${encodedChatId}-`) && name.endsWith('.json'))
+          .map(name => fs.rm(join(corruptLegacyDir, name), { force: true }))
+      )
       await fs.rm(this.chatCompatibilitySignaturePath(agentRef, chatId), { force: true })
       await fs.rm(this.chatDirPath(agentRef, chatId), { recursive: true, force: true })
       await this.removePagedChatSnapshotSiblings(agentRef, chatId)
       const cacheKey = this.chatSnapshotCleanupKey(agentRef, chatId)
       this.cleanedSnapshotSiblingKeys.delete(cacheKey)
       this.compatibilityCheckedKeys.delete(cacheKey)
-      this.compatibilityWindows.delete(cacheKey)
+      this.dropCompatibilityWindow(cacheKey)
     })
   }
 
@@ -1335,12 +1386,13 @@ export class ChatStore {
       if (!chat) return
 
       const aggregate = aggregateMessages(messages)
+      const displayMessageCount = visibleMessageCount(messages)
       if (options.preserveExistingTotals) {
-        chat.messageCount = Math.max(chat.messageCount ?? 0, messages.length)
+        chat.messageCount = Math.max(chat.messageCount ?? 0, displayMessageCount)
         chat.errorCount = Math.max(chat.errorCount ?? 0, aggregate.errorCount ?? 0)
         chat.toolCallCount = Math.max(chat.toolCallCount ?? 0, aggregate.toolCallCount ?? 0)
       } else {
-        chat.messageCount = messages.length
+        chat.messageCount = displayMessageCount
         Object.assign(chat, aggregate)
       }
       if (options.touchUpdatedAt !== false) {
@@ -1391,13 +1443,22 @@ export class ChatStore {
    * Merge the window into the complete local snapshot before publishing a new
    * generation so a background reconcile cannot discard either category.
    */
-  async replaceMessages(agentRef: string, chatId: string, messages: ChatMessage[]): Promise<void> {
+  async replaceMessages(
+    agentRef: string,
+    chatId: string,
+    messages: ChatMessage[],
+    options: ReplaceChatMessagesOptions = {}
+  ): Promise<void> {
     await this.serializeChat(agentRef, chatId, async () => {
       const existingMeta = await this.readOrMigratePagedChatUnlocked(agentRef, chatId)
       const existingMessages = existingMeta
         ? await this.readMessagesFromPagedMeta(agentRef, chatId, existingMeta)
         : []
-      const merged = mergeAuthoritativeServerMessages(existingMessages, messages)
+      const merged = options.replaceLocalWindow
+        ? messages
+        : mergeAuthoritativeServerMessages(existingMessages, messages, {
+            activeTaskIds: options.activeTaskIds ? new Set(options.activeTaskIds) : undefined,
+          })
       const indexedCount = await this.indexedMessageCount(agentRef, chatId)
       await this.writePagedChatUnlocked(agentRef, chatId, merged, {
         messageCount: Math.max(merged.length, indexedCount ?? 0),

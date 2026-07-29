@@ -6,6 +6,7 @@ import {
   type Turn,
   type TurnToolCall,
 } from '../types'
+import { sessionPartsFromPrefixedKey } from './sessionKeyParts'
 
 /**
  * Token usage from a SINGLE LLM call, accumulated additively into the durable
@@ -101,24 +102,6 @@ export interface ConversationSessionMessages extends Omit<
   updatedAt: Date
 }
 
-function sessionPartsFromKey(
-  key: string,
-  prefix: string
-): { agent: string; chatId: string } | null {
-  const rest = key.slice(prefix.length)
-  const colonIdx = rest.indexOf(':')
-  if (colonIdx < 0) {
-    const rpcPrefixIndex = prefix.lastIndexOf(':rpc:')
-    const scopedAgent =
-      rpcPrefixIndex >= 0 ? prefix.slice(rpcPrefixIndex + ':rpc:'.length).replace(/:$/, '') : ''
-    return scopedAgent && rest ? { agent: scopedAgent, chatId: rest } : null
-  }
-  return {
-    agent: rest.slice(0, colonIdx),
-    chatId: rest.slice(colonIdx + 1),
-  }
-}
-
 function compareSessionSummaries(
   left: Pick<ConversationSessionSummary, 'key' | 'lastActivityAt'>,
   right: Pick<ConversationSessionSummary, 'key' | 'lastActivityAt'>
@@ -158,7 +141,7 @@ function sessionMessagesFromConversation(
   conversation: Conversation,
   query: SessionMessagesQuery = {}
 ): ConversationSessionMessages | undefined {
-  const parts = sessionPartsFromKey(key, prefix)
+  const parts = sessionPartsFromPrefixedKey(key, prefix)
   if (!parts) return undefined
   const turns = boundedTurns(conversation.turns, query)
   return {
@@ -391,7 +374,7 @@ export class InMemoryConversationStore implements ConversationStore {
   ): Promise<ConversationSessionSummary[]> {
     const summaries: ConversationSessionSummary[] = []
     for (const { key, conversation } of this.listByPrefix(prefix)) {
-      const parts = sessionPartsFromKey(key, prefix)
+      const parts = sessionPartsFromPrefixedKey(key, prefix)
       if (!parts) continue
       summaries.push({
         key,
@@ -407,8 +390,7 @@ export class InMemoryConversationStore implements ConversationStore {
           : undefined,
         turnCount: conversation.turns.length,
         messageCount: conversation.turns.reduce(
-          (total, turn) =>
-            total + 1 + (turn.response === undefined ? 0 : 1) + turn.tool_calls.length,
+          (total, turn) => total + 1 + (turn.response === undefined ? 0 : 1),
           0
         ),
         lastActivityAt: conversation.updated_at,

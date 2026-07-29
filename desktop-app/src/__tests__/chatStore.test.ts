@@ -764,6 +764,84 @@ describe('messages', () => {
     ).toEqual(['m1', 'm2', 'm3'])
   })
 
+  it('publishes a true replacement for a bounded reconciliation fallback', async () => {
+    await store.createChat('agent-1', 'true-replace')
+    await store.saveMessages('agent-1', 'true-replace', [
+      {
+        id: 'turn-1-user',
+        role: 'user',
+        content: 'stale',
+        timestamp: 1,
+        serverTurnNumber: 1,
+      },
+      {
+        id: 'turn-999-user',
+        role: 'user',
+        content: 'newest',
+        timestamp: 999,
+        serverTurnNumber: 999,
+      },
+    ])
+
+    await store.replaceMessages(
+      'agent-1',
+      'true-replace',
+      [
+        {
+          id: 'turn-999-user',
+          role: 'user',
+          content: 'newest',
+          timestamp: 999,
+          serverTurnNumber: 999,
+        },
+      ],
+      { replaceLocalWindow: true }
+    )
+
+    expect(
+      (await store.loadMessages('agent-1', 'true-replace')).map(message => message.id)
+    ).toEqual(['turn-999-user'])
+  })
+
+  it('uses active task context while persisting an authoritative window', async () => {
+    await store.createChat('agent-1', 'active-window')
+    await store.saveMessages('agent-1', 'active-window', [
+      {
+        id: 'turn-1-user',
+        role: 'user',
+        content: 'first',
+        timestamp: 1,
+        serverTurnNumber: 1,
+      },
+      {
+        id: 'optimistic-user',
+        role: 'user',
+        content: 'second',
+        timestamp: 2,
+        task_id: 'task-2',
+      },
+    ])
+
+    await store.replaceMessages(
+      'agent-1',
+      'active-window',
+      [
+        {
+          id: 'turn-2-user',
+          role: 'user',
+          content: 'second',
+          timestamp: 3,
+          serverTurnNumber: 2,
+        },
+      ],
+      { activeTaskIds: ['task-2'] }
+    )
+
+    expect(
+      (await store.loadMessages('agent-1', 'active-window')).map(message => message.id)
+    ).toEqual(['turn-1-user', 'optimistic-user'])
+  })
+
   it('keeps unseen numbered history while replacing completed local-only echoes', async () => {
     await store.createChat('agent-1', 'reconcile-upsert')
     await store.saveMessages('agent-1', 'reconcile-upsert', [
@@ -1018,6 +1096,45 @@ describe('messages', () => {
     expect(appended.messages.at(-1)!.id).toBe('m105')
   })
 
+  it('bounds in-memory compatibility windows by serialized bytes', async () => {
+    const largeContent = 'x'.repeat(2 * 1024 * 1024)
+    for (let index = 0; index < 5; index += 1) {
+      const chatId = `large-window-${index}`
+      await store.createChat('agent-1', chatId)
+      await store.saveMessages('agent-1', chatId, [
+        {
+          id: `message-${index}`,
+          role: 'user',
+          content: largeContent,
+          timestamp: index,
+        },
+      ])
+    }
+
+    const internals = store as unknown as {
+      compatibilityWindows: Map<string, ChatMessage[]>
+      compatibilityWindowsTotalBytes: number
+    }
+    expect(internals.compatibilityWindowsTotalBytes).toBeLessThanOrEqual(8 * 1024 * 1024)
+    expect(internals.compatibilityWindows.size).toBeLessThan(5)
+  })
+
+  it('creates chat-store directories with owner-only permissions', async () => {
+    await store.createChat('agent-1', 'private-chat')
+    await store.saveMessages('agent-1', 'private-chat', [
+      { id: 'm1', role: 'user', content: 'private', timestamp: 1 },
+    ])
+
+    for (const dir of [
+      agentPath(),
+      agentPath('chats'),
+      chatCacheDir('private-chat'),
+      chatPagesDir('private-chat'),
+    ]) {
+      expect((await fs.stat(dir)).mode & 0o777).toBe(0o700)
+    }
+  })
+
   it('imports local messages written by a downgraded desktop build', async () => {
     await store.createChat('agent-1', 'downgraded-write')
     const original = { id: 'm1', role: 'user' as const, content: 'original', timestamp: 1 }
@@ -1198,6 +1315,49 @@ describe('corrupt/missing files', () => {
     await store.appendMessages('agent-1', chatId, [replacement])
     await expect(store.loadMessages('agent-1', chatId)).resolves.toEqual([replacement])
   })
+
+  it('quarantines an unreadable paged snapshot and allows server rehydration', async () => {
+    const chatId = 'corrupt-paged'
+    await store.createChat('agent-1', chatId)
+    await store.saveMessages('agent-1', chatId, [
+      { id: 'old', role: 'user', content: 'old', timestamp: 1 },
+    ])
+    await fs.rm(agentPath(`${chatId}.json`), { force: true })
+    await fs.rm(agentPath(`${chatId}.compat`), { force: true })
+    await fs.writeFile(chatMetaPath(chatId), JSON.stringify({ version: 999, chatId }))
+    await fs.writeFile(join(chatPagesDir(chatId), '000001.json'), 'not-json')
+
+    await expect(store.loadMessages('agent-1', chatId)).resolves.toEqual([])
+    const snapshotRoot = agentPath(
+      'chats',
+      '.snapshots',
+      Buffer.from(chatId, 'utf8').toString('base64url')
+    )
+    expect((await fs.readdir(snapshotRoot)).some(name => name.startsWith('corrupt-'))).toBe(true)
+
+    const replacement = {
+      id: 'turn-1-user',
+      role: 'user' as const,
+      content: 'rehydrated',
+      timestamp: 2,
+    }
+    await store.appendMessages('agent-1', chatId, [replacement])
+    await expect(store.loadMessages('agent-1', chatId)).resolves.toEqual([replacement])
+  })
+
+  it('deletes matching quarantined legacy files with the chat', async () => {
+    const chatId = 'deleted-corrupt'
+    await store.createChat('agent-1', chatId)
+    const corruptDir = agentPath('.corrupt')
+    await fs.mkdir(corruptDir, { recursive: true })
+    const encodedChatId = Buffer.from(chatId, 'utf8').toString('base64url')
+    await fs.writeFile(join(corruptDir, `${encodedChatId}-fixture.json`), '{}')
+    await fs.writeFile(join(corruptDir, 'another-chat-fixture.json'), '{}')
+
+    await store.deleteChat('agent-1', chatId)
+
+    expect(await fs.readdir(corruptDir)).toEqual(['another-chat-fixture.json'])
+  })
 })
 
 // ── unreadTerminal flag (D.5) ────────────────────────────────────────────────
@@ -1266,6 +1426,10 @@ describe('path-segment validation', () => {
     )
     await expect(store.saveMessages('agent-1', 'a/b', [])).rejects.toThrow(/unsafe path segment/)
     await expect(store.saveMessages('agent-1', 'other.next-shadow', [])).resolves.toBeUndefined()
+    await expect(store.saveMessages('agent-1', '.snapshots', [])).rejects.toThrow(
+      /unsafe path segment/
+    )
+    await expect(store.saveMessages('agent-1', 'index', [])).rejects.toThrow(/unsafe path segment/)
   })
 
   // Read verbs are tolerant-by-contract (return empty on any failure) — the key

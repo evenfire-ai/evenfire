@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mergeAuthoritativeServerMessages } from '../chatMessageMerge.js'
+import { turnsToChatMessages } from '../serverTurnAdapter.js'
 import type { ChatMessage } from '../types.js'
 
 describe('mergeAuthoritativeServerMessages', () => {
@@ -75,6 +76,13 @@ describe('mergeAuthoritativeServerMessages', () => {
   })
 
   it('does not duplicate an active optimistic message when the server returns its turn', () => {
+    const serverMessages = turnsToChatMessages([
+      {
+        number: 2,
+        user_input: 'second',
+        started_at: new Date(3).toISOString(),
+      },
+    ])
     const merged = mergeAuthoritativeServerMessages(
       [
         {
@@ -92,20 +100,40 @@ describe('mergeAuthoritativeServerMessages', () => {
           task_id: 'task-2',
         },
       ],
-      [
-        {
-          id: 'turn-2-user',
-          role: 'user',
-          content: 'second',
-          timestamp: 3,
-          serverTurnNumber: 2,
-          task_id: 'task-2',
-        },
-      ],
+      serverMessages,
       { activeTaskIds: new Set(['task-2']) }
     )
 
     expect(merged.map(message => message.id)).toEqual(['turn-1-user', 'optimistic-task-2'])
+  })
+
+  it('replaces a turnless echo after the previous numbered turn', () => {
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'turn-1-user',
+          role: 'user',
+          content: 'first',
+          timestamp: 1,
+          serverTurnNumber: 1,
+        },
+        {
+          id: 'optimistic-user',
+          role: 'user',
+          content: 'second',
+          timestamp: 2,
+        },
+      ],
+      turnsToChatMessages([
+        {
+          number: 2,
+          user_input: 'second',
+          started_at: new Date(3).toISOString(),
+        },
+      ])
+    )
+
+    expect(merged.map(message => message.id)).toEqual(['turn-1-user', 'turn-2-user'])
   })
 
   it('replaces completed task-backed echoes inside their authoritative turn', () => {

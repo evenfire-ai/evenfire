@@ -114,6 +114,21 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
     expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions?agent=chatllm&limit=100')
   })
 
+  it.each([
+    '/rpc/hosts/chatllm/sessions?limit=1.5',
+    '/rpc/hosts/chatllm/sessions?limit=1&limit=2',
+    '/rpc/hosts/chatllm/sessions?cursor=one&cursor=two',
+    '/rpc/hosts/chatllm/sessions?agent=one&agent=two',
+    '/rpc/hosts/chatllm/sessions?agent=.',
+  ])('rejects malformed session pagination before forwarding upstream: %s', async path => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp()).get(path).set('authorization', 'Bearer user-token').expect(400)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('returns 403 if the user cannot access the host', async () => {
     serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
     await request(makeApp())
@@ -205,6 +220,25 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
     expect(String(url)).toBe(
       'http://chatllm:8080/v1/runtime/sessions/chatllm/c1/messages?limit=200'
     )
+  })
+
+  it.each([
+    '?limit=1.5',
+    '?limit=1&limit=2',
+    '?beforeTurn=1.5',
+    '?beforeTurn=1&beforeTurn=2',
+    '?afterTurn=1.5',
+    '?beforeTurn=2&afterTurn=1',
+  ])('rejects malformed transcript pagination before forwarding upstream: %s', async query => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get(`/rpc/hosts/chatllm/sessions/chatllm/c1/messages${query}`)
+      .set('authorization', 'Bearer user-token')
+      .expect(400)
+
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('returns 404 when the upstream returns 404', async () => {

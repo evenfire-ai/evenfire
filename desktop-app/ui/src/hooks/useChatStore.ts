@@ -2,6 +2,7 @@ import { useCallback } from 'react'
 import type {
   ChatMessage,
   HostModelsResult,
+  ReplaceChatMessagesOptions,
   SessionMessagesQuery,
   SessionsListQuery,
   SessionsListResult,
@@ -112,8 +113,15 @@ export function useChatStore() {
     []
   )
   const replaceMessages = useCallback(
-    (agentRef: string, chatId: string, messages: ChatMessage[]) =>
-      window.clerum.chat.replaceMessages(agentRef, chatId, messages),
+    (
+      agentRef: string,
+      chatId: string,
+      messages: ChatMessage[],
+      options?: ReplaceChatMessagesOptions
+    ) =>
+      options
+        ? window.clerum.chat.replaceMessages(agentRef, chatId, messages, options)
+        : window.clerum.chat.replaceMessages(agentRef, chatId, messages),
     []
   )
   const markUnreadTerminal = useCallback(

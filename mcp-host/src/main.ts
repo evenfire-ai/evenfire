@@ -105,6 +105,7 @@ import {
   projectSessionTokens,
   projectTurnTokens,
   projectTurnToolSteps,
+  sessionsCursorScope,
 } from './server/wireProjections'
 import { SessionProcessor } from './session'
 import { serializeSessionKey } from './session/types.js'
@@ -2070,15 +2071,19 @@ async function startRPCServer(): Promise<void> {
   ) => {
     const convManager = agent!.getConversationManager()
     const keyPrefix = query.agent ? `${userSub}:rpc:${query.agent}:` : `${userSub}:rpc:`
-    const cursor = decodeSessionsCursor(query.cursor)
+    const cursorScope = sessionsCursorScope(userSub, query.agent)
+    const cursor = decodeSessionsCursor(query.cursor, cursorScope)
     const entries = await convManager.listSessionSummariesForUserAsync(keyPrefix, {
       limit: query.limit === undefined ? undefined : query.limit + 1,
       cursor: cursor
         ? { updatedAt: new Date(cursor.updatedAt), key: `${keyPrefix}${cursor.key}` }
         : undefined,
     })
-    const { page, nextCursor } = paginateSessionSummaries(entries, query.limit, key =>
-      key.slice(keyPrefix.length)
+    const { page, nextCursor } = paginateSessionSummaries(
+      entries,
+      query.limit,
+      key => key.slice(keyPrefix.length),
+      cursorScope
     )
     return {
       items: page.map(summary => ({

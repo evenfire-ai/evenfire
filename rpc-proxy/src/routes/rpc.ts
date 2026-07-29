@@ -32,6 +32,16 @@ import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 
+function isSafeUpstreamPathSegment(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value !== '.' &&
+    value !== '..' &&
+    value.length <= 500 &&
+    !/[/\\\0]/.test(value)
+  )
+}
+
 /**
  * Pre-wake host error mapping: AbortError → 504, everything else → 502.
  *
@@ -242,7 +252,7 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
+        if (!isSafeUpstreamPathSegment(hostRef)) {
           res.status(400).json({ error: 'hostRef is required' })
           return
         }
@@ -649,7 +659,13 @@ export function createRpcRouter(): Router {
         const sessionLimit =
           typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
         if (
-          (sessionAgent && (sessionAgent.length > 200 || sessionAgent.includes(':'))) ||
+          (req.query.agent !== undefined && typeof req.query.agent !== 'string') ||
+          (req.query.cursor !== undefined && typeof req.query.cursor !== 'string') ||
+          (req.query.limit !== undefined && typeof req.query.limit !== 'string') ||
+          (sessionAgent &&
+            (!isSafeUpstreamPathSegment(sessionAgent) ||
+              sessionAgent.length > 200 ||
+              sessionAgent.includes(':'))) ||
           sessionCursor.length > 2048 ||
           (sessionLimit !== undefined && (!Number.isInteger(sessionLimit) || sessionLimit < 1))
         ) {
@@ -716,7 +732,11 @@ export function createRpcRouter(): Router {
         const hostRef = String(req.params.hostRef || '').trim()
         const agent = String(req.params.agent || '').trim()
         const chatId = String(req.params.chatId || '').trim()
-        if (!hostRef || !agent || !chatId) {
+        if (
+          !isSafeUpstreamPathSegment(hostRef) ||
+          !isSafeUpstreamPathSegment(agent) ||
+          !isSafeUpstreamPathSegment(chatId)
+        ) {
           res.status(400).json({ error: 'hostRef, agent, and chatId are required' })
           return
         }
@@ -739,7 +759,11 @@ export function createRpcRouter(): Router {
           typeof req.query.beforeTurn === 'string' ? Number(req.query.beforeTurn) : undefined
         const afterTurn =
           typeof req.query.afterTurn === 'string' ? Number(req.query.afterTurn) : undefined
+        const invalidQueryShape = ['limit', 'beforeTurn', 'afterTurn'].some(
+          key => req.query[key] !== undefined && typeof req.query[key] !== 'string'
+        )
         if (
+          invalidQueryShape ||
           (rawLimit !== undefined && (!Number.isInteger(rawLimit) || rawLimit < 1)) ||
           (beforeTurn !== undefined && (!Number.isInteger(beforeTurn) || beforeTurn < 1)) ||
           (afterTurn !== undefined && (!Number.isInteger(afterTurn) || afterTurn < 0)) ||

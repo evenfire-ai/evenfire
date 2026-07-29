@@ -44,7 +44,7 @@ function sanitizeSessionsListQuery(
   if (agent && (agent.length > 200 || agent.includes(':'))) {
     throw new Error('Invalid session agent')
   }
-  if (cursor.length > 4096) throw new Error('Invalid sessions cursor')
+  if (cursor.length > 2048) throw new Error('Invalid sessions cursor')
   const rawLimit = sanitizeOptionalInteger(input?.limit)
   if (rawLimit !== undefined && rawLimit < 1) throw new Error('Invalid sessions limit')
   return {
@@ -1127,16 +1127,33 @@ export function registerIpcHandlers(service: AppService): void {
 
   ipcMain.handle(
     'chat:replaceMessages',
-    async (event, payload: { agentRef: string; chatId: string; messages: unknown[] }) => {
+    async (
+      event,
+      payload: {
+        agentRef: string
+        chatId: string
+        messages: unknown[]
+        options?: import('./types.js').ReplaceChatMessagesOptions
+      }
+    ) => {
       assertTrustedSender(event)
       const agentRef = sanitizeString(payload?.agentRef)
       const chatId = sanitizeString(payload?.chatId)
       if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
       const messages = Array.isArray(payload?.messages) ? payload.messages : []
+      const activeTaskIds = Array.isArray(payload?.options?.activeTaskIds)
+        ? payload.options.activeTaskIds
+            .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0)
+            .slice(0, 32)
+        : undefined
       await requireChatStore().replaceMessages(
         agentRef,
         chatId,
-        messages as import('./types.js').ChatMessage[]
+        messages as import('./types.js').ChatMessage[],
+        {
+          activeTaskIds,
+          replaceLocalWindow: payload?.options?.replaceLocalWindow === true,
+        }
       )
     }
   )

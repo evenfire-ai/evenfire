@@ -71,6 +71,7 @@ describe('migration 008 — active trace context', () => {
         '007-sessions-model-selections',
         '008-active-trace-context',
         '009-session-summary-indexes',
+        '010-materialized-session-summaries',
       ],
       pending: [],
     })

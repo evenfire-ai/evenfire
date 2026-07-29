@@ -96,7 +96,10 @@ export function AuthPage() {
   const handleRuntimeOptionSelect = (optionId: string) => {
     setRuntimeMenuOpen(false)
     if (optionId === activeRuntimeConfigId) {
-      handleClearRuntimeConfigSelection()
+      const selectedOption = runtimeConfigOptions.find(option => option.id === optionId)
+      if (selectedOption?.source === 'localhost') {
+        handleClearRuntimeConfigSelection()
+      }
       return
     }
     handleSelectRuntimeConfig(optionId)

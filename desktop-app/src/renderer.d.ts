@@ -22,6 +22,7 @@ import {
   PendingWorkflowApproval,
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
+  ReplaceChatMessagesOptions,
   RpcAllowedServersResult,
   SessionMessagesQuery,
   SessionMessagesResult,
@@ -492,7 +493,8 @@ declare global {
         replaceMessages: (
           agentRef: string,
           chatId: string,
-          messages: ChatMessage[]
+          messages: ChatMessage[],
+          options?: ReplaceChatMessagesOptions
         ) => Promise<void>
         backfillCounters: (
           agentRef: string,

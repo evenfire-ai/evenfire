@@ -69,7 +69,7 @@ export function mergeAuthoritativeServerMessages(
     const numberedInRange = turn !== undefined && turn >= firstTurn && turn <= lastTurn
     const turnlessInRange =
       turn === undefined &&
-      (previousTurns[index] ?? Number.NEGATIVE_INFINITY) < firstTurn &&
+      (previousTurns[index] ?? Number.NEGATIVE_INFINITY) <= lastTurn &&
       (nextTurns[index] ?? Number.POSITIVE_INFINITY) >= firstTurn
     const replaceableTurnRole = message.role === 'user' || message.role === 'assistant'
     const belongsToActiveTask =
@@ -99,20 +99,37 @@ export function mergeAuthoritativeServerMessages(
     entries.push(message)
     availableByRole.set(message.role, entries)
   }
-  const retainedActiveTaskRoles = new Set(
-    kept
-      .filter(
-        message =>
-          message.task_id !== undefined &&
-          options.activeTaskIds?.has(message.task_id) === true &&
-          (message.role === 'user' || message.role === 'assistant')
+  const claimedAuthoritativeSlots = new Set<string>()
+  for (const [index, message] of existing.entries()) {
+    if (
+      message.task_id === undefined ||
+      options.activeTaskIds?.has(message.task_id) !== true ||
+      (message.role !== 'user' && message.role !== 'assistant')
+    ) {
+      continue
+    }
+    const previous = previousTurns[index] ?? Number.NEGATIVE_INFINITY
+    const next = nextTurns[index] ?? Number.POSITIVE_INFINITY
+    const matchingServerMessage = authoritative.find(serverMessage => {
+      const serverTurn = messageServerTurnNumber(serverMessage)!
+      const slot = `${serverTurn}\u0000${serverMessage.role}`
+      return (
+        serverMessage.role === message.role &&
+        serverTurn > previous &&
+        serverTurn < next &&
+        !claimedAuthoritativeSlots.has(slot)
       )
-      .map(message => `${message.task_id}\u0000${message.role}`)
-  )
+    })
+    if (matchingServerMessage) {
+      claimedAuthoritativeSlots.add(
+        `${messageServerTurnNumber(matchingServerMessage)}\u0000${matchingServerMessage.role}`
+      )
+    }
+  }
   const replacements = authoritative
     .filter(
       message =>
-        !(message.task_id && retainedActiveTaskRoles.has(`${message.task_id}\u0000${message.role}`))
+        !claimedAuthoritativeSlots.has(`${messageServerTurnNumber(message)}\u0000${message.role}`)
     )
     .map(message => {
       const sameTurn = removed.find(

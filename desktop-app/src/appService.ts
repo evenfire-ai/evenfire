@@ -556,7 +556,16 @@ export class AppService {
     const restoreGeneration = this.sessionGeneration
     hydrateDesktopRuntimeConfig()
     const envKey = getActiveEnvKey()
-    const token = await this.tokenStore.getSessionToken(envKey)
+    let token: string | null
+    try {
+      token = await this.tokenStore.getSessionToken(envKey)
+    } catch (error) {
+      console.warn('[AppService] Failed to read the saved session token:', error)
+      if (this.sessionGeneration === restoreGeneration) {
+        this.clearAuthenticatedSessionState()
+      }
+      return { authenticated: false, me: null }
+    }
     if (this.logoutInProgress) return { authenticated: false, me: null }
     if (!token) {
       if (this.sessionGeneration === restoreGeneration) {
@@ -893,9 +902,12 @@ export class AppService {
 
   async logout(): Promise<void> {
     this.logoutInProgress = true
-    this.clearAuthenticatedSessionState()
-    await this.tokenStore.clearSessionToken(getActiveEnvKey())
-    this.logoutInProgress = false
+    try {
+      this.clearAuthenticatedSessionState()
+      await this.tokenStore.clearSessionToken(getActiveEnvKey())
+    } finally {
+      this.logoutInProgress = false
+    }
   }
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */

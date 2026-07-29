@@ -68,6 +68,36 @@ describe('chatStoreBinding', () => {
     expect(() => requireChatStore()).toThrow(/Not authenticated/)
   })
 
+  it('allows an immediate rebind after logout invalidates an in-flight bind', async () => {
+    let releaseFirstRead: (() => void) | undefined
+    const firstReadBlocked = new Promise<void>(resolve => {
+      releaseFirstRead = resolve
+    })
+    let firstReadStarted: (() => void) | undefined
+    const started = new Promise<void>(resolve => {
+      firstReadStarted = resolve
+    })
+    const originalReadDir = fs.readdir.bind(fs)
+    let blocked = false
+    vi.spyOn(fs, 'readdir').mockImplementation(async (...args) => {
+      if (!blocked && String(args[0]).endsWith(path.join(ENV_A, 'user-b'))) {
+        blocked = true
+        firstReadStarted?.()
+        await firstReadBlocked
+      }
+      return originalReadDir(...(args as Parameters<typeof fs.readdir>))
+    })
+
+    const staleBind = bindChatStoreForUser('user-b', ENV_A)
+    await started
+    unbindChatStore()
+    const freshBind = bindChatStoreForUser('user-b', ENV_A)
+    releaseFirstRead?.()
+    await Promise.all([staleBind, freshBind])
+
+    expect(requireChatStore()).toBeDefined()
+  })
+
   it('roots the store under <base>/<envKey>/<userId> (spec §5.2)', async () => {
     await bindChatStoreForUser('user-a', ENV_A)
     const store = requireChatStore()

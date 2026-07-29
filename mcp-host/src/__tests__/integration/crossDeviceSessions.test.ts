@@ -95,7 +95,7 @@ function makeApp(convManager: ConversationManager) {
         .sort(
           (left, right) =>
             right.lastActivityAt.getTime() - left.lastActivityAt.getTime() ||
-            left.key.localeCompare(right.key)
+            (left.key < right.key ? -1 : left.key > right.key ? 1 : 0)
         )
       const { page, nextCursor } = paginateSessionSummaries(entries, query.limit)
       return {

@@ -193,4 +193,40 @@ describe('AuthPage', () => {
     expect(handleSelectRuntimeConfig).not.toHaveBeenCalled()
     expect(handleClearRuntimeConfigSelection).toHaveBeenCalledTimes(1)
   })
+
+  it('does not clear an active saved environment when clicked again', async () => {
+    const user = userEvent.setup()
+    const handleSelectRuntimeConfig = vi.fn()
+    const handleClearRuntimeConfigSelection = vi.fn()
+
+    renderAuthPage({
+      runtimeConfigState: {
+        configured: true,
+        isLocalhost: false,
+        selectorVisible: true,
+        activeOptionId: 'saved-dev',
+        envKey: 'saved-dev-key',
+        storagePath: '/tmp/evenfire-runtime-config',
+        options: [
+          {
+            id: 'saved-dev',
+            label: 'Development',
+            source: 'file',
+            configPath: '/tmp/evenfire-runtime-config/dev.json',
+            externalRestApiBaseUrl: 'https://api.example.com',
+            rpcProxyBaseUrl: 'https://rpc.example.com',
+            appName: 'Development',
+          },
+        ],
+      },
+      handleSelectRuntimeConfig,
+      handleClearRuntimeConfigSelection,
+    })
+
+    await user.click(screen.getByLabelText('Open environment selector'))
+    await user.click(screen.getByRole('button', { name: 'Development' }))
+
+    expect(handleSelectRuntimeConfig).not.toHaveBeenCalled()
+    expect(handleClearRuntimeConfigSelection).not.toHaveBeenCalled()
+  })
 })

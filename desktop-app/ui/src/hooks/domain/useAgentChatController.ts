@@ -103,7 +103,8 @@ const MAX_ACTIVITY_EVENTS_PER_MESSAGE = 100
  * persisted `toolSteps` (#582 fallback in ChatThread).
  */
 const MAX_MESSAGES_WITH_ACTIVITY_PER_AGENT = 50
-const MESSAGE_PAGE_SIZE = 80
+const LOCAL_MESSAGE_PAGE_SIZE = 80
+const SERVER_TURN_PAGE_SIZE = 40
 const MAX_RECONCILE_DELTA_PAGES = 5
 const REPLACE_LOCAL_RECONCILIATION_WINDOW = Symbol('replace-local-reconciliation-window')
 type ReconciliationMessagesResult = SessionMessagesResult & {
@@ -751,7 +752,7 @@ export function useAgentChatController({
       // below requests a delta after the newest cached server turn.
       let cached: Awaited<ReturnType<typeof chatStore.loadMessages>> = []
       try {
-        cached = await chatStore.loadMessages(agentRef, chatId, MESSAGE_PAGE_SIZE)
+        cached = await chatStore.loadMessages(agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE)
       } catch (error) {
         console.warn('[chat-history] failed to load local messages', { agentRef, chatId, error })
       }
@@ -759,8 +760,8 @@ export function useAgentChatController({
       const hasOlderServerMessages = Boolean(oldestCachedTurn && oldestCachedTurn > 1)
       const hasOlderLocalMessages =
         !hasOlderServerMessages &&
-        cached.length === MESSAGE_PAGE_SIZE &&
-        (await hasLocalMessagesBeyond(chatStore, agentRef, chatId, MESSAGE_PAGE_SIZE))
+        cached.length === LOCAL_MESSAGE_PAGE_SIZE &&
+        (await hasLocalMessagesBeyond(chatStore, agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE))
       if (!isStillActive()) return
       loadedLocalMessageCountRef.current = cached.length
       setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
@@ -809,7 +810,7 @@ export function useAgentChatController({
         taskIdHint: zombieBefore?.taskId,
         isRelevant: isStillActive,
         messagesQuery: {
-          limit: MESSAGE_PAGE_SIZE,
+          limit: SERVER_TURN_PAGE_SIZE,
           ...(latestCachedTurn !== undefined ? { afterTurn: latestCachedTurn } : {}),
         },
       })
@@ -881,7 +882,7 @@ export function useAgentChatController({
         .loadMessages(
           requestAgent,
           requestChatId,
-          MESSAGE_PAGE_SIZE,
+          LOCAL_MESSAGE_PAGE_SIZE,
           loadedLocalMessageCountRef.current
         )
         .catch(() => [])) as AgentChatMessage[]
@@ -895,7 +896,7 @@ export function useAgentChatController({
         const hasOlderServerMessages = Boolean(oldestMergedTurn && oldestMergedTurn > 1)
         const hasOlderLocalMessages =
           !hasOlderServerMessages &&
-          localPage.length === MESSAGE_PAGE_SIZE &&
+          localPage.length === LOCAL_MESSAGE_PAGE_SIZE &&
           (await hasLocalMessagesBeyond(
             chatStore,
             requestAgent,
@@ -921,7 +922,7 @@ export function useAgentChatController({
         requestAgent,
         requestAgent,
         requestChatId,
-        { limit: MESSAGE_PAGE_SIZE, beforeTurn: oldestTurn }
+        { limit: SERVER_TURN_PAGE_SIZE, beforeTurn: oldestTurn }
       )
       if (!isStillRelevant()) return
       const older = turnsToChatMessages(response.turns) as AgentChatMessage[]
@@ -933,8 +934,13 @@ export function useAgentChatController({
       )
       chatMessagesRef.current = merged
       setChatMessages(merged)
-      if (!isStillRelevant()) return
-      await chatStore.replaceMessages(requestAgent, requestChatId, merged)
+      if (activeTaskId) {
+        await chatStore.replaceMessages(requestAgent, requestChatId, merged, {
+          activeTaskIds: [activeTaskId],
+        })
+      } else {
+        await chatStore.replaceMessages(requestAgent, requestChatId, merged)
+      }
       if (!isStillRelevant()) return
       loadedLocalMessageCountRef.current = merged.length
       setHasOlderMessages(Boolean(response.hasMoreBefore))
@@ -1065,16 +1071,10 @@ export function useAgentChatController({
       }
       if (requestedSelection?.mode === 'specific') {
         autoSelectedChatIdRef.current = null
-        const requested = merged.find(chat => chat.id === requestedSelection.chatId)
-        if (requested) {
-          await switchToChat(selectedAgent, requestedSelection.chatId)
-        } else {
-          // Server-only chats may not appear in the local index or first server
-          // catalog page yet. `switchToChat` already owns the cache-first →
-          // server-hydrate path, so still open the requested id instead of
-          // clearing the pending notification/deeplink selection.
-          await switchToChat(selectedAgent, requestedSelection.chatId)
-        }
+        // Server-only chats may not appear in the local index or first server
+        // catalog page yet. `switchToChat` already owns the cache-first →
+        // server-hydrate path, so open the requested id directly.
+        await switchToChat(selectedAgent, requestedSelection.chatId)
         return
       }
       if (navItem === DESKTOP_ROUTES.chat) {
@@ -1316,7 +1316,7 @@ export function useAgentChatController({
         return v.selectedAgent === agentRef && v.activeChatId === chatId
       }
       const cached = (await chatStore
-        .loadMessages(agentRef, chatId, MESSAGE_PAGE_SIZE)
+        .loadMessages(agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE)
         .catch(error => {
           console.warn('[chat-history] failed to read local reconciliation window', {
             agentRef,
@@ -1333,17 +1333,17 @@ export function useAgentChatController({
         return { rendered: localMessages, replaced: false, cached: localMessages }
       }
       const hydrated = turnsToChatMessages(resp.turns) as AgentChatMessage[]
+      if (replaceLocalWindow) {
+        setHasOlderMessages(Boolean(resp.hasMoreBefore))
+      } else {
+        setHasOlderMessages(previous => previous || Boolean(resp.hasMoreBefore))
+      }
       if (!hydrated.length) {
         return { rendered: localMessages, replaced: false, cached: localMessages }
       }
       const localHasServerTurns = localMessages.some(
         message => serverTurnNumber(message) !== undefined
       )
-      if (replaceLocalWindow) {
-        setHasOlderMessages(Boolean(resp.hasMoreBefore))
-      } else if (!localHasServerTurns) {
-        setHasOlderMessages(previous => previous || Boolean(resp.hasMoreBefore))
-      }
       if (!localHasServerTurns && localMessages.length > 0) {
         const responseContainsAllTurns =
           resp.totalTurns === undefined || resp.totalTurns === resp.turns.length
@@ -1371,7 +1371,14 @@ export function useAgentChatController({
       chatMessagesRef.current = rendered
       setChatMessages(rendered)
       const meta = await chatStore.createChat(agentRef, chatId)
-      await chatStore.replaceMessages(agentRef, chatId, rendered)
+      if (resp.activeTaskId || replaceLocalWindow) {
+        await chatStore.replaceMessages(agentRef, chatId, rendered, {
+          activeTaskIds: resp.activeTaskId ? [resp.activeTaskId] : undefined,
+          replaceLocalWindow,
+        })
+      } else {
+        await chatStore.replaceMessages(agentRef, chatId, rendered)
+      }
       if (!isActive()) return { rendered, replaced: true, cached: localMessages }
       loadedLocalMessageCountRef.current = rendered.length
       // Auto-title a fresh hydration (empty cache) from the first user turn, so a
@@ -1580,10 +1587,10 @@ export function useAgentChatController({
   useEffect(() => {
     reconcileBranchesRef.current = {
       loadSessionMessages: async (agentRef, chatId, query) => {
-        let requestedQuery = query ?? { limit: MESSAGE_PAGE_SIZE }
+        let requestedQuery = query ?? { limit: SERVER_TURN_PAGE_SIZE }
         if (requestedQuery.beforeTurn === undefined && requestedQuery.afterTurn === undefined) {
           const cached = (await chatStore
-            .loadMessages(agentRef, chatId, MESSAGE_PAGE_SIZE)
+            .loadMessages(agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE)
             .catch(error => {
               console.warn('[chat-history] failed to read local delta cursor', {
                 agentRef,
@@ -1611,6 +1618,12 @@ export function useAgentChatController({
         const turns = [...response.turns]
         const seenCursors = new Set<number>()
         let cursor = response.latestTurnNumber ?? turns.at(-1)?.number
+        if (response.hasMoreAfter && (!turns.length || cursor === undefined)) {
+          // A host claiming another page without returning an advancing cursor
+          // is malformed. Preserve the local cache instead of replacing it with
+          // an unrelated latest window.
+          return response
+        }
         let pagesLoaded = 1
         while (
           response.hasMoreAfter &&
@@ -1619,17 +1632,29 @@ export function useAgentChatController({
           pagesLoaded < MAX_RECONCILE_DELTA_PAGES
         ) {
           seenCursors.add(cursor)
+          const previousCursor = cursor
           response = await chatStore.loadSessionMessages(agentRef, agentRef, chatId, {
-            limit: requestedQuery.limit ?? MESSAGE_PAGE_SIZE,
+            limit: requestedQuery.limit ?? SERVER_TURN_PAGE_SIZE,
             afterTurn: cursor,
           })
           turns.push(...response.turns)
           cursor = response.latestTurnNumber ?? response.turns.at(-1)?.number
           pagesLoaded += 1
+          if (
+            response.hasMoreAfter &&
+            (!response.turns.length || cursor === undefined || cursor === previousCursor)
+          ) {
+            return {
+              ...response,
+              turns,
+              oldestTurnNumber: turns[0]?.number,
+              latestTurnNumber: turns.at(-1)?.number,
+            }
+          }
         }
         if (response.hasMoreAfter) {
           const latest = await chatStore.loadSessionMessages(agentRef, agentRef, chatId, {
-            limit: requestedQuery.limit ?? MESSAGE_PAGE_SIZE,
+            limit: requestedQuery.limit ?? SERVER_TURN_PAGE_SIZE,
           })
           return {
             ...latest,

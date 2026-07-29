@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConversationState, type PendingApproval, type TraceContextV1 } from '../../../types'
 import { ConversationManager } from '../../conversation'
 import { CacheOverflowError } from '../pinnedLruMap'
@@ -269,8 +269,8 @@ describe('SqliteConversationStore — session summary listing', () => {
         }
         await handle.persistQueue.drainSessionKey(session.key)
         handle.worker.db
-          .prepare('UPDATE sessions SET started_at = ? WHERE id = ?')
-          .run(session.timestamp - 1, conv.id)
+          .prepare('UPDATE sessions SET started_at = ?, last_activity_at = ? WHERE id = ?')
+          .run(session.timestamp - 1, session.timestamp, conv.id)
         handle.worker.db
           .prepare('UPDATE messages SET timestamp = ? WHERE session_id = ?')
           .run(session.timestamp, conv.id)
@@ -291,11 +291,13 @@ describe('SqliteConversationStore — session summary listing', () => {
           tool_name: 'shell_exec',
         },
         turnCount: 1,
+        messageCount: 1,
       })
       expect(firstPage[1]).toMatchObject({
         agent: 'agent-x',
         state: ConversationState.Idle,
         turnCount: 1,
+        messageCount: 2,
         input_tokens: 200,
         output_tokens: 100,
         cacheTokensReported: true,
@@ -309,6 +311,21 @@ describe('SqliteConversationStore — session summary listing', () => {
         ['agent-x', 'chat-2'],
         ['agent-x', 'chat-1'],
       ])
+
+      const colonKey = 'u-1:rpc:agent-x:chat:with:colons'
+      const colonConversation = await manager.getOrCreate(colonKey)
+      await manager.startTurn(colonConversation, 'colon chat', 'task-colon')
+      await manager.completeTurn(colonConversation, 'done')
+      handle.store['cache'].clear()
+      handle.store['ordinals'].clear()
+      handle.store['sessionKeyById'].clear()
+      const colonPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:agent-x:', {
+        limit: 10,
+      })
+      expect(colonPage.find(session => session.key === colonKey)).toMatchObject({
+        agent: 'agent-x',
+        chatId: 'chat:with:colons',
+      })
 
       const secondPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:', {
         limit: 2,
@@ -667,6 +684,29 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
         [1, 'first', '[Task cancelled by user before completion]'],
         [2, 'second', 'second response'],
       ])
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it('reserves and rolls back a completion turn number around the durability await', async () => {
+    const handle = await freshStore()
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'first', 'task-complete')
+
+      const enqueueSpy = vi
+        .spyOn(handle.persistQueue, 'enqueueSync')
+        .mockRejectedValueOnce(new Error('disk unavailable'))
+      await expect(handle.store.persistTurnComplete(conv, 'failed write')).rejects.toThrow(
+        /disk unavailable/
+      )
+      expect(handle.store['ordinals'].get(conv.id)?.nextTurnNumber).toBe(1)
+
+      enqueueSpy.mockRestore()
+      await handle.store.persistTurnComplete(conv, 'durable response')
+      expect(handle.store['ordinals'].get(conv.id)?.nextTurnNumber).toBe(2)
     } finally {
       await handle.shutdown()
     }

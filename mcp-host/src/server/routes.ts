@@ -35,7 +35,7 @@ import type {
   WorkflowApprovalNotificationTerminalHandler,
 } from './types'
 import type { RuntimeCallerContext } from './types'
-import { decodeSessionsCursor } from './wireProjections'
+import { decodeSessionsCursor, sessionsCursorScope } from './wireProjections'
 
 export type RouteHandlers = {
   messageHandler: MessageHandler | null
@@ -64,10 +64,23 @@ export type RouteHandlers = {
   setModelHandler?: SetModelHandler | null
 }
 
-function parseSessionsCursorParam(cursor: unknown): string | undefined | null {
+function parseSessionsCursorParam(
+  cursor: unknown,
+  expectedScope: string
+): string | undefined | null {
   if (cursor === undefined) return undefined
   if (typeof cursor !== 'string' || cursor.length > 2048) return null
-  return decodeSessionsCursor(cursor) ? cursor : null
+  return decodeSessionsCursor(cursor, expectedScope) ? cursor : null
+}
+
+function isSafeRouteSegment(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value !== '.' &&
+    value !== '..' &&
+    value.length <= 500 &&
+    !/[/\\\0]/.test(value)
+  )
 }
 
 function channelRuntimeSourceMismatch(
@@ -1097,26 +1110,32 @@ export async function handleSessionsListRoute(
       json(res, 501, { error: 'Sessions handler not configured' })
       return
     }
-    const agent = typeof req.query.agent === 'string' ? req.query.agent.trim() : undefined
-    if (agent !== undefined && (!agent || agent.length > 200 || agent.includes(':'))) {
+    if (req.query.agent !== undefined && typeof req.query.agent !== 'string') {
       badRequest(res, 'Invalid session agent')
       return
     }
-    const cursor = parseSessionsCursorParam(req.query.cursor)
+    const agent = typeof req.query.agent === 'string' ? req.query.agent.trim() : undefined
+    if (
+      agent !== undefined &&
+      (!isSafeRouteSegment(agent) || agent.length > 200 || agent.includes(':'))
+    ) {
+      badRequest(res, 'Invalid session agent')
+      return
+    }
+    const cursor = parseSessionsCursorParam(
+      req.query.cursor,
+      sessionsCursorScope(caller.userId, agent)
+    )
     if (cursor === null) {
       badRequest(res, 'Invalid sessions cursor')
       return
     }
     const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
-    if (
-      req.query.limit !== undefined &&
-      (!Number.isFinite(rawLimit) || Math.floor(rawLimit!) < 1)
-    ) {
+    if (req.query.limit !== undefined && (!Number.isInteger(rawLimit) || rawLimit! < 1)) {
       badRequest(res, 'limit must be a positive integer')
       return
     }
-    const limit =
-      rawLimit === undefined ? (cursor ? 50 : undefined) : Math.min(Math.floor(rawLimit), 100)
+    const limit = rawLimit === undefined ? (cursor ? 50 : undefined) : Math.min(rawLimit, 100)
     const result = await handlers.sessionsListHandler(caller.userId, { agent, limit, cursor })
     json(res, 200, result)
   } catch (error) {
@@ -1195,12 +1214,19 @@ export async function handleSessionMessagesRoute(
     }
     const agent = String(req.params.agent || '').trim()
     const chatId = String(req.params.chatId || '').trim()
-    if (!agent || !chatId) {
+    if (!isSafeRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
       badRequest(res, 'agent and chatId are required')
       return
     }
     if (!handlers.sessionMessagesHandler) {
       json(res, 501, { error: 'Sessions handler not configured' })
+      return
+    }
+    const invalidQueryShape = ['limit', 'beforeTurn', 'afterTurn'].some(
+      key => req.query[key] !== undefined && typeof req.query[key] !== 'string'
+    )
+    if (invalidQueryShape) {
+      badRequest(res, 'pagination parameters must be specified once')
       return
     }
     const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
@@ -1210,14 +1236,14 @@ export async function handleSessionMessagesRoute(
       typeof req.query.afterTurn === 'string' ? Number(req.query.afterTurn) : undefined
     if (
       req.query.beforeTurn !== undefined &&
-      (!Number.isFinite(rawBeforeTurn) || Math.floor(rawBeforeTurn!) < 1)
+      (!Number.isInteger(rawBeforeTurn) || rawBeforeTurn! < 1)
     ) {
       badRequest(res, 'beforeTurn must be a positive integer')
       return
     }
     if (
       req.query.afterTurn !== undefined &&
-      (!Number.isFinite(rawAfterTurn) || Math.floor(rawAfterTurn!) < 0)
+      (!Number.isInteger(rawAfterTurn) || rawAfterTurn! < 0)
     ) {
       badRequest(res, 'afterTurn must be a non-negative integer')
       return
@@ -1226,10 +1252,7 @@ export async function handleSessionMessagesRoute(
       badRequest(res, 'beforeTurn and afterTurn are mutually exclusive')
       return
     }
-    if (
-      req.query.limit !== undefined &&
-      (!Number.isFinite(rawLimit) || Math.floor(rawLimit!) < 1)
-    ) {
+    if (req.query.limit !== undefined && (!Number.isInteger(rawLimit) || rawLimit! < 1)) {
       badRequest(res, 'limit must be a positive integer')
       return
     }
@@ -1238,9 +1261,9 @@ export async function handleSessionMessagesRoute(
         ? rawBeforeTurn !== undefined || rawAfterTurn !== undefined
           ? 80
           : undefined
-        : Math.min(Math.floor(rawLimit), 200)
-    const beforeTurn = rawBeforeTurn !== undefined ? Math.floor(rawBeforeTurn) : undefined
-    const afterTurn = rawAfterTurn !== undefined ? Math.floor(rawAfterTurn) : undefined
+        : Math.min(rawLimit, 200)
+    const beforeTurn = rawBeforeTurn
+    const afterTurn = rawAfterTurn
     const result = await handlers.sessionMessagesHandler(caller.userId, agent, chatId, {
       limit,
       beforeTurn,
@@ -1275,7 +1298,7 @@ export async function handleContextBreakdownRoute(
     }
     const agent = String(req.params.agent || '').trim()
     const chatId = String(req.params.chatId || '').trim()
-    if (!agent || !chatId) {
+    if (!isSafeRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
       badRequest(res, 'agent and chatId are required')
       return
     }

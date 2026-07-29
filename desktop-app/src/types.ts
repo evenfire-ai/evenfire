@@ -1039,6 +1039,18 @@ export interface ChatMessage {
 }
 
 /**
+ * Controls how an authoritative server page is persisted locally.
+ *
+ * `activeTaskIds` lets the main process protect the same optimistic slots as
+ * the renderer. `replaceLocalWindow` is used only by the bounded latest-page
+ * fallback, where stale numbered turns must not survive on disk.
+ */
+export interface ReplaceChatMessagesOptions {
+  activeTaskIds?: string[]
+  replaceLocalWindow?: boolean
+}
+
+/**
  * The minimal, serializable subset of a tool call needed to render the desktop
  * progress stepper's collapsed "N tools" / "More details" view after a reload.
  * Mirrors the server `TurnToolStepWire` and the live `ProgressStep` (downsampled).

@@ -114,7 +114,7 @@ async function maybeWipePreEnvLegacyCache(baseDir: string): Promise<void> {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       // Fresh install — nothing legacy to wipe. Create the base + marker so the
       // scan never runs again.
-      await fs.mkdir(baseDir, { recursive: true })
+      await fs.mkdir(baseDir, { recursive: true, mode: 0o700 })
       await writeMigrationMarker(markerPath)
       return
     }
@@ -221,6 +221,7 @@ async function maybeWipeLegacyCache(userDir: string): Promise<void> {
 
 export function unbindChatStore(): void {
   bindingGeneration += 1
+  bindInFlight = null
   activeChatStore = null
   activeUserId = null
   activeEnvKey = null

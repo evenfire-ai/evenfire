@@ -102,7 +102,7 @@ describe('dbWorker dispatcher', () => {
     expect(row.message_count).toBe(1)
   })
 
-  it('insert_message does NOT touch token columns (no double-count)', async () => {
+  it('separates tool-call storage rows from visible messages and token counters', async () => {
     const deps = createDispatcher(db)
     await dispatch(
       { kind: 'insert_session', payload: makeSession('conv-2t', 'u-2t:rpc:agent:default') },
@@ -135,7 +135,7 @@ describe('dbWorker dispatcher', () => {
         'SELECT message_count, tool_call_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens FROM sessions WHERE id = ?'
       )
       .get('conv-2t') as Record<string, number>
-    expect(row.message_count).toBe(1)
+    expect(row.message_count).toBe(0)
     expect(row.tool_call_count).toBe(1)
     // tokens stay at DEFAULT 0 — only update_session_counters writes them
     expect(row.input_tokens).toBe(0)

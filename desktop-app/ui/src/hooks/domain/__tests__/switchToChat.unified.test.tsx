@@ -70,7 +70,7 @@ describe('switchToChat (unified, D.4)', () => {
       'agent-x',
       'c1',
       undefined,
-      { limit: 80, afterTurn: 1 }
+      { limit: 40, afterTurn: 1 }
     )
     expect(clerum.chat.replaceMessages).not.toHaveBeenCalled()
     expect(result.current.chatMessages).toHaveLength(2)
@@ -169,7 +169,7 @@ describe('switchToChat (unified, D.4)', () => {
       'agent-x',
       'delta-pages',
       undefined,
-      { limit: 80, afterTurn: 1 }
+      { limit: 40, afterTurn: 1 }
     )
     expect(clerum.rpc.loadSessionMessages).toHaveBeenNthCalledWith(
       2,
@@ -177,7 +177,7 @@ describe('switchToChat (unified, D.4)', () => {
       'agent-x',
       'delta-pages',
       undefined,
-      { limit: 80, afterTurn: 2 }
+      { limit: 40, afterTurn: 2 }
     )
     expect(result.current.chatMessages).toHaveLength(6)
     expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
@@ -294,13 +294,22 @@ describe('switchToChat (unified, D.4)', () => {
       'agent-x',
       'delta-cap',
       undefined,
-      { limit: 80 }
+      { limit: 40 }
     )
     expect(result.current.chatMessages.map(message => message.id)).toEqual([
       'turn-999-user',
       'turn-999-assistant',
     ])
     expect(result.current.hasOlderMessages).toBe(true)
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'delta-cap',
+      expect.arrayContaining([expect.objectContaining({ id: 'turn-999-assistant' })]),
+      {
+        activeTaskIds: undefined,
+        replaceLocalWindow: true,
+      }
+    )
   })
 
   it('loads older history on demand and prepends it without blocking first render', async () => {
@@ -356,7 +365,7 @@ describe('switchToChat (unified, D.4)', () => {
       'agent-x',
       'older-pages',
       undefined,
-      { limit: 80, beforeTurn: 21 }
+      { limit: 40, beforeTurn: 21 }
     )
     expect(result.current.chatMessages).toHaveLength(120)
     expect(result.current.chatMessages[0]?.id).toBe('turn-1-user')
@@ -688,6 +697,15 @@ describe('switchToChat (unified, D.4)', () => {
       })
     )
     expect(result.current.progressByMessageId['<unknown>']).toBeUndefined()
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'p1a',
+      expect.arrayContaining([expect.objectContaining({ id: 'turn-1-user' })]),
+      {
+        activeTaskIds: ['task-p1a'],
+        replaceLocalWindow: false,
+      }
+    )
   })
 
   it('P1-B: a processing-snapshot rejoin does not loop and settles within the cap', async () => {

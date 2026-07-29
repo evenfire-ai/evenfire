@@ -146,6 +146,37 @@ describe('InMemoryConversationStore', () => {
         ['agent-x', 'chat-1'],
       ])
     })
+
+    it('preserves colons in chat ids under an agent-scoped prefix', async () => {
+      store.set('u-1:rpc:agent-x:chat:with:colons', makeConversation('u-1'))
+
+      const summaries = await store.listSessionSummariesByPrefix('u-1:rpc:agent-x:')
+
+      expect(summaries.map(session => [session.agent, session.chatId])).toEqual([
+        ['agent-x', 'chat:with:colons'],
+      ])
+    })
+
+    it('counts user and assistant bubbles without counting tool storage rows', async () => {
+      const conversation = makeConversation('u-1')
+      conversation.turns = [
+        {
+          ...makeTurn(1),
+          tool_calls: [
+            {
+              name: 'search',
+              parameters: {},
+              result: 'found',
+            },
+          ],
+        },
+      ]
+      store.set('u-1:rpc:agent-x:chat-1', conversation)
+
+      const [summary] = await store.listSessionSummariesByPrefix('u-1:rpc:')
+
+      expect(summary?.messageCount).toBe(2)
+    })
   })
 
   describe('getSessionMessagesByKey', () => {

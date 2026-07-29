@@ -133,7 +133,7 @@ describe('pendingChatSelection effect', () => {
       'agent-x',
       'c-latest',
       undefined,
-      { limit: 80 }
+      { limit: 40 }
     )
   })
 
@@ -167,7 +167,7 @@ describe('pendingChatSelection effect', () => {
       'agent-x',
       'c-newest',
       undefined,
-      { limit: 80 }
+      { limit: 40 }
     )
   })
 
@@ -273,7 +273,7 @@ describe('pendingChatSelection effect', () => {
         'agent-x',
         'c-specific',
         undefined,
-        { limit: 80 }
+        { limit: 40 }
       )
     )
     await waitFor(() => expect(result.current.activeChatId).toBe('c-specific'))

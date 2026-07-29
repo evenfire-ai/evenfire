@@ -6,6 +6,7 @@
  * worker_threads boilerplate.
  */
 import type { Database } from 'better-sqlite3'
+import { scopedAgentFromSessionPrefix } from '../../core/conversation/sessionKeyParts'
 import { PreparedStatements, prepareStatements } from '../statements'
 import { withBusyRetry } from './busyRetry'
 import type {
@@ -26,6 +27,27 @@ export interface DispatcherDeps {
 
 export function createDispatcher(db: Database): DispatcherDeps {
   return { db, statements: prepareStatements(db) }
+}
+
+function updateSessionSummaryAfterInsert(
+  statements: PreparedStatements,
+  message: {
+    session_id: string
+    role: string
+    tool_calls: string | null
+    timestamp: number
+    turn_number: number | null
+  }
+): void {
+  statements.updateSessionSummaryAfterInsert.run({
+    id: message.session_id,
+    timestamp: message.timestamp,
+    turn_number: message.turn_number,
+    visible_message_delta:
+      message.role === 'user' || (message.role === 'assistant' && message.tool_calls === null)
+        ? 1
+        : 0,
+  })
 }
 
 /**
@@ -93,6 +115,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             system_prompt_stable_hash: row.system_prompt_stable_hash ?? null,
             parent_session_id: row.parent_session_id ?? null,
             started_at: row.started_at,
+            last_activity_at: row.last_activity_at ?? row.started_at,
+            turn_count: row.turn_count ?? 0,
             ended_at: row.ended_at ?? null,
             end_reason: row.end_reason ?? null,
             message_count: row.message_count ?? 0,
@@ -195,6 +219,13 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 output_tokens: null,
                 cache_read_tokens: null,
                 cache_write_tokens: null,
+              })
+              updateSessionSummaryAfterInsert(s, {
+                session_id: sess.id,
+                role: 'assistant',
+                tool_calls: null,
+                timestamp: nowMs / 1000,
+                turn_number: agg.max_turn,
               })
               s.updateSessionState.run({
                 id: sess.id,
@@ -311,6 +342,13 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 cache_read_tokens: null,
                 cache_write_tokens: null,
               })
+              updateSessionSummaryAfterInsert(s, {
+                session_id: sess.id,
+                role: 'assistant',
+                tool_calls: null,
+                timestamp: nowMs / 1000,
+                turn_number: agg.max_turn,
+              })
               // Resolve the (expired) approval row(s) atomically with the state
               // flip so PHASE 2's load_all_pending_approvals can't resurrect them.
               // No-op for the orphan case (row already gone).
@@ -413,9 +451,10 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             cache_read_tokens: op.payload.cache_read_tokens ?? null,
             cache_write_tokens: op.payload.cache_write_tokens ?? null,
           })
+          updateSessionSummaryAfterInsert(s, op.payload)
           s.updateSessionCounters.run({
             id: op.payload.session_id,
-            message_count_delta: 1,
+            message_count_delta: 0,
             tool_call_count_delta: op.payload.role === 'assistant' && op.payload.tool_calls ? 1 : 0,
             input_tokens_delta: 0,
             output_tokens_delta: 0,
@@ -455,9 +494,10 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             cache_read_tokens: op.message.cache_read_tokens ?? null,
             cache_write_tokens: op.message.cache_write_tokens ?? null,
           })
+          updateSessionSummaryAfterInsert(s, op.message)
           s.updateSessionCounters.run({
             id: op.message.session_id,
-            message_count_delta: 1,
+            message_count_delta: 0,
             tool_call_count_delta: op.message.role === 'assistant' && op.message.tool_calls ? 1 : 0,
             input_tokens_delta: 0,
             output_tokens_delta: 0,
@@ -510,6 +550,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
               cache_write_tokens: m.cache_write_tokens ?? null,
             })
           }
+          s.recomputeSessionMessageSummary.run({ id: op.sessionId })
         })
         tx.immediate()
         return { ok: true, count: op.messages.length }
@@ -617,10 +658,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         0,
         op.sessionKeyPrefix.length - (finalCodePoint > 0xffff ? 2 : 1)
       )}${String.fromCodePoint(finalCodePoint + 1)}`
-      const rpcPrefixIndex = op.sessionKeyPrefix.lastIndexOf(':rpc:')
-      const agentScoped =
-        rpcPrefixIndex >= 0 &&
-        op.sessionKeyPrefix.slice(rpcPrefixIndex + ':rpc:'.length).replace(/:$/, '').length > 0
+      const agentScoped = scopedAgentFromSessionPrefix(op.sessionKeyPrefix) !== null
       const rows = s.selectSessionSummariesByPrefix.all({
         prefix_start: prefixStart,
         prefix_end: prefixEnd,
@@ -630,19 +668,24 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         cursor_key: op.cursorKey ?? null,
       }) as Array<
         SessionRow & {
-          last_activity_at: number
-          turn_count: number
+          summary_last_activity_at: number
+          summary_turn_count: number
           pending_request_id: string | null
           pending_tool_name: string | null
         }
       >
       return rows.map(row => {
-        const { last_activity_at, turn_count, pending_request_id, pending_tool_name, ...session } =
-          row
+        const {
+          summary_last_activity_at,
+          summary_turn_count,
+          pending_request_id,
+          pending_tool_name,
+          ...session
+        } = row
         return {
           session: session as SessionRow,
-          last_activity_at,
-          turn_count,
+          last_activity_at: summary_last_activity_at,
+          turn_count: summary_turn_count,
           pending_approval:
             pending_request_id && pending_tool_name
               ? { request_id: pending_request_id, tool_name: pending_tool_name }

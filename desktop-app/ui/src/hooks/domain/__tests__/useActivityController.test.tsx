@@ -109,9 +109,10 @@ describe('useActivityController', () => {
         toolSteps: [{ toolName: 'read', displayName: 'Read', state: 'completed' }],
       },
     ])
+    const backfillCounters = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { chat: { getIndex, loadMessages } },
+      value: { chat: { getIndex, loadMessages, backfillCounters } },
     })
 
     const { result } = renderHook(() =>
@@ -140,5 +141,110 @@ describe('useActivityController', () => {
       })
     )
     expect(loadMessages).toHaveBeenCalledWith('agent-a', 'legacy-chat', 1000, undefined)
+    expect(backfillCounters).toHaveBeenCalledWith(
+      'agent-a',
+      'legacy-chat',
+      expect.arrayContaining([expect.objectContaining({ id: 'm1' })])
+    )
+  })
+
+  it('does not download transcripts for server-only catalog entries', async () => {
+    const getIndex = vi.fn(async () => ({
+      version: 3,
+      lastActiveChatId: null,
+      onboardingDismissed: false,
+      chats: [],
+    }))
+    const loadMessages = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { chat: { getIndex, loadMessages } },
+    })
+
+    renderHook(() =>
+      useActivityController({
+        selectedAgent: 'agent-a',
+        isAuthenticated: true,
+        loadMenuData: true,
+        chatList: [
+          {
+            id: 'remote-chat',
+            title: 'Remote',
+            createdAt: '2026-07-22T00:00:00.000Z',
+            updatedAt: '2026-07-22T00:00:00.000Z',
+            messageCount: 2,
+            remote: true,
+          },
+        ],
+        progressByAgentMessage: EMPTY_PROGRESS,
+        agentNames: AGENT_A,
+      })
+    )
+
+    await waitFor(() => expect(getIndex).toHaveBeenCalled())
+    expect(loadMessages).not.toHaveBeenCalled()
+  })
+
+  it('keeps prior backfills when a later chat list adds another legacy chat', async () => {
+    const loadMessages = vi.fn(async (_agentRef: string, chatId: string) =>
+      chatId === 'legacy-one'
+        ? [{ id: 'e1', role: 'assistant', content: 'failed', timestamp: 1, isError: true }]
+        : [
+            {
+              id: 't1',
+              role: 'assistant',
+              content: 'used tool',
+              timestamp: 2,
+              toolSteps: [{ toolName: 'read', displayName: 'Read', state: 'completed' }],
+            },
+          ]
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        chat: {
+          getIndex: vi.fn(async () => ({ chats: [] })),
+          loadMessages,
+          backfillCounters: vi.fn().mockResolvedValue(undefined),
+        },
+      },
+    })
+    const baseChat = {
+      title: 'Legacy',
+      createdAt: '2026-07-22T00:00:00.000Z',
+      updatedAt: '2026-07-22T00:00:00.000Z',
+      messageCount: 1,
+    }
+    const initialProps = {
+      chatList: [{ ...baseChat, id: 'legacy-one' }],
+    }
+    const { result, rerender } = renderHook(
+      ({ chatList }: typeof initialProps) =>
+        useActivityController({
+          selectedAgent: 'agent-a',
+          isAuthenticated: true,
+          loadMenuData: true,
+          chatList,
+          progressByAgentMessage: EMPTY_PROGRESS,
+          agentNames: AGENT_A,
+        }),
+      { initialProps }
+    )
+
+    await waitFor(() => expect(result.current.selectedAgentActivitySummary.errors).toBe(1))
+
+    rerender({
+      chatList: [
+        { ...baseChat, id: 'legacy-one' },
+        { ...baseChat, id: 'legacy-two', updatedAt: '2026-07-23T00:00:00.000Z' },
+      ],
+    })
+
+    await waitFor(() =>
+      expect(result.current.selectedAgentActivitySummary).toMatchObject({
+        errors: 1,
+        toolCalls: 1,
+      })
+    )
   })
 })

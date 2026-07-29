@@ -75,7 +75,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
         'agent-x',
         'chat-1',
         undefined,
-        { limit: 80 }
+        { limit: 40 }
       )
       // Cache was up to date → no overwrite, no rejoin.
       expect(clerum.chat.replaceMessages).not.toHaveBeenCalled()
@@ -111,7 +111,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
         'agent-x',
         'chat-2',
         undefined,
-        { limit: 80 }
+        { limit: 40 }
       )
       expect(clerum.chat.create).toHaveBeenCalledWith('agent-x', 'chat-2')
       // Server is source of truth → replace, not append.
@@ -1009,6 +1009,40 @@ describe('useAgentChatController — characterization (D.0)', () => {
         expect(result.current.latestChatSessions.some(chat => chat.id === 'local-chat')).toBe(true)
       )
       expect(result.current.latestChatSessionsLoading).toBe(false)
+    })
+
+    it('does not replace a newer local auto-selection with an older server session', async () => {
+      clerum.chat.getIndex.mockResolvedValue({
+        version: 1,
+        lastActiveChatId: null,
+        onboardingDismissed: false,
+        chats: [
+          {
+            id: 'newer-local',
+            title: 'Newer local chat',
+            createdAt: '2026-05-03T00:00:00Z',
+            updatedAt: '2026-05-03T00:00:00Z',
+            messageCount: 2,
+          },
+        ],
+      })
+      clerum.rpc.listSessions.mockResolvedValue({
+        items: [
+          {
+            agent: 'agent-x',
+            chatId: 'older-server',
+            turnCount: 1,
+            lastActivityAt: '2026-05-02T00:00:00Z',
+          },
+        ],
+      })
+
+      const { result } = renderController({ navItem: 'chat' })
+
+      await waitFor(() => expect(result.current.activeChatId).toBe('newer-local'))
+      await waitFor(() => expect(clerum.rpc.listSessions).toHaveBeenCalled())
+      expect(result.current.activeChatId).toBe('newer-local')
+      expect(clerum.chat.setLastActive).not.toHaveBeenCalledWith('agent-x', 'older-server')
     })
 
     it('loads the next remote session page only when requested', async () => {

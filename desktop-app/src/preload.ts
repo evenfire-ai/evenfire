@@ -400,8 +400,12 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('chat:loadMessages', { agentRef, chatId, limit, offset }),
     appendMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
       ipcRenderer.invoke('chat:appendMessages', { agentRef, chatId, messages }),
-    replaceMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
-      ipcRenderer.invoke('chat:replaceMessages', { agentRef, chatId, messages }),
+    replaceMessages: (
+      agentRef: string,
+      chatId: string,
+      messages: unknown[],
+      options?: import('./types.js').ReplaceChatMessagesOptions
+    ) => ipcRenderer.invoke('chat:replaceMessages', { agentRef, chatId, messages, options }),
     backfillCounters: (agentRef: string, chatId: string, messages: unknown[]) =>
       ipcRenderer.invoke('chat:backfillCounters', { agentRef, chatId, messages }),
     markUnreadTerminal: (agentRef: string, chatId: string) =>

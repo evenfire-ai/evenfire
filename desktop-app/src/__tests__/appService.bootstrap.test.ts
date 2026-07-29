@@ -267,6 +267,62 @@ describe('AppService invitation configuration lookup', () => {
     }
   })
 
+  it('fails closed when the saved-token store cannot be read', async () => {
+    process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
+    process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
+    vi.resetModules()
+
+    const { AppService } = await import('../appService.js')
+    const getMe = vi.fn()
+    const service = new AppService() as unknown as {
+      authClient: { getMe: ReturnType<typeof vi.fn> }
+      tokenStore: {
+        getSessionToken: ReturnType<typeof vi.fn>
+        clearSessionToken: ReturnType<typeof vi.fn>
+      }
+      rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
+      getSessionState: () => Promise<unknown>
+    }
+    service.authClient = { getMe } as never
+    service.tokenStore = {
+      getSessionToken: vi.fn().mockRejectedValue(new Error('keychain unavailable')),
+      clearSessionToken: vi.fn(),
+    } as never
+    service.rpcTokenManager = { clear: vi.fn() } as never
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      await expect(service.getSessionState()).resolves.toEqual({
+        authenticated: false,
+        me: null,
+      })
+    } finally {
+      warn.mockRestore()
+    }
+    expect(getMe).not.toHaveBeenCalled()
+  })
+
+  it('releases the logout guard when clearing the saved token fails', async () => {
+    process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
+    process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
+    vi.resetModules()
+
+    const { AppService } = await import('../appService.js')
+    const service = new AppService() as unknown as {
+      tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
+      rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
+      logoutInProgress: boolean
+      logout: () => Promise<void>
+    }
+    service.tokenStore = {
+      clearSessionToken: vi.fn().mockRejectedValue(new Error('keychain unavailable')),
+    } as never
+    service.rpcTokenManager = { clear: vi.fn() } as never
+
+    await expect(service.logout()).rejects.toThrow(/keychain unavailable/)
+    expect(service.logoutInProgress).toBe(false)
+  })
+
   it('shares one saved-session restore across concurrent session-state requests', async () => {
     const configPath = await createTempConfigPath('clerum-desktop-restore-single-flight')
     await fs.writeFile(

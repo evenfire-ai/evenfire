@@ -24,6 +24,25 @@ describe('session pagination projections', () => {
     expect(decodeSessionsCursor(invalidDate)).toBeNull()
   })
 
+  it('rejects legacy and cross-scope cursors', () => {
+    const legacy = Buffer.from(
+      JSON.stringify({ updatedAt: '2026-01-03T00:00:00.000Z', key: 'a' })
+    ).toString('base64url')
+    expect(decodeSessionsCursor(legacy)).toBeNull()
+
+    const scoped = paginateSessionSummaries(
+      [
+        { key: 'a', lastActivityAt: new Date('2026-01-03T00:00:00Z') },
+        { key: 'b', lastActivityAt: new Date('2026-01-02T00:00:00Z') },
+      ],
+      1,
+      key => key,
+      'scope-a'
+    ).nextCursor
+    expect(decodeSessionsCursor(scoped, 'scope-a')).not.toBeNull()
+    expect(decodeSessionsCursor(scoped, 'scope-b')).toBeNull()
+  })
+
   it('returns a cursor only when another summary page exists', () => {
     const entries = [
       { key: 'a', lastActivityAt: new Date('2026-01-03T00:00:00Z') },
@@ -32,6 +51,8 @@ describe('session pagination projections', () => {
     const result = paginateSessionSummaries(entries, 1)
     expect(result.page).toEqual([entries[0]])
     expect(decodeSessionsCursor(result.nextCursor)).toEqual({
+      version: 1,
+      scope: 'unscoped',
       updatedAt: '2026-01-03T00:00:00.000Z',
       key: 'a',
     })

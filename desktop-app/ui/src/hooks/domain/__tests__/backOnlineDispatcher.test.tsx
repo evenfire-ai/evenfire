@@ -53,7 +53,7 @@ describe('BACK_ONLINE dispatcher (§4.1)', () => {
         'agent-x',
         'chat-offline',
         undefined,
-        { limit: 80 }
+        { limit: 40 }
       )
     )
   })

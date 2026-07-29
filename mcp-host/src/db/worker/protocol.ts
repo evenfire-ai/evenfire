@@ -30,6 +30,10 @@ export interface SessionRow {
   system_prompt_stable_hash: string | null
   parent_session_id: string | null
   started_at: number
+  /** Materialized catalog sort key (migration 010). */
+  last_activity_at?: number | null
+  /** Materialized count of distinct persisted turn numbers (migration 010). */
+  turn_count?: number
   ended_at: number | null
   end_reason: string | null
   message_count: number

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { Conversation, Turn } from '../core/types'
 import { getDisplayName } from '../progress/intentExtraction'
 import type { ContextBreakdownWire, SessionTokensWire, TurnToolStepWire } from './types'
@@ -16,38 +17,63 @@ type SessionTokenSource = Pick<
 >
 
 export interface SessionsCursor {
+  version: 1
+  scope: string
   updatedAt: string
   key: string
 }
 
-export function decodeSessionsCursor(cursor: string | undefined): SessionsCursor | null {
+export function sessionsCursorScope(userSub: string, agent?: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify([userSub, agent ?? null]))
+    .digest('base64url')
+    .slice(0, 24)
+}
+
+export function decodeSessionsCursor(
+  cursor: string | undefined,
+  expectedScope?: string
+): SessionsCursor | null {
   if (!cursor) return null
   try {
     const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
+      version?: unknown
+      scope?: unknown
       updatedAt?: unknown
       key?: unknown
     }
     if (
+      parsed.version !== 1 ||
+      typeof parsed.scope !== 'string' ||
+      (expectedScope !== undefined && parsed.scope !== expectedScope) ||
       typeof parsed.updatedAt !== 'string' ||
       typeof parsed.key !== 'string' ||
       !Number.isFinite(Date.parse(parsed.updatedAt))
     ) {
       return null
     }
-    return { updatedAt: parsed.updatedAt, key: parsed.key }
+    return {
+      version: 1,
+      scope: parsed.scope,
+      updatedAt: parsed.updatedAt,
+      key: parsed.key,
+    }
   } catch {
     return null
   }
 }
 
-export function encodeSessionsCursor(updatedAt: string, key: string): string {
-  return Buffer.from(JSON.stringify({ updatedAt, key }), 'utf8').toString('base64url')
+export function encodeSessionsCursor(updatedAt: string, key: string, scope = 'unscoped'): string {
+  return Buffer.from(JSON.stringify({ version: 1, scope, updatedAt, key }), 'utf8').toString(
+    'base64url'
+  )
 }
 
 export function paginateSessionSummaries<T extends { key: string; lastActivityAt: Date }>(
   entries: T[],
   limit: number | undefined,
-  encodeKey: (key: string) => string = key => key
+  encodeKey: (key: string) => string = key => key,
+  cursorScope = 'unscoped'
 ): { page: T[]; nextCursor?: string } {
   if (limit === undefined) return { page: entries }
   const page = entries.slice(0, limit)
@@ -56,7 +82,11 @@ export function paginateSessionSummaries<T extends { key: string; lastActivityAt
     page,
     ...(entries.length > page.length && last
       ? {
-          nextCursor: encodeSessionsCursor(last.lastActivityAt.toISOString(), encodeKey(last.key)),
+          nextCursor: encodeSessionsCursor(
+            last.lastActivityAt.toISOString(),
+            encodeKey(last.key),
+            cursorScope
+          ),
         }
       : {}),
   }

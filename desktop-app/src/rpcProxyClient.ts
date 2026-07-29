@@ -29,6 +29,12 @@ import {
  */
 const MODEL_NOT_ALLOWED = 'model_not_allowed'
 
+function assertSafePathSegment(label: string, value: string): void {
+  if (!value || value === '.' || value === '..' || /[/\\\0]/.test(value)) {
+    throw new Error(`Invalid ${label}: unsafe path segment`)
+  }
+}
+
 /**
  * mcp-host answers HTTP 200 with `{success:false, error}` when an approval was
  * already decided by another channel (spec-v2 §4.7.4). Parse the body into a
@@ -576,6 +582,9 @@ export class RpcProxyClient {
     chatId: string,
     query: SessionMessagesQuery = {}
   ): Promise<SessionMessagesResult> {
+    assertSafePathSegment('hostRef', hostRef)
+    assertSafePathSegment('agent', agent)
+    assertSafePathSegment('chatId', chatId)
     const requestUrl = new URL(
       url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
@@ -626,6 +635,9 @@ export class RpcProxyClient {
     agent: string,
     chatId: string
   ): Promise<ContextBreakdownResult> {
+    assertSafePathSegment('hostRef', hostRef)
+    assertSafePathSegment('agent', agent)
+    assertSafePathSegment('chatId', chatId)
     const response = await fetch(
       url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`
