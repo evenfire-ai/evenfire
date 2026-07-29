@@ -2,9 +2,21 @@
 
 # Safety helpers shared by disruptive HCC fault-injection fixtures.
 
+profile_env_value() {
+  local key=$1 file=$2
+  awk -v key="$key" '
+    index($0, key "=") == 1 {
+      print substr($0, length(key) + 2)
+      exit
+    }
+  ' "$file"
+}
+
 require_branch_owned_hcc_gate() {
   local marker_namespace="${1:-control-plane}"
-  local actual_worktree_id actual_head worktree_dirty
+  local actual_worktree_id actual_head actual_cluster_fingerprint actual_gate
+  local worktree_dirty expected_short_head expected_branch profile_env
+  local pre_gate_state_root cluster_fingerprint_file expected_cluster_fingerprint
 
   is_branch_scoped_e2e_context "$E2E_KUBECONTEXT" ||
     die "fault injection requires a generated branch-scoped context, got '${E2E_KUBECONTEXT}'"
@@ -19,16 +31,55 @@ require_branch_owned_hcc_gate() {
     printf '%s' "$HCC_BRANCH_GATE_REPO_ROOT" | shasum | awk '{print $1}'
   )"
   HCC_BRANCH_GATE_EXPECTED_HEAD="$(git -C "$HCC_BRANCH_GATE_REPO_ROOT" rev-parse HEAD)"
+  expected_short_head="$(git -C "$HCC_BRANCH_GATE_REPO_ROOT" rev-parse --short=8 HEAD)"
+  expected_branch="$(git -C "$HCC_BRANCH_GATE_REPO_ROOT" branch --show-current)"
+  [ -n "$expected_branch" ] ||
+    die "branch-owned runtime proof requires a named branch, not detached HEAD"
+  [ "${MINIKUBE_PROFILE:-}" = "$E2E_KUBECONTEXT" ] ||
+    die "MINIKUBE_PROFILE must explicitly select context ${E2E_KUBECONTEXT}, got ${MINIKUBE_PROFILE:-missing}"
+
+  profile_env="${E2E_BRANCH_PROFILE_ENV:-${HOME}/.cache/clerum/minikube-profiles/${E2E_KUBECONTEXT}/profile.env}"
+  [ -r "$profile_env" ] ||
+    die "branch-profile helper evidence is missing at ${profile_env}; run a state-writing branch-profile helper action from this worktree"
+  [ "$(profile_env_value PROFILE "$profile_env")" = "$E2E_KUBECONTEXT" ] ||
+    die "branch-profile helper output does not select context ${E2E_KUBECONTEXT}"
+  [ "$(profile_env_value REPO_DIR "$profile_env")" = "$HCC_BRANCH_GATE_REPO_ROOT" ] ||
+    die "branch-profile helper output belongs to a different worktree"
+  [ "$(profile_env_value BRANCH "$profile_env")" = "$expected_branch" ] ||
+    die "branch-profile helper output belongs to a different branch"
+  [ "$(profile_env_value SHA_SHORT "$profile_env")" = "$expected_short_head" ] ||
+    die "branch-profile helper output belongs to a different HEAD"
+  [ "$(profile_env_value DIRTY "$profile_env")" = false ] ||
+    die "branch-profile helper recorded a dirty worktree; refresh it after committing"
+
+  pre_gate_state_root="${E2E_PRE_GATE_STATE_ROOT:-${TMPDIR:-/tmp}/clerum-pre-gate-sync}"
+  cluster_fingerprint_file="${pre_gate_state_root}/${HCC_BRANCH_GATE_EXPECTED_WORKTREE_ID}/cluster.sha"
+  [ -r "$cluster_fingerprint_file" ] ||
+    die "pre-gate fingerprint evidence is missing at ${cluster_fingerprint_file}"
+  expected_cluster_fingerprint="$(sed -n '1p' "$cluster_fingerprint_file")"
+  [[ "$expected_cluster_fingerprint" =~ ^[0-9a-f]{40}$ ]] ||
+    die "pre-gate fingerprint evidence is malformed"
+  [ -n "${E2E_EXPECTED_PRE_GATE_GATE:-}" ] ||
+    die "E2E_EXPECTED_PRE_GATE_GATE must name the gate recorded by the branch-owned pre-gate sync"
+
   HCC_BRANCH_GATE_SYNC_MARKER="$(
     kctl get configmap clerum-pre-gate-sync-state -n "$marker_namespace" -o json 2>/dev/null
   )" || die "cluster has no readable pre-gate sync marker"
   actual_worktree_id="$(jq -r '.data.worktreeId // ""' <<<"$HCC_BRANCH_GATE_SYNC_MARKER")"
   actual_head="$(jq -r '.data.gitHead // ""' <<<"$HCC_BRANCH_GATE_SYNC_MARKER")"
+  actual_cluster_fingerprint="$(
+    jq -r '.data.clusterFingerprint // ""' <<<"$HCC_BRANCH_GATE_SYNC_MARKER"
+  )"
+  actual_gate="$(jq -r '.data.gate // ""' <<<"$HCC_BRANCH_GATE_SYNC_MARKER")"
 
   [ "$actual_worktree_id" = "$HCC_BRANCH_GATE_EXPECTED_WORKTREE_ID" ] ||
     die "cluster ownership marker does not match this worktree; run minikube-pre-gate-sync first"
   [ "$actual_head" = "$HCC_BRANCH_GATE_EXPECTED_HEAD" ] ||
     die "cluster HEAD marker ${actual_head:-missing} does not match ${HCC_BRANCH_GATE_EXPECTED_HEAD}"
+  [ "$actual_cluster_fingerprint" = "$expected_cluster_fingerprint" ] ||
+    die "cluster fingerprint marker does not match this worktree's last pre-gate sync"
+  [ "$actual_gate" = "$E2E_EXPECTED_PRE_GATE_GATE" ] ||
+    die "cluster gate marker ${actual_gate:-missing} does not match expected ${E2E_EXPECTED_PRE_GATE_GATE}"
 }
 
 create_hcc_api_proxy() {

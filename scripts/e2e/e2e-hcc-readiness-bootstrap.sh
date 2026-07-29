@@ -100,16 +100,6 @@ wait_until() {
   return 1
 }
 
-profile_env_value() {
-  local key=$1 file=$2
-  awk -v key="$key" '
-    index($0, key "=") == 1 {
-      print substr($0, length(key) + 2)
-      exit
-    }
-  ' "$file"
-}
-
 running_hcc_pod() {
   local rows
   rows="$(kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" \
@@ -442,46 +432,6 @@ trap cleanup EXIT
 header "HCC readiness during initial Host fleet reconciliation"
 
 require_branch_owned_hcc_gate "$HCC_NS"
-repo_root="$HCC_BRANCH_GATE_REPO_ROOT"
-expected_worktree_id="$HCC_BRANCH_GATE_EXPECTED_WORKTREE_ID"
-expected_short_head="$(git -C "$repo_root" rev-parse --short=8 HEAD)"
-expected_branch="$(git -C "$repo_root" branch --show-current)"
-[ -n "$expected_branch" ] ||
-  die "branch-owned runtime proof requires a named branch, not detached HEAD"
-[ -z "${MINIKUBE_PROFILE:-}" ] || [ "$MINIKUBE_PROFILE" = "$E2E_KUBECONTEXT" ] ||
-  die "MINIKUBE_PROFILE ${MINIKUBE_PROFILE} disagrees with context ${E2E_KUBECONTEXT}"
-
-profile_env="${E2E_BRANCH_PROFILE_ENV:-${HOME}/.cache/clerum/minikube-profiles/${E2E_KUBECONTEXT}/profile.env}"
-[ -r "$profile_env" ] ||
-  die "branch-profile helper evidence is missing at ${profile_env}; run a state-writing branch-profile helper action from this worktree"
-[ "$(profile_env_value PROFILE "$profile_env")" = "$E2E_KUBECONTEXT" ] ||
-  die "branch-profile helper output does not select context ${E2E_KUBECONTEXT}"
-[ "$(profile_env_value REPO_DIR "$profile_env")" = "$repo_root" ] ||
-  die "branch-profile helper output belongs to a different worktree"
-[ "$(profile_env_value BRANCH "$profile_env")" = "$expected_branch" ] ||
-  die "branch-profile helper output belongs to a different branch"
-[ "$(profile_env_value SHA_SHORT "$profile_env")" = "$expected_short_head" ] ||
-  die "branch-profile helper output belongs to a different HEAD"
-[ "$(profile_env_value DIRTY "$profile_env")" = false ] ||
-  die "branch-profile helper recorded a dirty worktree; refresh it after committing"
-
-pre_gate_state_root="${E2E_PRE_GATE_STATE_ROOT:-${TMPDIR:-/tmp}/clerum-pre-gate-sync}"
-cluster_fingerprint_file="${pre_gate_state_root}/${expected_worktree_id}/cluster.sha"
-[ -r "$cluster_fingerprint_file" ] ||
-  die "pre-gate fingerprint evidence is missing at ${cluster_fingerprint_file}"
-expected_cluster_fingerprint="$(sed -n '1p' "$cluster_fingerprint_file")"
-printf '%s\n' "$expected_cluster_fingerprint" | grep -Eq '^[0-9a-f]{40}$' ||
-  die "pre-gate fingerprint evidence is malformed"
-[ -n "${E2E_EXPECTED_PRE_GATE_GATE:-}" ] ||
-  die "E2E_EXPECTED_PRE_GATE_GATE must name the gate recorded by the branch-owned pre-gate sync"
-
-sync_marker="$HCC_BRANCH_GATE_SYNC_MARKER"
-actual_cluster_fingerprint="$(jq -r '.data.clusterFingerprint // ""' <<<"$sync_marker")"
-actual_gate="$(jq -r '.data.gate // ""' <<<"$sync_marker")"
-[ "$actual_cluster_fingerprint" = "$expected_cluster_fingerprint" ] ||
-  die "cluster fingerprint marker does not match this worktree's last pre-gate sync"
-[ "$actual_gate" = "$E2E_EXPECTED_PRE_GATE_GATE" ] ||
-  die "cluster gate marker ${actual_gate:-missing} does not match expected ${E2E_EXPECTED_PRE_GATE_GATE}"
 ok "branch helper, profile, exact HEAD/fingerprint/gate verified"
 
 kctl get nodes -o json |

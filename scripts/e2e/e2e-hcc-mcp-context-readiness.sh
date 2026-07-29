@@ -19,6 +19,9 @@ source "${SCRIPT_DIR}/e2e-lib.sh"
 # shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-lock.sh
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-lock.sh"
+# shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-fixture.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"
 
 [ -n "$E2E_KUBECONTEXT" ] || {
   echo "KUBECONTEXT or E2E_K8S_CONTEXT must select an explicit branch-scoped minikube context." >&2
@@ -71,6 +74,7 @@ UPSTREAM_DNS_IP=""
 NEW_HCC_POD=""
 HCC_UID=""
 HCC_RESTARTS=""
+HCC_PORT=""
 HCC_MUTATED=0
 DNS_BLOCKER_CREATED=0
 MCP_CREATED=0
@@ -102,24 +106,16 @@ die() {
 wait_until() {
   local timeout=$1 description=$2
   shift 2
-  local elapsed=0
-  while [ "$elapsed" -lt "$timeout" ]; do
+  local deadline now
+  deadline=$(( $(date +%s) + timeout ))
+  while :; do
     "$@" && return 0
+    now="$(date +%s)"
+    [ "$now" -lt "$deadline" ] || break
     sleep 1
-    elapsed=$((elapsed + 1))
   done
   echo "Timed out after ${timeout}s waiting for ${description}" >&2
   return 1
-}
-
-profile_env_value() {
-  local key=$1 file=$2
-  awk -v key="$key" '
-    index($0, key "=") == 1 {
-      print substr($0, length(key) + 2)
-      exit
-    }
-  ' "$file"
 }
 
 running_hcc_pod() {
@@ -129,6 +125,13 @@ running_hcc_pod() {
     -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.uid}{"\t"}{.status.containerStatuses[?(@.name=="host-context-controller")].restartCount}{"\t"}{.metadata.deletionTimestamp}{"\n"}{end}' \
     2>/dev/null)" || return 1
   awk -F '\t' '$1 != "" && $4 == "" { print $1; exit }' <<<"$rows"
+}
+
+hcc_pods_absent() {
+  local pods
+  pods="$(kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" -o name 2>/dev/null)" ||
+    return 1
+  [ -z "$pods" ]
 }
 
 hcc_log_contains() {
@@ -348,6 +351,11 @@ fixture_resources_absent() {
   fixture_mcp_runtime_absent && context_policies_absent
 }
 
+fixture_inputs_absent() {
+  resource_absent context "$CONTEXT_NAME" "$MCP_NS" &&
+    resource_absent mcpserver "$MCP_NAME" "$MCP_NS"
+}
+
 baseline_policies_exist() {
   kctl get networkpolicy "deny-all-${MCP_NS}" -n "$MCP_NS" >/dev/null 2>&1 &&
     kctl get networkpolicy "allow-dns-egress-${MCP_NS}" -n "$MCP_NS" >/dev/null 2>&1 &&
@@ -381,7 +389,11 @@ const http = require('http');
 const expected = process.argv[1];
 function get(path) {
   return new Promise((resolve, reject) => {
-    const request = http.get({host: '127.0.0.1', port: 8081, path}, response => {
+    const request = http.get({
+      host: '127.0.0.1',
+      port: Number(process.env.HCC_E2E_PORT),
+      path
+    }, response => {
       let body = '';
       response.setEncoding('utf8');
       response.on('data', chunk => { body += chunk; });
@@ -413,7 +425,7 @@ function get(path) {
 NODE
 )"
   kctl exec "pod/${NEW_HCC_POD}" -n "$HCC_NS" -c host-context-controller -- \
-    node -e "$probe_script" "$MCP_NAME"
+    env "HCC_E2E_PORT=${HCC_PORT}" node -e "$probe_script" "$MCP_NAME"
 }
 
 probe_hcc_final_context() {
@@ -424,7 +436,11 @@ const context = process.argv[1];
 const expected = process.argv[2];
 function get(path) {
   return new Promise((resolve, reject) => {
-    const request = http.get({host: '127.0.0.1', port: 8081, path}, response => {
+    const request = http.get({
+      host: '127.0.0.1',
+      port: Number(process.env.HCC_E2E_PORT),
+      path
+    }, response => {
       let body = '';
       response.setEncoding('utf8');
       response.on('data', chunk => { body += chunk; });
@@ -456,6 +472,7 @@ function get(path) {
 NODE
 )"
   kctl exec "pod/${NEW_HCC_POD}" -n "$HCC_NS" -c host-context-controller -- \
+    env "HCC_E2E_PORT=${HCC_PORT}" \
     node -e "$probe_script" "$CONTEXT_NAME" "$MCP_NAME"
 }
 
@@ -463,10 +480,11 @@ probe_hcc_ready_pod() {
   local pod
   pod="$(ready_pod_name "$HCC_NS" "app=${HCC_DEPLOY}")" || return 1
   kctl exec "pod/${pod}" -n "$HCC_NS" -c host-context-controller -- \
+    env "HCC_E2E_PORT=${HCC_PORT}" \
     node -e '
       const http = require("node:http");
       const request = http.get(
-        {host: "127.0.0.1", port: 8081, path: "/ready"},
+        {host: "127.0.0.1", port: Number(process.env.HCC_E2E_PORT), path: "/ready"},
         response => {
           let body = "";
           response.setEncoding("utf8");
@@ -577,40 +595,57 @@ EOF
 }
 
 cleanup() {
-  local status=$? cleanup_failed=0 restore_ok=1 restore_patch
+  local status=$? cleanup_failed=0 restore_ok=1 fixture_inputs_removed=1 restore_patch
   trap - EXIT
   set +e
 
   if [ "$HCC_MUTATED" = 1 ]; then
     kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0 >/dev/null 2>&1 ||
       restore_ok=0
-    kctl wait pod -n "$HCC_NS" -l "app=${HCC_DEPLOY}" --for=delete \
-      --timeout=120s >/dev/null 2>&1 || restore_ok=0
+    if [ "$restore_ok" = 1 ]; then
+      wait_until 120 "HCC pods to stop before fixture cleanup" \
+        hcc_pods_absent >/dev/null 2>&1 || restore_ok=0
+    fi
   fi
 
   if [ "$CONTEXT_CREATED" = 1 ]; then
     kctl delete context "$CONTEXT_NAME" -n "$MCP_NS" \
       --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 ||
-      cleanup_failed=1
+      {
+        cleanup_failed=1
+        fixture_inputs_removed=0
+      }
   fi
   if [ "$MCP_CREATED" = 1 ]; then
     kctl delete mcpserver "$MCP_NAME" -n "$MCP_NS" \
       --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 ||
-      cleanup_failed=1
+      {
+        cleanup_failed=1
+        fixture_inputs_removed=0
+      }
+  fi
+  if ! wait_until 60 "gate-owned Context and McpServer inputs to disappear" \
+    fixture_inputs_absent >/dev/null 2>&1; then
+    cleanup_failed=1
+    fixture_inputs_removed=0
   fi
 
   if [ "$HCC_MUTATED" = 1 ]; then
-    restore_patch="$(jq -cn --arg dnsPolicy "$ORIGINAL_DNS_POLICY" \
-      '{spec:{template:{spec:{dnsPolicy:$dnsPolicy,dnsConfig:null}}}}')"
-    kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=strategic \
-      -p "$restore_patch" >/dev/null 2>&1 || restore_ok=0
-    kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" \
-      --replicas="${ORIGINAL_REPLICAS:-1}" >/dev/null 2>&1 || restore_ok=0
-    kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" \
-      --timeout=240s >/dev/null 2>&1 || restore_ok=0
-    if [ "$restore_ok" = 1 ]; then
-      wait_until 60 "restored HCC DNS, replicas, Ready pod, and /ready endpoint" \
-        hcc_restore_is_verified >/dev/null 2>&1 || restore_ok=0
+    if [ "$fixture_inputs_removed" = 1 ] && [ "$restore_ok" = 1 ]; then
+      restore_patch="$(jq -cn --arg dnsPolicy "$ORIGINAL_DNS_POLICY" \
+        '{spec:{template:{spec:{dnsPolicy:$dnsPolicy,dnsConfig:null}}}}')"
+      kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=strategic \
+        -p "$restore_patch" >/dev/null 2>&1 || restore_ok=0
+      kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" \
+        --replicas="${ORIGINAL_REPLICAS:-1}" >/dev/null 2>&1 || restore_ok=0
+      kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" \
+        --timeout=240s >/dev/null 2>&1 || restore_ok=0
+      if [ "$restore_ok" = 1 ]; then
+        wait_until 60 "restored HCC DNS, replicas, Ready pod, and /ready endpoint" \
+          hcc_restore_is_verified >/dev/null 2>&1 || restore_ok=0
+      fi
+    else
+      restore_ok=0
     fi
   fi
 
@@ -638,63 +673,19 @@ cleanup() {
     [ "$restore_ok" = 1 ] || print_repair_instructions
     [ "$status" = 0 ] && status=1
   fi
+  if [ "$status" = 0 ] && [ "$cleanup_failed" = 0 ] && [ "$restore_ok" = 1 ]; then
+    header "HCC McpServer/Context readiness gate passed"
+    echo "$blocked_probe"
+    echo "$post_context_probe"
+    echo "$final_probe"
+  fi
   exit "$status"
 }
 trap cleanup EXIT
 
 header "HCC readiness during initial McpServer and Context convergence"
 
-repo_root="$(git -C "${SCRIPT_DIR}/../.." rev-parse --show-toplevel)"
-[ -z "$(git -C "$repo_root" status --porcelain --untracked-files=normal)" ] ||
-  die "worktree has uncommitted changes; commit and pre-gate sync before runtime proof"
-expected_worktree_id="$(printf '%s' "$repo_root" | shasum | awk '{print $1}')"
-expected_head="$(git -C "$repo_root" rev-parse HEAD)"
-expected_short_head="$(git -C "$repo_root" rev-parse --short=8 HEAD)"
-expected_branch="$(git -C "$repo_root" branch --show-current)"
-[ -n "$expected_branch" ] ||
-  die "branch-owned runtime proof requires a named branch, not detached HEAD"
-[ -z "${MINIKUBE_PROFILE:-}" ] || [ "$MINIKUBE_PROFILE" = "$E2E_KUBECONTEXT" ] ||
-  die "MINIKUBE_PROFILE ${MINIKUBE_PROFILE} disagrees with context ${E2E_KUBECONTEXT}"
-
-profile_env="${E2E_BRANCH_PROFILE_ENV:-${HOME}/.cache/clerum/minikube-profiles/${E2E_KUBECONTEXT}/profile.env}"
-[ -r "$profile_env" ] ||
-  die "branch-profile helper evidence is missing at ${profile_env}; run a state-writing branch-profile helper action from this worktree"
-[ "$(profile_env_value PROFILE "$profile_env")" = "$E2E_KUBECONTEXT" ] ||
-  die "branch-profile helper output does not select context ${E2E_KUBECONTEXT}"
-[ "$(profile_env_value REPO_DIR "$profile_env")" = "$repo_root" ] ||
-  die "branch-profile helper output belongs to a different worktree"
-[ "$(profile_env_value BRANCH "$profile_env")" = "$expected_branch" ] ||
-  die "branch-profile helper output belongs to a different branch"
-[ "$(profile_env_value SHA_SHORT "$profile_env")" = "$expected_short_head" ] ||
-  die "branch-profile helper output belongs to a different HEAD"
-[ "$(profile_env_value DIRTY "$profile_env")" = false ] ||
-  die "branch-profile helper recorded a dirty worktree; refresh it after committing"
-
-pre_gate_state_root="${E2E_PRE_GATE_STATE_ROOT:-${TMPDIR:-/tmp}/clerum-pre-gate-sync}"
-cluster_fingerprint_file="${pre_gate_state_root}/${expected_worktree_id}/cluster.sha"
-[ -r "$cluster_fingerprint_file" ] ||
-  die "pre-gate fingerprint evidence is missing at ${cluster_fingerprint_file}"
-expected_cluster_fingerprint="$(sed -n '1p' "$cluster_fingerprint_file")"
-printf '%s\n' "$expected_cluster_fingerprint" | grep -Eq '^[0-9a-f]{40}$' ||
-  die "pre-gate fingerprint evidence is malformed"
-[ -n "${E2E_EXPECTED_PRE_GATE_GATE:-}" ] ||
-  die "E2E_EXPECTED_PRE_GATE_GATE must name the gate recorded by the branch-owned pre-gate sync"
-
-sync_marker="$(kctl get configmap clerum-pre-gate-sync-state -n "$HCC_NS" -o json \
-  2>/dev/null)" ||
-  die "cluster has no readable pre-gate sync marker"
-actual_worktree_id="$(jq -r '.data.worktreeId // ""' <<<"$sync_marker")"
-actual_head="$(jq -r '.data.gitHead // ""' <<<"$sync_marker")"
-actual_cluster_fingerprint="$(jq -r '.data.clusterFingerprint // ""' <<<"$sync_marker")"
-actual_gate="$(jq -r '.data.gate // ""' <<<"$sync_marker")"
-[ "$actual_worktree_id" = "$expected_worktree_id" ] ||
-  die "cluster ownership marker does not match this worktree"
-[ "$actual_head" = "$expected_head" ] ||
-  die "cluster HEAD marker ${actual_head:-missing} does not match ${expected_head}"
-[ "$actual_cluster_fingerprint" = "$expected_cluster_fingerprint" ] ||
-  die "cluster fingerprint marker does not match this worktree's last pre-gate sync"
-[ "$actual_gate" = "$E2E_EXPECTED_PRE_GATE_GATE" ] ||
-  die "cluster gate marker ${actual_gate:-missing} does not match expected ${E2E_EXPECTED_PRE_GATE_GATE}"
+require_branch_owned_hcc_gate "$HCC_NS"
 kctl get nodes -o json |
   jq -e 'any(.items[]; .metadata.labels["minikube.k8s.io/name"] != null)' >/dev/null ||
   die "target context is not a minikube cluster"
@@ -720,6 +711,17 @@ ORIGINAL_DNS_CONFIG="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o json |
 HCC_IMAGE="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
   -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].image}')"
 [ -n "$HCC_IMAGE" ] || die "could not resolve the running HCC image"
+HCC_PORT="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o json | jq -r '
+  .spec.template.spec.containers[]? |
+  select(.name == "host-context-controller") as $container |
+  (
+    [$container.env[]? | select(.name == "CONTEXT_MAPPER_PORT") | .value][0] //
+    [$container.ports[]? | select(.name == "http") | .containerPort][0] //
+    empty
+  )
+')"
+[[ "$HCC_PORT" =~ ^[0-9]+$ ]] && [ "$HCC_PORT" -ge 1 ] && [ "$HCC_PORT" -le 65535 ] ||
+  die "could not resolve a valid HCC HTTP port from the Deployment"
 UPSTREAM_DNS_IP="$(kctl get service kube-dns -n kube-system -o jsonpath='{.spec.clusterIP}')"
 [ -n "$UPSTREAM_DNS_IP" ] || die "could not resolve kube-system/kube-dns ClusterIP"
 running_dns_pods="$(kctl get pods -n kube-system -l k8s-app=kube-dns \
@@ -922,8 +924,8 @@ ok "isolated DNS hold proxy is ready and forwards non-fixture UDP/TCP queries to
 
 HCC_MUTATED=1
 kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0 >/dev/null
-kctl wait pod -n "$HCC_NS" -l "app=${HCC_DEPLOY}" --for=delete \
-  --timeout=120s >/dev/null || die "existing HCC pod did not stop"
+wait_until 120 "existing HCC pods to stop" hcc_pods_absent ||
+  die "existing HCC pod did not stop"
 
 CONTEXT_CREATED=1
 kctl apply -f - >/dev/null <<EOF
@@ -1103,7 +1105,4 @@ ok "released MCP convergence created the real runtime and external-egress policy
 ok "Context ingress, mcp-host egress, and rpc-proxy egress policies reflect the latest watch state"
 ok "HCC stayed Ready on the same pod throughout blocked and released convergence"
 
-header "HCC McpServer/Context readiness gate passed"
-echo "$blocked_probe"
-echo "$post_context_probe"
-echo "$final_probe"
+header "HCC McpServer/Context assertions complete; restoring branch-owned runtime"

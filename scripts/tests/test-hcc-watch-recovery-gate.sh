@@ -13,8 +13,9 @@ LOG_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-logs.sh"
 FIXTURE_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"
 MOCK_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/hcc-lock-test.XXXXXX")"
 MOCK_LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/hcc-log-test.XXXXXX")"
+MOCK_PROFILE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/hcc-profile-test.XXXXXX")"
 rm -f "$MOCK_STATE_FILE"
-trap 'rm -f "$MOCK_STATE_FILE" "$MOCK_LOG_FILE"' EXIT
+trap 'rm -f "$MOCK_STATE_FILE" "$MOCK_LOG_FILE"; rm -rf "$MOCK_PROFILE_ROOT"' EXIT
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
@@ -30,14 +31,13 @@ done
 # Literal source-code assertions.
 # shellcheck disable=SC2016
 if grep -Fq 'source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"' "$READINESS_GATE" &&
-   grep -Fq 'require_branch_owned_hcc_gate "$HCC_NS"' "$READINESS_GATE" &&
-   grep -Fq 'sync_marker="$HCC_BRANCH_GATE_SYNC_MARKER"' "$READINESS_GATE" &&
-   ! grep -Fq 'sync_marker="$(kctl get configmap' "$READINESS_GATE" &&
-   grep -Fq "actual_cluster_fingerprint=\"\$(jq -r '.data.clusterFingerprint" "$READINESS_GATE" &&
-   grep -Fq "actual_gate=\"\$(jq -r '.data.gate" "$READINESS_GATE"; then
-  pass "readiness gate reuses one shared branch-owned ownership, HEAD, fingerprint, and gate snapshot"
+   [ "$(grep -Fc 'require_branch_owned_hcc_gate "$HCC_NS"' "$READINESS_GATE")" = 1 ] &&
+   ! grep -Fq 'HCC_BRANCH_GATE_SYNC_MARKER' "$READINESS_GATE" &&
+   ! grep -Fq 'cluster_fingerprint_file=' "$READINESS_GATE" &&
+   ! grep -Fq 'profile_env=' "$READINESS_GATE"; then
+  pass "readiness gate delegates ownership, HEAD, profile, fingerprint, and gate proof once"
 else
-  fail "readiness gate duplicates, bypasses, or splits the branch-owned marker snapshot"
+  fail "readiness gate duplicates, bypasses, or splits the shared branch-owned proof"
 fi
 
 fixture_gate_function="$(sed -n '/^require_branch_owned_hcc_gate() {$/,/^}$/p' "$FIXTURE_HELPER")"
@@ -55,6 +55,132 @@ if [ "$marker_get_count" = 1 ] &&
 else
   fail "shared branch gate can split ownership and HEAD across marker reads"
 fi
+
+# Literal source-code assertions.
+# shellcheck disable=SC2016
+if [[ "$fixture_gate_function" == *'expected_branch="$(git -C "$HCC_BRANCH_GATE_REPO_ROOT" branch --show-current)"'* ]] &&
+   [[ "$fixture_gate_function" == *'[ -n "$expected_branch" ]'* ]] &&
+   [[ "$fixture_gate_function" == *'[ "${MINIKUBE_PROFILE:-}" = "$E2E_KUBECONTEXT" ]'* ]] &&
+   [[ "$fixture_gate_function" == *'profile_env="${E2E_BRANCH_PROFILE_ENV:-'* ]] &&
+   [[ "$fixture_gate_function" == *'profile_env_value PROFILE'* ]] &&
+   [[ "$fixture_gate_function" == *'profile_env_value REPO_DIR'* ]] &&
+   [[ "$fixture_gate_function" == *'profile_env_value BRANCH'* ]] &&
+   [[ "$fixture_gate_function" == *'profile_env_value SHA_SHORT'* ]] &&
+   [[ "$fixture_gate_function" == *'profile_env_value DIRTY'* ]] &&
+   [[ "$fixture_gate_function" == *'cluster_fingerprint_file='* ]] &&
+   [[ "$fixture_gate_function" == *'.data.clusterFingerprint'* ]] &&
+   [[ "$fixture_gate_function" == *'.data.gate'* ]] &&
+   [[ "$fixture_gate_function" == *'E2E_EXPECTED_PRE_GATE_GATE'* ]]; then
+  pass "shared branch gate owns the complete profile, fingerprint, and expected-gate proof"
+else
+  fail "shared branch gate omits a required profile, fingerprint, or expected-gate boundary"
+fi
+
+for gate in "${GATES[@]}"; do
+  marker_reads="$(grep -Fc 'kctl get configmap clerum-pre-gate-sync-state' "$gate")"
+  if [ "$marker_reads" = 0 ] &&
+     ! grep -Fq 'profile_env=' "$gate" &&
+     ! grep -Fq 'cluster_fingerprint_file=' "$gate" &&
+     grep -Fq 'require_branch_owned_hcc_gate' "$gate"; then
+    pass "$(basename "$gate") delegates its branch-owned proof to the shared authority"
+  else
+    fail "$(basename "$gate") duplicates or bypasses the shared branch-owned proof"
+  fi
+done
+
+run_branch_gate_case() (
+  local mode=$1
+  local repo_root="${MOCK_PROFILE_ROOT}/repo"
+  local context="clerum-codex-profile-test-1234abcd"
+  local head="1111111111111111111111111111111111111111"
+  local short_head="11111111"
+  local branch="codex/profile-test"
+  local fingerprint="2222222222222222222222222222222222222222"
+  local marker_fingerprint="$fingerprint"
+  local expected_gate="full"
+  local marker_gate="$expected_gate"
+  local minikube_profile="$context"
+  local profile="$context"
+  local profile_repo="$repo_root"
+  local profile_branch="$branch"
+  local profile_sha="$short_head"
+  local profile_dirty=false
+  local mock_worktree_dirty=""
+  local worktree_id
+  worktree_id="$(printf '%s' "$repo_root" | shasum | awk '{print $1}')"
+
+  case "$mode" in
+    success) ;;
+    detached) branch="" ;;
+    minikube-profile-missing) minikube_profile="" ;;
+    minikube-profile) minikube_profile="clerum-other-profile-1234abcd" ;;
+    profile-name) profile="clerum-other-profile-1234abcd" ;;
+    profile-repo) profile_repo="${repo_root}-other" ;;
+    profile-branch) profile_branch="codex/other" ;;
+    profile-sha) profile_sha="aaaaaaaa" ;;
+    profile-dirty) profile_dirty=true ;;
+    dirty-worktree) mock_worktree_dirty=" M changed.ts" ;;
+    fingerprint) marker_fingerprint="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ;;
+    gate) marker_gate="targeted" ;;
+    *) exit 98 ;;
+  esac
+
+  mkdir -p "${MOCK_PROFILE_ROOT}/state/${worktree_id}"
+  printf '%s\n' "$fingerprint" >"${MOCK_PROFILE_ROOT}/state/${worktree_id}/cluster.sha"
+  printf '%s\n' \
+    "PROFILE=${profile}" \
+    "REPO_DIR=${profile_repo}" \
+    "BRANCH=${profile_branch}" \
+    "SHA_SHORT=${profile_sha}" \
+    "DIRTY=${profile_dirty}" >"${MOCK_PROFILE_ROOT}/profile.env"
+
+  E2E_KUBECONTEXT="$context"
+  MINIKUBE_PROFILE="$minikube_profile"
+  E2E_BRANCH_PROFILE_ENV="${MOCK_PROFILE_ROOT}/profile.env"
+  E2E_PRE_GATE_STATE_ROOT="${MOCK_PROFILE_ROOT}/state"
+  E2E_EXPECTED_PRE_GATE_GATE="$expected_gate"
+  HCC_NS=control-plane
+  SCRIPT_DIR="${ROOT}/scripts/e2e"
+  MOCK_MARKER="$(
+    jq -cn --arg worktreeId "$worktree_id" --arg gitHead "$head" \
+      --arg clusterFingerprint "$marker_fingerprint" --arg gate "$marker_gate" \
+      '{data:{worktreeId:$worktreeId,gitHead:$gitHead,
+        clusterFingerprint:$clusterFingerprint,gate:$gate}}'
+  )"
+
+  is_branch_scoped_e2e_context() { return 0; }
+  die() { exit 97; }
+  git() {
+    local command=$3
+    shift 3
+    case "$command $*" in
+      "rev-parse --show-toplevel") printf '%s\n' "$repo_root" ;;
+      "status --porcelain --untracked-files=normal") printf '%s\n' "$mock_worktree_dirty" ;;
+      "rev-parse HEAD") printf '%s\n' "$head" ;;
+      "rev-parse --short=8 HEAD") printf '%s\n' "$short_head" ;;
+      "branch --show-current") printf '%s\n' "$branch" ;;
+      *) return 96 ;;
+    esac
+  }
+  kctl() { printf '%s\n' "$MOCK_MARKER"; }
+  # shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-fixture.sh
+  source "$FIXTURE_HELPER"
+  require_branch_owned_hcc_gate "$HCC_NS"
+)
+
+if run_branch_gate_case success; then
+  pass "shared branch gate accepts matching branch-profile evidence"
+else
+  fail "shared branch gate rejects matching branch-profile evidence"
+fi
+for case_name in detached minikube-profile-missing minikube-profile profile-name profile-repo profile-branch \
+  profile-sha profile-dirty dirty-worktree fingerprint gate; do
+  if run_branch_gate_case "$case_name" >/dev/null 2>&1; then
+    fail "shared branch gate accepted mismatched ${case_name} evidence"
+  else
+    pass "shared branch gate rejects mismatched ${case_name} evidence"
+  fi
+done
 
 # shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-logs.sh
 source "$LOG_HELPER"
@@ -286,6 +412,43 @@ else
   fail "readiness gate can announce a final pass before cleanup and ownership release finish"
 fi
 
+mcp_cleanup_body="$(sed -n '/^cleanup() {$/,/^}$/p' "$MCP_READINESS_GATE")"
+# shellcheck disable=SC2016
+mcp_input_absence_line="$(
+  grep -nF 'fixture_inputs_absent' <<<"$mcp_cleanup_body" | head -1 | cut -d: -f1
+)"
+# shellcheck disable=SC2016
+mcp_restore_line="$(
+  grep -nF 'restore_patch="$(jq -cn' <<<"$mcp_cleanup_body" | head -1 | cut -d: -f1
+)"
+if [[ "$mcp_cleanup_body" == *'fixture_inputs_removed=0'* ]] &&
+   [[ "$mcp_cleanup_body" == *'if [ "$fixture_inputs_removed" = 1 ] && [ "$restore_ok" = 1 ]; then'* ]] &&
+   [ -n "$mcp_input_absence_line" ] &&
+   [ -n "$mcp_restore_line" ] &&
+   [ "$mcp_input_absence_line" -lt "$mcp_restore_line" ]; then
+  pass "MCP readiness cleanup keeps HCC stopped until fixture input deletion is verified"
+else
+  fail "MCP readiness cleanup can restart HCC after an unverified Context or McpServer deletion"
+fi
+
+mcp_finalize_line="$(
+  grep -nF 'finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok"' \
+    <<<"$mcp_cleanup_body" | head -1 | cut -d: -f1
+)"
+mcp_pass_line="$(
+  grep -nF 'header "HCC McpServer/Context readiness gate passed"' \
+    <<<"$mcp_cleanup_body" | head -1 | cut -d: -f1
+)"
+if [ "$(grep -Fc 'header "HCC McpServer/Context readiness gate passed"' \
+       "$MCP_READINESS_GATE")" = 1 ] &&
+   [ -n "$mcp_finalize_line" ] &&
+   [ -n "$mcp_pass_line" ] &&
+   [ "$mcp_finalize_line" -lt "$mcp_pass_line" ]; then
+  pass "MCP readiness gate announces PASS only after cleanup and lock finalization"
+else
+  fail "MCP readiness gate can announce PASS before cleanup and lock finalization"
+fi
+
 wait_until_body="$(sed -n '/^wait_until() {$/,/^}$/p' "$READINESS_GATE")"
 # Literal source-code assertion.
 # shellcheck disable=SC2016
@@ -296,6 +459,28 @@ if [[ "$wait_until_body" == *'deadline=$(( $(date +%s) + timeout ))'* ]] &&
   pass "readiness gate uses wall-clock deadlines, absence waits, and the deployed HCC port"
 else
   fail "readiness gate retains a command-latency, zero-pod wait, or hard-coded-port edge"
+fi
+
+mcp_wait_until_body="$(sed -n '/^wait_until() {$/,/^}$/p' "$MCP_READINESS_GATE")"
+mcp_port_probe_count="$(grep -Fc 'env "HCC_E2E_PORT=${HCC_PORT}"' "$MCP_READINESS_GATE")"
+mcp_pod_absence_count="$(grep -Fc 'hcc_pods_absent' "$MCP_READINESS_GATE")"
+# Literal source-code assertions.
+# shellcheck disable=SC2016
+if grep -Fq 'source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"' \
+     "$MCP_READINESS_GATE" &&
+   [ "$(grep -Fc 'require_branch_owned_hcc_gate "$HCC_NS"' "$MCP_READINESS_GATE")" = 1 ] &&
+   ! grep -Fq 'HCC_BRANCH_GATE_SYNC_MARKER' "$MCP_READINESS_GATE" &&
+   ! grep -Fq 'cluster_fingerprint_file=' "$MCP_READINESS_GATE" &&
+   ! grep -Fq 'profile_env=' "$MCP_READINESS_GATE" &&
+   [[ "$mcp_wait_until_body" == *'deadline=$(( $(date +%s) + timeout ))'* ]] &&
+   grep -Fq 'hcc_pods_absent' "$MCP_READINESS_GATE" &&
+   ! grep -Fq -- '--for=delete' "$MCP_READINESS_GATE" &&
+   ! grep -Fq 'port: 8081' "$MCP_READINESS_GATE" &&
+   [ "$mcp_port_probe_count" = 3 ] &&
+   [ "$mcp_pod_absence_count" = 3 ]; then
+  pass "MCP readiness gate shares exact-head ownership and uses bounded portable runtime probes"
+else
+  fail "MCP readiness gate duplicates ownership or retains a deadline, pod-absence, or port edge"
 fi
 
 for gate in "${GATES[@]}"; do
