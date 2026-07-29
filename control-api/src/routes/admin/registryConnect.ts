@@ -298,11 +298,9 @@ export function createRegistryConnectRouter(): Router {
           const err = await readErrorCode(regRes)
           const retryAfter = regRes.headers.get('retry-after')
           if (retryAfter) res.set('Retry-After', retryAfter)
-          res
-            .status(429)
-            .json({
-              error: err === 'registration_capacity' ? 'registration_capacity' : 'rate_limited',
-            })
+          res.status(429).json({
+            error: err === 'registration_capacity' ? 'registration_capacity' : 'rate_limited',
+          })
           return
         }
         if (!regRes.ok) {
@@ -313,12 +311,10 @@ export function createRegistryConnectRouter(): Router {
           res.status(502).json({ error: 'registry_integration_error' })
           return
         }
-        const reg = (await regRes.json()) as {
-          deployment_id: string
-          key_id: string
-          claim_token?: unknown
-        }
-        const autoApproved = regRes.status === 201 && typeof reg.claim_token === 'string'
+        // Checked BEFORE parsing the body: a 2xx status this route doesn't
+        // expect (a proxy splash page, an empty 204) may carry a non-JSON
+        // body, and parsing first would throw out of this handler and surface
+        // as a bare 500 instead of the intended 502.
         if (regRes.status !== 201 && regRes.status !== 202) {
           rootLogger.error(
             { event: 'registry_connect_register_unexpected', status: regRes.status },
@@ -327,6 +323,21 @@ export function createRegistryConnectRouter(): Router {
           res.status(502).json({ error: 'registry_integration_error' })
           return
         }
+        const reg = (await regRes.json()) as {
+          deployment_id: string
+          key_id: string
+          claim_token?: unknown
+        }
+        // 201 IS the registry's approval, independent of whether this
+        // particular response body carries a usable token. Deriving the
+        // persisted status from the claim_token's presence/type instead of
+        // the HTTP status would write 'pending' for an already-approved
+        // deployment whenever the token is missing or malformed (partial
+        // rollout, response-rewriting proxy). Task 5's recovery endpoint
+        // refuses a 'pending' row, so that deployment could never recover and
+        // would squat its org name forever.
+        const isApproved = regRes.status === 201
+        const hasClaimToken = typeof reg.claim_token === 'string'
         // Persist BEFORE claiming. The keypair is the only artifact that can
         // recover this deployment (rotate is PoP-gated); claiming first and dying
         // before the write would burn the one-time token AND lose the key.
@@ -338,12 +349,22 @@ export function createRegistryConnectRouter(): Router {
           requestedOrgName,
           contactEmail,
           registryUrl: config.registryUrl,
-          status: autoApproved ? 'approved' : 'pending',
+          status: isApproved ? 'approved' : 'pending',
         })
-        if (!autoApproved) {
+        if (!isApproved) {
           res
             .status(202)
             .json({ state: 'pending', deploymentId: reg.deployment_id, requestedOrgName })
+          return
+        }
+        if (!hasClaimToken) {
+          rootLogger.error(
+            { event: 'registry_connect_auto_claim_missing_token', status: 0 },
+            '201 response carried no usable claim_token; recovery is available'
+          )
+          res
+            .status(202)
+            .json({ state: 'connecting', deploymentId: reg.deployment_id, requestedOrgName })
           return
         }
         const outcome = await redeemClaim({

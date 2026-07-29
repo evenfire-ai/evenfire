@@ -1,5 +1,5 @@
 // test/routes.registryConnect.test.ts
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import express from 'express'
 import { generateKeyPairSync } from 'node:crypto'
 import request from 'supertest'
@@ -405,7 +405,7 @@ describe('register — auto-claim (201)', () => {
   it('claims immediately and reports connected', async () => {
     connDb.getRegistryConnection.mockResolvedValue(null)
     connDb.markConnected.mockResolvedValue(true)
-    routeFetch({
+    const spy = routeFetch({
       '/register': () =>
         json(
           {
@@ -425,6 +425,14 @@ describe('register — auto-claim (201)', () => {
       .expect(200)
     expect(res.body).toMatchObject({ state: 'connected', org: 'acme' })
     expect(res.body.authEnabled).toBe(true)
+    // The claim call must actually carry the token the registry minted, and
+    // be PoP-authenticated — otherwise every auto-approved self-hoster gets a
+    // registry-side 401 and silently falls back to 202 connecting.
+    const [claimUrl, claimInit] = spy.mock.calls[1]!
+    expect(String(claimUrl)).toContain('/claim')
+    expect((claimInit as RequestInit).headers).toHaveProperty('DPoP')
+    const claimBody = JSON.parse(String((claimInit as RequestInit).body))
+    expect(claimBody.claim_token).toBe('tok-abc')
   })
 
   // The mocks return undefined, so `await x` and `void x` produce IDENTICAL
@@ -439,6 +447,13 @@ describe('register — auto-claim (201)', () => {
       await new Promise(r => setImmediate(r))
       events.push('persisted')
     })
+    // vitest's restoreAllMocks() only restores vi.spyOn registrations and
+    // clearAllMocks() only calls mockClear — neither undoes mockImplementation.
+    // If the assertion below FAILS (the exact mutation this test exists to
+    // catch), a bare mockReset() on the next line never runs and this
+    // implementation leaks into every later test in the file. onTestFinished
+    // runs regardless of pass/fail.
+    onTestFinished(() => connDb.upsertPendingConnection.mockReset())
     vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
       const url = String(input)
       if (url.includes('/register')) {
@@ -456,7 +471,6 @@ describe('register — auto-claim (201)', () => {
       .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
       .expect(200)
     expect(events).toEqual(['register', 'persisted', 'claim'])
-    connDb.upsertPendingConnection.mockReset()
   })
 
   it("persists status 'approved' and reports connecting when the claim fails", async () => {
@@ -506,8 +520,31 @@ describe('register — auto-claim (201)', () => {
       .post('/admin/registry/connect/request')
       .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
       .expect(202)
-    const body = JSON.parse(String((spy.mock.calls[0]![1] as RequestInit).body))
+    const init = spy.mock.calls[0]![1] as RequestInit
+    const body = JSON.parse(String(init.body))
     expect(body.deployment_info).toMatchObject({ auto_claim: true })
+    // A hung registry must not pin this request indefinitely.
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  // Registry truth (201 = approved, one-time token burned) must win over the
+  // response body's shape. A partial rollout or a response-rewriting proxy
+  // could return 201 without a usable claim_token; if that persisted
+  // 'pending', Task 5's recovery endpoint would refuse the row forever and
+  // the org name would be squatted permanently.
+  it('201 without a usable claim_token still persists approved and reports connecting', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    routeFetch({
+      '/register': () => json({ deployment_id: 'dep-1', key_id: 'kid-1', status: 'approved' }, 201),
+    })
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(202)
+    expect(res.body).toMatchObject({ state: 'connecting', deploymentId: 'dep-1' })
+    expect(connDb.upsertPendingConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'approved' })
+    )
   })
 })
 
@@ -540,9 +577,23 @@ describe('register — new registry rejections map to distinct codes', () => {
     ['per-IP', 429, { error: 'RATE_LIMITED' }, 429, 'rate_limited'],
     ['bad email', 400, { error: 'invalid_contact_email' }, 400, 'invalid_contact_email'],
     ['blocklist', 400, { error: 'org_blocklisted' }, 400, 'org_blocklisted'],
+    ['unknown 400', 400, { error: 'who_knows' }, 400, 'invalid_request'],
+    // deployment_info is non-empty as of this task (auto_claim capability
+    // declaration), so this registry rejection is newly reachable.
+    [
+      'info too large',
+      400,
+      { error: 'deployment_info_too_large' },
+      400,
+      'deployment_info_too_large',
+    ],
     ['bad pop', 401, { error: 'invalid_pop' }, 502, 'registry_integration_error'],
     ['unknown 409', 409, { error: 'who_knows' }, 502, 'registry_integration_error'],
     ['unparseable 429', 429, 'not json', 429, 'rate_limited'],
+    // Pins the ordering fix: the status check must run BEFORE the body is
+    // parsed, or a non-JSON body on an unexpected 2xx throws out of the
+    // handler and surfaces as a bare 500 instead of the intended 502.
+    ['unexpected 200', 200, 'not json', 502, 'registry_integration_error'],
   ]
   for (const [name, regStatus, regBody, want, code] of cases) {
     it(`${name} → ${want} ${code}`, async () => {
