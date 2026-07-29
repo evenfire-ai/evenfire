@@ -25,6 +25,7 @@ import {
   MCPSERVER_LABEL,
   POLICY_TYPE_LABEL,
 } from './constants'
+import { confirmAuthoritativeMcpServerAbsence } from './mcpServerSafety'
 import {
   ContextCRD,
   EgressBinding,
@@ -36,7 +37,7 @@ import {
 import { applyNetworkPolicy, getErrorCode } from './utils'
 
 type JsonPatchOperation = {
-  op: 'add' | 'replace' | 'remove'
+  op: 'add' | 'replace' | 'remove' | 'test'
   path: string
   value?: unknown
 }
@@ -44,6 +45,7 @@ type JsonPatchOperation = {
 const GROUP = 'clerum.io'
 const VERSION = 'v1alpha1'
 const PLURAL_MCPSERVERS = 'mcpservers'
+const PLURAL_CONTEXTS = 'contexts'
 const CONTEXT_LABEL = 'clerum.io/context'
 const EGRESS_CLASS_LABEL = 'clerum.io/egress-class'
 const RPC_PROXY_EGRESS_POLICY_TYPE = 'rpc-proxy-egress'
@@ -154,6 +156,23 @@ function k8sApiEgressPodSelector(namespace: string): k8s.V1LabelSelector {
   // future controller that genuinely needs Kubernetes API access must opt in
   // with this platform-owned label instead of inheriting namespace-wide egress.
   return { matchLabels: { 'clerum.io/k8s-api-egress': 'true' } }
+}
+
+export interface NetworkPolicyFullReconcileOptions {
+  serverInventoryComplete?: boolean
+  ensureDefaults?: boolean
+  /**
+   * Dynamic authority checks are intentionally callbacks: watch authority can
+   * be lost after the startup snapshot but before an orphan delete begins.
+   * Omitted callbacks preserve the historical authoritative-by-default API.
+   */
+  contextInventoryAuthoritative?: () => boolean
+  serverInventoryAuthoritative?: () => boolean
+  runContextEffect?: (contextId: string, work: () => Promise<void>) => Promise<void>
+  runServerEffect?: (serverName: string, work: () => Promise<void>) => Promise<void>
+  resolveCurrentContext?: (name: string) => ContextCRD | undefined
+  resolveCurrentContextById?: (contextId: string) => ContextCRD | undefined
+  resolveCurrentServer?: (name: string) => McpServerCRD | undefined
 }
 
 export class NetworkPolicyReconciler {
@@ -630,12 +649,16 @@ export class NetworkPolicyReconciler {
   /**
    * Delete all NetworkPolicies for a deleted Context.
    */
-  async reconcileDeleteContext(contextId: string): Promise<void> {
+  async reconcileDeleteContext(
+    contextId: string,
+    deleteAllowed?: () => Promise<boolean>
+  ): Promise<void> {
     console.log(`[NetPol] Context "${contextId}" deleted — removing all policies`)
 
     const policies = await this.listPoliciesForContext(contextId)
     for (const policy of policies) {
       const name = policy.metadata?.name || ''
+      if (deleteAllowed && !(await deleteAllowed())) return
       await this.deletePolicy(name)
     }
 
@@ -643,11 +666,12 @@ export class NetworkPolicyReconciler {
     const egressPolicies = await this.listEgressPoliciesForContext(contextId)
     for (const policy of egressPolicies) {
       const name = policy.metadata?.name || ''
+      if (deleteAllowed && !(await deleteAllowed())) return
       await this.deleteEgressPolicy(name)
     }
 
     // Also delete L2 rpc-proxy egress policies
-    await this.deleteRpcProxyPoliciesForContext(contextId)
+    await this.deleteRpcProxyPoliciesForContext(contextId, deleteAllowed)
   }
 
   /**
@@ -656,7 +680,7 @@ export class NetworkPolicyReconciler {
   async fullReconcile(
     contexts: ContextCRD[],
     servers: McpServerCRD[] = [],
-    options: { serverInventoryComplete?: boolean; ensureDefaults?: boolean } = {}
+    options: NetworkPolicyFullReconcileOptions = {}
   ): Promise<void> {
     console.log(`[NetPol] Running full reconciliation for ${contexts.length} Context(s)`)
 
@@ -664,62 +688,180 @@ export class NetworkPolicyReconciler {
       await this.ensureDefaultPolicies()
     }
 
+    const runContextEffect =
+      options.runContextEffect ?? ((_contextId: string, work: () => Promise<void>) => work())
+    const runServerEffect =
+      options.runServerEffect ?? ((_serverName: string, work: () => Promise<void>) => work())
+
     // Reconcile each context
     for (const context of contexts) {
-      await this.reconcileContext(context)
+      const contextId = context.spec.contextId
+      await runContextEffect(contextId, async () => {
+        const current = options.resolveCurrentContext
+          ? options.resolveCurrentContext(context.name)
+          : context
+        if (!current || current.spec.contextId !== contextId) return
+        await this.reconcileContext(current)
+      })
     }
 
     // Reconcile external egress for all existing servers on startup so a
     // controller restart converges pre-existing McpServer CRDs too.
     for (const server of servers) {
-      await this.reconcileExternalEgress(server)
+      await runServerEffect(server.name, async () => {
+        const current = options.resolveCurrentServer
+          ? options.resolveCurrentServer(server.name)
+          : server
+        if (!current) return
+        await this.reconcileExternalEgress(current)
+      })
     }
 
-    // Delete policies for contexts that no longer exist
-    const desiredContextIds = new Set(contexts.map(c => c.spec.contextId))
-    const allContextPolicies = await this.listAllContextPolicies()
-
-    for (const policy of allContextPolicies) {
-      const contextId = policy.metadata?.labels?.[CONTEXT_LABEL]
-      if (contextId && !desiredContextIds.has(contextId)) {
-        const name = policy.metadata?.name || ''
-        console.log(
-          `[NetPol] Deleting orphaned policy "${name}" (context "${contextId}" no longer exists)`
+    // Authority is monotonic within this pass. Once a watch loses authority,
+    // this inventory snapshot cannot safely become authoritative again even if
+    // the callback flips back before the next delete.
+    let contextAuthorityLost = false
+    let contextAuthorityWarningLogged = false
+    const contextCleanupAuthoritative = (): boolean => {
+      if (
+        !contextAuthorityLost &&
+        options.contextInventoryAuthoritative &&
+        !options.contextInventoryAuthoritative()
+      ) {
+        contextAuthorityLost = true
+      }
+      if (contextAuthorityLost && !contextAuthorityWarningLogged) {
+        contextAuthorityWarningLogged = true
+        console.warn(
+          '[NetPol] Skipping remaining Context policy orphan cleanup because Context inventory authority was lost'
         )
-        await this.deletePolicy(name)
+      }
+      return !contextAuthorityLost
+    }
+
+    const desiredContextIds = new Set(contexts.map(c => c.spec.contextId))
+    const cleanupOrphanedContextPolicies = async (
+      listPolicies: () => Promise<k8s.V1NetworkPolicy[]>,
+      deletePolicy: (name: string) => Promise<void>,
+      describePolicy: (name: string, contextId: string) => string
+    ): Promise<void> => {
+      if (!contextCleanupAuthoritative()) return
+      const policies = await listPolicies()
+      for (const policy of policies) {
+        const contextId = policy.metadata?.labels?.[CONTEXT_LABEL]
+        if (contextId && !desiredContextIds.has(contextId)) {
+          const name = policy.metadata?.name || ''
+          await runContextEffect(contextId, async () => {
+            if (
+              !(await this.contextOrphanDeleteAllowed(
+                contextId,
+                contextCleanupAuthoritative,
+                options.resolveCurrentContextById
+              ))
+            ) {
+              return
+            }
+            console.log(describePolicy(name, contextId))
+            await deletePolicy(name)
+          })
+        }
       }
     }
 
-    // Also clean up orphaned rpc-proxy egress policies
-    const allRpcProxyPolicies = await this.listAllRpcProxyEgressPolicies()
-    for (const policy of allRpcProxyPolicies) {
-      const ctxId = policy.metadata?.labels?.[CONTEXT_LABEL]
-      if (ctxId && !desiredContextIds.has(ctxId)) {
-        const pName = policy.metadata?.name || ''
-        console.log(`[NetPol] Deleting orphaned rpc-proxy egress policy "${pName}"`)
-        await this.deletePolicyInNamespace(config.rpcProxyNamespace, pName)
+    // Delete orphaned Context policies across every L2 lane. Each lane uses
+    // the canonical contextId effect key and rechecks authority plus live CRD
+    // presence immediately before its delete.
+    await cleanupOrphanedContextPolicies(
+      () => this.listAllContextPolicies(),
+      name => this.deletePolicy(name),
+      (name, contextId) =>
+        `[NetPol] Deleting orphaned policy "${name}" (context "${contextId}" no longer exists)`
+    )
+    await cleanupOrphanedContextPolicies(
+      () => this.listAllContextEgressPolicies(),
+      name => this.deleteEgressPolicy(name),
+      name => `[NetPol] Deleting orphaned L2 egress policy "${name}"`
+    )
+    await cleanupOrphanedContextPolicies(
+      () => this.listAllRpcProxyEgressPolicies(),
+      name => this.deletePolicyInNamespace(config.rpcProxyNamespace, name),
+      name => `[NetPol] Deleting orphaned rpc-proxy egress policy "${name}"`
+    )
+
+    let serverAuthorityLost = false
+    let serverAuthorityWarningLogged = false
+    const serverCleanupAuthoritative = (): boolean => {
+      if (
+        !serverAuthorityLost &&
+        options.serverInventoryAuthoritative &&
+        !options.serverInventoryAuthoritative()
+      ) {
+        serverAuthorityLost = true
       }
+      if (serverAuthorityLost && !serverAuthorityWarningLogged) {
+        serverAuthorityWarningLogged = true
+        console.warn(
+          '[NetPol] Skipping remaining external egress orphan cleanup because McpServer inventory authority was lost'
+        )
+      }
+      return !serverAuthorityLost
     }
 
     // Clean up external egress policies for servers that no longer exist.
-    if (options.serverInventoryComplete !== false) {
+    if (options.serverInventoryComplete !== false && serverCleanupAuthoritative()) {
       const desiredServerNames = new Set(servers.map(s => s.name))
       const allExternalPolicies = await this.listAllExternalEgressPolicies()
       for (const policy of allExternalPolicies) {
         const serverName = policy.metadata?.labels?.[MCPSERVER_LABEL]
         if (serverName && !desiredServerNames.has(serverName)) {
           const name = policy.metadata?.name || ''
-          console.log(`[NetPol] Deleting orphaned external egress policy "${name}"`)
-          await this.deletePolicyInNamespace(config.namespace, name)
+          await runServerEffect(serverName, async () => {
+            if (
+              !(await confirmAuthoritativeMcpServerAbsence({
+                inventoryAuthoritative: serverCleanupAuthoritative,
+                resolveCurrent: () => options.resolveCurrentServer?.(serverName),
+                readCurrent: () =>
+                  this.customApi.getNamespacedCustomObject({
+                    group: GROUP,
+                    version: VERSION,
+                    namespace: config.namespace,
+                    plural: PLURAL_MCPSERVERS,
+                    name: serverName,
+                  }),
+              }))
+            ) {
+              return
+            }
+            console.log(`[NetPol] Deleting orphaned external egress policy "${name}"`)
+            await this.deletePolicyInNamespace(config.namespace, name)
+          })
         }
       }
-    } else {
+    } else if (options.serverInventoryComplete === false) {
       console.warn(
         '[NetPol] Skipping external egress orphan cleanup because server inventory is incomplete'
       )
     }
 
     console.log('[NetPol] Full reconciliation complete')
+  }
+
+  private async contextOrphanDeleteAllowed(
+    contextId: string,
+    inventoryAuthoritative: () => boolean,
+    resolveCurrentContextById?: (contextId: string) => ContextCRD | undefined
+  ): Promise<boolean> {
+    if (!inventoryAuthoritative() || resolveCurrentContextById?.(contextId)) return false
+
+    const response = (await this.customApi.listNamespacedCustomObject({
+      group: GROUP,
+      version: VERSION,
+      namespace: config.namespace,
+      plural: PLURAL_CONTEXTS,
+    })) as { items?: Array<{ spec?: { contextId?: string } }> }
+    if ((response.items ?? []).some(context => context.spec?.contextId === contextId)) return false
+
+    return inventoryAuthoritative() && !resolveCurrentContextById?.(contextId)
   }
 
   // ─── L3 External Egress ────────────────────────────────────────────
@@ -989,7 +1131,8 @@ export class NetworkPolicyReconciler {
   async cleanupExternalEgress(
     serverName: string,
     namespace: string,
-    policies?: k8s.V1NetworkPolicy[]
+    policies?: k8s.V1NetworkPolicy[],
+    deleteAllowed?: () => Promise<boolean>
   ): Promise<void> {
     const policiesToDelete =
       policies ?? (await this.listExternalEgressPoliciesForServer(serverName, namespace))
@@ -998,6 +1141,7 @@ export class NetworkPolicyReconciler {
       const name = policy.metadata?.name
       if (!name) continue
       try {
+        if (deleteAllowed && !(await deleteAllowed())) return
         await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
         console.log(`[NetPol] Deleted external egress policy "${name}"`)
       } catch (error: unknown) {
@@ -1090,6 +1234,13 @@ export class NetworkPolicyReconciler {
   ): Promise<void> {
     let currentStatus: McpServerCrdStatus = {}
     let hasStatusObject = false
+    let currentMetadata:
+      | {
+          uid?: string
+          generation?: number
+          resourceVersion?: string
+        }
+      | undefined
 
     try {
       const current = (await this.customApi.getNamespacedCustomObjectStatus({
@@ -1098,7 +1249,15 @@ export class NetworkPolicyReconciler {
         namespace: server.namespace,
         plural: PLURAL_MCPSERVERS,
         name: server.name,
-      })) as { status?: McpServerCrdStatus }
+      })) as {
+        metadata?: {
+          uid?: string
+          generation?: number
+          resourceVersion?: string
+        }
+        status?: McpServerCrdStatus
+      }
+      currentMetadata = current.metadata
       hasStatusObject = typeof current.status === 'object' && current.status !== null
       currentStatus = current.status ?? {}
     } catch (error) {
@@ -1113,6 +1272,19 @@ export class NetworkPolicyReconciler {
         error
       )
       throw error
+    }
+
+    if (
+      (server.uid !== undefined && currentMetadata?.uid !== server.uid) ||
+      (server.generation !== undefined && currentMetadata?.generation !== server.generation)
+    ) {
+      throw new Error(
+        `Refusing to write external egress status for stale McpServer "${server.name}": ` +
+          `expected uid=${String(server.uid)} generation=${String(server.generation)}, ` +
+          `read uid=${String(currentMetadata?.uid)} generation=${String(
+            currentMetadata?.generation
+          )}`
+      )
     }
 
     const nextConditions = this.mergeStatusCondition(currentStatus.conditions ?? [], {
@@ -1138,12 +1310,33 @@ export class NetworkPolicyReconciler {
       return
     }
 
-    const statusPatch: JsonPatchOperation[] = hasStatusObject
+    const identityFence: JsonPatchOperation[] = []
+    const expectedUid = server.uid ?? currentMetadata?.uid
+    if (expectedUid !== undefined) {
+      identityFence.push({ op: 'test', path: '/metadata/uid', value: expectedUid })
+    }
+    const expectedGeneration = server.generation ?? currentMetadata?.generation
+    if (expectedGeneration !== undefined) {
+      identityFence.push({
+        op: 'test',
+        path: '/metadata/generation',
+        value: expectedGeneration,
+      })
+    }
+    if (currentMetadata?.resourceVersion !== undefined) {
+      identityFence.push({
+        op: 'test',
+        path: '/metadata/resourceVersion',
+        value: currentMetadata.resourceVersion,
+      })
+    }
+    const statusMutation: JsonPatchOperation[] = hasStatusObject
       ? [
           { op: 'add', path: '/status/resolvedEgressIPs', value: stableResolvedEgressIPs },
           { op: 'add', path: '/status/conditions', value: nextConditions },
         ]
       : [{ op: 'add', path: '/status', value: nextStatus }]
+    const statusPatch = [...identityFence, ...statusMutation]
 
     try {
       await this.customApi.patchNamespacedCustomObjectStatus({
@@ -1194,6 +1387,20 @@ export class NetworkPolicyReconciler {
       return response.items || []
     } catch (error) {
       console.error('[NetPol] Failed to list all context policies:', error)
+      throw error
+    }
+  }
+
+  /** List all L2 context-allow egress policies in the mcp-host namespace. */
+  private async listAllContextEgressPolicies(): Promise<k8s.V1NetworkPolicy[]> {
+    try {
+      const response = await this.networkingApi.listNamespacedNetworkPolicy({
+        namespace: config.hostNamespace,
+        labelSelector: `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE},${POLICY_TYPE_LABEL}=context-allow`,
+      })
+      return response.items || []
+    } catch (error) {
+      console.error('[NetPol] Failed to list all Context egress policies:', error)
       throw error
     }
   }
@@ -1326,11 +1533,15 @@ export class NetworkPolicyReconciler {
   }
 
   /** Delete all rpc-proxy egress policies for a given context. */
-  private async deleteRpcProxyPoliciesForContext(contextId: string): Promise<void> {
+  private async deleteRpcProxyPoliciesForContext(
+    contextId: string,
+    deleteAllowed?: () => Promise<boolean>
+  ): Promise<void> {
     try {
       const policies = await this.listRpcProxyEgressPoliciesForContext(contextId)
       for (const policy of policies) {
         const name = policy.metadata?.name || ''
+        if (deleteAllowed && !(await deleteAllowed())) return
         await this.deletePolicyInNamespace(config.rpcProxyNamespace, name)
       }
     } catch (error) {

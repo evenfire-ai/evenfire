@@ -171,7 +171,14 @@ function lastPatchedStatusConditions(customApi: MockCustomApi): any[] {
   const calls = customApi.patchNamespacedCustomObjectStatus.mock.calls
   const lastCall = calls[calls.length - 1]?.[0]
   const patch = lastCall?.body
-  const value = Array.isArray(patch) ? patch[0]?.value : undefined
+  const statusAdd = Array.isArray(patch)
+    ? patch.find(
+        candidate =>
+          candidate?.op === 'add' &&
+          (candidate.path === '/status' || candidate.path === '/status/conditions')
+      )
+    : undefined
+  const value = statusAdd?.value
   return Array.isArray(value) ? value : (value?.conditions ?? [])
 }
 
@@ -1115,6 +1122,12 @@ describe('McpServerReconciler remote egress proxy', () => {
   })
 
   describe('reconcileDelete for remote servers', () => {
+    beforeEach(() => {
+      reconciler.setInventoryAuthority(() => ({ known: true, generation: 1 }))
+      reconciler.setResolveCurrentServer(() => undefined)
+      customApi.getNamespacedCustomObject.mockRejectedValue(make404Error())
+    })
+
     it('should clean up ConfigMap via deleteResources', async () => {
       mockHccOwnedRuntimeReads(appsApi, coreApi)
 

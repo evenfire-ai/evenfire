@@ -8,24 +8,31 @@ import { McpServerProvider } from './k8sClient'
 import { registry } from './metrics'
 import { ErrorResponse, McpServersResponse } from './types'
 
+type ReadinessState =
+  | { ready: true; status: 'ready' }
+  | { ready: false; status: 'starting' | 'degraded'; message: string }
+
 export class ContextMapperServer {
   private server: http.Server | null = null
   private provider: McpServerProvider
   private port: number
   private hostReconciler: HostReconciler | null
   private hasDesktopFn: ((hostRef: string) => boolean) | null
+  private providerAuthoritativeFn: () => boolean
   private ready = false
 
   constructor(
     provider: McpServerProvider,
     port: number = config.port,
     hostReconciler?: HostReconciler,
-    hasDesktopFn?: (hostRef: string) => boolean
+    hasDesktopFn?: (hostRef: string) => boolean,
+    providerAuthoritativeFn: () => boolean = () => true
   ) {
     this.provider = provider
     this.port = port
     this.hostReconciler = hostReconciler ?? null
     this.hasDesktopFn = hasDesktopFn ?? null
+    this.providerAuthoritativeFn = providerAuthoritativeFn
   }
 
   /**
@@ -33,6 +40,30 @@ export class ContextMapperServer {
    */
   setReady(ready: boolean): void {
     this.ready = ready
+  }
+
+  private getReadinessState(): ReadinessState {
+    if (!this.ready) {
+      return {
+        ready: false,
+        status: 'starting',
+        message: 'Context mapper is still starting',
+      }
+    }
+
+    try {
+      if (this.providerAuthoritativeFn()) {
+        return { ready: true, status: 'ready' }
+      }
+    } catch (err) {
+      console.error('[Server] Provider authority readiness check failed:', err)
+    }
+
+    return {
+      ready: false,
+      status: 'degraded',
+      message: 'Context mapper provider inventory is not authoritative',
+    }
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -57,15 +88,20 @@ export class ContextMapperServer {
 
     // Health check
     if (req.method === 'GET' && url.pathname === '/health') {
-      this.sendJson(res, 200, { status: 'ok', ready: this.ready })
+      const readiness = this.getReadinessState()
+      this.sendJson(res, 200, {
+        status: 'ok',
+        ready: readiness.ready,
+      })
       return
     }
 
     // Readiness check
     if (req.method === 'GET' && url.pathname === '/ready') {
-      this.sendJson(res, this.ready ? 200 : 503, {
-        status: this.ready ? 'ready' : 'starting',
-        ready: this.ready,
+      const readiness = this.getReadinessState()
+      this.sendJson(res, readiness.ready ? 200 : 503, {
+        status: readiness.status,
+        ready: readiness.ready,
       })
       return
     }
@@ -78,10 +114,11 @@ export class ContextMapperServer {
       return
     }
 
-    if (!this.ready) {
+    const readiness = this.getReadinessState()
+    if (!readiness.ready) {
       this.sendJson(res, 503, {
         error: 'Service Unavailable',
-        message: 'Context mapper is still starting',
+        message: readiness.message,
       })
       return
     }
@@ -198,7 +235,8 @@ export class ContextMapperServer {
       endpoints: {
         'GET /': 'This information page',
         'GET /health': "Health check endpoint - returns { status: 'ok', ready: boolean }",
-        'GET /ready': 'Readiness endpoint - returns 200 only after warm-up completes',
+        'GET /ready':
+          'Readiness endpoint - returns 200 after warm-up while provider inventory is authoritative',
         'GET /api/v1/mcpservers': 'List all McpServer resources',
         'GET /api/v1/mcpservers/context/:contextRef':
           'List McpServers filtered by contextRef (only enabled servers)',
@@ -346,9 +384,12 @@ export class ContextMapperServer {
    * Stop the server.
    */
   stop(): Promise<void> {
+    this.ready = false
+    const activeServer = this.server
+    this.server = null
     return new Promise(resolve => {
-      if (this.server) {
-        this.server.close(() => {
+      if (activeServer) {
+        activeServer.close(() => {
           console.log('[Server] Context Mapper stopped')
           resolve()
         })

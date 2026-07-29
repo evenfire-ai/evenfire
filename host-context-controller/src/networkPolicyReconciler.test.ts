@@ -3,8 +3,17 @@ import * as k8s from '@kubernetes/client-node'
 import * as dns from 'node:dns/promises'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { confirmAuthoritativeMcpServerAbsence } from './mcpServerSafety'
 import { NetworkPolicyReconciler, PUBLIC_EGRESS_EXCEPT_CIDRS } from './networkPolicyReconciler'
 import { ContextCRD, McpServerCRD } from './types'
+
+vi.mock('./mcpServerSafety', async () => {
+  const actual = await vi.importActual<typeof import('./mcpServerSafety')>('./mcpServerSafety')
+  return {
+    ...actual,
+    confirmAuthoritativeMcpServerAbsence: vi.fn(actual.confirmAuthoritativeMcpServerAbsence),
+  }
+})
 
 // Mock config
 vi.mock('./config', () => ({
@@ -36,7 +45,17 @@ function makeMockNetworkingApi() {
 
 function makeMockCustomApi() {
   return {
-    getNamespacedCustomObjectStatus: vi.fn().mockResolvedValue({ status: {} }),
+    getNamespacedCustomObject: vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 })),
+    listNamespacedCustomObject: vi.fn().mockResolvedValue({ items: [] }),
+    getNamespacedCustomObjectStatus: vi.fn().mockResolvedValue({
+      metadata: {
+        generation: 7,
+        resourceVersion: 'status-rv-default',
+      },
+      status: {},
+    }),
     patchNamespacedCustomObjectStatus: vi.fn().mockResolvedValue({}),
   }
 }
@@ -624,6 +643,188 @@ describe('NetworkPolicyReconciler', () => {
       )
     })
 
+    it('identity-fences the status patch and preserves unrelated conditions', async () => {
+      mockCustomApi.getNamespacedCustomObjectStatus.mockResolvedValueOnce({
+        metadata: {
+          uid: 'openai-mcp-uid',
+          generation: 7,
+          resourceVersion: 'status-rv-17',
+        },
+        status: {
+          conditions: [
+            {
+              type: 'RuntimeReady',
+              status: 'True',
+              reason: 'DeploymentAvailable',
+              message: 'Runtime deployment is available',
+              lastTransitionTime: '2026-07-29T00:00:00.000Z',
+              observedGeneration: 7,
+            },
+          ],
+        },
+      })
+      const server: McpServerCRD = {
+        name: 'openai-mcp',
+        namespace: 'mcp-server',
+        uid: 'openai-mcp-uid',
+        generation: 7,
+        spec: {
+          contextRef: 'dev',
+          image: 'openai:latest',
+          transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
+          egressBindings: [{ dns: 'api.openai.com', port: 443 }],
+        },
+      }
+
+      await reconciler.reconcileExternalEgress(server)
+
+      const patch = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body
+      expect(patch.slice(0, 3)).toEqual([
+        { op: 'test', path: '/metadata/uid', value: 'openai-mcp-uid' },
+        { op: 'test', path: '/metadata/generation', value: 7 },
+        { op: 'test', path: '/metadata/resourceVersion', value: 'status-rv-17' },
+      ])
+      expect(patch).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: '/status/conditions',
+            value: expect.arrayContaining([
+              expect.objectContaining({
+                type: 'RuntimeReady',
+                reason: 'DeploymentAvailable',
+              }),
+              expect.objectContaining({
+                type: 'ExternalEgressReady',
+                status: 'True',
+                observedGeneration: 7,
+              }),
+            ]),
+          }),
+        ])
+      )
+    })
+
+    it('fences every identity field read from status when synthetic input omits them', async () => {
+      mockCustomApi.getNamespacedCustomObjectStatus.mockResolvedValueOnce({
+        metadata: {
+          uid: 'openai-mcp-uid',
+          generation: 7,
+          resourceVersion: 'status-rv-17',
+        },
+        status: {},
+      })
+      const server: McpServerCRD = {
+        name: 'openai-mcp',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'openai:latest',
+          transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
+          egressBindings: [{ dns: 'api.openai.com', port: 443 }],
+        },
+      }
+
+      await reconciler.reconcileExternalEgress(server)
+
+      const patch = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body
+      expect(patch.slice(0, 3)).toEqual([
+        { op: 'test', path: '/metadata/uid', value: 'openai-mcp-uid' },
+        { op: 'test', path: '/metadata/generation', value: 7 },
+        { op: 'test', path: '/metadata/resourceVersion', value: 'status-rv-17' },
+      ])
+    })
+
+    it.each([
+      {
+        name: 'UID',
+        currentMetadata: {
+          uid: 'replacement-uid',
+          generation: 7,
+          resourceVersion: 'status-rv-18',
+        },
+      },
+      {
+        name: 'generation',
+        currentMetadata: {
+          uid: 'openai-mcp-uid',
+          generation: 8,
+          resourceVersion: 'status-rv-18',
+        },
+      },
+    ])(
+      'rejects a stale $name before patching external egress status',
+      async ({ currentMetadata }) => {
+        mockCustomApi.getNamespacedCustomObjectStatus.mockResolvedValueOnce({
+          metadata: currentMetadata,
+          status: {},
+        })
+        const server: McpServerCRD = {
+          name: 'openai-mcp',
+          namespace: 'mcp-server',
+          uid: 'openai-mcp-uid',
+          generation: 7,
+          spec: {
+            contextRef: 'dev',
+            image: 'openai:latest',
+            transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
+            egressBindings: [{ dns: 'api.openai.com', port: 443 }],
+          },
+        }
+
+        await expect(reconciler.reconcileExternalEgress(server)).rejects.toThrow(/stale McpServer/i)
+
+        expect(mockCustomApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+      }
+    )
+
+    it('fails closed when a same-generation status writer wins the resourceVersion race', async () => {
+      const conflict = Object.assign(new Error('JSON patch test failed'), { code: 409 })
+      mockCustomApi.getNamespacedCustomObjectStatus.mockResolvedValueOnce({
+        metadata: {
+          uid: 'openai-mcp-uid',
+          generation: 7,
+          resourceVersion: 'status-rv-17',
+        },
+        status: {
+          conditions: [
+            {
+              type: 'RuntimeReady',
+              status: 'True',
+              reason: 'DeploymentAvailable',
+              lastTransitionTime: '2026-07-29T00:00:00.000Z',
+            },
+          ],
+        },
+      })
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockRejectedValueOnce(conflict)
+      const server: McpServerCRD = {
+        name: 'openai-mcp',
+        namespace: 'mcp-server',
+        uid: 'openai-mcp-uid',
+        generation: 7,
+        spec: {
+          contextRef: 'dev',
+          image: 'openai:latest',
+          transport: { type: 'streamableHttp', url: 'http://openai:3000', port: 3000 },
+          egressBindings: [{ dns: 'api.openai.com', port: 443 }],
+        },
+      }
+
+      await expect(reconciler.reconcileExternalEgress(server)).rejects.toBe(conflict)
+
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.arrayContaining([
+            {
+              op: 'test',
+              path: '/metadata/resourceVersion',
+              value: 'status-rv-17',
+            },
+          ]),
+        })
+      )
+    })
+
     it('fails closed when ExternalEgressReady status cannot be written', async () => {
       const statusError = new Error('status update denied')
       mockCustomApi.patchNamespacedCustomObjectStatus.mockRejectedValueOnce(statusError)
@@ -1109,6 +1310,14 @@ describe('NetworkPolicyReconciler', () => {
       await expect((reconciler as any).listAllContextPolicies()).rejects.toThrow('api list denied')
     })
 
+    it('propagates all-context mcp-host egress policy list failures', async () => {
+      mockApi.listNamespacedNetworkPolicy.mockRejectedValueOnce(new Error('api list denied'))
+
+      await expect((reconciler as any).listAllContextEgressPolicies()).rejects.toThrow(
+        'api list denied'
+      )
+    })
+
     it('propagates all external-egress policy list failures', async () => {
       mockApi.listNamespacedNetworkPolicy.mockRejectedValueOnce(new Error('api list denied'))
 
@@ -1119,6 +1328,151 @@ describe('NetworkPolicyReconciler', () => {
   })
 
   describe('startup fullReconcile', () => {
+    it('does not reconcile a queued Context when its current contextId changed', async () => {
+      const queuedContext: ContextCRD = {
+        name: 'mutable-context-resource',
+        namespace: 'mcp-server',
+        spec: { contextId: 'captured-context', mcpServers: [] },
+      }
+      const currentContext: ContextCRD = {
+        ...queuedContext,
+        spec: { contextId: 'replacement-context', mcpServers: [] },
+      }
+      const reconcileContext = vi.spyOn(reconciler, 'reconcileContext').mockResolvedValue(undefined)
+      const effectKeys: string[] = []
+
+      await reconciler.fullReconcile([queuedContext], [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => false,
+        resolveCurrentContext: () => currentContext,
+        runContextEffect: async (contextId, work) => {
+          effectKeys.push(contextId)
+          await work()
+        },
+      })
+
+      expect(effectKeys).toEqual(['captured-context'])
+      expect(reconcileContext).not.toHaveBeenCalled()
+    })
+
+    it('deletes orphaned Context policies in all three namespaces through the canonical contextId effect key', async () => {
+      const effectKeys: string[] = []
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
+          if (namespace === 'mcp-server' && labelSelector?.includes('context-allow')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ctx-orphan-context-old-server',
+                    labels: { 'clerum.io/context': 'orphan-context' },
+                  },
+                },
+              ],
+            }
+          }
+          if (namespace === 'mcp-host' && labelSelector?.includes('context-allow')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ctx-orphan-context-old-server-egress',
+                    labels: { 'clerum.io/context': 'orphan-context' },
+                  },
+                },
+              ],
+            }
+          }
+          if (namespace === 'rpc-proxy' && labelSelector?.includes('rpc-proxy-egress')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'rpc-egress-orphan-context-old-server',
+                    labels: { 'clerum.io/context': 'orphan-context' },
+                  },
+                },
+              ],
+            }
+          }
+          return { items: [] }
+        }
+      )
+
+      await reconciler.fullReconcile([], [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        runContextEffect: async (contextId, work) => {
+          effectKeys.push(contextId)
+          await work()
+        },
+      })
+
+      expect(effectKeys).toEqual(['orphan-context', 'orphan-context', 'orphan-context'])
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'ctx-orphan-context-old-server',
+        namespace: 'mcp-server',
+      })
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'ctx-orphan-context-old-server-egress',
+        namespace: 'mcp-host',
+      })
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'rpc-egress-orphan-context-old-server',
+        namespace: 'rpc-proxy',
+      })
+    })
+
+    it('routes desired and orphan Context policy lanes through canonical contextId effect keys', async () => {
+      const desiredContext: ContextCRD = {
+        name: 'desired-context-resource',
+        namespace: 'mcp-server',
+        spec: { contextId: 'desired-context', mcpServers: [] },
+      }
+      const effectKeys: string[] = []
+      vi.spyOn(reconciler, 'reconcileContext').mockResolvedValue(undefined)
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
+          if (namespace === 'mcp-server' && labelSelector?.includes('context-allow')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ctx-orphan-context-old-server',
+                    labels: { 'clerum.io/context': 'orphan-context' },
+                  },
+                },
+              ],
+            }
+          }
+          if (namespace === 'rpc-proxy' && labelSelector?.includes('rpc-proxy-egress')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'rpc-egress-orphan-context-old-server',
+                    labels: { 'clerum.io/context': 'orphan-context' },
+                  },
+                },
+              ],
+            }
+          }
+          return { items: [] }
+        }
+      )
+
+      await reconciler.fullReconcile([desiredContext], [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        runContextEffect: async (contextId, work) => {
+          effectKeys.push(contextId)
+          await work()
+        },
+      })
+
+      expect(effectKeys).toEqual(['desired-context', 'orphan-context', 'orphan-context'])
+    })
+
     it('reconciles external egress policies for existing servers on startup', async () => {
       const server: McpServerCRD = {
         name: 'airtable-mcp',
@@ -1207,6 +1561,236 @@ describe('NetworkPolicyReconciler', () => {
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
         name: 'ext-egress-old-server-api-example-com-443',
         namespace: 'mcp-server',
+      })
+    })
+
+    it('finishes desired Context reconciliation but stops Context and rpc-proxy orphan cleanup when authority is lost after inventory listing', async () => {
+      const desiredContext: ContextCRD = {
+        name: 'current',
+        namespace: 'mcp-server',
+        spec: { contextId: 'current', mcpServers: [] },
+      }
+      const reconcileContext = vi.spyOn(reconciler, 'reconcileContext').mockResolvedValue(undefined)
+      const contextInventoryAuthoritative = vi
+        .fn()
+        .mockReturnValueOnce(true)
+        .mockReturnValueOnce(false)
+        .mockReturnValue(true)
+
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
+          if (namespace === 'mcp-server' && labelSelector?.includes('policy-type=context-allow')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ctx-deleted-context-old-server',
+                    labels: { 'clerum.io/context': 'deleted-context' },
+                  },
+                },
+              ],
+            }
+          }
+          if (labelSelector?.includes('external-egress')) return { items: [] }
+          return { items: [] }
+        }
+      )
+
+      await reconciler.fullReconcile([desiredContext], [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative,
+      })
+
+      expect(reconcileContext).toHaveBeenCalledWith(desiredContext)
+      expect(contextInventoryAuthoritative).toHaveBeenCalledTimes(2)
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
+        name: 'ctx-deleted-context-old-server',
+        namespace: 'mcp-server',
+      })
+      expect(mockApi.listNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          namespace: 'rpc-proxy',
+          labelSelector: expect.stringContaining('policy-type=rpc-proxy-egress'),
+        })
+      )
+    })
+
+    it('finishes desired McpServer reconciliation but stops external-egress orphan cleanup when authority is lost after inventory listing', async () => {
+      const desiredServer: McpServerCRD = {
+        name: 'current-server',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'current',
+          image: 'current:latest',
+          transport: { type: 'streamableHttp', url: 'http://current:3000', port: 3000 },
+        },
+      }
+      const reconcileExternalEgress = vi
+        .spyOn(reconciler, 'reconcileExternalEgress')
+        .mockResolvedValue(undefined)
+      const serverInventoryAuthoritative = vi
+        .fn()
+        .mockReturnValueOnce(true)
+        .mockReturnValueOnce(false)
+        .mockReturnValue(true)
+
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ labelSelector }: { labelSelector?: string }) => {
+          if (labelSelector?.includes('external-egress')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ext-egress-deleted-server-api-example-com-443',
+                    labels: { 'clerum.io/mcpserver': 'deleted-server' },
+                  },
+                },
+              ],
+            }
+          }
+          return { items: [] }
+        }
+      )
+
+      await reconciler.fullReconcile([], [desiredServer], {
+        ensureDefaults: false,
+        serverInventoryComplete: true,
+        serverInventoryAuthoritative,
+      })
+
+      expect(reconcileExternalEgress).toHaveBeenCalledWith(desiredServer)
+      expect(serverInventoryAuthoritative).toHaveBeenCalledTimes(2)
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
+        name: 'ext-egress-deleted-server-api-example-com-443',
+        namespace: 'mcp-server',
+      })
+    })
+
+    it('does not delete any Context policy lane when a same-contextId CRD exists before its watch event arrives', async () => {
+      mockCustomApi.listNamespacedCustomObject.mockResolvedValue({
+        items: [{ metadata: { name: 'recreated-context' }, spec: { contextId: 'recreated' } }],
+      })
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
+          if (namespace === 'mcp-server' && labelSelector?.includes('context-allow')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ctx-recreated-server',
+                    labels: { 'clerum.io/context': 'recreated' },
+                  },
+                },
+              ],
+            }
+          }
+          if (namespace === 'mcp-host' && labelSelector?.includes('context-allow')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ctx-recreated-server-egress',
+                    labels: { 'clerum.io/context': 'recreated' },
+                  },
+                },
+              ],
+            }
+          }
+          if (namespace === 'rpc-proxy' && labelSelector?.includes('rpc-proxy-egress')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'rpc-egress-recreated-server',
+                    labels: { 'clerum.io/context': 'recreated' },
+                  },
+                },
+              ],
+            }
+          }
+          return { items: [] }
+        }
+      )
+
+      await reconciler.fullReconcile([], [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+      })
+
+      expect(mockCustomApi.listNamespacedCustomObject).toHaveBeenCalled()
+      expect(mockApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          namespace: 'mcp-host',
+          labelSelector: expect.stringContaining('policy-type=context-allow'),
+        })
+      )
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('does not delete external-egress policy when a same-name McpServer exists before ADDED arrives', async () => {
+      mockCustomApi.getNamespacedCustomObject.mockResolvedValue({
+        metadata: { name: 'recreated-server', uid: 'new-uid' },
+      })
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ labelSelector }: { labelSelector?: string }) => {
+          if (labelSelector?.includes('external-egress')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ext-egress-recreated-server-api-example-com-443',
+                    labels: { 'clerum.io/mcpserver': 'recreated-server' },
+                  },
+                },
+              ],
+            }
+          }
+          return { items: [] }
+        }
+      )
+
+      await reconciler.fullReconcile([], [], {
+        ensureDefaults: false,
+        serverInventoryComplete: true,
+        serverInventoryAuthoritative: () => true,
+      })
+
+      expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledWith(
+        expect.objectContaining({ plural: 'mcpservers', name: 'recreated-server' })
+      )
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('delegates startup McpServer orphan safety to the canonical absence helper', async () => {
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ labelSelector }: { labelSelector?: string }) => {
+          if (labelSelector?.includes('external-egress')) {
+            return {
+              items: [
+                {
+                  metadata: {
+                    name: 'ext-egress-orphan-server-api-example-com-443',
+                    labels: { 'clerum.io/mcpserver': 'orphan-server' },
+                  },
+                },
+              ],
+            }
+          }
+          return { items: [] }
+        }
+      )
+
+      await reconciler.fullReconcile([], [], {
+        ensureDefaults: false,
+        serverInventoryComplete: true,
+        serverInventoryAuthoritative: () => true,
+      })
+
+      expect(confirmAuthoritativeMcpServerAbsence).toHaveBeenCalledTimes(1)
+      expect(confirmAuthoritativeMcpServerAbsence).toHaveBeenCalledWith({
+        inventoryAuthoritative: expect.any(Function),
+        resolveCurrent: expect.any(Function),
+        readCurrent: expect.any(Function),
       })
     })
   })

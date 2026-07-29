@@ -113,6 +113,9 @@ async function main(): Promise<void> {
   const hasDesktopFn = hostReconciler
     ? (hostRef: string) => hostReconciler.hasDesktop(hostRef)
     : undefined
+  const providerAuthoritativeFn = watcher
+    ? () => watcher.isReadinessInventoryAuthoritative()
+    : undefined
 
   // Stateless heartbeat consumption — mcp-host pods authenticate their
   // heartbeats toward control-api's /mcp-host facade (control-api is the
@@ -145,16 +148,22 @@ async function main(): Promise<void> {
         `target=${config.controlApiBaseUrl})`
     )
   }
-  server = new ContextMapperServer(provider, config.port, hostReconciler, hasDesktopFn)
+  server = new ContextMapperServer(
+    provider,
+    config.port,
+    hostReconciler,
+    hasDesktopFn,
+    providerAuthoritativeFn
+  )
   await server.start()
 
   // One-shot legacy sweep: delete the static `clerum-channel-reader`
   // Deployment if it still exists in the channels namespace. MUST run
-  // BEFORE provider.start(): provider.start() invokes fullReconcile on
-  // the initial Host list, which creates per-Host channel-reader Deployments
-  // that immediately try to long-poll Telegram. If the static is still
-  // alive at that moment, both pods compete on the same bot's getUpdates
-  // and Telegram 409s one of them. Sweeping first guarantees zero overlap.
+  // BEFORE provider.start(): provider startup establishes the Host inventory
+  // watch and schedules its initial fleet convergence, which creates per-Host
+  // channel-reader Deployments in the background. If the static is still alive
+  // when that work begins, both pods compete on the same bot's getUpdates and
+  // Telegram 409s one of them. Sweeping first guarantees zero overlap.
   // Idempotent; 404 (already gone) is the steady state. See issue #273
   // for the empirical reproduction.
   if (!config.devMode && hostReconciler) {

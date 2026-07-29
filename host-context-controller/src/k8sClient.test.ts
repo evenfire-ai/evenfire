@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as http from 'http'
 import { HostFleetReconcileError } from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
-import { McpServerWatcher, listAllCommunicationChannels, listAllHosts } from './k8sClient'
+import {
+  McpServerWatcher,
+  getContext,
+  listAllCommunicationChannels,
+  listAllGlobalFileSystems,
+  listAllHosts,
+} from './k8sClient'
 import { ContextMapperServer } from './server'
 import type { HostCRD } from './types'
 
@@ -52,8 +58,28 @@ async function requestReadyOverHttp(server: ContextMapperServer): Promise<{
   })
 }
 
+function stubAuthoritativeInventoryWatch(
+  watcher: McpServerWatcher,
+  kind: 'McpServer' | 'Context',
+  effect?: () => void | Promise<void>
+) {
+  const method = kind === 'McpServer' ? 'startMcpServerWatch' : 'startContextWatch'
+  const generationField = kind === 'McpServer' ? 'mcpWatchGeneration' : 'contextWatchGeneration'
+  const requestField = kind === 'McpServer' ? 'mcpWatchRequest' : 'ctxWatchRequest'
+  return vi.spyOn(watcher as any, method).mockImplementation(async () => {
+    const generation = ((watcher as any)[generationField] as number) + 1
+    ;(watcher as any)[generationField] = generation
+    ;(watcher as any)[requestField] = { abort: vi.fn() }
+    await effect?.()
+    return generation
+  })
+}
+
 const mocks = vi.hoisted(() => {
   const listNamespacedCustomObject = vi.fn()
+  const getNamespacedCustomObject = vi
+    .fn()
+    .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 }))
   const ensureDefaultPolicies = vi.fn().mockResolvedValue(undefined)
   const netPolFullReconcile = vi.fn().mockResolvedValue(undefined)
   const serverFullReconcile = vi.fn().mockResolvedValue(undefined)
@@ -65,6 +91,7 @@ const mocks = vi.hoisted(() => {
   const createAdministrativeOutcomeReporter = vi.fn().mockReturnValue(undefined)
   return {
     listNamespacedCustomObject,
+    getNamespacedCustomObject,
     ensureDefaultPolicies,
     netPolFullReconcile,
     serverFullReconcile,
@@ -119,7 +146,8 @@ vi.mock('@kubernetes/client-node', () => {
             if (request.plural === 'hosts') mocks.hostListCallOptions(options)
             const response = await mocks.listNamespacedCustomObject(request)
             if (
-              request.plural === 'hosts' &&
+              request.plural &&
+              ['hosts', 'mcpservers', 'contexts'].includes(request.plural) &&
               response &&
               typeof response === 'object' &&
               !('metadata' in response)
@@ -129,11 +157,17 @@ vi.mock('@kubernetes/client-node', () => {
               // production missing-resourceVersion failure path.
               return {
                 ...response,
-                metadata: { resourceVersion: 'test-host-collection-rv' },
+                metadata: {
+                  resourceVersion:
+                    request.plural === 'hosts'
+                      ? 'test-host-collection-rv'
+                      : `test-${request.plural}-collection-rv`,
+                },
               }
             }
             return response
           },
+          getNamespacedCustomObject: mocks.getNamespacedCustomObject,
         }
       }
       return {}
@@ -158,6 +192,8 @@ vi.mock('./reconciler', () => ({
     reconcile = vi.fn()
     reconcileDelete = vi.fn()
     getStatus = vi.fn()
+    setInventoryAuthority = vi.fn()
+    setResolveCurrentServer = vi.fn()
   },
 }))
 
@@ -208,6 +244,7 @@ vi.mock('./networkPolicyReconciler', () => ({
     fullReconcile = mocks.netPolFullReconcile
     reconcileExternalEgress = vi.fn()
     reconcileContext = vi.fn()
+    reconcileDeleteContext = vi.fn()
     cleanupExternalEgress = vi.fn()
   },
 }))
@@ -240,7 +277,7 @@ describe('McpServerWatcher startup', () => {
     mocks.watch.mockReset().mockResolvedValue({ abort: vi.fn() })
     mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
       if (plural === 'mcpservers') return { items: [] }
-      if (plural === 'contexts') throw new Error('context discovery failed')
+      if (plural === 'contexts') return { items: [] }
       if (plural === 'hosts') return { items: [] }
       if (plural === 'sharedfilesystems') return { items: [] }
       if (plural === 'communicationchannels')
@@ -266,24 +303,340 @@ describe('McpServerWatcher startup', () => {
     })
   })
 
-  it('ensures default policies even when initial Context discovery fails', async () => {
+  it('ensures baseline policies before opening any inventory watch', async () => {
     const watcher = new McpServerWatcher()
-    vi.spyOn(watcher as any, 'startMcpServerWatch').mockImplementation(async () => undefined)
-    vi.spyOn(watcher as any, 'startContextWatch').mockImplementation(async () => undefined)
-    vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockImplementation(async () => undefined)
-    vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockImplementation(async () => undefined)
-    // #281 (Task 9): startCommunicationChannelWatch is wired into start() — stub to prevent the real watch from firing.
-    vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockImplementation(
-      async () => undefined
-    )
 
     await watcher.start()
 
     expect(mocks.ensureDefaultPolicies).toHaveBeenCalledTimes(1)
-    expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
-    await vi.waitFor(() => expect(mocks.serverFullReconcile).toHaveBeenCalledWith([]))
+    expect(mocks.ensureDefaultPolicies.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.watch.mock.invocationCallOrder[0]
+    )
+    await vi.waitFor(() =>
+      expect(mocks.serverFullReconcile).toHaveBeenCalledWith([], {
+        runEffect: expect.any(Function),
+      })
+    )
     expect(mocks.hostFullReconcile).toHaveBeenCalledWith([])
     expect(mocks.sfsFullReconcile).toHaveBeenCalledWith([])
+    await watcher.stop()
+  })
+
+  it('fails safe bootstrap and keeps readiness unavailable when baseline NetworkPolicies fail', async () => {
+    const policyError = new Error('baseline NetworkPolicies unavailable')
+    mocks.ensureDefaultPolicies.mockRejectedValueOnce(policyError)
+    const watcher = new McpServerWatcher()
+    const server = new ContextMapperServer(watcher, 0)
+    await server.start()
+    const bootstrap = watcher.start().then(() => server.setReady(true))
+
+    try {
+      await expect(bootstrap).rejects.toThrow(policyError)
+      const ready = await requestReadyOverHttp(server)
+      expect(ready.statusCode).toBe(503)
+      expect(JSON.parse(ready.body)).toEqual({ status: 'starting', ready: false })
+      expect(mocks.watch).not.toHaveBeenCalled()
+      expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
+      expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+    } finally {
+      await server.stop()
+      await watcher.stop()
+    }
+  })
+
+  it('starts McpServer and Context watches from their inventory resourceVersions', async () => {
+    const watcher = new McpServerWatcher()
+
+    await (watcher as any).startMcpServerWatch('mcp-inventory-rv')
+    await (watcher as any).startContextWatch('context-inventory-rv')
+
+    expect(mocks.watch).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('/mcpservers'),
+      { resourceVersion: 'mcp-inventory-rv' },
+      expect.any(Function),
+      expect.any(Function)
+    )
+    expect(mocks.watch).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('/contexts'),
+      { resourceVersion: 'context-inventory-rv' },
+      expect.any(Function),
+      expect.any(Function)
+    )
+    watcher.stop()
+  })
+
+  it.each([
+    ['McpServer', 'mcpservers'],
+    ['Context', 'contexts'],
+  ] as const)(
+    'rejects safe bootstrap when the %s inventory LIST is unavailable',
+    async (_kind, failingPlural) => {
+      mocks.listNamespacedCustomObject.mockImplementation(
+        async ({ plural }: { plural: string }) => {
+          if (plural === failingPlural) throw new Error(`${plural} inventory unavailable`)
+          if (plural === 'communicationchannels') {
+            return { metadata: { resourceVersion: 'cc-rv' }, items: [] }
+          }
+          return { items: [] }
+        }
+      )
+      const watcher = new McpServerWatcher()
+
+      await expect(watcher.start()).rejects.toThrow(`${failingPlural} inventory unavailable`)
+
+      expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
+      expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+      await watcher.stop()
+    }
+  )
+
+  it.each([
+    ['McpServer', 'mcpservers'],
+    ['Context', 'contexts'],
+  ] as const)(
+    'rejects safe bootstrap when the %s collection resourceVersion is missing',
+    async (kind, missingPlural) => {
+      mocks.listNamespacedCustomObject.mockImplementation(
+        async ({ plural }: { plural: string }) => {
+          if (plural === missingPlural) return { metadata: {}, items: [] }
+          if (plural === 'communicationchannels') {
+            return { metadata: { resourceVersion: 'cc-rv' }, items: [] }
+          }
+          return { items: [] }
+        }
+      )
+      const watcher = new McpServerWatcher()
+
+      await expect(watcher.start()).rejects.toThrow(`${kind} snapshot missing resourceVersion`)
+
+      expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
+      expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+      await watcher.stop()
+    }
+  )
+
+  it('replays McpServer and Context changes from the inventory resourceVersion before convergence', async () => {
+    const staleServer = {
+      metadata: {
+        name: 'gap-server',
+        namespace: 'mcp-server',
+        uid: 'gap-server-uid',
+        generation: 1,
+      },
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/gap-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    }
+    const staleContext = {
+      metadata: { name: 'gap-context', namespace: 'mcp-server' },
+      spec: { contextId: 'gap-context', mcpServers: [] },
+    }
+    const currentContext = {
+      metadata: { name: 'gap-context', namespace: 'mcp-server' },
+      spec: { contextId: 'gap-context', mcpServers: ['current-server'] },
+    }
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'mcpservers') {
+        return { metadata: { resourceVersion: 'opaque/mcp:101' }, items: [staleServer] }
+      }
+      if (plural === 'contexts') {
+        return { metadata: { resourceVersion: 'opaque/context:202' }, items: [staleContext] }
+      }
+      if (plural === 'communicationchannels') {
+        return { metadata: { resourceVersion: 'cc-rv' }, items: [] }
+      }
+      return { items: [] }
+    })
+    mocks.watch.mockImplementation(async (path, options, callback) => {
+      if (path.endsWith('/mcpservers')) {
+        expect(options).toEqual({ resourceVersion: 'opaque/mcp:101' })
+        await callback('DELETED', staleServer)
+      }
+      if (path.endsWith('/contexts')) {
+        expect(options).toEqual({ resourceVersion: 'opaque/context:202' })
+        await callback('MODIFIED', currentContext)
+      }
+      return { abort: vi.fn() }
+    })
+    const watcher = new McpServerWatcher()
+
+    await watcher.start()
+
+    await vi.waitFor(() => {
+      expect(mocks.serverFullReconcile).toHaveBeenCalledWith([], {
+        runEffect: expect.any(Function),
+      })
+      expect(mocks.netPolFullReconcile).toHaveBeenCalledWith(
+        [expect.objectContaining({ spec: currentContext.spec })],
+        [],
+        expect.objectContaining({
+          serverInventoryComplete: true,
+          ensureDefaults: false,
+          contextInventoryAuthoritative: expect.any(Function),
+          serverInventoryAuthoritative: expect.any(Function),
+        })
+      )
+    })
+    expect(watcher.getAllServers()).toEqual([])
+    await watcher.stop()
+  })
+
+  it('recovers a closed McpServer watch through a fresh authoritative snapshot', async () => {
+    vi.useFakeTimers()
+    const callbacks: Array<(type: string, apiObj: any) => Promise<void>> = []
+    const doneCallbacks: Array<(error: Error | null) => void> = []
+    const watchQueries: unknown[] = []
+    mocks.watch.mockImplementation(async (path, options, callback, done) => {
+      if (path.endsWith('/mcpservers')) {
+        callbacks.push(callback)
+        doneCallbacks.push(done)
+        watchQueries.push(options)
+      }
+      return { abort: vi.fn() }
+    })
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'mcpservers') {
+        return {
+          metadata: { resourceVersion: 'mcp-recovery-rv' },
+          items: [
+            {
+              metadata: {
+                name: 'recovered-server',
+                namespace: 'mcp-server',
+                uid: 'recovered-uid',
+                generation: 1,
+              },
+              spec: {
+                contextRef: 'default',
+                image: 'clerum/recovered:test',
+                transport: { type: 'streamableHttp' as const, port: 3000 },
+              },
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    await (watcher as any).restartMcpServerWatch({
+      resourceVersion: 'mcp-start-rv',
+      servers: [],
+    })
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
+
+    doneCallbacks[0](Object.assign(new Error('resource version expired'), { statusCode: 410 }))
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+    await vi.advanceTimersByTimeAsync(5000)
+    await vi.waitFor(() => expect(watchQueries).toHaveLength(2))
+
+    expect(watchQueries).toEqual([
+      { resourceVersion: 'mcp-start-rv' },
+      { resourceVersion: 'mcp-recovery-rv' },
+    ])
+    expect(watcher.getAllServers()).toEqual([expect.objectContaining({ name: 'recovered-server' })])
+    expect(callbacks).toHaveLength(2)
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
+    await watcher.stop()
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+  })
+
+  it('ignores a late McpServer callback from a retired watch generation', async () => {
+    const callbacks: Array<(type: string, apiObj: any) => Promise<void>> = []
+    mocks.watch.mockImplementation(async (path, _options, callback) => {
+      if (path.endsWith('/mcpservers')) callbacks.push(callback)
+      return { abort: vi.fn() }
+    })
+    const watcher = new McpServerWatcher()
+    await (watcher as any).restartMcpServerWatch({
+      resourceVersion: 'mcp-old-rv',
+      servers: [],
+    })
+    await (watcher as any).restartMcpServerWatch({
+      resourceVersion: 'mcp-new-rv',
+      servers: [
+        {
+          name: 'current-server',
+          namespace: 'mcp-server',
+          uid: 'current-uid',
+          generation: 1,
+          spec: {
+            contextRef: 'default',
+            image: 'clerum/current:test',
+            transport: { type: 'streamableHttp' as const, port: 3000 },
+          },
+        },
+      ],
+    })
+
+    await callbacks[0]('ADDED', {
+      metadata: {
+        name: 'stale-server',
+        namespace: 'mcp-server',
+        uid: 'stale-uid',
+        generation: 1,
+      },
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/stale:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    })
+
+    expect(watcher.getAllServers().map(server => server.name)).toEqual(['current-server'])
+    await watcher.stop()
+  })
+
+  it('recovers a closed Context watch through a fresh authoritative snapshot', async () => {
+    vi.useFakeTimers()
+    const doneCallbacks: Array<(error: Error | null) => void> = []
+    const watchQueries: unknown[] = []
+    mocks.watch.mockImplementation(async (path, options, _callback, done) => {
+      if (path.endsWith('/contexts')) {
+        doneCallbacks.push(done)
+        watchQueries.push(options)
+      }
+      return { abort: vi.fn() }
+    })
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'contexts') {
+        return {
+          metadata: { resourceVersion: 'context-recovery-rv' },
+          items: [
+            {
+              metadata: { name: 'recovered-context', namespace: 'mcp-server' },
+              spec: { contextId: 'recovered-context', mcpServers: [] },
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    await (watcher as any).restartContextWatch({
+      resourceVersion: 'context-start-rv',
+      contexts: [],
+    })
+
+    doneCallbacks[0](Object.assign(new Error('resource version expired'), { statusCode: 410 }))
+    await vi.advanceTimersByTimeAsync(5000)
+    await vi.waitFor(() => expect(watchQueries).toHaveLength(2))
+
+    expect(watchQueries).toEqual([
+      { resourceVersion: 'context-start-rv' },
+      { resourceVersion: 'context-recovery-rv' },
+    ])
+    expect((watcher as any).contexts.get('recovered-context')).toEqual(
+      expect.objectContaining({ name: 'recovered-context' })
+    )
+    await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalled())
+    await watcher.stop()
   })
 
   it('completes safe bootstrap while every initial convergence lane continues in background', async () => {
@@ -303,12 +656,8 @@ describe('McpServerWatcher startup', () => {
       return { items: [] }
     })
     const watcher = new McpServerWatcher()
-    const startMcpServerWatch = vi
-      .spyOn(watcher as any, 'startMcpServerWatch')
-      .mockResolvedValue(undefined)
-    const startContextWatch = vi
-      .spyOn(watcher as any, 'startContextWatch')
-      .mockResolvedValue(undefined)
+    const startMcpServerWatch = stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+    const startContextWatch = stubAuthoritativeInventoryWatch(watcher, 'Context')
     const startSharedFileSystemWatch = vi
       .spyOn(watcher as any, 'startSharedFileSystemWatch')
       .mockResolvedValue(undefined)
@@ -402,11 +751,11 @@ describe('McpServerWatcher startup', () => {
       return { items: [] }
     })
     const watcher = new McpServerWatcher()
-    vi.spyOn(watcher as any, 'startMcpServerWatch').mockImplementation(async () => {
+    stubAuthoritativeInventoryWatch(watcher, 'McpServer', () => {
       ;(watcher as any).servers.clear()
       ;(watcher as any).servers.set(currentServer.name, currentServer)
     })
-    vi.spyOn(watcher as any, 'startContextWatch').mockImplementation(async () => {
+    stubAuthoritativeInventoryWatch(watcher, 'Context', () => {
       ;(watcher as any).contexts.clear()
       ;(watcher as any).contexts.set(currentContext.name, currentContext)
     })
@@ -423,11 +772,19 @@ describe('McpServerWatcher startup', () => {
     await watcher.start()
 
     await vi.waitFor(() => {
-      expect(mocks.serverFullReconcile).toHaveBeenCalledWith([currentServer])
-      expect(mocks.netPolFullReconcile).toHaveBeenCalledWith([currentContext], [currentServer], {
-        serverInventoryComplete: true,
-        ensureDefaults: false,
+      expect(mocks.serverFullReconcile).toHaveBeenCalledWith([currentServer], {
+        runEffect: expect.any(Function),
       })
+      expect(mocks.netPolFullReconcile).toHaveBeenCalledWith(
+        [currentContext],
+        [currentServer],
+        expect.objectContaining({
+          serverInventoryComplete: true,
+          ensureDefaults: false,
+          contextInventoryAuthoritative: expect.any(Function),
+          serverInventoryAuthoritative: expect.any(Function),
+        })
+      )
       expect(mocks.sfsFullReconcile).toHaveBeenCalledWith([currentSfs])
       expect(gfsFullReconcile).toHaveBeenCalledWith([currentGfs])
     })
@@ -435,7 +792,111 @@ describe('McpServerWatcher startup', () => {
     watcher.stop()
   })
 
-  it('queues a McpServer watch reconciliation behind an in-flight initial fleet pass', async () => {
+  it('updates discovery without re-reconciling a status-only McpServer watch event', async () => {
+    const previousServer = {
+      name: 'status-server',
+      namespace: 'mcp-server',
+      uid: 'status-server-uid',
+      generation: 7,
+      annotations: { 'clerum.io/recipe': 'status-recipe' },
+      labels: { 'clerum.io/workload': 'status-server' },
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/status-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    }
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).servers.set(previousServer.name, previousServer)
+    const changed = vi.fn()
+    watcher.onChange(changed)
+    const reconciler = (watcher as any).reconciler
+    const netPol = (watcher as any).netPolReconciler
+    const callback = (watcher as any).getMcpServerWatchCallback()
+
+    await callback('MODIFIED', {
+      metadata: {
+        name: previousServer.name,
+        namespace: previousServer.namespace,
+        uid: previousServer.uid,
+        generation: previousServer.generation,
+        annotations: previousServer.annotations,
+        labels: previousServer.labels,
+      },
+      spec: previousServer.spec,
+      status: { conditions: [{ type: 'Ready', status: 'True' }] },
+    })
+
+    expect(watcher.getAllServers()[0]?.status).toEqual({
+      conditions: [{ type: 'Ready', status: 'True' }],
+    })
+    expect(changed).toHaveBeenCalledOnce()
+    expect(reconciler.reconcile).not.toHaveBeenCalled()
+    expect(netPol.reconcileExternalEgress).not.toHaveBeenCalled()
+
+    await callback('MODIFIED', {
+      metadata: {
+        name: previousServer.name,
+        namespace: previousServer.namespace,
+        uid: previousServer.uid,
+        generation: 8,
+        annotations: previousServer.annotations,
+        labels: previousServer.labels,
+      },
+      spec: { ...previousServer.spec, image: 'clerum/status-server:next' },
+    })
+    expect(reconciler.reconcile).toHaveBeenCalledOnce()
+    await watcher.stop()
+  })
+
+  it('uses only the bounded fleet pass for the cold-start Host snapshot', async () => {
+    const initialHosts = Array.from({ length: 50 }, (_, index) => ({
+      metadata: {
+        name: `initial-host-${index}`,
+        namespace: 'mcp-host',
+        uid: `initial-host-uid-${index}`,
+        generation: 1,
+      },
+      spec: {
+        host: `initial-host-${index}`,
+        contextRef: 'default',
+        secretRef: 'host-secret',
+      },
+    }))
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'hosts') {
+        return {
+          metadata: { resourceVersion: 'initial-host-rv' },
+          items: initialHosts,
+        }
+      }
+      if (plural === 'communicationchannels') {
+        return { metadata: { resourceVersion: 'initial-cc-rv' }, items: [] }
+      }
+      return { items: [] }
+    })
+    const watcher = new McpServerWatcher()
+    const urgentReconcile = vi.spyOn(watcher.getHostReconciler(), 'reconcile')
+
+    await watcher.start()
+    await vi.waitFor(() =>
+      expect(mocks.hostFullReconcile).toHaveBeenCalledWith(
+        initialHosts.map(host =>
+          expect.objectContaining({
+            name: host.metadata.name,
+            generation: host.metadata.generation,
+          })
+        )
+      )
+    )
+    await flushMicrotasks()
+
+    expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
+    expect(urgentReconcile).not.toHaveBeenCalled()
+    await watcher.stop()
+  })
+
+  it('admits a McpServer watch reconciliation while initial convergence is blocked on another server', async () => {
     const staleServer = {
       name: 'stale-server',
       namespace: 'mcp-server',
@@ -458,14 +919,21 @@ describe('McpServerWatcher startup', () => {
     const releaseEgress = deferred()
     const reconciliationOrder: string[] = []
     const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
     ;(watcher as any).servers.set(staleServer.name, staleServer)
     const netPol = (watcher as any).netPolReconciler
     netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
       egressStarted.resolve(undefined)
       await releaseEgress.promise
     })
-    mocks.serverFullReconcile.mockImplementationOnce(async () => {
-      reconciliationOrder.push('initial')
+    mocks.serverFullReconcile.mockImplementationOnce(async (servers, options) => {
+      await Promise.all(
+        servers.map((selected: { name: string }) =>
+          options.runEffect(selected.name, async () => {
+            reconciliationOrder.push('initial')
+          })
+        )
+      )
     })
     const reconciler = (watcher as any).reconciler
     reconciler.reconcile.mockImplementationOnce(async () => {
@@ -477,19 +945,82 @@ describe('McpServerWatcher startup', () => {
     const watchConvergence = (watcher as any).getMcpServerWatchCallback()('MODIFIED', currentServer)
 
     await flushMicrotasks()
-    expect(reconciler.reconcile).not.toHaveBeenCalled()
+    expect(reconciler.reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'current-server' })
+    )
 
     releaseEgress.resolve(undefined)
     await Promise.all([convergence, watchConvergence])
 
-    expect(reconciliationOrder).toEqual(['initial', 'watch'])
+    expect(reconciliationOrder).toEqual(['watch', 'initial'])
     expect(reconciler.reconcile).toHaveBeenLastCalledWith(
       expect.objectContaining({ name: 'current-server' })
     )
     await watcher.stop()
   })
 
-  it('queues a Context watch reconciliation behind an in-flight initial policy pass', async () => {
+  it('admits an initial server without egress while another initial server waits on DNS', async () => {
+    const dnsBlockedServer = {
+      name: 'dns-blocked-server',
+      namespace: 'mcp-server',
+      uid: 'dns-blocked-server-uid',
+      generation: 1,
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/dns-blocked-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        egressBindings: [{ dns: 'blocked.example', port: 443 }],
+      },
+    }
+    const independentServer = {
+      name: 'independent-server',
+      namespace: 'mcp-server',
+      uid: 'independent-server-uid',
+      generation: 1,
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/independent-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    }
+    const egressStarted = deferred()
+    const releaseEgress = deferred()
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).servers.set(dnsBlockedServer.name, dnsBlockedServer)
+    ;(watcher as any).servers.set(independentServer.name, independentServer)
+    const netPol = (watcher as any).netPolReconciler
+    const reconciler = (watcher as any).reconciler
+    netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
+      egressStarted.resolve(undefined)
+      await releaseEgress.promise
+    })
+    mocks.serverFullReconcile.mockImplementationOnce(
+      async (
+        servers: Array<typeof dnsBlockedServer | typeof independentServer>,
+        options: { runEffect: (serverName: string, work: () => Promise<void>) => Promise<void> }
+      ) => {
+        await Promise.all(
+          servers.map(server => options.runEffect(server.name, () => reconciler.reconcile(server)))
+        )
+      }
+    )
+
+    const convergence = (watcher as any).runInitialMcpServerConvergence()
+    await egressStarted.promise
+    await flushMicrotasks()
+
+    expect(reconciler.reconcile).toHaveBeenCalledWith(independentServer)
+    expect(reconciler.reconcile).not.toHaveBeenCalledWith(dnsBlockedServer)
+
+    releaseEgress.resolve(undefined)
+    await convergence
+
+    expect(reconciler.reconcile).toHaveBeenCalledWith(dnsBlockedServer)
+    await watcher.stop()
+  })
+
+  it('admits a Context watch reconciliation while initial policy convergence is blocked', async () => {
     const staleContext = {
       name: 'stale-context',
       namespace: 'mcp-server',
@@ -503,6 +1034,8 @@ describe('McpServerWatcher startup', () => {
     const releaseFullReconcile = deferred()
     const reconciliationOrder: string[] = []
     const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextCacheSynced = true
     ;(watcher as any).contexts.set(staleContext.name, staleContext)
     mocks.netPolFullReconcile.mockImplementationOnce(async () => {
       fullReconcileStarted.resolve(undefined)
@@ -520,30 +1053,370 @@ describe('McpServerWatcher startup', () => {
       contextWatchCallback = callback
       return { abort: vi.fn() }
     })
-    await (watcher as any).startContextWatch()
+    await (watcher as any).startContextWatch('context-queue-rv')
 
     const convergence = (watcher as any).runInitialNetworkPolicyConvergence(true)
     await fullReconcileStarted.promise
     const watchConvergence = contextWatchCallback!('MODIFIED', currentContext)
 
     await flushMicrotasks()
-    expect(netPol.reconcileContext).not.toHaveBeenCalled()
+    expect(netPol.reconcileContext).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'current-context' })
+    )
 
     releaseFullReconcile.resolve(undefined)
     await Promise.all([convergence, watchConvergence])
 
-    expect(reconciliationOrder).toEqual(['initial', 'watch'])
+    expect(reconciliationOrder).toEqual(['watch', 'initial'])
     expect(netPol.reconcileContext).toHaveBeenLastCalledWith(
       expect.objectContaining({ name: 'current-context' })
     )
     await watcher.stop()
   })
 
+  it('makes a recreated Context the last writer after same-contextId orphan cleanup', async () => {
+    const contextName = 'recreated-context-resource'
+    const contextId = 'recreated-context'
+    const recreatedContext = {
+      metadata: { name: contextName, namespace: 'mcp-server' },
+      spec: {
+        contextId,
+        description: 'recreated',
+        mcpServers: [],
+      },
+    }
+    const orphanCleanupStarted = deferred()
+    const releaseOrphanCleanup = deferred()
+    const order: string[] = []
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextCacheSynced = true
+    mocks.netPolFullReconcile.mockImplementationOnce(
+      async (
+        _contexts: unknown[],
+        _servers: unknown[],
+        options: {
+          runContextEffect: (effectContextId: string, work: () => Promise<void>) => Promise<void>
+        }
+      ) => {
+        await options.runContextEffect(contextId, async () => {
+          orphanCleanupStarted.resolve(undefined)
+          await releaseOrphanCleanup.promise
+          order.push('orphan-delete')
+        })
+      }
+    )
+    const netPol = (watcher as any).netPolReconciler
+    netPol.reconcileContext.mockImplementationOnce(async () => {
+      order.push('live-recreate')
+    })
+    let contextWatchCallback:
+      | ((type: string, apiObj: typeof recreatedContext) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback) => {
+      contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    await (watcher as any).startContextWatch('recreated-context-rv')
+
+    const convergence = (watcher as any).runInitialNetworkPolicyConvergence()
+    await orphanCleanupStarted.promise
+    const recreation = contextWatchCallback!('ADDED', recreatedContext)
+    await flushMicrotasks()
+
+    expect(netPol.reconcileContext).not.toHaveBeenCalled()
+
+    releaseOrphanCleanup.resolve(undefined)
+    await Promise.all([convergence, recreation])
+
+    expect(order).toEqual(['orphan-delete', 'live-recreate'])
+    expect(netPol.reconcileContext).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        name: contextName,
+        spec: expect.objectContaining({ contextId, description: 'recreated' }),
+      })
+    )
+    await watcher.stop()
+  })
+
+  it('retires old contextId policies before reconciling a mutable Context identity', async () => {
+    const oldContext = {
+      name: 'mutable-context-resource',
+      namespace: 'mcp-server',
+      spec: {
+        contextId: 'old-context-id',
+        mcpServers: ['redis-tools'],
+      },
+    }
+    const newContext = {
+      metadata: { name: oldContext.name, namespace: oldContext.namespace },
+      spec: {
+        contextId: 'new-context-id',
+        mcpServers: ['redis-tools'],
+      },
+    }
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'contexts') {
+        return {
+          metadata: { resourceVersion: 'mutable-context-rv' },
+          items: [newContext],
+        }
+      }
+      return { items: [] }
+    })
+    let contextWatchCallback:
+      | ((type: string, apiObj: typeof newContext) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback) => {
+      contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contexts.set(oldContext.name, oldContext)
+    ;(watcher as any).contextCacheSynced = true
+    const netPol = (watcher as any).netPolReconciler
+    const order: string[] = []
+    netPol.reconcileDeleteContext.mockImplementation(async (contextId: string) => {
+      order.push(`delete:${contextId}`)
+    })
+    netPol.reconcileContext.mockImplementation(async (context: typeof oldContext) => {
+      order.push(`reconcile:${context.spec.contextId}`)
+    })
+    await (watcher as any).startContextWatch('mutable-context-rv')
+
+    await contextWatchCallback!('MODIFIED', newContext)
+
+    expect(order).toEqual(['delete:old-context-id', 'reconcile:new-context-id'])
+    expect(netPol.reconcileDeleteContext).toHaveBeenCalledWith(
+      'old-context-id',
+      expect.any(Function)
+    )
+    await watcher.stop()
+  })
+
+  it('retires queued Context policy work immediately when its watch ends', async () => {
+    const context = {
+      metadata: { name: 'retired-context-resource', namespace: 'mcp-server' },
+      spec: { contextId: 'retired-context-id', mcpServers: [] },
+    }
+    const blockerStarted = deferred()
+    const releaseBlocker = deferred()
+    let contextWatchCallback: ((type: string, apiObj: typeof context) => Promise<void>) | undefined
+    let contextWatchDone: ((error: Error | null) => void) | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback, done) => {
+      contextWatchCallback = callback
+      contextWatchDone = done
+      return { abort: vi.fn() }
+    })
+    const watcher = new McpServerWatcher()
+    const netPol = (watcher as any).netPolReconciler
+    await (watcher as any).startContextWatch('retired-context-rv')
+    const blocker = (watcher as any).enqueueContextReconciliation(
+      context.spec.contextId,
+      async () => {
+        blockerStarted.resolve(undefined)
+        await releaseBlocker.promise
+      }
+    )
+    await blockerStarted.promise
+
+    const event = contextWatchCallback!('MODIFIED', context)
+    contextWatchDone!(null)
+    releaseBlocker.resolve(undefined)
+    await Promise.all([blocker, event])
+
+    expect(netPol.reconcileContext).not.toHaveBeenCalled()
+    await watcher.stop()
+  })
+
+  it('serializes McpServer-driven Context policy work with a newer Context watch revision', async () => {
+    const server = {
+      metadata: {
+        name: 'context-policy-server',
+        namespace: 'mcp-server',
+        uid: 'context-policy-server-uid',
+        generation: 1,
+      },
+      spec: {
+        contextRef: 'context-policy',
+        image: 'clerum/context-policy-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    }
+    const oldContext = {
+      name: 'context-policy-resource',
+      namespace: 'mcp-server',
+      spec: {
+        contextId: 'context-policy',
+        description: 'old',
+        mcpServers: [server.metadata.name],
+      },
+    }
+    const newContext = {
+      metadata: { name: oldContext.name, namespace: oldContext.namespace },
+      spec: {
+        ...oldContext.spec,
+        description: 'new',
+      },
+    }
+    const oldStarted = deferred()
+    const releaseOld = deferred()
+    const order: string[] = []
+    let contextWatchCallback:
+      | ((type: string, apiObj: typeof newContext) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback) => {
+      contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contexts.set(oldContext.name, oldContext)
+    const netPol = (watcher as any).netPolReconciler
+    netPol.reconcileContext.mockImplementation(async (context: typeof oldContext) => {
+      if (context.spec.description === 'old') {
+        oldStarted.resolve(undefined)
+        await releaseOld.promise
+        order.push('old')
+        return
+      }
+      order.push('new')
+    })
+    await (watcher as any).startContextWatch('context-policy-rv')
+
+    const serverEvent = (watcher as any).getMcpServerWatchCallback()('MODIFIED', server)
+    await oldStarted.promise
+    const contextEvent = contextWatchCallback!('MODIFIED', newContext)
+    await flushMicrotasks()
+
+    expect(netPol.reconcileContext).toHaveBeenCalledTimes(1)
+    releaseOld.resolve(undefined)
+    await Promise.all([serverEvent, contextEvent])
+
+    expect(order).toEqual(['old', 'new'])
+    expect(netPol.reconcileContext).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        spec: expect.objectContaining({ description: 'new' }),
+      })
+    )
+    await watcher.stop()
+  })
+
+  it('keeps live control-plane events responsive during a periodic external-egress fleet resync', async () => {
+    const server = {
+      name: 'periodic-egress-server',
+      namespace: 'mcp-server',
+      uid: 'periodic-egress-uid',
+      generation: 1,
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/periodic-egress:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        egressBindings: [{ dns: 'periodic.example', port: 443 }],
+      },
+    }
+    const context = {
+      metadata: { name: 'live-context', namespace: 'mcp-server' },
+      spec: { contextId: 'live-context', mcpServers: [] },
+    }
+    const resyncStarted = deferred()
+    const releaseResync = deferred()
+    let contextWatchCallback: ((type: string, apiObj: typeof context) => Promise<void>) | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback) => {
+      contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).servers.set(server.name, server)
+    const netPol = (watcher as any).netPolReconciler
+    netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
+      resyncStarted.resolve(undefined)
+      await releaseResync.promise
+    })
+    await (watcher as any).startContextWatch('live-context-rv')
+
+    const firstResync = (watcher as any).runExternalEgressResync() as Promise<void>
+    const overlappingResync = (watcher as any).runExternalEgressResync() as Promise<void>
+    expect(overlappingResync).toBe(firstResync)
+    await resyncStarted.promise
+
+    const liveEvent = contextWatchCallback!('MODIFIED', context)
+    await flushMicrotasks()
+    expect(netPol.reconcileContext).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'live-context' })
+    )
+
+    releaseResync.resolve(undefined)
+    await Promise.all([firstResync, liveEvent])
+    await watcher.stop()
+    randomSpy.mockRestore()
+  })
+
+  it('uses the latest cached McpServer after periodic external-egress jitter', async () => {
+    vi.useFakeTimers()
+    const staleServer = {
+      name: 'periodic-egress-server',
+      namespace: 'mcp-server',
+      uid: 'periodic-egress-uid',
+      generation: 1,
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/periodic-egress:old',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        egressBindings: [{ dns: 'old.example', port: 443 }],
+      },
+    }
+    const currentServer = {
+      metadata: {
+        name: staleServer.name,
+        namespace: staleServer.namespace,
+        uid: staleServer.uid,
+        generation: 2,
+      },
+      spec: {
+        ...staleServer.spec,
+        image: 'clerum/periodic-egress:new',
+        egressBindings: [{ dns: 'new.example', port: 443 }],
+      },
+    }
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).servers.set(staleServer.name, staleServer)
+    const netPol = (watcher as any).netPolReconciler
+
+    const periodic = (watcher as any).runExternalEgressResync() as Promise<void>
+    await flushMicrotasks()
+    await (watcher as any).getMcpServerWatchCallback()('MODIFIED', currentServer)
+    await vi.advanceTimersByTimeAsync(2500)
+    await periodic
+
+    expect(netPol.reconcileExternalEgress).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        name: staleServer.name,
+        generation: 2,
+        spec: expect.objectContaining({
+          egressBindings: [{ dns: 'new.example', port: 443 }],
+        }),
+      })
+    )
+    await watcher.stop()
+    randomSpy.mockRestore()
+  })
+
   it('queues SharedFileSystem and GlobalFileSystem watch effects behind their initial passes', async () => {
     const staleSfs = { name: 'stale-sfs', namespace: 'mcp-host', spec: {} }
     const currentSfs = { metadata: { name: 'current-sfs', namespace: 'mcp-host' }, spec: {} }
     const staleGfs = { name: 'stale-gfs', namespace: 'mcp-host', spec: {} }
-    const currentGfs = { metadata: { name: 'current-gfs', namespace: 'mcp-host' }, spec: {} }
+    const currentGfs = {
+      metadata: { name: 'current-gfs', namespace: 'mcp-host' },
+      spec: {},
+      status: {
+        phase: 'Ready',
+        pvcName: 'gfs-drive',
+        serviceName: 'gfsc',
+        serviceUrl: 'http://gfsc.gfs.svc.cluster.local:8087',
+      },
+    }
     const sfsInitialStarted = deferred()
     const releaseSfsInitial = deferred()
     const gfsInitialStarted = deferred()
@@ -603,6 +1476,9 @@ describe('McpServerWatcher startup', () => {
 
     expect(sfsOrder).toEqual(['initial', 'watch'])
     expect(gfsOrder).toEqual(['initial', 'watch'])
+    expect(gfsReconcile).toHaveBeenCalledWith(
+      expect.objectContaining({ status: currentGfs.status })
+    )
     await watcher.stop()
   })
 
@@ -686,6 +1562,7 @@ describe('McpServerWatcher startup', () => {
     const egressStarted = deferred()
     const releaseEgress = deferred()
     const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
     ;(watcher as any).servers.set(initialServer.name, initialServer)
     const netPol = (watcher as any).netPolReconciler
     netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
@@ -693,6 +1570,13 @@ describe('McpServerWatcher startup', () => {
       await releaseEgress.promise
     })
     const reconciler = (watcher as any).reconciler
+    mocks.serverFullReconcile.mockImplementationOnce(async (servers, options) => {
+      await Promise.all(
+        servers.map((selected: { name: string }) =>
+          options.runEffect(selected.name, () => reconciler.reconcile(selected))
+        )
+      )
+    })
 
     const initial = (watcher as any).runInitialMcpServerConvergence()
     await egressStarted.promise
@@ -702,27 +1586,75 @@ describe('McpServerWatcher startup', () => {
     releaseEgress.resolve(undefined)
     await Promise.all([initial, queuedWatch])
 
-    expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
+    expect(mocks.serverFullReconcile).toHaveBeenCalledOnce()
     expect(reconciler.reconcile).not.toHaveBeenCalled()
   })
 
   it('keeps an incomplete McpServer inventory non-authoritative across NetworkPolicy retries', async () => {
     vi.useFakeTimers()
     const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = false
     mocks.netPolFullReconcile
       .mockRejectedValueOnce(new Error('initial NetworkPolicy reconciliation failed'))
       .mockResolvedValueOnce(undefined)
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
-    await (watcher as any).runInitialNetworkPolicyConvergence(false)
+    await (watcher as any).runInitialNetworkPolicyConvergence()
     await vi.advanceTimersByTimeAsync(5000)
 
-    expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith([], [], {
-      serverInventoryComplete: false,
-      ensureDefaults: false,
-    })
+    expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
+      [],
+      [],
+      expect.objectContaining({
+        serverInventoryComplete: false,
+        ensureDefaults: false,
+        contextInventoryAuthoritative: expect.any(Function),
+        serverInventoryAuthoritative: expect.any(Function),
+      })
+    )
     await watcher.stop()
     errorSpy.mockRestore()
+  })
+
+  it('fences NetworkPolicy orphan cleanup to the inventory generations captured by the pass', async () => {
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextWatchGeneration = 17
+    ;(watcher as any).mcpWatchGeneration = 23
+    let options:
+      | {
+          contextInventoryAuthoritative: () => boolean
+          serverInventoryAuthoritative: () => boolean
+        }
+      | undefined
+    mocks.netPolFullReconcile.mockImplementationOnce(
+      async (
+        _contexts: unknown[],
+        _servers: unknown[],
+        received: {
+          contextInventoryAuthoritative: () => boolean
+          serverInventoryAuthoritative: () => boolean
+        }
+      ) => {
+        options = received
+      }
+    )
+
+    await (watcher as any).runInitialNetworkPolicyConvergence()
+
+    expect(options?.contextInventoryAuthoritative()).toBe(true)
+    expect(options?.serverInventoryAuthoritative()).toBe(true)
+
+    // A recovered watch may already be authoritative again, but it is a
+    // different snapshot generation and cannot authorize cleanup by this pass.
+    ;(watcher as any).contextWatchGeneration = 18
+    ;(watcher as any).mcpWatchGeneration = 24
+
+    expect(options?.contextInventoryAuthoritative()).toBe(false)
+    expect(options?.serverInventoryAuthoritative()).toBe(false)
+    await watcher.stop()
   })
 
   it('retries failed initial McpServer convergence without delaying safe bootstrap', async () => {
@@ -748,8 +1680,8 @@ describe('McpServerWatcher startup', () => {
       .mockResolvedValueOnce(undefined)
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const watcher = new McpServerWatcher()
-    vi.spyOn(watcher as any, 'startMcpServerWatch').mockResolvedValue(undefined)
-    vi.spyOn(watcher as any, 'startContextWatch').mockResolvedValue(undefined)
+    stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+    stubAuthoritativeInventoryWatch(watcher, 'Context')
     vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
     vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
     vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
@@ -784,8 +1716,8 @@ describe('McpServerWatcher startup', () => {
       .mockResolvedValueOnce(undefined)
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const watcher = new McpServerWatcher()
-    vi.spyOn(watcher as any, 'startMcpServerWatch').mockResolvedValue(undefined)
-    vi.spyOn(watcher as any, 'startContextWatch').mockResolvedValue(undefined)
+    stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+    stubAuthoritativeInventoryWatch(watcher, 'Context')
     vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
     vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
     vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
@@ -799,26 +1731,53 @@ describe('McpServerWatcher startup', () => {
     expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
       [expect.objectContaining({ name: 'initial-context' })],
       [],
-      { serverInventoryComplete: true, ensureDefaults: false }
+      expect.objectContaining({
+        serverInventoryComplete: true,
+        ensureDefaults: false,
+        contextInventoryAuthoritative: expect.any(Function),
+        serverInventoryAuthoritative: expect.any(Function),
+      })
     )
 
     watcher.stop()
     errorSpy.mockRestore()
   })
 
-  it('rejects safe bootstrap when the McpServer watch cannot be established', async () => {
-    const watcher = new McpServerWatcher()
-    vi.spyOn(watcher as any, 'startMcpServerWatch').mockRejectedValue(
-      new Error('watch unavailable')
-    )
-    vi.spyOn(watcher as any, 'startContextWatch').mockResolvedValue(undefined)
-    vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
-    vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
-    vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
+  it.each([
+    ['McpServer', 'startMcpServerWatch'],
+    ['Context', 'startContextWatch'],
+    ['SharedFileSystem', 'startSharedFileSystemWatch'],
+    ['GlobalFileSystem', 'startGlobalFileSystemWatch'],
+  ] as const)(
+    'rejects safe bootstrap when the %s watch cannot be established',
+    async (_kind, method) => {
+      const watcher = new McpServerWatcher()
+      if (method === 'startMcpServerWatch') {
+        vi.spyOn(watcher as any, method).mockRejectedValue(new Error(`${method} unavailable`))
+      } else {
+        stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+      }
+      if (method === 'startContextWatch') {
+        vi.spyOn(watcher as any, method).mockRejectedValue(new Error(`${method} unavailable`))
+      } else if (method !== 'startMcpServerWatch') {
+        stubAuthoritativeInventoryWatch(watcher, 'Context')
+      }
+      if (method === 'startSharedFileSystemWatch') {
+        vi.spyOn(watcher as any, method).mockRejectedValue(new Error(`${method} unavailable`))
+      } else {
+        vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
+      }
+      if (method === 'startGlobalFileSystemWatch') {
+        vi.spyOn(watcher as any, method).mockRejectedValue(new Error(`${method} unavailable`))
+      } else {
+        vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
+      }
+      vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
 
-    await expect(watcher.start()).rejects.toThrow('watch unavailable')
-    watcher.stop()
-  })
+      await expect(watcher.start()).rejects.toThrow(`${method} unavailable`)
+      await watcher.stop()
+    }
+  )
 
   it('applies the request deadline wrapper to the finite Host inventory LIST', async () => {
     mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
@@ -865,6 +1824,33 @@ describe('McpServerWatcher startup', () => {
     ])
   })
 
+  it('preserves observed GlobalFileSystem status from the Kubernetes inventory boundary', async () => {
+    const status = {
+      phase: 'Ready',
+      pvcName: 'gfs-drive',
+      serviceName: 'gfsc',
+      serviceUrl: 'http://gfsc.gfs.svc.cluster.local:8087',
+    }
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'globalfilesystems') {
+        return {
+          items: [
+            {
+              metadata: { name: 'gfs', namespace: 'gfs' },
+              spec: {},
+              status,
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+
+    await expect(listAllGlobalFileSystems()).resolves.toEqual([
+      expect.objectContaining({ name: 'gfs', namespace: 'gfs', status }),
+    ])
+  })
+
   it('reconciles startup external egress before runtime full reconciliation', async () => {
     const eventLog: string[] = []
     const server = {
@@ -889,17 +1875,24 @@ describe('McpServerWatcher startup', () => {
     mocks.ensureDefaultPolicies.mockImplementation(async () => {
       eventLog.push('defaults')
     })
-    mocks.serverFullReconcile.mockImplementation(async () => {
-      eventLog.push('runtime')
-    })
-
     const watcher = new McpServerWatcher()
+    const reconciler = (watcher as any).reconciler
+    mocks.serverFullReconcile.mockImplementation(async (servers, options) => {
+      await Promise.all(
+        servers.map((selected: { name: string }) =>
+          options.runEffect(selected.name, async () => {
+            eventLog.push('runtime')
+            await reconciler.reconcile(selected)
+          })
+        )
+      )
+    })
     const netPol = (watcher as any).netPolReconciler
     netPol.reconcileExternalEgress.mockImplementation(async () => {
       eventLog.push('egress')
     })
-    vi.spyOn(watcher as any, 'startMcpServerWatch').mockImplementation(async () => undefined)
-    vi.spyOn(watcher as any, 'startContextWatch').mockImplementation(async () => undefined)
+    stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+    stubAuthoritativeInventoryWatch(watcher, 'Context')
     vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockImplementation(async () => undefined)
     vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockImplementation(async () => undefined)
     vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockImplementation(
@@ -908,11 +1901,12 @@ describe('McpServerWatcher startup', () => {
 
     await watcher.start()
 
-    await vi.waitFor(() => expect(mocks.serverFullReconcile).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(eventLog).toContain('runtime'))
     expect(eventLog.slice(0, 3)).toEqual(['defaults', 'egress', 'runtime'])
-    expect(mocks.serverFullReconcile).toHaveBeenCalledWith([
-      expect.objectContaining({ name: 'web-search' }),
-    ])
+    expect(mocks.serverFullReconcile).toHaveBeenCalledWith(
+      [expect.objectContaining({ name: 'web-search' })],
+      { runEffect: expect.any(Function) }
+    )
 
     watcher.stop()
   })
@@ -940,12 +1934,20 @@ describe('McpServerWatcher startup', () => {
     })
 
     const watcher = new McpServerWatcher()
+    const reconciler = (watcher as any).reconciler
+    mocks.serverFullReconcile.mockImplementation(async (servers, options) => {
+      await Promise.all(
+        servers.map((selected: { name: string }) =>
+          options.runEffect(selected.name, () => reconciler.reconcile(selected))
+        )
+      )
+    })
     const netPol = (watcher as any).netPolReconciler
     netPol.reconcileExternalEgress.mockRejectedValueOnce(new Error('dns resolution failed'))
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    vi.spyOn(watcher as any, 'startMcpServerWatch').mockImplementation(async () => undefined)
-    vi.spyOn(watcher as any, 'startContextWatch').mockImplementation(async () => undefined)
+    stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+    stubAuthoritativeInventoryWatch(watcher, 'Context')
     vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockImplementation(async () => undefined)
     vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockImplementation(async () => undefined)
     vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockImplementation(
@@ -955,12 +1957,39 @@ describe('McpServerWatcher startup', () => {
     await watcher.start()
 
     await vi.waitFor(() => expect(mocks.serverFullReconcile).toHaveBeenCalledOnce())
-    expect(mocks.serverFullReconcile).toHaveBeenCalledWith([])
+    expect(mocks.serverFullReconcile).toHaveBeenCalledWith(
+      [expect.objectContaining({ name: 'web-search' })],
+      { runEffect: expect.any(Function) }
+    )
     expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(1)
+    expect(reconciler.reconcile).not.toHaveBeenCalled()
 
     watcher.stop()
     errorSpy.mockRestore()
     warnSpy.mockRestore()
+  })
+})
+
+describe('getContext error semantics', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('preserves not-found semantics only for an authoritative 404', async () => {
+    mocks.getNamespacedCustomObject.mockRejectedValueOnce(
+      Object.assign(new Error('context absent'), { code: 404 })
+    )
+
+    await expect(getContext('missing-context')).resolves.toBeNull()
+  })
+
+  it('propagates non-404 API failures instead of converting discovery to an empty fleet', async () => {
+    const unavailable = Object.assign(new Error('apiserver unavailable'), {
+      response: { statusCode: 503 },
+    })
+    mocks.getNamespacedCustomObject.mockRejectedValueOnce(unavailable)
+
+    await expect(getContext('production-context')).rejects.toBe(unavailable)
   })
 })
 
@@ -988,15 +2017,34 @@ describe('McpServerWatcher external egress retries', () => {
     const watcher = new McpServerWatcher()
     const netPol = (watcher as any).netPolReconciler
     const reconciler = (watcher as any).reconciler
+    const bindingReconciler = (watcher as any).bindingReconciler
+    const serverWithBindings = {
+      ...serverObject,
+      metadata: {
+        ...serverObject.metadata,
+        annotations: {
+          'clerum.io/recipe-bindings': JSON.stringify([
+            { source: 'redis-tools', target: 'downstream' },
+          ]),
+        },
+      },
+    }
+    ;(watcher as any).contexts.set('context1', {
+      name: 'context1',
+      namespace: 'mcp-server',
+      spec: { contextId: 'context1', mcpServers: ['redis-tools'] },
+    })
     netPol.reconcileExternalEgress.mockRejectedValueOnce(new Error('api temporarily unavailable'))
     netPol.reconcileExternalEgress.mockResolvedValue(undefined)
     vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     const watchCallback = (watcher as any).getMcpServerWatchCallback()
-    await watchCallback('ADDED', serverObject)
+    await watchCallback('ADDED', serverWithBindings)
 
     expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(1)
+    expect(bindingReconciler.reconcileBindings).not.toHaveBeenCalled()
+    expect(netPol.reconcileContext).not.toHaveBeenCalled()
 
     await vi.advanceTimersByTimeAsync(5000)
 
@@ -1005,7 +2053,38 @@ describe('McpServerWatcher external egress retries', () => {
     expect(reconciler.reconcile).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'redis-tools' })
     )
+    expect(bindingReconciler.reconcileBindings).toHaveBeenCalledTimes(1)
+    expect(netPol.reconcileContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        spec: expect.objectContaining({ contextId: 'context1' }),
+      })
+    )
 
+    watcher.stop()
+  })
+
+  it('retries the complete pipeline when a no-egress runtime reconcile fails', async () => {
+    const watcher = new McpServerWatcher()
+    const reconciler = (watcher as any).reconciler
+    const noEgressServer = {
+      ...serverObject,
+      spec: {
+        ...serverObject.spec,
+        egressBindings: undefined,
+      },
+    }
+    reconciler.reconcile
+      .mockRejectedValueOnce(new Error('deployment temporarily unavailable'))
+      .mockResolvedValue(undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    await (watcher as any).getMcpServerWatchCallback()('ADDED', noEgressServer)
+    expect(reconciler.reconcile).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(reconciler.reconcile).toHaveBeenCalledTimes(2)
     watcher.stop()
   })
 
@@ -1069,7 +2148,7 @@ describe('McpServerWatcher external egress retries', () => {
     watcher.stop()
   })
 
-  it('does not let periodic external egress resync cancel a pending runtime retry', async () => {
+  it('continues a pending runtime pipeline during periodic external egress resync', async () => {
     const watcher = new McpServerWatcher()
     const netPol = (watcher as any).netPolReconciler
     const reconciler = (watcher as any).reconciler
@@ -1079,6 +2158,7 @@ describe('McpServerWatcher external egress retries', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(Math, 'random').mockReturnValue(0)
 
     const watchCallback = (watcher as any).getMcpServerWatchCallback()
     await watchCallback('ADDED', serverObject)
@@ -1088,13 +2168,110 @@ describe('McpServerWatcher external egress retries', () => {
 
     await (watcher as any).runExternalEgressResync()
 
-    expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(1)
-
-    await vi.advanceTimersByTimeAsync(5000)
-
     expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(2)
     expect(reconciler.reconcile).toHaveBeenCalledTimes(2)
 
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(2)
+    expect(reconciler.reconcile).toHaveBeenCalledTimes(2)
+
+    watcher.stop()
+  })
+
+  it('keeps retrying an ADDED pipeline at the capped delay until it recovers', async () => {
+    const watcher = new McpServerWatcher()
+    const netPol = (watcher as any).netPolReconciler
+    const reconciler = (watcher as any).reconciler
+    netPol.reconcileExternalEgress
+      .mockRejectedValueOnce(new Error('initial outage'))
+      .mockRejectedValueOnce(new Error('outage after 5s'))
+      .mockRejectedValueOnce(new Error('outage after 15s'))
+      .mockRejectedValueOnce(new Error('outage after 30s'))
+      .mockResolvedValue(undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    await (watcher as any).getMcpServerWatchCallback()('ADDED', serverObject)
+    await vi.advanceTimersByTimeAsync(5000)
+    await vi.advanceTimersByTimeAsync(15000)
+    await vi.advanceTimersByTimeAsync(30000)
+
+    expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(4)
+    expect(reconciler.reconcile).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(30000)
+
+    expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(5)
+    expect(reconciler.reconcile).toHaveBeenCalledTimes(1)
+    watcher.stop()
+  })
+
+  it('keeps retrying a partial DELETE pipeline at the capped delay until it recovers', async () => {
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    const netPol = (watcher as any).netPolReconciler
+    const reconciler = (watcher as any).reconciler
+    const bindingReconciler = (watcher as any).bindingReconciler
+    netPol.cleanupExternalEgress
+      .mockRejectedValueOnce(new Error('initial cleanup outage'))
+      .mockRejectedValueOnce(new Error('cleanup outage after 5s'))
+      .mockRejectedValueOnce(new Error('cleanup outage after 15s'))
+      .mockRejectedValueOnce(new Error('cleanup outage after 30s'))
+      .mockResolvedValue(undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    await (watcher as any).getMcpServerWatchCallback()('DELETED', serverObject)
+    await vi.advanceTimersByTimeAsync(5000)
+    await vi.advanceTimersByTimeAsync(15000)
+    await vi.advanceTimersByTimeAsync(30000)
+
+    expect(netPol.cleanupExternalEgress).toHaveBeenCalledTimes(4)
+    expect(reconciler.reconcileDelete).not.toHaveBeenCalled()
+    expect(bindingReconciler.cleanupBindings).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(30000)
+
+    expect(netPol.cleanupExternalEgress).toHaveBeenCalledTimes(5)
+    expect(reconciler.reconcileDelete).toHaveBeenCalledWith('redis-tools', 'mcp-server')
+    expect(bindingReconciler.cleanupBindings).toHaveBeenCalledWith('redis-tools')
+    watcher.stop()
+  })
+
+  it('bounds concurrent durable retries across McpServers', async () => {
+    const watcher = new McpServerWatcher()
+    const reconciler = (watcher as any).reconciler
+    const release = deferred()
+    let active = 0
+    let maxActive = 0
+    reconciler.reconcile.mockImplementation(async () => {
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      await release.promise
+      active -= 1
+    })
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    for (let index = 0; index < 11; index += 1) {
+      const server = {
+        name: `server-${index}`,
+        namespace: 'mcp-server',
+        spec: {
+          ...serverObject.spec,
+          egressBindings: undefined,
+        },
+      }
+      ;(watcher as any).servers.set(server.name, server)
+      ;(watcher as any).scheduleExternalEgressRetry('ADDED', server)
+    }
+
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushMicrotasks()
+
+    expect(maxActive).toBe(10)
+
+    release.resolve(undefined)
+    await flushMicrotasks()
     watcher.stop()
   })
 
@@ -1136,7 +2313,10 @@ describe('McpServerWatcher external egress retries', () => {
 
   it('retries failed external egress cleanup from a DELETED event', async () => {
     const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
     const netPol = (watcher as any).netPolReconciler
+    const reconciler = (watcher as any).reconciler
+    const bindingReconciler = (watcher as any).bindingReconciler
     netPol.cleanupExternalEgress.mockRejectedValueOnce(new Error('delete temporarily unavailable'))
     netPol.cleanupExternalEgress.mockResolvedValue(undefined)
     vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -1150,9 +2330,232 @@ describe('McpServerWatcher external egress retries', () => {
     await vi.advanceTimersByTimeAsync(5000)
 
     expect(netPol.cleanupExternalEgress).toHaveBeenCalledTimes(2)
-    expect(netPol.cleanupExternalEgress).toHaveBeenLastCalledWith('redis-tools', 'mcp-server')
+    expect(netPol.cleanupExternalEgress).toHaveBeenLastCalledWith(
+      'redis-tools',
+      'mcp-server',
+      undefined,
+      expect.any(Function)
+    )
+    expect(reconciler.reconcileDelete).toHaveBeenCalledWith('redis-tools', 'mcp-server')
+    expect(bindingReconciler.cleanupBindings).toHaveBeenCalledWith('redis-tools')
 
     watcher.stop()
+  })
+
+  it('retires queued McpServer work immediately when its watch ends', async () => {
+    const blockerStarted = deferred()
+    const releaseBlocker = deferred()
+    let watchCallback: ((type: string, apiObj: typeof serverObject) => Promise<void>) | undefined
+    let watchDone: ((error: Error | null) => void) | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback, done) => {
+      watchCallback = callback
+      watchDone = done
+      return { abort: vi.fn() }
+    })
+    const watcher = new McpServerWatcher()
+    const netPol = (watcher as any).netPolReconciler
+    await (watcher as any).startMcpServerWatch('mcp-watch-rv')
+    const blocker = (watcher as any).enqueueMcpServerReconciliation(
+      { name: 'redis-tools', namespace: 'mcp-server' },
+      async () => {
+        blockerStarted.resolve(undefined)
+        await releaseBlocker.promise
+      }
+    )
+    await blockerStarted.promise
+
+    const event = watchCallback!('ADDED', serverObject)
+    watchDone!(null)
+    releaseBlocker.resolve(undefined)
+    await Promise.all([blocker, event])
+
+    expect(netPol.reconcileExternalEgress).not.toHaveBeenCalled()
+    await watcher.stop()
+  })
+
+  it('retries the recreated server when an older DELETE retry timer already owns the key', async () => {
+    const deletedServer = {
+      metadata: {
+        name: 'redis-tools',
+        namespace: 'mcp-server',
+        uid: 'redis-tools-old-uid',
+        generation: 1,
+      },
+      spec: serverObject.spec,
+    }
+    const recreatedServer = {
+      metadata: {
+        name: 'redis-tools',
+        namespace: 'mcp-server',
+        uid: 'redis-tools-new-uid',
+        generation: 1,
+      },
+      spec: { ...serverObject.spec, image: 'redis-tools:recreated' },
+    }
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    const netPol = (watcher as any).netPolReconciler
+    const reconciler = (watcher as any).reconciler
+    netPol.cleanupExternalEgress.mockRejectedValueOnce(new Error('cleanup unavailable'))
+    netPol.reconcileExternalEgress
+      .mockRejectedValueOnce(new Error('recreated policy unavailable'))
+      .mockResolvedValue(undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const watchCallback = (watcher as any).getMcpServerWatchCallback()
+
+    await watchCallback('DELETED', deletedServer)
+    await watchCallback('ADDED', recreatedServer)
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(netPol.cleanupExternalEgress).toHaveBeenCalledTimes(1)
+    expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(2)
+    expect(reconciler.reconcile).toHaveBeenCalledOnce()
+    expect(reconciler.reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        uid: 'redis-tools-new-uid',
+        generation: 1,
+        spec: expect.objectContaining({ image: 'redis-tools:recreated' }),
+      })
+    )
+
+    watcher.stop()
+  })
+
+  it('retries the latest DELETE cleanup when an older ADD retry timer already owns the key', async () => {
+    const server = {
+      metadata: {
+        name: 'redis-tools',
+        namespace: 'mcp-server',
+        uid: 'redis-tools-uid',
+        generation: 3,
+      },
+      spec: serverObject.spec,
+    }
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    const netPol = (watcher as any).netPolReconciler
+    netPol.reconcileExternalEgress.mockRejectedValueOnce(new Error('policy unavailable'))
+    netPol.cleanupExternalEgress
+      .mockRejectedValueOnce(new Error('cleanup unavailable'))
+      .mockResolvedValue(undefined)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const watchCallback = (watcher as any).getMcpServerWatchCallback()
+
+    await watchCallback('ADDED', server)
+    await watchCallback('DELETED', server)
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(1)
+    expect(netPol.cleanupExternalEgress).toHaveBeenCalledTimes(2)
+
+    watcher.stop()
+  })
+
+  it('does not continue to runtime or bindings after stop releases a live DNS hold', async () => {
+    const egressStarted = deferred()
+    const releaseEgress = deferred()
+    const server = {
+      metadata: {
+        name: 'redis-tools',
+        namespace: 'mcp-server',
+        uid: 'redis-tools-uid',
+        generation: 1,
+        annotations: {
+          'clerum.io/recipe-bindings': JSON.stringify([
+            { source: 'redis-tools', target: 'downstream' },
+          ]),
+        },
+      },
+      spec: serverObject.spec,
+    }
+    const watcher = new McpServerWatcher()
+    const netPol = (watcher as any).netPolReconciler
+    const reconciler = (watcher as any).reconciler
+    const bindingReconciler = (watcher as any).bindingReconciler
+    netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
+      egressStarted.resolve(undefined)
+      await releaseEgress.promise
+    })
+    const watchCallback = (watcher as any).getMcpServerWatchCallback()
+
+    const reconcile = watchCallback('ADDED', server)
+    await egressStarted.promise
+    await watcher.stop()
+    releaseEgress.resolve(undefined)
+    await reconcile
+
+    expect(reconciler.reconcile).not.toHaveBeenCalled()
+    expect(bindingReconciler.reconcileBindings).not.toHaveBeenCalled()
+  })
+
+  it('does not run an older runtime revision after newer desired state arrives during egress', async () => {
+    const egressStarted = deferred()
+    const releaseEgress = deferred()
+    const oldServer = {
+      metadata: {
+        name: 'redis-tools',
+        namespace: 'mcp-server',
+        uid: 'redis-tools-uid',
+        generation: 1,
+      },
+      spec: { ...serverObject.spec, image: 'redis-tools:old' },
+    }
+    const newServer = {
+      metadata: {
+        name: 'redis-tools',
+        namespace: 'mcp-server',
+        uid: 'redis-tools-uid',
+        generation: 2,
+      },
+      spec: { ...serverObject.spec, image: 'redis-tools:new' },
+    }
+    const watcher = new McpServerWatcher()
+    const netPol = (watcher as any).netPolReconciler
+    const reconciler = (watcher as any).reconciler
+    netPol.reconcileExternalEgress
+      .mockImplementationOnce(async () => {
+        egressStarted.resolve(undefined)
+        await releaseEgress.promise
+      })
+      .mockResolvedValue(undefined)
+    const watchCallback = (watcher as any).getMcpServerWatchCallback()
+
+    const oldReconcile = watchCallback('ADDED', oldServer)
+    await egressStarted.promise
+    const newReconcile = watchCallback('MODIFIED', newServer)
+    releaseEgress.resolve(undefined)
+    await Promise.all([oldReconcile, newReconcile])
+
+    expect(reconciler.reconcile).toHaveBeenCalledOnce()
+    expect(reconciler.reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        generation: 2,
+        spec: expect.objectContaining({ image: 'redis-tools:new' }),
+      })
+    )
+
+    watcher.stop()
+  })
+
+  it('does not resume periodic external egress work from jitter after stop', async () => {
+    const watcher = new McpServerWatcher()
+    const netPol = (watcher as any).netPolReconciler
+    ;(watcher as any).servers.set('redis-tools', {
+      name: 'redis-tools',
+      namespace: 'mcp-server',
+      spec: serverObject.spec,
+    })
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+
+    const resync = (watcher as any).runExternalEgressResync()
+    await flushMicrotasks()
+    await watcher.stop()
+    await vi.advanceTimersByTimeAsync(2500)
+    await resync
+
+    expect(netPol.reconcileExternalEgress).not.toHaveBeenCalled()
   })
 
   it('periodic resync reuses external egress reconciliation for cached servers with bindings', async () => {
@@ -1224,6 +2627,26 @@ describe('McpServerWatcher external egress retries', () => {
 
     warn.mockRestore()
     watcher.stop()
+  })
+
+  it('does not start another external egress mutation after stop releases an in-flight wait', async () => {
+    const watcher = new McpServerWatcher()
+    const netPol = (watcher as any).netPolReconciler
+    const server = {
+      name: 'redis-tools',
+      namespace: 'mcp-server',
+      spec: serverObject.spec,
+    }
+    const existing = deferred()
+    ;(watcher as any).externalEgressInFlight.set('mcp-server/redis-tools', existing.promise)
+
+    const run = (watcher as any).runExternalEgressOnce('MODIFIED', server)
+    await flushMicrotasks()
+    await watcher.stop()
+    existing.resolve(undefined)
+    await run
+
+    expect(netPol.reconcileExternalEgress).not.toHaveBeenCalled()
   })
 })
 
@@ -1412,8 +2835,8 @@ describe('McpServerWatcher.start ordering (#281 R6-bis)', () => {
     })
     const watcher = new McpServerWatcher()
 
-    vi.spyOn(watcher as any, 'startMcpServerWatch').mockResolvedValue(undefined)
-    vi.spyOn(watcher as any, 'startContextWatch').mockResolvedValue(undefined)
+    stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+    stubAuthoritativeInventoryWatch(watcher, 'Context')
     vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
     vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
     const ccWatchSpy = vi.spyOn(watcher as any, 'startCommunicationChannelWatch')
@@ -1452,8 +2875,8 @@ describe('McpServerWatcher.start ordering (#281 R6-bis)', () => {
 
     const watcher = new McpServerWatcher()
 
-    vi.spyOn(watcher as any, 'startMcpServerWatch').mockResolvedValue(undefined)
-    vi.spyOn(watcher as any, 'startContextWatch').mockResolvedValue(undefined)
+    stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+    stubAuthoritativeInventoryWatch(watcher, 'Context')
     vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
     vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
     const ccWatchSpy = vi
@@ -2253,8 +3676,8 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       activePasses -= 1
     })
     const watcher = new McpServerWatcher()
-    vi.spyOn(watcher as any, 'startMcpServerWatch').mockResolvedValue(undefined)
-    vi.spyOn(watcher as any, 'startContextWatch').mockResolvedValue(undefined)
+    stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+    stubAuthoritativeInventoryWatch(watcher, 'Context')
     vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
     vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
     vi.spyOn(watcher as any, 'scheduleCommunicationChannelCacheRecovery').mockImplementation(
@@ -2446,6 +3869,50 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(1)
   })
 
+  it('queues a trailing full Host pass when Context recovery lands during an active pass', async () => {
+    vi.clearAllMocks()
+    const activePass = deferred()
+    mocks.hostFullReconcile
+      .mockReset()
+      .mockImplementationOnce(() => activePass.promise)
+      .mockResolvedValue(undefined)
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'contexts') {
+        return {
+          metadata: { resourceVersion: 'recovered-context-rv' },
+          items: [
+            {
+              metadata: { name: 'recovered-context', namespace: 'mcp-server' },
+              spec: {
+                contextId: 'recovered-context',
+                mcpServers: [],
+                sharedFileSystems: [{ name: 'recovered-sfs' }],
+              },
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    mocks.watch.mockReset().mockResolvedValue({ abort: vi.fn() })
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).hostCacheSynced = true
+
+    const first = (watcher as any).requestHostFleetReconcile(
+      'before Context recovery'
+    ) as Promise<void>
+    await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(1))
+
+    await expect((watcher as any).recoverContextInventoryAndWatch()).resolves.toBe(true)
+    expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(1)
+
+    activePass.resolve(undefined)
+    await first
+    await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(2))
+
+    await watcher.stop()
+  })
+
   it('does not invent another fleet transition during a failed periodic cache recovery', async () => {
     vi.clearAllMocks()
     const watcher = new McpServerWatcher()
@@ -2461,6 +3928,33 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
 
     expect(recover).toHaveBeenCalledTimes(1)
     expect(reconcileFleet).not.toHaveBeenCalled()
+    watcher.stop()
+  })
+
+  it('coalesces the newest Host input revision into the serialized trailing pass', async () => {
+    vi.clearAllMocks()
+    const watcher = new McpServerWatcher()
+    const activePass = deferred()
+    const requests: Array<{ inputRevision: number }> = []
+    vi.spyOn(watcher as any, 'performHostFleetReconcile').mockImplementation(
+      async (...args: unknown[]) => {
+        const request = args[0] as { inputRevision: number }
+        requests.push({ ...request })
+        if (requests.length === 1) await activePass.promise
+      }
+    )
+    ;(watcher as any).hostFleetInputRevision = 1
+    const first = (watcher as any).requestHostFleetReconcile('active') as Promise<void>
+    ;(watcher as any).hostFleetInputRevision = 2
+    const second = (watcher as any).requestHostFleetReconcile('pending-v2') as Promise<void>
+    ;(watcher as any).hostFleetInputRevision = 3
+    const third = (watcher as any).requestHostFleetReconcile('pending-v3') as Promise<void>
+
+    activePass.resolve(undefined)
+    await Promise.all([first, second, third])
+
+    expect(requests).toHaveLength(2)
+    expect(requests[1].inputRevision).toBe(3)
     watcher.stop()
   })
 
