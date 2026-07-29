@@ -4,6 +4,7 @@ import express from 'express'
 import { generateKeyPairSync } from 'node:crypto'
 import request from 'supertest'
 import { createRegistryConnectRouter } from '../src/routes/admin/registryConnect.js'
+import { checkAndIncrement } from '../src/services/rateLimiterService.js'
 
 const { cfg } = vi.hoisted(() => ({
   cfg: {
@@ -38,6 +39,13 @@ const connDb = vi.hoisted(() => ({
   deleteConnection: vi.fn(),
 }))
 vi.mock('../src/services/registryConnectionDb.js', () => connDb)
+
+// The recover route is now behind rateLimitMiddleware, which calls
+// checkAndIncrement (a real Postgres round-trip in production). Mock it so
+// this suite stays hermetic; individual tests override the resolved value to
+// exercise the allowed/denied branches.
+const rateLimiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimiter)
 
 function app(): express.Express {
   const a = express()
@@ -82,6 +90,11 @@ beforeEach(() => {
   connDb.markConnected.mockResolvedValue(true)
   cfg.registryConnectionMode = 'self-hosted'
   cfg.registryAuthEnabled = true
+  rateLimiter.checkAndIncrement.mockResolvedValue({
+    allowed: true,
+    remaining: 9,
+    resetMs: Date.now() + 60000,
+  })
 })
 afterEach(() => vi.restoreAllMocks())
 
@@ -761,6 +774,54 @@ describe('POST recover', () => {
     // stale row/deploymentId — otherwise a bad rotate silently redeems garbage.
     const claim = spy.mock.calls.find(c => String(c[0]).endsWith('/claim'))!
     expect(JSON.parse(String((claim[1] as RequestInit).body)).claim_token).toBe('tok-new')
+  })
+
+  // The route is rate-limited (each call rotates a one-time claim token at
+  // the shared registry, which has no limiter of its own). This proves the
+  // middleware sits AFTER requireAuthForControlUI (bucket keyed on
+  // adminAuth.sub) and BEFORE the handler without breaking the normal
+  // success path.
+  it('is rate-limited per admin, keyed on adminAuth.sub, and still succeeds when allowed', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'approved',
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      privateKeyPem: pkForTest(),
+      requestedOrgName: 'acme',
+    })
+    connDb.markConnected.mockResolvedValue(true)
+    routeFetch({
+      '/status': () => json({ status: 'approved', suspended: false, claimed: false }, 200),
+      'claim-token': () => json({ claim_token: 'tok-new' }, 200),
+      '/claim': () => json({ client_id: 'cid', client_secret: 'csecret', org: 'acme' }, 200),
+    })
+    const res = await request(app()).post('/admin/registry/connect/recover').expect(200)
+    expect(res.body).toMatchObject({ state: 'connected', org: 'acme' })
+    expect(checkAndIncrement).toHaveBeenCalledWith('registry_connect_recover:admin-uuid-123', 10)
+    expect(res.headers['x-ratelimit-limit']).toBe('10')
+  })
+
+  // Proves the limiter actually blocks, and blocks BEFORE any registry work:
+  // a denied admin must not burn a rotate or reach getRegistryConnection.
+  it('429s when the per-admin bucket is exceeded, without touching the registry', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'approved',
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      privateKeyPem: pkForTest(),
+      requestedOrgName: 'acme',
+    })
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 30000,
+    })
+    const spy = routeFetch({})
+    const res = await request(app()).post('/admin/registry/connect/recover').expect(429)
+    expect(res.body.error).toBe('Too Many Requests')
+    expect(res.headers['retry-after']).toBeDefined()
+    expect(connDb.getRegistryConnection).not.toHaveBeenCalled()
+    expect(spy.mock.calls.length).toBe(0)
   })
 
   it('refuses when the local row is pending', async () => {

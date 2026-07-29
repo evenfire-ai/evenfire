@@ -3,6 +3,7 @@ import type { Request, Response } from 'express'
 import { generateKeyPairSync } from 'node:crypto'
 import { config } from '../../config.js'
 import { type UiAuthedRequest, requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
 import { findAdminById } from '../../services/adminAuthService.js'
 import {
@@ -506,6 +507,20 @@ export function createRegistryConnectRouter(): Router {
   router.post(
     '/admin/registry/connect/recover',
     requireAuthForControlUI,
+    // Per-admin token bucket — every call here rotates the deployment's
+    // one-time claim token at the shared registry (/:id/claim-token), which
+    // has no rate limiter of its own and emits a
+    // deployment.claim_token_reissued audit event on each rotate. 10/min is
+    // generous for a human-pressed recovery button while bounding registry
+    // rotate/audit spam from a looped admin.
+    rateLimitMiddleware({
+      bucketType: 'registry_connect_recover',
+      maxPerMinute: 10,
+      getBucketKey: req => {
+        const sub = (req as UiAuthedRequest).adminAuth?.sub
+        return sub ? `registry_connect_recover:${sub}` : null
+      },
+    }),
     async (req, res, next) => {
       try {
         const ctx = await requireSelfHostedAdmin(req, res)
