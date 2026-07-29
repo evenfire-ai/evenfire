@@ -49,15 +49,19 @@ interface RawRow {
   registry_url: string | null
 }
 
-// Process-local cache: a control-api serves one deployment for its lifetime, so
-// the decrypted row is stable. Evicted by any write here + the test reset.
-// Caveat: eviction is process-local only — a post-connection DELETE/reconnect
-// clears this cache on THIS replica alone, so a reconnect-in-place on a
-// multi-replica deployment requires a rollout restart to evict peer replicas.
+// Process-local cache with a bounded TTL: a control-api serves one deployment
+// for its lifetime, so the decrypted row is stable — but the DERIVED auth state
+// (isRegistryAuthActive) is an access-control input, and an unbounded cache
+// would let a peer replica keep reporting auth-active forever after another
+// replica disconnected. The TTL caps that window; writes here still evict
+// immediately on the local process.
+const CONNECTION_CACHE_TTL_MS = 15_000
 let cached: RegistryConnectionRow | null | undefined
+let cachedAt = 0
 
 export function __resetRegistryConnectionCacheForTests(): void {
   cached = undefined
+  cachedAt = 0
 }
 
 function encKey(): Buffer {
@@ -67,7 +71,7 @@ function encKey(): Buffer {
 export async function getRegistryConnection(
   db: DbClient = pool
 ): Promise<RegistryConnectionRow | null> {
-  if (cached !== undefined) return cached
+  if (cached !== undefined && Date.now() - cachedAt < CONNECTION_CACHE_TTL_MS) return cached
   const res = await db.query(
     `SELECT deployment_id, key_id, public_key_pem, private_key_encrypted, client_id,
             client_secret_encrypted, org_name, requested_org_name, contact_email, status, registry_url
@@ -78,6 +82,7 @@ export async function getRegistryConnection(
   const raw = res.rows[0] as RawRow | undefined
   if (!raw) {
     cached = null
+    cachedAt = Date.now()
     return null
   }
   const key = encKey()
@@ -96,6 +101,7 @@ export async function getRegistryConnection(
     status: raw.status,
     registryUrl: raw.registry_url,
   }
+  cachedAt = Date.now()
   return cached
 }
 

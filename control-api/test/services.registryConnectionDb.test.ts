@@ -408,3 +408,40 @@ describe('markConnected — scoped write', () => {
     expect(ok).toBe(false)
   })
 })
+
+describe('getRegistryConnection — cache TTL', () => {
+  it('serves a cached ROW inside the window, re-queries after it', { retry: 0 }, async () => {
+    vi.useFakeTimers()
+    try {
+      cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+      dbQuery.mockResolvedValue({ rows: [makeRawRow(cfg.oauthEncryptionKey)], rowCount: 1 })
+      await getRegistryConnection()
+      const afterFirst = dbQuery.mock.calls.length
+      await getRegistryConnection()
+      expect(dbQuery.mock.calls.length).toBe(afterFirst) // cache hit
+      vi.advanceTimersByTime(15_001)
+      await getRegistryConnection()
+      expect(dbQuery.mock.calls.length).toBe(afterFirst + 1) // re-queried
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The easiest way to implement the TTL wrong: stamp cachedAt only on the
+  // row-found branch. Then `cached` is null (so `!== undefined` passes) but
+  // cachedAt stays 0, and EVERY call re-queries — the most common self-hosted
+  // state, hit on every mintToken and every admin-route auth check.
+  it('serves a cached NULL inside the window without re-querying', { retry: 0 }, async () => {
+    vi.useFakeTimers()
+    try {
+      dbQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+      await getRegistryConnection()
+      const afterFirst = dbQuery.mock.calls.length
+      await getRegistryConnection()
+      await getRegistryConnection()
+      expect(dbQuery.mock.calls.length).toBe(afterFirst)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
