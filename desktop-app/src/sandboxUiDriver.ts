@@ -1,4 +1,4 @@
-import { BrowserWindow, WebContentsView, session } from 'electron'
+import { BrowserWindow, WebContentsView, screen, session } from 'electron'
 import path from 'node:path'
 import { getActiveEnvKey } from './config.js'
 import { extractSandboxUiViewRoute, normalizeSandboxUiRoute } from './sandboxUiDeepLinks.js'
@@ -56,8 +56,6 @@ function toViewBounds(
   // to the renderer while the screen's scaleFactor stays at 2.0).
   // WebContentsView.setBounds expects points, so multiply by dpr/scaleFactor
   // — a no-op when they match (the common 1× / 2× case).
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { screen } = require('electron') as typeof import('electron')
   const sf = screen.getDisplayMatching(parentWindow.getBounds()).scaleFactor
   const dpr = bounds.dpr ?? sf
   if (Math.abs(dpr - sf) < 0.01) {
@@ -100,6 +98,7 @@ type ActiveView = {
   parentWindow: BrowserWindow
   rpcProxyOrigin: string
   cleanupClientRouteHandoff?: () => void
+  cleanupParentClosed?: () => void
 }
 
 let active: ActiveView | null = null
@@ -262,6 +261,7 @@ async function teardownActive(reason: 'replaced' | 'closed' | 'parent_closed'): 
   active = null
   try {
     current.cleanupClientRouteHandoff?.()
+    current.cleanupParentClosed?.()
     // contentView.removeChildView is the documented teardown step; it both
     // detaches the view from layout AND severs the parent's ownership ref.
     if (!current.parentWindow.isDestroyed()) {
@@ -369,6 +369,9 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     onClosed?.()
   }
   parentWindow.once('closed', onParentClosed)
+  const cleanupParentClosed = (): void => {
+    parentWindow.removeListener('closed', onParentClosed)
+  }
 
   active = {
     view,
@@ -378,6 +381,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     partition,
     parentWindow,
     rpcProxyOrigin: proxyOriginUrl,
+    cleanupParentClosed,
   }
 
   parentWindow.contentView.addChildView(view)
