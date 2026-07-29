@@ -678,6 +678,25 @@ describe('GET — local approved row', () => {
     const res = await request(app()).get('/admin/registry/connect').expect(200)
     expect(res.body).toMatchObject({ state: 'connecting', recoveryError: 'already_claimed' })
   })
+
+  // Deleting the `poll?.suspended ? 'deployment_suspended'` arm of the
+  // recoveryError ternary fails no other test. Without it, an operator who
+  // suspends an auto-approved-but-unclaimed deployment leaves the panel
+  // offering "Finish connecting" with no terminal message.
+  it('surfaces a terminal recoveryError when suspended', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'approved',
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      privateKeyPem: pkForTest(),
+      requestedOrgName: 'acme',
+    })
+    routeFetch({
+      '/status': () => json({ status: 'approved', suspended: true, claimed: false }, 200),
+    })
+    const res = await request(app()).get('/admin/registry/connect').expect(200)
+    expect(res.body).toMatchObject({ state: 'connecting', recoveryError: 'deployment_suspended' })
+  })
 })
 
 // THE operator-flow regression proof. A flag-off registration stays locally
@@ -716,13 +735,24 @@ describe('POST recover', () => {
       requestedOrgName: 'acme',
     })
     connDb.markConnected.mockResolvedValue(true)
-    routeFetch({
+    const spy = routeFetch({
       '/status': () => json({ status: 'approved', suspended: false, claimed: false }, 200),
       'claim-token': () => json({ claim_token: 'tok-new' }, 200),
       '/claim': () => json({ client_id: 'cid', client_secret: 'csecret', org: 'acme' }, 200),
     })
     const res = await request(app()).post('/admin/registry/connect/recover').expect(200)
     expect(res.body).toMatchObject({ state: 'connected', org: 'acme', authEnabled: true })
+    // The rotate call itself must be a real, authenticated, bounded POST — not
+    // just a URL the mock happens to match. Each of these mutates production
+    // 100% of the time while leaving a body-only assertion green.
+    const rot = spy.mock.calls.find(c => String(c[0]).includes('claim-token'))!
+    expect((rot[1] as RequestInit).method).toBe('POST')
+    expect((rot[1] as RequestInit).headers).toMatchObject({ DPoP: expect.any(String) })
+    expect((rot[1] as RequestInit).signal).toBeInstanceOf(AbortSignal)
+    // And the token redeemed against /claim must be the ROTATED one, not the
+    // stale row/deploymentId — otherwise a bad rotate silently redeems garbage.
+    const claim = spy.mock.calls.find(c => String(c[0]).endsWith('/claim'))!
+    expect(JSON.parse(String((claim[1] as RequestInit).body)).claim_token).toBe('tok-new')
   })
 
   it('refuses when the local row is pending', async () => {
@@ -733,11 +763,17 @@ describe('POST recover', () => {
       privateKeyPem: pkForTest(),
       requestedOrgName: 'acme',
     })
+    // afterEach's restoreAllMocks() leaves globalThis.fetch REAL; if the
+    // row.status !== 'approved' gate is ever widened, this proves it loudly
+    // (a thrown "unexpected fetch") instead of emitting a real outbound
+    // request to example.com.
+    const spy = routeFetch({})
     const res = await request(app()).post('/admin/registry/connect/recover').expect(409)
     expect(res.body.error).toBe('not_recoverable')
+    expect(spy.mock.calls.map(c => String(c[0])).some(u => u.includes('claim-token'))).toBe(false)
   })
 
-  it('reports already_claimed WITHOUT spending a rotate', async () => {
+  it('reports already_claimed WITHOUT spending a rotate', { retry: 0 }, async () => {
     connDb.getRegistryConnection.mockResolvedValue({
       status: 'approved',
       deploymentId: 'dep-1',
@@ -753,7 +789,7 @@ describe('POST recover', () => {
     expect(spy.mock.calls.map(c => String(c[0])).some(u => u.includes('claim-token'))).toBe(false)
   })
 
-  it('reports deployment_suspended without rotating', async () => {
+  it('reports deployment_suspended without rotating', { retry: 0 }, async () => {
     connDb.getRegistryConnection.mockResolvedValue({
       status: 'approved',
       deploymentId: 'dep-1',
@@ -761,17 +797,38 @@ describe('POST recover', () => {
       privateKeyPem: pkForTest(),
       requestedOrgName: 'acme',
     })
-    routeFetch({
+    const spy = routeFetch({
       '/status': () => json({ status: 'approved', suspended: true, claimed: false }, 200),
     })
     const res = await request(app()).post('/admin/registry/connect/recover').expect(409)
     expect(res.body.error).toBe('deployment_suspended')
+    expect(spy.mock.calls.map(c => String(c[0])).some(u => u.includes('claim-token'))).toBe(false)
+  })
+
+  // Deleting the `poll?.status === 'rejected'` guard fails no other test: it
+  // would fall through to a rotate against a rejected deployment, the claim
+  // 401s, and the user sees a "still connecting" spinner instead of a
+  // terminal error.
+  it('reports rejected without rotating', { retry: 0 }, async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'approved',
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      privateKeyPem: pkForTest(),
+      requestedOrgName: 'acme',
+    })
+    const spy = routeFetch({
+      '/status': () => json({ status: 'rejected', suspended: false, claimed: false }, 200),
+    })
+    const res = await request(app()).post('/admin/registry/connect/recover').expect(409)
+    expect(res.body.error).toBe('rejected')
+    expect(spy.mock.calls.map(c => String(c[0])).some(u => u.includes('claim-token'))).toBe(false)
   })
 
   // client_unavailable means the registry client is disabled (operator
   // suspension). Retrying rotates forever against a deployment an operator
   // deliberately killed, so it must be terminal.
-  it('treats client_unavailable as terminal', async () => {
+  it('treats client_unavailable as terminal', { retry: 0 }, async () => {
     connDb.getRegistryConnection.mockResolvedValue({
       status: 'approved',
       deploymentId: 'dep-1',
@@ -788,9 +845,74 @@ describe('POST recover', () => {
     expect(res.body.error).toBe('client_unavailable')
   })
 
+  // The rotate call ITSELF can 409 (a second recover after the deployment was
+  // claimed elsewhere in between the status poll and the rotate). Falling
+  // through to !rotRes.ok -> 202 would tell the user to keep retrying a
+  // permanently-claimed deployment instead of a terminal 409.
+  it('rotate 409 reports already_claimed', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'approved',
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      privateKeyPem: pkForTest(),
+      requestedOrgName: 'acme',
+    })
+    routeFetch({
+      '/status': () => json({ status: 'approved', suspended: false, claimed: false }, 200),
+      'claim-token': () => json({ error: 'already_claimed' }, 409),
+    })
+    const res = await request(app()).post('/admin/registry/connect/recover').expect(409)
+    expect(res.body.error).toBe('already_claimed')
+  })
+
+  // A non-OK, non-409 rotate (e.g. registry 503) must degrade to 202
+  // connecting, never a 500 — the never-500 guarantee applies to the rotate
+  // response, not just to a thrown fetch.
+  it('rotate 503 degrades to 202 connecting', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'approved',
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      privateKeyPem: pkForTest(),
+      requestedOrgName: 'acme',
+    })
+    routeFetch({
+      '/status': () => json({ status: 'approved', suspended: false, claimed: false }, 200),
+      'claim-token': () => json({ error: 'boom' }, 503),
+    })
+    const res = await request(app()).post('/admin/registry/connect/recover').expect(202)
+    expect(res.body.state).toBe('connecting')
+  })
+
+  // A rotate response with a 200 status but a non-JSON body (an ingress or
+  // proxy splash page) must not let `await rotRes.json()` throw OUTSIDE the
+  // try/catch that guards the rest of this block — the register route
+  // already guards the equivalent hazard (registryConnect.ts:352-363).
+  it('rotate 200 with a non-JSON body degrades to 202 connecting', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'approved',
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      privateKeyPem: pkForTest(),
+      requestedOrgName: 'acme',
+    })
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input)
+      if (url.includes('/status')) {
+        return json({ status: 'approved', suspended: false, claimed: false }, 200)
+      }
+      if (url.includes('claim-token')) {
+        return new Response('<html>', { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    const res = await request(app()).post('/admin/registry/connect/recover').expect(202)
+    expect(res.body.state).toBe('connecting')
+  })
+
   // GET never 500s on a registry hiccup (registryConnect.ts:50-52); recovery
   // must honour the same guarantee.
-  it('degrades to 202 connecting when the rotate fetch throws', async () => {
+  it('degrades to 202 connecting when the rotate fetch throws', { retry: 0 }, async () => {
     connDb.getRegistryConnection.mockResolvedValue({
       status: 'approved',
       deploymentId: 'dep-1',
