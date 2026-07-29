@@ -3376,28 +3376,50 @@ export async function revokeRegistryApiKey(id: string): Promise<void> {
 }
 
 // ─── Self-hosted registry connect flow (spec §6.1/§6.3) ───────────────────────
-// Drives control-api's /api/v1/admin/registry/connect endpoints (Plan A1 Task 7,
-// control-api/src/routes/admin/registryConnect.ts). GET polls the registry status
-// endpoint, so state ∈ disconnected|pending|approved|rejected|connected — the panel
-// renders one view per state. Uses registryCodedRequest so it can branch on err.code
-// (not_self_hosted, already_connected, not_pending, claim_expired, claim_rejected).
+// Drives control-api's /api/v1/admin/registry/connect endpoints
+// (control-api/src/routes/admin/registryConnect.ts). GET is READ-ONLY and polls
+// the registry status endpoint, so state ∈ disconnected | pending | connecting |
+// approved | rejected | connected — the panel renders one view per state.
 //
-// GET fields by state: connected → { deploymentId, org }; pending/approved/rejected
-// → { deploymentId, requestedOrgName }; disconnected → {}. All fields optional below.
-// There is NO rejection_reason in the contract.
+// `connecting` means the registry AUTO-APPROVED (open registration) and the
+// inline claim has not completed. It is finished by recoverRegistryConnection(),
+// never by pasting a token — under auto-approval no operator ever sees one.
+// `approved` keeps its original meaning: an operator approved and a human must
+// paste the token they were given out of band.
+//
+// GET fields by state: connected → { deploymentId, org, authEnabled };
+// connecting → { deploymentId, requestedOrgName, authEnabled, recoveryError? };
+// pending/approved/rejected → { deploymentId, requestedOrgName };
+// disconnected → {}. There is NO rejection_reason in the contract.
+//
+// Uses registryCodedRequest so callers can branch on err.code: not_self_hosted,
+// already_connected, recovery_in_progress, not_pending, not_recoverable,
+// org_name_taken, registration_capacity, rate_limited, invalid_contact_email,
+// org_blocklisted, claim_expired, claim_rejected, already_claimed,
+// deployment_suspended, client_unavailable, connection_superseded.
 
 export type RegistryConnectionState =
   | 'disconnected'
   | 'pending'
+  | 'connecting'
   | 'approved'
   | 'rejected'
   | 'connected'
+
+export type RegistryRecoveryError =
+  | 'already_claimed'
+  | 'deployment_suspended'
+  | 'client_unavailable'
+  | 'connection_superseded'
+  | 'claim_expired'
+
 export type RegistryConnectionStatus = {
   state: RegistryConnectionState
   deploymentId?: string
   requestedOrgName?: string
   org?: string
   authEnabled?: boolean
+  recoveryError?: RegistryRecoveryError
 }
 
 export async function getRegistryConnection(): Promise<RegistryConnectionStatus> {
@@ -3427,4 +3449,11 @@ export async function submitRegistryClaim(input: {
 
 export async function disconnectRegistryConnection(): Promise<void> {
   await registryCodedRequest('DELETE', '/api/v1/admin/registry/connect')
+}
+
+export async function recoverRegistryConnection(): Promise<RegistryConnectionStatus> {
+  return registryCodedRequest(
+    'POST',
+    '/api/v1/admin/registry/connect/recover'
+  ) as Promise<RegistryConnectionStatus>
 }
