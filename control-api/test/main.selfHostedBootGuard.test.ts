@@ -56,6 +56,28 @@ describe('logRegistryConnectionState', () => {
     )
   })
 
+  // Discriminator pin: status and clientId deliberately disagree. If the
+  // discriminator ever regressed from `clientId != null` to a status check,
+  // this fails — the two fixtures above alone would not catch that mutation
+  // because in both of them status and clientId happen to point the same way.
+  it('reports connected for a pending-status row that already holds a clientId', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({ status: 'pending', clientId: 'cid' })
+    await logRegistryConnectionState()
+    expect(logger.rootLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ connected: true }),
+      expect.any(String)
+    )
+  })
+
+  it('reports NOT connected for a connected-status row with no clientId', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({ status: 'connected', clientId: null })
+    await logRegistryConnectionState()
+    expect(logger.rootLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ connected: false }),
+      expect.any(String)
+    )
+  })
+
   it('no-op in managed mode — does not even read the row', async () => {
     cfg.registryConnectionMode = 'managed'
     await expect(logRegistryConnectionState()).resolves.toBeUndefined()
