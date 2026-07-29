@@ -1524,6 +1524,12 @@ textarea.cu-input {
   font-size: 0.8125rem;
 }
 
+/* Sortable table header label: reads as header text, behaves as a button. */
+.cu-link--sort {
+  color: var(--cu-text-muted);
+  white-space: nowrap;
+}
+
 .cu-link--danger {
   color: var(--cu-danger);
 }

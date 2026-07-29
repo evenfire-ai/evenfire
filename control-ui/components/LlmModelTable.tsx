@@ -11,20 +11,26 @@ import { SectionSearchInput } from './SectionSearchInput'
 import { IconModels } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
-import type { TableHeaderColumn } from './TableHeaderRow/types'
+import type { TableHeaderColumn, TableSortDirection } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
 import { IconPencil, IconRefresh, IconX } from './icons'
 import { SelectInput } from './ui'
 
 const MODEL_COLUMNS: TableHeaderColumn[] = [
-  { key: 'provider', label: 'Provider', width: '10%' },
-  { key: 'model', label: 'Model', minWidth: '12rem' },
-  { key: 'vendor', label: 'Vendor', width: '10rem' },
-  { key: 'displayName', label: 'Display name', minWidth: '10rem' },
-  { key: 'contextWindow', label: 'Context window', align: 'right', width: '9rem' },
-  { key: 'enabled', label: 'Enabled', width: '6rem' },
-  { key: 'source', label: 'Source', width: '7rem' },
-  { key: 'stale', label: 'Stale', width: '6rem' },
+  { key: 'provider', label: 'Provider', width: '10%', sortable: true },
+  { key: 'model', label: 'Model', minWidth: '12rem', sortable: true },
+  { key: 'vendor', label: 'Vendor', width: '10rem', sortable: true },
+  { key: 'displayName', label: 'Display name', minWidth: '10rem', sortable: true },
+  {
+    key: 'contextWindow',
+    label: 'Context window',
+    align: 'right',
+    width: '9rem',
+    sortable: true,
+  },
+  { key: 'enabled', label: 'Enabled', width: '6rem', sortable: true },
+  { key: 'source', label: 'Source', width: '7rem', sortable: true },
+  { key: 'stale', label: 'Stale', width: '6rem', sortable: true },
   { key: 'actions', width: '5rem', align: 'right', ariaLabel: 'Actions' },
 ]
 
@@ -32,6 +38,80 @@ const ALL_PROVIDERS = '__all__'
 
 type EnabledFilter = 'all' | 'enabled' | 'disabled'
 type SourceFilter = 'all' | 'manual' | 'discovery'
+
+type ModelSortKey =
+  | 'provider'
+  | 'model'
+  | 'vendor'
+  | 'displayName'
+  | 'contextWindow'
+  | 'enabled'
+  | 'source'
+  | 'stale'
+
+const SORTABLE_KEYS = new Set<string>(
+  MODEL_COLUMNS.filter(column => column.sortable).map(column => column.key)
+)
+
+// Rows with no value for the sorted column always sink to the bottom, in both
+// directions — flipping the direction must not promote "—" cells to the top.
+function isBlank(value: string | number | null | undefined): boolean {
+  return value === null || value === undefined || value === ''
+}
+
+function compareBlankLast(
+  a: string | number | null | undefined,
+  b: string | number | null | undefined
+): number | null {
+  const aBlank = isBlank(a)
+  const bBlank = isBlank(b)
+  if (aBlank && bBlank) return 0
+  if (aBlank) return 1
+  if (bBlank) return -1
+  return null
+}
+
+function compareByKey(
+  a: LlmAllowedModel,
+  b: LlmAllowedModel,
+  key: ModelSortKey,
+  dir: TableSortDirection
+): number {
+  const sign = dir === 'asc' ? 1 : -1
+  switch (key) {
+    case 'provider':
+      // Sort on the label the operator actually reads, not the raw slug.
+      return (
+        sign *
+        getProviderDisplayLabel(a.provider).localeCompare(getProviderDisplayLabel(b.provider))
+      )
+    case 'model':
+      return sign * a.model.localeCompare(b.model)
+    case 'vendor': {
+      const blank = compareBlankLast(a.vendor, b.vendor)
+      if (blank !== null) return blank
+      return sign * String(a.vendor).localeCompare(String(b.vendor))
+    }
+    case 'displayName': {
+      const blank = compareBlankLast(a.display_name, b.display_name)
+      if (blank !== null) return blank
+      return sign * String(a.display_name).localeCompare(String(b.display_name))
+    }
+    case 'contextWindow': {
+      const blank = compareBlankLast(a.context_window_tokens, b.context_window_tokens)
+      if (blank !== null) return blank
+      return sign * (Number(a.context_window_tokens) - Number(b.context_window_tokens))
+    }
+    case 'enabled':
+      // false < true, so ascending lists Disabled before Enabled.
+      return sign * (Number(a.enabled) - Number(b.enabled))
+    case 'source':
+      // Legacy rows without `source` render as Manual — sort them the same way.
+      return sign * (a.source ?? 'manual').localeCompare(b.source ?? 'manual')
+    case 'stale':
+      return sign * (Number(a.stale === true) - Number(b.stale === true))
+  }
+}
 
 export function LlmModelTable({
   items,
@@ -48,6 +128,9 @@ export function LlmModelTable({
   const [providerFilter, setProviderFilter] = useState<string>(ALL_PROVIDERS)
   const [enabledFilter, setEnabledFilter] = useState<EnabledFilter>('all')
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
+  // null = untouched, keep the order the API returned.
+  const [sortKey, setSortKey] = useState<ModelSortKey | null>(null)
+  const [sortDir, setSortDir] = useState<TableSortDirection>('asc')
   const normalizedSearch = searchQuery.trim().toLowerCase()
 
   const providerOptions = useMemo(() => {
@@ -85,6 +168,30 @@ export function LlmModelTable({
         .includes(normalizedSearch)
     })
   }, [items, normalizedSearch, providerFilter, enabledFilter, sourceFilter])
+
+  // Sorting runs on the already-filtered subset, so filters stay applied by
+  // construction and the header count keeps tracking `filteredItems`.
+  const sortedItems = useMemo(() => {
+    if (!sortKey) return filteredItems
+    return [...filteredItems].sort((a, b) => {
+      const primary = compareByKey(a, b, sortKey, sortDir)
+      if (primary !== 0) return primary
+      // Stable tie-breaker so equal cells never shuffle between renders.
+      const byProvider = a.provider.localeCompare(b.provider)
+      if (byProvider !== 0) return byProvider
+      return a.model.localeCompare(b.model)
+    })
+  }, [filteredItems, sortKey, sortDir])
+
+  function toggleSort(nextKey: string) {
+    if (!SORTABLE_KEYS.has(nextKey)) return
+    if (sortKey === nextKey) {
+      setSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))
+      return
+    }
+    setSortKey(nextKey as ModelSortKey)
+    setSortDir('asc')
+  }
 
   const hasActiveFilter =
     Boolean(normalizedSearch) ||
@@ -212,10 +319,15 @@ export function LlmModelTable({
         <div className="cu-table-wrap">
           <table className="cu-table cu-table--header-band">
             <thead>
-              <TableHeaderRow columns={MODEL_COLUMNS} />
+              <TableHeaderRow
+                columns={MODEL_COLUMNS}
+                sortKey={sortKey}
+                sortDir={sortDir}
+                onSortToggle={toggleSort}
+              />
             </thead>
             <tbody>
-              {filteredItems.map((model: LlmAllowedModel) => (
+              {sortedItems.map((model: LlmAllowedModel) => (
                 <tr key={model.id} className="cu-table__row">
                   <td>{getProviderDisplayLabel(model.provider)}</td>
                   <td className="cu-px-model">

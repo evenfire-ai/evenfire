@@ -123,3 +123,114 @@ describe('LlmModelTable filters', () => {
     expect(screen.getByText('No models match this filter.')).toBeInTheDocument()
   })
 })
+
+describe('LlmModelTable sorting', () => {
+  // Reads the rendered order of the Model column (tbody only).
+  function rowModels(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll('.cu-px-model')).map(cell =>
+      (cell.textContent ?? '').trim()
+    )
+  }
+
+  function sortButton(column: string) {
+    return screen.getByRole('button', { name: new RegExp(`^Sort by ${column} `) })
+  }
+
+  const modelC: LlmAllowedModel = { ...baseModel, id: 'm-c', model: 'ccc' }
+  const modelA: LlmAllowedModel = { ...baseModel, id: 'm-a', model: 'aaa' }
+  const modelB: LlmAllowedModel = { ...baseModel, id: 'm-b', model: 'bbb' }
+
+  it('keeps the server order until a header is clicked', () => {
+    const { container } = renderTable([modelC, modelA, modelB])
+    expect(rowModels(container)).toEqual(['ccc', 'aaa', 'bbb'])
+    // Nothing is announced as sorted before the first click.
+    expect(container.querySelector('th[aria-sort]')).toBeNull()
+  })
+
+  it('sorts ascending on the first click and inverts on the second', () => {
+    const { container } = renderTable([modelC, modelA, modelB])
+
+    fireEvent.click(sortButton('model'))
+    expect(rowModels(container)).toEqual(['aaa', 'bbb', 'ccc'])
+    expect(container.querySelector('th[aria-sort]')?.getAttribute('aria-sort')).toBe('ascending')
+
+    fireEvent.click(sortButton('model'))
+    expect(rowModels(container)).toEqual(['ccc', 'bbb', 'aaa'])
+    expect(container.querySelector('th[aria-sort]')?.getAttribute('aria-sort')).toBe('descending')
+  })
+
+  it('switches to ascending when a different column becomes the sort key', () => {
+    const { container } = renderTable([
+      { ...baseModel, id: 'm-1', model: 'aaa', context_window_tokens: 300 },
+      { ...baseModel, id: 'm-2', model: 'bbb', context_window_tokens: 100 },
+      { ...baseModel, id: 'm-3', model: 'ccc', context_window_tokens: 200 },
+    ])
+
+    fireEvent.click(sortButton('model'))
+    fireEvent.click(sortButton('model'))
+    expect(rowModels(container)).toEqual(['ccc', 'bbb', 'aaa'])
+
+    fireEvent.click(sortButton('context window'))
+    expect(rowModels(container)).toEqual(['bbb', 'ccc', 'aaa'])
+  })
+
+  it('sorts only the filtered subset and keeps the filter applied', () => {
+    const { container } = renderTable([
+      { ...baseModel, id: 'm-1', model: 'zzz-on', enabled: true },
+      { ...baseModel, id: 'm-2', model: 'mmm-off', enabled: false },
+      { ...baseModel, id: 'm-3', model: 'aaa-on', enabled: true },
+    ])
+
+    fireEvent.change(screen.getByLabelText('Filter by enabled state'), {
+      target: { value: 'enabled' },
+    })
+    fireEvent.click(sortButton('model'))
+
+    expect(rowModels(container)).toEqual(['aaa-on', 'zzz-on'])
+    expect(screen.queryByText('mmm-off')).not.toBeInTheDocument()
+  })
+
+  it('keeps the active sort when a filter changes', () => {
+    const { container } = renderTable([
+      { ...baseModel, id: 'm-1', model: 'zzz', enabled: true },
+      { ...baseModel, id: 'm-2', model: 'aaa', enabled: true },
+      { ...baseModel, id: 'm-3', model: 'mmm', enabled: false },
+    ])
+
+    fireEvent.click(sortButton('model'))
+    fireEvent.click(sortButton('model'))
+    expect(rowModels(container)).toEqual(['zzz', 'mmm', 'aaa'])
+
+    fireEvent.change(screen.getByLabelText('Filter by enabled state'), {
+      target: { value: 'enabled' },
+    })
+    // Still descending — narrowing the set must not reset the sort.
+    expect(rowModels(container)).toEqual(['zzz', 'aaa'])
+    expect(container.querySelector('th[aria-sort]')?.getAttribute('aria-sort')).toBe('descending')
+  })
+
+  it.each([
+    ['vendor', 'vendor'] as const,
+    ['display name', 'display_name'] as const,
+    ['context window', 'context_window_tokens'] as const,
+  ])('keeps rows with no %s last in both directions', (columnLabel, field) => {
+    const withValue = field === 'context_window_tokens' ? 1000 : 'aaa'
+    const withHigherValue = field === 'context_window_tokens' ? 2000 : 'zzz'
+    const { container } = renderTable([
+      { ...baseModel, id: 'm-1', model: 'low', [field]: withValue },
+      { ...baseModel, id: 'm-2', model: 'none', [field]: null },
+      { ...baseModel, id: 'm-3', model: 'high', [field]: withHigherValue },
+    ])
+
+    fireEvent.click(sortButton(columnLabel))
+    expect(rowModels(container)).toEqual(['low', 'high', 'none'])
+
+    fireEvent.click(sortButton(columnLabel))
+    expect(rowModels(container)).toEqual(['high', 'low', 'none'])
+  })
+
+  it('does not turn the Actions column into a sort control', () => {
+    renderTable([baseModel])
+    expect(screen.queryByRole('button', { name: /^Sort by actions/ })).toBeNull()
+  })
+})
