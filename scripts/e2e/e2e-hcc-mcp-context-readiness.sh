@@ -142,14 +142,6 @@ hcc_log_contains() {
   grep -Fq "$marker" <<<"$logs"
 }
 
-hcc_log_matches() {
-  local pattern=$1 logs
-  [ -n "$NEW_HCC_POD" ] || return 1
-  logs="$(kctl logs "pod/${NEW_HCC_POD}" -n "$HCC_NS" \
-    -c host-context-controller 2>/dev/null)" || return 1
-  grep -Eq "$pattern" <<<"$logs"
-}
-
 dns_log_contains() {
   local marker=$1 logs
   logs="$(kctl logs "deployment/${DNS_BLOCKER_NAME}" -n "$HCC_NS" 2>/dev/null)" ||
@@ -158,13 +150,13 @@ dns_log_contains() {
 }
 
 startup_convergence_window_is_clean() {
+  # The fault injection deliberately withholds DNS answers. A resolver timeout
+  # may therefore schedule a bounded external-egress retry before the Context
+  # assertion completes. That retry is expected while runtime and policy stay
+  # absent; NetworkPolicy failures and terminal retry exhaustion are not.
   ! hcc_log_contains "Initial NetworkPolicy background reconciliation failed:" &&
     ! hcc_log_contains "Scheduling initial NetworkPolicy background convergence retry" &&
     ! hcc_log_contains "NetworkPolicy reconciliation failed for context ${CONTEXT_NAME}:" &&
-    ! hcc_log_contains \
-      "Initial external egress reconciliation failed for ${MCP_NS}/${MCP_NAME};" &&
-    ! hcc_log_matches \
-      "Scheduling external egress retry [0-9]+/[0-9]+ for McpServer \"${MCP_NAME}\"" &&
     ! hcc_log_contains \
       "External egress retry exhausted for McpServer \"${MCP_NAME}\" in namespace \"${MCP_NS}\""
 }
@@ -1036,7 +1028,7 @@ wait_until 120 "initial NetworkPolicy pass to reconcile the fixture's empty Cont
   hcc_log_contains "$initial_empty_context_log" ||
   die "initial NetworkPolicy pass never reconciled the fixture's empty Context"
 startup_convergence_window_is_clean ||
-  die "startup NetworkPolicy or fixture external-egress convergence failed/retried before the Context update"
+  die "startup NetworkPolicy failed or fixture external-egress retries exhausted before the Context update"
 context_policies_absent ||
   die "Context policy appeared before the isolated MODIFIED event"
 
@@ -1056,7 +1048,7 @@ wait_until 120 "all three latest-Context NetworkPolicies to converge during the 
   context_policies_converged ||
   die "Context policies remained blocked behind the held McpServer convergence"
 startup_convergence_window_is_clean ||
-  die "startup NetworkPolicy or fixture external-egress convergence failed/retried during the isolation window"
+  die "startup NetworkPolicy failed or fixture external-egress retries exhausted during the isolation window"
 fixture_mcp_convergence_absent ||
   die "McpServer runtime or external-egress policy escaped the deterministic DNS hold boundary"
 dns_log_contains "holding DNS A ${TARGET_DNS}" ||
@@ -1090,7 +1082,7 @@ wait_until 60 "initial NetworkPolicy full pass to run" \
   hcc_log_contains "Running initial NetworkPolicy background reconciliation" ||
   die "initial NetworkPolicy convergence was not observed after releasing MCP convergence"
 startup_convergence_window_is_clean ||
-  die "startup NetworkPolicy or fixture external-egress convergence failed/retried before final convergence"
+  die "startup NetworkPolicy failed or fixture external-egress retries exhausted before final convergence"
 hcc_identity_is_stable ||
   die "HCC restarted instead of completing the released background convergence"
 final_probe="$(probe_hcc_final_context)" ||

@@ -187,6 +187,39 @@ for case_name in detached minikube-profile-missing minikube-profile profile-name
   fi
 done
 
+startup_window_function="$(
+  sed -n '/^startup_convergence_window_is_clean() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+if (
+  MCP_NS=mcp-server
+  MCP_NAME=e2e-held-server
+  CONTEXT_NAME=e2e-context
+  MOCK_HCC_LOG='
+[K8s] Initial external egress reconciliation failed for mcp-server/e2e-held-server; runtime reconciliation will stay blocked until retry succeeds: dns timeout
+[K8s] Scheduling external egress retry 1/3 for McpServer "e2e-held-server" in 5000ms
+'
+  hcc_log_contains() { grep -Fq "$1" <<<"$MOCK_HCC_LOG"; }
+  eval "$startup_window_function"
+  startup_convergence_window_is_clean
+); then
+  pass "the injected DNS hold permits transient external-egress failure and bounded retry"
+else
+  fail "the injected DNS hold incorrectly treats its expected transient retry as fatal"
+fi
+if (
+  MCP_NS=mcp-server
+  MCP_NAME=e2e-held-server
+  CONTEXT_NAME=e2e-context
+  MOCK_HCC_LOG='External egress retry exhausted for McpServer "e2e-held-server" in namespace "mcp-server"'
+  hcc_log_contains() { grep -Fq "$1" <<<"$MOCK_HCC_LOG"; }
+  eval "$startup_window_function"
+  ! startup_convergence_window_is_clean
+); then
+  pass "the injected DNS hold still rejects terminal external-egress retry exhaustion"
+else
+  fail "the injected DNS hold can accept terminal external-egress retry exhaustion"
+fi
+
 # shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-logs.sh
 source "$LOG_HELPER"
 HCC_LOG_BUFFER="$MOCK_LOG_FILE"
