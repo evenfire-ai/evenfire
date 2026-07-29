@@ -23,5 +23,11 @@ export type TableHeaderRowProps = {
   // Key of the currently sorted column, or null for "unsorted" (server order).
   sortKey?: string | null
   sortDir?: TableSortDirection
+  // Receives the key of the clicked column. Implementations are expected to
+  // invert `sortDir` when that key is already active and to reset to 'asc' when
+  // switching to a different column. The header tooltip depends on it: for any
+  // inactive column it announces the next click as ascending, so a caller that
+  // preserved the current direction across columns would render a hint that
+  // contradicts what the click actually does.
   onSortToggle?: (key: string) => void
 }
