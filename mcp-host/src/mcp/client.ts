@@ -25,6 +25,14 @@ interface McpSdkRequestOptions {
   signal?: AbortSignal
 }
 
+interface McpCallRecovery {
+  sourceEpoch: number
+  sourceClient: Client
+  targetEpoch?: number
+  targetClient?: Client
+  promise: Promise<void>
+}
+
 type McpProbeResult =
   | { ok: true; toolCount: number }
   | { ok: false; error: unknown; stale: boolean }
@@ -68,12 +76,11 @@ function resolveMcpRequestTimeoutMs(callerTimeoutMs?: number): number {
 
 function ensureNotAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return
-  const reason =
-    typeof signal.reason === 'string' && signal.reason.trim() ? signal.reason : 'aborted'
-  throw new Error(reason)
+  throw abortError(signal, 'aborted')
 }
 
 function abortError(signal: AbortSignal | undefined, fallback: string): Error {
+  if (signal?.reason instanceof Error) return signal.reason
   const reason =
     typeof signal?.reason === 'string' && signal.reason.trim() ? signal.reason : fallback
   return new Error(reason)
@@ -140,8 +147,10 @@ export class McpClient {
   private tools: McpTool[] = []
   private connected: boolean = false
   private reconnectPromise: Promise<void> | null = null
+  private reconnectCallRecovery: McpCallRecovery | null = null
   private connectionEpoch = 0
   private retired = false
+  private readonly retirementController = new AbortController()
   private readonly transportCleanups = new WeakMap<SupportedMcpTransport, Promise<void>>()
 
   constructor(serverConfig: McpServerInfo, authToken?: string, proxyUrl?: string) {
@@ -352,6 +361,7 @@ export class McpClient {
    */
   retire(): () => Promise<void> {
     this.retired = true
+    this.retirementController.abort(this.lifecycleError('closed'))
     return this.detachConnection()
   }
 
@@ -469,6 +479,13 @@ export class McpClient {
     if (this.reconnectPromise) {
       return this.reconnectPromise
     }
+    // A caller-independent reconnect supersedes any completed session
+    // recovery. Calls from that older source must not adopt this connection.
+    this.reconnectCallRecovery = null
+    await this.startReconnect(options)
+  }
+
+  private async startReconnect(options: McpToolCallOptions): Promise<void> {
     this.reconnectPromise = (async () => {
       console.log(`[MCP:${this.name}] Reconnecting...`)
       await this.disconnect()
@@ -480,6 +497,92 @@ export class McpClient {
     } finally {
       this.reconnectPromise = null
     }
+  }
+
+  /**
+   * Join a session recovery only when it was started by another call from the
+   * exact same connection. An unrelated reconnect or replacement must keep
+   * stale calls fenced off. The completed source-to-target marker also lets a
+   * slower peer adopt a recovery that finished before its retry delay elapsed.
+   * Each joining caller retains its own budget and abort signal.
+   */
+  private async reconnectForCall(
+    callEpoch: number,
+    callClient: Client,
+    options: McpToolCallOptions
+  ): Promise<void> {
+    this.ensureNotRetired()
+    const existingRecovery = this.reconnectCallRecovery
+    if (
+      existingRecovery?.sourceEpoch === callEpoch &&
+      existingRecovery.sourceClient === callClient
+    ) {
+      await this.waitForCallRecovery(existingRecovery, options)
+      return
+    }
+
+    if (this.reconnectPromise) {
+      throw this.lifecycleError('superseded')
+    }
+
+    this.ensureCallCurrent(callEpoch, callClient)
+    const recovery: McpCallRecovery = {
+      sourceEpoch: callEpoch,
+      sourceClient: callClient,
+      promise: Promise.resolve(),
+    }
+    recovery.promise = (async () => {
+      try {
+        // Recovery belongs to the connection lifecycle, not to whichever
+        // affected call happens to win the race. Callers independently bound
+        // their wait below without cancelling recovery for healthier peers.
+        await this.startReconnect({})
+        const targetClient = this.client
+        const targetEpoch = this.connectionEpoch
+        if (!targetClient) throw this.lifecycleError('superseded')
+        this.ensureCallCurrent(targetEpoch, targetClient)
+        if (this.reconnectCallRecovery !== recovery) {
+          throw this.lifecycleError(this.retired ? 'closed' : 'superseded')
+        }
+        recovery.targetEpoch = targetEpoch
+        recovery.targetClient = targetClient
+      } catch (error) {
+        if (this.reconnectCallRecovery === recovery) {
+          this.reconnectCallRecovery = null
+        }
+        throw error
+      }
+    })()
+    this.reconnectCallRecovery = recovery
+    await this.waitForCallRecovery(recovery, options)
+  }
+
+  private async waitForCallRecovery(
+    recovery: McpCallRecovery,
+    options: McpToolCallOptions
+  ): Promise<void> {
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, this.retirementController.signal])
+      : this.retirementController.signal
+    await withRequestTimeout(recovery.promise, { ...options, signal }, 'MCP reconnect timeout')
+    const { targetEpoch, targetClient } = recovery
+    if (
+      targetEpoch === undefined ||
+      !targetClient ||
+      !this.isCallCurrent(targetEpoch, targetClient)
+    ) {
+      throw this.lifecycleError(this.retired ? 'closed' : 'superseded')
+    }
+  }
+
+  private canAdoptCallRecovery(callEpoch: number, callClient: Client): boolean {
+    const recovery = this.reconnectCallRecovery
+    if (recovery?.sourceEpoch !== callEpoch || recovery.sourceClient !== callClient) {
+      return false
+    }
+    if (recovery.targetEpoch === undefined && !recovery.targetClient) return true
+    if (recovery.targetEpoch === undefined || !recovery.targetClient) return false
+    return this.isCallCurrent(recovery.targetEpoch, recovery.targetClient)
   }
 
   /**
@@ -522,22 +625,22 @@ export class McpClient {
       console.log(`[MCP:${this.name}] Tool result:`, JSON.stringify(result).substring(0, 200))
       return result
     } catch (error) {
-      if (
-        this.retired ||
-        this.connectionEpoch !== callEpoch ||
-        this.client !== callClient ||
-        !this.connected
-      ) {
-        throw this.lifecycleError(this.retired ? 'closed' : 'superseded')
+      const sessionError = this.isSessionError(error)
+      if (this.retired) {
+        throw this.lifecycleError('closed')
       }
-      if (this.isSessionError(error)) {
+      const callCurrent = this.isCallCurrent(callEpoch, callClient)
+      if (!callCurrent && (!sessionError || !this.canAdoptCallRecovery(callEpoch, callClient))) {
+        throw this.lifecycleError('superseded')
+      }
+      if (sessionError) {
         console.warn(`[MCP:${this.name}] Session lost, reconnecting and retrying after delay...`)
         try {
           // Brief delay before reconnect to avoid hammering the server
           const retryDelayMs = Math.min(1000, remainingBudgetMs(deadlineMs) ?? 1000)
           await new Promise(resolve => setTimeout(resolve, retryDelayMs))
-          this.ensureCallCurrent(callEpoch, callClient)
-          await this.reconnect({
+          ensureNotAborted(options.signal)
+          await this.reconnectForCall(callEpoch, callClient, {
             timeoutMs: remainingBudgetMs(deadlineMs),
             signal: options.signal,
           })

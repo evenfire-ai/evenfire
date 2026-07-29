@@ -125,7 +125,7 @@ describe('McpClient SDK request timeouts', () => {
     ])
   })
 
-  it('preserves timeout options across reconnect retry', async () => {
+  it('preserves the caller budget for retry while shared recovery uses its lifecycle budget', async () => {
     vi.useFakeTimers()
     sdkState.callToolQueue.push(
       () => {
@@ -144,7 +144,202 @@ describe('McpClient SDK request timeouts', () => {
     expect(sdkState.callToolCalls).toHaveLength(2)
     expect(sdkState.callToolCalls[0][2]).toEqual(expect.objectContaining({ timeout: 30_000 }))
     expect(sdkState.callToolCalls[1][2]).toEqual(expect.objectContaining({ timeout: 29_000 }))
-    expect(sdkState.listToolsCalls[1][1]).toEqual(expect.objectContaining({ timeout: 29_000 }))
+    expect(sdkState.listToolsCalls[1][1]).toEqual(expect.objectContaining({ timeout: 3_600_000 }))
+  })
+
+  it('lets a slower peer adopt the completed recovery of their shared session', async () => {
+    vi.useFakeTimers()
+    sdkState.callToolQueue.push(
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => ({ content: [{ type: 'text', text: 'first-after-reconnect' }] }),
+      () => ({ content: [{ type: 'text', text: 'second-after-reconnect' }] })
+    )
+    const c = client()
+    await c.connect()
+
+    const first = c.callTool('read', { id: 1 }, { timeoutMs: 30_000 })
+    await vi.advanceTimersByTimeAsync(500)
+    const second = c.callTool('read', { id: 2 }, { timeoutMs: 30_000 })
+    const settled = Promise.allSettled([first, second])
+    await vi.advanceTimersByTimeAsync(500)
+
+    // The first call has already completed the one shared reconnect while the
+    // slower peer is still inside its independently budgeted retry delay.
+    expect(sdkState.connectCalls).toHaveLength(2)
+    expect(sdkState.callToolCalls).toHaveLength(3)
+    await vi.advanceTimersByTimeAsync(500)
+
+    await expect(settled).resolves.toEqual([
+      {
+        status: 'fulfilled',
+        value: { content: [{ type: 'text', text: 'first-after-reconnect' }] },
+      },
+      {
+        status: 'fulfilled',
+        value: { content: [{ type: 'text', text: 'second-after-reconnect' }] },
+      },
+    ])
+    expect(sdkState.connectCalls).toHaveLength(2)
+    expect(sdkState.callToolCalls).toHaveLength(4)
+  })
+
+  it('retries a session error that arrives after a peer has recovered their source', async () => {
+    vi.useFakeTimers()
+    const lateSessionError = deferred<unknown>()
+    sdkState.callToolQueue.push(
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => lateSessionError.promise,
+      () => ({ content: [{ type: 'text', text: 'first-after-reconnect' }] }),
+      () => ({ content: [{ type: 'text', text: 'late-after-reconnect' }] })
+    )
+    const c = client()
+    await c.connect()
+
+    const settled = Promise.allSettled([
+      c.callTool('read', { id: 1 }, { timeoutMs: 30_000 }),
+      c.callTool('read', { id: 2 }, { timeoutMs: 30_000 }),
+    ])
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(sdkState.connectCalls).toHaveLength(2)
+    expect(sdkState.callToolCalls).toHaveLength(3)
+
+    lateSessionError.reject(Object.assign(new Error('session not found'), { code: -32003 }))
+    await vi.advanceTimersByTimeAsync(1000)
+
+    await expect(settled).resolves.toEqual([
+      {
+        status: 'fulfilled',
+        value: { content: [{ type: 'text', text: 'first-after-reconnect' }] },
+      },
+      {
+        status: 'fulfilled',
+        value: { content: [{ type: 'text', text: 'late-after-reconnect' }] },
+      },
+    ])
+    expect(sdkState.connectCalls).toHaveLength(2)
+    expect(sdkState.callToolCalls).toHaveLength(4)
+  })
+
+  it('fails all shared recovery waiters closed when the client is retired', async () => {
+    vi.useFakeTimers()
+    const reconnectHandshake = deferred()
+    sdkState.callToolQueue.push(
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => ({ content: [{ type: 'text', text: 'must-not-run' }] }),
+      () => ({ content: [{ type: 'text', text: 'must-not-run' }] })
+    )
+    const c = client()
+    await c.connect()
+    sdkState.connectQueue.push(() => reconnectHandshake.promise)
+
+    const settled = Promise.allSettled([
+      c.callTool('write', { id: 1 }, { timeoutMs: 30_000 }),
+      c.callTool('write', { id: 2 }, { timeoutMs: 30_000 }),
+    ])
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(sdkState.connectCalls).toHaveLength(2)
+
+    const closing = retirePermanently(c)
+    reconnectHandshake.resolve()
+    await closing
+    await vi.advanceTimersByTimeAsync(0)
+
+    await expect(settled).resolves.toEqual([
+      {
+        status: 'rejected',
+        reason: expect.objectContaining({ message: expect.stringMatching(/closed|superseded/) }),
+      },
+      {
+        status: 'rejected',
+        reason: expect.objectContaining({ message: expect.stringMatching(/closed|superseded/) }),
+      },
+    ])
+    expect(sdkState.callToolCalls).toHaveLength(2)
+    expect(c.isConnected).toBe(false)
+  })
+
+  it('keeps shared recovery alive when its first caller exhausts a shorter budget', async () => {
+    vi.useFakeTimers()
+    const reconnectHandshake = deferred()
+    sdkState.callToolQueue.push(
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => ({ content: [{ type: 'text', text: 'long-budget-peer-recovered' }] })
+    )
+    const c = client()
+    await c.connect()
+    sdkState.connectQueue.push(() => reconnectHandshake.promise)
+
+    const shortBudget = c.callTool('read', { id: 1 }, { timeoutMs: 1_500 })
+    const shortAssertion = expect(shortBudget).rejects.toThrow('step-timeout')
+    const longBudget = c.callTool('read', { id: 2 }, { timeoutMs: 30_000 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(sdkState.connectCalls).toHaveLength(2)
+
+    await vi.advanceTimersByTimeAsync(500)
+    await shortAssertion
+    expect(sdkState.callToolCalls).toHaveLength(2)
+
+    reconnectHandshake.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    await expect(longBudget).resolves.toEqual({
+      content: [{ type: 'text', text: 'long-budget-peer-recovered' }],
+    })
+    expect(sdkState.connectCalls).toHaveLength(2)
+    expect(sdkState.callToolCalls).toHaveLength(3)
+  })
+
+  it('lets an aborted peer leave shared recovery without cancelling it for another caller', async () => {
+    vi.useFakeTimers()
+    const reconnectHandshake = deferred()
+    const peerController = new AbortController()
+    sdkState.callToolQueue.push(
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => ({ content: [{ type: 'text', text: 'leader-recovered' }] })
+    )
+    const c = client()
+    await c.connect()
+    sdkState.connectQueue.push(() => reconnectHandshake.promise)
+
+    const leader = c.callTool('read', { id: 1 }, { timeoutMs: 30_000 })
+    const peer = c.callTool('read', { id: 2 }, { timeoutMs: 30_000, signal: peerController.signal })
+    const peerAssertion = expect(peer).rejects.toThrow('peer-aborted')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(sdkState.connectCalls).toHaveLength(2)
+
+    peerController.abort('peer-aborted')
+    await peerAssertion
+    expect(sdkState.connectCalls).toHaveLength(2)
+    expect(sdkState.callToolCalls).toHaveLength(2)
+
+    reconnectHandshake.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    await expect(leader).resolves.toEqual({
+      content: [{ type: 'text', text: 'leader-recovered' }],
+    })
+    expect(sdkState.connectCalls).toHaveLength(2)
+    expect(sdkState.callToolCalls).toHaveLength(3)
   })
 
   it('does not start reconnect retry after the caller budget is exhausted', async () => {
@@ -162,6 +357,32 @@ describe('McpClient SDK request timeouts', () => {
     await assertion
     expect(sdkState.callToolCalls).toHaveLength(1)
     expect(sdkState.listToolsCalls).toHaveLength(1)
+  })
+
+  it('does not start reconnect after the caller aborts during the retry delay', async () => {
+    vi.useFakeTimers()
+    sdkState.callToolQueue.push(() => {
+      throw Object.assign(new Error('session not found'), { code: -32003 })
+    })
+    const controller = new AbortController()
+    const c = client()
+    await c.connect()
+
+    const pending = c.callTool(
+      'write',
+      { value: 'side-effect' },
+      { timeoutMs: 30_000, signal: controller.signal }
+    )
+    const assertion = expect(pending).rejects.toThrow('caller-aborted')
+    await vi.advanceTimersByTimeAsync(500)
+    controller.abort('caller-aborted')
+    await vi.advanceTimersByTimeAsync(500)
+
+    await assertion
+    expect(sdkState.connectCalls).toHaveLength(1)
+    expect(sdkState.transportCloseCalls).toHaveLength(0)
+    expect(sdkState.callToolCalls).toHaveLength(1)
+    expect(c.isConnected).toBe(true)
   })
 
   it('fails closed for invalid timeout env before SDK tool discovery', async () => {
@@ -390,6 +611,45 @@ describe('McpClient SDK request timeouts', () => {
     expect(c.isConnected).toBe(false)
     expect(sdkState.transportCloseCalls).toHaveLength(2)
     expect(new Set(sdkState.transportCloseCalls.map(([transport]) => transport)).size).toBe(2)
+  })
+
+  it('rejects all recovery waiters promptly when retired while reconnect never settles', async () => {
+    vi.useFakeTimers()
+    const reconnectHandshake = deferred()
+    sdkState.callToolQueue.push(
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      }
+    )
+    const c = client()
+    await c.connect()
+    sdkState.connectQueue.push(() => reconnectHandshake.promise)
+
+    const settled = Promise.allSettled([
+      c.callTool('write', { id: 1 }, { timeoutMs: 30_000 }),
+      c.callTool('write', { id: 2 }, { timeoutMs: 30_000 }),
+    ])
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(sdkState.connectCalls).toHaveLength(2)
+
+    await retirePermanently(c)
+    await vi.advanceTimersByTimeAsync(0)
+
+    await expect(settled).resolves.toEqual([
+      {
+        status: 'rejected',
+        reason: expect.objectContaining({ message: expect.stringMatching(/closed/) }),
+      },
+      {
+        status: 'rejected',
+        reason: expect.objectContaining({ message: expect.stringMatching(/closed/) }),
+      },
+    ])
+    expect(sdkState.callToolCalls).toHaveLength(2)
+    expect(c.isConnected).toBe(false)
   })
 
   it('does not publish tools discovered after permanent close', async () => {
