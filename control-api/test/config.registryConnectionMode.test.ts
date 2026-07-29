@@ -100,3 +100,52 @@ describe('config: registry URL allowlist', () => {
     expect(config.registryUrl).toBe('https://registry.MyCorp.example')
   })
 })
+
+describe('boot validation — URL allowlist re-gating', () => {
+  // The hole this task closes: today the allowlist only runs when auth is on,
+  // and auth ships false, so a self-hosted deployment registers and claims
+  // credentials against a totally unvalidated URL.
+  it('self-hosted + unlisted URL throws even with NO auth env var', { retry: 0 }, async () => {
+    vi.resetModules()
+    delete process.env.CLERUM_REGISTRY_AUTH_ENABLED
+    process.env.REGISTRY_CONNECTION_MODE = 'self-hosted'
+    process.env.CLERUM_REGISTRY_URL = 'https://evil.example.net'
+    await expect(import('../src/config.js')).rejects.toThrow(/allowlist/)
+  })
+
+  it('self-hosted + allowlisted URL boots with no auth env var', { retry: 0 }, async () => {
+    vi.resetModules()
+    delete process.env.CLERUM_REGISTRY_AUTH_ENABLED
+    process.env.REGISTRY_CONNECTION_MODE = 'self-hosted'
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
+    await expect(import('../src/config.js')).resolves.toBeDefined()
+  })
+
+  // Regression guard for the managed hard constraint: mode UNSET (defaults to
+  // managed) + a URL + auth off must still boot. This mirrors
+  // startupGuards.registryConsumer.test.ts:85-91, restated here because two
+  // spec revisions broke exactly this case.
+  it('managed-by-default + URL + auth off still boots', { retry: 0 }, async () => {
+    vi.resetModules()
+    delete process.env.REGISTRY_CONNECTION_MODE
+    process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'false'
+    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
+    await expect(import('../src/config.js')).resolves.toBeDefined()
+  })
+
+  // The new explicit check. Today an empty URL with auth on throws via the
+  // allowlist (allowed.includes('') is never true). The new allowlist block is
+  // preconditioned on registryUrl !== '', which would skip it — so this needs
+  // its own guard, and nothing covered it before.
+  it('auth on with an EMPTY url throws', { retry: 0 }, async () => {
+    vi.resetModules()
+    process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'true'
+    process.env.REGISTRY_CONNECTION_MODE = 'managed'
+    process.env.CLERUM_REGISTRY_CLIENT_ID = 'id'
+    process.env.CLERUM_REGISTRY_CLIENT_SECRET = 's'
+    process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY = voucherPem()
+    process.env.CONTROL_API_REGISTRY_VOUCHER_KID = 'key-uuid'
+    delete process.env.CLERUM_REGISTRY_URL
+    await expect(import('../src/config.js')).rejects.toThrow(/CLERUM_REGISTRY_URL is required/)
+  })
+})
