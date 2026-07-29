@@ -19,15 +19,19 @@ type ExternalEgressRetryIntent = {
 
 type ExternalEgressMutationOptions = {
   deleteAllowed?: () => Promise<boolean>
+  isCurrent: () => boolean
 }
 
-type ExternalEgressReconcileOptions = ExternalEgressMutationOptions & {
+type ExternalEgressReconcileOptions = {
+  deleteAllowed?: () => Promise<boolean>
   retry?: ExternalEgressRetryHandle
+  isCurrent?: () => boolean
 }
 
 type ExternalEgressCoordinatorDependencies = {
   listServers: () => McpServerCRD[]
   getCurrentServer: (name: string) => McpServerCRD | undefined
+  inventoryAuthoritative: () => boolean
   sameDesiredRevision: (left: McpServerCRD, right: McpServerCRD) => boolean
   enqueue: (server: McpServerCRD, work: () => Promise<void>) => Promise<void>
   mutate: (
@@ -129,7 +133,10 @@ export class ExternalEgressConvergenceCoordinator {
     return run
   }
 
-  prepareStartupGates(servers: McpServerCRD[]): ExternalEgressStartupGates {
+  prepareStartupGates(
+    servers: McpServerCRD[],
+    isCurrent: () => boolean = this.dependencies.inventoryAuthoritative
+  ): ExternalEgressStartupGates {
     const gates = new Map<string, Promise<boolean>>()
     const selectedServers = servers
       .filter(server => (server.spec.egressBindings?.length ?? 0) > 0)
@@ -150,10 +157,10 @@ export class ExternalEgressConvergenceCoordinator {
       const key = this.key(selected)
       const gate = limiter
         .run(async () => {
-          if (this.stopped) return false
+          if (this.stopped || !isCurrent()) return false
           let ready = false
           await this.dependencies.enqueue(selected, async () => {
-            if (this.stopped) return
+            if (this.stopped || !isCurrent()) return
             const current = this.dependencies.getCurrentServer(selected.name)
             if (
               !current ||
@@ -165,10 +172,11 @@ export class ExternalEgressConvergenceCoordinator {
             try {
               // Startup is an egress-only gate. Any pre-existing retry intent is
               // completed only by its full replay, never by this mutation.
-              await this.reconcile('MODIFIED', current)
+              await this.reconcile('MODIFIED', current, { isCurrent })
               const latest = this.dependencies.getCurrentServer(selected.name)
               ready =
                 !this.stopped &&
+                isCurrent() &&
                 latest !== undefined &&
                 latest.namespace === selected.namespace &&
                 this.dependencies.sameDesiredRevision(selected, latest)
@@ -197,19 +205,21 @@ export class ExternalEgressConvergenceCoordinator {
     server: McpServerCRD,
     options: ExternalEgressReconcileOptions = {}
   ): Promise<ExternalEgressRetryHandle | undefined> {
-    if (this.stopped || (options.retry && !options.retry.isCurrent())) return undefined
+    if (!this.reconcileIsCurrent(type, server, options)) return undefined
     const key = this.key(server)
     let existing = this.inFlight.get(key)
     while (existing) {
       console.warn(`[K8s] Waiting for external egress reconcile for ${key}; already in flight`)
       await existing
-      if (this.stopped || (options.retry && !options.retry.isCurrent())) return undefined
+      if (!this.reconcileIsCurrent(type, server, options)) return undefined
       existing = this.inFlight.get(key)
     }
 
+    if (!this.reconcileIsCurrent(type, server, options)) return undefined
     const completion = options.retry ?? this.currentRetryHandle(key)
     const run = this.dependencies.mutate(type, server, {
       deleteAllowed: options.deleteAllowed,
+      isCurrent: () => this.reconcileIsCurrent(type, server, options),
     })
     this.inFlight.set(key, run)
     try {
@@ -293,13 +303,25 @@ export class ExternalEgressConvergenceCoordinator {
     this.retrySlots.set(key, slot)
     void this.retryLimiter
       .run(async () => {
-        if (this.stopped || this.retrySlots.get(key) !== slot) return
+        if (
+          this.stopped ||
+          this.retrySlots.get(key) !== slot ||
+          !this.dependencies.inventoryAuthoritative()
+        ) {
+          return
+        }
         // Do not capture intent before the limiter. Churn while capacity is
         // saturated is represented by one slot and resolved latest-wins here.
         const admittedIntent = this.retryIntents.get(key)
         if (!admittedIntent) return
         await this.dependencies.enqueue(admittedIntent.server, async () => {
-          if (this.stopped || this.retrySlots.get(key) !== slot) return
+          if (
+            this.stopped ||
+            this.retrySlots.get(key) !== slot ||
+            !this.dependencies.inventoryAuthoritative()
+          ) {
+            return
+          }
           // The keyed queue may also wait. Resolve the intent again so only the
           // latest desired revision or absence is replayed.
           const currentIntent = this.retryIntents.get(key)
@@ -343,7 +365,7 @@ export class ExternalEgressConvergenceCoordinator {
   }
 
   private async runResyncCore(): Promise<void> {
-    if (this.stopped) return
+    if (this.stopped || !this.dependencies.inventoryAuthoritative()) return
     const servers = this.dependencies
       .listServers()
       .filter(server => (server.spec.egressBindings?.length ?? 0) > 0)
@@ -355,7 +377,7 @@ export class ExternalEgressConvergenceCoordinator {
     const workers = Array.from(
       { length: Math.min(EXTERNAL_EGRESS_MAX_CONCURRENCY, servers.length) },
       async () => {
-        while (!this.stopped) {
+        while (!this.stopped && this.dependencies.inventoryAuthoritative()) {
           const server = servers[index++]
           if (!server) return
           const key = this.key(server)
@@ -365,10 +387,10 @@ export class ExternalEgressConvergenceCoordinator {
           }
           const jitterMs = Math.floor(Math.random() * EXTERNAL_EGRESS_RESYNC_JITTER_MS)
           if (jitterMs > 0) await delay(jitterMs)
-          if (this.stopped) return
+          if (this.stopped || !this.dependencies.inventoryAuthoritative()) return
 
           await this.dependencies.enqueue(server, async () => {
-            if (this.stopped) return
+            if (this.stopped || !this.dependencies.inventoryAuthoritative()) return
             // The fleet snapshot selects work only. Desired state is resolved
             // after jitter and after entering the per-server FIFO lane.
             const current = this.dependencies.getCurrentServer(server.name)
@@ -387,7 +409,9 @@ export class ExternalEgressConvergenceCoordinator {
               }
               // Periodic refresh is egress-only and therefore cannot complete
               // a retry intent that may appear while the mutation is running.
-              await this.reconcile('MODIFIED', current)
+              await this.reconcile('MODIFIED', current, {
+                isCurrent: this.dependencies.inventoryAuthoritative,
+              })
             } catch (error) {
               console.error(`[K8s] External egress periodic resync failed for ${key}:`, error)
               this.scheduleRetry('MODIFIED', current)
@@ -400,7 +424,7 @@ export class ExternalEgressConvergenceCoordinator {
   }
 
   private async replayIntent(intent: ExternalEgressRetryIntent): Promise<void> {
-    if (this.stopped) return
+    if (this.stopped || !this.dependencies.inventoryAuthoritative()) return
     const handle = this.retryHandle(intent)
     if (!handle.isCurrent()) return
 
@@ -409,6 +433,25 @@ export class ExternalEgressConvergenceCoordinator {
       current && current.namespace === intent.server.namespace ? 'MODIFIED' : 'DELETED'
     const server = type === 'DELETED' ? intent.server : current!
     await this.dependencies.replay(type, server, handle)
+  }
+
+  private reconcileIsCurrent(
+    type: ExternalEgressWatchEventType,
+    server: McpServerCRD,
+    options: ExternalEgressReconcileOptions
+  ): boolean {
+    const callerIsCurrent =
+      !this.stopped &&
+      (!options.retry || options.retry.isCurrent()) &&
+      (!options.isCurrent || options.isCurrent())
+    if (!callerIsCurrent || type === 'DELETED') return callerIsCurrent
+
+    const current = this.dependencies.getCurrentServer(server.name)
+    return (
+      current !== undefined &&
+      current.namespace === server.namespace &&
+      this.dependencies.sameDesiredRevision(server, current)
+    )
   }
 
   private currentRetryHandle(key: string): ExternalEgressRetryHandle | undefined {

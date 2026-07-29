@@ -25,7 +25,10 @@ import {
   MCPSERVER_LABEL,
   POLICY_TYPE_LABEL,
 } from './constants'
-import { confirmAuthoritativeMcpServerAbsence } from './mcpServerSafety'
+import {
+  confirmAuthoritativeMcpServerAbsence,
+  sameMcpServerDesiredRevision,
+} from './mcpServerSafety'
 import {
   ContextCRD,
   EgressBinding,
@@ -40,6 +43,10 @@ type JsonPatchOperation = {
   op: 'add' | 'replace' | 'remove' | 'test'
   path: string
   value?: unknown
+}
+
+type NetworkPolicyMutationOptions = {
+  isCurrent?: () => boolean
 }
 
 const GROUP = 'clerum.io'
@@ -451,9 +458,23 @@ export class NetworkPolicyReconciler {
    * Reconcile NetworkPolicies for a Context CRD.
    * Creates one policy per allowed MCP server.
    */
-  async reconcileContext(context: ContextCRD): Promise<void> {
+  async reconcileContext(
+    context: ContextCRD,
+    options: NetworkPolicyMutationOptions = {}
+  ): Promise<void> {
+    const callerIsCurrent = options.isCurrent ?? (() => true)
+    if (!callerIsCurrent()) return
     const contextId = context.spec.contextId
     const allowedServers = context.spec.mcpServers || []
+    const selectedServers = new Map(
+      allowedServers.map(serverName => [serverName, this.serverCache.get(serverName)])
+    )
+    const isCurrent = (): boolean =>
+      callerIsCurrent() &&
+      allowedServers.every(
+        serverName => this.serverCache.get(serverName) === selectedServers.get(serverName)
+      )
+    if (!isCurrent()) return
 
     console.log(
       `[NetPol] Reconciling context "${contextId}" — allowed servers: [${allowedServers.join(', ')}]`
@@ -466,9 +487,11 @@ export class NetworkPolicyReconciler {
 
     // Get existing policies for this context
     const existingPolicies = await this.listPoliciesForContext(contextId)
+    if (!isCurrent()) return
 
     // Create or update policies for each allowed server
     for (const serverName of allowedServers) {
+      if (!isCurrent()) return
       const server = this.serverCache.get(serverName)
       if (!server) {
         console.warn(
@@ -549,7 +572,8 @@ export class NetworkPolicyReconciler {
         },
       }
 
-      await this.applyPolicy(name, ingressPolicy)
+      await this.applyPolicy(name, ingressPolicy, isCurrent)
+      if (!isCurrent()) return
 
       // L2 egress counterpart: allow traffic FROM mcp-host pods TO this MCP server
       // Without this, L0 egress deny-all blocks agents from reaching MCP servers.
@@ -602,46 +626,53 @@ export class NetworkPolicyReconciler {
         egressName,
         config.hostNamespace,
         egressPolicy,
-        '[NetPol]'
+        '[NetPol]',
+        isCurrent
       )
+      if (!isCurrent()) return
 
       // L2 rpc-proxy egress: allow rpc-proxy pods to reach this MCP server
-      await this.ensureRpcProxyEgress(contextId, serverName, port)
+      await this.ensureRpcProxyEgress(contextId, serverName, port, isCurrent)
     }
 
     // Delete policies for servers no longer in the context
     for (const existing of existingPolicies) {
+      if (!isCurrent()) return
       const existingName = existing.metadata?.name || ''
       if (!desiredNames.has(existingName)) {
         console.log(`[NetPol] Deleting orphaned policy "${existingName}"`)
-        await this.deletePolicy(existingName)
+        await this.deletePolicy(existingName, isCurrent)
       }
     }
 
     // Delete orphaned L2 egress counterparts in mcp-host namespace
     const existingEgressPolicies = await this.listEgressPoliciesForContext(contextId)
+    if (!isCurrent()) return
     const desiredEgressNames = new Set(
       allowedServers.map(serverName => `${this.policyName(contextId, serverName)}-egress`)
     )
     for (const existing of existingEgressPolicies) {
+      if (!isCurrent()) return
       const existingName = existing.metadata?.name || ''
       if (!desiredEgressNames.has(existingName)) {
         console.log(`[NetPol] Deleting orphaned L2 egress policy "${existingName}"`)
-        await this.deleteEgressPolicy(existingName)
+        await this.deleteEgressPolicy(existingName, isCurrent)
       }
     }
 
     // Delete orphaned rpc-proxy egress counterparts. Keeping these after a
     // server is removed from a Context would preserve an old in-cluster route.
     const existingRpcProxyPolicies = await this.listRpcProxyEgressPoliciesForContext(contextId)
+    if (!isCurrent()) return
     const desiredRpcProxyNames = new Set(
       allowedServers.map(serverName => `rpc-egress-${contextId}-${serverName}`)
     )
     for (const existing of existingRpcProxyPolicies) {
+      if (!isCurrent()) return
       const existingName = existing.metadata?.name || ''
       if (!desiredRpcProxyNames.has(existingName)) {
         console.log(`[NetPol] Deleting orphaned rpc-proxy egress policy "${existingName}"`)
-        await this.deletePolicyInNamespace(config.rpcProxyNamespace, existingName)
+        await this.deletePolicyInNamespace(config.rpcProxyNamespace, existingName, isCurrent)
       }
     }
   }
@@ -692,6 +723,9 @@ export class NetworkPolicyReconciler {
       options.runContextEffect ?? ((_contextId: string, work: () => Promise<void>) => work())
     const runServerEffect =
       options.runServerEffect ?? ((_serverName: string, work: () => Promise<void>) => work())
+    const contextInventoryIsCurrent = (): boolean =>
+      (options.contextInventoryAuthoritative?.() ?? true) &&
+      (options.serverInventoryAuthoritative?.() ?? true)
 
     // Reconcile each context
     for (const context of contexts) {
@@ -701,7 +735,11 @@ export class NetworkPolicyReconciler {
           ? options.resolveCurrentContext(context.name)
           : context
         if (!current || current.spec.contextId !== contextId) return
-        await this.reconcileContext(current)
+        const contextEffectIsCurrent = (): boolean =>
+          contextInventoryIsCurrent() &&
+          (!options.resolveCurrentContext ||
+            options.resolveCurrentContext(current.name) === current)
+        await this.reconcileContext(current, { isCurrent: contextEffectIsCurrent })
       })
     }
 
@@ -713,7 +751,13 @@ export class NetworkPolicyReconciler {
           ? options.resolveCurrentServer(server.name)
           : server
         if (!current) return
-        await this.reconcileExternalEgress(current)
+        const serverEffectIsCurrent = (): boolean => {
+          if (!(options.serverInventoryAuthoritative?.() ?? true)) return false
+          if (!options.resolveCurrentServer) return true
+          const latest = options.resolveCurrentServer(current.name)
+          return latest !== undefined && sameMcpServerDesiredRevision(current, latest)
+        }
+        await this.reconcileExternalEgress(current, { isCurrent: serverEffectIsCurrent })
       })
     }
 
@@ -871,7 +915,12 @@ export class NetworkPolicyReconciler {
    * For DNS bindings, resolves hostnames to IPs and creates ipBlock rules.
    * For CIDR bindings, creates ipBlock rules directly.
    */
-  async reconcileExternalEgress(server: McpServerCRD): Promise<void> {
+  async reconcileExternalEgress(
+    server: McpServerCRD,
+    options: NetworkPolicyMutationOptions = {}
+  ): Promise<void> {
+    const isCurrent = options.isCurrent ?? (() => true)
+    if (!isCurrent()) return
     let existingPolicies: k8s.V1NetworkPolicy[]
     try {
       existingPolicies = await this.listExternalEgressPoliciesForServer(
@@ -879,36 +928,48 @@ export class NetworkPolicyReconciler {
         server.namespace
       )
     } catch (error) {
+      if (!isCurrent()) return
       await this.writeExternalEgressStatus(
         server,
         [],
         'False',
         'InventoryListFailed',
-        `Failed to list existing external egress policies: ${this.errorMessage(error)}`
+        `Failed to list existing external egress policies: ${this.errorMessage(error)}`,
+        isCurrent
       )
       throw error
     }
+    if (!isCurrent()) return
 
     const bindings = server.spec.egressBindings
     if (!bindings || bindings.length === 0) {
       try {
-        await this.cleanupExternalEgress(server.name, server.namespace, existingPolicies)
+        await this.cleanupExternalEgress(
+          server.name,
+          server.namespace,
+          existingPolicies,
+          async () => isCurrent()
+        )
       } catch (error) {
+        if (!isCurrent()) return
         await this.writeExternalEgressStatus(
           server,
           [],
           'False',
           'CleanupFailed',
-          `Failed to delete stale external egress policies: ${this.errorMessage(error)}`
+          `Failed to delete stale external egress policies: ${this.errorMessage(error)}`,
+          isCurrent
         )
         throw error
       }
+      if (!isCurrent()) return
       await this.writeExternalEgressStatus(
         server,
         [],
         'True',
         'NoEgressBindings',
-        'No external egress bindings declared'
+        'No external egress bindings declared',
+        isCurrent
       )
       return
     }
@@ -923,6 +984,7 @@ export class NetworkPolicyReconciler {
     const resolvedAt = new Date().toISOString()
 
     for (const binding of bindings) {
+      if (!isCurrent()) return
       const egressClass = binding.egressClass ?? 'exact-host'
       if (egressClass !== 'exact-host' && egressClass !== 'public-web') {
         failures.push(`egressClass "${String(binding.egressClass)}" is not supported`)
@@ -988,7 +1050,14 @@ export class NetworkPolicyReconciler {
           },
         }
 
-        await applyNetworkPolicy(this.networkingApi, name, server.namespace, policy, '[NetPol]')
+        await applyNetworkPolicy(
+          this.networkingApi,
+          name,
+          server.namespace,
+          policy,
+          '[NetPol]',
+          isCurrent
+        )
         continue
       }
 
@@ -1022,6 +1091,7 @@ export class NetworkPolicyReconciler {
         }
         try {
           const ips = await dns.resolve4(binding.dns)
+          if (!isCurrent()) return
           const uniqueIps = [...new Set(ips)].sort()
           if (uniqueIps.length === 0) {
             failures.push(`hostname "${binding.dns}" resolved to no IPv4 addresses`)
@@ -1079,7 +1149,14 @@ export class NetworkPolicyReconciler {
         },
       }
 
-      await applyNetworkPolicy(this.networkingApi, name, server.namespace, policy, '[NetPol]')
+      await applyNetworkPolicy(
+        this.networkingApi,
+        name,
+        server.namespace,
+        policy,
+        '[NetPol]',
+        isCurrent
+      )
     }
 
     try {
@@ -1089,18 +1166,22 @@ export class NetworkPolicyReconciler {
         existingPolicies.filter(policy => {
           const name = policy.metadata?.name
           return Boolean(name) && !desiredPolicyNames.has(name!)
-        })
+        }),
+        async () => isCurrent()
       )
     } catch (error) {
+      if (!isCurrent()) return
       await this.writeExternalEgressStatus(
         server,
         resolvedEgressIPs,
         'False',
         'CleanupFailed',
-        `Failed to delete stale external egress policies: ${this.errorMessage(error)}`
+        `Failed to delete stale external egress policies: ${this.errorMessage(error)}`,
+        isCurrent
       )
       throw error
     }
+    if (!isCurrent()) return
 
     if (failures.length > 0) {
       const message = failures.join('; ')
@@ -1109,7 +1190,8 @@ export class NetworkPolicyReconciler {
         resolvedEgressIPs,
         'False',
         'ExternalEgressRejected',
-        message
+        message,
+        isCurrent
       )
       throw new Error(`External egress reconciliation failed for "${server.name}": ${message}`)
     }
@@ -1121,7 +1203,8 @@ export class NetworkPolicyReconciler {
       'Reconciled',
       bindings.some(binding => binding.egressClass === 'public-web')
         ? 'External egress policies reconciled; public-web allows public TCP 80/443 with private and special ranges excluded'
-        : 'External egress policies reconciled'
+        : 'External egress policies reconciled',
+      isCurrent
     )
   }
 
@@ -1230,8 +1313,10 @@ export class NetworkPolicyReconciler {
     resolvedEgressIPs: McpServerResolvedEgressIP[],
     status: 'True' | 'False' | 'Unknown',
     reason: string,
-    message: string
+    message: string,
+    isCurrent: () => boolean = () => true
   ): Promise<void> {
+    if (!isCurrent()) return
     let currentStatus: McpServerCrdStatus = {}
     let hasStatusObject = false
     let currentMetadata:
@@ -1273,6 +1358,7 @@ export class NetworkPolicyReconciler {
       )
       throw error
     }
+    if (!isCurrent()) return
 
     if (
       (server.uid !== undefined && currentMetadata?.uid !== server.uid) ||
@@ -1339,6 +1425,7 @@ export class NetworkPolicyReconciler {
     const statusPatch = [...identityFence, ...statusMutation]
 
     try {
+      if (!isCurrent()) return
       await this.customApi.patchNamespacedCustomObjectStatus({
         group: GROUP,
         version: VERSION,
@@ -1432,13 +1519,25 @@ export class NetworkPolicyReconciler {
   }
 
   /** Create or update a NetworkPolicy. */
-  private async applyPolicy(name: string, policy: k8s.V1NetworkPolicy): Promise<void> {
-    await applyNetworkPolicy(this.networkingApi, name, config.namespace, policy, '[NetPol]')
+  private async applyPolicy(
+    name: string,
+    policy: k8s.V1NetworkPolicy,
+    isCurrent?: () => boolean
+  ): Promise<void> {
+    await applyNetworkPolicy(
+      this.networkingApi,
+      name,
+      config.namespace,
+      policy,
+      '[NetPol]',
+      isCurrent
+    )
   }
 
   /** Delete a NetworkPolicy in mcp-server namespace. */
-  private async deletePolicy(name: string): Promise<void> {
+  private async deletePolicy(name: string, isCurrent?: () => boolean): Promise<void> {
     try {
+      if (isCurrent && !isCurrent()) return
       await this.networkingApi.deleteNamespacedNetworkPolicy({
         name,
         namespace: config.namespace,
@@ -1469,8 +1568,9 @@ export class NetworkPolicyReconciler {
   }
 
   /** Delete a NetworkPolicy in mcp-host namespace (L2 egress counterpart). */
-  private async deleteEgressPolicy(name: string): Promise<void> {
+  private async deleteEgressPolicy(name: string, isCurrent?: () => boolean): Promise<void> {
     try {
+      if (isCurrent && !isCurrent()) return
       await this.networkingApi.deleteNamespacedNetworkPolicy({
         name,
         namespace: config.hostNamespace,
@@ -1495,7 +1595,8 @@ export class NetworkPolicyReconciler {
   private async ensureRpcProxyEgress(
     contextId: string,
     serverName: string,
-    port: number
+    port: number,
+    isCurrent?: () => boolean
   ): Promise<void> {
     const name = `rpc-egress-${contextId}-${serverName}`
     const policy: k8s.V1NetworkPolicy = {
@@ -1529,7 +1630,14 @@ export class NetworkPolicyReconciler {
         ],
       },
     }
-    await applyNetworkPolicy(this.networkingApi, name, config.rpcProxyNamespace, policy, '[NetPol]')
+    await applyNetworkPolicy(
+      this.networkingApi,
+      name,
+      config.rpcProxyNamespace,
+      policy,
+      '[NetPol]',
+      isCurrent
+    )
   }
 
   /** Delete all rpc-proxy egress policies for a given context. */
@@ -1587,8 +1695,13 @@ export class NetworkPolicyReconciler {
   }
 
   /** Delete a NetworkPolicy in an arbitrary namespace. */
-  private async deletePolicyInNamespace(namespace: string, name: string): Promise<void> {
+  private async deletePolicyInNamespace(
+    namespace: string,
+    name: string,
+    isCurrent?: () => boolean
+  ): Promise<void> {
     try {
+      if (isCurrent && !isCurrent()) return
       await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
       console.log(`[NetPol] Deleted rpc-proxy egress policy "${name}"`)
     } catch (error: unknown) {

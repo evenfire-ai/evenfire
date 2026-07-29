@@ -1095,6 +1095,151 @@ describe('HostReconciler Host inventory mutation authority', () => {
     expect(reconcileCore).not.toHaveBeenCalled()
   })
 
+  it('rejects a queued fleet worker after Context authority retires and recovers', async () => {
+    const reconciler = makeBasicReconciler()
+    const hostA = makeHost({ name: 'context-authority-a' })
+    const hostB = makeHost({ name: 'context-authority-b' })
+    const hosts = new Map([
+      [hostA.name, hostA],
+      [hostB.name, hostB],
+    ])
+    reconciler.setResolveCurrentHost(name => hosts.get(name))
+    reconciler.setHostWatchAuthority(() => ({ known: true, generation: 7 }))
+    const mutationAuthority = {
+      current: {
+        known: true,
+        hostGeneration: 7,
+        contextGeneration: 11,
+      },
+    }
+    ;(reconciler as any).setHostMutationAuthority(() => mutationAuthority.current)
+    const reconcileCore = vi.spyOn(reconciler as any, 'reconcileCore').mockResolvedValue(undefined)
+    vi.spyOn(reconciler as any, 'collectHostCleanupFailures').mockResolvedValue([])
+    const blockerStarted = deferred()
+    const releaseBlocker = deferred()
+    const occupied = (reconciler as any).lifecycle.serializeByHost(hostB.name, async () => {
+      blockerStarted.resolve(undefined)
+      await releaseBlocker.promise
+    }) as Promise<void>
+    await blockerStarted.promise
+
+    const fleet = reconciler.fullReconcile([hostA, hostB])
+    await vi.waitFor(() => expect(reconcileCore).toHaveBeenCalledWith(hostA, expect.any(Function)))
+
+    // Context retired and recovered to a fresh LIST -> WATCH generation while
+    // Host authority remained continuously known: a host-only lease would miss
+    // this ABA transition and admit Host B with stale derived mounts.
+    mutationAuthority.current = {
+      known: true,
+      hostGeneration: 7,
+      contextGeneration: 13,
+    }
+    releaseBlocker.resolve(undefined)
+    await occupied
+
+    await expect(fleet).rejects.toBeInstanceOf(HostFleetReconcileError)
+    expect(reconcileCore).toHaveBeenCalledTimes(1)
+    expect(reconcileCore).not.toHaveBeenCalledWith(hostB, expect.any(Function))
+  })
+
+  it('retires a Host reconcile when its Context is superseded within the same watch', async () => {
+    const reconciler = makeBasicReconciler()
+    const host = {
+      ...makeHost({ name: 'context-revision-race', contextRef: 'context-a' }),
+      uid: 'context-revision-race-uid',
+      generation: 5,
+    }
+    const contextV1 = { name: 'context-a', spec: { sharedFileSystems: [] } }
+    const contextV2 = {
+      name: 'context-a',
+      spec: {
+        sharedFileSystems: [{ name: 'documents', mountPath: '/contexts/documents' }],
+      },
+    }
+    let selectedContext: unknown = contextV1
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostMutationAuthority(() => ({
+      known: true,
+      hostGeneration: 7,
+      contextGeneration: 11,
+    }))
+    reconciler.setResolveHostMutationDependencies(() => [selectedContext])
+
+    const secretReadStarted = deferred()
+    const releaseSecretRead = deferred()
+    vi.spyOn(reconciler as any, 'validateHostSecret').mockImplementation(async () => {
+      secretReadStarted.resolve(undefined)
+      await releaseSecretRead.promise
+      return { ok: true }
+    })
+    const ensureServiceAccount = vi
+      .spyOn(reconciler as any, 'ensureHostServiceAccount')
+      .mockResolvedValue(undefined)
+
+    const pending = reconciler.reconcile(host)
+    await secretReadStarted.promise
+    selectedContext = contextV2
+    releaseSecretRead.resolve(undefined)
+
+    await expect(pending).rejects.toThrow(/Host mutation dependency changed/)
+    expect(ensureServiceAccount).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [
+      'referenced SharedFileSystem revision',
+      { name: 'documents', spec: { storageClassName: 'fast-v1' } },
+      { name: 'documents', spec: { storageClassName: 'fast-v2' } },
+    ],
+    ['referenced SharedFileSystem mountability', true, false],
+    [
+      'Host-scoped CommunicationChannel revision',
+      { name: 'telegram', spec: { hostRef: 'dependency-race' } },
+      {
+        name: 'telegram',
+        spec: {
+          hostRef: 'dependency-race',
+          credentialsSecretRef: { name: 'telegram-v2' },
+        },
+      },
+    ],
+  ])('retires a Host reconcile when its %s changes', async (_label, original, replacement) => {
+    const reconciler = makeBasicReconciler()
+    const host = {
+      ...makeHost({ name: 'dependency-race', contextRef: 'context-a' }),
+      uid: 'dependency-race-uid',
+      generation: 5,
+    }
+    const context = { name: 'context-a', spec: { sharedFileSystems: [] } }
+    let selectedDependency: unknown = original
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostMutationAuthority(() => ({
+      known: true,
+      hostGeneration: 7,
+      contextGeneration: 11,
+    }))
+    reconciler.setResolveHostMutationDependencies(() => [context, selectedDependency])
+
+    const secretReadStarted = deferred()
+    const releaseSecretRead = deferred()
+    vi.spyOn(reconciler as any, 'validateHostSecret').mockImplementation(async () => {
+      secretReadStarted.resolve(undefined)
+      await releaseSecretRead.promise
+      return { ok: true }
+    })
+    const ensureServiceAccount = vi
+      .spyOn(reconciler as any, 'ensureHostServiceAccount')
+      .mockResolvedValue(undefined)
+
+    const pending = reconciler.reconcile(host)
+    await secretReadStarted.promise
+    selectedDependency = replacement
+    releaseSecretRead.resolve(undefined)
+
+    await expect(pending).rejects.toThrow(/Host mutation dependency changed/)
+    expect(ensureServiceAccount).not.toHaveBeenCalled()
+  })
+
   it('does not delete runtime after a Secret rejection when Host authority changes in flight', async () => {
     const reconciler = makeBasicReconciler()
     const host = { ...makeHost({ name: 'secret-authority-race' }), uid: 'host-uid', generation: 3 }

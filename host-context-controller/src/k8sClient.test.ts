@@ -11,7 +11,7 @@ import {
 } from './k8sClient'
 import { registry } from './metrics'
 import { ContextMapperServer } from './server'
-import type { HostCRD } from './types'
+import type { HostCRD, McpServerCRD } from './types'
 
 function deferred<T = void>(): {
   promise: Promise<T>
@@ -90,6 +90,17 @@ function stubAuthoritativeInventoryWatch(
 
 function markHostInventoryAuthoritative(watcher: McpServerWatcher): void {
   ;(watcher as any).hostCacheSynced = true
+  ;(watcher as any).contextCacheSynced = true
+}
+
+function markMcpServerInventoryAuthoritative(watcher: McpServerWatcher): void {
+  ;(watcher as any).mcpServerCacheSynced = true
+}
+
+function newContextAuthoritativeWatcher(): McpServerWatcher {
+  const watcher = new McpServerWatcher()
+  ;(watcher as any).contextCacheSynced = true
+  return watcher
 }
 
 const mocks = vi.hoisted(() => {
@@ -233,6 +244,14 @@ vi.mock('./hostReconciler', () => ({
     // and the watch-authority snapshot into HostReconciler at construction.
     setResolveCurrentHost = vi.fn()
     setHostWatchAuthority = vi.fn()
+    setHostMutationAuthority = vi.fn()
+    _hostMutationDependenciesFn: ((host: HostCRD) => readonly unknown[]) | null = null
+    setResolveHostMutationDependencies = vi.fn().mockImplementation(function (
+      this: { _hostMutationDependenciesFn: ((host: HostCRD) => readonly unknown[]) | null },
+      fn: (host: HostCRD) => readonly unknown[]
+    ) {
+      this._hostMutationDependenciesFn = fn
+    })
     // Stores the injected callback so tests can invoke it directly.
     _countCommunicationChannelsFn: ((host: string) => number) | null = null
     setCountCommunicationChannels = vi.fn().mockImplementation(function (
@@ -545,6 +564,52 @@ describe('McpServerWatcher startup', () => {
       errorSpy.mockRestore()
       warnSpy.mockRestore()
     }
+  })
+
+  it('defers Host fleet convergence until both Host and Context inventories are authoritative', async () => {
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).contextCacheSynced = false
+    ;(watcher as any).hosts.set('context-dependent-host', {
+      name: 'context-dependent-host',
+      namespace: 'mcp-host',
+      spec: {
+        host: 'context-dependent-host',
+        contextRef: 'current-context',
+        secretRef: 'host-secret',
+      },
+    })
+
+    await (watcher as any).performHostFleetReconcileOnce({
+      reason: 'Context authority test',
+      mode: 'full',
+    })
+
+    expect(mocks.hostFullReconcile).not.toHaveBeenCalled()
+    ;(watcher as any).contextCacheSynced = true
+    await (watcher as any).performHostFleetReconcileOnce({
+      reason: 'Context authority recovered',
+      mode: 'full',
+    })
+
+    expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
+    expect(mocks.hostFullReconcile).toHaveBeenCalledWith([
+      expect.objectContaining({ name: 'context-dependent-host' }),
+    ])
+    await watcher.stop()
+  })
+
+  it('applies a pending CommunicationChannel lifecycle generation during Context recovery', async () => {
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).contextCacheSynced = false
+    const pendingGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
+
+    await (watcher as any).recoverContextInventoryAndWatch()
+    await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledOnce())
+
+    expect((watcher as any).ccAppliedLifecycleGeneration).toBe(pendingGeneration)
+    await watcher.stop()
   })
 
   it('starts McpServer and Context watches from their inventory resourceVersions', async () => {
@@ -1150,7 +1215,8 @@ describe('McpServerWatcher startup', () => {
 
     await flushMicrotasks()
     expect(reconciler.reconcile).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'current-server' })
+      expect.objectContaining({ name: 'current-server' }),
+      { isCurrent: expect.any(Function) }
     )
 
     releaseEgress.resolve(undefined)
@@ -1158,7 +1224,8 @@ describe('McpServerWatcher startup', () => {
 
     expect(reconciliationOrder).toEqual(['watch', 'initial'])
     expect(reconciler.reconcile).toHaveBeenLastCalledWith(
-      expect.objectContaining({ name: 'current-server' })
+      expect.objectContaining({ name: 'current-server' }),
+      { isCurrent: expect.any(Function) }
     )
     await watcher.stop()
   })
@@ -1223,6 +1290,7 @@ describe('McpServerWatcher startup', () => {
     const blockerStarted = deferred()
     const releaseBlocker = deferred()
     const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
     const reconciler = (watcher as any).reconciler
     for (const server of [currentServer, staleServer, unrelatedServer]) {
       ;(watcher as any).servers.set(server.name, server)
@@ -1241,18 +1309,120 @@ describe('McpServerWatcher startup', () => {
     })
     await vi.waitFor(() =>
       expect(reconciler.reconcile).toHaveBeenCalledWith(
-        expect.objectContaining({ name: currentServer.name })
+        expect.objectContaining({ name: currentServer.name }),
+        { isCurrent: expect.any(Function) }
       )
     )
     releaseBlocker.resolve(undefined)
     await Promise.all([blocker, convergence])
 
     expect(reconciler.reconcile).toHaveBeenCalledTimes(1)
-    expect(reconciler.reconcile).not.toHaveBeenCalledWith(
-      expect.objectContaining({ name: staleServer.name })
+    expect(
+      reconciler.reconcile.mock.calls.some(
+        ([server]: [McpServerCRD]) => server.name === staleServer.name
+      )
+    ).toBe(false)
+    expect(
+      reconciler.reconcile.mock.calls.some(
+        ([server]: [McpServerCRD]) => server.name === unrelatedServer.name
+      )
+    ).toBe(false)
+    await watcher.stop()
+  })
+
+  it('defers env-Secret reconciliation until the McpServer inventory is authoritative', async () => {
+    const selected = {
+      name: 'authority-fenced-secret-server',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/authority-fenced-secret-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        envSecret: { name: 'shared-env' },
+      },
+    }
+    const watcher = new McpServerWatcher()
+    const reconciler = (watcher as any).reconciler
+    ;(watcher as any).servers.set(selected.name, selected)
+    ;(watcher as any).mcpServerCacheSynced = false
+
+    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server')
+
+    expect(reconciler.reconcile).not.toHaveBeenCalled()
+
+    markMcpServerInventoryAuthoritative(watcher)
+    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server')
+
+    expect(reconciler.reconcile).toHaveBeenCalledOnce()
+    expect(reconciler.reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({ name: selected.name }),
+      { isCurrent: expect.any(Function) }
     )
-    expect(reconciler.reconcile).not.toHaveBeenCalledWith(
-      expect.objectContaining({ name: unrelatedServer.name })
+    await watcher.stop()
+  })
+
+  it('fences Context-triggered SharedFileSystem convergence to the current Context lease', async () => {
+    const context = {
+      name: 'sfs-context',
+      namespace: 'mcp-server',
+      spec: {
+        contextId: 'sfs-context',
+        sharedFileSystems: [{ name: 'shared-data', mountPath: '/shared' }],
+      },
+    }
+    const sharedFileSystem = {
+      name: 'shared-data',
+      namespace: 'mcp-host',
+      spec: {},
+    }
+    const watcher = new McpServerWatcher()
+    const reconciler = (watcher as any).sharedFileSystemReconciler
+    ;(watcher as any).sharedFileSystems.set(sharedFileSystem.name, sharedFileSystem)
+
+    await (watcher as any).reconcileSharedFileSystemsReferencedByContext(
+      undefined,
+      context,
+      () => false
+    )
+
+    expect(reconciler.reconcile).not.toHaveBeenCalled()
+
+    await (watcher as any).reconcileSharedFileSystemsReferencedByContext(
+      undefined,
+      context,
+      () => true
+    )
+
+    expect(reconciler.reconcile).toHaveBeenCalledOnce()
+    expect(reconciler.reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({ name: sharedFileSystem.name })
+    )
+    await watcher.stop()
+  })
+
+  it('fences Context-triggered Host convergence to the current Context lease', async () => {
+    const watcher = new McpServerWatcher()
+    markHostInventoryAuthoritative(watcher)
+    ;(watcher as any).hosts.set('context-host', {
+      name: 'context-host',
+      namespace: 'mcp-host',
+      spec: {
+        host: 'context-host',
+        contextRef: 'context-a',
+        secretRef: 'host-secret',
+      },
+    })
+    const hostReconciler = (watcher as any).hostReconciler
+
+    await (watcher as any).reconcileHostsReferencingContext('context-a', () => false)
+
+    expect(hostReconciler.reconcile).not.toHaveBeenCalled()
+
+    await (watcher as any).reconcileHostsReferencingContext('context-a', () => true)
+
+    expect(hostReconciler.reconcile).toHaveBeenCalledOnce()
+    expect(hostReconciler.reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'context-host' })
     )
     await watcher.stop()
   })
@@ -1380,7 +1550,8 @@ describe('McpServerWatcher startup', () => {
 
     await flushMicrotasks()
     expect(netPol.reconcileContext).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'current-context' })
+      expect.objectContaining({ name: 'current-context' }),
+      { isCurrent: expect.any(Function) }
     )
 
     releaseFullReconcile.resolve(undefined)
@@ -1388,7 +1559,8 @@ describe('McpServerWatcher startup', () => {
 
     expect(reconciliationOrder).toEqual(['watch', 'initial'])
     expect(netPol.reconcileContext).toHaveBeenLastCalledWith(
-      expect.objectContaining({ name: 'current-context' })
+      expect.objectContaining({ name: 'current-context' }),
+      { isCurrent: expect.any(Function) }
     )
     await watcher.stop()
   })
@@ -1453,7 +1625,8 @@ describe('McpServerWatcher startup', () => {
       expect.objectContaining({
         name: contextName,
         spec: expect.objectContaining({ contextId, description: 'recreated' }),
-      })
+      }),
+      { isCurrent: expect.any(Function) }
     )
     await watcher.stop()
   })
@@ -1581,6 +1754,7 @@ describe('McpServerWatcher startup', () => {
     const oldStarted = deferred()
     const releaseOld = deferred()
     const order: string[] = []
+    let oldLease: (() => boolean) | undefined
     let contextWatchCallback:
       | ((type: string, apiObj: typeof newContext) => Promise<void>)
       | undefined
@@ -1591,15 +1765,18 @@ describe('McpServerWatcher startup', () => {
     const watcher = new McpServerWatcher()
     ;(watcher as any).contexts.set(oldContext.name, oldContext)
     const netPol = (watcher as any).netPolReconciler
-    netPol.reconcileContext.mockImplementation(async (context: typeof oldContext) => {
-      if (context.spec.description === 'old') {
-        oldStarted.resolve(undefined)
-        await releaseOld.promise
-        order.push('old')
-        return
+    netPol.reconcileContext.mockImplementation(
+      async (context: typeof oldContext, options: { isCurrent: () => boolean }) => {
+        if (context.spec.description === 'old') {
+          oldLease = options.isCurrent
+          oldStarted.resolve(undefined)
+          await releaseOld.promise
+          order.push('old')
+          return
+        }
+        order.push('new')
       }
-      order.push('new')
-    })
+    )
     await (watcher as any).startContextWatch('context-policy-rv')
 
     const serverEvent = (watcher as any).getMcpServerWatchCallback()('MODIFIED', server)
@@ -1608,6 +1785,7 @@ describe('McpServerWatcher startup', () => {
     await flushMicrotasks()
 
     expect(netPol.reconcileContext).toHaveBeenCalledTimes(1)
+    expect(oldLease?.()).toBe(false)
     releaseOld.resolve(undefined)
     await Promise.all([serverEvent, contextEvent])
 
@@ -1615,8 +1793,61 @@ describe('McpServerWatcher startup', () => {
     expect(netPol.reconcileContext).toHaveBeenLastCalledWith(
       expect.objectContaining({
         spec: expect.objectContaining({ description: 'new' }),
-      })
+      }),
+      { isCurrent: expect.any(Function) }
     )
+    await watcher.stop()
+  })
+
+  it('retires a blocked Context policy lease when MODIFIED replaces it in the same watch', async () => {
+    const oldContext = {
+      metadata: { name: 'same-stream-context', namespace: 'mcp-server' },
+      spec: {
+        contextId: 'same-stream-context',
+        description: 'old',
+        mcpServers: ['old-server'],
+      },
+    }
+    const newContext = {
+      metadata: oldContext.metadata,
+      spec: {
+        ...oldContext.spec,
+        description: 'new',
+        mcpServers: ['new-server'],
+      },
+    }
+    const mutationStarted = deferred()
+    const releaseMutation = deferred()
+    let oldLease: (() => boolean) | undefined
+    let contextWatchCallback:
+      | ((type: string, apiObj: typeof oldContext) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback) => {
+      contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    const watcher = new McpServerWatcher()
+    const netPol = (watcher as any).netPolReconciler
+    netPol.reconcileContext.mockImplementationOnce(
+      async (_context: unknown, options: { isCurrent: () => boolean }) => {
+        oldLease = options.isCurrent
+        mutationStarted.resolve()
+        await releaseMutation.promise
+      }
+    )
+    await (watcher as any).startContextWatch('same-stream-context-rv')
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+
+    const oldReconcile = contextWatchCallback!('MODIFIED', oldContext)
+    await mutationStarted.promise
+    expect(oldLease?.()).toBe(true)
+
+    const newReconcile = contextWatchCallback!('MODIFIED', newContext)
+    expect(oldLease?.()).toBe(false)
+
+    releaseMutation.resolve()
+    await Promise.all([oldReconcile, newReconcile])
     await watcher.stop()
   })
 
@@ -1646,6 +1877,7 @@ describe('McpServerWatcher startup', () => {
     })
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
     const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
     ;(watcher as any).servers.set(server.name, server)
     const netPol = (watcher as any).netPolReconciler
     netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
@@ -1662,13 +1894,68 @@ describe('McpServerWatcher startup', () => {
     const liveEvent = contextWatchCallback!('MODIFIED', context)
     await flushMicrotasks()
     expect(netPol.reconcileContext).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'live-context' })
+      expect.objectContaining({ name: 'live-context' }),
+      { isCurrent: expect.any(Function) }
     )
 
     releaseResync.resolve(undefined)
     await Promise.all([firstResync, liveEvent])
     await watcher.stop()
     randomSpy.mockRestore()
+  })
+
+  it('retires a blocked periodic egress lease when MODIFIED replaces it in the same watch', async () => {
+    const oldServer = {
+      name: 'same-stream-egress',
+      namespace: 'mcp-server',
+      uid: 'same-stream-egress-uid',
+      generation: 1,
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/same-stream-egress:old',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        egressBindings: [{ dns: 'old.example', port: 443 }],
+      },
+    }
+    const newServer = {
+      metadata: {
+        name: oldServer.name,
+        namespace: oldServer.namespace,
+        uid: oldServer.uid,
+        generation: 2,
+      },
+      spec: {
+        ...oldServer.spec,
+        image: 'clerum/same-stream-egress:new',
+        egressBindings: [{ dns: 'new.example', port: 443 }],
+      },
+    }
+    const mutationStarted = deferred()
+    const releaseMutation = deferred()
+    let oldLease: (() => boolean) | undefined
+    const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
+    ;(watcher as any).servers.set(oldServer.name, oldServer)
+    const netPol = (watcher as any).netPolReconciler
+    netPol.reconcileExternalEgress.mockImplementationOnce(
+      async (_server: unknown, options: { isCurrent: () => boolean }) => {
+        oldLease = options.isCurrent
+        mutationStarted.resolve()
+        await releaseMutation.promise
+      }
+    )
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+
+    const periodic = (watcher as any).runExternalEgressResync() as Promise<void>
+    await mutationStarted.promise
+    expect(oldLease?.()).toBe(true)
+
+    const replacement = (watcher as any).getMcpServerWatchCallback()('MODIFIED', newServer)
+    expect(oldLease?.()).toBe(false)
+
+    releaseMutation.resolve()
+    await Promise.all([periodic, replacement])
+    await watcher.stop()
   })
 
   it('uses the latest cached McpServer after periodic external-egress jitter', async () => {
@@ -1716,7 +2003,8 @@ describe('McpServerWatcher startup', () => {
         spec: expect.objectContaining({
           egressBindings: [{ dns: 'new.example', port: 443 }],
         }),
-      })
+      }),
+      { isCurrent: expect.any(Function) }
     )
     await watcher.stop()
     randomSpy.mockRestore()
@@ -1950,6 +2238,249 @@ describe('McpServerWatcher startup', () => {
     expect(reconciler.reconcile).not.toHaveBeenCalled()
   })
 
+  it('coalesces overlapping McpServer fleet passes into one trailing current-cache pass', async () => {
+    const firstPassStarted = deferred()
+    const releaseFirstPass = deferred()
+    const snapshots: string[][] = []
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).servers.set('first-server', {
+      name: 'first-server',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/first-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    })
+    mocks.serverFullReconcile
+      .mockImplementationOnce(async (servers: Array<{ name: string }>) => {
+        snapshots.push(servers.map(server => server.name))
+        firstPassStarted.resolve(undefined)
+        await releaseFirstPass.promise
+      })
+      .mockImplementationOnce(async (servers: Array<{ name: string }>) => {
+        snapshots.push(servers.map(server => server.name))
+      })
+
+    const first = (watcher as any).runInitialMcpServerConvergence()
+    await firstPassStarted.promise
+    ;(watcher as any).servers.set('second-server', {
+      name: 'second-server',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/second-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    })
+    const second = (watcher as any).runInitialMcpServerConvergence()
+    const third = (watcher as any).runInitialMcpServerConvergence()
+
+    expect(mocks.serverFullReconcile).toHaveBeenCalledTimes(1)
+    releaseFirstPass.resolve(undefined)
+    await Promise.all([first, second, third])
+
+    expect(mocks.serverFullReconcile).toHaveBeenCalledTimes(2)
+    expect(snapshots).toEqual([['first-server'], ['first-server', 'second-server']])
+    await watcher.stop()
+  })
+
+  it('coalesces overlapping NetworkPolicy fleet passes into one trailing current-cache pass', async () => {
+    const firstPassStarted = deferred()
+    const releaseFirstPass = deferred()
+    const snapshots: string[][] = []
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contexts.set('first-context', {
+      name: 'first-context',
+      namespace: 'mcp-server',
+      spec: { contextId: 'first-context', mcpServers: [] },
+    })
+    mocks.netPolFullReconcile
+      .mockImplementationOnce(async (contexts: Array<{ name: string }>) => {
+        snapshots.push(contexts.map(context => context.name))
+        firstPassStarted.resolve(undefined)
+        await releaseFirstPass.promise
+      })
+      .mockImplementationOnce(async (contexts: Array<{ name: string }>) => {
+        snapshots.push(contexts.map(context => context.name))
+      })
+
+    const first = (watcher as any).runInitialNetworkPolicyConvergence()
+    await firstPassStarted.promise
+    ;(watcher as any).contexts.set('second-context', {
+      name: 'second-context',
+      namespace: 'mcp-server',
+      spec: { contextId: 'second-context', mcpServers: [] },
+    })
+    const second = (watcher as any).runInitialNetworkPolicyConvergence()
+    const third = (watcher as any).runInitialNetworkPolicyConvergence()
+
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
+    releaseFirstPass.resolve(undefined)
+    await Promise.all([first, second, third])
+
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2)
+    expect(snapshots).toEqual([['first-context'], ['first-context', 'second-context']])
+    await watcher.stop()
+  })
+
+  it('fences an McpServer fleet pass when its LIST-to-WATCH authority is retired', async () => {
+    const egressStarted = deferred()
+    const releaseEgress = deferred()
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).mcpWatchGeneration = 7
+    ;(watcher as any).initialConvergenceRetryAttempts.set('McpServer', 3)
+    ;(watcher as any).servers.set('stale-server', {
+      name: 'stale-server',
+      namespace: 'mcp-server',
+      generation: 1,
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/stale-server:v1',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        egressBindings: [{ dns: 'stale.example', port: 443 }],
+      },
+    })
+    const netPol = (watcher as any).netPolReconciler
+    const reconciler = (watcher as any).reconciler
+    netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
+      egressStarted.resolve(undefined)
+      await releaseEgress.promise
+    })
+    mocks.serverFullReconcile.mockImplementation(async (servers, options) => {
+      await Promise.all(
+        servers.map((selected: { name: string }) =>
+          options.runEffect(selected.name, () => reconciler.reconcile(selected))
+        )
+      )
+    })
+
+    const stalePass = (watcher as any).runInitialMcpServerConvergence()
+    await egressStarted.promise
+    ;(watcher as any).mcpServerCacheSynced = false
+    ;(watcher as any).mcpWatchGeneration = 8
+    const trailing = (watcher as any).runInitialMcpServerConvergence()
+    releaseEgress.resolve(undefined)
+    await Promise.all([stalePass, trailing])
+
+    expect(reconciler.reconcile).not.toHaveBeenCalled()
+    expect((watcher as any).initialConvergenceRetryAttempts.get('McpServer')).toBe(3)
+    ;(watcher as any).servers.set('stale-server', {
+      name: 'stale-server',
+      namespace: 'mcp-server',
+      generation: 2,
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/stale-server:v2',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        egressBindings: [{ dns: 'current.example', port: 443 }],
+      },
+    })
+    ;(watcher as any).mcpServerCacheSynced = true
+    await (watcher as any).runInitialMcpServerConvergence()
+
+    expect(reconciler.reconcile).toHaveBeenCalledOnce()
+    expect(reconciler.reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        generation: 2,
+        spec: expect.objectContaining({ image: 'clerum/stale-server:v2' }),
+      })
+    )
+    expect((watcher as any).initialConvergenceRetryAttempts.has('McpServer')).toBe(false)
+    await watcher.stop()
+  })
+
+  it('fences NetworkPolicy positive effects when their inventory leases are retired', async () => {
+    const firstPassStarted = deferred()
+    const releaseFirstPass = deferred()
+    const appliedContexts: string[] = []
+    const appliedServers: string[] = []
+    let pass = 0
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextWatchGeneration = 11
+    ;(watcher as any).mcpWatchGeneration = 13
+    ;(watcher as any).initialConvergenceRetryAttempts.set('NetworkPolicy', 4)
+    ;(watcher as any).contexts.set('stale-context', {
+      name: 'stale-context',
+      namespace: 'mcp-server',
+      spec: { contextId: 'stale-context', mcpServers: ['stale-server'] },
+    })
+    ;(watcher as any).servers.set('stale-server', {
+      name: 'stale-server',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'stale-context',
+        image: 'clerum/stale-server:v1',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    })
+    mocks.netPolFullReconcile.mockImplementation(async (contexts, servers, options) => {
+      pass += 1
+      if (pass === 1) {
+        firstPassStarted.resolve(undefined)
+        await releaseFirstPass.promise
+      }
+      await Promise.all(
+        contexts.map((context: { spec: { contextId: string } }) =>
+          options.runContextEffect(context.spec.contextId, async () => {
+            appliedContexts.push(context.spec.contextId)
+          })
+        )
+      )
+      await Promise.all(
+        servers.map((server: { name: string }) =>
+          options.runServerEffect(server.name, async () => {
+            appliedServers.push(server.name)
+          })
+        )
+      )
+    })
+
+    const stalePass = (watcher as any).runInitialNetworkPolicyConvergence()
+    await firstPassStarted.promise
+    ;(watcher as any).contextCacheSynced = false
+    ;(watcher as any).mcpServerCacheSynced = false
+    ;(watcher as any).contextWatchGeneration = 12
+    ;(watcher as any).mcpWatchGeneration = 14
+    const trailing = (watcher as any).runInitialNetworkPolicyConvergence()
+    releaseFirstPass.resolve(undefined)
+    await Promise.all([stalePass, trailing])
+
+    expect(appliedContexts).toEqual([])
+    expect(appliedServers).toEqual([])
+    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(4)
+    ;(watcher as any).contexts.clear()
+    ;(watcher as any).servers.clear()
+    ;(watcher as any).contexts.set('current-context', {
+      name: 'current-context',
+      namespace: 'mcp-server',
+      spec: { contextId: 'current-context', mcpServers: ['current-server'] },
+    })
+    ;(watcher as any).servers.set('current-server', {
+      name: 'current-server',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'current-context',
+        image: 'clerum/current-server:v2',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    })
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    await (watcher as any).runInitialNetworkPolicyConvergence()
+
+    expect(appliedContexts).toEqual(['current-context'])
+    expect(appliedServers).toEqual(['current-server'])
+    expect((watcher as any).initialConvergenceRetryAttempts.has('NetworkPolicy')).toBe(false)
+    await watcher.stop()
+  })
+
   it.each([
     ['SharedFileSystem', 'enqueueSharedFileSystemReconciliation'],
     ['GlobalFileSystem', 'enqueueGlobalFileSystemReconciliation'],
@@ -1978,32 +2509,32 @@ describe('McpServerWatcher startup', () => {
     }
   )
 
-  it('keeps an incomplete McpServer inventory non-authoritative across NetworkPolicy retries', async () => {
-    vi.useFakeTimers()
+  it('defers NetworkPolicy full convergence until both inventories are authoritative', async () => {
     const watcher = new McpServerWatcher()
     ;(watcher as any).contextCacheSynced = true
     ;(watcher as any).mcpServerCacheSynced = false
-    mocks.netPolFullReconcile
-      .mockRejectedValueOnce(new Error('initial NetworkPolicy reconciliation failed'))
-      .mockResolvedValueOnce(undefined)
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    ;(watcher as any).initialConvergenceRetryAttempts.set('NetworkPolicy', 2)
 
     await (watcher as any).runInitialNetworkPolicyConvergence()
-    await vi.advanceTimersByTimeAsync(5000)
 
-    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2)
+    expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
+    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(2)
+    ;(watcher as any).mcpServerCacheSynced = true
+    await (watcher as any).runInitialNetworkPolicyConvergence()
+
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
     expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
       [],
       [],
       expect.objectContaining({
-        serverInventoryComplete: false,
+        serverInventoryComplete: true,
         ensureDefaults: false,
         contextInventoryAuthoritative: expect.any(Function),
         serverInventoryAuthoritative: expect.any(Function),
       })
     )
+    expect((watcher as any).initialConvergenceRetryAttempts.has('NetworkPolicy')).toBe(false)
     await watcher.stop()
-    errorSpy.mockRestore()
   })
 
   it('fences NetworkPolicy orphan cleanup to the inventory generations captured by the pass', async () => {
@@ -2453,6 +2984,7 @@ describe('McpServerWatcher external egress retries', () => {
 
   it('retries failed external egress reconciliation from an ADDED event', async () => {
     const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
     const netPol = (watcher as any).netPolReconciler
     const reconciler = (watcher as any).reconciler
     const bindingReconciler = (watcher as any).bindingReconciler
@@ -2489,20 +3021,120 @@ describe('McpServerWatcher external egress retries', () => {
     expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(2)
     expect(reconciler.reconcile).toHaveBeenCalledTimes(1)
     expect(reconciler.reconcile).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'redis-tools' })
+      expect.objectContaining({ name: 'redis-tools' }),
+      { isCurrent: expect.any(Function) }
     )
     expect(bindingReconciler.reconcileBindings).toHaveBeenCalledTimes(1)
     expect(netPol.reconcileContext).toHaveBeenCalledWith(
       expect.objectContaining({
         spec: expect.objectContaining({ contextId: 'context1' }),
-      })
+      }),
+      { isCurrent: expect.any(Function) }
     )
 
     watcher.stop()
   })
 
+  it('retires a binding-policy lease when a same-watch MODIFIED supersedes the server', async () => {
+    const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
+    const bindingReconciler = (watcher as any).bindingReconciler
+    const bindingStarted = deferred()
+    const releaseBinding = deferred()
+    bindingReconciler.reconcileBindings.mockImplementationOnce(async () => {
+      bindingStarted.resolve(undefined)
+      await releaseBinding.promise
+    })
+    const annotations = {
+      'clerum.io/recipe-bindings': JSON.stringify([
+        { from: 'redis-tools', to: 'downstream', port: 443 },
+      ]),
+    }
+    const original = {
+      ...serverObject,
+      metadata: {
+        ...serverObject.metadata,
+        uid: 'redis-tools-uid',
+        generation: 1,
+        annotations,
+      },
+    }
+    const replacement = {
+      ...original,
+      metadata: { ...original.metadata, generation: 2 },
+      spec: { ...original.spec, image: 'redis-tools:v2' },
+    }
+    const watchCallback = (watcher as any).getMcpServerWatchCallback()
+
+    const originalEffect = watchCallback('ADDED', original)
+    await bindingStarted.promise
+    const replacementEffect = watchCallback('MODIFIED', replacement)
+
+    const originalOptions = bindingReconciler.reconcileBindings.mock.calls[0][4]
+    expect(originalOptions).toEqual({ isCurrent: expect.any(Function) })
+    expect(originalOptions.isCurrent()).toBe(false)
+
+    releaseBinding.resolve(undefined)
+    await Promise.all([originalEffect, replacementEffect])
+
+    expect(bindingReconciler.reconcileBindings).toHaveBeenCalledTimes(2)
+    expect(bindingReconciler.reconcileBindings).toHaveBeenLastCalledWith(
+      'redis-tools',
+      expect.any(Array),
+      'redis-tools',
+      'redis-tools',
+      { isCurrent: expect.any(Function) }
+    )
+    await watcher.stop()
+  })
+
+  it('retires binding cleanup when a same-name McpServer is recreated during DELETE', async () => {
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    const bindingReconciler = (watcher as any).bindingReconciler
+    const cleanupStarted = deferred()
+    const releaseCleanup = deferred()
+    bindingReconciler.cleanupBindings.mockImplementationOnce(async () => {
+      cleanupStarted.resolve(undefined)
+      await releaseCleanup.promise
+    })
+    const deleted = {
+      ...serverObject,
+      metadata: {
+        ...serverObject.metadata,
+        uid: 'redis-tools-old-uid',
+        generation: 1,
+      },
+    }
+    const recreated = {
+      ...serverObject,
+      metadata: {
+        ...serverObject.metadata,
+        uid: 'redis-tools-new-uid',
+        generation: 1,
+      },
+      spec: { ...serverObject.spec, image: 'redis-tools:recreated' },
+    }
+    const watchCallback = (watcher as any).getMcpServerWatchCallback()
+
+    const deleteEffect = watchCallback('DELETED', deleted)
+    await cleanupStarted.promise
+    const recreateEffect = watchCallback('ADDED', recreated)
+
+    const cleanupOptions = bindingReconciler.cleanupBindings.mock.calls[0][1]
+    expect(cleanupOptions).toEqual({ deleteAllowed: expect.any(Function) })
+    await expect(cleanupOptions.deleteAllowed()).resolves.toBe(false)
+
+    releaseCleanup.resolve(undefined)
+    await Promise.all([deleteEffect, recreateEffect])
+
+    expect(bindingReconciler.cleanupBindings).toHaveBeenCalledTimes(1)
+    await watcher.stop()
+  })
+
   it('retries the complete pipeline when a no-egress runtime reconcile fails', async () => {
     const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
     const reconciler = (watcher as any).reconciler
     const noEgressServer = {
       ...serverObject,
@@ -2528,6 +3160,7 @@ describe('McpServerWatcher external egress retries', () => {
 
   it('retries runtime reconciliation when external egress is ready but runtime reconcile fails', async () => {
     const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
     const netPol = (watcher as any).netPolReconciler
     const reconciler = (watcher as any).reconciler
     netPol.reconcileExternalEgress.mockResolvedValue(undefined)
@@ -2547,7 +3180,8 @@ describe('McpServerWatcher external egress retries', () => {
     expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(2)
     expect(reconciler.reconcile).toHaveBeenCalledTimes(2)
     expect(reconciler.reconcile).toHaveBeenLastCalledWith(
-      expect.objectContaining({ name: 'redis-tools' })
+      expect.objectContaining({ name: 'redis-tools' }),
+      { isCurrent: expect.any(Function) }
     )
 
     watcher.stop()
@@ -2555,6 +3189,7 @@ describe('McpServerWatcher external egress retries', () => {
 
   it('keeps retry attempts bounded when runtime fails after an external egress retry succeeds', async () => {
     const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
     const netPol = (watcher as any).netPolReconciler
     const reconciler = (watcher as any).reconciler
     netPol.reconcileExternalEgress.mockRejectedValueOnce(new Error('api temporarily unavailable'))
@@ -2580,7 +3215,8 @@ describe('McpServerWatcher external egress retries', () => {
     expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(3)
     expect(reconciler.reconcile).toHaveBeenCalledTimes(2)
     expect(reconciler.reconcile).toHaveBeenLastCalledWith(
-      expect.objectContaining({ name: 'redis-tools' })
+      expect.objectContaining({ name: 'redis-tools' }),
+      { isCurrent: expect.any(Function) }
     )
 
     watcher.stop()
@@ -2588,6 +3224,7 @@ describe('McpServerWatcher external egress retries', () => {
 
   it('continues a pending runtime pipeline during periodic external egress resync', async () => {
     const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
     const netPol = (watcher as any).netPolReconciler
     const reconciler = (watcher as any).reconciler
     netPol.reconcileExternalEgress.mockResolvedValue(undefined)
@@ -2618,6 +3255,7 @@ describe('McpServerWatcher external egress retries', () => {
 
   it('keeps retrying an ADDED pipeline at the capped delay until it recovers', async () => {
     const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
     const netPol = (watcher as any).netPolReconciler
     const reconciler = (watcher as any).reconciler
     netPol.reconcileExternalEgress
@@ -2672,12 +3310,15 @@ describe('McpServerWatcher external egress retries', () => {
 
     expect(netPol.cleanupExternalEgress).toHaveBeenCalledTimes(5)
     expect(reconciler.reconcileDelete).toHaveBeenCalledWith('redis-tools', 'mcp-server')
-    expect(bindingReconciler.cleanupBindings).toHaveBeenCalledWith('redis-tools')
+    expect(bindingReconciler.cleanupBindings).toHaveBeenCalledWith('redis-tools', {
+      deleteAllowed: expect.any(Function),
+    })
     watcher.stop()
   })
 
   it('bounds concurrent durable retries across McpServers', async () => {
     const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
     const reconciler = (watcher as any).reconciler
     const release = deferred()
     let active = 0
@@ -2715,6 +3356,7 @@ describe('McpServerWatcher external egress retries', () => {
 
   it('replays a retry against the watcher generation current when the timer executes', async () => {
     const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
     const selected = {
       name: 'generation-fenced-server',
       namespace: 'mcp-server',
@@ -2807,7 +3449,9 @@ describe('McpServerWatcher external egress retries', () => {
       expect.any(Function)
     )
     expect(reconciler.reconcileDelete).toHaveBeenCalledWith('redis-tools', 'mcp-server')
-    expect(bindingReconciler.cleanupBindings).toHaveBeenCalledWith('redis-tools')
+    expect(bindingReconciler.cleanupBindings).toHaveBeenCalledWith('redis-tools', {
+      deleteAllowed: expect.any(Function),
+    })
 
     watcher.stop()
   })
@@ -2837,8 +3481,47 @@ describe('McpServerWatcher external egress retries', () => {
 
     expect(netPol.cleanupExternalEgress).toHaveBeenCalledTimes(1)
     expect(reconciler.reconcileDelete).toHaveBeenCalledWith('redis-tools', 'mcp-server')
-    expect(bindingReconciler.cleanupBindings).toHaveBeenCalledWith('redis-tools')
+    expect(bindingReconciler.cleanupBindings).toHaveBeenCalledWith('redis-tools', {
+      deleteAllowed: expect.any(Function),
+    })
     expect(mocks.getNamespacedCustomObject).toHaveBeenCalledTimes(4)
+
+    watcher.stop()
+  })
+
+  it('retries the full DELETE pipeline when inventory authority is lost between cleanup stages', async () => {
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    const netPol = (watcher as any).netPolReconciler
+    const reconciler = (watcher as any).reconciler
+    const bindingReconciler = (watcher as any).bindingReconciler
+    reconciler.reconcileDelete.mockImplementationOnce(async () => {
+      ;(watcher as any).mcpServerCacheSynced = false
+    })
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const watchCallback = (watcher as any).getMcpServerWatchCallback()
+    await expect(watchCallback('DELETED', serverObject)).resolves.toBeUndefined()
+
+    expect(netPol.cleanupExternalEgress).toHaveBeenCalledTimes(1)
+    expect(reconciler.reconcileDelete).toHaveBeenCalledWith('redis-tools', 'mcp-server')
+    expect(bindingReconciler.cleanupBindings).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(netPol.cleanupExternalEgress).toHaveBeenCalledTimes(1)
+    expect(reconciler.reconcileDelete).toHaveBeenCalledTimes(1)
+    expect(bindingReconciler.cleanupBindings).not.toHaveBeenCalled()
+    ;(watcher as any).mcpServerCacheSynced = true
+    await vi.advanceTimersByTimeAsync(14_999)
+    expect(netPol.cleanupExternalEgress).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(netPol.cleanupExternalEgress).toHaveBeenCalledTimes(2)
+    expect(reconciler.reconcileDelete).toHaveBeenCalledTimes(2)
+    expect(bindingReconciler.cleanupBindings).toHaveBeenCalledWith('redis-tools', {
+      deleteAllowed: expect.any(Function),
+    })
 
     watcher.stop()
   })
@@ -2917,7 +3600,8 @@ describe('McpServerWatcher external egress retries', () => {
         uid: 'redis-tools-new-uid',
         generation: 1,
         spec: expect.objectContaining({ image: 'redis-tools:recreated' }),
-      })
+      }),
+      { isCurrent: expect.any(Function) }
     )
 
     watcher.stop()
@@ -3034,7 +3718,8 @@ describe('McpServerWatcher external egress retries', () => {
       expect.objectContaining({
         generation: 2,
         spec: expect.objectContaining({ image: 'redis-tools:new' }),
-      })
+      }),
+      { isCurrent: expect.any(Function) }
     )
 
     watcher.stop()
@@ -3061,6 +3746,7 @@ describe('McpServerWatcher external egress retries', () => {
 
   it('periodic resync reuses external egress reconciliation for cached servers with bindings', async () => {
     const watcher = new McpServerWatcher()
+    markMcpServerInventoryAuthoritative(watcher)
     const netPol = (watcher as any).netPolReconciler
     netPol.reconcileExternalEgress.mockResolvedValue(undefined)
     vi.spyOn(Math, 'random').mockReturnValue(0)
@@ -3115,6 +3801,7 @@ describe('McpServerWatcher external egress retries', () => {
       namespace: 'mcp-server',
       spec: serverObject.spec,
     }
+    ;(watcher as any).servers.set(server.name, server)
     netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
       mutationStarted.resolve(undefined)
       await releaseMutation.promise
@@ -3149,6 +3836,7 @@ describe('McpServerWatcher external egress retries', () => {
       namespace: 'mcp-server',
       spec: serverObject.spec,
     }
+    ;(watcher as any).servers.set(server.name, server)
     netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
       mutationStarted.resolve(undefined)
       await releaseMutation.promise
@@ -3231,6 +3919,88 @@ describe('McpServerWatcher wires CC counter into HostReconciler', () => {
     // Same private field access pattern the hostReconciler tests use.
     expect((hostReconciler as any).countCommunicationChannels('alpha-host')).toBe(2)
     expect((hostReconciler as any).countCommunicationChannels('beta-host')).toBe(0)
+  })
+})
+
+describe('McpServerWatcher Host mutation dependency wiring', () => {
+  it('tracks only the selected Context, referenced SFS state, and Host-scoped channels', () => {
+    const watcher = new McpServerWatcher()
+    const host = {
+      name: 'alpha-host',
+      namespace: 'mcp-host',
+      spec: { contextRef: 'alpha-context' },
+    } as HostCRD
+    const context = {
+      name: 'alpha-context',
+      namespace: 'mcp-server',
+      spec: {
+        contextId: 'alpha-context',
+        sharedFileSystems: [{ name: 'documents', mountPath: '/contexts/documents' }],
+      },
+    }
+    const documentsV1 = {
+      name: 'documents',
+      namespace: 'mcp-host',
+      spec: { storageClassName: 'fast-v1' },
+    }
+    const alphaChannelV1 = {
+      name: 'telegram-alpha',
+      namespace: 'channels',
+      spec: { hostRef: 'alpha-host' },
+    }
+    ;(watcher as any).contexts.set(context.name, context)
+    ;(watcher as any).sharedFileSystems.set(documentsV1.name, documentsV1)
+    ;(watcher as any).communicationChannels.set(alphaChannelV1.name, alphaChannelV1)
+    ;(watcher as any).ccCacheSynced = true
+    ;(watcher as any).ccWatchGeneration = 7
+    const sfsReconciler = (watcher as any).sharedFileSystemReconciler
+    sfsReconciler.isMountable.mockReturnValue(true)
+    const hostReconciler = watcher.getHostReconciler() as any
+    const resolveDependencies = hostReconciler._hostMutationDependenciesFn
+
+    const original = resolveDependencies(host)
+    expect(original).toEqual([context, true, 7, documentsV1, true, alphaChannelV1])
+    ;(watcher as any).sharedFileSystems.set('unrelated', {
+      name: 'unrelated',
+      namespace: 'mcp-host',
+      spec: {},
+    })
+    ;(watcher as any).communicationChannels.set('telegram-beta', {
+      name: 'telegram-beta',
+      namespace: 'channels',
+      spec: { hostRef: 'beta-host' },
+    })
+    const afterUnrelatedChanges = resolveDependencies(host)
+    expect(
+      original.every((value: unknown, index: number) =>
+        Object.is(value, afterUnrelatedChanges[index])
+      )
+    ).toBe(true)
+
+    const documentsV2 = {
+      ...documentsV1,
+      spec: { storageClassName: 'fast-v2' },
+    }
+    ;(watcher as any).sharedFileSystems.set(documentsV2.name, documentsV2)
+    const afterSfsRevision = resolveDependencies(host)
+    expect(afterSfsRevision[3]).toBe(documentsV2)
+    expect(afterSfsRevision[3]).not.toBe(original[3])
+
+    sfsReconciler.isMountable.mockReturnValue(false)
+    const afterMountabilityChange = resolveDependencies(host)
+    expect(afterMountabilityChange[4]).toBe(false)
+
+    const alphaChannelV2 = {
+      ...alphaChannelV1,
+      spec: {
+        ...alphaChannelV1.spec,
+        credentialsSecretRef: { name: 'telegram-alpha-v2' },
+      },
+    }
+    ;(watcher as any).communicationChannels.set(alphaChannelV2.name, alphaChannelV2)
+    const afterChannelRevision = resolveDependencies(host)
+    expect(afterChannelRevision.at(-1)).toBe(alphaChannelV2)
+    expect(afterChannelRevision.at(-1)).not.toBe(original.at(-1))
   })
 })
 
@@ -3464,7 +4234,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       return { items: [] }
     })
 
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const cache = (watcher as any).communicationChannels as Map<string, any>
     cache.set('partial-channel', {
       name: 'partial-channel',
@@ -3504,7 +4274,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       if (plural === 'hosts') return { items: [host] }
       return { items: [] }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const cache = (watcher as any).communicationChannels as Map<string, any>
     cache.set('watch-observed-channel', {
       name: 'watch-observed-channel',
@@ -3545,7 +4315,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
     mocks.hostReconcileHosts
       .mockImplementationOnce(() => firstFleetPass.promise)
       .mockResolvedValue(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const lifecycleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
     const failClosedPass = (watcher as any).requestHostFleetReconcile(
@@ -3621,7 +4391,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
     })
     const fleetFailure = new Error('fleet did not converge')
     mocks.hostReconcileHosts.mockRejectedValueOnce(fleetFailure).mockResolvedValueOnce(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const lifecycleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
 
@@ -3663,7 +4433,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       if (hostListAttempts === 1) throw inventoryFailure
       return { items: [] }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const lifecycleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
 
@@ -3694,7 +4464,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       return { items: [] }
     })
     mocks.hostFullReconcile.mockRejectedValueOnce(new HostFleetReconcileError([], [cleanupFailure]))
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const lifecycleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
 
@@ -3726,7 +4496,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
     mocks.hostFullReconcile
       .mockRejectedValueOnce(new HostFleetReconcileError([hostFailure], [cleanupFailure]))
       .mockResolvedValue(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     ;(watcher as any).ccCacheSynced = true
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const lifecycleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
@@ -3767,7 +4537,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
     mocks.hostReconcileHosts
       .mockRejectedValueOnce(new Error('lifecycle pass failed'))
       .mockResolvedValue(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const lifecycleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
     ;(watcher as any).ccCacheSynced = true
@@ -3812,7 +4582,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       return { items: [] }
     })
     mocks.hostReconcileHosts.mockRejectedValue(new Error('persistent fleet failure'))
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const lifecycleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
 
@@ -3858,7 +4628,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
     mocks.hostReconcileHosts
       .mockRejectedValueOnce(new Error('old generation failed'))
       .mockResolvedValueOnce(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     try {
@@ -3892,7 +4662,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       }
       return { items: [] }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const cache = (watcher as any).communicationChannels as Map<string, any>
     cache.set('previous-channel', {
       name: 'previous-channel',
@@ -3933,7 +4703,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
         return { abort: vi.fn() }
       }
     )
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const scheduleSpy = vi
       .spyOn(watcher as any, 'scheduleCommunicationChannelCacheRecovery')
       .mockImplementation(() => {})
@@ -3991,7 +4761,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       .mockImplementationOnce(() => firstHostConvergence.promise)
       .mockResolvedValue(undefined)
 
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const firstRecovery = (watcher as any).recoverCommunicationChannelCache() as Promise<boolean>
 
     try {
@@ -4049,7 +4819,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
         }
       )
       .mockResolvedValue({ abort: vi.fn() })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
 
     try {
       await expect((watcher as any).recoverCommunicationChannelCache()).resolves.toBe(false)
@@ -4082,7 +4852,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       return { items: [] }
     })
     mocks.watch.mockImplementationOnce(() => pendingWatch.promise)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const recovery = (watcher as any).recoverCommunicationChannelCache() as Promise<boolean>
 
     try {
@@ -4127,7 +4897,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
         return { abort: vi.fn() }
       }
     )
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const scheduleSpy = vi
       .spyOn(watcher as any, 'scheduleCommunicationChannelCacheRecovery')
       .mockImplementation(() => {})
@@ -4189,7 +4959,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       maxActivePasses = Math.max(maxActivePasses, activePasses)
       activePasses -= 1
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     stubAuthoritativeInventoryWatch(watcher, 'McpServer')
     stubAuthoritativeInventoryWatch(watcher, 'Context')
     vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
@@ -4242,7 +5012,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
         return { abort }
       }
     )
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     ;(watcher as any).ccCacheSynced = true
 
     await (watcher as any).startCommunicationChannelWatch('504')
@@ -4276,7 +5046,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
         return requests[callbacks.length - 1]
       }
     )
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const scheduleSpy = vi
       .spyOn(watcher as any, 'scheduleCommunicationChannelCacheRecovery')
       .mockImplementation(() => {})
@@ -4327,7 +5097,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     const abort = vi.fn()
     const watchRequest = { abort }
     mocks.watch.mockReset().mockResolvedValue(watchRequest)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
 
     await (watcher as any).startHostWatch('stream-rv')
     await vi.advanceTimersByTimeAsync(30_001)
@@ -4362,7 +5132,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       .mockReset()
       .mockImplementationOnce(() => activePass)
       .mockResolvedValue(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     ;(watcher as any).ccCacheSynced = true
     ;(watcher as any).hostFleetScheduler.markLifecycleApplied(
       (watcher as any).ccLifecycleGeneration
@@ -4411,7 +5181,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       return { items: [] }
     })
     mocks.watch.mockReset().mockResolvedValue({ abort: vi.fn() })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     ;(watcher as any).hostCacheSynced = true
 
     const first = (watcher as any).requestHostFleetReconcile(
@@ -4431,7 +5201,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
 
   it('does not invent another fleet transition during a failed periodic cache recovery', async () => {
     vi.clearAllMocks()
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     ;(watcher as any).ccCacheSynced = false
     const recover = vi
       .spyOn(watcher as any, 'recoverCommunicationChannelCache')
@@ -4449,7 +5219,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
 
   it('coalesces the newest Host input revision into the serialized trailing pass', async () => {
     vi.clearAllMocks()
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const activePass = deferred()
     const requests: Array<{ inputRevision: number }> = []
     vi.spyOn(watcher as any, 'performHostFleetReconcile').mockImplementation(
@@ -4517,7 +5287,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
         maxActivePasses = Math.max(maxActivePasses, activePasses)
         activePasses -= 1
       })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const firstGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
     const first = (watcher as any).requestHostFleetReconcile(
       'first',
@@ -4570,7 +5340,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
 
   it('uses fresh lifecycle inventory without replacing newer Host watch-cache entries', async () => {
     vi.clearAllMocks()
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const initialHost = {
       name: 'stateless-primary',
       namespace: 'mcp-host',
@@ -4635,7 +5405,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       .mockReset()
       .mockImplementationOnce(() => lifecyclePass)
       .mockResolvedValue(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const generation = (watcher as any).beginCommunicationChannelLifecycleTransition()
     const lifecycle = (watcher as any).requestHostFleetReconcile(
       'CommunicationChannel interruption',
@@ -4680,7 +5450,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       .mockReset()
       .mockImplementationOnce(() => lifecyclePass)
       .mockResolvedValue(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const generation = (watcher as any).beginCommunicationChannelLifecycleTransition()
     const lifecycle = (watcher as any).requestHostFleetReconcile(
       'CommunicationChannel recovery',
@@ -4725,7 +5495,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       .mockReset()
       .mockImplementationOnce(() => lifecyclePass)
       .mockResolvedValue(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const firstGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
     const active = (watcher as any).requestHostFleetReconcile(
       'CommunicationChannel interruption',
@@ -4772,7 +5542,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     })
     mocks.hostFullReconcile.mockReset().mockResolvedValue(undefined)
     mocks.hostReconcileHosts.mockReset().mockResolvedValue(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const firstGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
     const full = (watcher as any).requestHostFleetReconcile(
       'initial Host reconciliation',
@@ -4824,7 +5594,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       return { items: [] }
     })
     mocks.hostFullReconcile.mockReset().mockResolvedValue(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     await (watcher as any).startHostWatch('test-host-rv')
     if (!hostWatchCallback) throw new Error('Host watch callback was not installed')
 
@@ -4909,7 +5679,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       return { items: [] }
     })
     mocks.hostFullReconcile.mockReset().mockResolvedValue(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const reconcile = vi
       .spyOn(watcher.getHostReconciler(), 'reconcile')
       .mockRejectedValueOnce(new Error('transient event failure'))
@@ -4980,7 +5750,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       await fullReconcile.promise
       order.push('full:end')
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const hostReconciler = watcher.getHostReconciler()
     const reconcile = vi.spyOn(hostReconciler, 'reconcile').mockImplementation(async host => {
       order.push(`watch:${host.name}:${host.generation}`)
@@ -5033,7 +5803,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       }
     )
     mocks.listNamespacedCustomObject.mockImplementation(async () => ({ items: [] }))
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const hostReconciler = watcher.getHostReconciler()
     // The reconcile()/reconcileDelete() spies stand in for the per-Host chain;
     // the actual serializeByHost non-overlap guarantee is proven in
@@ -5084,7 +5854,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
         return { abort: vi.fn() }
       }
     )
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const order: string[] = []
     const timeout = new HostK8sRequestTimeoutError('AppsV1Api.readNamespacedDeployment', 30_000)
     const reconcile = vi
@@ -5131,7 +5901,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       if (plural === 'hosts') return { items: [] }
       return { items: [] }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const reconcile = vi
       .spyOn(watcher.getHostReconciler(), 'reconcile')
       .mockResolvedValue(undefined)
@@ -5180,7 +5950,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
     // wins). Block that full pass so it stays running until shutdown unblocks
     // the promoted trailing waiter — the semantic this test protects.
     mocks.hostFullReconcile.mockReset().mockImplementation(() => trailingPass)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const activeGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
     const activeRequest = (watcher as any).requestHostFleetReconcile(
       'startup',
@@ -5226,7 +5996,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       resolveActivePass = resolve
     })
     mocks.hostReconcileHosts.mockReset().mockImplementationOnce(() => activePass)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const activeGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
     const activeRequest = (watcher as any).requestHostFleetReconcile(
       'active',
@@ -5265,7 +6035,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       return inventory
     })
     mocks.hostReconcileHosts.mockReset().mockResolvedValue(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const staleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
     const staleRequest = (watcher as any).requestHostFleetReconcile(
       'stale transition',
@@ -5319,7 +6089,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       if (plural === 'hosts') return hostInventory
       return { items: [] }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const run = (watcher as any).requestHostFleetReconcile('shutdown race') as Promise<void>
 
     await vi.waitFor(() => {
@@ -5344,7 +6114,7 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
 
   it('releases the periodic single-flight guard after a rejected pass', async () => {
     vi.clearAllMocks()
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const failure = new Error('transient resync failure')
     const performSpy = vi
       .spyOn(watcher as any, 'performHostResync')
@@ -5390,7 +6160,7 @@ describe('McpServerWatcher Host watch generation', () => {
       }
       return { items: [] }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const fleetRequest = vi
       .spyOn(watcher as any, 'requestHostFleetReconcile')
       .mockResolvedValue(undefined)
@@ -5424,7 +6194,7 @@ describe('McpServerWatcher Host watch generation', () => {
       }
       return { items: [] }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const fleetRequest = vi
       .spyOn(watcher as any, 'requestHostFleetReconcile')
       .mockResolvedValue(undefined)
@@ -5464,7 +6234,7 @@ describe('McpServerWatcher Host watch generation', () => {
       }
       return { items: [] }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const fleetRequest = vi
       .spyOn(watcher as any, 'requestHostFleetReconcile')
       .mockResolvedValue(undefined)
@@ -5512,7 +6282,7 @@ describe('McpServerWatcher Host watch generation', () => {
       }
       return { metadata: { resourceVersion: 'retry-preserved-rv' }, items: [] }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const fleetRequest = vi
       .spyOn(watcher as any, 'requestHostFleetReconcile')
       .mockResolvedValue(undefined)
@@ -5559,7 +6329,7 @@ describe('McpServerWatcher Host watch generation', () => {
       if (plural === 'hosts') return { metadata: {}, items: [] }
       return { items: [] }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     await (watcher as any).requestHostFleetReconcile('Periodic resync', undefined, 'full')
@@ -5595,7 +6365,7 @@ describe('McpServerWatcher Host watch generation', () => {
       if (watchQueries.length === 1) throw new Error('watch connection failed')
       return { abort: vi.fn() }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     await (watcher as any).requestHostFleetReconcile('Periodic resync', undefined, 'full')
@@ -5639,7 +6409,7 @@ describe('McpServerWatcher Host watch generation', () => {
       if (path.endsWith('/hosts')) return lateRequest.promise
       return { abort: vi.fn() }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const requested = (watcher as any).requestHostFleetReconcile(
       'Periodic resync',
@@ -5682,7 +6452,7 @@ describe('McpServerWatcher Host watch generation', () => {
         return { abort: vi.fn() }
       }
     )
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     await (watcher as any).startHostWatch('initial-rv')
     ;(watcher as any).hostCacheSynced = true
 
@@ -5722,7 +6492,7 @@ describe('McpServerWatcher Host watch generation', () => {
         return { abort: vi.fn() }
       }
     )
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const reconcile = vi
       .spyOn(watcher.getHostReconciler(), 'reconcile')
       .mockRejectedValueOnce(new Error('transient event failure'))
@@ -5799,7 +6569,7 @@ describe('McpServerWatcher Host watch generation', () => {
     mocks.hostFullReconcile
       .mockImplementationOnce(() => firstFullReconcile.promise)
       .mockResolvedValue(undefined)
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const full = (watcher as any).requestHostFleetReconcile(
       'Periodic resync',
       undefined,
@@ -5865,7 +6635,7 @@ describe('McpServerWatcher Host watch generation', () => {
         ],
       }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     await (watcher as any).startHostWatch('test-host-rv')
 
     await (watcher as any).requestHostFleetReconcile('Periodic resync', undefined, 'full')
@@ -5906,7 +6676,7 @@ describe('McpServerWatcher Host watch generation', () => {
         ],
       }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const reconcile = vi
       .spyOn(watcher.getHostReconciler(), 'reconcile')
       .mockResolvedValue(undefined)
@@ -5960,7 +6730,7 @@ describe('McpServerWatcher Host watch generation', () => {
         ],
       }
     })
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const reconcileDelete = vi
       .spyOn(watcher.getHostReconciler(), 'reconcileDelete')
       .mockResolvedValue(undefined)
@@ -5982,7 +6752,7 @@ describe('McpServerWatcher Host watch generation', () => {
 
   it('recovery diff enqueues an immediate per-Host delete for a disappeared Host (#827 item 1)', async () => {
     vi.clearAllMocks()
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     markHostInventoryAuthoritative(watcher)
     const reconcileDelete = vi
       .spyOn(watcher.getHostReconciler(), 'reconcileDelete')
@@ -6014,7 +6784,7 @@ describe('McpServerWatcher Host watch generation', () => {
   // short-circuits on snapshotNames.has(name) and never dispatches at all.
   it('recovery delete carries a live-cache fence for a Host recreated during admission (#827 F2 parity)', async () => {
     vi.clearAllMocks()
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     markHostInventoryAuthoritative(watcher)
     const reconcileDelete = vi
       .spyOn(watcher.getHostReconciler(), 'reconcileDelete')
@@ -6049,7 +6819,7 @@ describe('McpServerWatcher Host watch generation', () => {
 
   it('recovery diff reconciles (does NOT delete) a same-name Host recreated with a new uid (#827 items 1+2)', async () => {
     vi.clearAllMocks()
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     markHostInventoryAuthoritative(watcher)
     const reconcile = vi
       .spyOn(watcher.getHostReconciler(), 'reconcile')
@@ -6086,7 +6856,7 @@ describe('McpServerWatcher Host watch generation', () => {
   })
 
   it('suppresses a watch event whose identity (uid) differs from the cached Host (#827 item 2)', () => {
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     ;(watcher as any).hosts.set('x', {
       name: 'x',
       namespace: 'mcp-host',
@@ -6115,7 +6885,7 @@ describe('McpServerWatcher Host watch generation', () => {
 
   it('recovery urgently admits a wake-pending Host that is otherwise unchanged (§10.2 step 7 wake branch)', async () => {
     vi.clearAllMocks()
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     markHostInventoryAuthoritative(watcher)
     const reconcile = vi
       .spyOn(watcher.getHostReconciler(), 'reconcile')
@@ -6158,7 +6928,7 @@ describe('McpServerWatcher Host watch generation', () => {
 
   it('recovery does NOT urgently dispatch a fully-unchanged Host with no wake annotation', async () => {
     vi.clearAllMocks()
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const reconcile = vi
       .spyOn(watcher.getHostReconciler(), 'reconcile')
       .mockResolvedValue(undefined)
@@ -6206,7 +6976,7 @@ describe('McpServerWatcher Host watch generation', () => {
         return { abort: vi.fn() }
       }
     )
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const reconcile = vi
       .spyOn(watcher.getHostReconciler(), 'reconcile')
       .mockRejectedValueOnce(new Error('transient'))
@@ -6249,7 +7019,7 @@ describe('McpServerWatcher Host watch generation', () => {
         return { abort: vi.fn() }
       }
     )
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const unrelatedHost = {
       name: 'unrelated-host',
       namespace: 'mcp-host',
@@ -6300,7 +7070,7 @@ describe('McpServerWatcher Host watch generation', () => {
         return { abort: vi.fn() }
       }
     )
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const reconcile = vi
       .spyOn(watcher.getHostReconciler(), 'reconcile')
       .mockRejectedValue(new Error('persistent failure'))
@@ -6336,7 +7106,7 @@ describe('McpServerWatcher Host watch generation', () => {
         return { abort: vi.fn() }
       }
     )
-    const watcher = new McpServerWatcher()
+    const watcher = newContextAuthoritativeWatcher()
     const reconcile = vi
       .spyOn(watcher.getHostReconciler(), 'reconcile')
       .mockRejectedValueOnce(new Error('stale event failed'))

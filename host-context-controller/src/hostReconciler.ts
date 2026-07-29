@@ -77,16 +77,29 @@ export type HostReconcileSource = 'urgent' | 'retry' | 'fleet'
 /** Immutable Host watch authority snapshot captured at a full-pass boundary. */
 export type HostWatchAuthoritySnapshot = { known: boolean; generation: number }
 
+/**
+ * Immutable lease for every inventory that contributes to a Host mutation.
+ * Host resources come from the Host watch; mounted SharedFileSystems come from
+ * the Context watch. Keeping both generations prevents a false-stable
+ * Host-only lease when Context retires and recovers during queued work.
+ */
+export type HostMutationAuthoritySnapshot = {
+  known: boolean
+  hostGeneration: number
+  contextGeneration: number
+}
+
 class HostInventoryAuthorityUnavailableError extends Error {
   constructor(
     action: string,
-    captured: HostWatchAuthoritySnapshot,
-    current: HostWatchAuthoritySnapshot
+    captured: HostMutationAuthoritySnapshot,
+    current: HostMutationAuthoritySnapshot
   ) {
     super(
       `Host inventory authority changed before ${action} admission ` +
-        `(captured known=${captured.known} generation=${captured.generation}, ` +
-        `current known=${current.known} generation=${current.generation})`
+        `(captured known=${captured.known} hostGeneration=${captured.hostGeneration} ` +
+        `contextGeneration=${captured.contextGeneration}, current known=${current.known} ` +
+        `hostGeneration=${current.hostGeneration} contextGeneration=${current.contextGeneration})`
     )
     this.name = 'HostInventoryAuthorityUnavailableError'
   }
@@ -103,6 +116,13 @@ class HostMutationSpecRevisionChangedError extends Error {
   constructor(action: string, hostName: string) {
     super(`Host spec generation changed before ${action} admission for "${hostName}"`)
     this.name = 'HostMutationSpecRevisionChangedError'
+  }
+}
+
+class HostMutationDependencyChangedError extends Error {
+  constructor(action: string, hostName: string) {
+    super(`Host mutation dependency changed before ${action} admission for "${hostName}"`)
+    this.name = 'HostMutationDependencyChangedError'
   }
 }
 
@@ -415,6 +435,27 @@ export class HostReconciler {
     known: false,
     generation: 0,
   })
+  /**
+   * Positive Host mutations depend on Host plus Context authority. The default
+   * preserves the standalone HostReconciler contract by deriving a Host-only
+   * lease; McpServerWatcher wires the complete composite lease.
+   */
+  private hostMutationAuthority: () => HostMutationAuthoritySnapshot = () => {
+    const host = this.hostWatchAuthority()
+    return {
+      known: host.known,
+      hostGeneration: host.generation,
+      contextGeneration: 0,
+    }
+  }
+  /**
+   * Exact revisions of the cross-resource inputs selected by a Host. Watch
+   * generations fence LIST -> WATCH authority, but normal MODIFIED events stay
+   * in the same generation. The watcher supplies the selected Context,
+   * referenced SharedFileSystems plus mountability, and Host-scoped
+   * CommunicationChannels so unrelated fleet changes do not retire this lease.
+   */
+  private resolveHostMutationDependencies: ((host: HostCRD) => readonly unknown[]) | null = null
 
   constructor(kc: k8s.KubeConfig, deps?: HostReconcilerDeps) {
     this.appsApi =
@@ -525,23 +566,36 @@ export class HostReconciler {
     this.hostWatchAuthority = fn
   }
 
+  setHostMutationAuthority(fn: () => HostMutationAuthoritySnapshot): void {
+    this.hostMutationAuthority = fn
+  }
+
+  setResolveHostMutationDependencies(fn: (host: HostCRD) => readonly unknown[]): void {
+    this.resolveHostMutationDependencies = fn
+  }
+
   /**
    * A standalone HostReconciler receives an explicit Host object and has no
    * watch-backed cache to fence. Once a live-cache resolver is wired (the
    * production McpServerWatcher path), every mutation captures and revalidates
    * Host LIST -> WATCH authority at its actual serializer admission boundary.
    */
-  private captureHostMutationAuthority(): HostWatchAuthoritySnapshot | null {
-    return this.resolveCurrentHost === null ? null : this.hostWatchAuthority()
+  private captureHostMutationAuthority(): HostMutationAuthoritySnapshot | null {
+    return this.resolveCurrentHost === null ? null : this.hostMutationAuthority()
   }
 
   private requireHostMutationAuthority(
     action: string,
-    captured: HostWatchAuthoritySnapshot | null
+    captured: HostMutationAuthoritySnapshot | null
   ): void {
     if (captured === null) return
-    const current = this.hostWatchAuthority()
-    if (!captured.known || !current.known || captured.generation !== current.generation) {
+    const current = this.hostMutationAuthority()
+    if (
+      !captured.known ||
+      !current.known ||
+      captured.hostGeneration !== current.hostGeneration ||
+      captured.contextGeneration !== current.contextGeneration
+    ) {
       throw new HostInventoryAuthorityUnavailableError(action, captured, current)
     }
   }
@@ -554,13 +608,20 @@ export class HostReconciler {
    */
   private prepareHostMutationAdmission(action: string, requested: HostCRD): () => HostCRD {
     const capturedAuthority = this.captureHostMutationAuthority()
-    return this.makeHostMutationAdmission(action, requested, capturedAuthority)
+    const capturedDependencies = this.resolveHostMutationDependencies?.(requested)
+    return this.makeHostMutationAdmission(
+      action,
+      requested,
+      capturedAuthority,
+      capturedDependencies
+    )
   }
 
   private makeHostMutationAdmission(
     action: string,
     requested: HostCRD,
-    capturedAuthority: HostWatchAuthoritySnapshot | null
+    capturedAuthority: HostMutationAuthoritySnapshot | null,
+    capturedDependencies: readonly unknown[] | undefined
   ): () => HostCRD {
     return () => {
       this.requireHostMutationAuthority(action, capturedAuthority)
@@ -580,6 +641,16 @@ export class HostReconciler {
         requested.generation !== current.generation
       ) {
         throw new HostMutationSpecRevisionChangedError(action, requested.name)
+      }
+      if (this.resolveHostMutationDependencies !== null) {
+        const currentDependencies = this.resolveHostMutationDependencies(current)
+        const sameDependencies =
+          capturedDependencies !== undefined &&
+          capturedDependencies.length === currentDependencies.length &&
+          capturedDependencies.every((value, index) => Object.is(value, currentDependencies[index]))
+        if (!sameDependencies) {
+          throw new HostMutationDependencyChangedError(action, requested.name)
+        }
       }
       return current
     }
@@ -2193,7 +2264,12 @@ export class HostReconciler {
         const admittedHost = resolveCurrentHost?.(hostName)
         if (resolveCurrentHost !== null && admittedHost === undefined) return
         const revalidate = admittedHost
-          ? this.makeHostMutationAdmission(action, admittedHost, capturedAuthority)
+          ? this.makeHostMutationAdmission(
+              action,
+              admittedHost,
+              capturedAuthority,
+              this.resolveHostMutationDependencies?.(admittedHost)
+            )
           : () => this.requireHostMutationAuthority(action, capturedAuthority)
 
         revalidate()
@@ -3658,6 +3734,7 @@ export class HostReconciler {
   async reconcile(host: HostCRD, source: HostReconcileSource = 'urgent'): Promise<void> {
     const dispatchedAt = Date.now()
     const capturedAuthority = this.captureHostMutationAuthority()
+    const capturedDependencies = this.resolveHostMutationDependencies?.(host)
     return this.lifecycle.serializeByHost(host.name, async () => {
       this.requireHostMutationAuthority(`Host "${host.name}" reconcile`, capturedAuthority)
       const admittedHost = this.resolveCurrentHost ? this.resolveCurrentHost(host.name) : host
@@ -3665,7 +3742,8 @@ export class HostReconciler {
       const revalidate = this.makeHostMutationAdmission(
         `Host "${host.name}" reconcile`,
         admittedHost,
-        capturedAuthority
+        capturedAuthority,
+        capturedDependencies
       )
       const admittedAt = Date.now()
       hostReconcileInFlight.inc({ lane: source })

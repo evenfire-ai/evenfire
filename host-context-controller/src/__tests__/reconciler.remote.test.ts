@@ -1149,11 +1149,14 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should clear status tracking after delete', async () => {
+      let current: McpServerCRD | undefined = REMOTE_SERVER
+      reconciler.setResolveCurrentServer(() => current)
       // First reconcile to populate status
       await reconciler.reconcile(REMOTE_SERVER)
       expect(reconciler.getStatus('mcp-sentry-remote').deployed).toBe(true)
 
       // Then delete
+      current = undefined
       await reconciler.reconcileDelete('mcp-sentry-remote', 'mcp-server')
       const status = reconciler.getStatus('mcp-sentry-remote')
       expect(status.deployed).toBe(false)

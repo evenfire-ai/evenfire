@@ -7,6 +7,17 @@ import { confirmAuthoritativeMcpServerAbsence } from './mcpServerSafety'
 import { NetworkPolicyReconciler, PUBLIC_EGRESS_EXCEPT_CIDRS } from './networkPolicyReconciler'
 import { ContextCRD, McpServerCRD } from './types'
 
+function deferred<T = void>(): {
+  promise: Promise<T>
+  resolve: (value: T | PromiseLike<T>) => void
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>(res => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
 vi.mock('./mcpServerSafety', async () => {
   const actual = await vi.importActual<typeof import('./mcpServerSafety')>('./mcpServerSafety')
   return {
@@ -420,6 +431,134 @@ describe('NetworkPolicyReconciler', () => {
       )
     })
 
+    it('does not mutate policies after its combined inventory authority lease is retired', async () => {
+      const cache = new Map<string, McpServerCRD>()
+      cache.set('mongo', {
+        name: 'mongo',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'dev',
+          image: 'mongo:latest',
+          transport: { type: 'streamableHttp', port: 3000 },
+        },
+      })
+      const inventoryListed = deferred()
+      const releaseInventory = deferred<{ items: k8s.V1NetworkPolicy[] }>()
+      mockApi.listNamespacedNetworkPolicy.mockImplementationOnce(async () => {
+        inventoryListed.resolve(undefined)
+        return releaseInventory.promise
+      })
+      const rec = makeReconciler(mockApi, cache)
+      let contextGeneration = 4
+      let serverGeneration = 8
+      const capturedContextGeneration = contextGeneration
+      const capturedServerGeneration = serverGeneration
+      const context: ContextCRD = {
+        name: 'dev',
+        namespace: 'mcp-server',
+        spec: { contextId: 'dev', mcpServers: ['mongo'] },
+      }
+
+      const reconcile = rec.reconcileContext(context, {
+        isCurrent: () =>
+          contextGeneration === capturedContextGeneration &&
+          serverGeneration === capturedServerGeneration,
+      })
+      await inventoryListed.promise
+
+      contextGeneration = 6
+      serverGeneration = 10
+      releaseInventory.resolve({ items: [] })
+      await reconcile
+
+      expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('does not mutate a Context policy from a mixed McpServer cache revision', async () => {
+      const cache = new Map<string, McpServerCRD>()
+      cache.set('mongo', {
+        name: 'mongo',
+        namespace: 'mcp-server',
+        uid: 'mongo-uid',
+        generation: 1,
+        spec: {
+          contextRef: 'dev',
+          image: 'mongo:old',
+          transport: { type: 'streamableHttp', port: 3000 },
+        },
+      })
+      const inventoryListed = deferred()
+      const releaseInventory = deferred<{ items: k8s.V1NetworkPolicy[] }>()
+      mockApi.listNamespacedNetworkPolicy.mockImplementationOnce(async () => {
+        inventoryListed.resolve(undefined)
+        return releaseInventory.promise
+      })
+      const rec = makeReconciler(mockApi, cache)
+      const context: ContextCRD = {
+        name: 'dev',
+        namespace: 'mcp-server',
+        spec: { contextId: 'dev', mcpServers: ['mongo'] },
+      }
+
+      const reconcile = rec.reconcileContext(context)
+      await inventoryListed.promise
+      cache.set('mongo', {
+        name: 'mongo',
+        namespace: 'mcp-server',
+        uid: 'mongo-uid',
+        generation: 2,
+        spec: {
+          contextRef: 'dev',
+          image: 'mongo:new',
+          transport: { type: 'streamableHttp', port: 4000 },
+        },
+      })
+      releaseInventory.resolve({ items: [] })
+      await reconcile
+
+      expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('does not adopt an McpServer that appeared after Context selection', async () => {
+      const cache = new Map<string, McpServerCRD>()
+      const inventoryListed = deferred()
+      const releaseInventory = deferred<{ items: k8s.V1NetworkPolicy[] }>()
+      mockApi.listNamespacedNetworkPolicy.mockImplementationOnce(async () => {
+        inventoryListed.resolve(undefined)
+        return releaseInventory.promise
+      })
+      const rec = makeReconciler(mockApi, cache)
+      const context: ContextCRD = {
+        name: 'dev',
+        namespace: 'mcp-server',
+        spec: { contextId: 'dev', mcpServers: ['late-server'] },
+      }
+
+      const reconcile = rec.reconcileContext(context)
+      await inventoryListed.promise
+      cache.set('late-server', {
+        name: 'late-server',
+        namespace: 'mcp-server',
+        uid: 'late-server-uid',
+        generation: 1,
+        spec: {
+          contextRef: 'dev',
+          image: 'late-server:new',
+          transport: { type: 'streamableHttp', port: 3000 },
+        },
+      })
+      releaseInventory.resolve({ items: [] })
+      await reconcile
+
+      expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
     it('creates L2 egress counterpart in mcp-host namespace (bidirectional)', async () => {
       const cache = new Map<string, McpServerCRD>()
       cache.set('mongo', {
@@ -641,6 +780,45 @@ describe('NetworkPolicyReconciler', () => {
           ]),
         })
       )
+    })
+
+    it('does not mutate policy or status after its McpServer authority lease is retired', async () => {
+      const dnsStarted = deferred()
+      const releaseDns = deferred<string[]>()
+      vi.mocked(dns.resolve4).mockImplementationOnce(async () => {
+        dnsStarted.resolve(undefined)
+        return releaseDns.promise
+      })
+      let inventoryGeneration = 7
+      const capturedGeneration = inventoryGeneration
+      const server: McpServerCRD = {
+        name: 'authority-race-mcp',
+        namespace: 'mcp-server',
+        uid: 'authority-race-uid',
+        generation: 3,
+        spec: {
+          contextRef: 'dev',
+          image: 'authority-race:test',
+          transport: { type: 'streamableHttp', port: 3000 },
+          egressBindings: [{ dns: 'api.openai.com', port: 443 }],
+        },
+      }
+
+      const reconcile = reconciler.reconcileExternalEgress(server, {
+        isCurrent: () => inventoryGeneration === capturedGeneration,
+      })
+      await dnsStarted.promise
+
+      // Retire and recover to a different generation. The recovered cache is
+      // authoritative again, but never for this stale pass.
+      inventoryGeneration = 9
+      releaseDns.resolve(['1.2.3.4'])
+      await reconcile
+
+      expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
     })
 
     it('identity-fences the status patch and preserves unrelated conditions', async () => {
@@ -1355,6 +1533,89 @@ describe('NetworkPolicyReconciler', () => {
       expect(reconcileContext).not.toHaveBeenCalled()
     })
 
+    it('retires a full-pass Context lease when the selected object is replaced', async () => {
+      const selected: ContextCRD = {
+        name: 'full-pass-context',
+        namespace: 'mcp-server',
+        spec: { contextId: 'full-pass-context', description: 'old', mcpServers: [] },
+      }
+      const replacement: ContextCRD = {
+        ...selected,
+        spec: { ...selected.spec, description: 'new' },
+      }
+      let current = selected
+      let selectedLease: (() => boolean) | undefined
+      const mutationStarted = deferred()
+      const releaseMutation = deferred()
+      vi.spyOn(reconciler, 'reconcileContext').mockImplementationOnce(async (_context, options) => {
+        selectedLease = options?.isCurrent
+        mutationStarted.resolve(undefined)
+        await releaseMutation.promise
+      })
+
+      const fullPass = reconciler.fullReconcile([selected], [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+        resolveCurrentContext: () => current,
+      })
+      await mutationStarted.promise
+      expect(selectedLease?.()).toBe(true)
+
+      current = replacement
+      expect(selectedLease?.()).toBe(false)
+      releaseMutation.resolve(undefined)
+      await fullPass
+    })
+
+    it('retires a full-pass external-egress lease when desired state is replaced', async () => {
+      const selected: McpServerCRD = {
+        name: 'full-pass-egress',
+        namespace: 'mcp-server',
+        uid: 'full-pass-egress-uid',
+        generation: 1,
+        spec: {
+          contextRef: 'dev',
+          image: 'full-pass-egress:old',
+          transport: { type: 'streamableHttp', port: 3000 },
+          egressBindings: [{ dns: 'old.example', port: 443 }],
+        },
+      }
+      const replacement: McpServerCRD = {
+        ...selected,
+        generation: 2,
+        spec: {
+          ...selected.spec,
+          image: 'full-pass-egress:new',
+          egressBindings: [{ dns: 'new.example', port: 443 }],
+        },
+      }
+      let current = selected
+      let selectedLease: (() => boolean) | undefined
+      const mutationStarted = deferred()
+      const releaseMutation = deferred()
+      vi.spyOn(reconciler, 'reconcileExternalEgress').mockImplementationOnce(
+        async (_server, options) => {
+          selectedLease = options?.isCurrent
+          mutationStarted.resolve(undefined)
+          await releaseMutation.promise
+        }
+      )
+
+      const fullPass = reconciler.fullReconcile([], [selected], {
+        ensureDefaults: false,
+        serverInventoryAuthoritative: () => true,
+        resolveCurrentServer: () => current,
+      })
+      await mutationStarted.promise
+      expect(selectedLease?.()).toBe(true)
+
+      current = replacement
+      expect(selectedLease?.()).toBe(false)
+      releaseMutation.resolve(undefined)
+      await fullPass
+    })
+
     it('deletes orphaned Context policies in all three namespaces through the canonical contextId effect key', async () => {
       const effectKeys: string[] = []
       mockApi.listNamespacedNetworkPolicy.mockImplementation(
@@ -1601,7 +1862,9 @@ describe('NetworkPolicyReconciler', () => {
         contextInventoryAuthoritative,
       })
 
-      expect(reconcileContext).toHaveBeenCalledWith(desiredContext)
+      expect(reconcileContext).toHaveBeenCalledWith(desiredContext, {
+        isCurrent: expect.any(Function),
+      })
       expect(contextInventoryAuthoritative).toHaveBeenCalledTimes(2)
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
         name: 'ctx-deleted-context-old-server',
@@ -1658,7 +1921,9 @@ describe('NetworkPolicyReconciler', () => {
         serverInventoryAuthoritative,
       })
 
-      expect(reconcileExternalEgress).toHaveBeenCalledWith(desiredServer)
+      expect(reconcileExternalEgress).toHaveBeenCalledWith(desiredServer, {
+        isCurrent: expect.any(Function),
+      })
       expect(serverInventoryAuthoritative).toHaveBeenCalledTimes(2)
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
         name: 'ext-egress-deleted-server-api-example-com-443',

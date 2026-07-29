@@ -36,6 +36,8 @@ export async function replaceWithConflictRetry<
    * when a meaningful change is still required.
    */
   isUpToDate?: (body: T, existing: T) => boolean
+  /** Rechecked immediately before every Kubernetes write attempt. */
+  mutationAllowed?: () => boolean
   maxAttempts?: number
 }): Promise<void> {
   const {
@@ -47,6 +49,7 @@ export async function replaceWithConflictRetry<
     replace,
     mergeExisting,
     isUpToDate,
+    mutationAllowed,
     maxAttempts = 3,
   } = opts
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -58,6 +61,7 @@ export async function replaceWithConflictRetry<
     }
     const next = mergeExisting ? mergeExisting(base, existing) : base
     if (isUpToDate?.(next, existing)) return
+    if (mutationAllowed && !mutationAllowed()) return
     try {
       await replace(next)
       const suffix = attempt > 1 ? ` (after ${attempt} attempts)` : ''
@@ -171,8 +175,10 @@ export async function applyNetworkPolicy(
   name: string,
   namespace: string,
   policy: k8s.V1NetworkPolicy,
-  logPrefix = '[NetPol]'
+  logPrefix = '[NetPol]',
+  mutationAllowed?: () => boolean
 ): Promise<void> {
+  if (mutationAllowed && !mutationAllowed()) return
   try {
     await api.createNamespacedNetworkPolicy({ namespace, body: policy })
     console.log(`${logPrefix} Created policy "${name}" in ${namespace}`)
@@ -188,5 +194,6 @@ export async function applyNetworkPolicy(
     body: policy,
     read: () => api.readNamespacedNetworkPolicy({ name, namespace }),
     replace: body => api.replaceNamespacedNetworkPolicy({ name, namespace, body }),
+    mutationAllowed,
   })
 }

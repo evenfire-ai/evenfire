@@ -14,6 +14,17 @@ import { MANAGED_BY_LABEL, MCPSERVER_LABEL, WRC_MANAGED_BY_VALUE } from './const
 import { McpServerReconciler } from './reconciler'
 import { McpServerCRD } from './types'
 
+function deferred<T = void>(): {
+  promise: Promise<T>
+  resolve: (value: T | PromiseLike<T>) => void
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>(res => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
 /**
  * Tests for the managed:false guard in the reconciler (Risk 1.7).
  *
@@ -1164,7 +1175,9 @@ describe('full reconciliation inventory authority', () => {
     await reconciler.fullReconcile([desired])
 
     expect(reconcile).toHaveBeenCalledOnce()
-    expect(reconcile).toHaveBeenCalledWith(desired)
+    expect(reconcile).toHaveBeenCalledWith(desired, {
+      isCurrent: expect.any(Function),
+    })
     expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
     expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('inventory authority'))
@@ -1251,6 +1264,104 @@ describe('full reconciliation inventory authority', () => {
     expect(reconcile).not.toHaveBeenCalled()
   })
 
+  it('does not mutate runtime or status after startup authority retires during Secret validation', async () => {
+    let authority = { known: true, generation: 51 }
+    const server = {
+      ...makeServer({
+        name: 'secret-authority-race',
+        envSecret: {
+          name: 'runtime-secret',
+          keys: [{ secretKey: 'token', envVar: 'TOKEN' }],
+        },
+      }),
+      uid: 'secret-authority-race-uid',
+      generation: 4,
+    }
+    reconciler.setInventoryAuthority(() => authority)
+    reconciler.setResolveCurrentServer(name => (name === server.name ? server : undefined))
+    const secretReadStarted = deferred()
+    const releaseSecretRead = deferred<{ data: Record<string, string> }>()
+    coreApi.readNamespacedSecret.mockImplementationOnce(async () => {
+      secretReadStarted.resolve(undefined)
+      return releaseSecretRead.promise
+    })
+
+    const convergence = reconciler.fullReconcile([server])
+    await secretReadStarted.promise
+
+    authority = { known: true, generation: 53 }
+    releaseSecretRead.resolve({ data: { token: 'encoded-token' } })
+    await convergence
+
+    expect(coreApi.createNamespacedService).not.toHaveBeenCalled()
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(customApi.patchNamespacedCustomObject).not.toHaveBeenCalled()
+    expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+  })
+
+  it('retires a same-watch runtime revision superseded during Secret validation', async () => {
+    let current: McpServerCRD
+    const original: McpServerCRD = {
+      ...makeServer({
+        name: 'same-watch-runtime',
+        image: 'clerum/same-watch-runtime:v1',
+        envSecret: {
+          name: 'runtime-secret',
+          keys: [{ secretKey: 'token', envVar: 'TOKEN' }],
+        },
+      }),
+      uid: 'same-watch-runtime-uid',
+      generation: 1,
+    }
+    const replacement: McpServerCRD = {
+      ...original,
+      generation: 2,
+      spec: {
+        ...original.spec,
+        image: 'clerum/same-watch-runtime:v2',
+      },
+    }
+    current = original
+    reconciler.setInventoryAuthority(() => ({ known: true, generation: 61 }))
+    reconciler.setResolveCurrentServer(name => (name === original.name ? current : undefined))
+
+    const originalSecretReadStarted = deferred()
+    const releaseOriginalSecretRead = deferred<{ data: Record<string, string> }>()
+    coreApi.readNamespacedSecret
+      .mockImplementationOnce(async () => {
+        originalSecretReadStarted.resolve(undefined)
+        return releaseOriginalSecretRead.promise
+      })
+      .mockResolvedValueOnce({ data: { token: 'encoded-token' } })
+
+    const originalReconcile = reconciler.reconcile(original)
+    await originalSecretReadStarted.promise
+    current = replacement
+    const replacementReconcile = reconciler.reconcile(replacement)
+    releaseOriginalSecretRead.resolve({ data: { token: 'encoded-token' } })
+
+    await Promise.all([originalReconcile, replacementReconcile])
+
+    expect(coreApi.createNamespacedService).toHaveBeenCalledTimes(1)
+    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledWith({
+      namespace: replacement.namespace,
+      body: expect.objectContaining({
+        spec: expect.objectContaining({
+          template: expect.objectContaining({
+            spec: expect.objectContaining({
+              containers: expect.arrayContaining([
+                expect.objectContaining({
+                  image: 'clerum/same-watch-runtime:v2',
+                }),
+              ]),
+            }),
+          }),
+        }),
+      }),
+    })
+  })
+
   it('admits independent desired effects while another server effect is blocked', async () => {
     const blocked = makeServer({ name: 'blocked-server' })
     const independent = makeServer({ name: 'independent-server' })
@@ -1276,13 +1387,17 @@ describe('full reconciliation inventory authority', () => {
     await blockedStarted
     await Promise.resolve()
 
-    expect(reconcile).toHaveBeenCalledWith(independent)
-    expect(reconcile).not.toHaveBeenCalledWith(blocked)
+    expect(reconcile).toHaveBeenCalledWith(independent, {
+      isCurrent: expect.any(Function),
+    })
+    expect(reconcile.mock.calls.some(([server]) => server === blocked)).toBe(false)
 
     releaseBlocked()
     await fullReconcile
 
-    expect(reconcile).toHaveBeenCalledWith(blocked)
+    expect(reconcile).toHaveBeenCalledWith(blocked, {
+      isCurrent: expect.any(Function),
+    })
   })
 
   it('bounds desired-effect admission without serializing independent siblings', async () => {
@@ -1371,7 +1486,9 @@ describe('full reconciliation inventory authority', () => {
     expect(error).toMatchObject({
       message: 'Failed to reconcile desired McpServers',
     })
-    expect(reconcile).toHaveBeenCalledWith(slow)
+    expect(reconcile).toHaveBeenCalledWith(slow, {
+      isCurrent: expect.any(Function),
+    })
   })
 
   it('aggregates every desired-effect failure after all bounded workers settle', async () => {

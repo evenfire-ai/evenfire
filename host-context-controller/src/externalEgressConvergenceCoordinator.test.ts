@@ -47,6 +47,7 @@ function coordinator(overrides: CoordinatorOverrides = {}) {
   const instance = new ExternalEgressConvergenceCoordinator({
     listServers: () => [...servers.values()],
     getCurrentServer: name => servers.get(name),
+    inventoryAuthoritative: () => true,
     sameDesiredRevision: (left, right) =>
       left.uid === right.uid &&
       left.generation === right.generation &&
@@ -498,9 +499,11 @@ describe('ExternalEgressConvergenceCoordinator', () => {
     const state = new Map<string, McpServerCRD>([[selected.name, selected]])
     const mutationStarted = deferred()
     const releaseMutation = deferred()
+    let selectedLease: (() => boolean) | undefined
     const { instance } = coordinator({
       getCurrentServer: name => state.get(name),
-      mutate: async () => {
+      mutate: async (_type, _server, options) => {
+        selectedLease = options.isCurrent
         mutationStarted.resolve()
         await releaseMutation.promise
       },
@@ -508,10 +511,38 @@ describe('ExternalEgressConvergenceCoordinator', () => {
 
     const gates = instance.prepareStartupGates([selected])
     await mutationStarted.promise
+    expect(selectedLease?.()).toBe(true)
     state.set(current.name, current)
+    expect(selectedLease?.()).toBe(false)
     releaseMutation.resolve()
 
     await expect(gates.waitFor(selected)).resolves.toBe(false)
+    instance.stop()
+  })
+
+  it('retires a direct mutation lease when desired revision changes in place', async () => {
+    const selected = server('web-search', 1)
+    const replacement = server('web-search', 2)
+    const mutationStarted = deferred()
+    const releaseMutation = deferred()
+    let selectedLease: (() => boolean) | undefined
+    const { instance, servers } = coordinator({
+      mutate: async (_type, _server, options) => {
+        selectedLease = options.isCurrent
+        mutationStarted.resolve()
+        await releaseMutation.promise
+      },
+    })
+    servers.set(selected.name, selected)
+
+    const mutation = instance.reconcile('MODIFIED', selected)
+    await mutationStarted.promise
+    expect(selectedLease?.()).toBe(true)
+
+    servers.set(replacement.name, replacement)
+    expect(selectedLease?.()).toBe(false)
+    releaseMutation.resolve()
+    await mutation
     instance.stop()
   })
 
@@ -519,7 +550,8 @@ describe('ExternalEgressConvergenceCoordinator', () => {
     const firstMutation = deferred()
     const selected = server('web-search')
     const mutate = vi.fn(async () => firstMutation.promise)
-    const { instance } = coordinator({ mutate })
+    const { instance, servers } = coordinator({ mutate })
+    servers.set(selected.name, selected)
 
     const first = instance.reconcile('MODIFIED', selected)
     await vi.waitFor(() => expect(mutate).toHaveBeenCalledOnce())
@@ -546,7 +578,8 @@ describe('ExternalEgressConvergenceCoordinator', () => {
       await releases[index].promise
       active -= 1
     })
-    const { instance } = coordinator({ mutate })
+    const { instance, servers } = coordinator({ mutate })
+    servers.set(selected.name, selected)
 
     const first = instance.reconcile('MODIFIED', selected)
     await starts[0].promise
@@ -563,6 +596,65 @@ describe('ExternalEgressConvergenceCoordinator', () => {
       await Promise.all([first, second, third])
       instance.stop()
     }
+  })
+
+  it('rechecks a caller lease after waiting for an in-flight mutation', async () => {
+    const firstMutation = deferred()
+    const selected = server('web-search')
+    let current = true
+    const mutate = vi.fn(async () => firstMutation.promise)
+    const { instance, servers } = coordinator({ mutate })
+    servers.set(selected.name, selected)
+
+    const first = instance.reconcile('MODIFIED', selected)
+    await vi.waitFor(() => expect(mutate).toHaveBeenCalledOnce())
+    const waiting = instance.reconcile('MODIFIED', selected, {
+      isCurrent: () => current,
+    })
+    current = false
+    firstMutation.resolve()
+    await Promise.all([first, waiting])
+
+    expect(mutate).toHaveBeenCalledOnce()
+    instance.stop()
+  })
+
+  it('keeps a retry pending while inventory authority is unavailable', async () => {
+    vi.useFakeTimers()
+    const selected = server('web-search')
+    let authoritative = false
+    const { instance, replay, servers } = coordinator({
+      inventoryAuthoritative: () => authoritative,
+    })
+    servers.set(selected.name, selected)
+
+    instance.scheduleRetry('ADDED', selected)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(replay).not.toHaveBeenCalled()
+
+    authoritative = true
+    await vi.advanceTimersByTimeAsync(14_999)
+    expect(replay).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(replay).toHaveBeenCalledOnce()
+    instance.stop()
+  })
+
+  it('skips periodic resync while inventory authority is unavailable', async () => {
+    const selected = server('web-search')
+    let authoritative = false
+    const { instance, mutate, servers } = coordinator({
+      inventoryAuthoritative: () => authoritative,
+    })
+    servers.set(selected.name, selected)
+
+    await instance.runResync()
+    expect(mutate).not.toHaveBeenCalled()
+
+    authoritative = true
+    await instance.runResync()
+    expect(mutate).toHaveBeenCalledOnce()
+    instance.stop()
   })
 
   it('does not resume periodic work from jitter after stop', async () => {
@@ -614,7 +706,10 @@ describe('ExternalEgressConvergenceCoordinator', () => {
 
     await instance.reconcile('DELETED', selected, { deleteAllowed })
 
-    expect(mutate).toHaveBeenCalledWith('DELETED', selected, { deleteAllowed })
+    expect(mutate).toHaveBeenCalledWith('DELETED', selected, {
+      deleteAllowed,
+      isCurrent: expect.any(Function),
+    })
     expect(deleteAllowed).not.toHaveBeenCalled()
     instance.stop()
   })
