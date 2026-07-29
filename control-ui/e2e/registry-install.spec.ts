@@ -1358,7 +1358,7 @@ test.describe('H. Control-UI Smoke Tests', () => {
   test('H1. Catalog loads entries in control-ui', async ({ page }) => {
     await login(page)
     await navigateToRegistry(page)
-    await expect(page.locator('text=/\\d+ of \\d+ entries/')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('text=/Marketplace \\(\\d+\\)/')).toBeVisible({ timeout: 15_000 })
     await expect(page.locator('text=Connector').first()).toBeVisible()
     await expect(page.locator('text=Recipe').first()).toBeVisible()
   })
@@ -1366,14 +1366,14 @@ test.describe('H. Control-UI Smoke Tests', () => {
   test('H2. Type filter works', async ({ page }) => {
     await login(page)
     await navigateToRegistry(page)
-    await expect(page.locator('text=/\\d+ of \\d+ entries/')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('text=/Marketplace \\(\\d+\\)/')).toBeVisible({ timeout: 15_000 })
 
     const typeSelect = page.locator('select').filter({ hasText: 'All Types' })
     await typeSelect.selectOption('mcp-server')
     await expect(page.locator('tr', { hasText: 'mcp-filesystem' })).toBeVisible({
       timeout: 10_000,
     })
-    await expect(page.locator('text=/\\d+ of \\d+ entries/')).toBeVisible()
+    await expect(page.locator('text=/Marketplace \\(\\d+\\)/')).toBeVisible()
     await typeSelect.selectOption('all')
   })
 
@@ -1383,7 +1383,7 @@ test.describe('H. Control-UI Smoke Tests', () => {
     await cleanup(token, [serverName])
     try {
       await navigateToRegistry(page)
-      await expect(page.locator('text=/\\d+ of \\d+ entries/')).toBeVisible({ timeout: 15_000 })
+      await expect(page.locator('text=/Marketplace \\(\\d+\\)/')).toBeVisible({ timeout: 15_000 })
 
       // Filter to local connectors
       await page.locator('select').filter({ hasText: 'All Types' }).selectOption('mcp-server')
@@ -1462,7 +1462,7 @@ test.describe('H. Control-UI Smoke Tests', () => {
     await login(page)
     try {
       await navigateToRegistry(page)
-      await expect(page.locator('text=/\\d+ of \\d+ entries/')).toBeVisible({ timeout: 15_000 })
+      await expect(page.locator('text=/Marketplace \\(\\d+\\)/')).toBeVisible({ timeout: 15_000 })
 
       await page.getByLabel('Search Marketplace entries').fill(recipeEntryName)
       await page.locator('select').filter({ hasText: 'All Types' }).selectOption('recipe')

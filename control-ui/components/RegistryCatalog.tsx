@@ -3,6 +3,8 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
+import { FilterSelect } from '@components/FilterSelect'
+import { type RowAction, RowActionsMenu } from '@components/RowActionsMenu'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { IconStore } from '@components/Sidebar/icons'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
@@ -11,7 +13,7 @@ import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
 import { useToast } from '@components/Toast'
-import { IconChevronRight, IconPencil, IconX } from '@components/icons'
+import { IconChevronRight, IconX } from '@components/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RegistryConnectionState,
@@ -289,11 +291,6 @@ export default function RegistryCatalog() {
                   ariaLabel="Filter by mode"
                 />
               </div>
-              {!isInitialLoad ? (
-                <span className="cu-registry-count">
-                  {filtered.length} of {tabEntries.length} entries
-                </span>
-              ) : null}
               {connectionMode !== 'managed' ? (
                 <button
                   type="button"
@@ -457,33 +454,33 @@ export default function RegistryCatalog() {
                           onClick={event => event.stopPropagation()}
                           onKeyDown={event => event.stopPropagation()}
                         >
-                          <div className="cu-table-actions cu-marketplace-actions">
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--toolbar"
-                              onClick={() =>
-                                router.push(
-                                  CONTROL_ROUTES.marketplace.editEntry(entry.name, entry.version)
-                                )
-                              }
-                              aria-label={`Edit Marketplace metadata for ${entry.name} v${entry.version}`}
-                              title={`Edit Marketplace metadata for ${entry.name} v${entry.version}`}
-                            >
-                              <IconPencil width={16} height={16} />
-                            </button>
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                              onClick={() => {
-                                setRemoveError('')
-                                setRemoveTarget(entry)
-                              }}
-                              aria-label={`Remove ${entry.name} v${entry.version} from Marketplace`}
-                              title={`Remove ${entry.name} v${entry.version} from Marketplace`}
-                            >
-                              <IconX width={16} height={16} />
-                            </button>
-                          </div>
+                          <RowActionsMenu
+                            ariaLabel={`Actions for ${entry.name} v${entry.version}`}
+                            actions={
+                              [
+                                {
+                                  key: 'edit',
+                                  label: 'Edit',
+                                  onClick: () =>
+                                    router.push(
+                                      CONTROL_ROUTES.marketplace.editEntry(
+                                        entry.name,
+                                        entry.version
+                                      )
+                                    ),
+                                },
+                                {
+                                  key: 'remove',
+                                  label: 'Remove from Marketplace',
+                                  danger: true,
+                                  onClick: () => {
+                                    setRemoveError('')
+                                    setRemoveTarget(entry)
+                                  },
+                                },
+                              ] satisfies RowAction[]
+                            }
+                          />
                         </td>
                       </tr>
                       {expanded ? (
@@ -589,35 +586,5 @@ export default function RegistryCatalog() {
         </div>
       ) : null}
     </div>
-  )
-}
-
-function FilterSelect({
-  value,
-  onChange,
-  options,
-  disabled,
-  ariaLabel,
-}: {
-  value: string
-  onChange: (value: string) => void
-  options: { value: string; label: string }[]
-  disabled?: boolean
-  ariaLabel: string
-}) {
-  return (
-    <select
-      value={value}
-      onChange={event => onChange(event.target.value)}
-      className="cu-input cu-input--compact cu-registry-filter"
-      disabled={disabled}
-      aria-label={ariaLabel}
-    >
-      {options.map(option => (
-        <option key={option.value} value={option.value}>
-          {option.label}
-        </option>
-      ))}
-    </select>
   )
 }

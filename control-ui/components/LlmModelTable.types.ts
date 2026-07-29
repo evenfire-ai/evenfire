@@ -4,7 +4,7 @@ export type LlmModelTableProps = {
   items: LlmAllowedModel[]
   // Set of allowed models that have no enabled price, keyed both as
   // `provider/model` and bare `model` (the unpriced feed may omit the
-  // provider). Rows in this set render a "No price" chip.
+  // provider). Rows in this set render a compact price warning.
   unpricedKeys: Set<string>
   onCreate: () => void
   onEdit: (id: string) => void

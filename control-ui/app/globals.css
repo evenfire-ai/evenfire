@@ -2245,6 +2245,10 @@ textarea.cu-input {
   gap: var(--cu-space-2);
 }
 
+.cu-registry-toolbar {
+  align-items: stretch;
+}
+
 .cu-registry-toolbar .cu-section-search {
   width: 13rem;
   min-width: 13rem;
@@ -2252,18 +2256,56 @@ textarea.cu-input {
   flex: 0 0 13rem;
 }
 
-.cu-body select.cu-registry-filter {
-  width: auto;
-  max-width: none;
-  min-width: 8.75rem;
-  font-size: 0.8125rem;
-  padding: 0.5rem 2rem 0.5rem 0.7rem;
+.cu-registry-toolbar .cu-section-search,
+.cu-registry-toolbar .cu-agent-select__button,
+.cu-registry-toolbar .cu-btn--sm {
+  box-sizing: border-box;
+  height: 2.125rem;
+  line-height: 1.2;
+  padding-block: 0;
+  padding-inline: 0.75rem;
+  appearance: none;
 }
 
-.cu-registry-count {
-  color: var(--cu-text-soft);
-  font-size: 0.75rem;
+.cu-registry-toolbar .cu-agent-select {
+  min-width: 8.75rem;
+  width: auto;
+}
+
+.cu-registry-toolbar .cu-agent-select__button,
+.cu-registry-toolbar .cu-agent-select__option {
+  font-weight: 400;
+  font-size: 0.8125rem;
+}
+
+.cu-registry-toolbar .cu-agent-select__button {
+  padding-block: 0;
+  padding-inline: 0.75rem;
+  text-align: left;
+  overflow: hidden;
+}
+
+.cu-registry-toolbar .cu-agent-select__button-copy,
+.cu-registry-toolbar .cu-agent-select__option-copy,
+.cu-registry-toolbar .cu-agent-select__option-name {
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.cu-registry-toolbar .cu-agent-select__button-copy > span:first-child {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.cu-registry-toolbar .cu-agent-select__option-name {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.cu-registry-toolbar .cu-btn--sm {
+  padding-inline: 0.75rem;
 }
 
 .cu-registry-toolbar .cu-btn--primary {
@@ -2321,6 +2363,14 @@ textarea.cu-input {
 .cu-marketplace-action-cell {
   padding-inline: var(--cu-space-1);
   white-space: nowrap;
+}
+
+.cu-marketplace-table td.cu-marketplace-action-cell:nth-last-child(2) {
+  padding-right: 0.15rem;
+}
+
+.cu-marketplace-table td.cu-marketplace-action-cell:last-child {
+  padding-left: 0.15rem;
 }
 
 .cu-marketplace-table td:nth-child(7) {
@@ -5690,6 +5740,31 @@ textarea.cu-input {
   min-width: 0;
 }
 
+.cu-filter-select__copy {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-filter-select__icon {
+  display: inline-flex;
+  width: 1.45rem;
+  height: 1.45rem;
+  flex: 0 0 1.45rem;
+  align-items: center;
+  justify-content: center;
+}
+
+.cu-filter-select__icon > svg {
+  width: 1rem;
+  height: 1rem;
+  color: var(--cu-text-muted);
+}
+
+.cu-filter-select__icon--placeholder {
+  visibility: hidden;
+}
+
 .cu-agent-select__option-name {
   overflow-wrap: anywhere;
 }
@@ -6993,12 +7068,16 @@ textarea.cu-input {
 }
 
 /* OpenAI ships a white-on-transparent mark, so on light surfaces it needs to be
-   knocked back to black. Scoped to the PROVIDER pickers only (the agents LLM
-   provider select and the secrets "＋ Add provider" picker) — the model
-   dropdown reuses the same icon on a different treatment and must not inherit
-   this. */
+   knocked back to black. Scoped to provider-level controls — the model dropdown
+   reuses the same icon on a different treatment and must not inherit this. */
 :root[data-theme='light']
-  :is(.cu-llm-config__provider-select, .cu-llm-cred-add)
+  :is(
+    .cu-llm-config__provider-select,
+    .cu-llm-cred-add,
+    .cu-llm-model-group__toggle,
+    .cu-filter-select__copy,
+    .cu-filter-select__icon
+  )
   .cu-llm-provider-icon[data-provider='openai']
   img {
   filter: brightness(0);
@@ -9086,8 +9165,199 @@ textarea.cu-input {
   gap: var(--cu-space-2);
 }
 
-/* In-card slot for the unpriced notice: aligns with the panel header padding and
-   stays out of the flex-fill content so it never pushes the page layout. */
+.cu-llm-model-table {
+  min-width: 68rem;
+  table-layout: fixed;
+}
+
+.cu-agent-select.cu-llm-provider-filter {
+  width: 12rem;
+}
+
+.cu-llm-provider-filter .cu-agent-select__button {
+  min-height: 2.125rem;
+  padding: var(--cu-space-2) var(--cu-space-3);
+  font-size: 0.8125rem;
+}
+
+.cu-llm-provider-filter .cu-agent-select__menu {
+  width: 14rem;
+}
+
+.cu-llm-model-group__row > td {
+  padding: 0;
+  background: var(--cu-bg-elevated);
+}
+
+.cu-table tbody .cu-llm-model-group__row:hover > td {
+  background: var(--cu-surface-hover);
+}
+
+.cu-llm-model-group__toggle {
+  display: flex;
+  width: 100%;
+  min-height: calc(var(--cu-space-5) * 2.6);
+  align-items: center;
+  gap: var(--cu-space-3);
+  padding: var(--cu-space-3) var(--cu-space-4);
+  border: 0;
+  background: transparent;
+  color: var(--cu-text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.cu-llm-model-group__toggle:focus-visible {
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: -2px;
+}
+
+.cu-llm-model-group__chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--cu-text-muted);
+}
+
+.cu-llm-model-group__chevron svg {
+  transition: transform var(--cu-control-transition);
+}
+
+.cu-llm-model-group__chevron svg.is-expanded {
+  transform: rotate(90deg);
+}
+
+.cu-llm-model-group__provider {
+  min-width: 10rem;
+  font-weight: 600;
+}
+
+.cu-llm-model-group__count {
+  padding: calc(var(--cu-space-1) / 2) var(--cu-space-2);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-surface);
+  color: var(--cu-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.cu-llm-model-group__summary,
+.cu-llm-model-group__action {
+  color: var(--cu-text-soft);
+  font-size: 0.75rem;
+}
+
+.cu-llm-model-group__summary {
+  white-space: nowrap;
+}
+
+.cu-llm-model-group__action {
+  margin-left: auto;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.cu-llm-model-row > td:first-child {
+  padding-left: calc(var(--cu-space-5) * 2.8);
+}
+
+.cu-px-model-content {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+  color: var(--cu-text);
+}
+
+.cu-missing-price {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-family: var(--cu-font);
+}
+
+.cu-missing-price__trigger {
+  display: inline-flex;
+  width: calc(var(--cu-space-5) + var(--cu-space-1));
+  height: calc(var(--cu-space-5) + var(--cu-space-1));
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--cu-radius-sm);
+  background: transparent;
+  color: var(--cu-warning);
+  cursor: help;
+}
+
+.cu-missing-price__trigger:hover {
+  background: rgba(var(--cu-warning-rgb), 0.14);
+}
+
+.cu-missing-price__trigger:focus-visible {
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: 2px;
+}
+
+.cu-missing-price__popover {
+  position: absolute;
+  top: 50%;
+  left: 100%;
+  z-index: 30;
+  display: flex;
+  width: 17rem;
+  flex-direction: column;
+  gap: var(--cu-space-1);
+  margin-left: var(--cu-space-1);
+  padding: var(--cu-space-3);
+  border: 1px solid rgba(var(--cu-warning-rgb), 0.42);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+  box-shadow: var(--cu-shadow);
+  color: var(--cu-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition:
+    opacity var(--cu-control-transition),
+    visibility var(--cu-control-transition);
+  visibility: hidden;
+}
+
+.cu-missing-price:hover .cu-missing-price__popover,
+.cu-missing-price:focus-within .cu-missing-price__popover {
+  opacity: 1;
+  pointer-events: auto;
+  visibility: visible;
+}
+
+.cu-missing-price__popover::before {
+  position: absolute;
+  top: 0;
+  right: 100%;
+  width: var(--cu-space-1);
+  height: 100%;
+  content: '';
+}
+
+.cu-missing-price__popover strong {
+  color: var(--cu-text);
+}
+
+.cu-missing-price__cta {
+  align-self: flex-start;
+  font-weight: 600;
+}
+
+.cu-px-missing-row > td {
+  color: var(--cu-text-soft);
+}
+
+/* In-card status-notice slot: aligns with the panel header padding and stays
+   out of the flex-fill content so it never pushes the page layout. */
 .cu-px-unpriced-slot {
   flex: 0 0 auto;
   padding: var(--cu-space-3) 1rem 0;
@@ -9109,56 +9379,6 @@ textarea.cu-input {
   justify-content: flex-end;
   gap: var(--cu-space-3);
   padding: var(--cu-space-3) 1rem 0;
-}
-
-.cu-px-unpriced {
-  display: flex;
-  flex-direction: column;
-  gap: var(--cu-space-3);
-}
-
-.cu-px-unpriced__text {
-  color: var(--cu-text);
-}
-
-.cu-px-unpriced__chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--cu-space-2);
-}
-
-.cu-px-unpriced__chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--cu-space-2);
-  padding: 0.2rem 0.5rem;
-  border-radius: var(--cu-radius-sm);
-  background: var(--cu-bg-elevated);
-  border: 1px solid rgba(var(--cu-warning-rgb), 0.4);
-  color: var(--cu-text);
-  font-size: 0.78rem;
-  cursor: pointer;
-}
-
-.cu-px-unpriced__chip:hover {
-  border-color: rgba(var(--cu-warning-rgb), 0.6);
-  background: rgba(var(--cu-warning-rgb), 0.1);
-}
-
-.cu-px-unpriced__chip:focus-visible {
-  outline: 2px solid var(--cu-accent);
-  outline-offset: 2px;
-}
-
-.cu-px-unpriced__chip-label {
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
-    monospace;
-}
-
-.cu-px-unpriced__chip-cta {
-  color: var(--cu-accent);
-  font-weight: var(--font-weight-semibold, 600);
 }
 
 /* ── Token budgets (token-budgets P0c) ─────────────────────────────────── */
