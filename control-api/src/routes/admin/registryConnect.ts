@@ -228,6 +228,14 @@ export function createRegistryConnectRouter(): Router {
           res.status(409).json({ error: 'already_connected' })
           return
         }
+        // An 'approved' row is a registry-side auto-approval whose claim has not
+        // landed. Re-registering would DELETE it (dropping the keypair), leaving
+        // the approved deployment unrecoverable — rotate is PoP-gated — while it
+        // permanently holds its org name. Recovery is the only way forward.
+        if (existing && existing.status === 'approved') {
+          res.status(409).json({ error: 'recovery_in_progress' })
+          return
+        }
         const body = (req.body ?? {}) as {
           requested_org_name?: unknown
           contact_email?: unknown
@@ -253,17 +261,48 @@ export function createRegistryConnectRouter(): Router {
             requested_org_name: requestedOrgName,
             public_key_pem: publicKey,
             contact_email: contactEmail,
-            deployment_info: {},
+            // Capability declaration: the registry auto-approves ONLY for clients
+            // that can consume a 201 + claim_token. Without it, flipping the
+            // registry's open-registration flag would strand every control-api
+            // running code older than this change.
+            deployment_info: { auto_claim: true, client: 'control-api' },
             pop,
           }),
+          signal: AbortSignal.timeout(REGISTRY_FETCH_TIMEOUT_MS),
         })
-        // C-M6: surface the registry's 400 rejection code (org_blocklisted /
-        // invalid_request) instead of collapsing it into an opaque 502.
+        // Every mapping is an ALLOWLIST with a stated default. readErrorCode
+        // returns null on a non-JSON body (routine for an ingress-generated 429),
+        // and an unbounded pass-through would reflect a registry-controlled
+        // string into our response and the panel's code comparisons.
         if (regRes.status === 400) {
           const err = await readErrorCode(regRes)
+          const known = [
+            'org_blocklisted',
+            'invalid_contact_email',
+            'invalid_deployment_info',
+            'deployment_info_too_large',
+          ]
+          res.status(400).json({ error: known.includes(err ?? '') ? err : 'invalid_request' })
+          return
+        }
+        if (regRes.status === 409) {
+          const err = await readErrorCode(regRes)
+          if (err === 'org_name_taken' || err === 'jti_replayed') {
+            res.status(409).json({ error: err })
+            return
+          }
+          res.status(502).json({ error: 'registry_integration_error' })
+          return
+        }
+        if (regRes.status === 429) {
+          const err = await readErrorCode(regRes)
+          const retryAfter = regRes.headers.get('retry-after')
+          if (retryAfter) res.set('Retry-After', retryAfter)
           res
-            .status(400)
-            .json({ error: err === 'org_blocklisted' ? 'org_blocklisted' : 'invalid_request' })
+            .status(429)
+            .json({
+              error: err === 'registration_capacity' ? 'registration_capacity' : 'rate_limited',
+            })
           return
         }
         if (!regRes.ok) {
@@ -274,7 +313,23 @@ export function createRegistryConnectRouter(): Router {
           res.status(502).json({ error: 'registry_integration_error' })
           return
         }
-        const reg = (await regRes.json()) as { deployment_id: string; key_id: string }
+        const reg = (await regRes.json()) as {
+          deployment_id: string
+          key_id: string
+          claim_token?: unknown
+        }
+        const autoApproved = regRes.status === 201 && typeof reg.claim_token === 'string'
+        if (regRes.status !== 201 && regRes.status !== 202) {
+          rootLogger.error(
+            { event: 'registry_connect_register_unexpected', status: regRes.status },
+            'unexpected 2xx from register'
+          )
+          res.status(502).json({ error: 'registry_integration_error' })
+          return
+        }
+        // Persist BEFORE claiming. The keypair is the only artifact that can
+        // recover this deployment (rotate is PoP-gated); claiming first and dying
+        // before the write would burn the one-time token AND lose the key.
         await upsertPendingConnection({
           deploymentId: reg.deployment_id,
           keyId: reg.key_id,
@@ -283,10 +338,37 @@ export function createRegistryConnectRouter(): Router {
           requestedOrgName,
           contactEmail,
           registryUrl: config.registryUrl,
+          status: autoApproved ? 'approved' : 'pending',
         })
+        if (!autoApproved) {
+          res
+            .status(202)
+            .json({ state: 'pending', deploymentId: reg.deployment_id, requestedOrgName })
+          return
+        }
+        const outcome = await redeemClaim({
+          deploymentId: reg.deployment_id,
+          keyId: reg.key_id,
+          privateKeyPem: privateKey,
+          adminId: ctx.adminId,
+          claimToken: reg.claim_token as string,
+        })
+        if (outcome.kind === 'connected') {
+          res.status(200).json({
+            state: 'connected',
+            org: outcome.org,
+            deploymentId: reg.deployment_id,
+            authEnabled: config.registryAuthEnabled,
+          })
+          return
+        }
+        rootLogger.error(
+          { event: 'registry_connect_auto_claim_failed', status: 0, outcome: outcome.kind },
+          'auto-claim failed; recovery is available'
+        )
         res
           .status(202)
-          .json({ state: 'pending', deploymentId: reg.deployment_id, requestedOrgName })
+          .json({ state: 'connecting', deploymentId: reg.deployment_id, requestedOrgName })
       } catch (err) {
         next(err)
       }

@@ -54,6 +54,24 @@ function pkForTest(): string {
   }).privateKey
 }
 
+/**
+ * Route fetches by URL, constructing a FRESH Response per call. The existing
+ * mockResolvedValue idiom cannot be reused here: it returns one Response
+ * instance, and reading its body twice throws 'Body is unusable'.
+ */
+function routeFetch(handlers: Record<string, () => Response>): ReturnType<typeof vi.spyOn> {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+    const url = String(input)
+    for (const [fragment, make] of Object.entries(handlers)) {
+      if (url.includes(fragment)) return make()
+    }
+    throw new Error(`unexpected fetch: ${url}`)
+  }) as ReturnType<typeof vi.spyOn>
+}
+
+const json = (body: unknown, status: number, headers?: Record<string, string>) =>
+  new Response(JSON.stringify(body), { status, headers })
+
 beforeEach(() => {
   vi.clearAllMocks()
   adminSvc.findAdminById.mockResolvedValue({
@@ -361,5 +379,219 @@ describe('registry connect flow', () => {
     connDb.getRegistryConnection.mockResolvedValue({ status: 'pending', deploymentId: 'dep-9' })
     await request(app()).delete('/admin/registry/connect').expect(204)
     expect(connDb.deleteConnection).toHaveBeenCalled()
+  })
+
+  // The redeemClaim extraction must NOT convert a registry-unreachable failure
+  // into a 502. It escapes the handler and the Express error handler makes it a
+  // 500, exactly as before the refactor. Collapsing it to 502 would be a silent
+  // contract change for the manual paste route.
+  it('manual claim → registry unreachable → 500, not 502', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'pending',
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      privateKeyPem: pkForTest(),
+      requestedOrgName: 'acme',
+    })
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('ECONNREFUSED'))
+    await request(app())
+      .post('/admin/registry/connect/claim')
+      .send({ claim_token: 'tok-abc' })
+      .expect(500)
+  })
+})
+
+describe('register — auto-claim (201)', () => {
+  it('claims immediately and reports connected', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    connDb.markConnected.mockResolvedValue(true)
+    routeFetch({
+      '/register': () =>
+        json(
+          {
+            deployment_id: 'dep-1',
+            key_id: 'kid-1',
+            status: 'approved',
+            claim_token: 'tok-abc',
+            claim_expires_at: '2026-07-30T00:00:00Z',
+          },
+          201
+        ),
+      '/claim': () => json({ client_id: 'cid', client_secret: 'csecret', org: 'acme' }, 200),
+    })
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(200)
+    expect(res.body).toMatchObject({ state: 'connected', org: 'acme' })
+    expect(res.body.authEnabled).toBe(true)
+  })
+
+  // The mocks return undefined, so `await x` and `void x` produce IDENTICAL
+  // invocationCallOrder — an ordering assertion built on call order is green
+  // against the exact mutation it exists to catch. Assert on an event log
+  // driven by a real async implementation instead.
+  it('persists the row BEFORE burning the one-time token', { retry: 0 }, async () => {
+    const events: string[] = []
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    connDb.markConnected.mockResolvedValue(true)
+    connDb.upsertPendingConnection.mockImplementation(async () => {
+      await new Promise(r => setImmediate(r))
+      events.push('persisted')
+    })
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input)
+      if (url.includes('/register')) {
+        events.push('register')
+        return json(
+          { deployment_id: 'dep-1', key_id: 'kid-1', status: 'approved', claim_token: 'tok-abc' },
+          201
+        )
+      }
+      events.push('claim')
+      return json({ client_id: 'cid', client_secret: 'csecret', org: 'acme' }, 200)
+    })
+    await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(200)
+    expect(events).toEqual(['register', 'persisted', 'claim'])
+    connDb.upsertPendingConnection.mockReset()
+  })
+
+  it("persists status 'approved' and reports connecting when the claim fails", async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    routeFetch({
+      '/register': () =>
+        json(
+          { deployment_id: 'dep-1', key_id: 'kid-1', status: 'approved', claim_token: 'tok-abc' },
+          201
+        ),
+      '/claim': () => json({ error: 'boom' }, 500),
+    })
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(202)
+    expect(res.body).toMatchObject({ state: 'connecting', deploymentId: 'dep-1' })
+    expect(connDb.upsertPendingConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'approved' })
+    )
+  })
+
+  it('reports connecting when the claim fetch throws', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      if (String(input).includes('/register')) {
+        return json(
+          { deployment_id: 'dep-1', key_id: 'kid-1', status: 'approved', claim_token: 'tok-abc' },
+          201
+        )
+      }
+      throw new Error('ECONNREFUSED')
+    })
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(202)
+    expect(res.body.state).toBe('connecting')
+  })
+
+  it('declares the auto_claim capability in deployment_info', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    const spy = routeFetch({
+      '/register': () => json({ deployment_id: 'dep-1', key_id: 'kid-1', status: 'pending' }, 202),
+    })
+    await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(202)
+    const body = JSON.parse(String((spy.mock.calls[0]![1] as RequestInit).body))
+    expect(body.deployment_info).toMatchObject({ auto_claim: true })
+  })
+})
+
+describe('register — 202 pending path is unchanged', () => {
+  // Asserting only the response body lets a mutation that pastes
+  // status:'approved' into the 202 branch survive: the body is identical, and
+  // the never-rotate test below uses a synthetic row so it never observes the
+  // real write. Assert the persisted status too.
+  it("replies pending AND persists status 'pending'", { retry: 0 }, async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    routeFetch({
+      '/register': () => json({ deployment_id: 'dep-1', key_id: 'kid-1', status: 'pending' }, 202),
+    })
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(202)
+    expect(res.body).toMatchObject({ state: 'pending', deploymentId: 'dep-1' })
+    expect(connDb.upsertPendingConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'pending' })
+    )
+  })
+})
+
+describe('register — new registry rejections map to distinct codes', () => {
+  const cases: Array<[string, number, unknown, number, string]> = [
+    ['org_name_taken', 409, { error: 'org_name_taken' }, 409, 'org_name_taken'],
+    ['jti_replayed', 409, { error: 'jti_replayed' }, 409, 'jti_replayed'],
+    ['capacity', 429, { error: 'registration_capacity' }, 429, 'registration_capacity'],
+    ['per-IP', 429, { error: 'RATE_LIMITED' }, 429, 'rate_limited'],
+    ['bad email', 400, { error: 'invalid_contact_email' }, 400, 'invalid_contact_email'],
+    ['blocklist', 400, { error: 'org_blocklisted' }, 400, 'org_blocklisted'],
+    ['bad pop', 401, { error: 'invalid_pop' }, 502, 'registry_integration_error'],
+    ['unknown 409', 409, { error: 'who_knows' }, 502, 'registry_integration_error'],
+    ['unparseable 429', 429, 'not json', 429, 'rate_limited'],
+  ]
+  for (const [name, regStatus, regBody, want, code] of cases) {
+    it(`${name} → ${want} ${code}`, async () => {
+      connDb.getRegistryConnection.mockResolvedValue(null)
+      routeFetch({
+        '/register': () =>
+          typeof regBody === 'string'
+            ? new Response(regBody, { status: regStatus })
+            : json(regBody, regStatus),
+      })
+      const res = await request(app())
+        .post('/admin/registry/connect/request')
+        .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+        .expect(want)
+      expect(res.body.error).toBe(code)
+      expect(connDb.upsertPendingConnection).not.toHaveBeenCalled()
+    })
+  }
+
+  it('forwards Retry-After on a per-IP rate limit', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    routeFetch({
+      '/register': () => json({ error: 'RATE_LIMITED' }, 429, { 'Retry-After': '86400' }),
+    })
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(429)
+    expect(res.headers['retry-after']).toBe('86400')
+  })
+})
+
+describe('register — guarded while a recovery is outstanding', () => {
+  it('rejects a re-request when the local row is approved', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'approved',
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      privateKeyPem: pkForTest(),
+      requestedOrgName: 'acme',
+    })
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(409)
+    expect(res.body.error).toBe('recovery_in_progress')
+    // upsertPendingConnection DELETEs the row and regenerates the keypair.
+    // Doing that here would destroy the only artifact that can recover an
+    // already-approved deployment and permanently squat its org name.
+    expect(connDb.upsertPendingConnection).not.toHaveBeenCalled()
   })
 })
