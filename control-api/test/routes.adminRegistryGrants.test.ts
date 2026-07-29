@@ -60,6 +60,19 @@ const { cfg } = vi.hoisted(() => ({
   cfg: { registryAuthEnabled: true, registryConnectionMode: 'managed' },
 }))
 vi.mock('../src/config.js', () => ({ config: cfg }))
+// Partial mock (unlike the Keys file's full replacement): the "wire shape"
+// tests below exercise the REAL registryClient.ts wrapper via importActual,
+// and its mintToken() calls resolveMachineCreds() unconditionally whenever env
+// creds are absent — regardless of the auth-enabled flag. A full-replacement
+// mock leaves resolveMachineCreds undefined and 500s those tests. Keep every
+// real export (resolveMachineCreds, getRegistryConnection, ...) and override
+// only the one symbol the route guard now consumes, mirroring the
+// registryClient.js partial mock above.
+const connDb = vi.hoisted(() => ({ isRegistryAuthActive: vi.fn() }))
+vi.mock('../src/services/registryConnectionDb.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/registryConnectionDb.js')>()
+  return { ...actual, isRegistryAuthActive: connDb.isRegistryAuthActive }
+})
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn(async () => ({
     allowed: true,
@@ -84,6 +97,15 @@ function makeApp(adminId: string | null = 'admin-1') {
 beforeEach(() => {
   vi.clearAllMocks()
   cfg.registryAuthEnabled = true
+  cfg.registryConnectionMode = 'managed'
+  // Default mirrors the real accessor's managed-mode branch (registryAuthEnabled
+  // verbatim) so the pre-existing tests below — which only flip
+  // cfg.registryAuthEnabled, not this mock — still reach the same 200/400/409
+  // they did before this module was mocked. Reading cfg at call time (not a
+  // captured literal) also means vi.clearAllMocks() can never silently freeze
+  // this to a stale value. The self-hosted test overrides this per-call via
+  // mockResolvedValue, independent of cfg.registryAuthEnabled.
+  connDb.isRegistryAuthActive.mockImplementation(async () => cfg.registryAuthEnabled)
   vi.mocked(checkAndIncrement).mockResolvedValue({
     allowed: true,
     remaining: 29,
@@ -229,6 +251,18 @@ describe('GET /admin/registry/grants + granted-to-me', () => {
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ grants: [] })
     expect(listGrantedToMe).toHaveBeenCalledWith('acme')
+  })
+
+  // Discriminates resolveSelfServiceOrg's guard from a plain config read: reverting
+  // just that guard to `if (!config.registryAuthEnabled)` would make this fail,
+  // since registryAuthEnabled is deliberately false here and only the mocked
+  // accessor says auth is active.
+  it('self-hosted: grants work with NO auth env var once credentials exist', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.registryAuthEnabled = false // deliberately off — must be ignored
+    connDb.isRegistryAuthActive.mockResolvedValue(true) // credentials exist
+    const res = await request(makeApp()).get('/admin/registry/grants')
+    expect(res.status).not.toBe(409)
   })
 })
 

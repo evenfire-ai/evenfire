@@ -2166,7 +2166,14 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     req: Request,
     res: Response
   ): Promise<{ admin: AdminUserRecord; orgName: string } | null> {
-    if (!(await isRegistryAuthActive())) {
+    let authActive: boolean
+    try {
+      authActive = await isRegistryAuthActive()
+    } catch {
+      res.status(502).json({ error: 'registry_integration_error' })
+      return null
+    }
+    if (!authActive) {
       res.status(409).json({ error: 'registry_auth_disabled' })
       return null
     }
@@ -2264,7 +2271,14 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     req: Request,
     res: Response
   ): Promise<{ orgName: string; actingUserId: string } | null> {
-    if (!(await isRegistryAuthActive())) {
+    let authActive: boolean
+    try {
+      authActive = await isRegistryAuthActive()
+    } catch {
+      res.status(502).json({ error: 'registry_integration_error' })
+      return null
+    }
+    if (!authActive) {
       res.status(409).json({ error: 'registry_auth_disabled' })
       return null
     }

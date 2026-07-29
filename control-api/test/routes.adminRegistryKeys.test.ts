@@ -124,6 +124,20 @@ describe('GET /admin/registry/keys', () => {
     expect(res.status).not.toBe(409)
   })
 
+  // isRegistryAuthActive() can now reject (self-hosted reaches a raw pool.query
+  // in getRegistryConnection with no try/catch of its own). The guard must catch
+  // it and degrade to the same 502 used for a resolvePublishScope failure one
+  // line below, rather than let the rejection escape uncaught — Express 4 does
+  // not forward async rejections to error middleware, so an uncaught one here
+  // would crash the process instead of producing a response.
+  it('502 registry_integration_error when isRegistryAuthActive rejects (does not throw)', async () => {
+    connDb.isRegistryAuthActive.mockRejectedValue(new Error('pg blip'))
+    const res = await request(makeApp()).get('/admin/registry/keys')
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({ error: 'registry_integration_error' })
+    expect(resolvePublishScope).not.toHaveBeenCalled()
+  })
+
   it('401 when admin missing/inactive', async () => {
     vi.mocked(findAdminById).mockResolvedValue(null as never)
     const res = await request(makeApp()).get('/admin/registry/keys')
