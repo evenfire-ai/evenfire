@@ -62,8 +62,8 @@ export function mergeAuthoritativeServerMessages(
   }
 
   const removed: ChatMessage[] = []
-  const kept: ChatMessage[] = []
-  let insertionIndex: number | undefined
+  const removedIndexes = new Set<number>()
+  const removedIndexByMessage = new Map<ChatMessage, number>()
   for (const [index, message] of existing.entries()) {
     const turn = messageServerTurnNumber(message)
     const numberedInRange = turn !== undefined && turn >= firstTurn && turn <= lastTurn
@@ -78,19 +78,10 @@ export function mergeAuthoritativeServerMessages(
       numberedInRange ||
       (turnlessInRange && replaceableTurnRole && !message.isError && !belongsToActiveTask)
     if (shouldReplace) {
-      insertionIndex ??= kept.length
       removed.push(message)
-    } else {
-      kept.push(message)
+      removedIndexes.add(index)
+      removedIndexByMessage.set(message, index)
     }
-  }
-
-  if (insertionIndex === undefined) {
-    const nextNumberedIndex = kept.findIndex(message => {
-      const turn = messageServerTurnNumber(message)
-      return turn !== undefined && turn > lastTurn
-    })
-    insertionIndex = nextNumberedIndex < 0 ? kept.length : nextNumberedIndex
   }
 
   const availableByRole = new Map<ChatMessage['role'], ChatMessage[]>()
@@ -102,6 +93,7 @@ export function mergeAuthoritativeServerMessages(
   const claimedAuthoritativeSlots = new Set<string>()
   for (const [index, message] of existing.entries()) {
     if (
+      messageServerTurnNumber(message) !== undefined ||
       message.task_id === undefined ||
       options.activeTaskIds?.has(message.task_id) !== true ||
       (message.role !== 'user' && message.role !== 'assistant')
@@ -138,9 +130,50 @@ export function mergeAuthoritativeServerMessages(
           local.role === message.role
       )
       const local = sameTurn ?? availableByRole.get(message.role)?.shift()
-      return preferredServerMessage(message, local)
+      return {
+        message: preferredServerMessage(message, local),
+        localAnchorIndex: local ? removedIndexByMessage.get(local) : undefined,
+      }
     })
 
-  kept.splice(insertionIndex, 0, ...replacements)
-  return kept
+  const replacementAnchorByTurn = new Map<number, number>()
+  for (const replacement of replacements) {
+    const replacementTurn = messageServerTurnNumber(replacement.message)!
+    if (replacement.localAnchorIndex === undefined) continue
+    const currentAnchor = replacementAnchorByTurn.get(replacementTurn)
+    if (currentAnchor === undefined || replacement.localAnchorIndex < currentAnchor) {
+      replacementAnchorByTurn.set(replacementTurn, replacement.localAnchorIndex)
+    }
+  }
+  const replacementBuckets = new Map<number, ChatMessage[]>()
+  for (const replacement of replacements) {
+    const replacementTurn = messageServerTurnNumber(replacement.message)!
+    const exactTurnAnchor = existing.findIndex(
+      message => messageServerTurnNumber(message) === replacementTurn
+    )
+    let anchorIndex = exactTurnAnchor
+    if (anchorIndex < 0) {
+      anchorIndex = replacementAnchorByTurn.get(replacementTurn) ?? -1
+    }
+    if (anchorIndex < 0) {
+      anchorIndex = existing.findIndex(message => {
+        const existingTurn = messageServerTurnNumber(message)
+        return existingTurn !== undefined && existingTurn > replacementTurn
+      })
+    }
+    if (anchorIndex < 0) anchorIndex = existing.length
+    replacementAnchorByTurn.set(replacementTurn, anchorIndex)
+    const bucket = replacementBuckets.get(anchorIndex) ?? []
+    bucket.push(replacement.message)
+    replacementBuckets.set(anchorIndex, bucket)
+  }
+
+  const merged: ChatMessage[] = []
+  for (let index = 0; index <= existing.length; index += 1) {
+    merged.push(...(replacementBuckets.get(index) ?? []))
+    if (index < existing.length && !removedIndexes.has(index)) {
+      merged.push(existing[index]!)
+    }
+  }
+  return merged
 }

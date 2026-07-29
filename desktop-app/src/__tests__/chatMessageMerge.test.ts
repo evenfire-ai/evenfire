@@ -219,4 +219,94 @@ describe('mergeAuthoritativeServerMessages', () => {
       'turn-3-user',
     ])
   })
+
+  it('preserves durable turnless message positions between replaced turns', () => {
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'turn-2-user-local',
+          role: 'user',
+          content: 'second',
+          timestamp: 1,
+          serverTurnNumber: 2,
+        },
+        {
+          id: 'system-note',
+          role: 'system',
+          content: 'local diagnostic',
+          timestamp: 2,
+        },
+        {
+          id: 'durable-error',
+          role: 'assistant',
+          content: 'connection interrupted',
+          timestamp: 3,
+          isError: true,
+        },
+        {
+          id: 'turn-3-user-local',
+          role: 'user',
+          content: 'third',
+          timestamp: 4,
+          serverTurnNumber: 3,
+        },
+      ],
+      [
+        {
+          id: 'turn-2-user',
+          role: 'user',
+          content: 'second',
+          timestamp: 20,
+          serverTurnNumber: 2,
+        },
+        {
+          id: 'turn-3-user',
+          role: 'user',
+          content: 'third',
+          timestamp: 30,
+          serverTurnNumber: 3,
+        },
+      ]
+    )
+
+    expect(merged.map(message => message.id)).toEqual([
+      'turn-2-user',
+      'system-note',
+      'durable-error',
+      'turn-3-user',
+    ])
+  })
+
+  it('replaces numbered active-task rows instead of suppressing their server slot', () => {
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'turn-4-user-local',
+          role: 'user',
+          content: 'local',
+          timestamp: 1,
+          serverTurnNumber: 4,
+          task_id: 'task-4',
+        },
+      ],
+      [
+        {
+          id: 'turn-4-user',
+          role: 'user',
+          content: 'server',
+          timestamp: 2,
+          serverTurnNumber: 4,
+        },
+      ],
+      { activeTaskIds: new Set(['task-4']) }
+    )
+
+    expect(merged).toEqual([
+      expect.objectContaining({
+        id: 'turn-4-user',
+        content: 'server',
+        task_id: 'task-4',
+      }),
+    ])
+  })
 })

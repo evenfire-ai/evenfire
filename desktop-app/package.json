@@ -1,7 +1,7 @@
 {
   "name": "evenfire",
   "productName": "Evenfire",
-  "version": "0.1.337",
+  "version": "0.1.338",
   "private": true,
   "license": "MPL-2.0",
   "description": "Evenfire desktop client for secure agent and workflow access",

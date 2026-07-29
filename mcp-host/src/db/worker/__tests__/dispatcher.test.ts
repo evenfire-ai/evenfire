@@ -3,7 +3,7 @@ import Database from 'better-sqlite3'
 import { runMigrations } from '../../migrate'
 import { applyPragmas } from '../../pragmas'
 import { createDispatcher, dispatch } from '../dispatcher'
-import type { PersistedSession, ReapedSession, SessionRow } from '../protocol'
+import type { MessageRow, PersistedSession, ReapedSession, SessionRow } from '../protocol'
 
 describe('dbWorker dispatcher', () => {
   let db: Database.Database
@@ -100,6 +100,135 @@ describe('dbWorker dispatcher', () => {
       message_count: number
     }
     expect(row.message_count).toBe(1)
+  })
+
+  it('keeps incremental session summaries equal to a full recomputation', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-summary', 'u-summary:rpc:agent:default'),
+      started_at: 5,
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+
+    const messages: MessageRow[] = [
+      {
+        session_id: session.id,
+        ordinal: 0,
+        role: 'user',
+        content: 'question',
+        content_parts: null,
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 10,
+        token_count: null,
+        finish_reason: null,
+        spillover_ref: null,
+        is_error: 0,
+        turn_number: 1,
+      },
+      {
+        session_id: session.id,
+        ordinal: 1,
+        role: 'assistant',
+        content: null,
+        content_parts: null,
+        tool_call_id: null,
+        tool_calls: '[{"name":"search"}]',
+        tool_name: null,
+        timestamp: 11,
+        token_count: null,
+        finish_reason: 'tool_use',
+        spillover_ref: null,
+        is_error: 0,
+        turn_number: 1,
+      },
+      {
+        session_id: session.id,
+        ordinal: 2,
+        role: 'tool',
+        content: 'result',
+        content_parts: null,
+        tool_call_id: 'tool-call-1',
+        tool_calls: null,
+        tool_name: 'search',
+        timestamp: 12,
+        token_count: null,
+        finish_reason: null,
+        spillover_ref: null,
+        is_error: 0,
+        turn_number: 1,
+      },
+      {
+        session_id: session.id,
+        ordinal: 3,
+        role: 'assistant',
+        content: 'answer',
+        content_parts: null,
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 13,
+        token_count: null,
+        finish_reason: 'stop',
+        spillover_ref: null,
+        is_error: 0,
+        turn_number: 1,
+      },
+      {
+        session_id: session.id,
+        ordinal: 4,
+        role: 'user',
+        content: 'next question',
+        content_parts: null,
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 20,
+        token_count: null,
+        finish_reason: null,
+        spillover_ref: null,
+        is_error: 0,
+        turn_number: 2,
+      },
+      {
+        session_id: session.id,
+        ordinal: 5,
+        role: 'system',
+        content: 'legacy metadata',
+        content_parts: null,
+        tool_call_id: null,
+        tool_calls: null,
+        tool_name: null,
+        timestamp: 8,
+        token_count: null,
+        finish_reason: null,
+        spillover_ref: null,
+        is_error: 0,
+        turn_number: null,
+      },
+    ]
+    for (const message of messages) {
+      await dispatch({ kind: 'insert_message', payload: message }, deps)
+    }
+
+    const readSummary = () =>
+      db
+        .prepare(
+          `SELECT last_activity_at, turn_count, message_count
+             FROM sessions
+            WHERE id = ?`
+        )
+        .get(session.id)
+    const incrementalSummary = readSummary()
+    expect(incrementalSummary).toEqual({
+      last_activity_at: 20,
+      turn_count: 3,
+      message_count: 3,
+    })
+
+    deps.statements.recomputeSessionMessageSummary.run({ id: session.id })
+    expect(readSummary()).toEqual(incrementalSummary)
   })
 
   it('separates tool-call storage rows from visible messages and token counters', async () => {
