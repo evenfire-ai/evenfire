@@ -2,9 +2,10 @@
 
 The Evenfire registry (`registry.evenfire.ai`) is a shared catalog of connectors
 and recipes. A **managed** deployment is connected for you; a **self-hosted**
-deployment connects itself, once — after an Evenfire operator approves the
-request. This guide covers the self-hoster's side of that flow. Once connected
-you can install from the catalog, [publish under your own org](publish-plugin-to-registry.md),
+deployment connects itself, once. Depending on how the registry is configured,
+that either completes on its own or waits for an Evenfire operator to approve
+the request. This guide covers the self-hoster's side of that flow. Once
+connected you can install from the catalog, [publish under your own org](publish-plugin-to-registry.md),
 and use registry SSO from your Control UI.
 
 ## Prerequisites
@@ -17,13 +18,16 @@ and use registry SSO from your Control UI.
 
 ## Connect
 
-Open **Control UI → Registry → Connect** (`/registry/connect`). The panel walks a
-small state machine — `disconnected → pending | connecting → approved → connected`:
+Open **Control UI → Registry → Connect** (`/registry/connect`). The panel walks
+one of two state machines, depending on how the registry is configured:
 
-1. **Request access.** You enter an organization name and a contact email. The
-   panel generates a keypair, registers with the registry, and saves the row.
-   (The keypair is how the registry knows later requests really come from this
-   deployment. It never leaves your cluster.)
+- Auto-approved: `disconnected → connecting → connected`
+- Operator-approved: `disconnected → pending → approved → connected`
+
+1. **Request access.** You enter an organization name and a contact email. Your
+   control-api generates a signing keypair, registers with the registry, and
+   saves the row. (The keypair is how the registry knows later requests really
+   come from this deployment. It never leaves your cluster.)
 
 2. **What happens next depends on the registry.**
 
@@ -32,7 +36,12 @@ small state machine — `disconnected → pending | connecting → approved → 
      token is ever shown to a human. If that automatic step cannot complete (a
      network blip, or the registry briefly unavailable), the panel shows
      **Finishing the connection** with a **Finish connecting** button; press it
-     to retry. Nothing is stranded, and you never need a token.
+     to retry. In most cases, retrying with **Finish connecting** will succeed and
+     you never need a token. If the panel reports that the deployment can no
+     longer authenticate, **Finish connecting** will not help — the only path
+     forward is **Start over**, which permanently deletes the deployment's stored
+     registry credentials and gives up the organization name. If you use
+     **Start over**, you must register again under a different organization name.
 
    - **Open registration disabled** — the request lands as **pending**. An
      Evenfire operator reviews it and either approves or rejects it. On
