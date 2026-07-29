@@ -83,6 +83,10 @@ function isSafeRouteSegment(value: string): boolean {
   )
 }
 
+function isSafeAgentRouteSegment(value: string): boolean {
+  return isSafeRouteSegment(value) && value.length <= 200 && !value.includes(':')
+}
+
 function channelRuntimeSourceMismatch(
   caller: RuntimeCallerContext | undefined,
   source: { channelType?: string; channelId?: string; sender?: string }
@@ -1214,7 +1218,7 @@ export async function handleSessionMessagesRoute(
     }
     const agent = String(req.params.agent || '').trim()
     const chatId = String(req.params.chatId || '').trim()
-    if (!isSafeRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
+    if (!isSafeAgentRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
       badRequest(res, 'agent and chatId are required')
       return
     }
@@ -1298,7 +1302,7 @@ export async function handleContextBreakdownRoute(
     }
     const agent = String(req.params.agent || '').trim()
     const chatId = String(req.params.chatId || '').trim()
-    if (!isSafeRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
+    if (!isSafeAgentRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
       badRequest(res, 'agent and chatId are required')
       return
     }

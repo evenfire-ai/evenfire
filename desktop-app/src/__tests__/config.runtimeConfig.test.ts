@@ -98,6 +98,42 @@ describe('desktop runtime config', () => {
     expect(config.rpcProxyBaseUrl).toBe('http://127.0.0.1:8094')
   })
 
+  it('ignores CLERUM_DESKTOP_CONFIG_PATH in packaged builds', async () => {
+    tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
+    const explicitConfigPath = path.join(tempUserDataDir, 'explicit-runtime-config.json')
+    await fsp.writeFile(
+      explicitConfigPath,
+      JSON.stringify({
+        externalRestApiBaseUrl: 'https://explicit-api.example.com',
+        rpcProxyBaseUrl: 'https://explicit-rpc.example.com',
+        appName: 'Explicit',
+      })
+    )
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = explicitConfigPath
+    process.env.EXTERNAL_REST_API_BASE_URL = 'https://packaged-api.example.com'
+    process.env.RPC_PROXY_BASE_URL = 'https://packaged-rpc.example.com'
+
+    vi.doMock('electron', () => ({
+      app: {
+        getPath: vi.fn((name: string) =>
+          name === 'userData' ? tempUserDataDir : path.dirname(tempUserDataDir || os.tmpdir())
+        ),
+        isPackaged: true,
+        isReady: vi.fn(() => true),
+        setName: vi.fn(),
+        setPath: vi.fn(),
+      },
+    }))
+
+    const { config, getDesktopRuntimeConfigState } = await import('../config.js')
+
+    expect(config.externalRestApiBaseUrl).toBe('https://packaged-api.example.com')
+    expect(config.rpcProxyBaseUrl).toBe('https://packaged-rpc.example.com')
+    expect(getDesktopRuntimeConfigState().storagePath).toBe(
+      path.join(tempUserDataDir, 'runtime-configs')
+    )
+  })
+
   it('selects localhost for the packaged development app used by npm run ui', async () => {
     tempUserDataDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-user-data-'))
     const runtimeConfigDir = path.join(tempUserDataDir, 'runtime-configs')

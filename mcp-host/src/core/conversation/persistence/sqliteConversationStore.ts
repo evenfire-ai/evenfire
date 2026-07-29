@@ -43,7 +43,7 @@ import {
   type SessionTokenUsage,
   boundedTurns,
 } from '../conversationStore'
-import { sessionPartsFromPrefixedKey } from '../sessionKeyParts'
+import { scopedAgentFromSessionPrefix, sessionPartsFromPrefixedKey } from '../sessionKeyParts'
 import type { PersistQueue } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
 import {
@@ -364,13 +364,14 @@ export class SqliteConversationStore implements ConversationStore {
       limit: query.limit,
       cursorUpdatedAt: query.cursor ? query.cursor.updatedAt.getTime() / 1000 : undefined,
       cursorKey: query.cursor?.key,
+      agentScoped: query.agent !== undefined || scopedAgentFromSessionPrefix(prefix) !== null,
     })
 
     const out: ConversationSessionSummary[] = []
     for (const row of rows) {
       const key = row.session.session_key
       const cached = this.cache.get(key)
-      const parts = sessionPartsFromPrefixedKey(key, prefix)
+      const parts = sessionPartsFromPrefixedKey(key, prefix, query.agent)
       if (!parts) continue
       const state = cached ? cached.state : conversationStateFromRow(row.session.state)
       out.push({
@@ -431,7 +432,6 @@ export class SqliteConversationStore implements ConversationStore {
         totalTurns: cached.turns.length,
         firstTurnNumber: cached.turns[0]?.number,
         lastTurnNumber: cached.turns.at(-1)?.number,
-        updatedAt: cached.updated_at,
         input_tokens: cached.input_tokens,
         output_tokens: cached.output_tokens,
         cache_read_tokens: cached.cache_read_tokens,
@@ -468,7 +468,6 @@ export class SqliteConversationStore implements ConversationStore {
       totalTurns: Math.max(0, Math.floor(page.total_turns ?? 0)),
       firstTurnNumber: page.first_turn_number ?? undefined,
       lastTurnNumber: page.last_turn_number ?? undefined,
-      updatedAt: new Date(page.last_activity_at * 1000),
       input_tokens: page.session.input_tokens,
       output_tokens: page.session.output_tokens,
       cache_read_tokens: page.session.cache_read_tokens,

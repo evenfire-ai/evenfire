@@ -74,6 +74,14 @@ function hostModelKey(hostRef: string, chatId: string): string {
   return `${remoteCacheScope}:${hostRef}:${chatId}`
 }
 
+function pruneExpiredSessionCatalogRequests(now = Date.now()): void {
+  for (const [key, cached] of sessionCatalogRequests) {
+    if (cached.expiresAt <= now) {
+      sessionCatalogRequests.delete(key)
+    }
+  }
+}
+
 /**
  * Hook providing typed access to the chat persistence IPC layer.
  * All methods are stable (useCallback) and safe to use in dependency arrays.
@@ -152,11 +160,7 @@ export function useChatStore() {
   )
 
   const listSessions = useCallback(
-    (
-      hostRef: string,
-      query: SessionsListQuery = { limit: 50 },
-      options: { force?: boolean } = {}
-    ) => {
+    (hostRef: string, query: SessionsListQuery = {}, options: { force?: boolean } = {}) => {
       const source = window.clerum.rpc.listSessions
       if (sessionCatalogSource !== source) {
         sessionCatalogRequests.clear()
@@ -169,6 +173,7 @@ export function useChatStore() {
         query.limit ?? 'all',
         query.cursor ?? '',
       ].join(':')
+      pruneExpiredSessionCatalogRequests()
       const cached = sessionCatalogRequests.get(key)
       if (!options.force && cached && cached.expiresAt > Date.now()) return cached.promise
 

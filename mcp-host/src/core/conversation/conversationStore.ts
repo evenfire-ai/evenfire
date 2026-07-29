@@ -66,6 +66,12 @@ export interface SessionListCursor {
 export interface SessionListQuery {
   limit?: number
   cursor?: SessionListCursor
+  /**
+   * Explicit scoped agent for prefixes shaped as `${user}:rpc:${agent}:`.
+   * This avoids re-inferring scoped intent from ambiguous keys such as
+   * `${user}:rpc:rpc:`.
+   */
+  agent?: string
 }
 
 export interface SessionMessagesQuery {
@@ -99,7 +105,6 @@ export interface ConversationSessionMessages extends Omit<
   totalTurns: number
   firstTurnNumber?: number
   lastTurnNumber?: number
-  updatedAt: Date
 }
 
 function compareSessionSummaries(
@@ -160,7 +165,6 @@ function sessionMessagesFromConversation(
     totalTurns: conversation.turns.length,
     firstTurnNumber: conversation.turns[0]?.number,
     lastTurnNumber: conversation.turns.at(-1)?.number,
-    updatedAt: conversation.updated_at,
     input_tokens: conversation.input_tokens,
     output_tokens: conversation.output_tokens,
     cache_read_tokens: conversation.cache_read_tokens,
@@ -374,7 +378,7 @@ export class InMemoryConversationStore implements ConversationStore {
   ): Promise<ConversationSessionSummary[]> {
     const summaries: ConversationSessionSummary[] = []
     for (const { key, conversation } of this.listByPrefix(prefix)) {
-      const parts = sessionPartsFromPrefixedKey(key, prefix)
+      const parts = sessionPartsFromPrefixedKey(key, prefix, query.agent)
       if (!parts) continue
       summaries.push({
         key,

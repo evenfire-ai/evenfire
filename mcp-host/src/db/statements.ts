@@ -249,13 +249,13 @@ export function prepareStatements(db: Database): PreparedStatements {
            )
            AND (
              @cursor_updated_at IS NULL
-             OR COALESCE(last_activity_at, started_at) < @cursor_updated_at
+             OR last_activity_at < @cursor_updated_at
              OR (
-               COALESCE(last_activity_at, started_at) = @cursor_updated_at
+               last_activity_at = @cursor_updated_at
                AND session_key > @cursor_key
              )
            )
-         ORDER BY COALESCE(last_activity_at, started_at) DESC, session_key ASC
+         ORDER BY last_activity_at DESC, session_key ASC
          LIMIT @limit
       ),
       ranked_approvals AS (
@@ -270,7 +270,7 @@ export function prepareStatements(db: Database): PreparedStatements {
           JOIN scoped_sessions s ON s.id = pa.session_id
       )
       SELECT s.*,
-             COALESCE(s.last_activity_at, s.started_at) AS summary_last_activity_at,
+             s.last_activity_at AS summary_last_activity_at,
              COALESCE(s.turn_count, 0) AS summary_turn_count,
              pa.request_id AS pending_request_id,
              pa.tool_name AS pending_tool_name
@@ -281,10 +281,8 @@ export function prepareStatements(db: Database): PreparedStatements {
        ORDER BY summary_last_activity_at DESC, s.session_key ASC
     `),
     selectSessionTurnBounds: db.prepare(`
-      SELECT COUNT(DISTINCT COALESCE(turn_number, 0)) AS total_turns,
-             MIN(COALESCE(turn_number, 0))             AS first_turn_number,
-             MAX(COALESCE(turn_number, 0))             AS last_turn_number,
-             MAX(timestamp)                           AS last_activity_at
+      SELECT MIN(COALESCE(turn_number, 0)) AS first_turn_number,
+             MAX(COALESCE(turn_number, 0)) AS last_turn_number
         FROM messages
        WHERE session_id = ?
     `),

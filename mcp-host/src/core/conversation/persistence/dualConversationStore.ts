@@ -147,6 +147,9 @@ export class DualConversationStore implements ConversationStore {
     prefix: string,
     query: SessionMessagesQuery = {}
   ): Promise<ConversationSessionMessages | undefined> {
+    // Transcript pages deliberately return the SQLite result in dual mode.
+    // That keeps the durable pagination contract under canary coverage; a
+    // memory-only session can read as absent until dual parity is complete.
     const [memPage, sqlPage] = await Promise.all([
       this.memory.getSessionMessagesByKey(key, prefix, query),
       this.sqlite.getSessionMessagesByKey(key, prefix, query),

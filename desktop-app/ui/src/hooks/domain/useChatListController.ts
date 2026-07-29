@@ -111,7 +111,8 @@ export function useChatListController({
   // Selection requested for an agent before its chats have loaded, consumed by
   // the parent's agent-selection effect. Ref (not state): imperative, per-agent.
   const pendingChatSelectionByAgentRef = useRef<Record<string, PendingChatSelection>>({})
-  const suppressAutoSelectionByAgentRef = useRef<Set<string>>(new Set())
+  const suppressAutoSelectionByAgentRef = useRef<Map<string, number>>(new Map())
+  const suppressAutoSelectionSequenceRef = useRef(0)
   const chatListNextCursorByAgentRef = useRef<Record<string, string | null | undefined>>({})
   const chatListLoadingMoreByAgentRef = useRef<Set<string>>(new Set())
   const requestGenerationRef = useRef(0)
@@ -171,6 +172,7 @@ export function useChatListController({
       setChatList(merged)
 
       const requestGeneration = requestGenerationRef.current
+      const suppressionMarkerAtRequest = suppressAutoSelectionByAgentRef.current.get(agentRef)
       scheduleAfterFirstPaint(async () => {
         const serverResult = await chatStore
           .listSessions(agentRef, { agent: agentRef, limit: SESSION_CATALOG_PAGE_LIMIT })
@@ -179,6 +181,12 @@ export function useChatListController({
           selectedAgentRef.current !== agentRef ||
           requestGenerationRef.current !== requestGeneration
         ) {
+          if (
+            suppressionMarkerAtRequest !== undefined &&
+            suppressAutoSelectionByAgentRef.current.get(agentRef) === suppressionMarkerAtRequest
+          ) {
+            suppressAutoSelectionByAgentRef.current.delete(agentRef)
+          }
           return
         }
 
@@ -287,7 +295,17 @@ export function useChatListController({
           { force: true }
         )
         .catch(() => null)
-      if (!serverResult || requestGenerationRef.current !== requestGeneration) return
+      if (!serverResult) {
+        if (
+          requestGenerationRef.current === requestGeneration &&
+          selectedAgentRef.current === agentRef
+        ) {
+          chatListNextCursorByAgentRef.current[agentRef] = null
+          setChatListHasMoreRemoteSessions(false)
+        }
+        return
+      }
+      if (requestGenerationRef.current !== requestGeneration) return
 
       const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
       if (selectedAgentRef.current !== agentRef) return
@@ -306,6 +324,7 @@ export function useChatListController({
             createdAt: s.lastActivityAt,
             updatedAt: s.lastActivityAt,
             messageCount: knownServerMessageCount(s),
+            remote: true,
           }))
         return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
       })
@@ -477,8 +496,15 @@ export function useChatListController({
   const writePendingSelection = useCallback(
     (agentName: string, selection: PendingChatSelection) => {
       pendingChatSelectionByAgentRef.current[agentName] = selection
-      if (selection.mode === 'none') suppressAutoSelectionByAgentRef.current.add(agentName)
-      else suppressAutoSelectionByAgentRef.current.delete(agentName)
+      if (selection.mode === 'none') {
+        suppressAutoSelectionSequenceRef.current += 1
+        suppressAutoSelectionByAgentRef.current.set(
+          agentName,
+          suppressAutoSelectionSequenceRef.current
+        )
+      } else {
+        suppressAutoSelectionByAgentRef.current.delete(agentName)
+      }
     },
     []
   )

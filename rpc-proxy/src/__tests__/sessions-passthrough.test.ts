@@ -119,7 +119,10 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
     '/rpc/hosts/chatllm/sessions?limit=1&limit=2',
     '/rpc/hosts/chatllm/sessions?cursor=one&cursor=two',
     '/rpc/hosts/chatllm/sessions?agent=one&agent=two',
+    '/rpc/hosts/chatllm/sessions?agent=',
+    '/rpc/hosts/chatllm/sessions?agent=%20%20',
     '/rpc/hosts/chatllm/sessions?agent=.',
+    '/rpc/hosts/chatllm/sessions?agent=agent:other',
     '/rpc/hosts/chat%2Fllm/sessions',
   ])('rejects malformed session pagination before forwarding upstream: %s', async path => {
     const fetchMock = vi.fn()
@@ -242,6 +245,18 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('rejects unsafe transcript route segments before forwarding upstream', async () => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions/agent%3Aother/c1/messages')
+      .set('authorization', 'Bearer user-token')
+      .expect(400)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('returns 404 when the upstream returns 404', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       status: 404,
@@ -320,6 +335,18 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/context-breakdown — 
       .expect(404)
 
     expect(res.body).toEqual({ error: 'session not found' })
+  })
+
+  it('rejects unsafe route segments before forwarding upstream', async () => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .get('/rpc/hosts/chatllm/sessions/agent%3Aother/c1/context-breakdown')
+      .set('authorization', 'Bearer user-token')
+      .expect(400)
+
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('returns 403 if the user cannot access the host', async () => {

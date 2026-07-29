@@ -10,7 +10,7 @@ export interface AgentChatSessionParts {
  * agent and a trailing colon, for example `user:rpc:agent-a:`.
  */
 export function scopedAgentFromSessionPrefix(prefix: string): string | null {
-  const rpcPrefixIndex = prefix.lastIndexOf(':rpc:')
+  const rpcPrefixIndex = prefix.indexOf(':rpc:')
   if (rpcPrefixIndex < 0) return null
   const suffix = prefix.slice(rpcPrefixIndex + ':rpc:'.length)
   if (!suffix.endsWith(':')) return null
@@ -27,14 +27,17 @@ export function scopedAgentFromSessionPrefix(prefix: string): string | null {
  */
 export function sessionPartsFromPrefixedKey(
   key: string,
-  prefix: string
+  prefix: string,
+  scopedAgent?: string
 ): AgentChatSessionParts | null {
   if (!key.startsWith(prefix)) return null
   const rest = key.slice(prefix.length)
   if (!rest) return null
 
-  const scopedAgent = scopedAgentFromSessionPrefix(prefix)
   if (scopedAgent) return { agent: scopedAgent, chatId: rest }
+
+  const inferredScopedAgent = scopedAgentFromSessionPrefix(prefix)
+  if (inferredScopedAgent) return { agent: inferredScopedAgent, chatId: rest }
 
   const colonIndex = rest.indexOf(':')
   if (colonIndex <= 0 || colonIndex === rest.length - 1) return null

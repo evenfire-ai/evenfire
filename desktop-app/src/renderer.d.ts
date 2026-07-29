@@ -496,7 +496,7 @@ declare global {
           messages: ChatMessage[],
           options?: ReplaceChatMessagesOptions
         ) => Promise<void>
-        backfillCounters: (
+        backfillCounters?: (
           agentRef: string,
           chatId: string,
           messages: ChatMessage[]

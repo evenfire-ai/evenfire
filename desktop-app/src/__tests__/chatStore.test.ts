@@ -1308,7 +1308,8 @@ describe('corrupt/missing files', () => {
     await fs.writeFile(agentPath(`${chatId}.json`), '{"version":2,"messages":[')
 
     await expect(store.loadMessages('agent-1', chatId)).resolves.toEqual([])
-    const quarantined = await fs.readdir(agentPath('.corrupt'))
+    const encodedChatId = Buffer.from(chatId, 'utf8').toString('base64url')
+    const quarantined = await fs.readdir(agentPath('.corrupt', encodedChatId))
     expect(quarantined).toHaveLength(1)
     await expect(fs.stat(agentPath(`${chatId}.json`))).rejects.toMatchObject({ code: 'ENOENT' })
 
@@ -1353,16 +1354,30 @@ describe('corrupt/missing files', () => {
 
   it('deletes matching quarantined legacy files with the chat', async () => {
     const chatId = 'deleted-corrupt'
+    const otherChatId = `${chatId}-other`
     await store.createChat('agent-1', chatId)
     const corruptDir = agentPath('.corrupt')
-    await fs.mkdir(corruptDir, { recursive: true })
     const encodedChatId = Buffer.from(chatId, 'utf8').toString('base64url')
-    await fs.writeFile(join(corruptDir, `${encodedChatId}-fixture.json`), '{}')
-    await fs.writeFile(join(corruptDir, 'another-chat-fixture.json'), '{}')
+    const otherEncodedChatId = Buffer.from(otherChatId, 'utf8').toString('base64url')
+    const legacyUuid = '00000000-0000-4000-8000-000000000000'
+    await fs.mkdir(join(corruptDir, encodedChatId), { recursive: true })
+    await fs.writeFile(join(corruptDir, encodedChatId, 'nested.json'), '{}')
+    await fs.writeFile(join(corruptDir, `${encodedChatId}-${legacyUuid}.json`), '{}')
+    await fs.writeFile(join(corruptDir, `${otherEncodedChatId}-${legacyUuid}.json`), '{}')
 
     await store.deleteChat('agent-1', chatId)
 
-    expect(await fs.readdir(corruptDir)).toEqual(['another-chat-fixture.json'])
+    await expect(fs.access(join(corruptDir, encodedChatId))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+    await expect(
+      fs.access(join(corruptDir, `${encodedChatId}-${legacyUuid}.json`))
+    ).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+    await expect(
+      fs.access(join(corruptDir, `${otherEncodedChatId}-${legacyUuid}.json`))
+    ).resolves.toBeUndefined()
   })
 })
 

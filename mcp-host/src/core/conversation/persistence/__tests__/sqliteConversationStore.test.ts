@@ -327,6 +327,22 @@ describe('SqliteConversationStore — session summary listing', () => {
         chatId: 'chat:with:colons',
       })
 
+      const rpcAgentKey = 'u-1:rpc:rpc:chat-rpc'
+      const rpcAgentConversation = await manager.getOrCreate(rpcAgentKey)
+      await manager.startTurn(rpcAgentConversation, 'rpc agent chat', 'task-rpc-agent')
+      await manager.completeTurn(rpcAgentConversation, 'done')
+      handle.store['cache'].clear()
+      handle.store['ordinals'].clear()
+      handle.store['sessionKeyById'].clear()
+      const rpcAgentPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:rpc:', {
+        agent: 'rpc',
+        limit: 10,
+      })
+      expect(rpcAgentPage.find(session => session.key === rpcAgentKey)).toMatchObject({
+        agent: 'rpc',
+        chatId: 'chat-rpc',
+      })
+
       const secondPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:', {
         limit: 2,
         cursor: {

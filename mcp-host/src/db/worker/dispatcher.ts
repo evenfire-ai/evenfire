@@ -610,10 +610,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
               })
       const bounds = s.selectSessionTurnBounds.get(sessionRow.id) as
         | {
-            total_turns: number
             first_turn_number: number | null
             last_turn_number: number | null
-            last_activity_at: number | null
           }
         | undefined
       const pendingRow = s.selectPendingApprovalBySession.get(sessionRow.id) as
@@ -625,10 +623,10 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         pending_approval: pendingRow
           ? { request_id: pendingRow.request_id, tool_name: pendingRow.tool_name }
           : null,
-        total_turns: bounds?.total_turns ?? 0,
+        total_turns: sessionRow.turn_count ?? 0,
         first_turn_number: bounds?.first_turn_number ?? null,
         last_turn_number: bounds?.last_turn_number ?? null,
-        last_activity_at: bounds?.last_activity_at ?? sessionRow.started_at,
+        last_activity_at: sessionRow.last_activity_at ?? sessionRow.started_at,
       } satisfies PersistedSessionMessagePage
     }
 
@@ -650,15 +648,16 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
 
     case 'list_session_summaries_by_prefix': {
       const prefixStart = op.sessionKeyPrefix
-      const finalCodePoint = op.sessionKeyPrefix.codePointAt(op.sessionKeyPrefix.length - 1)
+      const prefixCharacters = Array.from(op.sessionKeyPrefix)
+      const finalCodePoint = prefixCharacters.at(-1)?.codePointAt(0)
       if (finalCodePoint === undefined || finalCodePoint >= 0x10ffff) {
         throw new Error('Session key prefix must have a finite lexicographic upper bound')
       }
-      const prefixEnd = `${op.sessionKeyPrefix.slice(
-        0,
-        op.sessionKeyPrefix.length - (finalCodePoint > 0xffff ? 2 : 1)
-      )}${String.fromCodePoint(finalCodePoint + 1)}`
-      const agentScoped = scopedAgentFromSessionPrefix(op.sessionKeyPrefix) !== null
+      const prefixEnd = `${prefixCharacters
+        .slice(0, -1)
+        .join('')}${String.fromCodePoint(finalCodePoint + 1)}`
+      const agentScoped =
+        op.agentScoped === true || scopedAgentFromSessionPrefix(op.sessionKeyPrefix) !== null
       const rows = s.selectSessionSummariesByPrefix.all({
         prefix_start: prefixStart,
         prefix_end: prefixEnd,

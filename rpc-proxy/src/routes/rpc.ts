@@ -42,6 +42,10 @@ function isSafeUpstreamPathSegment(value: string): boolean {
   )
 }
 
+function isSafeUpstreamAgentSegment(value: string): boolean {
+  return isSafeUpstreamPathSegment(value) && value.length <= 200 && !value.includes(':')
+}
+
 /**
  * Pre-wake host error mapping: AbortError → 504, everything else → 502.
  *
@@ -641,7 +645,25 @@ export function createRpcRouter(): Router {
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
         if (!isSafeUpstreamPathSegment(hostRef)) {
-          res.status(400).json({ error: 'hostRef is required' })
+          res.status(400).json({ error: 'Invalid hostRef' })
+          return
+        }
+        const rawSessionAgent = req.query.agent
+        const sessionAgent =
+          typeof rawSessionAgent === 'string' ? rawSessionAgent.trim() : undefined
+        const sessionCursor = typeof req.query.cursor === 'string' ? req.query.cursor : ''
+        const sessionLimit =
+          typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
+        if (
+          (rawSessionAgent !== undefined && typeof rawSessionAgent !== 'string') ||
+          (req.query.cursor !== undefined && typeof req.query.cursor !== 'string') ||
+          (req.query.limit !== undefined && typeof req.query.limit !== 'string') ||
+          (rawSessionAgent !== undefined &&
+            (!sessionAgent || !isSafeUpstreamAgentSegment(sessionAgent))) ||
+          sessionCursor.length > 2048 ||
+          (sessionLimit !== undefined && (!Number.isInteger(sessionLimit) || sessionLimit < 1))
+        ) {
+          res.status(400).json({ error: 'Invalid session pagination query' })
           return
         }
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
@@ -652,31 +674,13 @@ export function createRpcRouter(): Router {
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
-        console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=list-sessions`)
         const upstreamUrl = new URL(`${baseUrl}/v1/runtime/sessions`)
-        const sessionAgent = typeof req.query.agent === 'string' ? req.query.agent.trim() : ''
-        const sessionCursor = typeof req.query.cursor === 'string' ? req.query.cursor : ''
-        const sessionLimit =
-          typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
-        if (
-          (req.query.agent !== undefined && typeof req.query.agent !== 'string') ||
-          (req.query.cursor !== undefined && typeof req.query.cursor !== 'string') ||
-          (req.query.limit !== undefined && typeof req.query.limit !== 'string') ||
-          (sessionAgent &&
-            (!isSafeUpstreamPathSegment(sessionAgent) ||
-              sessionAgent.length > 200 ||
-              sessionAgent.includes(':'))) ||
-          sessionCursor.length > 2048 ||
-          (sessionLimit !== undefined && (!Number.isInteger(sessionLimit) || sessionLimit < 1))
-        ) {
-          res.status(400).json({ error: 'Invalid session pagination query' })
-          return
-        }
         if (sessionAgent) upstreamUrl.searchParams.set('agent', sessionAgent)
         if (sessionLimit !== undefined) {
           upstreamUrl.searchParams.set('limit', String(Math.min(sessionLimit, 100)))
         }
         if (sessionCursor) upstreamUrl.searchParams.set('cursor', sessionCursor)
+        console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=list-sessions`)
         // Wake-eligible finite operation (§11.4): the route scope stays
         // host:session:read; wake capability rides on the token. A suspended
         // (network-down) or draining Host triggers a wake-and-hold instead of a
@@ -734,10 +738,10 @@ export function createRpcRouter(): Router {
         const chatId = String(req.params.chatId || '').trim()
         if (
           !isSafeUpstreamPathSegment(hostRef) ||
-          !isSafeUpstreamPathSegment(agent) ||
+          !isSafeUpstreamAgentSegment(agent) ||
           !isSafeUpstreamPathSegment(chatId)
         ) {
-          res.status(400).json({ error: 'hostRef, agent, and chatId are required' })
+          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
           return
         }
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
@@ -748,9 +752,6 @@ export function createRpcRouter(): Router {
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
-        console.info(
-          `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-session-messages agent=${agent} chatId=${chatId}`
-        )
         const upstreamUrl = new URL(
           `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
         )
@@ -779,6 +780,9 @@ export function createRpcRouter(): Router {
           upstreamUrl.searchParams.set('beforeTurn', String(beforeTurn))
         }
         if (afterTurn !== undefined) upstreamUrl.searchParams.set('afterTurn', String(afterTurn))
+        console.info(
+          `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-session-messages agent=${agent} chatId=${chatId}`
+        )
         // Wake-eligible finite operation (§11.4): scope stays host:session:read.
         const forwardTranscript = async () => {
           const response = await fetch(upstreamUrl, {
@@ -832,8 +836,12 @@ export function createRpcRouter(): Router {
         const hostRef = String(req.params.hostRef || '').trim()
         const agent = String(req.params.agent || '').trim()
         const chatId = String(req.params.chatId || '').trim()
-        if (!hostRef || !agent || !chatId) {
-          res.status(400).json({ error: 'hostRef, agent, and chatId are required' })
+        if (
+          !isSafeUpstreamPathSegment(hostRef) ||
+          !isSafeUpstreamAgentSegment(agent) ||
+          !isSafeUpstreamPathSegment(chatId)
+        ) {
+          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
           return
         }
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {

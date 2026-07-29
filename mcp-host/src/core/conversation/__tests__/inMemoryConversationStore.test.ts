@@ -157,6 +157,16 @@ describe('InMemoryConversationStore', () => {
       ])
     })
 
+    it('supports an agent literally named rpc when the scoped agent is explicit', async () => {
+      store.set('u-1:rpc:rpc:chat-1', makeConversation('u-1'))
+
+      const summaries = await store.listSessionSummariesByPrefix('u-1:rpc:rpc:', {
+        agent: 'rpc',
+      })
+
+      expect(summaries.map(session => [session.agent, session.chatId])).toEqual([['rpc', 'chat-1']])
+    })
+
     it('counts user and assistant bubbles without counting tool storage rows', async () => {
       const conversation = makeConversation('u-1')
       conversation.turns = [

@@ -341,6 +341,7 @@ describe('handleSessionMessagesRoute', () => {
 
   it.each([
     ['dot agent', '.', 'chat-1'],
+    ['colon-bearing agent', 'agent:other', 'chat-1'],
     ['dot-dot chat id', 'agent', '..'],
     ['separator-bearing chat id', 'agent', 'nested/chat'],
   ])('rejects unsafe %s route segments', async (_label, agent, chatId) => {
@@ -499,6 +500,15 @@ describe('handleContextBreakdownRoute (F1.5)', () => {
       makeHandlers({ contextBreakdownHandler: vi.fn() })
     )
     expect(captured.statusCode).toBe(400)
+  })
+
+  it('rejects unsafe route segments', async () => {
+    const contextBreakdownHandler: ContextBreakdownHandler = vi.fn()
+    const req = makeReqWithParams('user-1', 'agent:other', 'c1')
+    const captured = makeRes()
+    await handleContextBreakdownRoute(req, captured.res, makeHandlers({ contextBreakdownHandler }))
+    expect(captured.statusCode).toBe(400)
+    expect(contextBreakdownHandler).not.toHaveBeenCalled()
   })
 
   it('returns 501 when contextBreakdownHandler is not configured', async () => {

@@ -243,6 +243,7 @@ export type WorkerOp =
       limit?: number
       cursorUpdatedAt?: number
       cursorKey?: string
+      agentScoped?: boolean
     }
   | { kind: 'load_all_pending_approvals' }
   | { kind: 'sweep_expired'; nowEpoch: number; ttlSeconds: number }

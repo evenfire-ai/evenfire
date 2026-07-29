@@ -2078,6 +2078,7 @@ async function startRPCServer(): Promise<void> {
       cursor: cursor
         ? { updatedAt: new Date(cursor.updatedAt), key: `${keyPrefix}${cursor.key}` }
         : undefined,
+      agent: query.agent,
     })
     const { page, nextCursor } = paginateSessionSummaries(
       entries,

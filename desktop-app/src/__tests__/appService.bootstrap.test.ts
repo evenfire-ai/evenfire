@@ -129,7 +129,7 @@ describe('AppService invitation configuration lookup', () => {
     // chat:* IPC throws "Not authenticated" until something else re-binds.
     expect(bindChatStoreForUser).toHaveBeenCalledWith(
       'user-1',
-      resolveEnvKey('https://api.example.com')
+      resolveEnvKey('https://api.example.com', 'https://rpc.example.com')
     )
     expect(config.externalRestApiBaseUrl).toBe('https://api.example.com')
     expect(config.rpcProxyBaseUrl).toBe('https://rpc.example.com')
@@ -424,7 +424,9 @@ describe('AppService invitation configuration lookup', () => {
 
     await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
 
-    expect(clearSessionToken).toHaveBeenCalledWith(resolveEnvKey('https://api.example.com'))
+    expect(clearSessionToken).toHaveBeenCalledWith(
+      resolveEnvKey('https://api.example.com', 'https://rpc.example.com')
+    )
   })
 
   it('clears a saved token when startup session restore is forbidden', async () => {

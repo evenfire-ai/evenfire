@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { mergeAuthoritativeServerMessages, messageServerTurnNumber } from './chatMessageMerge.js'
 import type {
   ChatFile,
@@ -135,6 +135,19 @@ function assertSafeSegment(label: string, value: string): void {
   if (!value || value === '.' || value === '..' || reservedChatId || /[/\\\0]/.test(value)) {
     throw new Error(`Invalid ${label}: unsafe path segment`)
   }
+}
+
+function encodedChatId(chatId: string): string {
+  return Buffer.from(chatId, 'utf8').toString('base64url')
+}
+
+function legacyCorruptFileBelongsToChat(fileName: string, chatId: string): boolean {
+  const encoded = encodedChatId(chatId)
+  const match =
+    /^(.*)-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/i.exec(
+      fileName
+    )
+  return match?.[1] === encoded
 }
 
 function sameReconciledMessage(local: ChatMessage, server: ChatMessage): boolean {
@@ -305,8 +318,7 @@ export class ChatStore {
 
   private corruptLegacyChatFilePath(agentRef: string, chatId: string): string {
     assertSafeSegment('chatId', chatId)
-    const encodedChatId = Buffer.from(chatId, 'utf8').toString('base64url')
-    return join(this.agentDir(agentRef), '.corrupt', `${encodedChatId}-${randomUUID()}.json`)
+    return join(this.agentDir(agentRef), '.corrupt', encodedChatId(chatId), `${randomUUID()}.json`)
   }
 
   private chatDirPath(agentRef: string, chatId: string): string {
@@ -321,14 +333,18 @@ export class ChatStore {
     token: string
   ): string {
     assertSafeSegment('chatId', chatId)
-    const encodedChatId = Buffer.from(chatId, 'utf8').toString('base64url')
-    return join(this.agentDir(agentRef), 'chats', '.snapshots', encodedChatId, `${kind}-${token}`)
+    return join(
+      this.agentDir(agentRef),
+      'chats',
+      '.snapshots',
+      encodedChatId(chatId),
+      `${kind}-${token}`
+    )
   }
 
   private chatSnapshotRootPath(agentRef: string, chatId: string): string {
     assertSafeSegment('chatId', chatId)
-    const encodedChatId = Buffer.from(chatId, 'utf8').toString('base64url')
-    return join(this.agentDir(agentRef), 'chats', '.snapshots', encodedChatId)
+    return join(this.agentDir(agentRef), 'chats', '.snapshots', encodedChatId(chatId))
   }
 
   private chatPagesDirPath(agentRef: string, chatId: string): string {
@@ -360,8 +376,13 @@ export class ChatStore {
 
   private async writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
     const tmp = `${filePath}.tmp`
-    await fs.writeFile(tmp, JSON.stringify(value), { mode: 0o600 })
-    await fs.rename(tmp, filePath)
+    try {
+      await fs.writeFile(tmp, JSON.stringify(value), { mode: 0o600 })
+      await fs.rename(tmp, filePath)
+    } catch (err) {
+      await fs.rm(tmp, { force: true }).catch(() => undefined)
+      throw err
+    }
   }
 
   private finalizePagedMeta(meta: PagedChatMeta): PagedChatMeta {
@@ -436,14 +457,9 @@ export class ChatStore {
       // truncated JSON. Quarantine only malformed content; filesystem errors
       // above still propagate. Returning "no legacy snapshot" lets the server
       // rehydrate the chat and makes subsequent appends writable again.
-      await fs.mkdir(join(this.agentDir(agentRef), '.corrupt'), {
-        recursive: true,
-        mode: 0o700,
-      })
-      await fs.rename(
-        this.chatFilePath(agentRef, chatId),
-        this.corruptLegacyChatFilePath(agentRef, chatId)
-      )
+      const corruptPath = this.corruptLegacyChatFilePath(agentRef, chatId)
+      await fs.mkdir(dirname(corruptPath), { recursive: true, mode: 0o700 })
+      await fs.rename(this.chatFilePath(agentRef, chatId), corruptPath)
       return null
     }
   }
@@ -622,12 +638,7 @@ export class ChatStore {
     pageNumber: number,
     pagePath: string
   ): Promise<ChatMessage[]> {
-    let raw: string
-    try {
-      raw = await fs.readFile(pagePath, 'utf-8')
-    } catch (err) {
-      throw err
-    }
+    const raw = await fs.readFile(pagePath, 'utf-8')
 
     try {
       const parsed = JSON.parse(raw) as ChatPageFile
@@ -1338,15 +1349,17 @@ export class ChatStore {
         await this.saveIndex(agentRef, index)
       })
       await fs.rm(this.chatFilePath(agentRef, chatId), { force: true })
-      const encodedChatId = Buffer.from(chatId, 'utf8').toString('base64url')
       const corruptLegacyDir = join(this.agentDir(agentRef), '.corrupt')
+      await fs.rm(join(corruptLegacyDir, encodedChatId(chatId)), { recursive: true, force: true })
       const corruptLegacyEntries = await fs.readdir(corruptLegacyDir).catch(() => [])
       await Promise.all(
         corruptLegacyEntries
-          .filter(name => name.startsWith(`${encodedChatId}-`) && name.endsWith('.json'))
+          .filter(name => legacyCorruptFileBelongsToChat(name, chatId))
           .map(name => fs.rm(join(corruptLegacyDir, name), { force: true }))
       )
+      await fs.rm(`${this.chatFilePath(agentRef, chatId)}.tmp`, { force: true })
       await fs.rm(this.chatCompatibilitySignaturePath(agentRef, chatId), { force: true })
+      await fs.rm(`${this.chatCompatibilitySignaturePath(agentRef, chatId)}.tmp`, { force: true })
       await fs.rm(this.chatDirPath(agentRef, chatId), { recursive: true, force: true })
       await this.removePagedChatSnapshotSiblings(agentRef, chatId)
       const cacheKey = this.chatSnapshotCleanupKey(agentRef, chatId)
