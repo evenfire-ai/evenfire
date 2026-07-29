@@ -375,6 +375,75 @@ describe('mergeAuthoritativeServerMessages', () => {
     ])
   })
 
+  it('does not copy turnless orphan metadata onto unrelated backfilled server turns', () => {
+    const existing: ChatMessage[] = [
+      {
+        id: 'turnless-upload-orphan',
+        role: 'user',
+        content: 'old local upload',
+        timestamp: 1,
+        task_id: 'orphan-task',
+        attachments: [
+          {
+            id: 'orphan-upload',
+            type: 'uploaded_file',
+            label: 'orphan.txt',
+          },
+        ],
+      },
+      ...Array.from({ length: 4 }, (_, index) => index + 5).flatMap(n => [
+        {
+          id: `turn-${n}-user-local`,
+          role: 'user' as const,
+          content: `local q${n}`,
+          timestamp: n * 10,
+          serverTurnNumber: n,
+          task_id: `task-${n}`,
+          attachments: [
+            {
+              id: `upload-${n}`,
+              type: 'uploaded_file' as const,
+              label: `file-${n}.txt`,
+            },
+          ],
+        },
+        {
+          id: `turn-${n}-assistant-local`,
+          role: 'assistant' as const,
+          content: `local a${n}`,
+          timestamp: n * 10 + 1,
+          serverTurnNumber: n,
+          task_id: `task-${n}`,
+        },
+      ]),
+    ]
+    const incoming = turnsToChatMessages(
+      Array.from({ length: 8 }, (_, index) => ({
+        number: index + 1,
+        user_input: `q${index + 1}`,
+        response: `a${index + 1}`,
+        started_at: new Date(index + 1).toISOString(),
+      }))
+    )
+
+    const merged = mergeAuthoritativeServerMessages(existing, incoming)
+
+    expect(
+      merged
+        .filter(message => (message.serverTurnNumber ?? 0) <= 4)
+        .flatMap(message => [message.task_id, message.attachments])
+        .filter(Boolean)
+    ).toEqual([])
+    expect(
+      merged
+        .filter(message => message.serverTurnNumber === 5 && message.role === 'user')
+        .map(message => ({
+          taskId: message.task_id,
+          attachmentId: message.attachments?.[0]?.id,
+        }))
+    ).toEqual([{ taskId: 'task-5', attachmentId: 'upload-5' }])
+  })
+
   it('places a server response after the active optimistic prompt for that turn', () => {
     const merged = mergeAuthoritativeServerMessages(
       [

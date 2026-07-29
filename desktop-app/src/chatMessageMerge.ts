@@ -10,8 +10,12 @@ function roleRank(message: Pick<ChatMessage, 'role'>): number {
   return message.role === 'user' ? 0 : message.role === 'assistant' ? 1 : 2
 }
 
-function preferredServerMessage(server: ChatMessage, local: ChatMessage | undefined): ChatMessage {
-  if (!local) return server
+function preferredServerMessage(
+  server: ChatMessage,
+  local: ChatMessage | undefined,
+  options: { copyLocalMetadata: boolean }
+): ChatMessage {
+  if (!local || !options.copyLocalMetadata) return server
   return {
     ...server,
     task_id: local.task_id ?? server.task_id,
@@ -124,6 +128,7 @@ export function mergeAuthoritativeServerMessages(
   )
   const consumedRemovedMessages = new Set<ChatMessage>()
   const exactLocalByIncoming = new Map<ChatMessage, ChatMessage>()
+  const copyLocalMetadataByIncoming = new Map<ChatMessage, boolean>()
   for (const message of replacements) {
     const sameTurn = removed.find(
       local =>
@@ -134,7 +139,24 @@ export function mergeAuthoritativeServerMessages(
     if (sameTurn) {
       consumedRemovedMessages.add(sameTurn)
       exactLocalByIncoming.set(message, sameTurn)
+      copyLocalMetadataByIncoming.set(message, true)
     }
+  }
+  const shouldCopyFallbackMetadata = (local: ChatMessage): boolean => {
+    const index = removedIndexByMessage.get(local)
+    if (index === undefined || messageServerTurnNumber(local) !== undefined) return false
+    if (nextTurns[index] !== undefined) return false
+
+    const previous = previousTurns[index] ?? Number.NEGATIVE_INFINITY
+    const next = nextTurns[index] ?? Number.POSITIVE_INFINITY
+    const candidateTurns = new Set<number>()
+    for (const replacement of replacements) {
+      const turn = messageServerTurnNumber(replacement)
+      if (turn !== undefined && turn > previous && turn < next) {
+        candidateTurns.add(turn)
+      }
+    }
+    return candidateTurns.size === 1
   }
   const takeFallbackByRole = (role: ChatMessage['role']): ChatMessage | undefined => {
     const entries = availableByRole.get(role)
@@ -148,8 +170,11 @@ export function mergeAuthoritativeServerMessages(
   }
   const hydratedReplacements = replacements.map(message => {
     const local = exactLocalByIncoming.get(message) ?? takeFallbackByRole(message.role)
+    const copyLocalMetadata =
+      copyLocalMetadataByIncoming.get(message) ??
+      (local ? shouldCopyFallbackMetadata(local) : false)
     return {
-      message: preferredServerMessage(message, local),
+      message: preferredServerMessage(message, local, { copyLocalMetadata }),
       localAnchorIndex: local ? removedIndexByMessage.get(local) : undefined,
     }
   })

@@ -314,6 +314,106 @@ describe('switchToChat (unified, D.4)', () => {
     )
   })
 
+  it('loads older history into the first server-turn gap after a delta-cap fallback', async () => {
+    const serverTurn = (n: number) => ({
+      number: n,
+      user_input: `q${n}`,
+      response: `a${n}`,
+      started_at: '2026-05-28T10:00:00Z',
+      completed_at: '2026-05-28T10:00:05Z',
+    })
+    const localTail = [
+      {
+        id: 'turn-1-user',
+        role: 'user' as const,
+        content: 'q1',
+        timestamp: 1,
+        serverTurnNumber: 1,
+      },
+      {
+        id: 'turn-1-assistant',
+        role: 'assistant' as const,
+        content: 'a1',
+        timestamp: 2,
+        serverTurnNumber: 1,
+      },
+    ]
+    const latestWindow = Array.from({ length: 40 }, (_, index) => serverTurn(960 + index))
+    const gapPage = Array.from({ length: 40 }, (_, index) => serverTurn(920 + index))
+    clerum.chat.loadMessages.mockImplementation(
+      async (_agentRef: string, _chatId: string, _limit?: number, offset?: number) =>
+        offset ? [] : localTail
+    )
+    clerum.rpc.loadSessionMessages.mockImplementation(
+      async (
+        _hostRef: string,
+        _agent: string,
+        chatId: string,
+        _teamId?: string,
+        query?: { afterTurn?: number; beforeTurn?: number; limit?: number }
+      ) => {
+        if (query?.beforeTurn === 960) {
+          return {
+            agent: 'agent-x',
+            chatId,
+            state: 'idle',
+            totalTurns: 999,
+            oldestTurnNumber: 920,
+            latestTurnNumber: 959,
+            hasMoreBefore: true,
+            hasMoreAfter: true,
+            turns: gapPage,
+          }
+        }
+        if (query?.afterTurn !== undefined) {
+          const nextTurn = query.afterTurn + 1
+          return {
+            agent: 'agent-x',
+            chatId,
+            state: 'idle',
+            latestTurnNumber: nextTurn,
+            hasMoreAfter: true,
+            turns: [serverTurn(nextTurn)],
+          }
+        }
+        return {
+          agent: 'agent-x',
+          chatId,
+          state: 'idle',
+          totalTurns: 999,
+          oldestTurnNumber: 960,
+          latestTurnNumber: 999,
+          hasMoreBefore: true,
+          hasMoreAfter: false,
+          turns: latestWindow,
+        }
+      }
+    )
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'delta-gap')
+    })
+
+    expect(result.current.hasOlderMessages).toBe(true)
+    expect(result.current.chatMessages.map(message => message.serverTurnNumber)).toContain(960)
+
+    await act(async () => {
+      await result.current.handleLoadOlderMessages()
+    })
+
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenLastCalledWith(
+      'agent-x',
+      'agent-x',
+      'delta-gap',
+      undefined,
+      { limit: 40, beforeTurn: 960 }
+    )
+    expect(result.current.chatMessages.map(message => message.id)).toContain('turn-920-user')
+    expect(result.current.hasOlderMessages).toBe(true)
+  })
+
   it('loads older history on demand and prepends it without blocking first render', async () => {
     const newestLocalPage = Array.from({ length: 80 }, (_, index) => ({
       id: `turn-${index + 21}-user`,

@@ -131,6 +131,29 @@ function latestServerTurnNumber(messages: AgentChatMessage[]): number | undefine
   }, undefined)
 }
 
+function sortedUniqueServerTurnNumbers(messages: AgentChatMessage[]): number[] {
+  return Array.from(
+    new Set(messages.map(serverTurnNumber).filter((turn): turn is number => turn !== undefined))
+  ).sort((left, right) => left - right)
+}
+
+function firstServerTurnGapUpperBound(messages: AgentChatMessage[]): number | undefined {
+  const turns = sortedUniqueServerTurnNumbers(messages)
+  for (let index = 1; index < turns.length; index += 1) {
+    const previous = turns[index - 1]!
+    const current = turns[index]!
+    if (current > previous + 1) return current
+  }
+  return undefined
+}
+
+function nextServerBackfillBeforeTurn(messages: AgentChatMessage[]): number | undefined {
+  const gapUpperBound = firstServerTurnGapUpperBound(messages)
+  if (gapUpperBound !== undefined) return gapUpperBound
+  const oldestTurn = oldestServerTurnNumber(messages)
+  return oldestTurn !== undefined && oldestTurn > 1 ? oldestTurn : undefined
+}
+
 type ChatStoreClient = ReturnType<typeof useChatStore>
 
 async function hasLocalMessagesBeyond(
@@ -758,8 +781,8 @@ export function useAgentChatController({
       } catch (error) {
         console.warn('[chat-history] failed to load local messages', { agentRef, chatId, error })
       }
-      const oldestCachedTurn = oldestServerTurnNumber(cached as AgentChatMessage[])
-      const hasOlderServerMessages = Boolean(oldestCachedTurn && oldestCachedTurn > 1)
+      const hasOlderServerMessages =
+        nextServerBackfillBeforeTurn(cached as AgentChatMessage[]) !== undefined
       const hasOlderLocalMessages =
         !hasOlderServerMessages &&
         cached.length === LOCAL_MESSAGE_PAGE_SIZE &&
@@ -898,8 +921,7 @@ export function useAgentChatController({
         const nextLoadedLocalMessageCount = loadedLocalMessageCountRef.current + localPage.length
         const currentMessages = chatMessagesRef.current
         const previewMerged = mergeUniqueMessages(currentMessages, unseenLocal, 'before')
-        const oldestMergedTurn = oldestServerTurnNumber(previewMerged)
-        const hasOlderServerMessages = Boolean(oldestMergedTurn && oldestMergedTurn > 1)
+        const hasOlderServerMessages = nextServerBackfillBeforeTurn(previewMerged) !== undefined
         const hasOlderLocalMessages =
           !hasOlderServerMessages &&
           localPage.length === LOCAL_MESSAGE_PAGE_SIZE &&
@@ -918,8 +940,8 @@ export function useAgentChatController({
         return
       }
 
-      const oldestTurn = oldestServerTurnNumber(chatMessagesRef.current)
-      if (oldestTurn === undefined || oldestTurn <= 1) {
+      const beforeTurn = nextServerBackfillBeforeTurn(chatMessagesRef.current)
+      if (beforeTurn === undefined) {
         setHasOlderMessages(false)
         return
       }
@@ -928,7 +950,7 @@ export function useAgentChatController({
         requestAgent,
         requestAgent,
         requestChatId,
-        { limit: SERVER_TURN_PAGE_SIZE, beforeTurn: oldestTurn }
+        { limit: SERVER_TURN_PAGE_SIZE, beforeTurn }
       )
       if (!isStillRelevant()) return
       const older = turnsToChatMessages(response.turns) as AgentChatMessage[]
@@ -949,7 +971,9 @@ export function useAgentChatController({
       }
       if (!isStillRelevant()) return
       loadedLocalMessageCountRef.current = merged.length
-      setHasOlderMessages(Boolean(response.hasMoreBefore))
+      setHasOlderMessages(
+        Boolean(response.hasMoreBefore) || nextServerBackfillBeforeTurn(merged) !== undefined
+      )
     } catch (error) {
       console.warn('[chat-history] failed to load older messages', {
         agentRef: requestAgent,
@@ -1345,11 +1369,6 @@ export function useAgentChatController({
       if (!hydrated.length) {
         return { rendered: localMessages, replaced: false, cached: localMessages }
       }
-      if (replaceLocalWindow) {
-        setHasOlderMessages(hasOlderFromServer)
-      } else {
-        setHasOlderMessages(previous => previous || hasOlderFromServer)
-      }
       const localHasServerTurns = localMessages.some(
         message => serverTurnNumber(message) !== undefined
       )
@@ -1374,6 +1393,13 @@ export function useAgentChatController({
             resp.activeTaskId ? new Set([resp.activeTaskId]) : undefined
           )
         : hydratedWithAttachments
+      const hasOlderAfterMerge =
+        hasOlderFromServer || nextServerBackfillBeforeTurn(rendered) !== undefined
+      if (replaceLocalWindow) {
+        setHasOlderMessages(hasOlderAfterMerge)
+      } else {
+        setHasOlderMessages(previous => previous || hasOlderAfterMerge)
+      }
       if (sameMessageSequence(rendered, localMessages)) {
         return { rendered: localMessages, replaced: false, cached: localMessages }
       }
