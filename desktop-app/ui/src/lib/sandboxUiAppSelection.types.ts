@@ -1,15 +1,7 @@
 import type { ActiveSandboxUiApp } from '@/uiTypes'
+import type { SandboxUiApp } from '../../../src/rpcProxyClient'
 
-export type SandboxUiAppListing = {
-  appRef: string
-  title?: string
-  description?: string
-  icon?: string
-  defaultPath: string
-  ready: boolean
-  phase?: string | null
-  updatedAt?: string | null
-}
+export type SandboxUiAppListing = SandboxUiApp
 
 export type SandboxUiDeepLinkAppResolution =
   | { status: 'ready'; app: ActiveSandboxUiApp }

@@ -1,3 +1,4 @@
+import type { SandboxUiApp } from './rpcProxyClient.js'
 import type { SandboxUiDeepLinkEnvelope } from './sandboxUiDeepLinks.js'
 import {
   AccessCatalog,
@@ -534,16 +535,7 @@ declare global {
       }
       sandboxUi: {
         listApps: () => Promise<{
-          apps: Array<{
-            appRef: string
-            title?: string
-            description?: string
-            icon?: string
-            defaultPath: string
-            ready: boolean
-            phase: string | null
-            updatedAt: string | null
-          }>
+          apps: SandboxUiApp[]
         }>
         mintSession: (recipeNs: string, recipeName: string) => Promise<{ setCookie: string }>
         open: (args: {

@@ -2,6 +2,7 @@
 
 const SANDBOX_UI_DEEP_LINK_HOST = 'app'
 const SANDBOX_UI_DEEP_LINK_PROTOCOL = 'evenfire:'
+const CLERUM_OAUTH_PROTOCOL = 'clerum:'
 const SANDBOX_UI_WEB_LINK_PATH = '/open/apps'
 const MAX_APP_SEGMENT_LENGTH = 253
 const MAX_APP_ROUTE_LENGTH = 4096
@@ -12,11 +13,7 @@ const DOT_SEGMENT_PATTERN = /^(?:\.|%2e){1,2}$/i
 
 function isValidAppSegment(value) {
   return (
-    value.length > 0 &&
-    value.length <= MAX_APP_SEGMENT_LENGTH &&
-    APP_SEGMENT_PATTERN.test(value) &&
-    value !== '.' &&
-    value !== '..'
+    value.length > 0 && value.length <= MAX_APP_SEGMENT_LENGTH && APP_SEGMENT_PATTERN.test(value)
   )
 }
 
@@ -35,12 +32,13 @@ function normalizeSandboxUiRoute(rawPath) {
     !routePath.startsWith('/') ||
     routePath.startsWith('//') ||
     routePath.includes('\\') ||
+    routePath.includes('?') ||
+    routePath.includes('#') ||
     /[\u0000-\u001f\u007f]/.test(routePath)
   ) {
     return null
   }
-  const pathname = routePath.split(/[?#]/, 1)[0]
-  if (pathname.split('/').some(segment => DOT_SEGMENT_PATTERN.test(segment))) return null
+  if (routePath.split('/').some(segment => DOT_SEGMENT_PATTERN.test(segment))) return null
   return routePath
 }
 
@@ -84,11 +82,13 @@ function buildSandboxUiWebLink(profileUiBaseUrl, parts) {
   if (!['http:', 'https:'].includes(baseUrl.protocol) || baseUrl.username || baseUrl.password) {
     throw new Error('Cannot create a shareable link for this desktop environment')
   }
+  if (baseUrl.pathname !== '/' || baseUrl.search) {
+    throw new Error('Cannot create a shareable link for this desktop environment')
+  }
 
   baseUrl.hash = ''
-  const basePath = baseUrl.pathname.replace(/\/+$/, '')
   baseUrl.pathname =
-    `${basePath}${SANDBOX_UI_WEB_LINK_PATH}/${encodeURIComponent(valid.recipeNs)}/` +
+    `${SANDBOX_UI_WEB_LINK_PATH}/${encodeURIComponent(valid.recipeNs)}/` +
     encodeURIComponent(valid.recipeName)
   const search = new URLSearchParams()
   if (valid.path) search.set('path', valid.path)
@@ -106,11 +106,14 @@ function parseSandboxUiDeepLink(rawUrl) {
   }
   if (
     parsed.protocol !== SANDBOX_UI_DEEP_LINK_PROTOCOL ||
-    parsed.hostname !== SANDBOX_UI_DEEP_LINK_HOST ||
+    parsed.hostname.toLowerCase() !== SANDBOX_UI_DEEP_LINK_HOST ||
     parsed.port
   ) {
     return null
   }
+  // The canonical app target has exactly two path segments. Reject a trailing
+  // slash explicitly so producers and consumers cannot disagree on identity.
+  if (parsed.pathname.endsWith('/')) return null
 
   const segments = parsed.pathname.split('/')
   if (segments.length !== 3 || segments[0] !== '' || !segments[1] || !segments[2]) return null
@@ -145,6 +148,7 @@ function sandboxUiDeepLinkTargetsEqual(left, right) {
 }
 
 module.exports = {
+  CLERUM_OAUTH_PROTOCOL,
   SANDBOX_UI_DEEP_LINK_HOST,
   SANDBOX_UI_DEEP_LINK_PROTOCOL,
   SANDBOX_UI_WEB_LINK_PATH,

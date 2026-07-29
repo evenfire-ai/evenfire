@@ -28,6 +28,7 @@ kubeconfig*
 **/dist
 **/.next
 **/coverage
+**/.test-dist
 **/*.log
 .DS_Store
 **/.DS_Store

@@ -37,6 +37,13 @@ type AppController = ReturnType<typeof useAppController>
 
 function makeController(overrides: Partial<AppController> = {}): AppController {
   const noop = vi.fn()
+  let liveTeamId = String(overrides.currentTeamId || 'team-a')
+  const ensureTeamContext = vi.fn(async (target: { teamId?: string }): Promise<boolean> => {
+    const targetTeamId = String(target.teamId || '').trim()
+    if (!targetTeamId || targetTeamId === liveTeamId) return false
+    liveTeamId = targetTeamId
+    return true
+  })
   return {
     booting: false,
     initialExperienceLoading: true,
@@ -86,7 +93,8 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     showRuntimeConfigSelector: false,
     runtimeConfigMissing: false,
     authTransitioning: false,
-    handleEnsureTeamContext: vi.fn(),
+    handleEnsureTeamContext: ensureTeamContext,
+    getCurrentTeamId: vi.fn(() => liveTeamId),
     handleSelectChatAgent: vi.fn(),
     handleNavSelect: vi.fn(),
     pushToast: vi.fn(),
@@ -228,6 +236,78 @@ describe('App deep-link orchestration', () => {
       expect.stringContaining("You don't have access"),
       'error'
     )
+  })
+
+  it('lets the server authorize a linked team even when the local directory is empty', async () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      availableTeamIds: [],
+      teamDirectoryHydrated: false,
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(currentController.handleEnsureTeamContext).toHaveBeenCalledWith({
+      teamId: 'team-b',
+      announce: true,
+    })
+    expect(currentController.pushToast).not.toHaveBeenCalledWith(
+      expect.stringContaining("don't have access to the linked team"),
+      'error'
+    )
+  })
+
+  it('does not roll back a team the user selected while a linked app was loading', async () => {
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    let resolveApps!: (value: { apps: [] }) => void
+    listApps.mockResolvedValueOnce({ apps: [] }).mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          resolveApps = resolve
+        })
+    )
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
+    })
+    await waitFor(() => expect(ensureTeamContext).toHaveBeenCalledTimes(1))
+    liveTeamId = 'team-c'
+    await act(async () => {
+      resolveApps({ apps: [] })
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-c')
   })
 
   it('contains a synchronously throwing acknowledgement bridge', async () => {

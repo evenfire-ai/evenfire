@@ -6,16 +6,15 @@ import {
   buildEvenfireDesktopAppRedirectDocument,
 } from '../lib/desktopAppLinks'
 
-test('buildEvenfireDesktopAppLink preserves a nested app route and team', () => {
+test('buildEvenfireDesktopAppLink preserves a nested app pathname and team', () => {
   assert.equal(
     buildEvenfireDesktopAppLink({
       recipeNs: 'sandbox-recipes',
       recipeName: 'agentic-task-board',
-      path: '/tasks/task-42?view=detail#activity',
+      path: '/tasks/task-42',
       teamId: 'team-123',
     }),
-    'evenfire://app/sandbox-recipes/agentic-task-board' +
-      '?path=%2Ftasks%2Ftask-42%3Fview%3Ddetail%23activity&team=team-123'
+    'evenfire://app/sandbox-recipes/agentic-task-board' + '?path=%2Ftasks%2Ftask-42&team=team-123'
   )
 })
 
@@ -25,6 +24,14 @@ test('buildEvenfireDesktopAppLink rejects unsafe routes', () => {
       recipeNs: 'sandbox-recipes',
       recipeName: 'agentic-task-board',
       path: '//outside.example',
+    }),
+    null
+  )
+  assert.equal(
+    buildEvenfireDesktopAppLink({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'agentic-task-board',
+      path: '/tasks?authorization=secret',
     }),
     null
   )
@@ -54,7 +61,7 @@ test('buildEvenfireDesktopAppRedirectDocument creates an unauthenticated protoco
   const scriptNonce = 'dGVzdC1ub25jZQ=='
   const document = buildEvenfireDesktopAppRedirectDocument(deepLink, scriptNonce)
 
-  assert.match(document, /http-equiv="refresh"/)
+  assert.doesNotMatch(document, /http-equiv="refresh"/)
   assert.match(document, /window\.location\.replace/)
   assert.match(document, new RegExp(`<script nonce="${scriptNonce}">`))
   assert.match(document, /evenfire:\/\/app\/sandbox-recipes\/agentic-task-board/)

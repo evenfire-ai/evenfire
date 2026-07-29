@@ -303,8 +303,13 @@ export function SandboxUiPage({
 
   const handleBackToConversation = useCallback(async () => {
     if (!conversationOrigin || !onBackToConversation) return
-    await onBackToConversation()
-    await closeEmbed()
+    try {
+      await onBackToConversation()
+      await closeEmbed()
+    } catch {
+      // The owner keeps the embedded app open and reports the failed team or
+      // conversation transition without leaving the two views inconsistent.
+    }
   }, [closeEmbed, conversationOrigin, onBackToConversation])
 
   // In-place hard-reload of the embedded app — fetches freshly-arrived

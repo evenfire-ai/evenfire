@@ -27,12 +27,12 @@ describe('SandboxUiDeepLinkQueue', () => {
     expect(queue.list().map(item => item.appRef)).toEqual(['ns/two', 'ns/three'])
   })
 
-  it('moves a repeated unacknowledged target to the newest queue position', () => {
+  it('keeps a repeated unacknowledged target in its original FIFO position', () => {
     const queue = new SandboxUiDeepLinkQueue(3)
     const first = queue.enqueue({ appRef: 'ns/one' })
     queue.enqueue({ appRef: 'ns/two' })
 
     expect(queue.enqueue({ appRef: 'ns/one' })).toEqual(first)
-    expect(queue.list().map(item => item.appRef)).toEqual(['ns/two', 'ns/one'])
+    expect(queue.list().map(item => item.appRef)).toEqual(['ns/one', 'ns/two'])
   })
 })

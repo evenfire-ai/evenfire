@@ -64,7 +64,6 @@ export function buildEvenfireDesktopAppRedirectDocument(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="0;url=${escapedLink}">
   <title>Open app in Evenfire</title>
   <style nonce="${nonce}">
     :root {

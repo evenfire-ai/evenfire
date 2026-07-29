@@ -32,3 +32,24 @@ export function createMainWindowCoordinator<TWindow extends MainWindowHandle>(
 
   return { ensureWindow }
 }
+
+export function createRetryableInitializer(initialize: () => Promise<unknown>) {
+  let initialized = false
+  let initializationPromise: Promise<void> | null = null
+
+  const ensureInitialized = async (): Promise<void> => {
+    if (initialized) return
+    if (!initializationPromise) {
+      initializationPromise = initialize()
+        .then(() => {
+          initialized = true
+        })
+        .finally(() => {
+          initializationPromise = null
+        })
+    }
+    await initializationPromise
+  }
+
+  return { ensureInitialized }
+}

@@ -529,22 +529,26 @@ export function useAppController() {
   )
 
   const ensureTeamContext = useCallback(
-    async (target: { teamId?: string; announce?: boolean }) => {
+    async (target: { teamId?: string; announce?: boolean }): Promise<boolean> => {
       const targetTeamId = String(target.teamId || '').trim()
-      if (!targetTeamId) return
+      if (!targetTeamId) return false
 
       const queuedSwitch = notificationTeamContextQueueRef.current.then(async () => {
         const activeTeamId = currentTeamIdRef.current
-        if (targetTeamId === activeTeamId) return
+        if (targetTeamId === activeTeamId) return false
 
-        chat.clearActiveChat()
         await switchTeamForWorkspace(targetTeamId, { announce: target.announce ?? false })
+        return true
       })
-      notificationTeamContextQueueRef.current = queuedSwitch.catch(() => undefined)
-      await queuedSwitch
+      notificationTeamContextQueueRef.current = queuedSwitch.then(
+        () => undefined,
+        () => undefined
+      )
+      return queuedSwitch
     },
-    [chat.clearActiveChat, switchTeamForWorkspace]
+    [switchTeamForWorkspace]
   )
+  const getCurrentTeamId = useCallback(() => currentTeamIdRef.current, [])
 
   const decideApprovalNotificationTarget = useCallback(
     async (target: AgentApprovalNotificationTarget) => {
@@ -1095,6 +1099,7 @@ export function useAppController() {
     handleOpenAgentWorkspace,
     handleSelectChatAgent,
     handleEnsureTeamContext: ensureTeamContext,
+    getCurrentTeamId,
     handleBackToAgents: nav.handleBackToAgents,
     handleOpenContextDetails: nav.handleOpenContextDetails,
     handleBackToContexts: nav.handleBackToContexts,

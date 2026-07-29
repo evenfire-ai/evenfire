@@ -4,11 +4,17 @@ const os = require('node:os')
 const path = require('node:path')
 const { FusesPlugin } = require('@electron-forge/plugin-fuses')
 const { FuseV1Options, FuseVersion } = require('@electron/fuses')
+const {
+  CLERUM_OAUTH_PROTOCOL,
+  SANDBOX_UI_DEEP_LINK_PROTOCOL,
+} = require('@clerum/desktop-app-links')
 
 const desktopLicense = require('./package.json').license
 const defaultAppleBundleId = 'ai.evenfire.desktop'
 const assetsDirectory = path.resolve(__dirname, 'assets')
 const adaptiveIconDocument = path.join(assetsDirectory, 'adaptive-icon.icon')
+const evenfireProtocol = SANDBOX_UI_DEEP_LINK_PROTOCOL.replace(/:$/, '')
+const clerumProtocol = CLERUM_OAUTH_PROTOCOL.replace(/:$/, '')
 
 function compileMacAdaptiveIcon(buildPath, _electronVersion, platform, _arch, callback) {
   if (platform !== 'darwin') {
@@ -151,11 +157,11 @@ module.exports = {
     protocols: [
       {
         name: 'Evenfire',
-        schemes: ['evenfire'],
+        schemes: [evenfireProtocol],
       },
       {
         name: 'Clerum OAuth callback',
-        schemes: ['clerum'],
+        schemes: [clerumProtocol],
       },
     ],
     ...(osxSign ? { osxSign } : {}),
@@ -205,7 +211,7 @@ module.exports = {
           bin: 'Evenfire',
           categories: ['Utility'],
           icon: path.join(assetsDirectory, 'icon.png'),
-          mimeType: ['x-scheme-handler/evenfire', 'x-scheme-handler/clerum'],
+          mimeType: [`x-scheme-handler/${evenfireProtocol}`, `x-scheme-handler/${clerumProtocol}`],
         },
       },
     },
@@ -221,7 +227,7 @@ module.exports = {
           license: desktopLicense,
           categories: ['Utility'],
           icon: path.join(assetsDirectory, 'icon.png'),
-          mimeType: ['x-scheme-handler/evenfire', 'x-scheme-handler/clerum'],
+          mimeType: [`x-scheme-handler/${evenfireProtocol}`, `x-scheme-handler/${clerumProtocol}`],
         },
       },
     },

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createMainWindowCoordinator } from '../mainWindowCoordinator.js'
+import {
+  createMainWindowCoordinator,
+  createRetryableInitializer,
+} from '../mainWindowCoordinator.js'
 
 type TestWindow = {
   isDestroyed: () => boolean
@@ -69,5 +72,39 @@ describe('main window coordinator', () => {
     await Promise.all([firstRequest, secondRequest])
 
     expect(focusWindow).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries window creation after a failed load', async () => {
+    let currentWindow: TestWindow | null = null
+    const createWindow = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error('renderer load failed'))
+      .mockImplementationOnce(async () => {
+        currentWindow = { isDestroyed: () => false }
+      })
+    const coordinator = createMainWindowCoordinator<TestWindow>({
+      createWindow,
+      focusWindow: vi.fn(),
+      getWindow: () => currentWindow,
+    })
+
+    await expect(coordinator.ensureWindow()).rejects.toThrow('renderer load failed')
+    await expect(coordinator.ensureWindow()).resolves.toBeUndefined()
+    expect(createWindow).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('retryable initializer', () => {
+  it('retries failures and never repeats a successful initialization', async () => {
+    const initialize = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error('session restore failed'))
+      .mockResolvedValue(undefined)
+    const initializer = createRetryableInitializer(initialize)
+
+    await expect(initializer.ensureInitialized()).rejects.toThrow('session restore failed')
+    await expect(initializer.ensureInitialized()).resolves.toBeUndefined()
+    await expect(initializer.ensureInitialized()).resolves.toBeUndefined()
+    expect(initialize).toHaveBeenCalledTimes(2)
   })
 })

@@ -3,10 +3,11 @@ import path from 'node:path'
 import { AppService } from './appService.js'
 import { config } from './config.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
-import { createMainWindowCoordinator } from './mainWindowCoordinator.js'
+import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
 import { collectInitialProtocolUrls } from './protocolLaunchArgs.js'
 import { SandboxUiDeepLinkQueue } from './sandboxUiDeepLinkQueue.js'
 import {
+  CLERUM_OAUTH_PROTOCOL,
   SANDBOX_UI_DEEP_LINK_HOST,
   SANDBOX_UI_DEEP_LINK_PROTOCOL,
   parseSandboxUiDeepLink,
@@ -27,9 +28,18 @@ process.stderr?.on?.('error', () => {})
 let mainWindow: BrowserWindow | null = null
 const appService = new AppService()
 const pendingEvenfireUrls: string[] = []
+const MAX_PENDING_EVENFIRE_URLS = 20
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 let mainWindowLifecycleReady = false
 let mainWindowRendererReady = false
+const appServiceInitializer = createRetryableInitializer(() => appService.initialize())
+
+function enqueuePendingEvenfireUrl(rawUrl: string): void {
+  pendingEvenfireUrls.push(rawUrl)
+  if (pendingEvenfireUrls.length > MAX_PENDING_EVENFIRE_URLS) {
+    pendingEvenfireUrls.shift()
+  }
+}
 
 function systemIconAssetsDirectory(): string {
   return app.isPackaged ? process.resourcesPath : path.join(__dirname, '../assets')
@@ -121,7 +131,7 @@ ipcMain.handle('sandboxUi:acknowledgeDeepLink', (event, payload: { id?: unknown 
   sandboxUiDeepLinkQueue.acknowledge(id)
 })
 const DESKTOP_SETUP_PROTOCOL = SANDBOX_UI_DEEP_LINK_PROTOCOL.replace(/:$/, '')
-const CLERUM_PROTOCOL = 'clerum'
+const CLERUM_PROTOCOL = CLERUM_OAUTH_PROTOCOL.replace(/:$/, '')
 
 function focusMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
@@ -183,12 +193,13 @@ function handleEvenfireUrl(rawUrl: string): void {
     return
   }
 
-  if (parsed.hostname === SANDBOX_UI_DEEP_LINK_HOST) {
+  const hostname = parsed.hostname.toLowerCase()
+  if (hostname === SANDBOX_UI_DEEP_LINK_HOST) {
     if (!handleSandboxUiDeepLink(rawUrl)) requestMainWindow()
     return
   }
 
-  if (parsed.hostname === 'logout') {
+  if (hostname === 'logout') {
     void appService.logout().finally(() => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         if (mainWindow.isMinimized()) mainWindow.restore()
@@ -200,7 +211,7 @@ function handleEvenfireUrl(rawUrl: string): void {
     return
   }
 
-  if (parsed.hostname === 'desktop-environment') {
+  if (hostname === 'desktop-environment') {
     const externalRestApiBaseUrl = parsed.searchParams.get('externalRestApiBaseUrl') || ''
     const appName =
       parsed.searchParams.get('tenantName') || parsed.searchParams.get('appName') || ''
@@ -213,13 +224,13 @@ function handleEvenfireUrl(rawUrl: string): void {
         appName,
       })
     } else {
-      pendingEvenfireUrls.push(rawUrl)
+      enqueuePendingEvenfireUrl(rawUrl)
       requestMainWindow()
     }
     return
   }
 
-  if (parsed.hostname !== 'desktop-setup') return
+  if (hostname !== 'desktop-setup') return
 
   const email = parsed.searchParams.get('email') || ''
   const authorizationToken = parsed.searchParams.get('authorizationToken') || ''
@@ -229,17 +240,15 @@ function handleEvenfireUrl(rawUrl: string): void {
     focusMainWindow()
     mainWindow.webContents.send('auth:desktopSetupToken', { email, authorizationToken })
   } else {
-    pendingEvenfireUrls.push(rawUrl)
+    enqueuePendingEvenfireUrl(rawUrl)
     requestMainWindow()
   }
 }
 
 function drainPendingEvenfireUrls(): void {
   if (!mainWindowRendererReady) return
-  while (pendingEvenfireUrls.length > 0) {
-    const pendingUrl = pendingEvenfireUrls.shift()
-    if (pendingUrl) handleEvenfireUrl(pendingUrl)
-  }
+  const pendingBatch = pendingEvenfireUrls.splice(0)
+  pendingBatch.forEach(handleEvenfireUrl)
 }
 
 /**
@@ -259,7 +268,7 @@ function handleClerumUrl(rawUrl: string): void {
     return
   }
   if (parsed.protocol !== `${CLERUM_PROTOCOL}:`) return
-  if (parsed.hostname !== 'oauth-completed') return
+  if (parsed.hostname.toLowerCase() !== 'oauth-completed') return
 
   const oauthClientId = parsed.searchParams.get('clientId') || ''
   const provider = parsed.searchParams.get('provider') || ''
@@ -297,6 +306,14 @@ app.on('open-url', (event, rawUrl) => {
 })
 
 async function createWindow(): Promise<void> {
+  try {
+    // Initialization is process-scoped. A failed attempt remains retryable when
+    // the user recreates the window, while a successful attempt is never repeated.
+    await appServiceInitializer.ensureInitialized()
+  } catch (error) {
+    console.error('[Desktop] Could not initialize the desktop session:', error)
+  }
+
   const devUrl = String(process.env.EVENFIRE_RENDERER_URL || '').trim()
 
   const window = new BrowserWindow({
@@ -338,11 +355,20 @@ async function createWindow(): Promise<void> {
     }
   })
 
-  if (devUrl) {
-    await window.loadURL(devUrl)
-  } else {
-    const htmlPath = path.join(__dirname, '../ui-dist/index.html')
-    await window.loadFile(htmlPath)
+  try {
+    if (devUrl) {
+      await window.loadURL(devUrl)
+    } else {
+      const htmlPath = path.join(__dirname, '../ui-dist/index.html')
+      await window.loadFile(htmlPath)
+    }
+  } catch (error) {
+    if (mainWindow === window) {
+      mainWindow = null
+      mainWindowRendererReady = false
+    }
+    if (!window.isDestroyed()) window.destroy()
+    throw error
   }
   // Open maximized by default; users can manually resize afterward.
   window.maximize()
@@ -361,31 +387,22 @@ if (gotSingleInstanceLock) {
     .then(async () => {
       wireAdaptiveSystemIcon()
       registerIpcHandlers(appService)
-      // Window creation must remain recoverable even if session restoration fails.
       mainWindowLifecycleReady = true
-      try {
-        // AppService belongs to the process, not a BrowserWindow. Initialize it once
-        // so recreating a closed macOS window does not repeat session network I/O.
-        await appService.initialize()
-      } catch (error) {
-        console.error('[Desktop] Could not initialize the desktop session:', error)
-      }
+      wirePowerMonitor()
+      app.on('activate', () => {
+        if (BrowserWindow.getAllWindows().length === 0) {
+          requestMainWindow()
+        }
+      })
       // Collect startup argv once. The renderer-ready handshake drains queued
       // Evenfire URLs after its listeners are installed; rescanning argv would
       // dispatch setup links twice on Windows/Linux.
       const initialProtocolUrls = collectInitialProtocolUrls(process.argv)
-      pendingEvenfireUrls.push(...initialProtocolUrls.evenfireUrls)
+      initialProtocolUrls.evenfireUrls.forEach(enqueuePendingEvenfireUrl)
       await mainWindowCoordinator.ensureWindow()
       if (process.platform !== 'darwin') {
         initialProtocolUrls.clerumUrls.forEach(handleClerumUrl)
       }
-      wirePowerMonitor()
-
-      app.on('activate', async () => {
-        if (BrowserWindow.getAllWindows().length === 0) {
-          await mainWindowCoordinator.ensureWindow()
-        }
-      })
     })
     .catch(error => {
       mainWindowLifecycleReady = app.isReady()

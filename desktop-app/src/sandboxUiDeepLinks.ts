@@ -1,6 +1,7 @@
 import { normalizeSandboxUiRoute } from '@clerum/desktop-app-links'
 
 export {
+  CLERUM_OAUTH_PROTOCOL,
   SANDBOX_UI_DEEP_LINK_HOST,
   SANDBOX_UI_DEEP_LINK_PROTOCOL,
   SANDBOX_UI_WEB_LINK_PATH,
@@ -40,7 +41,7 @@ export function extractSandboxUiViewRoute(input: SandboxUiViewRouteInput): strin
   if (current.pathname !== prefix && !current.pathname.startsWith(`${prefix}/`)) return null
 
   const pathname = current.pathname.slice(prefix.length) || '/'
-  // Fragments commonly contain ephemeral OAuth/access tokens and never reach
-  // the server. Do not copy them into a public Profile UI handoff URL.
-  return normalizeSandboxUiRoute(`${pathname}${current.search}`) ?? null
+  // Shared app links carry only an SPA pathname. Queries and fragments can hold
+  // OAuth codes or other ephemeral state and must not leave the local embed.
+  return normalizeSandboxUiRoute(pathname) ?? null
 }

@@ -94,7 +94,7 @@ type ActiveView = {
   view: WebContentsView
   recipeNs: string
   recipeName: string
-  initialPath: string
+  defaultPath: string
   partition: string
   parentWindow: BrowserWindow
   rpcProxyOrigin: string
@@ -120,21 +120,34 @@ export function getActiveSandboxUi(): {
 export function getActiveSandboxUiLocation(): {
   recipeNs: string
   recipeName: string
-  path: string
+  path?: string
 } | null {
   if (!active) return null
   if (active.view.webContents.isDestroyed()) return null
-  const currentPath = extractSandboxUiViewRoute({
+  const path = resolveSandboxUiSharePath({
     currentUrl: active.view.webContents.getURL(),
     rpcProxyOrigin: active.rpcProxyOrigin,
     recipeNs: active.recipeNs,
     recipeName: active.recipeName,
+    defaultPath: active.defaultPath,
   })
   return {
     recipeNs: active.recipeNs,
     recipeName: active.recipeName,
-    path: currentPath ?? active.initialPath,
+    ...(path ? { path } : {}),
   }
+}
+
+export function resolveSandboxUiSharePath(input: {
+  currentUrl: string
+  rpcProxyOrigin: string
+  recipeNs: string
+  recipeName: string
+  defaultPath: string
+}): string | undefined {
+  const currentPath = extractSandboxUiViewRoute(input)
+  if (currentPath === null) throw new Error('Cannot read the current app route')
+  return currentPath === input.defaultPath ? undefined : currentPath
 }
 
 export function partitionFor(envKey: string, recipeNs: string, recipeName: string): string {
@@ -288,7 +301,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   const clientRoutePath = normalizeSandboxUiRoute(routePath || '')
   const allowedNavigationPrefix =
     `${proxyOriginUrl}/api/v1/sandbox-ui/` +
-    `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view/`
+    `${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/view`
 
   // Install the session cookie BEFORE creating the view so the very first
   // navigation request carries it. The proxy enforces the recipe binding
@@ -355,7 +368,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     view,
     recipeNs,
     recipeName,
-    initialPath: clientRoutePath || viewPath,
+    defaultPath: viewPath,
     partition,
     parentWindow,
     rpcProxyOrigin: proxyOriginUrl,
@@ -476,12 +489,6 @@ export async function applySandboxUiClientRoute(
       if (new URL(previousUrl).href === targetUrl) return true;
       window.history.replaceState(window.history.state, '', targetUrl);
       window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }));
-      if (new URL(previousUrl).hash !== new URL(targetUrl).hash) {
-        window.dispatchEvent(new HashChangeEvent('hashchange', {
-          oldURL: previousUrl,
-          newURL: targetUrl,
-        }));
-      }
       return new URL(window.location.href).href === targetUrl;
     })()`)
   )
@@ -501,7 +508,13 @@ export function isSandboxUiNavigationWithinPrefix(
   allowedNavigationPrefix: string
 ): boolean {
   try {
-    return new URL(navigationUrl).href.startsWith(new URL(allowedNavigationPrefix).href)
+    const navigation = new URL(navigationUrl)
+    const allowed = new URL(allowedNavigationPrefix)
+    return (
+      navigation.origin === allowed.origin &&
+      (navigation.pathname === allowed.pathname ||
+        navigation.pathname.startsWith(`${allowed.pathname}/`))
+    )
   } catch {
     return false
   }

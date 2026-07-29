@@ -245,4 +245,73 @@ describe('AppService profile UI link authority', () => {
       'Cannot resolve a shareable Profile UI link'
     )
   })
+
+  it('omits the path when the active app is still on its default route', async () => {
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      createSandboxUiDeepLink: (teamId?: string) => Promise<{ url: string }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.memberRegistrationServiceClient = {
+      getInvitationProfile: vi.fn().mockResolvedValue({
+        profileUiBaseUrl: 'https://profile.tenant.example',
+      }),
+    }
+    mockGetActiveSandboxUiLocation.mockReturnValue({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'task-board',
+    })
+
+    await expect(service.createSandboxUiDeepLink('team-1')).resolves.toEqual({
+      url: 'https://profile.tenant.example/open/apps/sandbox-recipes/task-board' + '?team=team-1',
+    })
+  })
+
+  it('fails visibly when a successful profile lookup omits the Profile UI URL', async () => {
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      createSandboxUiDeepLink: () => Promise<{ url: string }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.memberRegistrationServiceClient = {
+      getInvitationProfile: vi.fn().mockResolvedValue({ profileUiBaseUrl: '' }),
+    }
+    mockGetActiveSandboxUiLocation.mockReturnValue({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'task-board',
+      path: '/',
+    })
+
+    await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
+      'the invitation profile did not provide a Profile UI URL'
+    )
+    await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
+      'the invitation profile did not provide a Profile UI URL'
+    )
+    expect(service.memberRegistrationServiceClient.getInvitationProfile).toHaveBeenCalledTimes(2)
+  })
+
+  it('surfaces an invalid active app URL instead of copying its initial route', async () => {
+    const service = makeService() as unknown as {
+      me: { id: string; email: string }
+      memberRegistrationServiceClient: { getInvitationProfile: ReturnType<typeof vi.fn> }
+      createSandboxUiDeepLink: () => Promise<{ url: string }>
+    }
+    service.me = { id: 'user-1', email: 'user@tenant.example' }
+    service.memberRegistrationServiceClient = {
+      getInvitationProfile: vi.fn().mockResolvedValue({
+        profileUiBaseUrl: 'https://profile.tenant.example',
+      }),
+    }
+    mockGetActiveSandboxUiLocation.mockImplementation(() => {
+      throw new Error('Cannot read the current app route')
+    })
+
+    await expect(service.createSandboxUiDeepLink()).rejects.toThrow(
+      'Cannot read the current app route'
+    )
+    expect(service.memberRegistrationServiceClient.getInvitationProfile).not.toHaveBeenCalled()
+  })
 })

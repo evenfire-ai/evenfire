@@ -1,3 +1,4 @@
+export declare const CLERUM_OAUTH_PROTOCOL: 'clerum:'
 export declare const SANDBOX_UI_DEEP_LINK_HOST: 'app'
 export declare const SANDBOX_UI_DEEP_LINK_PROTOCOL: 'evenfire:'
 export declare const SANDBOX_UI_WEB_LINK_PATH: '/open/apps'
@@ -15,6 +16,7 @@ export type SandboxUiDeepLinkEnvelope = SandboxUiDeepLinkTarget & {
 export type SandboxUiDeepLinkParts = {
   recipeNs: string
   recipeName: string
+  /** Optional client-side SPA pathname. Query strings and fragments are not shared. */
   path?: string
   teamId?: string
 }

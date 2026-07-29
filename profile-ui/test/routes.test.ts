@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
+import { SANDBOX_UI_WEB_LINK_PATH } from '@clerum/desktop-app-links'
 import { PROFILE_ROUTES } from '../app/constants/routes'
 
 function collectRoutePaths(value: unknown): string[] {
@@ -46,4 +47,11 @@ test('PROFILE_ROUTES resolve to App Router pages or route handlers', () => {
   const unresolved = routePaths.filter(route => !appRoutes.some(pattern => pattern.test(route)))
 
   assert.deepEqual(unresolved, [])
+})
+
+test('desktop app route stays aligned with the shared handoff contract', () => {
+  assert.equal(
+    PROFILE_ROUTES.openDesktopApp('sandbox-recipes', 'task-board'),
+    `${SANDBOX_UI_WEB_LINK_PATH}/sandbox-recipes/task-board`
+  )
 })

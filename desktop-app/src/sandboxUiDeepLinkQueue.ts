@@ -16,9 +16,7 @@ export class SandboxUiDeepLinkQueue {
       sandboxUiDeepLinkTargetsEqual(item, target)
     )
     if (existingIndex >= 0) {
-      const [existing] = this.pending.splice(existingIndex, 1)
-      this.pending.push(existing!)
-      return existing!
+      return this.pending[existingIndex]!
     }
     const envelope = { id: (this.sequence += 1), ...target }
     this.pending.push(envelope)

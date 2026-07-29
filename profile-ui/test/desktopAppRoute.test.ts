@@ -29,3 +29,12 @@ test('desktop app handoff rejects dot-segment routes with hardened error headers
   assert.equal(response.headers.get('referrer-policy'), 'no-referrer')
   assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
 })
+
+test('desktop app handoff rejects query or fragment data inside the shared app path', async () => {
+  const response = await GET(
+    new Request('https://profile.example/open/apps/ns/app?path=%2Ftasks%3Fauthorization%3Dsecret'),
+    routeContext
+  )
+
+  assert.equal(response.status, 400)
+})

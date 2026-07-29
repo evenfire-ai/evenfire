@@ -278,26 +278,39 @@ export function App() {
   const handleSandboxUiBackToConversation = React.useCallback(async () => {
     if (!sandboxUiConversationOrigin) return
     const origin = sandboxUiConversationOrigin
+    let refreshWarning: string | null = null
     try {
-      if (origin.teamId && origin.teamId !== vm.currentTeamId) {
+      if (origin.teamId && origin.teamId !== vm.getCurrentTeamId()) {
         await vm.handleEnsureTeamContext({ teamId: origin.teamId })
       }
-      setActiveSandboxUiApp(null)
-      setSandboxUiConversationOrigin(null)
-      setHeaderShellOverlayOpen(false)
-      setSidebarSettingsMenuOpen(false)
-      vm.handleSelectChatAgent(origin.agentName, {
-        selectLatest: false,
-        chatId: origin.chatId,
-        title: origin.title,
-      })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      vm.pushToast(`Could not return to the conversation: ${message}`, 'error')
+      if (!origin.teamId || vm.getCurrentTeamId() !== origin.teamId) {
+        vm.pushToast(`Could not return to the conversation: ${message}`, 'error')
+        throw err
+      }
+      // The authoritative switch completed but its follow-up refresh failed.
+      // Keep the page aligned with the live team and surface the refresh problem.
+      refreshWarning = message
+    }
+    setActiveSandboxUiApp(null)
+    setSandboxUiConversationOrigin(null)
+    setHeaderShellOverlayOpen(false)
+    setSidebarSettingsMenuOpen(false)
+    vm.handleSelectChatAgent(origin.agentName, {
+      selectLatest: false,
+      chatId: origin.chatId,
+      title: origin.title,
+    })
+    if (refreshWarning) {
+      vm.pushToast(
+        `Returned to the conversation, but team data did not refresh: ${refreshWarning}`,
+        'warn'
+      )
     }
   }, [
     sandboxUiConversationOrigin,
-    vm.currentTeamId,
+    vm.getCurrentTeamId,
     vm.handleEnsureTeamContext,
     vm.handleSelectChatAgent,
     vm.pushToast,
@@ -380,29 +393,28 @@ export function App() {
       return
     }
     const pending = pendingSandboxUiDeepLinksRef.current[0]
-    if (
-      pending?.link.teamId &&
-      pending.link.teamId !== vm.currentTeamId &&
-      !vm.teamDirectoryHydrated
-    ) {
-      return
-    }
     if (!pending || processingSandboxUiDeepLinkIdRef.current !== null) return
     processingSandboxUiDeepLinkIdRef.current = pending.link.id
     const processingGeneration = sandboxUiDeepLinkGenerationRef.current
 
     void (async () => {
-      const originalTeamId = vm.currentTeamId
+      const originalTeamId = vm.getCurrentTeamId()
       let switchedTeam = false
       let openedApp = false
       try {
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
-        if (pending.link.teamId && pending.link.teamId !== vm.currentTeamId) {
-          if (!vm.availableTeamIds.includes(pending.link.teamId)) {
-            throw new Error("You don't have access to the linked team")
+        if (pending.link.teamId && pending.link.teamId !== vm.getCurrentTeamId()) {
+          try {
+            switchedTeam = await vm.handleEnsureTeamContext({
+              teamId: pending.link.teamId,
+              announce: true,
+            })
+          } catch (error) {
+            switchedTeam =
+              originalTeamId !== pending.link.teamId &&
+              vm.getCurrentTeamId() === pending.link.teamId
+            throw error
           }
-          await vm.handleEnsureTeamContext({ teamId: pending.link.teamId, announce: true })
-          switchedTeam = true
         }
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
         const result = await window.clerum.sandboxUi.listApps()
@@ -436,6 +448,7 @@ export function App() {
           !openedApp &&
           switchedTeam &&
           originalTeamId &&
+          vm.getCurrentTeamId() === pending.link.teamId &&
           processingGeneration === sandboxUiDeepLinkGenerationRef.current
         ) {
           try {
@@ -478,13 +491,11 @@ export function App() {
     bootSplashLoading,
     launchSandboxUiApp,
     pendingSandboxUiDeepLinks,
-    vm.availableTeamIds,
-    vm.currentTeamId,
+    vm.getCurrentTeamId,
     vm.handleEnsureTeamContext,
     vm.handleSelectChatAgent,
     vm.isAuthenticated,
     vm.pushToast,
-    vm.teamDirectoryHydrated,
     sandboxUiConversationOrigin,
   ])
 

@@ -175,7 +175,7 @@ describe('SandboxUiPage', () => {
           appRef: 'sandbox-recipes/task-board',
           label: 'Agentic Task Board',
           defaultPath: '/',
-          routePath: '/tasks/task-42?panel=details',
+          routePath: '/tasks/task-42',
         }}
         shortcutOpenRequestId={1}
         onEmbeddedAppOpening={onEmbeddedAppOpening}
@@ -187,7 +187,7 @@ describe('SandboxUiPage', () => {
         recipeNs: 'sandbox-recipes',
         recipeName: 'task-board',
         defaultPath: '/',
-        routePath: '/tasks/task-42?panel=details',
+        routePath: '/tasks/task-42',
         bounds: {
           x: 16,
           y: 12,
@@ -201,7 +201,7 @@ describe('SandboxUiPage', () => {
       appRef: 'sandbox-recipes/task-board',
       label: 'Agentic Task Board',
       defaultPath: '/',
-      routePath: '/tasks/task-42?panel=details',
+      routePath: '/tasks/task-42',
     })
   })
 
@@ -240,6 +240,42 @@ describe('SandboxUiPage', () => {
       expect(sandboxUi.close).toHaveBeenCalledTimes(1)
       expect(onBackToConversation).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it('keeps the app mounted when returning to the conversation fails', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onBackToConversation = vi.fn().mockRejectedValue(new Error('team switch failed'))
+
+    render(
+      <SandboxUiPage
+        conversationOrigin={{
+          agentName: 'sales-agent',
+          chatId: 'chat-123',
+          title: 'Quarterly planning',
+          teamId: 'team-b',
+        }}
+        onBackToConversation={onBackToConversation}
+      />
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to Quarterly planning' }))
+
+    await waitFor(() => expect(onBackToConversation).toHaveBeenCalledOnce())
+    expect(sandboxUi.close).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Back to apps' })).toBeTruthy()
   })
 
   it('keeps the conversation origin during Strict Mode effect replay', async () => {

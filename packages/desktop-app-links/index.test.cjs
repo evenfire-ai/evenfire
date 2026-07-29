@@ -6,7 +6,7 @@ const path = require('node:path')
 const test = require('node:test')
 const links = require('./index.cjs')
 
-test('runtime exports stay aligned with the declaration file', () => {
+test('runtime exports and constant values stay aligned with the declaration file', () => {
   const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
   const declaredRuntimeExports = Array.from(
     declarations.matchAll(/export (?:declare )?(?:const|function)\s+([A-Za-z0-9_]+)/g),
@@ -14,6 +14,18 @@ test('runtime exports stay aligned with the declaration file', () => {
   ).sort()
 
   assert.deepEqual(Object.keys(links).sort(), declaredRuntimeExports)
+  assert.equal(links.CLERUM_OAUTH_PROTOCOL, 'clerum:')
+  assert.equal(links.SANDBOX_UI_DEEP_LINK_PROTOCOL, 'evenfire:')
+  assert.equal(links.SANDBOX_UI_DEEP_LINK_HOST, 'app')
+  assert.equal(links.SANDBOX_UI_WEB_LINK_PATH, '/open/apps')
+  assert.match(
+    declarations,
+    /buildSandboxUiWebLink\(\s*profileUiBaseUrl: string,\s*parts: SandboxUiDeepLinkParts\s*\): string/
+  )
+  assert.match(
+    declarations,
+    /parseSandboxUiDeepLink\(rawUrl: string\): SandboxUiDeepLinkTarget \| null/
+  )
 })
 
 test('web and desktop links use the same canonical route contract', () => {
@@ -34,4 +46,54 @@ test('web and desktop links use the same canonical route contract', () => {
     path: '/tasks/42',
     teamId: 'team-1',
   })
+})
+
+test('shared app links carry only client-side pathnames', () => {
+  for (const pathValue of [
+    '/tasks?authorization=secret',
+    '/tasks#access-token',
+    '//outside.example',
+    '/safe/../admin',
+    '/safe/%2e%2e/admin',
+    '/safe\\admin',
+  ]) {
+    assert.throws(
+      () =>
+        links.buildSandboxUiDeepLink({
+          recipeNs: 'sandbox-recipes',
+          recipeName: 'task-board',
+          path: pathValue,
+        }),
+      /Cannot create a deep link/
+    )
+  }
+})
+
+test('parser accepts a case-insensitive host and rejects non-canonical targets', () => {
+  assert.deepEqual(links.parseSandboxUiDeepLink('evenfire://APP/sandbox-recipes/task-board'), {
+    appRef: 'sandbox-recipes/task-board',
+  })
+  for (const rawUrl of [
+    'evenfire://app/sandbox-recipes/task-board/',
+    'evenfire://app:444/sandbox-recipes/task-board',
+    'evenfire://app/sandbox-recipes/task-board?team=other%2Fteam',
+    'https://profile.example/open/apps/sandbox-recipes/task-board',
+  ]) {
+    assert.equal(links.parseSandboxUiDeepLink(rawUrl), null)
+  }
+})
+
+test('web handoffs require a root-mounted HTTP(S) Profile UI', () => {
+  const parts = { recipeNs: 'sandbox-recipes', recipeName: 'task-board' }
+  for (const baseUrl of [
+    'https://profile.example/settings',
+    'https://profile.example/?token=secret',
+    'https://user:pass@profile.example/',
+    'javascript:alert(1)',
+  ]) {
+    assert.throws(
+      () => links.buildSandboxUiWebLink(baseUrl, parts),
+      /Cannot create a shareable link/
+    )
+  }
 })

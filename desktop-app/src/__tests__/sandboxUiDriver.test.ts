@@ -9,6 +9,7 @@ import {
   partitionFor,
   reloadSandboxUiWebContents,
   resolveSandboxUiDefaultPath,
+  resolveSandboxUiSharePath,
 } from '../sandboxUiDriver.js'
 
 describe('applySandboxUiClientRoute', () => {
@@ -40,7 +41,7 @@ describe('applySandboxUiClientRoute', () => {
 })
 
 describe('canApplySandboxUiClientRoute', () => {
-  const allowedNavigationPrefix = 'https://rpc.example/api/v1/sandbox-ui/ns/app/view/'
+  const allowedNavigationPrefix = 'https://rpc.example/api/v1/sandbox-ui/ns/app/view'
 
   it('waits through a 503 interstitial before handing off the client route', () => {
     expect(
@@ -57,8 +58,8 @@ describe('canApplySandboxUiClientRoute', () => {
     expect(
       canApplySandboxUiClientRoute({
         allowedNavigationPrefix,
-        currentUrl: `${allowedNavigationPrefix}a%20b`,
-        navigatedUrl: `${allowedNavigationPrefix}index.html`,
+        currentUrl: `${allowedNavigationPrefix}/a%20b`,
+        navigatedUrl: `${allowedNavigationPrefix}/index.html`,
         httpResponseCode: 200,
       })
     ).toBe(true)
@@ -78,9 +79,33 @@ describe('sandbox UI route normalization', () => {
     expect(
       isSandboxUiNavigationWithinPrefix(
         'https://rpc.example/api/v1/sandbox-ui/ns/app/view/a%20b',
-        'https://rpc.example/api/v1/sandbox-ui/ns/app/view/'
+        'https://rpc.example/api/v1/sandbox-ui/ns/app/view'
       )
     ).toBe(true)
+  })
+
+  it('omits the default route and rejects an unreadable active app URL when sharing', () => {
+    const input = {
+      currentUrl: 'https://rpc.example/api/v1/sandbox-ui/ns/app/view/tasks',
+      rpcProxyOrigin: 'https://rpc.example',
+      recipeNs: 'ns',
+      recipeName: 'app',
+      defaultPath: '/tasks',
+    }
+    expect(resolveSandboxUiSharePath(input)).toBeUndefined()
+    expect(() =>
+      resolveSandboxUiSharePath({
+        ...input,
+        currentUrl: 'https://outside.example/api/v1/sandbox-ui/ns/app/view/tasks',
+      })
+    ).toThrow('Cannot read the current app route')
+  })
+
+  it('treats the bare view endpoint and nested routes as the same boundary', () => {
+    const prefix = 'https://rpc.example/api/v1/sandbox-ui/ns/app/view'
+    expect(isSandboxUiNavigationWithinPrefix(prefix, prefix)).toBe(true)
+    expect(isSandboxUiNavigationWithinPrefix(`${prefix}/tasks`, prefix)).toBe(true)
+    expect(isSandboxUiNavigationWithinPrefix(`${prefix}-other`, prefix)).toBe(false)
   })
 
   it('uses valid defaults and warns before falling back from an invalid default', () => {

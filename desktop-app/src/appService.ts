@@ -730,8 +730,13 @@ export class AppService {
     try {
       const activation =
         await this.memberRegistrationServiceClient.getInvitationProfile(normalizedEmail)
-      const profileUiBaseUrl =
-        String(activation.profileUiBaseUrl || '').trim() || config.desktopProfileUiBaseUrl
+      const profileUiBaseUrl = String(activation.profileUiBaseUrl || '').trim()
+      if (!profileUiBaseUrl) {
+        if (!fallbackOnLookupError) {
+          throw new Error('the invitation profile did not provide a Profile UI URL')
+        }
+        return config.desktopProfileUiBaseUrl
+      }
       this.profileUiBaseUrlCache = { key: cacheKey, value: profileUiBaseUrl }
       return profileUiBaseUrl
     } catch (error) {

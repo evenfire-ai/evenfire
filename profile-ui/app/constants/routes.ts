@@ -1,5 +1,3 @@
-import { SANDBOX_UI_WEB_LINK_PATH } from '@clerum/desktop-app-links'
-
 type QueryValue = boolean | number | string | null | undefined
 type ProfileRouteQuery = Record<string, QueryValue>
 
@@ -28,7 +26,7 @@ export const PROFILE_ROUTES = {
   forgotPassword: (query?: ProfileRouteQuery) => withQuery('/forgot-password', query),
   invitation: (token: string) => `/invitations/${segment(token)}`,
   openDesktopApp: (recipeNs: string, recipeName: string) =>
-    `${SANDBOX_UI_WEB_LINK_PATH}/${segment(recipeNs)}/${segment(recipeName)}`,
+    `/open/apps/${segment(recipeNs)}/${segment(recipeName)}`,
   members: {
     root: '/members',
     invite: '/members/invite',

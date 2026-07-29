@@ -8,17 +8,17 @@ import {
 } from '../sandboxUiDeepLinks.js'
 
 describe('sandbox UI deep links', () => {
-  it('round-trips an app route, query, fragment, and team', () => {
+  it('round-trips an app SPA pathname and team', () => {
     const url = buildSandboxUiDeepLink({
       recipeNs: 'sandbox-recipes',
       recipeName: 'agentic-task-board',
-      path: '/boards/product/tasks/task-42?view=detail#activity',
+      path: '/boards/product/tasks/task-42',
       teamId: 'team-123',
     })
 
     expect(parseSandboxUiDeepLink(url)).toEqual({
       appRef: 'sandbox-recipes/agentic-task-board',
-      path: '/boards/product/tasks/task-42?view=detail#activity',
+      path: '/boards/product/tasks/task-42',
       teamId: 'team-123',
     })
   })
@@ -28,22 +28,22 @@ describe('sandbox UI deep links', () => {
       buildSandboxUiWebLink('https://profile.example.com', {
         recipeNs: 'sandbox-recipes',
         recipeName: 'agentic-task-board',
-        path: '/tasks/task-42?view=detail#activity',
+        path: '/tasks/task-42',
         teamId: 'team-123',
       })
     ).toBe(
       'https://profile.example.com/open/apps/sandbox-recipes/agentic-task-board' +
-        '?path=%2Ftasks%2Ftask-42%3Fview%3Ddetail%23activity&team=team-123'
+        '?path=%2Ftasks%2Ftask-42&team=team-123'
     )
   })
 
-  it('preserves a profile UI base-path prefix', () => {
-    expect(
+  it('rejects a Profile UI base URL with a non-root path', () => {
+    expect(() =>
       buildSandboxUiWebLink('https://tenant.example.com/profile/', {
         recipeNs: 'sandbox-recipes',
         recipeName: 'agentic-task-board',
       })
-    ).toBe('https://tenant.example.com/profile/open/apps/sandbox-recipes/agentic-task-board')
+    ).toThrow('Cannot create a shareable link')
   })
 
   it('keeps an omitted path optional so the recipe default route wins', () => {
@@ -93,13 +93,23 @@ describe('sandbox UI deep links', () => {
         'evenfire://app/sandbox-recipes/agentic-task-board?path=%2Fsafe%2F%252e%252e%2Fadmin'
       )
     ).toBeNull()
+    expect(
+      parseSandboxUiDeepLink(
+        'evenfire://app/sandbox-recipes/agentic-task-board?path=%2Ftasks%3Ftoken%3Dsecret'
+      )
+    ).toBeNull()
+    expect(
+      parseSandboxUiDeepLink(
+        'evenfire://app/sandbox-recipes/agentic-task-board?path=%2Ftasks%23secret'
+      )
+    ).toBeNull()
     expect(parseSandboxUiDeepLink('evenfire://app/sandbox-recipes/agentic-task-board/')).toBeNull()
     expect(
       parseSandboxUiDeepLink('evenfire://app:444/sandbox-recipes/agentic-task-board')
     ).toBeNull()
   })
 
-  it('extracts the current route without copying a potentially sensitive fragment', () => {
+  it('extracts only the current pathname without copying query or fragment state', () => {
     expect(
       extractSandboxUiViewRoute({
         currentUrl:
@@ -109,7 +119,13 @@ describe('sandbox UI deep links', () => {
         recipeNs: 'sandbox-recipes',
         recipeName: 'agentic-task-board',
       })
-    ).toBe('/tasks/task-42?panel=comments')
+    ).toBe('/tasks/task-42')
+  })
+
+  it('accepts the deep-link host case-insensitively', () => {
+    expect(parseSandboxUiDeepLink('evenfire://APP/sandbox-recipes/agentic-task-board')).toEqual({
+      appRef: 'sandbox-recipes/agentic-task-board',
+    })
   })
 
   it('does not extract routes from another origin or recipe', () => {
