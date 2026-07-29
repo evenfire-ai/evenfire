@@ -61,6 +61,7 @@ beforeEach(() => {
     username: 'alice',
     status: 'active',
   })
+  connDb.markConnected.mockResolvedValue(true)
   cfg.registryConnectionMode = 'self-hosted'
   cfg.registryAuthEnabled = true
 })
@@ -233,6 +234,7 @@ describe('registry connect flow', () => {
     expect(String(url)).toContain('/api/v1/deployments/claim')
     expect((init as RequestInit).headers).toHaveProperty('DPoP')
     expect(connDb.markConnected).toHaveBeenCalledWith({
+      deploymentId: 'dep-9',
       clientId: 'cid',
       clientSecret: 'csecret',
       orgName: 'acme',
@@ -315,6 +317,44 @@ describe('registry connect flow', () => {
       .send({ claim_token: 't' })
       .expect(409)
     expect(res.body.error).toBe('not_pending')
+  })
+
+  it('claim → registry 500 → 502 registry_integration_error', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'pending',
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      privateKeyPem: pkForTest(),
+      requestedOrgName: 'acme',
+    })
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 500 }))
+    const res = await request(app())
+      .post('/admin/registry/connect/claim')
+      .send({ claim_token: 'tok-abc' })
+      .expect(502)
+    expect(res.body.error).toBe('registry_integration_error')
+    expect(connDb.markConnected).not.toHaveBeenCalled()
+  })
+
+  it('claim → markConnected matches no row → 409 connection_superseded', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'pending',
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      privateKeyPem: pkForTest(),
+      requestedOrgName: 'acme',
+    })
+    connDb.markConnected.mockResolvedValue(false)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ client_id: 'cid', client_secret: 'csecret', org: 'acme' }), {
+        status: 200,
+      })
+    )
+    const res = await request(app())
+      .post('/admin/registry/connect/claim')
+      .send({ claim_token: 'tok-abc' })
+      .expect(409)
+    expect(res.body.error).toBe('connection_superseded')
   })
 
   it('DELETE → 204 drops the row', async () => {

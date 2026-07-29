@@ -26,9 +26,99 @@ import { signPop } from '../../services/registryPopSigner.js'
  * status endpoint so operator approval is visible before the user claims —
  * matching the register → poll status → claim flow.
  */
+/** Bound every registry hop (registryClient.ts convention). */
+const REGISTRY_FETCH_TIMEOUT_MS = 10_000
+
 export function createRegistryConnectRouter(): Router {
   const router = Router()
   const base = (): string => `${config.registryUrl}/api/v1/deployments`
+
+  type ClaimOutcome =
+    | { kind: 'connected'; org: string }
+    | { kind: 'expired' }
+    | { kind: 'rejected' }
+    | { kind: 'already_claimed' }
+    | { kind: 'client_unavailable' }
+    | { kind: 'superseded' }
+    | { kind: 'unreachable'; err: unknown }
+    | { kind: 'error'; status: number }
+
+  // Single claim implementation shared by the manual paste route and the
+  // auto-claim path. EXCEPTION-TOTAL: markConnected encrypts and writes to
+  // Postgres AFTER the registry has already burned the one-time secret, so a
+  // throw here must be a value the caller can act on, never an unhandled 500.
+  async function redeemClaim(input: {
+    deploymentId: string
+    keyId: string
+    privateKeyPem: string
+    adminId: string
+    claimToken: string
+  }): Promise<ClaimOutcome> {
+    try {
+      const pop = signPop({
+        privateKeyPem: input.privateKeyPem,
+        sub: input.adminId,
+        kid: input.keyId,
+      })
+      const claimRes = await fetch(`${base()}/claim`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', DPoP: pop },
+        body: JSON.stringify({ claim_token: input.claimToken }),
+        signal: AbortSignal.timeout(REGISTRY_FETCH_TIMEOUT_MS),
+      })
+      if (claimRes.status === 410) return { kind: 'expired' }
+      // The registry returns 401 for both invalid_pop and invalid_claim_token;
+      // both mean the same to the operator — the claim was rejected.
+      if (claimRes.status === 401) return { kind: 'rejected' }
+      if (claimRes.status === 409) {
+        const err = await readErrorCode(claimRes)
+        return err === 'client_unavailable'
+          ? { kind: 'client_unavailable' }
+          : { kind: 'already_claimed' }
+      }
+      if (!claimRes.ok) {
+        rootLogger.error(
+          { event: 'registry_connect_claim_failed', status: claimRes.status },
+          'claim failed'
+        )
+        return { kind: 'error', status: claimRes.status }
+      }
+      const claimed = (await claimRes.json()) as {
+        client_id?: unknown
+        client_secret?: unknown
+        org?: unknown
+      }
+      // A hostile or mis-proxied registry must produce a clean outcome, not a
+      // Buffer.from(null) crash inside the encryption path.
+      if (
+        typeof claimed.client_id !== 'string' ||
+        typeof claimed.client_secret !== 'string' ||
+        typeof claimed.org !== 'string'
+      ) {
+        rootLogger.error(
+          { event: 'registry_connect_claim_malformed', status: claimRes.status },
+          'claim response missing required fields'
+        )
+        return { kind: 'error', status: claimRes.status }
+      }
+      const wrote = await markConnected({
+        deploymentId: input.deploymentId,
+        clientId: claimed.client_id,
+        clientSecret: claimed.client_secret,
+        orgName: claimed.org,
+      })
+      if (!wrote) {
+        rootLogger.error(
+          { event: 'registry_connect_claim_superseded', status: claimRes.status },
+          'claim succeeded but the connection row moved; credentials are lost'
+        )
+        return { kind: 'superseded' }
+      }
+      return { kind: 'connected', org: claimed.org }
+    } catch (err) {
+      return { kind: 'unreachable', err }
+    }
+  }
 
   async function requireSelfHostedAdmin(
     req: Request,
@@ -218,51 +308,41 @@ export function createRegistryConnectRouter(): Router {
         res.status(400).json({ error: 'invalid_request' })
         return
       }
-      const pop = signPop({ privateKeyPem: row.privateKeyPem, sub: ctx.adminId, kid: row.keyId })
-      const claimRes = await fetch(`${base()}/claim`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', DPoP: pop },
-        body: JSON.stringify({ claim_token: claimToken }),
-      })
-      if (claimRes.status === 410) {
-        res.status(410).json({ error: 'claim_expired' })
-        return
-      }
-      if (claimRes.status === 401) {
-        // The registry returns 401 for both invalid_pop and invalid_claim_token;
-        // both mean the same to the operator — the claim was rejected.
-        res.status(401).json({ error: 'claim_rejected' })
-        return
-      }
-      // C-M6: a claim 409 (already_claimed / client_unavailable) is a distinct,
-      // actionable state — surface it rather than the opaque 502.
-      if (claimRes.status === 409) {
-        const err = await readErrorCode(claimRes)
-        res
-          .status(409)
-          .json({ error: err === 'client_unavailable' ? 'client_unavailable' : 'already_claimed' })
-        return
-      }
-      if (!claimRes.ok) {
-        rootLogger.error(
-          { event: 'registry_connect_claim_failed', status: claimRes.status },
-          'claim failed'
-        )
-        res.status(502).json({ error: 'registry_integration_error' })
-        return
-      }
-      const claimed = (await claimRes.json()) as {
-        client_id: string
-        client_secret: string
-        org: string
-      }
-      await markConnected({
+      const outcome = await redeemClaim({
         deploymentId: row.deploymentId,
-        clientId: claimed.client_id,
-        clientSecret: claimed.client_secret,
-        orgName: claimed.org,
+        keyId: row.keyId,
+        privateKeyPem: row.privateKeyPem,
+        adminId: ctx.adminId,
+        claimToken,
       })
-      res.status(200).json({ state: 'connected', org: claimed.org })
+      switch (outcome.kind) {
+        case 'connected':
+          res.status(200).json({ state: 'connected', org: outcome.org })
+          return
+        case 'expired':
+          res.status(410).json({ error: 'claim_expired' })
+          return
+        case 'rejected':
+          res.status(401).json({ error: 'claim_rejected' })
+          return
+        case 'already_claimed':
+          res.status(409).json({ error: 'already_claimed' })
+          return
+        case 'client_unavailable':
+          res.status(409).json({ error: 'client_unavailable' })
+          return
+        case 'superseded':
+          res.status(409).json({ error: 'connection_superseded' })
+          return
+        // Preserves today's behaviour exactly: a registry-unreachable failure
+        // threw out of this handler and became a 500. Collapsing it to 502 here
+        // would be a silent contract change for the manual route.
+        case 'unreachable':
+          throw outcome.err
+        case 'error':
+          res.status(502).json({ error: 'registry_integration_error' })
+          return
+      }
     } catch (err) {
       next(err)
     }
