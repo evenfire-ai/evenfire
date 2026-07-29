@@ -9,6 +9,7 @@ import { findAdminById } from '../../services/adminAuthService.js'
 import {
   deleteConnection,
   getRegistryConnection,
+  isRegistryAuthActive,
   markConnected,
   upsertPendingConnection,
 } from '../../services/registryConnectionDb.js'
@@ -137,6 +138,13 @@ export function createRegistryConnectRouter(): Router {
       res.status(409).json({ error: 'not_self_hosted' })
       return null
     }
+    // Task 4 permits booting without a registry URL. Fail cleanly here rather
+    // than letting base() build '/api/v1/deployments' and fetch() throw
+    // TypeError: Failed to parse URL, which surfaces as a bare 500.
+    if (config.registryUrl === '') {
+      res.status(409).json({ error: 'registry_url_not_configured' })
+      return null
+    }
     const sub = (req as UiAuthedRequest).adminAuth?.sub
     const admin = sub ? await findAdminById(sub) : null
     if (!admin || admin.status !== 'active') {
@@ -198,8 +206,27 @@ export function createRegistryConnectRouter(): Router {
       const ctx = await requireSelfHostedAdmin(req, res)
       if (!ctx) return
       const row = await getRegistryConnection()
+      // Hoisted: every branch below reports authEnabled, and this call is
+      // cache-friendly here — getRegistryConnection() just populated (or hit)
+      // the process-local cache that isRegistryAuthActive()'s self-hosted
+      // path reads via resolveMachineCreds(), so this cannot trigger a fresh
+      // Postgres round-trip on its own. It CAN still reject (a bare
+      // pool.query with no try/catch of its own), so this is guarded the same
+      // way the sibling admin registry routes guard it
+      // (routes/admin/registry.ts's prepareKeysRequest/resolveSelfServiceOrg)
+      // rather than letting it fall through to the generic catch below and
+      // surface as a bare 500 — GET already documents a never-500-on-a-hiccup
+      // guarantee for the status poll, and this preserves that for the newly
+      // derived read too.
+      let authEnabled: boolean
+      try {
+        authEnabled = await isRegistryAuthActive()
+      } catch {
+        res.status(502).json({ error: 'registry_integration_error' })
+        return
+      }
       if (!row) {
-        res.status(200).json({ state: 'disconnected', authEnabled: config.registryAuthEnabled })
+        res.status(200).json({ state: 'disconnected', authEnabled })
         return
       }
       if (row.status === 'connected') {
@@ -207,7 +234,7 @@ export function createRegistryConnectRouter(): Router {
           state: 'connected',
           deploymentId: row.deploymentId,
           org: row.orgName,
-          authEnabled: config.registryAuthEnabled,
+          authEnabled,
         })
         return
       }
@@ -233,7 +260,7 @@ export function createRegistryConnectRouter(): Router {
           state: 'connecting',
           deploymentId: row.deploymentId,
           requestedOrgName: row.requestedOrgName,
-          authEnabled: config.registryAuthEnabled,
+          authEnabled,
           ...(recoveryError ? { recoveryError } : {}),
         })
         return
@@ -257,7 +284,7 @@ export function createRegistryConnectRouter(): Router {
         state,
         deploymentId: row.deploymentId,
         requestedOrgName: row.requestedOrgName,
-        authEnabled: config.registryAuthEnabled,
+        authEnabled,
       })
     } catch (err) {
       next(err)
@@ -424,11 +451,23 @@ export function createRegistryConnectRouter(): Router {
           claimToken: reg.claim_token as string,
         })
         if (outcome.kind === 'connected') {
+          // The connect itself already succeeded (markConnected committed
+          // inside redeemClaim) by the time we get here — a rejecting
+          // isRegistryAuthActive() must not surface as an uncaught rejection
+          // or a bare 500 for a request whose underlying mutation landed.
+          // Same 502 the sibling admin registry routes use for this accessor.
+          let authEnabled: boolean
+          try {
+            authEnabled = await isRegistryAuthActive()
+          } catch {
+            res.status(502).json({ error: 'registry_integration_error' })
+            return
+          }
           res.status(200).json({
             state: 'connected',
             org: outcome.org,
             deploymentId: reg.deployment_id,
-            authEnabled: config.registryAuthEnabled,
+            authEnabled,
           })
           return
         }
@@ -601,13 +640,25 @@ export function createRegistryConnectRouter(): Router {
           claimToken,
         })
         switch (outcome.kind) {
-          case 'connected':
+          case 'connected': {
+            // Same reasoning as the auto-claim branch in POST /request: the
+            // recover has already succeeded (markConnected committed) by the
+            // time we're here, so a rejecting isRegistryAuthActive() must
+            // degrade to 502 rather than an uncaught rejection or a bare 500.
+            let authEnabled: boolean
+            try {
+              authEnabled = await isRegistryAuthActive()
+            } catch {
+              res.status(502).json({ error: 'registry_integration_error' })
+              return
+            }
             res.status(200).json({
               state: 'connected',
               org: outcome.org,
-              authEnabled: config.registryAuthEnabled,
+              authEnabled,
             })
             return
+          }
           // Terminal: the client is disabled (operator suspension). Retrying
           // rotates forever against a deployment that was deliberately killed.
           case 'client_unavailable':
