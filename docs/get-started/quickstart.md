@@ -151,21 +151,22 @@ Details: [Connect Telegram](../how-to/connect-telegram.md).
 
 ## Troubleshooting
 
-| Symptom                                    | Fix                                                                                               |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| Agent never replies                        | No real LLM key in `.env`; with several keys, set `CLERUM_MODEL_PROVIDER` explicitly (see step 1) |
+| Symptom                                    | Fix                                                                                                                                                                                  |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Agent never replies                        | No real LLM key in `.env`; with several keys, set `CLERUM_MODEL_PROVIDER` explicitly (see step 1)                                                                                    |
 | `minikube start` fails on memory           | Raise Docker Desktop to ≥10 GB RAM / 6 CPUs — or, if you can't spare it, `MINIKUBE_MEMORY=9216 make minikube-setup` (stock Docker Desktop's ~9.9 GB is just under the 10 GB default) |
-| Pods `Pending` early on                    | Calico is still coming up — wait, then `make minikube-status`                                     |
-| postgres CrashLoopBackOff after cold start | `make minikube-setup ARGS="--reset-db --skip-build"`                                              |
-| Port-forwards die                          | re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops)                                  |
+| Pods `Pending` early on                    | Calico is still coming up — wait, then `make minikube-status`                                                                                                                        |
+| postgres CrashLoopBackOff after cold start | `make minikube-setup ARGS="--reset-db --skip-build"`                                                                                                                                 |
+| Port-forwards die                          | re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops)                                                                                                                     |
 
 ## Next steps
 
-| Goal                      | Doc                                                                                            |
-| ------------------------- | ---------------------------------------------------------------------------------------------- |
-| Wire an MCP connector     | [Add an MCP server](../how-to/add-mcp-server.md)                                               |
-| Tune the approval gates   | [Configure approvals](../how-to/configure-approvals.md)                                        |
-| Understand the design     | [Why evenfire](../concepts/why-evenfire.md) · [Security model](../../README.md#security-model) |
-| Deep deployment reference | [Minikube guide](../deploy/minikube.md) · [Production notes](../deploy/production.md)          |
-| Tour the other UIs        | [Surfaces index](../surfaces/README.md)                                                        |
-| Learning paths            | [Learning path](learning-path.md)                                                              |
+| Goal                           | Doc                                                                                            |
+| ------------------------------ | ---------------------------------------------------------------------------------------------- |
+| Wire an MCP connector          | [Add an MCP server](../how-to/add-mcp-server.md)                                               |
+| Connect to the shared registry | [Connect to the registry](../how-to/connect-to-registry.md)                                    |
+| Tune the approval gates        | [Configure approvals](../how-to/configure-approvals.md)                                        |
+| Understand the design          | [Why evenfire](../concepts/why-evenfire.md) · [Security model](../../README.md#security-model) |
+| Deep deployment reference      | [Minikube guide](../deploy/minikube.md) · [Production notes](../deploy/production.md)          |
+| Tour the other UIs             | [Surfaces index](../surfaces/README.md)                                                        |
+| Learning paths                 | [Learning path](learning-path.md)                                                              |

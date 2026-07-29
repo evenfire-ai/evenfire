@@ -2,9 +2,10 @@
 
 The Evenfire registry (`registry.evenfire.ai`) is a shared catalog of connectors
 and recipes. A **managed** deployment is connected for you; a **self-hosted**
-deployment connects itself, once — after an Evenfire operator approves the
-request. This guide covers the self-hoster's side of that flow. Once connected
-you can install from the catalog, [publish under your own org](publish-plugin-to-registry.md),
+deployment connects itself, once. Depending on how the registry is configured,
+that either completes on its own or waits for an Evenfire operator to approve
+the request. This guide covers the self-hoster's side of that flow. Once
+connected you can install from the catalog, [publish under your own org](publish-plugin-to-registry.md),
 and use registry SSO from your Control UI.
 
 ## Prerequisites
@@ -17,22 +18,41 @@ and use registry SSO from your Control UI.
 
 ## Connect
 
-Open **Control UI → Registry → Connect** (`/registry/connect`). The panel walks a
-small state machine — `disconnected → pending → approved → connected`:
+Open **Control UI → Registry → Connect** (`/registry/connect`). The panel walks
+one of two state machines, depending on how the registry is configured:
 
-1. **Request.** Enter a **requested org name** and a **contact email**, and
-   submit. Your control-api generates a signing keypair, registers the request
-   with the registry, and saves it as **pending**. (The keypair is how the
-   registry later confirms the claim really comes from your deployment — you
-   never handle it.) A reserved or blocked org name is refused up front.
-2. **Wait for approval.** An Evenfire operator reviews the request and either
-   approves or rejects it. The panel polls the registry, so the decision appears
-   without you re-submitting.
-3. **Claim.** On approval the operator sends you a **one-time claim token**
-   out-of-band. Paste it into the panel to finish connecting. The token is
-   single-use and short-lived.
-4. **Connected.** The panel shows your bound org. You can now install catalog
-   entries, mint publish keys, and use registry SSO.
+- Auto-approved: `disconnected → connecting → connected`
+- Operator-approved: `disconnected → pending → approved → connected`
+
+1. **Request access.** You enter an organization name and a contact email. Your
+   control-api generates a signing keypair, registers with the registry, and
+   saves the row. (The keypair is how the registry knows later requests really
+   come from this deployment. It never leaves your cluster.)
+
+2. **What happens next depends on the registry.**
+   - **Open registration enabled** — the registry approves immediately and the
+     panel finishes connecting on its own. No operator is involved and no claim
+     token is ever shown to a human. If that automatic step cannot complete (a
+     network blip, or the registry briefly unavailable), the panel shows
+     **Finishing the connection** with a **Finish connecting** button; press it
+     to retry. In most cases, retrying with **Finish connecting** will succeed and
+     you never need a token. If the panel says to contact support, do that: a
+     suspended deployment can be reversed by Evenfire, and **Start over** would
+     destroy a keypair you may still need. Only use **Start over** when the
+     panel says the deployment's one-time credentials were issued but never
+     stored. That connection cannot be recovered: **Start over** permanently
+     deletes the deployment's stored registry credentials and gives up the
+     organization name. If you use **Start over**, you must register again
+     under a different organization name.
+
+   - **Open registration disabled** — the request lands as **pending**. An
+     Evenfire operator reviews it and either approves or rejects it. On
+     approval you receive a one-time claim token out of band; paste it into the
+     panel to finish connecting. Use **Refresh status** to check whether the
+     decision has landed.
+
+3. **Connected.** The deployment holds its machine credentials and can read the
+   catalog, publish entries, and push images to its own org.
 
 ## What connecting gives you
 
