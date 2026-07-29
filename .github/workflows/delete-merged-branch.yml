@@ -1,0 +1,55 @@
+name: Delete merged branch
+
+# Deletes a PR's head branch once the PR is merged, EXCEPT for long-lived
+# branches. The exception that matters is `dev`: the dev -> main promotion PR
+# uses `dev` itself as the head branch, so GitHub's repo-level "Automatically
+# delete head branches" setting deleted `dev` on the v0.5.0 promotion. That
+# setting is all-or-nothing, so it stays OFF and this workflow does the cleanup
+# with an exception list instead.
+#
+# `pull_request_target` rather than `pull_request` so the workflow file is read
+# from the base branch — cleanup then applies to PRs opened before this landed,
+# instead of only to branches cut afterwards. Nothing from the PR is checked
+# out or run here, so the write-scoped token never touches contributor code.
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  delete:
+    name: Delete head branch
+    runs-on: ubuntu-latest
+    # Fork branches are not ours to delete.
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Delete head branch unless it is long-lived
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+
+          # Branches that outlive any single PR.
+          KEEP=(dev main cla-signatures gh-pages)
+          for keep in "${KEEP[@]}"; do
+            if [[ "$HEAD_REF" == "$keep" ]]; then
+              echo "::notice::'$HEAD_REF' is long-lived — keeping it."
+              exit 0
+            fi
+          done
+
+          # Already gone (someone clicked "Delete branch", or this is a re-run).
+          if ! gh api "repos/$REPO/git/ref/heads/$HEAD_REF" --silent 2>/dev/null; then
+            echo "::notice::'$HEAD_REF' no longer exists — nothing to do."
+            exit 0
+          fi
+
+          gh api -X DELETE "repos/$REPO/git/ref/heads/$HEAD_REF"
+          echo "::notice::Deleted merged branch '$HEAD_REF'."
