@@ -101,6 +101,39 @@ describe('sandbox UI route normalization', () => {
     ).toThrow('Cannot read the current app route')
   })
 
+  it('falls back to the default route when the app view has not committed a URL yet', () => {
+    expect(
+      resolveSandboxUiSharePath({
+        currentUrl: '',
+        rpcProxyOrigin: 'https://rpc.example',
+        recipeNs: 'ns',
+        recipeName: 'app',
+        defaultPath: '/tasks',
+      })
+    ).toBeUndefined()
+  })
+
+  it('omits default routes that include query or hash state when sharing', () => {
+    expect(
+      resolveSandboxUiSharePath({
+        currentUrl: 'https://rpc.example/api/v1/sandbox-ui/ns/app/view/#/dashboard',
+        rpcProxyOrigin: 'https://rpc.example',
+        recipeNs: 'ns',
+        recipeName: 'app',
+        defaultPath: '/#/dashboard',
+      })
+    ).toBeUndefined()
+    expect(
+      resolveSandboxUiSharePath({
+        currentUrl: 'https://rpc.example/api/v1/sandbox-ui/ns/app/view/index.php?view=board',
+        rpcProxyOrigin: 'https://rpc.example',
+        recipeNs: 'ns',
+        recipeName: 'app',
+        defaultPath: '/index.php?view=board',
+      })
+    ).toBeUndefined()
+  })
+
   it('treats the bare view endpoint and nested routes as the same boundary', () => {
     const prefix = 'https://rpc.example/api/v1/sandbox-ui/ns/app/view'
     expect(isSandboxUiNavigationWithinPrefix(prefix, prefix)).toBe(true)
@@ -111,6 +144,9 @@ describe('sandbox UI route normalization', () => {
   it('uses valid defaults and warns before falling back from an invalid default', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     expect(resolveSandboxUiDefaultPath('/accounts')).toBe('/accounts')
+    expect(resolveSandboxUiDefaultPath('/#/dashboard')).toBe('/#/dashboard')
+    expect(resolveSandboxUiDefaultPath('/index.php?view=board')).toBe('/index.php?view=board')
+    expect(resolveSandboxUiDefaultPath('/app#/inbox')).toBe('/app#/inbox')
     expect(resolveSandboxUiDefaultPath(undefined)).toBe('/')
     expect(resolveSandboxUiDefaultPath('/safe/../admin')).toBe('/')
     expect(warn).toHaveBeenCalledOnce()

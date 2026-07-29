@@ -29,4 +29,16 @@ describe('collectInitialProtocolUrls', () => {
       ],
     })
   })
+
+  it('matches protocol schemes case-insensitively', () => {
+    expect(
+      collectInitialProtocolUrls([
+        'EVENFIRE://app/sandbox-recipes/task-board?path=%2Ftasks',
+        'CLERUM://oauth-completed?clientId=github&provider=github',
+      ])
+    ).toEqual({
+      evenfireUrls: ['EVENFIRE://app/sandbox-recipes/task-board?path=%2Ftasks'],
+      clerumUrls: ['CLERUM://oauth-completed?clientId=github&provider=github'],
+    })
+  })
 })

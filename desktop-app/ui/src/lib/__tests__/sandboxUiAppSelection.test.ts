@@ -12,6 +12,7 @@ const apps = [
     defaultPath: '/',
     ready: true,
     phase: 'Ready',
+    updatedAt: null,
   },
   {
     appRef: 'sandbox-recipes/provisioning-app',
@@ -19,6 +20,7 @@ const apps = [
     defaultPath: '/',
     ready: false,
     phase: 'Installing',
+    updatedAt: null,
   },
 ]
 

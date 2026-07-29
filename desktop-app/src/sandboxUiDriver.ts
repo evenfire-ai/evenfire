@@ -6,6 +6,7 @@ import { touchSandboxUiPartition } from './sandboxUiPartitionGc.js'
 import {
   applySandboxUiNavigationPolicies,
   applySandboxUiPartitionPolicies,
+  isSandboxUiNavigationWithinPrefix as isNavigationWithinPrefix,
 } from './sandboxUiPartitionPolicies.js'
 
 /**
@@ -98,9 +99,12 @@ type ActiveView = {
   partition: string
   parentWindow: BrowserWindow
   rpcProxyOrigin: string
+  cleanupClientRouteHandoff?: () => void
 }
 
 let active: ActiveView | null = null
+
+export const isSandboxUiNavigationWithinPrefix = isNavigationWithinPrefix
 
 export function getActiveSandboxUi(): {
   recipeNs: string
@@ -145,9 +149,10 @@ export function resolveSandboxUiSharePath(input: {
   recipeName: string
   defaultPath: string
 }): string | undefined {
+  if (!input.currentUrl.trim()) return undefined
   const currentPath = extractSandboxUiViewRoute(input)
   if (currentPath === null) throw new Error('Cannot read the current app route')
-  return currentPath === input.defaultPath ? undefined : currentPath
+  return currentPath === sharedPathForDefaultPath(input.defaultPath) ? undefined : currentPath
 }
 
 export function partitionFor(envKey: string, recipeNs: string, recipeName: string): string {
@@ -256,6 +261,7 @@ async function teardownActive(reason: 'replaced' | 'closed' | 'parent_closed'): 
   const current = active
   active = null
   try {
+    current.cleanupClientRouteHandoff?.()
     // contentView.removeChildView is the documented teardown step; it both
     // detaches the view from layout AND severs the parent's ownership ref.
     if (!current.parentWindow.isDestroyed()) {
@@ -456,6 +462,9 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
       console.warn('[SandboxUI] client route handoff timed out before the app became ready')
       cleanupClientRouteHandoff()
     }, CLIENT_ROUTE_HANDOFF_TIMEOUT_MS)
+    if (active && active.view === view) {
+      active.cleanupClientRouteHandoff = cleanupClientRouteHandoff
+    }
   }
   // Drop the HTTP cache on every open so a stale entry from a prior
   // broken pod can't keep painting after the recipe is healthy. The
@@ -497,27 +506,47 @@ export async function applySandboxUiClientRoute(
 export function resolveSandboxUiDefaultPath(defaultPath?: string): string {
   const rawDefaultPath = String(defaultPath || '').trim()
   if (!rawDefaultPath) return '/'
-  const normalized = normalizeSandboxUiRoute(rawDefaultPath)
+  const normalized = normalizeSandboxUiDefaultPath(rawDefaultPath)
   if (normalized) return normalized
   console.warn('[SandboxUI] Invalid recipe defaultPath; falling back to "/":', rawDefaultPath)
   return '/'
 }
 
-export function isSandboxUiNavigationWithinPrefix(
-  navigationUrl: string,
-  allowedNavigationPrefix: string
-): boolean {
-  try {
-    const navigation = new URL(navigationUrl)
-    const allowed = new URL(allowedNavigationPrefix)
-    return (
-      navigation.origin === allowed.origin &&
-      (navigation.pathname === allowed.pathname ||
-        navigation.pathname.startsWith(`${allowed.pathname}/`))
-    )
-  } catch {
-    return false
+const DOT_SEGMENT_PATTERN = /^(?:\.|%2e){1,2}$/i
+
+function pathHasDotSegment(pathname: string): boolean {
+  return pathname.split('/').some(segment => DOT_SEGMENT_PATTERN.test(segment))
+}
+
+function sharedPathForDefaultPath(defaultPath: string): string {
+  const firstQueryIndex = defaultPath.indexOf('?')
+  const firstHashIndex = defaultPath.indexOf('#')
+  const firstMetaIndex = [firstQueryIndex, firstHashIndex]
+    .filter(index => index !== -1)
+    .sort((a, b) => a - b)[0]
+  return firstMetaIndex === undefined ? defaultPath : defaultPath.slice(0, firstMetaIndex) || '/'
+}
+
+function normalizeSandboxUiDefaultPath(rawPath: string): string | null {
+  const routePath = String(rawPath || '').trim()
+  if (!routePath) return '/'
+  if (
+    routePath.length > 4096 ||
+    !routePath.startsWith('/') ||
+    routePath.startsWith('//') ||
+    routePath.includes('\\') ||
+    /[\u0000-\u001f\u007f\s]/.test(routePath)
+  ) {
+    return null
   }
+  const firstHashIndex = routePath.indexOf('#')
+  const serverPath = sharedPathForDefaultPath(routePath)
+  if (pathHasDotSegment(serverPath)) return null
+  if (firstHashIndex !== -1) {
+    const hashRoute = routePath.slice(firstHashIndex + 1).split('?')[0] || ''
+    if (hashRoute.startsWith('/') && pathHasDotSegment(hashRoute)) return null
+  }
+  return routePath
 }
 
 export function canApplySandboxUiClientRoute(input: {

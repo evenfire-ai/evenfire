@@ -4,6 +4,7 @@ import { AppService } from './appService.js'
 import { config } from './config.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
+import { shouldResetRendererReadinessForNavigation } from './mainWindowReadiness.js'
 import { collectInitialProtocolUrls } from './protocolLaunchArgs.js'
 import { SandboxUiDeepLinkQueue } from './sandboxUiDeepLinkQueue.js'
 import {
@@ -35,6 +36,7 @@ let mainWindowRendererReady = false
 const appServiceInitializer = createRetryableInitializer(() => appService.initialize())
 
 function enqueuePendingEvenfireUrl(rawUrl: string): void {
+  if (pendingEvenfireUrls.includes(rawUrl)) return
   pendingEvenfireUrls.push(rawUrl)
   if (pendingEvenfireUrls.length > MAX_PENDING_EVENFIRE_URLS) {
     pendingEvenfireUrls.shift()
@@ -298,9 +300,10 @@ if (!gotSingleInstanceLock) {
 
 app.on('open-url', (event, rawUrl) => {
   event.preventDefault()
-  if (rawUrl.startsWith(`${DESKTOP_SETUP_PROTOCOL}:`)) {
+  const lowerUrl = rawUrl.toLowerCase()
+  if (lowerUrl.startsWith(`${DESKTOP_SETUP_PROTOCOL}:`)) {
     handleEvenfireUrl(rawUrl)
-  } else if (rawUrl.startsWith(`${CLERUM_PROTOCOL}:`)) {
+  } else if (lowerUrl.startsWith(`${CLERUM_PROTOCOL}:`)) {
     handleClerumUrl(rawUrl)
   }
 })
@@ -340,8 +343,15 @@ async function createWindow(): Promise<void> {
       mainWindowRendererReady = false
     }
   })
-  window.webContents.on('did-start-loading', () => {
-    if (mainWindow === window) mainWindowRendererReady = false
+  window.webContents.on('did-start-navigation', details => {
+    if (mainWindow === window && shouldResetRendererReadinessForNavigation(details)) {
+      mainWindowRendererReady = false
+    }
+  })
+  window.webContents.on('render-process-gone', () => {
+    if (mainWindow === window) {
+      mainWindowRendererReady = false
+    }
   })
 
   wireWindowVisibility(window)

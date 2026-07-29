@@ -6,10 +6,12 @@ export type InitialProtocolUrls = {
 }
 
 export function collectInitialProtocolUrls(argv: string[]): InitialProtocolUrls {
+  const hasProtocol = (argument: string, protocol: string) =>
+    argument.slice(0, protocol.length).toLowerCase() === protocol
   return {
     evenfireUrls: [
-      ...new Set(argv.filter(argument => argument.startsWith(SANDBOX_UI_DEEP_LINK_PROTOCOL))),
+      ...new Set(argv.filter(argument => hasProtocol(argument, SANDBOX_UI_DEEP_LINK_PROTOCOL))),
     ],
-    clerumUrls: [...new Set(argv.filter(argument => argument.startsWith(CLERUM_OAUTH_PROTOCOL)))],
+    clerumUrls: [...new Set(argv.filter(argument => hasProtocol(argument, CLERUM_OAUTH_PROTOCOL)))],
   }
 }
