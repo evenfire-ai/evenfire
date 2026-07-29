@@ -2185,37 +2185,44 @@ export class HostReconciler {
     const capturedAuthority = this.captureHostMutationAuthority()
     const depName = `channel-reader-${hostName}`
     try {
-      this.requireHostMutationAuthority(
-        `channel-reader "${hostName}" revision patch`,
-        capturedAuthority
-      )
-      if (this.resolveCurrentHost && !this.resolveCurrentHost(hostName)) return
-      const revision = await this.computeChannelReaderRevisionForHost(hostName)
-      this.requireHostMutationAuthority(
-        `channel-reader "${hostName}" revision patch`,
-        capturedAuthority
-      )
-      if (this.resolveCurrentHost && !this.resolveCurrentHost(hostName)) return
-      const patchBody = {
-        spec: {
-          template: {
-            metadata: {
-              annotations: { 'clerum.io/credentials-revision': revision },
+      await this.lifecycle.serializeByHost(hostName, async () => {
+        const action = `channel-reader "${hostName}" revision patch`
+        this.requireHostMutationAuthority(action, capturedAuthority)
+
+        const resolveCurrentHost = this.resolveCurrentHost
+        const admittedHost = resolveCurrentHost?.(hostName)
+        if (resolveCurrentHost !== null && admittedHost === undefined) return
+        const revalidate = admittedHost
+          ? this.makeHostMutationAdmission(action, admittedHost, capturedAuthority)
+          : () => this.requireHostMutationAuthority(action, capturedAuthority)
+
+        revalidate()
+        const revision = await this.computeChannelReaderRevisionForHost(hostName)
+        // The revision calculation can await multiple Secret reads. Revalidate
+        // Host LIST/WATCH authority plus UID and generation immediately before
+        // entering the Kubernetes mutation, while still holding this Host lane.
+        revalidate()
+        const patchBody = {
+          spec: {
+            template: {
+              metadata: {
+                annotations: { 'clerum.io/credentials-revision': revision },
+              },
             },
           },
-        },
-      }
-      await this.appsApi.patchNamespacedDeployment(
-        { name: depName, namespace: config.channelsNamespace, body: patchBody },
-        {
-          middleware: [
-            k8s.setHeaderMiddleware('Content-Type', 'application/strategic-merge-patch+json'),
-          ],
         }
-      )
-      console.log(
-        `[HostReconciler] Patched ${depName} credentials-revision=${revision || '(empty)'}`
-      )
+        await this.appsApi.patchNamespacedDeployment(
+          { name: depName, namespace: config.channelsNamespace, body: patchBody },
+          {
+            middleware: [
+              k8s.setHeaderMiddleware('Content-Type', 'application/strategic-merge-patch+json'),
+            ],
+          }
+        )
+        console.log(
+          `[HostReconciler] Patched ${depName} credentials-revision=${revision || '(empty)'}`
+        )
+      })
     } catch (err) {
       if (getErrorCode(err) === 404) return
       console.error(`[HostReconciler] Failed to reconcile ${depName} revision:`, err)

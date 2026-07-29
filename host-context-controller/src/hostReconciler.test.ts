@@ -1368,7 +1368,11 @@ describe('HostReconciler Host inventory mutation authority', () => {
 
   it('does not patch channel-reader after Host authority changes during revision resolution', async () => {
     const reconciler = makeBasicReconciler()
-    const host = makeHost({ name: 'channel-authority-race' })
+    const host = {
+      ...makeHost({ name: 'channel-authority-race' }),
+      uid: 'channel-authority-race-uid',
+      generation: 3,
+    }
     const authority = { current: { known: true, generation: 9 } }
     wireAuthoritativeHost(reconciler, host, authority)
     const revisionStarted = deferred()
@@ -1390,6 +1394,98 @@ describe('HostReconciler Host inventory mutation authority', () => {
     await pending
 
     expect(patchDeployment).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['UID', (host: HostCRD) => ({ ...host, uid: 'replacement-channel-reader-uid' })],
+    [
+      'spec generation',
+      (host: HostCRD) => ({
+        ...host,
+        generation: (host.generation ?? 0) + 1,
+        spec: { ...host.spec, contextRef: 'replacement-context' },
+      }),
+    ],
+  ] as const)(
+    'does not patch channel-reader when the Host %s changes during revision resolution',
+    async (_, replaceCurrent) => {
+      const reconciler = makeBasicReconciler()
+      const host = {
+        ...makeHost({ name: 'channel-host-race' }),
+        uid: 'channel-host-race-uid',
+        generation: 3,
+      }
+      let current: HostCRD = host
+      reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
+      reconciler.setHostWatchAuthority(() => ({ known: true, generation: 9 }))
+      const revisionStarted = deferred()
+      const releaseRevision = deferred<string>()
+      vi.spyOn(reconciler as any, 'computeChannelReaderRevisionForHost').mockImplementation(
+        async () => {
+          revisionStarted.resolve(undefined)
+          return releaseRevision.promise
+        }
+      )
+      const patchDeployment = vi
+        .spyOn((reconciler as any).appsApi, 'patchNamespacedDeployment')
+        .mockResolvedValue(undefined)
+
+      const pending = reconciler.patchChannelReaderRevisionAnnotation(host.name)
+      await revisionStarted.promise
+      current = replaceCurrent(host)
+      releaseRevision.resolve('resolved-revision')
+      await pending
+
+      expect(patchDeployment).not.toHaveBeenCalled()
+    }
+  )
+
+  it('serializes a fresh channel-reader revision behind an older in-flight Host reconcile', async () => {
+    const reconciler = makeBasicReconciler()
+    const host = {
+      ...makeHost({ name: 'channel-revision-order' }),
+      uid: 'channel-revision-order-uid',
+      generation: 4,
+    }
+    const authority = { current: { known: true, generation: 9 } }
+    wireAuthoritativeHost(reconciler, host, authority)
+    const staleReconcileStarted = deferred()
+    const releaseStaleReconcile = deferred()
+    const order: string[] = []
+    let liveRevision = ''
+
+    vi.spyOn(reconciler as any, 'reconcileCore').mockImplementation(async () => {
+      order.push('reconcile-a:start')
+      staleReconcileStarted.resolve(undefined)
+      await releaseStaleReconcile.promise
+      liveRevision = 'revision-a'
+      order.push('reconcile-a:write')
+    })
+    vi.spyOn(reconciler as any, 'computeChannelReaderRevisionForHost').mockResolvedValue(
+      'revision-b'
+    )
+    const patchDeployment = vi
+      .spyOn((reconciler as any).appsApi, 'patchNamespacedDeployment')
+      .mockImplementation(async (request: any) => {
+        const { body } = request
+        liveRevision = body.spec.template.metadata.annotations['clerum.io/credentials-revision']
+        order.push('revision-b:patch')
+      })
+
+    const staleReconcile = reconciler.reconcile(host)
+    await staleReconcileStarted.promise
+    const freshRevision = reconciler.patchChannelReaderRevisionAnnotation(host.name)
+
+    // Give B the opportunity to patch before A is released. Without a shared
+    // Host lane, B writes first and A deterministically overwrites it.
+    await Promise.resolve()
+    await Promise.resolve()
+    releaseStaleReconcile.resolve(undefined)
+    await Promise.all([staleReconcile, freshRevision])
+
+    expect(liveRevision).toBe('revision-b')
+    expect(patchDeployment).toHaveBeenCalledOnce()
+    expect(order).toEqual(['reconcile-a:start', 'reconcile-a:write', 'revision-b:patch'])
   })
 
   it('rejects a queued delete when Host authority changes before admission', async () => {

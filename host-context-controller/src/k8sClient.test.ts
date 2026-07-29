@@ -307,6 +307,7 @@ describe('McpServerWatcher startup', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+    vi.restoreAllMocks()
     mocks.ensureDefaultPolicies.mockReset().mockResolvedValue(undefined)
     mocks.netPolFullReconcile.mockReset().mockResolvedValue(undefined)
     mocks.serverFullReconcile.mockReset().mockResolvedValue(undefined)
@@ -1256,6 +1257,27 @@ describe('McpServerWatcher startup', () => {
     await watcher.stop()
   })
 
+  it('keeps env-Secret reconciliation a no-op after stop', async () => {
+    const selected = {
+      name: 'stopped-secret-server',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/stopped-secret-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        envSecret: { name: 'shared-env' },
+      },
+    }
+    const watcher = new McpServerWatcher()
+    const reconciler = (watcher as any).reconciler
+    ;(watcher as any).servers.set(selected.name, selected)
+
+    await watcher.stop()
+    await watcher.reconcileByEnvSecret('shared-env', 'mcp-server')
+
+    expect(reconciler.reconcile).not.toHaveBeenCalled()
+  })
+
   it('admits an initial server without egress while another initial server waits on DNS', async () => {
     const dnsBlockedServer = {
       name: 'dns-blocked-server',
@@ -1969,6 +1991,7 @@ describe('McpServerWatcher startup', () => {
     await (watcher as any).runInitialNetworkPolicyConvergence()
     await vi.advanceTimersByTimeAsync(5000)
 
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2)
     expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
       [],
       [],
@@ -2153,7 +2176,7 @@ describe('McpServerWatcher startup', () => {
       })
     )
 
-    watcher.stop()
+    await watcher.stop()
     errorSpy.mockRestore()
   })
 
@@ -2419,6 +2442,7 @@ describe('McpServerWatcher external egress retries', () => {
   }
 
   beforeEach(() => {
+    vi.clearAllMocks()
     vi.useFakeTimers()
   })
 
@@ -2689,6 +2713,38 @@ describe('McpServerWatcher external egress retries', () => {
     watcher.stop()
   })
 
+  it('replays a retry against the watcher generation current when the timer executes', async () => {
+    const watcher = new McpServerWatcher()
+    const selected = {
+      name: 'generation-fenced-server',
+      namespace: 'mcp-server',
+      spec: {
+        ...serverObject.spec,
+        egressBindings: undefined,
+      },
+    }
+    ;(watcher as any).servers.set(selected.name, selected)
+    ;(watcher as any).mcpWatchGeneration = 41
+    const replay = vi
+      .spyOn(watcher as any, 'reconcileMcpServerWatchEvent')
+      .mockResolvedValue(undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    ;(watcher as any).scheduleExternalEgressRetry('ADDED', selected)
+    ;(watcher as any).mcpWatchGeneration = 42
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(replay).toHaveBeenCalledWith(
+      'MODIFIED',
+      expect.objectContaining({ name: selected.name }),
+      42,
+      expect.objectContaining({
+        isCurrent: expect.any(Function),
+        complete: expect.any(Function),
+      })
+    )
+    watcher.stop()
+  })
+
   it('reconciles external egress before runtime reconciliation on ADDED events', async () => {
     const watcher = new McpServerWatcher()
     const netPol = (watcher as any).netPolReconciler
@@ -2752,6 +2808,37 @@ describe('McpServerWatcher external egress retries', () => {
     )
     expect(reconciler.reconcileDelete).toHaveBeenCalledWith('redis-tools', 'mcp-server')
     expect(bindingReconciler.cleanupBindings).toHaveBeenCalledWith('redis-tools')
+
+    watcher.stop()
+  })
+
+  it('retries the full DELETE pipeline when authoritative absence is temporarily unavailable', async () => {
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).mcpServerCacheSynced = true
+    const netPol = (watcher as any).netPolReconciler
+    const reconciler = (watcher as any).reconciler
+    const bindingReconciler = (watcher as any).bindingReconciler
+    const unavailable = Object.assign(new Error('apiserver temporarily unavailable'), {
+      response: { statusCode: 503 },
+    })
+    mocks.getNamespacedCustomObject.mockRejectedValueOnce(unavailable)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const watchCallback = (watcher as any).getMcpServerWatchCallback()
+    await expect(watchCallback('DELETED', serverObject)).resolves.toBeUndefined()
+
+    expect(mocks.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
+    expect(netPol.cleanupExternalEgress).not.toHaveBeenCalled()
+    expect(reconciler.reconcileDelete).not.toHaveBeenCalled()
+    expect(bindingReconciler.cleanupBindings).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(netPol.cleanupExternalEgress).toHaveBeenCalledTimes(1)
+    expect(reconciler.reconcileDelete).toHaveBeenCalledWith('redis-tools', 'mcp-server')
+    expect(bindingReconciler.cleanupBindings).toHaveBeenCalledWith('redis-tools')
+    expect(mocks.getNamespacedCustomObject).toHaveBeenCalledTimes(4)
 
     watcher.stop()
   })
@@ -2993,51 +3080,60 @@ describe('McpServerWatcher external egress retries', () => {
   it('does not run parallel external egress reconciles for the same McpServer', async () => {
     const watcher = new McpServerWatcher()
     const netPol = (watcher as any).netPolReconciler
+    const mutationStarted = deferred()
+    const releaseMutation = deferred()
     const server = {
       name: 'redis-tools',
       namespace: 'mcp-server',
       spec: serverObject.spec,
     }
     ;(watcher as any).servers.set('redis-tools', server)
-    ;(watcher as any).externalEgressInFlight.set(
-      'mcp-server/redis-tools',
-      new Promise(() => undefined)
-    )
+    netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
+      mutationStarted.resolve(undefined)
+      await releaseMutation.promise
+    })
     vi.spyOn(Math, 'random').mockReturnValue(0)
 
+    const active = (watcher as any).runExternalEgressOnce('MODIFIED', server)
+    await mutationStarted.promise
     await (watcher as any).runExternalEgressResync()
 
-    expect(netPol.reconcileExternalEgress).not.toHaveBeenCalled()
+    expect(netPol.reconcileExternalEgress).toHaveBeenCalledOnce()
 
+    releaseMutation.resolve(undefined)
+    await active
     watcher.stop()
   })
 
   it('waits for already in-flight external egress before reconciling the current server', async () => {
     const watcher = new McpServerWatcher()
     const netPol = (watcher as any).netPolReconciler
+    const mutationStarted = deferred()
+    const releaseMutation = deferred()
     const server = {
       name: 'redis-tools',
       namespace: 'mcp-server',
       spec: serverObject.spec,
     }
-    let releaseExisting!: () => void
-    const existing = new Promise<void>(resolve => {
-      releaseExisting = resolve
+    netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
+      mutationStarted.resolve(undefined)
+      await releaseMutation.promise
     })
-    ;(watcher as any).externalEgressInFlight.set('mcp-server/redis-tools', existing)
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
-    const run = (watcher as any).runExternalEgressOnce('MODIFIED', server)
-    await Promise.resolve()
+    const active = (watcher as any).runExternalEgressOnce('MODIFIED', server)
+    await mutationStarted.promise
+    const waiting = (watcher as any).runExternalEgressOnce('MODIFIED', server)
+    await flushMicrotasks()
 
-    expect(netPol.reconcileExternalEgress).not.toHaveBeenCalled()
+    expect(netPol.reconcileExternalEgress).toHaveBeenCalledOnce()
     expect(warn).toHaveBeenCalledWith(
       '[K8s] Waiting for external egress reconcile for mcp-server/redis-tools; already in flight'
     )
 
-    releaseExisting()
-    await expect(run).resolves.toBeUndefined()
-    expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(1)
+    releaseMutation.resolve(undefined)
+    await Promise.all([active, waiting])
+    expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(2)
 
     warn.mockRestore()
     watcher.stop()
@@ -3046,21 +3142,27 @@ describe('McpServerWatcher external egress retries', () => {
   it('does not start another external egress mutation after stop releases an in-flight wait', async () => {
     const watcher = new McpServerWatcher()
     const netPol = (watcher as any).netPolReconciler
+    const mutationStarted = deferred()
+    const releaseMutation = deferred()
     const server = {
       name: 'redis-tools',
       namespace: 'mcp-server',
       spec: serverObject.spec,
     }
-    const existing = deferred()
-    ;(watcher as any).externalEgressInFlight.set('mcp-server/redis-tools', existing.promise)
+    netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
+      mutationStarted.resolve(undefined)
+      await releaseMutation.promise
+    })
 
-    const run = (watcher as any).runExternalEgressOnce('MODIFIED', server)
+    const active = (watcher as any).runExternalEgressOnce('MODIFIED', server)
+    await mutationStarted.promise
+    const waiting = (watcher as any).runExternalEgressOnce('MODIFIED', server)
     await flushMicrotasks()
     await watcher.stop()
-    existing.resolve(undefined)
-    await run
+    releaseMutation.resolve(undefined)
+    await Promise.all([active, waiting])
 
-    expect(netPol.reconcileExternalEgress).not.toHaveBeenCalled()
+    expect(netPol.reconcileExternalEgress).toHaveBeenCalledOnce()
   })
 })
 
@@ -3571,14 +3673,12 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
         lifecycleGeneration
       )
       expect((watcher as any).ccAppliedLifecycleGeneration).not.toBe(lifecycleGeneration)
-      expect((watcher as any).ccFleetRetryTimer).not.toBeNull()
       expect(mocks.hostReconcileHosts).not.toHaveBeenCalled()
 
       await vi.advanceTimersByTimeAsync(5000)
       await vi.waitFor(() => expect(mocks.hostReconcileHosts).toHaveBeenCalledOnce())
       expect(hostListAttempts).toBe(2)
       expect((watcher as any).ccAppliedLifecycleGeneration).toBe(lifecycleGeneration)
-      expect((watcher as any).ccFleetRetryTimer).toBeNull()
     } finally {
       errorSpy.mockRestore()
       watcher.stop()
@@ -3606,7 +3706,6 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       )
 
       expect((watcher as any).ccAppliedLifecycleGeneration).toBe(lifecycleGeneration)
-      expect((watcher as any).ccFleetRetryTimer).toBeNull()
       await vi.advanceTimersByTimeAsync(300000)
       expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
     } finally {
@@ -3644,7 +3743,6 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       await vi.advanceTimersByTimeAsync(5000)
       await vi.waitFor(() => expect(mocks.hostReconcileHosts).toHaveBeenCalledOnce())
       expect((watcher as any).ccAppliedLifecycleGeneration).toBe(lifecycleGeneration)
-      expect((watcher as any).ccFleetRetryTimer).toBeNull()
 
       await (watcher as any).performHostResync()
       expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(2)
@@ -3766,9 +3864,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
     try {
       const staleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
       await (watcher as any).requestHostFleetReconcile('fail-closed', staleGeneration)
-      expect((watcher as any).ccFleetRetryTimer).not.toBeNull()
       const currentGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
-      expect((watcher as any).ccFleetRetryTimer).toBeNull()
       await (watcher as any).requestHostFleetReconcile('recovered', currentGeneration)
       expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(2)
 
@@ -4268,7 +4364,9 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
       .mockResolvedValue(undefined)
     const watcher = new McpServerWatcher()
     ;(watcher as any).ccCacheSynced = true
-    ;(watcher as any).ccAppliedLifecycleGeneration = (watcher as any).ccLifecycleGeneration
+    ;(watcher as any).hostFleetScheduler.markLifecycleApplied(
+      (watcher as any).ccLifecycleGeneration
+    )
     const first = (watcher as any).runHostResync() as Promise<void>
 
     await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledTimes(1))
@@ -4361,11 +4459,11 @@ describe('McpServerWatcher Host periodic resync serialization', () => {
         if (requests.length === 1) await activePass.promise
       }
     )
-    ;(watcher as any).hostFleetInputRevision = 1
+    ;(watcher as any).hostFleetScheduler.bumpInputRevision()
     const first = (watcher as any).requestHostFleetReconcile('active') as Promise<void>
-    ;(watcher as any).hostFleetInputRevision = 2
+    ;(watcher as any).hostFleetScheduler.bumpInputRevision()
     const second = (watcher as any).requestHostFleetReconcile('pending-v2') as Promise<void>
-    ;(watcher as any).hostFleetInputRevision = 3
+    ;(watcher as any).hostFleetScheduler.bumpInputRevision()
     const third = (watcher as any).requestHostFleetReconcile('pending-v3') as Promise<void>
 
     activePass.resolve(undefined)
@@ -5550,7 +5648,8 @@ describe('McpServerWatcher Host watch generation', () => {
     ) as Promise<void>
 
     await vi.waitFor(() => expect(mocks.watch).toHaveBeenCalledOnce())
-    const internal = (watcher as any).hostFleetReconcileInFlight.promise as Promise<void>
+    const internal = (watcher as any).hostFleetScheduler.hostFleetReconcileInFlight
+      .promise as Promise<void>
     expect((watcher as any).hosts.has('snapshot-host')).toBe(true)
 
     watcher.stop()

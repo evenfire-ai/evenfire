@@ -14,9 +14,19 @@ import {
 } from './administrativeOutcomeReporter'
 import { BindingDef, BindingPolicyReconciler } from './bindingPolicyReconciler'
 import { config } from './config'
+import {
+  ExternalEgressConvergenceCoordinator,
+  type ExternalEgressRetryHandle,
+  type ExternalEgressWatchEventType,
+} from './externalEgressConvergenceCoordinator'
 import { gfsDefaultFactoryConfig } from './gfsConfig'
 import { GfsReconciler } from './gfsReconciler'
 import { ControlApiGfsSeedClient } from './gfsSeedClient'
+import {
+  type HostFleetReconcileMode,
+  type HostFleetReconcileRequest,
+  HostFleetScheduler,
+} from './hostFleetScheduler'
 import {
   HostFleetReconcileError,
   type HostReconcileSource,
@@ -95,16 +105,12 @@ const PLURAL_HOSTS = 'hosts'
 const PLURAL_SHAREDFILESYSTEMS = 'sharedfilesystems'
 const PLURAL_GLOBALFILESYSTEMS = 'globalfilesystems'
 const PLURAL_COMMUNICATIONCHANNELS = 'communicationchannels'
-const EXTERNAL_EGRESS_RETRY_DELAYS_MS = [5000, 15000, 30000]
-const EXTERNAL_EGRESS_RESYNC_MAX_CONCURRENCY = 10
-const EXTERNAL_EGRESS_RESYNC_JITTER_MS = 5000
 // Before readiness was decoupled, a failed initial McpServer or NetworkPolicy
 // sweep made provider.start() fail and Kubernetes restarted HCC. These retries
 // retain that convergence guarantee now that the sweeps run in the background.
 const INITIAL_CONVERGENCE_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 300000]
 const INVENTORY_CACHE_RECOVERY_RETRY_MS = 5000
 const COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS = 5000
-const COMMUNICATION_CHANNEL_FLEET_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 300000]
 const HOST_CACHE_RECOVERY_RETRY_MS = 5000
 const HOST_WATCH_RECONCILE_RETRY_DELAYS_MS = [5000, 15000, 30000]
 // Wake-pending Hosts get immediate per-Host admission after watch recovery
@@ -131,10 +137,8 @@ type HostSnapshot = {
   resourceVersion?: string
 }
 
-type HostFleetReconcileMode = 'full' | 'lifecycle'
 type HostInventoryRecoveryCause = 'cold-start' | 'watch-recovery'
 type HostWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
-type McpServerWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
 type InitialConvergenceLane = 'McpServer' | 'NetworkPolicy'
 
 type HostInventoryRecoveryRequest = {
@@ -192,80 +196,6 @@ class SerializedReconciliationQueue {
 type KeyedReconciliationQueue = {
   queue: SerializedReconciliationQueue
   references: number
-}
-
-class AsyncConcurrencyLimiter {
-  private active = 0
-  private readonly waiters: Array<() => void> = []
-
-  constructor(private readonly limit: number) {}
-
-  async run<T>(work: () => Promise<T>): Promise<T> {
-    if (this.active >= this.limit) {
-      await new Promise<void>(resolve => this.waiters.push(resolve))
-    }
-    this.active += 1
-    try {
-      return await work()
-    } finally {
-      this.active -= 1
-      this.waiters.shift()?.()
-    }
-  }
-}
-
-type ExternalEgressRetryIntent = {
-  sequence: number
-  type: McpServerWatchEventType
-  server: McpServerCRD
-}
-
-type HostFleetReconcileRequest = {
-  reason: string
-  mode: HostFleetReconcileMode
-  ccLifecycleGeneration?: number
-  inputRevision: number
-}
-
-type PendingHostFleetReconcile = HostFleetReconcileRequest & {
-  promise: Promise<void>
-  resolve: () => void
-}
-
-type ActiveHostFleetReconcile = HostFleetReconcileRequest & { promise: Promise<void> }
-
-function hostFleetRequestCovers(
-  active: HostFleetReconcileRequest,
-  requested: HostFleetReconcileRequest
-): boolean {
-  const modeCovered = active.mode === 'full' || requested.mode === 'lifecycle'
-  if (!modeCovered) return false
-  if (active.inputRevision !== requested.inputRevision) return false
-  if (requested.ccLifecycleGeneration === undefined) return true
-  return active.ccLifecycleGeneration === requested.ccLifecycleGeneration
-}
-
-function mergeHostFleetRequests(
-  pending: HostFleetReconcileRequest,
-  requested: HostFleetReconcileRequest
-): HostFleetReconcileRequest {
-  const pendingGeneration = pending.ccLifecycleGeneration
-  const requestedGeneration = requested.ccLifecycleGeneration
-  return {
-    reason: requested.reason,
-    mode: pending.mode === 'full' || requested.mode === 'full' ? 'full' : 'lifecycle',
-    inputRevision: Math.max(pending.inputRevision, requested.inputRevision),
-    ccLifecycleGeneration:
-      pendingGeneration === undefined
-        ? requestedGeneration
-        : requestedGeneration === undefined
-          ? pendingGeneration
-          : Math.max(pendingGeneration, requestedGeneration),
-  }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 type McpServerWatchObject = {
@@ -719,17 +649,16 @@ export class McpServerWatcher implements McpServerProvider {
   private ccWatchGeneration = 0
   private ccCacheRecoveryTimer: ReturnType<typeof setTimeout> | null = null
   private ccCacheRecoveryInFlight: Promise<boolean> | null = null
-  private ccLifecycleGeneration = 0
-  private ccAppliedLifecycleGeneration = -1
-  private ccFleetRetryTimer: ReturnType<typeof setTimeout> | null = null
-  private ccFleetRetryAttempt = 0
-  private hostFleetReconcileInFlight: ActiveHostFleetReconcile | null = null
-  private hostFleetReconcilePending: PendingHostFleetReconcile | null = null
-  private hostFleetInputRevision = 0
-  private resolveHostFleetShutdown: () => void = () => {}
-  private readonly hostFleetShutdown = new Promise<void>(resolve => {
-    this.resolveHostFleetShutdown = resolve
+  private readonly hostFleetScheduler = new HostFleetScheduler({
+    perform: request => this.performHostFleetReconcile(request),
+    recordRequest: result => hostFleetRequestsTotal.inc({ result }),
   })
+  private get ccLifecycleGeneration(): number {
+    return this.hostFleetScheduler.currentLifecycleGeneration
+  }
+  private get ccAppliedLifecycleGeneration(): number {
+    return this.hostFleetScheduler.appliedLifecycleGeneration
+  }
   private hostResyncInFlight: Promise<void> | null = null
   private changeCallback?: () => void
   private stopped = false
@@ -741,15 +670,16 @@ export class McpServerWatcher implements McpServerProvider {
   private gfsReconciler: GfsReconciler
   private readonly infrastructureTelemetryReporter?: InfrastructureTelemetryReporter
   private readonly administrativeOutcomeReporter?: AdministrativeOutcomeReporter
-  private readonly externalEgressRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  private readonly externalEgressRetryAttempts = new Map<string, number>()
-  private readonly externalEgressRetryIntents = new Map<string, ExternalEgressRetryIntent>()
-  private externalEgressRetrySequence = 0
-  private readonly externalEgressRetryLimiter = new AsyncConcurrencyLimiter(
-    EXTERNAL_EGRESS_RESYNC_MAX_CONCURRENCY
-  )
-  private readonly externalEgressInFlight = new Map<string, Promise<void>>()
-  private externalEgressResyncInFlight: Promise<void> | null = null
+  private readonly externalEgressCoordinator = new ExternalEgressConvergenceCoordinator({
+    listServers: () => [...this.servers.values()],
+    getCurrentServer: name => this.servers.get(name),
+    sameDesiredRevision: sameMcpServerDesiredRevision,
+    enqueue: (server, work) => this.enqueueMcpServerReconciliation(server, work),
+    mutate: (type, server, options) =>
+      this.performExternalEgressMutation(type, server, options.deleteAllowed),
+    replay: (type, server, retry) =>
+      this.reconcileMcpServerWatchEvent(type, server, this.mcpWatchGeneration, retry),
+  })
   private readonly initialConvergenceRetryTimers = new Map<
     InitialConvergenceLane,
     ReturnType<typeof setTimeout>
@@ -770,7 +700,6 @@ export class McpServerWatcher implements McpServerProvider {
   // rotation eventually catches up even after a missed MODIFIED event.
   // Disabled when interval <= 0 (tests).
   private resyncTimer: ReturnType<typeof setInterval> | null = null
-  private externalEgressResyncTimer: ReturnType<typeof setInterval> | null = null
   // Periodic SharedFileSystem resync (#592): the SFS watch fires only on SFS CRD
   // changes, not on PVC binding / wfc pod readiness, so a SharedFileSystem that
   // reported Initializing/Degraded needs a periodic re-reconcile to converge to a
@@ -1017,6 +946,24 @@ export class McpServerWatcher implements McpServerProvider {
     })
   }
 
+  private async authorizeMcpServerDeleteOrRetry(
+    server: McpServerCRD,
+    watchGeneration: number
+  ): Promise<boolean> {
+    try {
+      return await this.mcpServerAbsentForDelete(server.name, server.namespace, watchGeneration)
+    } catch (error) {
+      console.error(
+        `[K8s] Authoritative absence check failed for deleted McpServer ${server.name}; ` +
+          'cleanup blocked until retry:',
+        error
+      )
+      this.scheduleExternalEgressRetry('DELETED', server)
+      this.changeCallback?.()
+      return false
+    }
+  }
+
   private async contextAbsentForDelete(
     name: string,
     namespace: string,
@@ -1188,7 +1135,7 @@ export class McpServerWatcher implements McpServerProvider {
         if (this.stopped) return false
         await this.restartContextWatch(snapshot)
         if (this.stopped) return false
-        this.hostFleetInputRevision += 1
+        this.hostFleetScheduler.bumpInputRevision()
         void this.runInitialNetworkPolicyConvergence()
         void this.runInitialSharedFileSystemConvergence()
         if (this.hostCacheSynced) {
@@ -1239,57 +1186,15 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   private beginCommunicationChannelLifecycleTransition(): number {
-    this.ccLifecycleGeneration += 1
-    this.ccFleetRetryAttempt = 0
-    if (this.ccFleetRetryTimer) {
-      clearTimeout(this.ccFleetRetryTimer)
-      this.ccFleetRetryTimer = null
-    }
-    return this.ccLifecycleGeneration
+    return this.hostFleetScheduler.beginLifecycleTransition()
   }
 
   private markCommunicationChannelLifecycleApplied(generation: number): void {
-    if (generation !== this.ccLifecycleGeneration) return
-    this.ccAppliedLifecycleGeneration = generation
-    this.ccFleetRetryAttempt = 0
-    if (this.ccFleetRetryTimer) {
-      clearTimeout(this.ccFleetRetryTimer)
-      this.ccFleetRetryTimer = null
-    }
+    this.hostFleetScheduler.markLifecycleApplied(generation)
   }
 
   private scheduleCommunicationChannelFleetRetry(request: HostFleetReconcileRequest): void {
-    const generation = request.ccLifecycleGeneration
-    if (generation === undefined) return
-    if (
-      this.stopped ||
-      generation !== this.ccLifecycleGeneration ||
-      generation === this.ccAppliedLifecycleGeneration ||
-      this.ccFleetRetryTimer
-    ) {
-      return
-    }
-    const delayIndex = Math.min(
-      this.ccFleetRetryAttempt,
-      COMMUNICATION_CHANNEL_FLEET_RETRY_DELAYS_MS.length - 1
-    )
-    const retryDelay = COMMUNICATION_CHANNEL_FLEET_RETRY_DELAYS_MS[delayIndex]
-    this.ccFleetRetryAttempt += 1
-    this.ccFleetRetryTimer = setTimeout(() => {
-      this.ccFleetRetryTimer = null
-      if (
-        this.stopped ||
-        generation !== this.ccLifecycleGeneration ||
-        generation === this.ccAppliedLifecycleGeneration
-      ) {
-        return
-      }
-      void this.requestHostFleetReconcile(
-        'CommunicationChannel lifecycle convergence retry',
-        generation,
-        request.mode
-      )
-    }, retryDelay)
+    this.hostFleetScheduler.scheduleLifecycleRetry(request)
   }
 
   /**
@@ -1843,80 +1748,7 @@ export class McpServerWatcher implements McpServerProvider {
     ccLifecycleGeneration?: number,
     mode?: HostFleetReconcileMode
   ): Promise<void> {
-    if (this.stopped) return Promise.resolve()
-    const requestMode = mode ?? (ccLifecycleGeneration === undefined ? 'full' : 'lifecycle')
-    if (
-      ccLifecycleGeneration !== undefined &&
-      (ccLifecycleGeneration !== this.ccLifecycleGeneration ||
-        (requestMode === 'lifecycle' &&
-          ccLifecycleGeneration === this.ccAppliedLifecycleGeneration))
-    ) {
-      return Promise.resolve()
-    }
-
-    const request: HostFleetReconcileRequest = {
-      reason,
-      mode: requestMode,
-      ccLifecycleGeneration,
-      inputRevision: this.hostFleetInputRevision,
-    }
-    const active = this.hostFleetReconcileInFlight
-    if (!active) {
-      hostFleetRequestsTotal.inc({ result: 'started' })
-      return this.waitForHostFleetOrShutdown(this.startHostFleetReconcile(request))
-    }
-    if (hostFleetRequestCovers(active, request)) {
-      hostFleetRequestsTotal.inc({ result: 'coalesced' })
-      return this.waitForHostFleetOrShutdown(active.promise)
-    }
-
-    if (!this.hostFleetReconcilePending) {
-      let resolve!: () => void
-      const promise = new Promise<void>(resolvePromise => {
-        resolve = resolvePromise
-      })
-      this.hostFleetReconcilePending = {
-        ...request,
-        promise,
-        resolve,
-      }
-    } else {
-      const merged = mergeHostFleetRequests(this.hostFleetReconcilePending, request)
-      this.hostFleetReconcilePending.reason = merged.reason
-      this.hostFleetReconcilePending.mode = merged.mode
-      this.hostFleetReconcilePending.ccLifecycleGeneration = merged.ccLifecycleGeneration
-      this.hostFleetReconcilePending.inputRevision = merged.inputRevision
-    }
-    // The request did not start its own pass; it is queued behind the active one.
-    hostFleetRequestsTotal.inc({ result: 'coalesced' })
-    return this.waitForHostFleetOrShutdown(this.hostFleetReconcilePending.promise)
-  }
-
-  private waitForHostFleetOrShutdown(coverage: Promise<void>): Promise<void> {
-    return Promise.race([coverage, this.hostFleetShutdown])
-  }
-
-  private startHostFleetReconcile(request: HostFleetReconcileRequest): Promise<void> {
-    const promise = this.performHostFleetReconcile(request)
-    const active: ActiveHostFleetReconcile = { ...request, promise }
-    this.hostFleetReconcileInFlight = active
-
-    const settle = () => {
-      if (this.hostFleetReconcileInFlight !== active) return
-      this.hostFleetReconcileInFlight = null
-      const pending = this.hostFleetReconcilePending
-      this.hostFleetReconcilePending = null
-      if (!pending) return
-      if (this.stopped) {
-        pending.resolve()
-        return
-      }
-      hostFleetRequestsTotal.inc({ result: 'trailing' })
-      const trailing = this.startHostFleetReconcile(pending)
-      void trailing.then(pending.resolve, pending.resolve)
-    }
-    void promise.then(settle, settle)
-    return promise
+    return this.hostFleetScheduler.request(reason, ccLifecycleGeneration, mode)
   }
 
   private contextsReferencingSfs(sfsName: string): Array<{ namespace: string; name: string }> {
@@ -2377,8 +2209,10 @@ export class McpServerWatcher implements McpServerProvider {
     }
 
     // SFS/GFS retain their established eventual-resync contract. McpServer,
-    // Context, CommunicationChannel and Host use authoritative LIST-to-WATCH
-    // handoffs before readiness; full convergence remains outside readiness.
+    // Context and Host require authoritative LIST-to-WATCH handoffs before
+    // readiness. CommunicationChannel recovery instead fails safe by preserving
+    // replicas and disabling stateless suspension; full convergence remains
+    // outside readiness for every inventory.
     await this.startSharedFileSystemWatch()
     await this.startGlobalFileSystemWatch()
 
@@ -2444,14 +2278,7 @@ export class McpServerWatcher implements McpServerProvider {
     }
 
     const externalEgressResyncSec = config.externalEgressResyncIntervalSec
-    if (externalEgressResyncSec > 0) {
-      this.externalEgressResyncTimer = setInterval(() => {
-        void this.runExternalEgressResync()
-      }, externalEgressResyncSec * 1000)
-      console.log(
-        `[K8s] External egress periodic DNS resync enabled (every ${externalEgressResyncSec}s)`
-      )
-    }
+    this.externalEgressCoordinator.startPeriodicResync(externalEgressResyncSec)
 
     // Full convergence is observable and retains each lane's existing retry or
     // periodic-resync contract, but it no longer extends provider.start() or
@@ -2477,7 +2304,7 @@ export class McpServerWatcher implements McpServerProvider {
     try {
       const initialServers = [...this.servers.values()]
       const initialExternalEgressGates =
-        this.reconcileInitialExternalEgressBeforeRuntime(initialServers)
+        this.externalEgressCoordinator.prepareStartupGates(initialServers)
       if (this.stopped) return
       console.log('[K8s] Running initial McpServer background reconciliation...')
       await this.reconciler.fullReconcile(initialServers, {
@@ -2487,10 +2314,7 @@ export class McpServerWatcher implements McpServerProvider {
             name: serverName,
             namespace: config.namespace,
           }
-          const externalEgressReady = initialExternalEgressGates.get(
-            this.externalEgressRetryKey(laneOwner)
-          )
-          if (externalEgressReady && !(await externalEgressReady)) return
+          if (!(await initialExternalEgressGates.waitFor(laneOwner))) return
           if (this.stopped) return
           await this.enqueueMcpServerReconciliation(laneOwner, work)
         },
@@ -3031,128 +2855,7 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   private runExternalEgressResync(): Promise<void> {
-    if (this.externalEgressResyncInFlight) return this.externalEgressResyncInFlight
-    const run = this.runExternalEgressResyncCore().finally(() => {
-      if (this.externalEgressResyncInFlight === run) {
-        this.externalEgressResyncInFlight = null
-      }
-    })
-    this.externalEgressResyncInFlight = run
-    return run
-  }
-
-  private async runExternalEgressResyncCore(): Promise<void> {
-    if (this.stopped) return
-    const servers = [...this.servers.values()]
-      .filter(server => (server.spec.egressBindings?.length ?? 0) > 0)
-      .sort((a, b) => `${a.namespace}/${a.name}`.localeCompare(`${b.namespace}/${b.name}`))
-
-    if (servers.length === 0) return
-
-    console.log(`[K8s] Periodic external egress DNS resync: ${servers.length} McpServer(s)`)
-    let index = 0
-    const workers = Array.from(
-      { length: Math.min(EXTERNAL_EGRESS_RESYNC_MAX_CONCURRENCY, servers.length) },
-      async () => {
-        while (!this.stopped) {
-          const server = servers[index++]
-          if (!server) return
-          const key = this.externalEgressRetryKey(server)
-          if (this.externalEgressInFlight.has(key)) {
-            console.log(`[K8s] Skipping external egress resync for ${key}; reconcile in flight`)
-            continue
-          }
-          const jitterMs = Math.floor(Math.random() * EXTERNAL_EGRESS_RESYNC_JITTER_MS)
-          if (jitterMs > 0) await delay(jitterMs)
-          if (this.stopped) return
-          await this.enqueueMcpServerReconciliation(server, async () => {
-            // The fleet snapshot above selects work only. Resolve desired state
-            // after entering the same per-server FIFO lane as watch and retry
-            // effects, so a newer revision can never be overwritten by stale
-            // periodic work.
-            const current = this.servers.get(server.name)
-            if (
-              this.stopped ||
-              !current ||
-              current.namespace !== server.namespace ||
-              (current.spec.egressBindings?.length ?? 0) === 0
-            ) {
-              return
-            }
-            try {
-              // A pending intent represents the full ordered pipeline, not only
-              // DNS state. Continue it in this same per-server FIFO lane so a
-              // successful periodic refresh also heals runtime and bindings.
-              const retryIntent = this.externalEgressRetryIntents.get(key)
-              if (retryIntent) {
-                await this.retryExternalEgressCore(retryIntent)
-                return
-              }
-              await this.runExternalEgressOnce('MODIFIED', current, {
-                clearRetryOnSuccess: false,
-              })
-            } catch (error) {
-              console.error(`[K8s] External egress periodic resync failed for ${key}:`, error)
-              this.scheduleExternalEgressRetry('MODIFIED', current)
-            }
-          })
-        }
-      }
-    )
-    await Promise.all(workers)
-  }
-
-  private reconcileInitialExternalEgressBeforeRuntime(
-    servers: McpServerCRD[]
-  ): Map<string, Promise<boolean>> {
-    const gates = new Map<string, Promise<boolean>>()
-    const serversWithExternalEgress = servers
-      .filter(server => (server.spec.egressBindings?.length ?? 0) > 0)
-      .sort((a, b) => `${a.namespace}/${a.name}`.localeCompare(`${b.namespace}/${b.name}`))
-
-    if (serversWithExternalEgress.length === 0) return gates
-
-    console.log(
-      `[K8s] Reconciling external egress before startup runtime reconciliation for ` +
-        `${serversWithExternalEgress.length} McpServer(s)`
-    )
-
-    const limiter = new AsyncConcurrencyLimiter(EXTERNAL_EGRESS_RESYNC_MAX_CONCURRENCY)
-    for (const selected of serversWithExternalEgress) {
-      const key = this.externalEgressRetryKey(selected)
-      const gate = limiter.run(async () => {
-        let ready = false
-        await this.enqueueMcpServerReconciliation(selected, async () => {
-          if (this.stopped) return
-          const current = this.servers.get(selected.name)
-          if (
-            !current ||
-            current.namespace !== selected.namespace ||
-            !sameMcpServerDesiredRevision(selected, current)
-          ) {
-            return
-          }
-          try {
-            await this.runExternalEgressOnce('MODIFIED', current)
-            const latest = this.servers.get(selected.name)
-            ready =
-              !this.stopped &&
-              latest !== undefined &&
-              sameMcpServerDesiredRevision(selected, latest)
-          } catch (error) {
-            console.error(
-              `[K8s] Initial external egress reconciliation failed for ${key}; ` +
-                'runtime reconciliation will stay blocked until retry succeeds:',
-              error
-            )
-            this.scheduleExternalEgressRetry('MODIFIED', current)
-          }
-        })
-        return ready
-      })
-      gates.set(key, gate)
-    }
-    return gates
+    return this.externalEgressCoordinator.runResync()
   }
 
   /**
@@ -3197,25 +2900,23 @@ export class McpServerWatcher implements McpServerProvider {
       }
 
       await this.enqueueMcpServerReconciliation(server, () =>
-        this.reconcileMcpServerWatchEvent(type, server, watchGeneration)
+        this.reconcileMcpServerWatchEvent(
+          type as ExternalEgressWatchEventType,
+          server,
+          watchGeneration
+        )
       )
     }
   }
 
   private async reconcileMcpServerWatchEvent(
-    type: string,
+    type: ExternalEgressWatchEventType,
     server: McpServerCRD,
     watchGeneration: number,
-    retryIntent?: ExternalEgressRetryIntent
+    retry?: ExternalEgressRetryHandle
   ): Promise<void> {
     if (this.stopped || watchGeneration !== this.mcpWatchGeneration) return
-    if (
-      retryIntent &&
-      this.externalEgressRetryIntents.get(this.externalEgressRetryKey(retryIntent.server))
-        ?.sequence !== retryIntent.sequence
-    ) {
-      return
-    }
+    if (retry && !retry.isCurrent()) return
     const current = this.servers.get(server.name)
     if (type === 'DELETED') {
       // A same-name recreation may already be accepted while this callback
@@ -3229,11 +2930,10 @@ export class McpServerWatcher implements McpServerProvider {
     // External egress is part of the workload's pre-start contract. Reconcile
     // it before HCC creates or updates any managed runtime Deployment so a
     // stdio MCP with egressBindings cannot start before ExternalEgressReady.
+    let retryCompletion: ExternalEgressRetryHandle | undefined
     if (type === 'ADDED' || type === 'MODIFIED') {
       try {
-        await this.runExternalEgressOnce(type, server, {
-          clearRetryOnSuccess: retryIntent === undefined,
-        })
+        retryCompletion = await this.runExternalEgressOnce(type, server, { retry })
       } catch (error) {
         console.error(
           `[K8s] External egress reconciliation failed for ${server.name}; runtime reconciliation blocked:`,
@@ -3246,11 +2946,11 @@ export class McpServerWatcher implements McpServerProvider {
     } else {
       const deleteAllowed = () =>
         this.mcpServerAbsentForDelete(server.name, server.namespace, watchGeneration)
-      if (!(await deleteAllowed())) return
+      if (!(await this.authorizeMcpServerDeleteOrRetry(server, watchGeneration))) return
       try {
-        await this.runExternalEgressOnce(type, server, {
-          clearRetryOnSuccess: retryIntent === undefined,
+        retryCompletion = await this.runExternalEgressOnce(type, server, {
           deleteAllowed,
+          retry,
         })
       } catch (error) {
         console.error(
@@ -3266,9 +2966,7 @@ export class McpServerWatcher implements McpServerProvider {
     if (type === 'ADDED' || type === 'MODIFIED') {
       if (!this.mcpServerWatchEffectIsCurrent(server, watchGeneration)) return
       server = this.servers.get(server.name)!
-    } else if (
-      !(await this.mcpServerAbsentForDelete(server.name, server.namespace, watchGeneration))
-    ) {
+    } else if (!(await this.authorizeMcpServerDeleteOrRetry(server, watchGeneration))) {
       return
     }
 
@@ -3289,9 +2987,7 @@ export class McpServerWatcher implements McpServerProvider {
     if (type === 'ADDED' || type === 'MODIFIED') {
       if (!this.mcpServerWatchEffectIsCurrent(server, watchGeneration)) return
       server = this.servers.get(server.name)!
-    } else if (
-      !(await this.mcpServerAbsentForDelete(server.name, server.namespace, watchGeneration))
-    ) {
+    } else if (!(await this.authorizeMcpServerDeleteOrRetry(server, watchGeneration))) {
       return
     }
 
@@ -3343,7 +3039,7 @@ export class McpServerWatcher implements McpServerProvider {
       return
     }
 
-    if (retryIntent) this.clearExternalEgressRetryIntent(retryIntent)
+    retryCompletion?.complete()
     this.changeCallback?.()
   }
 
@@ -3381,154 +3077,42 @@ export class McpServerWatcher implements McpServerProvider {
     return watchGeneration
   }
 
-  private externalEgressRetryKey(server: Pick<McpServerCRD, 'name' | 'namespace'>): string {
-    return `${server.namespace}/${server.name}`
-  }
-
   private mcpServerWatchEffectIsCurrent(expected: McpServerCRD, watchGeneration: number): boolean {
     if (this.stopped || watchGeneration !== this.mcpWatchGeneration) return false
     const current = this.servers.get(expected.name)
     return current !== undefined && sameMcpServerDesiredRevision(expected, current)
   }
 
-  private async runExternalEgressOnce(
-    type: string,
+  private runExternalEgressOnce(
+    type: ExternalEgressWatchEventType,
     server: McpServerCRD,
     options: {
-      clearRetryOnSuccess?: boolean
       deleteAllowed?: () => Promise<boolean>
+      retry?: ExternalEgressRetryHandle
     } = {}
-  ): Promise<void> {
-    if (this.stopped) return
-    const clearRetryOnSuccess = options.clearRetryOnSuccess ?? true
-    const key = this.externalEgressRetryKey(server)
-    const existing = this.externalEgressInFlight.get(key)
-    if (existing) {
-      console.warn(`[K8s] Waiting for external egress reconcile for ${key}; already in flight`)
-      await existing
-      if (this.stopped) return
-    }
-
-    const run = (async () => {
-      if (type === 'DELETED') {
-        await this.netPolReconciler.cleanupExternalEgress(
-          server.name,
-          server.namespace,
-          undefined,
-          options.deleteAllowed
-        )
-      } else {
-        await this.netPolReconciler.reconcileExternalEgress(server)
-      }
-    })()
-    this.externalEgressInFlight.set(key, run)
-    try {
-      await run
-      if (clearRetryOnSuccess) {
-        this.clearExternalEgressRetry(server)
-      }
-    } finally {
-      if (this.externalEgressInFlight.get(key) === run) {
-        this.externalEgressInFlight.delete(key)
-      }
-    }
-  }
-
-  private clearExternalEgressRetry(server: Pick<McpServerCRD, 'name' | 'namespace'>): void {
-    const key = this.externalEgressRetryKey(server)
-    const timer = this.externalEgressRetryTimers.get(key)
-    if (timer) {
-      clearTimeout(timer)
-      this.externalEgressRetryTimers.delete(key)
-    }
-    this.externalEgressRetryAttempts.delete(key)
-    this.externalEgressRetryIntents.delete(key)
-  }
-
-  private clearExternalEgressRetryIntent(intent: ExternalEgressRetryIntent): void {
-    const key = this.externalEgressRetryKey(intent.server)
-    if (this.externalEgressRetryIntents.get(key)?.sequence !== intent.sequence) return
-    this.clearExternalEgressRetry(intent.server)
-  }
-
-  private sameExternalEgressRetryTarget(
-    previous: ExternalEgressRetryIntent,
-    type: McpServerWatchEventType,
-    server: McpServerCRD
-  ): boolean {
-    const previousPresent = previous.type !== 'DELETED'
-    const nextPresent = type !== 'DELETED'
-    return previousPresent === nextPresent && sameMcpServerDesiredRevision(previous.server, server)
+  ): Promise<ExternalEgressRetryHandle | undefined> {
+    return this.externalEgressCoordinator.reconcile(type, server, options)
   }
 
   private scheduleExternalEgressRetry(type: string, server: McpServerCRD): void {
-    if (type !== 'ADDED' && type !== 'MODIFIED' && type !== 'DELETED') return
-    if (this.stopped) return
-
-    const cached = this.servers.get(server.name)
-    const retryType: McpServerWatchEventType =
-      cached && cached.namespace === server.namespace
-        ? type === 'ADDED' && sameMcpServerDesiredRevision(server, cached)
-          ? 'ADDED'
-          : 'MODIFIED'
-        : 'DELETED'
-    const retryServer = cached && cached.namespace === server.namespace ? cached : server
-    const key = this.externalEgressRetryKey(server)
-    const previousIntent = this.externalEgressRetryIntents.get(key)
-    if (
-      previousIntent &&
-      !this.sameExternalEgressRetryTarget(previousIntent, retryType, retryServer)
-    ) {
-      this.externalEgressRetryAttempts.delete(key)
-    }
-    const intent: ExternalEgressRetryIntent = {
-      sequence: ++this.externalEgressRetrySequence,
-      type: retryType,
-      server: retryServer,
-    }
-    this.externalEgressRetryIntents.set(key, intent)
-    if (this.externalEgressRetryTimers.has(key)) return
-
-    const attempt = Math.min(
-      (this.externalEgressRetryAttempts.get(key) ?? 0) + 1,
-      EXTERNAL_EGRESS_RETRY_DELAYS_MS.length
-    )
-    const delayMs = EXTERNAL_EGRESS_RETRY_DELAYS_MS[attempt - 1]
-
-    this.externalEgressRetryAttempts.set(key, attempt)
-    const capped = attempt === EXTERNAL_EGRESS_RETRY_DELAYS_MS.length
-    console.warn(
-      `[K8s] Scheduling external egress retry ${attempt}/${EXTERNAL_EGRESS_RETRY_DELAYS_MS.length}` +
-        `${capped ? ' (capped)' : ''} ` +
-        `for McpServer "${server.name}" in ${delayMs}ms`
-    )
-
-    const timer = setTimeout(() => {
-      this.externalEgressRetryTimers.delete(key)
-      const currentIntent = this.externalEgressRetryIntents.get(key)
-      if (currentIntent) {
-        void this.externalEgressRetryLimiter.run(() => this.retryExternalEgress(currentIntent))
-      }
-    }, delayMs)
-    this.externalEgressRetryTimers.set(key, timer)
+    this.externalEgressCoordinator.scheduleRetry(type, server)
   }
 
-  private retryExternalEgress(intent: ExternalEgressRetryIntent): Promise<void> {
-    return this.enqueueMcpServerReconciliation(intent.server, () =>
-      this.retryExternalEgressCore(intent)
-    )
-  }
-
-  private async retryExternalEgressCore(intent: ExternalEgressRetryIntent): Promise<void> {
-    if (this.stopped) return
-    const key = this.externalEgressRetryKey(intent.server)
-    if (this.externalEgressRetryIntents.get(key)?.sequence !== intent.sequence) return
-
-    const current = this.servers.get(intent.server.name)
-    const type: McpServerWatchEventType =
-      current && current.namespace === intent.server.namespace ? 'MODIFIED' : 'DELETED'
-    const server = type === 'DELETED' ? intent.server : current!
-    await this.reconcileMcpServerWatchEvent(type, server, this.mcpWatchGeneration, intent)
+  private async performExternalEgressMutation(
+    type: ExternalEgressWatchEventType,
+    server: McpServerCRD,
+    deleteAllowed?: () => Promise<boolean>
+  ): Promise<void> {
+    if (type === 'DELETED') {
+      await this.netPolReconciler.cleanupExternalEgress(
+        server.name,
+        server.namespace,
+        undefined,
+        deleteAllowed
+      )
+      return
+    }
+    await this.netPolReconciler.reconcileExternalEgress(server)
   }
 
   /**
@@ -3756,22 +3340,17 @@ export class McpServerWatcher implements McpServerProvider {
    */
   async stop(): Promise<void> {
     this.stopped = true
+    this.externalEgressCoordinator.stop()
     this.retireMcpServerWatch()
     this.retireContextWatch()
     this.ccCacheSynced = false
     this.hostCacheSynced = false
     this.hostWatchGeneration += 1
     this.ccWatchGeneration += 1
-    this.resolveHostFleetShutdown()
-    this.hostFleetReconcilePending?.resolve()
-    this.hostFleetReconcilePending = null
+    this.hostFleetScheduler.stop()
     if (this.ccCacheRecoveryTimer) {
       clearTimeout(this.ccCacheRecoveryTimer)
       this.ccCacheRecoveryTimer = null
-    }
-    if (this.ccFleetRetryTimer) {
-      clearTimeout(this.ccFleetRetryTimer)
-      this.ccFleetRetryTimer = null
     }
     if (this.hostCacheRecoveryTimer) {
       clearTimeout(this.hostCacheRecoveryTimer)
@@ -3799,17 +3378,6 @@ export class McpServerWatcher implements McpServerProvider {
       clearInterval(this.gfsResyncTimer)
       this.gfsResyncTimer = null
     }
-    if (this.externalEgressResyncTimer) {
-      clearInterval(this.externalEgressResyncTimer)
-      this.externalEgressResyncTimer = null
-    }
-    for (const timer of this.externalEgressRetryTimers.values()) {
-      clearTimeout(timer)
-    }
-    this.externalEgressRetryTimers.clear()
-    this.externalEgressRetryAttempts.clear()
-    this.externalEgressRetryIntents.clear()
-    this.externalEgressInFlight.clear()
     for (const timer of this.initialConvergenceRetryTimers.values()) {
       clearTimeout(timer)
     }
