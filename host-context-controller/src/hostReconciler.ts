@@ -77,6 +77,35 @@ export type HostReconcileSource = 'urgent' | 'retry' | 'fleet'
 /** Immutable Host watch authority snapshot captured at a full-pass boundary. */
 export type HostWatchAuthoritySnapshot = { known: boolean; generation: number }
 
+class HostInventoryAuthorityUnavailableError extends Error {
+  constructor(
+    action: string,
+    captured: HostWatchAuthoritySnapshot,
+    current: HostWatchAuthoritySnapshot
+  ) {
+    super(
+      `Host inventory authority changed before ${action} admission ` +
+        `(captured known=${captured.known} generation=${captured.generation}, ` +
+        `current known=${current.known} generation=${current.generation})`
+    )
+    this.name = 'HostInventoryAuthorityUnavailableError'
+  }
+}
+
+class HostMutationIdentityChangedError extends Error {
+  constructor(action: string, hostName: string) {
+    super(`Host identity changed before ${action} admission for "${hostName}"`)
+    this.name = 'HostMutationIdentityChangedError'
+  }
+}
+
+class HostMutationSpecRevisionChangedError extends Error {
+  constructor(action: string, hostName: string) {
+    super(`Host spec generation changed before ${action} admission for "${hostName}"`)
+    this.name = 'HostMutationSpecRevisionChangedError'
+  }
+}
+
 /**
  * The exact §13.2 destructive-cleanup predicate. Deletion of an orphan Host's
  * owned bundle is permitted ONLY when watch authority is known, the watch
@@ -419,7 +448,9 @@ export class HostReconciler {
       now: this.now,
       countCommunicationChannels: hostName => this.countCommunicationChannels(hostName),
       isCommunicationChannelCacheSynced: () => this.ccCacheSyncedFn(),
-      reconcileCore: host => this.reconcileCore(host),
+      reconcileCore: (host, revalidate) => this.reconcileCore(host, revalidate),
+      prepareHostMutationAdmission: (action, host) =>
+        this.prepareHostMutationAdmission(action, host),
       onLifecycleStatusCommitted: (host, lifecycle) => {
         const occurredAt = this.now().toISOString()
         this.infrastructureTelemetryReporter?.enqueueHealthTransition({
@@ -492,6 +523,66 @@ export class HostReconciler {
    */
   setHostWatchAuthority(fn: () => HostWatchAuthoritySnapshot): void {
     this.hostWatchAuthority = fn
+  }
+
+  /**
+   * A standalone HostReconciler receives an explicit Host object and has no
+   * watch-backed cache to fence. Once a live-cache resolver is wired (the
+   * production McpServerWatcher path), every mutation captures and revalidates
+   * Host LIST -> WATCH authority at its actual serializer admission boundary.
+   */
+  private captureHostMutationAuthority(): HostWatchAuthoritySnapshot | null {
+    return this.resolveCurrentHost === null ? null : this.hostWatchAuthority()
+  }
+
+  private requireHostMutationAuthority(
+    action: string,
+    captured: HostWatchAuthoritySnapshot | null
+  ): void {
+    if (captured === null) return
+    const current = this.hostWatchAuthority()
+    if (!captured.known || !current.known || captured.generation !== current.generation) {
+      throw new HostInventoryAuthorityUnavailableError(action, captured, current)
+    }
+  }
+
+  /**
+   * Heartbeat writers own their serializer inside StatelessLifecycleExecutor.
+   * Capture authority here at dispatch, then let the returned closure re-check
+   * it and resolve the current same-UID Host when that serializer admits the
+   * work. This preserves one queue per Host without a nested-lock deadlock.
+   */
+  private prepareHostMutationAdmission(action: string, requested: HostCRD): () => HostCRD {
+    const capturedAuthority = this.captureHostMutationAuthority()
+    return this.makeHostMutationAdmission(action, requested, capturedAuthority)
+  }
+
+  private makeHostMutationAdmission(
+    action: string,
+    requested: HostCRD,
+    capturedAuthority: HostWatchAuthoritySnapshot | null
+  ): () => HostCRD {
+    return () => {
+      this.requireHostMutationAuthority(action, capturedAuthority)
+      if (this.resolveCurrentHost === null) return requested
+      const current = this.resolveCurrentHost(requested.name)
+      if (
+        current === undefined ||
+        requested.uid === undefined ||
+        current.uid === undefined ||
+        requested.uid !== current.uid
+      ) {
+        throw new HostMutationIdentityChangedError(action, requested.name)
+      }
+      if (
+        requested.generation === undefined ||
+        current.generation === undefined ||
+        requested.generation !== current.generation
+      ) {
+        throw new HostMutationSpecRevisionChangedError(action, requested.name)
+      }
+      return current
+    }
   }
 
   /**
@@ -2091,9 +2182,20 @@ export class HostReconciler {
    * Host CRD is present).
    */
   async patchChannelReaderRevisionAnnotation(hostName: string): Promise<void> {
+    const capturedAuthority = this.captureHostMutationAuthority()
     const depName = `channel-reader-${hostName}`
     try {
+      this.requireHostMutationAuthority(
+        `channel-reader "${hostName}" revision patch`,
+        capturedAuthority
+      )
+      if (this.resolveCurrentHost && !this.resolveCurrentHost(hostName)) return
       const revision = await this.computeChannelReaderRevisionForHost(hostName)
+      this.requireHostMutationAuthority(
+        `channel-reader "${hostName}" revision patch`,
+        capturedAuthority
+      )
+      if (this.resolveCurrentHost && !this.resolveCurrentHost(hostName)) return
       const patchBody = {
         spec: {
           template: {
@@ -3548,16 +3650,25 @@ export class HostReconciler {
 
   async reconcile(host: HostCRD, source: HostReconcileSource = 'urgent'): Promise<void> {
     const dispatchedAt = Date.now()
+    const capturedAuthority = this.captureHostMutationAuthority()
     return this.lifecycle.serializeByHost(host.name, async () => {
+      this.requireHostMutationAuthority(`Host "${host.name}" reconcile`, capturedAuthority)
+      const admittedHost = this.resolveCurrentHost ? this.resolveCurrentHost(host.name) : host
+      if (!admittedHost) return
+      const revalidate = this.makeHostMutationAdmission(
+        `Host "${host.name}" reconcile`,
+        admittedHost,
+        capturedAuthority
+      )
       const admittedAt = Date.now()
       hostReconcileInFlight.inc({ lane: source })
       try {
-        await this.reconcileCore(host)
-        this.enqueueReconcileOutcome(host)
+        await this.reconcileCore(admittedHost, revalidate)
+        this.enqueueReconcileOutcome(admittedHost)
         this.observeReconcileLatency(source, 'success', dispatchedAt, admittedAt)
       } catch (error) {
-        this.enqueueControllerError(host, 'reconcile_exception', error)
-        this.enqueueReconcileOutcome(host)
+        this.enqueueControllerError(admittedHost, 'reconcile_exception', error)
+        this.enqueueReconcileOutcome(admittedHost)
         this.observeReconcileLatency(source, 'error', dispatchedAt, admittedAt)
         throw error
       } finally {
@@ -3582,7 +3693,19 @@ export class HostReconciler {
     )
   }
 
-  private async reconcileCore(host: HostCRD): Promise<void> {
+  private async reconcileCore(host: HostCRD, revalidate?: () => HostCRD): Promise<void> {
+    // A per-Host serializer orders work, but it does not invalidate an older
+    // reconcile when the watch cache observes a newer spec while this body is
+    // awaiting Kubernetes or issuer I/O. Re-check the captured authority,
+    // identity, and spec generation at every material mutation boundary.
+    // Individual API writes remain atomic at the Kubernetes resource level;
+    // these checks prevent subsequent stale writes from spanning an observed
+    // generation change.
+    const revalidateHostMutationBoundary = (): void => {
+      revalidate?.()
+    }
+
+    revalidateHostMutationBoundary()
     // Wake fast-path (Stage 4.3) BEFORE the heavy reconcile body: reconciles
     // are serialized PER HOST (serializeByHost), so a pending wake for THIS
     // Host must not wait behind token issuance, NetworkPolicies or the
@@ -3591,6 +3714,7 @@ export class HostReconciler {
     // funnels through this same method, so a watch event dropped on disconnect
     // is recovered here.
     const forceFreshForWake = (await this.lifecycle.handleWakeFastPath(host)) === true
+    revalidateHostMutationBoundary()
 
     // Track whether this host has desktop enabled
     const isDesktop = !!(host.spec.desktop?.browser || host.spec.desktop?.x11)
@@ -3601,11 +3725,18 @@ export class HostReconciler {
     }
 
     const secretResult = await this.validateHostSecret(host)
+    revalidateHostMutationBoundary()
     if (!secretResult.ok) {
       if (
         secretResult.reason === 'SecretNotFound' ||
         secretResult.reason === 'SecretAccessDenied'
       ) {
+        // This branch deletes every ephemeral runtime resource. The Secret
+        // decision may have blocked on the API while Host watch authority or
+        // the Host UID/spec generation changed. Revalidate at the destructive
+        // commit boundary so a stale secretRef can never tear down the current
+        // runtime; the recovered/current Host reconcile will decide again.
+        revalidateHostMutationBoundary()
         await this.deleteHostRuntimeResources(host.name, host.namespace, {
           deleteWorkspacePvc: false,
         })
@@ -3626,8 +3757,11 @@ export class HostReconciler {
     // Per-Host SA + Role + RoleBinding must exist BEFORE the Deployment,
     // otherwise the kubelet can't mount the SA token and the pod will
     // crash-loop until RBAC is created.
+    revalidateHostMutationBoundary()
     await this.ensureHostServiceAccount(host)
+    revalidateHostMutationBoundary()
     await this.ensureHostRole(host)
+    revalidateHostMutationBoundary()
     await this.ensureHostRoleBinding(host)
 
     let mounts: ResolvedSfsMount[] = []
@@ -3640,10 +3774,12 @@ export class HostReconciler {
       // will inject them.
       console.error(`[HostReconciler] Failed to resolve context mounts for "${host.name}":`, err)
     }
+    revalidateHostMutationBoundary()
     // Stateless lifecycle (Stage 2): assess enable/reject and persist the
     // durable state to the Host status subresource BEFORE building the
     // Deployment, so replicas derive from the same assessment.
     let lifecycle = await this.lifecycle.assessLifecycle(host, mounts)
+    revalidateHostMutationBoundary()
     // Drained-pre-scale guard (Stage 4.3): a pending wake must abort the
     // suspension IMMEDIATELY before replicas:0 derives from this assessment
     // — see StatelessLifecycleExecutor.resolveWakeBeforeScaleDown. A null
@@ -3651,14 +3787,17 @@ export class HostReconciler {
     // pass (the periodic resync retries) rather than scaling to 0 on stale
     // data.
     const guardedLifecycle = await this.lifecycle.resolveWakeBeforeScaleDown(host, lifecycle)
+    revalidateHostMutationBoundary()
     if (guardedLifecycle === null) {
       return
     }
     lifecycle = guardedLifecycle
+    revalidateHostMutationBoundary()
     const lifecycleStatusCommitted = await this.lifecycle.writeLifecycleStatusToCluster(
       host,
       lifecycle
     )
+    revalidateHostMutationBoundary()
     if (lifecycleStatusCommitted) {
       this.enqueueHostTelemetry(host, 'lifecycle_transition', lifecycle.effective.state, {
         status: 'committed',
@@ -3669,7 +3808,9 @@ export class HostReconciler {
       })
     }
 
+    revalidateHostMutationBoundary()
     await this.ensurePvc(host)
+    revalidateHostMutationBoundary()
     await this.ensureService(host)
 
     // NetworkPolicies before Deployments. Calico/Cilium evaluate egress and
@@ -3685,23 +3826,31 @@ export class HostReconciler {
     // surface it via HostRuntimeStatus instead of swallowing it.
     const npFailures: string[] = []
     try {
+      revalidateHostMutationBoundary()
       await this.ensureMcpHostIngressNetworkPolicy(host)
+      revalidateHostMutationBoundary()
       await this.ensureMcpHostGfsEgressNetworkPolicy(host)
+      revalidateHostMutationBoundary()
       await this.ensureWorkflowApprovalReaderMcpHostIngressNetworkPolicy(host)
     } catch (err) {
       console.error(`[HostReconciler] Failed to ensure mcp-host NP for "${host.name}":`, err)
       npFailures.push(`mcp-host NP: ${(err as Error).message}`)
     }
     try {
+      revalidateHostMutationBoundary()
       await this.ensureRpcProxyMcpHostIngressNetworkPolicy(host)
+      revalidateHostMutationBoundary()
       await this.ensureRpcProxyHostEgressNetworkPolicy(host)
     } catch (err) {
       console.error(`[HostReconciler] Failed to ensure rpc-proxy host NP for "${host.name}":`, err)
       npFailures.push(`rpc-proxy NP: ${(err as Error).message}`)
     }
+    revalidateHostMutationBoundary()
     await this.ensureDesktopNetworkPolicy(host)
     try {
+      revalidateHostMutationBoundary()
       await this.ensureChannelReaderEgressNetworkPolicy(host)
+      revalidateHostMutationBoundary()
       await this.ensureWorkflowApprovalReaderHostEgressNetworkPolicy(host)
     } catch (err) {
       console.error(`[HostReconciler] Failed to ensure channels egress NP for "${host.name}":`, err)
@@ -3716,8 +3865,10 @@ export class HostReconciler {
     )
     if (bootstrapLifecycle !== lifecycle) {
       lifecycle = bootstrapLifecycle
+      revalidateHostMutationBoundary()
       await this.lifecycle.writeLifecycleStatusToCluster(host, lifecycle)
     }
+    revalidateHostMutationBoundary()
 
     // Bootstrap captures the scope contract used for issuance. The Deployment
     // guard below compares that contract with the live channel cache after this
@@ -3726,23 +3877,28 @@ export class HostReconciler {
       forceFreshForWake,
       targetSuspended: lifecycle.effective.stateless && lifecycle.effective.state === 'suspended',
     })
+    revalidateHostMutationBoundary()
 
     // replaceWithConflictRetry may wait and re-read after a 409, so each body is
     // rebuilt from a stable lifecycle plus token-scope pair before mutation.
     const resolveDeploymentLifecycle = async (): Promise<EffectiveHostLifecycle> => {
+      revalidateHostMutationBoundary()
       const deploymentLifecycle = this.lifecycle.enforceCommunicationChannelPolicyBeforeDeployment(
         host.name,
         lifecycle
       )
       if (deploymentLifecycle !== lifecycle) {
         lifecycle = deploymentLifecycle
+        revalidateHostMutationBoundary()
         await this.lifecycle.writeLifecycleStatusToCluster(host, lifecycle)
       }
+      revalidateHostMutationBoundary()
       return lifecycle.effective
     }
 
     const ensureCurrentRuntimeTokenScope = async (): Promise<void> => {
       for (let attempt = 1; attempt <= 3; attempt++) {
+        revalidateHostMutationBoundary()
         const currentScopeHash = HostReconciler.runtimeTokenScopeHash(
           host,
           this.hasChannelIngress(host)
@@ -3754,6 +3910,7 @@ export class HostReconciler {
           targetSuspended:
             lifecycle.effective.stateless && lifecycle.effective.state === 'suspended',
         })
+        revalidateHostMutationBoundary()
         const postProvisionScopeHash = HostReconciler.runtimeTokenScopeHash(
           host,
           this.hasChannelIngress(host)
@@ -3773,6 +3930,7 @@ export class HostReconciler {
 
     const resolveDeploymentState = async (): Promise<DeploymentMutationState> => {
       for (let attempt = 1; attempt <= 3; attempt++) {
+        revalidateHostMutationBoundary()
         await resolveDeploymentLifecycle()
         await ensureCurrentRuntimeTokenScope()
         const effective = await resolveDeploymentLifecycle()
@@ -3781,6 +3939,7 @@ export class HostReconciler {
           this.hasChannelIngress(host)
         )
         if (runtimeTokenProvision.scopeHash === currentScopeHash) {
+          revalidateHostMutationBoundary()
           return {
             lifecycle: effective,
             runtimeTokenRevision: runtimeTokenProvision.revision,
@@ -3797,6 +3956,7 @@ export class HostReconciler {
       )
     }
 
+    revalidateHostMutationBoundary()
     await this.ensureDeployment(
       host,
       mounts,
@@ -3804,6 +3964,7 @@ export class HostReconciler {
       lifecycle.effective,
       resolveDeploymentState
     )
+    revalidateHostMutationBoundary()
 
     const suspended = lifecycle.effective.stateless && lifecycle.effective.state === 'suspended'
     if (suspended) {
@@ -3812,6 +3973,7 @@ export class HostReconciler {
       this.lifecycle.markHostNotSuspended(host.name)
     }
     const ready = suspended ? false : await this.checkDeploymentReady(host.name, host.namespace)
+    revalidateHostMutationBoundary()
     // If any per-Host NP failed to apply, mark the host as degraded:
     // deployed remains true (the pod is in place), but ready=false +
     // a message that names the missing security boundary. Operators see
@@ -3847,6 +4009,7 @@ export class HostReconciler {
       () => this.reconcileChannelReaderDeployment(host),
     ]) {
       try {
+        revalidateHostMutationBoundary()
         await reconcileResource()
       } catch (err) {
         channelReaderFailures.push(err)
@@ -3867,6 +4030,7 @@ export class HostReconciler {
     // Best-effort — checkChannelReaderStatus never throws.
     const ccCount = this.countCommunicationChannels(host.name)
     const channelReaderStatus = await this.checkChannelReaderStatus(host.name, ccCount)
+    revalidateHostMutationBoundary()
     if (channelReaderFailures.length > 0) {
       // Overlay the reconcile error onto the status message so both signals
       // are visible (the deploy error may explain why the Deployment is missing).
@@ -3908,11 +4072,13 @@ export class HostReconciler {
     namespace: string,
     opts?: { skipIf?: () => boolean }
   ): Promise<void> {
+    const capturedAuthority = this.captureHostMutationAuthority()
     // A DELETED event must not race an in-flight create/update for the same
     // Host: route it through the same per-Host serializer as reconcile(). The
     // global convergence tail no longer provides this ordering.
     await this.lifecycle.serializeByHost(name, async () => {
-      if (opts?.skipIf?.()) {
+      this.requireHostMutationAuthority(`Host "${name}" delete`, capturedAuthority)
+      if (this.resolveCurrentHost?.(name) !== undefined || opts?.skipIf?.()) {
         // Same vocabulary the watch path already reports for this condition
         // (reconcileHostWatchEvent), so the skip is observable, not silent.
         hostDeleteCleanupTotal.inc({ outcome: 'superseded' })
@@ -4059,6 +4225,15 @@ export class HostReconciler {
         }
         try {
           await this.lifecycle.serializeByHost(hostName, async () => {
+            // The fresh 404 and the cache omission are only destructive
+            // authority while the same LIST -> WATCH generation remains live.
+            // Revalidate inside the serializer: queued Host work can otherwise
+            // outlive that generation and delete a same-name recreation whose
+            // ADDED event has not reached the retired cache.
+            if (!authorityValid()) {
+              hostCleanupDeferredTotal.inc({ reason: 'watch_lost' })
+              return
+            }
             // F2 / #827 TOCTOU: a same-name Host recreated between the fresh read
             // above and admission into this serializer updates the current cache
             // (its ADDED event sets the cache before its reconcile runs, and that

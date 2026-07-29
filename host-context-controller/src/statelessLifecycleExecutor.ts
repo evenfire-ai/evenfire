@@ -71,7 +71,15 @@ export interface StatelessLifecycleExecutorDeps {
    * serialization slot, so re-entering the per-host chain would
    * self-deadlock.
    */
-  reconcileCore: (host: HostCRD) => Promise<void>
+  reconcileCore: (host: HostCRD, revalidate?: () => HostCRD) => Promise<void>
+  /**
+   * Capture Host inventory authority at heartbeat dispatch time and return an
+   * admission closure that revalidates that authority and resolves the current
+   * same-identity Host inside this executor's per-Host serializer. The two-step
+   * shape is intentional: capturing only after the queue drains cannot detect
+   * an authority generation change that happened while the work was waiting.
+   */
+  prepareHostMutationAdmission?: (action: string, host: HostCRD) => () => HostCRD
   onLifecycleStatusCommitted?: (host: HostCRD, lifecycle: HostLifecycleStatus) => void
 }
 
@@ -82,7 +90,8 @@ export class StatelessLifecycleExecutor {
   private readonly now: () => Date
   private readonly countCommunicationChannels: (hostName: string) => number
   private readonly isCommunicationChannelCacheSynced: () => boolean
-  private readonly reconcileCore: (host: HostCRD) => Promise<void>
+  private readonly reconcileCore: (host: HostCRD, revalidate?: () => HostCRD) => Promise<void>
+  private readonly prepareHostMutationAdmission: (action: string, host: HostCRD) => () => HostCRD
   private readonly onLifecycleStatusCommitted: (
     host: HostCRD,
     lifecycle: HostLifecycleStatus
@@ -132,6 +141,8 @@ export class StatelessLifecycleExecutor {
     this.countCommunicationChannels = deps.countCommunicationChannels
     this.isCommunicationChannelCacheSynced = deps.isCommunicationChannelCacheSynced
     this.reconcileCore = deps.reconcileCore
+    this.prepareHostMutationAdmission =
+      deps.prepareHostMutationAdmission ?? ((_action, host) => () => host)
     this.onLifecycleStatusCommitted = deps.onLifecycleStatusCommitted ?? (() => {})
     StatelessLifecycleExecutor.warnSingleReplicaInvariantOnce()
   }
@@ -671,15 +682,19 @@ export class StatelessLifecycleExecutor {
       metadata: {
         name: string
         namespace?: string
+        uid?: string
+        generation?: number
         resourceVersion?: string
         annotations?: Record<string, string>
       }
       spec: HostCRD['spec']
       status?: HostCRD['status']
     }
-    return {
+    const fresh: HostCRD = {
       name: obj.metadata.name,
       namespace: obj.metadata.namespace ?? host.namespace,
+      uid: obj.metadata.uid,
+      generation: obj.metadata.generation,
       // Preserve resourceVersion so heartbeat-path status writers can pass it
       // back as an optimistic-concurrency precondition (D3). Dropping it here
       // would force every write to be an unconditioned last-write-wins patch.
@@ -688,6 +703,8 @@ export class StatelessLifecycleExecutor {
       spec: obj.spec,
       status: obj.status,
     }
+    this.requireSameHostIdentity(host, fresh)
+    return fresh
   }
 
   /**
@@ -716,17 +733,24 @@ export class StatelessLifecycleExecutor {
     reason: string,
     entryWakeHandledGeneration: number
   ): Promise<SuspendFromHeartbeatOutcome> {
-    // L2: serialize on the host chain so a tracker-driven suspend never
-    // interleaves with a watch-driven wake reconcile for the same host.
-    return this.serializeByHost(host.name, () =>
-      this.suspendHostFromHeartbeatCore(host, reason, entryWakeHandledGeneration)
+    return this.serializeHeartbeatMutation(
+      'heartbeat suspension',
+      host,
+      (admittedHost, revalidate) =>
+        this.suspendHostFromHeartbeatCore(
+          admittedHost,
+          reason,
+          entryWakeHandledGeneration,
+          revalidate
+        )
     )
   }
 
   private async suspendHostFromHeartbeatCore(
     host: HostCRD,
     reason: string,
-    entryWakeHandledGeneration: number
+    entryWakeHandledGeneration: number,
+    revalidate?: () => HostCRD
   ): Promise<SuspendFromHeartbeatOutcome> {
     // FRESH GET (see readFreshHost): guard against the CURRENT server-side
     // lifecycle, not the caller's watch-cache snapshot. The guard is re-run
@@ -741,6 +765,17 @@ export class StatelessLifecycleExecutor {
     const result = await this.patchStatusWithPrecondition(
       host,
       fresh => {
+        // UID proves object identity, not decision freshness. A same-identity
+        // Host may have advanced from stateless to stateful while the watch
+        // cache trails the API. Re-evaluate the complete effective stateless
+        // policy from every fresh read/retry before honoring old heartbeat
+        // evidence.
+        if (
+          !this.sameHostSpecRevision(host, fresh) ||
+          !this.effectiveLifecycleFromCache(fresh).stateless
+        ) {
+          return { skip: true }
+        }
         const freshLifecycle = fresh.status?.lifecycle
         if (freshLifecycle?.state !== 'draining') {
           // Every legitimate suspend follows a durable `draining` write (the
@@ -802,12 +837,34 @@ export class StatelessLifecycleExecutor {
         writtenStatus = { ...(fresh.status ?? {}), lifecycle }
         return this.fullStatusOps(writtenStatus)
       },
-      initialFresh
+      initialFresh,
+      revalidate
     )
     if ('skipped' in result || writtenStatus === undefined) {
       return skipOutcome
     }
+    // Revalidate authority/UID immediately before follow-on effects, then read
+    // once more from the API. The successful PATCH attempt's fresh object is
+    // the exact spec on which the status write committed, but a wake/spec
+    // update can land immediately AFTER that commit and BEFORE runtime
+    // reconciliation. A linearizable follow-on GET observes both our durable
+    // suspended write and any such newer same-UID update; the watch cache can
+    // legitimately trail either one.
+    const currentAtFollowOn = revalidate?.()
+    if (currentAtFollowOn) this.requireSameHostIdentity(host, currentAtFollowOn)
     host.status = writtenStatus
+    const reconcileHost = await this.readFreshHost(result.fresh)
+    if (!this.sameHostSpecRevision(host, reconcileHost)) {
+      const error = new Error(
+        `Host spec generation changed before heartbeat suspension follow-on for "${host.name}"`
+      )
+      error.name = 'HostMutationSpecRevisionChangedError'
+      throw error
+    }
+    const currentAfterFollowOnRead = revalidate?.()
+    if (currentAfterFollowOnRead) {
+      this.requireSameHostIdentity(host, currentAfterFollowOnRead)
+    }
     this.lastWrittenLifecycleStatus.delete(host.name)
     this.logSuspendedApplied(host.name)
     console.log(
@@ -816,18 +873,30 @@ export class StatelessLifecycleExecutor {
     // L2: call reconcileCore (not the serialized reconcile) — this method
     // already runs inside this host's serialization slot, so re-entering the
     // per-host chain here would self-deadlock.
-    await this.reconcileCore(host)
+    await this.reconcileCore(reconcileHost, revalidate)
+    // Preserve the historical caller-visible reflection contract even when
+    // follow-on work correctly used a fresher API object. The tracker may hold
+    // the originally admitted instance until the watch delivers the next
+    // MODIFIED event; reflect the final authoritative outcome immediately so
+    // it cannot make a second decision from the pre-follow-on status.
+    host.uid = reconcileHost.uid
+    host.generation = reconcileHost.generation
+    host.resourceVersion = reconcileHost.resourceVersion
+    host.annotations = reconcileHost.annotations
+    host.spec = reconcileHost.spec
+    host.status = reconcileHost.status
     // The wake fast-path / drained-pre-scale guard inside reconcile() may
     // have flipped the host back to active (a wake raced the suspension) —
     // in that case no scale-down happened, so no phase/metric is emitted.
     const wakePending =
-      this.wakeRequestedGeneration(host) > (host.status?.lifecycle?.wakeHandledGeneration ?? 0)
-    if (host.status?.lifecycle?.state !== 'suspended' || wakePending) {
+      this.wakeRequestedGeneration(reconcileHost) >
+      (reconcileHost.status?.lifecycle?.wakeHandledGeneration ?? 0)
+    if (reconcileHost.status?.lifecycle?.state !== 'suspended' || wakePending) {
       // The durable suspended write DID commit (a racing wake revived the
       // host afterwards), so the drained evidence was honored: 'suspended'.
       return 'suspended'
     }
-    this.recordSuspendedApplied(host.name)
+    this.recordSuspendedApplied(reconcileHost.name)
     return 'suspended'
   }
 
@@ -838,12 +907,19 @@ export class StatelessLifecycleExecutor {
    * Throws on API failure — the tracker logs it loudly.
    */
   async publishSuspendBlockedReason(host: HostCRD, reason: string): Promise<void> {
-    // L2: serialize on the host chain (see serializeByHost) so this status
-    // write never interleaves with a concurrent reconcile for the same host.
-    return this.serializeByHost(host.name, () => this.publishSuspendBlockedReasonCore(host, reason))
+    return this.serializeHeartbeatMutation(
+      'heartbeat suspend-blocked reason publication',
+      host,
+      (admittedHost, revalidate) =>
+        this.publishSuspendBlockedReasonCore(admittedHost, reason, revalidate)
+    )
   }
 
-  private async publishSuspendBlockedReasonCore(host: HostCRD, reason: string): Promise<void> {
+  private async publishSuspendBlockedReasonCore(
+    host: HostCRD,
+    reason: string,
+    revalidate?: () => HostCRD
+  ): Promise<void> {
     // FRESH GET (see readFreshHost): this is a suspend-BLOCKED reason
     // ANNOTATOR, not a state writer — it must NEVER change state, only stamp
     // the reason on top of the CURRENT server-side state. AP-1 (the 9th
@@ -866,6 +942,12 @@ export class StatelessLifecycleExecutor {
     const result = await this.patchStatusWithPrecondition(
       host,
       fresh => {
+        if (
+          !this.sameHostSpecRevision(host, fresh) ||
+          !this.effectiveLifecycleFromCache(fresh).stateless
+        ) {
+          return { skip: true }
+        }
         const freshLifecycle = fresh.status?.lifecycle
         const freshState = freshLifecycle?.state ?? 'active'
         if (freshState !== 'active') {
@@ -889,7 +971,8 @@ export class StatelessLifecycleExecutor {
         writtenLifecycle = lifecycle
         return [{ op: 'add', path: '/status/lifecycle', value: lifecycle }]
       },
-      initialFresh
+      initialFresh,
+      revalidate
     )
     if ('skipped' in result || writtenLifecycle === undefined) {
       return
@@ -926,17 +1009,18 @@ export class StatelessLifecycleExecutor {
     host: HostCRD,
     entryWakeHandledGeneration: number
   ): Promise<void> {
-    // L2: serialize on the host chain (see serializeByHost) so the drain
-    // status write never interleaves with a concurrent reconcile for the
-    // same host.
-    return this.serializeByHost(host.name, () =>
-      this.markHostDrainingFromHeartbeatCore(host, entryWakeHandledGeneration)
+    return this.serializeHeartbeatMutation(
+      'heartbeat draining transition',
+      host,
+      (admittedHost, revalidate) =>
+        this.markHostDrainingFromHeartbeatCore(admittedHost, entryWakeHandledGeneration, revalidate)
     )
   }
 
   private async markHostDrainingFromHeartbeatCore(
     host: HostCRD,
-    entryWakeHandledGeneration: number
+    entryWakeHandledGeneration: number,
+    revalidate?: () => HostCRD
   ): Promise<void> {
     // FRESH GET (see readFreshHost): a stale `active` snapshot over an
     // actually-`suspended` CR would write `draining` (a running state) and
@@ -948,6 +1032,12 @@ export class StatelessLifecycleExecutor {
     const result = await this.patchStatusWithPrecondition(
       host,
       fresh => {
+        if (
+          !this.sameHostSpecRevision(host, fresh) ||
+          !this.effectiveLifecycleFromCache(fresh).stateless
+        ) {
+          return { skip: true }
+        }
         const freshLifecycle = fresh.status?.lifecycle
         if ((freshLifecycle?.state ?? 'active') !== 'active') {
           return { skip: true }
@@ -983,7 +1073,8 @@ export class StatelessLifecycleExecutor {
         writtenStatus = { ...(fresh.status ?? {}), lifecycle }
         return this.fullStatusOps(writtenStatus)
       },
-      initialFresh
+      initialFresh,
+      revalidate
     )
     if ('skipped' in result || writtenStatus === undefined) {
       return
@@ -1010,13 +1101,17 @@ export class StatelessLifecycleExecutor {
    * heartbeat retries.
    */
   async markHostActiveFromHeartbeat(host: HostCRD): Promise<void> {
-    // L2: serialize on the host chain (see serializeByHost) so the
-    // cancel-drain status write never interleaves with a concurrent
-    // reconcile for the same host.
-    return this.serializeByHost(host.name, () => this.markHostActiveFromHeartbeatCore(host))
+    return this.serializeHeartbeatMutation(
+      'heartbeat cancel-drain transition',
+      host,
+      (admittedHost, revalidate) => this.markHostActiveFromHeartbeatCore(admittedHost, revalidate)
+    )
   }
 
-  private async markHostActiveFromHeartbeatCore(host: HostCRD): Promise<void> {
+  private async markHostActiveFromHeartbeatCore(
+    host: HostCRD,
+    revalidate?: () => HostCRD
+  ): Promise<void> {
     // FRESH GET (see readFreshHost): a stale `draining` snapshot over an
     // actually-`suspended` CR must never resurrect it (and would regress
     // wakeHandledGeneration). Proceed only when the CURRENT server-side
@@ -1029,6 +1124,12 @@ export class StatelessLifecycleExecutor {
     const result = await this.patchStatusWithPrecondition(
       host,
       fresh => {
+        if (
+          !this.sameHostSpecRevision(host, fresh) ||
+          !this.effectiveLifecycleFromCache(fresh).stateless
+        ) {
+          return { skip: true }
+        }
         const freshLifecycle = fresh.status?.lifecycle
         if (freshLifecycle?.state !== 'draining') {
           skippedNotDraining = freshLifecycle?.state ?? 'active'
@@ -1041,7 +1142,8 @@ export class StatelessLifecycleExecutor {
         writtenStatus = { ...(fresh.status ?? {}), lifecycle }
         return this.fullStatusOps(writtenStatus)
       },
-      initialFresh
+      initialFresh,
+      revalidate
     )
     if ('skipped' in result || writtenStatus === undefined) {
       console.log(
@@ -1417,19 +1519,31 @@ export class StatelessLifecycleExecutor {
   private async patchStatusWithPrecondition(
     host: HostCRD,
     build: (fresh: HostCRD) => Array<{ op: 'add'; path: string; value: unknown }> | { skip: true },
-    initialFresh?: HostCRD
+    initialFresh?: HostCRD,
+    revalidate?: () => HostCRD
   ): Promise<{ fresh: HostCRD } | { skipped: true }> {
     const maxAttempts = 5
     let fresh = initialFresh
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const currentAtAttempt = revalidate?.()
+      if (currentAtAttempt) this.requireSameHostIdentity(host, currentAtAttempt)
       if (fresh === undefined) {
         fresh = await this.readFreshHost(host)
+      }
+      if (host.uid !== undefined && fresh.resourceVersion === undefined) {
+        const error = new Error(
+          `Host status mutation for "${host.name}" has no fresh resourceVersion; refusing an unconditioned write`
+        )
+        error.name = 'HostMutationPreconditionUnavailableError'
+        throw error
       }
       const built = build(fresh)
       if ('skip' in built) {
         return { skipped: true }
       }
       try {
+        const currentBeforePatch = revalidate?.()
+        if (currentBeforePatch) this.requireSameHostIdentity(host, currentBeforePatch)
         await this.customApi.patchNamespacedCustomObjectStatus({
           group: GROUP,
           version: VERSION,
@@ -1497,6 +1611,58 @@ export class StatelessLifecycleExecutor {
       }
     })
     return result
+  }
+
+  /**
+   * Capture admission before enqueueing, then resolve the current Host only
+   * after this mutation reaches the front of its own serializer. Keeping the
+   * check here avoids wrapping a lifecycle call in HostReconciler's serializer,
+   * which would recursively acquire the same Host chain and deadlock.
+   */
+  private serializeHeartbeatMutation<T>(
+    action: string,
+    host: HostCRD,
+    work: (admittedHost: HostCRD, revalidate: () => HostCRD) => Promise<T>
+  ): Promise<T> {
+    const revalidate = this.prepareHostMutationAdmission(action, host)
+    return this.serializeByHost(host.name, () => work(revalidate(), revalidate))
+  }
+
+  /**
+   * A resourceVersion conflict can be caused by ordinary writes or by a
+   * delete/recreate. Every fresh read, including every bounded 409 retry, must
+   * remain on the Kubernetes UID that was admitted. Name equality is not an
+   * identity fence. Production watch snapshots always carry UID; if only one
+   * side carries it, fail closed rather than guessing.
+   */
+  private requireSameHostIdentity(expected: HostCRD, current: HostCRD): void {
+    if (expected.uid === undefined && current.uid === undefined) return
+    if (expected.uid === undefined || current.uid === undefined || expected.uid !== current.uid) {
+      const error = new Error(
+        `Host identity changed while mutating "${expected.name}"; refusing to cross a same-name recreation`
+      )
+      error.name = 'HostMutationIdentityChangedError'
+      throw error
+    }
+  }
+
+  /**
+   * Heartbeat evidence belongs to one Host spec epoch. UID equality allows
+   * status-only updates and retries, but a generation change can replace the
+   * runtime inputs (context, Secret, image, lifecycle policy, etc.) while
+   * remaining stateless. Never apply an older runtime's heartbeat decision to
+   * that new spec. UID-less standalone fixtures retain their legacy behavior;
+   * production objects (which carry UID) fail closed on a missing generation.
+   */
+  private sameHostSpecRevision(expected: HostCRD, current: HostCRD): boolean {
+    if (expected.generation === undefined && current.generation === undefined) {
+      return expected.uid === undefined && current.uid === undefined
+    }
+    return (
+      expected.generation !== undefined &&
+      current.generation !== undefined &&
+      expected.generation === current.generation
+    )
   }
 
   /**

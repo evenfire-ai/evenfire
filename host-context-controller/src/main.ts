@@ -211,9 +211,8 @@ async function main(): Promise<void> {
   if (!config.devMode && hostReconciler) {
     const kc = getKubeConfig()
     if (kc) {
-      const reconciler = hostReconciler
       channelSecretInformer = new SecretInformer(kc, config.channelsNamespace, evt => {
-        reconciler.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
+        watcher?.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
           console.error('[Main] reconcileChannelReaderRevision failed:', err)
         })
       })

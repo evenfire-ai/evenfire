@@ -47,9 +47,7 @@ function gauge(options: {
  * (15s), and wake (45s) budgets, plus longer diagnostic tails. Shared by every
  * HCC reconcile/recovery latency histogram.
  */
-const RECONCILE_LATENCY_BUCKETS = [
-  0.05, 0.1, 0.25, 0.5, 1, 2, 5, 15, 45, 120,
-] as const
+const RECONCILE_LATENCY_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 15, 45, 120] as const
 
 /** Idempotent Histogram helper mirroring counter()/gauge(). */
 function histogram(options: {
@@ -79,6 +77,18 @@ export const networkPoliciesTotal = gauge({
   name: 'clerum_hcc_networkpolicies_total',
   help: 'Total number of NetworkPolicies managed by HCC',
   labelNames: ['layer'] as const,
+})
+
+export const initialConvergenceRetriesTotal = counter({
+  name: 'clerum_hcc_initial_convergence_retries_total',
+  help: 'Initial background convergence retries scheduled after a failed fleet pass.',
+  labelNames: ['lane'] as const,
+})
+
+export const initialConvergenceLastSuccessTimestampSeconds = gauge({
+  name: 'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
+  help: 'Unix timestamp of the last successful initial background convergence pass.',
+  labelNames: ['lane'] as const,
 })
 
 export const contextReconciliationsTotal = counter({

@@ -35,7 +35,13 @@ import {
   isMcpServerStatusOnlyUpdate,
   sameMcpServerDesiredRevision,
 } from './mcpServerSafety'
-import { hostDeleteCleanupTotal, hostFleetRequestsTotal, hostWatchRecoverySeconds } from './metrics'
+import {
+  hostDeleteCleanupTotal,
+  hostFleetRequestsTotal,
+  hostWatchRecoverySeconds,
+  initialConvergenceLastSuccessTimestampSeconds,
+  initialConvergenceRetriesTotal,
+} from './metrics'
 import { NetworkPolicyReconciler } from './networkPolicyReconciler'
 import { McpServerReconciler } from './reconciler'
 import { SharedFileSystemReconciler } from './sharedFileSystemReconciler'
@@ -130,6 +136,38 @@ type HostInventoryRecoveryCause = 'cold-start' | 'watch-recovery'
 type HostWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
 type McpServerWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
 type InitialConvergenceLane = 'McpServer' | 'NetworkPolicy'
+
+type HostInventoryRecoveryRequest = {
+  convergenceReason: string
+  ccLifecycleGeneration?: number
+  cause: HostInventoryRecoveryCause
+}
+
+type ActiveHostInventoryRecovery = {
+  request: HostInventoryRecoveryRequest
+  promise: Promise<HostCRD[]>
+}
+
+function mergeHostInventoryRecoveryRequest(
+  target: HostInventoryRecoveryRequest,
+  requested: HostInventoryRecoveryRequest
+): void {
+  // Cold start is the stronger admission mode: its snapshot is consumed only
+  // by the bounded full pass, whereas watch recovery also dispatches urgent
+  // per-Host work. Preserve that mode when either joined caller requires it.
+  if (requested.cause === 'cold-start' || target.cause !== 'cold-start') {
+    target.convergenceReason = requested.convergenceReason
+  }
+  if (target.cause === 'cold-start' || requested.cause === 'cold-start') {
+    target.cause = 'cold-start'
+  }
+  if (requested.ccLifecycleGeneration !== undefined) {
+    target.ccLifecycleGeneration =
+      target.ccLifecycleGeneration === undefined
+        ? requested.ccLifecycleGeneration
+        : Math.max(target.ccLifecycleGeneration, requested.ccLifecycleGeneration)
+  }
+}
 
 /**
  * Serializes a reconciliation domain without turning a rejected operation into
@@ -672,7 +710,8 @@ export class McpServerWatcher implements McpServerProvider {
   // (§10.2). Concurrent recovery signals reuse the in-flight promise so exactly
   // one LIST + WATCH is installed. Independent per-Host events no longer share a
   // process-wide convergence tail — they enter the per-Host serializer directly.
-  private hostRecoveryInFlight: Promise<HostCRD[]> | null = null
+  private hostRecoveryInFlight: ActiveHostInventoryRecovery | null = null
+  private hostCacheRecoveryIntent: HostInventoryRecoveryRequest | null = null
   // B2: tracks whether the CC snapshot is paired with a continuing watch.
   // Set to true only while a complete snapshot is paired with a live watch;
   // used by HostReconciler to make fail-closed lifecycle decisions.
@@ -849,6 +888,37 @@ export class McpServerWatcher implements McpServerProvider {
     return (
       !this.stopped && this.mcpServerCacheSynced && this.contextCacheSynced && this.hostCacheSynced
     )
+  }
+
+  /**
+   * Host-managed runtime mutation requires a LIST snapshot paired with its
+   * continuing WATCH. This narrower predicate is also used by non-HTTP effect
+   * producers while the broader readiness predicate additionally covers
+   * McpServer and Context discovery authority.
+   */
+  isHostInventoryAuthoritative(): boolean {
+    return !this.stopped && this.hostCacheSynced
+  }
+
+  /**
+   * Fail closed at every Host-effect admission boundary while recovery owns
+   * inventory authority. Preserve the reason/generation in the retry intent so
+   * the successful LIST -> WATCH recovery's full pass applies the deferred
+   * effect from current state instead of acting on the stale cache.
+   */
+  private admitHostDependentEffects(
+    convergenceReason: string,
+    ccLifecycleGeneration?: number
+  ): boolean {
+    if (this.isHostInventoryAuthoritative()) return true
+    if (!this.stopped) {
+      this.scheduleHostCacheRecovery({
+        convergenceReason,
+        ccLifecycleGeneration,
+        cause: 'watch-recovery',
+      })
+    }
+    return false
   }
 
   private retireMcpServerWatch(expectedGeneration?: number): boolean {
@@ -1323,24 +1393,38 @@ export class McpServerWatcher implements McpServerProvider {
     cause: HostInventoryRecoveryCause = 'watch-recovery'
   ): Promise<HostCRD[]> {
     if (this.stopped) return Promise.resolve([])
-    if (this.hostRecoveryInFlight) return this.hostRecoveryInFlight
-    const recovery = this.performHostInventoryRecovery(
-      convergenceReason,
-      ccLifecycleGeneration,
-      cause
-    )
-    this.hostRecoveryInFlight = recovery
+    const requested = { convergenceReason, ccLifecycleGeneration, cause }
+    // A scheduled retry and an immediate caller are two entrances to the same
+    // monotonic recovery intent. Adopt the pending request before choosing or
+    // joining the active operation so a direct recovery cannot erase a stronger
+    // cold-start cause or newer lifecycle generation when it cancels the timer.
+    const request = this.hostCacheRecoveryIntent
+      ? { ...this.hostCacheRecoveryIntent }
+      : { ...requested }
+    if (this.hostCacheRecoveryIntent) {
+      mergeHostInventoryRecoveryRequest(request, requested)
+      this.hostCacheRecoveryIntent = null
+      if (this.hostCacheRecoveryTimer) {
+        clearTimeout(this.hostCacheRecoveryTimer)
+        this.hostCacheRecoveryTimer = null
+      }
+    }
+    if (this.hostRecoveryInFlight) {
+      mergeHostInventoryRecoveryRequest(this.hostRecoveryInFlight.request, request)
+      return this.hostRecoveryInFlight.promise
+    }
+    const recovery = this.performHostInventoryRecovery(request)
+    const active = { request, promise: recovery }
+    this.hostRecoveryInFlight = active
     const clear = (): void => {
-      if (this.hostRecoveryInFlight === recovery) this.hostRecoveryInFlight = null
+      if (this.hostRecoveryInFlight === active) this.hostRecoveryInFlight = null
     }
     void recovery.then(clear, clear)
     return recovery
   }
 
   private async performHostInventoryRecovery(
-    convergenceReason: string,
-    ccLifecycleGeneration: number | undefined,
-    cause: HostInventoryRecoveryCause
+    request: HostInventoryRecoveryRequest
   ): Promise<HostCRD[]> {
     const startedAt = Date.now()
     // Capture the pre-recovery inventory so step 7 can distinguish genuinely
@@ -1386,11 +1470,19 @@ export class McpServerWatcher implements McpServerProvider {
         { phase: 'total', outcome: 'success' },
         (Date.now() - startedAt) / 1000
       )
+      // Effect producers can discover newer work while LIST/WATCH recovery is
+      // already in flight. Fold that scheduled intent into this successful
+      // operation before cancelling its timer so no lifecycle generation,
+      // convergence reason, or stronger cold-start cause is discarded.
+      if (this.hostCacheRecoveryIntent) {
+        mergeHostInventoryRecoveryRequest(request, this.hostCacheRecoveryIntent)
+      }
       if (this.hostCacheRecoveryTimer) {
         clearTimeout(this.hostCacheRecoveryTimer)
         this.hostCacheRecoveryTimer = null
       }
-      if (cause === 'watch-recovery') {
+      this.hostCacheRecoveryIntent = null
+      if (request.cause === 'watch-recovery') {
         this.enqueueRecoveredUrgentHosts(
           snapshot.hosts,
           previousNames,
@@ -1405,7 +1497,11 @@ export class McpServerWatcher implements McpServerProvider {
       }
       // Request a coalesced background full pass, but do NOT await it before
       // declaring watch recovery complete.
-      void this.requestHostFleetReconcile(convergenceReason, ccLifecycleGeneration, 'full')
+      void this.requestHostFleetReconcile(
+        request.convergenceReason,
+        request.ccLifecycleGeneration,
+        'full'
+      )
       return snapshot.hosts
     } catch (error) {
       // Keep authority unknown, record the failure, and use the existing
@@ -1417,7 +1513,7 @@ export class McpServerWatcher implements McpServerProvider {
       )
       if (!this.stopped) {
         console.error('[K8s] Host watch recovery failed:', error)
-        this.scheduleHostCacheRecovery()
+        this.scheduleHostCacheRecovery(request)
       }
       throw error
     }
@@ -1457,6 +1553,7 @@ export class McpServerWatcher implements McpServerProvider {
 
   private async dispatchUrgentHostReconcile(name: string): Promise<void> {
     if (this.stopped) return
+    if (!this.admitHostDependentEffects('Recovered urgent Host convergence')) return
     const host = this.hosts.get(name)
     if (!host) return
     try {
@@ -1488,6 +1585,7 @@ export class McpServerWatcher implements McpServerProvider {
 
   private async dispatchRecoveredHostDelete(name: string): Promise<void> {
     if (this.stopped) return
+    if (!this.admitHostDependentEffects('Recovered Host deletion convergence')) return
     // The fresh authoritative LIST already confirmed absence and the cache no
     // longer holds this Host, so cleanup is authorized. Route it through the
     // per-Host serializer (reconcileDelete → serializeByHost) so an older
@@ -1519,13 +1617,30 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
-  private scheduleHostCacheRecovery(): void {
-    if (this.stopped || this.hostCacheRecoveryTimer) return
+  private scheduleHostCacheRecovery(
+    requested: HostInventoryRecoveryRequest = {
+      convergenceReason: 'Host watch recovery convergence',
+      cause: 'watch-recovery',
+    }
+  ): void {
+    if (this.stopped) return
+    if (this.hostCacheRecoveryIntent) {
+      mergeHostInventoryRecoveryRequest(this.hostCacheRecoveryIntent, requested)
+    } else {
+      this.hostCacheRecoveryIntent = { ...requested }
+    }
+    if (this.hostCacheRecoveryTimer) return
     this.hostCacheRecoveryTimer = setTimeout(() => {
       this.hostCacheRecoveryTimer = null
+      const request = this.hostCacheRecoveryIntent ?? requested
+      this.hostCacheRecoveryIntent = null
       // Watch recovery is an independent operation, no longer coupled to a full
       // fleet pass. Recovery itself requests the background convergence pass.
-      void this.recoverHostInventoryAndWatch().catch(() => undefined)
+      void this.recoverHostInventoryAndWatch(
+        request.convergenceReason,
+        request.ccLifecycleGeneration,
+        request.cause
+      ).catch(() => undefined)
     }, HOST_CACHE_RECOVERY_RETRY_MS)
   }
 
@@ -1570,6 +1685,7 @@ export class McpServerWatcher implements McpServerProvider {
     source: HostReconcileSource = 'urgent'
   ): Promise<void> {
     if (this.stopped) return
+    if (!this.admitHostDependentEffects('Host watch event convergence')) return
     if (!this.isCurrentHostWatchEvent(type, host, eventRevision)) {
       // #827: a DELETE that is no longer current because the cache now holds a
       // (recreated) same-name Host is a superseded delete — record it and do
@@ -1664,6 +1780,7 @@ export class McpServerWatcher implements McpServerProvider {
         await this.recoverHostInventoryAndWatch()
         if (this.stopped) return
       }
+      if (!this.isHostInventoryAuthoritative()) return
       // Reconcile the CURRENT cache. Fleet workers dispatch Host keys and
       // resolve the freshest cached spec at execution (see collectHostReconcile
       // Failures); only fullReconcile runs the authority-gated orphan cleanup.
@@ -1892,6 +2009,9 @@ export class McpServerWatcher implements McpServerProvider {
    * Deployment template picks up (or drops) the volume + volumeMount.
    */
   private async reconcileHostsReferencingSfs(sfsName: string): Promise<void> {
+    if (!this.admitHostDependentEffects(`SharedFileSystem "${sfsName}" Host convergence`)) {
+      return
+    }
     const affectedContexts = new Set<string>()
     for (const ctx of this.contexts.values()) {
       if (ctx.spec.sharedFileSystems?.some(r => r.name === sfsName)) {
@@ -1910,6 +2030,19 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   /**
+   * Reconcile Hosts affected by a Context change only while the Host cache is
+   * authoritative. A recovery full pass consumes the current Context cache, so
+   * deferral loses no effect and never acts on an unpaired Host LIST.
+   */
+  private async reconcileHostsReferencingContext(contextName: string): Promise<void> {
+    if (!this.admitHostDependentEffects(`Context "${contextName}" Host convergence`)) return
+    for (const host of this.hosts.values()) {
+      if (host.spec.contextRef !== contextName) continue
+      await this.hostReconciler.reconcile(host)
+    }
+  }
+
+  /**
    * Re-reconcile the Host whose name matches the given hostRef. Called by the
    * CommunicationChannel watch handler so per-Host channel-reader Deployment
    * replicas converge to the new CC count (#281).
@@ -1921,6 +2054,9 @@ export class McpServerWatcher implements McpServerProvider {
    * its caller schedules bounded fleet convergence.
    */
   private async reconcileHostsReferencingCC(hostRef: string): Promise<boolean> {
+    if (!this.admitHostDependentEffects(`CommunicationChannel Host "${hostRef}" convergence`)) {
+      return false
+    }
     const host = this.hosts.get(hostRef)
     if (!host) return true
     try {
@@ -2012,7 +2148,21 @@ export class McpServerWatcher implements McpServerProvider {
    * tracker resolves the heartbeat's hostRef through this).
    */
   getHost(name: string): HostCRD | undefined {
+    if (!this.isHostInventoryAuthoritative()) return undefined
     return this.hosts.get(name)
+  }
+
+  /**
+   * Route channel credentials-Secret events through the same Host authority
+   * boundary as watch, Context, SFS, and heartbeat effects.
+   */
+  async reconcileChannelReaderRevision(secretName: string, secretNamespace: string): Promise<void> {
+    const convergenceReason = `CommunicationChannel Secret "${secretNamespace}/${secretName}" Host convergence`
+    if (!this.ccCacheSynced) return
+    if (!this.admitHostDependentEffects(convergenceReason)) {
+      return
+    }
+    await this.hostReconciler.reconcileChannelReaderRevision(secretName, secretNamespace)
   }
 
   /**
@@ -2239,11 +2389,23 @@ export class McpServerWatcher implements McpServerProvider {
       this.ccLifecycleGeneration === 0
         ? this.beginCommunicationChannelLifecycleTransition()
         : this.ccLifecycleGeneration
-    await this.recoverHostInventoryAndWatch(
-      'initial Host reconciliation',
-      initialLifecycleGeneration,
-      'cold-start'
-    )
+    try {
+      await this.recoverHostInventoryAndWatch(
+        'initial Host reconciliation',
+        initialLifecycleGeneration,
+        'cold-start'
+      )
+    } catch (error) {
+      // Host inventory is an essential readiness authority, but a transient
+      // LIST/WATCH failure must not kill the retry that recovery just armed.
+      // Continue startup with hostCacheSynced=false: the HTTP server stays live,
+      // dynamic readiness remains 503, and recovery promotes readiness only
+      // after a fresh LIST is paired with its continuing WATCH.
+      console.warn(
+        '[K8s] Initial Host inventory is unavailable; HCC remains unready while in-process recovery continues:',
+        error
+      )
+    }
 
     const resyncSec = config.hostResyncIntervalSec
     if (resyncSec > 0) {
@@ -2333,6 +2495,7 @@ export class McpServerWatcher implements McpServerProvider {
           await this.enqueueMcpServerReconciliation(laneOwner, work)
         },
       })
+      initialConvergenceLastSuccessTimestampSeconds.set({ lane: 'McpServer' }, Date.now() / 1000)
       this.clearInitialConvergenceRetry('McpServer')
     } catch (error) {
       console.error('[K8s] Initial McpServer background reconciliation failed:', error)
@@ -2372,6 +2535,10 @@ export class McpServerWatcher implements McpServerProvider {
           [...this.contexts.values()].find(context => context.spec.contextId === contextId),
         resolveCurrentServer: name => this.servers.get(name),
       })
+      initialConvergenceLastSuccessTimestampSeconds.set(
+        { lane: 'NetworkPolicy' },
+        Date.now() / 1000
+      )
       this.clearInitialConvergenceRetry('NetworkPolicy')
     } catch (error) {
       console.error('[K8s] Initial NetworkPolicy background reconciliation failed:', error)
@@ -2397,6 +2564,7 @@ export class McpServerWatcher implements McpServerProvider {
         Math.min(attempt - 1, INITIAL_CONVERGENCE_RETRY_DELAYS_MS.length - 1)
       ]
     this.initialConvergenceRetryAttempts.set(lane, attempt)
+    initialConvergenceRetriesTotal.inc({ lane })
     console.warn(
       `[K8s] Scheduling initial ${lane} background convergence retry ${attempt} in ${delayMs}ms`
     )
@@ -2619,6 +2787,14 @@ export class McpServerWatcher implements McpServerProvider {
       if (previousHostRef && previousHostRef !== cc.spec.hostRef) {
         affectedHostRefs.add(previousHostRef)
       }
+      if (!this.isHostInventoryAuthoritative()) {
+        const lifecycleGeneration = this.beginCommunicationChannelLifecycleTransition()
+        this.admitHostDependentEffects(
+          'CommunicationChannel event Host convergence',
+          lifecycleGeneration
+        )
+        return
+      }
       let needsFleetRetry = false
       for (const hostRef of affectedHostRefs) {
         if (!(await this.reconcileHostsReferencingCC(hostRef))) {
@@ -2786,11 +2962,15 @@ export class McpServerWatcher implements McpServerProvider {
     try {
       const cacheRevisionAtListStart = this.globalFileSystemCacheRevision
       const gfses = await listAllGlobalFileSystems()
+      let reconcileInventory: GlobalFileSystemCRD[]
       if (cacheRevisionAtListStart === this.globalFileSystemCacheRevision) {
         this.globalFileSystems.clear()
         for (const gfs of gfses) this.globalFileSystems.set(gfs.name, gfs)
+        reconcileInventory = gfses
+      } else {
+        reconcileInventory = [...this.globalFileSystems.values()]
       }
-      await this.gfsReconciler.fullReconcile(gfses)
+      await this.gfsReconciler.fullReconcile(reconcileInventory)
     } catch (err) {
       console.error(
         `[K8s] GlobalFileSystem periodic resync failed: ${
@@ -2809,9 +2989,13 @@ export class McpServerWatcher implements McpServerProvider {
     try {
       const cacheRevisionAtListStart = this.sharedFileSystemCacheRevision
       const sfses = await listAllSharedFileSystems()
+      let reconcileInventory: SharedFileSystemCRD[]
       if (cacheRevisionAtListStart === this.sharedFileSystemCacheRevision) {
         this.sharedFileSystems.clear()
         for (const sfs of sfses) this.sharedFileSystems.set(sfs.name, sfs)
+        reconcileInventory = sfses
+      } else {
+        reconcileInventory = [...this.sharedFileSystems.values()]
       }
 
       // Capture each SFS's mountability (PVC Bound) BEFORE reconciling so we can
@@ -2821,11 +3005,11 @@ export class McpServerWatcher implements McpServerProvider {
       // on phase==='Ready': a transient wfc readiness dip while the PVC stays
       // Bound must NOT re-roll consumers — see resolveContextMounts.)
       const wasMountable = new Map<string, boolean>()
-      for (const sfs of sfses) {
+      for (const sfs of reconcileInventory) {
         wasMountable.set(sfs.name, this.sharedFileSystemReconciler.isMountable(sfs))
       }
 
-      await this.sharedFileSystemReconciler.fullReconcile(sfses)
+      await this.sharedFileSystemReconciler.fullReconcile(reconcileInventory)
 
       // #592 gap fix: heal the consuming mcp-host Deployments on a mountability
       // flip — inject the mount + affinity once the PVC binds, or drop it if the
@@ -2835,7 +3019,7 @@ export class McpServerWatcher implements McpServerProvider {
       // an already-Bound SFS picked up on HCC restart still re-injects its mount
       // within one resync interval instead of waiting for the (much longer) Host
       // resync.
-      for (const sfs of sfses) {
+      for (const sfs of reconcileInventory) {
         const nowMountable = this.sharedFileSystemReconciler.isMountable(sfs)
         if (nowMountable !== (wasMountable.get(sfs.name) ?? false)) {
           await this.reconcileHostsReferencingSfs(sfs.name)
@@ -3442,10 +3626,7 @@ export class McpServerWatcher implements McpServerProvider {
         // Re-reconcile any Host that points at this Context so that changes to
         // spec.sharedFileSystems[] propagate into the mcp-host pod template.
         try {
-          for (const host of this.hosts.values()) {
-            if (host.spec.contextRef !== context.name) continue
-            await this.hostReconciler.reconcile(host)
-          }
+          await this.reconcileHostsReferencingContext(context.name)
         } catch (error) {
           console.error(
             `[K8s] Host re-reconcile after Context "${context.name}" change failed:`,
@@ -3596,6 +3777,7 @@ export class McpServerWatcher implements McpServerProvider {
       clearTimeout(this.hostCacheRecoveryTimer)
       this.hostCacheRecoveryTimer = null
     }
+    this.hostCacheRecoveryIntent = null
     if (this.mcpServerCacheRecoveryTimer) {
       clearTimeout(this.mcpServerCacheRecoveryTimer)
       this.mcpServerCacheRecoveryTimer = null
