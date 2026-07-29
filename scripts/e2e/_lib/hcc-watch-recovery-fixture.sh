@@ -15,7 +15,7 @@ profile_env_value() {
 require_branch_owned_hcc_gate() {
   local marker_namespace="${1:-control-plane}"
   local actual_worktree_id actual_head actual_cluster_fingerprint actual_gate
-  local worktree_dirty expected_short_head expected_branch profile_env
+  local worktree_dirty expected_branch profile_env
   local pre_gate_state_root cluster_fingerprint_file expected_cluster_fingerprint
 
   is_branch_scoped_e2e_context "$E2E_KUBECONTEXT" ||
@@ -31,7 +31,6 @@ require_branch_owned_hcc_gate() {
     printf '%s' "$HCC_BRANCH_GATE_REPO_ROOT" | shasum | awk '{print $1}'
   )"
   HCC_BRANCH_GATE_EXPECTED_HEAD="$(git -C "$HCC_BRANCH_GATE_REPO_ROOT" rev-parse HEAD)"
-  expected_short_head="$(git -C "$HCC_BRANCH_GATE_REPO_ROOT" rev-parse --short=8 HEAD)"
   expected_branch="$(git -C "$HCC_BRANCH_GATE_REPO_ROOT" branch --show-current)"
   [ -n "$expected_branch" ] ||
     die "branch-owned runtime proof requires a named branch, not detached HEAD"
@@ -47,8 +46,6 @@ require_branch_owned_hcc_gate() {
     die "branch-profile helper output belongs to a different worktree"
   [ "$(profile_env_value BRANCH "$profile_env")" = "$expected_branch" ] ||
     die "branch-profile helper output belongs to a different branch"
-  [ "$(profile_env_value SHA_SHORT "$profile_env")" = "$expected_short_head" ] ||
-    die "branch-profile helper output belongs to a different HEAD"
   [ "$(profile_env_value DIRTY "$profile_env")" = false ] ||
     die "branch-profile helper recorded a dirty worktree; refresh it after committing"
 

@@ -65,7 +65,7 @@ if [[ "$fixture_gate_function" == *'expected_branch="$(git -C "$HCC_BRANCH_GATE_
    [[ "$fixture_gate_function" == *'profile_env_value PROFILE'* ]] &&
    [[ "$fixture_gate_function" == *'profile_env_value REPO_DIR'* ]] &&
    [[ "$fixture_gate_function" == *'profile_env_value BRANCH'* ]] &&
-   [[ "$fixture_gate_function" == *'profile_env_value SHA_SHORT'* ]] &&
+   [[ "$fixture_gate_function" != *'profile_env_value SHA_SHORT'* ]] &&
    [[ "$fixture_gate_function" == *'profile_env_value DIRTY'* ]] &&
    [[ "$fixture_gate_function" == *'cluster_fingerprint_file='* ]] &&
    [[ "$fixture_gate_function" == *'.data.clusterFingerprint'* ]] &&
@@ -117,7 +117,7 @@ run_branch_gate_case() (
     profile-name) profile="clerum-other-profile-1234abcd" ;;
     profile-repo) profile_repo="${repo_root}-other" ;;
     profile-branch) profile_branch="codex/other" ;;
-    profile-sha) profile_sha="aaaaaaaa" ;;
+    reused-profile) profile_sha="aaaaaaaa" ;;
     profile-dirty) profile_dirty=true ;;
     dirty-worktree) mock_worktree_dirty=" M changed.ts" ;;
     fingerprint) marker_fingerprint="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ;;
@@ -173,8 +173,13 @@ if run_branch_gate_case success; then
 else
   fail "shared branch gate rejects matching branch-profile evidence"
 fi
+if run_branch_gate_case reused-profile; then
+  pass "shared branch gate accepts a reused same-branch profile after an exact-head pre-gate sync"
+else
+  fail "shared branch gate rejects a reused same-branch profile despite exact-head pre-gate evidence"
+fi
 for case_name in detached minikube-profile-missing minikube-profile profile-name profile-repo profile-branch \
-  profile-sha profile-dirty dirty-worktree fingerprint gate; do
+  profile-dirty dirty-worktree fingerprint gate; do
   if run_branch_gate_case "$case_name" >/dev/null 2>&1; then
     fail "shared branch gate accepted mismatched ${case_name} evidence"
   else
