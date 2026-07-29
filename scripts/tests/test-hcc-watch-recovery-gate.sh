@@ -10,6 +10,7 @@ MCP_READINESS_GATE="${SCRIPT_DIR}/e2e-hcc-mcp-context-readiness.sh"
 GATES=("$WATCH_GATE" "$READINESS_GATE" "$MCP_READINESS_GATE")
 LOCK_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-lock.sh"
 LOG_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-logs.sh"
+FIXTURE_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"
 MOCK_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/hcc-lock-test.XXXXXX")"
 MOCK_LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/hcc-log-test.XXXXXX")"
 rm -f "$MOCK_STATE_FILE"
@@ -18,7 +19,7 @@ trap 'rm -f "$MOCK_STATE_FILE" "$MOCK_LOG_FILE"' EXIT
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
-for script in "${GATES[@]}" "$LOCK_HELPER" "$LOG_HELPER"; do
+for script in "${GATES[@]}" "$LOCK_HELPER" "$LOG_HELPER" "$FIXTURE_HELPER"; do
   if bash -n "$script"; then
     pass "$(basename "$script") has valid bash syntax"
   else
@@ -26,11 +27,94 @@ for script in "${GATES[@]}" "$LOCK_HELPER" "$LOG_HELPER"; do
   fi
 done
 
+# Literal source-code assertions.
+# shellcheck disable=SC2016
+if grep -Fq 'source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"' "$READINESS_GATE" &&
+   grep -Fq 'require_branch_owned_hcc_gate "$HCC_NS"' "$READINESS_GATE" &&
+   grep -Fq 'sync_marker="$HCC_BRANCH_GATE_SYNC_MARKER"' "$READINESS_GATE" &&
+   ! grep -Fq 'sync_marker="$(kctl get configmap' "$READINESS_GATE" &&
+   grep -Fq "actual_cluster_fingerprint=\"\$(jq -r '.data.clusterFingerprint" "$READINESS_GATE" &&
+   grep -Fq "actual_gate=\"\$(jq -r '.data.gate" "$READINESS_GATE"; then
+  pass "readiness gate reuses one shared branch-owned ownership, HEAD, fingerprint, and gate snapshot"
+else
+  fail "readiness gate duplicates, bypasses, or splits the branch-owned marker snapshot"
+fi
+
+fixture_gate_function="$(sed -n '/^require_branch_owned_hcc_gate() {$/,/^}$/p' "$FIXTURE_HELPER")"
+marker_get_count="$(
+  grep -Fc 'kctl get configmap clerum-pre-gate-sync-state' <<<"$fixture_gate_function"
+)"
+# Literal source-code assertions.
+# shellcheck disable=SC2016
+if [ "$marker_get_count" = 1 ] &&
+   [[ "$fixture_gate_function" == *'-o json'* ]] &&
+   [[ "$fixture_gate_function" == *'.data.worktreeId'* ]] &&
+   [[ "$fixture_gate_function" == *'.data.gitHead'* ]] &&
+   [[ "$fixture_gate_function" == *'<<<"$HCC_BRANCH_GATE_SYNC_MARKER"'* ]]; then
+  pass "shared branch gate derives ownership and HEAD from one exported ConfigMap JSON snapshot"
+else
+  fail "shared branch gate can split ownership and HEAD across marker reads"
+fi
+
 # shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-logs.sh
 source "$LOG_HELPER"
 HCC_LOG_BUFFER="$MOCK_LOG_FILE"
 START_TIME=2026-07-14T00:00:00Z
 HOST_NS=mcp-host
+
+blocker_holds_function="$(sed -n '/^blocker_holds_token_request() {$/,/^}$/p' "$READINESS_GATE")"
+blocker_count_function="$(sed -n '/^blocker_fixture_request_count() {$/,/^}$/p' "$READINESS_GATE")"
+if (
+  BLOCKER_NAME=readiness-blocker
+  HCC_NS=control-plane
+  FIXTURE_HOST_PREFIX=e2e-hcc-ready-test
+  TOKEN_REQUEST_LOG_PREFIX='holding-token POST /api/v1/auth/mcp-host/mcp-host/standalone/tokens host='
+  kctl() { cat "$MOCK_LOG_FILE"; }
+  eval "$blocker_holds_function"
+  eval "$blocker_count_function"
+  printf '%s\n' \
+    'holding-token GET /api/v1/auth/mcp-host/mcp-host/standalone/tokens host=e2e-hcc-ready-test-01' \
+    'holding-token POST /wrong/path host=e2e-hcc-ready-test-02' \
+    'holding-token POST /api/v1/auth/mcp-host/mcp-host/standalone/tokens host=e2e-hcc-ready-test-03' \
+    'holding-token POST /api/v1/auth/mcp-host/mcp-host/standalone/tokens host=e2e-hcc-ready-test-03' \
+    'holding-token POST /api/v1/auth/mcp-host/mcp-host/standalone/tokens host=e2e-hcc-ready-test-04' \
+    >"$MOCK_LOG_FILE"
+  [ "$(blocker_fixture_request_count)" = 2 ] &&
+    blocker_holds_token_request
+); then
+  pass "blocker evidence counts unique fixtures only on the canonical token issuance method and path"
+else
+  fail "wrong-method, wrong-path, or duplicate blocker traffic can satisfy the fleet evidence"
+fi
+
+create_fixtures_function="$(sed -n '/^create_host_fixtures() {$/,/^}$/p' "$READINESS_GATE")"
+if (
+  RUN_ID=fixture-failure
+  SUITE_NAME=hcc-readiness-bootstrap
+  HOST_NS=mcp-host
+  MCP_NS=mcp-server
+  FIXTURE_SECRET=e2e-secret
+  FIXTURE_CONTEXT=e2e-context
+  FIXTURE_HOST_PREFIX=e2e-host
+  FIXTURE_HOST_COUNT=4
+  FIXTURE_HOST_NAMES=()
+  FIXTURES_CREATED=0
+  KCTL_APPLY_COUNT=0
+  kctl() {
+    KCTL_APPLY_COUNT=$((KCTL_APPLY_COUNT + 1))
+    cat >/dev/null
+    [ "$KCTL_APPLY_COUNT" -ne 3 ]
+  }
+  eval "$create_fixtures_function"
+  if create_host_fixtures; then
+    exit 1
+  fi
+  [ "$KCTL_APPLY_COUNT" = 3 ]
+); then
+  pass "an intermediate Host apply failure aborts fixture creation even from an OR-list"
+else
+  fail "fixture creation can continue or report success after an intermediate apply failure"
+fi
 
 printf '%s\n' \
   '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery' \
@@ -83,6 +167,135 @@ if recovery_cycle_used_fresh_host_inventory 2 5; then
   pass "recovery attribution selects the requested interruption cycle"
 else
   fail "the second recovery cycle was not isolated from the first"
+fi
+
+large_log_tail="$(awk 'BEGIN {
+  for (i = 1; i <= 20000; i++) {
+    printf "trailing-log-line-%05d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n", i
+  }
+}')"
+large_active_snapshot="${START_MARKER:-Starting initial Host background convergence}
+${large_log_tail}"
+if hcc_log_snapshot_contains \
+     "$large_active_snapshot" 'Starting initial Host background convergence'; then
+  pass "buffered marker lookup survives a log tail larger than a pipe buffer"
+else
+  fail "large trailing logs can hide a marker from buffered lookup"
+fi
+
+if hcc_initial_pass_snapshot_is_active \
+     "$large_active_snapshot" \
+     'Starting initial Host background convergence' \
+     'Completed Host reconciliation after initial Host reconciliation' \
+     'Host reconciliation after initial Host reconciliation failed'; then
+  pass "Host pass snapshot is active only with START and no terminal marker"
+else
+  fail "valid active Host pass snapshot was rejected"
+fi
+
+for terminal_marker in \
+  'Completed Host reconciliation after initial Host reconciliation' \
+  'Host reconciliation after initial Host reconciliation failed'; do
+  if hcc_initial_pass_snapshot_is_active \
+       "${large_active_snapshot}
+${terminal_marker}" \
+       'Starting initial Host background convergence' \
+       'Completed Host reconciliation after initial Host reconciliation' \
+       'Host reconciliation after initial Host reconciliation failed'; then
+    fail "terminal Host marker '${terminal_marker}' can still satisfy the active-pass guard"
+  else
+    pass "terminal Host marker '${terminal_marker}' invalidates the active-pass guard"
+  fi
+done
+
+readiness_log_function="$(
+  sed -n '/^hcc_log_contains() {$/,/^}$/p' "$READINESS_GATE"
+)"
+running_pod_function="$(
+  sed -n '/^running_hcc_pod() {$/,/^}$/p' "$READINESS_GATE"
+)"
+# Literal source-code assertions.
+# shellcheck disable=SC2016
+if [[ "$readiness_log_function" == *'logs="$(hcc_logs "$pod")"'* ]] &&
+   [[ "$readiness_log_function" == *'hcc_log_snapshot_contains "$logs" "$marker"'* ]] &&
+   [[ "$running_pod_function" == *'rows="$(kctl get pods'* ]] &&
+   [[ "$running_pod_function" == *'<<<"$rows"'* ]]; then
+  pass "readiness log and Running-pod selection buffer producers before early-exit consumers"
+else
+  fail "readiness log or Running-pod selection reintroduced a pipefail/SIGPIPE path"
+fi
+
+active_guard_function="$(
+  sed -n '/^initial_host_pass_is_active() {$/,/^}$/p' "$READINESS_GATE"
+)"
+# shellcheck disable=SC2016
+probe_result_line="$(grep -nF 'probe_result="$(kctl exec' "$READINESS_GATE" | cut -d: -f1)"
+# shellcheck disable=SC2016
+final_active_guard_line="$(
+  grep -nF 'initial_host_pass_is_active "$new_hcc_pod"' "$READINESS_GATE" |
+    tail -1 |
+    cut -d: -f1
+)"
+# Literal source-code assertions.
+# shellcheck disable=SC2016
+if [[ "$active_guard_function" == *'"$COMPLETE_MARKER"'* ]] &&
+   [[ "$active_guard_function" == *'"$FAIL_MARKER"'* ]] &&
+   [ -n "$probe_result_line" ] &&
+   [ -n "$final_active_guard_line" ] &&
+   [ "$final_active_guard_line" -gt "$probe_result_line" ]; then
+  pass "final readiness assertion rejects both failed and completed Host passes"
+else
+  fail "final readiness assertion does not enforce both terminal Host markers"
+fi
+
+cleanup_body="$(sed -n '/^cleanup() {$/,/^}$/p' "$READINESS_GATE")"
+fixture_cleanup_body="$(sed -n '/^delete_host_fixtures() {$/,/^}$/p' "$READINESS_GATE")"
+# shellcheck disable=SC2016
+cleanup_stop_line="$(grep -nF 'kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0' \
+  <<<"$cleanup_body" | head -1 | cut -d: -f1)"
+cleanup_fixture_line="$(grep -nF 'delete_host_fixtures' <<<"$cleanup_body" | head -1 | cut -d: -f1)"
+# shellcheck disable=SC2016
+cleanup_restore_line="$(grep -nF 'kctl set env deployment/"$HCC_DEPLOY"' \
+  <<<"$cleanup_body" | head -1 | cut -d: -f1)"
+# Literal source-code assertion.
+# shellcheck disable=SC2016
+if grep -Fq 'FIXTURE_HOST_COUNT=$((HOST_RECONCILE_CONCURRENCY * 2 + 1))' "$READINESS_GATE" &&
+   grep -Fq 'kind: Host' "$READINESS_GATE" &&
+   grep -Fq "host='+host" "$READINESS_GATE" &&
+   grep -Fq 'blocker_fixture_request_count' "$READINESS_GATE" &&
+   [[ "$fixture_cleanup_body" == *'clerum.io/managed-by=host-context-controller,clerum.io/host=${host}'* ]] &&
+   [[ "$fixture_cleanup_body" == *'fixture_resources_absent'* ]] &&
+   ! grep -Fq 'RUNTIME_SECRET' "$READINESS_GATE" &&
+   ! grep -Fq 'HOST_REF' "$READINESS_GATE" &&
+   [ -n "$cleanup_stop_line" ] &&
+   [ -n "$cleanup_fixture_line" ] &&
+   [ -n "$cleanup_restore_line" ] &&
+   [ "$cleanup_stop_line" -lt "$cleanup_fixture_line" ] &&
+   [ "$cleanup_fixture_line" -lt "$cleanup_restore_line" ]; then
+  pass "readiness gate uses a multi-wave owned Host fleet and deletes it while HCC is stopped"
+else
+  fail "readiness gate can mutate a real Host Secret or restore HCC before fixture deletion"
+fi
+
+if [[ "$cleanup_body" == *'header "HCC readiness bootstrap gate passed"'* ]] &&
+   grep -Fq 'header "HCC readiness assertions passed; restoring branch-owned runtime"' \
+     "$READINESS_GATE" &&
+   [ "$(grep -Fc 'header "HCC readiness bootstrap gate passed"' "$READINESS_GATE")" = 1 ]; then
+  pass "readiness gate emits its final pass banner only after verified restoration and lock finalization"
+else
+  fail "readiness gate can announce a final pass before cleanup and ownership release finish"
+fi
+
+wait_until_body="$(sed -n '/^wait_until() {$/,/^}$/p' "$READINESS_GATE")"
+# Literal source-code assertion.
+# shellcheck disable=SC2016
+if [[ "$wait_until_body" == *'deadline=$(( $(date +%s) + timeout ))'* ]] &&
+   ! grep -Fq -- '--for=delete' "$READINESS_GATE" &&
+   ! grep -Fq 'port: 8081' "$READINESS_GATE" &&
+   grep -Fq 'HCC_E2E_PORT' "$READINESS_GATE"; then
+  pass "readiness gate uses wall-clock deadlines, absence waits, and the deployed HCC port"
+else
+  fail "readiness gate retains a command-latency, zero-pod wait, or hard-coded-port edge"
 fi
 
 for gate in "${GATES[@]}"; do

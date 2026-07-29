@@ -2,6 +2,18 @@
 
 # Log capture and causal recovery-cycle assertions for the HCC watch gate.
 
+hcc_log_snapshot_contains() {
+  local snapshot=$1 marker=$2
+  grep -Fq -- "$marker" <<<"$snapshot"
+}
+
+hcc_initial_pass_snapshot_is_active() {
+  local snapshot=$1 start_marker=$2 complete_marker=$3 fail_marker=$4
+  hcc_log_snapshot_contains "$snapshot" "$start_marker" &&
+    ! hcc_log_snapshot_contains "$snapshot" "$complete_marker" &&
+    ! hcc_log_snapshot_contains "$snapshot" "$fail_marker"
+}
+
 hcc_recovery_logs() {
   [ -n "$START_TIME" ] || return 0
   grep -E 'CommunicationChannel|Listing all Hosts|Reconciling [0-9]+ Host|Completed Host reconciliation|Periodic resync' \

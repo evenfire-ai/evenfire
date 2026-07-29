@@ -1,28 +1,34 @@
 #!/usr/bin/env bash
 
-# Safety helpers for the HCC CommunicationChannel watch-recovery fault fixture.
+# Safety helpers shared by disruptive HCC fault-injection fixtures.
 
 require_branch_owned_hcc_gate() {
-  local repo_root expected_worktree_id expected_head actual_worktree_id actual_head worktree_dirty
+  local marker_namespace="${1:-control-plane}"
+  local actual_worktree_id actual_head worktree_dirty
 
   is_branch_scoped_e2e_context "$E2E_KUBECONTEXT" ||
     die "fault injection requires a generated branch-scoped context, got '${E2E_KUBECONTEXT}'"
 
-  repo_root="$(git -C "${SCRIPT_DIR}/../.." rev-parse --show-toplevel)"
-  worktree_dirty="$(git -C "$repo_root" status --porcelain --untracked-files=normal)"
+  HCC_BRANCH_GATE_REPO_ROOT="$(git -C "${SCRIPT_DIR}/../.." rev-parse --show-toplevel)"
+  worktree_dirty="$(
+    git -C "$HCC_BRANCH_GATE_REPO_ROOT" status --porcelain --untracked-files=normal
+  )"
   [ -z "$worktree_dirty" ] ||
     die "worktree has uncommitted changes; commit and re-sync before runtime proof"
-  expected_worktree_id="$(printf '%s' "$repo_root" | shasum | awk '{print $1}')"
-  expected_head="$(git -C "$repo_root" rev-parse HEAD)"
-  actual_worktree_id="$(kctl get configmap clerum-pre-gate-sync-state -n control-plane \
-    -o jsonpath='{.data.worktreeId}' 2>/dev/null || true)"
-  actual_head="$(kctl get configmap clerum-pre-gate-sync-state -n control-plane \
-    -o jsonpath='{.data.gitHead}' 2>/dev/null || true)"
+  HCC_BRANCH_GATE_EXPECTED_WORKTREE_ID="$(
+    printf '%s' "$HCC_BRANCH_GATE_REPO_ROOT" | shasum | awk '{print $1}'
+  )"
+  HCC_BRANCH_GATE_EXPECTED_HEAD="$(git -C "$HCC_BRANCH_GATE_REPO_ROOT" rev-parse HEAD)"
+  HCC_BRANCH_GATE_SYNC_MARKER="$(
+    kctl get configmap clerum-pre-gate-sync-state -n "$marker_namespace" -o json 2>/dev/null
+  )" || die "cluster has no readable pre-gate sync marker"
+  actual_worktree_id="$(jq -r '.data.worktreeId // ""' <<<"$HCC_BRANCH_GATE_SYNC_MARKER")"
+  actual_head="$(jq -r '.data.gitHead // ""' <<<"$HCC_BRANCH_GATE_SYNC_MARKER")"
 
-  [ "$actual_worktree_id" = "$expected_worktree_id" ] ||
+  [ "$actual_worktree_id" = "$HCC_BRANCH_GATE_EXPECTED_WORKTREE_ID" ] ||
     die "cluster ownership marker does not match this worktree; run minikube-pre-gate-sync first"
-  [ "$actual_head" = "$expected_head" ] ||
-    die "cluster HEAD marker ${actual_head:-missing} does not match ${expected_head}"
+  [ "$actual_head" = "$HCC_BRANCH_GATE_EXPECTED_HEAD" ] ||
+    die "cluster HEAD marker ${actual_head:-missing} does not match ${HCC_BRANCH_GATE_EXPECTED_HEAD}"
 }
 
 create_hcc_api_proxy() {
