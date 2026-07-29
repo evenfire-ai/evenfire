@@ -257,6 +257,7 @@ export function createRegistryConnectRouter(): Router {
         org: string
       }
       await markConnected({
+        deploymentId: row.deploymentId,
         clientId: claimed.client_id,
         clientSecret: claimed.client_secret,
         orgName: claimed.org,
