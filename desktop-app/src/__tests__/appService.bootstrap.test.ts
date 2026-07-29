@@ -192,7 +192,7 @@ describe('AppService invitation configuration lookup', () => {
     expect(service.authClient.passwordLogin).toHaveBeenCalledWith('user@example.com', 'password123')
   })
 
-  it('keeps a saved token when startup session restore has a transient failure', async () => {
+  it('does not repeat a failed startup restore before the login screen can paint', async () => {
     const configPath = await createTempConfigPath('clerum-desktop-restore-local')
     await fs.writeFile(
       configPath,
@@ -208,21 +208,7 @@ describe('AppService invitation configuration lookup', () => {
     delete process.env.PROFILE_UI_BASE_URL
     vi.resetModules()
 
-    const [{ AppService }, { resolveEnvKey }] = await Promise.all([
-      import('../appService.js'),
-      import('../config.js'),
-    ])
-    const { bindChatStoreForUser } = await import('../chatStoreBinding.js')
-
-    const me = {
-      id: 'user-1',
-      email: 'user@example.com',
-      name: null,
-      picture: null,
-      teamId: 'team-1',
-      teamName: 'Marketing',
-      role: 'member',
-    }
+    const { AppService } = await import('../appService.js')
     const getSessionToken = vi.fn().mockResolvedValue('stored-token')
     const clearSessionToken = vi.fn().mockResolvedValue(undefined)
     const service = new AppService() as unknown as {
@@ -237,7 +223,7 @@ describe('AppService invitation configuration lookup', () => {
     }
 
     service.authClient = {
-      getMe: vi.fn().mockRejectedValueOnce(new Error('fetch failed')).mockResolvedValueOnce(me),
+      getMe: vi.fn().mockRejectedValue(new Error('fetch failed')),
     } as never
     service.tokenStore = {
       getSessionToken,
@@ -253,15 +239,12 @@ describe('AppService invitation configuration lookup', () => {
 
       expect(clearSessionToken).not.toHaveBeenCalled()
 
-      await expect(service.getSessionState()).resolves.toMatchObject({
-        authenticated: true,
-        me: { email: 'user@example.com' },
+      await expect(service.getSessionState()).resolves.toEqual({
+        authenticated: false,
+        me: null,
       })
-      expect(getSessionToken).toHaveBeenCalledTimes(2)
-      expect(bindChatStoreForUser).toHaveBeenCalledWith(
-        'user-1',
-        resolveEnvKey('http://127.0.0.1:8091')
-      )
+      expect(getSessionToken).toHaveBeenCalledTimes(1)
+      expect(service.authClient.getMe).toHaveBeenCalledTimes(1)
     } finally {
       warn.mockRestore()
     }

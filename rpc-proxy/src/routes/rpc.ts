@@ -428,7 +428,7 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
+        if (!isSafeUpstreamPathSegment(hostRef)) {
           res.status(400).json({ error: 'hostRef is required' })
           return
         }
@@ -640,7 +640,7 @@ export function createRpcRouter(): Router {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
+        if (!isSafeUpstreamPathSegment(hostRef)) {
           res.status(400).json({ error: 'hostRef is required' })
           return
         }

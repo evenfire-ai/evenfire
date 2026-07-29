@@ -170,6 +170,42 @@ describe('chatStoreBinding', () => {
     expect(() => requireChatStore()).toThrow(/Not authenticated/)
   })
 
+  it('sweeps expired corrupt transcript quarantines while retaining recent recovery data', async () => {
+    const agentDir = path.join(tmpBase, ENV_A, 'user-retention', 'agent-x')
+    const legacyCorruptDir = path.join(agentDir, '.corrupt')
+    const snapshotRoot = path.join(agentDir, 'chats', '.snapshots', 'encoded-chat')
+    const oldPagedCorrupt = path.join(snapshotRoot, 'corrupt-old')
+    const recentPagedCorrupt = path.join(snapshotRoot, 'corrupt-recent')
+    const oldLegacyCorrupt = path.join(legacyCorruptDir, 'old.json')
+    const recentLegacyCorrupt = path.join(legacyCorruptDir, 'recent.json')
+    await fs.mkdir(legacyCorruptDir, { recursive: true })
+    await fs.mkdir(oldPagedCorrupt, { recursive: true })
+    await fs.mkdir(recentPagedCorrupt, { recursive: true })
+    await fs.writeFile(
+      path.join(agentDir, 'index.json'),
+      JSON.stringify({
+        version: 2,
+        chats: [],
+        lastActiveChatId: null,
+        onboardingDismissed: false,
+      })
+    )
+    await fs.writeFile(oldLegacyCorrupt, 'old legacy transcript')
+    await fs.writeFile(recentLegacyCorrupt, 'recent legacy transcript')
+    await fs.writeFile(path.join(oldPagedCorrupt, 'meta.json'), 'old paged transcript')
+    await fs.writeFile(path.join(recentPagedCorrupt, 'meta.json'), 'recent paged transcript')
+    const expiredAt = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000)
+    await fs.utimes(oldLegacyCorrupt, expiredAt, expiredAt)
+    await fs.utimes(oldPagedCorrupt, expiredAt, expiredAt)
+
+    await bindChatStoreForUser('user-retention', ENV_A)
+
+    expect(await exists(oldLegacyCorrupt)).toBe(false)
+    expect(await exists(oldPagedCorrupt)).toBe(false)
+    expect(await exists(recentLegacyCorrupt)).toBe(true)
+    expect(await exists(recentPagedCorrupt)).toBe(true)
+  })
+
   // §5.2 / §7.1 — bootstrap wipes any pre-v2 (legacy schema) per-agent cache dir
   // WITHIN the env-scoped user directory.
   describe('legacy schema wipe on bind', () => {

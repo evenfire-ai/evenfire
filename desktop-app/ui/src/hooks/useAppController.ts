@@ -428,26 +428,21 @@ export function useAppController() {
 
   const refreshWorkspaceDataForRoute = useCallback(
     async (route: NavItem) => {
-      let cycleCatalogPromise: Promise<AccessCatalog> | null = null
-      const getCycleCatalogPromise = () => {
-        if (!cycleCatalogPromise) {
-          cycleCatalogPromise = getCatalogRefreshPromise()
-        }
-        return cycleCatalogPromise
-      }
-
+      // Route refreshes deliberately update only the visible section. Hidden
+      // route data remains deferred until that route becomes visible; shared
+      // menu/composer data is loaded by the post-paint bootstrap instead.
       const refreshers = [
         {
           route: DESKTOP_ROUTES.agents,
-          refresh: () => agentsData.refreshWithCatalog(getCycleCatalogPromise()),
+          refresh: () => agentsData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
         {
           route: DESKTOP_ROUTES.contexts,
-          refresh: () => contextsData.refreshWithCatalog(getCycleCatalogPromise()),
+          refresh: () => contextsData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
         {
           route: DESKTOP_ROUTES.connectors,
-          refresh: () => mcpServersData.refreshWithCatalog(getCycleCatalogPromise()),
+          refresh: () => mcpServersData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
         { route: DESKTOP_ROUTES.teams, refresh: teamsData.refresh },
         { route: DESKTOP_ROUTES.plugins, refresh: refreshWorkflowsData },

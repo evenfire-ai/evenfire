@@ -9,6 +9,7 @@ import { ChatStore } from './chatStore.js'
  */
 const SCHEMA_VERSION = 2
 const PREVIOUS_PAGED_INDEX_VERSION = 3
+const CORRUPT_QUARANTINE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 
 // Default base dir derived from Electron's userData path. Tests override via
 // __setChatStoreBaseDirForTests to point at a tmpdir, which means the
@@ -73,6 +74,7 @@ export async function bindChatStoreForUser(userId: string, envKey: string): Prom
     await maybeWipePreEnvLegacyCache(baseDir)
     const userDir = join(baseDir, envKey, userId)
     await maybeWipeLegacyCache(userDir)
+    await sweepExpiredCorruptQuarantines(userDir)
     if (generation !== bindingGeneration) return
     activeChatStore = new ChatStore(userDir)
     activeUserId = userId
@@ -217,6 +219,55 @@ async function maybeWipeLegacyCache(userDir: string): Promise<void> {
       await fs.rm(agentDir, { recursive: true, force: true })
     }
   }
+}
+
+/**
+ * Corrupt snapshots preserve recoverable local work, but they also retain full
+ * transcript content. Keep recent quarantines for downgrade/crash recovery and
+ * remove abandoned copies after a bounded retention window on each bind.
+ */
+async function sweepExpiredCorruptQuarantines(userDir: string, nowMs = Date.now()): Promise<void> {
+  const agentEntries = await fs.readdir(userDir, { withFileTypes: true }).catch(() => [])
+  await Promise.all(
+    agentEntries
+      .filter(entry => entry.isDirectory())
+      .map(async entry => {
+        const agentDir = join(userDir, entry.name)
+        await removeExpiredQuarantineEntries(join(agentDir, '.corrupt'), () => true, nowMs)
+
+        const snapshotRoot = join(agentDir, 'chats', '.snapshots')
+        const chatEntries = await fs.readdir(snapshotRoot, { withFileTypes: true }).catch(() => [])
+        await Promise.all(
+          chatEntries
+            .filter(chatEntry => chatEntry.isDirectory())
+            .map(chatEntry =>
+              removeExpiredQuarantineEntries(
+                join(snapshotRoot, chatEntry.name),
+                name => name.startsWith('corrupt-'),
+                nowMs
+              )
+            )
+        )
+      })
+  )
+}
+
+async function removeExpiredQuarantineEntries(
+  directory: string,
+  shouldRemove: (name: string) => boolean,
+  nowMs: number
+): Promise<void> {
+  const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => [])
+  await Promise.all(
+    entries
+      .filter(entry => shouldRemove(entry.name))
+      .map(async entry => {
+        const target = join(directory, entry.name)
+        const stat = await fs.lstat(target).catch(() => null)
+        if (!stat || nowMs - stat.mtimeMs < CORRUPT_QUARANTINE_RETENTION_MS) return
+        await fs.rm(target, { recursive: entry.isDirectory(), force: true }).catch(() => undefined)
+      })
+  )
 }
 
 export function unbindChatStore(): void {

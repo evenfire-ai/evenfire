@@ -120,6 +120,7 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
     '/rpc/hosts/chatllm/sessions?cursor=one&cursor=two',
     '/rpc/hosts/chatllm/sessions?agent=one&agent=two',
     '/rpc/hosts/chatllm/sessions?agent=.',
+    '/rpc/hosts/chat%2Fllm/sessions',
   ])('rejects malformed session pagination before forwarding upstream: %s', async path => {
     const fetchMock = vi.fn()
     globalThis.fetch = fetchMock as unknown as typeof fetch

@@ -37,6 +37,19 @@ describe('buildMessageGroupChunks', () => {
     )
   })
 
+  it('keeps existing server-turn chunks stable when older turns are prepended', () => {
+    const before = buildMessageGroupChunks(turnGroups(5, 12))
+    const after = buildMessageGroupChunks(turnGroups(1, 12))
+    const afterByKey = new Map(after.map(chunk => [chunk.chunkKey, chunk]))
+
+    expect(before.map(chunk => chunk.chunkKey)).toEqual(['server-turns-1', 'server-turns-2'])
+    for (const chunk of before) {
+      expect(afterByKey.get(chunk.chunkKey)?.groups.map(({ group }) => group.groupKey)).toEqual(
+        chunk.groups.map(({ group }) => group.groupKey)
+      )
+    }
+  })
+
   it('suffixes repeated server buckets separated by a local-only group', () => {
     const local = { groupKey: 'local-message', items: [{}] }
     const chunks = buildMessageGroupChunks([group(1, 'user'), local, group(2, 'assistant')])

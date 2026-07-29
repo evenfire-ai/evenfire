@@ -270,6 +270,7 @@ export class AppService {
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
   private restoreSavedSessionInFlight: Promise<SessionState> | null = null
+  private savedSessionRestoreAttemptedEnvKey: string | null = null
   private logoutInProgress = false
   private sessionGeneration = 0
   private workflowApprovalTeamById = new Map<string, string>()
@@ -556,6 +557,7 @@ export class AppService {
     const restoreGeneration = this.sessionGeneration
     hydrateDesktopRuntimeConfig()
     const envKey = getActiveEnvKey()
+    this.savedSessionRestoreAttemptedEnvKey = envKey
     let token: string | null
     try {
       token = await this.tokenStore.getSessionToken(envKey)
@@ -1050,7 +1052,17 @@ export class AppService {
   }
 
   async getSessionState(): Promise<SessionState> {
-    if (!this.sessionToken || !this.me) return this.restoreSavedSession()
+    if (!this.sessionToken || !this.me) {
+      if (this.restoreSavedSessionInFlight) return this.restoreSavedSession()
+      // createWindow() already performs the saved-token restore before showing
+      // the renderer. Do not immediately repeat a failed 60-second network
+      // attempt from the renderer bootstrap; a new app launch or environment
+      // selection gets a fresh attempt because its service/env key is new.
+      if (this.savedSessionRestoreAttemptedEnvKey === getActiveEnvKey()) {
+        return { authenticated: false, me: null }
+      }
+      return this.restoreSavedSession()
+    }
     return { authenticated: true, me: this.me }
   }
 

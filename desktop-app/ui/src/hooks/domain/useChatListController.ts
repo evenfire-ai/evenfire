@@ -33,7 +33,6 @@ const SESSION_CATALOG_PAGE_LIMIT = 50
 
 export interface SidebarChatEntry extends ChatMetadata {
   remote?: boolean
-  turnCount?: number
 }
 
 /** Cross-agent sidebar entry (dev's `latestChatSessions`): a chat plus its owning agent. */
@@ -213,7 +212,6 @@ export function useChatListController({
               // instead of fabricating two messages per turn and overstating
               // Activity totals when tool/system messages vary by session.
               messageCount: knownServerMessageCount(s),
-              turnCount: s.turnCount,
               remote: true,
             }))
           return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
@@ -308,7 +306,6 @@ export function useChatListController({
             createdAt: s.lastActivityAt,
             updatedAt: s.lastActivityAt,
             messageCount: knownServerMessageCount(s),
-            turnCount: s.turnCount,
           }))
         return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
       })
@@ -656,7 +653,6 @@ export function useChatListController({
                 updatedAt: session.lastActivityAt,
                 messageCount: knownServerMessageCount(session),
                 remote: true,
-                turnCount: session.turnCount,
                 agentRef: group.agentRef,
               })
             }

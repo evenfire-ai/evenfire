@@ -102,7 +102,6 @@ describe('pendingChatSelection effect', () => {
           expect.objectContaining({
             id: 'legacy-summary',
             messageCount: 0,
-            turnCount: 7,
           }),
         ])
       )
