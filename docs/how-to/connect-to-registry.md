@@ -18,21 +18,30 @@ and use registry SSO from your Control UI.
 ## Connect
 
 Open **Control UI → Registry → Connect** (`/registry/connect`). The panel walks a
-small state machine — `disconnected → pending → approved → connected`:
+small state machine — `disconnected → pending | connecting → approved → connected`:
 
-1. **Request.** Enter a **requested org name** and a **contact email**, and
-   submit. Your control-api generates a signing keypair, registers the request
-   with the registry, and saves it as **pending**. (The keypair is how the
-   registry later confirms the claim really comes from your deployment — you
-   never handle it.) A reserved or blocked org name is refused up front.
-2. **Wait for approval.** An Evenfire operator reviews the request and either
-   approves or rejects it. The panel polls the registry, so the decision appears
-   without you re-submitting.
-3. **Claim.** On approval the operator sends you a **one-time claim token**
-   out-of-band. Paste it into the panel to finish connecting. The token is
-   single-use and short-lived.
-4. **Connected.** The panel shows your bound org. You can now install catalog
-   entries, mint publish keys, and use registry SSO.
+1. **Request access.** You enter an organization name and a contact email. The
+   panel generates a keypair, registers with the registry, and saves the row.
+   (The keypair is how the registry knows later requests really come from this
+   deployment. It never leaves your cluster.)
+
+2. **What happens next depends on the registry.**
+
+   - **Open registration enabled** — the registry approves immediately and the
+     panel finishes connecting on its own. No operator is involved and no claim
+     token is ever shown to a human. If that automatic step cannot complete (a
+     network blip, or the registry briefly unavailable), the panel shows
+     **Finishing the connection** with a **Finish connecting** button; press it
+     to retry. Nothing is stranded, and you never need a token.
+
+   - **Open registration disabled** — the request lands as **pending**. An
+     Evenfire operator reviews it and either approves or rejects it. On
+     approval you receive a one-time claim token out of band; paste it into the
+     panel to finish connecting. Use **Refresh status** to check whether the
+     decision has landed.
+
+3. **Connected.** The deployment holds its machine credentials and can read the
+   catalog, publish entries, and push images to its own org.
 
 ## What connecting gives you
 
