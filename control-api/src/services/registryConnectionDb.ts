@@ -1,5 +1,5 @@
 import { config } from '../config.js'
-import { pool } from '../db.js'
+import { pool, withTransaction } from '../db.js'
 import type { DbClient } from '../db.js'
 import {
   decryptOAuthSecret,
@@ -108,43 +108,60 @@ export async function upsertPendingConnection(
     requestedOrgName: string
     contactEmail: string
     registryUrl: string
+    /** 'approved' marks a registry auto-approval whose claim has not landed yet. */
+    status?: 'pending' | 'approved'
   },
-  db: DbClient = pool
+  db?: DbClient
 ): Promise<void> {
   const encPriv = encryptOAuthSecret(encKey(), input.privateKeyPem)
-  // Singleton table: delete any prior row then insert. (A connect restart replaces
-  // a stale pending row — the deployment keypair is regenerated fresh each request.)
-  await db.query(`DELETE FROM registry_connection`)
-  await db.query(
-    `INSERT INTO registry_connection
-       (deployment_id, key_id, public_key_pem, private_key_encrypted,
-        requested_org_name, contact_email, status, registry_url)
-     VALUES ($1,$2,$3,$4,$5,$6,'pending',$7)`,
-    [
-      input.deploymentId,
-      input.keyId,
-      input.publicKeyPem,
-      encPriv,
-      input.requestedOrgName,
-      input.contactEmail,
-      input.registryUrl,
-    ]
-  )
+  const status = input.status ?? 'pending'
+  // Singleton table: replace any prior row. DELETE + INSERT must be ATOMIC —
+  // a crash between them destroys the deployment keypair, which is the only
+  // artifact that can recover an already-approved deployment (rotate is
+  // PoP-gated). An explicit db means the caller already owns a transaction.
+  const run = async (tx: DbClient): Promise<void> => {
+    await tx.query(`DELETE FROM registry_connection`)
+    await tx.query(
+      `INSERT INTO registry_connection
+         (deployment_id, key_id, public_key_pem, private_key_encrypted,
+          requested_org_name, contact_email, status, registry_url)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [
+        input.deploymentId,
+        input.keyId,
+        input.publicKeyPem,
+        encPriv,
+        input.requestedOrgName,
+        input.contactEmail,
+        status,
+        input.registryUrl,
+      ]
+    )
+  }
+  if (db) await run(db)
+  else await withTransaction(run)
   cached = undefined
 }
 
 export async function markConnected(
-  input: { clientId: string; clientSecret: string; orgName: string },
+  input: { deploymentId: string; clientId: string; clientSecret: string; orgName: string },
   db: DbClient = pool
-): Promise<void> {
+): Promise<boolean> {
   const encSecret = encryptOAuthSecret(encKey(), input.clientSecret)
-  await db.query(
+  // Scoped to the deployment that actually claimed. Without the predicate a
+  // DELETE or a second registration landing mid-claim would either silently
+  // swallow the credentials or stamp THIS deployment's client secret onto a
+  // DIFFERENT deployment's keypair — machine creds and voucher signing key
+  // would then belong to two different deployments.
+  const res = await db.query(
     `UPDATE registry_connection
         SET client_id = $1, client_secret_encrypted = $2, org_name = $3,
-            status = 'connected', updated_at = now()`,
-    [input.clientId, encSecret, input.orgName]
+            status = 'connected', updated_at = now()
+      WHERE deployment_id = $4 AND status <> 'connected'`,
+    [input.clientId, encSecret, input.orgName, input.deploymentId]
   )
   cached = undefined
+  return (res.rowCount ?? 0) > 0
 }
 
 export async function deleteConnection(db: DbClient = pool): Promise<void> {
