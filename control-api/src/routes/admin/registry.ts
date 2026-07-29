@@ -33,6 +33,7 @@ import {
   updateVersionMetadata,
   uploadArtifacts,
 } from '../../services/registryClient.js'
+import { isRegistryAuthActive } from '../../services/registryConnectionDb.js'
 import {
   validateWorkflowRecipeEgressPreflight,
   validateWorkflowRecipeLimits,
@@ -2165,7 +2166,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     req: Request,
     res: Response
   ): Promise<{ admin: AdminUserRecord; orgName: string } | null> {
-    if (!config.registryAuthEnabled) {
+    if (!(await isRegistryAuthActive())) {
       res.status(409).json({ error: 'registry_auth_disabled' })
       return null
     }
@@ -2263,7 +2264,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     req: Request,
     res: Response
   ): Promise<{ orgName: string; actingUserId: string } | null> {
-    if (!config.registryAuthEnabled) {
+    if (!(await isRegistryAuthActive())) {
       res.status(409).json({ error: 'registry_auth_disabled' })
       return null
     }

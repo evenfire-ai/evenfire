@@ -53,7 +53,12 @@ vi.mock('../src/services/orgApiKeyClient.js', () => ({
   },
 }))
 vi.mock('../src/services/adminAuthService.js', () => ({ findAdminById: vi.fn() }))
-const { cfg } = vi.hoisted(() => ({ cfg: { registryAuthEnabled: true } }))
+// registryConnectionMode is required: the routes now call isRegistryAuthActive(),
+// which branches on mode first. 'managed' makes it return registryAuthEnabled
+// verbatim, which is the behaviour these tests intend to exercise.
+const { cfg } = vi.hoisted(() => ({
+  cfg: { registryAuthEnabled: true, registryConnectionMode: 'managed' },
+}))
 vi.mock('../src/config.js', () => ({ config: cfg }))
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn(async () => ({

@@ -39,8 +39,17 @@ vi.mock('../src/services/registryClient.js', () => ({
   resolvePublishScope: vi.fn(),
 }))
 vi.mock('../src/services/adminAuthService.js', () => ({ findAdminById: vi.fn() }))
-const { cfg } = vi.hoisted(() => ({ cfg: { registryAuthEnabled: true } }))
+// registryConnectionMode is required: the routes now call isRegistryAuthActive(),
+// which branches on mode first. 'managed' makes it return registryAuthEnabled
+// verbatim, which is the behaviour these tests intend to exercise.
+const { cfg } = vi.hoisted(() => ({
+  cfg: { registryAuthEnabled: true, registryConnectionMode: 'managed' },
+}))
 vi.mock('../src/config.js', () => ({ config: cfg }))
+// Narrow mock: registry.ts imports nothing else from registryConnectionDb, so
+// stubbing only the accessor it now consumes is safe.
+const connDb = vi.hoisted(() => ({ isRegistryAuthActive: vi.fn() }))
+vi.mock('../src/services/registryConnectionDb.js', () => connDb)
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn(async () => ({
     allowed: true,
@@ -65,6 +74,15 @@ function makeApp(adminId: string | null = 'admin-1') {
 beforeEach(() => {
   vi.clearAllMocks()
   cfg.registryAuthEnabled = true
+  cfg.registryConnectionMode = 'managed'
+  // Default mirrors the real accessor's managed-mode branch (registryAuthEnabled
+  // verbatim) so the pre-existing tests below — which only flip
+  // cfg.registryAuthEnabled, not this mock — still reach the same 200/409 they did
+  // before this module was mocked. Reading cfg at call time (not a captured
+  // literal) also means vi.clearAllMocks() can never silently freeze this to a
+  // stale value. The self-hosted test overrides this per-call via
+  // mockResolvedValue, independent of cfg.registryAuthEnabled.
+  connDb.isRegistryAuthActive.mockImplementation(async () => cfg.registryAuthEnabled)
   vi.mocked(checkAndIncrement).mockResolvedValue({
     allowed: true,
     remaining: 29,
@@ -96,6 +114,14 @@ describe('GET /admin/registry/keys', () => {
     expect(res.status).toBe(409)
     expect(res.body).toEqual({ error: 'registry_auth_disabled' })
     expect(resolvePublishScope).not.toHaveBeenCalled()
+  })
+
+  it('self-hosted: keys work with NO auth env var once credentials exist', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.registryAuthEnabled = false // deliberately off — must be ignored
+    connDb.isRegistryAuthActive.mockResolvedValue(true) // credentials exist
+    const res = await request(makeApp()).get('/admin/registry/keys')
+    expect(res.status).not.toBe(409)
   })
 
   it('401 when admin missing/inactive', async () => {
