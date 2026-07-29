@@ -214,3 +214,21 @@ export async function resolveMachineCreds(): Promise<{
     clientSecret: config.registryClientSecret,
   }
 }
+
+/**
+ * Registry auth is ACTIVE when this deployment actually holds usable machine
+ * credentials.
+ *
+ * Self-hosted derives it from the claimed connection row, so connecting is the
+ * only operator action — there is no env var to set and no restart. Managed
+ * keeps CLERUM_REGISTRY_AUTH_ENABLED, because managed has no row (its creds
+ * come from env).
+ *
+ * Note this checks CREDENTIALS, not row presence: a 'pending' row, and an
+ * 'approved' row whose claim has not landed, both correctly report inactive.
+ * That falls out of resolveMachineCreds, which null-checks clientId/clientSecret.
+ */
+export async function isRegistryAuthActive(): Promise<boolean> {
+  if (config.registryConnectionMode === 'managed') return config.registryAuthEnabled
+  return (await resolveMachineCreds()) !== null
+}

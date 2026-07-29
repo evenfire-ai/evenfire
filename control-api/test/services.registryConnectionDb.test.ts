@@ -10,6 +10,7 @@ import {
   __resetRegistryConnectionCacheForTests,
   deleteConnection,
   getRegistryConnection,
+  isRegistryAuthActive,
   markConnected,
   resolveMachineCreds,
   resolveVoucherSigningMaterial,
@@ -443,5 +444,64 @@ describe('getRegistryConnection — cache TTL', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('isRegistryAuthActive', () => {
+  it('managed: returns the env value verbatim (true)', async () => {
+    cfg.registryConnectionMode = 'managed'
+    cfg.registryAuthEnabled = true
+    expect(await isRegistryAuthActive()).toBe(true)
+  })
+
+  it('managed: returns the env value verbatim (false)', async () => {
+    cfg.registryConnectionMode = 'managed'
+    cfg.registryAuthEnabled = false
+    expect(await isRegistryAuthActive()).toBe(false)
+  })
+
+  it('self-hosted: false with no connection row', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    dbQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    expect(await isRegistryAuthActive()).toBe(false)
+  })
+
+  // Kills a `row !== null` implementation. The DB status CHECK is
+  // ('pending','approved','connected') — there is NO 'connecting' status. An
+  // auto-approved-but-unclaimed row is status='approved' with a null client_id.
+  it('self-hosted: false for an approved row with no client_id', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    dbQuery.mockResolvedValue({
+      rows: [
+        makeRawRow(cfg.oauthEncryptionKey, {
+          status: 'approved',
+          client_id: null,
+          client_secret_encrypted: null,
+        }),
+      ],
+      rowCount: 1,
+    })
+    expect(await isRegistryAuthActive()).toBe(false)
+  })
+
+  it('self-hosted: true for a claimed row', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    const encSecret = encryptOAuthSecret(
+      deriveOAuthEncryptionKey(cfg.oauthEncryptionKey),
+      'db-secret-abc'
+    )
+    dbQuery.mockResolvedValue({
+      rows: [
+        makeRawRow(cfg.oauthEncryptionKey, {
+          status: 'connected',
+          client_id: 'db-cid',
+          client_secret_encrypted: encSecret,
+        }),
+      ],
+      rowCount: 1,
+    })
+    expect(await isRegistryAuthActive()).toBe(true)
   })
 })
