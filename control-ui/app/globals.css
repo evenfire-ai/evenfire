@@ -9172,6 +9172,7 @@ textarea.cu-input {
 
 .cu-agent-select.cu-llm-provider-filter {
   width: 12rem;
+  flex: 0 0 12rem;
 }
 
 .cu-llm-provider-filter .cu-agent-select__button {
@@ -9180,8 +9181,42 @@ textarea.cu-input {
   font-size: 0.8125rem;
 }
 
+.cu-llm-provider-filter .cu-agent-select__button-copy,
+.cu-llm-provider-filter .cu-agent-select__option-copy,
+.cu-llm-provider-filter .cu-agent-select__option-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
 .cu-llm-provider-filter .cu-agent-select__menu {
   width: 14rem;
+  scrollbar-color: rgba(var(--cu-accent-rgb), 0.42) transparent;
+  scrollbar-width: thin;
+}
+
+.cu-llm-provider-filter .cu-agent-select__menu::-webkit-scrollbar {
+  width: var(--cu-space-2);
+}
+
+.cu-llm-provider-filter .cu-agent-select__menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.cu-llm-provider-filter .cu-agent-select__menu::-webkit-scrollbar-thumb {
+  border: 2px solid var(--cu-surface);
+  border-radius: var(--cu-radius);
+  background: rgba(var(--cu-accent-rgb), 0.38);
+}
+
+.cu-llm-provider-filter .cu-agent-select__menu::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--cu-accent-rgb), 0.58);
+}
+
+.cu-llm-provider-filter .cu-agent-select__option {
+  gap: var(--cu-space-2);
 }
 
 .cu-llm-model-group__row > td {
