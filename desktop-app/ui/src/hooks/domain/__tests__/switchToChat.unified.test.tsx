@@ -297,6 +297,8 @@ describe('switchToChat (unified, D.4)', () => {
       { limit: 40 }
     )
     expect(result.current.chatMessages.map(message => message.id)).toEqual([
+      'turn-1-user',
+      'turn-1-assistant',
       'turn-999-user',
       'turn-999-assistant',
     ])
@@ -433,6 +435,53 @@ describe('switchToChat (unified, D.4)', () => {
     expect(result.current.hasOlderMessages).toBe(false)
   })
 
+  it('ignores hasMoreBefore from an empty afterTurn reconciliation response', async () => {
+    const cached = [
+      {
+        id: 'turn-1-user',
+        role: 'user' as const,
+        content: 'q1',
+        timestamp: 1,
+        serverTurnNumber: 1,
+      },
+      {
+        id: 'turn-1-assistant',
+        role: 'assistant' as const,
+        content: 'a1',
+        timestamp: 2,
+        serverTurnNumber: 1,
+      },
+    ]
+    clerum.chat.loadMessages.mockResolvedValue(cached)
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'synced-chat',
+      state: 'idle',
+      turns: [],
+      hasMoreBefore: true,
+      hasMoreAfter: false,
+    })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'synced-chat')
+    })
+
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'agent-x',
+      'synced-chat',
+      undefined,
+      { limit: 40, afterTurn: 1 }
+    )
+    expect(result.current.chatMessages.map(message => message.id)).toEqual([
+      'turn-1-user',
+      'turn-1-assistant',
+    ])
+    expect(result.current.hasOlderMessages).toBe(false)
+  })
+
   it('does not keep older history visible after loading an exact multiple of local pages', async () => {
     const allMessages = Array.from({ length: 160 }, (_, index) => ({
       id: `turn-${index + 1}-user`,
@@ -527,6 +576,72 @@ describe('switchToChat (unified, D.4)', () => {
     await act(async () => {
       await pendingOlder
     })
+    expect(result.current.olderMessagesLoading).toBe(false)
+  })
+
+  it('ignores an older-page response when switching away and back before it resolves', async () => {
+    let resolveOlder!: (messages: unknown[]) => void
+    const olderPage = new Promise<unknown[]>(resolve => {
+      resolveOlder = resolve
+    })
+    clerum.chat.loadMessages.mockImplementation(
+      async (_agentRef: string, chatId: string, _limit?: number, offset?: number) => {
+        if (chatId === 'chat-a' && offset === 1) return olderPage
+        if (chatId === 'chat-a') {
+          return [
+            {
+              id: 'turn-10-user',
+              role: 'user' as const,
+              content: 'q10',
+              timestamp: 10,
+              serverTurnNumber: 10,
+            },
+          ]
+        }
+        return []
+      }
+    )
+    clerum.rpc.loadSessionMessages.mockImplementation(
+      async (_hostRef: string, _agent: string, chatId: string) => ({
+        agent: 'agent-x',
+        chatId,
+        state: 'idle',
+        turns: [],
+        hasMoreBefore: false,
+        hasMoreAfter: false,
+      })
+    )
+    const { result } = renderController()
+    await settleMount()
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'chat-a')
+    })
+
+    let pendingOlder!: Promise<void>
+    act(() => {
+      pendingOlder = result.current.handleLoadOlderMessages()
+    })
+    await waitFor(() => expect(result.current.olderMessagesLoading).toBe(true))
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'chat-b')
+      await result.current.switchToChat('agent-x', 'chat-a')
+    })
+
+    resolveOlder([
+      {
+        id: 'turn-1-user',
+        role: 'user',
+        content: 'stale q1',
+        timestamp: 1,
+        serverTurnNumber: 1,
+      },
+    ])
+    await act(async () => {
+      await pendingOlder
+    })
+
+    expect(result.current.chatMessages.map(message => message.id)).toEqual(['turn-10-user'])
     expect(result.current.olderMessagesLoading).toBe(false)
   })
 

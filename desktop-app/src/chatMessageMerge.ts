@@ -118,26 +118,44 @@ export function mergeAuthoritativeServerMessages(
       )
     }
   }
-  const replacements = authoritative
-    .filter(
-      message =>
-        !claimedAuthoritativeSlots.has(`${messageServerTurnNumber(message)}\u0000${message.role}`)
+  const replacements = authoritative.filter(
+    message =>
+      !claimedAuthoritativeSlots.has(`${messageServerTurnNumber(message)}\u0000${message.role}`)
+  )
+  const consumedRemovedMessages = new Set<ChatMessage>()
+  const exactLocalByIncoming = new Map<ChatMessage, ChatMessage>()
+  for (const message of replacements) {
+    const sameTurn = removed.find(
+      local =>
+        !consumedRemovedMessages.has(local) &&
+        messageServerTurnNumber(local) === messageServerTurnNumber(message) &&
+        local.role === message.role
     )
-    .map(message => {
-      const sameTurn = removed.find(
-        local =>
-          messageServerTurnNumber(local) === messageServerTurnNumber(message) &&
-          local.role === message.role
-      )
-      const local = sameTurn ?? availableByRole.get(message.role)?.shift()
-      return {
-        message: preferredServerMessage(message, local),
-        localAnchorIndex: local ? removedIndexByMessage.get(local) : undefined,
-      }
-    })
+    if (sameTurn) {
+      consumedRemovedMessages.add(sameTurn)
+      exactLocalByIncoming.set(message, sameTurn)
+    }
+  }
+  const takeFallbackByRole = (role: ChatMessage['role']): ChatMessage | undefined => {
+    const entries = availableByRole.get(role)
+    while (entries?.length) {
+      const candidate = entries.shift()!
+      if (consumedRemovedMessages.has(candidate)) continue
+      consumedRemovedMessages.add(candidate)
+      return candidate
+    }
+    return undefined
+  }
+  const hydratedReplacements = replacements.map(message => {
+    const local = exactLocalByIncoming.get(message) ?? takeFallbackByRole(message.role)
+    return {
+      message: preferredServerMessage(message, local),
+      localAnchorIndex: local ? removedIndexByMessage.get(local) : undefined,
+    }
+  })
 
   const replacementAnchorByTurn = new Map<number, number>()
-  for (const replacement of replacements) {
+  for (const replacement of hydratedReplacements) {
     const replacementTurn = messageServerTurnNumber(replacement.message)!
     if (replacement.localAnchorIndex === undefined) continue
     const currentAnchor = replacementAnchorByTurn.get(replacementTurn)
@@ -146,7 +164,8 @@ export function mergeAuthoritativeServerMessages(
     }
   }
   const replacementBuckets = new Map<number, ChatMessage[]>()
-  for (const replacement of replacements) {
+  let minimumAnchorIndex = 0
+  for (const replacement of hydratedReplacements) {
     const replacementTurn = messageServerTurnNumber(replacement.message)!
     const exactTurnAnchor = existing.findIndex(
       message => messageServerTurnNumber(message) === replacementTurn
@@ -162,6 +181,8 @@ export function mergeAuthoritativeServerMessages(
       })
     }
     if (anchorIndex < 0) anchorIndex = existing.length
+    anchorIndex = Math.max(anchorIndex, minimumAnchorIndex)
+    minimumAnchorIndex = anchorIndex
     replacementAnchorByTurn.set(replacementTurn, anchorIndex)
     const bucket = replacementBuckets.get(anchorIndex) ?? []
     bucket.push(replacement.message)

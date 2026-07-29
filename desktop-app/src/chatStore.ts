@@ -1454,11 +1454,9 @@ export class ChatStore {
       const existingMessages = existingMeta
         ? await this.readMessagesFromPagedMeta(agentRef, chatId, existingMeta)
         : []
-      const merged = options.replaceLocalWindow
-        ? messages
-        : mergeAuthoritativeServerMessages(existingMessages, messages, {
-            activeTaskIds: options.activeTaskIds ? new Set(options.activeTaskIds) : undefined,
-          })
+      const merged = mergeAuthoritativeServerMessages(existingMessages, messages, {
+        activeTaskIds: options.activeTaskIds ? new Set(options.activeTaskIds) : undefined,
+      })
       const indexedCount = await this.indexedMessageCount(agentRef, chatId)
       await this.writePagedChatUnlocked(agentRef, chatId, merged, {
         messageCount: Math.max(merged.length, indexedCount ?? 0),

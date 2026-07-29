@@ -689,7 +689,7 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
     }
   })
 
-  it('reserves and rolls back a completion turn number around the durability await', async () => {
+  it('does not reuse a turn number after completion and failure writes both reject', async () => {
     const handle = await freshStore()
     try {
       const manager = new ConversationManager(handle.store)
@@ -699,14 +699,27 @@ describe('SqliteConversationStore — active_task_id (D.1)', () => {
       const enqueueSpy = vi
         .spyOn(handle.persistQueue, 'enqueueSync')
         .mockRejectedValueOnce(new Error('disk unavailable'))
-      await expect(handle.store.persistTurnComplete(conv, 'failed write')).rejects.toThrow(
-        /disk unavailable/
-      )
-      expect(handle.store['ordinals'].get(conv.id)?.nextTurnNumber).toBe(1)
+        .mockRejectedValueOnce(new Error('disk still unavailable'))
+      await expect(manager.completeTurn(conv, 'failed write')).rejects.toThrow(/disk unavailable/)
+      expect(handle.store['ordinals'].get(conv.id)?.nextTurnNumber).toBe(2)
+      await expect(manager.failTurn(conv)).rejects.toThrow(/disk still unavailable/)
+      expect(handle.store['ordinals'].get(conv.id)?.nextTurnNumber).toBe(2)
 
       enqueueSpy.mockRestore()
-      await handle.store.persistTurnComplete(conv, 'durable response')
-      expect(handle.store['ordinals'].get(conv.id)?.nextTurnNumber).toBe(2)
+      await manager.startTurn(conv, 'second', 'task-next')
+      await manager.completeTurn(conv, 'durable response')
+      expect(handle.store['ordinals'].get(conv.id)?.nextTurnNumber).toBe(3)
+
+      const rows = handle.worker.db
+        .prepare(
+          'SELECT role, content, turn_number FROM messages WHERE session_id = ? ORDER BY ordinal'
+        )
+        .all(conv.id) as Array<{ role: string; content: string; turn_number: number }>
+      expect(rows.map(row => [row.role, row.content, row.turn_number])).toEqual([
+        ['user', 'first', 1],
+        ['user', 'second', 2],
+        ['assistant', 'durable response', 2],
+      ])
     } finally {
       await handle.shutdown()
     }

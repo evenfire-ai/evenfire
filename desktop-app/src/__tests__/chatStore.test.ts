@@ -764,9 +764,15 @@ describe('messages', () => {
     ).toEqual(['m1', 'm2', 'm3'])
   })
 
-  it('publishes a true replacement for a bounded reconciliation fallback', async () => {
-    await store.createChat('agent-1', 'true-replace')
-    await store.saveMessages('agent-1', 'true-replace', [
+  it('preserves local history around a bounded reconciliation fallback', async () => {
+    await store.createChat('agent-1', 'bounded-window')
+    await store.saveMessages('agent-1', 'bounded-window', [
+      {
+        id: 'local-note',
+        role: 'assistant',
+        content: 'local-only message outside the server window',
+        timestamp: 0,
+      },
       {
         id: 'turn-1-user',
         role: 'user',
@@ -785,7 +791,7 @@ describe('messages', () => {
 
     await store.replaceMessages(
       'agent-1',
-      'true-replace',
+      'bounded-window',
       [
         {
           id: 'turn-999-user',
@@ -799,8 +805,8 @@ describe('messages', () => {
     )
 
     expect(
-      (await store.loadMessages('agent-1', 'true-replace')).map(message => message.id)
-    ).toEqual(['turn-999-user'])
+      (await store.loadMessages('agent-1', 'bounded-window')).map(message => message.id)
+    ).toEqual(['local-note', 'turn-1-user', 'turn-999-user'])
   })
 
   it('uses active task context while persisting an authoritative window', async () => {

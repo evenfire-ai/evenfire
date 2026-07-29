@@ -309,4 +309,128 @@ describe('mergeAuthoritativeServerMessages', () => {
       }),
     ])
   })
+
+  it('does not reuse later exact matches when backfilling older server turns', () => {
+    const existing: ChatMessage[] = Array.from({ length: 4 }, (_, index) => index + 5).flatMap(
+      n => [
+        {
+          id: `turn-${n}-user-local`,
+          role: 'user' as const,
+          content: `local q${n}`,
+          timestamp: n * 10,
+          serverTurnNumber: n,
+          task_id: `task-${n}`,
+          attachments: [
+            {
+              id: `upload-${n}`,
+              type: 'uploaded_file' as const,
+              label: `file-${n}.txt`,
+            },
+          ],
+        },
+        {
+          id: `turn-${n}-assistant-local`,
+          role: 'assistant' as const,
+          content: `local a${n}`,
+          timestamp: n * 10 + 1,
+          serverTurnNumber: n,
+          task_id: `task-${n}`,
+        },
+      ]
+    )
+    const incoming = turnsToChatMessages(
+      Array.from({ length: 8 }, (_, index) => ({
+        number: index + 1,
+        user_input: `q${index + 1}`,
+        response: `a${index + 1}`,
+        started_at: new Date(index + 1).toISOString(),
+      }))
+    )
+
+    const merged = mergeAuthoritativeServerMessages(existing, incoming)
+
+    expect(merged.map(message => message.id)).toEqual(
+      Array.from({ length: 8 }, (_, index) => index + 1).flatMap(n => [
+        `turn-${n}-user`,
+        `turn-${n}-assistant`,
+      ])
+    )
+    expect(
+      merged
+        .filter(message => (message.serverTurnNumber ?? 0) <= 4)
+        .flatMap(message => [message.task_id, message.attachments])
+        .filter(Boolean)
+    ).toEqual([])
+    expect(
+      merged
+        .filter(message => message.serverTurnNumber === 5)
+        .map(message => ({
+          id: message.id,
+          taskId: message.task_id,
+          attachmentId: message.attachments?.[0]?.id,
+        }))
+    ).toEqual([
+      { id: 'turn-5-user', taskId: 'task-5', attachmentId: 'upload-5' },
+      { id: 'turn-5-assistant', taskId: 'task-5', attachmentId: undefined },
+    ])
+  })
+
+  it('places a server response after the active optimistic prompt for that turn', () => {
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'turn-5-user-local',
+          role: 'user',
+          content: 'q5',
+          timestamp: 1,
+          serverTurnNumber: 5,
+        },
+        {
+          id: 'turn-5-assistant-local',
+          role: 'assistant',
+          content: 'a5',
+          timestamp: 2,
+          serverTurnNumber: 5,
+        },
+        {
+          id: 'optimistic-turn-6-user',
+          role: 'user',
+          content: 'q6',
+          timestamp: 3,
+          task_id: 'task-live',
+        },
+      ],
+      [
+        {
+          id: 'turn-5-user',
+          role: 'user',
+          content: 'q5',
+          timestamp: 4,
+          serverTurnNumber: 5,
+        },
+        {
+          id: 'turn-5-assistant',
+          role: 'assistant',
+          content: 'a5',
+          timestamp: 5,
+          serverTurnNumber: 5,
+        },
+        {
+          id: 'turn-6-assistant',
+          role: 'assistant',
+          content: 'a6',
+          timestamp: 6,
+          serverTurnNumber: 6,
+        },
+      ],
+      { activeTaskIds: new Set(['task-live']) }
+    )
+
+    expect(merged.map(message => message.id)).toEqual([
+      'turn-5-user',
+      'turn-5-assistant',
+      'optimistic-turn-6-user',
+      'turn-6-assistant',
+    ])
+  })
 })

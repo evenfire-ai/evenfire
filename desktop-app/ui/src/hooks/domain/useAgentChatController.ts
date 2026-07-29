@@ -107,8 +107,10 @@ const LOCAL_MESSAGE_PAGE_SIZE = 80
 const SERVER_TURN_PAGE_SIZE = 40
 const MAX_RECONCILE_DELTA_PAGES = 5
 const REPLACE_LOCAL_RECONCILIATION_WINDOW = Symbol('replace-local-reconciliation-window')
+const DELTA_RECONCILIATION_WINDOW = Symbol('delta-reconciliation-window')
 type ReconciliationMessagesResult = SessionMessagesResult & {
   [REPLACE_LOCAL_RECONCILIATION_WINDOW]?: true
+  [DELTA_RECONCILIATION_WINDOW]?: true
 }
 
 function serverTurnNumber(message: AgentChatMessage): number | undefined {
@@ -873,7 +875,11 @@ export function useAgentChatController({
     olderMessagesRequestRef.current = requestToken
     const isStillRelevant = () => {
       const visible = activeChatVisibilityRef.current
-      return visible.selectedAgent === requestAgent && visible.activeChatId === requestChatId
+      return (
+        olderMessagesRequestRef.current === requestToken &&
+        visible.selectedAgent === requestAgent &&
+        visible.activeChatId === requestChatId
+      )
     }
     setOlderMessagesLoading(true)
     try {
@@ -1294,8 +1300,8 @@ export function useAgentChatController({
   // instance — and its coalescing state — stable across renders.
 
   // Shared hydration (§4.3 / A.4.4): materialize the server's page into the
-  // active view, append a delta when the cache has durable server turn IDs, or
-  // replace once when migrating a legacy/random-ID cache. It also auto-titles a
+  // active view, append a delta when the cache has durable server turn IDs, and
+  // merge server windows into legacy/random-ID caches. It also auto-titles a
   // fresh hydration from turn one and upserts the sidebar (S4).
   // Both reconcile branches use it: `settleIdle` (idle replace) and
   // `attachLiveTask` (render in-flight turns so a rejoin can anchor to the
@@ -1328,18 +1334,21 @@ export function useAgentChatController({
       const visible = isActive() ? chatMessagesRef.current : []
       const replaceLocalWindow =
         (resp as ReconciliationMessagesResult)[REPLACE_LOCAL_RECONCILIATION_WINDOW] === true
-      const localMessages = replaceLocalWindow ? [] : mergeUniqueMessages(visible, cached)
+      const deltaWindow =
+        (resp as ReconciliationMessagesResult)[DELTA_RECONCILIATION_WINDOW] === true
+      const hasOlderFromServer = !deltaWindow && Boolean(resp.hasMoreBefore)
+      const localMessages = mergeUniqueMessages(visible, cached)
       if (!isActive() || tracker.get(chatKey)) {
         return { rendered: localMessages, replaced: false, cached: localMessages }
       }
       const hydrated = turnsToChatMessages(resp.turns) as AgentChatMessage[]
-      if (replaceLocalWindow) {
-        setHasOlderMessages(Boolean(resp.hasMoreBefore))
-      } else {
-        setHasOlderMessages(previous => previous || Boolean(resp.hasMoreBefore))
-      }
       if (!hydrated.length) {
         return { rendered: localMessages, replaced: false, cached: localMessages }
+      }
+      if (replaceLocalWindow) {
+        setHasOlderMessages(hasOlderFromServer)
+      } else {
+        setHasOlderMessages(previous => previous || hasOlderFromServer)
       }
       const localHasServerTurns = localMessages.some(
         message => serverTurnNumber(message) !== undefined
@@ -1358,7 +1367,7 @@ export function useAgentChatController({
       if (!isActive() || tracker.get(chatKey)) {
         return { rendered: localMessages, replaced: false, cached: localMessages }
       }
-      const rendered = localHasServerTurns
+      const rendered = localMessages.length
         ? mergeServerMessages(
             localMessages,
             hydratedWithAttachments,
@@ -1612,6 +1621,12 @@ export function useAgentChatController({
           requestedQuery
         )
         if (requestedQuery.afterTurn === undefined || !response.hasMoreAfter) {
+          if (requestedQuery.afterTurn !== undefined) {
+            return {
+              ...response,
+              [DELTA_RECONCILIATION_WINDOW]: true,
+            } satisfies ReconciliationMessagesResult
+          }
           return response
         }
 
@@ -1622,7 +1637,10 @@ export function useAgentChatController({
           // A host claiming another page without returning an advancing cursor
           // is malformed. Preserve the local cache instead of replacing it with
           // an unrelated latest window.
-          return response
+          return {
+            ...response,
+            [DELTA_RECONCILIATION_WINDOW]: true,
+          } satisfies ReconciliationMessagesResult
         }
         let pagesLoaded = 1
         while (
@@ -1649,6 +1667,7 @@ export function useAgentChatController({
               turns,
               oldestTurnNumber: turns[0]?.number,
               latestTurnNumber: turns.at(-1)?.number,
+              [DELTA_RECONCILIATION_WINDOW]: true,
             }
           }
         }
@@ -1667,6 +1686,7 @@ export function useAgentChatController({
           oldestTurnNumber: turns[0]?.number,
           latestTurnNumber: turns.at(-1)?.number,
           hasMoreAfter: false,
+          [DELTA_RECONCILIATION_WINDOW]: true,
         }
       },
       attachLiveTask: reconcileAttachLiveTask,
