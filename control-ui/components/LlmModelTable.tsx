@@ -16,7 +16,23 @@ import { TablePanelHeader } from './TablePanelHeader'
 import { IconPencil, IconRefresh, IconX } from './icons'
 import { SelectInput } from './ui'
 
-const MODEL_COLUMNS: TableHeaderColumn[] = [
+type ModelSortKey =
+  | 'provider'
+  | 'model'
+  | 'vendor'
+  | 'displayName'
+  | 'contextWindow'
+  | 'enabled'
+  | 'source'
+  | 'stale'
+
+// A column may only opt into sorting if its key is one `compareByKey` knows how
+// to order — marking `sortable: true` on any other column is a compile error,
+// so MODEL_COLUMNS and the comparator cannot drift apart.
+type ModelColumn = TableHeaderColumn &
+  ({ sortable: true; key: ModelSortKey } | { sortable?: false })
+
+const MODEL_COLUMNS: ModelColumn[] = [
   { key: 'provider', label: 'Provider', width: '10%', sortable: true },
   { key: 'model', label: 'Model', minWidth: '12rem', sortable: true },
   { key: 'vendor', label: 'Vendor', width: '10rem', sortable: true },
@@ -39,36 +55,33 @@ const ALL_PROVIDERS = '__all__'
 type EnabledFilter = 'all' | 'enabled' | 'disabled'
 type SourceFilter = 'all' | 'manual' | 'discovery'
 
-type ModelSortKey =
-  | 'provider'
-  | 'model'
-  | 'vendor'
-  | 'displayName'
-  | 'contextWindow'
-  | 'enabled'
-  | 'source'
-  | 'stale'
-
-const SORTABLE_KEYS = new Set<string>(
-  MODEL_COLUMNS.filter(column => column.sortable).map(column => column.key)
+const SORTABLE_KEYS: ReadonlySet<ModelSortKey> = new Set(
+  MODEL_COLUMNS.flatMap(column => (column.sortable ? [column.key] : []))
 )
+
+function isModelSortKey(key: string): key is ModelSortKey {
+  return (SORTABLE_KEYS as ReadonlySet<string>).has(key)
+}
 
 // Rows with no value for the sorted column always sink to the bottom, in both
 // directions — flipping the direction must not promote "—" cells to the top.
-function isBlank(value: string | number | null | undefined): boolean {
-  return value === null || value === undefined || value === ''
-}
-
-function compareBlankLast(
-  a: string | number | null | undefined,
-  b: string | number | null | undefined
-): number | null {
-  const aBlank = isBlank(a)
-  const bBlank = isBlank(b)
+// Returns null when both sides have a value and the caller must compare them.
+function compareBlankLast(aBlank: boolean, bBlank: boolean): number | null {
   if (aBlank && bBlank) return 0
   if (aBlank) return 1
   if (bBlank) return -1
   return null
+}
+
+function isBlankText(value: string | null | undefined): boolean {
+  return value === null || value === undefined || value === ''
+}
+
+// Mirrors `formatContextWindow`, which renders '—' for null/undefined AND for
+// any non-finite number — a NaN off the wire must sink with the empty cells,
+// not land mid-table.
+function isBlankNumber(value: number | null | undefined): boolean {
+  return !Number.isFinite(value)
 }
 
 function compareByKey(
@@ -88,17 +101,20 @@ function compareByKey(
     case 'model':
       return sign * a.model.localeCompare(b.model)
     case 'vendor': {
-      const blank = compareBlankLast(a.vendor, b.vendor)
+      const blank = compareBlankLast(isBlankText(a.vendor), isBlankText(b.vendor))
       if (blank !== null) return blank
       return sign * String(a.vendor).localeCompare(String(b.vendor))
     }
     case 'displayName': {
-      const blank = compareBlankLast(a.display_name, b.display_name)
+      const blank = compareBlankLast(isBlankText(a.display_name), isBlankText(b.display_name))
       if (blank !== null) return blank
       return sign * String(a.display_name).localeCompare(String(b.display_name))
     }
     case 'contextWindow': {
-      const blank = compareBlankLast(a.context_window_tokens, b.context_window_tokens)
+      const blank = compareBlankLast(
+        isBlankNumber(a.context_window_tokens),
+        isBlankNumber(b.context_window_tokens)
+      )
       if (blank !== null) return blank
       return sign * (Number(a.context_window_tokens) - Number(b.context_window_tokens))
     }
@@ -110,6 +126,12 @@ function compareByKey(
       return sign * (a.source ?? 'manual').localeCompare(b.source ?? 'manual')
     case 'stale':
       return sign * (Number(a.stale === true) - Number(b.stale === true))
+    default: {
+      // `strict` is off in this project, so a missing case would otherwise
+      // return undefined silently. This makes it a compile error.
+      const exhaustive: never = key
+      return exhaustive
+    }
   }
 }
 
@@ -176,20 +198,24 @@ export function LlmModelTable({
     return [...filteredItems].sort((a, b) => {
       const primary = compareByKey(a, b, sortKey, sortDir)
       if (primary !== 0) return primary
-      // Stable tie-breaker so equal cells never shuffle between renders.
-      const byProvider = a.provider.localeCompare(b.provider)
+      // Deliberate secondary order for rows that tie on the sorted column:
+      // provider then model, always ascending, so a tied group still reads
+      // top-to-bottom the way the Provider column is labelled. Reuses the
+      // provider comparator so the tie-break sorts on the display label
+      // ("Anthropic"), not the raw slug ("claude").
+      const byProvider = compareByKey(a, b, 'provider', 'asc')
       if (byProvider !== 0) return byProvider
       return a.model.localeCompare(b.model)
     })
   }, [filteredItems, sortKey, sortDir])
 
   function toggleSort(nextKey: string) {
-    if (!SORTABLE_KEYS.has(nextKey)) return
+    if (!isModelSortKey(nextKey)) return
     if (sortKey === nextKey) {
       setSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))
       return
     }
-    setSortKey(nextKey as ModelSortKey)
+    setSortKey(nextKey)
     setSortDir('asc')
   }
 

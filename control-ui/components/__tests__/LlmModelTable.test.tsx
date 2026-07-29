@@ -132,8 +132,11 @@ describe('LlmModelTable sorting', () => {
     )
   }
 
-  function sortButton(column: string) {
-    return screen.getByRole('button', { name: new RegExp(`^Sort by ${column} `) })
+  // The header button's accessible name is its visible label (plus the ↑/↓
+  // indicator once active) — deliberately not an aria-label, which would leak
+  // into the <th>'s accessible name and be announced for every cell.
+  function sortButton(label: string) {
+    return screen.getByRole('button', { name: new RegExp(`^${label}( [↑↓])?$`) })
   }
 
   const modelC: LlmAllowedModel = { ...baseModel, id: 'm-c', model: 'ccc' }
@@ -150,11 +153,11 @@ describe('LlmModelTable sorting', () => {
   it('sorts ascending on the first click and inverts on the second', () => {
     const { container } = renderTable([modelC, modelA, modelB])
 
-    fireEvent.click(sortButton('model'))
+    fireEvent.click(sortButton('Model'))
     expect(rowModels(container)).toEqual(['aaa', 'bbb', 'ccc'])
     expect(container.querySelector('th[aria-sort]')?.getAttribute('aria-sort')).toBe('ascending')
 
-    fireEvent.click(sortButton('model'))
+    fireEvent.click(sortButton('Model'))
     expect(rowModels(container)).toEqual(['ccc', 'bbb', 'aaa'])
     expect(container.querySelector('th[aria-sort]')?.getAttribute('aria-sort')).toBe('descending')
   })
@@ -166,11 +169,11 @@ describe('LlmModelTable sorting', () => {
       { ...baseModel, id: 'm-3', model: 'ccc', context_window_tokens: 200 },
     ])
 
-    fireEvent.click(sortButton('model'))
-    fireEvent.click(sortButton('model'))
+    fireEvent.click(sortButton('Model'))
+    fireEvent.click(sortButton('Model'))
     expect(rowModels(container)).toEqual(['ccc', 'bbb', 'aaa'])
 
-    fireEvent.click(sortButton('context window'))
+    fireEvent.click(sortButton('Context window'))
     expect(rowModels(container)).toEqual(['bbb', 'ccc', 'aaa'])
   })
 
@@ -184,7 +187,7 @@ describe('LlmModelTable sorting', () => {
     fireEvent.change(screen.getByLabelText('Filter by enabled state'), {
       target: { value: 'enabled' },
     })
-    fireEvent.click(sortButton('model'))
+    fireEvent.click(sortButton('Model'))
 
     expect(rowModels(container)).toEqual(['aaa-on', 'zzz-on'])
     expect(screen.queryByText('mmm-off')).not.toBeInTheDocument()
@@ -197,8 +200,8 @@ describe('LlmModelTable sorting', () => {
       { ...baseModel, id: 'm-3', model: 'mmm', enabled: false },
     ])
 
-    fireEvent.click(sortButton('model'))
-    fireEvent.click(sortButton('model'))
+    fireEvent.click(sortButton('Model'))
+    fireEvent.click(sortButton('Model'))
     expect(rowModels(container)).toEqual(['zzz', 'mmm', 'aaa'])
 
     fireEvent.change(screen.getByLabelText('Filter by enabled state'), {
@@ -210,9 +213,9 @@ describe('LlmModelTable sorting', () => {
   })
 
   it.each([
-    ['vendor', 'vendor'] as const,
-    ['display name', 'display_name'] as const,
-    ['context window', 'context_window_tokens'] as const,
+    ['Vendor', 'vendor'] as const,
+    ['Display name', 'display_name'] as const,
+    ['Context window', 'context_window_tokens'] as const,
   ])('keeps rows with no %s last in both directions', (columnLabel, field) => {
     const withValue = field === 'context_window_tokens' ? 1000 : 'aaa'
     const withHigherValue = field === 'context_window_tokens' ? 2000 : 'zzz'
@@ -229,8 +232,99 @@ describe('LlmModelTable sorting', () => {
     expect(rowModels(container)).toEqual(['high', 'low', 'none'])
   })
 
+  it('keeps a NaN context window with the empty ones at the bottom', () => {
+    // formatContextWindow renders '—' for any non-finite value, so the sort
+    // must treat it as empty rather than leaving it mid-table.
+    const { container } = renderTable([
+      { ...baseModel, id: 'm-1', model: 'nan', context_window_tokens: Number.NaN },
+      { ...baseModel, id: 'm-2', model: 'low', context_window_tokens: 1000 },
+      { ...baseModel, id: 'm-3', model: 'high', context_window_tokens: 2000 },
+    ])
+
+    fireEvent.click(sortButton('Context window'))
+    expect(rowModels(container)).toEqual(['low', 'high', 'nan'])
+
+    fireEvent.click(sortButton('Context window'))
+    expect(rowModels(container)).toEqual(['high', 'low', 'nan'])
+  })
+
+  it('sorts providers by display label, not by the raw slug', () => {
+    // 'claude' renders as "Anthropic" and 'bailian' as "Bailian", so label
+    // order (Anthropic, Bailian) is the inverse of slug order (bailian,
+    // claude). Sorting on the slug would flip this expectation.
+    const { container } = renderTable([
+      { ...baseModel, id: 'm-1', provider: 'bailian', model: 'aaa-bailian' },
+      { ...baseModel, id: 'm-2', provider: 'claude', model: 'zzz-anthropic' },
+    ])
+
+    fireEvent.click(sortButton('Provider'))
+    expect(rowModels(container)).toEqual(['zzz-anthropic', 'aaa-bailian'])
+
+    fireEvent.click(sortButton('Provider'))
+    expect(rowModels(container)).toEqual(['aaa-bailian', 'zzz-anthropic'])
+  })
+
+  it('sorts Disabled before Enabled when ascending', () => {
+    const { container } = renderTable([
+      { ...baseModel, id: 'm-1', model: 'on', enabled: true },
+      { ...baseModel, id: 'm-2', model: 'off', enabled: false },
+    ])
+
+    fireEvent.click(sortButton('Enabled'))
+    expect(rowModels(container)).toEqual(['off', 'on'])
+
+    fireEvent.click(sortButton('Enabled'))
+    expect(rowModels(container)).toEqual(['on', 'off'])
+  })
+
+  it('sorts non-stale before stale when ascending', () => {
+    const { container } = renderTable([
+      { ...baseModel, id: 'm-1', model: 'stale-row', source: 'discovery', stale: true },
+      { ...baseModel, id: 'm-2', model: 'fresh-row', source: 'discovery', stale: false },
+    ])
+
+    fireEvent.click(sortButton('Stale'))
+    expect(rowModels(container)).toEqual(['fresh-row', 'stale-row'])
+
+    fireEvent.click(sortButton('Stale'))
+    expect(rowModels(container)).toEqual(['stale-row', 'fresh-row'])
+  })
+
+  it('sorts Discovered before Manual when ascending', () => {
+    const { container } = renderTable([
+      { ...baseModel, id: 'm-1', model: 'manual-row', source: 'manual' },
+      { ...baseModel, id: 'm-2', model: 'discovered-row', source: 'discovery' },
+    ])
+
+    fireEvent.click(sortButton('Source'))
+    expect(rowModels(container)).toEqual(['discovered-row', 'manual-row'])
+
+    fireEvent.click(sortButton('Source'))
+    expect(rowModels(container)).toEqual(['manual-row', 'discovered-row'])
+  })
+
+  it('breaks ties by provider label then model, in input-independent order', () => {
+    // All three enabled rows tie on the sorted column, and their input order is
+    // the reverse of the expected one — so a missing (or slug-based) tie-break
+    // produces a different result.
+    const { container } = renderTable([
+      { ...baseModel, id: 'm-1', provider: 'bailian', model: 'mmm', enabled: true },
+      { ...baseModel, id: 'm-2', provider: 'claude', model: 'zzz', enabled: true },
+      { ...baseModel, id: 'm-3', provider: 'claude', model: 'aaa', enabled: true },
+      { ...baseModel, id: 'm-4', provider: 'claude', model: 'ddd', enabled: false },
+    ])
+
+    fireEvent.click(sortButton('Enabled'))
+    // Disabled first, then the tied Enabled group: Anthropic (aaa, zzz) before
+    // Bailian (mmm).
+    expect(rowModels(container)).toEqual(['ddd', 'aaa', 'zzz', 'mmm'])
+  })
+
   it('does not turn the Actions column into a sort control', () => {
-    renderTable([baseModel])
-    expect(screen.queryByRole('button', { name: /^Sort by actions/ })).toBeNull()
+    const { container } = renderTable([baseModel])
+    const headers = Array.from(container.querySelectorAll('thead th'))
+    const actionsHeader = headers[headers.length - 1]
+    expect(actionsHeader?.getAttribute('aria-label')).toBe('Actions')
+    expect(actionsHeader?.querySelector('button')).toBeNull()
   })
 })

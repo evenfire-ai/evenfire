@@ -1524,10 +1524,18 @@ textarea.cu-input {
   font-size: 0.8125rem;
 }
 
-/* Sortable table header label: reads as header text, behaves as a button. */
+/* Sortable table header label: reads as header text, behaves as a button.
+   Inherits the <th> typography (0.7rem, uppercase) through `.cu-link`'s
+   `font: inherit` — deliberately NOT combined with `.cu-link--sm`, which would
+   bump it to 0.8125rem and break size parity with plain headers and with the
+   loading skeleton. */
 .cu-link--sort {
   color: var(--cu-text-muted);
   white-space: nowrap;
+}
+
+.cu-link--sort:hover {
+  color: var(--cu-text);
 }
 
 .cu-link--danger {

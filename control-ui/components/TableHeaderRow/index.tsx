@@ -3,7 +3,12 @@
 import React from 'react'
 import type { TableHeaderColumn, TableHeaderRowProps } from './types'
 
-function sortAriaLabel(column: TableHeaderColumn, isActive: boolean, nextDir: string) {
+// Hint for the pointer tooltip only. It must NOT be an aria-label: that would
+// override the button's text as the accessible name and, since the button is
+// the sole content of the <th>, screen readers would announce "Sort by model
+// ascending" as the header of every cell in the column. The sort state is
+// already conveyed by `aria-sort` on the <th>.
+function sortTitle(column: TableHeaderColumn, nextDir: 'ascending' | 'descending') {
   const name =
     column.sortLabel ??
     (typeof column.label === 'string' ? column.label : (column.ariaLabel ?? column.key))
@@ -21,8 +26,9 @@ export function TableHeaderRow({
       {columns.map(column => {
         const isSortable = Boolean(column.sortable) && Boolean(onSortToggle)
         const isActive = isSortable && sortKey === column.key
-        // The label announces the direction the *next* click will apply.
-        const nextDir = isActive && sortDir === 'asc' ? 'descending' : 'ascending'
+        // The tooltip announces the direction the *next* click will apply.
+        const nextDir: 'ascending' | 'descending' =
+          isActive && sortDir === 'asc' ? 'descending' : 'ascending'
         return (
           <th
             key={column.key}
@@ -38,12 +44,14 @@ export function TableHeaderRow({
             {isSortable ? (
               <button
                 type="button"
-                className="cu-link cu-link--sm cu-link--sort"
+                className="cu-link cu-link--sort"
                 onClick={() => onSortToggle?.(column.key)}
-                aria-label={sortAriaLabel(column, isActive, nextDir)}
+                title={sortTitle(column, nextDir)}
               >
                 {column.label}
-                {isActive ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}
+                {isActive ? (
+                  <span aria-hidden="true">{sortDir === 'asc' ? ' ↑' : ' ↓'}</span>
+                ) : null}
               </button>
             ) : (
               column.label
