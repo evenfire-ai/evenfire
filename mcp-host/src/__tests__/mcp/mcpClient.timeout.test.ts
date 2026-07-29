@@ -3,12 +3,15 @@ import { McpClient } from '../../mcp/client'
 
 const sdkState = vi.hoisted(() => ({
   closeCalls: [] as unknown[][],
+  closeQueue: [] as Array<() => unknown>,
   connectCalls: [] as unknown[][],
   connectQueue: [] as Array<() => unknown>,
   callToolCalls: [] as unknown[][],
   callToolQueue: [] as Array<() => unknown>,
   listToolsCalls: [] as unknown[][],
   listToolsQueue: [] as Array<() => unknown>,
+  transportCloseCalls: [] as unknown[][],
+  transportCloseQueue: [] as Array<() => unknown>,
 }))
 
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
@@ -21,6 +24,8 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
 
     async close(...args: unknown[]) {
       sdkState.closeCalls.push(args)
+      const next = sdkState.closeQueue.shift()
+      if (next) return next()
     }
 
     async listTools(...args: unknown[]) {
@@ -41,13 +46,21 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
 
 vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
   StreamableHTTPClientTransport: class MockStreamableHTTP {
-    close = vi.fn().mockResolvedValue(undefined)
+    async close(...args: unknown[]) {
+      sdkState.transportCloseCalls.push([this, ...args])
+      const next = sdkState.transportCloseQueue.shift()
+      if (next) return next()
+    }
   },
 }))
 
 vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
   SSEClientTransport: class MockSSE {
-    close = vi.fn().mockResolvedValue(undefined)
+    async close(...args: unknown[]) {
+      sdkState.transportCloseCalls.push([this, ...args])
+      const next = sdkState.transportCloseQueue.shift()
+      if (next) return next()
+    }
   },
 }))
 
@@ -61,15 +74,37 @@ function client(): McpClient {
   })
 }
 
+function deferred<T = void>(): {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (error: unknown) => void
+} {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+function retirePermanently(client: McpClient): Promise<void> {
+  const cleanup = client.retire()
+  return cleanup()
+}
+
 describe('McpClient SDK request timeouts', () => {
   beforeEach(() => {
     sdkState.closeCalls.length = 0
+    sdkState.closeQueue.length = 0
     sdkState.connectCalls.length = 0
     sdkState.connectQueue.length = 0
     sdkState.callToolCalls.length = 0
     sdkState.callToolQueue.length = 0
     sdkState.listToolsCalls.length = 0
     sdkState.listToolsQueue.length = 0
+    sdkState.transportCloseCalls.length = 0
+    sdkState.transportCloseQueue.length = 0
   })
 
   afterEach(() => {
@@ -194,7 +229,7 @@ describe('McpClient SDK request timeouts', () => {
     expect(sdkState.listToolsCalls[0][1]).toEqual(
       expect.objectContaining({ timeout: 5_000, maxTotalTimeout: 5_000 })
     )
-    expect(sdkState.closeCalls).toHaveLength(1)
+    expect(sdkState.transportCloseCalls).toHaveLength(1)
   })
 
   it('abandons SDK connect when the caller budget expires during handshake', async () => {
@@ -210,7 +245,7 @@ describe('McpClient SDK request timeouts', () => {
     expect(c.isConnected).toBe(false)
     expect(sdkState.connectCalls).toHaveLength(1)
     expect(sdkState.listToolsCalls).toHaveLength(0)
-    expect(sdkState.closeCalls).toHaveLength(1)
+    expect(sdkState.transportCloseCalls).toHaveLength(1)
   })
 
   it('abandons SDK connect when the caller signal aborts during handshake', async () => {
@@ -225,6 +260,204 @@ describe('McpClient SDK request timeouts', () => {
     expect(c.isConnected).toBe(false)
     expect(sdkState.connectCalls).toHaveLength(1)
     expect(sdkState.listToolsCalls).toHaveLength(0)
-    expect(sdkState.closeCalls).toHaveLength(1)
+    expect(sdkState.transportCloseCalls).toHaveLength(1)
+  })
+
+  it('detaches immediately and closes the owned transport when SDK protocol close hangs', async () => {
+    const releaseClose = deferred()
+    sdkState.transportCloseQueue.push(() => releaseClose.promise)
+    const c = client()
+    await c.connect()
+
+    const disconnecting = c.disconnect()
+    await Promise.resolve()
+
+    expect(c.isConnected).toBe(false)
+    expect(c.availableTools).toEqual([])
+    expect(sdkState.closeCalls).toHaveLength(0)
+    expect(sdkState.transportCloseCalls).toHaveLength(1)
+
+    releaseClose.resolve()
+    await expect(disconnecting).resolves.toBeUndefined()
+  })
+
+  it('does not reconnect or replay a tool after permanent close during the retry delay', async () => {
+    vi.useFakeTimers()
+    sdkState.callToolQueue.push(
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => ({ content: [{ type: 'text', text: 'must-not-run' }] })
+    )
+    const c = client()
+    await c.connect()
+
+    const pending = c.callTool('write', { value: 'side-effect' }, { timeoutMs: 30_000 })
+    const assertion = expect(pending).rejects.toThrow(/closed/)
+    await vi.advanceTimersByTimeAsync(0)
+    await retirePermanently(c)
+    await vi.advanceTimersByTimeAsync(1000)
+
+    await assertion
+    expect(sdkState.connectCalls).toHaveLength(1)
+    expect(sdkState.callToolCalls).toHaveLength(1)
+    expect(c.isConnected).toBe(false)
+  })
+
+  it('discards a successful tool result that arrives after permanent close', async () => {
+    let resolveCall!: (value: unknown) => void
+    const callResult = new Promise<unknown>(resolve => {
+      resolveCall = resolve
+    })
+    sdkState.callToolQueue.push(() => callResult)
+    const c = client()
+    await c.connect()
+
+    const pending = c.callTool('write', { value: 'side-effect' })
+    const assertion = expect(pending).rejects.toThrow(/closed/)
+    await vi.waitFor(() => expect(sdkState.callToolCalls).toHaveLength(1))
+    await retirePermanently(c)
+    resolveCall({ content: [{ type: 'text', text: 'late-success' }] })
+
+    await assertion
+    expect(sdkState.connectCalls).toHaveLength(1)
+    expect(sdkState.callToolCalls).toHaveLength(1)
+    expect(c.isConnected).toBe(false)
+  })
+
+  it('starts transport close synchronously when permanently retired', async () => {
+    const c = client()
+    await c.connect()
+
+    const cleanup = c.retire()
+
+    expect(c.isConnected).toBe(false)
+    expect(sdkState.transportCloseCalls).toHaveLength(1)
+    await cleanup()
+    expect(sdkState.transportCloseCalls).toHaveLength(1)
+  })
+
+  it('discards a retry result that arrives after permanent close', async () => {
+    vi.useFakeTimers()
+    const retryResult = deferred<unknown>()
+    sdkState.callToolQueue.push(
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => retryResult.promise
+    )
+    const c = client()
+    await c.connect()
+
+    const pending = c.callTool('write', { value: 'side-effect' }, { timeoutMs: 30_000 })
+    const assertion = expect(pending).rejects.toThrow(/closed/)
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(sdkState.callToolCalls).toHaveLength(2))
+
+    await retirePermanently(c)
+    retryResult.resolve({ content: [{ type: 'text', text: 'late-retry-success' }] })
+
+    await assertion
+    expect(sdkState.callToolCalls).toHaveLength(2)
+    expect(c.isConnected).toBe(false)
+  })
+
+  it('invalidates a reconnect handshake when permanent close arrives in flight', async () => {
+    vi.useFakeTimers()
+    const reconnectHandshake = deferred()
+    sdkState.callToolQueue.push(
+      () => {
+        throw Object.assign(new Error('session not found'), { code: -32003 })
+      },
+      () => ({ content: [{ type: 'text', text: 'must-not-run' }] })
+    )
+    const c = client()
+    await c.connect()
+    sdkState.connectQueue.push(() => reconnectHandshake.promise)
+
+    const pending = c.callTool('write', { value: 'side-effect' }, { timeoutMs: 30_000 })
+    const assertion = expect(pending).rejects.toThrow(/closed|superseded/)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(sdkState.connectCalls).toHaveLength(2)
+
+    const closing = retirePermanently(c)
+    reconnectHandshake.resolve()
+    await closing
+    await vi.advanceTimersByTimeAsync(0)
+
+    await assertion
+    expect(sdkState.callToolCalls).toHaveLength(1)
+    expect(c.isConnected).toBe(false)
+    expect(sdkState.transportCloseCalls).toHaveLength(2)
+    expect(new Set(sdkState.transportCloseCalls.map(([transport]) => transport)).size).toBe(2)
+  })
+
+  it('does not publish tools discovered after permanent close', async () => {
+    const discovery = deferred<{
+      tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
+    }>()
+    sdkState.listToolsQueue.push(() => discovery.promise)
+    const c = client()
+
+    const pending = c.connect()
+    await vi.waitFor(() => expect(sdkState.listToolsCalls).toHaveLength(1))
+    const closing = retirePermanently(c)
+    discovery.resolve({
+      tools: [{ name: 'stale-tool', description: 'stale', inputSchema: {} }],
+    })
+
+    await closing
+    await expect(pending).rejects.toThrow(/closed/)
+    expect(c.availableTools).toEqual([])
+    expect(c.isConnected).toBe(false)
+    expect(sdkState.transportCloseCalls).toHaveLength(1)
+  })
+
+  it('does not let an old tools/list failure erase a reconnected tool cache', async () => {
+    const c = client()
+    await c.connect()
+
+    const staleDiscovery = deferred<{
+      tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
+    }>()
+    sdkState.listToolsQueue.push(
+      () => staleDiscovery.promise,
+      () => ({
+        tools: [{ name: 'fresh-tool', description: 'fresh', inputSchema: {} }],
+      })
+    )
+    const staleRefresh = c.listTools()
+    await vi.waitFor(() => expect(sdkState.listToolsCalls).toHaveLength(2))
+
+    await c.reconnect()
+    expect(c.availableTools.map(tool => tool.name)).toEqual(['fresh-tool'])
+
+    staleDiscovery.reject(new Error('old tools/list failed'))
+    await expect(staleRefresh).rejects.toThrow(/superseded/)
+    expect(c.availableTools.map(tool => tool.name)).toEqual(['fresh-tool'])
+    expect(c.isConnected).toBe(true)
+  })
+
+  it('does not report a successful probe from a permanently closed connection', async () => {
+    const c = client()
+    await c.connect()
+    const staleProbe = deferred<{
+      tools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
+    }>()
+    sdkState.listToolsQueue.push(() => staleProbe.promise)
+
+    const probing = c.probeTools()
+    await vi.waitFor(() => expect(sdkState.listToolsCalls).toHaveLength(2))
+    const closing = retirePermanently(c)
+    staleProbe.resolve({
+      tools: [{ name: 'stale-tool', description: 'stale', inputSchema: {} }],
+    })
+
+    await closing
+    await expect(probing).resolves.toEqual({
+      ok: false,
+      error: expect.objectContaining({ message: expect.stringMatching(/closed/) }),
+      stale: true,
+    })
   })
 })
