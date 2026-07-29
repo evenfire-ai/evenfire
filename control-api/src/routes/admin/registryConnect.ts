@@ -139,18 +139,20 @@ export function createRegistryConnectRouter(): Router {
 
   // Poll the registry for the deployment's current lifecycle status. Best-effort:
   // a poll failure degrades to the locally-known pending state so GET never 500s
-  // on a transient registry hiccup. Returns the registry status string or null.
+  // on a transient registry hiccup. Returns the parsed status/suspended/claimed
+  // triple, or null on any failure.
   async function pollRegistryStatus(row: {
     deploymentId: string
     keyId: string
     privateKeyPem: string
     adminId: string
-  }): Promise<string | null> {
+  }): Promise<{ status: string | null; suspended: boolean; claimed: boolean } | null> {
     try {
       const pop = signPop({ privateKeyPem: row.privateKeyPem, sub: row.adminId, kid: row.keyId })
       const statusRes = await fetch(`${base()}/${row.deploymentId}/status`, {
         method: 'GET',
         headers: { DPoP: pop },
+        signal: AbortSignal.timeout(REGISTRY_FETCH_TIMEOUT_MS),
       })
       if (!statusRes.ok) {
         rootLogger.warn(
@@ -159,8 +161,16 @@ export function createRegistryConnectRouter(): Router {
         )
         return null
       }
-      const parsed = (await statusRes.json()) as { status?: unknown }
-      return typeof parsed.status === 'string' ? parsed.status : null
+      const parsed = (await statusRes.json()) as {
+        status?: unknown
+        suspended?: unknown
+        claimed?: unknown
+      }
+      return {
+        status: typeof parsed.status === 'string' ? parsed.status : null,
+        suspended: parsed.suspended === true,
+        claimed: parsed.claimed === true,
+      }
     } catch (err) {
       rootLogger.warn(
         { event: 'registry_connect_status_poll_error', err: (err as Error).message },
@@ -190,14 +200,42 @@ export function createRegistryConnectRouter(): Router {
         })
         return
       }
+      // A locally-'approved' row is a registry auto-approval whose claim has
+      // not landed. GET stays READ-ONLY: it reports state so the panel can
+      // offer the recover button. It must never rotate — GET is also called by
+      // RegistryCatalog on every Marketplace mount and is reachable by
+      // cross-site navigation (SameSite=Lax), so a mutation here would rotate
+      // claim tokens on catalog browsing and on CSRF.
+      if (row.status === 'approved') {
+        const poll = await pollRegistryStatus({
+          deploymentId: row.deploymentId,
+          keyId: row.keyId,
+          privateKeyPem: row.privateKeyPem,
+          adminId: ctx.adminId,
+        })
+        const recoveryError = poll?.claimed
+          ? 'already_claimed'
+          : poll?.suspended
+            ? 'deployment_suspended'
+            : undefined
+        res.status(200).json({
+          state: 'connecting',
+          deploymentId: row.deploymentId,
+          requestedOrgName: row.requestedOrgName,
+          authEnabled: config.registryAuthEnabled,
+          ...(recoveryError ? { recoveryError } : {}),
+        })
+        return
+      }
       // Not yet connected — poll the registry so an operator approval (or
       // rejection) is reflected before the user attempts to claim.
-      const registryStatus = await pollRegistryStatus({
+      const poll = await pollRegistryStatus({
         deploymentId: row.deploymentId,
         keyId: row.keyId,
         privateKeyPem: row.privateKeyPem,
         adminId: ctx.adminId,
       })
+      const registryStatus = poll?.status ?? null
       const state =
         registryStatus === 'approved'
           ? 'approved'
@@ -450,6 +488,124 @@ export function createRegistryConnectRouter(): Router {
       next(err)
     }
   })
+
+  // POST recover — finish an auto-approved connection whose inline claim failed.
+  // Explicit POST rather than a side effect of GET: GET has a second caller
+  // (RegistryCatalog) and is CSRF-reachable, and /:id/claim-token is unthrottled
+  // at the registry.
+  router.post(
+    '/admin/registry/connect/recover',
+    requireAuthForControlUI,
+    async (req, res, next) => {
+      try {
+        const ctx = await requireSelfHostedAdmin(req, res)
+        if (!ctx) return
+        const row = await getRegistryConnection()
+        if (!row || row.status !== 'approved') {
+          res.status(409).json({ error: 'not_recoverable' })
+          return
+        }
+        // Cheapest check first: a read tells us whether a rotate can possibly
+        // help, so a terminal state costs no mutation and no audit event.
+        const poll = await pollRegistryStatus({
+          deploymentId: row.deploymentId,
+          keyId: row.keyId,
+          privateKeyPem: row.privateKeyPem,
+          adminId: ctx.adminId,
+        })
+        if (poll?.claimed) {
+          res.status(409).json({ error: 'already_claimed' })
+          return
+        }
+        if (poll?.suspended) {
+          res.status(409).json({ error: 'deployment_suspended' })
+          return
+        }
+        if (poll?.status === 'rejected') {
+          res.status(409).json({ error: 'rejected' })
+          return
+        }
+        rootLogger.info(
+          { event: 'registry_connect_recover_attempted', status: 0 },
+          'attempting auto-claim recovery'
+        )
+        let claimToken: string
+        try {
+          const pop = signPop({
+            privateKeyPem: row.privateKeyPem,
+            sub: ctx.adminId,
+            kid: row.keyId,
+          })
+          const rotRes = await fetch(`${base()}/${row.deploymentId}/claim-token`, {
+            method: 'POST',
+            headers: { DPoP: pop },
+            signal: AbortSignal.timeout(REGISTRY_FETCH_TIMEOUT_MS),
+          })
+          if (rotRes.status === 409) {
+            res.status(409).json({ error: 'already_claimed' })
+            return
+          }
+          if (!rotRes.ok) {
+            rootLogger.error(
+              { event: 'registry_connect_recover_rotate_failed', status: rotRes.status },
+              'claim-token rotate failed'
+            )
+            res.status(202).json({ state: 'connecting', deploymentId: row.deploymentId })
+            return
+          }
+          const rotated = (await rotRes.json()) as { claim_token?: unknown }
+          if (typeof rotated.claim_token !== 'string') {
+            res.status(202).json({ state: 'connecting', deploymentId: row.deploymentId })
+            return
+          }
+          claimToken = rotated.claim_token
+        } catch {
+          // Never 500 on a registry hiccup — same guarantee the status poll makes.
+          res.status(202).json({ state: 'connecting', deploymentId: row.deploymentId })
+          return
+        }
+        const outcome = await redeemClaim({
+          deploymentId: row.deploymentId,
+          keyId: row.keyId,
+          privateKeyPem: row.privateKeyPem,
+          adminId: ctx.adminId,
+          claimToken,
+        })
+        switch (outcome.kind) {
+          case 'connected':
+            res.status(200).json({
+              state: 'connected',
+              org: outcome.org,
+              authEnabled: config.registryAuthEnabled,
+            })
+            return
+          // Terminal: the client is disabled (operator suspension). Retrying
+          // rotates forever against a deployment that was deliberately killed.
+          case 'client_unavailable':
+            rootLogger.error(
+              { event: 'registry_connect_recover_terminal', status: 0 },
+              'recovery terminal: client unavailable'
+            )
+            res.status(409).json({ error: 'client_unavailable' })
+            return
+          case 'already_claimed':
+            res.status(409).json({ error: 'already_claimed' })
+            return
+          case 'superseded':
+            res.status(409).json({ error: 'connection_superseded' })
+            return
+          case 'expired':
+            res.status(409).json({ error: 'claim_expired' })
+            return
+          default:
+            res.status(202).json({ state: 'connecting', deploymentId: row.deploymentId })
+            return
+        }
+      } catch (err) {
+        next(err)
+      }
+    }
+  )
 
   // DELETE — disconnect (drop the row).
   router.delete('/admin/registry/connect', requireAuthForControlUI, async (req, res, next) => {
