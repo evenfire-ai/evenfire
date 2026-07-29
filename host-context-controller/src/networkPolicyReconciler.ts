@@ -180,6 +180,12 @@ export interface NetworkPolicyFullReconcileOptions {
   resolveCurrentContext?: (name: string) => ContextCRD | undefined
   resolveCurrentContextById?: (contextId: string) => ContextCRD | undefined
   resolveCurrentServer?: (name: string) => McpServerCRD | undefined
+  /**
+   * Called only after every authoritative orphan-allow revocation lane has
+   * completed. Additive Context/McpServer convergence intentionally happens
+   * afterwards and must not delay this safety boundary.
+   */
+  onAuthoritativeRevocationComplete?: () => void
 }
 
 export class NetworkPolicyReconciler {
@@ -471,9 +477,12 @@ export class NetworkPolicyReconciler {
     )
     const isCurrent = (): boolean =>
       callerIsCurrent() &&
-      allowedServers.every(
-        serverName => this.serverCache.get(serverName) === selectedServers.get(serverName)
-      )
+      allowedServers.every(serverName => {
+        const selected = selectedServers.get(serverName)
+        const current = this.serverCache.get(serverName)
+        if (!selected || !current) return selected === current
+        return sameMcpServerDesiredRevision(selected, current)
+      })
     if (!isCurrent()) return
 
     console.log(
@@ -727,40 +736,6 @@ export class NetworkPolicyReconciler {
       (options.contextInventoryAuthoritative?.() ?? true) &&
       (options.serverInventoryAuthoritative?.() ?? true)
 
-    // Reconcile each context
-    for (const context of contexts) {
-      const contextId = context.spec.contextId
-      await runContextEffect(contextId, async () => {
-        const current = options.resolveCurrentContext
-          ? options.resolveCurrentContext(context.name)
-          : context
-        if (!current || current.spec.contextId !== contextId) return
-        const contextEffectIsCurrent = (): boolean =>
-          contextInventoryIsCurrent() &&
-          (!options.resolveCurrentContext ||
-            options.resolveCurrentContext(current.name) === current)
-        await this.reconcileContext(current, { isCurrent: contextEffectIsCurrent })
-      })
-    }
-
-    // Reconcile external egress for all existing servers on startup so a
-    // controller restart converges pre-existing McpServer CRDs too.
-    for (const server of servers) {
-      await runServerEffect(server.name, async () => {
-        const current = options.resolveCurrentServer
-          ? options.resolveCurrentServer(server.name)
-          : server
-        if (!current) return
-        const serverEffectIsCurrent = (): boolean => {
-          if (!(options.serverInventoryAuthoritative?.() ?? true)) return false
-          if (!options.resolveCurrentServer) return true
-          const latest = options.resolveCurrentServer(current.name)
-          return latest !== undefined && sameMcpServerDesiredRevision(current, latest)
-        }
-        await this.reconcileExternalEgress(current, { isCurrent: serverEffectIsCurrent })
-      })
-    }
-
     // Authority is monotonic within this pass. Once a watch loses authority,
     // this inventory snapshot cannot safely become authoritative again even if
     // the callback flips back before the next delete.
@@ -885,6 +860,51 @@ export class NetworkPolicyReconciler {
       console.warn(
         '[NetPol] Skipping external egress orphan cleanup because server inventory is incomplete'
       )
+    }
+
+    if (
+      options.serverInventoryComplete !== false &&
+      contextCleanupAuthoritative() &&
+      serverCleanupAuthoritative()
+    ) {
+      options.onAuthoritativeRevocationComplete?.()
+    }
+
+    // Additive convergence happens only after every stale allow policy implied
+    // by the authoritative inventory has been revoked. A slow or failing
+    // positive effect therefore cannot extend a stale-permission window after
+    // readiness becomes available.
+    for (const context of contexts) {
+      const contextId = context.spec.contextId
+      await runContextEffect(contextId, async () => {
+        const current = options.resolveCurrentContext
+          ? options.resolveCurrentContext(context.name)
+          : context
+        if (!current || current.spec.contextId !== contextId) return
+        const contextEffectIsCurrent = (): boolean =>
+          contextInventoryIsCurrent() &&
+          (!options.resolveCurrentContext ||
+            options.resolveCurrentContext(current.name) === current)
+        await this.reconcileContext(current, { isCurrent: contextEffectIsCurrent })
+      })
+    }
+
+    // Reconcile external egress for all existing servers on startup so a
+    // controller restart converges pre-existing McpServer CRDs too.
+    for (const server of servers) {
+      await runServerEffect(server.name, async () => {
+        const current = options.resolveCurrentServer
+          ? options.resolveCurrentServer(server.name)
+          : server
+        if (!current) return
+        const serverEffectIsCurrent = (): boolean => {
+          if (!(options.serverInventoryAuthoritative?.() ?? true)) return false
+          if (!options.resolveCurrentServer) return true
+          const latest = options.resolveCurrentServer(current.name)
+          return latest !== undefined && sameMcpServerDesiredRevision(current, latest)
+        }
+        await this.reconcileExternalEgress(current, { isCurrent: serverEffectIsCurrent })
+      })
     }
 
     console.log('[NetPol] Full reconciliation complete')

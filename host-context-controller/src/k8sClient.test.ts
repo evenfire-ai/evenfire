@@ -97,6 +97,13 @@ function markMcpServerInventoryAuthoritative(watcher: McpServerWatcher): void {
   ;(watcher as any).mcpServerCacheSynced = true
 }
 
+function markNetworkPolicyRevocationAuthoritative(watcher: McpServerWatcher): void {
+  ;(watcher as any).networkPolicyRevocationContextGeneration = (
+    watcher as any
+  ).contextWatchGeneration
+  ;(watcher as any).networkPolicyRevocationServerGeneration = (watcher as any).mcpWatchGeneration
+}
+
 function newContextAuthoritativeWatcher(): McpServerWatcher {
   const watcher = new McpServerWatcher()
   ;(watcher as any).contextCacheSynced = true
@@ -109,7 +116,10 @@ const mocks = vi.hoisted(() => {
     .fn()
     .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 }))
   const ensureDefaultPolicies = vi.fn().mockResolvedValue(undefined)
-  const netPolFullReconcile = vi.fn().mockResolvedValue(undefined)
+  const netPolFullReconcile = vi.fn().mockImplementation(async (...args: unknown[]) => {
+    const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
+    options?.onAuthoritativeRevocationComplete?.()
+  })
   const serverFullReconcile = vi.fn().mockResolvedValue(undefined)
   const hostFullReconcile = vi.fn().mockResolvedValue(undefined)
   const hostReconcileHosts = vi.fn().mockResolvedValue(undefined)
@@ -328,7 +338,10 @@ describe('McpServerWatcher startup', () => {
     vi.useRealTimers()
     vi.restoreAllMocks()
     mocks.ensureDefaultPolicies.mockReset().mockResolvedValue(undefined)
-    mocks.netPolFullReconcile.mockReset().mockResolvedValue(undefined)
+    mocks.netPolFullReconcile.mockReset().mockImplementation(async (...args: unknown[]) => {
+      const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
+      options?.onAuthoritativeRevocationComplete?.()
+    })
     mocks.serverFullReconcile.mockReset().mockResolvedValue(undefined)
     mocks.hostFullReconcile.mockReset().mockResolvedValue(undefined)
     mocks.sfsFullReconcile.mockReset().mockResolvedValue(undefined)
@@ -796,6 +809,7 @@ describe('McpServerWatcher startup', () => {
       resourceVersion: 'mcp-start-rv',
       servers: [],
     })
+    markNetworkPolicyRevocationAuthoritative(watcher)
     expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
 
     doneCallbacks[0](Object.assign(new Error('resource version expired'), { statusCode: 410 }))
@@ -907,14 +921,24 @@ describe('McpServerWatcher startup', () => {
     await watcher.stop()
   })
 
-  it('completes safe bootstrap while every initial convergence lane continues in background', async () => {
+  it('becomes ready after authoritative revocation while every additive convergence lane remains pending', async () => {
     const initialServerFleet = deferred()
     const initialNetworkPolicies = deferred()
     const initialHostFleet = deferred()
     const initialSfsFleet = deferred()
     const initialGfsFleet = deferred()
+    let completeAuthoritativeRevocation: (() => void) | undefined
     mocks.serverFullReconcile.mockImplementationOnce(() => initialServerFleet.promise)
-    mocks.netPolFullReconcile.mockImplementationOnce(() => initialNetworkPolicies.promise)
+    mocks.netPolFullReconcile.mockImplementationOnce(
+      async (
+        _contexts: unknown,
+        _servers: unknown,
+        options?: { onAuthoritativeRevocationComplete?: () => void }
+      ) => {
+        completeAuthoritativeRevocation = options?.onAuthoritativeRevocationComplete
+        await initialNetworkPolicies.promise
+      }
+    )
     mocks.hostFullReconcile.mockImplementationOnce(() => initialHostFleet.promise)
     mocks.sfsFullReconcile.mockImplementationOnce(() => initialSfsFleet.promise)
     mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
@@ -936,7 +960,9 @@ describe('McpServerWatcher startup', () => {
       .spyOn((watcher as any).gfsReconciler, 'fullReconcile')
       .mockImplementationOnce(() => initialGfsFleet.promise)
 
-    const server = new ContextMapperServer(watcher, 0)
+    const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+      watcher.isReadinessInventoryAuthoritative()
+    )
     await server.start()
     const bootstrap = watcher.start()
 
@@ -951,8 +977,12 @@ describe('McpServerWatcher startup', () => {
 
       await expect(bootstrap).resolves.toBeUndefined()
       server.setReady(true)
-      const ready = await requestReadyOverHttp(server)
+      const beforeRevocation = await requestReadyOverHttp(server)
+      expect(beforeRevocation.statusCode).toBe(503)
+      expect(completeAuthoritativeRevocation).toBeTypeOf('function')
 
+      completeAuthoritativeRevocation?.()
+      const ready = await requestReadyOverHttp(server)
       expect(ready.statusCode).toBe(200)
       expect(JSON.parse(ready.body)).toEqual({ status: 'ready', ready: true })
       expect(startMcpServerWatch).toHaveBeenCalledOnce()
@@ -2681,7 +2711,15 @@ describe('McpServerWatcher startup', () => {
     })
     mocks.netPolFullReconcile
       .mockRejectedValueOnce(new Error('initial NetworkPolicy reconciliation failed'))
-      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(
+        async (
+          _contexts: unknown,
+          _servers: unknown,
+          options?: { onAuthoritativeRevocationComplete?: () => void }
+        ) => {
+          options?.onAuthoritativeRevocationComplete?.()
+        }
+      )
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const watcher = new McpServerWatcher()
     stubAuthoritativeInventoryWatch(watcher, 'McpServer')
@@ -2693,9 +2731,11 @@ describe('McpServerWatcher startup', () => {
     await watcher.start()
     await vi.advanceTimersByTimeAsync(0)
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
 
     await vi.advanceTimersByTimeAsync(5000)
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2)
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
     expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
       [expect.objectContaining({ name: 'initial-context' })],
       [],

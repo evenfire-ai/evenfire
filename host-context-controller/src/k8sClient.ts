@@ -623,6 +623,12 @@ export class McpServerWatcher implements McpServerProvider {
   private communicationChannels: Map<string, CommunicationChannelCRD> = new Map()
   private mcpWatchGeneration = 0
   private contextWatchGeneration = 0
+  // Readiness covers authoritative revocation, not additive fleet completion.
+  // Generations bind the completed safety sweep to the exact LIST -> WATCH
+  // pair that supplied its absence decisions. A recovered watch invalidates
+  // this marker until the new inventory's orphan-allow sweep completes.
+  private networkPolicyRevocationContextGeneration = 0
+  private networkPolicyRevocationServerGeneration = 0
   private mcpServerCacheSynced = false
   private contextCacheSynced = false
   private mcpServerCacheRecoveryTimer: ReturnType<typeof setTimeout> | null = null
@@ -842,7 +848,12 @@ export class McpServerWatcher implements McpServerProvider {
    */
   isReadinessInventoryAuthoritative(): boolean {
     return (
-      !this.stopped && this.mcpServerCacheSynced && this.contextCacheSynced && this.hostCacheSynced
+      !this.stopped &&
+      this.mcpServerCacheSynced &&
+      this.contextCacheSynced &&
+      this.hostCacheSynced &&
+      this.networkPolicyRevocationContextGeneration === this.contextWatchGeneration &&
+      this.networkPolicyRevocationServerGeneration === this.mcpWatchGeneration
     )
   }
 
@@ -2502,6 +2513,11 @@ export class McpServerWatcher implements McpServerProvider {
         resolveCurrentContextById: contextId =>
           [...this.contexts.values()].find(context => context.spec.contextId === contextId),
         resolveCurrentServer: name => this.servers.get(name),
+        onAuthoritativeRevocationComplete: () => {
+          if (!contextInventoryAuthoritative() || !serverInventoryAuthoritative()) return
+          this.networkPolicyRevocationContextGeneration = contextInventoryGeneration
+          this.networkPolicyRevocationServerGeneration = serverInventoryGeneration
+        },
       })
       if (!contextInventoryAuthoritative() || !serverInventoryAuthoritative()) return
       initialConvergenceLastSuccessTimestampSeconds.set(
