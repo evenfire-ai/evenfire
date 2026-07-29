@@ -209,12 +209,17 @@ associate_agents_union() {
   # PUT /admin/.../agents filters names against the ACTIVE agent set, so a
   # just-applied Host CR can lag. Retry until the response echoes the new
   # agent back; die loudly if it never does (silent filtering is a failure).
-  local url="$1" label="$2" attempt=1 union
+  local url="$1" label="$2" attempt=1 union expected
   while :; do
     admin_call GET "$url"
     union="$(echo "$ADMIN_BODY" | jq -c --arg a "$STATELESS_HOST" \
       '((.agentNames // []) + [$a]) | unique')"
-    admin_call PUT "$url" "$(jq -cn --argjson names "$union" '{agentNames: $names}')"
+    # CAS precondition: the server's stored set is active + deleted history.
+    # Omitting expectedCurrentAgentNames now yields 428 (agentGrants.ts).
+    expected="$(echo "$ADMIN_BODY" | jq -c '((.agentNames // []) + (.deletedAgentNames // []))')"
+    admin_call PUT "$url" \
+      "$(jq -cn --argjson names "$union" --argjson e "$expected" \
+        '{agentNames: $names, expectedCurrentAgentNames: $e}')"
     if echo "$ADMIN_BODY" | jq -e --arg a "$STATELESS_HOST" \
         '(.agentNames // []) | index($a) != null' >/dev/null; then
       ok "$label now includes '${STATELESS_HOST}'"
