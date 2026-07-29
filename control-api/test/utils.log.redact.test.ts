@@ -25,4 +25,11 @@ describe('token-leak redaction', () => {
   it('redacts the registry voucher field (defense-in-depth)', () => {
     expect(TOKEN_LEAK_REDACT_PATHS).toContain('voucher')
   })
+
+  it('redacts registry connect claim tokens and client secrets', () => {
+    for (const p of ['claim_token', 'claimToken', 'client_secret', 'clientSecret']) {
+      expect(TOKEN_LEAK_REDACT_PATHS).toContain(p)
+      expect(REQUIRED_REDACT_PATHS).toContain(p)
+    }
+  })
 })

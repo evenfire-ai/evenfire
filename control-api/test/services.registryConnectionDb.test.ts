@@ -36,6 +36,8 @@ vi.mock('../src/config.js', () => ({ config: cfg }))
 const dbQuery = vi.fn()
 vi.mock('../src/db.js', () => ({
   pool: { query: (t: string, v?: unknown[]) => dbQuery(t, v) },
+  withTransaction: async (fn: (db: unknown) => Promise<unknown>) =>
+    fn({ query: (t: string, v?: unknown[]) => dbQuery(t, v) }),
 }))
 
 const keypair = () =>
@@ -222,7 +224,12 @@ describe('markConnected — writes ciphertext for the client secret (C-I3a)', ()
     cfg.oauthEncryptionKey = encKeyHex
     dbQuery.mockResolvedValue({ rows: [], rowCount: 0 })
 
-    await markConnected({ clientId: 'cid-9', clientSecret: 'super-secret-xyz', orgName: 'acme' })
+    await markConnected({
+      deploymentId: 'dep-9',
+      clientId: 'cid-9',
+      clientSecret: 'super-secret-xyz',
+      orgName: 'acme',
+    })
 
     const upd = dbQuery.mock.calls.find(([sql]) =>
       String(sql).includes('UPDATE registry_connection')
@@ -321,5 +328,83 @@ describe('resolveMachineCreds (C-I3b)', () => {
       rowCount: 1,
     })
     expect(await resolveMachineCreds()).toBeNull()
+  })
+})
+
+describe('upsertPendingConnection — status parameter reaches the SQL', () => {
+  it('defaults to pending', async () => {
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    dbQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    await upsertPendingConnection({
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      publicKeyPem: 'PUB',
+      privateKeyPem: keypair().privateKey,
+      requestedOrgName: 'acme',
+      contactEmail: 'a@x.io',
+      registryUrl: 'https://r.example',
+    })
+    const insert = dbQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO registry_connection')
+    )
+    // status is a BOUND PARAMETER ($7), not a SQL literal
+    expect(String(insert![0])).not.toMatch(/'pending'/)
+    expect((insert![1] as string[])[6]).toBe('pending')
+  })
+
+  it("writes 'approved' when asked", async () => {
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    dbQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    await upsertPendingConnection({
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      publicKeyPem: 'PUB',
+      privateKeyPem: keypair().privateKey,
+      requestedOrgName: 'acme',
+      contactEmail: 'a@x.io',
+      registryUrl: 'https://r.example',
+      status: 'approved',
+    })
+    const insert = dbQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO registry_connection')
+    )
+    expect((insert![1] as string[])[6]).toBe('approved')
+  })
+})
+
+describe('markConnected — scoped write', () => {
+  it('scopes the UPDATE to the deployment and returns true on a match', async () => {
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    dbQuery.mockResolvedValue({ rows: [], rowCount: 1 })
+    const ok = await markConnected({
+      deploymentId: 'dep-9',
+      clientId: 'cid-9',
+      clientSecret: 'super-secret-xyz',
+      orgName: 'acme',
+    })
+    expect(ok).toBe(true)
+    const upd = dbQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('UPDATE registry_connection')
+    )
+    // ONE contiguous assertion: mutating the AND to OR (a row belonging to a
+    // DIFFERENT deployment with status 'pending' would then also match) must
+    // fail this test. Two independent regexes each match an OR-joined clause
+    // just as well as an AND-joined one, so they cannot catch that mutation.
+    expect(String(upd![0])).toMatch(
+      /WHERE\s+deployment_id\s*=\s*\$4\s+AND\s+status\s*<>\s*'connected'/
+    )
+    expect((upd![1] as string[])[3]).toBe('dep-9')
+  })
+
+  it('returns false when no row matched (row deleted or superseded mid-claim)', async () => {
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    dbQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    const ok = await markConnected({
+      deploymentId: 'dep-9',
+      clientId: 'cid-9',
+      clientSecret: 'super-secret-xyz',
+      orgName: 'acme',
+    })
+    expect(ok).toBe(false)
   })
 })
