@@ -30,7 +30,6 @@ one of two state machines, depending on how the registry is configured:
    come from this deployment. It never leaves your cluster.)
 
 2. **What happens next depends on the registry.**
-
    - **Open registration enabled** — the registry approves immediately and the
      panel finishes connecting on its own. No operator is involved and no claim
      token is ever shown to a human. If that automatic step cannot complete (a
