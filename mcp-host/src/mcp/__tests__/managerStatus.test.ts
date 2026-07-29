@@ -264,4 +264,28 @@ describe('McpManager.disconnectAll resets the tracker', () => {
     await m.disconnectAll()
     expect(m.status.size()).toBe(0)
   })
+
+  it('cleans every client when one disconnect fails, then reports the cleanup error', async () => {
+    const { McpClient } = await import('../client')
+    vi.spyOn(McpClient.prototype, 'connect').mockImplementation(async function (this: any) {
+      this.connected = true
+      this.tools = []
+    })
+    const cleanupError = new Error('first disconnect failed')
+    const disconnect = vi
+      .spyOn(McpClient.prototype, 'disconnect')
+      .mockImplementation(async function (this: any) {
+        if (this.name === 'a') throw cleanupError
+      })
+
+    const m = new McpManager()
+    await m.addServer(serverInfo({ name: 'a' }))
+    await m.addServer(serverInfo({ name: 'b' }))
+
+    await expect(m.disconnectAll()).rejects.toBe(cleanupError)
+
+    expect(disconnect).toHaveBeenCalledTimes(2)
+    expect(m.getConnectedServers()).toEqual([])
+    expect(m.status.size()).toBe(0)
+  })
 })

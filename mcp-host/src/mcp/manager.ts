@@ -180,12 +180,22 @@ export class McpManager {
    */
   async disconnectAll(): Promise<void> {
     const serverNames = [...this.clients.keys()]
+    let firstError: unknown
+    let cleanupFailed = false
     for (const name of serverNames) {
-      await this.removeServer(name)
+      try {
+        await this.removeServer(name)
+      } catch (error) {
+        if (!cleanupFailed) firstError = error
+        cleanupFailed = true
+      }
     }
     this.toolToServerMap.clear()
     this.serverInfos.clear()
     this.statusTracker.reset()
+    if (cleanupFailed) {
+      throw firstError
+    }
   }
 
   /**

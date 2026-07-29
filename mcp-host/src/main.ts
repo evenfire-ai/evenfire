@@ -821,11 +821,6 @@ export async function replaceAuthoritativeMcpFleet<
 
   try {
     for (const server of options.servers) {
-      if (server.status?.authoritative === false) {
-        nextServerState.set(server.name, JSON.stringify(server))
-        continue
-      }
-
       let authToken: string | undefined
       try {
         authToken = await resolveRequiredMcpAuthToken(server, options.getAuthToken)
@@ -877,6 +872,27 @@ export async function replaceAuthoritativeMcpFleet<
   }
 }
 
+/**
+ * Admit development MCP servers independently.
+ *
+ * McpManager.addServer propagates connection failures so production fleet
+ * reconciliation can leave a failed revision retryable. Development startup
+ * has no authoritative polling loop, so one unavailable optional server must
+ * not prevent the remaining servers or the host itself from starting.
+ */
+export async function admitDevelopmentMcpServers(
+  servers: McpServerInfo[],
+  manager: Pick<McpManager, 'addServer'>
+): Promise<void> {
+  for (const server of servers) {
+    try {
+      await manager.addServer(server)
+    } catch (error) {
+      console.error(`[Main] Dev MCP server admission failed; continuing: ${server.name}`, error)
+    }
+  }
+}
+
 interface AuthoritativeMcpSnapshotManager {
   addServer(server: McpServerInfo, authToken?: string): Promise<void>
   replaceServer(server: McpServerInfo, authToken?: string): Promise<void>
@@ -885,9 +901,24 @@ interface AuthoritativeMcpSnapshotManager {
   recordAdmissionFailure(server: McpServerInfo, error: unknown): void
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`
+  }
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+    return `{${entries
+      .map(([key, entryValue]) => `${JSON.stringify(key)}:${canonicalJson(entryValue)}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
 function mcpServerDesiredRevision(server: McpServerInfo): string {
   const { status: _observedStatus, ...desired } = server
-  return JSON.stringify(desired)
+  return canonicalJson(desired)
 }
 
 /**
@@ -923,11 +954,6 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
     const currentState = JSON.stringify(server)
 
     if (!previousState) {
-      if (server.status?.authoritative === false) {
-        options.serverState.set(server.name, currentState)
-        return
-      }
-
       const authToken = await resolveAuthToken(server)
       await options.manager.addServer(server, authToken)
       options.serverState.set(server.name, currentState)
@@ -941,6 +967,9 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
     if (desiredChanged) {
       if (server.status?.authoritative === false) {
         await options.manager.removeServer(server.name)
+        // Reuse the manager's fail-closed admission path to keep the expected
+        // server visible as not_ready without opening a connection.
+        await options.manager.addServer(server, undefined)
         options.serverState.set(server.name, currentState)
         return
       }
@@ -2840,9 +2869,7 @@ async function startDevMode(): Promise<void> {
 
   if (config.devMcpServers && config.devMcpServers.length > 0) {
     console.log(`[Main] Adding ${config.devMcpServers.length} dev MCP server(s)`)
-    for (const server of config.devMcpServers) {
-      await mcpManager.addServer(server)
-    }
+    await admitDevelopmentMcpServers(config.devMcpServers, mcpManager)
 
     const tools = mcpManager.getAllTools()
     console.log(`[Main] Total tools available: ${tools.length}`)

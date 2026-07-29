@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  admitDevelopmentMcpServers,
   createCoalescedPollRunner,
   reconcileAuthoritativeMcpSnapshot,
   replaceAuthoritativeMcpFleet,
@@ -7,6 +8,7 @@ import {
   startContextMapperPolling,
   stopContextMapperPolling,
 } from '../main'
+import { McpManager } from '../mcp/manager'
 import type { McpServerInfo } from '../types'
 
 function readyServer(overrides: Partial<McpServerInfo> = {}): McpServerInfo {
@@ -20,6 +22,28 @@ function readyServer(overrides: Partial<McpServerInfo> = {}): McpServerInfo {
     ...overrides,
   }
 }
+
+describe('admitDevelopmentMcpServers', () => {
+  it('continues admitting peers when one development server is unavailable', async () => {
+    const firstServer = readyServer({ name: 'first-server', auth: { type: 'none' } })
+    const failedServer = readyServer({ name: 'failed-server', auth: { type: 'none' } })
+    const thirdServer = readyServer({ name: 'third-server', auth: { type: 'none' } })
+    const addServer = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('MCP connect failed'))
+      .mockResolvedValueOnce(undefined)
+
+    await expect(
+      admitDevelopmentMcpServers([firstServer, failedServer, thirdServer], { addServer })
+    ).resolves.toBeUndefined()
+
+    expect(addServer).toHaveBeenCalledTimes(3)
+    expect(addServer).toHaveBeenNthCalledWith(1, firstServer)
+    expect(addServer).toHaveBeenNthCalledWith(2, failedServer)
+    expect(addServer).toHaveBeenNthCalledWith(3, thirdServer)
+  })
+})
 
 describe('runAuthoritativeMcpInitialization', () => {
   it('obtains an authoritative snapshot before replacing the current fleet', async () => {
@@ -348,11 +372,44 @@ describe('replaceAuthoritativeMcpFleet', () => {
     })
 
     expect(getAuthToken).not.toHaveBeenCalled()
-    expect(candidateManager.addServer).not.toHaveBeenCalled()
+    expect(candidateManager.addServer).toHaveBeenCalledWith(nonAuthoritative, undefined)
     expect(installFleet).toHaveBeenCalledWith(
       candidateManager,
       new Map([[nonAuthoritative.name, JSON.stringify(nonAuthoritative)]])
     )
+  })
+
+  it('publishes a real not-ready health entry for a non-authoritative cold snapshot', async () => {
+    const nonAuthoritative = readyServer({
+      status: {
+        deployed: true,
+        ready: true,
+        authoritative: false,
+        message: 'Status identity could not be verified',
+      },
+    })
+    let installedManager: McpManager | undefined
+
+    await replaceAuthoritativeMcpFleet({
+      servers: [nonAuthoritative],
+      previousManager: null,
+      createManager: () => new McpManager(),
+      getAuthToken: vi.fn(),
+      installFleet: manager => {
+        installedManager = manager
+      },
+    })
+
+    expect(installedManager?.getConnectedServers()).toEqual([])
+    expect(installedManager?.status.snapshot()).toEqual([
+      expect.objectContaining({
+        name: nonAuthoritative.name,
+        state: 'failed',
+        expected: true,
+        reason: 'not_ready',
+        message: 'Status identity could not be verified',
+      }),
+    ])
   })
 
   it('keeps the committed fleet when retiring the prior manager fails', async () => {
@@ -570,7 +627,7 @@ describe('reconcileAuthoritativeMcpSnapshot', () => {
     })
 
     expect(getAuthToken).not.toHaveBeenCalled()
-    expect(manager.addServer).not.toHaveBeenCalled()
+    expect(manager.addServer).toHaveBeenCalledWith(nonAuthoritative, undefined)
     expect(manager.removeServer).not.toHaveBeenCalled()
     expect(serverState.get(nonAuthoritative.name)).toBe(JSON.stringify(nonAuthoritative))
   })
@@ -605,8 +662,45 @@ describe('reconcileAuthoritativeMcpSnapshot', () => {
 
     expect(manager.removeServer).toHaveBeenCalledWith(previous.name)
     expect(getAuthToken).not.toHaveBeenCalled()
-    expect(manager.addServer).not.toHaveBeenCalled()
+    expect(manager.addServer).toHaveBeenCalledWith(modified, undefined)
     expect(serverState.get(modified.name)).toBe(JSON.stringify(modified))
+  })
+
+  it('does not reconnect when desired objects differ only by key insertion order', async () => {
+    const current = readyServer({
+      auth: { type: 'bearer', secretRef: 'secured-server-auth', secretKey: 'token' },
+    })
+    const previousWithDifferentKeyOrder = {
+      enabled: true,
+      transport: {
+        url: 'http://secured-server.test/mcp',
+        type: 'streamableHttp',
+      },
+      contextRef: 'production',
+      name: 'secured-server',
+      auth: { secretKey: 'token', secretRef: 'secured-server-auth', type: 'bearer' },
+      status: { ready: true, deployed: true },
+    } as McpServerInfo
+    const serverState = new Map([[current.name, JSON.stringify(previousWithDifferentKeyOrder)]])
+    const manager = {
+      addServer: vi.fn(),
+      replaceServer: vi.fn(),
+      removeServer: vi.fn(),
+      getConnectedServers: vi.fn(() => [current.name]),
+      recordAdmissionFailure: vi.fn(),
+    }
+
+    await reconcileAuthoritativeMcpSnapshot({
+      servers: [current],
+      manager,
+      serverState,
+      getAuthToken: vi.fn(),
+    })
+
+    expect(manager.replaceServer).not.toHaveBeenCalled()
+    expect(manager.removeServer).not.toHaveBeenCalled()
+    expect(manager.addServer).not.toHaveBeenCalled()
+    expect(serverState.get(current.name)).toBe(JSON.stringify(current))
   })
 
   it('retains reconnect semantics for a desired transport change', async () => {
