@@ -852,7 +852,14 @@ test-e2e-hcc-communicationchannel-watch-recovery: ## Run isolated minikube HCC w
 .PHONY: test-e2e-hcc-readiness-bootstrap
 test-e2e-hcc-readiness-bootstrap: ## Prove HCC readiness while its initial Host fleet pass remains active
 	@echo "Running HCC initial-fleet readiness gate..."
-	E2E_HCC_READINESS_FAULT_INJECTION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-readiness-bootstrap.sh
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_HCC_READINESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-readiness-bootstrap.sh
+
+.PHONY: test-e2e-hcc-mcp-context-readiness
+test-e2e-hcc-mcp-context-readiness: ## Prove HCC readiness during exact MCP/Context/NetworkPolicy initial convergence
+	@echo "Running HCC MCP/Context/NetworkPolicy readiness gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_HCC_MCP_READINESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-mcp-context-readiness.sh
 
 .PHONY: test-e2e-stateless-multinode
 test-e2e-stateless-multinode: ## Run stateless multi-node lane (opt-in: STATELESS_MULTINODE_GATE=1; needs >=2 schedulable nodes; exit 3 = cross-node UNVERIFIED)

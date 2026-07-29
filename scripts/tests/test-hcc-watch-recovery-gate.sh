@@ -4,7 +4,10 @@ set -u
 FAIL=0
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_DIR="${ROOT}/scripts/e2e"
-GATE="${SCRIPT_DIR}/e2e-hcc-communicationchannel-watch-recovery.sh"
+WATCH_GATE="${SCRIPT_DIR}/e2e-hcc-communicationchannel-watch-recovery.sh"
+READINESS_GATE="${SCRIPT_DIR}/e2e-hcc-readiness-bootstrap.sh"
+MCP_READINESS_GATE="${SCRIPT_DIR}/e2e-hcc-mcp-context-readiness.sh"
+GATES=("$WATCH_GATE" "$READINESS_GATE" "$MCP_READINESS_GATE")
 LOCK_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-lock.sh"
 LOG_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-logs.sh"
 MOCK_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/hcc-lock-test.XXXXXX")"
@@ -15,7 +18,7 @@ trap 'rm -f "$MOCK_STATE_FILE" "$MOCK_LOG_FILE"' EXIT
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
-for script in "$GATE" "$LOCK_HELPER" "$LOG_HELPER"; do
+for script in "${GATES[@]}" "$LOCK_HELPER" "$LOG_HELPER"; do
   if bash -n "$script"; then
     pass "$(basename "$script") has valid bash syntax"
   else
@@ -82,18 +85,28 @@ else
   fail "the second recovery cycle was not isolated from the first"
 fi
 
-acquire_line="$(grep -nF 'acquire_hcc_watch_gate_lock || die' "$GATE" | cut -d: -f1)"
-# Literal source-code assertion.
-# shellcheck disable=SC2016
-mutation_line="$(grep -nF 'kctl get deployment "$HCC_DEPLOY"' "$GATE" | head -1 | cut -d: -f1)"
-# Literal source-code assertion.
-# shellcheck disable=SC2016
-if [ -n "$acquire_line" ] && [ -n "$mutation_line" ] && [ "$acquire_line" -lt "$mutation_line" ] &&
-   grep -Fq 'finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok" || cleanup_failed=1' "$GATE"; then
-  pass "gate acquires before HCC access and finalizes ownership from cleanup"
-else
-  fail "gate lock is not held across the full HCC fault-injection window"
-fi
+for gate in "${GATES[@]}"; do
+  acquire_line="$(grep -nF 'acquire_hcc_watch_gate_lock' "$gate" | tail -1 | cut -d: -f1)"
+  case "$gate" in
+    "$WATCH_GATE")
+      # Literal source-code assertion.
+      # shellcheck disable=SC2016
+      mutation_line="$(grep -nF 'kctl patch deployment "$HCC_DEPLOY"' "$gate" | tail -1 | cut -d: -f1)"
+      ;;
+    *)
+      mutation_line="$(grep -nF 'HCC_MUTATED=1' "$gate" | tail -1 | cut -d: -f1)"
+      ;;
+  esac
+  # The grep pattern intentionally matches literal shell variable references.
+  # shellcheck disable=SC2016
+  if [ -n "$acquire_line" ] && [ -n "$mutation_line" ] &&
+     [ "$acquire_line" -lt "$mutation_line" ] &&
+     grep -Fq 'finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok"' "$gate"; then
+    pass "$(basename "$gate") acquires before mutation and finalizes ownership from cleanup"
+  else
+    fail "$(basename "$gate") does not hold the shared lock across its full fault-injection window"
+  fi
+done
 
 kctl() {
   local action=$1 body expected_rv current_rv current_uid next_rv
@@ -253,8 +266,8 @@ else
 fi
 unset MOCK_CREATE_WITHOUT_UID
 
-cleanup_fail_line="$(grep -nF 'fail "fixture cleanup, HCC restoration, or lock finalization did not complete' "$GATE" | cut -d: -f1)"
-results_line="$(grep -nF '  print_results' "$GATE" | head -1 | cut -d: -f1)"
+cleanup_fail_line="$(grep -nF 'fail "fixture cleanup, HCC restoration, or lock finalization did not complete' "$WATCH_GATE" | cut -d: -f1)"
+results_line="$(grep -nF '  print_results' "$WATCH_GATE" | head -1 | cut -d: -f1)"
 if [ -n "$cleanup_fail_line" ] && [ -n "$results_line" ] && [ "$cleanup_fail_line" -lt "$results_line" ]; then
   pass "cleanup failure is counted before the final result summary"
 else
