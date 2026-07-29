@@ -30,7 +30,7 @@ const { cfg } = vi.hoisted(() => ({
     registryClientSecret: '',
     registryUrl: 'https://registry.evenfire.ai',
     oauthEncryptionKey: '',
-  } as Record<string, string>,
+  } as Record<string, string | boolean>,
 }))
 vi.mock('../src/config.js', () => ({ config: cfg }))
 
@@ -92,6 +92,7 @@ afterEach(() => {
   cfg.registryClientSecret = ''
   cfg.registryUrl = 'https://registry.evenfire.ai'
   cfg.oauthEncryptionKey = ''
+  cfg.registryAuthEnabled = false
 })
 
 describe('resolveVoucherSigningMaterial — managed', () => {
