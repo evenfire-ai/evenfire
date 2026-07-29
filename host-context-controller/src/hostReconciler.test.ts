@@ -1148,7 +1148,7 @@ describe('HostReconciler Host inventory mutation authority', () => {
         uid: 'host-uid',
         generation: 3,
       }
-      let current = host
+      let current: HostCRD = host
       const authority = { current: { known: true, generation: 7 } }
       reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
       reconciler.setHostWatchAuthority(() => authority.current)
