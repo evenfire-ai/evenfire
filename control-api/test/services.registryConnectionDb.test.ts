@@ -386,8 +386,13 @@ describe('markConnected — scoped write', () => {
     const upd = dbQuery.mock.calls.find(([sql]) =>
       String(sql).includes('UPDATE registry_connection')
     )
-    expect(String(upd![0])).toMatch(/WHERE\s+deployment_id\s*=\s*\$4/)
-    expect(String(upd![0])).toMatch(/status\s*<>\s*'connected'/)
+    // ONE contiguous assertion: mutating the AND to OR (a row belonging to a
+    // DIFFERENT deployment with status 'pending' would then also match) must
+    // fail this test. Two independent regexes each match an OR-joined clause
+    // just as well as an AND-joined one, so they cannot catch that mutation.
+    expect(String(upd![0])).toMatch(
+      /WHERE\s+deployment_id\s*=\s*\$4\s+AND\s+status\s*<>\s*'connected'/
+    )
     expect((upd![1] as string[])[3]).toBe('dep-9')
   })
 

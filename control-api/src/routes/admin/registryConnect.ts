@@ -20,6 +20,14 @@ import { signPop } from '../../services/registryPopSigner.js'
  * token — the deployment has none yet). Persists into registry_connection.
  * Managed mode has no connect flow (409 not_self_hosted).
  *
+ * GET reports state ∈ disconnected|pending|connecting|approved|rejected|connected.
+ * `connecting` means the registry auto-approved the registration and the
+ * inline claim did not land yet; it is finished by POST
+ * /admin/registry/connect/recover, never by pasting a token — under
+ * auto-approval no operator ever issues one. `approved` keeps the original
+ * operator-approved meaning: a human pastes the one-time claim token via POST
+ * /admin/registry/connect/claim.
+ *
  * Error mapping (C-M6): register 400 org_blocklisted and claim 409
  * already_claimed/client_unavailable are surfaced with distinct codes rather
  * than the opaque 502 registry_integration_error, and GET polls the registry
@@ -181,7 +189,9 @@ export function createRegistryConnectRouter(): Router {
   }
 
   // GET status — current state; polls the registry so operator approval is
-  // visible pre-claim (state ∈ disconnected|pending|approved|rejected|connected).
+  // visible pre-claim (state ∈ disconnected|pending|connecting|approved|rejected|connected).
+  // `connecting` is finished via POST /admin/registry/connect/recover, not by
+  // pasting a token.
   router.get('/admin/registry/connect', requireAuthForControlUI, async (req, res, next) => {
     try {
       const ctx = await requireSelfHostedAdmin(req, res)
@@ -521,6 +531,10 @@ export function createRegistryConnectRouter(): Router {
           res.status(409).json({ error: 'deployment_suspended' })
           return
         }
+        // Unreachable by construction: the registry's rejectDeployment is
+        // gated `WHERE status = 'pending'`, so a locally-'approved' row can
+        // never observe 'rejected' here — kept for defense in depth, which is
+        // also why the panel has no dedicated UI branch for this code.
         if (poll?.status === 'rejected') {
           res.status(409).json({ error: 'rejected' })
           return

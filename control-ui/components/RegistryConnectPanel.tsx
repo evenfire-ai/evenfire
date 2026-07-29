@@ -157,7 +157,7 @@ export default function RegistryConnectPanel() {
       else if (code === 'registration_capacity')
         setFormError('The registry is not accepting new registrations right now. Try again later.')
       else if (code === 'rate_limited')
-        setFormError('Too many registration attempts from this network. Try again tomorrow.')
+        setFormError('Too many registration attempts from this network. Try again later.')
       else if (code === 'invalid_contact_email')
         setFormError(
           'That contact email is not a valid address. Use a full address such as ops@example.com.'
@@ -189,6 +189,12 @@ export default function RegistryConnectPanel() {
         setFormError('That claim token has expired. Ask your operator to re-issue it.')
       else if (code === 'claim_rejected')
         setFormError('That claim token was rejected. Check it and try again.')
+      else if (code === 'connection_superseded')
+        // Terminal, not retryable: the registry already burned this one-time
+        // token and the credentials it returned could not be saved here.
+        setFormError(
+          'This deployment can no longer authenticate: its one-time credentials were issued but never stored. Disconnect, then register again with a different organization name.'
+        )
       else if (code === 'not_pending')
         await load() // server state moved on — re-sync
       else setFormError('Could not complete the claim. Try again shortly.')

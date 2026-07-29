@@ -402,38 +402,46 @@ describe('registry connect flow', () => {
 })
 
 describe('register — auto-claim (201)', () => {
-  it('claims immediately and reports connected', async () => {
-    connDb.getRegistryConnection.mockResolvedValue(null)
-    connDb.markConnected.mockResolvedValue(true)
-    const spy = routeFetch({
-      '/register': () =>
-        json(
-          {
-            deployment_id: 'dep-1',
-            key_id: 'kid-1',
-            status: 'approved',
-            claim_token: 'tok-abc',
-            claim_expires_at: '2026-07-30T00:00:00Z',
-          },
-          201
-        ),
-      '/claim': () => json({ client_id: 'cid', client_secret: 'csecret', org: 'acme' }, 200),
-    })
-    const res = await request(app())
-      .post('/admin/registry/connect/request')
-      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
-      .expect(200)
-    expect(res.body).toMatchObject({ state: 'connected', org: 'acme' })
-    expect(res.body.authEnabled).toBe(true)
-    // The claim call must actually carry the token the registry minted, and
-    // be PoP-authenticated — otherwise every auto-approved self-hoster gets a
-    // registry-side 401 and silently falls back to 202 connecting.
-    const [claimUrl, claimInit] = spy.mock.calls[1]!
-    expect(String(claimUrl)).toContain('/claim')
-    expect((claimInit as RequestInit).headers).toHaveProperty('DPoP')
-    const claimBody = JSON.parse(String((claimInit as RequestInit).body))
-    expect(claimBody.claim_token).toBe('tok-abc')
-  })
+  // Parameterized over registryAuthEnabled: the beforeEach default is `true`,
+  // so a mutation replacing `authEnabled: config.registryAuthEnabled` with the
+  // literal `true` on the 201-connected response passes an authEnabled-only-true
+  // suite. The `false` case is the one that would catch it.
+  it.each([true, false])(
+    'claims immediately and reports connected (registryAuthEnabled=%s)',
+    async registryAuthEnabled => {
+      cfg.registryAuthEnabled = registryAuthEnabled
+      connDb.getRegistryConnection.mockResolvedValue(null)
+      connDb.markConnected.mockResolvedValue(true)
+      const spy = routeFetch({
+        '/register': () =>
+          json(
+            {
+              deployment_id: 'dep-1',
+              key_id: 'kid-1',
+              status: 'approved',
+              claim_token: 'tok-abc',
+              claim_expires_at: '2026-07-30T00:00:00Z',
+            },
+            201
+          ),
+        '/claim': () => json({ client_id: 'cid', client_secret: 'csecret', org: 'acme' }, 200),
+      })
+      const res = await request(app())
+        .post('/admin/registry/connect/request')
+        .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+        .expect(200)
+      expect(res.body).toMatchObject({ state: 'connected', org: 'acme' })
+      expect(res.body.authEnabled).toBe(registryAuthEnabled)
+      // The claim call must actually carry the token the registry minted, and
+      // be PoP-authenticated — otherwise every auto-approved self-hoster gets a
+      // registry-side 401 and silently falls back to 202 connecting.
+      const [claimUrl, claimInit] = spy.mock.calls[1]!
+      expect(String(claimUrl)).toContain('/claim')
+      expect((claimInit as RequestInit).headers).toHaveProperty('DPoP')
+      const claimBody = JSON.parse(String((claimInit as RequestInit).body))
+      expect(claimBody.claim_token).toBe('tok-abc')
+    }
+  )
 
   // The mocks return undefined, so `await x` and `void x` produce IDENTICAL
   // invocationCallOrder — an ordering assertion built on call order is green

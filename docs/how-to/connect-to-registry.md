@@ -36,11 +36,14 @@ one of two state machines, depending on how the registry is configured:
      network blip, or the registry briefly unavailable), the panel shows
      **Finishing the connection** with a **Finish connecting** button; press it
      to retry. In most cases, retrying with **Finish connecting** will succeed and
-     you never need a token. If the panel reports that the deployment can no
-     longer authenticate, **Finish connecting** will not help — the only path
-     forward is **Start over**, which permanently deletes the deployment's stored
-     registry credentials and gives up the organization name. If you use
-     **Start over**, you must register again under a different organization name.
+     you never need a token. If the panel says to contact support, do that: a
+     suspended deployment can be reversed by Evenfire, and **Start over** would
+     destroy a keypair you may still need. Only use **Start over** when the
+     panel says the deployment's one-time credentials were issued but never
+     stored. That connection cannot be recovered: **Start over** permanently
+     deletes the deployment's stored registry credentials and gives up the
+     organization name. If you use **Start over**, you must register again
+     under a different organization name.
 
    - **Open registration disabled** — the request lands as **pending**. An
      Evenfire operator reviews it and either approves or rejects it. On

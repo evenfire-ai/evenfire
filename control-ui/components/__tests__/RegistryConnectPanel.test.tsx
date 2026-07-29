@@ -139,6 +139,34 @@ describe('RegistryConnectPanel', () => {
     await waitFor(() => expect(screen.getByText(/has expired/)).toBeInTheDocument())
   })
 
+  // The server can 409 connection_superseded when markConnected matches no
+  // row (the claim token was already redeemed and burned, but the credentials
+  // could not be saved to this connection). Falling through to the generic
+  // "Could not complete the claim. Try again shortly." would tell the user to
+  // retry a claim that can never succeed again.
+  it('shows terminal copy on a connection_superseded code, not a retry prompt', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'approved',
+      deploymentId: 'd',
+      requestedOrgName: 'acme',
+    })
+    vi.mocked(api.submitRegistryClaim).mockRejectedValue(
+      Object.assign(new Error('x'), { code: 'connection_superseded' })
+    )
+    render(<RegistryConnectPanel />)
+    await waitFor(() => screen.getByPlaceholderText('paste claim token'))
+    fireEvent.change(screen.getByPlaceholderText('paste claim token'), {
+      target: { value: 'tok-1' },
+    })
+    fireEvent.click(screen.getByText('Complete connection'))
+    await waitFor(() =>
+      expect(
+        screen.getByText(/one-time credentials were issued but never stored/i)
+      ).toBeInTheDocument()
+    )
+    expect(screen.queryByText(/Try again shortly/i)).toBeNull()
+  })
+
   it('shows connected + Disconnect when already connected', async () => {
     vi.mocked(api.getRegistryConnection).mockResolvedValue({
       state: 'connected',
@@ -333,6 +361,28 @@ describe('RegistryConnectPanel', () => {
     await userEvent.click(await screen.findByRole('button', { name: /finish connecting/i }))
     expect(
       await screen.findByText(/can no longer authenticate. Contact support/i)
+    ).toBeInTheDocument()
+  })
+
+  // handleRecover's terminal arm (already_claimed / connection_superseded)
+  // drives the "Disconnect, then register again" copy. This is distinct from
+  // the "shows the terminal message when recovery is already claimed" test
+  // above, which exercises GET's recoveryError JSX, not this REJECTION path.
+  // Deleting this catch branch would keep the suite green while the user
+  // retries forever, spending an unthrottled registry rotate each time.
+  it('shows terminal disconnect-and-restart copy when recovery reports already_claimed', async () => {
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({
+      state: 'connecting',
+      deploymentId: 'dep-1',
+      requestedOrgName: 'acme',
+    })
+    vi.mocked(api.recoverRegistryConnection).mockRejectedValue(
+      Object.assign(new Error('x'), { code: 'already_claimed' })
+    )
+    render(<RegistryConnectPanel />)
+    await userEvent.click(await screen.findByRole('button', { name: /finish connecting/i }))
+    expect(
+      await screen.findByText(/one-time credentials were issued but never stored/i)
     ).toBeInTheDocument()
   })
 
