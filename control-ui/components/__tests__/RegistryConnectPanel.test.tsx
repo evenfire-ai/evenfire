@@ -177,7 +177,12 @@ describe('RegistryConnectPanel', () => {
     await waitFor(() => expect(screen.getByText('Disconnect')).toBeInTheDocument())
   })
 
-  it('connected + authEnabled:false → shows guidance to enable registry auth for API keys', async () => {
+  // Regression guard: self-hosted derives auth from credential presence, so a
+  // real `connected` response always has authEnabled: true — this combination
+  // is unreachable in practice. The panel used to render an env-var banner for
+  // it; that banner is gone. Pin its absence so a future change cannot
+  // resurrect the old CLERUM_REGISTRY_AUTH_ENABLED guidance.
+  it('connected + authEnabled:false → shows no auth guidance (unreachable in practice)', async () => {
     vi.mocked(api.getRegistryConnection).mockResolvedValue({
       state: 'connected',
       deploymentId: 'd',
@@ -186,9 +191,10 @@ describe('RegistryConnectPanel', () => {
     })
     render(<RegistryConnectPanel />)
     await waitFor(() =>
-      expect(screen.getByText(/enable registry authentication/i)).toBeInTheDocument()
+      expect(screen.getByText(/Connected to the Evenfire Registry/)).toBeInTheDocument()
     )
-    expect(screen.getByText('CLERUM_REGISTRY_AUTH_ENABLED=true')).toBeInTheDocument()
+    expect(screen.queryByText(/CLERUM_REGISTRY_AUTH_ENABLED/)).toBeNull()
+    expect(screen.queryByText(/enable registry authentication/i)).toBeNull()
   })
 
   it('connected + authEnabled:true → does not show the enable-auth guidance', async () => {

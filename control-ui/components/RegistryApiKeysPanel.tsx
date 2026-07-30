@@ -2,6 +2,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateRegistryApiKeyInput,
   type CreatedRegistryApiKey,
@@ -18,6 +19,8 @@ import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
 import { useToast } from './Toast'
 import { Button } from './ui'
+
+// control-ui/components/RegistryApiKeysPanel.tsx
 
 type View =
   | { kind: 'loading' }
@@ -138,9 +141,8 @@ export default function RegistryApiKeysPanel() {
           ) : null}
           {view.kind === 'auth-disabled' ? (
             <p className="cu-banner cu-banner--info">
-              Registry authentication is disabled, so API keys can&apos;t be created here. To enable
-              it, set <code>CLERUM_REGISTRY_AUTH_ENABLED=true</code> and restart control-api, then
-              reload this page.
+              API keys become available once this deployment is connected to the registry.{' '}
+              <a href={CONTROL_ROUTES.marketplace.connect}>Connect to Evenfire Registry</a>.
             </p>
           ) : null}
           {view.kind === 'error' ? (

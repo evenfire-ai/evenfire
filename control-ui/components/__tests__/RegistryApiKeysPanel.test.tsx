@@ -68,14 +68,15 @@ describe('RegistryApiKeysPanel', () => {
     expect(await screen.findByText(/not bound to a registry org/i)).toBeInTheDocument()
   })
 
-  it('shows actionable guidance to enable registry auth on 409 registry_auth_disabled', async () => {
+  it('shows guidance to connect the registry on 409 registry_auth_disabled', async () => {
     vi.mocked(api.listRegistryApiKeys).mockRejectedValue(
       Object.assign(new Error('x'), { status: 409, code: 'registry_auth_disabled' })
     )
     render(<RegistryApiKeysPanel />)
-    expect(await screen.findByText(/registry authentication is disabled/i)).toBeInTheDocument()
-    expect(screen.getByText('CLERUM_REGISTRY_AUTH_ENABLED=true')).toBeInTheDocument()
-    expect(screen.getByText(/restart/i)).toBeInTheDocument()
+    expect(
+      await screen.findByText(/API keys become available once this deployment is connected/i)
+    ).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /connect to evenfire registry/i })).toBeInTheDocument()
   })
 
   it('on create success, shows the reveal modal then refetches', async () => {
