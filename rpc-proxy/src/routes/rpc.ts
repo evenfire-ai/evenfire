@@ -752,17 +752,6 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
           return
         }
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
-        const baseUrl = host.url.replace(/\/+$/, '')
-        const upstreamUrl = new URL(
-          `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
-        )
         const rawLimit = parseUnsignedIntegerQuery(req.query.limit)
         const beforeTurn = parseUnsignedIntegerQuery(req.query.beforeTurn)
         const afterTurn = parseUnsignedIntegerQuery(req.query.afterTurn)
@@ -782,6 +771,17 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid session messages pagination query' })
           return
         }
+        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
+          teamId: auth.teamId,
+        })
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
+        const baseUrl = host.url.replace(/\/+$/, '')
+        const upstreamUrl = new URL(
+          `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
+        )
         if (rawLimit !== undefined) {
           upstreamUrl.searchParams.set('limit', String(Math.min(rawLimit, 200)))
         }

@@ -182,6 +182,30 @@ describe('InMemoryConversationStore', () => {
       ])
     })
 
+    it('rejects malformed unscoped keys before applying the page limit', async () => {
+      const malformedEmptyAgent = {
+        ...makeConversation('u-1'),
+        updated_at: new Date('2026-01-03T00:00:00.000Z'),
+      }
+      const malformedEmptyChat = {
+        ...makeConversation('u-1'),
+        updated_at: new Date('2026-01-02T00:00:00.000Z'),
+      }
+      const valid = {
+        ...makeConversation('u-1'),
+        updated_at: new Date('2026-01-01T00:00:00.000Z'),
+      }
+      store.set('u-1:rpc::missing-agent', malformedEmptyAgent)
+      store.set('u-1:rpc:agent-x:', malformedEmptyChat)
+      store.set('u-1:rpc:agent-x:chat-1', valid)
+
+      const summaries = await store.listSessionSummariesByPrefix('u-1:rpc:', { limit: 1 })
+
+      expect(summaries.map(session => [session.agent, session.chatId])).toEqual([
+        ['agent-x', 'chat-1'],
+      ])
+    })
+
     it('counts user and assistant bubbles without counting tool storage rows', async () => {
       const conversation = makeConversation('u-1')
       conversation.turns = [

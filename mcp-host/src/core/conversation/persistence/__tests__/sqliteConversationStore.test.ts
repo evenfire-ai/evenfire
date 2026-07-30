@@ -289,6 +289,12 @@ describe('SqliteConversationStore — session summary listing', () => {
       handle.worker.db
         .prepare(
           `INSERT INTO sessions (id, session_key, source, user_id, started_at, last_activity_at)
+           VALUES (?, ?, 'rpc', ?, ?, ?)`
+        )
+        .run('degenerate-empty-chat', 'u-1:rpc:agent-x:', 'u-1', 398, 399)
+      handle.worker.db
+        .prepare(
+          `INSERT INTO sessions (id, session_key, source, user_id, started_at, last_activity_at)
            VALUES (?, ?, 'rpc', ?, ?, NULL)`
         )
         .run('legacy-null-activity', 'u-1:rpc:agent-z:legacy-null', 'u-1', 50)

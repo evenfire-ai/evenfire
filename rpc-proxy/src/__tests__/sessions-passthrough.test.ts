@@ -251,6 +251,7 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
       .set('authorization', 'Bearer user-token')
       .expect(400)
 
+    expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
