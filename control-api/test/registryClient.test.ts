@@ -11,6 +11,18 @@ import {
   searchEntries,
 } from '../src/services/registryClient.js'
 
+// mintToken() with NO envOverride resolves both the active decision and the
+// credential pair through this mode-aware dependency. Most tests in this file
+// populate process.env; the default mock mirrors managed-mode resolution from
+// those values so they exercise the normal client path without rebuilding the
+// config singleton.
+const connDb = vi.hoisted(() => ({
+  resolveMachineCreds: vi.fn(),
+}))
+vi.mock('../src/services/registryConnectionDb.js', () => connDb)
+
+const ORIGINAL_ENV = { ...process.env }
+
 function fakeTokenResponse(token = 'tok-abc', expiresIn = 600) {
   return new Response(
     JSON.stringify({ access_token: token, token_type: 'Bearer', expires_in: expiresIn }),
@@ -26,11 +38,18 @@ const ENV_OVERRIDE: NodeJS.ProcessEnv = {
 }
 
 beforeEach(() => {
+  process.env = { ...ORIGINAL_ENV }
   __resetTokenCacheForTests()
   __resetScopeCacheForTests()
+  connDb.resolveMachineCreds.mockReset().mockImplementation(async () => {
+    const clientId = process.env.CLERUM_REGISTRY_CLIENT_ID
+    const clientSecret = process.env.CLERUM_REGISTRY_CLIENT_SECRET
+    return clientId && clientSecret ? { clientId, clientSecret } : null
+  })
 })
 
 afterEach(() => {
+  process.env = { ...ORIGINAL_ENV }
   vi.unstubAllGlobals()
   vi.useRealTimers()
 })
@@ -124,6 +143,24 @@ describe('registryClient — mintToken cache behavior', () => {
       // It must NOT use the credential-rejected wording.
       await expect(mintToken(ENV_OVERRIDE)).rejects.not.toThrow(/credential rejected/)
     }
+  })
+})
+
+describe('registryClient — mintToken derived auth (no envOverride)', () => {
+  // Critical: no ENV_OVERRIDE here. That test-only path intentionally bypasses
+  // the mode-aware resolver.
+  beforeEach(() => {
+    process.env = {
+      ...process.env,
+      CLERUM_REGISTRY_CLIENT_ID: '',
+      CLERUM_REGISTRY_CLIENT_SECRET: '',
+    }
+  })
+
+  it('returns an empty token when auth is inactive and no creds exist', async () => {
+    connDb.resolveMachineCreds.mockResolvedValue(null)
+    await expect(mintToken()).resolves.toBe('') // NO ENV_OVERRIDE — see above
+    expect(connDb.resolveMachineCreds).toHaveBeenCalledTimes(1)
   })
 })
 

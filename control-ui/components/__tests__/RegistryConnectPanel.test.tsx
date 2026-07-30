@@ -177,33 +177,31 @@ describe('RegistryConnectPanel', () => {
     await waitFor(() => expect(screen.getByText('Disconnect')).toBeInTheDocument())
   })
 
-  it('connected + authEnabled:false → shows guidance to enable registry auth for API keys', async () => {
-    vi.mocked(api.getRegistryConnection).mockResolvedValue({
-      state: 'connected',
-      deploymentId: 'd',
-      org: 'acme',
-      authEnabled: false,
-    })
-    render(<RegistryConnectPanel />)
-    await waitFor(() =>
-      expect(screen.getByText(/enable registry authentication/i)).toBeInTheDocument()
-    )
-    expect(screen.getByText('CLERUM_REGISTRY_AUTH_ENABLED=true')).toBeInTheDocument()
-  })
-
-  it('connected + authEnabled:true → does not show the enable-auth guidance', async () => {
-    vi.mocked(api.getRegistryConnection).mockResolvedValue({
-      state: 'connected',
-      deploymentId: 'd',
-      org: 'acme',
-      authEnabled: true,
-    })
-    render(<RegistryConnectPanel />)
-    await waitFor(() =>
-      expect(screen.getByText(/Connected to the Evenfire Registry/)).toBeInTheDocument()
-    )
-    expect(screen.queryByText(/enable registry authentication/i)).toBeNull()
-  })
+  // Regression guard: the panel used to render an env-var banner
+  // (CLERUM_REGISTRY_AUTH_ENABLED guidance) when connected without registry
+  // auth active. That banner is gone entirely, so pin its absence for BOTH
+  // authEnabled values, not just false. (Self-hosted derives auth from
+  // credential presence, so a real `connected` response always has
+  // authEnabled: true — connected + authEnabled:false is unreachable in
+  // practice — but the assertion must hold under either value so a future
+  // change cannot resurrect the old guidance behind just one of them.)
+  it.each([false, true])(
+    'connected + authEnabled:%s → shows no auth guidance',
+    async authEnabled => {
+      vi.mocked(api.getRegistryConnection).mockResolvedValue({
+        state: 'connected',
+        deploymentId: 'd',
+        org: 'acme',
+        authEnabled,
+      })
+      render(<RegistryConnectPanel />)
+      await waitFor(() =>
+        expect(screen.getByText(/Connected to the Evenfire Registry/)).toBeInTheDocument()
+      )
+      expect(screen.queryByText(/CLERUM_REGISTRY_AUTH_ENABLED/)).toBeNull()
+      expect(screen.queryByText(/enable registry authentication/i)).toBeNull()
+    }
+  )
 
   it('lands on the connected view when registration auto-claims', async () => {
     vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'disconnected' })

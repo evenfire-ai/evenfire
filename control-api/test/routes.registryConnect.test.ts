@@ -37,6 +37,14 @@ const connDb = vi.hoisted(() => ({
   upsertPendingConnection: vi.fn(),
   markConnected: vi.fn(),
   deleteConnection: vi.fn(),
+  // The routes now derive authEnabled from credentials rather than reading
+  // config.registryAuthEnabled directly. This whole-module mock replaces the
+  // entire registryConnectionDb surface, so without this key `connDb` has no
+  // `isRegistryAuthActive` property and the routes' `await
+  // isRegistryAuthActive()` throws a TypeError in every handler. beforeEach
+  // re-arms a cfg-mirroring default (see below); tests that need the derived
+  // value to diverge from cfg override it per-test.
+  isRegistryAuthActive: vi.fn(),
 }))
 vi.mock('../src/services/registryConnectionDb.js', () => connDb)
 
@@ -88,8 +96,25 @@ beforeEach(() => {
     status: 'active',
   })
   connDb.markConnected.mockResolvedValue(true)
+  // Mirrors the real accessor's derivation at call time rather than a
+  // captured literal default (e.g. a static mockResolvedValue(true)), so
+  // pre-existing tests that only flip cfg.registryAuthEnabled — without ever
+  // touching this mock — still see it reflected in authEnabled (see 'GET
+  // connected -> includes authEnabled reflecting config (false)' below,
+  // which would otherwise get a stale `true`). vi.clearAllMocks() only clears
+  // call history, not implementations, but afterEach's restoreAllMocks()
+  // strips a prior test's mockResolvedValue/mockRejectedValue override, so
+  // this re-arm still runs every time to guarantee the default is never
+  // stale. Tests that need the derived value to diverge from cfg override it
+  // per-test with their own mockResolvedValue/mockRejectedValue, which wins
+  // for that test since it runs after this beforeEach.
+  connDb.isRegistryAuthActive.mockImplementation(async () => cfg.registryAuthEnabled)
   cfg.registryConnectionMode = 'self-hosted'
   cfg.registryAuthEnabled = true
+  // Reset every time: the registry_url_not_configured test below sets this to
+  // '' to exercise the new guard; without resetting it here that empty
+  // string would leak into every test that runs after it in this file.
+  cfg.registryUrl = 'https://example.com'
   rateLimiter.checkAndIncrement.mockResolvedValue({
     allowed: true,
     remaining: 9,
@@ -105,6 +130,33 @@ describe('registry connect flow', () => {
     const res = await request(app()).get('/admin/registry/connect').expect(200)
     expect(res.body.state).toBe('disconnected')
     expect(res.body.authEnabled).toBe(true)
+  })
+
+  // The discriminator: cfg.registryAuthEnabled is left at the beforeEach
+  // default (true) and never touched here. Only the mocked accessor says
+  // false. A route still reading config.registryAuthEnabled directly would
+  // report authEnabled: true and fail this assertion.
+  it('GET reports authEnabled false when no credentials exist', async () => {
+    connDb.isRegistryAuthActive.mockResolvedValue(false)
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    const res = await request(app()).get('/admin/registry/connect').expect(200)
+    expect(res.body).toMatchObject({ state: 'disconnected', authEnabled: false })
+  })
+
+  // isRegistryAuthActive() can reject: self-hosted mode reaches a raw
+  // pool.query (via getRegistryConnection, inside resolveMachineCreds) with
+  // no try/catch of its own — see routes.adminRegistryKeys.test.ts's sibling
+  // test for the admin registry routes' version of this same hazard. GET
+  // already documents a "never 500 on a registry hiccup" guarantee for the
+  // status poll (pollRegistryStatus); this extends the same clean-degrade
+  // treatment to the newly-derived authEnabled read instead of letting the
+  // rejection fall through to the router's generic catch -> next(err) -> a
+  // bare 500.
+  it('GET → 502 registry_integration_error when isRegistryAuthActive rejects (does not throw)', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    connDb.isRegistryAuthActive.mockRejectedValue(new Error('pg blip'))
+    const res = await request(app()).get('/admin/registry/connect').expect(502)
+    expect(res.body.error).toBe('registry_integration_error')
   })
 
   it('GET connected → includes authEnabled reflecting config (true)', async () => {
@@ -133,6 +185,15 @@ describe('registry connect flow', () => {
     cfg.registryConnectionMode = 'managed'
     const res = await request(app()).get('/admin/registry/connect').expect(409)
     expect(res.body.error).toBe('not_self_hosted')
+  })
+
+  // Task 4 lets an unconfigured URL boot, so the connect routes must fail
+  // cleanly rather than building a request against '' (fetch throws
+  // TypeError: Failed to parse URL -> a bare 500).
+  it('returns 409 registry_url_not_configured when no registry URL is set', async () => {
+    cfg.registryUrl = ''
+    const res = await request(app()).get('/admin/registry/connect').expect(409)
+    expect(res.body.error).toBe('registry_url_not_configured')
   })
 
   it('GET pending → polls the registry status endpoint and surfaces approval', async () => {
@@ -394,6 +455,35 @@ describe('registry connect flow', () => {
     expect(connDb.deleteConnection).toHaveBeenCalled()
   })
 
+  it('DELETE still drops the local row when the registry URL was removed', async () => {
+    cfg.registryUrl = ''
+    await request(app()).delete('/admin/registry/connect').expect(204)
+    expect(connDb.deleteConnection).toHaveBeenCalled()
+  })
+
+  // The disconnect transition: nothing currently re-reads state after a
+  // DELETE. cfg.registryAuthEnabled is never touched in this test (stays
+  // true throughout, per beforeEach) -- only the mocked accessor moves, so
+  // this discriminates a route deriving authEnabled from
+  // isRegistryAuthActive() from one still reading config.registryAuthEnabled.
+  it('authEnabled flips back to false after disconnect', { retry: 0 }, async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'connected',
+      deploymentId: 'dep-1',
+      orgName: 'acme',
+    })
+    connDb.isRegistryAuthActive.mockResolvedValue(true)
+    const before = await request(app()).get('/admin/registry/connect').expect(200)
+    expect(before.body.authEnabled).toBe(true)
+
+    await request(app()).delete('/admin/registry/connect').expect(204)
+
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    connDb.isRegistryAuthActive.mockResolvedValue(false)
+    const after = await request(app()).get('/admin/registry/connect').expect(200)
+    expect(after.body).toMatchObject({ state: 'disconnected', authEnabled: false })
+  })
+
   // The redeemClaim extraction must NOT convert a registry-unreachable failure
   // into a 502. It escapes the handler and the Express error handler makes it a
   // 500, exactly as before the refactor. Collapsing it to 502 would be a silent
@@ -412,13 +502,81 @@ describe('registry connect flow', () => {
       .send({ claim_token: 'tok-abc' })
       .expect(500)
   })
+
+  // GET is mounted by RegistryCatalog on every Marketplace visit and is
+  // CSRF-reachable (SameSite=Lax, no origin check), so it too is now behind a
+  // per-admin token bucket. This proves the middleware sits AFTER
+  // requireAuthForControlUI (bucket keyed on adminAuth.sub) and BEFORE the
+  // handler without breaking the normal success path.
+  it('GET is rate-limited per admin, keyed on adminAuth.sub, and still succeeds when allowed', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    const res = await request(app()).get('/admin/registry/connect').expect(200)
+    expect(res.body.state).toBe('disconnected')
+    expect(checkAndIncrement).toHaveBeenCalledWith('registry_connect_status:admin-uuid-123', 30)
+    expect(res.headers['x-ratelimit-limit']).toBe('30')
+  })
+
+  // Proves the limiter blocks BEFORE any DB/registry work: a denied admin
+  // must not reach getRegistryConnection.
+  it('GET 429s when the per-admin bucket is exceeded, without touching the registry', async () => {
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 30000,
+    })
+    const res = await request(app()).get('/admin/registry/connect').expect(429)
+    expect(res.body.error).toBe('Too Many Requests')
+    expect(res.headers['retry-after']).toBeDefined()
+    expect(connDb.getRegistryConnection).not.toHaveBeenCalled()
+  })
+
+  // POST request registers against the SHARED production registry — each call
+  // consumes one of its ~5/day per-IP registration attempts. This proves the
+  // middleware sits AFTER requireAuthForControlUI (bucket keyed on
+  // adminAuth.sub) and BEFORE the handler without breaking the normal success
+  // path.
+  it('POST request is rate-limited per admin, keyed on adminAuth.sub, and still succeeds when allowed', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ deployment_id: 'dep-9', key_id: 'kid-9', status: 'pending' }), {
+        status: 202,
+      })
+    )
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(202)
+    expect(res.body.state).toBe('pending')
+    expect(checkAndIncrement).toHaveBeenCalledWith('registry_connect_request:admin-uuid-123', 3)
+    expect(res.headers['x-ratelimit-limit']).toBe('3')
+  })
+
+  // Proves the limiter blocks BEFORE any registry work: a denied admin must
+  // not burn a registration attempt against the shared registry's small daily
+  // per-IP quota.
+  it('POST request 429s when the per-admin bucket is exceeded, without touching the registry', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 30000,
+    })
+    const spy = routeFetch({})
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(429)
+    expect(res.body.error).toBe('Too Many Requests')
+    expect(res.headers['retry-after']).toBeDefined()
+    expect(connDb.getRegistryConnection).not.toHaveBeenCalled()
+    expect(spy.mock.calls.length).toBe(0)
+  })
 })
 
 describe('register — auto-claim (201)', () => {
-  // Parameterized over registryAuthEnabled: the beforeEach default is `true`,
-  // so a mutation replacing `authEnabled: config.registryAuthEnabled` with the
-  // literal `true` on the 201-connected response passes an authEnabled-only-true
-  // suite. The `false` case is the one that would catch it.
+  // A successful claim has persisted a validated credential pair, so the
+  // response is authEnabled:true regardless of the now-inert self-hosted env
+  // flag. Parameterize over both values to pin that invariant.
   it.each([true, false])(
     'claims immediately and reports connected (registryAuthEnabled=%s)',
     async registryAuthEnabled => {
@@ -444,7 +602,7 @@ describe('register — auto-claim (201)', () => {
         .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
         .expect(200)
       expect(res.body).toMatchObject({ state: 'connected', org: 'acme' })
-      expect(res.body.authEnabled).toBe(registryAuthEnabled)
+      expect(res.body.authEnabled).toBe(true)
       // The claim call must actually carry the token the registry minted, and
       // be PoP-authenticated — otherwise every auto-approved self-hoster gets a
       // registry-side 401 and silently falls back to 202 connecting.
@@ -455,6 +613,46 @@ describe('register — auto-claim (201)', () => {
       expect(claimBody.claim_token).toBe('tok-abc')
     }
   )
+
+  it('does not re-read auth state after a successful auto-claim', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    connDb.markConnected.mockResolvedValue(true)
+    connDb.isRegistryAuthActive.mockRejectedValue(new Error('pg blip'))
+    routeFetch({
+      '/register': () =>
+        json(
+          { deployment_id: 'dep-1', key_id: 'kid-1', status: 'approved', claim_token: 'tok-abc' },
+          201
+        ),
+      '/claim': () => json({ client_id: 'cid', client_secret: 'csecret', org: 'acme' }, 200),
+    })
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(200)
+    expect(res.body).toMatchObject({ state: 'connected', authEnabled: true })
+    expect(connDb.isRegistryAuthActive).not.toHaveBeenCalled()
+  })
+
+  it('does not persist empty machine credentials from a malformed claim response', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    routeFetch({
+      '/register': () =>
+        json(
+          { deployment_id: 'dep-1', key_id: 'kid-1', status: 'approved', claim_token: 'tok-abc' },
+          201
+        ),
+      '/claim': () => json({ client_id: '', client_secret: '', org: 'acme' }, 200),
+    })
+
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(202)
+
+    expect(res.body.state).toBe('connecting')
+    expect(connDb.markConnected).not.toHaveBeenCalled()
+  })
 
   // The mocks return undefined, so `await x` and `void x` produce IDENTICAL
   // invocationCallOrder — an ordering assertion built on call order is green
@@ -774,6 +972,26 @@ describe('POST recover', () => {
     // stale row/deploymentId — otherwise a bad rotate silently redeems garbage.
     const claim = spy.mock.calls.find(c => String(c[0]).endsWith('/claim'))!
     expect(JSON.parse(String((claim[1] as RequestInit).body)).claim_token).toBe('tok-new')
+  })
+
+  it('does not re-read auth state after a successful recover', async () => {
+    connDb.getRegistryConnection.mockResolvedValue({
+      status: 'approved',
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      privateKeyPem: pkForTest(),
+      requestedOrgName: 'acme',
+    })
+    connDb.markConnected.mockResolvedValue(true)
+    connDb.isRegistryAuthActive.mockRejectedValue(new Error('pg blip'))
+    routeFetch({
+      '/status': () => json({ status: 'approved', suspended: false, claimed: false }, 200),
+      'claim-token': () => json({ claim_token: 'tok-new' }, 200),
+      '/claim': () => json({ client_id: 'cid', client_secret: 'csecret', org: 'acme' }, 200),
+    })
+    const res = await request(app()).post('/admin/registry/connect/recover').expect(200)
+    expect(res.body).toMatchObject({ state: 'connected', authEnabled: true })
+    expect(connDb.isRegistryAuthActive).not.toHaveBeenCalled()
   })
 
   // The route is rate-limited (each call rotates a one-time claim token at
