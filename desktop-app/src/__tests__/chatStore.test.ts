@@ -1432,13 +1432,71 @@ describe('onboarding', () => {
 // ── corrupt/missing files ────────────────────────────────────────────────────
 
 describe('corrupt/missing files', () => {
-  it('recovers from corrupt index.json', async () => {
+  it('fails closed and preserves a corrupt index during later mutations', async () => {
     const agentDir = join(tempDir, 'agent-1')
     await fs.mkdir(agentDir, { recursive: true })
-    await fs.writeFile(join(agentDir, 'index.json'), 'NOT VALID JSON{{{')
-    const index = await store.getIndex('agent-1')
-    expect(index.version).toBe(2) // v2 remains readable by pre-paging desktop builds
-    expect(index.chats).toEqual([])
+    const indexPath = join(agentDir, 'index.json')
+    const corrupt = 'NOT VALID JSON{{{'
+    await fs.writeFile(indexPath, corrupt)
+
+    await expect(store.getIndex('agent-1')).rejects.toThrow(/Unable to read chat index/)
+    await expect(store.createChat('agent-1', 'new-chat')).rejects.toThrow(
+      /Unable to read chat index/
+    )
+    expect(await fs.readFile(indexPath, 'utf8')).toBe(corrupt)
+  })
+
+  it('keeps a v3 index readable but refuses to normalize it during ordinary RMW', async () => {
+    const agentDir = join(tempDir, 'agent-1')
+    await fs.mkdir(agentDir, { recursive: true })
+    const indexPath = join(agentDir, 'index.json')
+    const future = JSON.stringify({
+      version: 3,
+      lastActiveChatId: 'kept',
+      onboardingDismissed: false,
+      chats: [
+        {
+          id: 'kept',
+          title: 'Keep',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          messageCount: 1,
+        },
+      ],
+    })
+    await fs.writeFile(indexPath, future)
+
+    expect((await store.getIndex('agent-1')).chats[0]?.id).toBe('kept')
+    await expect(store.renameChat('agent-1', 'kept', 'Changed')).rejects.toThrow(
+      /unsupported chat index version 3/
+    )
+    expect(await fs.readFile(indexPath, 'utf8')).toBe(future)
+  })
+
+  it('rejects structurally invalid index counters before an RMW can normalize them', async () => {
+    const agentDir = join(tempDir, 'agent-1')
+    await fs.mkdir(agentDir, { recursive: true })
+    const indexPath = join(agentDir, 'index.json')
+    const invalid = JSON.stringify({
+      version: 2,
+      lastActiveChatId: 'kept',
+      onboardingDismissed: false,
+      chats: [
+        {
+          id: 'kept',
+          title: 'Keep',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          messageCount: 1e309,
+        },
+      ],
+    })
+    await fs.writeFile(indexPath, invalid)
+
+    await expect(store.renameChat('agent-1', 'kept', 'Changed')).rejects.toThrow(
+      /Unable to read chat index/
+    )
+    expect(await fs.readFile(indexPath, 'utf8')).toBe(invalid)
   })
 
   it('does not overwrite an index after a transient read failure', async () => {

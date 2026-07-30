@@ -60,6 +60,10 @@ interface SnapshotCandidate {
   mtimeMs: number
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
 function normalizePositiveInteger(value: number | undefined, fallback: number): number {
   if (value === undefined) return fallback
   if (!Number.isFinite(value)) return fallback
@@ -128,6 +132,40 @@ function pageEntry(file: string, messages: ChatMessage[]): ChatPageEntry {
     firstServerTurnNumber: serverTurns.length ? Math.min(...serverTurns) : undefined,
     lastServerTurnNumber: serverTurns.length ? Math.max(...serverTurns) : undefined,
   }
+}
+
+function parseChatIndex(raw: string): ChatIndex {
+  const parsed = JSON.parse(raw) as unknown
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Invalid chat index')
+  }
+  const candidate = parsed as Record<string, unknown>
+  if (
+    (candidate.version !== 2 && candidate.version !== 3) ||
+    (candidate.lastActiveChatId !== null && typeof candidate.lastActiveChatId !== 'string') ||
+    typeof candidate.onboardingDismissed !== 'boolean' ||
+    !Array.isArray(candidate.chats)
+  ) {
+    throw new Error('Invalid chat index')
+  }
+  for (const chat of candidate.chats) {
+    if (!chat || typeof chat !== 'object') throw new Error('Invalid chat index entry')
+    const metadata = chat as Record<string, unknown>
+    if (
+      typeof metadata.id !== 'string' ||
+      typeof metadata.title !== 'string' ||
+      typeof metadata.createdAt !== 'string' ||
+      typeof metadata.updatedAt !== 'string' ||
+      !isNonNegativeSafeInteger(metadata.messageCount) ||
+      (metadata.errorCount !== undefined && !isNonNegativeSafeInteger(metadata.errorCount)) ||
+      (metadata.toolCallCount !== undefined && !isNonNegativeSafeInteger(metadata.toolCallCount)) ||
+      (metadata.unreadTerminal !== undefined && typeof metadata.unreadTerminal !== 'boolean') ||
+      (metadata.lastTerminalAt !== undefined && typeof metadata.lastTerminalAt !== 'string')
+    ) {
+      throw new Error('Invalid chat index entry')
+    }
+  }
+  return candidate as unknown as ChatIndex
 }
 
 /**
@@ -1363,23 +1401,20 @@ export class ChatStore {
       throw error
     }
     try {
-      const parsed = JSON.parse(raw) as ChatIndex
-      // Version-agnostic read: legacy directories are handled at bind time by
-      // chatStoreBinding. saveIndex normalizes v3 indexes produced by earlier
-      // paging builds back to the v2 downgrade-compatible catalog schema.
-      if (parsed && Array.isArray(parsed.chats)) {
-        return parsed
-      }
-      return emptyIndex()
-    } catch {
-      // A malformed catalog can be rebuilt from the server and the transcript
-      // files. Raw filesystem failures above must propagate so a later RMW
-      // cannot overwrite a temporarily unreadable live index with an empty one.
-      return emptyIndex()
+      return parseChatIndex(raw)
+    } catch (error) {
+      // Bind-time migration deliberately preserves malformed and future catalogs
+      // because their paged transcripts may contain local-only work. Fail closed:
+      // treating those bytes as an empty writable index would let the next RMW
+      // silently orphan the preserved chats.
+      throw new Error(`Unable to read chat index for ${agentRef}`, { cause: error })
     }
   }
 
   private async saveIndex(agentRef: string, index: ChatIndex): Promise<void> {
+    if (index.version !== INDEX_VERSION) {
+      throw new Error(`Refusing to overwrite unsupported chat index version ${index.version}`)
+    }
     const dir = this.agentDir(agentRef)
     await fs.mkdir(dir, { recursive: true, mode: 0o700 })
     // Keep the index readable by the pre-paging desktop while the transcript
