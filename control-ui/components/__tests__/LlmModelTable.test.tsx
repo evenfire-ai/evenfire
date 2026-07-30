@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { LlmAllowedModel } from '../../lib/api'
 import { LlmModelTable } from '../LlmModelTable'
 
@@ -123,6 +123,42 @@ describe('LlmModelTable filters', () => {
   it('hides the source filter when only one source is present', () => {
     renderTable([enabledModel])
     expect(screen.queryByLabelText('Filter by source')).toBeNull()
+  })
+
+  it('clears a selected provider when that provider disappears', async () => {
+    const openAiModel = {
+      ...enabledModel,
+      id: 'openai-model',
+      provider: 'openai',
+      model: 'gpt-5',
+      vendor: 'OpenAI',
+      display_name: 'GPT-5',
+    }
+    const view = renderTable([enabledModel, openAiModel])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Filter by provider' }))
+    fireEvent.click(screen.getByRole('option', { name: 'OpenAI' }))
+    expect(screen.getByText('gpt-5')).toBeInTheDocument()
+
+    view.rerender(
+      <LlmModelTable
+        items={[enabledModel]}
+        unpricedKeys={new Set()}
+        onCreate={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        onRefresh={vi.fn()}
+        deletingId={null}
+        refreshing={false}
+        loading={false}
+      />
+    )
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText('Filter by provider')).toBeNull()
+      expect(screen.getByRole('button', { name: 'Expand Anthropic models' })).toBeInTheDocument()
+    })
+    expect(screen.queryByText('No models match this filter.')).toBeNull()
   })
 
   it('shows the filtered empty state when no row matches', () => {

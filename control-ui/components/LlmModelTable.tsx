@@ -88,6 +88,15 @@ export function LlmModelTable({
     if (!hasMultipleSources) setSourceFilter('all')
   }, [hasMultipleSources])
 
+  // Mirror the source-filter reset above. A provider can disappear after a
+  // refresh or deletion; once only one remains, its filter control unmounts,
+  // so clear any stale provider selection before it can strand the table empty.
+  useEffect(() => {
+    if (providerOptions.length <= 1 && providerFilter !== ALL_PROVIDERS) {
+      setProviderFilter(ALL_PROVIDERS)
+    }
+  }, [providerFilter, providerOptions.length])
+
   const filteredItems = useMemo(() => {
     return items.filter(model => {
       if (providerFilter !== ALL_PROVIDERS && model.provider !== providerFilter) return false
