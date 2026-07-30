@@ -14,6 +14,9 @@ vi.mock('../PublisherView/GrantedToMe', () => ({
 vi.mock('../PublisherView/DockerCredentials', () => ({
   DockerCredentialsPanel: () => <div>docker-credentials-panel</div>,
 }))
+vi.mock('../RegistryApiKeysPanel', () => ({
+  default: () => <div>api-keys-panel</div>,
+}))
 vi.mock('../../lib/hooks/usePublishScope', async orig => {
   const actual = await orig<typeof import('../../lib/hooks/usePublishScope')>()
   return { ...actual, usePublishScope: vi.fn() }
@@ -93,6 +96,16 @@ describe('PublisherView', () => {
     expect(screen.getByText('docker-credentials-panel')).toBeInTheDocument()
   })
 
+  it('renders API-key management on the API keys tab', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue({
+      scope: { scope: 'acme', curator: false, orgName: 'Acme' },
+      loading: false,
+      error: false,
+    })
+    render(<PublisherView activeTab="api-keys" />)
+    expect(screen.getByText('api-keys-panel')).toBeInTheDocument()
+  })
+
   it('renders the granted-to-me panel on the shared tab', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue({
       scope: { scope: 'acme', curator: false, orgName: 'Acme' },
@@ -112,6 +125,10 @@ describe('PublisherView', () => {
     render(<PublisherView activeTab="entries" />)
     const shared = screen.getByRole('tab', { name: /shared with me/i })
     expect(shared).toHaveAttribute('href', '/publisher/shared-with-me')
+    expect(screen.getByRole('tab', { name: /^api keys$/i })).toHaveAttribute(
+      'href',
+      '/publisher/api-keys'
+    )
   })
 
   it('hides the "Shared with me" tab when inbound grants are unavailable (403)', () => {
@@ -129,6 +146,7 @@ describe('PublisherView', () => {
     expect(screen.queryByRole('tab', { name: /shared with me/i })).toBeNull()
     expect(screen.getByRole('tab', { name: /published entries/i })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: /docker credentials/i })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /^api keys$/i })).toBeInTheDocument()
   })
 
   it('shows the "Shared with me" tab when inbound grants are available', () => {

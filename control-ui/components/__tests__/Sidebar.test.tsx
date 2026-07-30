@@ -128,6 +128,17 @@ describe('Sidebar publisher gating', () => {
     }
   })
 
+  it('uses the folder glyph for the Directories group', () => {
+    vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
+    render(<Sidebar currentTab="directories" />)
+
+    const directories = screen.getByRole('button', { name: 'Directories' })
+    expect(directories.querySelector('.cu-sidebar__icon path')).toHaveAttribute(
+      'd',
+      'M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z'
+    )
+  })
+
   it('hides Agent Files from the sidebar without changing its route', () => {
     vi.mocked(hook.usePublishScope).mockReturnValue({ scope: null, loading: false, error: false })
     navigationState.pathname = '/agent-files/example'

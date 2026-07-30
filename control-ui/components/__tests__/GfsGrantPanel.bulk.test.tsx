@@ -101,12 +101,9 @@ function selectPermission(name: string) {
   fireEvent.click(within(openPermissionMenu()).getByRole('menuitemcheckbox', { name }))
 }
 
-async function submit(action: 'Grant access' | 'Create share') {
+function submit(action: 'Grant access' | 'Create share') {
   fireEvent.click(screen.getByRole('button', { name: action }))
-  const dialog = await screen.findByRole('alertdialog')
-  fireEvent.click(
-    within(dialog).getByRole('button', { name: action === 'Grant access' ? 'Grant' : action })
-  )
+  expect(screen.queryByRole('alertdialog')).toBeNull()
 }
 
 describe('GfsGrantPanel bulk access', () => {

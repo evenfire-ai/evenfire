@@ -311,15 +311,6 @@ export default function RegistryCatalog() {
               >
                 + Publish to Marketplace
               </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                title="Manage org publish API keys (efrk_) for CI/scripts"
-                onClick={() => router.push(CONTROL_ROUTES.marketplace.keys)}
-                disabled={isInitialLoad}
-              >
-                Manage API keys
-              </button>
             </>
           }
         />
@@ -334,7 +325,6 @@ export default function RegistryCatalog() {
               href: CONTROL_ROUTES.marketplace.connectors,
               label: 'Connectors',
             },
-            { value: 'plugins', href: CONTROL_ROUTES.marketplace.plugins, label: 'Plugins' },
           ]}
         />
 

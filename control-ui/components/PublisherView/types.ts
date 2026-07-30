@@ -1,1 +1,1 @@
-export type PublisherTab = 'entries' | 'shared' | 'credentials'
+export type PublisherTab = 'entries' | 'shared' | 'credentials' | 'api-keys'

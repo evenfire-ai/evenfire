@@ -533,9 +533,9 @@ async function openRegistryInstallPackage(page: Page, entryName: string): Promis
 }
 
 async function continueToRegistryInstallForm(page: Page) {
-  await page.getByRole('button', { name: 'Continue' }).click()
   const installForm = page.locator('form').filter({ has: page.locator('#ri-name') })
   await expect(installForm).toBeVisible({ timeout: 10_000 })
+  await installForm.locator('summary', { hasText: 'Configuration' }).click()
   return installForm
 }
 
@@ -558,10 +558,6 @@ async function submitRegistryInstallForm(
     await credentialInputs.nth(i).fill('e2e-test-value')
   }
   await installForm.getByRole('button', { name: 'Continue' }).click()
-  await expect(page.getByRole('heading', { name: 'Network egress' })).toBeVisible({
-    timeout: 10_000,
-  })
-  await page.getByRole('button', { name: 'Continue' }).click()
   await expect(page.getByText(`Connector ${serverName} will be installed`)).toBeVisible({
     timeout: 10_000,
   })
@@ -1398,9 +1394,9 @@ test.describe('H. Control-UI Smoke Tests', () => {
       await expect(page.getByText('Install Connector from Marketplace')).toBeVisible({
         timeout: 5_000,
       })
-      await page.getByRole('button', { name: 'Continue' }).click()
       const installForm = page.locator('form').filter({ has: page.locator('#ri-name') })
       await expect(installForm).toBeVisible({ timeout: 10_000 })
+      await installForm.locator('summary', { hasText: 'Configuration' }).click()
 
       // Fill form
       const nameInput = installForm.locator('#ri-name')
@@ -1419,10 +1415,6 @@ test.describe('H. Control-UI Smoke Tests', () => {
 
       // Submit
       await installForm.getByRole('button', { name: 'Continue' }).click()
-      await expect(page.getByRole('heading', { name: 'Network egress' })).toBeVisible({
-        timeout: 10_000,
-      })
-      await page.getByRole('button', { name: 'Continue' }).click()
       await expect(page.getByText(`Connector ${serverName} will be installed`)).toBeVisible({
         timeout: 10_000,
       })
@@ -2166,22 +2158,15 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await expect(page.getByText('Install Connector from Marketplace')).toBeVisible({
       timeout: 10_000,
     })
-    await page.getByRole('button', { name: 'Continue' }).click()
-
     const installForm = page.locator('form')
     await expect(installForm).toBeVisible({ timeout: 10_000 })
+    await installForm.locator('summary', { hasText: 'Configuration' }).click()
     await expect(installForm.locator('#ri-name')).toBeVisible({ timeout: 10_000 })
     await installForm.locator('#ri-name').fill(deferredMcpServerName)
     await installForm.locator('#ri-context').selectOption('context1')
     await expect(
       installForm.getByText(/Leave all credential fields empty to install now/)
     ).toBeVisible()
-    await installForm.getByRole('button', { name: 'Continue' }).click()
-    await expect(
-      installForm.getByText(
-        'Review and adjust the egress contract that will be installed from this'
-      )
-    ).toBeVisible({ timeout: 10_000 })
     await installForm.getByRole('button', { name: 'Continue' }).click()
     await expect(
       page.getByText(`Connector ${deferredMcpServerName} will be installed`)

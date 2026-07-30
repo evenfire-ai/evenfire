@@ -5,8 +5,8 @@ import { type OwnedRegistryEntry, getOwnedRegistryEntries } from '../../lib/api'
 import { TableHeaderRow } from '../TableHeaderRow'
 import type { TableHeaderColumn } from '../TableHeaderRow/types'
 import { Button } from '../ui'
+import { GrantAccessModal } from './GrantAccessModal'
 import { RetryBanner } from './RetryBanner'
-import { ShareAccessPanel } from './ShareAccessPanel'
 
 const COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
@@ -34,7 +34,7 @@ export function OwnedEntries({ orgScope }: { orgScope: string }) {
   const [entries, setEntries] = useState<OwnedRegistryEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
-  const [expanded, setExpanded] = useState<string | null>(null)
+  const [grantTarget, setGrantTarget] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -64,19 +64,19 @@ export function OwnedEntries({ orgScope }: { orgScope: string }) {
   }
 
   return (
-    <div className="cu-table-wrap">
-      <table className="cu-table">
-        <thead>
-          <TableHeaderRow columns={COLUMNS} />
-        </thead>
-        <tbody>
-          {entries.map(e => {
-            const k = entryKey(e)
-            const isPrivate = e.visibility === 'private'
-            const isOpen = expanded === k
-            return (
-              <React.Fragment key={k}>
-                <tr>
+    <>
+      <div className="cu-table-wrap">
+        <table className="cu-table">
+          <thead>
+            <TableHeaderRow columns={COLUMNS} />
+          </thead>
+          <tbody>
+            {entries.map(e => {
+              const k = entryKey(e)
+              const isPrivate = e.visibility === 'private'
+              const isGranting = grantTarget === e.name
+              return (
+                <tr key={k}>
                   <td>
                     <code>{e.name}</code>
                   </td>
@@ -96,28 +96,29 @@ export function OwnedEntries({ orgScope }: { orgScope: string }) {
                         type="button"
                         variant="ghost"
                         size="sm"
-                        aria-expanded={isOpen}
-                        onClick={() => setExpanded(isOpen ? null : k)}
+                        aria-haspopup="dialog"
+                        aria-expanded={isGranting}
+                        onClick={() => setGrantTarget(e.name)}
                       >
-                        {isOpen ? 'Hide' : 'Share access'}
+                        Share access
                       </Button>
                     ) : (
                       <span className="cu-muted-note--compact">Public — no grant needed</span>
                     )}
                   </td>
                 </tr>
-                {isPrivate && isOpen ? (
-                  <tr>
-                    <td colSpan={COLUMNS.length}>
-                      <ShareAccessPanel entryName={e.name} orgScope={orgScope} />
-                    </td>
-                  </tr>
-                ) : null}
-              </React.Fragment>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      {grantTarget ? (
+        <GrantAccessModal
+          entryName={grantTarget}
+          orgScope={orgScope}
+          onClose={() => setGrantTarget(null)}
+        />
+      ) : null}
+    </>
   )
 }

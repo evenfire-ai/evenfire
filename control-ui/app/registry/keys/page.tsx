@@ -1,16 +1,6 @@
-'use client'
-
-import React from 'react'
-import { AuthGate } from '@components/AuthGate'
-import { DashboardLayout } from '@components/DashboardLayout'
-import RegistryApiKeysPanel from '@components/RegistryApiKeysPanel'
+import { redirect } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 
 export default function RegistryKeysPage() {
-  return (
-    <AuthGate>
-      <DashboardLayout isDetailPage>
-        <RegistryApiKeysPanel />
-      </DashboardLayout>
-    </AuthGate>
-  )
+  redirect(CONTROL_ROUTES.publisher.apiKeys)
 }

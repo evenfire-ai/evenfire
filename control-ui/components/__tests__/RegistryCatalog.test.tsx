@@ -159,7 +159,7 @@ describe('RegistryCatalog tabs and columns', () => {
     }
   })
 
-  it('provides canonical tabs for connectors and plugins', async () => {
+  it('shows only the connectors Marketplace tab', async () => {
     mockApiSuccess()
     render(<RegistryCatalog />)
     await screen.findByText('brave-search')
@@ -168,10 +168,7 @@ describe('RegistryCatalog tabs and columns', () => {
       'href',
       '/marketplace/connectors'
     )
-    expect(screen.getByRole('tab', { name: 'Plugins' })).toHaveAttribute(
-      'href',
-      '/marketplace/plugins'
-    )
+    expect(screen.queryByRole('tab', { name: 'Plugins' })).not.toBeInTheDocument()
   })
 
   it('links entry names to their shareable detail routes', async () => {
@@ -322,13 +319,6 @@ describe('RegistryCatalog controls', () => {
     expect(navigation.push).toHaveBeenCalledWith('/marketplace/publish?type=recipe')
   })
 
-  it('routes to canonical API-key management', async () => {
-    mockApiSuccess()
-    render(<RegistryCatalog />)
-
-    fireEvent.click(await screen.findByRole('button', { name: /manage api keys/i }))
-    expect(navigation.push).toHaveBeenCalledWith('/marketplace/keys')
-  })
 })
 
 describe('RegistryCatalog state handling', () => {

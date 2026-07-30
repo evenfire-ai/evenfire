@@ -4,6 +4,7 @@ import {
   IconAdministrativeTrace,
   IconBroadcast,
   IconCable,
+  IconFolder,
   IconGroupWork,
   IconInfrastructureTrace,
   IconKey,
@@ -57,7 +58,7 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
   directories: {
     label: 'Directories',
     href: CONTROL_ROUTES.agentFiles.root,
-    icon: <IconPaperclip />,
+    icon: <IconFolder />,
     children: [
       {
         label: 'Agent Outputs',

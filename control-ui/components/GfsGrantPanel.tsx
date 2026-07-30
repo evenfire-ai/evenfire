@@ -30,7 +30,6 @@ import {
 import type { GfsExistingAccessItem, GfsGrantPanelProps } from './GfsGrantPanel.types'
 import {
   buildGfsBulkSubjectOptions,
-  summarizeGfsBulkSubjectTypes,
   toGfsBulkSubjectInputs,
 } from './gfsGrantSubjectOptions'
 
@@ -214,27 +213,12 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     setSelectedValues(bulkValues)
   }
 
-  function confirmationMessage(kind: 'grant' | 'share'): string {
-    const action = kind === 'grant' ? 'Grant' : 'Share with'
-    const recipients = operatorSelected
-      ? '1 operator'
-      : `${selectedSubjects.length} subjects (${summarizeGfsBulkSubjectTypes(selectedSubjects)})`
-    const scope = includeDescendants ? 'resource and descendants' : 'resource only'
-    return `${action} ${recipients} [${bits.join(', ')}] on "${resource.name}". Scope: ${scope}.`
-  }
-
   async function submit(kind: 'grant' | 'share') {
     setError('')
     if (!subjectValid || bits.length === 0) {
       setError('subject_and_permissions_required')
       return
     }
-    const confirmed = await confirm({
-      title: kind === 'grant' ? 'Grant access?' : 'Create share?',
-      message: confirmationMessage(kind),
-      confirmLabel: kind === 'grant' ? 'Grant' : 'Create share',
-    })
-    if (!confirmed) return
     setBusy(true)
     try {
       if (operatorSelected) {

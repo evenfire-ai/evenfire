@@ -168,6 +168,14 @@ describe('LlmModelTable provider groups', () => {
     )
   })
 
+  it('surfaces stale counts in the collapsed provider summary', () => {
+    renderTable([{ ...baseModel, source: 'discovery', stale: true }])
+
+    expect(screen.getByRole('button', { name: 'Expand Anthropic models' })).toHaveTextContent(
+      '1 stale'
+    )
+  })
+
   it('opens matching groups while searching and shows the match count', () => {
     renderTable([
       baseModel,

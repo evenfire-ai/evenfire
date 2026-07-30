@@ -2880,7 +2880,7 @@ export type GrantedToMeItem = {
 // tests, so normalize defensively here — accept camelCase OR snake_case — and
 // hand components one canonical camelCase shape. This keeps the mocked→live
 // transition safe regardless of which the registry emits, and avoids silent
-// empty lists (ShareAccessPanel filters on pluginName) or "@undefined" rows.
+// empty lists (GrantAccessModal filters on pluginName) or "@undefined" rows.
 type RawOrgGrant = {
   id?: string
   pluginName?: string

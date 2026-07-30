@@ -1,6 +1,6 @@
 // control-ui/e2e/qa-recorder-marketplace-api-keys.spec.ts
 //
-// Optional headful QA recorder journey for the Control UI Marketplace ->
+// Optional headful QA recorder journey for the Control UI Publisher ->
 // registry API keys panel. MUTATING: it creates a publish-scoped API key,
 // drives the one-time reveal modal, then revokes the key from the table and
 // best-effort revokes it through the Control API in finally. Requires
@@ -41,11 +41,11 @@ async function waitForKeyId(request: APIRequestContext, description: string): Pr
   throw new Error(`Created API key "${description}" did not appear through Control API.`)
 }
 
-test.describe('optional QA recorder: Control UI marketplace API keys', () => {
-  test('Marketplace API key — create, reveal, revoke', async ({ page }, testInfo) => {
+test.describe('optional QA recorder: Control UI publisher API keys', () => {
+  test('Publisher API key — create, reveal, revoke', async ({ page }, testInfo) => {
     requireRecorderConfirm(
       'QA_RECORDER_CONFIRM_MUTATIONS',
-      'This journey creates and revokes a marketplace API key.'
+      'This journey creates and revokes a publisher API key.'
     )
     assertAllowedTarget('CONTROL_UI_URL', CONTROL_UI_URL)
     assertAllowedTarget('CONTROL_API_URL', CONTROL_API_URL)
@@ -57,7 +57,7 @@ test.describe('optional QA recorder: Control UI marketplace API keys', () => {
     try {
       await loginThroughUi(page, credentials)
 
-      await page.goto(`${CONTROL_UI_URL}/marketplace/keys`)
+      await page.goto(`${CONTROL_UI_URL}/publisher/api-keys`)
       // The "+ Create key" CTA only renders once the panel reaches its ready
       // state, so it doubles as the shell + readiness assertion.
       await expect(page.getByRole('button', { name: '+ Create key', exact: true })).toBeVisible({
@@ -102,7 +102,7 @@ test.describe('optional QA recorder: Control UI marketplace API keys', () => {
       await confirmDialog.getByRole('button', { name: 'Revoke', exact: true }).click()
       await expect(page.getByText(description)).toBeHidden({ timeout: 20_000 })
 
-      await screenshotAndLog(page, testInfo, 'control-ui-marketplace-api-keys')
+      await screenshotAndLog(page, testInfo, 'control-ui-publisher-api-keys')
     } finally {
       const id = keyId || (await findKeyId(page.request, description))
       if (id) {

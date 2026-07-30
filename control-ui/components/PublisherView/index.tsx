@@ -3,6 +3,7 @@
 import { CONTROL_ROUTES } from '@constants/routes'
 import { useInboundGrants } from '../../lib/hooks/useInboundGrants'
 import { isPublisherEnabled, usePublishScope } from '../../lib/hooks/usePublishScope'
+import RegistryApiKeysPanel from '../RegistryApiKeysPanel'
 import { TabBar } from '../TabBar'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { DockerCredentialsPanel } from './DockerCredentials'
@@ -14,6 +15,7 @@ const TABS: { value: PublisherTab; href: string; label: string }[] = [
   { value: 'entries', href: CONTROL_ROUTES.publisher.entries, label: 'Published entries' },
   { value: 'shared', href: CONTROL_ROUTES.publisher.sharedWithMe, label: 'Shared with me' },
   { value: 'credentials', href: CONTROL_ROUTES.publisher.credentials, label: 'Docker credentials' },
+  { value: 'api-keys', href: CONTROL_ROUTES.publisher.apiKeys, label: 'API keys' },
 ]
 
 export function PublisherView({ activeTab }: { activeTab: PublisherTab }) {
@@ -70,6 +72,7 @@ export function PublisherView({ activeTab }: { activeTab: PublisherTab }) {
             <GrantedToMe status={inbound.status} grants={inbound.grants} reload={inbound.reload} />
           ) : null}
           {activeTab === 'credentials' ? <DockerCredentialsPanel orgScope={orgScope} /> : null}
+          {activeTab === 'api-keys' ? <RegistryApiKeysPanel embedded /> : null}
         </div>
       </div>
     </section>

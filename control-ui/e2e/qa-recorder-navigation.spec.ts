@@ -65,8 +65,8 @@ test.describe('optional QA recorder: Control UI navigation', () => {
     ).toBeVisible({ timeout: 20_000 })
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-external-channels')
 
-    // 5) LLM Models — Catalog, Discovery Review, and Stale Models share one
-    //    canonical operator surface, so the sidebar uses one direct link.
+    // 5) LLM Models — Catalog and Discovery Review share one tabbed operator
+    //    surface, so the sidebar uses one direct link.
     await mainNav.getByRole('link', { name: 'LLM Models', exact: true }).click()
     await expect(page).toHaveURL(/\/llm-models/, { timeout: 20_000 })
     // The subtitle is long; anchor on a unique leading substring.

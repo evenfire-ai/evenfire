@@ -22,13 +22,14 @@ test.describe('optional QA recorder: Control UI LLM models and secrets', () => {
 
     const mainNav = page.getByRole('navigation', { name: 'Main sections' })
 
-    // (1) Unified LLM Models inventory. Catalog, Discovery Review, and Stale
-    // Models now share this direct sidebar destination.
+    // (1) Unified LLM Models surface. Catalog and Discovery Review use
+    // route-backed tabs under the same direct sidebar destination.
     await mainNav.getByRole('link', { name: 'LLM Models', exact: true }).click()
     await expect(page).toHaveURL(/\/llm-models/, { timeout: 20_000 })
     await expect(page.getByText('Context window').first()).toBeVisible({ timeout: 20_000 })
-    await expect(page.getByText(/Discovery review/)).toBeVisible({ timeout: 20_000 })
-    await expect(page.getByText(/Stale models/)).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByRole('tab', { name: 'Discovery review' })).toBeVisible({
+      timeout: 20_000,
+    })
     await screenshotAndLog(page, testInfo, 'control-ui-llm-models')
 
     // (2) Secrets management (LLM scope). 'Secrets' is a direct sidebar link to

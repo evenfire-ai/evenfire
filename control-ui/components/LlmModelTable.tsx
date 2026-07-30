@@ -24,7 +24,7 @@ const MODEL_COLUMNS: TableHeaderColumn[] = [
   { key: 'contextWindow', label: 'Context window', align: 'right', width: '9rem' },
   { key: 'enabled', label: 'Enabled', width: '6rem' },
   { key: 'source', label: 'Source', width: '7rem' },
-  { key: 'stale', label: 'Stale', width: '6rem' },
+  { key: 'catalogStatus', label: 'Catalog status', width: '8rem' },
   { key: 'actions', width: '5rem', align: 'right', ariaLabel: 'Actions' },
 ]
 
@@ -35,6 +35,7 @@ type SourceFilter = 'all' | 'manual' | 'discovery'
 
 export function LlmModelTable({
   items,
+  navigation,
   unpricedKeys,
   onCreate,
   onEdit,
@@ -155,7 +156,7 @@ export function LlmModelTable({
   }
 
   return (
-    <div className="cu-card cu-section-card">
+    <div className="cu-card cu-card--viewport-fill cu-section-card">
       <TablePanelHeader
         title={
           <>
@@ -227,6 +228,7 @@ export function LlmModelTable({
           </>
         }
       />
+      {navigation}
       {isInitialLoad ? (
         <div className="cu-table-wrap cu-table-wrap--sticky-header">
           <table className="cu-table cu-table--header-band cu-llm-model-table">
@@ -254,6 +256,7 @@ export function LlmModelTable({
               const providerLabel = getProviderDisplayLabel(provider)
               const providerModels = items.filter(model => model.provider === provider)
               const enabledCount = providerModels.filter(model => model.enabled).length
+              const staleCount = providerModels.filter(model => model.stale).length
               const hasFilteredModels = models.length !== providerModels.length
               const expanded = expandedProviders.has(provider)
 
@@ -282,6 +285,7 @@ export function LlmModelTable({
                         </span>
                         <span className="cu-llm-model-group__summary">
                           {enabledCount} enabled
+                          {staleCount > 0 ? ` · ${staleCount} stale` : ''}
                           {hasFilteredModels ? ` · ${models.length} matching` : ''}
                         </span>
                         <span className="cu-llm-model-group__action" aria-hidden="true">
@@ -335,7 +339,7 @@ export function LlmModelTable({
                             {model.stale === true ? (
                               <span
                                 className="cu-px-badge cu-px-badge--warn"
-                                title="This model vanished from provider discovery but is kept — it is never auto-removed. Review whether to keep or remove it."
+                                title="Missing from the latest live provider catalog. It remains available when enabled until an operator disables or removes it."
                               >
                                 Stale
                               </span>

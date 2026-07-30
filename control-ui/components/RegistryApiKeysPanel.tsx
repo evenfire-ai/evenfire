@@ -48,7 +48,7 @@ function fmtExpiry(v: string | null): string {
   return d.getTime() < Date.now() ? `Expired ${d.toLocaleDateString()}` : d.toLocaleString()
 }
 
-export default function RegistryApiKeysPanel() {
+export default function RegistryApiKeysPanel({ embedded = false }: { embedded?: boolean }) {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [view, setView] = useState<View>({ kind: 'loading' })
@@ -108,91 +108,94 @@ export default function RegistryApiKeysPanel() {
 
   const isReady = view.kind === 'ready'
 
+  const content = (
+    <>
+      <TablePanelHeader
+        title={`API keys${isReady ? ` for @${(view as { org: string }).org}` : ''}`}
+        actions={
+          isReady ? (
+            <Button type="button" variant="primary" size="sm" onClick={() => setCreating(true)}>
+              + Create key
+            </Button>
+          ) : null
+        }
+      />
+
+      <div className="cu-card__body">
+        {view.kind === 'loading' ? <p>Loading…</p> : null}
+        {view.kind === 'not-owner' ? (
+          <p className="cu-banner cu-banner--warn">
+            You must be an org owner to manage API keys
+            {view.org ? ` for @${view.org}` : ''}.
+          </p>
+        ) : null}
+        {view.kind === 'no-org' ? (
+          <p className="cu-banner cu-banner--warn">
+            This deployment is not bound to a registry org, so there are no org API keys to
+            manage.
+          </p>
+        ) : null}
+        {view.kind === 'auth-disabled' ? (
+          <p className="cu-banner cu-banner--info">
+            Registry authentication is disabled, so API keys can&apos;t be created here. To enable it,
+            set <code>CLERUM_REGISTRY_AUTH_ENABLED=true</code> and restart control-api, then reload
+            this page.
+          </p>
+        ) : null}
+        {view.kind === 'error' ? (
+          <p className="cu-banner cu-banner--warn">
+            Could not load API keys.{' '}
+            <Button type="button" variant="ghost" size="sm" onClick={() => void load()}>
+              Retry
+            </Button>
+          </p>
+        ) : null}
+
+        {view.kind === 'ready' ? (
+          view.keys.length === 0 ? (
+            <p>No API keys yet. Create one to publish to @{view.org} from CI or scripts.</p>
+          ) : (
+            <div className="cu-table-wrap">
+              <table className="cu-table">
+                <thead>
+                  <TableHeaderRow columns={API_KEYS_COLUMNS} />
+                </thead>
+                <tbody>
+                  {view.keys.map(k => (
+                    <tr key={k.id}>
+                      <td>
+                        <code>{k.key_prefix}</code>
+                      </td>
+                      <td>{k.description || '—'}</td>
+                      <td>{k.scopes.join(', ')}</td>
+                      <td>{k.created_by_username}</td>
+                      <td title={k.created_at}>{fmtTime(k.created_at, '—')}</td>
+                      <td>{fmtExpiry(k.expires_at)}</td>
+                      <td>{fmtTime(k.last_used_at, 'Never used')}</td>
+                      <td>
+                        <Button
+                          type="button"
+                          variant="danger"
+                          size="sm"
+                          onClick={() => void handleRevoke(k)}
+                        >
+                          Revoke
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        ) : null}
+      </div>
+    </>
+  )
+
   return (
     <section>
-      <div className="cu-card cu-card--viewport-fill">
-        <TablePanelHeader
-          title={`API keys${isReady ? ` for @${(view as { org: string }).org}` : ''}`}
-          actions={
-            isReady ? (
-              <Button type="button" variant="primary" size="sm" onClick={() => setCreating(true)}>
-                + Create key
-              </Button>
-            ) : null
-          }
-        />
-
-        <div className="cu-card__body">
-          {view.kind === 'loading' ? <p>Loading…</p> : null}
-          {view.kind === 'not-owner' ? (
-            <p className="cu-banner cu-banner--warn">
-              You must be an org owner to manage API keys
-              {view.org ? ` for @${view.org}` : ''}.
-            </p>
-          ) : null}
-          {view.kind === 'no-org' ? (
-            <p className="cu-banner cu-banner--warn">
-              This deployment is not bound to a registry org, so there are no org API keys to
-              manage.
-            </p>
-          ) : null}
-          {view.kind === 'auth-disabled' ? (
-            <p className="cu-banner cu-banner--info">
-              Registry authentication is disabled, so API keys can&apos;t be created here. To enable
-              it, set <code>CLERUM_REGISTRY_AUTH_ENABLED=true</code> and restart control-api, then
-              reload this page.
-            </p>
-          ) : null}
-          {view.kind === 'error' ? (
-            <p className="cu-banner cu-banner--warn">
-              Could not load API keys.{' '}
-              <Button type="button" variant="ghost" size="sm" onClick={() => void load()}>
-                Retry
-              </Button>
-            </p>
-          ) : null}
-
-          {view.kind === 'ready' ? (
-            view.keys.length === 0 ? (
-              <p>No API keys yet. Create one to publish to @{view.org} from CI or scripts.</p>
-            ) : (
-              <div className="cu-table-wrap">
-                <table className="cu-table">
-                  <thead>
-                    <TableHeaderRow columns={API_KEYS_COLUMNS} />
-                  </thead>
-                  <tbody>
-                    {view.keys.map(k => (
-                      <tr key={k.id}>
-                        <td>
-                          <code>{k.key_prefix}</code>
-                        </td>
-                        <td>{k.description || '—'}</td>
-                        <td>{k.scopes.join(', ')}</td>
-                        <td>{k.created_by_username}</td>
-                        <td title={k.created_at}>{fmtTime(k.created_at, '—')}</td>
-                        <td>{fmtExpiry(k.expires_at)}</td>
-                        <td>{fmtTime(k.last_used_at, 'Never used')}</td>
-                        <td>
-                          <Button
-                            type="button"
-                            variant="danger"
-                            size="sm"
-                            onClick={() => void handleRevoke(k)}
-                          >
-                            Revoke
-                          </Button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )
-          ) : null}
-        </div>
-      </div>
-
+      {embedded ? content : <div className="cu-card cu-card--viewport-fill">{content}</div>}
       {creating ? (
         <CreateApiKeyModal onCreate={handleCreate} onCancel={() => setCreating(false)} />
       ) : null}

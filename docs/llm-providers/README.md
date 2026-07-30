@@ -232,11 +232,11 @@ to the `clerum-llm-allowed-models` ConfigMap for the runtime.
 
 - **Fail-closed**: a row must exist and be `enabled`. A provider with no enabled
   rows is unusable and flagged in the wizard.
-- **Discovery review**: `/llm-models` combines the authoritative catalog,
-  discovery review queue, and stale-model triage in one operator surface. A
+- **Discovery review**: `/llm-models` and `/llm-models/discovery` are the
+  route-backed Catalog and Discovery Review tabs of one operator surface. A
   models.dev sync still lands rows as **disabled** for the operator to curate —
-  it never auto-enables anything. The legacy `/llm-models/discovery` URL
-  redirects to this merged surface.
+  it never auto-enables anything. Models missing from the latest live catalog
+  remain in Catalog with a **Stale** row indicator and provider-level stale count.
 - **Deployed resources are never interrupted.** If a model falls out of the
   allowlist, running Hosts keep working (a `WARN` plus a metric, marked "out of
   allowlist" in the UI). Hard enforcement applies only to _new_ selections: host

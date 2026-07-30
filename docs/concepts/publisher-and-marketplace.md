@@ -79,15 +79,15 @@ The **Marketplace** is the catalog surface — what every authenticated admin in
 - **Browse** — `/marketplace`. Search/filter by category, mode, transport. Shows public entries from every org.
 - **Install** — `/marketplace/install`. Pick an entry, supply credentials if the entry has a credential schema, hit `POST /admin/registry/install` (or `/install-recipe` for plugins). control-api materializes the K8s resource and tags it with `clerum.io/catalog-id` annotations.
 - **Detail** — `/marketplace/entries/[name]/[version]`. View metadata, version history, install instructions.
-- **Manage API keys** — `/marketplace/keys`. Generate `efrk_...` keys for CI publishing.
 - **Connect** — `/marketplace/connect`. Self-hosted deploys only — bind your deploy to an org.
 
 ### 4. Publisher
 
-The **Publisher** is the *owner-only* surface. Once your deploy is org-bound, a "Publisher" entry appears in the sidebar with three tabs:
+The **Publisher** is the *owner-only* surface. Once your deploy is org-bound, a "Publisher" entry appears in the sidebar with four tabs:
 
 - **Published entries** (`/publisher/entries`) — your org's entries. Expand a row to share it with another org (cross-org grant).
 - **Docker credentials** (`/publisher/credentials`) — mint a `efrk_` API key + docker config so CI can `docker push` images for local-mode connectors.
+- **API keys** (`/publisher/api-keys`) — create, scope, expire, and revoke `efrk_` keys for CI and scripts.
 - **Shared with me** (`/publisher/shared-with-me`) — entries other orgs have granted to yours.
 
 The whole surface is hidden in the sidebar if your deploy isn't org-bound, or if `CONTROL_API_PUBLISHER_UI_ENABLED=false`.

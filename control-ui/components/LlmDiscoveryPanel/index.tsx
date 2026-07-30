@@ -1,7 +1,6 @@
 'use client'
 
 import React, { useEffect, useMemo, useState } from 'react'
-import { useConfirmDialog } from '@components/ConfirmDialog'
 import { LlmProviderIcon } from '@components/LlmProviderIcon'
 import { IconModels } from '@components/Sidebar/icons'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
@@ -9,11 +8,10 @@ import { TableHeaderRow } from '@components/TableHeaderRow'
 import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
 import { useToast } from '@components/Toast'
-import { IconChevronRight, IconRefresh, IconTrash } from '@components/icons'
+import { IconChevronRight, IconRefresh } from '@components/icons'
 import {
   type LlmAllowedModel,
   type LlmDiscoveryStatus,
-  deleteLlmModel,
   getDiscoveryStatus,
   isLlmModelConfigMapDeferred,
   isSilentApiError,
@@ -33,24 +31,14 @@ const REVIEW_COLUMNS: TableHeaderColumn[] = [
   { key: 'actions', width: '7rem', align: 'right', ariaLabel: 'Actions' },
 ]
 
-const STALE_COLUMNS: TableHeaderColumn[] = [
-  { key: 'model', label: 'Model', minWidth: '12rem' },
-  { key: 'vendor', label: 'Vendor', width: '10rem' },
-  { key: 'contextWindow', label: 'Context window', align: 'right', width: '9rem' },
-  { key: 'status', label: 'Runtime status', width: '9rem' },
-  { key: 'actions', width: '11rem', align: 'right', ariaLabel: 'Actions' },
-]
-
 type ProviderModelGroup = [provider: string, models: LlmAllowedModel[]]
 
 type ProviderGroupRowProps = {
-  actionLabel: string
   colSpan: number
   expanded: boolean
   models: LlmAllowedModel[]
   onToggle: () => void
   provider: string
-  summary: string
 }
 
 function modelLabel(model: LlmAllowedModel): string {
@@ -76,13 +64,11 @@ function groupByProvider(models: LlmAllowedModel[]): ProviderModelGroup[] {
 }
 
 function ProviderGroupRow({
-  actionLabel,
   colSpan,
   expanded,
   models,
   onToggle,
   provider,
-  summary,
 }: ProviderGroupRowProps) {
   const providerLabel = getProviderDisplayLabel(provider)
   return (
@@ -93,7 +79,7 @@ function ProviderGroupRow({
           className="cu-llm-model-group__toggle"
           onClick={onToggle}
           aria-expanded={expanded}
-          aria-label={`${expanded ? 'Collapse' : 'Expand'} ${providerLabel} ${actionLabel}`}
+          aria-label={`${expanded ? 'Collapse' : 'Expand'} ${providerLabel} review models`}
         >
           <span className="cu-llm-model-group__chevron" aria-hidden="true">
             <IconChevronRight
@@ -107,7 +93,7 @@ function ProviderGroupRow({
           <span className="cu-llm-model-group__count">
             {models.length} model{models.length === 1 ? '' : 's'}
           </span>
-          <span className="cu-llm-model-group__summary">{summary}</span>
+          <span className="cu-llm-model-group__summary">Awaiting operator enablement</span>
           <span className="cu-llm-model-group__action" aria-hidden="true">
             {expanded ? 'Hide models' : 'Show models'}
           </span>
@@ -117,12 +103,13 @@ function ProviderGroupRow({
   )
 }
 
-// Discovery and Catalog are two workflows over the same llm_allowed_models
-// records. The parent owns that shared inventory; this panel owns only sync,
-// review selection, and stale-model actions.
-export function LlmDiscoveryPanel({ items, loading, onRefresh }: LlmDiscoveryPanelProps) {
+export function LlmDiscoveryPanel({
+  items,
+  loading,
+  navigation,
+  onRefresh,
+}: LlmDiscoveryPanelProps) {
   const { showToast } = useToast()
-  const { confirm, confirmDialog } = useConfirmDialog()
 
   const [status, setStatus] = useState<LlmDiscoveryStatus | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
@@ -131,20 +118,14 @@ export function LlmDiscoveryPanel({ items, loading, onRefresh }: LlmDiscoveryPan
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [bulkEnabling, setBulkEnabling] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const [expandedReviewProviders, setExpandedReviewProviders] = useState<Set<string>>(new Set())
-  const [expandedStaleProviders, setExpandedStaleProviders] = useState<Set<string>>(new Set())
+  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
 
   const isInitialLoad = loading && items.length === 0
   const reviewQueue = useMemo(
     () => items.filter(model => model.source === 'discovery' && !model.enabled && !model.stale),
     [items]
   )
-  const staleModels = useMemo(
-    () => items.filter(model => model.source === 'discovery' && model.stale),
-    [items]
-  )
   const reviewGroups = useMemo(() => groupByProvider(reviewQueue), [reviewQueue])
-  const staleGroups = useMemo(() => groupByProvider(staleModels), [staleModels])
 
   const selectedCount = useMemo(
     () => reviewQueue.reduce((count, model) => (selectedIds.has(model.id) ? count + 1 : count), 0),
@@ -196,11 +177,8 @@ export function LlmDiscoveryPanel({ items, loading, onRefresh }: LlmDiscoveryPan
     })
   }
 
-  function toggleProvider(
-    provider: string,
-    setExpanded: React.Dispatch<React.SetStateAction<Set<string>>>
-  ) {
-    setExpanded(previous => {
+  function toggleProvider(provider: string) {
+    setExpandedProviders(previous => {
       const next = new Set(previous)
       if (next.has(provider)) next.delete(provider)
       else next.add(provider)
@@ -311,60 +289,6 @@ export function LlmDiscoveryPanel({ items, loading, onRefresh }: LlmDiscoveryPan
     showToast(message, { tone: 'error' })
   }
 
-  async function handleDisable(model: LlmAllowedModel) {
-    const label = modelLabel(model)
-    setPendingId(model.id)
-    setError('')
-    try {
-      await updateLlmModel(model.id, { enabled: false })
-      await onRefresh()
-      showToast(`${label} disabled.`, { tone: 'success' })
-    } catch (caught) {
-      if (isSilentApiError(caught)) return
-      if (isLlmModelConfigMapDeferred(caught)) {
-        await onRefresh()
-        showToast(`${label} disabled. ${CONFIGMAP_DEFERRED_WARNING}`, { tone: 'info' })
-        return
-      }
-      const message = caught instanceof Error ? caught.message : `Failed to disable ${label}`
-      setError(message)
-      showToast(message, { tone: 'error' })
-    } finally {
-      setPendingId(null)
-    }
-  }
-
-  async function handleDelete(model: LlmAllowedModel) {
-    const label = modelLabel(model)
-    const shouldDelete = await confirm({
-      title: 'Delete stale model',
-      message: `Remove ${label} from the inventory? It already vanished from the provider catalog. Existing agents keep running, but it can no longer be selected.`,
-      confirmLabel: 'Delete',
-      tone: 'danger',
-    })
-    if (!shouldDelete) return
-
-    setPendingId(model.id)
-    setError('')
-    try {
-      await deleteLlmModel(model.id)
-      await onRefresh()
-      showToast(`${label} removed from the inventory.`, { tone: 'success' })
-    } catch (caught) {
-      if (isSilentApiError(caught)) return
-      if (isLlmModelConfigMapDeferred(caught)) {
-        await onRefresh()
-        showToast(`${label} removed. ${CONFIGMAP_DEFERRED_WARNING}`, { tone: 'info' })
-        return
-      }
-      const message = caught instanceof Error ? caught.message : `Failed to delete ${label}`
-      setError(message)
-      showToast(message, { tone: 'error' })
-    } finally {
-      setPendingId(null)
-    }
-  }
-
   const reviewColumns: TableHeaderColumn[] = [
     {
       key: 'select',
@@ -393,7 +317,7 @@ export function LlmDiscoveryPanel({ items, loading, onRefresh }: LlmDiscoveryPan
         </div>
       ) : null}
 
-      <div className="cu-card cu-section-card">
+      <div className="cu-card cu-card--viewport-fill cu-section-card">
         <TablePanelHeader
           title={
             <>
@@ -401,7 +325,7 @@ export function LlmDiscoveryPanel({ items, loading, onRefresh }: LlmDiscoveryPan
               {isInitialLoad ? 'Discovery review' : `Discovery review (${reviewQueue.length})`}
             </>
           }
-          subtitle="Newly synced models land here disabled. Enabling one makes the same inventory row available to agents and runtime."
+          subtitle="Newly synced models land here disabled. Enable only the models you want available to agents and runtime."
           actions={
             <>
               <button
@@ -428,6 +352,7 @@ export function LlmDiscoveryPanel({ items, loading, onRefresh }: LlmDiscoveryPan
             </>
           }
         />
+        {navigation}
 
         <div className="cu-discovery-status" role="status">
           <span>
@@ -487,17 +412,15 @@ export function LlmDiscoveryPanel({ items, loading, onRefresh }: LlmDiscoveryPan
                 <TableHeaderRow columns={reviewColumns} />
               </thead>
               {reviewGroups.map(([provider, models]) => {
-                const expanded = expandedReviewProviders.has(provider)
+                const expanded = expandedProviders.has(provider)
                 return (
                   <tbody key={provider} className="cu-llm-model-group">
                     <ProviderGroupRow
-                      actionLabel="review models"
                       colSpan={reviewColumns.length}
                       expanded={expanded}
                       models={models}
-                      onToggle={() => toggleProvider(provider, setExpandedReviewProviders)}
+                      onToggle={() => toggleProvider(provider)}
                       provider={provider}
-                      summary="Awaiting operator enablement"
                     />
                     {expanded
                       ? models.map(model => (
@@ -536,114 +459,6 @@ export function LlmDiscoveryPanel({ items, loading, onRefresh }: LlmDiscoveryPan
           </div>
         )}
       </div>
-
-      <div className="cu-card cu-section-card">
-        <TablePanelHeader
-          title={
-            <>
-              <IconModels />
-              {isInitialLoad ? 'Stale models' : `Stale models (${staleModels.length})`}
-            </>
-          }
-          subtitle="Rows missing from the latest live provider catalog stay in the inventory and are never auto-disabled or auto-removed."
-        />
-        {staleModels.length > 0 ? (
-          <div className="cu-px-unpriced-slot">
-            <div className="cu-banner cu-banner--warning" role="status">
-              A stale model that is still <strong>enabled</strong> remains <strong>served</strong>{' '}
-              at runtime. Disable it to stop serving it, or delete it to remove it from the
-              inventory.
-            </div>
-          </div>
-        ) : null}
-        {isInitialLoad ? (
-          <div className="cu-table-wrap cu-table-wrap--sticky-header">
-            <table className="cu-table cu-table--header-band">
-              <thead>
-                <TableHeaderRow columns={STALE_COLUMNS} />
-              </thead>
-              <tbody>
-                <SkeletonTableRows columns={STALE_COLUMNS.length} rows={3} />
-              </tbody>
-            </table>
-          </div>
-        ) : staleModels.length === 0 ? (
-          <div className="cu-empty">
-            No stale models. Every discovered row was present in the latest live sync.
-          </div>
-        ) : (
-          <div className="cu-table-wrap cu-table-wrap--sticky-header">
-            <table className="cu-table cu-table--header-band cu-llm-stale-table">
-              <thead>
-                <TableHeaderRow columns={STALE_COLUMNS} />
-              </thead>
-              {staleGroups.map(([provider, models]) => {
-                const expanded = expandedStaleProviders.has(provider)
-                const servedCount = models.filter(model => model.enabled).length
-                return (
-                  <tbody key={provider} className="cu-llm-model-group">
-                    <ProviderGroupRow
-                      actionLabel="stale models"
-                      colSpan={STALE_COLUMNS.length}
-                      expanded={expanded}
-                      models={models}
-                      onToggle={() => toggleProvider(provider, setExpandedStaleProviders)}
-                      provider={provider}
-                      summary={`${servedCount} still served`}
-                    />
-                    {expanded
-                      ? models.map(model => (
-                          <tr key={model.id} className="cu-table__row cu-llm-model-row">
-                            <td className="cu-px-model">{model.model}</td>
-                            <td>{model.vendor || '—'}</td>
-                            <td className="cu-px-num">
-                              {formatContextWindow(model.context_window_tokens)}
-                            </td>
-                            <td>
-                              {model.enabled ? (
-                                <span
-                                  className="cu-px-badge cu-px-badge--warn"
-                                  title="Enabled and still served at runtime despite being stale."
-                                >
-                                  Enabled · served
-                                </span>
-                              ) : (
-                                <span className="cu-px-badge cu-px-badge--off">Disabled</span>
-                              )}
-                            </td>
-                            <td className="cu-px-actions">
-                              {model.enabled ? (
-                                <button
-                                  type="button"
-                                  className="cu-btn cu-btn--secondary cu-btn--sm"
-                                  onClick={() => void handleDisable(model)}
-                                  disabled={pendingId === model.id}
-                                >
-                                  {pendingId === model.id ? 'Working…' : 'Disable'}
-                                </button>
-                              ) : null}
-                              <button
-                                type="button"
-                                className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                                onClick={() => void handleDelete(model)}
-                                disabled={pendingId === model.id}
-                                aria-label={`Delete ${modelLabel(model)}`}
-                              >
-                                <IconTrash width={16} height={16} />
-                              </button>
-                            </td>
-                          </tr>
-                        ))
-                      : null}
-                  </tbody>
-                )
-              })}
-            </table>
-          </div>
-        )}
-      </div>
-
-      {confirmDialog}
     </>
   )
 }

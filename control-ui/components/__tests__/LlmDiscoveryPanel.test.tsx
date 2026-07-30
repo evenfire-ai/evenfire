@@ -72,7 +72,7 @@ afterEach(() => {
 })
 
 describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
-  it('keeps discovery review and stale models visually distinct and grouped by provider', async () => {
+  it('groups discovery review by provider and excludes stale rows', async () => {
     render(
       <LlmDiscoveryPanel
         items={[reviewModel, staleModel]}
@@ -82,14 +82,10 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     )
 
     expect(screen.getByText('Discovery review (1)')).toBeInTheDocument()
-    expect(screen.getByText('Stale models (1)')).toBeInTheDocument()
     expect(screen.getByText(/Newly synced models land here disabled/)).toBeInTheDocument()
-    expect(screen.getByText(/never auto-disabled or auto-removed/)).toBeInTheDocument()
 
     const reviewGroup = screen.getByRole('button', { name: 'Expand OpenAI review models' })
-    const staleGroup = screen.getByRole('button', { name: 'Expand Anthropic stale models' })
     expect(reviewGroup).toHaveAttribute('aria-expanded', 'false')
-    expect(staleGroup).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByText('gpt-5')).toBeNull()
     expect(screen.queryByText('claude-retired')).toBeNull()
 
@@ -116,18 +112,16 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     expect(onRefresh).toHaveBeenCalledTimes(1)
   })
 
-  it('always renders an explicit empty stale state', () => {
+  it('does not render a dedicated stale-model management section', () => {
     render(
       <LlmDiscoveryPanel
-        items={[reviewModel]}
+        items={[reviewModel, staleModel]}
         loading={false}
         onRefresh={vi.fn().mockResolvedValue(undefined)}
       />
     )
 
-    expect(screen.getByText('Stale models (0)')).toBeInTheDocument()
-    expect(
-      screen.getByText('No stale models. Every discovered row was present in the latest live sync.')
-    ).toBeInTheDocument()
+    expect(screen.queryByText(/Stale models/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /Anthropic stale models/ })).toBeNull()
   })
 })
