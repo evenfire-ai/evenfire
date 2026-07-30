@@ -807,25 +807,42 @@ for (const key of NAMESPACE_KEYS) {
 }
 
 // Registry consumer auth guard: when auth is on, refuse to boot without OAuth2
-// credentials and refuse a registry URL outside the allowlist (defense against
+// credentials; separately, refuse a registry URL outside the allowlist for any
+// deployment that will really talk to a registry (defense against
 // cross-environment misconfiguration sending writes to the wrong registry).
-if (config.registryAuthEnabled) {
-  // Mode must be set EXPLICITLY when the registry is enabled — never inferred
-  // from which credentials happen to be present (S10: no silent split-brain).
-  if (!process.env.REGISTRY_CONNECTION_MODE) {
-    throw new Error(
-      'REGISTRY_CONNECTION_MODE is required (managed|self-hosted) when CLERUM_REGISTRY_AUTH_ENABLED=true'
-    )
-  }
-  console.log(`[ControlAPI] Registry connection mode: ${config.registryConnectionMode}`)
 
-  // URL allowlist applies in BOTH modes. The shared registry
-  // `registry.evenfire.ai` is the default a self-hoster connects to (see
-  // docs/how-to/connect-to-registry.md); the in-cluster URL covers a
-  // self-hosted registry-api. A deployment that runs its own registry adds its
-  // URL via CLERUM_REGISTRY_URL_ALLOWLIST (comma-separated) rather than editing
-  // this list. `example.com` is the reserved-domain fixture used across the
-  // test suite — inert (no real registry) and kept so tests need no churn.
+// A configured URL is MANDATORY whenever auth is on. Today this is enforced
+// implicitly — allowed.includes('') is never true, so an empty URL falls
+// through to the allowlist throw. The allowlist block below is preconditioned
+// on registryUrl !== '', which would SKIP that throw and let a managed
+// deployment with auth on and no URL boot, then fail later with a bare fetch
+// URL-parse TypeError. Kept as its own check so the OR cannot swallow it.
+if (config.registryAuthEnabled && config.registryUrl === '') {
+  throw new Error('CLERUM_REGISTRY_URL is required when CLERUM_REGISTRY_AUTH_ENABLED=true')
+}
+
+// URL allowlist — defense against cross-environment misconfiguration sending
+// writes to the wrong registry. Enforced whenever the deployment will really
+// talk to a registry: an EXPLICITLY self-hosted deployment (which POSTs its
+// registration before any credentials exist, so gating this on auth was always
+// backwards), or any auth-enabled deployment. The shared registry
+// `registry.evenfire.ai` is the default a self-hoster connects to (see
+// docs/how-to/connect-to-registry.md); the in-cluster URL covers a
+// self-hosted registry-api. A deployment that runs its own registry adds its
+// URL via CLERUM_REGISTRY_URL_ALLOWLIST (comma-separated) rather than editing
+// this list. `example.com` is the reserved-domain fixture used across the
+// test suite — inert (no real registry) and kept so tests need no churn.
+//
+// The gate must never be `config.registryUrl !== ''` alone — dropping the
+// self-hosted disjunct is exactly the rejected design that broke managed mode
+// (see the regression test below). Reading process.env directly here is
+// defensive against a future change to the parser's default; for today's
+// parser it is equivalent to config.registryConnectionMode, not itself
+// load-bearing.
+if (
+  config.registryUrl !== '' &&
+  (process.env.REGISTRY_CONNECTION_MODE === 'self-hosted' || config.registryAuthEnabled)
+) {
   const allowed = [
     'https://registry.evenfire.ai',
     'http://registry-api.registry.svc.cluster.local:8085',
@@ -845,6 +862,19 @@ if (config.registryAuthEnabled) {
       `CLERUM_REGISTRY_URL=${config.registryUrl} is not in the registry URL allowlist: ${allowed.join(', ')}`
     )
   }
+}
+
+// Mode requirement (S10: never infer mode from which credentials exist) and the
+// managed credential/voucher checks stay gated on auth, UNCHANGED.
+if (config.registryAuthEnabled) {
+  // Mode must be set EXPLICITLY when the registry is enabled — never inferred
+  // from which credentials happen to be present (S10: no silent split-brain).
+  if (!process.env.REGISTRY_CONNECTION_MODE) {
+    throw new Error(
+      'REGISTRY_CONNECTION_MODE is required (managed|self-hosted) when CLERUM_REGISTRY_AUTH_ENABLED=true'
+    )
+  }
+  console.log(`[ControlAPI] Registry connection mode: ${config.registryConnectionMode}`)
 
   if (config.registryConnectionMode === 'managed') {
     // Managed machine creds live in env (unchanged).

@@ -14,6 +14,10 @@ and use registry SSO from your Control UI.
   `managed`, and the connect flow only runs in self-hosted mode — a managed
   deployment is connected automatically, so the panel has nothing to configure.
 - `CLERUM_REGISTRY_URL` set, with outbound HTTPS to the registry.
+- `CLERUM_REGISTRY_URL` must be in the allowlist. `https://registry.evenfire.ai`
+  and `http://registry-api.registry.svc.cluster.local:8085` are built in; add
+  any other registry URL via `CLERUM_REGISTRY_URL_ALLOWLIST`. control-api
+  refuses to start if the configured URL is not allowlisted.
 - You are an **admin** in your Control UI.
 
 ## Connect
@@ -61,25 +65,22 @@ one of two state machines, depending on how the registry is configured:
   [Publish a plugin to the registry](publish-plugin-to-registry.md).
 - **SSO** to registry API keys from your own Control UI.
 
-## Enable registry authentication (to manage API keys)
+## API keys for programmatic publishing
 
 Once connected, browsing the public catalog, publishing, and image push/pull all
 work using the credential stored when you claimed the connection — no further
 setup is needed for those.
 
 **Creating and managing API keys** (`efrk_` org keys, used for CI and other
-programmatic publishing) is a separate surface that requires **registry
-authentication** to be enabled. If you see a banner saying registry
-authentication is disabled, or you want to issue org API keys, enable it:
+programmatic publishing) needs registry authentication active. In self-hosted,
+connecting is sufficient: authentication turns on automatically the moment
+this deployment holds machine credentials, which is as soon as the connect
+flow above completes. There is no flag to set and no restart.
 
-1. Set `CLERUM_REGISTRY_AUTH_ENABLED=true` in the control-api config (e.g. the
-   `control-api-config` ConfigMap, or your env file).
-2. Restart control-api. The flag is read at boot only — there is no hot-reload.
-
-Note the boot guard this enables: with auth on and `REGISTRY_CONNECTION_MODE=self-hosted`,
-control-api requires a completed connection (which you already have once
-claimed) and the registry URL must be in the allowlist — `registry.evenfire.ai`
-is allowed by default; add others via `CLERUM_REGISTRY_URL_ALLOWLIST`.
+The registry URL allowlist still applies regardless of authentication: any
+explicitly self-hosted deployment with a registry URL configured must have
+that URL in the allowlist. `registry.evenfire.ai` is allowed by default; add
+others via `CLERUM_REGISTRY_URL_ALLOWLIST`.
 
 ## If something goes wrong
 

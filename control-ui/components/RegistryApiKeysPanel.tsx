@@ -1,12 +1,13 @@
-// control-ui/components/RegistryApiKeysPanel.tsx
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreateRegistryApiKeyInput,
   type CreatedRegistryApiKey,
   type RegistryApiKey,
   createRegistryApiKey,
+  getRegistryConnection,
   listRegistryApiKeys,
   revokeRegistryApiKey,
 } from '../lib/api'
@@ -25,6 +26,7 @@ type View =
   | { kind: 'not-owner'; org?: string }
   | { kind: 'no-org' }
   | { kind: 'auth-disabled' }
+  | { kind: 'url-not-configured' }
   | { kind: 'error' }
 
 const API_KEYS_COLUMNS: TableHeaderColumn[] = [
@@ -54,6 +56,16 @@ export default function RegistryApiKeysPanel() {
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [creating, setCreating] = useState(false)
   const [revealed, setRevealed] = useState<string | null>(null)
+  // The auth-disabled view needs mode-specific copy: self-hosted fixes it by
+  // connecting, managed fixes it via CLERUM_REGISTRY_AUTH_ENABLED (no connect
+  // flow exists there). Same best-effort detection RegistryCatalog uses for its
+  // Connect button — getRegistryConnection() 409s not_self_hosted in managed
+  // mode. Fail-open to 'self-hosted' (treat 'unknown' like RegistryCatalog does
+  // via its `!== 'managed'` check) since a transient error here is far more
+  // likely than a real managed deployment misreporting its own mode.
+  const [connectionMode, setConnectionMode] = useState<'self-hosted' | 'managed' | 'unknown'>(
+    'unknown'
+  )
 
   const load = useCallback(async () => {
     try {
@@ -67,13 +79,25 @@ export default function RegistryApiKeysPanel() {
       else if (status === 409 && code === 'no_org') setView({ kind: 'no-org' })
       else if (status === 409 && code === 'registry_auth_disabled')
         setView({ kind: 'auth-disabled' })
+      else if (status === 409 && code === 'registry_url_not_configured')
+        setView({ kind: 'url-not-configured' })
       else setView({ kind: 'error' })
+    }
+  }, [])
+
+  const loadConnectionMode = useCallback(async () => {
+    try {
+      await getRegistryConnection()
+      setConnectionMode('self-hosted')
+    } catch (e) {
+      setConnectionMode((e as { code?: string }).code === 'not_self_hosted' ? 'managed' : 'unknown')
     }
   }, [])
 
   useEffect(() => {
     void load()
-  }, [load])
+    void loadConnectionMode()
+  }, [load, loadConnectionMode])
 
   async function handleCreate(input: CreateRegistryApiKeyInput) {
     const created: CreatedRegistryApiKey = await createRegistryApiKey(input)
@@ -138,9 +162,25 @@ export default function RegistryApiKeysPanel() {
           ) : null}
           {view.kind === 'auth-disabled' ? (
             <p className="cu-banner cu-banner--info">
-              Registry authentication is disabled, so API keys can&apos;t be created here. To enable
-              it, set <code>CLERUM_REGISTRY_AUTH_ENABLED=true</code> and restart control-api, then
-              reload this page.
+              {connectionMode === 'managed' ? (
+                <>
+                  Registry authentication for this deployment is controlled by{' '}
+                  <code>CLERUM_REGISTRY_AUTH_ENABLED</code>. An operator must enable it and restart
+                  control-api before API keys can be created here.
+                </>
+              ) : (
+                <>
+                  API keys become available once this deployment is connected to the registry.{' '}
+                  <a href={CONTROL_ROUTES.marketplace.connect}>Connect to Evenfire Registry</a>.
+                </>
+              )}
+            </p>
+          ) : null}
+          {view.kind === 'url-not-configured' ? (
+            <p className="cu-banner cu-banner--warn">
+              This deployment still holds registry credentials, but <code>CLERUM_REGISTRY_URL</code>{' '}
+              is not configured. Restore the registry URL or disconnect the stale connection before
+              managing API keys.
             </p>
           ) : null}
           {view.kind === 'error' ? (

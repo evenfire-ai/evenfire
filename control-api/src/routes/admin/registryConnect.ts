@@ -9,6 +9,7 @@ import { findAdminById } from '../../services/adminAuthService.js'
 import {
   deleteConnection,
   getRegistryConnection,
+  isRegistryAuthActive,
   markConnected,
   upsertPendingConnection,
 } from '../../services/registryConnectionDb.js'
@@ -101,8 +102,11 @@ export function createRegistryConnectRouter(): Router {
       // Buffer.from(null) crash inside the encryption path.
       if (
         typeof claimed.client_id !== 'string' ||
+        claimed.client_id.length === 0 ||
         typeof claimed.client_secret !== 'string' ||
-        typeof claimed.org !== 'string'
+        claimed.client_secret.length === 0 ||
+        typeof claimed.org !== 'string' ||
+        claimed.org.length === 0
       ) {
         rootLogger.error(
           { event: 'registry_connect_claim_malformed', status: claimRes.status },
@@ -131,10 +135,18 @@ export function createRegistryConnectRouter(): Router {
 
   async function requireSelfHostedAdmin(
     req: Request,
-    res: Response
+    res: Response,
+    options: { requireRegistryUrl?: boolean } = {}
   ): Promise<{ adminId: string } | null> {
     if (config.registryConnectionMode !== 'self-hosted') {
       res.status(409).json({ error: 'not_self_hosted' })
+      return null
+    }
+    // Network-dependent connect routes need a configured registry URL. DELETE
+    // is deliberately exempt: it only removes local credentials, and must
+    // remain the recovery path after an operator removes a broken/stale URL.
+    if (options.requireRegistryUrl !== false && config.registryUrl === '') {
+      res.status(409).json({ error: 'registry_url_not_configured' })
       return null
     }
     const sub = (req as UiAuthedRequest).adminAuth?.sub
@@ -193,81 +205,135 @@ export function createRegistryConnectRouter(): Router {
   // visible pre-claim (state ∈ disconnected|pending|connecting|approved|rejected|connected).
   // `connecting` is finished via POST /admin/registry/connect/recover, not by
   // pasting a token.
-  router.get('/admin/registry/connect', requireAuthForControlUI, async (req, res, next) => {
-    try {
-      const ctx = await requireSelfHostedAdmin(req, res)
-      if (!ctx) return
-      const row = await getRegistryConnection()
-      if (!row) {
-        res.status(200).json({ state: 'disconnected', authEnabled: config.registryAuthEnabled })
-        return
-      }
-      if (row.status === 'connected') {
-        res.status(200).json({
-          state: 'connected',
-          deploymentId: row.deploymentId,
-          org: row.orgName,
-          authEnabled: config.registryAuthEnabled,
-        })
-        return
-      }
-      // A locally-'approved' row is a registry auto-approval whose claim has
-      // not landed. GET stays READ-ONLY: it reports state so the panel can
-      // offer the recover button. It must never rotate — GET is also called by
-      // RegistryCatalog on every Marketplace mount and is reachable by
-      // cross-site navigation (SameSite=Lax), so a mutation here would rotate
-      // claim tokens on catalog browsing and on CSRF.
-      if (row.status === 'approved') {
+  router.get(
+    '/admin/registry/connect',
+    requireAuthForControlUI,
+    // Per-admin token bucket — this route is mounted by RegistryCatalog on
+    // every Marketplace visit (control-ui/components/RegistryCatalog.tsx),
+    // not just the connect panel, and is reachable by top-level cross-site
+    // navigation (the session cookie is SameSite=Lax and this router has no
+    // CSRF/origin check). Each call makes an outbound registry /status
+    // fetch, so this bounds that outbound traffic under a CSRF-driven loop
+    // while staying generous enough for normal navigation (Marketplace
+    // mount, connect panel mount, refresh button).
+    rateLimitMiddleware({
+      bucketType: 'registry_connect_status',
+      maxPerMinute: 30,
+      getBucketKey: req => {
+        const sub = (req as UiAuthedRequest).adminAuth?.sub
+        return sub ? `registry_connect_status:${sub}` : null
+      },
+    }),
+    async (req, res, next) => {
+      try {
+        const ctx = await requireSelfHostedAdmin(req, res)
+        if (!ctx) return
+        const row = await getRegistryConnection()
+        // Hoisted: every branch below reports authEnabled, and this call is
+        // cache-friendly here — getRegistryConnection() just populated (or hit)
+        // the process-local cache that isRegistryAuthActive()'s self-hosted
+        // path reads via resolveMachineCreds(), so this cannot trigger a fresh
+        // Postgres round-trip on its own. It CAN still reject (a bare
+        // pool.query with no try/catch of its own), so this is guarded the same
+        // way the sibling admin registry routes guard it
+        // (routes/admin/registry.ts's prepareKeysRequest/resolveSelfServiceOrg)
+        // rather than letting it fall through to the generic catch below and
+        // surface as a bare 500 — GET already documents a never-500-on-a-hiccup
+        // guarantee for the status poll, and this preserves that for the newly
+        // derived read too.
+        let authEnabled: boolean
+        try {
+          authEnabled = await isRegistryAuthActive()
+        } catch {
+          res.status(502).json({ error: 'registry_integration_error' })
+          return
+        }
+        if (!row) {
+          res.status(200).json({ state: 'disconnected', authEnabled })
+          return
+        }
+        if (row.status === 'connected') {
+          res.status(200).json({
+            state: 'connected',
+            deploymentId: row.deploymentId,
+            org: row.orgName,
+            authEnabled,
+          })
+          return
+        }
+        // A locally-'approved' row is a registry auto-approval whose claim has
+        // not landed. GET stays READ-ONLY: it reports state so the panel can
+        // offer the recover button. It must never rotate — GET is also called by
+        // RegistryCatalog on every Marketplace mount and is reachable by
+        // cross-site navigation (SameSite=Lax), so a mutation here would rotate
+        // claim tokens on catalog browsing and on CSRF.
+        if (row.status === 'approved') {
+          const poll = await pollRegistryStatus({
+            deploymentId: row.deploymentId,
+            keyId: row.keyId,
+            privateKeyPem: row.privateKeyPem,
+            adminId: ctx.adminId,
+          })
+          const recoveryError = poll?.claimed
+            ? 'already_claimed'
+            : poll?.suspended
+              ? 'deployment_suspended'
+              : undefined
+          res.status(200).json({
+            state: 'connecting',
+            deploymentId: row.deploymentId,
+            requestedOrgName: row.requestedOrgName,
+            authEnabled,
+            ...(recoveryError ? { recoveryError } : {}),
+          })
+          return
+        }
+        // Not yet connected — poll the registry so an operator approval (or
+        // rejection) is reflected before the user attempts to claim.
         const poll = await pollRegistryStatus({
           deploymentId: row.deploymentId,
           keyId: row.keyId,
           privateKeyPem: row.privateKeyPem,
           adminId: ctx.adminId,
         })
-        const recoveryError = poll?.claimed
-          ? 'already_claimed'
-          : poll?.suspended
-            ? 'deployment_suspended'
-            : undefined
+        const registryStatus = poll?.status ?? null
+        const state =
+          registryStatus === 'approved'
+            ? 'approved'
+            : registryStatus === 'rejected'
+              ? 'rejected'
+              : 'pending'
         res.status(200).json({
-          state: 'connecting',
+          state,
           deploymentId: row.deploymentId,
           requestedOrgName: row.requestedOrgName,
-          authEnabled: config.registryAuthEnabled,
-          ...(recoveryError ? { recoveryError } : {}),
+          authEnabled,
         })
-        return
+      } catch (err) {
+        next(err)
       }
-      // Not yet connected — poll the registry so an operator approval (or
-      // rejection) is reflected before the user attempts to claim.
-      const poll = await pollRegistryStatus({
-        deploymentId: row.deploymentId,
-        keyId: row.keyId,
-        privateKeyPem: row.privateKeyPem,
-        adminId: ctx.adminId,
-      })
-      const registryStatus = poll?.status ?? null
-      const state =
-        registryStatus === 'approved'
-          ? 'approved'
-          : registryStatus === 'rejected'
-            ? 'rejected'
-            : 'pending'
-      res.status(200).json({
-        state,
-        deploymentId: row.deploymentId,
-        requestedOrgName: row.requestedOrgName,
-        authEnabled: config.registryAuthEnabled,
-      })
-    } catch (err) {
-      next(err)
     }
-  })
+  )
 
   // POST request — generate keypair, register with the registry, persist pending.
   router.post(
     '/admin/registry/connect/request',
     requireAuthForControlUI,
+    // Per-admin token bucket — registration is a rare, deliberate,
+    // once-in-a-deployment-lifetime action, and each call consumes one of
+    // the shared registry's ~5/day per-IP registration attempts (and can
+    // create a deployment row there). 3/min still allows a legitimate retry
+    // after a transient failure (e.g. a typo'd org name) while capping how
+    // much of that daily budget a looped admin can burn through in a single
+    // minute.
+    rateLimitMiddleware({
+      bucketType: 'registry_connect_request',
+      maxPerMinute: 3,
+      getBucketKey: req => {
+        const sub = (req as UiAuthedRequest).adminAuth?.sub
+        return sub ? `registry_connect_request:${sub}` : null
+      },
+    }),
     async (req, res, next) => {
       try {
         const ctx = await requireSelfHostedAdmin(req, res)
@@ -424,11 +490,16 @@ export function createRegistryConnectRouter(): Router {
           claimToken: reg.claim_token as string,
         })
         if (outcome.kind === 'connected') {
+          // redeemClaim validated a non-empty credential pair and
+          // markConnected committed it. Do not perform a second fallible DB
+          // read after this irreversible one-time claim has succeeded: a
+          // transient read failure must not turn a completed connection into a
+          // misleading 502 response.
           res.status(200).json({
             state: 'connected',
             org: outcome.org,
             deploymentId: reg.deployment_id,
-            authEnabled: config.registryAuthEnabled,
+            authEnabled: true,
           })
           return
         }
@@ -601,13 +672,17 @@ export function createRegistryConnectRouter(): Router {
           claimToken,
         })
         switch (outcome.kind) {
-          case 'connected':
+          case 'connected': {
+            // Same committed-outcome rule as POST /request: recovery already
+            // consumed the one-time token and stored a validated credential
+            // pair, so its response must not depend on a redundant DB read.
             res.status(200).json({
               state: 'connected',
               org: outcome.org,
-              authEnabled: config.registryAuthEnabled,
+              authEnabled: true,
             })
             return
+          }
           // Terminal: the client is disabled (operator suspension). Retrying
           // rotates forever against a deployment that was deliberately killed.
           case 'client_unavailable':
@@ -639,7 +714,7 @@ export function createRegistryConnectRouter(): Router {
   // DELETE — disconnect (drop the row).
   router.delete('/admin/registry/connect', requireAuthForControlUI, async (req, res, next) => {
     try {
-      const ctx = await requireSelfHostedAdmin(req, res)
+      const ctx = await requireSelfHostedAdmin(req, res, { requireRegistryUrl: false })
       if (!ctx) return
       await deleteConnection()
       res.status(204).end()
