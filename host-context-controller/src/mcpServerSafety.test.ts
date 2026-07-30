@@ -58,8 +58,9 @@ describe('sameMcpServerDesiredRevision', () => {
     expect(sameMcpServerDesiredRevision(expected, makeServer({ generation: undefined }))).toBe(true)
   })
 
-  it('uses JSON equality for spec, annotations, and labels', () => {
+  it('compares desired object fields by semantic content, not Kubernetes map key order', () => {
     const expected = makeServer({
+      annotations: { first: '1', second: '2' },
       labels: { first: '1', second: '2' },
     })
 
@@ -79,6 +80,15 @@ describe('sameMcpServerDesiredRevision', () => {
       sameMcpServerDesiredRevision(
         expected,
         makeServer({
+          annotations: { second: '2', first: '1' },
+          labels: expected.labels,
+        })
+      )
+    ).toBe(true)
+    expect(
+      sameMcpServerDesiredRevision(
+        expected,
+        makeServer({
           annotations: { 'clerum.io/recipe': 'other' },
           labels: expected.labels,
         })
@@ -89,9 +99,10 @@ describe('sameMcpServerDesiredRevision', () => {
         expected,
         makeServer({
           labels: { second: '2', first: '1' },
+          annotations: expected.annotations,
         })
       )
-    ).toBe(false)
+    ).toBe(true)
   })
 
   it('ignores the controller-owned network-ready handshake annotation', () => {

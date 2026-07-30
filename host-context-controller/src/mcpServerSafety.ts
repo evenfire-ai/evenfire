@@ -16,6 +16,24 @@ function desiredAnnotations(annotations: Record<string, string> | undefined): Re
   return remaining
 }
 
+/**
+ * Kubernetes represents objects such as labels and annotations as maps, whose
+ * wire key order is not meaningful or stable across LIST and WATCH payloads.
+ * Preserve array order (it is semantic) while sorting object keys so a
+ * status-only event cannot masquerade as a desired-state revision.
+ */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record)
+      .sort()
+      .map(key => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'undefined'
+}
+
 export function sameMcpServerDesiredRevision(
   expected: McpServerCRD,
   current: McpServerCRD
@@ -31,10 +49,10 @@ export function sameMcpServerDesiredRevision(
   }
 
   return (
-    JSON.stringify(expected.spec) === JSON.stringify(current.spec) &&
-    JSON.stringify(desiredAnnotations(expected.annotations)) ===
-      JSON.stringify(desiredAnnotations(current.annotations)) &&
-    JSON.stringify(expected.labels ?? {}) === JSON.stringify(current.labels ?? {})
+    stableJson(expected.spec) === stableJson(current.spec) &&
+    stableJson(desiredAnnotations(expected.annotations)) ===
+      stableJson(desiredAnnotations(current.annotations)) &&
+    stableJson(expected.labels ?? {}) === stableJson(current.labels ?? {})
   )
 }
 
