@@ -271,6 +271,8 @@ spec:
   agent:
     provider: zai
     model: glm-4.7
+  triggers:
+    onDemand: {}
   steps:
     - id: tool-step
       instruction: "Synthetic status-contract step for toolsCalled args validation."
