@@ -78,8 +78,11 @@ spec:
     url: http://e2e-sec-pullpolicy.mcp-server.svc:3000/mcp
 EOF
 
-log "Waiting for HCC to create Deployment..."
-sleep 15
+if wait_for_deployment "$MCP_NS" e2e-sec-pullpolicy "$TIMEOUT_POD"; then
+  ok "imagePullPolicy fixture rendered a ready Deployment"
+else
+  fail "imagePullPolicy fixture did not render a ready Deployment"
+fi
 
 PULL_POLICY=$(kctl get deployment e2e-sec-pullpolicy -n "$MCP_NS" \
   -o jsonpath='{.spec.template.spec.containers[0].imagePullPolicy}' 2>/dev/null || echo "NOT_FOUND")
@@ -237,7 +240,11 @@ spec:
       value: postgres://safe
 EOF
 
-sleep 15
+if wait_for_deployment "$MCP_NS" e2e-sec-envvars "$TIMEOUT_POD"; then
+  ok "Dangerous-env fixture rendered a ready Deployment"
+else
+  fail "Dangerous-env fixture did not render a ready Deployment"
+fi
 
 ENV_JSON=$(kctl get deployment e2e-sec-envvars -n "$MCP_NS" \
   -o jsonpath='{.spec.template.spec.containers[0].env}' 2>/dev/null || echo "[]")
@@ -276,7 +283,11 @@ spec:
       - DAC_OVERRIDE
 EOF
 
-sleep 15
+if wait_for_deployment "$MCP_NS" e2e-sec-uid70 "$TIMEOUT_POD"; then
+  ok "Non-root UID fixture rendered a ready Deployment"
+else
+  fail "Non-root UID fixture did not render a ready Deployment"
+fi
 
 UID_70=$(kctl get deployment e2e-sec-uid70 -n "$MCP_NS" \
   -o jsonpath='{.spec.template.spec.securityContext.runAsUser}' 2>/dev/null || echo "NOT_FOUND")
