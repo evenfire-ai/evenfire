@@ -48,6 +48,7 @@ describe('GET /admin/registry/publish-scope: publisherUiEnabled (effective, thro
     process.env = { ...ORIGINAL_ENV }
     delete process.env.CONTROL_API_PUBLISHER_UI_ENABLED
     delete process.env.REGISTRY_CONNECTION_MODE
+    delete process.env.CLERUM_REGISTRY_URL
     registryClient.resolvePublishScope.mockReset()
     registryClient.resolvePublishScope.mockResolvedValue({
       curator: false,

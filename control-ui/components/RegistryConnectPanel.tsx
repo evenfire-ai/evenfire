@@ -490,14 +490,6 @@ export default function RegistryConnectPanel() {
               deployment can now publish entries and push/pull images.
             </p>
           ) : null}
-
-          {view.kind === 'connected' && view.authEnabled === false ? (
-            <p className="cu-banner cu-banner--info" role="status">
-              To create and manage API keys for programmatic publishing, enable registry
-              authentication: set <code>CLERUM_REGISTRY_AUTH_ENABLED=true</code> and restart
-              control-api. See the &quot;connect to registry&quot; guide for details.
-            </p>
-          ) : null}
         </div>
       </div>
       {confirmDialog}
