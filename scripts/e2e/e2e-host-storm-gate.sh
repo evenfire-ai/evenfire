@@ -26,16 +26,11 @@
 #      construction, so A1 is primarily a RECORDING of that evidence — it
 #      can only fail if the harness itself degenerates into sequential
 #      phases; the load-bearing falsifiable claims are A2-A8.
-#   A2 urgent queue-wait p95 <= 5s DURING the storm window, computed from
-#      the clerum_hcc_host_reconcile_queue_wait_seconds{lane="urgent"}
-#      histogram buckets (§14.1) across two counter windows: pre-kill pod
-#      delta (scrape B - scrape A) plus post-kill pod absolute (scrape C1,
-#      taken IMMEDIATELY after created-Host convergence so post-storm quiet
-#      samples cannot dilute the p95 — a fresh process starts at zero, and
-#      the C1 window includes replacement-pod recovery traffic). Samples in
-#      flight between scrape B and process death are unrecoverable (counter
-#      reset) and are recorded as a documented measurement gap, never
-#      silently backfilled.
+#   A2 urgent queue-wait p95 <= 5s, computed from ten dedicated Host ADDED
+#      events issued only after the replacement HCC has completed LIST→WATCH
+#      recovery (proved by scrape C1's A4 recovery sample). Their histogram
+#      delta is scrape D - C1 on one pod, so the result cannot be diluted by
+#      cold-start snapshot work or corrupted by the intentional pod restart.
 #   A3 no starvation: EVERY created Host's Deployment materializes within
 #      STORM_MATERIALIZATION_BUDGET_S (20s, §14.2 "New Host
 #      materialization") of that Host's OWN metadata.creationTimestamp,
@@ -59,13 +54,13 @@
 #      All-zero is legitimate (deletes fully handled by the direct
 #      watch-DELETE path, which by design does not touch this counter) —
 #      A5 remains the falsifiable cleanup proof.
-#   A7 fleet coalescing held (one active + one trailing slot), from
-#      clerum_hcc_host_fleet_requests_total (scrape C2): failed == 0 in
-#      both windows; on the post-kill pod started >= 1 (the recovery
-#      convergence pass ran), coalesced >= 1 (the recovery-triggered
-#      request landed against the active initial pass), and trailing <=
-#      coalesced (every trailing drain corresponds to at least one request
-#      that was queued behind the single pending slot).
+#   A7 recovered fleet convergence is bounded, from
+#      clerum_hcc_host_fleet_requests_total (scrape C2): failed == 0 in both
+#      windows, exactly one background full pass starts after the replacement
+#      LIST→WATCH, and trailing <= coalesced. Cold start produces one request,
+#      so requiring a coalesced request here would invent a second signal; the
+#      concurrent-request coalescing contract is covered deterministically by
+#      hostFleetScheduler.test.ts.
 #   A8 wake ingredient integrity: the woken Host leaves state=suspended and
 #      reaches a Ready pod within STORM_WAKE_READY_BUDGET_S of the wake
 #      POST. This is an ingredient-integrity bound (a silently no-op wake
@@ -109,7 +104,7 @@
 #   EXTERNAL_REST_API_BASE_URL  default http://127.0.0.1:8091
 #   RPC_PROXY_BASE_URL          default http://127.0.0.1:8094
 #   E2E_DEV_LOGIN_EMAIL         default test@clerum.io
-#   E2E_USER_PASSWORD           default ${ADMIN_PASSWORD:-admin123!}
+#   E2E_USER_PASSWORD           default ${ADMIN_PASSWORD:-changeme123!}
 #   STORM_CONTEXT_REF           Context CR fixtures reference (default context1)
 #   STORM_MODEL_PROVIDER / STORM_MODEL_NAME  fixture model (default zai/glm-5.1)
 #   HCC_METRICS_LOCAL_PORT      ephemeral scrape port (default 18082)
@@ -164,6 +159,11 @@ export QUEUE_WAIT_METRIC WATCH_RECOVERY_METRIC FLEET_METRIC DELETE_CLEANUP_METRI
 # ─── Storm shape + budgets (each constant states its contract) ────────
 # Addendum 5.1: ">=10" created fixture Hosts, mixed stateful/stateless.
 readonly STORM_CREATE_COUNT=10
+# A2's direct-watch probe is deliberately separate from the restart window:
+# a cold-start LIST legitimately converges objects on the fleet lane. These
+# ten ADDED events are emitted only once the replacement's LIST→WATCH recovery
+# has succeeded, so their queue histogram is an unambiguous urgent-lane SLO.
+readonly STORM_URGENT_PROBE_COUNT=10
 # Addendum 5.1: ">=3" pre-created fixture Hosts deleted mid-storm.
 readonly STORM_DELETE_COUNT=3
 # §14.2 "urgent new/wake queue wait": local hard gate <= 5s (histogram
@@ -295,11 +295,12 @@ RUN_ID=''; WORK_DIR=''
 FIXTURE_SECRET=''
 STORM_CREATED_HOSTS=()
 STORM_DELETE_HOSTS=()
+STORM_URGENT_PROBE_HOSTS=()
 WAKE_HOST_REF="${E2E_STORM_WAKE_HOST_REF:-chatllm-stateless}"
 EXT_BASE="${EXTERNAL_REST_API_BASE_URL:-http://127.0.0.1:8091}"
 RPC_BASE="${RPC_PROXY_BASE_URL:-http://127.0.0.1:8094}"
 DEV_EMAIL="${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}"
-DEV_PASSWORD="${E2E_USER_PASSWORD:-${ADMIN_PASSWORD:-admin123!}}"
+DEV_PASSWORD="${E2E_USER_PASSWORD:-${ADMIN_PASSWORD:-changeme123!}}"
 STORM_CTX_REF="${STORM_CONTEXT_REF:-context1}"
 STORM_PROVIDER="${STORM_MODEL_PROVIDER:-zai}"
 STORM_MODEL="${STORM_MODEL_NAME:-glm-5.1}"
@@ -404,6 +405,9 @@ init_run() {
   done
   for i in $(seq 1 "$STORM_DELETE_COUNT"); do
     STORM_DELETE_HOSTS+=("$(printf 's791-%s-d%d' "$RUN_ID" "$i")")
+  done
+  for i in $(seq 1 "$STORM_URGENT_PROBE_COUNT"); do
+    STORM_URGENT_PROBE_HOSTS+=("$(printf 's791-%s-u%02d' "$RUN_ID" "$i")")
   done
   log "run-id ${RUN_ID}; work dir ${WORK_DIR}"
   log "create fixtures: ${STORM_CREATED_HOSTS[*]}"
@@ -748,6 +752,7 @@ SCRAPE_A="${WORK_DIR}/metrics-A.prom"
 SCRAPE_B="${WORK_DIR}/metrics-B.prom"
 SCRAPE_C1="${WORK_DIR}/metrics-C1.prom"
 SCRAPE_C2="${WORK_DIR}/metrics-C2.prom"
+SCRAPE_D="${WORK_DIR}/metrics-D.prom"
 HCC_POD_A="$(hcc_pod_name)"
 if [[ -z "$HCC_POD_A" ]]; then
   fail "no Running HCC pod found for baseline identity"; storm_diagnostics; print_results; exit 1
@@ -880,6 +885,68 @@ if ! scrape_hcc_metrics "$SCRAPE_C1" "$HCC_POD_C"; then
 fi
 log "scrape C1 captured (replacement pod ${HCC_POD_C})"
 
+# ─── A2 input: direct-watch urgent probe after replacement LIST→WATCH ──
+# The storm's second half is intentionally issued immediately after pod
+# deletion, when a cold-start LIST may legitimately own those Hosts on the
+# fleet lane. C1 proves the replacement has completed LIST→WATCH recovery;
+# issue a fresh, independent set now so every observed sample is a direct
+# watch ADDED admission on the urgent lane.
+header "A2 input — urgent direct-watch probe (${STORM_URGENT_PROBE_COUNT} Hosts)"
+for i in $(seq 1 "${#STORM_URGENT_PROBE_HOSTS[@]}"); do
+  h="${STORM_URGENT_PROBE_HOSTS[$((i - 1))]}"
+  if (( i % 2 == 0 )); then apply_storm_host "$h" true; else apply_storm_host "$h" false; fi
+done
+log "urgent probe: ${STORM_URGENT_PROBE_COUNT} Host ADDED events issued after replacement LIST→WATCH"
+
+# shellcheck disable=SC2329  # invoked by name via wait_until
+_urgent_probe_deploys_probe() {
+  local h
+  for h in "${STORM_URGENT_PROBE_HOSTS[@]}"; do
+    kctl -n "$MCP_HOST_NS" get deployment "$h" >/dev/null 2>&1 || return 1
+  done
+}
+if wait_until "$STORM_CONVERGENCE_DEADLINE_S" 3 \
+  "all ${STORM_URGENT_PROBE_COUNT} urgent-probe Hosts' Deployments to exist" \
+  _urgent_probe_deploys_probe storm_diagnostics; then
+  ok "A2 input: every direct-watch urgent-probe Host materialized"
+else
+  fail "A2 input: urgent-probe Host materialization incomplete after ${STORM_CONVERGENCE_DEADLINE_S}s"
+  print_results; exit 1
+fi
+HCC_POD_C_NOW="$(hcc_pod_name)"
+if [[ -z "$HCC_POD_C_NOW" || "$HCC_POD_C_NOW" != "$HCC_POD_C" ]]; then
+  fail "replacement HCC pod changed before urgent-probe scrape D (${HCC_POD_C} -> ${HCC_POD_C_NOW:-<none>}) — urgent counter window is invalid"
+  storm_diagnostics; print_results; exit 1
+fi
+
+# Deployment existence can precede the end of reconcileCore, where the queue
+# histogram is observed. Poll the metric itself instead of sleeping, otherwise
+# a fast API server can make this gate race its own telemetry.
+# shellcheck disable=SC2329  # invoked by name via wait_until
+_urgent_probe_metrics_recorded() {
+  local current_pod pre_count post_count
+  current_pod="$(hcc_pod_name)"
+  [[ -n "$current_pod" && "$current_pod" == "$HCC_POD_C" ]] || return 1
+  scrape_hcc_metrics "$SCRAPE_D" "$HCC_POD_C" || return 1
+  pre_count="$(awk -v metric="${QUEUE_WAIT_METRIC}_bucket" '
+    index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ && $0 ~ /le="\+Inf"/ { total += $NF }
+    END { print total + 0 }
+  ' "$SCRAPE_C1")"
+  post_count="$(awk -v metric="${QUEUE_WAIT_METRIC}_bucket" '
+    index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ && $0 ~ /le="\+Inf"/ { total += $NF }
+    END { print total + 0 }
+  ' "$SCRAPE_D")"
+  awk -v before="$pre_count" -v after="$post_count" -v required="$STORM_URGENT_PROBE_COUNT" \
+    'BEGIN { exit !((after - before) >= required) }'
+}
+if ! wait_until 60 2 \
+  "at least ${STORM_URGENT_PROBE_COUNT} direct-watch urgent metric samples" \
+  _urgent_probe_metrics_recorded storm_diagnostics; then
+  fail "urgent-probe reconciles did not publish ${STORM_URGENT_PROBE_COUNT} queue samples within 60s"
+  print_results; exit 1
+fi
+log "scrape D captured (replacement pod ${HCC_POD_C}; direct-watch urgent window C1→D)"
+
 # ─── A3: per-host materialization <= 20s from ITS OWN creation ───────
 header "A3 — per-host materialization (budget ${STORM_MATERIALIZATION_BUDGET_S}s, §14.2)"
 MAT_ROWS="${WORK_DIR}/materialization.rows"
@@ -995,9 +1062,9 @@ log "scrape C2 captured (replacement pod ${HCC_POD_C}; A6/A7 counters settled po
 # VERDICT|<name>|PASS/FAIL|<detail> line each. python exits nonzero only
 # when it cannot parse its inputs (a hard failure of the gate itself).
 METRIC_VERDICTS="${WORK_DIR}/metric-verdicts.txt"
-if ! SCRAPE_A="$SCRAPE_A" SCRAPE_B="$SCRAPE_B" SCRAPE_C1="$SCRAPE_C1" SCRAPE_C2="$SCRAPE_C2" \
+if ! SCRAPE_A="$SCRAPE_A" SCRAPE_B="$SCRAPE_B" SCRAPE_C1="$SCRAPE_C1" SCRAPE_C2="$SCRAPE_C2" SCRAPE_D="$SCRAPE_D" \
   P95_BUDGET_S="$STORM_URGENT_P95_BUDGET_S" RECOVERY_BUDGET_S="$STORM_WATCH_RECOVERY_BUDGET_S" \
-  MIN_URGENT_SAMPLES="$STORM_CREATE_COUNT" \
+  MIN_URGENT_SAMPLES="$STORM_URGENT_PROBE_COUNT" \
   python3 >"$METRIC_VERDICTS" <<'PY'
 import os, re, sys
 from collections import defaultdict
@@ -1033,6 +1100,7 @@ a, _ = load(os.environ["SCRAPE_A"])
 b, _ = load(os.environ["SCRAPE_B"])
 c1, _ = load(os.environ["SCRAPE_C1"])
 c2, c2_types = load(os.environ["SCRAPE_C2"])
+d, _ = load(os.environ["SCRAPE_D"])
 
 def buckets(samples, metric, match):
     """Cumulative histogram buckets {le: count} summed over matching series."""
@@ -1057,30 +1125,29 @@ def le_key(le):
 
 verdicts = []
 
-# ── A2: urgent queue-wait p95 <= budget across (B-A) + C1 ─────────────
+# ── A2: urgent queue-wait p95 across direct-watch window D-C1 ─────────
 qm = os.environ["QUEUE_WAIT_METRIC"]
 budget = float(os.environ["P95_BUDGET_S"])
-window_note = "windows: pre-kill delta (B-A) + replacement pod C1, which includes replacement-pod recovery traffic"
-pre_a = buckets(a, qm, {"lane": "urgent"})
-pre_b = buckets(b, qm, {"lane": "urgent"})
-post = buckets(c1, qm, {"lane": "urgent"})
+window_note = "window: replacement-pod direct-watch probe delta (D-C1) after LIST→WATCH recovery"
+pre = buckets(c1, qm, {"lane": "urgent"})
+post = buckets(d, qm, {"lane": "urgent"})
 combined = defaultdict(float)
 reset = False
-for le in set(pre_a) | set(pre_b) | set(post):
-    delta = pre_b.get(le, 0.0) - pre_a.get(le, 0.0)
+for le in set(pre) | set(post):
+    delta = post.get(le, 0.0) - pre.get(le, 0.0)
     if delta < 0:
         reset = True
-    combined[le] = delta + post.get(le, 0.0)
+    combined[le] = delta
 if reset:
     verdicts.append(("A2-urgent-queue-wait-p95", False,
-                     "negative bucket delta between scrapes A and B (unexpected counter reset)"))
+                     "negative bucket delta between scrapes C1 and D (unexpected counter reset)"))
 else:
     total = combined.get("+Inf", 0.0)
     min_samples = float(os.environ["MIN_URGENT_SAMPLES"])
     if total < min_samples:
         verdicts.append(("A2-urgent-queue-wait-p95", False,
-                         f"only {total:.0f} urgent samples in the storm window (need >= {min_samples:.0f} — "
-                         "the storm did not exercise the urgent lane, cannot claim a p95)"))
+                         f"only {total:.0f} direct-watch urgent samples (need >= {min_samples:.0f} — "
+                         "the urgent probe did not exercise its declared lane)"))
     else:
         p95_ub = None
         for le in sorted(combined, key=le_key):
@@ -1090,8 +1157,7 @@ else:
         dist = " ".join(f"le{le}={combined[le]:.0f}" for le in sorted(combined, key=le_key))
         if p95_ub is not None and le_key(p95_ub) <= budget:
             verdicts.append(("A2-urgent-queue-wait-p95", True,
-                             f"p95 <= {p95_ub}s over {total:.0f} samples (budget {budget:.0f}s; {dist}; {window_note}; "
-                             "gap: samples in flight between scrape B and process death are unrecoverable)"))
+                             f"p95 <= {p95_ub}s over {total:.0f} samples (budget {budget:.0f}s; {dist}; {window_note})"))
         else:
             verdicts.append(("A2-urgent-queue-wait-p95", False,
                              f"p95 bucket upper bound {p95_ub} exceeds {budget:.0f}s over {total:.0f} samples ({dist}; {window_note})"))
@@ -1117,7 +1183,7 @@ else:
     verdicts.append(("A4-watch-recovery", True,
                      f"{succ_total:.0f} recovery sample(s), all <= {bound}s (budget {rbudget}s)"))
 
-# ── A7: fleet coalescing held (settled window C2) ─────────────────────
+# ── A7: recovered fleet convergence remains bounded (settled C2) ─────
 fm = os.environ["FLEET_METRIC"]
 pre_failed = counter(b, fm, "result", "failed") - counter(a, fm, "result", "failed")
 post_started = counter(c2, fm, "result", "started")
@@ -1127,18 +1193,16 @@ post_failed = counter(c2, fm, "result", "failed")
 problems = []
 if pre_failed > 0 or post_failed > 0:
     problems.append(f"fleet pass failures (pre={pre_failed:.0f} post={post_failed:.0f})")
-if post_started < 1:
-    problems.append("no fleet pass started on the replacement pod (recovery convergence missing)")
-if post_coalesced < 1:
-    problems.append("no coalesced fleet request on the replacement pod (recovery request should land against the active initial pass)")
+if post_started != 1:
+    problems.append(f"expected exactly one recovery fleet pass on the replacement pod, got started={post_started:.0f}")
 if post_trailing > post_coalesced:
     problems.append(f"trailing={post_trailing:.0f} > coalesced={post_coalesced:.0f} (violates the single-pending-slot structure)")
 detail = (f"started={post_started:.0f} coalesced={post_coalesced:.0f} "
           f"trailing={post_trailing:.0f} failed={post_failed:.0f} (pre-kill failed delta={pre_failed:.0f})")
 if problems:
-    verdicts.append(("A7-fleet-coalescing", False, "; ".join(problems) + f" [{detail}]"))
+    verdicts.append(("A7-fleet-recovery-bounded", False, "; ".join(problems) + f" [{detail}]"))
 else:
-    verdicts.append(("A7-fleet-coalescing", True, detail))
+    verdicts.append(("A7-fleet-recovery-bounded", True, detail))
 
 # ── A6: delete-cleanup counters consistent (settled window C2) ────────
 dm = os.environ["DELETE_CLEANUP_METRIC"]
@@ -1227,7 +1291,7 @@ else
   teardown_converge_deadline=$((SECONDS + STORM_TEARDOWN_CONVERGE_S))
   while :; do
     TEARDOWN_LEFTOVER=0; teardown_orphan=0; teardown_unverifiable=0; teardown_report=''
-    for h in "${STORM_CREATED_HOSTS[@]}" "${STORM_DELETE_HOSTS[@]}"; do
+    for h in "${STORM_CREATED_HOSTS[@]}" "${STORM_URGENT_PROBE_HOSTS[@]}" "${STORM_DELETE_HOSTS[@]}"; do
       if ! leftovers="$(collect_children "$h")"; then
         teardown_report+="  ${h}: kubectl read FAILED (unverifiable, fail-closed)"$'\n'
         TEARDOWN_LEFTOVER=$((TEARDOWN_LEFTOVER + 1)); teardown_unverifiable=1
