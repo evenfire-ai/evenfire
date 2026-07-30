@@ -42,6 +42,7 @@ kctl get nodes -o json | jq -e \
 
 HCC_NS="${HCC_NS:-control-plane}"
 HCC_DEPLOY="${HCC_DEPLOY:-host-context-controller}"
+MCP_NS="${MCP_NS:-mcp-server}"
 SOURCE_HOST="${E2E_SOURCE_HOST_REF:-chatllm-stateless}"
 HOST_NS="${MCP_HOST_NS:-mcp-host}"
 CHANNEL_NS="${CHANNELS_NS:-channels}"
@@ -87,7 +88,7 @@ print_hcc_proxy_rollout_diagnostics() {
     jq -r '
       .items[] |
       .status.containerStatuses[]? |
-      "pod=\(.metadata.name) phase=\(.status.phase // \"unknown\") ready=\(.ready) restarts=\(.restartCount) waiting=\(.state.waiting.reason // \"none\") terminated=\(.state.terminated.reason // \"none\") exitCode=\(.state.terminated.exitCode // \"none\") lastTerminated=\(.lastState.terminated.reason // \"none\") lastExitCode=\(.lastState.terminated.exitCode // \"none\")"
+      "pod=\(.metadata.name) phase=\(.status.phase // "unknown") ready=\(.ready) restarts=\(.restartCount) waiting=\(.state.waiting.reason // "none") terminated=\(.state.terminated.reason // "none") exitCode=\(.state.terminated.exitCode // "none") lastTerminated=\(.lastState.terminated.reason // "none") lastExitCode=\(.lastState.terminated.exitCode // "none")"
     ' >&2 || true
 
   while IFS= read -r pod; do
@@ -176,13 +177,24 @@ host_override="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
   -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="KUBERNETES_SERVICE_HOST")].name}')"
 port_override="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
   -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="KUBERNETES_SERVICE_PORT")].name}')"
-[ -z "$host_override$port_override" ] || die "HCC already has an explicit Kubernetes service override"
+api_cidrs_override="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="CONTEXT_MAPPER_K8S_API_CIDRS")].name}')"
+[ -z "$host_override$port_override$api_cidrs_override" ] ||
+  die "HCC already has an explicit Kubernetes service or API CIDR override"
 [ -z "$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.template.spec.hostAliases}')" ] ||
   die "HCC already has hostAliases; refusing a non-restorable fault injection"
 
 HCC_IMAGE="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
   -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].image}')"
 [ -n "$HCC_IMAGE" ] || die "could not resolve the running HCC image"
+K8S_API_SERVICE_HOST="$(kctl exec deployment/"$HCC_DEPLOY" -n "$HCC_NS" \
+  -c host-context-controller -- printenv KUBERNETES_SERVICE_HOST)" ||
+  die "could not read the Kubernetes-injected API service IP"
+kctl exec deployment/"$HCC_DEPLOY" -n "$HCC_NS" -c host-context-controller -- \
+  node -e 'const { isIP } = require("node:net"); process.exit(isIP(process.argv[1]) === 4 ? 0 : 1)' \
+  "$K8S_API_SERVICE_HOST" >/dev/null ||
+  die "Kubernetes-injected API service host is not an IPv4 address"
+K8S_API_CIDR="${K8S_API_SERVICE_HOST}/32"
 
 log "Creating an isolated TCP proxy for the Kubernetes API"
 create_hcc_api_proxy
@@ -191,11 +203,12 @@ verify_hcc_proxy_network_policy
 PROXY_IP="$(kctl get service "$PROXY_NAME" -n "$HCC_NS" -o jsonpath='{.spec.clusterIP}')"
 [ -n "$PROXY_IP" ] || die "proxy Service has no ClusterIP"
 HCC_PATCHED=1
-hcc_proxy_patch="$(jq -cn --arg ip "$PROXY_IP" '{spec:{template:{spec:{
+hcc_proxy_patch="$(jq -cn --arg ip "$PROXY_IP" --arg api_cidr "$K8S_API_CIDR" '{spec:{template:{spec:{
   hostAliases:[{ip:$ip,hostnames:["kubernetes.default.svc"]}],
   containers:[{name:"host-context-controller",env:[
     {name:"KUBERNETES_SERVICE_HOST",value:"kubernetes.default.svc"},
-    {name:"KUBERNETES_SERVICE_PORT",value:"443"}
+    {name:"KUBERNETES_SERVICE_PORT",value:"443"},
+    {name:"CONTEXT_MAPPER_K8S_API_CIDRS",value:$api_cidr}
   ]}]
 }}}}')"
 kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=strategic -p "$hcc_proxy_patch" >/dev/null
@@ -206,6 +219,11 @@ fi
 initial_hcc_identity="$(wait_for_hcc_identity 30)" || die "could not capture HCC pod identity"
 read -r HCC_UID HCC_RESTARTS <<<"$initial_hcc_identity"
 [ -n "$HCC_UID" ] && [ "$HCC_UID" != invalid ] || die "could not capture HCC pod identity"
+proxy_policy_cidrs="$(kctl get networkpolicy "allow-k8s-api-egress-${MCP_NS}" -n "$MCP_NS" -o json |
+  jq -r '[.spec.egress[0].to[]?.ipBlock.cidr] | join(",")')" ||
+  die "could not read the proxy-run API egress policy"
+[ "$proxy_policy_cidrs" = "$K8S_API_CIDR" ] ||
+  die "proxy-run API egress policy did not retain the injected Kubernetes API CIDR"
 ok "HCC is healthy through the proxy (pod=${HCC_UID}, restarts=${HCC_RESTARTS})"
 
 log "Creating one stateful control and two stateless Host fixtures"

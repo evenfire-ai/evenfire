@@ -46,11 +46,29 @@ proxy_rollout_function="$(
 if [[ "$proxy_rollout_function" == *'kctl get pods'* ]] &&
    [[ "$proxy_rollout_function" == *'--previous --tail=120'* ]] &&
    [[ "$proxy_rollout_function" == *'status.containerStatuses'* ]] &&
+   [[ "$proxy_rollout_function" == *'// "unknown"'* ]] &&
+   [[ "$proxy_rollout_function" != *'\\"unknown\\"'* ]] &&
    grep -Fq 'if ! kctl rollout status deployment "$HCC_DEPLOY"' "$WATCH_GATE" &&
    [ "$(grep -Fc 'print_hcc_proxy_rollout_diagnostics' "$WATCH_GATE")" = 2 ]; then
   pass "proxy rollout failure emits bounded HCC pod and previous-container diagnostics"
 else
   fail "proxy rollout failure can discard the distinguishing HCC startup evidence"
+fi
+
+# The proxy changes only the HCC client's target hostname.  The HCC's
+# allow-k8s-api-egress policies must retain the Kubernetes-injected API IP,
+# which is the explicit fail-closed configuration seam for CIDR policy data.
+# shellcheck disable=SC2016
+if grep -Fq 'K8S_API_SERVICE_HOST="$(kctl exec deployment/"$HCC_DEPLOY"' "$WATCH_GATE" &&
+   grep -Fq 'K8S_API_CIDR="${K8S_API_SERVICE_HOST}/32"' "$WATCH_GATE" &&
+   grep -Fq -- '--arg api_cidr "$K8S_API_CIDR"' "$WATCH_GATE" &&
+   grep -Fq 'CONTEXT_MAPPER_K8S_API_CIDRS",value:$api_cidr' "$WATCH_GATE" &&
+   grep -Fq 'allow-k8s-api-egress-${MCP_NS}' "$WATCH_GATE" &&
+   grep -Fq '[ "$proxy_policy_cidrs" = "$K8S_API_CIDR" ]' "$WATCH_GATE" &&
+   grep -Fq 'CONTEXT_MAPPER_K8S_API_CIDRS-' "$FIXTURE_HELPER"; then
+  pass "proxy fault injection preserves an explicit valid API egress CIDR and restores it"
+else
+  fail "proxy fault injection can turn a DNS hostname into an invalid API egress CIDR"
 fi
 
 if grep -Fq 'source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"' "$READINESS_GATE" &&

@@ -338,10 +338,10 @@ delete_hcc_proxy_fixture() {
 }
 
 restore_hcc_after_fault_injection() {
-  local host_override port_override host_aliases desired ready
+  local host_override port_override api_cidrs_override host_aliases desired ready
 
   kctl set env deployment/"$HCC_DEPLOY" -n "$HCC_NS" \
-    KUBERNETES_SERVICE_HOST- KUBERNETES_SERVICE_PORT- >/dev/null || return 1
+    KUBERNETES_SERVICE_HOST- KUBERNETES_SERVICE_PORT- CONTEXT_MAPPER_K8S_API_CIDRS- >/dev/null || return 1
   kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=merge \
     -p '{"spec":{"template":{"spec":{"hostAliases":null}}}}' >/dev/null || return 1
   kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" --timeout=180s >/dev/null || return 1
@@ -350,10 +350,12 @@ restore_hcc_after_fault_injection() {
     -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="KUBERNETES_SERVICE_HOST")].name}')"
   port_override="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
     -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="KUBERNETES_SERVICE_PORT")].name}')"
+  api_cidrs_override="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
+    -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="CONTEXT_MAPPER_K8S_API_CIDRS")].name}')"
   host_aliases="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.template.spec.hostAliases}')"
   desired="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.replicas}')"
   ready="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.status.readyReplicas}')"
-  [ -z "$host_override$port_override$host_aliases" ] && [ "$desired" = "$ready" ]
+  [ -z "$host_override$port_override$api_cidrs_override$host_aliases" ] && [ "$desired" = "$ready" ]
 }
 
 print_hcc_repair_instructions() {
@@ -362,7 +364,7 @@ HCC restoration failed. Proxy resources were retained for repair.
 Context: ${E2E_KUBECONTEXT}
 Proxy: ${HCC_NS}/${PROXY_NAME}
 Repair commands:
-  kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} set env deployment/${HCC_DEPLOY} KUBERNETES_SERVICE_HOST- KUBERNETES_SERVICE_PORT-
+  kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} set env deployment/${HCC_DEPLOY} KUBERNETES_SERVICE_HOST- KUBERNETES_SERVICE_PORT- CONTEXT_MAPPER_K8S_API_CIDRS-
   kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} patch deployment/${HCC_DEPLOY} --type=merge -p '{"spec":{"template":{"spec":{"hostAliases":null}}}}'
   kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} rollout status deployment/${HCC_DEPLOY} --timeout=180s
 After HCC is healthy, delete ${PROXY_NAME}, ${PROXY_EGRESS_NP}, ${HCC_PROXY_NP}, and ${PROBE_EGRESS_NP} in ${HCC_NS}.
