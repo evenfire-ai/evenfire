@@ -531,8 +531,10 @@ mcp_restart_line="$(grep -nF 'kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" -
 if grep -Fq 'MCP_FLEET_SIZE="${E2E_HCC_MCP_FLEET_SIZE:-11}"' "$MCP_READINESS_GATE" &&
    grep -Fq '[ "$MCP_FLEET_SIZE" -gt 10 ]' "$MCP_READINESS_GATE" &&
    grep -Fq 'create_peer_fleet' "$MCP_READINESS_GATE" &&
+   grep -Fq 'peer_fleet_has_background_progress' "$MCP_READINESS_GATE" &&
    grep -Fq 'peer_fleet_converged' "$MCP_READINESS_GATE" &&
-   grep -Fq 'unblocked peer MCP/Context fleet to converge during held primary egress' "$MCP_READINESS_GATE" &&
+   grep -Fq 'peer MCP/Context fleet to make safe background progress during held primary egress' "$MCP_READINESS_GATE" &&
+   grep -Fq 'all peer MCP/Context runtimes to converge after releasing the held primary egress' "$MCP_READINESS_GATE" &&
    [ -n "$mcp_peer_create_line" ] && [ -n "$mcp_restart_line" ] &&
    [ "$mcp_peer_create_line" -lt "$mcp_restart_line" ]; then
   pass "MCP readiness gate crosses the bounded worker width with gate-owned MCP and Context peers"

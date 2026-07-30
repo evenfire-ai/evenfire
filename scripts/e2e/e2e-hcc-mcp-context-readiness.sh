@@ -410,18 +410,11 @@ peer_fleet_runtime_absent() {
   done
 }
 
-peer_fleet_converged() {
-  local index server context desired available namespace policy_type policy_count
+peer_fleet_has_background_progress() {
+  local index server context namespace policy_type policy_count ready_peers=0
   for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
     server="${MCP_FLEET_NAMES[index]}"
     context="${CONTEXT_FLEET_NAMES[index]}"
-    desired="$(kctl get deployment "$server" -n "$MCP_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null)" || return 1
-    available="$(kctl get deployment "$server" -n "$MCP_NS" -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" || return 1
-    [ "${desired:-0}" -ge 1 ] && [ "${available:-0}" -ge 1 ] || return 1
-    kctl get service "$server" -n "$MCP_NS" >/dev/null 2>&1 || return 1
-    kctl get mcpserver "$server" -n "$MCP_NS" -o json | jq -e '
-      any(.status.conditions[]?; .type == "Ready" and .status == "True")
-    ' >/dev/null || return 1
     kctl get context "$context" -n "$MCP_NS" -o json | jq -e --arg server "$server" '
       .spec.mcpServers == [$server]
     ' >/dev/null || return 1
@@ -436,6 +429,30 @@ peer_fleet_converged() {
         -o json 2>/dev/null | jq '.items | length')" || return 1
       [ "$policy_count" = 1 ] || return 1
     done
+    if kctl get mcpserver "$server" -n "$MCP_NS" -o json | jq -e '
+      any(.status.conditions[]?; .type == "Ready" and .status == "True")
+    ' >/dev/null; then
+      ready_peers=$((ready_peers + 1))
+    fi
+  done
+  # At least one independent peer must finish a real runtime reconcile while
+  # the primary remains held. Requiring every peer here would contradict the
+  # deliberately bounded startup worker pool: a held item is allowed to leave
+  # later peers queued, but it must never keep HCC readiness unavailable.
+  [ "$ready_peers" -ge 1 ]
+}
+
+peer_fleet_converged() {
+  local index server desired available
+  for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
+    server="${MCP_FLEET_NAMES[index]}"
+    desired="$(kctl get deployment "$server" -n "$MCP_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null)" || return 1
+    available="$(kctl get deployment "$server" -n "$MCP_NS" -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" || return 1
+    [ "${desired:-0}" -ge 1 ] && [ "${available:-0}" -ge 1 ] || return 1
+    kctl get service "$server" -n "$MCP_NS" >/dev/null 2>&1 || return 1
+    kctl get mcpserver "$server" -n "$MCP_NS" -o json | jq -e '
+      any(.status.conditions[]?; .type == "Ready" and .status == "True")
+    ' >/dev/null || return 1
   done
 }
 
@@ -1261,11 +1278,11 @@ baseline_policies_exist ||
   die "baseline safety NetworkPolicies are absent while HCC reports Ready"
 hcc_identity_is_stable ||
   die "HCC restarted while the MCP external-egress query was held"
-wait_until 300 "unblocked peer MCP/Context fleet to converge during held primary egress" \
-  peer_fleet_converged ||
-  die "peer MCP/Context fleet did not converge while the primary egress remained held"
+wait_until 300 "peer MCP/Context fleet to make safe background progress during held primary egress" \
+  peer_fleet_has_background_progress ||
+  die "peer MCP/Context fleet made no safe background progress while the primary egress remained held"
 ok "/ready is 200 and discovery contains the exact McpServer while its real initial convergence is blocked"
-ok "all unblocked peer MCP/Context fixtures converged while the primary egress remained held"
+ok "the worker-width-crossing peer fleet made safe background progress while the primary egress remained held"
 ok "baseline NetworkPolicies exist and the stale same-name external-egress policy was revoked before Ready"
 
 initial_empty_context_log="[NetPol] Reconciling context \"${CONTEXT_ID}\" — allowed servers: []"
@@ -1323,6 +1340,9 @@ wait_until 30 "DNS blocker to answer the held query" \
 wait_until 300 "McpServer runtime, status, and latest Context NetworkPolicies to converge" \
   fixture_converged ||
   die "McpServer/Context/NetworkPolicy convergence did not complete after DNS release"
+wait_until 300 "all peer MCP/Context runtimes to converge after releasing the held primary egress" \
+  peer_fleet_converged ||
+  die "peer MCP/Context fleet did not converge after the held primary egress was released"
 wait_until 60 "initial NetworkPolicy full pass to run" \
   hcc_log_contains "Running initial NetworkPolicy background reconciliation" ||
   die "initial NetworkPolicy convergence was not observed after releasing MCP convergence"
@@ -1339,6 +1359,7 @@ echo "$final_probe" | jq -e \
   ' >/dev/null ||
   die "HCC final probe returned an invalid result: ${final_probe}"
 ok "released MCP convergence created the real runtime and external-egress policy"
+ok "the full worker-width-crossing peer fleet converged after releasing the held primary egress"
 ok "Context ingress, mcp-host egress, and rpc-proxy egress policies reflect the latest watch state"
 ok "HCC stayed Ready on the same pod throughout blocked and released convergence"
 
