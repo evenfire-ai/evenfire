@@ -2,9 +2,8 @@
 
 The Evenfire registry (`registry.evenfire.ai`) is a shared catalog of connectors
 and recipes. A **managed** deployment is connected for you; a **self-hosted**
-deployment connects itself, once. Depending on how the registry is configured,
-that either completes on its own or waits for an Evenfire operator to approve
-the request. This guide covers the self-hoster's side of that flow. Once
+deployment connects itself, once, with no human in the loop. You enter an
+organization name and a contact email, and the panel finishes on its own. Once
 connected you can install from the catalog, [publish under your own org](publish-plugin-to-registry.md),
 and use registry SSO from your Control UI.
 
@@ -23,40 +22,31 @@ and use registry SSO from your Control UI.
 ## Connect
 
 Open **Control UI → Marketplace → Connect** (`/marketplace/connect`). The panel
-walks one of two state machines, depending on how the registry is configured:
+walks `disconnected → connecting → connected`:
 
-- Auto-approved: `disconnected → connecting → connected`
-- Operator-approved: `disconnected → pending → approved → connected`
+1. **Request registration.** You enter an organization name and a contact
+   email. Your control-api generates a signing keypair, registers with the
+   registry, and saves the row. (The keypair is how the registry knows later
+   requests really come from this deployment. It never leaves your cluster.)
 
-1. **Request access.** You enter an organization name and a contact email. Your
-   control-api generates a signing keypair, registers with the registry, and
-   saves the row. (The keypair is how the registry knows later requests really
-   come from this deployment. It never leaves your cluster.)
+2. **The registry approves immediately** and your control-api redeems the
+   credentials inline. No operator is involved, and no claim token is ever
+   shown to a human.
 
-2. **What happens next depends on the registry.**
-   - **Open registration enabled** — the registry approves immediately and the
-     panel finishes connecting on its own. No operator is involved and no claim
-     token is ever shown to a human. If that automatic step cannot complete (a
-     network blip, or the registry briefly unavailable), the panel shows
-     **Finishing the connection** with a **Finish connecting** button; press it
-     to retry. In most cases, retrying with **Finish connecting** will succeed and
-     you never need a token. If the panel says to contact support, do that: a
-     suspended deployment can be reversed by Evenfire, and **Start over** would
-     destroy a keypair you may still need. Only use **Start over** when the
-     panel says the deployment's one-time credentials were issued but never
-     stored. That connection cannot be recovered: **Start over** permanently
-     deletes the deployment's stored registry credentials and gives up the
-     organization name. If you use **Start over**, you must register again
-     under a different organization name.
-
-   - **Open registration disabled** — the request lands as **pending**. An
-     Evenfire operator reviews it and either approves or rejects it. On
-     approval you receive a one-time claim token out of band; paste it into the
-     panel to finish connecting. Use **Refresh status** to check whether the
-     decision has landed.
+   If that automatic step cannot complete (a network blip, or the registry
+   briefly unavailable), the panel shows **Finishing the connection** with a
+   **Finish connecting** button. Press it to retry; in most cases it succeeds.
 
 3. **Connected.** The deployment holds its machine credentials and can read the
    catalog, publish entries, and push images to its own org.
+
+> ⚠️ **Start over is destructive and is rarely the answer.** It permanently
+> deletes this deployment's stored registry credentials and gives up the
+> organization name, so you must register again under a **different** name.
+> Use it only when the panel says the one-time credentials were issued but
+> never stored. If the panel tells you to contact support, do that instead: a
+> suspended deployment can be reversed by Evenfire, and **Start over** would
+> destroy a keypair you may still need.
 
 ## What connecting gives you
 
@@ -68,8 +58,8 @@ walks one of two state machines, depending on how the registry is configured:
 ## API keys for programmatic publishing
 
 Once connected, browsing the public catalog, publishing, and image push/pull all
-work using the credential stored when you claimed the connection — no further
-setup is needed for those.
+work using the credential stored when the connection completed. No further setup
+is needed for those.
 
 **Creating and managing API keys** (`efrk_` org keys, used for CI and other
 programmatic publishing) needs registry authentication active. In self-hosted,
@@ -84,15 +74,30 @@ others via `CLERUM_REGISTRY_URL_ALLOWLIST`.
 
 ## If something goes wrong
 
+Registration is refused up front, before anything is saved, in these cases:
+
+- **`org_name_taken`** — another deployment already holds that organization
+  name. Pick a different one and request again.
+- **`org_blocklisted`** — the name is reserved. Pick a different one.
+- **`invalid_contact_email`** — the address was rejected. Correct it and retry.
+- **`registration_capacity` / `rate_limited`** — the registry is throttling
+  registrations. Wait and retry; nothing is lost.
+
+Once a registration has landed, the panel reports these instead:
+
 - **Already connected** — a deployment has one connection; there is nothing more
   to do.
-- **Request rejected** — the operator declined (often an org-name conflict).
-  Adjust the requested name and request again.
-- **Claim token expired or rejected** — ask the operator to re-issue it; tokens
-  are single-use and time-limited.
+- **Finishing the connection** — the inline redeem did not land. Press **Finish
+  connecting**. This is the normal recovery and needs no token.
+- **`already_claimed`** — the one-time credentials were issued but never stored
+  here. This connection cannot be recovered; **Start over** under a new
+  organization name.
+- **`deployment_suspended`** — Evenfire suspended the deployment. Contact
+  support. Do **not** press Start over; a suspension can be reversed, a
+  destroyed keypair cannot.
 
 ## Not in this repo
 
-The approval side lives in Evenfire's operator console, which is part of the
-managed service, not this repository — this guide covers only the self-hoster's
-side. See [Open core: self-host vs hosted](../concepts/open-core-and-hosted.md).
+The registry service itself is part of Evenfire's managed offering, not this
+repository — this guide covers only the self-hoster's side. See
+[Open core: self-host vs hosted](../concepts/open-core-and-hosted.md).

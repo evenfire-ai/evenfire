@@ -66,17 +66,11 @@ lives at **Marketplace → Connect** (`/marketplace/connect`).
    registry. The private key never leaves your cluster; it is how the registry
    recognizes later requests from this deployment.
 
-2. What happens next depends on how the registry is configured:
-   - **Open registration enabled.** The registry approves immediately and the
-     panel finishes connecting on its own. No operator is involved and no claim
-     token is ever shown to a human. If that last step does not land (a network
-     blip, or the registry briefly unavailable), the panel offers **Finish
-     connecting** — press it to retry.
-
-   - **Open registration disabled.** The request lands as **pending** while an
-     Evenfire operator reviews it. On approval you receive a one-time claim
-     token out of band: paste it into the panel and press **Complete
-     connection**. **Refresh status** checks whether the decision has landed.
+2. The registry approves immediately and your control-api redeems the
+   credentials inline. No operator is involved and no claim token is ever shown
+   to a human. If that last step does not land (a network blip, or the registry
+   briefly unavailable), the panel offers **Finish connecting** — press it to
+   retry.
 
 3. The panel reports **connected**. Your deployment now holds machine
    credentials for the catalog, publishing, and image push/pull.
@@ -183,18 +177,19 @@ Field-by-field reference and the update/delete routes are in
 
 ## Troubleshooting
 
-| Symptom                                               | Cause and fix                                                                                                                                        |
-| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `control-api` will not start, complains about the URL | `CLERUM_REGISTRY_URL` is not in the allowlist. Add it to `CLERUM_REGISTRY_URL_ALLOWLIST` (see step 1).                                               |
-| No Connect panel, no banner                           | The deployment is in `managed` mode. Managed deployments are connected for you and have nothing to configure.                                        |
-| Request **rejected**                                  | An operator declined, most often an org-name conflict. Adjust the requested name and register again.                                                 |
-| Claim token expired or rejected                       | Tokens are single-use and time-limited. Ask the operator to re-issue.                                                                                |
-| Connect panel stuck mid-connect                       | Press **Finish connecting**. Reach for **Start over** only when the panel says the credentials were issued but never stored.                         |
-| `409 CONFLICT` on publish                             | That `name` + `version` already exists. Bump the version; versions are immutable.                                                                    |
-| `400 scope_required` on publish                       | The entry name is unscoped. Use `@<org>/<name>`.                                                                                                     |
-| `422` naming the `imageRef`                           | For an evenfire-hosted local plugin the image repo must equal the entry name, or the cross-org pull is denied at install time.                       |
-| `403` when managing **grants**                        | Expected. Deployments that onboarded through self-hosted connect do not hold `registry:grant`. Receiving and installing granted plugins still works. |
-| Connector installed but cannot reach its API          | Egress. Default-deny networking blocks anything not declared in the install's egress step.                                                           |
+| Symptom                                               | Cause and fix                                                                                                                                                                   |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `control-api` will not start, complains about the URL | `CLERUM_REGISTRY_URL` is not in the allowlist. Add it to `CLERUM_REGISTRY_URL_ALLOWLIST` (see step 1).                                                                          |
+| No Connect panel, no banner                           | The deployment is in `managed` mode. Managed deployments are connected for you and have nothing to configure.                                                                   |
+| `org_name_taken` on registration                      | Another deployment holds that organization name. Pick a different one and register again. Nothing was saved.                                                                    |
+| `org_blocklisted` on registration                     | The name is reserved. Pick a different one.                                                                                                                                     |
+| Connect panel stuck at **Finishing the connection**   | The inline redeem did not land. Press **Finish connecting**; it needs no token. Reach for **Start over** only when the panel says the credentials were issued but never stored. |
+| `deployment_suspended`                                | Evenfire suspended the deployment. Contact support. Do **not** press Start over: a suspension is reversible, a destroyed keypair is not.                                        |
+| `409 CONFLICT` on publish                             | That `name` + `version` already exists. Bump the version; versions are immutable.                                                                                               |
+| `400 scope_required` on publish                       | The entry name is unscoped. Use `@<org>/<name>`.                                                                                                                                |
+| `422` naming the `imageRef`                           | For an evenfire-hosted local plugin the image repo must equal the entry name, or the cross-org pull is denied at install time.                                                  |
+| `403` when managing **grants**                        | Expected. Deployments that onboarded through self-hosted connect do not hold `registry:grant`. Receiving and installing granted plugins still works.                            |
+| Connector installed but cannot reach its API          | Egress. Default-deny networking blocks anything not declared in the install's egress step.                                                                                      |
 
 ## Next steps
 
