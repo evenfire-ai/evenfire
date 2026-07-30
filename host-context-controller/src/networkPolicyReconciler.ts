@@ -41,7 +41,7 @@ import {
   McpServerCrdStatus,
   McpServerResolvedEgressIP,
 } from './types'
-import { applyNetworkPolicy, getErrorCode } from './utils'
+import { applyNetworkPolicy, getErrorCode, replaceWithConflictRetry } from './utils'
 
 type JsonPatchOperation = {
   op: 'add' | 'replace' | 'remove' | 'test'
@@ -349,6 +349,16 @@ export class NetworkPolicyReconciler {
 
   /** Reference to the MCP server cache so we can look up ports. */
   private serverCache: Map<string, McpServerCRD>
+
+  /**
+   * Set whenever an authoritative safety pass ends without certifying, cleared
+   * as soon as one certifies again. Only that pass enumerates the bounded
+   * namespaces and classifies every object it finds; the scoped delta lane sees
+   * nothing but its own label selectors. A delta therefore cannot vouch for a
+   * namespace whose classified inventory is still stuck on an unresolved
+   * policy, and must not certify readiness on its behalf.
+   */
+  private safetyPassLeftUncertified = false
 
   constructor(kc: k8s.KubeConfig, serverCache: Map<string, McpServerCRD>) {
     this.networkingApi = kc.makeApiClient(k8s.NetworkingV1Api)
@@ -814,7 +824,14 @@ export class NetworkPolicyReconciler {
 
     // Re-LIST every lane after writes so a same-name policy that was just
     // replaced is compared in its new form and cannot delete itself.
-    return await this.revokeStaleContextAllows(context, isCurrent)
+    const revoked = await this.revokeStaleContextAllows(context, isCurrent)
+    if (revoked && this.safetyPassLeftUncertified) {
+      console.warn(
+        `[NetPol] Not certifying the scoped delta for context "${contextId}": the last authoritative safety pass ended without certifying its namespace-wide inventory`
+      )
+      return false
+    }
+    return revoked
   }
 
   private async revokeStaleContextAllows(
@@ -829,6 +846,10 @@ export class NetworkPolicyReconciler {
   ): Promise<boolean> {
     if (!isCurrent()) return false
     const safetySnapshotProvided = listedPolicies !== undefined
+    // A delete whose uid/resourceVersion preconditions were rejected revoked
+    // nothing. The scoped lane has no second source of truth to reclassify
+    // from, so it finishes its remaining work and then declines to certify.
+    let lostDeleteFence = false
     const contextId = context.spec.contextId
     const allowedServers = context.spec.mcpServers || []
     const desiredIngress = new Map<string, k8s.V1NetworkPolicy>()
@@ -853,11 +874,27 @@ export class NetworkPolicyReconciler {
       if (!desired) {
         console.log(`[NetPol] Deleting orphaned policy "${existingName}"`)
         if (safetySnapshotProvided) {
-          if (!(await this.deleteSafetyPolicySnapshot(config.namespace, existing, isCurrent))) {
+          if (
+            !(await this.deleteSafetyPolicySnapshot(
+              config.namespace,
+              existing,
+              isCurrent,
+              undefined,
+              'report'
+            ))
+          ) {
             return false
           }
-        } else {
-          await this.deleteSafetyPolicySnapshot(config.namespace, existing, isCurrent)
+        } else if (
+          !(await this.deleteSafetyPolicySnapshot(
+            config.namespace,
+            existing,
+            isCurrent,
+            undefined,
+            'report'
+          ))
+        ) {
+          lostDeleteFence = true
         }
         onRevoked?.()
       } else if (
@@ -900,11 +937,27 @@ export class NetworkPolicyReconciler {
       if (!desired) {
         console.log(`[NetPol] Deleting orphaned L2 egress policy "${existingName}"`)
         if (safetySnapshotProvided) {
-          if (!(await this.deleteSafetyPolicySnapshot(config.hostNamespace, existing, isCurrent))) {
+          if (
+            !(await this.deleteSafetyPolicySnapshot(
+              config.hostNamespace,
+              existing,
+              isCurrent,
+              undefined,
+              'report'
+            ))
+          ) {
             return false
           }
-        } else {
-          await this.deleteSafetyPolicySnapshot(config.hostNamespace, existing, isCurrent)
+        } else if (
+          !(await this.deleteSafetyPolicySnapshot(
+            config.hostNamespace,
+            existing,
+            isCurrent,
+            undefined,
+            'report'
+          ))
+        ) {
+          lostDeleteFence = true
         }
         onRevoked?.()
       } else if (
@@ -948,12 +1001,26 @@ export class NetworkPolicyReconciler {
         console.log(`[NetPol] Deleting orphaned rpc-proxy egress policy "${existingName}"`)
         if (safetySnapshotProvided) {
           if (
-            !(await this.deleteSafetyPolicySnapshot(config.rpcProxyNamespace, existing, isCurrent))
+            !(await this.deleteSafetyPolicySnapshot(
+              config.rpcProxyNamespace,
+              existing,
+              isCurrent,
+              undefined,
+              'report'
+            ))
           ) {
             return false
           }
-        } else {
-          await this.deleteSafetyPolicySnapshot(config.rpcProxyNamespace, existing, isCurrent)
+        } else if (
+          !(await this.deleteSafetyPolicySnapshot(
+            config.rpcProxyNamespace,
+            existing,
+            isCurrent,
+            undefined,
+            'report'
+          ))
+        ) {
+          lostDeleteFence = true
         }
         onRevoked?.()
       } else if (
@@ -986,7 +1053,7 @@ export class NetworkPolicyReconciler {
       }
     }
 
-    return isCurrent()
+    return isCurrent() && !lostDeleteFence
   }
 
   /**
@@ -1034,6 +1101,10 @@ export class NetworkPolicyReconciler {
     const recordSafetyPassDuration = (outcome: 'completed' | 'failed'): void => {
       if (safetyPassDurationRecorded) return
       safetyPassDurationRecorded = true
+      // First outcome wins for both the sample and the delta fence: a pass that
+      // certified and only then failed an additive effect still revoked every
+      // stale allow its inventory implied.
+      this.safetyPassLeftUncertified = outcome === 'failed'
       networkPolicySafetyPassDurationSeconds.observe(
         { outcome },
         (performance.now() - safetyPassStartedAt) / 1_000
@@ -1048,6 +1119,9 @@ export class NetworkPolicyReconciler {
           recordSafetyPassDuration('completed')
         },
       })
+      // The pass returned without certifying: no exception, no certificate.
+      // Operators alert on this exact condition, so it must produce a sample
+      // rather than the absence of one.
       recordSafetyPassDuration('failed')
     } catch (error) {
       recordSafetyPassDuration('failed')
@@ -1643,11 +1717,19 @@ export class NetworkPolicyReconciler {
 
     // Preserve traffic only with deterministic CIDR/public-web policies. A
     // renamed deterministic binding is created before its stale predecessor is
-    // removed; a conflict aborts safety rather than adopting the live object.
+    // removed; a same-name conflict is converged only under the ownership
+    // guard, which still refuses to adopt a foreign live object.
     if (stale.length > 0) {
       for (const selected of desired.values()) {
         if (!selected.policy) continue
-        if (!(await this.createSafetyPolicy(server.namespace, selected.policy, isCurrent))) {
+        if (
+          !(await this.createSafetyPolicy(
+            server.namespace,
+            selected.policy,
+            'external-egress',
+            isCurrent
+          ))
+        ) {
           return false
         }
       }
@@ -2377,7 +2459,8 @@ export class NetworkPolicyReconciler {
     namespace: string,
     policy: k8s.V1NetworkPolicy,
     isCurrent?: () => boolean,
-    onDeleted?: () => void
+    onDeleted?: () => void,
+    lostFenceOutcome: 'throw' | 'report' = 'throw'
   ): Promise<boolean> {
     if (isCurrent && !isCurrent()) return false
     const { name, uid, resourceVersion } = this.safetyPolicyIdentity(policy)
@@ -2394,6 +2477,18 @@ export class NetworkPolicyReconciler {
       if (getErrorCode(error) === 404) {
         console.log(`[NetPol] Safety-inventory policy "${name}" already gone`)
         return true
+      }
+      if (getErrorCode(error) === 409 && lostFenceOutcome === 'report') {
+        // Kubernetes rejected the uid/resourceVersion preconditions, so the
+        // object live under this name is not the one the authoritative
+        // inventory classified. Nothing was revoked, and nothing may be
+        // adopted. Callers that opt in act on this outcome by declining to
+        // certify, which is the expected racy result rather than a failure.
+        // Callers that cannot act on it keep the loud default.
+        console.warn(
+          `[NetPol] Lost the delete fence on safety-inventory policy "${name}" in ${namespace}; it changed identity after the authoritative inventory and was not revoked`
+        )
+        return false
       }
       console.error(
         `[NetPol] Failed identity-bound delete of safety-inventory policy "${name}" in ${namespace}:`,
@@ -2448,13 +2543,42 @@ export class NetworkPolicyReconciler {
   private async createSafetyPolicy(
     namespace: string,
     desired: k8s.V1NetworkPolicy,
+    lane: SafetyInventoryLane,
     isCurrent: () => boolean
   ): Promise<boolean> {
     if (!isCurrent()) return false
-    const created = await this.networkingApi.createNamespacedNetworkPolicy({
-      namespace,
-      body: desired,
-    })
+    let created: k8s.V1NetworkPolicy
+    try {
+      created = await this.networkingApi.createNamespacedNetworkPolicy({
+        namespace,
+        body: desired,
+      })
+    } catch (error: unknown) {
+      if (getErrorCode(error) !== 409) throw error
+      // This is the only creation route that does not go through
+      // applyNetworkPolicy, so a same-name object used to abort the whole
+      // safety pass and hold readiness down. Converge it exactly like every
+      // other lane does: adopt it only under the ownership guard, which still
+      // refuses a foreign or ambiguous object.
+      const name = desired.metadata?.name
+      if (!name) {
+        throw new Error(`Cannot converge a conflicting ${lane} policy without a desired name`)
+      }
+      console.log(
+        `[NetPol] Safety policy "${name}" in ${namespace} already exists — converging it to the desired spec`
+      )
+      await replaceWithConflictRetry<k8s.V1NetworkPolicy>({
+        description: `policy "${name}" in ${namespace}`,
+        logPrefix: '[NetPol]',
+        body: desired,
+        read: () => this.networkingApi.readNamespacedNetworkPolicy({ name, namespace }),
+        replace: body =>
+          this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
+        mutationAllowed: isCurrent,
+        validateExisting: existing => this.assertPolicyOwnership(name, existing, desired, lane),
+      })
+      return isCurrent()
+    }
     if (isCurrent()) return true
 
     // The mutation crossed its desired-state fence. Remove exactly the object

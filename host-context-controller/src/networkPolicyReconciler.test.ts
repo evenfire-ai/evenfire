@@ -4692,4 +4692,301 @@ describe('NetworkPolicyReconciler', () => {
       expect(onDeleted).not.toHaveBeenCalled()
     })
   })
+
+  describe('scoped delta certification vs. a stuck safety inventory', () => {
+    const ambiguousReservedPolicy: k8s.V1NetworkPolicy = {
+      metadata: { name: 'ctx-reserved-context-server', labels: {} },
+      spec: { podSelector: {}, policyTypes: ['Ingress'] },
+    }
+    const deltaContext: ContextCRD = {
+      name: 'default',
+      namespace: 'mcp-server',
+      spec: { contextId: 'default', mcpServers: [] },
+    }
+
+    function stickSafetyInventory(): void {
+      // Only the namespace-wide safety inventory sees the foreign policy. The
+      // label-scoped LISTs the delta lane uses stay clean, which is exactly why
+      // the delta cannot vouch for the namespace.
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => ({
+          items: !labelSelector && namespace === 'mcp-server' ? [ambiguousReservedPolicy] : [],
+        })
+      )
+    }
+
+    it('refuses to certify a scoped delta while the safety pass is stuck on its inventory', async () => {
+      stickSafetyInventory()
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      await expect(
+        reconciler.fullReconcile([], [], {
+          ensureDefaults: false,
+          contextInventoryAuthoritative: () => true,
+          serverInventoryAuthoritative: () => true,
+          onAuthoritativeRevocationComplete,
+        })
+      ).rejects.toThrow(/Ambiguous NetworkPolicy ownership/)
+      expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
+
+      expect(await reconciler.reconcileContext(deltaContext)).toBe(false)
+    })
+
+    it('certifies a scoped delta again once a later safety pass completes', async () => {
+      stickSafetyInventory()
+      await expect(
+        reconciler.fullReconcile([], [], {
+          ensureDefaults: false,
+          contextInventoryAuthoritative: () => true,
+          serverInventoryAuthoritative: () => true,
+          onAuthoritativeRevocationComplete: vi.fn(),
+        })
+      ).rejects.toThrow(/Ambiguous NetworkPolicy ownership/)
+
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+      const onAuthoritativeRevocationComplete = vi.fn()
+      await reconciler.fullReconcile([], [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+        onAuthoritativeRevocationComplete,
+      })
+
+      expect(onAuthoritativeRevocationComplete).toHaveBeenCalledOnce()
+      expect(await reconciler.reconcileContext(deltaContext)).toBe(true)
+    })
+
+    it('certifies a scoped delta when no safety pass has failed', async () => {
+      expect(await reconciler.reconcileContext(deltaContext)).toBe(true)
+    })
+  })
+
+  describe('lost delete fence during stale-allow revocation', () => {
+    const staleContext: ContextCRD = {
+      name: 'default',
+      namespace: 'mcp-server',
+      spec: { contextId: 'default', mcpServers: [] },
+    }
+    const stalePolicy: k8s.V1NetworkPolicy = {
+      metadata: {
+        name: 'ctx-default-alpha',
+        namespace: 'mcp-server',
+        labels: {
+          'clerum.io/managed-by': 'host-context-controller',
+          'clerum.io/policy-type': 'context-allow',
+          'clerum.io/context': 'default',
+          'clerum.io/mcpserver': 'alpha',
+        },
+      },
+      spec: { podSelector: {}, policyTypes: ['Ingress'] },
+    }
+    const lostFence = Object.assign(new Error('the UID in the precondition does not match'), {
+      code: 409,
+    })
+
+    function listOnlyTheStalePolicy(): void {
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace }: { namespace?: string }) => ({
+          items: namespace === 'mcp-server' ? [stalePolicy] : [],
+        })
+      )
+    }
+
+    it('refuses to certify a scoped delta instead of throwing the lost fence', async () => {
+      listOnlyTheStalePolicy()
+      mockApi.deleteNamespacedNetworkPolicy.mockRejectedValueOnce(lostFence)
+
+      // 409 is what Kubernetes returns when the uid/resourceVersion
+      // preconditions no longer match: the object live under that name is not
+      // the one this pass classified. Nothing was revoked, so the delta must
+      // decline to certify — and it must not blow up the caller, which would
+      // only force a spurious full re-convergence.
+      expect(await reconciler.reconcileContext(staleContext)).toBe(false)
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'ctx-default-alpha', namespace: 'mcp-server' })
+      )
+    })
+
+    it('refuses to certify the safety pass instead of throwing the lost fence', async () => {
+      listOnlyTheStalePolicy()
+      mockApi.deleteNamespacedNetworkPolicy.mockRejectedValueOnce(lostFence)
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      await expect(
+        reconciler.fullReconcile([staleContext], [], {
+          ensureDefaults: false,
+          contextInventoryAuthoritative: () => true,
+          serverInventoryAuthoritative: () => true,
+          onAuthoritativeRevocationComplete,
+        })
+      ).rejects.toThrow(/Desired NetworkPolicy inventory changed/)
+
+      expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
+    })
+
+    it('still fails loud when the delete fails for any other reason', async () => {
+      listOnlyTheStalePolicy()
+      const forbidden = Object.assign(new Error('forbidden'), { code: 403 })
+      mockApi.deleteNamespacedNetworkPolicy.mockRejectedValueOnce(forbidden)
+
+      await expect(reconciler.reconcileContext(staleContext)).rejects.toBe(forbidden)
+    })
+
+    it('still certifies when the stale policy was already gone', async () => {
+      listOnlyTheStalePolicy()
+      mockApi.deleteNamespacedNetworkPolicy.mockRejectedValueOnce(
+        Object.assign(new Error('not found'), { code: 404 })
+      )
+
+      expect(await reconciler.reconcileContext(staleContext)).toBe(true)
+    })
+  })
+
+  describe('same-name conflict creating a safety external-egress policy', () => {
+    const server: McpServerCRD = {
+      name: 'renamed-server',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'default',
+        image: 'renamed:latest',
+        transport: { type: 'streamableHttp', port: 3000 },
+        egressBindings: [{ cidr: '104.18.0.0/16', port: 443 }],
+      },
+    }
+    const desiredName = 'ext-egress-renamed-server-104-18-0-0-16-443'
+    const stalePredecessor: k8s.V1NetworkPolicy = {
+      metadata: {
+        name: 'ext-egress-renamed-server-stale',
+        namespace: 'mcp-server',
+        uid: 'stale-uid',
+        resourceVersion: '3',
+      },
+    }
+
+    function reconcileExternalEgressSafety(): Promise<boolean> {
+      return (
+        reconciler as unknown as {
+          reconcileExternalEgressSafety: (
+            server: McpServerCRD,
+            existingPolicies: k8s.V1NetworkPolicy[],
+            isCurrent: () => boolean
+          ) => Promise<boolean>
+        }
+      ).reconcileExternalEgressSafety(server, [stalePredecessor], () => true)
+    }
+
+    it('converges an HCC-owned same-name policy instead of aborting the pass', async () => {
+      mockApi.createNamespacedNetworkPolicy.mockRejectedValueOnce(
+        Object.assign(new Error('already exists'), { code: 409 })
+      )
+      mockApi.readNamespacedNetworkPolicy.mockResolvedValueOnce({
+        metadata: {
+          name: desiredName,
+          namespace: server.namespace,
+          uid: 'own-uid',
+          resourceVersion: '7',
+          labels: {
+            'clerum.io/managed-by': 'host-context-controller',
+            'clerum.io/policy-type': 'external-egress',
+            'clerum.io/mcpserver': server.name,
+          },
+        },
+      })
+
+      // This is the only creation route that bypasses applyNetworkPolicy. A
+      // same-name object HCC already owns is an idempotent re-run, not a
+      // reason to fail the pass and hold readiness down.
+      expect(await reconcileExternalEgressSafety()).toBe(true)
+      expect(mockApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: desiredName, namespace: server.namespace })
+      )
+    })
+
+    it('still fails closed when the same-name policy is foreign', async () => {
+      mockApi.createNamespacedNetworkPolicy.mockRejectedValueOnce(
+        Object.assign(new Error('already exists'), { code: 409 })
+      )
+      mockApi.readNamespacedNetworkPolicy.mockResolvedValueOnce({
+        metadata: {
+          name: desiredName,
+          namespace: server.namespace,
+          uid: 'foreign-uid',
+          resourceVersion: '7',
+          labels: {
+            'clerum.io/managed-by': 'foreign-controller',
+            'clerum.io/policy-type': 'external-egress',
+            'clerum.io/mcpserver': server.name,
+          },
+        },
+      })
+
+      await expect(reconcileExternalEgressSafety()).rejects.toThrow(/ownership/i)
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('still fails loud when the create fails for any other reason', async () => {
+      const forbidden = Object.assign(new Error('forbidden'), { code: 403 })
+      mockApi.createNamespacedNetworkPolicy.mockRejectedValueOnce(forbidden)
+
+      await expect(reconcileExternalEgressSafety()).rejects.toBe(forbidden)
+    })
+  })
+
+  describe('safety-pass duration on the uncertified return path', () => {
+    it('samples a failed outcome when the pass returns without certifying', async () => {
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      // Losing inventory authority ends the pass without an exception and
+      // without certifying. Operators alert on "the pass never completed", so
+      // this path has to produce a `failed` sample — absence is not a signal.
+      await expect(
+        reconciler.fullReconcile([], [], {
+          ensureDefaults: false,
+          contextInventoryAuthoritative: () => false,
+          serverInventoryAuthoritative: () => true,
+          onAuthoritativeRevocationComplete,
+        })
+      ).resolves.toBeUndefined()
+
+      expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
+      expect(networkPolicySafetyPassDurationSeconds.observe).toHaveBeenCalledWith(
+        { outcome: 'failed' },
+        expect.any(Number)
+      )
+      expect(networkPolicySafetyPassDurationSeconds.observe).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps the completed sample when a certified pass fails an additive effect afterwards', async () => {
+      const context: ContextCRD = {
+        name: 'default',
+        namespace: 'mcp-server',
+        spec: { contextId: 'default', mcpServers: [] },
+      }
+      const additiveFailure = new Error('additive list unavailable')
+      let certified = false
+      const onAuthoritativeRevocationComplete = vi.fn(() => {
+        certified = true
+      })
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(async () => {
+        if (certified) throw additiveFailure
+        return { items: [] }
+      })
+
+      await expect(
+        reconciler.fullReconcile([context], [], {
+          ensureDefaults: false,
+          contextInventoryAuthoritative: () => true,
+          serverInventoryAuthoritative: () => true,
+          onAuthoritativeRevocationComplete,
+        })
+      ).rejects.toThrow(/additive Context NetworkPolicy reconciliations failed/)
+
+      expect(onAuthoritativeRevocationComplete).toHaveBeenCalledOnce()
+      expect(networkPolicySafetyPassDurationSeconds.observe).toHaveBeenCalledWith(
+        { outcome: 'completed' },
+        expect.any(Number)
+      )
+      expect(networkPolicySafetyPassDurationSeconds.observe).toHaveBeenCalledTimes(1)
+    })
+  })
 })
