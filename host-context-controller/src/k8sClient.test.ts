@@ -2601,7 +2601,8 @@ describe('McpServerWatcher startup', () => {
     const watcher = new McpServerWatcher()
     const acquired: string[] = []
     vi.spyOn(watcher as any, 'enqueueContextReconciliation').mockImplementation(
-      async (key: string, work: () => Promise<void>) => {
+      async (...args: unknown[]) => {
+        const [key, work] = args as [string, () => Promise<void>]
         acquired.push(key)
         await work()
       }
