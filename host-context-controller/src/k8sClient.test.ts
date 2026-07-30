@@ -2173,8 +2173,10 @@ describe('McpServerWatcher startup', () => {
     })
     await (watcher as any).startContextWatch('live-context-rv')
 
-    const firstResync = (watcher as any).runExternalEgressResync() as Promise<void>
-    const overlappingResync = (watcher as any).runExternalEgressResync() as Promise<void>
+    const firstResync = (watcher as any).externalEgressCoordinator.runResync() as Promise<void>
+    const overlappingResync = (
+      watcher as any
+    ).externalEgressCoordinator.runResync() as Promise<void>
     expect(overlappingResync).toBe(firstResync)
     await resyncStarted.promise
 
@@ -2233,7 +2235,7 @@ describe('McpServerWatcher startup', () => {
     )
     vi.spyOn(Math, 'random').mockReturnValue(0)
 
-    const periodic = (watcher as any).runExternalEgressResync() as Promise<void>
+    const periodic = (watcher as any).externalEgressCoordinator.runResync() as Promise<void>
     await mutationStarted.promise
     expect(oldLease?.()).toBe(true)
 
@@ -2277,7 +2279,7 @@ describe('McpServerWatcher startup', () => {
     ;(watcher as any).servers.set(staleServer.name, staleServer)
     const netPol = (watcher as any).netPolReconciler
 
-    const periodic = (watcher as any).runExternalEgressResync() as Promise<void>
+    const periodic = (watcher as any).externalEgressCoordinator.runResync() as Promise<void>
     await flushMicrotasks()
     await (watcher as any).getMcpServerWatchCallback()('MODIFIED', currentServer)
     await vi.advanceTimersByTimeAsync(2500)
@@ -3949,7 +3951,7 @@ describe('McpServerWatcher external egress retries', () => {
     expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(1)
     expect(reconciler.reconcile).toHaveBeenCalledTimes(1)
 
-    await (watcher as any).runExternalEgressResync()
+    await (watcher as any).externalEgressCoordinator.runResync()
 
     expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(2)
     expect(reconciler.reconcile).toHaveBeenCalledTimes(2)
@@ -4443,7 +4445,7 @@ describe('McpServerWatcher external egress retries', () => {
     })
     vi.spyOn(Math, 'random').mockReturnValue(0.5)
 
-    const resync = (watcher as any).runExternalEgressResync()
+    const resync = (watcher as any).externalEgressCoordinator.runResync()
     await flushMicrotasks()
     await watcher.stop()
     await vi.advanceTimersByTimeAsync(2500)
@@ -4464,7 +4466,7 @@ describe('McpServerWatcher external egress retries', () => {
       spec: serverObject.spec,
     })
 
-    await (watcher as any).runExternalEgressResync()
+    await (watcher as any).externalEgressCoordinator.runResync()
 
     expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(1)
 
@@ -4490,7 +4492,7 @@ describe('McpServerWatcher external egress retries', () => {
 
     const active = (watcher as any).runExternalEgressOnce('MODIFIED', server)
     await mutationStarted.promise
-    await (watcher as any).runExternalEgressResync()
+    await (watcher as any).externalEgressCoordinator.runResync()
 
     expect(netPol.reconcileExternalEgress).toHaveBeenCalledOnce()
 

@@ -61,7 +61,15 @@ vi.mock('./metrics', () => ({
 function makeMockNetworkingApi() {
   return {
     createNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
-    readNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '1' } }),
+    readNamespacedNetworkPolicy: vi.fn().mockImplementation(async ({ name }) => {
+      if (
+        name === 'allow-desktop-egress-rpc-proxy' ||
+        name === 'allow-rpc-proxy-to-managed-mcp-servers'
+      ) {
+        throw Object.assign(new Error('not found'), { code: 404 })
+      }
+      return { metadata: { resourceVersion: '1' } }
+    }),
     replaceNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
     listNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ items: [] }),
     deleteNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
@@ -317,6 +325,50 @@ describe('NetworkPolicyReconciler', () => {
   // ─── L1: Infrastructure Policies ───────────────────────────────────
 
   describe('L1 — ensureInfrastructurePolicies', () => {
+    it.each([
+      ['deny-all-mcp-server', 'default-deny'],
+      ['allow-dns-egress-mcp-server', 'infrastructure'],
+      ['allow-hcc-api-egress-mcp-server', 'infrastructure'],
+      ['allow-k8s-api-egress-mcp-server', 'infrastructure'],
+    ])(
+      'refuses to adopt a foreign policy that collides with %s',
+      async (targetName, policyType) => {
+        mockApi.createNamespacedNetworkPolicy.mockImplementation(
+          async ({ body }: { body: k8s.V1NetworkPolicy }) => {
+            if (body.metadata?.name === targetName) {
+              throw Object.assign(new Error('already exists'), { code: 409 })
+            }
+            return {}
+          }
+        )
+        mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => {
+          if (
+            name === 'allow-desktop-egress-rpc-proxy' ||
+            name === 'allow-rpc-proxy-to-managed-mcp-servers'
+          ) {
+            throw Object.assign(new Error('not found'), { code: 404 })
+          }
+          return {
+            metadata: {
+              name,
+              namespace,
+              uid: 'foreign-baseline-uid',
+              resourceVersion: '7',
+              labels: {
+                'clerum.io/managed-by': 'foreign-controller',
+                'clerum.io/policy-type': policyType,
+              },
+            },
+          }
+        })
+
+        await expect(reconciler.ensureDefaultPolicies()).rejects.toThrow(/ownership/i)
+        expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+          expect.objectContaining({ name: targetName })
+        )
+      }
+    )
+
     it('creates DNS egress policies in every runtime namespace', async () => {
       await reconciler.ensureDefaultPolicies()
 
@@ -475,33 +527,100 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('removes legacy static policies now replaced by generated scoped policies', async () => {
+      mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => ({
+        metadata: {
+          name,
+          namespace,
+          uid: `${name}-uid`,
+          resourceVersion: '7',
+          labels: {
+            'clerum.io/managed-by': 'host-context-controller',
+          },
+        },
+      }))
+
       await reconciler.ensureDefaultPolicies()
 
-      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          namespace: 'rpc-proxy',
-          name: 'allow-desktop-egress-rpc-proxy',
-        })
-      )
-      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          namespace: 'mcp-server',
-          name: 'allow-rpc-proxy-to-managed-mcp-servers',
-        })
-      )
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        namespace: 'rpc-proxy',
+        name: 'allow-desktop-egress-rpc-proxy',
+        body: {
+          preconditions: {
+            uid: 'allow-desktop-egress-rpc-proxy-uid',
+            resourceVersion: '7',
+          },
+        },
+      })
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        namespace: 'mcp-server',
+        name: 'allow-rpc-proxy-to-managed-mcp-servers',
+        body: {
+          preconditions: {
+            uid: 'allow-rpc-proxy-to-managed-mcp-servers-uid',
+            resourceVersion: '7',
+          },
+        },
+      })
     })
 
-    it('fails closed when legacy static policy cleanup fails', async () => {
-      const cleanupError = Object.assign(new Error('rbac denied'), { code: 403 })
-      mockApi.deleteNamespacedNetworkPolicy.mockImplementation(async ({ name }) => {
-        if (name === 'allow-rpc-proxy-to-managed-mcp-servers') {
-          throw cleanupError
+    it.each([
+      ['rpc-proxy', 'allow-desktop-egress-rpc-proxy'],
+      ['mcp-server', 'allow-rpc-proxy-to-managed-mcp-servers'],
+    ])('refuses to delete a foreign legacy policy %s/%s', async (targetNamespace, targetName) => {
+      mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => {
+        if (name !== targetName) {
+          throw Object.assign(new Error('not found'), { code: 404 })
         }
-        return {}
+        return {
+          metadata: {
+            name,
+            namespace,
+            uid: 'foreign-legacy-uid',
+            resourceVersion: '7',
+            labels: {
+              'clerum.io/managed-by': 'foreign-controller',
+            },
+          },
+        }
       })
 
-      await expect(reconciler.ensureDefaultPolicies()).rejects.toBe(cleanupError)
+      await expect(reconciler.ensureDefaultPolicies()).rejects.toThrow(/ownership/i)
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ namespace: targetNamespace, name: targetName })
+      )
     })
+
+    it.each([
+      ['rpc-proxy', 'allow-desktop-egress-rpc-proxy'],
+      ['mcp-server', 'allow-rpc-proxy-to-managed-mcp-servers'],
+    ])(
+      'propagates an identity conflict deleting legacy policy %s/%s',
+      async (targetNamespace, targetName) => {
+        mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => {
+          if (name !== targetName) {
+            throw Object.assign(new Error('not found'), { code: 404 })
+          }
+          return {
+            metadata: {
+              name,
+              namespace,
+              uid: 'legacy-policy-uid',
+              resourceVersion: '7',
+              labels: {
+                'clerum.io/managed-by': 'host-context-controller',
+              },
+            },
+          }
+        })
+        const conflict = Object.assign(new Error('identity changed'), { code: 409 })
+        mockApi.deleteNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => {
+          if (name === targetName && namespace === targetNamespace) throw conflict
+          return {}
+        })
+
+        await expect(reconciler.ensureDefaultPolicies()).rejects.toBe(conflict)
+      }
+    )
   })
 
   // ─── L1: Allow API ─────────────────────────────────────────────────
@@ -562,6 +681,48 @@ describe('NetworkPolicyReconciler', () => {
 
       await expect(reconciler.ensureDefaultPolicies()).rejects.toThrow(/ownership/i)
       expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('revalidates allow-api ownership after a replace conflict', async () => {
+      mockApi.createNamespacedNetworkPolicy.mockImplementation(
+        async ({ body }: { body: k8s.V1NetworkPolicy }) => {
+          if (body.metadata?.name === 'allow-host-context-controller-api') {
+            throw Object.assign(new Error('already exists'), { code: 409 })
+          }
+          return {}
+        }
+      )
+      mockApi.readNamespacedNetworkPolicy
+        .mockResolvedValueOnce({
+          metadata: {
+            name: 'allow-host-context-controller-api',
+            namespace: 'mcp-server',
+            uid: 'owned-uid',
+            resourceVersion: '7',
+            labels: {
+              'clerum.io/managed-by': 'host-context-controller',
+              'clerum.io/policy-type': 'allow-api',
+            },
+          },
+        })
+        .mockResolvedValueOnce({
+          metadata: {
+            name: 'allow-host-context-controller-api',
+            namespace: 'mcp-server',
+            uid: 'foreign-uid',
+            resourceVersion: '8',
+            labels: {
+              'clerum.io/managed-by': 'foreign-controller',
+              'clerum.io/policy-type': 'allow-api',
+            },
+          },
+        })
+      mockApi.replaceNamespacedNetworkPolicy.mockRejectedValueOnce(
+        Object.assign(new Error('conflict'), { code: 409 })
+      )
+
+      await expect(reconciler.ensureDefaultPolicies()).rejects.toThrow(/ownership/i)
+      expect(mockApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
     })
 
     it('creates allow-api ingress policy using _from (K8s client convention)', async () => {

@@ -702,6 +702,74 @@ else
   fail "divergent hold evidence can pass without HCC readiness"
 fi
 
+baseline_policy_snapshot_function="$(
+  sed -n '/^baseline_policy_snapshot() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+baseline_policies_unchanged_function="$(
+  sed -n '/^baseline_policies_unchanged() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+valid_baseline_policies='{"items":[
+  {"metadata":{"name":"deny-all-mcp-server","labels":{"clerum.io/managed-by":"host-context-controller","clerum.io/policy-type":"default-deny"}},"spec":{"podSelector":{},"policyTypes":["Ingress","Egress"]}},
+  {"metadata":{"name":"allow-dns-egress-mcp-server","labels":{"clerum.io/managed-by":"host-context-controller","clerum.io/policy-type":"infrastructure"}},"spec":{"podSelector":{},"policyTypes":["Egress"],"egress":[{"ports":[{"port":53,"protocol":"UDP"},{"port":53,"protocol":"TCP"}]}]}},
+  {"metadata":{"name":"allow-host-context-controller-api","labels":{"clerum.io/managed-by":"host-context-controller","clerum.io/policy-type":"allow-api"}},"spec":{"podSelector":{"matchLabels":{"app":"host-context-controller"}},"policyTypes":["Ingress"]}}
+]}'
+if (
+  MCP_NS=mcp-server
+  MANAGED_BY_VALUE=host-context-controller
+  MOCK_POLICY_JSON="$valid_baseline_policies"
+  kctl() { printf '%s\n' "$MOCK_POLICY_JSON"; }
+  eval "$baseline_policy_snapshot_function"
+  eval "$baseline_policies_unchanged_function"
+  BASELINE_POLICY_SNAPSHOT="$(baseline_policy_snapshot)"
+  baseline_policies_unchanged &&
+    MOCK_POLICY_JSON="$(jq -c '
+      .items[0].metadata.labels["clerum.io/managed-by"] = "foreign-controller"
+    ' <<<"$valid_baseline_policies")" &&
+    ! baseline_policies_unchanged &&
+    MOCK_POLICY_JSON="$(jq -c '.items[1].spec.egress[0].ports[0].port = 5353' \
+      <<<"$valid_baseline_policies")" &&
+    ! baseline_policies_unchanged
+); then
+  pass "baseline safety proof rejects ownership and spec drift under stable policy names"
+else
+  fail "baseline safety proof can pass after ownership or spec drift"
+fi
+
+peer_fleet_policies_absent_function="$(
+  sed -n '/^peer_fleet_policies_absent() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+fixture_resources_absent_function="$(
+  sed -n '/^fixture_resources_absent() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+delete_peer_fleet_runtime_function="$(
+  sed -n '/^delete_peer_fleet_runtime() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+if (
+  MCP_NS=mcp-server
+  HOST_NS=mcp-host
+  RPC_PROXY_NS=rpc-proxy
+  MCP_SERVER_LABEL=clerum.io/mcpserver
+  POLICY_TYPE_LABEL=clerum.io/policy-type
+  MCP_FLEET_NAMES=(primary peer)
+  CONTEXT_FLEET_NAMES=(primary-context peer-context)
+  SURVIVOR_NS=""
+  resource_absent() { [ "$3" != "$SURVIVOR_NS" ]; }
+  kctl() { return 0; }
+  eval "$peer_fleet_policies_absent_function"
+  peer_fleet_policies_absent &&
+    SURVIVOR_NS=mcp-host &&
+    ! peer_fleet_policies_absent &&
+    SURVIVOR_NS=rpc-proxy &&
+    ! peer_fleet_policies_absent
+) &&
+   [[ "$fixture_resources_absent_function" == *'peer_fleet_policies_absent'* ]] &&
+   [[ "$delete_peer_fleet_runtime_function" == *'"${context_policy}-egress"'* ]] &&
+   [[ "$delete_peer_fleet_runtime_function" == *'"rpc-egress-${context}-${server}"'* ]]; then
+  pass "peer fleet cleanup rejects surviving mcp-host or rpc-proxy policies"
+else
+  fail "peer fleet cleanup can release ownership with residual derived policies"
+fi
+
 # shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-logs.sh
 source "$LOG_HELPER"
 HCC_LOG_BUFFER="$MOCK_LOG_FILE"

@@ -101,6 +101,7 @@ HCC_GATE_LOCK_UID=""
 # shellcheck disable=SC2034
 HCC_GATE_FINALIZATION_FAILURE=""
 HCC_READY_PROBE_DIAGNOSTIC=""
+BASELINE_POLICY_SNAPSHOT=""
 
 [[ "$MCP_FLEET_SIZE" =~ ^[0-9]+$ ]] && [ "$MCP_FLEET_SIZE" -gt 10 ] &&
   [ "$MCP_FLEET_SIZE" -le 24 ] || {
@@ -478,7 +479,10 @@ fixture_runtime_converged_with_protocol() {
 }
 
 fixture_resources_absent() {
-  fixture_mcp_runtime_absent && context_policies_absent && peer_fleet_runtime_absent
+  fixture_mcp_runtime_absent &&
+    context_policies_absent &&
+    peer_fleet_runtime_absent &&
+    peer_fleet_policies_absent
 }
 
 fixture_inputs_absent() {
@@ -503,6 +507,24 @@ peer_fleet_runtime_absent() {
   done
 }
 
+peer_fleet_policies_absent() {
+  local index server context context_policy external_policies
+  for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
+    server="${MCP_FLEET_NAMES[index]}"
+    context="${CONTEXT_FLEET_NAMES[index]}"
+    context_policy="ctx-${context}-${server}"
+    resource_absent networkpolicy "$context_policy" "$MCP_NS" || return 1
+    resource_absent networkpolicy "${context_policy}-egress" "$HOST_NS" || return 1
+    resource_absent networkpolicy "rpc-egress-${context}-${server}" "$RPC_PROXY_NS" || return 1
+    external_policies="$(
+      kctl get networkpolicy -n "$MCP_NS" \
+        -l "${MCP_SERVER_LABEL}=${server},${POLICY_TYPE_LABEL}=external-egress" \
+        -o name 2>/dev/null
+    )" || return 1
+    [ -z "$external_policies" ] || return 1
+  done
+}
+
 peer_fleet_converged() {
   local index server context desired available
   for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
@@ -517,10 +539,37 @@ peer_fleet_converged() {
   done
 }
 
-baseline_policies_exist() {
-  kctl get networkpolicy "deny-all-${MCP_NS}" -n "$MCP_NS" >/dev/null 2>&1 &&
-    kctl get networkpolicy "allow-dns-egress-${MCP_NS}" -n "$MCP_NS" >/dev/null 2>&1 &&
-    kctl get networkpolicy allow-host-context-controller-api -n "$MCP_NS" >/dev/null 2>&1
+baseline_policy_snapshot() {
+  kctl get \
+    "networkpolicy/deny-all-${MCP_NS}" \
+    "networkpolicy/allow-dns-egress-${MCP_NS}" \
+    networkpolicy/allow-host-context-controller-api \
+    -n "$MCP_NS" -o json 2>/dev/null |
+    jq -ceS \
+      --arg managedBy "$MANAGED_BY_VALUE" \
+      --arg deny "deny-all-${MCP_NS}" \
+      --arg dns "allow-dns-egress-${MCP_NS}" '
+      [.items[] | {
+        name: .metadata.name,
+        managedBy: .metadata.labels["clerum.io/managed-by"],
+        policyType: .metadata.labels["clerum.io/policy-type"],
+        spec
+      }]
+      | sort_by(.name)
+      | select(length == 3)
+      | select(all(.[];
+          .managedBy == $managedBy and
+          ((.name == $deny and .policyType == "default-deny") or
+           (.name == $dns and .policyType == "infrastructure") or
+           (.name == "allow-host-context-controller-api" and .policyType == "allow-api"))))
+    '
+}
+
+baseline_policies_unchanged() {
+  local current
+  [ -n "$BASELINE_POLICY_SNAPSHOT" ] || return 1
+  current="$(baseline_policy_snapshot)" || return 1
+  [ "$current" = "$BASELINE_POLICY_SNAPSHOT" ]
 }
 
 context_watch_has_latest_spec() {
@@ -843,9 +892,11 @@ delete_residual_fixture_runtime() {
 }
 
 delete_peer_fleet_runtime() {
-  local index server failed=0
+  local index server context context_policy failed=0
   for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
     server="${MCP_FLEET_NAMES[index]}"
+    context="${CONTEXT_FLEET_NAMES[index]}"
+    context_policy="ctx-${context}-${server}"
     kctl delete deployment "$server" -n "$MCP_NS" --ignore-not-found --wait=true --timeout=60s \
       >/dev/null 2>&1 || failed=1
     kctl delete service "$server" -n "$MCP_NS" --ignore-not-found --wait=true --timeout=60s \
@@ -853,6 +904,10 @@ delete_peer_fleet_runtime() {
     kctl delete configmap "${server}-nginx-conf" -n "$MCP_NS" --ignore-not-found --wait=true --timeout=60s \
       >/dev/null 2>&1 || failed=1
     kctl delete networkpolicy -n "$MCP_NS" -l "${MCP_SERVER_LABEL}=${server}" \
+      --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
+    kctl delete networkpolicy "${context_policy}-egress" -n "$HOST_NS" \
+      --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
+    kctl delete networkpolicy "rpc-egress-${context}-${server}" -n "$RPC_PROXY_NS" \
       --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
   done
   [ "$failed" = 0 ]
@@ -1303,6 +1358,8 @@ wait_until 180 "HCC to create the real initial TCP external-egress policy" \
   external_egress_policy_converged_with_protocol "$INITIAL_EXTERNAL_EGRESS_PROTOCOL" ||
   die "HCC never created the initial external-egress policy for the stale-policy fixture"
 ok "HCC created a real initial TCP external-egress policy"
+BASELINE_POLICY_SNAPSHOT="$(baseline_policy_snapshot)" ||
+  die "could not capture canonical baseline NetworkPolicy ownership and specs"
 
 # Same-intent safety phase: restart with the exact same desired binding. The
 # safety pass must revoke the DNS-derived policy without resolving DNS, certify
@@ -1418,8 +1475,8 @@ external_egress_policy_absent ||
   die "a divergent external-egress policy survived the fail-closed revocation"
 context_policies_absent ||
   die "Context policy existed before the Context watch update"
-baseline_policies_exist ||
-  die "baseline safety NetworkPolicies are absent during safety convergence"
+baseline_policies_unchanged ||
+  die "baseline safety NetworkPolicy ownership or specs changed during safety convergence"
 hcc_identity_is_stable ||
   die "HCC restarted while the MCP external-egress query was held"
 ok "/ready is 200 while the divergent stale policy and affected runtime remain absent"
@@ -1495,6 +1552,8 @@ echo "$final_probe" | jq -e \
     .fixture == $fixture and .fixtureReady == true and .contextRef == $context
   ' >/dev/null ||
   die "HCC final probe returned an invalid result: ${final_probe}"
+baseline_policies_unchanged ||
+  die "baseline safety NetworkPolicy ownership or specs changed before final convergence"
 ok "DNS release created the current UDP policy and affected runtime without gating HCC readiness"
 ok "the full worker-width-crossing peer fleet converged after releasing the held primary egress"
 ok "Context ingress, mcp-host egress, and rpc-proxy egress policies reflect the latest watch state"

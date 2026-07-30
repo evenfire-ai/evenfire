@@ -3222,10 +3222,6 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
-  private runExternalEgressResync(): Promise<void> {
-    return this.externalEgressCoordinator.runResync()
-  }
-
   /**
    * Start watching McpServer CRDs.
    */

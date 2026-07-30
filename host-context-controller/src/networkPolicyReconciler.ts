@@ -411,7 +411,7 @@ export class NetworkPolicyReconciler {
         },
       }
 
-      await applyNetworkPolicy(this.networkingApi, name, ns, policy, '[NetPol]')
+      await this.applyFixedPolicy(name, ns, policy, 'default-deny')
     }
   }
 
@@ -485,7 +485,7 @@ export class NetworkPolicyReconciler {
         egress,
       },
     }
-    await applyNetworkPolicy(this.networkingApi, name, namespace, policy, '[NetPol]')
+    await this.applyFixedPolicy(name, namespace, policy, INFRA_POLICY_TYPE)
   }
 
   /** Allow egress to host-context-controller API gateway in control-plane namespace. */
@@ -522,7 +522,7 @@ export class NetworkPolicyReconciler {
         ],
       },
     }
-    await applyNetworkPolicy(this.networkingApi, name, namespace, policy, '[NetPol]')
+    await this.applyFixedPolicy(name, namespace, policy, INFRA_POLICY_TYPE)
   }
 
   /**
@@ -567,7 +567,7 @@ export class NetworkPolicyReconciler {
         ],
       },
     }
-    await applyNetworkPolicy(this.networkingApi, name, namespace, policy, '[NetPol]')
+    await this.applyFixedPolicy(name, namespace, policy, INFRA_POLICY_TYPE)
   }
 
   /**
@@ -610,21 +610,7 @@ export class NetworkPolicyReconciler {
       },
     }
 
-    await applyNetworkPolicy(
-      this.networkingApi,
-      name,
-      config.namespace,
-      policy,
-      '[NetPol]',
-      undefined,
-      existing => {
-        if (!hasExpectedPolicyOwnership(existing, 'allow-api')) {
-          throw new Error(
-            `NetworkPolicy "${name}" has conflicting ownership for the allow-api lane`
-          )
-        }
-      }
-    )
+    await this.applyFixedPolicy(name, config.namespace, policy, 'allow-api')
   }
 
   // ─── Context-Based Policies ──────────────────────────────────────────
@@ -2291,6 +2277,30 @@ export class NetworkPolicyReconciler {
   }
 
   /** Create or update a NetworkPolicy. */
+  private async applyFixedPolicy(
+    name: string,
+    namespace: string,
+    policy: k8s.V1NetworkPolicy,
+    policyType: string
+  ): Promise<void> {
+    await applyNetworkPolicy(
+      this.networkingApi,
+      name,
+      namespace,
+      policy,
+      '[NetPol]',
+      undefined,
+      existing => {
+        if (!hasExpectedPolicyOwnership(existing, policyType)) {
+          throw new Error(
+            `NetworkPolicy "${name}" has conflicting ownership for the ${policyType} lane`
+          )
+        }
+      }
+    )
+  }
+
+  /** Create or update a Context ingress NetworkPolicy. */
   private async applyContextIngressPolicy(
     name: string,
     policy: k8s.V1NetworkPolicy,
@@ -2552,17 +2562,17 @@ export class NetworkPolicyReconciler {
 
   /** Delete a formerly static NetworkPolicy that is now generated dynamically. */
   private async deleteLegacyStaticPolicy(namespace: string, name: string): Promise<void> {
+    let existing: k8s.V1NetworkPolicy
     try {
-      await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
-      console.log(`[NetPol] Deleted legacy static policy "${name}" in "${namespace}"`)
+      existing = await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
     } catch (error: unknown) {
-      if (getErrorCode(error) !== 404) {
-        console.error(
-          `[NetPol] Failed to delete legacy static policy "${name}" in "${namespace}":`,
-          error
-        )
-        throw error
-      }
+      if (getErrorCode(error) === 404) return
+      throw error
     }
+    if (existing.metadata?.labels?.[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE) {
+      throw new Error(`NetworkPolicy "${name}" has conflicting ownership for legacy cleanup`)
+    }
+    await this.deleteSafetyPolicySnapshot(namespace, existing)
+    console.log(`[NetPol] Deleted legacy static policy "${name}" in "${namespace}"`)
   }
 }
