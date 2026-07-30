@@ -38,6 +38,24 @@ describe('chatStoreBinding', () => {
     expect(() => requireChatStore()).toThrow(/Not authenticated/)
   })
 
+  it('does not follow symlinked quarantine roots during retention cleanup', async () => {
+    const externalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clerum-external-quarantine-'))
+    const sentinel = path.join(externalDir, 'corrupt-old')
+    await fs.mkdir(sentinel)
+    const old = new Date('2000-01-01T00:00:00.000Z')
+    await fs.utimes(sentinel, old, old)
+    const corruptRoot = path.join(tmpBase, ENV_A, 'user-a', 'agent-x', '.corrupt')
+    await fs.mkdir(path.dirname(corruptRoot), { recursive: true })
+    await fs.symlink(externalDir, corruptRoot, process.platform === 'win32' ? 'junction' : 'dir')
+
+    try {
+      await bindChatStoreForUser('user-a', ENV_A)
+      expect(await exists(sentinel)).toBe(true)
+    } finally {
+      await fs.rm(externalDir, { recursive: true, force: true })
+    }
+  })
+
   it('does not publish a stale store when logout interrupts an in-flight bind', async () => {
     await bindChatStoreForUser('seed-user', ENV_A)
     unbindChatStore()

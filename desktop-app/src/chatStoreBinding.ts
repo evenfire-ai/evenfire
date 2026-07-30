@@ -302,6 +302,7 @@ async function sweepExpiredCorruptQuarantines(userDir: string, nowMs = Date.now(
         await removeExpiredQuarantineEntries(join(agentDir, '.corrupt'), () => true, nowMs)
 
         const snapshotRoot = join(agentDir, 'chats', '.snapshots')
+        if (!(await isRealDirectory(snapshotRoot))) return
         const chatEntries = await fs.readdir(snapshotRoot, { withFileTypes: true }).catch(() => [])
         await Promise.all(
           chatEntries
@@ -318,11 +319,17 @@ async function sweepExpiredCorruptQuarantines(userDir: string, nowMs = Date.now(
   )
 }
 
+async function isRealDirectory(directory: string): Promise<boolean> {
+  const stat = await fs.lstat(directory).catch(() => null)
+  return Boolean(stat?.isDirectory() && !stat.isSymbolicLink())
+}
+
 async function removeExpiredQuarantineEntries(
   directory: string,
   shouldRemove: (name: string) => boolean,
   nowMs: number
 ): Promise<void> {
+  if (!(await isRealDirectory(directory))) return
   const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => [])
   await Promise.all(
     entries
