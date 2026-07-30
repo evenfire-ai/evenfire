@@ -7,7 +7,7 @@
  */
 import { config } from '../config.js'
 import { rootLogger } from '../observability/logger.js'
-import { resolveMachineCreds } from './registryConnectionDb.js'
+import { isRegistryAuthActive, resolveMachineCreds } from './registryConnectionDb.js'
 
 const API_BASE = `${config.registryUrl}/api/v1`
 
@@ -100,13 +100,12 @@ export async function mintToken(envOverride?: NodeJS.ProcessEnv): Promise<string
     }
   }
 
-  const authEnabledRaw = env.CLERUM_REGISTRY_AUTH_ENABLED
-  const authEnabled =
-    authEnabledRaw === undefined
-      ? envOverride
-        ? false
-        : config.registryAuthEnabled
-      : authEnabledRaw === 'true'
+  // Auth is ACTIVE when credentials actually exist (self-hosted) or the env
+  // says so (managed). The old CLERUM_REGISTRY_AUTH_ENABLED override is gone:
+  // in self-hosted the var is inert, and in managed isRegistryAuthActive()
+  // returns it verbatim. envOverride still short-circuits for the env-driven
+  // test/minikube paths, which must never touch the DB.
+  const authEnabled = envOverride ? false : await isRegistryAuthActive()
 
   if (!id || !secret) {
     if (!authEnabled) return '' // minikube / auth-off

@@ -13,7 +13,15 @@ const { cfg } = vi.hoisted(() => ({
 }))
 vi.mock('../src/config.js', () => ({ config: cfg }))
 
-const resolver = vi.hoisted(() => ({ resolveMachineCreds: vi.fn() }))
+// Task 7: mintToken() now also calls isRegistryAuthActive() to derive
+// authEnabled (replacing the CLERUM_REGISTRY_AUTH_ENABLED env read). This is
+// a whole-module mock, so isRegistryAuthActive must be included here too —
+// otherwise it is undefined on the mocked module and mintToken's `await
+// isRegistryAuthActive()` throws a TypeError in both tests below.
+const resolver = vi.hoisted(() => ({
+  resolveMachineCreds: vi.fn(),
+  isRegistryAuthActive: vi.fn(),
+}))
 vi.mock('../src/services/registryConnectionDb.js', () => resolver)
 
 afterEach(() => {
@@ -29,6 +37,8 @@ describe('mintToken — self-hosted sources creds from the DB row', () => {
       clientId: 'db-id',
       clientSecret: 'db-secret',
     })
+    // Mirrors the real self-hosted isRegistryAuthActive(): creds resolved → active.
+    resolver.isRegistryAuthActive.mockResolvedValue(true)
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(
@@ -44,6 +54,8 @@ describe('mintToken — self-hosted sources creds from the DB row', () => {
   it('returns "" (auth-off) when no creds are resolvable and auth is disabled', async () => {
     cfg.registryAuthEnabled = false
     resolver.resolveMachineCreds.mockResolvedValue(null)
+    // Mirrors the real self-hosted isRegistryAuthActive(): no creds → inactive.
+    resolver.isRegistryAuthActive.mockResolvedValue(false)
     expect(await mintToken()).toBe('')
   })
 })
