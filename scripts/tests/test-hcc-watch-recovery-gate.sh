@@ -521,6 +521,25 @@ else
   fail "MCP readiness gate duplicates ownership or retains a deadline, pod-absence, or port edge"
 fi
 
+# A single held McpServer proves the minimal failure, but this gate must also
+# cross the controller's bounded worker width with independent, gate-owned
+# McpServer/Context pairs. Keep this as a static contract so future edits do
+# not silently reduce the fleet scenario back to one fixture. The fixture
+# must exist while HCC is stopped, otherwise it would not exercise startup.
+mcp_peer_create_line="$(grep -nF 'create_peer_fleet || die' "$MCP_READINESS_GATE" | cut -d: -f1)"
+mcp_restart_line="$(grep -nF 'kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=1' "$MCP_READINESS_GATE" | tail -1 | cut -d: -f1)"
+if grep -Fq 'MCP_FLEET_SIZE="${E2E_HCC_MCP_FLEET_SIZE:-11}"' "$MCP_READINESS_GATE" &&
+   grep -Fq '[ "$MCP_FLEET_SIZE" -gt 10 ]' "$MCP_READINESS_GATE" &&
+   grep -Fq 'create_peer_fleet' "$MCP_READINESS_GATE" &&
+   grep -Fq 'peer_fleet_converged' "$MCP_READINESS_GATE" &&
+   grep -Fq 'unblocked peer MCP/Context fleet to converge during held primary egress' "$MCP_READINESS_GATE" &&
+   [ -n "$mcp_peer_create_line" ] && [ -n "$mcp_restart_line" ] &&
+   [ "$mcp_peer_create_line" -lt "$mcp_restart_line" ]; then
+  pass "MCP readiness gate crosses the bounded worker width with gate-owned MCP and Context peers"
+else
+  fail "MCP readiness gate does not prove a fleet larger than the worker width"
+fi
+
 for gate in "${GATES[@]}"; do
   acquire_line="$(grep -nF 'acquire_hcc_watch_gate_lock' "$gate" | tail -1 | cut -d: -f1)"
   case "$gate" in

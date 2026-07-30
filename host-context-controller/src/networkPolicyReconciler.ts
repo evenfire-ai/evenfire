@@ -1530,7 +1530,9 @@ export class NetworkPolicyReconciler {
           console.error(`[NetPol] Failed to delete external egress policy "${name}":`, error)
           throw error
         }
-        onDeleted?.()
+        // A concurrent actor may already have removed the policy. The safety
+        // invariant still holds, but this pass did not revoke it and must not
+        // inflate the authoritative safety-pass `revoked` counter.
       }
     }
   }

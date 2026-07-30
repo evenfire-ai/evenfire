@@ -2923,5 +2923,24 @@ describe('NetworkPolicyReconciler', () => {
         reconciler.cleanupExternalEgress('openai-mcp', 'mcp-server')
       ).resolves.toBeUndefined()
     })
+
+    it('does not report a revocation when the policy was already absent', async () => {
+      const error = Object.assign(new Error('not found'), { code: 404 })
+      const onDeleted = vi.fn()
+      mockApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [{ metadata: { name: 'ext-egress-openai-mcp-old-api-443' } }],
+      })
+      mockApi.deleteNamespacedNetworkPolicy.mockRejectedValueOnce(error)
+
+      await reconciler.cleanupExternalEgress(
+        'openai-mcp',
+        'mcp-server',
+        undefined,
+        undefined,
+        onDeleted
+      )
+
+      expect(onDeleted).not.toHaveBeenCalled()
+    })
   })
 })

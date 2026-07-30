@@ -10,7 +10,9 @@
 # before it reports Ready. While the query is held, the gate also applies a
 # real Context watch update and requires that Context's three NetworkPolicies
 # converge independently. It then releases DNS and proves eventual McpServer
-# runtime convergence.
+# runtime convergence. It also creates a fleet wider than the controller's
+# bounded worker width, so the branch-owned runtime proof covers the original
+# large-fleet symptom rather than a single delayed object only.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +55,7 @@ RUN_LABEL="$(truncate_rfc1123 "$RUN_ID")"
 MCP_NAME="$(truncate_rfc1123 "e2e-hcc-mcp-${RUN_ID}")"
 CONTEXT_NAME="$(truncate_rfc1123 "e2e-hcc-context-${RUN_ID}")"
 CONTEXT_ID="$CONTEXT_NAME"
+MCP_FLEET_SIZE="${E2E_HCC_MCP_FLEET_SIZE:-11}"
 TARGET_DNS="$(truncate_rfc1123 "hcc-readiness-${RUN_ID}").example.com"
 DNS_BLOCKER_NAME="$(truncate_rfc1123 "e2e-hcc-dns-${RUN_ID}")"
 DNS_BLOCKER_POLICY="$(truncate_rfc1123 "${DNS_BLOCKER_NAME}-policy")"
@@ -83,6 +86,9 @@ HCC_MUTATED=0
 DNS_BLOCKER_CREATED=0
 MCP_CREATED=0
 CONTEXT_CREATED=0
+PEER_FLEET_CREATED=0
+MCP_FLEET_NAMES=("$MCP_NAME")
+CONTEXT_FLEET_NAMES=("$CONTEXT_NAME")
 # Read and mutated by the sourced compare-and-swap lock helper.
 # shellcheck disable=SC2034
 HCC_GATE_LOCK_ACQUIRED=0
@@ -92,6 +98,16 @@ HCC_GATE_LOCK_NAME=""
 HCC_GATE_LOCK_UID=""
 # shellcheck disable=SC2034
 HCC_GATE_FINALIZATION_FAILURE=""
+
+[[ "$MCP_FLEET_SIZE" =~ ^[0-9]+$ ]] && [ "$MCP_FLEET_SIZE" -gt 10 ] &&
+  [ "$MCP_FLEET_SIZE" -le 24 ] || {
+  echo "E2E_HCC_MCP_FLEET_SIZE must be an integer from 11 through 24; got ${MCP_FLEET_SIZE}." >&2
+  exit 1
+}
+for ((index = 2; index <= MCP_FLEET_SIZE; index++)); do
+  MCP_FLEET_NAMES+=("$(truncate_rfc1123 "e2e-hcc-mcp-${RUN_ID}-${index}")")
+  CONTEXT_FLEET_NAMES+=("$(truncate_rfc1123 "e2e-hcc-context-${RUN_ID}-${index}")")
+done
 
 die() {
   if [ -n "$NEW_HCC_POD" ]; then
@@ -369,12 +385,58 @@ external_egress_policy_converged() {
 }
 
 fixture_resources_absent() {
-  fixture_mcp_runtime_absent && context_policies_absent
+  fixture_mcp_runtime_absent && context_policies_absent && peer_fleet_runtime_absent
 }
 
 fixture_inputs_absent() {
   resource_absent context "$CONTEXT_NAME" "$MCP_NS" &&
-    resource_absent mcpserver "$MCP_NAME" "$MCP_NS"
+    resource_absent mcpserver "$MCP_NAME" "$MCP_NS" && peer_fleet_inputs_absent
+}
+
+peer_fleet_inputs_absent() {
+  local index
+  for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
+    resource_absent context "${CONTEXT_FLEET_NAMES[index]}" "$MCP_NS" || return 1
+    resource_absent mcpserver "${MCP_FLEET_NAMES[index]}" "$MCP_NS" || return 1
+  done
+}
+
+peer_fleet_runtime_absent() {
+  local index server
+  for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
+    server="${MCP_FLEET_NAMES[index]}"
+    resource_absent deployment "$server" "$MCP_NS" || return 1
+    resource_absent service "$server" "$MCP_NS" || return 1
+  done
+}
+
+peer_fleet_converged() {
+  local index server context desired available namespace policy_type policy_count
+  for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
+    server="${MCP_FLEET_NAMES[index]}"
+    context="${CONTEXT_FLEET_NAMES[index]}"
+    desired="$(kctl get deployment "$server" -n "$MCP_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null)" || return 1
+    available="$(kctl get deployment "$server" -n "$MCP_NS" -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" || return 1
+    [ "${desired:-0}" -ge 1 ] && [ "${available:-0}" -ge 1 ] || return 1
+    kctl get service "$server" -n "$MCP_NS" >/dev/null 2>&1 || return 1
+    kctl get mcpserver "$server" -n "$MCP_NS" -o json | jq -e '
+      any(.status.conditions[]?; .type == "Ready" and .status == "True")
+    ' >/dev/null || return 1
+    kctl get context "$context" -n "$MCP_NS" -o json | jq -e --arg server "$server" '
+      .spec.mcpServers == [$server]
+    ' >/dev/null || return 1
+    for namespace_policy in \
+      "${MCP_NS}:context-allow" \
+      "${HOST_NS}:context-allow" \
+      "${RPC_PROXY_NS}:rpc-proxy-egress"; do
+      namespace="${namespace_policy%%:*}"
+      policy_type="${namespace_policy#*:}"
+      policy_count="$(kctl get networkpolicy -n "$namespace" \
+        -l "${CONTEXT_LABEL}=${context},${MCP_SERVER_LABEL}=${server},${POLICY_TYPE_LABEL}=${policy_type}" \
+        -o json 2>/dev/null | jq '.items | length')" || return 1
+      [ "$policy_count" = 1 ] || return 1
+    done
+  done
 }
 
 baseline_policies_exist() {
@@ -397,6 +459,47 @@ mcp_egress_binding_is_udp() {
       .spec.egressBindings[0].port == 443 and
       .spec.egressBindings[0].protocol == "UDP"
     ' >/dev/null
+}
+
+create_peer_fleet() {
+  local index server context
+  for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
+    server="${MCP_FLEET_NAMES[index]}"
+    context="${CONTEXT_FLEET_NAMES[index]}"
+    kctl apply -f - >/dev/null <<EOF
+apiVersion: clerum.io/v1alpha1
+kind: Context
+metadata:
+  name: ${context}
+  namespace: ${MCP_NS}
+  labels:
+    e2e.clerum.io/suite: ${SUITE_NAME}
+    e2e.clerum.io/run: "${RUN_LABEL}"
+spec:
+  contextId: ${context}
+  description: Gate-owned peer Context for HCC readiness fleet coverage.
+  mcpServers: [${server}]
+---
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: ${server}
+  namespace: ${MCP_NS}
+  labels:
+    e2e.clerum.io/suite: ${SUITE_NAME}
+    e2e.clerum.io/run: "${RUN_LABEL}"
+spec:
+  contextRef: ${context}
+  description: Gate-owned peer McpServer for bounded HCC fleet coverage.
+  image: clerum/mock-mcp-server:test
+  imagePullPolicy: IfNotPresent
+  transport:
+    type: streamableHttp
+    url: http://${server}.${MCP_NS}.svc.cluster.local:3000/mcp
+    port: 3000
+EOF
+  done
+  PEER_FLEET_CREATED=1
 }
 
 fixture_converged() {
@@ -626,6 +729,34 @@ delete_residual_fixture_runtime() {
     --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
   kctl delete networkpolicy -n "$MCP_NS" -l "${MCP_SERVER_LABEL}=${MCP_NAME}" \
     --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
+  delete_peer_fleet_runtime || failed=1
+  [ "$failed" = 0 ]
+}
+
+delete_peer_fleet_runtime() {
+  local index server failed=0
+  for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
+    server="${MCP_FLEET_NAMES[index]}"
+    kctl delete deployment "$server" -n "$MCP_NS" --ignore-not-found --wait=true --timeout=60s \
+      >/dev/null 2>&1 || failed=1
+    kctl delete service "$server" -n "$MCP_NS" --ignore-not-found --wait=true --timeout=60s \
+      >/dev/null 2>&1 || failed=1
+    kctl delete configmap "${server}-nginx-conf" -n "$MCP_NS" --ignore-not-found --wait=true --timeout=60s \
+      >/dev/null 2>&1 || failed=1
+    kctl delete networkpolicy -n "$MCP_NS" -l "${MCP_SERVER_LABEL}=${server}" \
+      --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
+  done
+  [ "$failed" = 0 ]
+}
+
+delete_peer_fleet_inputs() {
+  local index failed=0
+  for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
+    kctl delete context "${CONTEXT_FLEET_NAMES[index]}" -n "$MCP_NS" \
+      --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
+    kctl delete mcpserver "${MCP_FLEET_NAMES[index]}" -n "$MCP_NS" \
+      --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
+  done
   [ "$failed" = 0 ]
 }
 
@@ -686,6 +817,12 @@ cleanup() {
         cleanup_failed=1
         fixture_inputs_removed=0
       }
+  fi
+  if [ "$PEER_FLEET_CREATED" = 1 ]; then
+    delete_peer_fleet_inputs || {
+      cleanup_failed=1
+      fixture_inputs_removed=0
+    }
   fi
   if ! wait_until 60 "gate-owned Context and McpServer inputs to disappear" \
     fixture_inputs_absent >/dev/null 2>&1; then
@@ -1074,6 +1211,9 @@ wait_until 60 "McpServer API to expose the revised UDP external-egress binding" 
   mcp_egress_binding_is_udp ||
   die "McpServer external-egress revision did not persist"
 
+create_peer_fleet || die "could not create the gate-owned MCP/Context peer fleet"
+ok "created ${#MCP_FLEET_NAMES[@]} gate-owned MCP/Context fixtures for bounded-worker coverage"
+
 kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=1 >/dev/null
 
 capture_hcc() {
@@ -1121,7 +1261,11 @@ baseline_policies_exist ||
   die "baseline safety NetworkPolicies are absent while HCC reports Ready"
 hcc_identity_is_stable ||
   die "HCC restarted while the MCP external-egress query was held"
+wait_until 300 "unblocked peer MCP/Context fleet to converge during held primary egress" \
+  peer_fleet_converged ||
+  die "peer MCP/Context fleet did not converge while the primary egress remained held"
 ok "/ready is 200 and discovery contains the exact McpServer while its real initial convergence is blocked"
+ok "all unblocked peer MCP/Context fixtures converged while the primary egress remained held"
 ok "baseline NetworkPolicies exist and the stale same-name external-egress policy was revoked before Ready"
 
 initial_empty_context_log="[NetPol] Reconciling context \"${CONTEXT_ID}\" — allowed servers: []"
