@@ -4,12 +4,13 @@
 #
 # The gate runs only on an exact-HEAD, branch-owned Minikube profile. It routes
 # HCC DNS through an isolated in-cluster proxy that forwards every query except
-# one fixture hostname. Holding that single A query blocks real initial
-# McpServer external-egress reconciliation without a production test hook.
-# While the query is held, the gate proves readiness and discovery, applies a
-# real Context watch update, and requires that Context's three NetworkPolicies
-# to converge independently of the blocked McpServer entity. It then releases
-# DNS and proves eventual McpServer runtime convergence.
+# one fixture hostname. The gate first lets HCC create a real external-egress
+# policy, then changes that same DNS binding's protocol while HCC is stopped.
+# Holding the next A query proves HCC removes the now-unprovable old allow
+# before it reports Ready. While the query is held, the gate also applies a
+# real Context watch update and requires that Context's three NetworkPolicies
+# converge independently. It then releases DNS and proves eventual McpServer
+# runtime convergence.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,6 +67,8 @@ POLICY_TYPE_LABEL="clerum.io/policy-type"
 CONTEXT_LABEL="clerum.io/context"
 EXTERNAL_EGRESS_CIDR="93.184.216.34/32"
 EXTERNAL_EGRESS_PORT=443
+INITIAL_EXTERNAL_EGRESS_PROTOCOL=TCP
+EXTERNAL_EGRESS_PROTOCOL=UDP
 ORIGINAL_REPLICAS=""
 ORIGINAL_DNS_POLICY=""
 ORIGINAL_DNS_CONFIG=""
@@ -201,8 +204,7 @@ resource_absent() {
 
 fixture_mcp_runtime_absent() {
   local external_egress_policies
-  resource_absent deployment "$MCP_NAME" "$MCP_NS" &&
-    resource_absent service "$MCP_NAME" "$MCP_NS" || return 1
+  fixture_runtime_absent || return 1
   external_egress_policies="$(
     kctl get networkpolicy -n "$MCP_NS" \
       -l "${MCP_SERVER_LABEL}=${MCP_NAME},${POLICY_TYPE_LABEL}=external-egress" \
@@ -211,11 +213,20 @@ fixture_mcp_runtime_absent() {
   [ -z "$external_egress_policies" ]
 }
 
+fixture_runtime_absent() {
+  resource_absent deployment "$MCP_NAME" "$MCP_NS" &&
+    resource_absent service "$MCP_NAME" "$MCP_NS"
+}
+
 fixture_mcp_convergence_absent() {
   fixture_mcp_runtime_absent &&
     kctl get mcpserver "$MCP_NAME" -n "$MCP_NS" -o json 2>/dev/null |
     jq -e '
-      any(.status.conditions[]?; .type == "Ready" and .status == "True") | not
+      any(
+        .status.conditions[]?;
+        .type == "Ready" and .status == "True" and
+        (.observedGeneration // -1) == .metadata.generation
+      ) | not
     ' >/dev/null
 }
 
@@ -314,7 +325,8 @@ context_policies_converged() {
     ' >/dev/null
 }
 
-external_egress_policy_converged() {
+external_egress_policy_converged_with_protocol() {
+  local protocol=$1
   kctl get networkpolicy -n "$MCP_NS" \
     -l "${MCP_SERVER_LABEL}=${MCP_NAME},${POLICY_TYPE_LABEL}=external-egress" \
     -o json |
@@ -325,6 +337,7 @@ external_egress_policy_converged() {
       --arg managedByValue "$MANAGED_BY_VALUE" \
       --arg serverLabel "$MCP_SERVER_LABEL" \
       --arg policyTypeLabel "$POLICY_TYPE_LABEL" \
+      --arg protocol "$protocol" \
       --argjson port "$EXTERNAL_EGRESS_PORT" '
       (.items | length) == 1 and
       .items[0].metadata.labels[$managedByLabel] == $managedByValue and
@@ -333,10 +346,14 @@ external_egress_policy_converged() {
       .items[0].spec.podSelector.matchLabels[$serverLabel] == $server and
       .items[0].spec.policyTypes == ["Egress"] and
       (.items[0].spec.egress | length) == 1 and
-      .items[0].spec.egress[0].ports == [{port: $port, protocol: "TCP"}] and
+      .items[0].spec.egress[0].ports == [{port: $port, protocol: $protocol}] and
       (.items[0].spec.egress[0].to | length) == 1 and
       .items[0].spec.egress[0].to[0].ipBlock == {cidr: $cidr}
     ' >/dev/null
+}
+
+external_egress_policy_converged() {
+  external_egress_policy_converged_with_protocol "$EXTERNAL_EGRESS_PROTOCOL"
 }
 
 fixture_resources_absent() {
@@ -357,6 +374,13 @@ baseline_policies_exist() {
 context_watch_has_latest_spec() {
   kctl get context "$CONTEXT_NAME" -n "$MCP_NS" -o json |
     jq -e --arg server "$MCP_NAME" '.spec.mcpServers == [$server]' >/dev/null
+}
+
+mcp_egress_binding_is_udp() {
+  kctl get mcpserver "$MCP_NAME" -n "$MCP_NS" -o json |
+    jq -e --arg dns "$TARGET_DNS" '
+      .spec.egressBindings == [{dns: $dns, port: 443, protocol: "UDP"}]
+    ' >/dev/null
 }
 
 fixture_converged() {
@@ -526,6 +550,37 @@ NODE
 )"
   kctl exec "deployment/${DNS_BLOCKER_NAME}" -n "$HCC_NS" -c dns-blocker -- \
     node -e "$release_script"
+}
+
+hold_dns_blocker() {
+  local hold_script
+  hold_script="$(cat <<'NODE'
+const http = require('http');
+const request = http.request(
+  {host: '127.0.0.1', port: 8090, path: '/hold', method: 'POST'},
+  response => {
+    response.resume();
+    response.on('end', () => process.exit(response.statusCode === 200 ? 0 : 2));
+  }
+);
+request.setTimeout(5000, () => request.destroy(new Error('timeout')));
+request.once('error', error => { console.error(error.message); process.exit(3); });
+request.end();
+NODE
+)"
+  kctl exec "deployment/${DNS_BLOCKER_NAME}" -n "$HCC_NS" -c dns-blocker -- \
+    node -e "$hold_script"
+}
+
+delete_fixture_runtime_preserving_external_policy() {
+  local failed=0
+  kctl delete deployment "$MCP_NAME" -n "$MCP_NS" \
+    --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
+  kctl delete service "$MCP_NAME" -n "$MCP_NS" \
+    --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
+  kctl delete configmap "${MCP_NAME}-nginx-conf" -n "$MCP_NS" \
+    --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
+  [ "$failed" = 0 ] && fixture_runtime_absent
 }
 
 delete_dns_blocker_fixture() {
@@ -755,7 +810,7 @@ spec:
           const dgram=require('node:dgram'),http=require('node:http'),
           net=require('node:net');
           const target=process.env.TARGET_DNS,upstream=process.env.UPSTREAM_DNS;
-          const udp=dgram.createSocket('udp4');let released=false;const held=[];
+          const udp=dgram.createSocket('udp4');let released=process.env.START_RELEASED==='1';const held=[];
           function question(message){let offset=12,labels=[];while(offset<message.length){
           const length=message[offset++];if(length===0)break;if(offset+length>message.length)
           return null;labels.push(message.subarray(offset,offset+length).toString('ascii'));
@@ -805,11 +860,14 @@ spec:
           });tcp.listen(8053,'0.0.0.0',listening);
           http.createServer((request,response)=>{if(request.method==='POST'&&
           request.url==='/release'){released=true;while(held.length)respond(held.shift());
-          response.writeHead(200);response.end('released');return;}response.writeHead(404);
-          response.end();}).listen(8090,'127.0.0.1');
+          response.writeHead(200);response.end('released');return;}if(request.method==='POST'&&
+          request.url==='/hold'){released=false;response.writeHead(200);response.end('holding');return;}
+          response.writeHead(404);response.end();}).listen(8090,'127.0.0.1');
         env:
         - name: TARGET_DNS
           value: ${TARGET_DNS}
+        - name: START_RELEASED
+          value: "1"
         - name: UPSTREAM_DNS
           value: ${UPSTREAM_DNS_IP}
         resources:
@@ -915,9 +973,25 @@ DNS_BLOCKER_IP="$(kctl get service "$DNS_BLOCKER_NAME" -n "$HCC_NS" \
 ok "isolated DNS hold proxy is ready and forwards non-fixture UDP/TCP queries to CoreDNS"
 
 HCC_MUTATED=1
-kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0 >/dev/null
-wait_until 120 "existing HCC pods to stop" hcc_pods_absent ||
-  die "existing HCC pod did not stop"
+dns_patch="$(jq -cn --arg nameserver "$DNS_BLOCKER_IP" '
+  {spec:{template:{spec:{
+    dnsPolicy:"None",
+    dnsConfig:{
+      nameservers:[$nameserver],
+      options:[
+        {name:"ndots",value:"1"},
+        {name:"timeout",value:"30"},
+        {name:"attempts",value:"20"}
+      ]
+    }
+  }}}}
+')"
+kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=strategic \
+  -p "$dns_patch" >/dev/null
+kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" --timeout=180s >/dev/null ||
+  die "HCC did not become Ready with the deterministic DNS proxy"
+wait_until 60 "HCC /ready endpoint with the released DNS proxy" probe_hcc_ready_pod ||
+  die "HCC readiness was unavailable before the stale-policy fixture"
 
 CONTEXT_CREATED=1
 kctl apply -f - >/dev/null <<EOF
@@ -957,24 +1031,31 @@ spec:
   egressBindings:
   - dns: ${TARGET_DNS}
     port: 443
-    protocol: TCP
+    protocol: ${INITIAL_EXTERNAL_EGRESS_PROTOCOL}
 EOF
 
-dns_patch="$(jq -cn --arg nameserver "$DNS_BLOCKER_IP" '
-  {spec:{template:{spec:{
-    dnsPolicy:"None",
-    dnsConfig:{
-      nameservers:[$nameserver],
-      options:[
-        {name:"ndots",value:"1"},
-        {name:"timeout",value:"30"},
-        {name:"attempts",value:"20"}
-      ]
-    }
-  }}}}
-')"
-kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=strategic \
-  -p "$dns_patch" >/dev/null
+wait_until 180 "HCC to create the real initial TCP external-egress policy" \
+  external_egress_policy_converged_with_protocol "$INITIAL_EXTERNAL_EGRESS_PROTOCOL" ||
+  die "HCC never created the initial external-egress policy for the stale-policy fixture"
+ok "HCC created a real TCP external-egress policy before the revision"
+
+kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0 >/dev/null
+wait_until 120 "existing HCC pods to stop" hcc_pods_absent ||
+  die "existing HCC pod did not stop"
+delete_fixture_runtime_preserving_external_policy ||
+  die "could not remove the initial MCP runtime while retaining its external-egress policy"
+external_egress_policy_converged_with_protocol "$INITIAL_EXTERNAL_EGRESS_PROTOCOL" ||
+  die "the actual initial external-egress policy disappeared before the revision"
+
+hold_dns_blocker || die "could not hold the next fixture DNS query"
+egress_patch="$(jq -cn --arg dns "$TARGET_DNS" \
+  '{spec:{egressBindings:[{dns:$dns,port:443,protocol:"UDP"}]}}')"
+kctl patch mcpserver "$MCP_NAME" -n "$MCP_NS" --type=merge \
+  -p "$egress_patch" >/dev/null
+wait_until 60 "McpServer API to expose the revised UDP external-egress binding" \
+  mcp_egress_binding_is_udp ||
+  die "McpServer external-egress revision did not persist"
+
 kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=1 >/dev/null
 
 capture_hcc() {
@@ -1003,6 +1084,8 @@ dns_log_contains "holding DNS A ${TARGET_DNS}" ||
 if dns_log_contains "released DNS A ${TARGET_DNS}"; then
   die "DNS blocker released the McpServer query before Kubernetes reported HCC Ready"
 fi
+fixture_mcp_runtime_absent ||
+  die "the stale same-name external-egress policy or fixture runtime survived before HCC reported Ready"
 fixture_mcp_convergence_absent ||
   die "fixture runtime, policy, or Ready status appeared before Kubernetes reported HCC Ready"
 blocked_probe="$(probe_hcc_during_block)" ||
@@ -1021,7 +1104,7 @@ baseline_policies_exist ||
 hcc_identity_is_stable ||
   die "HCC restarted while the MCP external-egress query was held"
 ok "/ready is 200 and discovery contains the exact McpServer while its real initial convergence is blocked"
-ok "baseline NetworkPolicies exist and no fixture runtime/policy was created prematurely"
+ok "baseline NetworkPolicies exist and the stale same-name external-egress policy was revoked before Ready"
 
 initial_empty_context_log="[NetPol] Reconciling context \"${CONTEXT_ID}\" — allowed servers: []"
 wait_until 120 "initial NetworkPolicy pass to reconcile the fixture's empty Context snapshot" \

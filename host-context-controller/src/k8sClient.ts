@@ -52,7 +52,7 @@ import {
   initialConvergenceLastSuccessTimestampSeconds,
   initialConvergenceRetriesTotal,
 } from './metrics'
-import { NetworkPolicyReconciler } from './networkPolicyReconciler'
+import { NetworkPolicyReconciler, sameContextDesiredRevision } from './networkPolicyReconciler'
 import { McpServerReconciler } from './reconciler'
 import { SharedFileSystemReconciler } from './sharedFileSystemReconciler'
 import {
@@ -623,6 +623,8 @@ export class McpServerWatcher implements McpServerProvider {
   private communicationChannels: Map<string, CommunicationChannelCRD> = new Map()
   private mcpWatchGeneration = 0
   private contextWatchGeneration = 0
+  private mcpServerDesiredRevision = 0
+  private contextDesiredRevision = 0
   // Readiness covers authoritative revocation, not additive fleet completion.
   // Generations bind the completed safety sweep to the exact LIST -> WATCH
   // pair that supplied its absence decisions. A recovered watch invalidates
@@ -2513,6 +2515,8 @@ export class McpServerWatcher implements McpServerProvider {
         resolveCurrentContextById: contextId =>
           [...this.contexts.values()].find(context => context.spec.contextId === contextId),
         resolveCurrentServer: name => this.servers.get(name),
+        contextDesiredRevision: () => this.contextDesiredRevision,
+        serverDesiredRevision: () => this.mcpServerDesiredRevision,
         onAuthoritativeRevocationComplete: () => {
           if (!contextInventoryAuthoritative() || !serverInventoryAuthoritative()) return
           this.networkPolicyRevocationContextGeneration = contextInventoryGeneration
@@ -3043,13 +3047,17 @@ export class McpServerWatcher implements McpServerProvider {
       const previous = this.servers.get(server.name)
 
       // Update cache
+      let desiredStateChanged = false
       if (type === 'ADDED' || type === 'MODIFIED') {
+        desiredStateChanged =
+          previous === undefined || !sameMcpServerDesiredRevision(previous, server)
         this.servers.set(server.name, server)
       } else if (type === 'DELETED') {
         if (!previous?.uid || !server.uid || previous.uid === server.uid) {
-          this.servers.delete(server.name)
+          desiredStateChanged = this.servers.delete(server.name)
         }
       }
+      if (desiredStateChanged) this.mcpServerDesiredRevision += 1
 
       // HCC writes McpServer status during reconciliation. Those writes emit
       // MODIFIED events but do not change the desired runtime or policy state.
@@ -3351,11 +3359,15 @@ export class McpServerWatcher implements McpServerProvider {
       const previous = this.contexts.get(context.name)
 
       // Cache the context for cross-resource re-reconciliation
+      let desiredStateChanged = false
       if (type === 'ADDED' || type === 'MODIFIED') {
+        desiredStateChanged =
+          previous === undefined || !sameContextDesiredRevision(previous, context)
         this.contexts.set(context.name, context)
       } else if (type === 'DELETED') {
-        this.contexts.delete(context.name)
+        desiredStateChanged = this.contexts.delete(context.name)
       }
+      if (desiredStateChanged) this.contextDesiredRevision += 1
 
       // Re-reconcile every SFS this Context referenced before or after the
       // change so SharedFileSystem.status.mountedByContexts stays in sync

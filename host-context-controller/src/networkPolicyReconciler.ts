@@ -49,11 +49,32 @@ type NetworkPolicyMutationOptions = {
   isCurrent?: () => boolean
 }
 
-function sameContextDesiredRevision(expected: ContextCRD, current: ContextCRD): boolean {
+export function sameContextDesiredRevision(expected: ContextCRD, current: ContextCRD): boolean {
   return (
     expected.name === current.name &&
     expected.namespace === current.namespace &&
     JSON.stringify(expected.spec) === JSON.stringify(current.spec)
+  )
+}
+
+function canonicalizeNetworkPolicyValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeNetworkPolicyValue)
+  if (value === null || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalizeNetworkPolicyValue(entry)])
+  )
+}
+
+function sameNetworkPolicySpec(
+  existing: k8s.V1NetworkPolicy,
+  desired: k8s.V1NetworkPolicy
+): boolean {
+  return (
+    JSON.stringify(canonicalizeNetworkPolicyValue(existing.spec)) ===
+    JSON.stringify(canonicalizeNetworkPolicyValue(desired.spec))
   )
 }
 
@@ -188,6 +209,13 @@ export interface NetworkPolicyFullReconcileOptions {
   resolveCurrentContext?: (name: string) => ContextCRD | undefined
   resolveCurrentContextById?: (contextId: string) => ContextCRD | undefined
   resolveCurrentServer?: (name: string) => McpServerCRD | undefined
+  /**
+   * Monotonic desired-state revisions fence ordinary watch events that arrive
+   * after an owner has completed its safety turn. Watch generations remain the
+   * separate authority fence for LIST -> WATCH recovery.
+   */
+  contextDesiredRevision?: () => number
+  serverDesiredRevision?: () => number
   /**
    * Called only after every authoritative orphan-allow revocation lane has
    * completed. Additive Context/McpServer convergence intentionally happens
@@ -468,54 +496,21 @@ export class NetworkPolicyReconciler {
 
   // ─── Context-Based Policies ──────────────────────────────────────────
 
-  /**
-   * Reconcile NetworkPolicies for a Context CRD.
-   * Creates one policy per allowed MCP server.
-   */
-  async reconcileContext(
+  private buildContextAllowPolicies(
     context: ContextCRD,
-    options: NetworkPolicyMutationOptions = {}
-  ): Promise<void> {
-    const callerIsCurrent = options.isCurrent ?? (() => true)
-    if (!callerIsCurrent()) return
+    server: McpServerCRD
+  ): {
+    ingress: k8s.V1NetworkPolicy
+    hostEgress: k8s.V1NetworkPolicy
+    rpcProxyEgress: k8s.V1NetworkPolicy
+  } {
     const contextId = context.spec.contextId
-    const allowedServers = context.spec.mcpServers || []
-    const selectedServers = new Map(
-      allowedServers.map(serverName => [serverName, this.serverCache.get(serverName)])
-    )
-    const isCurrent = (): boolean =>
-      callerIsCurrent() &&
-      allowedServers.every(serverName => {
-        const selected = selectedServers.get(serverName)
-        const current = this.serverCache.get(serverName)
-        if (!selected || !current) return selected === current
-        return sameMcpServerDesiredRevision(selected, current)
-      })
-    if (!isCurrent()) return
+    const serverName = server.name
+    const name = this.policyName(contextId, serverName)
+    const port = server.spec.transport.port || 3000
 
-    console.log(
-      `[NetPol] Reconciling context "${contextId}" — allowed servers: [${allowedServers.join(', ')}]`
-    )
-
-    const existingPolicies = await this.listPoliciesForContext(contextId)
-    if (!isCurrent()) return
-
-    // Create or update policies for each allowed server
-    for (const serverName of allowedServers) {
-      if (!isCurrent()) return
-      const server = this.serverCache.get(serverName)
-      if (!server) {
-        console.warn(
-          `[NetPol] McpServer "${serverName}" not found in cache — skipping policy for context "${contextId}"`
-        )
-        continue
-      }
-
-      const name = this.policyName(contextId, serverName)
-      const port = server.spec.transport.port || 3000
-
-      // L2 ingress: allow scoped mcp-host/rpc-proxy access to this MCP server.
-      const ingressPolicy: k8s.V1NetworkPolicy = {
+    return {
+      ingress: {
         apiVersion: 'networking.k8s.io/v1',
         kind: 'NetworkPolicy',
         metadata: {
@@ -564,7 +559,6 @@ export class NetworkPolicyReconciler {
                   },
                 },
                 {
-                  // MCP Proxy ingress: allow proxy to reach MCP servers
                   namespaceSelector: {
                     matchLabels: {
                       'kubernetes.io/metadata.name': config.namespace,
@@ -581,19 +575,12 @@ export class NetworkPolicyReconciler {
             },
           ],
         },
-      }
-
-      await this.applyPolicy(name, ingressPolicy, isCurrent)
-      if (!isCurrent()) return
-
-      // L2 egress counterpart: allow traffic FROM mcp-host pods TO this MCP server
-      // Without this, L0 egress deny-all blocks agents from reaching MCP servers.
-      const egressName = `${name}-egress`
-      const egressPolicy: k8s.V1NetworkPolicy = {
+      },
+      hostEgress: {
         apiVersion: 'networking.k8s.io/v1',
         kind: 'NetworkPolicy',
         metadata: {
-          name: egressName,
+          name: `${name}-egress`,
           namespace: config.hostNamespace,
           labels: {
             [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
@@ -630,20 +617,79 @@ export class NetworkPolicyReconciler {
             },
           ],
         },
+      },
+      rpcProxyEgress: this.buildRpcProxyEgressPolicy(contextId, serverName, port),
+    }
+  }
+
+  /**
+   * Reconcile NetworkPolicies for a Context CRD.
+   * Creates one policy per allowed MCP server.
+   */
+  async reconcileContext(
+    context: ContextCRD,
+    options: NetworkPolicyMutationOptions = {}
+  ): Promise<void> {
+    const callerIsCurrent = options.isCurrent ?? (() => true)
+    if (!callerIsCurrent()) return
+    const contextId = context.spec.contextId
+    const allowedServers = context.spec.mcpServers || []
+    const selectedServers = new Map(
+      allowedServers.map(serverName => [serverName, this.serverCache.get(serverName)])
+    )
+    const isCurrent = (): boolean =>
+      callerIsCurrent() &&
+      allowedServers.every(serverName => {
+        const selected = selectedServers.get(serverName)
+        const current = this.serverCache.get(serverName)
+        if (!selected || !current) return selected === current
+        return sameMcpServerDesiredRevision(selected, current)
+      })
+    if (!isCurrent()) return
+
+    console.log(
+      `[NetPol] Reconciling context "${contextId}" — allowed servers: [${allowedServers.join(', ')}]`
+    )
+
+    const existingPolicies = await this.listPoliciesForContext(contextId)
+    if (!isCurrent()) return
+
+    // Create or update policies for each allowed server.
+    for (const serverName of allowedServers) {
+      if (!isCurrent()) return
+      const server = this.serverCache.get(serverName)
+      if (!server) {
+        console.warn(
+          `[NetPol] McpServer "${serverName}" not found in cache — skipping policy for context "${contextId}"`
+        )
+        continue
       }
 
+      const desired = this.buildContextAllowPolicies(context, server)
+      const ingressName = desired.ingress.metadata!.name!
+      await this.applyPolicy(ingressName, desired.ingress, isCurrent)
+      if (!isCurrent()) return
+
+      const hostEgressName = desired.hostEgress.metadata!.name!
       await applyNetworkPolicy(
         this.networkingApi,
-        egressName,
+        hostEgressName,
         config.hostNamespace,
-        egressPolicy,
+        desired.hostEgress,
         '[NetPol]',
         isCurrent
       )
       if (!isCurrent()) return
 
-      // L2 rpc-proxy egress: allow rpc-proxy pods to reach this MCP server
-      await this.ensureRpcProxyEgress(contextId, serverName, port, isCurrent)
+      const rpcProxyEgressName = desired.rpcProxyEgress.metadata!.name!
+      await applyNetworkPolicy(
+        this.networkingApi,
+        rpcProxyEgressName,
+        config.rpcProxyNamespace,
+        desired.rpcProxyEgress,
+        '[NetPol]',
+        isCurrent
+      )
     }
 
     await this.revokeStaleContextAllows(context, isCurrent, { context: existingPolicies })
@@ -661,15 +707,17 @@ export class NetworkPolicyReconciler {
     if (!isCurrent()) return false
     const contextId = context.spec.contextId
     const allowedServers = context.spec.mcpServers || []
-    const desiredNames = new Set(
-      allowedServers.map(serverName => this.policyName(contextId, serverName))
-    )
-    const desiredEgressNames = new Set(
-      allowedServers.map(serverName => `${this.policyName(contextId, serverName)}-egress`)
-    )
-    const desiredRpcProxyNames = new Set(
-      allowedServers.map(serverName => `rpc-egress-${contextId}-${serverName}`)
-    )
+    const desiredIngress = new Map<string, k8s.V1NetworkPolicy>()
+    const desiredHostEgress = new Map<string, k8s.V1NetworkPolicy>()
+    const desiredRpcProxyEgress = new Map<string, k8s.V1NetworkPolicy>()
+    for (const serverName of allowedServers) {
+      const server = this.serverCache.get(serverName)
+      if (!server) continue
+      const desired = this.buildContextAllowPolicies(context, server)
+      desiredIngress.set(desired.ingress.metadata!.name!, desired.ingress)
+      desiredHostEgress.set(desired.hostEgress.metadata!.name!, desired.hostEgress)
+      desiredRpcProxyEgress.set(desired.rpcProxyEgress.metadata!.name!, desired.rpcProxyEgress)
+    }
 
     const existingPolicies =
       listedPolicies?.context ?? (await this.listPoliciesForContext(contextId))
@@ -677,8 +725,9 @@ export class NetworkPolicyReconciler {
     for (const existing of existingPolicies) {
       if (!isCurrent()) return false
       const existingName = existing.metadata?.name || ''
-      if (!desiredNames.has(existingName)) {
-        console.log(`[NetPol] Deleting orphaned policy "${existingName}"`)
+      const desired = desiredIngress.get(existingName)
+      if (!desired || !sameNetworkPolicySpec(existing, desired)) {
+        console.log(`[NetPol] Deleting stale or orphaned policy "${existingName}"`)
         await this.deletePolicy(existingName, isCurrent)
       }
     }
@@ -689,8 +738,9 @@ export class NetworkPolicyReconciler {
     for (const existing of existingEgressPolicies) {
       if (!isCurrent()) return false
       const existingName = existing.metadata?.name || ''
-      if (!desiredEgressNames.has(existingName)) {
-        console.log(`[NetPol] Deleting orphaned L2 egress policy "${existingName}"`)
+      const desired = desiredHostEgress.get(existingName)
+      if (!desired || !sameNetworkPolicySpec(existing, desired)) {
+        console.log(`[NetPol] Deleting stale or orphaned L2 egress policy "${existingName}"`)
         await this.deleteEgressPolicy(existingName, isCurrent)
       }
     }
@@ -701,8 +751,9 @@ export class NetworkPolicyReconciler {
     for (const existing of existingRpcProxyPolicies) {
       if (!isCurrent()) return false
       const existingName = existing.metadata?.name || ''
-      if (!desiredRpcProxyNames.has(existingName)) {
-        console.log(`[NetPol] Deleting orphaned rpc-proxy egress policy "${existingName}"`)
+      const desired = desiredRpcProxyEgress.get(existingName)
+      if (!desired || !sameNetworkPolicySpec(existing, desired)) {
+        console.log(`[NetPol] Deleting stale or orphaned rpc-proxy egress policy "${existingName}"`)
         await this.deletePolicyInNamespace(config.rpcProxyNamespace, existingName, isCurrent)
       }
     }
@@ -747,6 +798,11 @@ export class NetworkPolicyReconciler {
     options: NetworkPolicyFullReconcileOptions = {}
   ): Promise<void> {
     console.log(`[NetPol] Running full reconciliation for ${contexts.length} Context(s)`)
+
+    // The revision fence starts at invocation, before any asynchronous
+    // default-policy setup can interleave a watch update with this snapshot.
+    const selectedContextDesiredRevision = options.contextDesiredRevision?.()
+    const selectedServerDesiredRevision = options.serverDesiredRevision?.()
 
     if (options.ensureDefaults !== false) {
       await this.ensureDefaultPolicies()
@@ -956,8 +1012,13 @@ export class NetworkPolicyReconciler {
       }
     }
 
+    const inventoryDesiredRevisionChanged =
+      (selectedContextDesiredRevision !== undefined &&
+        options.contextDesiredRevision?.() !== selectedContextDesiredRevision) ||
+      (selectedServerDesiredRevision !== undefined &&
+        options.serverDesiredRevision?.() !== selectedServerDesiredRevision)
     if (
-      liveDesiredRevisionChanged &&
+      (liveDesiredRevisionChanged || inventoryDesiredRevisionChanged) &&
       contextCleanupAuthoritative() &&
       serverCleanupAuthoritative()
     ) {
@@ -1034,11 +1095,110 @@ export class NetworkPolicyReconciler {
 
   // ─── L3 External Egress ────────────────────────────────────────────
 
-  private desiredExternalEgressPolicyNames(server: McpServerCRD): Set<string> {
-    const desired = new Set<string>()
+  private buildPublicWebEgressPolicy(server: McpServerCRD, name: string): k8s.V1NetworkPolicy {
+    return {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name,
+        namespace: server.namespace,
+        labels: {
+          [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+          [POLICY_TYPE_LABEL]: EXTERNAL_EGRESS_POLICY_TYPE,
+          [MCPSERVER_LABEL]: server.name,
+          [EGRESS_CLASS_LABEL]: 'public-web',
+        },
+      },
+      spec: {
+        podSelector: {
+          matchLabels: { [MCPSERVER_LABEL]: server.name },
+        },
+        policyTypes: ['Egress'],
+        egress: [
+          {
+            to: [
+              {
+                ipBlock: {
+                  cidr: '0.0.0.0/0',
+                  except: PUBLIC_EGRESS_EXCEPT_CIDRS,
+                },
+              },
+            ],
+            ports: [
+              { port: 443, protocol: 'TCP' },
+              { port: 80, protocol: 'TCP' },
+            ],
+          },
+        ],
+      },
+    }
+  }
+
+  private buildExactHostEgressPolicy(
+    server: McpServerCRD,
+    name: string,
+    binding: EgressBinding,
+    cidrs: string[]
+  ): k8s.V1NetworkPolicy {
+    return {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name,
+        namespace: server.namespace,
+        labels: {
+          [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+          [POLICY_TYPE_LABEL]: EXTERNAL_EGRESS_POLICY_TYPE,
+          [MCPSERVER_LABEL]: server.name,
+          [EGRESS_CLASS_LABEL]: 'exact-host',
+        },
+      },
+      spec: {
+        podSelector: {
+          matchLabels: { [MCPSERVER_LABEL]: server.name },
+        },
+        policyTypes: ['Egress'],
+        egress: cidrs.map(cidr => ({
+          to: [{ ipBlock: { cidr } }],
+          ports: [{ port: binding.port!, protocol: binding.protocol ?? 'TCP' }],
+        })),
+      },
+    }
+  }
+
+  private desiredProvableExternalEgressPolicies(
+    server: McpServerCRD
+  ): Map<string, k8s.V1NetworkPolicy> {
+    const desired = new Map<string, k8s.V1NetworkPolicy>()
     for (const binding of server.spec.egressBindings ?? []) {
       const name = this.externalEgressPolicyName(server.name, binding)
-      if (name) desired.add(name)
+      if (!name) continue
+      const egressClass = binding.egressClass ?? 'exact-host'
+      if (
+        egressClass === 'public-web' &&
+        !binding.dns &&
+        !binding.cidr &&
+        binding.port === undefined &&
+        binding.protocol === undefined
+      ) {
+        desired.set(name, this.buildPublicWebEgressPolicy(server, name))
+        continue
+      }
+      if (
+        egressClass === 'exact-host' &&
+        binding.cidr &&
+        isAllowedExternalEgressCidr(binding.cidr) &&
+        binding.port !== undefined &&
+        Number.isInteger(binding.port) &&
+        binding.port >= 1 &&
+        binding.port <= 65535
+      ) {
+        desired.set(name, this.buildExactHostEgressPolicy(server, name, binding, [binding.cidr]))
+      }
+      // DNS-derived IPs are intentionally not retained in the safety phase:
+      // their currentness cannot be proven without the slow external lookup.
+      // The additive phase resolves DNS and recreates the policy after stale
+      // allows have been revoked and readiness can become available.
     }
     return desired
   }
@@ -1053,13 +1213,15 @@ export class NetworkPolicyReconciler {
       listedPolicies ??
       (await this.listExternalEgressPoliciesForServer(server.name, server.namespace))
     if (!isCurrent()) return false
-    const desiredPolicyNames = this.desiredExternalEgressPolicyNames(server)
+    const desiredPolicies = this.desiredProvableExternalEgressPolicies(server)
     await this.cleanupExternalEgress(
       server.name,
       server.namespace,
       existingPolicies.filter(policy => {
         const name = policy.metadata?.name
-        return Boolean(name) && !desiredPolicyNames.has(name!)
+        if (!name) return false
+        const desired = desiredPolicies.get(name)
+        return !desired || !sameNetworkPolicySpec(policy, desired)
       }),
       async () => isCurrent()
     )
@@ -1168,56 +1330,17 @@ export class NetworkPolicyReconciler {
         }
 
         desiredPolicyNames.add(name)
-
-        const policy: k8s.V1NetworkPolicy = {
-          apiVersion: 'networking.k8s.io/v1',
-          kind: 'NetworkPolicy',
-          metadata: {
-            name,
-            namespace: server.namespace,
-            labels: {
-              [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
-              [POLICY_TYPE_LABEL]: EXTERNAL_EGRESS_POLICY_TYPE,
-              [MCPSERVER_LABEL]: server.name,
-              [EGRESS_CLASS_LABEL]: egressClass,
-            },
-          },
-          spec: {
-            podSelector: {
-              matchLabels: { [MCPSERVER_LABEL]: server.name },
-            },
-            policyTypes: ['Egress'],
-            egress: [
-              {
-                to: [
-                  {
-                    ipBlock: {
-                      cidr: '0.0.0.0/0',
-                      except: PUBLIC_EGRESS_EXCEPT_CIDRS,
-                    },
-                  },
-                ],
-                ports: [
-                  { port: 443, protocol: 'TCP' },
-                  { port: 80, protocol: 'TCP' },
-                ],
-              },
-            ],
-          },
-        }
-
         await applyNetworkPolicy(
           this.networkingApi,
           name,
           server.namespace,
-          policy,
+          this.buildPublicWebEgressPolicy(server, name),
           '[NetPol]',
           isCurrent
         )
         continue
       }
 
-      const protocol = binding.protocol ?? 'TCP'
       if (
         binding.port === undefined ||
         !Number.isInteger(binding.port) ||
@@ -1279,37 +1402,11 @@ export class NetworkPolicyReconciler {
       }
 
       desiredPolicyNames.add(name)
-
-      const policy: k8s.V1NetworkPolicy = {
-        apiVersion: 'networking.k8s.io/v1',
-        kind: 'NetworkPolicy',
-        metadata: {
-          name,
-          namespace: server.namespace,
-          labels: {
-            [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
-            [POLICY_TYPE_LABEL]: EXTERNAL_EGRESS_POLICY_TYPE,
-            [MCPSERVER_LABEL]: server.name,
-            [EGRESS_CLASS_LABEL]: egressClass,
-          },
-        },
-        spec: {
-          podSelector: {
-            matchLabels: { [MCPSERVER_LABEL]: server.name },
-          },
-          policyTypes: ['Egress'],
-          egress: cidrs.map(cidr => ({
-            to: [{ ipBlock: { cidr } }],
-            ports: [{ port: binding.port, protocol }],
-          })),
-        },
-      }
-
       await applyNetworkPolicy(
         this.networkingApi,
         name,
         server.namespace,
-        policy,
+        this.buildExactHostEgressPolicy(server, name, binding, cidrs),
         '[NetPol]',
         isCurrent
       )
@@ -1744,18 +1841,13 @@ export class NetworkPolicyReconciler {
 
   // ─── RPC-Proxy Egress (L2) ──────────────────────────────────────────
 
-  /**
-   * Create or update an egress policy in the rpc-proxy namespace allowing
-   * rpc-proxy pods to reach a specific MCP server on a given port.
-   */
-  private async ensureRpcProxyEgress(
+  private buildRpcProxyEgressPolicy(
     contextId: string,
     serverName: string,
-    port: number,
-    isCurrent?: () => boolean
-  ): Promise<void> {
+    port: number
+  ): k8s.V1NetworkPolicy {
     const name = `rpc-egress-${contextId}-${serverName}`
-    const policy: k8s.V1NetworkPolicy = {
+    return {
       apiVersion: 'networking.k8s.io/v1',
       kind: 'NetworkPolicy',
       metadata: {
@@ -1786,14 +1878,6 @@ export class NetworkPolicyReconciler {
         ],
       },
     }
-    await applyNetworkPolicy(
-      this.networkingApi,
-      name,
-      config.rpcProxyNamespace,
-      policy,
-      '[NetPol]',
-      isCurrent
-    )
   }
 
   /** Delete all rpc-proxy egress policies for a given context. */

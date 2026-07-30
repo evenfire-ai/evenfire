@@ -145,6 +145,10 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
     // First reconcile with both servers
     const ctx1 = makeContext('ctx-delta', ['mongodb-mcp', 'airtable-mcp'])
     await reconciler.reconcileContext(ctx1)
+    const existingRpcProxyPolicies = mockApply.mock.calls
+      .filter(call => call[2] === 'rpc-proxy')
+      .map(call => call[3] as k8s.V1NetworkPolicy)
+    expect(existingRpcProxyPolicies).toHaveLength(2)
 
     vi.clearAllMocks()
     mockNetApi.listNamespacedNetworkPolicy.mockImplementation(
@@ -154,10 +158,7 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
           String(labelSelector).includes('clerum.io/context=ctx-delta')
         ) {
           return {
-            items: [
-              { metadata: { name: 'rpc-egress-ctx-delta-mongodb-mcp' } },
-              { metadata: { name: 'rpc-egress-ctx-delta-airtable-mcp' } },
-            ],
+            items: existingRpcProxyPolicies,
           }
         }
         return { items: [] }

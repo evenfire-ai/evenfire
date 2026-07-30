@@ -286,6 +286,13 @@ vi.mock('./hostReconciler', () => ({
 }))
 
 vi.mock('./networkPolicyReconciler', () => ({
+  sameContextDesiredRevision: (
+    expected: { name: string; namespace: string; spec: unknown },
+    current: { name: string; namespace: string; spec: unknown }
+  ) =>
+    expected.name === current.name &&
+    expected.namespace === current.namespace &&
+    JSON.stringify(expected.spec) === JSON.stringify(current.spec),
   NetworkPolicyReconciler: class {
     ensureDefaultPolicies = mocks.ensureDefaultPolicies
     fullReconcile = mocks.netPolFullReconcile
@@ -759,6 +766,8 @@ describe('McpServerWatcher startup', () => {
           ensureDefaults: false,
           contextInventoryAuthoritative: expect.any(Function),
           serverInventoryAuthoritative: expect.any(Function),
+          contextDesiredRevision: expect.any(Function),
+          serverDesiredRevision: expect.any(Function),
         })
       )
     })
@@ -1112,6 +1121,7 @@ describe('McpServerWatcher startup', () => {
     const reconciler = (watcher as any).reconciler
     const netPol = (watcher as any).netPolReconciler
     const callback = (watcher as any).getMcpServerWatchCallback()
+    expect((watcher as any).mcpServerDesiredRevision).toBe(0)
 
     await callback('MODIFIED', {
       metadata: {
@@ -1132,6 +1142,7 @@ describe('McpServerWatcher startup', () => {
     expect(changed).toHaveBeenCalledOnce()
     expect(reconciler.reconcile).not.toHaveBeenCalled()
     expect(netPol.reconcileExternalEgress).not.toHaveBeenCalled()
+    expect((watcher as any).mcpServerDesiredRevision).toBe(0)
 
     await callback('MODIFIED', {
       metadata: {
@@ -1145,6 +1156,76 @@ describe('McpServerWatcher startup', () => {
       spec: { ...previousServer.spec, image: 'clerum/status-server:next' },
     })
     expect(reconciler.reconcile).toHaveBeenCalledOnce()
+    expect((watcher as any).mcpServerDesiredRevision).toBe(1)
+    await watcher.stop()
+  })
+
+  it('advances McpServer desired revision for owner addition and deletion', async () => {
+    const serverObject = {
+      metadata: {
+        name: 'revision-server',
+        namespace: 'mcp-server',
+        uid: 'revision-server-uid',
+        generation: 1,
+      },
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/revision-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    }
+    const watcher = new McpServerWatcher()
+    const callback = (watcher as any).getMcpServerWatchCallback()
+
+    expect((watcher as any).mcpServerDesiredRevision).toBe(0)
+    await callback('ADDED', serverObject)
+    expect((watcher as any).mcpServerDesiredRevision).toBe(1)
+    await callback('DELETED', serverObject)
+    expect((watcher as any).mcpServerDesiredRevision).toBe(2)
+
+    await watcher.stop()
+  })
+
+  it('advances Context desired revision only when the authoritative desired cache changes', async () => {
+    const watcher = new McpServerWatcher()
+    let contextWatchCallback:
+      | ((
+          type: string,
+          apiObj: {
+            metadata: { name: string; namespace: string }
+            spec: { contextId: string; mcpServers: string[] }
+          }
+        ) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback) => {
+      contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    await (watcher as any).startContextWatch('context-desired-revision-rv')
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+
+    const added = {
+      metadata: { name: 'revision-context', namespace: 'mcp-server' },
+      spec: { contextId: 'revision-context', mcpServers: [] as string[] },
+    }
+    expect((watcher as any).contextDesiredRevision).toBe(0)
+    await contextWatchCallback!('ADDED', added)
+    expect((watcher as any).contextDesiredRevision).toBe(1)
+
+    await contextWatchCallback!('MODIFIED', added)
+    expect((watcher as any).contextDesiredRevision).toBe(1)
+
+    const modified = {
+      ...added,
+      spec: { ...added.spec, mcpServers: ['revision-server'] },
+    }
+    await contextWatchCallback!('MODIFIED', modified)
+    expect((watcher as any).contextDesiredRevision).toBe(2)
+
+    await contextWatchCallback!('DELETED', modified)
+    expect((watcher as any).contextDesiredRevision).toBe(3)
+
     await watcher.stop()
   })
 

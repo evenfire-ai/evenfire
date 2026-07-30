@@ -2013,6 +2013,351 @@ describe('NetworkPolicyReconciler', () => {
       }
     })
 
+    it('revokes same-name Context allow policies whose authoritative server port changed', async () => {
+      const oldServer: McpServerCRD = {
+        name: 'live-server',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'default',
+          image: 'live:latest',
+          transport: { type: 'streamableHttp', port: 3000 },
+        },
+      }
+      const currentServer: McpServerCRD = {
+        ...oldServer,
+        spec: {
+          ...oldServer.spec,
+          transport: { type: 'streamableHttp', port: 4000 },
+        },
+      }
+      const liveContext: ContextCRD = {
+        name: 'live-context-resource',
+        namespace: 'mcp-server',
+        spec: { contextId: 'live-context', mcpServers: [oldServer.name] },
+      }
+      const serverCache = new Map([[oldServer.name, oldServer]])
+      const rec = makeReconciler(mockApi, serverCache, mockCustomApi)
+
+      await rec.reconcileContext(liveContext)
+      const oldPolicies = mockApi.createNamespacedNetworkPolicy.mock.calls.map(
+        call => (call[0] as { body: k8s.V1NetworkPolicy }).body
+      )
+      expect(oldPolicies).toHaveLength(3)
+
+      vi.clearAllMocks()
+      serverCache.set(currentServer.name, currentServer)
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
+          if (labelSelector?.includes('external-egress')) return { items: [] }
+          return {
+            items: oldPolicies.filter(policy => policy.metadata?.namespace === namespace),
+          }
+        }
+      )
+      vi.spyOn(rec, 'reconcileContext').mockResolvedValue(undefined)
+      vi.spyOn(rec, 'reconcileExternalEgress').mockResolvedValue(undefined)
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      await rec.fullReconcile([liveContext], [currentServer], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+        onAuthoritativeRevocationComplete,
+      })
+
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'ctx-live-context-live-server',
+        namespace: 'mcp-server',
+      })
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'ctx-live-context-live-server-egress',
+        namespace: 'mcp-host',
+      })
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: 'rpc-egress-live-context-live-server',
+        namespace: 'rpc-proxy',
+      })
+      expect(onAuthoritativeRevocationComplete).toHaveBeenCalledOnce()
+    })
+
+    it('retains authoritative same-name policies when only API object key order differs', async () => {
+      const server: McpServerCRD = {
+        name: 'live-server',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'default',
+          image: 'live:latest',
+          transport: { type: 'streamableHttp', port: 3000 },
+        },
+      }
+      const liveContext: ContextCRD = {
+        name: 'live-context-resource',
+        namespace: 'mcp-server',
+        spec: { contextId: 'live-context', mcpServers: [server.name] },
+      }
+      const rec = makeReconciler(mockApi, new Map([[server.name, server]]), mockCustomApi)
+      const reverseObjectKeys = (value: unknown): unknown => {
+        if (Array.isArray(value)) return value.map(reverseObjectKeys)
+        if (value === null || typeof value !== 'object') return value
+        return Object.fromEntries(
+          Object.entries(value as Record<string, unknown>)
+            .reverse()
+            .map(([key, entry]) => [key, reverseObjectKeys(entry)])
+        )
+      }
+
+      await rec.reconcileContext(liveContext)
+      const existingPolicies = mockApi.createNamespacedNetworkPolicy.mock.calls.map(call => {
+        const policy = (call[0] as { body: k8s.V1NetworkPolicy }).body
+        return { ...policy, spec: reverseObjectKeys(policy.spec) as k8s.V1NetworkPolicySpec }
+      })
+      vi.clearAllMocks()
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
+          if (labelSelector?.includes('external-egress')) return { items: [] }
+          return {
+            items: existingPolicies.filter(policy => policy.metadata?.namespace === namespace),
+          }
+        }
+      )
+      vi.spyOn(rec, 'reconcileContext').mockResolvedValue(undefined)
+      vi.spyOn(rec, 'reconcileExternalEgress').mockResolvedValue(undefined)
+
+      await rec.fullReconcile([liveContext], [server], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+      })
+
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('revokes same-name DNS egress whose protocol or resolved IP cannot be proven current', async () => {
+      const oldServer: McpServerCRD = {
+        name: 'live-server',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'default',
+          image: 'live:latest',
+          transport: { type: 'streamableHttp', port: 3000 },
+          egressBindings: [{ dns: 'api.example.com', port: 443, protocol: 'TCP' }],
+        },
+      }
+      const currentServer: McpServerCRD = {
+        ...oldServer,
+        spec: {
+          ...oldServer.spec,
+          egressBindings: [{ dns: 'api.example.com', port: 443, protocol: 'UDP' }],
+        },
+      }
+      const rec = makeReconciler(mockApi, new Map([[oldServer.name, oldServer]]), mockCustomApi)
+
+      await rec.reconcileExternalEgress(oldServer)
+      const oldPolicy = mockApi.createNamespacedNetworkPolicy.mock.calls
+        .map(call => (call[0] as { body: k8s.V1NetworkPolicy }).body)
+        .find(policy => policy.metadata?.labels?.['clerum.io/policy-type'] === 'external-egress')
+      expect(oldPolicy).toBeDefined()
+
+      vi.clearAllMocks()
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ labelSelector }: { labelSelector?: string }) =>
+          labelSelector?.includes('external-egress') ? { items: [oldPolicy!] } : { items: [] }
+      )
+      vi.spyOn(rec, 'reconcileExternalEgress').mockResolvedValue(undefined)
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      await rec.fullReconcile([], [currentServer], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+        onAuthoritativeRevocationComplete,
+      })
+
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: oldPolicy!.metadata!.name!,
+        namespace: 'mcp-server',
+      })
+      expect(onAuthoritativeRevocationComplete).toHaveBeenCalledOnce()
+    })
+
+    it('does not certify revocation when an earlier Context changes while a later owner is paused', async () => {
+      const contexts: ContextCRD[] = ['first', 'later'].map(contextId => ({
+        name: `${contextId}-resource`,
+        namespace: 'mcp-server',
+        spec: { contextId, mcpServers: [] },
+      }))
+      const currentContexts = new Map(contexts.map(context => [context.name, context]))
+      let contextDesiredRevision = 10
+      let laterPaused = false
+      const laterStarted = deferred()
+      const releaseLater = deferred()
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      const fullPass = reconciler.fullReconcile(contexts, [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+        resolveCurrentContext: name => currentContexts.get(name),
+        runContextEffect: async (contextId, work) => {
+          if (contextId === 'later' && !laterPaused) {
+            laterPaused = true
+            laterStarted.resolve(undefined)
+            await releaseLater.promise
+          }
+          await work()
+        },
+        contextDesiredRevision: () => contextDesiredRevision,
+        onAuthoritativeRevocationComplete,
+      })
+
+      await laterStarted.promise
+      currentContexts.set('first-resource', {
+        ...contexts[0],
+        spec: { ...contexts[0].spec, mcpServers: ['replacement'] },
+      })
+      contextDesiredRevision += 1
+      releaseLater.resolve(undefined)
+
+      await expect(fullPass).rejects.toThrow(/desired NetworkPolicy inventory changed/i)
+      expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
+    })
+
+    it('does not certify revocation when a new owner is added after the global inventory LISTs', async () => {
+      const anchorContext: ContextCRD = {
+        name: 'anchor-resource',
+        namespace: 'mcp-server',
+        spec: { contextId: 'anchor', mcpServers: [] },
+      }
+      const currentContexts = new Map([[anchorContext.name, anchorContext]])
+      let contextDesiredRevision = 21
+      const safetyEffectStarted = deferred()
+      const releaseSafetyEffect = deferred()
+      let safetyEffectPaused = false
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      const fullPass = reconciler.fullReconcile([anchorContext], [], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+        resolveCurrentContext: name => currentContexts.get(name),
+        runContextEffect: async (_contextId, work) => {
+          if (!safetyEffectPaused) {
+            safetyEffectPaused = true
+            safetyEffectStarted.resolve(undefined)
+            await releaseSafetyEffect.promise
+          }
+          await work()
+        },
+        contextDesiredRevision: () => contextDesiredRevision,
+        onAuthoritativeRevocationComplete,
+      })
+
+      await safetyEffectStarted.promise
+      currentContexts.set('late-resource', {
+        name: 'late-resource',
+        namespace: 'mcp-server',
+        spec: { contextId: 'late', mcpServers: [] },
+      })
+      contextDesiredRevision += 1
+      releaseSafetyEffect.resolve(undefined)
+
+      await expect(fullPass).rejects.toThrow(/desired NetworkPolicy inventory changed/i)
+      expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
+    })
+
+    it('does not certify revocation when a new McpServer owner is added after inventory LISTs', async () => {
+      const anchorServer: McpServerCRD = {
+        name: 'anchor-server',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'default',
+          image: 'anchor:latest',
+          transport: { type: 'streamableHttp', port: 3000 },
+        },
+      }
+      const currentServers = new Map([[anchorServer.name, anchorServer]])
+      let serverDesiredRevision = 31
+      const safetyEffectStarted = deferred()
+      const releaseSafetyEffect = deferred()
+      let safetyEffectPaused = false
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      const fullPass = reconciler.fullReconcile([], [anchorServer], {
+        ensureDefaults: false,
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+        resolveCurrentServer: name => currentServers.get(name),
+        runServerEffect: async (_serverName, work) => {
+          if (!safetyEffectPaused) {
+            safetyEffectPaused = true
+            safetyEffectStarted.resolve(undefined)
+            await releaseSafetyEffect.promise
+          }
+          await work()
+        },
+        serverDesiredRevision: () => serverDesiredRevision,
+        onAuthoritativeRevocationComplete,
+      })
+
+      await safetyEffectStarted.promise
+      currentServers.set('late-server', {
+        name: 'late-server',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'default',
+          image: 'late:latest',
+          transport: { type: 'streamableHttp', port: 3000 },
+        },
+      })
+      serverDesiredRevision += 1
+      releaseSafetyEffect.resolve(undefined)
+
+      await expect(fullPass).rejects.toThrow(/desired NetworkPolicy inventory changed/i)
+      expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
+    })
+
+    it('does not certify revocation when desired inventory changes while default policies are ensured', async () => {
+      const context: ContextCRD = {
+        name: 'default-window-context',
+        namespace: 'mcp-server',
+        spec: { contextId: 'default-window', mcpServers: [] },
+      }
+      const server: McpServerCRD = {
+        name: 'default-window-server',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'default-window',
+          image: 'default-window:latest',
+          transport: { type: 'streamableHttp', port: 3000 },
+        },
+      }
+      let contextDesiredRevision = 41
+      let serverDesiredRevision = 51
+      const defaultsStarted = deferred()
+      const releaseDefaults = deferred()
+      const onAuthoritativeRevocationComplete = vi.fn()
+      vi.spyOn(reconciler, 'ensureDefaultPolicies').mockImplementation(async () => {
+        defaultsStarted.resolve(undefined)
+        await releaseDefaults.promise
+      })
+
+      const fullPass = reconciler.fullReconcile([context], [server], {
+        contextInventoryAuthoritative: () => true,
+        serverInventoryAuthoritative: () => true,
+        contextDesiredRevision: () => contextDesiredRevision,
+        serverDesiredRevision: () => serverDesiredRevision,
+        onAuthoritativeRevocationComplete,
+      })
+
+      await defaultsStarted.promise
+      contextDesiredRevision += 1
+      serverDesiredRevision += 1
+      releaseDefaults.resolve(undefined)
+
+      await expect(fullPass).rejects.toThrow(/desired NetworkPolicy inventory changed/i)
+      expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
+    })
+
     it('does not signal authoritative revocation when a live-owner delete fails', async () => {
       const liveContext: ContextCRD = {
         name: 'live-context-resource',
