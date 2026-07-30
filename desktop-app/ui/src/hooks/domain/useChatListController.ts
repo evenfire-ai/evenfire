@@ -167,6 +167,7 @@ export function useChatListController({
 
   const loadChatListOnce = useCallback(
     async (agentRef: string): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] }> => {
+      const requestGeneration = ++requestGenerationRef.current
       chatListNextCursorByAgentRef.current[agentRef] = null
       if (selectedAgentRef.current === agentRef) {
         setChatListHasMoreRemoteSessions(false)
@@ -174,10 +175,14 @@ export function useChatListController({
       }
       const index = await chatStore.getIndex(agentRef)
       const merged = [...index.chats].sort(byUpdatedDesc)
-      if (selectedAgentRef.current !== agentRef) return { index, merged }
+      if (
+        selectedAgentRef.current !== agentRef ||
+        requestGenerationRef.current !== requestGeneration
+      ) {
+        return { index, merged }
+      }
       setChatList(merged)
 
-      const requestGeneration = requestGenerationRef.current
       const suppressionMarkerAtRequest = suppressAutoSelectionByAgentRef.current.get(agentRef)
       scheduleAfterFirstPaint(async () => {
         const serverResult = await chatStore

@@ -1122,6 +1122,81 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(result.current.chatList.map(chat => chat.id)).toEqual(['agent-y-chat'])
     })
 
+    it('does not let an older same-agent index replace a newer A-B-A load', async () => {
+      type Index = Awaited<ReturnType<typeof clerum.chat.getIndex>>
+      const firstAgentX = deferred<Index>()
+      const agentY = deferred<Index>()
+      const secondAgentX = deferred<Index>()
+      let agentXCalls = 0
+      clerum.chat.getIndex.mockImplementation((agentRef: string) => {
+        if (agentRef === 'agent-y') return agentY.promise
+        agentXCalls += 1
+        return agentXCalls === 1 ? firstAgentX.promise : secondAgentX.promise
+      })
+      const { result, rerender } = renderController({
+        agentNames: ['agent-x', 'agent-y'],
+        loadMenuData: false,
+      })
+      await waitFor(() => expect(agentXCalls).toBe(1))
+
+      rerender({
+        selectedAgent: 'agent-y',
+        agentNames: ['agent-x', 'agent-y'],
+        loadMenuData: false,
+      })
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledWith('agent-y'))
+      rerender({
+        selectedAgent: 'agent-x',
+        agentNames: ['agent-x', 'agent-y'],
+        loadMenuData: false,
+      })
+      await waitFor(() => expect(agentXCalls).toBe(2))
+
+      await act(async () => {
+        secondAgentX.resolve({
+          version: 2,
+          lastActiveChatId: null,
+          onboardingDismissed: false,
+          chats: [
+            {
+              id: 'fresh-agent-x-chat',
+              title: 'Fresh',
+              createdAt: '2026-05-04T00:00:00Z',
+              updatedAt: '2026-05-04T00:00:00Z',
+              messageCount: 1,
+            },
+          ],
+        })
+      })
+      await waitFor(() => expect(result.current.chatList[0]?.id).toBe('fresh-agent-x-chat'))
+
+      await act(async () => {
+        firstAgentX.resolve({
+          version: 2,
+          lastActiveChatId: null,
+          onboardingDismissed: false,
+          chats: [
+            {
+              id: 'stale-agent-x-chat',
+              title: 'Stale',
+              createdAt: '2026-05-01T00:00:00Z',
+              updatedAt: '2026-05-01T00:00:00Z',
+              messageCount: 1,
+            },
+          ],
+        })
+        agentY.resolve({
+          version: 2,
+          lastActiveChatId: null,
+          onboardingDismissed: false,
+          chats: [],
+        })
+        await Promise.resolve()
+      })
+
+      expect(result.current.chatList.map(chat => chat.id)).toEqual(['fresh-agent-x-chat'])
+    })
+
     it('renders local sessions without waiting for remote listSessions', async () => {
       clerum.chat.getIndex.mockResolvedValue({
         version: 1,
