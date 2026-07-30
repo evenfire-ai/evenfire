@@ -11,6 +11,7 @@ GATES=("$WATCH_GATE" "$READINESS_GATE" "$MCP_READINESS_GATE")
 LOCK_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-lock.sh"
 LOG_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-logs.sh"
 FIXTURE_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"
+WATCH_GATE_TARGET="$(sed -n '/^test-e2e-hcc-communicationchannel-watch-recovery:/,/^$/p' "${ROOT}/Makefile")"
 MOCK_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/hcc-lock-test.XXXXXX")"
 MOCK_LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/hcc-log-test.XXXXXX")"
 MOCK_PROFILE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/hcc-profile-test.XXXXXX")"
@@ -30,6 +31,13 @@ done
 
 # Literal source-code assertions.
 # shellcheck disable=SC2016
+if [[ "$WATCH_GATE_TARGET" == *'E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)"'* ]] &&
+   [[ "$WATCH_GATE_TARGET" == *'MINIKUBE_PROFILE=$(E2E_KUBECONTEXT)'* ]]; then
+  pass "CommunicationChannel gate target propagates exact pre-gate and profile ownership"
+else
+  fail "CommunicationChannel gate target omits exact pre-gate or profile ownership"
+fi
+
 if grep -Fq 'source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"' "$READINESS_GATE" &&
    [ "$(grep -Fc 'require_branch_owned_hcc_gate "$HCC_NS"' "$READINESS_GATE")" = 1 ] &&
    ! grep -Fq 'HCC_BRANCH_GATE_SYNC_MARKER' "$READINESS_GATE" &&
