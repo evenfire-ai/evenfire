@@ -1613,6 +1613,15 @@ describe('reconcileAuthoritativeMcpSnapshot', () => {
         status: { deployed: true, ready: false, authoritative: true },
       }),
     ],
+    // Absent `authoritative` must keep the legacy fail-closed contract on the
+    // synchronous revoke path too. Without this row the condition can be
+    // narrowed to `authoritative === true` and every other test still passes.
+    [
+      'not-ready without an authoritative field',
+      readyServer({
+        status: { deployed: false, ready: false, message: 'Deployment not ready' },
+      }),
+    ],
   ])(
     'synchronously detaches a connected %s server before asynchronous reconciliation',
     async (_reason, next) => {
