@@ -142,7 +142,39 @@ curl -s -H "Authorization: Bearer $REGISTRY_API_KEY" \
 # → {"type":"machine","orgName":"<org>","scopes":["registry:publish", …]}
 ```
 
-## 6. Publish your first entry
+## 6. Push an image (local connectors only)
+
+A **local** connector runs from an image the registry hosts under your org. Push
+it before publishing the entry that points at it. Recipes have no image and skip
+this step.
+
+**Publisher → Docker credentials** (`/publisher/credentials`) generates a push
+credential and shows your exact coordinate. Log in with the literal username
+`_`, then push into `<org>/<name>`:
+
+```bash
+echo "$REGISTRY_API_KEY" | docker login registry.evenfire.ai -u _ --password-stdin
+docker tag my-connector:local registry.evenfire.ai/acme/db-tools:1.4.0
+docker push registry.evenfire.ai/acme/db-tools:1.4.0
+```
+
+Three ways this goes wrong:
+
+- **The `@` does not belong in the image path.** The entry is `@acme/db-tools`;
+  the image is `registry.evenfire.ai/acme/db-tools`. Docker reads `@` as the
+  digest delimiter and rejects the reference outright.
+- **The org segment is not optional.** `registry.evenfire.ai/db-tools` sits
+  outside your namespace, which is all your key grants. Host, then org, then
+  name, every time.
+- **`<name>` must equal the entry's name.** The pull grant is resolved from the
+  OCI path, so `@acme/db-tools` published against
+  `registry.evenfire.ai/acme/dbtools` is rejected with a `422` at publish and
+  again at install. Left unchecked it would deny the pull and show up as an
+  `ImagePullBackOff` in someone else's cluster.
+
+The tag is yours to pick — only the repo path is matched against the entry name.
+
+## 7. Publish your first entry
 
 ### From the Control UI
 
@@ -177,19 +209,21 @@ Field-by-field reference and the update/delete routes are in
 
 ## Troubleshooting
 
-| Symptom                                               | Cause and fix                                                                                                                                                                   |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `control-api` will not start, complains about the URL | `CLERUM_REGISTRY_URL` is not in the allowlist. Add it to `CLERUM_REGISTRY_URL_ALLOWLIST` (see step 1).                                                                          |
-| No Connect panel, no banner                           | The deployment is in `managed` mode. Managed deployments are connected for you and have nothing to configure.                                                                   |
-| `org_name_taken` on registration                      | Another deployment holds that organization name. Pick a different one and register again. Nothing was saved.                                                                    |
-| `org_blocklisted` on registration                     | The name is reserved. Pick a different one.                                                                                                                                     |
-| Connect panel stuck at **Finishing the connection**   | The inline redeem did not land. Press **Finish connecting**; it needs no token. Reach for **Start over** only when the panel says the credentials were issued but never stored. |
-| `deployment_suspended`                                | Evenfire suspended the deployment. Contact support. Do **not** press Start over: a suspension is reversible, a destroyed keypair is not.                                        |
-| `409 CONFLICT` on publish                             | That `name` + `version` already exists. Bump the version; versions are immutable.                                                                                               |
-| `400 scope_required` on publish                       | The entry name is unscoped. Use `@<org>/<name>`.                                                                                                                                |
-| `422` naming the `imageRef`                           | For an evenfire-hosted local plugin the image repo must equal the entry name, or the cross-org pull is denied at install time.                                                  |
-| `403` when managing **grants**                        | Expected. Deployments that onboarded through self-hosted connect do not hold `registry:grant`. Receiving and installing granted plugins still works.                            |
-| Connector installed but cannot reach its API          | Egress. Default-deny networking blocks anything not declared in the install's egress step.                                                                                      |
+| Symptom                                               | Cause and fix                                                                                                                                                                     |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `control-api` will not start, complains about the URL | `CLERUM_REGISTRY_URL` is not in the allowlist. Add it to `CLERUM_REGISTRY_URL_ALLOWLIST` (see step 1).                                                                            |
+| No Connect panel, no banner                           | The deployment is in `managed` mode. Managed deployments are connected for you and have nothing to configure.                                                                     |
+| `org_name_taken` on registration                      | Another deployment holds that organization name. Pick a different one and register again. Nothing was saved.                                                                      |
+| `org_blocklisted` on registration                     | The name is reserved. Pick a different one.                                                                                                                                       |
+| Connect panel stuck at **Finishing the connection**   | The inline redeem did not land. Press **Finish connecting**; it needs no token. Reach for **Start over** only when the panel says the credentials were issued but never stored.   |
+| `deployment_suspended`                                | Evenfire suspended the deployment. Contact support. Do **not** press Start over: a suspension is reversible, a destroyed keypair is not.                                          |
+| `409 CONFLICT` on publish                             | That `name` + `version` already exists. Bump the version; versions are immutable.                                                                                                 |
+| `400 scope_required` on publish                       | The entry name is unscoped. Use `@<org>/<name>`.                                                                                                                                  |
+| `invalid reference format` from `docker`              | The `@` scope prefix is in the image path. It belongs in the entry name only: push to `registry.evenfire.ai/<org>/<name>`, not `/@<org>/<name>`.                                  |
+| `docker push` denied                                  | The path is missing the org segment, or you logged in as something other than the literal username `_`. Your key grants `<org>/…` and nothing above it.                           |
+| `422` naming the `imageRef`                           | The image repo path does not equal the entry name. `@acme/db-tools` needs `registry.evenfire.ai/acme/db-tools`. Checked at publish and install, since a mismatch denies the pull. |
+| `403` when managing **grants**                        | Expected. Deployments that onboarded through self-hosted connect do not hold `registry:grant`. Receiving and installing granted plugins still works.                              |
+| Connector installed but cannot reach its API          | Egress. Default-deny networking blocks anything not declared in the install's egress step.                                                                                        |
 
 ## Next steps
 
