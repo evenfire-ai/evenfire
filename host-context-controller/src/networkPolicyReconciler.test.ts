@@ -2322,6 +2322,56 @@ describe('NetworkPolicyReconciler', () => {
       expect(onAuthoritativeRevocationComplete).toHaveBeenCalledOnce()
     })
 
+    it('revokes a divergent same-name DNS policy when its safe replacement cannot resolve', async () => {
+      const oldServer: McpServerCRD = {
+        name: 'live-server',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'default',
+          image: 'live:latest',
+          transport: { type: 'streamableHttp', port: 3000 },
+          egressBindings: [{ dns: 'api.example.com', port: 443, protocol: 'TCP' }],
+        },
+      }
+      const currentServer: McpServerCRD = {
+        ...oldServer,
+        spec: {
+          ...oldServer.spec,
+          egressBindings: [{ dns: 'api.example.com', port: 443, protocol: 'UDP' }],
+        },
+      }
+      const rec = makeReconciler(mockApi, new Map([[oldServer.name, oldServer]]), mockCustomApi)
+
+      await rec.reconcileExternalEgress(oldServer)
+      const oldPolicy = mockApi.createNamespacedNetworkPolicy.mock.calls
+        .map(call => (call[0] as { body: k8s.V1NetworkPolicy }).body)
+        .find(policy => policy.metadata?.labels?.['clerum.io/policy-type'] === 'external-egress')
+      expect(oldPolicy).toBeDefined()
+
+      vi.clearAllMocks()
+      vi.mocked(dns.resolve4).mockRejectedValue(new Error('dns unavailable'))
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ labelSelector }: { labelSelector?: string }) =>
+          labelSelector?.includes('external-egress') ? { items: [oldPolicy!] } : { items: [] }
+      )
+      const onAuthoritativeRevocationComplete = vi.fn()
+
+      await expect(
+        rec.fullReconcile([], [currentServer], {
+          ensureDefaults: false,
+          contextInventoryAuthoritative: () => true,
+          serverInventoryAuthoritative: () => true,
+          onAuthoritativeRevocationComplete,
+        })
+      ).rejects.toThrow('dns unavailable')
+
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: oldPolicy!.metadata!.name!,
+        namespace: oldServer.namespace,
+      })
+      expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
+    })
+
     it('retains a valid same-intent DNS policy so readiness does not await fleet DNS refresh', async () => {
       const server: McpServerCRD = {
         name: 'stable-dns-server',
@@ -2370,7 +2420,7 @@ describe('NetworkPolicyReconciler', () => {
       }
     })
 
-    it('preserves a safety-certified DNS policy when the post-ready refresh fails', async () => {
+    it('preserves a safety-certified DNS policy on every default refresh failure', async () => {
       const server: McpServerCRD = {
         name: 'stable-dns-server',
         namespace: 'mcp-server',
@@ -2394,19 +2444,10 @@ describe('NetworkPolicyReconciler', () => {
         async ({ labelSelector }: { labelSelector?: string }) =>
           labelSelector?.includes('external-egress') ? { items: [existing!] } : { items: [] }
       )
-      const onAuthoritativeRevocationComplete = vi.fn()
+      await expect(rec.reconcileExternalEgress(server)).rejects.toThrow('dns unavailable')
 
-      await expect(
-        rec.fullReconcile([], [server], {
-          ensureDefaults: false,
-          contextInventoryAuthoritative: () => true,
-          serverInventoryAuthoritative: () => true,
-          onAuthoritativeRevocationComplete,
-        })
-      ).rejects.toThrow('dns unavailable')
-
-      expect(onAuthoritativeRevocationComplete).toHaveBeenCalledOnce()
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
 
     it('does not certify revocation when an earlier Context changes while a later owner is paused', async () => {

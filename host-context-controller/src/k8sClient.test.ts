@@ -102,6 +102,10 @@ function markNetworkPolicyRevocationAuthoritative(watcher: McpServerWatcher): vo
     watcher as any
   ).contextWatchGeneration
   ;(watcher as any).networkPolicyRevocationServerGeneration = (watcher as any).mcpWatchGeneration
+  ;(watcher as any).networkPolicyRevocationContextRevision = (watcher as any).contextDesiredRevision
+  ;(watcher as any).networkPolicyRevocationServerRevision = (
+    watcher as any
+  ).mcpServerDesiredRevision
 }
 
 function newContextAuthoritativeWatcher(): McpServerWatcher {
@@ -1030,12 +1034,12 @@ describe('McpServerWatcher startup', () => {
 
     try {
       await vi.waitFor(() => {
-        expect(mocks.serverFullReconcile).toHaveBeenCalledOnce()
         expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
         expect(mocks.hostFullReconcile).toHaveBeenCalledOnce()
         expect(mocks.sfsFullReconcile).toHaveBeenCalledOnce()
         expect(gfsFullReconcile).toHaveBeenCalledOnce()
       })
+      expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
 
       await expect(bootstrap).resolves.toBeUndefined()
       server.setReady(true)
@@ -1044,6 +1048,7 @@ describe('McpServerWatcher startup', () => {
       expect(completeAuthoritativeRevocation).toBeTypeOf('function')
 
       completeAuthoritativeRevocation?.()
+      await vi.waitFor(() => expect(mocks.serverFullReconcile).toHaveBeenCalledOnce())
       const ready = await requestReadyOverHttp(server)
       expect(ready.statusCode).toBe(200)
       expect(JSON.parse(ready.body)).toEqual({ status: 'ready', ready: true })
@@ -1053,9 +1058,10 @@ describe('McpServerWatcher startup', () => {
       expect(startGlobalFileSystemWatch).toHaveBeenCalledOnce()
       expect(watcher.isCommunicationChannelCacheSynced()).toBe(true)
 
-      // McpServer and NetworkPolicy convergence are independent background
-      // lanes: neither a slow runtime fleet nor policy fleet may delay safe
-      // bootstrap or prevent the other lane from starting.
+      // Runtime convergence starts at the safety-certification boundary, not
+      // after the NetworkPolicy additive fleet completes. This prevents the
+      // startup egress lane from racing the policy safety pass while retaining
+      // readiness decoupling from both additive fleets.
       expect(mocks.serverFullReconcile).toHaveBeenCalledOnce()
       expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
     } finally {
@@ -1391,6 +1397,8 @@ describe('McpServerWatcher startup', () => {
     const reconciliationOrder: string[] = []
     const watcher = new McpServerWatcher()
     ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextCacheSynced = true
+    markNetworkPolicyRevocationAuthoritative(watcher)
     ;(watcher as any).servers.set(staleServer.name, staleServer)
     const netPol = (watcher as any).netPolReconciler
     netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
@@ -1424,7 +1432,7 @@ describe('McpServerWatcher startup', () => {
     releaseEgress.resolve(undefined)
     await Promise.all([convergence, watchConvergence])
 
-    expect(reconciliationOrder).toEqual(['watch', 'initial'])
+    expect(reconciliationOrder).toEqual(['watch'])
     expect(reconciler.reconcile).toHaveBeenLastCalledWith(
       expect.objectContaining({ name: 'current-server' }),
       { isCurrent: expect.any(Function) }
@@ -1678,6 +1686,8 @@ describe('McpServerWatcher startup', () => {
     const releaseEgress = deferred()
     const watcher = new McpServerWatcher()
     ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextCacheSynced = true
+    markNetworkPolicyRevocationAuthoritative(watcher)
     ;(watcher as any).servers.set(dnsBlockedServer.name, dnsBlockedServer)
     ;(watcher as any).servers.set(independentServer.name, independentServer)
     const netPol = (watcher as any).netPolReconciler
@@ -2413,6 +2423,8 @@ describe('McpServerWatcher startup', () => {
     const releaseEgress = deferred()
     const watcher = new McpServerWatcher()
     ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextCacheSynced = true
+    markNetworkPolicyRevocationAuthoritative(watcher)
     ;(watcher as any).servers.set(initialServer.name, initialServer)
     const netPol = (watcher as any).netPolReconciler
     netPol.reconcileExternalEgress.mockImplementationOnce(async () => {
@@ -2446,6 +2458,8 @@ describe('McpServerWatcher startup', () => {
     const snapshots: string[][] = []
     const watcher = new McpServerWatcher()
     ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextCacheSynced = true
+    markNetworkPolicyRevocationAuthoritative(watcher)
     ;(watcher as any).servers.set('first-server', {
       name: 'first-server',
       namespace: 'mcp-server',
@@ -2622,7 +2636,9 @@ describe('McpServerWatcher startup', () => {
     const releaseEgress = deferred()
     const watcher = new McpServerWatcher()
     ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextCacheSynced = true
     ;(watcher as any).mcpWatchGeneration = 7
+    markNetworkPolicyRevocationAuthoritative(watcher)
     ;(watcher as any).initialConvergenceRetryAttempts.set('McpServer', 3)
     ;(watcher as any).servers.set('stale-server', {
       name: 'stale-server',
@@ -2671,6 +2687,7 @@ describe('McpServerWatcher startup', () => {
       },
     })
     ;(watcher as any).mcpServerCacheSynced = true
+    markNetworkPolicyRevocationAuthoritative(watcher)
     await (watcher as any).runInitialMcpServerConvergence()
 
     expect(reconciler.reconcile).toHaveBeenCalledOnce()
@@ -2786,6 +2803,136 @@ describe('McpServerWatcher startup', () => {
 
     expect((watcher as any).networkPolicyRevocationContextGeneration).not.toBe(21)
     expect((watcher as any).networkPolicyRevocationServerGeneration).not.toBe(34)
+    await watcher.stop()
+  })
+
+  it('does not start runtime fleet convergence without a current NetworkPolicy safety certificate', async () => {
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextWatchGeneration = 4
+    ;(watcher as any).mcpWatchGeneration = 7
+
+    await (watcher as any).runInitialMcpServerConvergence()
+    expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
+
+    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await vi.waitFor(() => expect(mocks.serverFullReconcile).toHaveBeenCalledOnce())
+
+    await watcher.stop()
+  })
+
+  it('invalidates readiness when either desired policy revision advances', async () => {
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextWatchGeneration = 4
+    ;(watcher as any).mcpWatchGeneration = 7
+    markNetworkPolicyRevocationAuthoritative(watcher)
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
+    ;(watcher as any).mcpServerDesiredRevision += 1
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+
+    markNetworkPolicyRevocationAuthoritative(watcher)
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
+    ;(watcher as any).contextDesiredRevision += 1
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+
+    await watcher.stop()
+  })
+
+  it('retires readiness and requests a safety pass before a changed McpServer effect settles', async () => {
+    const previous = {
+      metadata: {
+        name: 'restrictive-change',
+        namespace: 'mcp-server',
+        uid: 'restrictive-change-uid',
+        generation: 1,
+      },
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/restrictive-change:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        egressBindings: [{ dns: 'api.example.com', port: 443, protocol: 'TCP' as const }],
+      },
+    }
+    const current = {
+      ...previous,
+      metadata: { ...previous.metadata, generation: 2 },
+      spec: {
+        ...previous.spec,
+        egressBindings: [{ dns: 'api.example.com', port: 443, protocol: 'UDP' as const }],
+      },
+    }
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextWatchGeneration = 4
+    ;(watcher as any).mcpWatchGeneration = 7
+    ;(watcher as any).servers.set(previous.metadata.name, {
+      name: previous.metadata.name,
+      namespace: previous.metadata.namespace,
+      uid: previous.metadata.uid,
+      generation: previous.metadata.generation,
+      spec: previous.spec,
+    })
+    markNetworkPolicyRevocationAuthoritative(watcher)
+    const safetyPass = vi
+      .spyOn(watcher as any, 'runInitialNetworkPolicyConvergence')
+      .mockResolvedValue(undefined)
+    ;(watcher as any).netPolReconciler.reconcileExternalEgress.mockRejectedValueOnce(
+      new Error('replacement policy unavailable')
+    )
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await (watcher as any).getMcpServerWatchCallback(7)('MODIFIED', current)
+
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+    expect(safetyPass).toHaveBeenCalled()
+    await watcher.stop()
+    errorSpy.mockRestore()
+  })
+
+  it('fences runtime effects when either generation retires the safety certificate', async () => {
+    const selected = {
+      name: 'certificate-fenced-server',
+      namespace: 'mcp-server',
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/certificate-fenced:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+        egressBindings: [{ dns: 'certificate-fenced.example', port: 443 }],
+      },
+    }
+    const egressStarted = deferred()
+    const releaseEgress = deferred()
+    const runtimeEffect = vi.fn()
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextWatchGeneration = 11
+    ;(watcher as any).mcpWatchGeneration = 13
+    markNetworkPolicyRevocationAuthoritative(watcher)
+    ;(watcher as any).servers.set(selected.name, selected)
+    ;(watcher as any).netPolReconciler.reconcileExternalEgress.mockImplementationOnce(async () => {
+      egressStarted.resolve(undefined)
+      await releaseEgress.promise
+    })
+    mocks.serverFullReconcile.mockImplementationOnce(async (servers, options) => {
+      await Promise.all(
+        servers.map((server: { name: string }) => options.runEffect(server.name, runtimeEffect))
+      )
+    })
+
+    const convergence = (watcher as any).runInitialMcpServerConvergence()
+    await egressStarted.promise
+    ;(watcher as any).contextWatchGeneration = 12
+    releaseEgress.resolve(undefined)
+    await convergence
+
+    expect(runtimeEffect).not.toHaveBeenCalled()
     await watcher.stop()
   })
 
@@ -2953,6 +3100,8 @@ describe('McpServerWatcher startup', () => {
     vi.useFakeTimers()
     const watcher = new McpServerWatcher()
     ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextCacheSynced = true
+    markNetworkPolicyRevocationAuthoritative(watcher)
     mocks.serverFullReconcile.mockRejectedValueOnce(
       new Error('initial runtime reconciliation unavailable')
     )

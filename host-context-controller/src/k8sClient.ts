@@ -141,6 +141,13 @@ type HostInventoryRecoveryCause = 'cold-start' | 'watch-recovery'
 type HostWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
 type InitialConvergenceLane = 'McpServer' | 'NetworkPolicy'
 
+type NetworkPolicySafetyCertificate = {
+  contextGeneration: number
+  serverGeneration: number
+  contextRevision: number
+  serverRevision: number
+}
+
 type ActiveInitialConvergenceRun = {
   trailingRequested: boolean
   promise: Promise<void>
@@ -631,6 +638,8 @@ export class McpServerWatcher implements McpServerProvider {
   // this marker until the new inventory's orphan-allow sweep completes.
   private networkPolicyRevocationContextGeneration = 0
   private networkPolicyRevocationServerGeneration = 0
+  private networkPolicyRevocationContextRevision = 0
+  private networkPolicyRevocationServerRevision = 0
   private mcpServerCacheSynced = false
   private contextCacheSynced = false
   private mcpServerCacheRecoveryTimer: ReturnType<typeof setTimeout> | null = null
@@ -855,7 +864,9 @@ export class McpServerWatcher implements McpServerProvider {
       this.contextCacheSynced &&
       this.hostCacheSynced &&
       this.networkPolicyRevocationContextGeneration === this.contextWatchGeneration &&
-      this.networkPolicyRevocationServerGeneration === this.mcpWatchGeneration
+      this.networkPolicyRevocationServerGeneration === this.mcpWatchGeneration &&
+      this.networkPolicyRevocationContextRevision === this.contextDesiredRevision &&
+      this.networkPolicyRevocationServerRevision === this.mcpServerDesiredRevision
     )
   }
 
@@ -1173,7 +1184,6 @@ export class McpServerWatcher implements McpServerProvider {
         await this.restartMcpServerWatch(snapshot)
         if (this.stopped) return false
         this.changeCallback?.()
-        void this.runInitialMcpServerConvergence()
         if (this.contextCacheSynced) {
           void this.runInitialNetworkPolicyConvergence()
         }
@@ -2385,11 +2395,11 @@ export class McpServerWatcher implements McpServerProvider {
     this.externalEgressCoordinator.startPeriodicResync(externalEgressResyncSec)
 
     // Full convergence is observable and retains each lane's existing retry or
-    // periodic-resync contract, but it no longer extends provider.start() or
-    // the readiness probe. Each lane snapshots its cache only after cache/watch
-    // bootstrap above, so a watch event accepted during startup is not undone by
-    // a pre-watch inventory snapshot.
-    void this.runInitialMcpServerConvergence()
+    // periodic-resync contract, but it no longer extends provider.start().
+    // NetworkPolicy safety starts first and launches McpServer convergence from
+    // its certification callback, before additive policy convergence completes.
+    // This prevents the startup egress refresh from racing or undoing the safety
+    // pass while keeping readiness independent from both additive fleets.
     void this.runInitialNetworkPolicyConvergence()
     if (sfsInventoryComplete) {
       void this.runInitialSharedFileSystemConvergence()
@@ -2403,10 +2413,46 @@ export class McpServerWatcher implements McpServerProvider {
     return this.runInitialConvergence('McpServer')
   }
 
+  private currentNetworkPolicySafetyCertificate(): NetworkPolicySafetyCertificate | null {
+    if (
+      this.stopped ||
+      !this.contextCacheSynced ||
+      !this.mcpServerCacheSynced ||
+      this.networkPolicyRevocationContextGeneration !== this.contextWatchGeneration ||
+      this.networkPolicyRevocationServerGeneration !== this.mcpWatchGeneration ||
+      this.networkPolicyRevocationContextRevision !== this.contextDesiredRevision ||
+      this.networkPolicyRevocationServerRevision !== this.mcpServerDesiredRevision
+    ) {
+      return null
+    }
+    return {
+      contextGeneration: this.contextWatchGeneration,
+      serverGeneration: this.mcpWatchGeneration,
+      contextRevision: this.contextDesiredRevision,
+      serverRevision: this.mcpServerDesiredRevision,
+    }
+  }
+
+  private isNetworkPolicySafetyCertificateCurrent(
+    certificate: NetworkPolicySafetyCertificate
+  ): boolean {
+    const current = this.currentNetworkPolicySafetyCertificate()
+    return (
+      current !== null &&
+      current.contextGeneration === certificate.contextGeneration &&
+      current.serverGeneration === certificate.serverGeneration &&
+      current.contextRevision === certificate.contextRevision &&
+      current.serverRevision === certificate.serverRevision
+    )
+  }
+
   private async runInitialMcpServerConvergenceCore(): Promise<void> {
-    if (!this.mcpServerCacheSynced) return
+    const safetyCertificate = this.currentNetworkPolicySafetyCertificate()
+    if (safetyCertificate === null) return
     const inventoryGeneration = this.mcpWatchGeneration
-    const inventoryAuthoritative = () => this.hasMcpServerInventoryAuthority(inventoryGeneration)
+    const inventoryAuthoritative = () =>
+      this.hasMcpServerInventoryAuthority(inventoryGeneration) &&
+      this.isNetworkPolicySafetyCertificateCurrent(safetyCertificate)
     try {
       const initialServers = [...this.servers.values()]
       const initialExternalEgressGates = this.externalEgressCoordinator.prepareStartupGates(
@@ -2528,6 +2574,13 @@ export class McpServerWatcher implements McpServerProvider {
           if (!contextInventoryAuthoritative() || !serverInventoryAuthoritative()) return
           this.networkPolicyRevocationContextGeneration = contextInventoryGeneration
           this.networkPolicyRevocationServerGeneration = serverInventoryGeneration
+          this.networkPolicyRevocationContextRevision = this.contextDesiredRevision
+          this.networkPolicyRevocationServerRevision = this.mcpServerDesiredRevision
+          // Start runtime convergence at the safety boundary, before this full
+          // pass enters additive Context and DNS refresh work. Startup egress
+          // gates may now preserve only policies certified by this exact
+          // authoritative inventory generation.
+          void this.runInitialMcpServerConvergence()
         },
       })
       if (!contextInventoryAuthoritative() || !serverInventoryAuthoritative()) return
@@ -3064,7 +3117,10 @@ export class McpServerWatcher implements McpServerProvider {
           desiredStateChanged = this.servers.delete(server.name)
         }
       }
-      if (desiredStateChanged) this.mcpServerDesiredRevision += 1
+      if (desiredStateChanged) {
+        this.mcpServerDesiredRevision += 1
+        void this.runInitialNetworkPolicyConvergence()
+      }
 
       // HCC writes McpServer status during reconciliation. Those writes emit
       // MODIFIED events but do not change the desired runtime or policy state.
@@ -3374,7 +3430,10 @@ export class McpServerWatcher implements McpServerProvider {
       } else if (type === 'DELETED') {
         desiredStateChanged = this.contexts.delete(context.name)
       }
-      if (desiredStateChanged) this.contextDesiredRevision += 1
+      if (desiredStateChanged) {
+        this.contextDesiredRevision += 1
+        void this.runInitialNetworkPolicyConvergence()
+      }
 
       // Re-reconcile every SFS this Context referenced before or after the
       // change so SharedFileSystem.status.mountedByContexts stays in sync

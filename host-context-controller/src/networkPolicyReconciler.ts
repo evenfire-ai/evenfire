@@ -52,7 +52,6 @@ type JsonPatchOperation = {
 type NetworkPolicyMutationOptions = {
   isCurrent?: () => boolean
   existingPolicies?: k8s.V1NetworkPolicy[]
-  preserveCertifiedDnsPolicyOnRefreshFailure?: boolean
 }
 
 export function sameContextDesiredRevision(expected: ContextCRD, current: ContextCRD): boolean {
@@ -1147,7 +1146,6 @@ export class NetworkPolicyReconciler {
         }
         await this.reconcileExternalEgress(current, {
           isCurrent: serverEffectIsCurrent,
-          preserveCertifiedDnsPolicyOnRefreshFailure: true,
         })
       })
     }
@@ -1536,10 +1534,7 @@ export class NetworkPolicyReconciler {
               policy.metadata?.name === name &&
               this.canRetainDnsEgressPolicy(policy, server, binding)
           )
-          if (
-            options.preserveCertifiedDnsPolicyOnRefreshFailure &&
-            certifiedExisting !== undefined
-          ) {
+          if (certifiedExisting !== undefined) {
             desiredPolicyNames.add(name)
           }
           failures.push(`failed to resolve hostname "${binding.dns}": ${this.errorMessage(err)}`)
