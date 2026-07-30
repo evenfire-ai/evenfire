@@ -1,4 +1,5 @@
 import { app, safeStorage } from 'electron'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -99,6 +100,47 @@ async function legacyFilePath(): Promise<string> {
   return path.join(await resolvedStorageBase(), 'session-token.json')
 }
 
+function isUnsupportedDirectorySyncError(error: unknown): boolean {
+  if (process.platform !== 'win32') return false
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === 'EISDIR' || code === 'EPERM' || code === 'EINVAL' || code === 'ENOTSUP'
+}
+
+async function syncDirectory(directoryPath: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null
+  try {
+    handle = await fs.open(directoryPath, 'r')
+    await handle.sync()
+  } catch (error) {
+    if (!isUnsupportedDirectorySyncError(error)) throw error
+  } finally {
+    await handle?.close()
+  }
+}
+
+async function writeTokenFileAtomic(filePath: string, value: string | Uint8Array): Promise<void> {
+  const temporaryPath = `${filePath}.${randomUUID()}.tmp`
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null
+  try {
+    handle = await fs.open(temporaryPath, 'w', 0o600)
+    await handle.writeFile(value)
+    await handle.sync()
+    await handle.close()
+    handle = null
+    await fs.rename(temporaryPath, filePath)
+    await syncDirectory(path.dirname(filePath))
+  } catch (error) {
+    await handle?.close().catch(() => undefined)
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined)
+    throw error
+  }
+}
+
+async function removeTokenFileDurably(filePath: string): Promise<void> {
+  await fs.unlink(filePath)
+  await syncDirectory(path.dirname(filePath))
+}
+
 export class TokenStore {
   /**
    * Read the session token for `envKey`. Falls back keytar → safeStorage file,
@@ -197,7 +239,7 @@ export class TokenStore {
           const token = safeStorage.decryptString(encrypted)
           if (token) {
             await this.setSessionToken(token, envKey)
-            await fs.unlink(file).catch(() => {})
+            await removeTokenFileDurably(file).catch(() => {})
             return token
           }
         } catch {
@@ -212,7 +254,7 @@ export class TokenStore {
         const token = typeof data.token === 'string' && data.token ? data.token : null
         if (token) {
           await this.setSessionToken(token, envKey)
-          await fs.unlink(file).catch(() => {})
+          await removeTokenFileDurably(file).catch(() => {})
           return token
         }
       } catch {
@@ -254,7 +296,7 @@ export class TokenStore {
         const token = safeStorage.decryptString(encrypted)
         if (token) {
           await this.setSessionToken(token, envKey)
-          await fs.unlink(file).catch(() => {})
+          await removeTokenFileDurably(file).catch(() => {})
           return token
         }
       } catch {
@@ -270,7 +312,7 @@ export class TokenStore {
       const token = typeof data.token === 'string' && data.token ? data.token : null
       if (token) {
         await this.setSessionToken(token, envKey)
-        await fs.unlink(file).catch(() => {})
+        await removeTokenFileDurably(file).catch(() => {})
       }
       return token
     } catch {
@@ -293,12 +335,12 @@ export class TokenStore {
 
     if (app?.isReady() && safeStorage.isEncryptionAvailable()) {
       const file = await encryptedFilePath(envKey)
-      await fs.writeFile(file, safeStorage.encryptString(token), { mode: 0o600 })
+      await writeTokenFileAtomic(file, safeStorage.encryptString(token))
       return
     }
 
     const file = await plainFilePath(envKey)
-    await fs.writeFile(file, JSON.stringify({ token }), { encoding: 'utf8', mode: 0o600 })
+    await writeTokenFileAtomic(file, JSON.stringify({ token }))
   }
 
   async clearSessionToken(
