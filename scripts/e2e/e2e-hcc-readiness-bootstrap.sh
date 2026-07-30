@@ -205,7 +205,7 @@ probe_hcc_ready_pod() {
 }
 
 running_hcc_gateway_pod() {
-  running_pod_name "$HCC_NS" "app=${HCC_GATEWAY_DEPLOY}"
+  ready_pod_name "$HCC_NS" "app=${HCC_GATEWAY_DEPLOY}"
 }
 
 hcc_gateway_deployment_ready() {

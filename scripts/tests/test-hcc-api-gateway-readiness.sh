@@ -71,6 +71,15 @@ runtime_hold_function="$(
 unavailable_probe_function="$(
   sed -n '/^hcc_gateway_ready_proxy_unavailable() {$/,/^}$/p' "${BOOTSTRAP_E2E}"
 )"
+gateway_pod_function="$(
+  sed -n '/^running_hcc_gateway_pod() {$/,/^}$/p' "${BOOTSTRAP_E2E}"
+)"
+if [[ "${gateway_pod_function}" != *'ready_pod_name "$HCC_NS" "app=${HCC_GATEWAY_DEPLOY}"'* ]] ||
+   [[ "${gateway_pod_function}" == *'running_pod_name'* ]]; then
+  fail "gateway runtime proof must select a Ready pod through the shared E2E helper"
+fi
+echo "PASS: gateway runtime proof selects a Ready pod through the shared helper"
+
 if [[ "${runtime_hold_function}" != *'hcc_gateway_deployment_ready'* ]] ||
    [[ "${runtime_hold_function}" != *'hcc_gateway_local_health_ok'* ]] ||
    [[ "${runtime_hold_function}" != *'hcc_gateway_ready_proxy_unavailable'* ]] ||
