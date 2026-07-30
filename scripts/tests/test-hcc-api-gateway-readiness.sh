@@ -88,20 +88,22 @@ if [[ "${runtime_hold_function}" != *'hcc_gateway_deployment_ready'* ]] ||
 fi
 echo "PASS: bootstrap E2E proves gateway readiness remains local while HCC is unavailable"
 
-if (
-  HCC_NS=control-plane
-  running_hcc_gateway_pod() { printf '%s\n' gateway-pod; }
-  kctl() {
-    printf '%s\n' '  HTTP/1.1 502 Bad Gateway'
-    return 8
-  }
-  eval "${unavailable_probe_function}"
-  hcc_gateway_ready_proxy_unavailable
-); then
-  echo "PASS: gateway hold accepts the explicit upstream-unavailable HTTP status"
-else
-  fail "gateway hold rejects the expected upstream-unavailable HTTP status"
-fi
+for unavailable_status in 502 503 504; do
+  if (
+    HCC_NS=control-plane
+    running_hcc_gateway_pod() { printf '%s\n' gateway-pod; }
+    kctl() {
+      printf '  HTTP/1.1 %s upstream unavailable\n' "${unavailable_status}"
+      return 8
+    }
+    eval "${unavailable_probe_function}"
+    hcc_gateway_ready_proxy_unavailable
+  ); then
+    echo "PASS: gateway hold accepts explicit upstream-unavailable HTTP ${unavailable_status}"
+  else
+    fail "gateway hold rejects expected upstream-unavailable HTTP ${unavailable_status}"
+  fi
+done
 
 if (
   HCC_NS=control-plane

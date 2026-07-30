@@ -233,7 +233,7 @@ hcc_gateway_ready_proxy_unavailable() {
   pod="$(running_hcc_gateway_pod)" || return 1
   output="$(
     kctl exec "pod/${pod}" -n "$HCC_NS" -c nginx -- \
-      wget -O /dev/null -S http://127.0.0.1:8081/ready 2>&1
+      wget -T 70 -t 1 -O /dev/null -S http://127.0.0.1:8081/ready 2>&1
   )" && return 1
   status="$(
     awk '
@@ -245,7 +245,10 @@ hcc_gateway_ready_proxy_unavailable() {
       }
     ' <<<"$output"
   )"
-  [ "$status" = 502 ]
+  case "$status" in
+    502|503|504) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 hcc_gateway_remains_ready_without_hcc() {
@@ -254,7 +257,9 @@ hcc_gateway_remains_ready_without_hcc() {
   while [ "$(date +%s)" -lt "$deadline" ]; do
     hcc_gateway_deployment_ready &&
       hcc_gateway_local_health_ok &&
-      hcc_gateway_ready_proxy_unavailable ||
+      hcc_gateway_ready_proxy_unavailable &&
+      hcc_gateway_deployment_ready &&
+      hcc_gateway_local_health_ok ||
       return 1
     sleep 1
   done
