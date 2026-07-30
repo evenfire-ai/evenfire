@@ -754,8 +754,7 @@ export class NetworkPolicyReconciler {
   /**
    * Reconcile NetworkPolicies for a Context CRD.
    * Creates one policy per allowed MCP server.
-   */
-  /**
+   *
    * Returns whether this Context's stale-allow revocation ran to completion.
    * Callers that certify readiness from a scoped delta MUST honour it: the pass
    * aborts as soon as its authority fence breaks, and an aborted pass leaves
@@ -850,6 +849,28 @@ export class NetworkPolicyReconciler {
     // nothing. The scoped lane has no second source of truth to reclassify
     // from, so it finishes its remaining work and then declines to certify.
     let lostDeleteFence = false
+    /**
+     * Revoke one orphaned policy in any lane. Returns false only when the
+     * caller must abort the pass outright, which is what the authoritative
+     * safety-snapshot lane does with a lost delete fence; the scoped lane
+     * records it and keeps going so the rest of its work still lands.
+     */
+    const revokeOrphanedPolicy = async (
+      namespace: string,
+      existing: k8s.V1NetworkPolicy
+    ): Promise<boolean> => {
+      const deleted = await this.deleteSafetyPolicySnapshot(
+        namespace,
+        existing,
+        isCurrent,
+        undefined,
+        'report'
+      )
+      if (deleted) return true
+      if (safetySnapshotProvided) return false
+      lostDeleteFence = true
+      return true
+    }
     const contextId = context.spec.contextId
     const allowedServers = context.spec.mcpServers || []
     const desiredIngress = new Map<string, k8s.V1NetworkPolicy>()
@@ -873,29 +894,7 @@ export class NetworkPolicyReconciler {
       const desired = desiredIngress.get(existingName)
       if (!desired) {
         console.log(`[NetPol] Deleting orphaned policy "${existingName}"`)
-        if (safetySnapshotProvided) {
-          if (
-            !(await this.deleteSafetyPolicySnapshot(
-              config.namespace,
-              existing,
-              isCurrent,
-              undefined,
-              'report'
-            ))
-          ) {
-            return false
-          }
-        } else if (
-          !(await this.deleteSafetyPolicySnapshot(
-            config.namespace,
-            existing,
-            isCurrent,
-            undefined,
-            'report'
-          ))
-        ) {
-          lostDeleteFence = true
-        }
+        if (!(await revokeOrphanedPolicy(config.namespace, existing))) return false
         onRevoked?.()
       } else if (
         !sameNetworkPolicySpec(existing, desired) ||
@@ -936,29 +935,7 @@ export class NetworkPolicyReconciler {
       const desired = desiredHostEgress.get(existingName)
       if (!desired) {
         console.log(`[NetPol] Deleting orphaned L2 egress policy "${existingName}"`)
-        if (safetySnapshotProvided) {
-          if (
-            !(await this.deleteSafetyPolicySnapshot(
-              config.hostNamespace,
-              existing,
-              isCurrent,
-              undefined,
-              'report'
-            ))
-          ) {
-            return false
-          }
-        } else if (
-          !(await this.deleteSafetyPolicySnapshot(
-            config.hostNamespace,
-            existing,
-            isCurrent,
-            undefined,
-            'report'
-          ))
-        ) {
-          lostDeleteFence = true
-        }
+        if (!(await revokeOrphanedPolicy(config.hostNamespace, existing))) return false
         onRevoked?.()
       } else if (
         !sameNetworkPolicySpec(existing, desired) ||
@@ -999,29 +976,7 @@ export class NetworkPolicyReconciler {
       const desired = desiredRpcProxyEgress.get(existingName)
       if (!desired) {
         console.log(`[NetPol] Deleting orphaned rpc-proxy egress policy "${existingName}"`)
-        if (safetySnapshotProvided) {
-          if (
-            !(await this.deleteSafetyPolicySnapshot(
-              config.rpcProxyNamespace,
-              existing,
-              isCurrent,
-              undefined,
-              'report'
-            ))
-          ) {
-            return false
-          }
-        } else if (
-          !(await this.deleteSafetyPolicySnapshot(
-            config.rpcProxyNamespace,
-            existing,
-            isCurrent,
-            undefined,
-            'report'
-          ))
-        ) {
-          lostDeleteFence = true
-        }
+        if (!(await revokeOrphanedPolicy(config.rpcProxyNamespace, existing))) return false
         onRevoked?.()
       } else if (
         !sameNetworkPolicySpec(existing, desired) ||
@@ -1097,13 +1052,16 @@ export class NetworkPolicyReconciler {
     }
 
     const safetyPassStartedAt = performance.now()
-    let safetyPassDurationRecorded = false
-    const recordSafetyPassDuration = (outcome: 'completed' | 'failed'): void => {
-      if (safetyPassDurationRecorded) return
-      safetyPassDurationRecorded = true
-      // First outcome wins for both the sample and the delta fence: a pass that
-      // certified and only then failed an additive effect still revoked every
-      // stale allow its inventory implied.
+    let safetyPassOutcomeRecorded = false
+    /**
+     * Settles both observable results of this pass: the duration sample and the
+     * cross-lane fence the scoped delta reads. First outcome wins for both — a
+     * pass that certified and only then failed an additive effect still revoked
+     * every stale allow its inventory implied.
+     */
+    const recordSafetyPassOutcome = (outcome: 'completed' | 'failed'): void => {
+      if (safetyPassOutcomeRecorded) return
+      safetyPassOutcomeRecorded = true
       this.safetyPassLeftUncertified = outcome === 'failed'
       networkPolicySafetyPassDurationSeconds.observe(
         { outcome },
@@ -1116,15 +1074,15 @@ export class NetworkPolicyReconciler {
         ...options,
         onAuthoritativeRevocationComplete: () => {
           onAuthoritativeRevocationComplete()
-          recordSafetyPassDuration('completed')
+          recordSafetyPassOutcome('completed')
         },
       })
       // The pass returned without certifying: no exception, no certificate.
       // Operators alert on this exact condition, so it must produce a sample
       // rather than the absence of one.
-      recordSafetyPassDuration('failed')
+      recordSafetyPassOutcome('failed')
     } catch (error) {
-      recordSafetyPassDuration('failed')
+      recordSafetyPassOutcome('failed')
       throw error
     }
   }

@@ -523,6 +523,12 @@ for ((marker_index = 0; marker_index < ${#marker_bindings[@]}; marker_index += 4
   producer_file="${marker_bindings[marker_index + 2]}"
   producer_marker="${marker_bindings[marker_index + 3]}"
   marker_binding_count=$((marker_binding_count + 1))
+  # `grep -Fq -- ""` matches every file, so an empty marker would disarm this
+  # pair while still reporting a pass. Refuse it instead of searching for it.
+  if [ -z "$consumer_marker" ] || [ -z "$producer_marker" ]; then
+    marker_drift+="  marker pair at index ${marker_index} has an empty marker"$'\n'
+    continue
+  fi
   if ! grep -Fq -- "$consumer_marker" "$consumer_file"; then
     marker_drift+="  consumer $(basename "$consumer_file") no longer reads: ${consumer_marker}"$'\n'
   fi
@@ -530,7 +536,13 @@ for ((marker_index = 0; marker_index < ${#marker_bindings[@]}; marker_index += 4
     marker_drift+="  producer $(basename "$producer_file") no longer emits: ${producer_marker}"$'\n'
   fi
 done
-if [ "$marker_binding_count" -eq 29 ] && [ -z "$marker_drift" ]; then
+# The stride loop consumes 4 elements per pair, so an array whose length is not
+# a multiple of 4 silently shifts every entry after the edit and leaves the tail
+# unset. Assert the arity explicitly rather than relying on the pair count to
+# happen to notice.
+if [ $((${#marker_bindings[@]} % 4)) -eq 0 ] &&
+  [ "$marker_binding_count" -eq 29 ] &&
+  [ -z "$marker_drift" ]; then
   pass "all ${marker_binding_count} consumed HCC log markers stay bound to their runtime producers"
 else
   printf '%s' "$marker_drift" >&2
