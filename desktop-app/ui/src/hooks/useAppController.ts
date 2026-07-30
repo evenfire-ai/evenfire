@@ -154,7 +154,7 @@ export function useAppController() {
   const contextsData = useContextsDataController()
   const mcpServersData = useMcpServersDataController()
   const teamsData = useTeamsDataController()
-  const currentTeamId = teamsData.currentTeamId || auth.me?.teamId || ''
+  const currentTeamId = auth.me?.teamId || teamsData.currentTeamId || ''
   const availableTeamIds = useMemo(() => teamsData.teams.map(team => team.id), [teamsData.teams])
   const authenticatedPrincipalIdentity =
     auth.isAuthenticated && auth.me
