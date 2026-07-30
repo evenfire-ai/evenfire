@@ -715,7 +715,7 @@ valid_baseline_policies='{"items":[
 ]}'
 if (
   MCP_NS=mcp-server
-  MANAGED_BY_VALUE=host-context-controller
+  MANAGED_BY_VALUE='host-context-controller'
   MOCK_POLICY_JSON="$valid_baseline_policies"
   kctl() { printf '%s\n' "$MOCK_POLICY_JSON"; }
   eval "$baseline_policy_snapshot_function"

@@ -298,7 +298,7 @@ else
 fi
 rm -f "$running_response_file"
 
-if running_status_json="$(wait_for_running_workflowrecipe_status)"; then
+if wait_for_running_workflowrecipe_status >/dev/null; then
   ok "WorkflowRecipe becomes active when workflow execution is running"
 else
   fail "WorkflowRecipe did not become active on running workflow execution"
@@ -429,7 +429,7 @@ else
 fi
 rm -f "$pending_response_file"
 
-if pending_status_json="$(wait_for_pending_preserves_non_terminal_recipe_status)"; then
+if wait_for_pending_preserves_non_terminal_recipe_status >/dev/null; then
   ok "WorkflowRecipe stays non-terminal when workflow execution is pending"
 else
   fail "WorkflowRecipe did not stay non-terminal on pending workflow execution"

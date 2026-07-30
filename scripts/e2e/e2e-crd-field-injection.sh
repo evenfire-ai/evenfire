@@ -55,6 +55,7 @@ require_safe_kube_context || exit 1
 cleanup_e2e_resources
 ensure_e2e_resources_absent ||
   fail "Stale e2e-sec resources remain after cleanup; refusing stale-positive E2E run"
+# shellcheck disable=SC2154 # e2e-lib.sh owns the shared result counters.
 [ "$e2e_fail" -gt 0 ] && exit 1
 
 # ═══ Test 1: imagePullPolicy override prevention ═════════════════════
@@ -303,5 +304,6 @@ ensure_e2e_resources_absent && ok "All e2e-sec resources cleaned up" || fail "e2
 
 # ═══ Summary ═════════════════════════════════════════════════════════
 header "Summary"
+# shellcheck disable=SC2154 # e2e-lib.sh owns the shared result counters.
 echo -e "  ${GREEN}PASS${NC}: ${e2e_pass}  ${RED}FAIL${NC}: ${e2e_fail}  Total: ${e2e_total}"
 [ "$e2e_fail" -gt 0 ] && exit 1 || exit 0
