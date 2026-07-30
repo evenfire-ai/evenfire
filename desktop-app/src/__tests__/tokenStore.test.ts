@@ -31,7 +31,6 @@ const LEGACY_ACCOUNT = 'session-token'
 // hash separator.
 const ENV_A = 'env_a-000000000000'
 const ENV_B = 'env_b-111111111111'
-const ENV_A_WITH_RPC = 'env_a_rpc-222222222222'
 
 let TokenStore: typeof import('../tokenStore.js').TokenStore
 
@@ -83,19 +82,6 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
 
     // A second env no longer sees the (now-consumed) legacy token.
     expect(await store.getSessionToken(ENV_B)).toBeNull()
-  })
-
-  it('migrates an older env-scoped token into the active env slot, then deletes it', async () => {
-    keychain.set(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`), 'rest-only-tok')
-    const store = new TokenStore()
-
-    const migrated = await store.getSessionToken(ENV_A_WITH_RPC, { legacyEnvKeys: [ENV_A] })
-    expect(migrated).toBe('rest-only-tok')
-    expect(keychain.get(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A_WITH_RPC}`))).toBe(
-      'rest-only-tok'
-    )
-    expect(keychain.has(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe(false)
-    expect(await store.getSessionToken(ENV_A)).toBeNull()
   })
 
   it('clear removes the legacy global slot too (defense against later migration)', async () => {

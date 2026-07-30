@@ -18,17 +18,16 @@ import {
   HostModelsResult,
   HostRuntimeStatus,
   HostStatusStreamEvent,
+  MessageToolStep,
   PasswordLoginResult,
+  PendingApprovalLite,
   PendingWorkflowApproval,
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
-  ReplaceChatMessagesOptions,
   RpcAllowedServersResult,
-  SessionMessagesQuery,
-  SessionMessagesResult,
+  SessionLifecycleState,
   SessionState,
-  SessionsListQuery,
-  SessionsListResult,
+  SessionTokensLite,
   SetHostModelResult,
   TaskProgressStreamEvent,
   TeamDirectoryResult,
@@ -398,16 +397,41 @@ declare global {
         ) => Promise<Buffer>
         listSessions: (
           hostRef: string,
-          hostRefs?: string[],
-          query?: SessionsListQuery
-        ) => Promise<SessionsListResult>
+          hostRefs?: string[]
+        ) => Promise<{
+          items: Array<{
+            agent: string
+            chatId: string
+            turnCount: number
+            lastActivityAt: string
+            state?: SessionLifecycleState
+            activeTaskId?: string
+            pendingApproval?: PendingApprovalLite
+            tokens?: SessionTokensLite
+          }>
+        }>
         loadSessionMessages: (
           hostRef: string,
           agent: string,
           chatId: string,
-          hostRefs?: string[],
-          query?: SessionMessagesQuery
-        ) => Promise<SessionMessagesResult>
+          hostRefs?: string[]
+        ) => Promise<{
+          agent: string
+          chatId: string
+          state?: SessionLifecycleState
+          activeTaskId?: string
+          pendingApproval?: PendingApprovalLite
+          tokens?: SessionTokensLite
+          turns: Array<{
+            number: number
+            user_input: string
+            response?: string
+            started_at: string
+            completed_at?: string
+            tokens?: SessionTokensLite
+            tool_steps?: MessageToolStep[]
+          }>
+        }>
         getContextBreakdown: (
           hostRef: string,
           agent: string,
@@ -491,12 +515,6 @@ declare global {
         ) => Promise<ChatMessage[]>
         appendMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
         replaceMessages: (
-          agentRef: string,
-          chatId: string,
-          messages: ChatMessage[],
-          options?: ReplaceChatMessagesOptions
-        ) => Promise<void>
-        backfillCounters?: (
           agentRef: string,
           chatId: string,
           messages: ChatMessage[]

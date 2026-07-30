@@ -796,9 +796,6 @@ export interface ChatMetadata {
   createdAt: string // ISO 8601
   updatedAt: string // ISO 8601
   messageCount: number
-  /** Persisted activity aggregates keep dashboards from opening complete chat files. */
-  errorCount?: number
-  toolCallCount?: number
   /** D.5: a task terminated while this chat was NOT the active view. Drives the
    * sidebar "completed_unread" badge; persisted so it survives an app restart. */
   unreadTerminal?: boolean
@@ -807,8 +804,8 @@ export interface ChatMetadata {
 }
 
 export interface ChatIndex {
-  /** v2 remains readable by pre-paging builds; v3 is accepted and normalized for compatibility. */
-  version: 1 | 2 | 3
+  /** v2 aligns with ChatFile v2; bootstrap wipes any v1/missing-version dir (D.4 §7.1). */
+  version: 1 | 2
   lastActiveChatId: string | null
   onboardingDismissed: boolean
   chats: ChatMetadata[]
@@ -851,13 +848,6 @@ export interface ApprovalDecisionResult {
 export interface SessionMessagesResult {
   agent: string
   chatId: string
-  totalTurns?: number
-  oldestTurnNumber?: number
-  latestTurnNumber?: number
-  /** True only when older turns exist before the returned non-empty window. */
-  hasMoreBefore?: boolean
-  /** True only when newer turns exist after the returned non-empty window. */
-  hasMoreAfter?: boolean
   state?: SessionLifecycleState
   activeTaskId?: string
   pendingApproval?: PendingApprovalLite
@@ -871,33 +861,6 @@ export interface SessionMessagesResult {
     tokens?: SessionTokensLite
     tool_steps?: MessageToolStep[]
   }>
-}
-
-export interface SessionMessagesQuery {
-  limit?: number
-  beforeTurn?: number
-  afterTurn?: number
-}
-
-export interface SessionsListQuery {
-  agent?: string
-  limit?: number
-  cursor?: string
-}
-
-export interface SessionsListResult {
-  items: Array<{
-    agent: string
-    chatId: string
-    turnCount: number
-    messageCount?: number
-    lastActivityAt: string
-    state?: SessionLifecycleState
-    activeTaskId?: string
-    pendingApproval?: PendingApprovalLite
-    tokens?: SessionTokensLite
-  }>
-  nextCursor?: string
 }
 
 // F5 compile-time guard: `SessionMessagesResult` MUST keep carrying the recovery
@@ -1019,15 +982,11 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   timestamp: number
-  /** Authoritative server turn ordinal used for delta reconciliation and paging. */
-  serverTurnNumber?: number
   /** mcp-host task that produced/owns this message — used to rejoin after reload (D.3, v2). */
   task_id?: string
   attachments?: ChatMessageAttachment[]
   /** True when this message represents a structured error returned by mcp-host. */
   isError?: boolean
-  /** Local-only durable message that must not be evicted by server window reconciliation. */
-  preserveLocal?: boolean
   /** LLM error code, e.g. "LLM_AUTHENTICATION_FAILED". Present when isError is true. */
   errorCode?: string
   /** LLM provider name, e.g. "zai". Present when isError is true. */
@@ -1040,18 +999,6 @@ export interface ChatMessage {
    *  SSE steps are renderer-only). Minimal, serializable shape (no raw args/output).
    *  Absent on user messages and on turns with no tool calls. */
   toolSteps?: MessageToolStep[]
-}
-
-/**
- * Controls how an authoritative server page is persisted locally.
- *
- * `activeTaskIds` lets the main process protect the same optimistic slots as
- * the renderer. `replaceLocalWindow` marks the bounded latest-page fallback;
- * it still merges into local history rather than truncating the whole chat.
- */
-export interface ReplaceChatMessagesOptions {
-  activeTaskIds?: string[]
-  replaceLocalWindow?: boolean
 }
 
 /**

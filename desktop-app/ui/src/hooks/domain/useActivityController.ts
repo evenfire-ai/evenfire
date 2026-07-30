@@ -1,28 +1,26 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { TaskProgress } from '../../uiTypes'
 import { useChatStore } from '../useChatStore'
 import type { SidebarChatEntry } from './useAgentChatController'
 
+const ACTIVITY_SUMMARY_CHAT_SCAN_LIMIT = 20
+
+function getChatUpdatedTimestamp(chat: { updatedAt: string }): number {
+  const timestamp = Date.parse(chat.updatedAt)
+  return Number.isNaN(timestamp) ? 0 : timestamp
+}
+
 interface UseActivityControllerParams {
   selectedAgent: string | null
   isAuthenticated: boolean
-  loadMenuData: boolean
   chatList: SidebarChatEntry[]
   progressByAgentMessage: Record<string, Record<string, TaskProgress>>
   agentNames: string[]
 }
 
-const ACTIVITY_SUMMARY_CHAT_SCAN_LIMIT = 20
-const ACTIVITY_SUMMARY_MESSAGE_SCAN_LIMIT = 1000
-
-function activityCounterKey(agentRef: string, chatId: string): string {
-  return `${agentRef}\u0000${chatId}`
-}
-
 export function useActivityController({
   selectedAgent,
   isAuthenticated,
-  loadMenuData,
   chatList,
   progressByAgentMessage,
   agentNames,
@@ -32,136 +30,17 @@ export function useActivityController({
   const [agentLastActiveByAgent, setAgentLastActiveByAgent] = useState<
     Record<string, string | null>
   >({})
-  const [backfilledCountersByChat, setBackfilledCountersByChat] = useState<
-    Record<string, { errors: number; toolCalls: number }>
-  >({})
-  const selectedAgentActivitySummary = useMemo(() => {
-    if (!selectedAgent) {
-      return {
-        conversations: 0,
-        messages: 0,
-        toolCalls: 0,
-        errors: 0,
-        conversationsPerDay: [] as Array<{ dayLabel: string; count: number }>,
-      }
-    }
-
-    const dateCursor = new Date()
-    const dayKeys: string[] = []
-    for (let index = 6; index >= 0; index -= 1) {
-      const day = new Date(dateCursor)
-      day.setDate(day.getDate() - index)
-      dayKeys.push(day.toISOString().slice(0, 10))
-    }
-
-    const conversationsPerDayMap = new Map<string, number>(dayKeys.map(key => [key, 0]))
-    let totalMessages = 0
-    let totalErrors = 0
-    let persistedToolCalls = 0
-
-    for (const chat of chatList) {
-      const backfilledCounters =
-        backfilledCountersByChat[activityCounterKey(selectedAgent, chat.id)]
-      totalMessages += chat.messageCount || 0
-      totalErrors += chat.errorCount ?? backfilledCounters?.errors ?? 0
-      persistedToolCalls += chat.toolCallCount ?? backfilledCounters?.toolCalls ?? 0
-
-      const chatTimestamp = Date.parse(chat.updatedAt)
-      if (Number.isNaN(chatTimestamp)) continue
-      const chatDateKey = new Date(chatTimestamp).toISOString().slice(0, 10)
-      if (conversationsPerDayMap.has(chatDateKey)) {
-        conversationsPerDayMap.set(chatDateKey, (conversationsPerDayMap.get(chatDateKey) || 0) + 1)
-      }
-    }
-
-    const liveToolCalls = Object.values(progressByAgentMessage[selectedAgent] || {}).reduce(
-      (total, progress) => total + progress.steps.length,
-      0
-    )
-    const formatter = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' })
-
-    return {
-      conversations: chatList.length,
-      messages: totalMessages,
-      toolCalls: Math.max(persistedToolCalls, liveToolCalls),
-      errors: totalErrors,
-      conversationsPerDay: [...conversationsPerDayMap.entries()].map(([dayKey, count]) => ({
-        dayLabel: formatter.format(new Date(dayKey)),
-        count,
-      })),
-    }
-  }, [backfilledCountersByChat, chatList, progressByAgentMessage, selectedAgent])
-
-  const missingCounterChatIds = JSON.stringify(
-    chatList
-      .filter(chat => {
-        const key = selectedAgent ? activityCounterKey(selectedAgent, chat.id) : ''
-        return (
-          !chat.remote &&
-          backfilledCountersByChat[key] === undefined &&
-          (chat.errorCount === undefined || chat.toolCallCount === undefined)
-        )
-      })
-      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
-      .slice(0, ACTIVITY_SUMMARY_CHAT_SCAN_LIMIT)
-      .map(chat => chat.id)
-  )
-
-  useEffect(() => {
-    if (!isAuthenticated || !loadMenuData || !selectedAgent) {
-      setBackfilledCountersByChat({})
-      return
-    }
-    const chatIds = JSON.parse(missingCounterChatIds) as string[]
-    if (!chatIds.length) return
-
-    let cancelled = false
-    void Promise.all(
-      chatIds.map(async chatId => {
-        const messages = await chatStore
-          .loadMessages(selectedAgent, chatId, ACTIVITY_SUMMARY_MESSAGE_SCAN_LIMIT)
-          .catch(() => [])
-        try {
-          await chatStore.backfillCounters(selectedAgent, chatId, messages)
-        } catch {
-          // Older preload bridges cannot persist the backfill; keep the computed
-          // renderer value for this session and retry after the app upgrades.
-        }
-        return [
-          activityCounterKey(selectedAgent, chatId),
-          {
-            errors: messages.reduce((total, message) => total + (message.isError ? 1 : 0), 0),
-            toolCalls: messages.reduce(
-              (total, message) => total + (message.toolSteps?.length ?? 0),
-              0
-            ),
-          },
-        ] as const
-      })
-    ).then(entries => {
-      if (!cancelled) {
-        setBackfilledCountersByChat(previous => ({
-          ...previous,
-          ...Object.fromEntries(entries),
-        }))
-      }
-    })
-
-    return () => {
-      cancelled = true
-    }
-  }, [
-    chatStore.backfillCounters,
-    chatStore.loadMessages,
-    isAuthenticated,
-    loadMenuData,
-    missingCounterChatIds,
-    selectedAgent,
-  ])
+  const [selectedAgentActivitySummary, setSelectedAgentActivitySummary] = useState({
+    conversations: 0,
+    messages: 0,
+    toolCalls: 0,
+    errors: 0,
+    conversationsPerDay: [] as Array<{ dayLabel: string; count: number }>,
+  })
 
   // Compute agentLastActiveByAgent for all agents
   useEffect(() => {
-    if (!isAuthenticated || !loadMenuData || !agentNames.length) {
+    if (!isAuthenticated || !agentNames.length) {
       setAgentLastActiveByAgent({})
       return
     }
@@ -192,7 +71,85 @@ export function useActivityController({
     return () => {
       cancelled = true
     }
-  }, [agentNames, chatStore.getIndex, isAuthenticated, loadMenuData])
+  }, [agentNames, chatStore.getIndex, isAuthenticated])
+
+  // Compute selectedAgentActivitySummary
+  useEffect(() => {
+    if (!selectedAgent) {
+      setSelectedAgentActivitySummary({
+        conversations: 0,
+        messages: 0,
+        toolCalls: 0,
+        errors: 0,
+        conversationsPerDay: [],
+      })
+      return
+    }
+
+    let cancelled = false
+    ;(async () => {
+      const dateCursor = new Date()
+      const dayKeys: string[] = []
+      for (let index = 6; index >= 0; index -= 1) {
+        const day = new Date(dateCursor)
+        day.setDate(day.getDate() - index)
+        dayKeys.push(day.toISOString().slice(0, 10))
+      }
+      const conversationsPerDayMap = new Map<string, number>(dayKeys.map(key => [key, 0]))
+      for (const chat of chatList) {
+        const chatTimestamp = Date.parse(chat.updatedAt)
+        if (Number.isNaN(chatTimestamp)) continue
+        const chatDateKey = new Date(chatTimestamp).toISOString().slice(0, 10)
+        if (conversationsPerDayMap.has(chatDateKey)) {
+          conversationsPerDayMap.set(
+            chatDateKey,
+            (conversationsPerDayMap.get(chatDateKey) || 0) + 1
+          )
+        }
+      }
+
+      let totalMessages = 0
+      let totalErrors = 0
+      if (chatList.length > 0) {
+        const chatsToScan = [...chatList]
+          .sort((left, right) => getChatUpdatedTimestamp(right) - getChatUpdatedTimestamp(left))
+          .slice(0, ACTIVITY_SUMMARY_CHAT_SCAN_LIMIT)
+        const messageLists = await Promise.all(
+          chatsToScan.map(chat => chatStore.loadMessages(selectedAgent, chat.id).catch(() => []))
+        )
+        for (const messages of messageLists) {
+          totalMessages += messages.length
+          totalErrors += messages.filter((message: any) => message.isError).length
+        }
+      }
+
+      const progressByMessage = progressByAgentMessage[selectedAgent] || {}
+      let totalToolCalls = 0
+      for (const progress of Object.values(progressByMessage)) {
+        totalToolCalls += progress.steps.length
+      }
+
+      const formatter = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' })
+      const conversationsPerDay = [...conversationsPerDayMap.entries()].map(([dayKey, count]) => ({
+        dayLabel: formatter.format(new Date(dayKey)),
+        count,
+      }))
+
+      if (!cancelled) {
+        setSelectedAgentActivitySummary({
+          conversations: chatList.length,
+          messages: totalMessages,
+          toolCalls: totalToolCalls,
+          errors: totalErrors,
+          conversationsPerDay,
+        })
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [chatList, chatStore.loadMessages, progressByAgentMessage, selectedAgent])
 
   return {
     agentLastActiveByAgent,

@@ -143,22 +143,14 @@ describe('selecting a chat session across a route change', () => {
     })
 
     await waitFor(() =>
-      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
-        'agent-x',
-        'agent-x',
-        'c-old',
-        undefined,
-        { limit: 40 }
-      )
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-old')
     )
     expect(result.current.activeChatId).toBe('c-old')
     // It must not fall back to the most recently updated chat.
     expect(clerum.rpc.loadSessionMessages).not.toHaveBeenCalledWith(
       'agent-x',
       'agent-x',
-      'c-newest',
-      undefined,
-      { limit: 40 }
+      'c-newest'
     )
   })
 
@@ -177,13 +169,7 @@ describe('selecting a chat session across a route change', () => {
 
     await waitFor(() => expect(result.current.chatMessagesLoading).toBe(false))
     expect(result.current.activeChatId).toBe('c-old')
-    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
-      'agent-x',
-      'agent-x',
-      'c-old',
-      undefined,
-      { limit: 40 }
-    )
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-old')
   })
 
   it('notification -> session from another route opens the notified chat', async () => {
@@ -208,21 +194,13 @@ describe('selecting a chat session across a route change', () => {
     expect(result.current.activeChatId).toBe('c-old')
 
     await waitFor(() =>
-      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
-        'agent-x',
-        'agent-x',
-        'c-old',
-        undefined,
-        { limit: 40 }
-      )
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-old')
     )
     expect(result.current.activeChatId).toBe('c-old')
     expect(clerum.rpc.loadSessionMessages).not.toHaveBeenCalledWith(
       'agent-x',
       'agent-x',
-      'c-newest',
-      undefined,
-      { limit: 40 }
+      'c-newest'
     )
   })
 
@@ -361,13 +339,7 @@ describe('chat-route guard on the real selection entry points', () => {
     )
     await waitFor(
       () =>
-        expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
-          'agent-x',
-          'agent-x',
-          'c-old',
-          undefined,
-          { limit: 40 }
-        ),
+        expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-old'),
       SLOW
     )
     expect(result.current.activeChatId).toBe('c-old')
@@ -405,13 +377,7 @@ describe('chat-route guard on the real selection entry points', () => {
 
     await waitFor(
       () =>
-        expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
-          'agent-x',
-          'agent-x',
-          'c-old',
-          undefined,
-          { limit: 40 }
-        ),
+        expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-old'),
       SLOW
     )
     expect(result.current.activeChatId).toBe('c-old')
@@ -466,13 +432,7 @@ describe('chat-route guard on the real selection entry points', () => {
     )
     await waitFor(
       () =>
-        expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
-          'agent-x',
-          'agent-x',
-          'c-old',
-          undefined,
-          { limit: 40 }
-        ),
+        expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'c-old'),
       SLOW
     )
     expect(result.current.activeChatId).toBe('c-old')

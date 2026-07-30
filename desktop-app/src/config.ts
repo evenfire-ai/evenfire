@@ -120,11 +120,6 @@ function loadPackagedEnv(): void {
 
 loadPackagedEnv()
 
-function explicitRuntimeConfigPath(): string {
-  if (app?.isPackaged) return ''
-  return process.env.CLERUM_DESKTOP_CONFIG_PATH?.trim() || ''
-}
-
 function requiredOrDefault(name: string, fallback: string): string {
   const value = process.env[name]?.trim()
   return value || fallback
@@ -169,7 +164,7 @@ function deriveProfileUiBaseUrl(externalRestApiBaseUrl: string): string {
 }
 
 function runtimeConfigDirectoryPath(): string {
-  const explicit = explicitRuntimeConfigPath()
+  const explicit = process.env.CLERUM_DESKTOP_CONFIG_PATH?.trim()
   if (explicit) return path.dirname(explicit)
 
   if (app?.isReady()) {
@@ -282,7 +277,7 @@ function loadStoredProfilesSync(): {
   profiles: StoredRuntimeProfile[]
   activeProfileId: string | null
 } {
-  const explicitPath = explicitRuntimeConfigPath()
+  const explicitPath = process.env.CLERUM_DESKTOP_CONFIG_PATH?.trim()
   if (explicitPath) {
     const configFromFile = readRuntimeConfigFileSync(explicitPath)
     if (!configFromFile) return { profiles: [], activeProfileId: null }
@@ -342,14 +337,9 @@ function loadStoredProfilesSync(): {
 
 function configsMatch(a: DesktopRuntimeConfig, b: DesktopRuntimeConfig): boolean {
   return (
-    runtimeEndpointsMatch(a, b) &&
+    a.externalRestApiBaseUrl === b.externalRestApiBaseUrl &&
+    a.rpcProxyBaseUrl === b.rpcProxyBaseUrl &&
     (a.appName?.trim() || DEFAULT_APP_NAME) === (b.appName?.trim() || DEFAULT_APP_NAME)
-  )
-}
-
-function runtimeEndpointsMatch(a: DesktopRuntimeConfig, b: DesktopRuntimeConfig): boolean {
-  return (
-    a.externalRestApiBaseUrl === b.externalRestApiBaseUrl && a.rpcProxyBaseUrl === b.rpcProxyBaseUrl
   )
 }
 
@@ -417,7 +407,6 @@ function resolveActiveProfile(
   profiles: StoredRuntimeProfile[],
   activeProfileId: string | null
 ): StoredRuntimeProfile | null {
-  if (activeProfileId === LOCALHOST_OPTION_ID) return null
   if (activeProfileId) {
     const direct = profiles.find(profile => profile.id === activeProfileId)
     if (direct) return direct
@@ -430,7 +419,7 @@ async function persistProfilesIndex(
   profiles: StoredRuntimeProfile[],
   activeProfileId: string | null
 ): Promise<void> {
-  if (explicitRuntimeConfigPath()) return
+  if (process.env.CLERUM_DESKTOP_CONFIG_PATH?.trim()) return
   const directoryPath = runtimeConfigDirectoryPath()
   const nextIndex: RuntimeConfigIndex = {
     version: 1,
@@ -486,31 +475,25 @@ const envRuntimeConfig = validateRuntimeConfig({
   rpcProxyBaseUrl: requiredOrDefault('RPC_PROXY_BASE_URL', LOCALHOST_RPC_PROXY_BASE_URL),
   appName: requiredOrDefault('DESKTOP_APP_NAME', DEFAULT_APP_NAME),
 })
-const desktopDevPackageRuntimeConfigEnabled =
-  process.argv.includes('--evenfire-desktop-dev-package') &&
-  runtimeEndpointsMatch(envRuntimeConfig, localhostRuntimeConfig)
-const canUseEnvRuntimeConfig = !app?.isPackaged || desktopDevPackageRuntimeConfigEnabled
 const envRuntimeConfigured = Boolean(
-  canUseEnvRuntimeConfig &&
+  !app?.isPackaged &&
   process.env.EXTERNAL_REST_API_BASE_URL?.trim() &&
   process.env.RPC_PROXY_BASE_URL?.trim()
 )
-const envMatchesLocalhostOption = runtimeEndpointsMatch(envRuntimeConfig, localhostRuntimeConfig)
+const envMatchesLocalhostOption = configsMatch(envRuntimeConfig, localhostRuntimeConfig)
 
 function shouldPreferLocalhostByDefault(): boolean {
-  return canUseEnvRuntimeConfig && envRuntimeConfigured && envMatchesLocalhostOption
+  return (
+    !app?.isPackaged &&
+    Boolean(process.env.EVENFIRE_RENDERER_URL?.trim()) &&
+    envMatchesLocalhostOption
+  )
 }
 const loadedProfilesState = loadStoredProfilesSync()
 let storedProfiles = loadedProfilesState.profiles
-const preferLocalhostRuntimeByDefault = shouldPreferLocalhostByDefault()
-let activeRuntimeOptionId = preferLocalhostRuntimeByDefault
-  ? LOCALHOST_OPTION_ID
-  : loadedProfilesState.activeProfileId
-const activeStoredProfile = preferLocalhostRuntimeByDefault
-  ? null
-  : resolveActiveProfile(storedProfiles, activeRuntimeOptionId)
+let activeRuntimeOptionId = loadedProfilesState.activeProfileId
+const activeStoredProfile = resolveActiveProfile(storedProfiles, activeRuntimeOptionId)
 if (
-  !preferLocalhostRuntimeByDefault &&
   !activeStoredProfile &&
   activeRuntimeOptionId !== LOCALHOST_OPTION_ID &&
   envRuntimeConfigured &&
@@ -566,12 +549,7 @@ export function hydrateDesktopRuntimeConfig(): void {
 
   const loaded = loadStoredProfilesSync()
   storedProfiles = loaded.profiles
-  const preserveLocalhostRuntime =
-    preferLocalhostRuntimeByDefault ||
-    (desktopDevPackageRuntimeConfigEnabled &&
-      envMatchesLocalhostOption &&
-      isLocalhostRuntimeConfig(currentRuntimeConfig()))
-  activeRuntimeOptionId = preserveLocalhostRuntime ? LOCALHOST_OPTION_ID : loaded.activeProfileId
+  activeRuntimeOptionId = loaded.activeProfileId
 
   const selectedProfile = resolveActiveProfile(storedProfiles, activeRuntimeOptionId)
   if (selectedProfile) {
@@ -614,7 +592,7 @@ export function isDesktopRuntimeConfigured(): boolean {
 export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Promise<void> {
   hydrateDesktopRuntimeConfig()
   const validated = validateRuntimeConfig(next)
-  const explicitPath = explicitRuntimeConfigPath()
+  const explicitPath = process.env.CLERUM_DESKTOP_CONFIG_PATH?.trim()
   if (explicitPath) {
     const timestamp = new Date().toISOString()
     const existing = storedProfiles.find(profile => profile.id === 'custom-file')
@@ -672,49 +650,36 @@ export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Prom
 
 /**
  * Derive the environment namespacing key from a runtime config's external-rest-api
- * and rpc-proxy base origins (spec §5.1, D1). Same REST origin + different RPC
- * origin is a different runtime boundary because desktop session tokens are
- * accepted by the RPC proxy, not by external-rest-api alone.
+ * base URL (spec §5.1, D1). Semantically "one environment = one external-rest-api
+ * origin": `new URL(url).origin` includes scheme + host + port, so
+ * `https://api.dev…` and `https://api.prod…` (or `:8091` vs `:8092`) key apart
+ * automatically, and `rpcProxyBaseUrl` is deliberately NOT mixed in.
  *
- * The raw identity is not filesystem/keychain-safe (it carries `://`, `:`), so we
+ * The raw origin is not filesystem/keychain-safe (it carries `://`, `:`), so we
  * emit a stable, collision-resistant slug: a lowercase `scheme_host_port`
- * fragment for human debuggability, suffixed with a 12-hex sha256 of the full
- * identity so distinct origins can never collide even when the slug is truncated.
+ * fragment for human debuggability, suffixed with a 12-hex sha256 of the origin
+ * so distinct origins can never collide even when the slug is truncated. Purely a
+ * function of the origin ⇒ deterministic and stable across restarts.
  */
-function resolveOriginKeyPart(value: string): string {
-  const raw = String(value || '').trim()
+export function resolveEnvKey(externalRestApiBaseUrl: string): string {
+  const raw = String(externalRestApiBaseUrl || '').trim()
+  let origin: string
   try {
-    return new URL(raw).origin
+    origin = new URL(raw).origin
   } catch {
-    return raw || 'unknown'
+    origin = raw || 'unknown'
   }
-}
-
-export function resolveEnvKey(externalRestApiBaseUrl: string, rpcProxyBaseUrl = ''): string {
-  const restOrigin = resolveOriginKeyPart(externalRestApiBaseUrl)
-  const rpcOrigin = rpcProxyBaseUrl.trim() ? resolveOriginKeyPart(rpcProxyBaseUrl) : ''
-  const identity = rpcOrigin ? `${restOrigin}|rpc=${rpcOrigin}` : restOrigin
-  const slugSource = rpcOrigin ? `${restOrigin}_${rpcOrigin}` : restOrigin
-  const slug = slugSource
+  const slug = origin
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 48)
-  const hash = createHash('sha256').update(identity).digest('hex').slice(0, 12)
+  const hash = createHash('sha256').update(origin).digest('hex').slice(0, 12)
   return `${slug || 'env'}-${hash}`
 }
 
 /** Env key for the CURRENTLY active runtime config (main-process surfaces). */
 export function getActiveEnvKey(): string {
-  hydrateDesktopRuntimeConfig()
-  return resolveEnvKey(config.externalRestApiBaseUrl, config.rpcProxyBaseUrl)
-}
-
-/**
- * Legacy env key from the pre-RPC-origin namespace. Used only for one-shot
- * upgrade migration into the current REST+RPC namespace.
- */
-export function getActiveLegacyRestOnlyEnvKey(): string {
   hydrateDesktopRuntimeConfig()
   return resolveEnvKey(config.externalRestApiBaseUrl)
 }
@@ -738,8 +703,8 @@ export function getDesktopRuntimeConfigState(): DesktopRuntimeConfigState {
     isLocalhost,
     selectorVisible,
     activeOptionId,
-    envKey: resolveEnvKey(current.externalRestApiBaseUrl, current.rpcProxyBaseUrl),
-    storagePath: explicitRuntimeConfigPath() || runtimeConfigDirectoryPath(),
+    envKey: resolveEnvKey(current.externalRestApiBaseUrl),
+    storagePath: process.env.CLERUM_DESKTOP_CONFIG_PATH?.trim() || runtimeConfigDirectoryPath(),
     options,
   }
 }

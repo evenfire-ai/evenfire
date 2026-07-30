@@ -51,9 +51,7 @@ describe('BACK_ONLINE dispatcher (§4.1)', () => {
       expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
         'agent-x',
         'agent-x',
-        'chat-offline',
-        undefined,
-        { limit: 40 }
+        'chat-offline'
       )
     )
   })

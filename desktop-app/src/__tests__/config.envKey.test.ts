@@ -12,7 +12,7 @@ vi.mock('electron', () => ({
   },
 }))
 
-let resolveEnvKey: (url: string, rpcProxyBaseUrl?: string) => string
+let resolveEnvKey: (url: string) => string
 
 beforeEach(async () => {
   const mod = await import('../config.js')
@@ -50,12 +50,6 @@ describe('resolveEnvKey (spec §5.1, D1)', () => {
   it('ignores path/query (same origin ⇒ same key)', () => {
     expect(resolveEnvKey('https://api.example.com/rpc?x=1')).toBe(
       resolveEnvKey('https://api.example.com')
-    )
-  })
-
-  it('keys apart when the external REST origin matches but the RPC origin differs', () => {
-    expect(resolveEnvKey('https://api.example.com', 'https://rpc.dev.example.com')).not.toBe(
-      resolveEnvKey('https://api.example.com', 'https://rpc.example.com')
     )
   })
 

@@ -49,7 +49,6 @@ export function renderController(
     currentTeamId: 'team-1',
     currentTeamName: 'Team 1',
     isAuthenticated: true,
-    loadMenuData: true,
     navItem: 'agents',
     pushToast: spies.pushToast,
     pushNotification: spies.pushNotification,

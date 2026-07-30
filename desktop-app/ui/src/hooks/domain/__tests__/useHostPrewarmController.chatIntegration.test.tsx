@@ -90,7 +90,6 @@ function useBothControllers({ selectedAgent, agentNames, isAuthenticated, navIte
     currentTeamId: 'team-1',
     currentTeamName: 'Team 1',
     isAuthenticated,
-    loadMenuData: true,
     navItem,
     ...stableCallbacks,
   })
