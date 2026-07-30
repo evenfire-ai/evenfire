@@ -932,6 +932,44 @@ describe('HostReconciler heartbeat mutation admission', () => {
 })
 
 describe('HostReconciler.suspendHostFromHeartbeat', () => {
+  it('does not mutate the admitted watch-cache snapshot while applying a suspension', async () => {
+    const { reconciler, customApi } = createReconciler()
+    const host = makeStatelessHost({
+      status: { lifecycle: { state: 'draining', wakeHandledGeneration: 2 } },
+    })
+    host.uid = 'stateless-host-uid'
+    host.generation = 1
+    host.resourceVersion = 'cache-rv'
+    const snapshot = structuredClone(host)
+    Object.freeze(host)
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostMutationAuthority(() => ({
+      known: true,
+      hostGeneration: 1,
+      contextGeneration: 1,
+    }))
+    const draining = freshHostRead({ state: 'draining', wakeHandledGeneration: 2 })
+    Object.assign(draining.metadata, {
+      uid: host.uid,
+      generation: host.generation,
+      resourceVersion: 'draining-rv',
+    })
+    const suspended = freshHostRead({
+      state: 'suspended',
+      wakeHandledGeneration: 2,
+      reason: 'idle',
+    })
+    Object.assign(suspended.metadata, {
+      uid: host.uid,
+      generation: host.generation,
+      resourceVersion: 'suspended-rv',
+    })
+    customApi.getNamespacedCustomObject.mockResolvedValueOnce(draining).mockResolvedValue(suspended)
+
+    await expect(reconciler.suspendHostFromHeartbeat(host, 'idle', 2)).resolves.toBe('suspended')
+    expect(host).toEqual(snapshot)
+  })
+
   it("writes state='suspended' + reason 'idle' durably, then reconciles to replicas=0", async () => {
     const { reconciler, appsApi, customApi } = createReconciler()
     const host = makeStatelessHost({

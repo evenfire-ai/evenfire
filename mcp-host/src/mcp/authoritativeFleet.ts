@@ -798,9 +798,9 @@ export async function reconcileAuthoritativeMcpSnapshot(options: {
     }
 
     if (!server.status?.ready) {
-      // An authoritative ready=false, and a legacy ready=false with no
-      // authority marker, retain the existing fail-closed behavior. Re-adding
-      // a not-ready server does not connect; it updates observed status.
+      // Explicit authoritative ready=false and legacy ready=false both revoke.
+      // Only the negotiated authoritative=false state preserves a live
+      // connection; field absence must retain the legacy fail-closed contract.
       if (connectedNames.has(server.name)) {
         await options.manager.removeServer(server.name)
       }

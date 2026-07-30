@@ -1640,7 +1640,7 @@ describe('reconcileAuthoritativeMcpSnapshot', () => {
     }
   )
 
-  it('retains legacy fail-closed teardown when status authority is undefined', async () => {
+  it('preserves the legacy fail-closed revocation contract when HCC omits authoritative', async () => {
     const previous = readyServer()
     const legacyNotReady = readyServer({
       status: { deployed: false, ready: false, message: 'Deployment not ready' },
@@ -1663,7 +1663,12 @@ describe('reconcileAuthoritativeMcpSnapshot', () => {
     })
 
     expect(manager.removeServer).toHaveBeenCalledWith(previous.name)
-    expect(manager.addServer).toHaveBeenCalledWith(legacyNotReady, undefined, expect.any(Object))
+    expect(manager.addServer).toHaveBeenCalledWith(
+      legacyNotReady,
+      undefined,
+      expect.objectContaining({ isCurrent: expect.any(Function) })
+    )
+    expect(serverState.get(previous.name)).toBe(JSON.stringify(legacyNotReady))
   })
 
   it('admits an unconnected server when its observed readiness becomes true', async () => {

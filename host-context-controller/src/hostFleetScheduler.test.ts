@@ -63,6 +63,35 @@ describe('HostFleetScheduler', () => {
     expect(results).toEqual(['started', 'coalesced', 'coalesced', 'trailing'])
   })
 
+  it('carries the known lifecycle generation when merging a generation-less full request', async () => {
+    const activePass = deferred()
+    const requests: HostFleetReconcileRequest[] = []
+    const scheduler = new HostFleetScheduler({
+      perform: async request => {
+        requests.push({ ...request })
+        if (requests.length === 1) await activePass.promise
+      },
+      recordRequest: vi.fn(),
+    })
+    const generation = scheduler.beginLifecycleTransition()
+    const active = scheduler.request('active')
+    await vi.waitFor(() => expect(requests).toHaveLength(1))
+    scheduler.bumpInputRevision()
+    const pendingLifecycle = scheduler.request('lifecycle', generation, 'lifecycle')
+    scheduler.bumpInputRevision()
+    const pendingFull = scheduler.request('full')
+
+    activePass.resolve()
+    await Promise.all([active, pendingLifecycle, pendingFull])
+
+    expect(requests[1]).toMatchObject({
+      reason: 'full',
+      mode: 'full',
+      ccLifecycleGeneration: generation,
+      inputRevision: 2,
+    })
+  })
+
   it('reuses active work only when its mode, revision, and lifecycle generation cover the request', async () => {
     const activePass = deferred()
     const requests: HostFleetReconcileRequest[] = []
@@ -187,6 +216,32 @@ describe('HostFleetScheduler', () => {
 
     expect(scheduler.appliedLifecycleGeneration).toBe(secondGeneration)
     expect(perform).not.toHaveBeenCalled()
+  })
+
+  it('does not let a stale applied marker clear the current generation retry', async () => {
+    vi.useFakeTimers()
+    const perform = vi.fn<(request: HostFleetReconcileRequest) => Promise<void>>(
+      async () => undefined
+    )
+    const scheduler = new HostFleetScheduler({
+      perform,
+      recordRequest: vi.fn(),
+    })
+    const staleGeneration = scheduler.beginLifecycleTransition()
+    const currentGeneration = scheduler.beginLifecycleTransition()
+    scheduler.scheduleLifecycleRetry({
+      reason: 'current lifecycle',
+      mode: 'lifecycle',
+      ccLifecycleGeneration: currentGeneration,
+      inputRevision: 0,
+    })
+
+    scheduler.markLifecycleApplied(staleGeneration)
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(perform).toHaveBeenCalledWith(
+      expect.objectContaining({ ccLifecycleGeneration: currentGeneration })
+    )
   })
 
   it('retries an unapplied current lifecycle generation with bounded backoff', async () => {

@@ -167,23 +167,52 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
     expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
   })
 
-  it('canonicalizes a remote proxy image without mutating the authoritative cache object', async () => {
+  it('completes a remote proxy reconcile without rewriting the desired image', async () => {
     const server = makeServer({
       name: 'remote-api',
       image: 'vendor/original-image:1',
       remote: { baseUrl: 'https://api.example.com' },
     })
     const originalSpec = structuredClone(server.spec)
+    let desiredRevisionIsCurrent = true
+    customApi.patchNamespacedCustomObject.mockImplementation(
+      ({ body }: { body?: { spec?: unknown } }) => {
+        if (body?.spec !== undefined) {
+          desiredRevisionIsCurrent = false
+        }
+        return Promise.resolve({})
+      }
+    )
 
-    await reconciler.reconcile(server)
+    await reconciler.reconcile(server, {
+      isCurrent: () => desiredRevisionIsCurrent,
+    })
 
     expect(server.spec).toEqual(originalSpec)
-    expect(customApi.patchNamespacedCustomObject).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: 'remote-api',
-        body: { spec: { image: 'clerum/nginx-egress-proxy:test' } },
-      }),
+    expect(customApi.patchNamespacedCustomObject).not.toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.objectContaining({ spec: expect.anything() }) }),
       expect.anything()
+    )
+    expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledOnce()
+    expect(coreApi.createNamespacedService).toHaveBeenCalledOnce()
+    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledOnce()
+    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          spec: expect.objectContaining({
+            template: expect.objectContaining({
+              spec: expect.objectContaining({
+                containers: [
+                  expect.objectContaining({
+                    name: 'egress-proxy',
+                    image: 'clerum/nginx-egress-proxy:test',
+                  }),
+                ],
+              }),
+            }),
+          }),
+        }),
+      })
     )
   })
 

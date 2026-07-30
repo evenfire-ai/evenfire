@@ -60,6 +60,8 @@ spec:
           value: sandbox-ui
         - name: HCC_EXTERNAL_EGRESS_RESYNC_SEC
           value: "300"
+        - name: HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS
+          value: "5000"
         - name: HCC_HOST_K8S_REQUEST_TIMEOUT_MS
           value: "30000"
         # Bounded cross-Host concurrency for a full/lifecycle Host fleet pass.

@@ -350,6 +350,8 @@ export interface ContextStatus {
 export interface ContextCRD {
   name: string
   namespace: string
+  uid?: string
+  generation?: number
   spec: ContextSpec
   status?: ContextStatus
 }

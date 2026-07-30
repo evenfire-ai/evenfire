@@ -196,6 +196,10 @@ export interface Config {
   // requiring a watch event. 0 disables.
   externalEgressResyncIntervalSec: number
 
+  // Deadline for one DNS resolution attempt. A silent resolver cannot block
+  // safety convergence indefinitely.
+  externalEgressDnsResolveTimeoutMs: number
+
   // Plugin image-host allowlist (Phase 2.3). Trusted raw-image prefixes for
   // local-mode McpServer images. Audit mode (default) logs would-be denials
   // without blocking; enforce mode blocks the workload build.
@@ -227,6 +231,17 @@ function getEnvInt(key: string, defaultValue: number): number {
   if (!value) return defaultValue
   const parsed = parseInt(value, 10)
   return isNaN(parsed) ? defaultValue : parsed
+}
+
+export function parseExternalEgressDnsTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 5_000
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > 2_147_483_647) {
+    throw new Error(
+      `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS must be a positive integer no greater than 2147483647, got '${raw}'`
+    )
+  }
+  return parsed
 }
 
 /**
@@ -596,6 +611,9 @@ export const config: Config = {
 
   // Periodic external-egress DNS resync (default 5 min). 0 disables.
   externalEgressResyncIntervalSec: getEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 300),
+  externalEgressDnsResolveTimeoutMs: parseExternalEgressDnsTimeoutMs(
+    getEnv('HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS')
+  ),
 
   // Plugin image-host allowlist (Phase 2.3). Permissive default = current
   // fleet hosts + registry.evenfire.ai; enforce defaults to false (audit mode).

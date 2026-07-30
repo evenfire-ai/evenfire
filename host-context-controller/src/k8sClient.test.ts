@@ -577,11 +577,15 @@ describe('McpServerWatcher startup', () => {
       })
       await (watcher as any).reconcileHostsReferencingSfs('bootstrap-sfs')
       await (watcher as any).reconcileHostsReferencingContext('bootstrap-context')
+      ;(watcher as any).ccCacheSynced = false
       await (watcher as any).reconcileChannelReaderRevision('bootstrap-channel-secret', 'channels')
 
       expect(hostReconciler.reconcile).not.toHaveBeenCalled()
       expect(hostReconciler.patchChannelReaderRevisionAnnotation).not.toHaveBeenCalled()
       expect(hostReconciler.reconcileChannelReaderRevision).not.toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[K8s] Deferring CommunicationChannel Secret "channels/bootstrap-channel-secret" Host convergence; CommunicationChannel cache is not authoritative'
+      )
       expect((watcher as any).hostCacheRecoveryTimer).not.toBeNull()
     } finally {
       await watcher.stop()
@@ -1075,6 +1079,77 @@ describe('McpServerWatcher startup', () => {
       watcher.stop()
     }
   })
+
+  it.each([
+    ['SharedFileSystem', 'LIST', 'sharedfilesystems', 'startSharedFileSystemWatch'],
+    ['SharedFileSystem', 'WATCH', 'sharedfilesystems', 'startSharedFileSystemWatch'],
+    ['GlobalFileSystem', 'LIST', 'globalfilesystems', 'startGlobalFileSystemWatch'],
+    ['GlobalFileSystem', 'WATCH', 'globalfilesystems', 'startGlobalFileSystemWatch'],
+  ] as const)(
+    'does not let a pending %s %s delay NetworkPolicy safety, bootstrap, or readiness certification',
+    async (_kind, boundary, plural, watchMethod) => {
+      const pendingBoundary = deferred<unknown>()
+      const pendingAdditivePolicies = deferred()
+      let completeAuthoritativeRevocation: (() => void) | undefined
+      mocks.listNamespacedCustomObject.mockImplementation(
+        async ({ plural: requestedPlural }: { plural: string }) => {
+          if (requestedPlural === 'communicationchannels') {
+            return { metadata: { resourceVersion: 'background-lane-rv' }, items: [] }
+          }
+          if (boundary === 'LIST' && requestedPlural === plural) {
+            return pendingBoundary.promise
+          }
+          return { items: [] }
+        }
+      )
+      mocks.netPolFullReconcile.mockImplementationOnce(
+        async (
+          _contexts: unknown,
+          _servers: unknown,
+          options?: { onAuthoritativeRevocationComplete?: () => void }
+        ) => {
+          completeAuthoritativeRevocation = options?.onAuthoritativeRevocationComplete
+          await pendingAdditivePolicies.promise
+        }
+      )
+
+      const watcher = new McpServerWatcher()
+      stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+      stubAuthoritativeInventoryWatch(watcher, 'Context')
+      const sfsWatch = vi
+        .spyOn(watcher as any, 'startSharedFileSystemWatch')
+        .mockResolvedValue(undefined)
+      const gfsWatch = vi
+        .spyOn(watcher as any, 'startGlobalFileSystemWatch')
+        .mockResolvedValue(undefined)
+      const targetWatch = watchMethod === 'startSharedFileSystemWatch' ? sfsWatch : gfsWatch
+      if (boundary === 'WATCH') {
+        targetWatch.mockImplementationOnce(() => pendingBoundary.promise as Promise<void>)
+      }
+      const bootstrap = watcher.start()
+
+      try {
+        await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce())
+        await expect(bootstrap).resolves.toBeUndefined()
+
+        expect(completeAuthoritativeRevocation).toBeTypeOf('function')
+        expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+        if (boundary === 'LIST') {
+          expect(targetWatch).not.toHaveBeenCalled()
+        } else {
+          expect(targetWatch).toHaveBeenCalledOnce()
+        }
+
+        completeAuthoritativeRevocation?.()
+        await vi.waitFor(() => expect(watcher.isReadinessInventoryAuthoritative()).toBe(true))
+      } finally {
+        pendingBoundary.resolve({ items: [] })
+        pendingAdditivePolicies.resolve(undefined)
+        await flushMicrotasks()
+        await watcher.stop()
+      }
+    }
+  )
 
   it('starts every initial background convergence lane from the caches current after watches', async () => {
     const staleServer = {
@@ -2222,12 +2297,12 @@ describe('McpServerWatcher startup', () => {
     randomSpy.mockRestore()
   })
 
-  it('queues SharedFileSystem and GlobalFileSystem watch effects behind their initial passes', async () => {
+  it('queues same-object SharedFileSystem and GlobalFileSystem watch effects behind initial passes', async () => {
     const staleSfs = { name: 'stale-sfs', namespace: 'mcp-host', spec: {} }
-    const currentSfs = { metadata: { name: 'current-sfs', namespace: 'mcp-host' }, spec: {} }
+    const currentSfs = { metadata: { name: 'stale-sfs', namespace: 'mcp-host' }, spec: {} }
     const staleGfs = { name: 'stale-gfs', namespace: 'mcp-host', spec: {} }
     const currentGfs = {
-      metadata: { name: 'current-gfs', namespace: 'mcp-host' },
+      metadata: { name: 'stale-gfs', namespace: 'mcp-host' },
       spec: {},
       status: {
         phase: 'Ready',
@@ -2947,12 +3022,12 @@ describe('McpServerWatcher startup', () => {
       const watcher = new McpServerWatcher()
       let queuedEffectRan = false
 
-      const first = (watcher as any)[enqueueMethod](async () => {
+      const first = (watcher as any)[enqueueMethod]('same-object', async () => {
         firstStarted.resolve(undefined)
         await releaseFirst.promise
       }) as Promise<void>
       await firstStarted.promise
-      const queued = (watcher as any)[enqueueMethod](async () => {
+      const queued = (watcher as any)[enqueueMethod]('same-object', async () => {
         queuedEffectRan = true
       }) as Promise<void>
 
@@ -2963,6 +3038,90 @@ describe('McpServerWatcher startup', () => {
       expect(queuedEffectRan).toBe(false)
     }
   )
+
+  it.each([
+    ['SharedFileSystem', 'enqueueSharedFileSystemReconciliation'],
+    ['GlobalFileSystem', 'enqueueGlobalFileSystemReconciliation'],
+  ] as const)(
+    'serializes the same %s identity without blocking an unrelated fleet member',
+    async (_, enqueueMethod) => {
+      const firstStarted = deferred()
+      const releaseFirst = deferred()
+      const secondStarted = deferred()
+      const unrelatedStarted = deferred()
+      const watcher = new McpServerWatcher()
+      let secondRan = false
+
+      const first = (watcher as any)[enqueueMethod]('slow', async () => {
+        firstStarted.resolve(undefined)
+        await releaseFirst.promise
+      }) as Promise<void>
+      await firstStarted.promise
+      const second = (watcher as any)[enqueueMethod]('slow', async () => {
+        secondRan = true
+        secondStarted.resolve(undefined)
+      }) as Promise<void>
+      const unrelated = (watcher as any)[enqueueMethod]('independent', async () => {
+        unrelatedStarted.resolve(undefined)
+      }) as Promise<void>
+
+      await unrelatedStarted.promise
+      expect(secondRan).toBe(false)
+      releaseFirst.resolve(undefined)
+      await Promise.all([first, second, unrelated])
+      await expect(secondStarted.promise).resolves.toBeUndefined()
+      await watcher.stop()
+    }
+  )
+
+  it('keeps a keyed lane alive until a third waiter has consumed the same queue entry', async () => {
+    const firstStarted = deferred()
+    const releaseFirst = deferred()
+    const secondStarted = deferred()
+    const releaseSecond = deferred()
+    const thirdStarted = deferred()
+    let thirdRan = false
+    const watcher = new McpServerWatcher()
+
+    const first = (watcher as any).enqueueContextReconciliation('shared', async () => {
+      firstStarted.resolve(undefined)
+      await releaseFirst.promise
+    })
+    await firstStarted.promise
+    const second = (watcher as any).enqueueContextReconciliation('shared', async () => {
+      secondStarted.resolve(undefined)
+      await releaseSecond.promise
+    })
+    const third = (watcher as any).enqueueContextReconciliation('shared', async () => {
+      thirdRan = true
+      thirdStarted.resolve(undefined)
+    })
+
+    expect((watcher as any).contextReconciliationQueues.get('shared').references).toBe(3)
+    releaseFirst.resolve(undefined)
+    await secondStarted.promise
+    expect(thirdRan).toBe(false)
+    expect((watcher as any).contextReconciliationQueues.get('shared').references).toBe(2)
+    releaseSecond.resolve(undefined)
+    await Promise.all([first, second, third])
+    expect((watcher as any).contextReconciliationQueues.has('shared')).toBe(false)
+    await watcher.stop()
+  })
+
+  it('caps initial convergence retry delay after attempts exceed the schedule', async () => {
+    vi.useFakeTimers()
+    const watcher = new McpServerWatcher()
+    const convergence = vi
+      .spyOn(watcher as any, 'runInitialMcpServerConvergence')
+      .mockResolvedValue(undefined)
+    ;(watcher as any).initialConvergenceRetryAttempts.set('McpServer', 99)
+    ;(watcher as any).scheduleInitialConvergenceRetry('McpServer')
+    await vi.advanceTimersByTimeAsync(299_999)
+    expect(convergence).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(convergence).toHaveBeenCalledOnce()
+    await watcher.stop()
+  })
 
   it('defers NetworkPolicy full convergence until both inventories are authoritative', async () => {
     const watcher = new McpServerWatcher()
@@ -3181,10 +3340,8 @@ describe('McpServerWatcher startup', () => {
   it.each([
     ['McpServer', 'startMcpServerWatch'],
     ['Context', 'startContextWatch'],
-    ['SharedFileSystem', 'startSharedFileSystemWatch'],
-    ['GlobalFileSystem', 'startGlobalFileSystemWatch'],
   ] as const)(
-    'rejects safe bootstrap when the %s watch cannot be established',
+    'keeps safe bootstrap authority-gated when the %s watch cannot be established',
     async (_kind, method) => {
       const watcher = new McpServerWatcher()
       if (method === 'startMcpServerWatch') {
@@ -3197,20 +3354,55 @@ describe('McpServerWatcher startup', () => {
       } else if (method !== 'startMcpServerWatch') {
         stubAuthoritativeInventoryWatch(watcher, 'Context')
       }
-      if (method === 'startSharedFileSystemWatch') {
-        vi.spyOn(watcher as any, method).mockRejectedValue(new Error(`${method} unavailable`))
-      } else {
-        vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
-      }
-      if (method === 'startGlobalFileSystemWatch') {
-        vi.spyOn(watcher as any, method).mockRejectedValue(new Error(`${method} unavailable`))
-      } else {
-        vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
-      }
       vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
 
       await expect(watcher.start()).rejects.toThrow(`${method} unavailable`)
+      expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+      expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
       await watcher.stop()
+    }
+  )
+
+  it.each([
+    ['SharedFileSystem', 'startSharedFileSystemWatch'],
+    ['GlobalFileSystem', 'startGlobalFileSystemWatch'],
+  ] as const)(
+    'isolates, logs, and retries an initial %s background watch rejection',
+    async (kind, method) => {
+      vi.useFakeTimers()
+      const failure = new Error(`${method} unavailable`)
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const watcher = new McpServerWatcher()
+      stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+      stubAuthoritativeInventoryWatch(watcher, 'Context')
+      const rejectedWatch = vi
+        .spyOn(watcher as any, method)
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValueOnce(undefined)
+      const otherMethod =
+        method === 'startSharedFileSystemWatch'
+          ? 'startGlobalFileSystemWatch'
+          : 'startSharedFileSystemWatch'
+      vi.spyOn(watcher as any, otherMethod).mockResolvedValue(undefined)
+      vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
+
+      await expect(watcher.start()).resolves.toBeUndefined()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        `[K8s] ${kind} background watch failed to start:`,
+        failure
+      )
+      expect(rejectedWatch).toHaveBeenCalledOnce()
+      expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
+
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(rejectedWatch).toHaveBeenCalledOnce()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(rejectedWatch).toHaveBeenCalledTimes(2)
+
+      await watcher.stop()
+      errorSpy.mockRestore()
     }
   )
 
@@ -4426,7 +4618,18 @@ describe('McpServerWatcher Host mutation dependency wiring', () => {
     const resolveDependencies = hostReconciler._hostMutationDependenciesFn
 
     const original = resolveDependencies(host)
-    expect(original).toEqual([context, true, 7, documentsV1, true, alphaChannelV1])
+    expect(original).toEqual([
+      { name: context.name, namespace: context.namespace, spec: context.spec },
+      true,
+      7,
+      { name: documentsV1.name, namespace: documentsV1.namespace, spec: documentsV1.spec },
+      true,
+      {
+        name: alphaChannelV1.name,
+        namespace: alphaChannelV1.namespace,
+        spec: alphaChannelV1.spec,
+      },
+    ])
     ;(watcher as any).sharedFileSystems.set('unrelated', {
       name: 'unrelated',
       namespace: 'mcp-host',
@@ -4438,11 +4641,7 @@ describe('McpServerWatcher Host mutation dependency wiring', () => {
       spec: { hostRef: 'beta-host' },
     })
     const afterUnrelatedChanges = resolveDependencies(host)
-    expect(
-      original.every((value: unknown, index: number) =>
-        Object.is(value, afterUnrelatedChanges[index])
-      )
-    ).toBe(true)
+    expect(afterUnrelatedChanges).toEqual(original)
 
     const documentsV2 = {
       ...documentsV1,
@@ -4450,8 +4649,12 @@ describe('McpServerWatcher Host mutation dependency wiring', () => {
     }
     ;(watcher as any).sharedFileSystems.set(documentsV2.name, documentsV2)
     const afterSfsRevision = resolveDependencies(host)
-    expect(afterSfsRevision[3]).toBe(documentsV2)
-    expect(afterSfsRevision[3]).not.toBe(original[3])
+    expect(afterSfsRevision[3]).toEqual({
+      name: documentsV2.name,
+      namespace: documentsV2.namespace,
+      spec: documentsV2.spec,
+    })
+    expect(afterSfsRevision[3]).not.toEqual(original[3])
 
     sfsReconciler.isMountable.mockReturnValue(false)
     const afterMountabilityChange = resolveDependencies(host)
@@ -4466,8 +4669,12 @@ describe('McpServerWatcher Host mutation dependency wiring', () => {
     }
     ;(watcher as any).communicationChannels.set(alphaChannelV2.name, alphaChannelV2)
     const afterChannelRevision = resolveDependencies(host)
-    expect(afterChannelRevision.at(-1)).toBe(alphaChannelV2)
-    expect(afterChannelRevision.at(-1)).not.toBe(original.at(-1))
+    expect(afterChannelRevision.at(-1)).toEqual({
+      name: alphaChannelV2.name,
+      namespace: alphaChannelV2.namespace,
+      spec: alphaChannelV2.spec,
+    })
+    expect(afterChannelRevision.at(-1)).not.toEqual(original.at(-1))
   })
 })
 

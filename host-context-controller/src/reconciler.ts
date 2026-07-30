@@ -1479,92 +1479,6 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   }
 
   /**
-   * Keep remote egress proxy CRDs aligned with the platform-owned runtime image.
-   *
-   * Remote servers are rendered as nginx egress proxies and never run
-   * `server.spec.image`, but stale CR specs can mislead scanners or future
-   * tooling. Patch only the declarative image field; Deployment rendering still
-   * uses `config.egressProxyImage` as the authority.
-   *
-   * This stays internally non-throwing because image canonicalization is
-   * best-effort cleanup; a failed CRD patch must not block ConfigMap,
-   * Service, or Deployment reconciliation for the actual proxy runtime.
-   */
-  private async canonicalizeRemoteEgressProxyImage(
-    server: McpServerCRD,
-    isCurrent: () => boolean = () => true
-  ): Promise<void> {
-    if (!isCurrent()) return
-    if (!this.isRemote(server)) {
-      return
-    }
-    if (server.spec.image === config.egressProxyImage) {
-      await this.writeStatusCondition(
-        server,
-        {
-          type: 'ImageCanonicalized',
-          status: 'True',
-          reason: 'RemoteEgressProxyImageMatches',
-          message: 'Remote McpServer spec.image matches the platform egress proxy image',
-        },
-        isCurrent
-      )
-      return
-    }
-
-    try {
-      if (!isCurrent()) return
-      await this.customApi.patchNamespacedCustomObject(
-        {
-          group: 'clerum.io',
-          version: 'v1alpha1',
-          namespace: server.namespace,
-          plural: 'mcpservers',
-          name: server.name,
-          body: {
-            spec: {
-              image: config.egressProxyImage,
-            },
-          },
-        },
-        {
-          middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')],
-        }
-      )
-      if (!isCurrent()) return
-      console.log(
-        `[Reconciler] Canonicalized remote McpServer "${server.name}" image to ${config.egressProxyImage}`
-      )
-      await this.writeStatusCondition(
-        server,
-        {
-          type: 'ImageCanonicalized',
-          status: 'True',
-          reason: 'RemoteEgressProxyImageMatches',
-          message: 'Remote McpServer spec.image matches the platform egress proxy image',
-        },
-        isCurrent
-      )
-    } catch (err) {
-      if (!isCurrent()) return
-      console.warn(
-        `[Reconciler] Failed to canonicalize remote McpServer "${server.name}" image to ${config.egressProxyImage}:`,
-        err
-      )
-      await this.writeStatusCondition(
-        server,
-        {
-          type: 'ImageCanonicalized',
-          status: 'False',
-          reason: 'RemoteEgressProxyImagePatchFailed',
-          message: 'Failed to patch remote McpServer spec.image to the platform egress proxy image',
-        },
-        isCurrent
-      )
-    }
-  }
-
-  /**
    * G11: Update status conditions on McpServer CRD.
    * Sets NetworkReady and DeploymentReady conditions so WRC can watch
    * for status changes instead of polling with sleeps.
@@ -1925,8 +1839,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     try {
       // Remote egress proxy: create nginx ConfigMap before Deployment
       if (this.isRemote(server)) {
-        await this.canonicalizeRemoteEgressProxyImage(server, isCurrent)
-        if (!isCurrent()) return
+        // The CRD image remains desired-state input owned by its author. Remote
+        // workloads use the platform-owned proxy image selected in
+        // buildDeployment(); rewriting spec.image here would bump generation
+        // and retire this reconcile before it can create the runtime resources.
         await this.ensureConfigMap(server, isCurrent)
       } else {
         // Phase 2.3: plugin image-host allowlist. Audit mode (default) logs a

@@ -97,7 +97,21 @@ Servers removed from a Context lose their policies on the next reconcile; deleti
 - **`exact-host`** (default) — a CIDR binding, or a public DNS hostname resolved to `/32` ipBlocks, on one declared port/protocol. CIDRs and resolved IPs are rejected if they overlap `PUBLIC_EGRESS_EXCEPT_CIDRS` (RFC1918, CGNAT, loopback, link-local incl. cloud metadata, documentation, benchmarking, multicast, reserved ranges). Hostnames like `localhost`, `metadata.goog`, `*.internal`, `*.svc`, `*.cluster.local` are rejected outright.
 - **`public-web`** — `0.0.0.0/0` on TCP 80/443 with `PUBLIC_EGRESS_EXCEPT_CIDRS` carved out via `except`.
 
-Results are written to the McpServer's `status.conditions` (`ExternalEgressReady`) and `status.resolvedEgressIPs`. A failed binding blocks runtime reconciliation of that server, so a workload cannot start before its egress converges. DNS answers are re-resolved periodically (`HCC_EXTERNAL_EGRESS_RESYNC_SEC`, default 300s).
+Results are written to the McpServer's `status.conditions` (`ExternalEgressReady`) and `status.resolvedEgressIPs`. A failed binding blocks runtime reconciliation of that server, so a workload cannot start before its egress converges. DNS-derived allows are never retained across a failed refresh: HCC revokes the unprovable policy before certifying global readiness, while only the affected runtime remains blocked until DNS recovers. Each lookup has a bounded deadline.
+
+HCC readiness certifies authoritative inventory and revocation safety, not
+completion of positive policy creation. A renamed or newly requested allow may
+therefore remain unavailable after HCC becomes Ready until its additive
+reconciliation succeeds. HCC never keeps an obsolete allow merely to avoid
+that availability gap: when old and new ownership cannot be proven equivalent,
+revocation wins and only the affected runtime remains fail-closed.
+
+During an in-place release, HCC is also the controller that stamps
+`CONTEXT_MAPPER_HOST_IMAGE` onto managed mcp-host workloads. The new HCC
+producer is consequently running before it replaces those consumers with the
+new mcp-host image. For compatibility, an omitted `status.authoritative` field
+retains the legacy fail-closed meaning; only an explicit `authoritative: false`
+asks a new mcp-host to preserve an unchanged live connection.
 
 ### Recipe binding policies
 
@@ -267,16 +281,17 @@ a permissive policy — see the NetworkPolicy and GFS tables:
 
 ### MCP server provisioning
 
-| Variable                                     | Default                             | Description                                                                                                 |
-| -------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY` | `IfNotPresent`                      | Pull policy for reconciled McpServer workloads.                                                             |
-| `CONTEXT_MAPPER_EGRESS_PROXY_IMAGE`          | `clerum/nginx-egress-proxy:0.1.0`   | Per-server nginx egress proxy for **remote** MCP servers (`spec.remote`).                                   |
-| `CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE`          | (registry-qualified `stdio-bridge`) | stdio-bridge sidecar image for managed stdio MCP servers. Manifest pins `clerum/stdio-bridge:0.9.5`.        |
-| `CONTEXT_MAPPER_STDIO_BRIDGE_REQUEST_MEMORY` | `32Mi`                              | stdio-bridge sidecar memory request.                                                                        |
-| `CONTEXT_MAPPER_STDIO_BRIDGE_REQUEST_CPU`    | `50m`                               | stdio-bridge sidecar CPU request.                                                                           |
-| `CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_MEMORY`   | `128Mi`                             | stdio-bridge sidecar memory limit.                                                                          |
-| `CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_CPU`      | `200m`                              | stdio-bridge sidecar CPU limit.                                                                             |
-| `HCC_EXTERNAL_EGRESS_RESYNC_SEC`             | `300`                               | Periodic external-egress DNS resync (seconds), so DNS changes converge without a watch event. `0` disables. |
+| Variable                                     | Default                             | Description                                                                                                          |
+| -------------------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `CONTEXT_MAPPER_MCPSERVER_IMAGE_PULL_POLICY` | `IfNotPresent`                      | Pull policy for reconciled McpServer workloads.                                                                      |
+| `CONTEXT_MAPPER_EGRESS_PROXY_IMAGE`          | `clerum/nginx-egress-proxy:0.1.0`   | Per-server nginx egress proxy for **remote** MCP servers (`spec.remote`).                                            |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE`          | (registry-qualified `stdio-bridge`) | stdio-bridge sidecar image for managed stdio MCP servers. Manifest pins `clerum/stdio-bridge:0.9.5`.                 |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_REQUEST_MEMORY` | `32Mi`                              | stdio-bridge sidecar memory request.                                                                                 |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_REQUEST_CPU`    | `50m`                               | stdio-bridge sidecar CPU request.                                                                                    |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_MEMORY`   | `128Mi`                             | stdio-bridge sidecar memory limit.                                                                                   |
+| `CONTEXT_MAPPER_STDIO_BRIDGE_LIMIT_CPU`      | `200m`                              | stdio-bridge sidecar CPU limit.                                                                                      |
+| `HCC_EXTERNAL_EGRESS_RESYNC_SEC`             | `300`                               | Periodic external-egress DNS resync interval (seconds). `0` disables periodic refresh; watch events still reconcile. |
+| `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS`         | `5000`                              | Per-hostname DNS lookup deadline in milliseconds.                                                                    |
 
 ### mcp-host provisioning
 

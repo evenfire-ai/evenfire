@@ -1,6 +1,7 @@
 import * as k8s from '@kubernetes/client-node'
 import { IntOrString } from '@kubernetes/client-node/dist/types.js'
 import { createHash, randomUUID } from 'crypto'
+import { isDeepStrictEqual } from 'node:util'
 import * as path from 'path'
 import type { AdministrativeOutcomeReporter } from './administrativeOutcomeReporter'
 import { config } from './config'
@@ -647,12 +648,19 @@ export class HostReconciler {
         const sameDependencies =
           capturedDependencies !== undefined &&
           capturedDependencies.length === currentDependencies.length &&
-          capturedDependencies.every((value, index) => Object.is(value, currentDependencies[index]))
+          capturedDependencies.every((value, index) =>
+            isDeepStrictEqual(value, currentDependencies[index])
+          )
         if (!sameDependencies) {
           throw new HostMutationDependencyChangedError(action, requested.name)
         }
       }
-      return current
+      // McpServerWatcher owns the canonical LIST/WATCH cache object. Mutation
+      // bodies historically reflect status into their admitted object for
+      // same-pass decisions, so detach the working snapshot whenever a live
+      // cache resolver is wired. Standalone callers without a resolver retain
+      // the legacy caller-visible reflection contract.
+      return structuredClone(current)
     }
   }
 

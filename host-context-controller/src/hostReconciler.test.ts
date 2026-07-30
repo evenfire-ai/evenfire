@@ -1185,6 +1185,48 @@ describe('HostReconciler Host inventory mutation authority', () => {
     expect(ensureServiceAccount).not.toHaveBeenCalled()
   })
 
+  it('keeps a Host reconcile admitted when a watch replaces dependencies with deep-equal values', async () => {
+    const reconciler = makeBasicReconciler()
+    const host = {
+      ...makeHost({ name: 'deep-equal-dependency', contextRef: 'context-a' }),
+      uid: 'deep-equal-dependency-uid',
+      generation: 5,
+    }
+    let selectedContext: unknown = {
+      name: 'context-a',
+      spec: {
+        sharedFileSystems: [{ name: 'documents', mountPath: '/contexts/documents' }],
+      },
+    }
+    reconciler.setResolveCurrentHost(name => (name === host.name ? host : undefined))
+    reconciler.setHostMutationAuthority(() => ({
+      known: true,
+      hostGeneration: 7,
+      contextGeneration: 11,
+    }))
+    reconciler.setResolveHostMutationDependencies(() => [selectedContext])
+
+    const secretReadStarted = deferred()
+    const releaseSecretRead = deferred()
+    vi.spyOn(reconciler as any, 'validateHostSecret').mockImplementation(async () => {
+      secretReadStarted.resolve(undefined)
+      await releaseSecretRead.promise
+      return { ok: true }
+    })
+    const admitted = new Error('deep-equal dependency admitted')
+    const ensureServiceAccount = vi
+      .spyOn(reconciler as any, 'ensureHostServiceAccount')
+      .mockRejectedValue(admitted)
+
+    const pending = reconciler.reconcile(host)
+    await secretReadStarted.promise
+    selectedContext = structuredClone(selectedContext)
+    releaseSecretRead.resolve(undefined)
+
+    await expect(pending).rejects.toBe(admitted)
+    expect(ensureServiceAccount).toHaveBeenCalled()
+  })
+
   it.each([
     [
       'referenced SharedFileSystem revision',

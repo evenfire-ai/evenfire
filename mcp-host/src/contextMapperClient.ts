@@ -18,14 +18,24 @@ export interface AuthTokenResponse {
   message?: string
 }
 
+const DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS = 10_000
+
 /**
  * Context Mapper client.
  */
 export class ContextMapperClient {
   private baseUrl: string
+  private requestTimeoutMs: number
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, requestTimeoutMs = DEFAULT_CONTEXT_MAPPER_REQUEST_TIMEOUT_MS) {
     this.baseUrl = baseUrl.replace(/\/$/, '') // Remove trailing slash
+    this.requestTimeoutMs = requestTimeoutMs
+  }
+
+  private fetch(input: string): Promise<Response> {
+    return fetch(input, {
+      signal: AbortSignal.timeout(this.requestTimeoutMs),
+    })
   }
 
   /**
@@ -33,7 +43,7 @@ export class ContextMapperClient {
    */
   async healthCheck(): Promise<boolean> {
     try {
-      const response = await fetch(`${this.baseUrl}/ready`)
+      const response = await this.fetch(`${this.baseUrl}/ready`)
       return response.ok
     } catch (error) {
       console.error('[ContextMapper] Health check failed:', error)
@@ -43,24 +53,21 @@ export class ContextMapperClient {
 
   /**
    * List all McpServers.
+   * Rejects transport and HTTP failures so a future caller cannot confuse an
+   * unavailable controller with an authoritative empty fleet.
    */
   async listAllServers(): Promise<McpServerInfo[]> {
-    try {
-      console.log('[ContextMapper] Fetching all McpServers')
+    console.log('[ContextMapper] Fetching all McpServers')
 
-      const response = await fetch(`${this.baseUrl}/api/v1/mcpservers`)
+    const response = await this.fetch(`${this.baseUrl}/api/v1/mcpservers`)
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-
-      const data = (await response.json()) as McpServersResponse
-      console.log(`[ContextMapper] Found ${data.servers.length} McpServer(s)`)
-      return data.servers
-    } catch (error) {
-      console.error('[ContextMapper] Failed to list servers:', error)
-      return []
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`)
     }
+
+    const data = (await response.json()) as McpServersResponse
+    console.log(`[ContextMapper] Found ${data.servers.length} McpServer(s)`)
+    return data.servers
   }
 
   /**
@@ -71,7 +78,7 @@ export class ContextMapperClient {
   async listServersByContext(contextRef: string): Promise<McpServerInfo[]> {
     console.log(`[ContextMapper] Fetching McpServers for context: ${contextRef}`)
 
-    const response = await fetch(
+    const response = await this.fetch(
       `${this.baseUrl}/api/v1/mcpservers/context/${encodeURIComponent(contextRef)}`
     )
 
@@ -93,7 +100,7 @@ export class ContextMapperClient {
   async getAuthToken(serverName: string): Promise<string | undefined> {
     console.log(`[ContextMapper] Fetching auth token for server: ${serverName}`)
 
-    const response = await fetch(
+    const response = await this.fetch(
       `${this.baseUrl}/api/v1/mcpservers/${encodeURIComponent(serverName)}/auth`
     )
 
@@ -119,7 +126,7 @@ export class ContextMapperClient {
    * unavailable controller as an authoritative empty inventory.
    */
   async pollServers(contextRef: string): Promise<{ servers: McpServerInfo[]; timestamp: string }> {
-    const response = await fetch(
+    const response = await this.fetch(
       `${this.baseUrl}/api/v1/mcpservers/context/${encodeURIComponent(contextRef)}`
     )
 

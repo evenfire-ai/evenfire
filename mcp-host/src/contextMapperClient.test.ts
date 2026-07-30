@@ -13,7 +13,10 @@ describe('ContextMapperClient readiness and discovery', () => {
     const client = new ContextMapperClient('http://context-mapper.test')
 
     await expect(client.healthCheck()).resolves.toBe(true)
-    expect(fetchMock).toHaveBeenCalledWith('http://context-mapper.test/ready')
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://context-mapper.test/ready',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
   })
 
   it('rejects an HTTP 503 during initial discovery instead of returning an empty fleet', async () => {
@@ -62,6 +65,14 @@ describe('ContextMapperClient readiness and discovery', () => {
 
     await expect(client.listServersByContext('production')).resolves.toEqual([])
   })
+
+  it('does not convert a failed all-server request into an authoritative empty fleet', async () => {
+    const networkError = new Error('connection reset')
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(networkError))
+    const client = new ContextMapperClient('http://context-mapper.test')
+
+    await expect(client.listAllServers()).rejects.toBe(networkError)
+  })
 })
 
 describe('ContextMapperClient.pollServers', () => {
@@ -94,6 +105,27 @@ describe('ContextMapperClient.pollServers', () => {
     const client = new ContextMapperClient('http://context-mapper.test')
 
     await expect(client.pollServers('production')).rejects.toBe(networkError)
+  })
+
+  it('bounds a silent HCC request so authoritative polling cannot stall indefinitely', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        return new Promise((_resolve, reject) => {
+          const signal = init?.signal
+          if (!signal) return
+          signal.addEventListener(
+            'abort',
+            () =>
+              reject(signal.reason ?? new DOMException('The operation was aborted', 'AbortError')),
+            { once: true }
+          )
+        })
+      })
+    )
+    const client = new ContextMapperClient('http://context-mapper.test', 10)
+
+    await expect(client.pollServers('production')).rejects.toMatchObject({ name: 'TimeoutError' })
   })
 
   it('accepts an HTTP 200 empty fleet as an authoritative deletion snapshot', async () => {

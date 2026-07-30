@@ -43,6 +43,7 @@ command -v jq >/dev/null 2>&1 || {
 
 HCC_NS="${HCC_NS:-control-plane}"
 HCC_DEPLOY="${HCC_DEPLOY:-host-context-controller}"
+HCC_GATEWAY_DEPLOY="${HCC_GATEWAY_DEPLOY:-host-context-controller-api-gateway}"
 HOST_NS="${MCP_HOST_NS:-mcp-host}"
 MCP_NS="${MCP_SERVER_NS:-mcp-server}"
 TOKEN_REQUEST_PATH="/api/v1/auth/mcp-host/${HOST_NS}/standalone/tokens"
@@ -203,6 +204,70 @@ probe_hcc_ready_pod() {
     ' >/dev/null 2>&1
 }
 
+running_hcc_gateway_pod() {
+  running_pod_name "$HCC_NS" "app=${HCC_GATEWAY_DEPLOY}"
+}
+
+hcc_gateway_deployment_ready() {
+  kctl get deployment "$HCC_GATEWAY_DEPLOY" -n "$HCC_NS" -o json |
+    jq -e '
+      .spec.replicas == 1 and
+      .status.observedGeneration == .metadata.generation and
+      (.status.updatedReplicas // 0) == 1 and
+      (.status.readyReplicas // 0) == 1 and
+      (.status.availableReplicas // 0) == 1 and
+      (.status.unavailableReplicas // 0) == 0
+    ' >/dev/null
+}
+
+hcc_gateway_local_health_ok() {
+  local pod
+  pod="$(running_hcc_gateway_pod)" || return 1
+  kctl exec "pod/${pod}" -n "$HCC_NS" -c nginx -- \
+    wget -qO- http://127.0.0.1:8081/health |
+    jq -e '.status == "ok"' >/dev/null
+}
+
+hcc_gateway_ready_proxy_unavailable() {
+  local pod output status
+  pod="$(running_hcc_gateway_pod)" || return 1
+  output="$(
+    kctl exec "pod/${pod}" -n "$HCC_NS" -c nginx -- \
+      wget -O /dev/null -S http://127.0.0.1:8081/ready 2>&1
+  )" && return 1
+  status="$(
+    awk '
+      /^[[:space:]]*HTTP\/[0-9.]+[[:space:]]+[0-9][0-9][0-9]([[:space:]]|$)/ {
+        code = $2
+      }
+      END {
+        if (code != "") print code
+      }
+    ' <<<"$output"
+  )"
+  [ "$status" = 502 ]
+}
+
+hcc_gateway_remains_ready_without_hcc() {
+  local duration=$1 deadline
+  deadline=$(( $(date +%s) + duration ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    hcc_gateway_deployment_ready &&
+      hcc_gateway_local_health_ok &&
+      hcc_gateway_ready_proxy_unavailable ||
+      return 1
+    sleep 1
+  done
+}
+
+hcc_gateway_ready_proxy_recovers() {
+  local pod
+  pod="$(running_hcc_gateway_pod)" || return 1
+  kctl exec "pod/${pod}" -n "$HCC_NS" -c nginx -- \
+    wget -qO- http://127.0.0.1:8081/ready |
+    jq -e '.ready == true and .status == "ready"' >/dev/null
+}
+
 fixture_inputs_absent() {
   local hosts contexts secrets
   hosts="$(kctl get host -n "$HOST_NS" -l "e2e.clerum.io/suite=${SUITE_NAME}" \
@@ -358,6 +423,10 @@ Inspect before changing anything:
 
 Do not remove the blocker or HCC gate lock until HCC configuration, rollout, Pod readiness,
 /ready, and fixture absence are verified.
+
+Restore the original HCC replica count before verifying rollout and /ready:
+  kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} scale deployment/${HCC_DEPLOY} --replicas=${ORIGINAL_REPLICAS:-1}
+  kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} rollout status deployment/${HCC_DEPLOY} --timeout=180s
 EOF
 }
 
@@ -437,7 +506,8 @@ require_branch_owned_hcc_gate "$HCC_NS"
 ok "branch helper, profile, exact HEAD/fingerprint/gate verified"
 
 kctl get nodes -o json |
-  jq -e 'any(.items[]; .metadata.labels["minikube.k8s.io/name"] != null)' >/dev/null ||
+  jq -e --arg context "$E2E_KUBECONTEXT" \
+    'any(.items[]; .metadata.labels["minikube.k8s.io/name"] == $context)' >/dev/null ||
   die "target context is not a minikube cluster"
 readiness_blocker_suite_absent ||
   die "stale HCC readiness blocker resources exist; inspect them before fault injection"
@@ -626,6 +696,9 @@ HCC_MUTATED=1
 kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0 >/dev/null
 wait_until 120 "existing HCC pods to stop" hcc_pods_absent ||
   die "existing HCC pod did not stop"
+hcc_gateway_remains_ready_without_hcc 20 ||
+  die "HCC API gateway did not remain Ready on local /health while proxied /ready was unavailable"
+ok "API gateway remained Ready for a complete probe-failure window while /ready reflected HCC unavailability"
 create_host_fixtures ||
   die "could not create the gate-owned Host fleet while HCC was stopped"
 ok "created ${FIXTURE_HOST_COUNT} gate-owned Hosts without modifying any real Host or Secret"
@@ -695,9 +768,12 @@ echo "$probe_result" | jq -e \
   '.readyStatus == 200 and .discoveryStatus == 200 and (.discoveredServers | type == "number")' \
   >/dev/null ||
   die "HCC HTTP probe returned an invalid result: ${probe_result}"
+hcc_gateway_ready_proxy_recovers ||
+  die "HCC API gateway /ready did not recover after HCC became ready"
 initial_host_pass_is_active "$new_hcc_pod" ||
   die "initial Host reconciliation failed or completed before the HTTP assertions finished"
 ok "/ready returned 200 while the initial Host fleet pass remained active"
+ok "API gateway /ready recovered without changing its local readiness"
 ok "/api/v1/mcpservers returned a valid live discovery response during that same pass"
 
 header "HCC readiness assertions passed; restoring branch-owned runtime"

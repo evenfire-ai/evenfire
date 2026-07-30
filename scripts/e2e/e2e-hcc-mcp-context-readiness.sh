@@ -5,13 +5,14 @@
 # The gate runs only on an exact-HEAD, branch-owned Minikube profile. It routes
 # HCC DNS through an isolated in-cluster proxy that forwards every query except
 # one fixture hostname. The gate first lets HCC create a real external-egress
-# policy. A same-intent restart then holds DNS through a real retry and proves
-# the certified policy keeps the same UID/spec while HCC remains Ready. A
-# second phase changes that binding's protocol while HCC is stopped; holding
-# DNS now proves the divergent allow is revoked and HCC remains unready until
-# the UDP replacement exists. A real Context watch update must still converge
-# its three NetworkPolicies during that hold. The fleet is wider than the
-# bounded worker width, covering the original large-fleet symptom.
+# policy. A same-intent restart then proves the safety pass revokes that
+# DNS-derived allow without attempting DNS and certifies global readiness while
+# the affected runtime stays blocked. DNS release lets the additive lane create
+# the current TCP policy and runtime. A second phase changes that binding's
+# protocol while HCC is stopped and proves the same contract for TCP-to-UDP
+# replacement. A real Context watch update still converges its three
+# NetworkPolicies. The fleet is wider than the bounded worker width, covering
+# the original large-fleet symptom.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,7 +83,6 @@ NEW_HCC_POD=""
 HCC_UID=""
 HCC_RESTARTS=""
 HCC_PORT=""
-CERTIFIED_POLICY_IDENTITY=""
 HCC_MUTATED=0
 DNS_BLOCKER_CREATED=0
 MCP_CREATED=0
@@ -99,6 +99,7 @@ HCC_GATE_LOCK_NAME=""
 HCC_GATE_LOCK_UID=""
 # shellcheck disable=SC2034
 HCC_GATE_FINALIZATION_FAILURE=""
+HCC_READY_PROBE_DIAGNOSTIC=""
 
 [[ "$MCP_FLEET_SIZE" =~ ^[0-9]+$ ]] && [ "$MCP_FLEET_SIZE" -gt 10 ] &&
   [ "$MCP_FLEET_SIZE" -le 24 ] || {
@@ -183,6 +184,20 @@ hcc_log_contains() {
   grep -Fq "$marker" <<<"$logs"
 }
 
+hcc_log_count() {
+  local marker=$1 logs
+  [ -n "$NEW_HCC_POD" ] || return 1
+  logs="$(kctl logs "pod/${NEW_HCC_POD}" -n "$HCC_NS" \
+    -c host-context-controller 2>/dev/null)" || return 1
+  grep -Fc "$marker" <<<"$logs" || true
+}
+
+hcc_log_count_exceeds() {
+  local marker=$1 baseline=$2 current
+  current="$(hcc_log_count "$marker")" || return 1
+  [ "$current" -gt "$baseline" ]
+}
+
 dns_log_contains() {
   local marker=$1 logs
   logs="$(kctl logs "deployment/${DNS_BLOCKER_NAME}" -n "$HCC_NS" 2>/dev/null)" ||
@@ -226,14 +241,19 @@ initial_network_policy_retry_progress_is_observed() {
 }
 
 external_egress_retry_progress_is_observed() {
-  local logs
+  local logs marker
   [ -n "$NEW_HCC_POD" ] || return 1
   logs="$(kctl logs "pod/${NEW_HCC_POD}" -n "$HCC_NS" \
     -c host-context-controller 2>/dev/null)" || return 1
+  marker="Scheduling external egress retry "
   grep -Fq \
     "Initial external egress reconciliation failed for ${MCP_NS}/${MCP_NAME};" <<<"$logs" &&
-    grep -Fq "Scheduling external egress retry " <<<"$logs" &&
-    grep -Fq "for McpServer \"${MCP_NAME}\"" <<<"$logs"
+    awk \
+      -v marker="$marker" \
+      -v server="for McpServer \"${MCP_NAME}\"" '
+        index($0, marker) && index($0, server) { found = 1 }
+        END { exit found ? 0 : 1 }
+      ' <<<"$logs"
 }
 
 external_egress_retry_rearmed_is_observed() {
@@ -298,16 +318,35 @@ fixture_runtime_absent() {
     resource_absent service "$MCP_NAME" "$MCP_NS"
 }
 
-fixture_runtime_and_ready_absent() {
-  fixture_runtime_absent &&
-    kctl get mcpserver "$MCP_NAME" -n "$MCP_NS" -o json 2>/dev/null |
+mcpserver_current_ready() {
+  local name=$1
+  kctl get mcpserver "$name" -n "$MCP_NS" -o json 2>/dev/null |
     jq -e '
+      .metadata.generation as $generation |
       any(
         .status.conditions[]?;
         .type == "Ready" and .status == "True" and
-        (.observedGeneration // -1) == .metadata.generation
-      ) | not
+        (.observedGeneration // -1) == $generation
+      )
     ' >/dev/null
+}
+
+mcpserver_current_ready_absent() {
+  local name=$1 resource
+  resource="$(kctl get mcpserver "$name" -n "$MCP_NS" -o json 2>/dev/null)" ||
+    return 1
+  jq -e '
+    .metadata.generation as $generation |
+    any(
+      .status.conditions[]?;
+      .type == "Ready" and .status == "True" and
+      (.observedGeneration // -1) == $generation
+    ) | not
+  ' <<<"$resource" >/dev/null
+}
+
+fixture_runtime_and_ready_absent() {
+  fixture_runtime_absent && mcpserver_current_ready_absent "$MCP_NAME"
 }
 
 context_policies_absent() {
@@ -317,11 +356,17 @@ context_policies_absent() {
 }
 
 context_policies_converged() {
-  kctl get networkpolicy "$CONTEXT_POLICY" -n "$MCP_NS" -o json |
+  local context_id=${1:-$CONTEXT_ID}
+  local context_name=${2:-$CONTEXT_NAME}
+  local server=${3:-$MCP_NAME}
+  local ingress_policy="ctx-${context_id}-${server}"
+  local host_egress_policy="${ingress_policy}-egress"
+  local rpc_egress_policy="rpc-egress-${context_id}-${server}"
+  kctl get networkpolicy "$ingress_policy" -n "$MCP_NS" -o json |
     jq -e \
-      --arg contextId "$CONTEXT_ID" \
-      --arg contextName "$CONTEXT_NAME" \
-      --arg server "$MCP_NAME" \
+      --arg contextId "$context_id" \
+      --arg contextName "$context_name" \
+      --arg server "$server" \
       --arg hostNs "$HOST_NS" \
       --arg rpcNs "$RPC_PROXY_NS" \
       --arg mcpNs "$MCP_NS" \
@@ -353,11 +398,11 @@ context_policies_converged() {
         .podSelector.matchLabels.app == "mcp-proxy"
       )
     ' >/dev/null || return 1
-  kctl get networkpolicy "$CONTEXT_EGRESS_POLICY" -n "$HOST_NS" -o json |
+  kctl get networkpolicy "$host_egress_policy" -n "$HOST_NS" -o json |
     jq -e \
-      --arg contextId "$CONTEXT_ID" \
-      --arg contextName "$CONTEXT_NAME" \
-      --arg server "$MCP_NAME" \
+      --arg contextId "$context_id" \
+      --arg contextName "$context_name" \
+      --arg server "$server" \
       --arg mcpNs "$MCP_NS" \
       --arg managedByLabel "$MANAGED_BY_LABEL" \
       --arg managedByValue "$MANAGED_BY_VALUE" \
@@ -379,10 +424,10 @@ context_policies_converged() {
       ] == $mcpNs and
       .spec.egress[0].to[0].podSelector.matchLabels[$serverLabel] == $server
     ' >/dev/null || return 1
-  kctl get networkpolicy "$RPC_EGRESS_POLICY" -n "$RPC_PROXY_NS" -o json |
+  kctl get networkpolicy "$rpc_egress_policy" -n "$RPC_PROXY_NS" -o json |
     jq -e \
-      --arg contextId "$CONTEXT_ID" \
-      --arg server "$MCP_NAME" \
+      --arg contextId "$context_id" \
+      --arg server "$server" \
       --arg mcpNs "$MCP_NS" \
       --arg managedByLabel "$MANAGED_BY_LABEL" \
       --arg managedByValue "$MANAGED_BY_VALUE" \
@@ -446,21 +491,6 @@ external_egress_policy_absent() {
   [ -z "$policies" ]
 }
 
-external_egress_policy_identity() {
-  kctl get networkpolicy -n "$MCP_NS" \
-    -l "${MCP_SERVER_LABEL}=${MCP_NAME},${POLICY_TYPE_LABEL}=external-egress" \
-    -o json |
-    jq -ceS '
-      select((.items | length) == 1) |
-      {uid: .items[0].metadata.uid, spec: .items[0].spec}
-    '
-}
-
-certified_external_egress_policy_is_unchanged() {
-  [ -n "$CERTIFIED_POLICY_IDENTITY" ] &&
-    [ "$(external_egress_policy_identity)" = "$CERTIFIED_POLICY_IDENTITY" ]
-}
-
 fixture_runtime_converged_with_protocol() {
   local protocol=$1 desired available
   desired="$(kctl get deployment "$MCP_NAME" -n "$MCP_NS" \
@@ -469,9 +499,7 @@ fixture_runtime_converged_with_protocol() {
     -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" || return 1
   [ "${desired:-0}" -ge 1 ] && [ "${available:-0}" -ge 1 ] || return 1
   kctl get service "$MCP_NAME" -n "$MCP_NS" >/dev/null 2>&1 || return 1
-  kctl get mcpserver "$MCP_NAME" -n "$MCP_NS" -o json |
-    jq -e 'any(.status.conditions[]?; .type == "Ready" and .status == "True")' >/dev/null ||
-    return 1
+  mcpserver_current_ready "$MCP_NAME" || return 1
   external_egress_policy_converged_with_protocol "$protocol"
 }
 
@@ -502,16 +530,16 @@ peer_fleet_runtime_absent() {
 }
 
 peer_fleet_converged() {
-  local index server desired available
+  local index server context desired available
   for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
     server="${MCP_FLEET_NAMES[index]}"
+    context="${CONTEXT_FLEET_NAMES[index]}"
     desired="$(kctl get deployment "$server" -n "$MCP_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null)" || return 1
     available="$(kctl get deployment "$server" -n "$MCP_NS" -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" || return 1
     [ "${desired:-0}" -ge 1 ] && [ "${available:-0}" -ge 1 ] || return 1
     kctl get service "$server" -n "$MCP_NS" >/dev/null 2>&1 || return 1
-    kctl get mcpserver "$server" -n "$MCP_NS" -o json | jq -e '
-      any(.status.conditions[]?; .type == "Ready" and .status == "True")
-    ' >/dev/null || return 1
+    mcpserver_current_ready "$server" || return 1
+    context_policies_converged "$context" "$context" "$server" || return 1
   done
 }
 
@@ -588,9 +616,7 @@ fixture_converged() {
     -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" || return 1
   [ "${desired:-0}" -ge 1 ] && [ "${available:-0}" -ge 1 ] || return 1
   kctl get service "$MCP_NAME" -n "$MCP_NS" >/dev/null 2>&1 || return 1
-  kctl get mcpserver "$MCP_NAME" -n "$MCP_NS" -o json |
-    jq -e 'any(.status.conditions[]?; .type == "Ready" and .status == "True")' >/dev/null ||
-    return 1
+  mcpserver_current_ready "$MCP_NAME" || return 1
   external_egress_policy_converged || return 1
   context_policies_converged
 }
@@ -669,11 +695,23 @@ probe_hcc_ready_pod() {
 }
 
 probe_new_hcc_ready_endpoint() {
+  local output first_line
+  HCC_READY_PROBE_DIAGNOSTIC="HCC_READY_PROBE category=pod-not-selected"
   [ -n "$NEW_HCC_POD" ] || return 1
-  kctl exec "pod/${NEW_HCC_POD}" -n "$HCC_NS" -c host-context-controller -- \
-    env "HCC_E2E_PORT=${HCC_PORT}" \
-    node -e '
+  if output="$(
+    kctl exec "pod/${NEW_HCC_POD}" -n "$HCC_NS" -c host-context-controller -- \
+      env "HCC_E2E_PORT=${HCC_PORT}" \
+      node -e '
       const http = require("node:http");
+      let finished = false;
+      const finish = (code, category, detail = "") => {
+        if (finished) return;
+        finished = true;
+        if (category) {
+          console.error(`HCC_READY_PROBE category=${category}${detail}`);
+        }
+        process.exitCode = code;
+      };
       const request = http.get(
         {host: "127.0.0.1", port: Number(process.env.HCC_E2E_PORT), path: "/ready"},
         response => {
@@ -681,49 +719,54 @@ probe_new_hcc_ready_endpoint() {
           response.setEncoding("utf8");
           response.on("data", chunk => { body += chunk; });
           response.on("end", () => {
+            if (response.statusCode !== 200) {
+              finish(3, "http-status", ` status=${response.statusCode ?? "unknown"}`);
+              return;
+            }
             let parsed;
-            try { parsed = JSON.parse(body); } catch { process.exit(2); }
-            process.exit(response.statusCode === 200 && parsed?.ready === true ? 0 : 3);
+            try {
+              parsed = JSON.parse(body);
+            } catch {
+              finish(2, "json-invalid");
+              return;
+            }
+            if (parsed?.ready !== true) {
+              finish(3, "json-ready-false");
+              return;
+            }
+            finish(0);
           });
         }
       );
-      request.setTimeout(2000, () => request.destroy(new Error("timeout")));
-      request.once("error", () => process.exit(4));
-    ' >/dev/null 2>&1
+      request.setTimeout(2000, () => {
+        finish(4, "timeout");
+        request.destroy();
+      });
+      request.once("error", () => finish(5, "transport"));
+    ' 2>&1
+  )"; then
+    HCC_READY_PROBE_DIAGNOSTIC=""
+    return 0
+  fi
+  first_line="${output%%$'\n'*}"
+  case "$first_line" in
+    "HCC_READY_PROBE category="*)
+      printf -v HCC_READY_PROBE_DIAGNOSTIC '%.240s' "$first_line"
+      ;;
+    *)
+      HCC_READY_PROBE_DIAGNOSTIC="HCC_READY_PROBE category=kubectl-exec"
+      ;;
+  esac
+  return 1
 }
 
-probe_new_hcc_unready_endpoint() {
-  [ -n "$NEW_HCC_POD" ] || return 1
-  kctl exec "pod/${NEW_HCC_POD}" -n "$HCC_NS" -c host-context-controller -- \
-    env "HCC_E2E_PORT=${HCC_PORT}" \
-    node -e '
-      const http = require("node:http");
-      const request = http.get(
-        {host: "127.0.0.1", port: Number(process.env.HCC_E2E_PORT), path: "/ready"},
-        response => {
-          let body = "";
-          response.setEncoding("utf8");
-          response.on("data", chunk => { body += chunk; });
-          response.on("end", () => {
-            let parsed;
-            try { parsed = JSON.parse(body); } catch { process.exit(2); }
-            process.exit(response.statusCode === 503 && parsed?.ready === false ? 0 : 3);
-          });
-        }
-      );
-      request.setTimeout(2000, () => request.destroy(new Error("timeout")));
-      request.once("error", () => process.exit(4));
-    ' >/dev/null 2>&1
-}
-
-hcc_unready_after_stale_policy_revoked() {
-  probe_new_hcc_unready_endpoint && external_egress_policy_absent
-}
-
-hcc_ready_only_after_current_policy_applied() {
+hcc_ready_after_stale_policy_revoked() {
   probe_new_hcc_ready_endpoint || return 1
-  external_egress_policy_converged ||
-    die "HCC served /ready=200 before the safe replacement external-egress policy existed"
+  if external_egress_policy_absent; then
+    return 0
+  fi
+  HCC_READY_PROBE_DIAGNOSTIC="HCC_READY_PROBE category=stale-policy-present"
+  return 1
 }
 
 hcc_restore_is_verified() {
@@ -783,7 +826,7 @@ NODE
     node -e "$hold_script"
 }
 
-delete_fixture_runtime_preserving_external_policy() {
+delete_fixture_runtime_leaving_dns_policy_for_safety() {
   local failed=0
   kctl delete deployment "$MCP_NAME" -n "$MCP_NS" \
     --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
@@ -877,6 +920,10 @@ Inspect before changing anything:
   kubectl --context=${E2E_KUBECONTEXT} get mcpserver,context -A -l e2e.clerum.io/suite=${SUITE_NAME}
 
 Do not remove the HCC gate lock until HCC health and fixture absence are verified.
+
+Restore the original HCC replica count before verifying rollout and /ready:
+  kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} scale deployment/${HCC_DEPLOY} --replicas=${ORIGINAL_REPLICAS:-1}
+  kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} rollout status deployment/${HCC_DEPLOY} --timeout=240s
 EOF
 }
 
@@ -977,7 +1024,8 @@ header "HCC readiness during initial McpServer and Context convergence"
 
 require_branch_owned_hcc_gate "$HCC_NS"
 kctl get nodes -o json |
-  jq -e 'any(.items[]; .metadata.labels["minikube.k8s.io/name"] != null)' >/dev/null ||
+  jq -e --arg context "$E2E_KUBECONTEXT" \
+    'any(.items[]; .metadata.labels["minikube.k8s.io/name"] == $context)' >/dev/null ||
   die "target context is not a minikube cluster"
 suite_resources_absent ||
   die "stale ${SUITE_NAME} resources exist; inspect them before starting a new fault injection"
@@ -1280,20 +1328,19 @@ EOF
 wait_until 180 "HCC to create the real initial TCP external-egress policy" \
   external_egress_policy_converged_with_protocol "$INITIAL_EXTERNAL_EGRESS_PROTOCOL" ||
   die "HCC never created the initial external-egress policy for the stale-policy fixture"
-CERTIFIED_POLICY_IDENTITY="$(external_egress_policy_identity)" ||
-  die "could not capture the certified TCP policy UID and spec"
-ok "HCC created and certified a real TCP external-egress policy"
+ok "HCC created a real initial TCP external-egress policy"
 
-# Availability phase: restart with the exact same desired binding. Safety may
-# certify the existing policy without DNS, and every later refresh/retry must
-# preserve that same object while DNS is unavailable.
+# Same-intent safety phase: restart with the exact same desired binding. The
+# safety pass must revoke the DNS-derived policy without resolving DNS, certify
+# global readiness, and leave the affected runtime blocked for the additive
+# lane.
 kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0 >/dev/null
 wait_until 120 "existing HCC pods to stop" hcc_pods_absent ||
   die "existing HCC pod did not stop"
-delete_fixture_runtime_preserving_external_policy ||
+delete_fixture_runtime_leaving_dns_policy_for_safety ||
   die "could not remove the initial MCP runtime while retaining its external-egress policy"
-certified_external_egress_policy_is_unchanged ||
-  die "the certified TCP policy changed before the same-intent restart"
+external_egress_policy_converged_with_protocol "$INITIAL_EXTERNAL_EGRESS_PROTOCOL" ||
+  die "the initial TCP policy disappeared before the same-intent safety pass"
 create_peer_fleet || die "could not create the gate-owned MCP/Context peer fleet"
 ok "created ${#MCP_FLEET_NAMES[@]} gate-owned MCP/Context fixtures before fleet bootstrap"
 
@@ -1311,16 +1358,16 @@ read -r HCC_UID HCC_RESTARTS <<<"$identity"
 wait_until 120 "same-intent external-egress refresh to reach the DNS hold" \
   dns_hold_observed_since_arm ||
   die "same-intent external-egress refresh never reached the DNS hold"
-wait_until_fast 60 "HCC /ready with a certified policy while DNS refresh is held" \
-  probe_new_hcc_ready_endpoint ||
-  die "HCC readiness incorrectly waited for same-intent DNS refresh"
-fixture_runtime_absent ||
-  die "HCC became ready only after the held fleet runtime resources had already converged"
+wait_until_fast 60 "HCC readiness after revoking the same-intent DNS policy" \
+  hcc_ready_after_stale_policy_revoked ||
+  die "HCC did not revoke the same-intent DNS policy before global readiness (${HCC_READY_PROBE_DIAGNOSTIC:-HCC_READY_PROBE category=unknown})"
+fixture_runtime_and_ready_absent ||
+  die "the affected runtime or Ready status escaped the held same-intent DNS boundary"
 wait_until 30 "Kubernetes to corroborate same-intent HCC readiness" \
   hcc_kubernetes_readiness_is_exact ||
   die "Kubernetes did not corroborate same-intent HCC readiness"
-certified_external_egress_policy_is_unchanged ||
-  die "the certified policy was deleted or rewritten before the first retry"
+external_egress_policy_absent ||
+  die "the same-intent DNS policy reappeared before additive retry"
 wait_until 120 "a real same-intent external-egress retry to be scheduled" \
   external_egress_retry_progress_is_observed ||
   die "the held same-intent refresh did not schedule a real retry"
@@ -1328,30 +1375,33 @@ wait_until 180 "the scheduled same-intent external-egress retry to execute" \
   external_egress_retry_rearmed_is_observed ||
   die "the scheduled same-intent external-egress retry did not execute"
 probe_new_hcc_ready_endpoint ||
-  die "HCC lost readiness after a same-intent DNS retry"
-certified_external_egress_policy_is_unchanged ||
-  die "a same-intent retry deleted or rewrote the certified policy"
+  die "HCC lost readiness after a same-intent DNS retry (${HCC_READY_PROBE_DIAGNOSTIC:-HCC_READY_PROBE category=unknown})"
+external_egress_policy_absent ||
+  die "a held same-intent retry recreated the DNS policy without current resolution"
 dns_has_not_released_since_hold ||
-  die "the DNS blocker released before the retry preservation assertion"
-ok "same-intent DNS failure and retry preserved the policy UID/spec while HCC stayed Ready"
+  die "the DNS blocker released before the retry revocation assertion"
+ok "same-intent safety revoked the DNS policy while HCC stayed Ready and runtime stayed blocked"
 
 release_dns_blocker || die "could not release the same-intent DNS query"
 wait_until 30 "DNS blocker to answer the same-intent query" \
   dns_released_since_hold ||
   die "DNS blocker did not answer the same-intent query"
+wait_until 120 "current TCP external-egress policy after same-intent DNS release" \
+  external_egress_policy_converged_with_protocol "$INITIAL_EXTERNAL_EGRESS_PROTOCOL" ||
+  die "the current TCP external-egress policy did not converge after DNS release"
 wait_until 180 "same-intent runtime convergence after DNS release" \
   fixture_runtime_converged_with_protocol "$INITIAL_EXTERNAL_EGRESS_PROTOCOL" ||
   die "same-intent runtime did not converge after DNS release"
 
-# Security phase: a protocol change invalidates the certified policy. The old
+# Security phase: a protocol change invalidates the current TCP policy. The old
 # TCP allow must be revoked even when DNS prevents constructing the UDP policy.
 kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0 >/dev/null
 wait_until 120 "same-intent HCC pod to stop" hcc_pods_absent ||
   die "same-intent HCC pod did not stop"
-delete_fixture_runtime_preserving_external_policy ||
+delete_fixture_runtime_leaving_dns_policy_for_safety ||
   die "could not remove the same-intent runtime before the divergent revision"
-certified_external_egress_policy_is_unchanged ||
-  die "the certified TCP policy changed before the divergent revision"
+external_egress_policy_converged_with_protocol "$INITIAL_EXTERNAL_EGRESS_PROTOCOL" ||
+  die "the current TCP policy disappeared before the divergent safety pass"
 hold_dns_blocker || die "could not hold the divergent fixture DNS query"
 DNS_RELEASE_COUNT_AT_HOLD="$(dns_release_count)" ||
   die "could not capture the DNS release baseline before the divergent revision"
@@ -1375,25 +1425,28 @@ read -r HCC_UID HCC_RESTARTS <<<"$identity"
 wait_until 120 "fixture external-egress DNS query to reach the hold proxy" \
   dns_hold_observed_since_arm ||
   die "NetworkPolicy safety convergence never reached the divergent DNS hold"
-wait_until_fast 120 "HCC to stay unready after revoking the divergent stale policy" \
-  hcc_unready_after_stale_policy_revoked ||
-  die "HCC did not revoke the divergent stale policy before readiness"
+wait_until_fast 120 "HCC readiness after revoking the divergent stale policy" \
+  hcc_ready_after_stale_policy_revoked ||
+  die "HCC did not become globally ready after revoking the divergent stale policy (${HCC_READY_PROBE_DIAGNOSTIC:-HCC_READY_PROBE category=unknown})"
+wait_until 30 "Kubernetes to corroborate HCC readiness during divergent DNS hold" \
+  hcc_kubernetes_readiness_is_exact ||
+  die "Kubernetes did not corroborate HCC readiness during divergent DNS hold"
 dns_log_contains "holding DNS A ${TARGET_DNS}" ||
   die "DNS hold ended before the fail-closed revocation assertion"
 if ! dns_has_not_released_since_hold; then
   die "DNS blocker released before the fail-closed revocation assertion"
 fi
 fixture_runtime_and_ready_absent ||
-  die "fixture runtime or Ready status appeared before safe egress replacement"
+  die "fixture runtime or Ready status appeared while divergent DNS remained held"
 external_egress_policy_absent ||
-  die "a divergent external-egress policy survived before safe replacement"
+  die "a divergent external-egress policy survived the fail-closed revocation"
 context_policies_absent ||
   die "Context policy existed before the Context watch update"
 baseline_policies_exist ||
   die "baseline safety NetworkPolicies are absent during safety convergence"
 hcc_identity_is_stable ||
   die "HCC restarted while the MCP external-egress query was held"
-ok "/ready is 503 and the divergent stale policy is absent while replacement is blocked"
+ok "/ready is 200 while the divergent stale policy and affected runtime remain absent"
 ok "baseline NetworkPolicies remain present throughout fail-closed safety convergence"
 
 initial_empty_context_log="[NetPol] Reconciling context \"${CONTEXT_ID}\" — allowed servers: []"
@@ -1423,33 +1476,39 @@ wait_until 120 "all three latest-Context NetworkPolicies to converge during the 
 fixture_runtime_and_ready_absent ||
   die "McpServer runtime or Ready status escaped the deterministic DNS hold boundary"
 external_egress_policy_absent ||
-  die "a divergent external-egress policy reappeared before safe replacement"
+  die "a divergent external-egress policy reappeared while DNS remained held"
 dns_log_contains "holding DNS A ${TARGET_DNS}" ||
   die "DNS hold evidence disappeared before Context policy convergence"
 if ! dns_has_not_released_since_hold; then
   die "DNS blocker released the McpServer query before the Context isolation assertion"
 fi
-probe_new_hcc_unready_endpoint ||
-  die "HCC became ready before the safe replacement policy existed"
-if hcc_kubernetes_readiness_is_exact; then
-  die "Kubernetes reported HCC Ready before the safe replacement policy existed"
-fi
+probe_new_hcc_ready_endpoint ||
+  die "HCC lost global readiness while the affected runtime remained safely blocked (${HCC_READY_PROBE_DIAGNOSTIC:-HCC_READY_PROBE category=unknown})"
+hcc_kubernetes_readiness_is_exact ||
+  die "Kubernetes lost HCC readiness during isolated Context convergence"
 hcc_identity_is_stable ||
   die "HCC restarted while Context policies converged around the held MCP entity"
 ok "the MODIFIED handler, not the initial empty-Context pass, converged all three policies"
-ok "McpServer runtime and divergent policy stayed absent until safe replacement"
+ok "global readiness and Context progress continued while the affected runtime stayed blocked"
+
+initial_policy_run_marker="Running initial NetworkPolicy background reconciliation"
+initial_policy_complete_marker="[NetPol] Full reconciliation complete"
+initial_policy_run_count_before_release="$(hcc_log_count "$initial_policy_run_marker")" ||
+  die "could not snapshot initial NetworkPolicy run evidence before DNS release"
+initial_policy_complete_count_before_release="$(
+  hcc_log_count "$initial_policy_complete_marker"
+)" || die "could not snapshot initial NetworkPolicy completion evidence before DNS release"
 
 release_dns_blocker ||
   die "could not release the fixture DNS query"
 wait_until 30 "DNS blocker to answer the held query" \
   dns_released_since_hold ||
   die "DNS blocker did not answer the held query"
-wait_until_fast 120 "HCC /ready only after the current replacement policy is applied" \
-  hcc_ready_only_after_current_policy_applied ||
-  die "HCC did not become ready after the safe replacement policy was applied"
-wait_until 30 "replacement HCC pod and Deployment to corroborate readiness" \
-  hcc_kubernetes_readiness_is_exact ||
-  die "Kubernetes did not corroborate HCC readiness after the direct ordering assertion"
+wait_until 120 "current UDP external-egress policy after DNS release" \
+  external_egress_policy_converged_with_protocol UDP ||
+  die "the current UDP external-egress policy did not converge after DNS release"
+probe_new_hcc_ready_endpoint ||
+  die "HCC lost readiness while the released UDP policy converged (${HCC_READY_PROBE_DIAGNOSTIC:-HCC_READY_PROBE category=unknown})"
 wait_until 300 "McpServer runtime, status, and latest Context NetworkPolicies to converge" \
   fixture_converged ||
   die "McpServer/Context/NetworkPolicy convergence did not complete after DNS release"
@@ -1457,10 +1516,12 @@ wait_until 300 "all peer MCP/Context runtimes to converge after releasing the he
   peer_fleet_converged ||
   die "peer MCP/Context fleet did not converge after the held primary egress was released"
 wait_until 60 "initial NetworkPolicy full pass to run" \
-  hcc_log_contains "Running initial NetworkPolicy background reconciliation" ||
+  hcc_log_count_exceeds \
+    "$initial_policy_run_marker" "$initial_policy_run_count_before_release" ||
   die "initial NetworkPolicy convergence was not observed after releasing MCP convergence"
 wait_until 60 "initial NetworkPolicy retry to complete after DNS release" \
-  hcc_log_contains "[NetPol] Full reconciliation complete" ||
+  hcc_log_count_exceeds \
+    "$initial_policy_complete_marker" "$initial_policy_complete_count_before_release" ||
   die "initial NetworkPolicy convergence did not recover after DNS release"
 hcc_identity_is_stable ||
   die "HCC restarted instead of completing the released background convergence"
@@ -1472,9 +1533,9 @@ echo "$final_probe" | jq -e \
     .fixture == $fixture and .fixtureReady == true and .contextRef == $context
   ' >/dev/null ||
   die "HCC final probe returned an invalid result: ${final_probe}"
-ok "DNS release replaced the old policy before readiness and then created the real runtime"
+ok "DNS release created the current UDP policy and affected runtime without gating HCC readiness"
 ok "the full worker-width-crossing peer fleet converged after releasing the held primary egress"
 ok "Context ingress, mcp-host egress, and rpc-proxy egress policies reflect the latest watch state"
-ok "HCC stayed unready through divergent revocation and became Ready only after replacement"
+ok "HCC stayed Ready through divergent revocation while the affected runtime remained fail-closed"
 
 header "HCC McpServer/Context assertions complete; restoring branch-owned runtime"

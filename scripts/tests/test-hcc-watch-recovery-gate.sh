@@ -14,6 +14,13 @@ GATES=("$WATCH_GATE" "$READINESS_GATE" "$MCP_READINESS_GATE")
 LOCK_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-lock.sh"
 LOG_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-logs.sh"
 FIXTURE_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"
+HCC_K8S_CLIENT="${ROOT}/host-context-controller/src/k8sClient.ts"
+HCC_EGRESS_COORDINATOR="$(
+  printf '%s' "${ROOT}/host-context-controller/src/externalEgressConvergenceCoordinator.ts"
+)"
+HCC_NETWORK_POLICY_RECONCILER="$(
+  printf '%s' "${ROOT}/host-context-controller/src/networkPolicyReconciler.ts"
+)"
 WATCH_GATE_TARGET="$(sed -n '/^test-e2e-hcc-communicationchannel-watch-recovery:/,/^$/p' "${ROOT}/Makefile")"
 MOCK_STATE_FILE="$(mktemp "${TMPDIR:-/tmp}/hcc-lock-test.XXXXXX")"
 MOCK_LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/hcc-log-test.XXXXXX")"
@@ -31,6 +38,24 @@ for script in "${GATES[@]}" "$LOCK_HELPER" "$LOG_HELPER" "$FIXTURE_HELPER"; do
     fail "$(basename "$script") has invalid bash syntax"
   fi
 done
+
+# A node carrying a minikube label from another profile must not satisfy the
+# destructive-gate boundary. Each gate binds the label value to the explicit
+# context instead of accepting any non-null label.
+matching_nodes='{"items":[{"metadata":{"labels":{"minikube.k8s.io/name":"branch-profile"}}}]}'
+mismatched_nodes='{"items":[{"metadata":{"labels":{"minikube.k8s.io/name":"other-profile"}}}]}'
+if jq -e --arg context branch-profile \
+     'any(.items[]; .metadata.labels["minikube.k8s.io/name"] == $context)' \
+     <<<"$matching_nodes" >/dev/null &&
+   ! jq -e --arg context branch-profile \
+     'any(.items[]; .metadata.labels["minikube.k8s.io/name"] == $context)' \
+     <<<"$mismatched_nodes" >/dev/null &&
+   [ "$(grep -Fl 'minikube.k8s.io/name"] == $context' "${GATES[@]}" | wc -l | tr -d ' ')" = 3 ] &&
+   ! grep -Fq 'minikube.k8s.io/name"] != null' "${GATES[@]}"; then
+  pass "all destructive HCC gates bind the minikube node label to the explicit profile"
+else
+  fail "an HCC gate can accept a minikube node owned by another profile"
+fi
 
 # Literal source-code assertions.
 # shellcheck disable=SC2016
@@ -58,6 +83,31 @@ else
   fail "proxy rollout failure can discard the distinguishing HCC startup evidence"
 fi
 
+if (
+  HCC_NS=control-plane
+  HCC_DEPLOY='host-context-controller'
+  kctl() {
+    if [ "$1" = get ] && [ "$2" = pods ] && [[ "$*" == *"-o jsonpath="* ]]; then
+      printf '%s\n' hcc-pod
+    elif [ "$1" = get ] && [ "$2" = pods ]; then
+      printf '%s\n' '{"items":[{"metadata":{"name":"hcc-pod"},"status":{"phase":"Pending","containerStatuses":[{"name":"host-context-controller","ready":false,"restartCount":2,"state":{"waiting":{"reason":"CrashLoopBackOff"}},"lastState":{}}]}}]}'
+    elif [ "$1" = logs ]; then
+      printf '%s\n' 'bounded diagnostic log'
+    else
+      return 1
+    fi
+  }
+  eval "$proxy_rollout_function"
+  output="$(print_hcc_proxy_rollout_diagnostics 2>&1)"
+  [[ "$output" == *"pod=hcc-pod phase=Pending"* ]] &&
+    [[ "$output" != *"pod=null"* ]] &&
+    [[ "$output" != *"phase=null"* ]]
+); then
+  pass "proxy rollout diagnostics retain the parent pod identity and phase"
+else
+  fail "proxy rollout diagnostics lose pod metadata inside container status iteration"
+fi
+
 # The proxy changes only the HCC client's target hostname.  The HCC's
 # allow-k8s-api-egress policies must retain the Kubernetes-injected API IP,
 # which is the explicit fail-closed configuration seam for CIDR policy data.
@@ -82,6 +132,26 @@ if grep -Fq 'source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"' "$READIN
   pass "readiness gate delegates ownership, HEAD, profile, fingerprint, and gate proof once"
 else
   fail "readiness gate duplicates, bypasses, or splits the shared branch-owned proof"
+fi
+
+bootstrap_repair_function="$(
+  sed -n '/^print_repair_instructions() {$/,/^}$/p' "$READINESS_GATE"
+)"
+mcp_repair_function="$(
+  sed -n '/^print_repair_instructions() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+# Literal source-code assertions: every fail-closed repair path must restore
+# the captured replica count before treating rollout health as repair proof.
+# shellcheck disable=SC2016
+if [[ "$bootstrap_repair_function" == *'scale deployment/${HCC_DEPLOY} --replicas=${ORIGINAL_REPLICAS:-1}'* ]] &&
+   [[ "$bootstrap_repair_function" == *'rollout status deployment/${HCC_DEPLOY} --timeout=180s'* ]] &&
+   [[ "$mcp_repair_function" == *'scale deployment/${HCC_DEPLOY} --replicas=${ORIGINAL_REPLICAS:-1}'* ]] &&
+   [[ "$mcp_repair_function" == *'rollout status deployment/${HCC_DEPLOY} --timeout=240s'* ]] &&
+   grep -Fq 'scale deployment/${HCC_DEPLOY} --replicas=${ORIGINAL_REPLICAS:-1}' "$WATCH_GATE" &&
+   grep -Fq 'rollout status deployment/${HCC_DEPLOY} --timeout=180s' "$WATCH_GATE"; then
+  pass "all HCC repair instructions restore the original replica count and verify rollout"
+else
+  fail "an HCC repair path can leave the controller scaled to zero"
 fi
 
 fixture_gate_function="$(sed -n '/^require_branch_owned_hcc_gate() {$/,/^}$/p' "$FIXTURE_HELPER")"
@@ -240,6 +310,12 @@ retry_progress_function="$(
 retry_rearmed_function="$(
   sed -n '/^external_egress_retry_rearmed_is_observed() {$/,/^}$/p' "$MCP_READINESS_GATE"
 )"
+hcc_log_count_function="$(
+  sed -n '/^hcc_log_count() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+hcc_log_count_exceeds_function="$(
+  sed -n '/^hcc_log_count_exceeds() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
 if (
   NEW_HCC_POD=hcc-pod
   HCC_NS=control-plane
@@ -271,6 +347,46 @@ if (
   MCP_NS=mcp-server
   MCP_NAME=e2e-held-server
   CONTEXT_NAME=e2e-context
+  MOCK_HCC_LOG='
+[K8s] Initial external egress reconciliation failed for mcp-server/e2e-held-server; runtime reconciliation will stay blocked until retry succeeds: dns timeout
+[K8s] Scheduling external egress retry 1/3 for McpServer "different-server" in 5000ms
+[K8s] unrelated message for McpServer "e2e-held-server"
+'
+  kctl() { printf '%s\n' "$MOCK_HCC_LOG"; }
+  eval "$retry_progress_function"
+  ! external_egress_retry_progress_is_observed
+); then
+  pass "external-egress retry evidence cannot combine a peer retry with the fixture server marker"
+else
+  fail "external-egress retry evidence can be assembled from different log lines or servers"
+fi
+if (
+  NEW_HCC_POD=hcc-pod
+  HCC_NS=control-plane
+  MCP_NS=mcp-server
+  MCP_NAME=e2e-held-server
+  CONTEXT_NAME=e2e-context
+  MOCK_HCC_LOG='
+[K8s] Initial external egress reconciliation failed for mcp-server/e2e-held-server; runtime reconciliation will stay blocked until retry succeeds: dns timeout
+[K8s] Scheduling external egress retry 1/3 for McpServer "e2e-held-server" in 5000ms
+'
+  for ((line = 0; line < 4096; line++)); do
+    MOCK_HCC_LOG+=$'\n[K8s] unrelated high-volume log line'
+  done
+  kctl() { printf '%s\n' "$MOCK_HCC_LOG"; }
+  eval "$retry_progress_function"
+  external_egress_retry_progress_is_observed
+); then
+  pass "an early matching retry line survives a high-volume log buffer without SIGPIPE ambiguity"
+else
+  fail "a valid early retry marker is lost in a high-volume log buffer"
+fi
+if (
+  NEW_HCC_POD=hcc-pod
+  HCC_NS=control-plane
+  MCP_NS=mcp-server
+  MCP_NAME=e2e-held-server
+  CONTEXT_NAME=e2e-context
   MOCK_HCC_LOG='[K8s] Initial NetworkPolicy background reconciliation failed: denied'
   kctl() { printf '%s\n' "$MOCK_HCC_LOG"; }
   eval "$network_policy_retry_function"
@@ -293,6 +409,351 @@ if (
   pass "the safety retry predicate fails closed when HCC logs are unavailable"
 else
   fail "the safety retry predicate passes vacuously when HCC logs are unavailable"
+fi
+
+if (
+  NEW_HCC_POD=hcc-pod
+  HCC_NS=control-plane
+  marker='[NetPol] Full reconciliation complete'
+  MOCK_HCC_LOG="$marker"
+  kctl() { printf '%s\n' "$MOCK_HCC_LOG"; }
+  eval "$hcc_log_count_function"
+  eval "$hcc_log_count_exceeds_function"
+  baseline="$(hcc_log_count "$marker")" &&
+    ! hcc_log_count_exceeds "$marker" "$baseline" &&
+    MOCK_HCC_LOG="${MOCK_HCC_LOG}"$'\n'"$marker" &&
+    hcc_log_count_exceeds "$marker" "$baseline"
+); then
+  pass "post-release NetworkPolicy waits require evidence newer than their baseline snapshot"
+else
+  fail "post-release NetworkPolicy waits can pass on a pre-release log marker"
+fi
+# Literal source-code assertions bind both final waits to their pre-release
+# counters; a plain contains check would make either wait vacuous.
+# shellcheck disable=SC2016
+if grep -Fq 'initial_policy_run_count_before_release="$(hcc_log_count "$initial_policy_run_marker")"' \
+     "$MCP_READINESS_GATE" &&
+   grep -Fq 'initial_policy_complete_count_before_release="$(' "$MCP_READINESS_GATE" &&
+   [ "$(grep -Fc 'hcc_log_count_exceeds \' "$MCP_READINESS_GATE")" = 2 ]; then
+  pass "both final NetworkPolicy waits are causally fenced by pre-release counts"
+else
+  fail "a final NetworkPolicy wait is not fenced from earlier startup logs"
+fi
+
+# Keep the runtime log contract consumed above tied to its producer. Template
+# literals are checked as their fixed text plus the variable that supplies the
+# dynamic identity, avoiding a rendered-string grep that would produce false
+# drift reports.
+if grep -Fq 'Initial external egress reconciliation failed for ${key};' \
+     "$HCC_EGRESS_COORDINATOR" &&
+   grep -Fq 'Scheduling external egress retry ${attempt}/${EXTERNAL_EGRESS_RETRY_DELAYS_MS.length}' \
+     "$HCC_EGRESS_COORDINATOR" &&
+   grep -Fq 'for McpServer "${this.retryIntents.get(key)!.server.name}"' \
+     "$HCC_EGRESS_COORDINATOR" &&
+   grep -Fq 'Initial NetworkPolicy background reconciliation failed:' \
+     "$HCC_K8S_CLIENT" &&
+   grep -Fq 'Scheduling initial ${lane} background convergence retry ${attempt}' \
+     "$HCC_K8S_CLIENT" &&
+   grep -Fq 'Context watch event: ${type} for ${context.name}' \
+     "$HCC_K8S_CLIENT" &&
+   grep -Fq 'Running initial NetworkPolicy background reconciliation...' \
+     "$HCC_K8S_CLIENT" &&
+   grep -Fq 'Reconciling context "${contextId}" — allowed servers: [${allowedServers.join(' \
+     "$HCC_NETWORK_POLICY_RECONCILER" &&
+   grep -Fq "[NetPol] Full reconciliation complete" \
+     "$HCC_NETWORK_POLICY_RECONCILER"; then
+  pass "MCP readiness log predicates remain bound to their runtime producers"
+else
+  fail "an MCP readiness log predicate drifted from its runtime producer"
+fi
+
+fixture_mcp_runtime_absent_function="$(
+  sed -n '/^fixture_mcp_runtime_absent() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+hcc_kubernetes_readiness_function="$(
+  sed -n '/^hcc_kubernetes_readiness_is_exact() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+external_policy_protocol_function="$(
+  sed -n '/^external_egress_policy_converged_with_protocol() {$/,/^}$/p' \
+    "$MCP_READINESS_GATE"
+)"
+hcc_ready_after_revoke_function="$(
+  sed -n '/^hcc_ready_after_stale_policy_revoked() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+ready_probe_function="$(
+  sed -n '/^probe_new_hcc_ready_endpoint() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+
+run_ready_probe_failure_case() (
+  local expected=$1
+  MOCK_READY_PROBE_OUTPUT=$2
+  NEW_HCC_POD=hcc-pod
+  HCC_NS=control-plane
+  HCC_PORT=8080
+  HCC_READY_PROBE_DIAGNOSTIC=""
+  kctl() {
+    printf '%s\n' "$MOCK_READY_PROBE_OUTPUT"
+    return 1
+  }
+  eval "$ready_probe_function"
+  ! probe_new_hcc_ready_endpoint &&
+    [ "$HCC_READY_PROBE_DIAGNOSTIC" = "HCC_READY_PROBE category=${expected}" ]
+)
+
+if run_ready_probe_failure_case timeout 'HCC_READY_PROBE category=timeout' &&
+   run_ready_probe_failure_case transport 'HCC_READY_PROBE category=transport' &&
+   run_ready_probe_failure_case 'http-status status=503' \
+     'HCC_READY_PROBE category=http-status status=503' &&
+   run_ready_probe_failure_case json-ready-false \
+     'HCC_READY_PROBE category=json-ready-false'; then
+  pass "ready probe preserves distinct timeout, transport, HTTP, and ready=false diagnostics"
+else
+  fail "ready probe collapses a failure boundary into an indiagnostic boolean"
+fi
+if (
+  NEW_HCC_POD=hcc-pod
+  HCC_NS=control-plane
+  HCC_PORT=8080
+  HCC_READY_PROBE_DIAGNOSTIC="stale"
+  kctl() { return 0; }
+  eval "$ready_probe_function"
+  probe_new_hcc_ready_endpoint && [ -z "$HCC_READY_PROBE_DIAGNOSTIC" ]
+); then
+  pass "successful ready probe clears stale failure diagnostics"
+else
+  fail "successful ready probe retains a misleading prior diagnostic"
+fi
+if (
+  NEW_HCC_POD=hcc-pod
+  HCC_NS=control-plane
+  HCC_PORT=8080
+  HCC_READY_PROBE_DIAGNOSTIC=""
+  kctl() {
+    printf '%s\n' 'untrusted kubectl output containing super-secret material'
+    return 1
+  }
+  eval "$ready_probe_function"
+  ! probe_new_hcc_ready_endpoint &&
+    [ "$HCC_READY_PROBE_DIAGNOSTIC" = 'HCC_READY_PROBE category=kubectl-exec' ]
+); then
+  pass "ready probe replaces untrusted exec output with a bounded sanitized category"
+else
+  fail "ready probe can leak untrusted exec output into diagnostics"
+fi
+# Literal source-code assertions guarantee one request and bounded categories,
+# without logging the response body, headers, URL, or transport error text.
+if [ "$(grep -Fc 'kctl exec' <<<"$ready_probe_function")" = 1 ] &&
+   [[ "$ready_probe_function" == *'finish(4, "timeout")'* ]] &&
+   [[ "$ready_probe_function" == *'finish(5, "transport")'* ]] &&
+   [[ "$ready_probe_function" == *'finish(3, "http-status"'* ]] &&
+   [[ "$ready_probe_function" == *'finish(3, "json-ready-false")'* ]] &&
+   [[ "$ready_probe_function" == *"printf -v HCC_READY_PROBE_DIAGNOSTIC '%.240s'"* ]] &&
+   [[ "$ready_probe_function" != *'console.error(body'* ]] &&
+   [[ "$ready_probe_function" != *'error.message'* ]]; then
+  pass "ready probe uses one request and emits only bounded non-secret failure categories"
+else
+  fail "ready probe duplicates requests or exposes an unbounded diagnostic surface"
+fi
+
+if (
+  MCP_NS=mcp-server
+  MCP_NAME=e2e-held-server
+  MCP_SERVER_LABEL=clerum.io/mcp-server
+  POLICY_TYPE_LABEL=clerum.io/policy-type
+  fixture_runtime_absent() { return 0; }
+  kctl() { return 0; }
+  eval "$fixture_mcp_runtime_absent_function"
+  fixture_mcp_runtime_absent
+); then
+  pass "fixture absence predicate accepts an absent runtime and external-egress policy"
+else
+  fail "fixture absence predicate rejects an actually absent runtime"
+fi
+if (
+  MCP_NS=mcp-server
+  MCP_NAME=e2e-held-server
+  MCP_SERVER_LABEL=clerum.io/mcp-server
+  POLICY_TYPE_LABEL=clerum.io/policy-type
+  fixture_runtime_absent() { return 0; }
+  kctl() { printf '%s\n' 'networkpolicy.networking.k8s.io/stale-policy'; }
+  eval "$fixture_mcp_runtime_absent_function"
+  ! fixture_mcp_runtime_absent
+); then
+  pass "fixture absence predicate rejects a surviving external-egress policy"
+else
+  fail "fixture absence predicate can hide a surviving external-egress policy"
+fi
+if (
+  MCP_NS=mcp-server
+  MCP_NAME=e2e-held-server
+  MCP_SERVER_LABEL=clerum.io/mcp-server
+  POLICY_TYPE_LABEL=clerum.io/policy-type
+  fixture_runtime_absent() { return 1; }
+  kctl() { return 0; }
+  eval "$fixture_mcp_runtime_absent_function"
+  ! fixture_mcp_runtime_absent
+); then
+  pass "fixture absence predicate rejects a surviving MCP runtime"
+else
+  fail "fixture absence predicate can hide a surviving MCP runtime"
+fi
+
+if (
+  NEW_HCC_POD=hcc-pod
+  HCC_UID=pod-uid
+  HCC_NS=control-plane
+  HCC_DEPLOY='host-context-controller'
+  kctl() {
+    case "$2" in
+      pod)
+        printf '%s\n' '{"metadata":{"uid":"pod-uid"},"status":{"conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"host-context-controller","ready":true}]}}'
+        ;;
+      deployment)
+        printf '%s\n' '{"metadata":{"generation":4},"spec":{"replicas":1},"status":{"observedGeneration":4,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  eval "$hcc_kubernetes_readiness_function"
+  hcc_kubernetes_readiness_is_exact
+); then
+  pass "exact Kubernetes readiness accepts one current Ready HCC identity"
+else
+  fail "exact Kubernetes readiness rejects current Ready HCC evidence"
+fi
+if (
+  NEW_HCC_POD=hcc-pod
+  HCC_UID=pod-uid
+  HCC_NS=control-plane
+  HCC_DEPLOY='host-context-controller'
+  kctl() {
+    case "$2" in
+      pod)
+        printf '%s\n' '{"metadata":{"uid":"pod-uid"},"status":{"conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"host-context-controller","ready":true}]}}'
+        ;;
+      deployment)
+        printf '%s\n' '{"metadata":{"generation":5},"spec":{"replicas":1},"status":{"observedGeneration":4,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  eval "$hcc_kubernetes_readiness_function"
+  ! hcc_kubernetes_readiness_is_exact
+); then
+  pass "exact Kubernetes readiness rejects a stale Deployment generation"
+else
+  fail "exact Kubernetes readiness can accept stale Deployment status"
+fi
+
+if (
+  MCP_NS=mcp-server
+  MCP_NAME=e2e-held-server
+  MCP_SERVER_LABEL=clerum.io/mcp-server
+  POLICY_TYPE_LABEL=clerum.io/policy-type
+  MANAGED_BY_LABEL=app.kubernetes.io/managed-by
+  MANAGED_BY_VALUE='host-context-controller'
+  EXTERNAL_EGRESS_CIDR=203.0.113.10/32
+  EXTERNAL_EGRESS_PORT=443
+  kctl() {
+    printf '%s\n' '{"items":[{"metadata":{"labels":{"app.kubernetes.io/managed-by":"host-context-controller","clerum.io/policy-type":"external-egress","clerum.io/mcp-server":"e2e-held-server"}},"spec":{"podSelector":{"matchLabels":{"clerum.io/mcp-server":"e2e-held-server"}},"policyTypes":["Egress"],"egress":[{"ports":[{"port":443,"protocol":"UDP"}],"to":[{"ipBlock":{"cidr":"203.0.113.10/32"}}]}]}}]}'
+  }
+  eval "$external_policy_protocol_function"
+  external_egress_policy_converged_with_protocol UDP &&
+    ! external_egress_policy_converged_with_protocol TCP
+); then
+  pass "external-egress convergence binds the exact current protocol"
+else
+  fail "external-egress convergence can accept a stale protocol"
+fi
+
+mcpserver_current_ready_function="$(
+  sed -n '/^mcpserver_current_ready() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+mcpserver_current_ready_absent_function="$(
+  sed -n '/^mcpserver_current_ready_absent() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+fixture_runtime_and_ready_absent_function="$(
+  sed -n '/^fixture_runtime_and_ready_absent() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+fixture_runtime_converged_function="$(
+  sed -n '/^fixture_runtime_converged_with_protocol() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+peer_fleet_converged_function="$(
+  sed -n '/^peer_fleet_converged() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+fixture_converged_function="$(
+  sed -n '/^fixture_converged() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+if (
+  MCP_NS=mcp-server
+  GENERATION=7
+  OBSERVED_GENERATION=7
+  kctl() {
+    printf '{"metadata":{"generation":%s},"status":{"conditions":[{"type":"Ready","status":"True","observedGeneration":%s}]}}\n' \
+      "$GENERATION" "$OBSERVED_GENERATION"
+  }
+  eval "$mcpserver_current_ready_function"
+  eval "$mcpserver_current_ready_absent_function"
+  mcpserver_current_ready current &&
+    ! mcpserver_current_ready_absent current &&
+    OBSERVED_GENERATION=6 &&
+    ! mcpserver_current_ready stale &&
+    mcpserver_current_ready_absent stale
+) &&
+   [[ "$fixture_runtime_and_ready_absent_function" == *'mcpserver_current_ready_absent "$MCP_NAME"'* ]] &&
+   [[ "$fixture_runtime_converged_function" == *'mcpserver_current_ready "$MCP_NAME"'* ]] &&
+   [[ "$peer_fleet_converged_function" == *'mcpserver_current_ready "$server"'* ]] &&
+   [[ "$fixture_converged_function" == *'mcpserver_current_ready "$MCP_NAME"'* ]]; then
+  pass "McpServer runtime predicates accept only Ready status observed for the current generation"
+else
+  fail "McpServer runtime predicates can accept stale Ready status or bypass the canonical check"
+fi
+
+if (
+  MCP_NS=mcp-server
+  MCP_NAME=e2e-held-server
+  fixture_runtime_absent() { return 0; }
+  kctl() { return 1; }
+  eval "$mcpserver_current_ready_absent_function"
+  eval "$fixture_runtime_and_ready_absent_function"
+  ! fixture_runtime_and_ready_absent
+); then
+  pass "McpServer Ready absence fails closed when the API read is unavailable"
+else
+  fail "an unavailable McpServer API read can masquerade as Ready absence"
+fi
+
+if (
+  probe_new_hcc_ready_endpoint() { return 0; }
+  external_egress_policy_absent() { return 0; }
+  eval "$hcc_ready_after_revoke_function"
+  hcc_ready_after_stale_policy_revoked
+); then
+  pass "divergent DNS hold permits global readiness only after stale-policy revocation"
+else
+  fail "divergent DNS hold rejects globally safe readiness evidence"
+fi
+if (
+  HCC_READY_PROBE_DIAGNOSTIC=""
+  probe_new_hcc_ready_endpoint() { return 0; }
+  external_egress_policy_absent() { return 1; }
+  eval "$hcc_ready_after_revoke_function"
+  ! hcc_ready_after_stale_policy_revoked &&
+    [ "$HCC_READY_PROBE_DIAGNOSTIC" = 'HCC_READY_PROBE category=stale-policy-present' ]
+); then
+  pass "global readiness evidence rejects a surviving divergent policy"
+else
+  fail "global readiness can self-confirm while a divergent policy survives"
+fi
+if (
+  probe_new_hcc_ready_endpoint() { return 1; }
+  external_egress_policy_absent() { return 0; }
+  eval "$hcc_ready_after_revoke_function"
+  ! hcc_ready_after_stale_policy_revoked
+); then
+  pass "stale-policy revocation alone cannot substitute for global readiness"
+else
+  fail "divergent hold evidence can pass without HCC readiness"
 fi
 
 # shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-logs.sh
@@ -383,29 +844,41 @@ else
   fail "peer fleet cleanup is armed only after all applies complete"
 fi
 
-readiness_boundary_function="$(
-  sed -n '/^hcc_ready_only_after_current_policy_applied() {$/,/^}$/p' "$MCP_READINESS_GATE"
+divergent_ready_function="$(
+  sed -n '/^hcc_ready_after_stale_policy_revoked() {$/,/^}$/p' "$MCP_READINESS_GATE"
 )"
-direct_ready_line="$(
-  grep -nF 'wait_until_fast 120 "HCC /ready only after the current replacement policy is applied"' \
+divergent_ready_line="$(
+  grep -nF 'wait_until_fast 120 "HCC readiness after revoking the divergent stale policy"' \
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
-kubernetes_ready_line="$(
-  grep -nF 'wait_until 30 "replacement HCC pod and Deployment to corroborate readiness"' \
+divergent_context_line="$(
+  grep -nF 'wait_until 120 "all three latest-Context NetworkPolicies to converge during the MCP hold"' \
+    "$MCP_READINESS_GATE" | cut -d: -f1
+)"
+divergent_release_line="$(
+  grep -nF 'release_dns_blocker ||' "$MCP_READINESS_GATE" | tail -1 | cut -d: -f1
+)"
+udp_policy_line="$(
+  grep -nF 'wait_until 120 "current UDP external-egress policy after DNS release"' \
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
 # shellcheck disable=SC2016
-if [[ "$readiness_boundary_function" == *'probe_new_hcc_ready_endpoint || return 1'* ]] &&
-   [[ "$readiness_boundary_function" == *'external_egress_policy_converged ||'* ]] &&
-   [ -n "$direct_ready_line" ] && [ -n "$kubernetes_ready_line" ] &&
-   [ "$direct_ready_line" -lt "$kubernetes_ready_line" ]; then
-  pass "direct /ready ordering is asserted against current policy materialization before Kubernetes corroboration"
+if [[ "$divergent_ready_function" == *'probe_new_hcc_ready_endpoint || return 1'* ]] &&
+   [[ "$divergent_ready_function" == *'external_egress_policy_absent'* ]] &&
+   [ -n "$divergent_ready_line" ] && [ -n "$divergent_context_line" ] &&
+   [ -n "$divergent_release_line" ] && [ -n "$udp_policy_line" ] &&
+   [ "$divergent_ready_line" -lt "$divergent_context_line" ] &&
+   [ "$divergent_context_line" -lt "$divergent_release_line" ] &&
+   [ "$divergent_release_line" -lt "$udp_policy_line" ] &&
+   ! grep -Fq 'probe_new_hcc_unready_endpoint' "$MCP_READINESS_GATE" &&
+   ! grep -Fq '/ready is 503' "$MCP_READINESS_GATE"; then
+  pass "divergent DNS hold proves global readiness, fail-closed runtime isolation, and post-release UDP convergence"
 else
-  fail "readiness ordering still relies on the delayed Kubernetes Pod Ready signal"
+  fail "the MCP gate still couples global readiness to divergent DNS replacement"
 fi
 
-same_intent_capture_line="$(
-  grep -nF 'CERTIFIED_POLICY_IDENTITY="$(external_egress_policy_identity)"' \
+initial_tcp_policy_line="$(
+  grep -nF 'wait_until 180 "HCC to create the real initial TCP external-egress policy"' \
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
 same_intent_retry_line="$(
@@ -413,11 +886,11 @@ same_intent_retry_line="$(
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
 same_intent_ready_line="$(
-  grep -nF 'wait_until_fast 60 "HCC /ready with a certified policy while DNS refresh is held"' \
+  grep -nF 'wait_until_fast 60 "HCC readiness after revoking the same-intent DNS policy"' \
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
 same_intent_incomplete_line="$(
-  grep -nF 'HCC became ready only after the held fleet runtime resources had already converged' \
+  grep -nF 'the affected runtime or Ready status escaped the held same-intent DNS boundary' \
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
 same_intent_retry_execution_line="$(
@@ -425,26 +898,40 @@ same_intent_retry_execution_line="$(
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
 same_intent_recheck_line="$(
-  grep -nF 'a same-intent retry deleted or rewrote the certified policy' \
+  grep -nF 'a held same-intent retry recreated the DNS policy without current resolution' \
+    "$MCP_READINESS_GATE" | cut -d: -f1
+)"
+same_intent_release_line="$(
+  grep -nF 'release_dns_blocker || die "could not release the same-intent DNS query"' \
+    "$MCP_READINESS_GATE" | cut -d: -f1
+)"
+same_intent_tcp_policy_line="$(
+  grep -nF 'wait_until 120 "current TCP external-egress policy after same-intent DNS release"' \
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
 divergent_revoke_line="$(
-  grep -nF 'wait_until_fast 120 "HCC to stay unready after revoking the divergent stale policy"' \
+  grep -nF 'wait_until_fast 120 "HCC readiness after revoking the divergent stale policy"' \
     "$MCP_READINESS_GATE" | cut -d: -f1
 )"
-if [ -n "$same_intent_capture_line" ] && [ -n "$same_intent_retry_line" ] &&
+if [ -n "$initial_tcp_policy_line" ] && [ -n "$same_intent_retry_line" ] &&
    [ -n "$same_intent_ready_line" ] && [ -n "$same_intent_incomplete_line" ] &&
    [ -n "$same_intent_retry_execution_line" ] &&
-   [ -n "$same_intent_recheck_line" ] && [ -n "$divergent_revoke_line" ] &&
-   [ "$same_intent_capture_line" -lt "$same_intent_ready_line" ] &&
+   [ -n "$same_intent_recheck_line" ] && [ -n "$same_intent_release_line" ] &&
+   [ -n "$same_intent_tcp_policy_line" ] && [ -n "$divergent_revoke_line" ] &&
+   [ "$initial_tcp_policy_line" -lt "$same_intent_ready_line" ] &&
    [ "$same_intent_ready_line" -lt "$same_intent_incomplete_line" ] &&
    [ "$same_intent_incomplete_line" -lt "$same_intent_retry_line" ] &&
    [ "$same_intent_retry_line" -lt "$same_intent_retry_execution_line" ] &&
    [ "$same_intent_retry_execution_line" -lt "$same_intent_recheck_line" ] &&
-   [ "$same_intent_recheck_line" -lt "$divergent_revoke_line" ]; then
-  pass "same-intent UID/spec preservation through retry precedes divergent fail-closed revocation"
+   [ "$same_intent_recheck_line" -lt "$same_intent_release_line" ] &&
+   [ "$same_intent_release_line" -lt "$same_intent_tcp_policy_line" ] &&
+   [ "$same_intent_tcp_policy_line" -lt "$divergent_revoke_line" ] &&
+   ! grep -Fq 'CERTIFIED_POLICY_IDENTITY' "$MCP_READINESS_GATE" &&
+   ! grep -Fq 'external_egress_policy_identity' "$MCP_READINESS_GATE" &&
+   ! grep -Fq 'UID/spec' "$MCP_READINESS_GATE"; then
+  pass "same-intent safety revokes before readiness and additive TCP convergence follows DNS release"
 else
-  fail "the MCP readiness gate does not cover both DNS availability and revocation contracts"
+  fail "the MCP readiness gate still preserves a DNS policy or gates readiness on additive convergence"
 fi
 
 printf '%s\n' \
@@ -583,6 +1070,26 @@ fi
 active_guard_function="$(
   sed -n '/^initial_host_pass_is_active() {$/,/^}$/p' "$READINESS_GATE"
 )"
+initial_host_startup_producer="$(
+  sed -n \
+    '/Starting initial Host background convergence/,/const resyncSec = config.hostResyncIntervalSec/p' \
+    "$HCC_K8S_CLIENT"
+)"
+# The bootstrap guard's negative COMPLETE/FAIL checks are safe only while all
+# three consumed markers remain bound to the runtime templates and the startup
+# call supplies the exact reason that renders the terminal pair.
+if grep -Fq 'Starting initial Host background convergence...' \
+     "$HCC_K8S_CLIENT" &&
+   grep -Fq 'Completed Host reconciliation after ${reason}' \
+     "$HCC_K8S_CLIENT" &&
+   grep -Fq 'Host reconciliation after ${reason} failed:' \
+     "$HCC_K8S_CLIENT" &&
+   [[ "$initial_host_startup_producer" == *'await this.recoverHostInventoryAndWatch('* ]] &&
+   [[ "$initial_host_startup_producer" == *"'initial Host reconciliation',"* ]]; then
+  pass "bootstrap START/COMPLETE/FAIL markers remain bound to the initial Host producer reason"
+else
+  fail "bootstrap Host pass markers drifted from their runtime producer or reason binding"
+fi
 # shellcheck disable=SC2016
 probe_result_line="$(grep -nF 'probe_result="$(kctl exec' "$READINESS_GATE" | cut -d: -f1)"
 # shellcheck disable=SC2016
@@ -705,7 +1212,7 @@ if grep -Fq 'source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"' \
    grep -Fq 'hcc_pods_absent' "$MCP_READINESS_GATE" &&
    ! grep -Fq -- '--for=delete' "$MCP_READINESS_GATE" &&
    ! grep -Fq 'port: 8081' "$MCP_READINESS_GATE" &&
-   [ "$mcp_port_probe_count" = 4 ] &&
+   [ "$mcp_port_probe_count" = 3 ] &&
    [ "$mcp_pod_absence_count" = 4 ]; then
   pass "MCP readiness gate shares exact-head ownership and uses bounded portable runtime probes"
 else
@@ -719,10 +1226,15 @@ fi
 # must exist while HCC is stopped, otherwise it would not exercise startup.
 mcp_peer_create_line="$(grep -nF 'create_peer_fleet || die' "$MCP_READINESS_GATE" | cut -d: -f1)"
 mcp_restart_line="$(grep -nF 'kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=1' "$MCP_READINESS_GATE" | tail -1 | cut -d: -f1)"
+peer_fleet_converged_body="$(
+  sed -n '/^peer_fleet_converged() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
 if grep -Fq 'MCP_FLEET_SIZE="${E2E_HCC_MCP_FLEET_SIZE:-11}"' "$MCP_READINESS_GATE" &&
    grep -Fq '[ "$MCP_FLEET_SIZE" -gt 10 ]' "$MCP_READINESS_GATE" &&
    grep -Fq 'create_peer_fleet' "$MCP_READINESS_GATE" &&
    grep -Fq 'peer_fleet_converged' "$MCP_READINESS_GATE" &&
+   [[ "$peer_fleet_converged_body" == *'mcpserver_current_ready "$server"'* ]] &&
+   [[ "$peer_fleet_converged_body" == *'context_policies_converged "$context" "$context" "$server"'* ]] &&
    grep -Fq 'all peer MCP/Context runtimes to converge after releasing the held primary egress' "$MCP_READINESS_GATE" &&
    [ -n "$mcp_peer_create_line" ] && [ -n "$mcp_restart_line" ] &&
    [ "$mcp_peer_create_line" -lt "$mcp_restart_line" ]; then

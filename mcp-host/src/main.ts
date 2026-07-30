@@ -829,7 +829,11 @@ async function initializeMcpServers(contextRef: string): Promise<void> {
     throw new Error('MCP manager was not installed after authoritative discovery')
   }
   const connectedServers = mcpManager.getConnectedServers()
-  console.log(`[Main] Connected to ${connectedServers.length} MCP server(s)`)
+  console.log(
+    config.devMode
+      ? `[Main] Connected to ${connectedServers.length} MCP server(s)`
+      : `[Main] Published the initial MCP fleet manager with ${connectedServers.length} currently connected server(s); background reconciliation may still be in progress`
+  )
 
   if (connectedServers.length > 0) {
     const tools = mcpManager.getAllTools()

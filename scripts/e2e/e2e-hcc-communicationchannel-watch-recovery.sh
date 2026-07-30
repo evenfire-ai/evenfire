@@ -35,7 +35,8 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
   exit 1
 }
 kctl get nodes -o json | jq -e \
-  'any(.items[]; .metadata.labels["minikube.k8s.io/name"] != null)' >/dev/null || {
+  --arg context "$E2E_KUBECONTEXT" \
+  'any(.items[]; .metadata.labels["minikube.k8s.io/name"] == $context)' >/dev/null || {
   echo "Refusing HCC fault injection: target is not a minikube cluster." >&2
   exit 1
 }
@@ -62,7 +63,7 @@ HCC_LOG_BUFFER="$(mktemp "${TMPDIR:-/tmp}/hcc-watch-stream.XXXXXX")"
 NON_FIXTURE_BASELINE="$(mktemp "${TMPDIR:-/tmp}/hcc-watch-baseline.XXXXXX")"
 NON_FIXTURE_AFTER="$(mktemp "${TMPDIR:-/tmp}/hcc-watch-after.XXXXXX")"
 CLEANUP_KINDS="deployments,services,secrets,serviceaccounts,roles,rolebindings,networkpolicies,persistentvolumeclaims"
-START_TIME="" HCC_UID="" HCC_RESTARTS="" CONTROL_IDENTITY=""
+START_TIME="" HCC_UID="" HCC_RESTARTS="" CONTROL_IDENTITY="" ORIGINAL_REPLICAS=""
 HCC_LOG_STREAM_PID=""
 # Mirrors COMMUNICATION_CHANNEL_CACHE_RECOVERY_RETRY_MS in k8sClient.ts.
 CC_RECOVERY_RETRY_SECONDS=5
@@ -87,8 +88,10 @@ print_hcc_proxy_rollout_diagnostics() {
   kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" -o json |
     jq -r '
       .items[] |
+      .metadata.name as $pod |
+      .status.phase as $phase |
       .status.containerStatuses[]? |
-      "pod=\(.metadata.name) phase=\(.status.phase // "unknown") ready=\(.ready) restarts=\(.restartCount) waiting=\(.state.waiting.reason // "none") terminated=\(.state.terminated.reason // "none") exitCode=\(.state.terminated.exitCode // "none") lastTerminated=\(.lastState.terminated.reason // "none") lastExitCode=\(.lastState.terminated.exitCode // "none")"
+      "pod=\($pod) phase=\($phase // "unknown") ready=\(.ready) restarts=\(.restartCount) waiting=\(.state.waiting.reason // "none") terminated=\(.state.terminated.reason // "none") exitCode=\(.state.terminated.exitCode // "none") lastTerminated=\(.lastState.terminated.reason // "none") lastExitCode=\(.lastState.terminated.exitCode // "none")"
     ' >&2 || true
 
   while IFS= read -r pod; do
@@ -154,6 +157,8 @@ cleanup() {
   else
     cleanup_failed=1
     print_hcc_repair_instructions
+    echo "  kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} scale deployment/${HCC_DEPLOY} --replicas=${ORIGINAL_REPLICAS:-1}" >&2
+    echo "  kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} rollout status deployment/${HCC_DEPLOY} --timeout=180s" >&2
   fi
   finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok" || cleanup_failed=1
   rm -f "$HCC_LOG_BUFFER" "$NON_FIXTURE_BASELINE" "$NON_FIXTURE_AFTER"
@@ -171,6 +176,11 @@ header "HCC CommunicationChannel watch recovery"
 require_branch_owned_hcc_gate
 acquire_hcc_watch_gate_lock || die "another HCC watch-recovery gate owns this profile"
 kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" >/dev/null
+ORIGINAL_REPLICAS="$(
+  kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.replicas}'
+)"
+[ "$ORIGINAL_REPLICAS" = 1 ] ||
+  die "expected exactly one HCC replica, found ${ORIGINAL_REPLICAS:-unknown}"
 kctl get host "$SOURCE_HOST" -n "$HOST_NS" >/dev/null
 
 host_override="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \

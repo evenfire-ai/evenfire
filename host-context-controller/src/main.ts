@@ -208,11 +208,11 @@ async function main(): Promise<void> {
   // reconcileChannelReaderRevision is self-contained (does not throw), so
   // the .catch here is defensive — it catches any unexpected runtime error
   // in the SecretInformer's own callback path.
-  if (!config.devMode && hostReconciler) {
+  if (!config.devMode && watcher) {
     const kc = getKubeConfig()
     if (kc) {
       channelSecretInformer = new SecretInformer(kc, config.channelsNamespace, evt => {
-        watcher?.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
+        watcher.reconcileChannelReaderRevision(evt.name, evt.namespace).catch(err => {
           console.error('[Main] reconcileChannelReaderRevision failed:', err)
         })
       })

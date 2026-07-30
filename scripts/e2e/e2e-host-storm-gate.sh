@@ -58,12 +58,15 @@
 #      watch-DELETE path, which by design does not touch this counter) —
 #      A5 remains the falsifiable cleanup proof.
 #   A7 recovered fleet convergence is bounded, from
-#      clerum_hcc_host_fleet_requests_total (scrape C2): failed == 0 in both
-#      windows, exactly one background full pass starts after the replacement
-#      LIST→WATCH, and trailing <= coalesced. Cold start produces one request,
-#      so requiring a coalesced request here would invent a second signal; the
-#      concurrent-request coalescing contract is covered deterministically by
-#      hostFleetScheduler.test.ts.
+#      clerum_hcc_host_fleet_requests_total (scrape C2) plus the replacement
+#      pod's explicit initial-fleet COMPLETED log: failed == 0 in both windows,
+#      the exact replacement pod completes its startup fleet pass, and
+#      trailing <= coalesced. The pod identity, completion marker, and A4's
+#      successful recovery histogram form the causal fence; started is not
+#      capped because an independent request may legitimately begin after the
+#      recovery pass settles. Requiring a coalesced request here would invent
+#      a second overlapping signal; the concurrent-request coalescing contract
+#      is covered deterministically by hostFleetScheduler.test.ts.
 #   A8 wake ingredient integrity: the woken Host leaves state=suspended and
 #      reaches a Ready pod within STORM_WAKE_READY_BUDGET_S of the wake
 #      POST. This is an ingredient-integrity bound (a silently no-op wake
@@ -95,23 +98,26 @@
 #
 # ----------------------------------------------------------------------
 # INPUTS (environment; fail-loud if missing/invalid)
-#   CONTEXT     kubectl context. REFUSED unless it matches
-#               ^clerum-(test|codex-|detached-|claude-) — a local minikube
-#               profile. Any GKE / *prod* context is rejected outright.
+#   KUBECONTEXT / E2E_K8S_CONTEXT
+#               Exact generated branch-owned minikube context.
+#   MINIKUBE_PROFILE
+#               Must equal that context.
+#   E2E_EXPECTED_PRE_GATE_GATE
+#               Exact gate recorded by the branch-owned pre-gate sync.
+#   E2E_HCC_HOST_STORM_FAULT_INJECTION=1
+#               Explicit acknowledgement of the disruptive HCC pod restart.
 #
 # OPTIONAL INPUTS
 #   E2E_STORM_WAKE_HOST_REF  suspended-wake target (default chatllm-stateless,
 #               the seeded stateless Host — it must exist with
 #               spec.lifecycle.stateless=true and be associated to the E2E
 #               user; seed via scripts/e2e/seed-stateless-host.sh).
-#   EXTERNAL_REST_API_BASE_URL  default http://127.0.0.1:8091
-#   RPC_PROXY_BASE_URL          default http://127.0.0.1:8094
 #   E2E_DEV_LOGIN_EMAIL         default test@clerum.io
 #   E2E_USER_PASSWORD           default ${ADMIN_PASSWORD:-changeme123!}
 #   STORM_CONTEXT_REF           Context CR fixtures reference (default context1)
 #   STORM_MODEL_PROVIDER / STORM_MODEL_NAME  fixture model (default zai/glm-5.1)
-#   HCC_METRICS_LOCAL_PORT      ephemeral scrape port (default 18082)
-#   KEEP_FIXTURES               set to 1 to skip teardown (diagnosis only)
+#   CLERUM_PROFILE_PORTS_ENV     optional explicit path to the selected branch
+#                               profile's generated ports.env.
 #
 # Prereqs (each a HARD FAIL with the concrete reason):
 #   - branch HCC image deployed (clerum_hcc_host_delete_cleanup_total
@@ -120,7 +126,10 @@
 #   - external-rest-api + rpc-proxy reachable (make minikube-pf-all)
 #
 # Usage:
-#   CONTEXT=clerum-test bash scripts/e2e/e2e-host-storm-gate.sh
+#   MINIKUBE_PROFILE=<profile> KUBECONTEXT=<profile> \
+#   E2E_EXPECTED_PRE_GATE_GATE=<gate> \
+#   E2E_HCC_HOST_STORM_FAULT_INJECTION=1 \
+#     bash scripts/e2e/e2e-host-storm-gate.sh
 #
 # EXIT CODES
 #   0  every storm assertion passed and teardown left zero fixtures
@@ -128,6 +137,17 @@
 #   2  usage / input error
 # ======================================================================
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/e2e/e2e-lib.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/e2e-lib.sh"
+# shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-fixture.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"
+# shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-lock.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-lock.sh"
 
 # ─── Constants mirrored from host-context-controller/src/{constants,config}.ts ──
 readonly MANAGED_BY_LABEL='clerum.io/managed-by'
@@ -142,6 +162,10 @@ readonly CONTROL_NS='control-plane'
 readonly HCC_DEPLOY='host-context-controller'
 readonly HCC_PORT='8081'               # containerPort http (deploy/base/control-plane)
 readonly HCC_METRICS_PATH='/metrics'   # server.ts GET /metrics
+readonly HCC_PASS_COMPLETED_MARKER='Completed Host reconciliation after initial Host reconciliation'
+readonly HCC_PASS_FAILED_MARKER='Host reconciliation after initial Host reconciliation failed'
+# Shared HCC ownership/lock helpers use HCC_NS.
+HCC_NS="$CONTROL_NS"
 
 # Owned-child kinds + namespaces of a per-Host bundle (mirrors
 # measure-host-bundle-reconcile.sh — includes per-Host NetworkPolicies).
@@ -248,26 +272,44 @@ print_results() {
   log "fairness and convergence under realistic concurrency, not API degradation."
 }
 
-# ─── kubectl wrapper — EVERY call carries --context (CLAUDE.md mandate) ──
-kctl() { kubectl --context "$CONTEXT" "$@"; }
-
 # ─── Portable time helper (python3; mirrors measure script) ───────────
 now_ms() { python3 -c 'import time;print(int(time.time()*1000))'; }
 
 # ─── Strict local-profile context guard (fail-loud) ───────────────────
 require_storm_context() {
-  [[ -n "${CONTEXT:-}" ]] || die "CONTEXT is required (a local minikube profile context)." 2
-  case "$CONTEXT" in
-    *gke_*|*prod*)
-      die "Refusing: CONTEXT='${CONTEXT}' looks like a GKE/production context. Local profiles only." 2 ;;
-  esac
-  if [[ ! "$CONTEXT" =~ ^clerum-(test|codex-|detached-|claude-) ]]; then
-    die "Refusing: CONTEXT='${CONTEXT}' is not an allowed local profile. Must match ^clerum-(test|codex-|detached-|claude-)." 2
-  fi
+  [[ -n "${E2E_KUBECONTEXT:-}" ]] ||
+    die "KUBECONTEXT or E2E_K8S_CONTEXT must select an explicit branch-scoped minikube context." 2
+  is_branch_scoped_e2e_context "$E2E_KUBECONTEXT" ||
+    die "Refusing Host storm fault injection on non-branch context '${E2E_KUBECONTEXT}'." 2
+  require_safe_kube_context ||
+    die "context '${E2E_KUBECONTEXT}' is not an allowed local E2E context." 2
   if ! kctl get nodes -o name >/dev/null 2>&1; then
-    die "CONTEXT='${CONTEXT}' is not reachable (kubectl get nodes failed). Start the profile and its port-forwards." 1
+    die "context '${E2E_KUBECONTEXT}' is not reachable (kubectl get nodes failed)." 1
   fi
-  log "context OK: ${CONTEXT}"
+  kctl get nodes -o json | jq -e --arg context "$E2E_KUBECONTEXT" \
+    'any(.items[]; .metadata.labels["minikube.k8s.io/name"] == $context)' >/dev/null ||
+    die "target context is not the exact selected minikube profile '${E2E_KUBECONTEXT}'." 2
+  log "branch-owned minikube context OK: ${E2E_KUBECONTEXT}"
+}
+
+load_branch_profile_endpoints() {
+  local ports_env external_url rpc_url
+  ports_env="${CLERUM_PROFILE_PORTS_ENV:-${HOME}/.cache/clerum/minikube-profiles/${E2E_KUBECONTEXT}/ports.env}"
+  [[ -r "$ports_env" ]] ||
+    die "branch profile ports evidence is missing at ${ports_env}; refresh the branch-profile helper." 2
+  external_url="$(profile_env_value EXTERNAL_REST_API_BASE_URL "$ports_env")"
+  [[ -n "$external_url" ]] ||
+    external_url="$(profile_env_value EXTERNAL_REST_API_URL "$ports_env")"
+  rpc_url="$(profile_env_value RPC_PROXY_BASE_URL "$ports_env")"
+  [[ -n "$rpc_url" ]] ||
+    rpc_url="$(profile_env_value RPC_PROXY_URL "$ports_env")"
+  [[ "$external_url" =~ ^http://127\.0\.0\.1:[0-9]{2,5}$ ]] ||
+    die "branch ports.env has no valid loopback External REST URL." 2
+  [[ "$rpc_url" =~ ^http://127\.0\.0\.1:[0-9]{2,5}$ ]] ||
+    die "branch ports.env has no valid loopback RPC proxy URL." 2
+  EXT_BASE="$external_url"
+  RPC_BASE="$rpc_url"
+  log "using branch-profile endpoints from ${ports_env}"
 }
 
 require_deps() {
@@ -305,8 +347,8 @@ STORM_CREATED_HOSTS=()
 STORM_DELETE_HOSTS=()
 STORM_URGENT_PROBE_HOSTS=()
 WAKE_HOST_REF="${E2E_STORM_WAKE_HOST_REF:-chatllm-stateless}"
-EXT_BASE="${EXTERNAL_REST_API_BASE_URL:-http://127.0.0.1:8091}"
-RPC_BASE="${RPC_PROXY_BASE_URL:-http://127.0.0.1:8094}"
+EXT_BASE=''
+RPC_BASE=''
 DEV_EMAIL="${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}"
 DEV_PASSWORD="${E2E_USER_PASSWORD:-${ADMIN_PASSWORD:-changeme123!}}"
 STORM_CTX_REF="${STORM_CONTEXT_REF:-context1}"
@@ -320,6 +362,14 @@ T_CREATE_FIRST_MS=''; T_DELETE_MS=''; T_WAKE_MS=''; T_KILL_MS=''; T_CREATE_LAST_
 PF_PID=''
 HCC_ENV_SAVED=''
 TEARDOWN_DONE=0
+TEARDOWN_CLEANUP_FAILED=0
+HCC_RESTORE_OK=1
+STORM_FIXTURES_CREATED=0
+# Read and mutated by the sourced compare-and-swap lock helper.
+HCC_GATE_LOCK_ACQUIRED=0
+HCC_GATE_LOCK_NAME=''
+HCC_GATE_LOCK_UID=''
+HCC_GATE_FINALIZATION_FAILURE=''
 
 cleanup_portforward() {
   if [[ -n "$PF_PID" ]] && kill -0 "$PF_PID" 2>/dev/null; then
@@ -349,10 +399,16 @@ restore_hcc_env() {
   _hcc_restore_args
   [[ ${#args[@]} -gt 0 ]] || { HCC_ENV_SAVED=''; return 0; }
   log "Restoring HCC cadence env on deployment/${HCC_DEPLOY}"
-  kctl set env "deployment/${HCC_DEPLOY}" -n "$CONTROL_NS" "${args[@]}" >/dev/null 2>&1 || \
-    warn "failed to restore HCC env (manual check advised)"
-  kctl rollout status "deployment/${HCC_DEPLOY}" -n "$CONTROL_NS" --timeout=180s >/dev/null 2>&1 || \
+  if ! kctl set env "deployment/${HCC_DEPLOY}" -n "$CONTROL_NS" "${args[@]}" >/dev/null 2>&1; then
+    warn "failed to restore HCC env (manual check required)"
+    HCC_RESTORE_OK=0
+    return 1
+  fi
+  if ! kctl rollout status "deployment/${HCC_DEPLOY}" -n "$CONTROL_NS" --timeout=180s >/dev/null 2>&1; then
     warn "HCC rollout did not settle after env restore"
+    HCC_RESTORE_OK=0
+    return 1
+  fi
   HCC_ENV_SAVED=''
 }
 
@@ -367,10 +423,12 @@ restore_hcc_env_strict() {
   [[ ${#args[@]} -gt 0 ]] || { HCC_ENV_SAVED=''; return 0; }
   log "Restoring HCC cadence env on deployment/${HCC_DEPLOY} (strict)"
   if ! kctl set env "deployment/${HCC_DEPLOY}" -n "$CONTROL_NS" "${args[@]}" >/dev/null 2>&1; then
+    HCC_RESTORE_OK=0
     fail "cadence restore FAILED — the profile is left with test cadences on deployment/${HCC_DEPLOY} (the EXIT trap retries best-effort; verify manually)"
     return 0
   fi
   if ! kctl rollout status "deployment/${HCC_DEPLOY}" -n "$CONTROL_NS" --timeout=180s >/dev/null 2>&1; then
+    HCC_RESTORE_OK=0
     fail "HCC rollout did not settle after the cadence restore — verify deployment/${HCC_DEPLOY} manually"
     return 0
   fi
@@ -380,10 +438,11 @@ restore_hcc_env_strict() {
 
 # shellcheck disable=SC2329  # invoked via the EXIT trap below
 cleanup_on_exit() {
-  local status=$?
+  local status=$? cleanup_failed=0
   set +e
   cleanup_portforward
-  if [[ "$TEARDOWN_DONE" != '1' && -n "$RUN_ID" && "${KEEP_FIXTURES:-}" != '1' ]]; then
+  if [[ "$TEARDOWN_DONE" != '1' && "$STORM_FIXTURES_CREATED" == '1' && -n "$RUN_ID" ]]; then
+    cleanup_failed=1
     local sel="${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VAL},${FIXTURE_RUN_KEY}=${RUN_ID}"
     warn "abnormal exit — best-effort deletion of storm fixtures (${sel})"
     kctl -n "$MCP_HOST_NS" delete host -l "$sel" --wait=false >/dev/null 2>&1 || \
@@ -391,7 +450,10 @@ cleanup_on_exit() {
     kctl -n "$MCP_HOST_NS" delete secret -l "$sel" --wait=false >/dev/null 2>&1 || \
       warn "best-effort fixture Secret deletion failed (manual check advised)"
   fi
-  restore_hcc_env
+  restore_hcc_env || HCC_RESTORE_OK=0
+  if ! finalize_hcc_watch_gate_lock "$cleanup_failed" "$HCC_RESTORE_OK"; then
+    status=1
+  fi
   exit "$status"
 }
 trap cleanup_on_exit EXIT
@@ -543,14 +605,30 @@ storm_diagnostics() {
 # different pod (e.g. a terminating one during a rollout) than the one the
 # identity guard checked; cross-pod counter deltas would false-PASS A4.
 scrape_hcc_metrics() {
-  local out="$1" pod="$2" lport="${HCC_METRICS_LOCAL_PORT:-18082}"
-  local url="http://127.0.0.1:${lport}${HCC_METRICS_PATH}"
-  kctl -n "$CONTROL_NS" port-forward "pod/${pod}" "${lport}:${HCC_PORT}" >"${WORK_DIR}/pf.log" 2>&1 &
+  local out="$1" pod="$2" lport='' url pf_log
+  pf_log="${WORK_DIR}/pf-${pod}.log"
+  # Let kubectl allocate a process-owned loopback port. A fixed port is
+  # machine-global and can silently collide with another branch/profile gate.
+  kctl -n "$CONTROL_NS" port-forward --address=127.0.0.1 \
+    "pod/${pod}" ":${HCC_PORT}" >"$pf_log" 2>&1 &
   PF_PID=$!
+  # shellcheck disable=SC2329  # invoked by name via wait_until
+  _pf_ready_probe() {
+    kill -0 "$PF_PID" 2>/dev/null || return 1
+    lport="$(sed -nE 's/^Forwarding from 127\.0\.0\.1:([0-9]+) -> .*/\1/p' "$pf_log" | head -n1)"
+    [[ "$lport" =~ ^[0-9]+$ ]]
+  }
+  # shellcheck disable=SC2329  # invoked by name via wait_until
+  _pf_diag() { { echo '----- port-forward log -----'; cat "$pf_log" 2>/dev/null; } >&2; }
+  if ! wait_until 30 1 "random HCC metrics port-forward" _pf_ready_probe _pf_diag; then
+    cleanup_portforward
+    return 1
+  fi
+  url="http://127.0.0.1:${lport}${HCC_METRICS_PATH}"
   # shellcheck disable=SC2329  # invoked by name via wait_until
   _scrape_probe() { curl -fsS --max-time 3 "$url" -o "$out" 2>/dev/null; }
   # shellcheck disable=SC2329  # invoked by name via wait_until
-  _scrape_diag()  { { echo '----- port-forward log -----'; cat "${WORK_DIR}/pf.log" 2>/dev/null; } >&2; }
+  _scrape_diag() { _pf_diag; }
   if ! wait_until 30 2 "HCC metrics scrape -> ${out}" _scrape_probe _scrape_diag; then
     cleanup_portforward
     return 1
@@ -695,8 +773,15 @@ _wake_target_diag() {
 require_deps
 require_storm_context
 init_run
+[[ "${KEEP_FIXTURES:-0}" != '1' ]] ||
+  die "KEEP_FIXTURES=1 is diagnostic-only and cannot produce a probative T2 Host-storm result; refusing before mutation." 2
+[[ "${E2E_HCC_HOST_STORM_FAULT_INJECTION:-0}" == '1' ]] ||
+  die "Set E2E_HCC_HOST_STORM_FAULT_INJECTION=1 to acknowledge the temporary HCC pod restart." 2
+require_branch_owned_hcc_gate "$CONTROL_NS"
+load_branch_profile_endpoints
 
 header "Prerequisites"
+ok "branch helper, profile, exact HEAD/fingerprint/gate, and minikube node label verified"
 if kctl get deployment "$HCC_DEPLOY" -n "$CONTROL_NS" >/dev/null 2>&1; then
   ok "HCC deployment present in ${CONTROL_NS}"
 else
@@ -736,12 +821,18 @@ else
   fail "cannot mint RPC token for hostRef=${WAKE_HOST_REF} -- is ${DEV_EMAIL} associated to it? Seed: bash scripts/e2e/seed-stateless-host.sh"
   print_results; exit 1
 fi
+if acquire_hcc_watch_gate_lock; then
+  ok "exclusive shared HCC fault-injection lock acquired"
+else
+  die "another disruptive HCC gate owns context ${E2E_KUBECONTEXT}"
+fi
 
 # ======================================================================
 # Prep 1 — storm fixtures that will be DELETED mid-storm (bundles must
 # exist first: deleting a bundle-less Host proves nothing)
 # ======================================================================
 header "Prep — pre-create ${STORM_DELETE_COUNT} delete-target fixture Hosts"
+STORM_FIXTURES_CREATED=1
 ensure_fixture_secret
 for h in "${STORM_DELETE_HOSTS[@]}"; do
   apply_storm_host "$h" false
@@ -959,6 +1050,41 @@ else
   print_results; exit 1
 fi
 
+# A7's causal business signal is the replacement pod's own completion log for
+# its startup fleet reconciliation. A scheduled/started counter is insufficient:
+# it can increment before the pass fails, stalls, or is superseded.
+FLEET_COMPLETION_PROVEN=0
+replacement_fleet_state=''
+# shellcheck disable=SC2329  # invoked by name via wait_until
+_replacement_fleet_completed_probe() {
+  local logs current_pod
+  current_pod="$(hcc_pod_name)"
+  [[ -n "$current_pod" && "$current_pod" == "$HCC_POD_C" ]] || return 1
+  logs="$(kctl -n "$CONTROL_NS" logs "pod/${HCC_POD_C}" \
+    -c host-context-controller 2>/dev/null)" || return 1
+  if printf '%s\n' "$logs" | grep -Fq "$HCC_PASS_FAILED_MARKER"; then
+    replacement_fleet_state='failed'
+    return 0
+  fi
+  if printf '%s\n' "$logs" | grep -Fq "$HCC_PASS_COMPLETED_MARKER"; then
+    replacement_fleet_state='completed'
+    return 0
+  fi
+  return 1
+}
+if ! wait_until "$STORM_CONVERGENCE_DEADLINE_S" 2 \
+  "replacement HCC initial Host fleet reconciliation completion" \
+  _replacement_fleet_completed_probe storm_diagnostics; then
+  fail "A7: replacement pod did not complete its initial Host fleet reconciliation within ${STORM_CONVERGENCE_DEADLINE_S}s"
+  print_results; exit 1
+fi
+if [[ "$replacement_fleet_state" != 'completed' ]]; then
+  fail "A7: replacement pod's initial Host fleet reconciliation failed"
+  storm_diagnostics; print_results; exit 1
+fi
+FLEET_COMPLETION_PROVEN=1
+ok "A7 input: replacement pod logged completed initial Host fleet reconciliation"
+
 # shellcheck disable=SC2329  # invoked by name via wait_until
 _all_created_deploys_probe() {
   local h
@@ -1171,7 +1297,7 @@ METRIC_VERDICTS="${WORK_DIR}/metric-verdicts.txt"
 if ! SCRAPE_A="$SCRAPE_A" SCRAPE_B="$SCRAPE_B" SCRAPE_C1="$SCRAPE_C1" SCRAPE_C2="$SCRAPE_C2" SCRAPE_D="$SCRAPE_D" \
   SCRAPE_WAKE_PRE="$SCRAPE_WAKE_PRE" SCRAPE_WAKE_POST="$SCRAPE_WAKE_POST" \
   P95_BUDGET_S="$STORM_URGENT_P95_BUDGET_S" RECOVERY_BUDGET_S="$STORM_WATCH_RECOVERY_BUDGET_S" \
-  MIN_URGENT_SAMPLES="$STORM_URGENT_PROBE_COUNT" \
+  MIN_URGENT_SAMPLES="$STORM_URGENT_PROBE_COUNT" FLEET_COMPLETION_PROVEN="$FLEET_COMPLETION_PROVEN" \
   python3 >"$METRIC_VERDICTS" <<'PY'
 import os, re, sys
 from collections import defaultdict
@@ -1331,14 +1457,16 @@ post_coalesced = counter(c2, fm, "result", "coalesced")
 post_trailing = counter(c2, fm, "result", "trailing")
 post_failed = counter(c2, fm, "result", "failed")
 problems = []
-if pre_failed > 0 or post_failed > 0:
+if pre_failed != 0 or post_failed > 0:
     problems.append(f"fleet pass failures (pre={pre_failed:.0f} post={post_failed:.0f})")
-if post_started != 1:
-    problems.append(f"expected exactly one recovery fleet pass on the replacement pod, got started={post_started:.0f}")
+if os.environ.get("FLEET_COMPLETION_PROVEN") != "1":
+    problems.append("replacement-pod initial fleet completion was not causally proven")
 if post_trailing > post_coalesced:
     problems.append(f"trailing={post_trailing:.0f} > coalesced={post_coalesced:.0f} (violates the single-pending-slot structure)")
-detail = (f"started={post_started:.0f} coalesced={post_coalesced:.0f} "
-          f"trailing={post_trailing:.0f} failed={post_failed:.0f} (pre-kill failed delta={pre_failed:.0f})")
+detail = (f"completion-proven={os.environ.get('FLEET_COMPLETION_PROVEN', 'missing')} "
+          f"started={post_started:.0f} coalesced={post_coalesced:.0f} "
+          f"trailing={post_trailing:.0f} failed={post_failed:.0f} "
+          f"(replacement pod; A4 recovery-success fenced; pre-kill failed delta={pre_failed:.0f})")
 if problems:
     verdicts.append(("A7-fleet-recovery-bounded", False, "; ".join(problems) + f" [{detail}]"))
 else:
@@ -1391,11 +1519,7 @@ fi
 # The profile and seeded data (including the wake target) stay.
 # ======================================================================
 header "Teardown — storm fixtures (${FIXTURE_RUN_KEY}=${RUN_ID})"
-if [[ "${KEEP_FIXTURES:-}" == '1' ]]; then
-  warn "KEEP_FIXTURES=1 — leaving fixtures in place for diagnosis (run-id ${RUN_ID})"
-  TEARDOWN_DONE=1
-else
-  STORM_SEL="${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VAL},${FIXTURE_RUN_KEY}=${RUN_ID}"
+STORM_SEL="${FIXTURE_LABEL_KEY}=${FIXTURE_LABEL_VAL},${FIXTURE_RUN_KEY}=${RUN_ID}"
   kctl -n "$MCP_HOST_NS" delete host -l "$STORM_SEL" --wait=false >/dev/null 2>&1 || \
     warn "teardown: label-selector Host deletion returned nonzero (leftover check below is authoritative)"
   kctl -n "$MCP_HOST_NS" delete secret -l "$STORM_SEL" --wait=false >/dev/null 2>&1 || \
@@ -1418,6 +1542,7 @@ else
     ok "teardown: all storm fixture Hosts deleted via the supported CR path"
   else
     fail "teardown: storm fixture Hosts still present after ${STORM_TEARDOWN_DEADLINE_S}s (run-id ${RUN_ID})"
+    TEARDOWN_CLEANUP_FAILED=1
   fi
 
   # FAIL-CLOSED (B2): an unverifiable read counts as a leftover — the teardown
@@ -1484,14 +1609,19 @@ else
     ok "teardown: zero storm-fixture leftovers across ${BUNDLE_NAMESPACES} (profile and seeded data untouched)"
   else
     fail "teardown: ${TEARDOWN_LEFTOVER} storm fixture subject(s) left resources behind (run-id ${RUN_ID}) — investigate before trusting results"
+    TEARDOWN_CLEANUP_FAILED=1
   fi
-  TEARDOWN_DONE=1
-fi
+TEARDOWN_DONE=1
 
 # M3: on the success path a failed cadence restore must FAIL the gate
 # (restore_hcc_env_strict registers fail() and leaves HCC_ENV_SAVED for
 # the trap's best-effort retry); the EXIT trap keeps the lenient restore.
 restore_hcc_env_strict
+if ! finalize_hcc_watch_gate_lock "$TEARDOWN_CLEANUP_FAILED" "$HCC_RESTORE_OK"; then
+  fail "shared HCC fault-injection lock was retained fail-closed; follow the printed repair instructions"
+else
+  ok "exclusive shared HCC fault-injection lock finalized"
+fi
 
 print_results
 if [[ "$g_fail" -gt 0 ]]; then

@@ -658,6 +658,8 @@ export class McpServerWatcher implements McpServerProvider {
   private readonly hostWatchRetryAttempts = new Map<string, number>()
   private hostCacheSynced = false
   private hostCacheRecoveryTimer: ReturnType<typeof setTimeout> | null = null
+  private sfsWatchRestartTimer: ReturnType<typeof setTimeout> | null = null
+  private gfsWatchRestartTimer: ReturnType<typeof setTimeout> | null = null
   // Host watch LIST-to-WATCH recovery is a dedicated, deduplicated operation
   // (§10.2). Concurrent recovery signals reuse the in-flight promise so exactly
   // one LIST + WATCH is installed. Independent per-Host events no longer share a
@@ -711,14 +713,19 @@ export class McpServerWatcher implements McpServerProvider {
     InitialConvergenceLane,
     ActiveInitialConvergenceRun
   >()
-  // McpServer and Context effects serialize by resource identity, so one slow
-  // fleet member cannot block unrelated live events while same-resource
-  // updates still retain last-writer ordering. SFS/GFS keep their established
-  // domain-wide queues.
+  // Every resource effect serializes by resource identity, so one slow fleet
+  // member cannot block unrelated live events while same-resource updates
+  // still retain last-writer ordering.
   private readonly mcpServerReconciliationQueues = new Map<string, KeyedReconciliationQueue>()
   private readonly contextReconciliationQueues = new Map<string, KeyedReconciliationQueue>()
-  private readonly sharedFileSystemReconciliationQueue = new SerializedReconciliationQueue()
-  private readonly globalFileSystemReconciliationQueue = new SerializedReconciliationQueue()
+  private readonly sharedFileSystemReconciliationQueues = new Map<
+    string,
+    KeyedReconciliationQueue
+  >()
+  private readonly globalFileSystemReconciliationQueues = new Map<
+    string,
+    KeyedReconciliationQueue
+  >()
   private sharedFileSystemCacheRevision = 0
   private globalFileSystemCacheRevision = 0
   // Periodic resync timer: K8s watches can drop events on long disconnects;
@@ -811,15 +818,31 @@ export class McpServerWatcher implements McpServerProvider {
     }))
     this.hostReconciler.setResolveHostMutationDependencies(host => {
       const context = this.contexts.get(host.spec.contextRef)
-      const dependencies: unknown[] = [context, this.ccCacheSynced, this.ccWatchGeneration]
+      // Lease desired semantics, not cache-object identity or observed status.
+      // Kubernetes watch events replace objects and status-only changes may
+      // legitimately advance resourceVersion without changing Host inputs.
+      const desiredRevision = <T extends { name: string; namespace: string; spec: unknown }>(
+        resource: T | undefined
+      ) =>
+        resource
+          ? { name: resource.name, namespace: resource.namespace, spec: resource.spec }
+          : undefined
+      const dependencies: unknown[] = [
+        desiredRevision(context),
+        this.ccCacheSynced,
+        this.ccWatchGeneration,
+      ]
       for (const ref of context?.spec.sharedFileSystems ?? []) {
         const sfs = this.sharedFileSystems.get(ref.name)
-        dependencies.push(sfs, sfs ? this.sharedFileSystemReconciler.isMountable(sfs) : false)
+        dependencies.push(
+          desiredRevision(sfs),
+          sfs ? this.sharedFileSystemReconciler.isMountable(sfs) : false
+        )
       }
       const channels = this.findCommunicationChannelsByHostRef(host.name).sort((a, b) =>
         a.name.localeCompare(b.name)
       )
-      dependencies.push(...channels)
+      dependencies.push(...channels.map(channel => desiredRevision(channel)))
       return dependencies
     })
     // Per-CC credentials Secret migration: HostReconciler computes the
@@ -1097,18 +1120,59 @@ export class McpServerWatcher implements McpServerProvider {
     return inventoryAuthoritative() && !resolveCurrent()
   }
 
-  private enqueueSharedFileSystemReconciliation(work: () => Promise<void>): Promise<void> {
-    return this.sharedFileSystemReconciliationQueue.enqueue(async () => {
-      if (this.stopped) return
-      await work()
-    })
+  private enqueueSharedFileSystemReconciliation(
+    name: string,
+    work: () => Promise<void>
+  ): Promise<void> {
+    return this.enqueueKeyedReconciliation(this.sharedFileSystemReconciliationQueues, name, work)
   }
 
-  private enqueueGlobalFileSystemReconciliation(work: () => Promise<void>): Promise<void> {
-    return this.globalFileSystemReconciliationQueue.enqueue(async () => {
-      if (this.stopped) return
-      await work()
-    })
+  private enqueueGlobalFileSystemReconciliation(
+    name: string,
+    work: () => Promise<void>
+  ): Promise<void> {
+    return this.enqueueKeyedReconciliation(this.globalFileSystemReconciliationQueues, name, work)
+  }
+
+  /**
+   * Fleet passes acquire every selected object lane in stable order. This
+   * preserves their snapshot-wide ordering without making two unrelated live
+   * watch events wait behind one another.
+   */
+  private enqueueKeyedFleetReconciliation(
+    queues: Map<string, KeyedReconciliationQueue>,
+    keys: string[],
+    work: () => Promise<void>
+  ): Promise<void> {
+    const orderedKeys = [...new Set(keys)].sort()
+    const enter = (index: number): Promise<void> => {
+      const key = orderedKeys[index]
+      if (!key) return work()
+      return this.enqueueKeyedReconciliation(queues, key, () => enter(index + 1))
+    }
+    return enter(0)
+  }
+
+  private enqueueSharedFileSystemFleetReconciliation(
+    names: string[],
+    work: () => Promise<void>
+  ): Promise<void> {
+    return this.enqueueKeyedFleetReconciliation(
+      this.sharedFileSystemReconciliationQueues,
+      names,
+      work
+    )
+  }
+
+  private enqueueGlobalFileSystemFleetReconciliation(
+    names: string[],
+    work: () => Promise<void>
+  ): Promise<void> {
+    return this.enqueueKeyedFleetReconciliation(
+      this.globalFileSystemReconciliationQueues,
+      names,
+      work
+    )
   }
 
   private requireInventoryResourceVersion(
@@ -1900,7 +1964,11 @@ export class McpServerWatcher implements McpServerProvider {
     nextContext: ContextCRD | undefined,
     isCurrent: () => boolean = () => true
   ): Promise<void> {
-    return this.enqueueSharedFileSystemReconciliation(async () => {
+    const names = [
+      ...(prevContext?.spec.sharedFileSystems ?? []).map(ref => ref.name),
+      ...(nextContext?.spec.sharedFileSystems ?? []).map(ref => ref.name),
+    ]
+    return this.enqueueSharedFileSystemFleetReconciliation(names, async () => {
       if (!isCurrent()) return
       await this.reconcileSharedFileSystemsReferencedByContextCore(
         prevContext,
@@ -2090,7 +2158,12 @@ export class McpServerWatcher implements McpServerProvider {
    */
   async reconcileChannelReaderRevision(secretName: string, secretNamespace: string): Promise<void> {
     const convergenceReason = `CommunicationChannel Secret "${secretNamespace}/${secretName}" Host convergence`
-    if (!this.ccCacheSynced) return
+    if (!this.ccCacheSynced) {
+      console.warn(
+        `[K8s] Deferring ${convergenceReason}; CommunicationChannel cache is not authoritative`
+      )
+      return
+    }
     if (!this.admitHostDependentEffects(convergenceReason)) {
       return
     }
@@ -2285,51 +2358,6 @@ export class McpServerWatcher implements McpServerProvider {
       this.scheduleCommunicationChannelCacheRecovery()
     }
 
-    // ── SharedFileSystem initial inventory ──
-    let initialSfses: SharedFileSystemCRD[] = []
-    let sfsInventoryComplete = false
-    try {
-      initialSfses = await listAllSharedFileSystems()
-      sfsInventoryComplete = true
-      for (const sfs of initialSfses) {
-        this.sharedFileSystems.set(sfs.name, sfs)
-      }
-    } catch (error) {
-      console.error(
-        '[K8s] Skipping initial SharedFileSystem background convergence because discovery failed:',
-        error
-      )
-    }
-
-    // ── GlobalFileSystem (gfs) initial inventory ──
-    // gfs is a cluster singleton (DISTINCT from SharedFileSystem). A failed
-    // discovery (e.g. the CRD not installed yet) is skipped, not fatal — the
-    // next HCC restart / resync retries. Live updates land via the watch
-    // and the periodic resync; the deploy applies the singleton before HCC
-    // reconciles it.
-    let initialGfses: GlobalFileSystemCRD[] = []
-    let gfsInventoryComplete = false
-    try {
-      initialGfses = await listAllGlobalFileSystems()
-      gfsInventoryComplete = true
-      for (const gfs of initialGfses) {
-        this.globalFileSystems.set(gfs.name, gfs)
-      }
-    } catch (error) {
-      console.error(
-        '[K8s] Skipping initial GlobalFileSystem background convergence because discovery failed:',
-        error
-      )
-    }
-
-    // SFS/GFS retain their established eventual-resync contract. McpServer,
-    // Context and Host require authoritative LIST-to-WATCH handoffs before
-    // readiness. CommunicationChannel recovery instead fails safe by preserving
-    // replicas and disabling stateless suspension; full convergence remains
-    // outside readiness for every inventory.
-    await this.startSharedFileSystemWatch()
-    await this.startGlobalFileSystemWatch()
-
     console.log(
       `[K8s] Starting initial Host background convergence... (ccCacheSynced=${this.ccCacheSynced})`
     )
@@ -2401,10 +2429,52 @@ export class McpServerWatcher implements McpServerProvider {
     // This prevents the startup egress refresh from racing or undoing the safety
     // pass while keeping readiness independent from both additive fleets.
     void this.runInitialNetworkPolicyConvergence()
-    if (sfsInventoryComplete) {
+    void this.startSharedFileSystemBackgroundLane()
+    void this.startGlobalFileSystemBackgroundLane()
+  }
+
+  private async startSharedFileSystemBackgroundLane(): Promise<void> {
+    let inventoryComplete = false
+    try {
+      const initialSfses = await listAllSharedFileSystems()
+      inventoryComplete = true
+      for (const sfs of initialSfses) this.sharedFileSystems.set(sfs.name, sfs)
+    } catch (error) {
+      console.error(
+        '[K8s] Skipping initial SharedFileSystem background convergence because discovery failed:',
+        error
+      )
+    }
+    try {
+      await this.startSharedFileSystemWatch()
+    } catch (error) {
+      console.error('[K8s] SharedFileSystem background watch failed to start:', error)
+      this.scheduleSharedFileSystemWatchRestart(5000)
+    }
+    if (inventoryComplete && !this.stopped) {
       void this.runInitialSharedFileSystemConvergence()
     }
-    if (gfsInventoryComplete) {
+  }
+
+  private async startGlobalFileSystemBackgroundLane(): Promise<void> {
+    let inventoryComplete = false
+    try {
+      const initialGfses = await listAllGlobalFileSystems()
+      inventoryComplete = true
+      for (const gfs of initialGfses) this.globalFileSystems.set(gfs.name, gfs)
+    } catch (error) {
+      console.error(
+        '[K8s] Skipping initial GlobalFileSystem background convergence because discovery failed:',
+        error
+      )
+    }
+    try {
+      await this.startGlobalFileSystemWatch()
+    } catch (error) {
+      console.error('[K8s] GlobalFileSystem background watch failed to start:', error)
+      this.scheduleGlobalFileSystemWatchRestart(5000)
+    }
+    if (inventoryComplete && !this.stopped) {
       void this.runInitialGlobalFileSystemConvergence()
     }
   }
@@ -2631,7 +2701,8 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   private runInitialSharedFileSystemConvergence(): Promise<void> {
-    return this.enqueueSharedFileSystemReconciliation(() =>
+    const names = [...this.sharedFileSystems.keys()]
+    return this.enqueueSharedFileSystemFleetReconciliation(names, () =>
       this.runInitialSharedFileSystemConvergenceCore()
     )
   }
@@ -2647,7 +2718,8 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   private runInitialGlobalFileSystemConvergence(): Promise<void> {
-    return this.enqueueGlobalFileSystemReconciliation(() =>
+    const names = [...this.globalFileSystems.keys()]
+    return this.enqueueGlobalFileSystemFleetReconciliation(names, () =>
       this.runInitialGlobalFileSystemConvergenceCore()
     )
   }
@@ -2688,7 +2760,7 @@ export class McpServerWatcher implements McpServerProvider {
       }
       this.sharedFileSystemCacheRevision += 1
 
-      await this.enqueueSharedFileSystemReconciliation(async () => {
+      await this.enqueueSharedFileSystemReconciliation(sfs.name, async () => {
         try {
           if (type === 'ADDED' || type === 'MODIFIED') {
             await this.sharedFileSystemReconciler.reconcile(sfs)
@@ -2715,14 +2787,27 @@ export class McpServerWatcher implements McpServerProvider {
 
     const doneCallback = (err: Error | null) => {
       if (this.stopped) return
+      this.sfsWatchRequest = null
       if (err) {
         console.error('[K8s] SharedFileSystem watch error:', err)
       }
       console.log('[K8s] SharedFileSystem watch ended, restarting...')
-      setTimeout(() => this.startSharedFileSystemWatch(), err ? 5000 : 1000)
+      this.scheduleSharedFileSystemWatchRestart(err ? 5000 : 1000)
     }
 
     this.sfsWatchRequest = await this.watch.watch(path, {}, watchCallback, doneCallback)
+  }
+
+  private scheduleSharedFileSystemWatchRestart(delayMs: number): void {
+    if (this.stopped || this.sfsWatchRestartTimer) return
+    this.sfsWatchRestartTimer = setTimeout(() => {
+      this.sfsWatchRestartTimer = null
+      if (this.stopped) return
+      void this.startSharedFileSystemWatch().catch(error => {
+        console.error('[K8s] SharedFileSystem background watch restart failed:', error)
+        this.scheduleSharedFileSystemWatchRestart(5000)
+      })
+    }, delayMs)
   }
 
   /**
@@ -2757,7 +2842,7 @@ export class McpServerWatcher implements McpServerProvider {
         this.globalFileSystems.delete(gfs.name)
       }
       this.globalFileSystemCacheRevision += 1
-      await this.enqueueGlobalFileSystemReconciliation(async () => {
+      await this.enqueueGlobalFileSystemReconciliation(gfs.name, async () => {
         try {
           if (type === 'ADDED' || type === 'MODIFIED') {
             await this.gfsReconciler.reconcile(gfs)
@@ -2772,14 +2857,27 @@ export class McpServerWatcher implements McpServerProvider {
 
     const doneCallback = (err: Error | null) => {
       if (this.stopped) return
+      this.gfsWatchRequest = null
       if (err) {
         console.error('[K8s] GlobalFileSystem watch error:', err)
       }
       console.log('[K8s] GlobalFileSystem watch ended, restarting...')
-      setTimeout(() => this.startGlobalFileSystemWatch(), err ? 5000 : 1000)
+      this.scheduleGlobalFileSystemWatchRestart(err ? 5000 : 1000)
     }
 
     this.gfsWatchRequest = await this.watch.watch(path, {}, watchCallback, doneCallback)
+  }
+
+  private scheduleGlobalFileSystemWatchRestart(delayMs: number): void {
+    if (this.stopped || this.gfsWatchRestartTimer) return
+    this.gfsWatchRestartTimer = setTimeout(() => {
+      this.gfsWatchRestartTimer = null
+      if (this.stopped) return
+      void this.startGlobalFileSystemWatch().catch(error => {
+        console.error('[K8s] GlobalFileSystem background watch restart failed:', error)
+        this.scheduleGlobalFileSystemWatchRestart(5000)
+      })
+    }, delayMs)
   }
 
   /**
@@ -3002,15 +3100,35 @@ export class McpServerWatcher implements McpServerProvider {
    * one-time root-directory seed once the writer is up. Idempotent; per-item
    * failures are logged by fullReconcile, never thrown.
    */
-  private runGfsResync(): Promise<void> {
-    return this.enqueueGlobalFileSystemReconciliation(() => this.runGfsResyncCore())
-  }
-
-  private async runGfsResyncCore(): Promise<void> {
+  private async runGfsResync(): Promise<void> {
     if (this.stopped) return
     try {
       const cacheRevisionAtListStart = this.globalFileSystemCacheRevision
       const gfses = await listAllGlobalFileSystems()
+      const names = [
+        ...this.globalFileSystems.keys(),
+        ...gfses.map(globalFileSystem => globalFileSystem.name),
+      ]
+      return this.enqueueGlobalFileSystemFleetReconciliation(names, () =>
+        this.runGfsResyncCore(gfses, cacheRevisionAtListStart)
+      )
+    } catch (err) {
+      console.error(
+        `[K8s] GlobalFileSystem periodic resync failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      )
+    }
+  }
+
+  private async runGfsResyncCore(
+    listedGfses?: GlobalFileSystemCRD[],
+    listedAtCacheRevision?: number
+  ): Promise<void> {
+    if (this.stopped) return
+    try {
+      const cacheRevisionAtListStart = listedAtCacheRevision ?? this.globalFileSystemCacheRevision
+      const gfses = listedGfses ?? (await listAllGlobalFileSystems())
       let reconcileInventory: GlobalFileSystemCRD[]
       if (cacheRevisionAtListStart === this.globalFileSystemCacheRevision) {
         this.globalFileSystems.clear()
@@ -3029,15 +3147,31 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
-  private runSfsResync(): Promise<void> {
-    return this.enqueueSharedFileSystemReconciliation(() => this.runSfsResyncCore())
-  }
-
-  private async runSfsResyncCore(): Promise<void> {
+  private async runSfsResync(): Promise<void> {
     if (this.stopped) return
     try {
       const cacheRevisionAtListStart = this.sharedFileSystemCacheRevision
       const sfses = await listAllSharedFileSystems()
+      const names = [
+        ...this.sharedFileSystems.keys(),
+        ...sfses.map(sharedFileSystem => sharedFileSystem.name),
+      ]
+      return this.enqueueSharedFileSystemFleetReconciliation(names, () =>
+        this.runSfsResyncCore(sfses, cacheRevisionAtListStart)
+      )
+    } catch (error) {
+      console.error('[K8s] Periodic SharedFileSystem resync failed:', error)
+    }
+  }
+
+  private async runSfsResyncCore(
+    listedSfses?: SharedFileSystemCRD[],
+    listedAtCacheRevision?: number
+  ): Promise<void> {
+    if (this.stopped) return
+    try {
+      const cacheRevisionAtListStart = listedAtCacheRevision ?? this.sharedFileSystemCacheRevision
+      const sfses = listedSfses ?? (await listAllSharedFileSystems())
       let reconcileInventory: SharedFileSystemCRD[]
       if (cacheRevisionAtListStart === this.sharedFileSystemCacheRevision) {
         this.sharedFileSystems.clear()
@@ -3649,6 +3783,14 @@ export class McpServerWatcher implements McpServerProvider {
     if (this.hostCacheRecoveryTimer) {
       clearTimeout(this.hostCacheRecoveryTimer)
       this.hostCacheRecoveryTimer = null
+    }
+    if (this.sfsWatchRestartTimer) {
+      clearTimeout(this.sfsWatchRestartTimer)
+      this.sfsWatchRestartTimer = null
+    }
+    if (this.gfsWatchRestartTimer) {
+      clearTimeout(this.gfsWatchRestartTimer)
+      this.gfsWatchRestartTimer = null
     }
     this.hostCacheRecoveryIntent = null
     if (this.mcpServerCacheRecoveryTimer) {
