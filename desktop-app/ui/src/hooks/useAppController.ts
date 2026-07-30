@@ -340,7 +340,7 @@ export function useAppController() {
   }, [])
 
   const refreshAgentsData = useCallback(async () => {
-    await agentsData.refreshWithCatalog(getCatalogRefreshPromise())
+    return agentsData.refreshWithCatalog(getCatalogRefreshPromise())
   }, [agentsData.refreshWithCatalog, getCatalogRefreshPromise])
 
   const refreshContextsData = useCallback(async () => {
@@ -383,8 +383,7 @@ export function useAppController() {
         if (!scheduledIdentity) return false
         let agentsLoaded = false
         try {
-          await refreshAgentsData()
-          agentsLoaded = true
+          agentsLoaded = await refreshAgentsData()
         } catch (error) {
           console.warn('[startup] failed to load the initial agent catalog', error)
         } finally {
