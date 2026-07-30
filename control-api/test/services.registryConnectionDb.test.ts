@@ -10,6 +10,7 @@ import {
   __resetRegistryConnectionCacheForTests,
   deleteConnection,
   getRegistryConnection,
+  isRegistryAuthActive,
   markConnected,
   resolveMachineCreds,
   resolveVoucherSigningMaterial,
@@ -29,13 +30,15 @@ const { cfg } = vi.hoisted(() => ({
     registryClientSecret: '',
     registryUrl: 'https://registry.evenfire.ai',
     oauthEncryptionKey: '',
-  } as Record<string, string>,
+  } as Record<string, string | boolean>,
 }))
 vi.mock('../src/config.js', () => ({ config: cfg }))
 
 const dbQuery = vi.fn()
 vi.mock('../src/db.js', () => ({
   pool: { query: (t: string, v?: unknown[]) => dbQuery(t, v) },
+  withTransaction: async (fn: (db: unknown) => Promise<unknown>) =>
+    fn({ query: (t: string, v?: unknown[]) => dbQuery(t, v) }),
 }))
 
 const keypair = () =>
@@ -89,6 +92,7 @@ afterEach(() => {
   cfg.registryClientSecret = ''
   cfg.registryUrl = 'https://registry.evenfire.ai'
   cfg.oauthEncryptionKey = ''
+  cfg.registryAuthEnabled = false
 })
 
 describe('resolveVoucherSigningMaterial — managed', () => {
@@ -222,7 +226,12 @@ describe('markConnected — writes ciphertext for the client secret (C-I3a)', ()
     cfg.oauthEncryptionKey = encKeyHex
     dbQuery.mockResolvedValue({ rows: [], rowCount: 0 })
 
-    await markConnected({ clientId: 'cid-9', clientSecret: 'super-secret-xyz', orgName: 'acme' })
+    await markConnected({
+      deploymentId: 'dep-9',
+      clientId: 'cid-9',
+      clientSecret: 'super-secret-xyz',
+      orgName: 'acme',
+    })
 
     const upd = dbQuery.mock.calls.find(([sql]) =>
       String(sql).includes('UPDATE registry_connection')
@@ -321,5 +330,225 @@ describe('resolveMachineCreds (C-I3b)', () => {
       rowCount: 1,
     })
     expect(await resolveMachineCreds()).toBeNull()
+  })
+})
+
+describe('upsertPendingConnection — status parameter reaches the SQL', () => {
+  it('defaults to pending', async () => {
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    dbQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    await upsertPendingConnection({
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      publicKeyPem: 'PUB',
+      privateKeyPem: keypair().privateKey,
+      requestedOrgName: 'acme',
+      contactEmail: 'a@x.io',
+      registryUrl: 'https://r.example',
+    })
+    const insert = dbQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO registry_connection')
+    )
+    // status is a BOUND PARAMETER ($7), not a SQL literal
+    expect(String(insert![0])).not.toMatch(/'pending'/)
+    expect((insert![1] as string[])[6]).toBe('pending')
+  })
+
+  it("writes 'approved' when asked", async () => {
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    dbQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    await upsertPendingConnection({
+      deploymentId: 'dep-1',
+      keyId: 'kid-1',
+      publicKeyPem: 'PUB',
+      privateKeyPem: keypair().privateKey,
+      requestedOrgName: 'acme',
+      contactEmail: 'a@x.io',
+      registryUrl: 'https://r.example',
+      status: 'approved',
+    })
+    const insert = dbQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO registry_connection')
+    )
+    expect((insert![1] as string[])[6]).toBe('approved')
+  })
+})
+
+describe('markConnected — scoped write', () => {
+  it('scopes the UPDATE to the deployment and returns true on a match', async () => {
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    dbQuery.mockResolvedValue({ rows: [], rowCount: 1 })
+    const ok = await markConnected({
+      deploymentId: 'dep-9',
+      clientId: 'cid-9',
+      clientSecret: 'super-secret-xyz',
+      orgName: 'acme',
+    })
+    expect(ok).toBe(true)
+    const upd = dbQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('UPDATE registry_connection')
+    )
+    // ONE contiguous assertion: mutating the AND to OR (a row belonging to a
+    // DIFFERENT deployment with status 'pending' would then also match) must
+    // fail this test. Two independent regexes each match an OR-joined clause
+    // just as well as an AND-joined one, so they cannot catch that mutation.
+    expect(String(upd![0])).toMatch(
+      /WHERE\s+deployment_id\s*=\s*\$4\s+AND\s+status\s*<>\s*'connected'/
+    )
+    expect((upd![1] as string[])[3]).toBe('dep-9')
+  })
+
+  it('returns false when no row matched (row deleted or superseded mid-claim)', async () => {
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    dbQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    const ok = await markConnected({
+      deploymentId: 'dep-9',
+      clientId: 'cid-9',
+      clientSecret: 'super-secret-xyz',
+      orgName: 'acme',
+    })
+    expect(ok).toBe(false)
+  })
+})
+
+describe('getRegistryConnection — cache TTL', () => {
+  it('serves a cached ROW inside the window, re-queries after it', { retry: 0 }, async () => {
+    vi.useFakeTimers()
+    try {
+      cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+      dbQuery.mockResolvedValue({ rows: [makeRawRow(cfg.oauthEncryptionKey)], rowCount: 1 })
+      await getRegistryConnection()
+      const afterFirst = dbQuery.mock.calls.length
+      await getRegistryConnection()
+      expect(dbQuery.mock.calls.length).toBe(afterFirst) // cache hit
+      // Pin the TTL CONSTANT itself, not just its existence: 14_999ms elapsed
+      // is still inside the 15_000ms window. Without this checkpoint, shrinking
+      // CONNECTION_CACHE_TTL_MS to any smaller positive value would still pass
+      // this test — the only two checks otherwise present (elapsed 0, elapsed
+      // 15_001) cannot distinguish "TTL is 15_000" from "TTL is 1".
+      vi.advanceTimersByTime(14_999)
+      await getRegistryConnection()
+      expect(dbQuery.mock.calls.length).toBe(afterFirst) // still cached
+      vi.advanceTimersByTime(2) // total elapsed now 15_001
+      await getRegistryConnection()
+      expect(dbQuery.mock.calls.length).toBe(afterFirst + 1) // re-queried
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The easiest way to implement the TTL wrong: stamp cachedAt only on the
+  // row-found branch. Then `cached` is null (so `!== undefined` passes) but
+  // cachedAt stays 0, and EVERY call re-queries — the most common self-hosted
+  // state, hit on every mintToken and every admin-route auth check.
+  it('serves a cached NULL inside the window without re-querying', { retry: 0 }, async () => {
+    vi.useFakeTimers()
+    try {
+      dbQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+      await getRegistryConnection()
+      const afterFirst = dbQuery.mock.calls.length
+      await getRegistryConnection()
+      await getRegistryConnection()
+      expect(dbQuery.mock.calls.length).toBe(afterFirst)
+      // The TTL must apply to a cached NULL exactly as it does to a cached row.
+      // The three reads above all happen at elapsed 0, so a mutation that
+      // special-cases `if (cached === null) return cached` ahead of the
+      // `Date.now() - cachedAt < TTL` check would cache "never connected"
+      // forever and this test would not catch it. Advancing past the TTL and
+      // requiring a re-query does.
+      vi.advanceTimersByTime(15_001)
+      await getRegistryConnection()
+      expect(dbQuery.mock.calls.length).toBe(afterFirst + 1) // re-queried
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('isRegistryAuthActive', () => {
+  it('managed: returns the env value verbatim (true)', async () => {
+    cfg.registryConnectionMode = 'managed'
+    cfg.registryAuthEnabled = true
+    expect(await isRegistryAuthActive()).toBe(true)
+  })
+
+  it('managed: returns the env value verbatim (false)', async () => {
+    cfg.registryConnectionMode = 'managed'
+    cfg.registryAuthEnabled = false
+    expect(await isRegistryAuthActive()).toBe(false)
+  })
+
+  it('self-hosted: false with no connection row', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    dbQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    expect(await isRegistryAuthActive()).toBe(false)
+  })
+
+  // Kills a `row !== null` implementation. The DB status CHECK is
+  // ('pending','approved','connected') — there is NO 'connecting' status. An
+  // auto-approved-but-unclaimed row is status='approved' with a null client_id.
+  it('self-hosted: false for an approved row with no client_id', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    dbQuery.mockResolvedValue({
+      rows: [
+        makeRawRow(cfg.oauthEncryptionKey, {
+          status: 'approved',
+          client_id: null,
+          client_secret_encrypted: null,
+        }),
+      ],
+      rowCount: 1,
+    })
+    expect(await isRegistryAuthActive()).toBe(false)
+  })
+
+  it('self-hosted: true for a claimed row', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    const encSecret = encryptOAuthSecret(
+      deriveOAuthEncryptionKey(cfg.oauthEncryptionKey),
+      'db-secret-abc'
+    )
+    dbQuery.mockResolvedValue({
+      rows: [
+        makeRawRow(cfg.oauthEncryptionKey, {
+          status: 'connected',
+          client_id: 'db-cid',
+          client_secret_encrypted: encSecret,
+        }),
+      ],
+      rowCount: 1,
+    })
+    expect(await isRegistryAuthActive()).toBe(true)
+  })
+
+  // Discriminator pin: status and credential-presence deliberately disagree.
+  // isRegistryAuthActive derives auth from resolveMachineCreds (credential
+  // presence via clientId/clientSecret), never from row.status. Every fixture
+  // above happens to have status and credential-presence pointing the same
+  // way, so mutating the self-hosted branch to
+  // `(await getRegistryConnection())?.status === 'connected'` would still pass
+  // all of them. A 'pending' row that already holds real machine credentials
+  // must still report auth ACTIVE — that combination is exactly what a
+  // status-based implementation gets wrong.
+  it('self-hosted: true for a pending-status row that already holds real credentials', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    const encSecret = encryptOAuthSecret(
+      deriveOAuthEncryptionKey(cfg.oauthEncryptionKey),
+      'db-secret-abc'
+    )
+    dbQuery.mockResolvedValue({
+      rows: [
+        makeRawRow(cfg.oauthEncryptionKey, {
+          status: 'pending',
+          client_id: 'db-cid',
+          client_secret_encrypted: encSecret,
+        }),
+      ],
+      rowCount: 1,
+    })
+    expect(await isRegistryAuthActive()).toBe(true)
   })
 })

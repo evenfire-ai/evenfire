@@ -7,6 +7,7 @@ beforeEach(() => {
   process.env = { ...ORIGINAL_ENV }
   delete process.env.CONTROL_API_PUBLISHER_UI_ENABLED
   delete process.env.REGISTRY_CONNECTION_MODE
+  delete process.env.CLERUM_REGISTRY_URL
 })
 afterEach(() => {
   process.env = ORIGINAL_ENV
