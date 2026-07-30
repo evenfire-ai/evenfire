@@ -1,4 +1,3 @@
-// control-ui/components/RegistryApiKeysPanel.tsx
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
@@ -19,8 +18,6 @@ import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
 import { useToast } from './Toast'
 import { Button } from './ui'
-
-// control-ui/components/RegistryApiKeysPanel.tsx
 
 type View =
   | { kind: 'loading' }
