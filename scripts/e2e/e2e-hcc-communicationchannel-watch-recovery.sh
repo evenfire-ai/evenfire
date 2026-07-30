@@ -261,14 +261,13 @@ ok "isolated Host fleet reached its baseline"
 
 run_recovery_cycle() {
   local cycle=$1 cycle_logs recovery_logs outage_started outage_seconds max_retry_failures list_pattern
-  local host_list_pattern ended_before started_before recovered_before completed_before failed_before
+  local host_list_pattern ended_before started_before recovered_before failed_before
   local list_before host_list_before expected_host_count
   local failed_after retry_failures
   cycle_logs="$(hcc_recovery_logs)"
   ended_before="$(log_count_from "$cycle_logs" 'CommunicationChannel watch ended;')"
   started_before="$(log_count_from "$cycle_logs" 'Starting CommunicationChannel watch')"
   recovered_before="$(log_count_from "$cycle_logs" 'Recovered [0-9]+ CommunicationChannel\(s\) into cache')"
-  completed_before="$(log_count_from "$cycle_logs" 'Completed Host reconciliation after CommunicationChannel recovery$')"
   failed_before="$(log_count_from "$cycle_logs" 'cache recovery failed;')"
   list_pattern="Listing all CommunicationChannels in namespace ${CHANNEL_NS}"
   host_list_pattern="Listing all Hosts in namespace ${HOST_NS}"
@@ -312,10 +311,7 @@ run_recovery_cycle() {
   max_retry_failures=$((
     (outage_seconds + CC_RECOVERY_RETRY_SECONDS - 1) / CC_RECOVERY_RETRY_SECONDS + 2
   ))
-  wait_log_count 'Completed Host reconciliation after CommunicationChannel recovery$' \
-    "$((completed_before + 1))" 180 ||
-    die "Host fleet did not converge after snapshot recovery in cycle ${cycle}"
-  recovery_cycle_used_fresh_host_inventory "$cycle" "$expected_host_count" ||
+  wait_recovery_cycle_fresh_host_inventory "$cycle" "$expected_host_count" 180 ||
     die "cycle ${cycle} did not reconcile the fresh ${expected_host_count}-Host inventory"
   recovery_logs="$(hcc_recovery_logs)"
   failed_after="$(log_count_from "$recovery_logs" 'cache recovery failed;')"
@@ -363,14 +359,18 @@ ended="$(log_count_from "$final_logs" 'CommunicationChannel watch ended;')"
 started="$(log_count_from "$final_logs" 'Starting CommunicationChannel watch')"
 recovered="$(log_count_from "$final_logs" 'Recovered [0-9]+ CommunicationChannel\(s\) into cache')"
 failed="$(log_count_from "$final_logs" 'cache recovery failed;')"
-fleet_passes="$(log_count_from "$final_logs" 'Completed Host reconciliation after CommunicationChannel')"
+fleet_passes="$(
+  log_count_from "$final_logs" \
+    'Completed Host reconciliation after (CommunicationChannel recovery|Host watch recovery convergence)$'
+)"
 [ "$ended" = 2 ] && [ "$started" = 2 ] && [ "$recovered" = 2 ] && \
   [ "$failed" = "$TOTAL_RETRY_FAILURES" ] && [ "$failed" -le "$TOTAL_RETRY_FAILURE_LIMIT" ] ||
   die "unexpected watch lifecycle counts: ended=${ended}, started=${started}, recovered=${recovered}, failed=${failed}"
 [ "$fleet_passes" -ge 2 ] && [ "$fleet_passes" -le 4 ] ||
   die "unexpected successful fleet reconcile count ${fleet_passes}; expected 2..4 passes"
-# Each recovered snapshot requires one successful pass; at most one already
-# queued fail-closed pass may also finish per cycle. The deterministic
+# Each recovered snapshot requires one causally ordered successful pass; a
+# Host-watch recovery pass may cover the same fresh CC+Host inventories. At
+# most one already queued covering pass may also finish per cycle. The deterministic
 # max-concurrency=1 proof stays in k8sClient unit tests where overlapping passes
 # can be barrier-controlled.
 

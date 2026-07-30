@@ -460,6 +460,30 @@ else
 fi
 
 printf '%s\n' \
+  '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery' \
+  '[K8s] Listing all Hosts in namespace mcp-host' \
+  '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
+  '[K8s] Reconciling 5 Host(s) after Host watch recovery convergence' \
+  '[K8s] Completed Host reconciliation after Host watch recovery convergence' >"$MOCK_LOG_FILE"
+if recovery_cycle_used_fresh_host_inventory 1 5; then
+  pass "a causally ordered Host-watch pass may cover the recovered CC and fresh Host inventories"
+else
+  fail "a valid covering Host-watch recovery pass was rejected"
+fi
+
+printf '%s\n' \
+  '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery' \
+  '[K8s] Listing all Hosts in namespace mcp-host' \
+  '[K8s] Reconciling 5 Host(s) after Host watch recovery convergence' \
+  '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
+  '[K8s] Completed Host reconciliation after Host watch recovery convergence' >"$MOCK_LOG_FILE"
+if recovery_cycle_used_fresh_host_inventory 1 5; then
+  fail "a Host-watch pass selected before CC recovery satisfied the covering assertion"
+else
+  pass "covering Host-watch recovery requires recovered CC state before pass selection"
+fi
+
+printf '%s\n' \
   '[K8s] Listing all Hosts in namespace mcp-host' \
   '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery' \
   '[K8s] Recovered 2 CommunicationChannel(s) into cache (ccCacheSynced=true)' \
