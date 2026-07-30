@@ -64,6 +64,10 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
+}
+
 function normalizePositiveInteger(value: number | undefined, fallback: number): number {
   if (value === undefined) return fallback
   if (!Number.isFinite(value)) return fallback
@@ -132,6 +136,16 @@ function pageEntry(file: string, messages: ChatMessage[]): ChatPageEntry {
     firstServerTurnNumber: serverTurns.length ? Math.min(...serverTurns) : undefined,
     lastServerTurnNumber: serverTurns.length ? Math.max(...serverTurns) : undefined,
   }
+}
+
+function samePageEntry(left: ChatPageEntry, right: ChatPageEntry): boolean {
+  return (
+    left.file === right.file &&
+    left.count === right.count &&
+    left.serverSynced === right.serverSynced &&
+    left.firstServerTurnNumber === right.firstServerTurnNumber &&
+    left.lastServerTurnNumber === right.lastServerTurnNumber
+  )
 }
 
 function parseChatIndex(raw: string): ChatIndex {
@@ -506,25 +520,32 @@ export class ChatStore {
       if (
         parsed?.version !== PAGED_CHAT_VERSION ||
         parsed.chatId !== chatId ||
-        !Array.isArray(parsed.pages)
+        !Array.isArray(parsed.pages) ||
+        !isPositiveSafeInteger(parsed.pageSize) ||
+        !isNonNegativeSafeInteger(parsed.messageCount) ||
+        !isNonNegativeSafeInteger(parsed.localMessageCount) ||
+        (parsed.prunedBeforeCount !== undefined &&
+          !isNonNegativeSafeInteger(parsed.prunedBeforeCount))
       ) {
         throw new Error('Invalid paged chat metadata')
       }
-      if (
-        parsed.pages.some(
-          page =>
-            !PAGE_FILE_PATTERN.test(page.file) ||
-            !Number.isSafeInteger(page.count) ||
-            page.count < 1
-        )
-      ) {
-        throw new Error('Invalid paged chat metadata page reference')
+      let previousPageNumber: number | undefined
+      for (const page of parsed.pages) {
+        const pageNumber = pageNumberFromFileName(page.file)
+        if (
+          !PAGE_FILE_PATTERN.test(page.file) ||
+          !isPositiveSafeInteger(page.count) ||
+          (previousPageNumber !== undefined && pageNumber !== previousPageNumber + 1)
+        ) {
+          throw new Error('Invalid paged chat metadata page reference')
+        }
+        previousPageNumber = pageNumber
       }
       return this.finalizePagedMeta({
         ...parsed,
         pageSize: normalizePositiveInteger(parsed.pageSize, this.pageSize),
-        messageCount: Math.max(0, Math.floor(parsed.messageCount ?? 0)),
-        localMessageCount: Math.max(0, Math.floor(parsed.localMessageCount ?? 0)),
+        messageCount: parsed.messageCount,
+        localMessageCount: parsed.localMessageCount,
       })
     } catch (err) {
       throw new Error(`Unable to read paged chat metadata for ${chatId}`, { cause: err })
@@ -871,7 +892,7 @@ export class ChatStore {
       if (messages.length > page.count && index !== meta.pages.length - 1) return null
       const repaired = pageEntry(page.file, messages)
       repairedPages.push(repaired)
-      changed ||= repaired.count !== page.count
+      changed ||= !samePageEntry(repaired, page)
     }
 
     const referenced = new Set(repairedPages.map(page => page.file))

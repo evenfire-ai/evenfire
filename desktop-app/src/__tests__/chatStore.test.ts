@@ -1086,6 +1086,81 @@ describe('messages', () => {
     ).toBe(1)
   })
 
+  it('re-derives page sync metadata before pruning local-only messages', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: 2,
+    })
+    await pagedStore.createChat('agent-1', 'corrupt-page-sync')
+    await pagedStore.saveMessages(
+      'agent-1',
+      'corrupt-page-sync',
+      Array.from({ length: 4 }, (_, index) => ({
+        id: `m${index}`,
+        role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
+        content: `message-${index}`,
+        timestamp: index,
+      }))
+    )
+    const metaPath = chatMetaPath('corrupt-page-sync')
+    const meta = await readJsonFile<{ pages: Array<{ serverSynced: boolean }> }>(metaPath)
+    meta.pages[0]!.serverSynced = true
+    await fs.writeFile(metaPath, JSON.stringify(meta))
+
+    const restarted = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: 2,
+    })
+    await restarted.appendMessages('agent-1', 'corrupt-page-sync', [
+      { id: 'm4', role: 'user', content: 'message-4', timestamp: 4 },
+    ])
+
+    expect(
+      (await restarted.loadMessages('agent-1', 'corrupt-page-sync')).map(message => message.id)
+    ).toEqual(['m0', 'm1', 'm2', 'm3', 'm4'])
+    expect(
+      (
+        await readJsonFile<{ pages: Array<{ serverSynced: boolean }> }>(
+          chatMetaPath('corrupt-page-sync')
+        )
+      ).pages[0]!.serverSynced
+    ).toBe(false)
+  })
+
+  it('recovers strictly ordered pages before appending to reordered metadata', async () => {
+    const pagedStore = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await pagedStore.createChat('agent-1', 'reordered-pages')
+    await pagedStore.saveMessages(
+      'agent-1',
+      'reordered-pages',
+      Array.from({ length: 6 }, (_, index) => ({
+        id: `m${index}`,
+        role: 'user' as const,
+        content: `message-${index}`,
+        timestamp: index,
+      }))
+    )
+    const metaPath = chatMetaPath('reordered-pages')
+    const meta = await readJsonFile<{ pages: unknown[] }>(metaPath)
+    meta.pages = [meta.pages[2], meta.pages[0], meta.pages[1]]
+    await fs.writeFile(metaPath, JSON.stringify(meta))
+
+    const restarted = new ChatStore(tempDir, {
+      pageSize: 2,
+      maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
+    })
+    await restarted.appendMessages('agent-1', 'reordered-pages', [
+      { id: 'm6', role: 'assistant', content: 'message-6', timestamp: 6 },
+    ])
+
+    expect(
+      (await restarted.loadMessages('agent-1', 'reordered-pages')).map(message => message.id)
+    ).toEqual(['m0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6'])
+  })
+
   it('persists task_id and writes the paged chat cache', async () => {
     await store.createChat('agent-1', 'v2-1')
     await store.saveMessages('agent-1', 'v2-1', [
