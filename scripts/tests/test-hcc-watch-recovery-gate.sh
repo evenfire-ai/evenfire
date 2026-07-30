@@ -414,6 +414,129 @@ else
   fail "an MCP readiness log predicate drifted from its runtime producer"
 fi
 
+# Full marker inventory: every runtime log marker any HCC gate consumes, paired
+# with the producer statement that emits it. Both sides are matched as fixed
+# source text, never as a rendered string: a template literal is pinned by its
+# fixed prefix plus the variable that supplies the dynamic identity, so a
+# marker that only ever exists rendered (`${config.hostNamespace}`,
+# `${reason}`, `${type}`, `${snapshot.channels.length}`) still resolves without
+# reporting false drift. Matching the consumer side too means a rename on
+# either side breaks the pair instead of silently disarming a live gate: the
+# marker no longer matches any log line, the count stays zero, and the gate
+# passes on evidence it never observed.
+# Entries are flat 4-tuples: consumer file, consumer text, producer file,
+# producer text.
+# shellcheck disable=SC2016
+marker_bindings=(
+  "$WATCH_GATE" 'CommunicationChannel watch ended;'
+  "$HCC_K8S_CLIENT" 'CommunicationChannel watch ended; holding stateless lifecycle active'
+
+  "$WATCH_GATE" 'Starting CommunicationChannel watch'
+  "$HCC_K8S_CLIENT" '[K8s] Starting CommunicationChannel watch'
+
+  "$WATCH_GATE" 'Recovered [0-9]+ CommunicationChannel\(s\) into cache'
+  "$HCC_K8S_CLIENT" 'Recovered ${snapshot.channels.length} CommunicationChannel(s) into cache'
+
+  "$WATCH_GATE" 'cache recovery failed;'
+  "$HCC_K8S_CLIENT" 'CommunicationChannel cache recovery failed; stateless lifecycle remains held active'
+
+  "$WATCH_GATE" 'Listing all CommunicationChannels in namespace ${CHANNEL_NS}'
+  "$HCC_K8S_CLIENT" 'Listing all CommunicationChannels in namespace ${config.channelsNamespace}'
+
+  "$WATCH_GATE" 'Listing all Hosts in namespace ${HOST_NS}'
+  "$HCC_K8S_CLIENT" 'Listing all Hosts in namespace ${config.hostNamespace}'
+
+  "$WATCH_GATE" 'Completed Host reconciliation after (CommunicationChannel recovery|Host watch recovery convergence)$'
+  "$HCC_K8S_CLIENT" 'Completed Host reconciliation after ${reason}'
+
+  "$WATCH_GATE" 'CommunicationChannel watch event: DELETED for ${FIXTURE_CHANNEL}'
+  "$HCC_K8S_CLIENT" 'CommunicationChannel watch event: ${type} for ${cc.name}'
+
+  "$WATCH_GATE" 'CommunicationChannel watch event: ADDED for ${FIXTURE_CHANNEL}'
+  "$HCC_K8S_CLIENT" 'CommunicationChannel watch event: ${type} for ${cc.name}'
+
+  "$LOG_HELPER" 'CommunicationChannel watch ended;'
+  "$HCC_K8S_CLIENT" 'CommunicationChannel watch ended; holding stateless lifecycle active'
+
+  "$LOG_HELPER" 'Recovered [0-9]+ CommunicationChannel\(s\) into cache'
+  "$HCC_K8S_CLIENT" 'Recovered ${snapshot.channels.length} CommunicationChannel(s) into cache'
+
+  "$LOG_HELPER" 'Listing all Hosts in namespace '
+  "$HCC_K8S_CLIENT" 'Listing all Hosts in namespace ${config.hostNamespace}'
+
+  "$LOG_HELPER" 'Host(s) for lifecycle after CommunicationChannel recovery'
+  "$HCC_K8S_CLIENT" 'Reconciling ${hosts.length} Host(s) for lifecycle after ${reason}'
+
+  "$LOG_HELPER" 'Host(s) after Host watch recovery convergence'
+  "$HCC_K8S_CLIENT" 'Reconciling ${hosts.length} Host(s) after ${reason}'
+
+  "$LOG_HELPER" 'Completed Host reconciliation after CommunicationChannel recovery$'
+  "$HCC_K8S_CLIENT" "requestHostFleetReconcile('CommunicationChannel recovery'"
+
+  "$LOG_HELPER" 'Completed Host reconciliation after Host watch recovery convergence$'
+  "$HCC_K8S_CLIENT" "convergenceReason = 'Host watch recovery convergence'"
+
+  "$LOG_HELPER" 'Periodic resync'
+  "$HCC_K8S_CLIENT" "requestHostFleetReconcile('Periodic resync'"
+
+  "$READINESS_GATE" "START_MARKER='Starting initial Host background convergence'"
+  "$HCC_K8S_CLIENT" 'Starting initial Host background convergence...'
+
+  "$READINESS_GATE" "COMPLETE_MARKER='Completed Host reconciliation after initial Host reconciliation'"
+  "$HCC_K8S_CLIENT" 'Completed Host reconciliation after ${reason}'
+
+  "$READINESS_GATE" "FAIL_MARKER='Host reconciliation after initial Host reconciliation failed'"
+  "$HCC_K8S_CLIENT" 'Host reconciliation after ${reason} failed:'
+
+  "$READINESS_GATE" 'after initial Host reconciliation'
+  "$HCC_K8S_CLIENT" "'initial Host reconciliation',"
+
+  "$HOST_BUNDLE_MEASURE" "HCC_PASS_STARTED_MARKER='Starting initial Host background convergence'"
+  "$HCC_K8S_CLIENT" 'Starting initial Host background convergence...'
+
+  "$HOST_BUNDLE_MEASURE" "HCC_PASS_COMPLETED_MARKER='Completed Host reconciliation after initial Host reconciliation'"
+  "$HCC_K8S_CLIENT" 'Completed Host reconciliation after ${reason}'
+
+  "$HOST_BUNDLE_MEASURE" "HCC_PASS_FAILED_MARKER='Host reconciliation after initial Host reconciliation failed'"
+  "$HCC_K8S_CLIENT" 'Host reconciliation after ${reason} failed:'
+
+  "$MCP_READINESS_GATE" 'Initial external egress reconciliation failed for ${MCP_NS}/${MCP_NAME};'
+  "$HCC_EGRESS_COORDINATOR" 'Initial external egress reconciliation failed for ${key};'
+
+  "$MCP_READINESS_GATE" 'Scheduling external egress retry '
+  "$HCC_EGRESS_COORDINATOR" 'Scheduling external egress retry ${attempt}/${EXTERNAL_EGRESS_RETRY_DELAYS_MS.length}'
+
+  "$MCP_READINESS_GATE" 'for McpServer \"${MCP_NAME}\"'
+  "$HCC_EGRESS_COORDINATOR" 'for McpServer "${this.retryIntents.get(key)!.server.name}"'
+
+  "$MCP_READINESS_GATE" 'Context watch event: MODIFIED for ${CONTEXT_NAME}'
+  "$HCC_K8S_CLIENT" 'Context watch event: ${type} for ${context.name}'
+
+  "$MCP_READINESS_GATE" '[NetPol] Reconciling context \"${CONTEXT_ID}\" — allowed servers: []'
+  "$HCC_NETWORK_POLICY_RECONCILER" 'Reconciling context "${contextId}" — allowed servers: [${allowedServers.join('
+)
+marker_drift=""
+marker_binding_count=0
+for ((marker_index = 0; marker_index < ${#marker_bindings[@]}; marker_index += 4)); do
+  consumer_file="${marker_bindings[marker_index]}"
+  consumer_marker="${marker_bindings[marker_index + 1]}"
+  producer_file="${marker_bindings[marker_index + 2]}"
+  producer_marker="${marker_bindings[marker_index + 3]}"
+  marker_binding_count=$((marker_binding_count + 1))
+  if ! grep -Fq -- "$consumer_marker" "$consumer_file"; then
+    marker_drift+="  consumer $(basename "$consumer_file") no longer reads: ${consumer_marker}"$'\n'
+  fi
+  if ! grep -Fq -- "$producer_marker" "$producer_file"; then
+    marker_drift+="  producer $(basename "$producer_file") no longer emits: ${producer_marker}"$'\n'
+  fi
+done
+if [ "$marker_binding_count" -eq 29 ] && [ -z "$marker_drift" ]; then
+  pass "all ${marker_binding_count} consumed HCC log markers stay bound to their runtime producers"
+else
+  printf '%s' "$marker_drift" >&2
+  fail "a consumed HCC log marker drifted from its runtime producer (${marker_binding_count} pairs checked)"
+fi
+
 fixture_mcp_runtime_absent_function="$(
   sed -n '/^fixture_mcp_runtime_absent() {$/,/^}$/p' "$MCP_READINESS_GATE"
 )"
@@ -568,6 +691,34 @@ if (
 else
   fail "exact Kubernetes readiness rejects current Ready HCC evidence"
 fi
+# Kubelet reports an indeterminate pod as Ready=Unknown, not Ready=False. Only
+# an Unknown fixture separates the exact `== "True"` readiness contract from a
+# weakened `!= "False"` one, so this red case pins the exact comparison instead
+# of the single status value both spellings already reject. Every other field is
+# healthy, which leaves the Ready condition as the only reason to refuse.
+if (
+  NEW_HCC_POD=hcc-pod
+  HCC_UID=pod-uid
+  HCC_NS=control-plane
+  HCC_DEPLOY='host-context-controller'
+  kctl() {
+    case "$2" in
+      pod)
+        printf '%s\n' '{"metadata":{"uid":"pod-uid"},"status":{"conditions":[{"type":"Ready","status":"Unknown"}],"containerStatuses":[{"name":"host-context-controller","ready":true}]}}'
+        ;;
+      deployment)
+        printf '%s\n' '{"metadata":{"generation":4},"spec":{"replicas":1},"status":{"observedGeneration":4,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  eval "$hcc_kubernetes_readiness_function"
+  ! hcc_kubernetes_readiness_is_exact
+); then
+  pass "exact Kubernetes readiness rejects a current pod whose Ready condition is Unknown"
+else
+  fail "exact Kubernetes readiness can accept an indeterminate HCC pod"
+fi
 if (
   NEW_HCC_POD=hcc-pod
   HCC_UID=pod-uid
@@ -590,6 +741,32 @@ if (
   pass "exact Kubernetes readiness rejects a current pod whose Ready condition is False"
 else
   fail "exact Kubernetes readiness can accept a non-Ready HCC pod"
+fi
+# The container-level readiness clause has its own red case: a pod whose Ready
+# condition is True while the host-context-controller container is not ready
+# must still be refused, so deleting or weakening that clause cannot pass.
+if (
+  NEW_HCC_POD=hcc-pod
+  HCC_UID=pod-uid
+  HCC_NS=control-plane
+  HCC_DEPLOY='host-context-controller'
+  kctl() {
+    case "$2" in
+      pod)
+        printf '%s\n' '{"metadata":{"uid":"pod-uid"},"status":{"conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"host-context-controller","ready":false}]}}'
+        ;;
+      deployment)
+        printf '%s\n' '{"metadata":{"generation":4},"spec":{"replicas":1},"status":{"observedGeneration":4,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  eval "$hcc_kubernetes_readiness_function"
+  ! hcc_kubernetes_readiness_is_exact
+); then
+  pass "exact Kubernetes readiness rejects a Ready pod whose HCC container is not ready"
+else
+  fail "exact Kubernetes readiness can accept an unready host-context-controller container"
 fi
 if (
   NEW_HCC_POD=hcc-pod
