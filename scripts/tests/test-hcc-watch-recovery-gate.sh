@@ -301,8 +301,8 @@ for case_name in detached minikube-profile-missing minikube-profile profile-name
   fi
 done
 
-network_policy_retry_function="$(
-  sed -n '/^initial_network_policy_retry_progress_is_observed() {$/,/^}$/p' "$MCP_READINESS_GATE"
+network_policy_failure_absent_function="$(
+  sed -n '/^initial_network_policy_failure_is_absent() {$/,/^}$/p' "$MCP_READINESS_GATE"
 )"
 retry_progress_function="$(
   sed -n '/^external_egress_retry_progress_is_observed() {$/,/^}$/p' "$MCP_READINESS_GATE"
@@ -326,20 +326,18 @@ if (
 [K8s] Initial external egress reconciliation failed for mcp-server/e2e-held-server; runtime reconciliation will stay blocked until retry succeeds: dns timeout
 [K8s] Scheduling external egress retry 1/3 for McpServer "e2e-held-server" in 5000ms
 [K8s] Scheduling external egress retry 2/3 for McpServer "e2e-held-server" in 15000ms
-[K8s] Initial NetworkPolicy background reconciliation failed: dns timeout
-[K8s] Scheduling initial NetworkPolicy background convergence retry 1 in 5000ms
 '
   kctl() { printf '%s\n' "$MOCK_HCC_LOG"; }
-  eval "$network_policy_retry_function"
+  eval "$network_policy_failure_absent_function"
   eval "$retry_progress_function"
   eval "$retry_rearmed_function"
-  initial_network_policy_retry_progress_is_observed &&
+  initial_network_policy_failure_is_absent &&
     external_egress_retry_progress_is_observed &&
     external_egress_retry_rearmed_is_observed
 ); then
-  pass "the two DNS phases require observable runtime-refresh and safety-pass retries"
+  pass "DNS failure remains in the additive runtime lane and does not fail readiness safety"
 else
-  fail "the injected DNS hold cannot distinguish expected live retry progress"
+  fail "the injected DNS hold can leak into readiness safety or hide runtime retry progress"
 fi
 if (
   NEW_HCC_POD=hcc-pod
@@ -389,12 +387,12 @@ if (
   CONTEXT_NAME=e2e-context
   MOCK_HCC_LOG='[K8s] Initial NetworkPolicy background reconciliation failed: denied'
   kctl() { printf '%s\n' "$MOCK_HCC_LOG"; }
-  eval "$network_policy_retry_function"
-  ! initial_network_policy_retry_progress_is_observed
+  eval "$network_policy_failure_absent_function"
+  ! initial_network_policy_failure_is_absent
 ); then
-  pass "the safety retry predicate rejects a failure without scheduled recovery"
+  pass "the safety predicate rejects an observed NetworkPolicy failure"
 else
-  fail "the safety retry predicate accepts a failure without scheduled recovery"
+  fail "an observed NetworkPolicy safety failure can masquerade as clean certification"
 fi
 if (
   NEW_HCC_POD=hcc-pod
@@ -403,12 +401,12 @@ if (
   MCP_NAME=e2e-held-server
   CONTEXT_NAME=e2e-context
   kctl() { return 1; }
-  eval "$network_policy_retry_function"
-  ! initial_network_policy_retry_progress_is_observed
+  eval "$network_policy_failure_absent_function"
+  ! initial_network_policy_failure_is_absent
 ); then
-  pass "the safety retry predicate fails closed when HCC logs are unavailable"
+  pass "the safety predicate fails closed when HCC logs are unavailable"
 else
-  fail "the safety retry predicate passes vacuously when HCC logs are unavailable"
+  fail "the safety predicate passes vacuously when HCC logs are unavailable"
 fi
 
 if (
@@ -451,8 +449,6 @@ if grep -Fq 'Initial external egress reconciliation failed for ${key};' \
    grep -Fq 'for McpServer "${this.retryIntents.get(key)!.server.name}"' \
      "$HCC_EGRESS_COORDINATOR" &&
    grep -Fq 'Initial NetworkPolicy background reconciliation failed:' \
-     "$HCC_K8S_CLIENT" &&
-   grep -Fq 'Scheduling initial ${lane} background convergence retry ${attempt}' \
      "$HCC_K8S_CLIENT" &&
    grep -Fq 'Context watch event: ${type} for ${context.name}' \
      "$HCC_K8S_CLIENT" &&

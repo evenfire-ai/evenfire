@@ -231,13 +231,12 @@ dns_released_since_hold() {
   [ "$(dns_release_count)" -gt "$DNS_RELEASE_COUNT_AT_HOLD" ]
 }
 
-initial_network_policy_retry_progress_is_observed() {
+initial_network_policy_failure_is_absent() {
   local logs
   [ -n "$NEW_HCC_POD" ] || return 1
   logs="$(kctl logs "pod/${NEW_HCC_POD}" -n "$HCC_NS" \
     -c host-context-controller 2>/dev/null)" || return 1
-  grep -Fq "Initial NetworkPolicy background reconciliation failed:" <<<"$logs" &&
-    grep -Fq "Scheduling initial NetworkPolicy background convergence retry" <<<"$logs"
+  ! grep -Fq "Initial NetworkPolicy background reconciliation failed:" <<<"$logs"
 }
 
 external_egress_retry_progress_is_observed() {
@@ -1453,8 +1452,8 @@ initial_empty_context_log="[NetPol] Reconciling context \"${CONTEXT_ID}\" — al
 wait_until 120 "initial NetworkPolicy pass to reconcile the fixture's empty Context snapshot" \
   hcc_log_contains "$initial_empty_context_log" ||
   die "initial NetworkPolicy pass never reconciled the fixture's empty Context"
-initial_network_policy_retry_progress_is_observed ||
-  die "the safety lane did not expose observable NetworkPolicy retry progress"
+initial_network_policy_failure_is_absent ||
+  die "the DNS hold unexpectedly failed the readiness safety lane"
 context_policies_absent ||
   die "Context policy appeared before the isolated MODIFIED event"
 
