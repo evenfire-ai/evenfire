@@ -120,8 +120,10 @@ describe('GET /admin/registry/keys', () => {
     cfg.registryConnectionMode = 'self-hosted'
     cfg.registryAuthEnabled = false // deliberately off — must be ignored
     connDb.isRegistryAuthActive.mockResolvedValue(true) // credentials exist
+    vi.mocked(listKeys).mockResolvedValue({ keys: [{ id: 'k1' }] } as never)
     const res = await request(makeApp()).get('/admin/registry/keys')
-    expect(res.status).not.toBe(409)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ org: 'acme', keys: [{ id: 'k1' }] })
   })
 
   // isRegistryAuthActive() can now reject (self-hosted reaches a raw pool.query

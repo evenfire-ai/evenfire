@@ -14,6 +14,10 @@ and use registry SSO from your Control UI.
   `managed`, and the connect flow only runs in self-hosted mode — a managed
   deployment is connected automatically, so the panel has nothing to configure.
 - `CLERUM_REGISTRY_URL` set, with outbound HTTPS to the registry.
+- `CLERUM_REGISTRY_URL` must be in the allowlist. `https://registry.evenfire.ai`
+  and `http://registry-api.registry.svc.cluster.local:8085` are built in; add
+  any other registry URL via `CLERUM_REGISTRY_URL_ALLOWLIST`. control-api
+  refuses to start if the configured URL is not allowlisted.
 - You are an **admin** in your Control UI.
 
 ## Connect

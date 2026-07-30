@@ -421,7 +421,15 @@ describe('getRegistryConnection — cache TTL', () => {
       const afterFirst = dbQuery.mock.calls.length
       await getRegistryConnection()
       expect(dbQuery.mock.calls.length).toBe(afterFirst) // cache hit
-      vi.advanceTimersByTime(15_001)
+      // Pin the TTL CONSTANT itself, not just its existence: 14_999ms elapsed
+      // is still inside the 15_000ms window. Without this checkpoint, shrinking
+      // CONNECTION_CACHE_TTL_MS to any smaller positive value would still pass
+      // this test — the only two checks otherwise present (elapsed 0, elapsed
+      // 15_001) cannot distinguish "TTL is 15_000" from "TTL is 1".
+      vi.advanceTimersByTime(14_999)
+      await getRegistryConnection()
+      expect(dbQuery.mock.calls.length).toBe(afterFirst) // still cached
+      vi.advanceTimersByTime(2) // total elapsed now 15_001
       await getRegistryConnection()
       expect(dbQuery.mock.calls.length).toBe(afterFirst + 1) // re-queried
     } finally {
@@ -442,6 +450,15 @@ describe('getRegistryConnection — cache TTL', () => {
       await getRegistryConnection()
       await getRegistryConnection()
       expect(dbQuery.mock.calls.length).toBe(afterFirst)
+      // The TTL must apply to a cached NULL exactly as it does to a cached row.
+      // The three reads above all happen at elapsed 0, so a mutation that
+      // special-cases `if (cached === null) return cached` ahead of the
+      // `Date.now() - cachedAt < TTL` check would cache "never connected"
+      // forever and this test would not catch it. Advancing past the TTL and
+      // requiring a re-query does.
+      vi.advanceTimersByTime(15_001)
+      await getRegistryConnection()
+      expect(dbQuery.mock.calls.length).toBe(afterFirst + 1) // re-queried
     } finally {
       vi.useRealTimers()
     }
@@ -497,6 +514,35 @@ describe('isRegistryAuthActive', () => {
       rows: [
         makeRawRow(cfg.oauthEncryptionKey, {
           status: 'connected',
+          client_id: 'db-cid',
+          client_secret_encrypted: encSecret,
+        }),
+      ],
+      rowCount: 1,
+    })
+    expect(await isRegistryAuthActive()).toBe(true)
+  })
+
+  // Discriminator pin: status and credential-presence deliberately disagree.
+  // isRegistryAuthActive derives auth from resolveMachineCreds (credential
+  // presence via clientId/clientSecret), never from row.status. Every fixture
+  // above happens to have status and credential-presence pointing the same
+  // way, so mutating the self-hosted branch to
+  // `(await getRegistryConnection())?.status === 'connected'` would still pass
+  // all of them. A 'pending' row that already holds real machine credentials
+  // must still report auth ACTIVE — that combination is exactly what a
+  // status-based implementation gets wrong.
+  it('self-hosted: true for a pending-status row that already holds real credentials', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.oauthEncryptionKey = randomBytes(32).toString('hex')
+    const encSecret = encryptOAuthSecret(
+      deriveOAuthEncryptionKey(cfg.oauthEncryptionKey),
+      'db-secret-abc'
+    )
+    dbQuery.mockResolvedValue({
+      rows: [
+        makeRawRow(cfg.oauthEncryptionKey, {
+          status: 'pending',
           client_id: 'db-cid',
           client_secret_encrypted: encSecret,
         }),

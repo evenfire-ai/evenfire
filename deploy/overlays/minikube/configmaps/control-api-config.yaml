@@ -60,10 +60,12 @@ data:
   # turns on by itself once the connect flow completes and this deployment
   # holds machine credentials: there is no flag to set and no restart needed.
   # To run your OWN in-cluster registry instead, set CLERUM_REGISTRY_URL to
-  # http://registry-api.registry.svc.cluster.local:8085 and add it via
-  # CLERUM_REGISTRY_URL_ALLOWLIST. The allowlist applies to any explicitly
-  # self-hosted deployment with a registry URL configured, regardless of
-  # whether auth is active.
+  # http://registry-api.registry.svc.cluster.local:8085. That URL is already
+  # built into the allowlist, so no CLERUM_REGISTRY_URL_ALLOWLIST entry is
+  # needed for it; the setting is only for any OTHER registry URL. The
+  # allowlist applies to any explicitly self-hosted deployment with a registry
+  # URL configured, regardless of whether auth is active, and control-api
+  # refuses to start if the configured URL is not allowlisted.
   CLERUM_REGISTRY_URL: 'https://registry.evenfire.ai'
   REGISTRY_CONNECTION_MODE: 'self-hosted'
   # The Publisher UI (Sidebar entry + /publisher route) defaults ON for every

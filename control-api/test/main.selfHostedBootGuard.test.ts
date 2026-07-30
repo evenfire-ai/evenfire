@@ -37,6 +37,23 @@ describe('logRegistryConnectionState', () => {
     )
   })
 
+  // A second deadlock regression guard, this time for the DB read itself. This
+  // now runs on EVERY self-hosted boot (not gated behind
+  // CLERUM_REGISTRY_AUTH_ENABLED), so getRegistryConnection rejecting — a
+  // rotated CLERUM_OAUTH_ENCRYPTION_KEY, a restored Postgres volume paired with
+  // a different key Secret, or a transient pool blip — must not escape as an
+  // unhandled rejection. `.resolves` is the detector: a future change that
+  // drops the try/catch fails this test with an unhandled rejection rather
+  // than a clean assertion failure.
+  it('does NOT throw when getRegistryConnection rejects', { retry: 0 }, async () => {
+    connDb.getRegistryConnection.mockRejectedValue(new Error('decrypt failed'))
+    await expect(logRegistryConnectionState()).resolves.toBeUndefined()
+    expect(logger.rootLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'registry_connection_state_unreadable' }),
+      expect.any(String)
+    )
+  })
+
   it('reports connected for a row holding client credentials', async () => {
     connDb.getRegistryConnection.mockResolvedValue({ status: 'connected', clientId: 'cid' })
     await expect(logRegistryConnectionState()).resolves.toBeUndefined()
