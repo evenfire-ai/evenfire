@@ -167,6 +167,13 @@ describe('registryClient — mintToken derived auth (no envOverride)', () => {
     connDb.resolveMachineCreds.mockResolvedValue(null)
     connDb.isRegistryAuthActive.mockResolvedValue(false)
     await expect(mintToken()).resolves.toBe('') // NO ENV_OVERRIDE — see above
+    // Without this, the assertion above is vacuous: the old env-var-based
+    // implementation also resolves authEnabled=false here (config.registryAuthEnabled
+    // is frozen false at module load in this test env) WITHOUT ever calling
+    // isRegistryAuthActive — so the return-value alone can't tell the derived
+    // path apart from the old, un-refactored one. This call-count assertion fails
+    // under both a full revert and a "hardcoded/ignored accessor" mutation.
+    expect(connDb.isRegistryAuthActive).toHaveBeenCalledTimes(1)
   })
 
   it('throws when auth is active but credentials are unavailable', async () => {
