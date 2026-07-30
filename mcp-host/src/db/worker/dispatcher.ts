@@ -6,7 +6,6 @@
  * worker_threads boilerplate.
  */
 import type { Database } from 'better-sqlite3'
-import { scopedAgentFromSessionPrefix } from '../../core/conversation/sessionKeyParts'
 import { PreparedStatements, prepareStatements } from '../statements'
 import { withBusyRetry } from './busyRetry'
 import type {
@@ -590,7 +589,8 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     case 'load_session_message_page': {
       const sessionRow = s.selectSessionBySessionKey.get(op.sessionKey) as SessionRow | undefined
       if (!sessionRow) return null
-      const limit = op.limit ?? -1
+      const limit =
+        op.limit === undefined ? -1 : Number.isInteger(op.limit) && op.limit > 0 ? op.limit : 0
       const messageRows =
         op.afterTurn !== undefined
           ? s.selectMessagesBySessionTurnsAfter.all({
@@ -656,13 +656,14 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       const prefixEnd = `${prefixCharacters
         .slice(0, -1)
         .join('')}${String.fromCodePoint(finalCodePoint + 1)}`
-      const agentScoped =
-        op.agentScoped === true || scopedAgentFromSessionPrefix(op.sessionKeyPrefix) !== null
+      const agentScoped = op.agentScoped === true
+      const limit =
+        op.limit === undefined ? -1 : Number.isInteger(op.limit) && op.limit > 0 ? op.limit : 0
       const rows = s.selectSessionSummariesByPrefix.all({
         prefix_start: prefixStart,
         prefix_end: prefixEnd,
         agent_scoped: agentScoped ? 1 : 0,
-        limit: op.limit ?? -1,
+        limit,
         cursor_updated_at: op.cursorUpdatedAt ?? null,
         cursor_key: op.cursorKey ?? null,
       }) as Array<

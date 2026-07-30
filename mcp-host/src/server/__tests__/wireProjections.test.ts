@@ -22,6 +22,24 @@ describe('session pagination projections', () => {
       JSON.stringify({ updatedAt: 'not-a-date', key: 'session-1' })
     ).toString('base64url')
     expect(decodeSessionsCursor(invalidDate)).toBeNull()
+    const nonCanonicalDate = Buffer.from(
+      JSON.stringify({
+        version: 1,
+        scope: 'scope-a',
+        updatedAt: '0',
+        key: 'session-1',
+      })
+    ).toString('base64url')
+    expect(decodeSessionsCursor(nonCanonicalDate, 'scope-a')).toBeNull()
+    const emptyKey = Buffer.from(
+      JSON.stringify({
+        version: 1,
+        scope: 'scope-a',
+        updatedAt: '2026-01-03T00:00:00.000Z',
+        key: '',
+      })
+    ).toString('base64url')
+    expect(decodeSessionsCursor(emptyKey, 'scope-a')).toBeNull()
   })
 
   it('rejects legacy and cross-scope cursors', () => {

@@ -116,6 +116,8 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
 
   it.each([
     '/rpc/hosts/chatllm/sessions?limit=1.5',
+    '/rpc/hosts/chatllm/sessions?limit=0x10',
+    '/rpc/hosts/chatllm/sessions?limit=1e2',
     '/rpc/hosts/chatllm/sessions?limit=1&limit=2',
     '/rpc/hosts/chatllm/sessions?cursor=',
     '/rpc/hosts/chatllm/sessions?cursor=one&cursor=two',
@@ -124,7 +126,9 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
     '/rpc/hosts/chatllm/sessions?agent=%20%20',
     '/rpc/hosts/chatllm/sessions?agent=.',
     '/rpc/hosts/chatllm/sessions?agent=agent:other',
+    '/rpc/hosts/chatllm/sessions?agent=agent%0Aother',
     '/rpc/hosts/chat%2Fllm/sessions',
+    '/rpc/hosts/chat%0Allm/sessions',
   ])('rejects malformed session pagination before forwarding upstream: %s', async path => {
     const fetchMock = vi.fn()
     globalThis.fetch = fetchMock as unknown as typeof fetch
@@ -229,8 +233,12 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
 
   it.each([
     '?limit=1.5',
+    '?limit=0x10',
+    '?limit=1e2',
     '?limit=1&limit=2',
     '?beforeTurn=1.5',
+    '?beforeTurn=0x10',
+    '?beforeTurn=1e2',
     '?beforeTurn=1&beforeTurn=2',
     '?afterTurn=1.5',
     '?beforeTurn=2&afterTurn=1',
@@ -254,6 +262,18 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
       .get('/rpc/hosts/chatllm/sessions/agent%3Aother/c1/messages')
       .set('authorization', 'Bearer user-token')
       .expect(400)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    '/rpc/hosts/chatllm/sessions/agent%0Aother/c1/messages',
+    '/rpc/hosts/chatllm/sessions/agent/chat%0Aother/messages',
+  ])('rejects control-bearing transcript route segments: %s', async path => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp()).get(path).set('authorization', 'Bearer user-token').expect(400)
 
     expect(fetchMock).not.toHaveBeenCalled()
   })

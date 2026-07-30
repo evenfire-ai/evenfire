@@ -4,26 +4,12 @@ export interface AgentChatSessionParts {
 }
 
 /**
- * Return the agent embedded in an agent-scoped RPC prefix.
- *
- * Unscoped prefixes end immediately after `:rpc:`. Scoped prefixes append the
- * agent and a trailing colon, for example `user:rpc:agent-a:`.
- */
-export function scopedAgentFromSessionPrefix(prefix: string): string | null {
-  const rpcPrefixIndex = prefix.indexOf(':rpc:')
-  if (rpcPrefixIndex < 0) return null
-  const suffix = prefix.slice(rpcPrefixIndex + ':rpc:'.length)
-  if (!suffix.endsWith(':')) return null
-  const agent = suffix.slice(0, -1)
-  return agent || null
-}
-
-/**
  * Parse a key relative to the exact prefix used to fetch it.
  *
  * For an agent-scoped prefix, the entire suffix is the chat ID. This preserves
- * chat IDs containing colons instead of treating their first segment as
- * another agent name.
+ * chat IDs containing colons instead of treating their first segment as another
+ * agent name. The scoped agent must be explicit because the prefix alone is
+ * ambiguous when a user subject contains `:rpc:` or the agent is named `rpc`.
  */
 export function sessionPartsFromPrefixedKey(
   key: string,
@@ -35,9 +21,6 @@ export function sessionPartsFromPrefixedKey(
   if (!rest) return null
 
   if (scopedAgent) return { agent: scopedAgent, chatId: rest }
-
-  const inferredScopedAgent = scopedAgentFromSessionPrefix(prefix)
-  if (inferredScopedAgent) return { agent: inferredScopedAgent, chatId: rest }
 
   const colonIndex = rest.indexOf(':')
   if (colonIndex <= 0 || colonIndex === rest.length - 1) return null

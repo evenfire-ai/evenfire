@@ -73,13 +73,20 @@ function parseSessionsCursorParam(
   return decodeSessionsCursor(cursor, expectedScope) ? cursor : null
 }
 
+function parseUnsignedIntegerParam(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : null
+}
+
 function isSafeRouteSegment(value: string): boolean {
   return (
     value.length > 0 &&
     value !== '.' &&
     value !== '..' &&
     value.length <= 500 &&
-    !/[/\\\0]/.test(value)
+    !/[/\\\u0000-\u001f\u007f]/.test(value)
   )
 }
 
@@ -1134,8 +1141,8 @@ export async function handleSessionsListRoute(
       badRequest(res, 'Invalid sessions cursor')
       return
     }
-    const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
-    if (req.query.limit !== undefined && (!Number.isInteger(rawLimit) || rawLimit! < 1)) {
+    const rawLimit = parseUnsignedIntegerParam(req.query.limit)
+    if (rawLimit === null || (rawLimit !== undefined && rawLimit < 1)) {
       badRequest(res, 'limit must be a positive integer')
       return
     }
@@ -1219,7 +1226,7 @@ export async function handleSessionMessagesRoute(
     const agent = String(req.params.agent || '').trim()
     const chatId = String(req.params.chatId || '').trim()
     if (!isSafeAgentRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
-      badRequest(res, 'agent and chatId are required')
+      badRequest(res, 'Invalid agent or chatId')
       return
     }
     if (!handlers.sessionMessagesHandler) {
@@ -1233,22 +1240,14 @@ export async function handleSessionMessagesRoute(
       badRequest(res, 'pagination parameters must be specified once')
       return
     }
-    const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
-    const rawBeforeTurn =
-      typeof req.query.beforeTurn === 'string' ? Number(req.query.beforeTurn) : undefined
-    const rawAfterTurn =
-      typeof req.query.afterTurn === 'string' ? Number(req.query.afterTurn) : undefined
-    if (
-      req.query.beforeTurn !== undefined &&
-      (!Number.isInteger(rawBeforeTurn) || rawBeforeTurn! < 1)
-    ) {
+    const rawLimit = parseUnsignedIntegerParam(req.query.limit)
+    const rawBeforeTurn = parseUnsignedIntegerParam(req.query.beforeTurn)
+    const rawAfterTurn = parseUnsignedIntegerParam(req.query.afterTurn)
+    if (rawBeforeTurn === null || (rawBeforeTurn !== undefined && rawBeforeTurn < 1)) {
       badRequest(res, 'beforeTurn must be a positive integer')
       return
     }
-    if (
-      req.query.afterTurn !== undefined &&
-      (!Number.isInteger(rawAfterTurn) || rawAfterTurn! < 0)
-    ) {
+    if (rawAfterTurn === null || (rawAfterTurn !== undefined && rawAfterTurn < 0)) {
       badRequest(res, 'afterTurn must be a non-negative integer')
       return
     }
@@ -1256,7 +1255,7 @@ export async function handleSessionMessagesRoute(
       badRequest(res, 'beforeTurn and afterTurn are mutually exclusive')
       return
     }
-    if (req.query.limit !== undefined && (!Number.isInteger(rawLimit) || rawLimit! < 1)) {
+    if (rawLimit === null || (rawLimit !== undefined && rawLimit < 1)) {
       badRequest(res, 'limit must be a positive integer')
       return
     }

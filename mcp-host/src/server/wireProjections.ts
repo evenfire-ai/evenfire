@@ -23,6 +23,11 @@ export interface SessionsCursor {
   key: string
 }
 
+function isCanonicalIsoTimestamp(value: string): boolean {
+  const milliseconds = Date.parse(value)
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value
+}
+
 export function sessionsCursorScope(userSub: string, agent?: string): string {
   return createHash('sha256')
     .update(JSON.stringify([userSub, agent ?? null]))
@@ -45,10 +50,12 @@ export function decodeSessionsCursor(
     if (
       parsed.version !== 1 ||
       typeof parsed.scope !== 'string' ||
+      parsed.scope.length === 0 ||
       (expectedScope !== undefined && parsed.scope !== expectedScope) ||
       typeof parsed.updatedAt !== 'string' ||
       typeof parsed.key !== 'string' ||
-      !Number.isFinite(Date.parse(parsed.updatedAt))
+      parsed.key.length === 0 ||
+      !isCanonicalIsoTimestamp(parsed.updatedAt)
     ) {
       return null
     }

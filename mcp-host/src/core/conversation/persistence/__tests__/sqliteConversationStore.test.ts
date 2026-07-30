@@ -318,6 +318,7 @@ describe('SqliteConversationStore — session summary listing', () => {
       expect(handle.store['cache'].size()).toBe(0)
 
       const agentPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:agent-x:', {
+        agent: 'agent-x',
         limit: 2,
       })
       expect(agentPage.map(session => [session.agent, session.chatId])).toEqual([
@@ -333,6 +334,7 @@ describe('SqliteConversationStore — session summary listing', () => {
       handle.store['ordinals'].clear()
       handle.store['sessionKeyById'].clear()
       const colonPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:agent-x:', {
+        agent: 'agent-x',
         limit: 10,
       })
       expect(colonPage.find(session => session.key === colonKey)).toMatchObject({
@@ -365,6 +367,49 @@ describe('SqliteConversationStore — session summary listing', () => {
       })
       expect(secondPage.map(session => session.chatId)).toEqual(['chat-1', 'legacy-null'])
       expect(handle.store['cache'].size()).toBe(0)
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it('keeps unscoped parsing stable when the user subject contains :rpc:', async () => {
+    const handle = await freshStore({ cacheSize: 4 })
+    try {
+      const manager = new ConversationManager(handle.store)
+      const userId = 'subject:rpc:embedded'
+      const key = `${userId}:rpc:agent-x:chat-1`
+      const conversation = await manager.getOrCreate(key)
+      await manager.startTurn(conversation, 'hello', 'task-1')
+      await manager.completeTurn(conversation, 'done')
+      await handle.persistQueue.drainSessionKey(key)
+      handle.store['cache'].clear()
+
+      const summaries = await handle.store.listSessionSummariesByPrefix(`${userId}:rpc:`)
+
+      expect(summaries.map(session => [session.agent, session.chatId])).toEqual([
+        ['agent-x', 'chat-1'],
+      ])
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it('fails closed instead of treating unsafe limits as unbounded reads', async () => {
+    const handle = await freshStore({ cacheSize: 4 })
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conversation = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conversation, 'hello', 'task-1')
+      await manager.completeTurn(conversation, 'done')
+      await handle.persistQueue.drainSessionKey(SESSION_KEY)
+      handle.store['cache'].clear()
+
+      await expect(
+        handle.store.listSessionSummariesByPrefix('u-1:rpc:', { limit: -1 })
+      ).resolves.toEqual([])
+      await expect(
+        handle.store.getSessionMessagesByKey(SESSION_KEY, 'u-1:rpc:', { limit: -1 })
+      ).resolves.toMatchObject({ turns: [] })
     } finally {
       await handle.shutdown()
     }

@@ -43,7 +43,7 @@ import {
   type SessionTokenUsage,
   boundedTurns,
 } from '../conversationStore'
-import { scopedAgentFromSessionPrefix, sessionPartsFromPrefixedKey } from '../sessionKeyParts'
+import { sessionPartsFromPrefixedKey } from '../sessionKeyParts'
 import type { PersistQueue } from './persistQueue'
 import { CacheOverflowError, PinnedLRUMap } from './pinnedLruMap'
 import {
@@ -364,7 +364,7 @@ export class SqliteConversationStore implements ConversationStore {
       limit: query.limit,
       cursorUpdatedAt: query.cursor ? query.cursor.updatedAt.getTime() / 1000 : undefined,
       cursorKey: query.cursor?.key,
-      agentScoped: query.agent !== undefined || scopedAgentFromSessionPrefix(prefix) !== null,
+      agentScoped: query.agent !== undefined,
     })
 
     const out: ConversationSessionSummary[] = []

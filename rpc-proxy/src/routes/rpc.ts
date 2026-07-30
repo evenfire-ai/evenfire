@@ -38,12 +38,19 @@ function isSafeUpstreamPathSegment(value: string): boolean {
     value !== '.' &&
     value !== '..' &&
     value.length <= 500 &&
-    !/[/\\\0]/.test(value)
+    !/[/\\\u0000-\u001f\u007f]/.test(value)
   )
 }
 
 function isSafeUpstreamAgentSegment(value: string): boolean {
   return isSafeUpstreamPathSegment(value) && value.length <= 200 && !value.includes(':')
+}
+
+function parseUnsignedIntegerQuery(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : null
 }
 
 /**
@@ -257,7 +264,7 @@ export function createRpcRouter(): Router {
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
         if (!isSafeUpstreamPathSegment(hostRef)) {
-          res.status(400).json({ error: 'hostRef is required' })
+          res.status(400).json({ error: 'Invalid hostRef' })
           return
         }
 
@@ -433,7 +440,7 @@ export function createRpcRouter(): Router {
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
         if (!isSafeUpstreamPathSegment(hostRef)) {
-          res.status(400).json({ error: 'hostRef is required' })
+          res.status(400).json({ error: 'Invalid hostRef' })
           return
         }
 
@@ -653,17 +660,16 @@ export function createRpcRouter(): Router {
           typeof rawSessionAgent === 'string' ? rawSessionAgent.trim() : undefined
         const rawSessionCursor = req.query.cursor
         const sessionCursor = typeof rawSessionCursor === 'string' ? rawSessionCursor : ''
-        const sessionLimit =
-          typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
+        const sessionLimit = parseUnsignedIntegerQuery(req.query.limit)
         if (
           (rawSessionAgent !== undefined && typeof rawSessionAgent !== 'string') ||
           (rawSessionCursor !== undefined && typeof rawSessionCursor !== 'string') ||
-          (req.query.limit !== undefined && typeof req.query.limit !== 'string') ||
           (rawSessionAgent !== undefined &&
             (!sessionAgent || !isSafeUpstreamAgentSegment(sessionAgent))) ||
           (rawSessionCursor !== undefined && !sessionCursor) ||
           sessionCursor.length > 2048 ||
-          (sessionLimit !== undefined && (!Number.isInteger(sessionLimit) || sessionLimit < 1))
+          sessionLimit === null ||
+          (sessionLimit !== undefined && sessionLimit < 1)
         ) {
           res.status(400).json({ error: 'Invalid session pagination query' })
           return
@@ -757,19 +763,20 @@ export function createRpcRouter(): Router {
         const upstreamUrl = new URL(
           `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
         )
-        const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
-        const beforeTurn =
-          typeof req.query.beforeTurn === 'string' ? Number(req.query.beforeTurn) : undefined
-        const afterTurn =
-          typeof req.query.afterTurn === 'string' ? Number(req.query.afterTurn) : undefined
+        const rawLimit = parseUnsignedIntegerQuery(req.query.limit)
+        const beforeTurn = parseUnsignedIntegerQuery(req.query.beforeTurn)
+        const afterTurn = parseUnsignedIntegerQuery(req.query.afterTurn)
         const invalidQueryShape = ['limit', 'beforeTurn', 'afterTurn'].some(
           key => req.query[key] !== undefined && typeof req.query[key] !== 'string'
         )
         if (
           invalidQueryShape ||
-          (rawLimit !== undefined && (!Number.isInteger(rawLimit) || rawLimit < 1)) ||
-          (beforeTurn !== undefined && (!Number.isInteger(beforeTurn) || beforeTurn < 1)) ||
-          (afterTurn !== undefined && (!Number.isInteger(afterTurn) || afterTurn < 0)) ||
+          rawLimit === null ||
+          (rawLimit !== undefined && rawLimit < 1) ||
+          beforeTurn === null ||
+          (beforeTurn !== undefined && beforeTurn < 1) ||
+          afterTurn === null ||
+          (afterTurn !== undefined && afterTurn < 0) ||
           (beforeTurn !== undefined && afterTurn !== undefined)
         ) {
           res.status(400).json({ error: 'Invalid session messages pagination query' })

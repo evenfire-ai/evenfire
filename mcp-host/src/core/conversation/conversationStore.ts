@@ -127,17 +127,25 @@ function afterSessionCursor(
 }
 
 export function boundedTurns(turns: Turn[], query: SessionMessagesQuery = {}): Turn[] {
+  const limit =
+    query.limit === undefined
+      ? undefined
+      : Number.isInteger(query.limit) && query.limit > 0
+        ? query.limit
+        : 0
   const eligibleTurns =
     query.afterTurn !== undefined
       ? turns.filter(turn => turn.number > query.afterTurn!)
       : query.beforeTurn !== undefined
         ? turns.filter(turn => turn.number < query.beforeTurn!)
         : turns
-  return query.limit === undefined
+  return limit === undefined
     ? eligibleTurns
     : query.afterTurn !== undefined
-      ? eligibleTurns.slice(0, query.limit)
-      : eligibleTurns.slice(-query.limit)
+      ? eligibleTurns.slice(0, limit)
+      : limit === 0
+        ? []
+        : eligibleTurns.slice(-limit)
 }
 
 function sessionMessagesFromConversation(
@@ -409,7 +417,13 @@ export class InMemoryConversationStore implements ConversationStore {
     const filtered = summaries
       .filter(summary => afterSessionCursor(summary, query.cursor))
       .sort(compareSessionSummaries)
-    return query.limit === undefined ? filtered : filtered.slice(0, query.limit)
+    const limit =
+      query.limit === undefined
+        ? undefined
+        : Number.isInteger(query.limit) && query.limit > 0
+          ? query.limit
+          : 0
+    return limit === undefined ? filtered : filtered.slice(0, limit)
   }
 
   async getSessionMessagesByKey(

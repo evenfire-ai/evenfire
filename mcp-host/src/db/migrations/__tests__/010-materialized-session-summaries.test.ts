@@ -65,15 +65,39 @@ describe('migration 010 — materialized session summaries', () => {
           WHERE type = 'index'
             AND name IN (
               'idx_sessions_summary_activity',
+              'idx_messages_session_turn_ordinal',
               'idx_messages_session_turn_key_ordinal'
             )
           ORDER BY name`
       )
       .all() as Array<{ name: string }>
     expect(indexes.map(index => index.name)).toEqual([
-      'idx_messages_session_turn_key_ordinal',
+      'idx_messages_session_turn_ordinal',
       'idx_sessions_summary_activity',
     ])
+    const activityIndex = db
+      .prepare(
+        `SELECT sql
+           FROM sqlite_master
+          WHERE type = 'index'
+            AND name = 'idx_sessions_summary_activity'`
+      )
+      .get() as { sql: string }
+    expect(activityIndex.sql).toContain(
+      'COALESCE(last_activity_at, started_at) DESC, session_key ASC'
+    )
+    const activityPlan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT id
+           FROM sessions
+          ORDER BY COALESCE(last_activity_at, started_at) DESC, session_key ASC
+          LIMIT 10`
+      )
+      .all() as Array<{ detail: string }>
+    expect(activityPlan.some(step => step.detail.includes('idx_sessions_summary_activity'))).toBe(
+      true
+    )
     db.close()
   })
 })

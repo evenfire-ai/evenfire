@@ -2,8 +2,8 @@
  * Migration 009 — indexes for paged session-summary catalogs.
  *
  * The desktop session catalog reads sessions by key prefix and projects
- * last-activity/turn-count summaries from messages. Existing databases need the
- * same supporting indexes fresh installs get from migration 001.
+ * last-activity/turn-count summaries from messages. This migration adds the
+ * supporting indexes without changing the already-shipped initial schema.
  */
 import type { Database } from 'better-sqlite3'
 

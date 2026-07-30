@@ -37,17 +37,13 @@ export function up(db: Database): void {
            );
 
     CREATE INDEX IF NOT EXISTS idx_sessions_summary_activity
-      ON sessions(last_activity_at DESC, session_key ASC);
-    CREATE INDEX IF NOT EXISTS idx_messages_session_turn_key_ordinal
-      ON messages(session_id, turn_number, ordinal)
-      WHERE turn_number IS NOT NULL;
+      ON sessions(COALESCE(last_activity_at, started_at) DESC, session_key ASC);
   `)
 }
 
 export function down(db: Database): void {
   db.exec(`
     DROP INDEX IF EXISTS idx_sessions_summary_activity;
-    DROP INDEX IF EXISTS idx_messages_session_turn_key_ordinal;
     ALTER TABLE sessions DROP COLUMN turn_count;
     ALTER TABLE sessions DROP COLUMN last_activity_at;
   `)

@@ -172,11 +172,14 @@ describe('handleSessionsListRoute', () => {
 
   it.each([
     ['fractional limit', { limit: '1.5' }],
+    ['hexadecimal limit', { limit: '0x10' }],
+    ['exponential limit', { limit: '1e2' }],
     ['repeated limit', { limit: ['1', '2'] }],
     ['repeated cursor', { cursor: ['one', 'two'] }],
     ['repeated agent', { agent: ['agent-a', 'agent-b'] }],
     ['dot agent', { agent: '.' }],
     ['colon-bearing agent', { agent: 'agent:other' }],
+    ['control-bearing agent', { agent: 'agent\nother' }],
   ])('rejects %s query input', async (_label, query) => {
     const sessionsListHandler: SessionsListHandler = vi.fn()
     const req = {
@@ -307,10 +310,14 @@ describe('handleSessionMessagesRoute', () => {
     ['beforeTurn', 'abc'],
     ['beforeTurn', '0'],
     ['beforeTurn', '1.5'],
+    ['beforeTurn', '0x10'],
+    ['beforeTurn', '1e2'],
     ['afterTurn', 'abc'],
     ['afterTurn', '-1'],
     ['afterTurn', '1.5'],
     ['limit', '1.5'],
+    ['limit', '0x10'],
+    ['limit', '1e2'],
   ])('rejects malformed %s cursors', async (name, value) => {
     const sessionMessagesHandler: SessionMessagesHandler = vi.fn()
     const req = {
@@ -344,6 +351,8 @@ describe('handleSessionMessagesRoute', () => {
     ['colon-bearing agent', 'agent:other', 'chat-1'],
     ['dot-dot chat id', 'agent', '..'],
     ['separator-bearing chat id', 'agent', 'nested/chat'],
+    ['control-bearing agent', 'agent\nother', 'chat-1'],
+    ['control-bearing chat id', 'agent', 'chat\nother'],
   ])('rejects unsafe %s route segments', async (_label, agent, chatId) => {
     const sessionMessagesHandler: SessionMessagesHandler = vi.fn()
     const req = makeReqWithParams('user-1', agent, chatId)

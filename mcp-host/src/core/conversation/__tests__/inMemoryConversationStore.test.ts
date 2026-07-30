@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { Conversation, ConversationState } from '../../types'
-import { InMemoryConversationStore } from '../conversationStore'
+import { InMemoryConversationStore, boundedTurns } from '../conversationStore'
 
 function makeConversation(userId: string): Conversation {
   return {
@@ -140,7 +140,9 @@ describe('InMemoryConversationStore', () => {
       store.set('u-1:rpc:agent-x:chat-1', makeConversation('u-1'))
       store.set('u-1:rpc:agent-y:chat-2', makeConversation('u-1'))
 
-      const summaries = await store.listSessionSummariesByPrefix('u-1:rpc:agent-x:')
+      const summaries = await store.listSessionSummariesByPrefix('u-1:rpc:agent-x:', {
+        agent: 'agent-x',
+      })
 
       expect(summaries.map(session => [session.agent, session.chatId])).toEqual([
         ['agent-x', 'chat-1'],
@@ -150,7 +152,9 @@ describe('InMemoryConversationStore', () => {
     it('preserves colons in chat ids under an agent-scoped prefix', async () => {
       store.set('u-1:rpc:agent-x:chat:with:colons', makeConversation('u-1'))
 
-      const summaries = await store.listSessionSummariesByPrefix('u-1:rpc:agent-x:')
+      const summaries = await store.listSessionSummariesByPrefix('u-1:rpc:agent-x:', {
+        agent: 'agent-x',
+      })
 
       expect(summaries.map(session => [session.agent, session.chatId])).toEqual([
         ['agent-x', 'chat:with:colons'],
@@ -165,6 +169,17 @@ describe('InMemoryConversationStore', () => {
       })
 
       expect(summaries.map(session => [session.agent, session.chatId])).toEqual([['rpc', 'chat-1']])
+    })
+
+    it('parses an unscoped prefix when the user subject contains :rpc:', async () => {
+      const userId = 'subject:rpc:embedded'
+      store.set(`${userId}:rpc:agent-x:chat-1`, makeConversation(userId))
+
+      const summaries = await store.listSessionSummariesByPrefix(`${userId}:rpc:`)
+
+      expect(summaries.map(session => [session.agent, session.chatId])).toEqual([
+        ['agent-x', 'chat-1'],
+      ])
     })
 
     it('counts user and assistant bubbles without counting tool storage rows', async () => {
@@ -186,6 +201,15 @@ describe('InMemoryConversationStore', () => {
       const [summary] = await store.listSessionSummariesByPrefix('u-1:rpc:')
 
       expect(summary?.messageCount).toBe(2)
+    })
+  })
+
+  describe('boundedTurns', () => {
+    const turns = [makeTurn(1), makeTurn(2), makeTurn(3)]
+
+    it.each([0, -1, 1.5])('returns no turns for an unsafe limit of %s', limit => {
+      expect(boundedTurns(turns, { limit })).toEqual([])
+      expect(boundedTurns(turns, { limit, afterTurn: 0 })).toEqual([])
     })
   })
 
