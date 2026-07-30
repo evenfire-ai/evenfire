@@ -10,6 +10,7 @@ vi.mock('../../lib/api', () => ({
   listRegistryApiKeys: vi.fn(),
   createRegistryApiKey: vi.fn(),
   revokeRegistryApiKey: vi.fn(),
+  getRegistryConnection: vi.fn(),
 }))
 
 vi.mock('../ConfirmDialog', () => ({
@@ -68,15 +69,38 @@ describe('RegistryApiKeysPanel', () => {
     expect(await screen.findByText(/not bound to a registry org/i)).toBeInTheDocument()
   })
 
-  it('shows guidance to connect the registry on 409 registry_auth_disabled', async () => {
+  // self-hosted: getRegistryConnection() resolves (it's only a 409 in managed).
+  // Regression guard: the old env-var copy must NOT reappear on this branch —
+  // scoped to self-hosted only, since the managed branch below legitimately
+  // shows CLERUM_REGISTRY_AUTH_ENABLED again.
+  it('self-hosted + 409 registry_auth_disabled → shows connect guidance, no env-var copy', async () => {
     vi.mocked(api.listRegistryApiKeys).mockRejectedValue(
       Object.assign(new Error('x'), { status: 409, code: 'registry_auth_disabled' })
     )
+    vi.mocked(api.getRegistryConnection).mockResolvedValue({ state: 'disconnected' })
     render(<RegistryApiKeysPanel />)
     expect(
       await screen.findByText(/API keys become available once this deployment is connected/i)
     ).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /connect to evenfire registry/i })).toBeInTheDocument()
+    expect(screen.queryByText(/CLERUM_REGISTRY_AUTH_ENABLED/)).toBeNull()
+  })
+
+  // managed: getRegistryConnection() 409s not_self_hosted (RegistryCatalog's own
+  // mode-detection convention). Managed has no connect flow, so the banner must
+  // point at the env var instead, and never link to the connect panel — that
+  // panel tells a managed deployment there's nothing to configure (dead end).
+  it('managed + 409 registry_auth_disabled → shows env-var guidance, no connect link', async () => {
+    vi.mocked(api.listRegistryApiKeys).mockRejectedValue(
+      Object.assign(new Error('x'), { status: 409, code: 'registry_auth_disabled' })
+    )
+    vi.mocked(api.getRegistryConnection).mockRejectedValue(
+      Object.assign(new Error('x'), { code: 'not_self_hosted' })
+    )
+    render(<RegistryApiKeysPanel />)
+    expect(await screen.findByText(/CLERUM_REGISTRY_AUTH_ENABLED/)).toBeInTheDocument()
+    expect(screen.getByText(/an operator must enable it/i)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /connect to evenfire registry/i })).toBeNull()
   })
 
   it('on create success, shows the reveal modal then refetches', async () => {

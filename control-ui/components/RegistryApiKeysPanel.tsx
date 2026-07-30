@@ -7,6 +7,7 @@ import {
   type CreatedRegistryApiKey,
   type RegistryApiKey,
   createRegistryApiKey,
+  getRegistryConnection,
   listRegistryApiKeys,
   revokeRegistryApiKey,
 } from '../lib/api'
@@ -54,6 +55,16 @@ export default function RegistryApiKeysPanel() {
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [creating, setCreating] = useState(false)
   const [revealed, setRevealed] = useState<string | null>(null)
+  // The auth-disabled view needs mode-specific copy: self-hosted fixes it by
+  // connecting, managed fixes it via CLERUM_REGISTRY_AUTH_ENABLED (no connect
+  // flow exists there). Same best-effort detection RegistryCatalog uses for its
+  // Connect button — getRegistryConnection() 409s not_self_hosted in managed
+  // mode. Fail-open to 'self-hosted' (treat 'unknown' like RegistryCatalog does
+  // via its `!== 'managed'` check) since a transient error here is far more
+  // likely than a real managed deployment misreporting its own mode.
+  const [connectionMode, setConnectionMode] = useState<'self-hosted' | 'managed' | 'unknown'>(
+    'unknown'
+  )
 
   const load = useCallback(async () => {
     try {
@@ -71,9 +82,19 @@ export default function RegistryApiKeysPanel() {
     }
   }, [])
 
+  const loadConnectionMode = useCallback(async () => {
+    try {
+      await getRegistryConnection()
+      setConnectionMode('self-hosted')
+    } catch (e) {
+      setConnectionMode((e as { code?: string }).code === 'not_self_hosted' ? 'managed' : 'unknown')
+    }
+  }, [])
+
   useEffect(() => {
     void load()
-  }, [load])
+    void loadConnectionMode()
+  }, [load, loadConnectionMode])
 
   async function handleCreate(input: CreateRegistryApiKeyInput) {
     const created: CreatedRegistryApiKey = await createRegistryApiKey(input)
@@ -138,8 +159,18 @@ export default function RegistryApiKeysPanel() {
           ) : null}
           {view.kind === 'auth-disabled' ? (
             <p className="cu-banner cu-banner--info">
-              API keys become available once this deployment is connected to the registry.{' '}
-              <a href={CONTROL_ROUTES.marketplace.connect}>Connect to Evenfire Registry</a>.
+              {connectionMode === 'managed' ? (
+                <>
+                  Registry authentication for this deployment is controlled by{' '}
+                  <code>CLERUM_REGISTRY_AUTH_ENABLED</code>. An operator must enable it and restart
+                  control-api before API keys can be created here.
+                </>
+              ) : (
+                <>
+                  API keys become available once this deployment is connected to the registry.{' '}
+                  <a href={CONTROL_ROUTES.marketplace.connect}>Connect to Evenfire Registry</a>.
+                </>
+              )}
             </p>
           ) : null}
           {view.kind === 'error' ? (
