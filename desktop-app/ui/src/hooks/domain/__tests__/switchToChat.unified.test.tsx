@@ -299,6 +299,16 @@ describe('switchToChat (unified, D.4)', () => {
     expect(result.current.chatMessages.map(message => message.id)).toEqual([
       'turn-1-user',
       'turn-1-assistant',
+      'turn-2-user',
+      'turn-2-assistant',
+      'turn-3-user',
+      'turn-3-assistant',
+      'turn-4-user',
+      'turn-4-assistant',
+      'turn-5-user',
+      'turn-5-assistant',
+      'turn-6-user',
+      'turn-6-assistant',
       'turn-999-user',
       'turn-999-assistant',
     ])
@@ -306,7 +316,10 @@ describe('switchToChat (unified, D.4)', () => {
     expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
       'agent-x',
       'delta-cap',
-      expect.arrayContaining([expect.objectContaining({ id: 'turn-999-assistant' })]),
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'turn-2-user' }),
+        expect.objectContaining({ id: 'turn-999-assistant' }),
+      ]),
       {
         activeTaskIds: undefined,
         replaceLocalWindow: true,
@@ -412,6 +425,102 @@ describe('switchToChat (unified, D.4)', () => {
     )
     expect(result.current.chatMessages.map(message => message.id)).toContain('turn-920-user')
     expect(result.current.hasOlderMessages).toBe(true)
+  })
+
+  it('skips an unfillable server-turn gap after a no-progress older-page response', async () => {
+    const serverTurn = (n: number) => ({
+      number: n,
+      user_input: `q${n}`,
+      response: `a${n}`,
+      started_at: '2026-05-28T10:00:00Z',
+      completed_at: '2026-05-28T10:00:05Z',
+    })
+    clerum.chat.loadMessages.mockResolvedValue([])
+    clerum.rpc.loadSessionMessages.mockImplementation(
+      async (
+        _hostRef: string,
+        _agent: string,
+        chatId: string,
+        _teamId?: string,
+        query?: { beforeTurn?: number; limit?: number }
+      ) => {
+        if (query?.beforeTurn === 61) {
+          return {
+            agent: 'agent-x',
+            chatId,
+            state: 'idle',
+            totalTurns: 99,
+            oldestTurnNumber: 58,
+            latestTurnNumber: 60,
+            hasMoreBefore: true,
+            hasMoreAfter: true,
+            turns: [58, 59, 60].map(serverTurn),
+          }
+        }
+        if (query?.beforeTurn === 58) {
+          return {
+            agent: 'agent-x',
+            chatId,
+            state: 'idle',
+            totalTurns: 99,
+            oldestTurnNumber: 17,
+            latestTurnNumber: 56,
+            hasMoreBefore: true,
+            hasMoreAfter: true,
+            turns: Array.from({ length: 40 }, (_, index) => serverTurn(17 + index)),
+          }
+        }
+        if (query?.beforeTurn === 17) {
+          return {
+            agent: 'agent-x',
+            chatId,
+            state: 'idle',
+            totalTurns: 99,
+            oldestTurnNumber: 1,
+            latestTurnNumber: 16,
+            hasMoreBefore: false,
+            hasMoreAfter: true,
+            turns: Array.from({ length: 16 }, (_, index) => serverTurn(1 + index)),
+          }
+        }
+        return {
+          agent: 'agent-x',
+          chatId,
+          state: 'idle',
+          totalTurns: 99,
+          oldestTurnNumber: 61,
+          latestTurnNumber: 100,
+          hasMoreBefore: true,
+          hasMoreAfter: false,
+          turns: Array.from({ length: 40 }, (_, index) => serverTurn(61 + index)),
+        }
+      }
+    )
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'missing-turn-gap')
+    })
+    await act(async () => {
+      await result.current.handleLoadOlderMessages()
+    })
+    await act(async () => {
+      await result.current.handleLoadOlderMessages()
+    })
+    await act(async () => {
+      await result.current.handleLoadOlderMessages()
+    })
+    await act(async () => {
+      await result.current.handleLoadOlderMessages()
+    })
+
+    const beforeTurns = clerum.rpc.loadSessionMessages.mock.calls
+      .map(call => (call[4] as { beforeTurn?: number } | undefined)?.beforeTurn)
+      .filter((turn): turn is number => turn !== undefined)
+    expect(beforeTurns).toEqual([61, 58, 58, 17])
+    expect(result.current.chatMessages.map(message => message.id)).toContain('turn-1-user')
+    expect(result.current.hasOlderMessages).toBe(false)
   })
 
   it('loads older history on demand and prepends it without blocking first render', async () => {

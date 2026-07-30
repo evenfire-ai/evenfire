@@ -280,6 +280,19 @@ describe('SqliteConversationStore — session summary listing', () => {
       handle.store['ordinals'].clear()
       handle.store['sessionKeyById'].clear()
 
+      handle.worker.db
+        .prepare(
+          `INSERT INTO sessions (id, session_key, source, user_id, started_at, last_activity_at)
+           VALUES (?, ?, 'rpc', ?, ?, ?)`
+        )
+        .run('degenerate-newest', 'u-1:rpc::bad', 'u-1', 399, 400)
+      handle.worker.db
+        .prepare(
+          `INSERT INTO sessions (id, session_key, source, user_id, started_at, last_activity_at)
+           VALUES (?, ?, 'rpc', ?, ?, NULL)`
+        )
+        .run('legacy-null-activity', 'u-1:rpc:agent-z:legacy-null', 'u-1', 50)
+
       const firstPage = await handle.store.listSessionSummariesByPrefix('u-1:rpc:', { limit: 2 })
       expect(firstPage.map(session => session.chatId)).toEqual(['chat-3', 'chat-2'])
       expect(firstPage[0]).toMatchObject({
@@ -350,7 +363,7 @@ describe('SqliteConversationStore — session summary listing', () => {
           key: firstPage[1]!.key,
         },
       })
-      expect(secondPage.map(session => session.chatId)).toEqual(['chat-1'])
+      expect(secondPage.map(session => session.chatId)).toEqual(['chat-1', 'legacy-null'])
       expect(handle.store['cache'].size()).toBe(0)
     } finally {
       await handle.shutdown()
@@ -383,6 +396,55 @@ describe('SqliteConversationStore — session summary listing', () => {
       expect(page?.turns.map(turn => turn.user_input)).toEqual(['user 3', 'user 4'])
       expect(page?.turns.map(turn => turn.response)).toEqual(['assistant 3', 'assistant 4'])
       expect(handle.store['cache'].size()).toBe(0)
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it('does not expose legacy NULL turn rows as synthetic turn zero on cold reads', async () => {
+    const handle = await freshStore({ cacheSize: 4 })
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      for (let turn = 1; turn <= 3; turn += 1) {
+        await manager.startTurn(conv, `user ${turn}`, `task-${turn}`)
+        await manager.completeTurn(conv, `assistant ${turn}`)
+      }
+      await handle.persistQueue.drainSessionKey(SESSION_KEY)
+      handle.worker.db
+        .prepare(
+          `INSERT INTO messages (session_id, ordinal, role, content, timestamp, turn_number)
+           VALUES (?, ?, 'user', 'legacy turnless row', ?, NULL)`
+        )
+        .run(conv.id, 99, 99)
+      handle.worker.db
+        .prepare(
+          `UPDATE sessions
+              SET last_activity_at = COALESCE(
+                    (SELECT MAX(timestamp) FROM messages WHERE session_id = ?),
+                    started_at
+                  ),
+                  turn_count = (
+                    SELECT COUNT(DISTINCT turn_number)
+                      FROM messages
+                     WHERE session_id = ?
+                       AND turn_number IS NOT NULL
+                  )
+            WHERE id = ?`
+        )
+        .run(conv.id, conv.id, conv.id)
+      handle.store['cache'].clear()
+      handle.store['ordinals'].clear()
+      handle.store['sessionKeyById'].clear()
+
+      const messages = await handle.store.getSessionMessagesByKey(SESSION_KEY, 'u-1:rpc:', {
+        limit: 10,
+      })
+
+      expect(messages?.totalTurns).toBe(3)
+      expect(messages?.firstTurnNumber).toBe(1)
+      expect(messages?.lastTurnNumber).toBe(3)
+      expect(messages?.turns.map(turn => turn.number)).toEqual([1, 2, 3])
     } finally {
       await handle.shutdown()
     }

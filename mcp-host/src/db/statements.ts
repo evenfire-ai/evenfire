@@ -212,9 +212,10 @@ export function prepareStatements(db: Database): PreparedStatements {
                started_at
              ),
              turn_count = (
-               SELECT COUNT(DISTINCT COALESCE(turn_number, 0))
+               SELECT COUNT(DISTINCT turn_number)
                  FROM messages
                 WHERE session_id = @id
+                  AND turn_number IS NOT NULL
              ),
              message_count = (
                SELECT COUNT(*)
@@ -244,18 +245,19 @@ export function prepareStatements(db: Database): PreparedStatements {
              OR
              (
                @agent_scoped = 0
-               AND instr(substr(session_key, length(@prefix_start) + 1), ':') > 0
+               AND instr(substr(session_key, length(@prefix_start) + 1), ':') > 1
+               AND substr(session_key, -1) <> ':'
              )
            )
            AND (
              @cursor_updated_at IS NULL
-             OR last_activity_at < @cursor_updated_at
+             OR COALESCE(last_activity_at, started_at) < @cursor_updated_at
              OR (
-               last_activity_at = @cursor_updated_at
+               COALESCE(last_activity_at, started_at) = @cursor_updated_at
                AND session_key > @cursor_key
              )
            )
-         ORDER BY last_activity_at DESC, session_key ASC
+         ORDER BY COALESCE(last_activity_at, started_at) DESC, session_key ASC
          LIMIT @limit
       ),
       ranked_approvals AS (
@@ -270,7 +272,7 @@ export function prepareStatements(db: Database): PreparedStatements {
           JOIN scoped_sessions s ON s.id = pa.session_id
       )
       SELECT s.*,
-             s.last_activity_at AS summary_last_activity_at,
+             COALESCE(s.last_activity_at, s.started_at) AS summary_last_activity_at,
              COALESCE(s.turn_count, 0) AS summary_turn_count,
              pa.request_id AS pending_request_id,
              pa.tool_name AS pending_tool_name
@@ -281,60 +283,64 @@ export function prepareStatements(db: Database): PreparedStatements {
        ORDER BY summary_last_activity_at DESC, s.session_key ASC
     `),
     selectSessionTurnBounds: db.prepare(`
-      SELECT MIN(COALESCE(turn_number, 0)) AS first_turn_number,
-             MAX(COALESCE(turn_number, 0)) AS last_turn_number
+      SELECT MIN(turn_number) AS first_turn_number,
+             MAX(turn_number) AS last_turn_number
         FROM messages
        WHERE session_id = ?
+         AND turn_number IS NOT NULL
     `),
     selectMessagesBySessionNewestTurns: db.prepare(`
       WITH selected_turns AS (
-        SELECT COALESCE(turn_number, 0) AS turn_number
+        SELECT turn_number
           FROM messages
          WHERE session_id = @session_id
-         GROUP BY COALESCE(turn_number, 0)
+           AND turn_number IS NOT NULL
+         GROUP BY turn_number
          ORDER BY turn_number DESC
          LIMIT @limit
       )
       SELECT m.*
         FROM messages m
         JOIN selected_turns st
-          ON COALESCE(m.turn_number, 0) = st.turn_number
+          ON m.turn_number = st.turn_number
        WHERE m.session_id = @session_id
-       ORDER BY COALESCE(m.turn_number, 0) ASC, m.ordinal ASC
+       ORDER BY m.turn_number ASC, m.ordinal ASC
     `),
     selectMessagesBySessionTurnsBefore: db.prepare(`
       WITH selected_turns AS (
-        SELECT COALESCE(turn_number, 0) AS turn_number
+        SELECT turn_number
           FROM messages
          WHERE session_id = @session_id
-           AND COALESCE(turn_number, 0) < @before_turn
-         GROUP BY COALESCE(turn_number, 0)
+           AND turn_number IS NOT NULL
+           AND turn_number < @before_turn
+         GROUP BY turn_number
          ORDER BY turn_number DESC
          LIMIT @limit
       )
       SELECT m.*
         FROM messages m
         JOIN selected_turns st
-          ON COALESCE(m.turn_number, 0) = st.turn_number
+          ON m.turn_number = st.turn_number
        WHERE m.session_id = @session_id
-       ORDER BY COALESCE(m.turn_number, 0) ASC, m.ordinal ASC
+       ORDER BY m.turn_number ASC, m.ordinal ASC
     `),
     selectMessagesBySessionTurnsAfter: db.prepare(`
       WITH selected_turns AS (
-        SELECT COALESCE(turn_number, 0) AS turn_number
+        SELECT turn_number
           FROM messages
          WHERE session_id = @session_id
-           AND COALESCE(turn_number, 0) > @after_turn
-         GROUP BY COALESCE(turn_number, 0)
+           AND turn_number IS NOT NULL
+           AND turn_number > @after_turn
+         GROUP BY turn_number
          ORDER BY turn_number ASC
          LIMIT @limit
       )
       SELECT m.*
         FROM messages m
         JOIN selected_turns st
-          ON COALESCE(m.turn_number, 0) = st.turn_number
+          ON m.turn_number = st.turn_number
        WHERE m.session_id = @session_id
-       ORDER BY COALESCE(m.turn_number, 0) ASC, m.ordinal ASC
+       ORDER BY m.turn_number ASC, m.ordinal ASC
     `),
 
     insertMessage: db.prepare(`

@@ -104,7 +104,14 @@ describe('mergeAuthoritativeServerMessages', () => {
       { activeTaskIds: new Set(['task-2']) }
     )
 
-    expect(merged.map(message => message.id)).toEqual(['turn-1-user', 'optimistic-task-2'])
+    expect(merged).toEqual([
+      expect.objectContaining({ id: 'turn-1-user' }),
+      expect.objectContaining({
+        id: 'turn-2-user',
+        content: 'second',
+        task_id: 'task-2',
+      }),
+    ])
   })
 
   it('replaces a turnless echo after the previous numbered turn', () => {
@@ -357,7 +364,7 @@ describe('mergeAuthoritativeServerMessages', () => {
     )
     expect(
       merged
-        .filter(message => (message.serverTurnNumber ?? 0) <= 4)
+        .filter(message => message.serverTurnNumber !== undefined && message.serverTurnNumber <= 4)
         .flatMap(message => [message.task_id, message.attachments])
         .filter(Boolean)
     ).toEqual([])
@@ -430,7 +437,7 @@ describe('mergeAuthoritativeServerMessages', () => {
 
     expect(
       merged
-        .filter(message => (message.serverTurnNumber ?? 0) <= 4)
+        .filter(message => message.serverTurnNumber !== undefined && message.serverTurnNumber <= 4)
         .flatMap(message => [message.task_id, message.attachments])
         .filter(Boolean)
     ).toEqual([])
@@ -442,6 +449,317 @@ describe('mergeAuthoritativeServerMessages', () => {
           attachmentId: message.attachments?.[0]?.id,
         }))
     ).toEqual([{ taskId: 'task-5', attachmentId: 'upload-5' }])
+  })
+
+  it('preserves local-only failed sends that the server never accepted', () => {
+    const failedPrompt: ChatMessage = {
+      id: 'failed-post-user',
+      role: 'user',
+      content: 'this prompt never reached the server',
+      timestamp: 3,
+      preserveLocal: true,
+    }
+
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'turn-1-user',
+          role: 'user',
+          content: 'q1',
+          timestamp: 1,
+          serverTurnNumber: 1,
+        },
+        {
+          id: 'turn-1-assistant',
+          role: 'assistant',
+          content: 'a1',
+          timestamp: 2,
+          serverTurnNumber: 1,
+        },
+        failedPrompt,
+      ],
+      turnsToChatMessages([
+        {
+          number: 1,
+          user_input: 'q1',
+          response: 'a1',
+          started_at: new Date(1).toISOString(),
+        },
+        {
+          number: 2,
+          user_input: 'server-only q2',
+          response: 'server-only a2',
+          started_at: new Date(2).toISOString(),
+        },
+      ])
+    )
+
+    expect(merged).toContainEqual(failedPrompt)
+  })
+
+  it('does not delete numbered local slots that the server window did not supply', () => {
+    const existing = turnsToChatMessages(
+      [3, 4, 5].map(number => ({
+        number,
+        user_input: `q${number}`,
+        response: `a${number}`,
+        started_at: new Date(number).toISOString(),
+      }))
+    )
+    const incoming = turnsToChatMessages(
+      [3, 5].map(number => ({
+        number,
+        user_input: `server q${number}`,
+        response: `server a${number}`,
+        started_at: new Date(number + 10).toISOString(),
+      }))
+    )
+
+    const merged = mergeAuthoritativeServerMessages(existing, incoming)
+
+    expect(merged.map(message => message.id)).toEqual([
+      'turn-3-user',
+      'turn-3-assistant',
+      'turn-4-user',
+      'turn-4-assistant',
+      'turn-5-user',
+      'turn-5-assistant',
+    ])
+    expect(
+      merged.filter(message => message.serverTurnNumber === 4).map(message => message.content)
+    ).toEqual(['q4', 'a4'])
+  })
+
+  it('preserves a local assistant when the server supplies only the user slot', () => {
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'turn-9-user-local',
+          role: 'user',
+          content: 'local q9',
+          timestamp: 1,
+          serverTurnNumber: 9,
+        },
+        {
+          id: 'turn-9-assistant-local',
+          role: 'assistant',
+          content: 'local a9',
+          timestamp: 2,
+          serverTurnNumber: 9,
+        },
+      ],
+      [
+        {
+          id: 'turn-9-user',
+          role: 'user',
+          content: 'server q9',
+          timestamp: 3,
+          serverTurnNumber: 9,
+        },
+      ]
+    )
+
+    expect(merged.map(message => message.id)).toEqual(['turn-9-user', 'turn-9-assistant-local'])
+    expect(merged[1]?.content).toBe('local a9')
+  })
+
+  it('does not let an active-task claim leak stale metadata onto another server turn', () => {
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'live-optimistic',
+          role: 'user',
+          content: 'live prompt',
+          timestamp: 1,
+          task_id: 'live',
+        },
+        {
+          id: 'stale-echo-turn4',
+          role: 'user',
+          content: 'stale turn 4',
+          timestamp: 2,
+          task_id: 'task-4',
+          attachments: [
+            {
+              id: 'photo-4',
+              type: 'uploaded_file',
+              label: 'photo-4.png',
+            },
+          ],
+        },
+      ],
+      [
+        {
+          id: 'turn-4-user',
+          role: 'user',
+          content: 'server turn 4',
+          timestamp: 4,
+          serverTurnNumber: 4,
+        },
+        {
+          id: 'turn-5-user',
+          role: 'user',
+          content: 'server turn 5',
+          timestamp: 5,
+          serverTurnNumber: 5,
+        },
+      ],
+      { activeTaskIds: new Set(['live']) }
+    )
+
+    const turnFive = merged.find(message => message.id === 'turn-5-user')
+    expect(turnFive?.task_id).toBeUndefined()
+    expect(turnFive?.attachments).toBeUndefined()
+  })
+
+  it('keeps active-task reconciliation idempotent when a same-turn neighbor appears', () => {
+    const existing: ChatMessage[] = [
+      {
+        id: 'turn-1-user',
+        role: 'user',
+        content: 'q1',
+        timestamp: 1,
+        serverTurnNumber: 1,
+      },
+      {
+        id: 'turn-1-assistant',
+        role: 'assistant',
+        content: 'a1',
+        timestamp: 2,
+        serverTurnNumber: 1,
+      },
+      {
+        id: 'optimistic-user',
+        role: 'user',
+        content: 'q3',
+        timestamp: 3,
+        task_id: 'live',
+      },
+    ]
+    const incoming = turnsToChatMessages([
+      {
+        number: 3,
+        user_input: 'q3',
+        response: 'a3',
+        started_at: new Date(3).toISOString(),
+      },
+      {
+        number: 4,
+        user_input: 'q4',
+        response: 'a4',
+        started_at: new Date(4).toISOString(),
+      },
+    ])
+
+    const firstPass = mergeAuthoritativeServerMessages(existing, incoming, {
+      activeTaskIds: new Set(['live']),
+    })
+    const secondPass = mergeAuthoritativeServerMessages(firstPass, incoming, {
+      activeTaskIds: new Set(['live']),
+    })
+
+    expect(secondPass.map(message => message.id)).toEqual(firstPass.map(message => message.id))
+    expect(secondPass.filter(message => message.id === 'turn-3-user')).toHaveLength(1)
+  })
+
+  it('keeps authoritative turns through a renderer/main double merge with active tasks', () => {
+    const existing: ChatMessage[] = [
+      {
+        id: 'turn-2-user',
+        role: 'user',
+        content: 'q2',
+        timestamp: 1,
+        serverTurnNumber: 2,
+      },
+      {
+        id: 'turn-2-assistant',
+        role: 'assistant',
+        content: 'a2',
+        timestamp: 2,
+        serverTurnNumber: 2,
+      },
+      {
+        id: 'turn-4-user',
+        role: 'user',
+        content: 'q4',
+        timestamp: 4,
+        serverTurnNumber: 4,
+      },
+      {
+        id: 'optimistic-user',
+        role: 'user',
+        content: 'live q5',
+        timestamp: 5,
+        task_id: 'live',
+      },
+      {
+        id: 'optimistic-assistant',
+        role: 'assistant',
+        content: 'working',
+        timestamp: 6,
+        task_id: 'live',
+      },
+    ]
+    const serverWindow = turnsToChatMessages(
+      [3, 4, 5, 6].map(number => ({
+        number,
+        user_input: `q${number}`,
+        response: `a${number}`,
+        started_at: new Date(number).toISOString(),
+      }))
+    )
+
+    const rendered = mergeAuthoritativeServerMessages(existing, serverWindow, {
+      activeTaskIds: new Set(['live']),
+    })
+    const persisted = mergeAuthoritativeServerMessages(existing, rendered, {
+      activeTaskIds: new Set(['live']),
+    })
+
+    expect(persisted.map(message => message.id)).toContain('turn-6-user')
+    expect(persisted.map(message => message.id)).toContain('turn-6-assistant')
+  })
+
+  it('reinjects turnless incoming messages that are present only in the replacement window', () => {
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'turn-1-user',
+          role: 'user',
+          content: 'q1',
+          timestamp: 1,
+          serverTurnNumber: 1,
+        },
+      ],
+      [
+        {
+          id: 'turn-1-user',
+          role: 'user',
+          content: 'q1',
+          timestamp: 1,
+          serverTurnNumber: 1,
+        },
+        {
+          id: 'turn-2-user',
+          role: 'user',
+          content: 'q2',
+          timestamp: 2,
+          serverTurnNumber: 2,
+        },
+        {
+          id: 'local-only-note',
+          role: 'assistant',
+          content: 'local note',
+          timestamp: 3,
+        },
+      ]
+    )
+
+    expect(merged.map(message => message.id)).toEqual([
+      'turn-1-user',
+      'turn-2-user',
+      'local-only-note',
+    ])
   })
 
   it('places a server response after the active optimistic prompt for that turn', () => {

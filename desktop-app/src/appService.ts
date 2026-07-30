@@ -7,6 +7,7 @@ import {
   config,
   deleteDesktopRuntimeConfigOption,
   getActiveEnvKey,
+  getActiveLegacyRestOnlyEnvKey,
   getDesktopRuntimeConfigState,
   hydrateDesktopRuntimeConfig,
   isDesktopRuntimeConfigured,
@@ -557,10 +558,12 @@ export class AppService {
     const restoreGeneration = this.sessionGeneration
     hydrateDesktopRuntimeConfig()
     const envKey = getActiveEnvKey()
+    const legacyEnvKey = getActiveLegacyRestOnlyEnvKey()
+    const legacyEnvKeys = legacyEnvKey !== envKey ? [legacyEnvKey] : []
     this.savedSessionRestoreAttemptedEnvKey = envKey
     let token: string | null
     try {
-      token = await this.tokenStore.getSessionToken(envKey)
+      token = await this.tokenStore.getSessionToken(envKey, { legacyEnvKeys })
     } catch (error) {
       console.warn('[AppService] Failed to read the saved session token:', error)
       if (this.sessionGeneration === restoreGeneration) {
@@ -585,10 +588,10 @@ export class AppService {
       if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
         return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
       }
-      await bindChatStoreForUser(restoredMe.id, envKey)
+      await bindChatStoreForUser(restoredMe.id, envKey, { legacyEnvKeys })
       if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
         if (this.me) {
-          await bindChatStoreForUser(this.me.id, getActiveEnvKey())
+          await bindChatStoreForUser(this.me.id, getActiveEnvKey(), { legacyEnvKeys })
         } else {
           unbindChatStore()
         }

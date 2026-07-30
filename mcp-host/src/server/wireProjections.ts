@@ -95,7 +95,7 @@ export function paginateSessionSummaries<T extends { key: string; lastActivityAt
 export function projectMessageWindowBounds(
   turns: Array<{ number: number }>,
   bounds: { firstTurnNumber?: number; lastTurnNumber?: number },
-  query: { beforeTurn?: number; afterTurn?: number }
+  _query: { beforeTurn?: number; afterTurn?: number }
 ) {
   const oldestTurnNumber = turns[0]?.number
   const latestTurnNumber = turns.at(-1)?.number
@@ -104,14 +104,12 @@ export function projectMessageWindowBounds(
     latestTurnNumber,
     hasMoreBefore:
       bounds.firstTurnNumber !== undefined &&
-      (oldestTurnNumber !== undefined
-        ? oldestTurnNumber > bounds.firstTurnNumber
-        : query.afterTurn !== undefined),
+      oldestTurnNumber !== undefined &&
+      oldestTurnNumber > bounds.firstTurnNumber,
     hasMoreAfter:
       bounds.lastTurnNumber !== undefined &&
-      (latestTurnNumber !== undefined
-        ? latestTurnNumber < bounds.lastTurnNumber
-        : query.beforeTurn !== undefined),
+      latestTurnNumber !== undefined &&
+      latestTurnNumber < bounds.lastTurnNumber,
   }
 }
 

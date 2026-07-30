@@ -137,18 +137,36 @@ function sortedUniqueServerTurnNumbers(messages: AgentChatMessage[]): number[] {
   ).sort((left, right) => left - right)
 }
 
-function firstServerTurnGapUpperBound(messages: AgentChatMessage[]): number | undefined {
+function mergeUniqueSessionTurns(
+  ...turnPages: Array<SessionMessagesResult['turns']>
+): SessionMessagesResult['turns'] {
+  const byNumber = new Map<number, SessionMessagesResult['turns'][number]>()
+  for (const turns of turnPages) {
+    for (const turn of turns) {
+      byNumber.set(turn.number, turn)
+    }
+  }
+  return Array.from(byNumber.values()).sort((left, right) => left.number - right.number)
+}
+
+function firstServerTurnGapUpperBound(
+  messages: AgentChatMessage[],
+  ignoredGapUpperBounds?: ReadonlySet<number>
+): number | undefined {
   const turns = sortedUniqueServerTurnNumbers(messages)
   for (let index = 1; index < turns.length; index += 1) {
     const previous = turns[index - 1]!
     const current = turns[index]!
-    if (current > previous + 1) return current
+    if (current > previous + 1 && !ignoredGapUpperBounds?.has(current)) return current
   }
   return undefined
 }
 
-function nextServerBackfillBeforeTurn(messages: AgentChatMessage[]): number | undefined {
-  const gapUpperBound = firstServerTurnGapUpperBound(messages)
+function nextServerBackfillBeforeTurn(
+  messages: AgentChatMessage[],
+  ignoredGapUpperBounds?: ReadonlySet<number>
+): number | undefined {
+  const gapUpperBound = firstServerTurnGapUpperBound(messages, ignoredGapUpperBounds)
   if (gapUpperBound !== undefined) return gapUpperBound
   const oldestTurn = oldestServerTurnNumber(messages)
   return oldestTurn !== undefined && oldestTurn > 1 ? oldestTurn : undefined
@@ -385,11 +403,26 @@ export function useAgentChatController({
   const chatMessagesRef = useRef<AgentChatMessage[]>([])
   const loadedLocalMessageCountRef = useRef(0)
   const olderMessagesRequestRef = useRef<symbol | null>(null)
+  const unfillableServerGapUpperBoundsRef = useRef<Map<string, Set<number>>>(new Map())
 
   const cancelOlderMessagesLoad = useCallback(() => {
     olderMessagesRequestRef.current = null
     setOlderMessagesLoading(false)
   }, [])
+
+  const ignoredServerGapUpperBounds = useCallback((agentRef: string, chatId: string) => {
+    return unfillableServerGapUpperBoundsRef.current.get(makeTaskKey(agentRef, chatId))
+  }, [])
+
+  const markServerGapUnfillable = useCallback(
+    (agentRef: string, chatId: string, beforeTurn: number) => {
+      const key = makeTaskKey(agentRef, chatId)
+      const gaps = unfillableServerGapUpperBoundsRef.current.get(key) ?? new Set<number>()
+      gaps.add(beforeTurn)
+      unfillableServerGapUpperBoundsRef.current.set(key, gaps)
+    },
+    []
+  )
 
   const [activityByAgentMessage, setActivityByAgentMessage] = useState<
     Record<string, Record<string, AgentMessageActivity>>
@@ -765,6 +798,7 @@ export function useAgentChatController({
       await chatStore.setLastActive(agentRef, chatId)
 
       const key = makeTaskKey(agentRef, chatId)
+      unfillableServerGapUpperBoundsRef.current.delete(key)
 
       // Renderer-local relevance guard for a fast A→B→A switch: THIS switch's
       // reconcile is aborted the moment the user switches away. Passed into
@@ -940,7 +974,12 @@ export function useAgentChatController({
         return
       }
 
-      const beforeTurn = nextServerBackfillBeforeTurn(chatMessagesRef.current)
+      const beforeBackfillMessages = chatMessagesRef.current
+      const beforeBackfillOldestTurn = oldestServerTurnNumber(beforeBackfillMessages)
+      const beforeTurn = nextServerBackfillBeforeTurn(
+        beforeBackfillMessages,
+        ignoredServerGapUpperBounds(requestAgent, requestChatId)
+      )
       if (beforeTurn === undefined) {
         setHasOlderMessages(false)
         return
@@ -971,8 +1010,20 @@ export function useAgentChatController({
       }
       if (!isStillRelevant()) return
       loadedLocalMessageCountRef.current = merged.length
+      const nextBackfillBeforeTurn = nextServerBackfillBeforeTurn(merged)
+      const oldestMergedTurn = oldestServerTurnNumber(merged)
+      const loweredOldestTurn =
+        oldestMergedTurn !== undefined &&
+        (beforeBackfillOldestTurn === undefined || oldestMergedTurn < beforeBackfillOldestTurn)
+      if (nextBackfillBeforeTurn === beforeTurn && !loweredOldestTurn) {
+        markServerGapUnfillable(requestAgent, requestChatId, beforeTurn)
+      }
+      const ignoredGaps = ignoredServerGapUpperBounds(requestAgent, requestChatId)
       setHasOlderMessages(
-        Boolean(response.hasMoreBefore) || nextServerBackfillBeforeTurn(merged) !== undefined
+        nextServerBackfillBeforeTurn(merged, ignoredGaps) !== undefined ||
+          (Boolean(response.hasMoreBefore) &&
+            oldestMergedTurn !== undefined &&
+            oldestMergedTurn > 1)
       )
     } catch (error) {
       console.warn('[chat-history] failed to load older messages', {
@@ -992,6 +1043,8 @@ export function useAgentChatController({
     chatStore.loadMessages,
     chatStore.loadSessionMessages,
     chatStore.replaceMessages,
+    ignoredServerGapUpperBounds,
+    markServerGapUnfillable,
     selectedAgent,
     tracker,
   ])
@@ -1701,8 +1754,12 @@ export function useAgentChatController({
           const latest = await chatStore.loadSessionMessages(agentRef, agentRef, chatId, {
             limit: requestedQuery.limit ?? SERVER_TURN_PAGE_SIZE,
           })
+          const combinedTurns = mergeUniqueSessionTurns(turns, latest.turns)
           return {
             ...latest,
+            turns: combinedTurns,
+            oldestTurnNumber: combinedTurns[0]?.number ?? latest.oldestTurnNumber,
+            latestTurnNumber: combinedTurns.at(-1)?.number ?? latest.latestTurnNumber,
             [REPLACE_LOCAL_RECONCILIATION_WINDOW]: true,
           } satisfies ReconciliationMessagesResult
         }
@@ -2567,7 +2624,11 @@ export function useAgentChatController({
         // typed input on reload — matches pre-D.3 eager-persist. Best-effort.
         if (sendChatId) {
           try {
-            await chatStore.appendMessages(sendAgent, sendChatId, [userMessage])
+            const failedUserMessage: AgentChatMessage = { ...userMessage, preserveLocal: true }
+            setChatMessages(prev =>
+              prev.map(message => (message.id === userMessageId ? failedUserMessage : message))
+            )
+            await chatStore.appendMessages(sendAgent, sendChatId, [failedUserMessage])
           } catch {
             // persistence is best-effort; the in-memory view still shows it
           }

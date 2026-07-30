@@ -21,9 +21,10 @@ export function up(db: Database): void {
              started_at
            ),
            turn_count = (
-             SELECT COUNT(DISTINCT COALESCE(m.turn_number, 0))
+             SELECT COUNT(DISTINCT m.turn_number)
                FROM messages m
               WHERE m.session_id = sessions.id
+                AND m.turn_number IS NOT NULL
            ),
            message_count = (
              SELECT COUNT(*)
@@ -38,7 +39,8 @@ export function up(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_sessions_summary_activity
       ON sessions(last_activity_at DESC, session_key ASC);
     CREATE INDEX IF NOT EXISTS idx_messages_session_turn_key_ordinal
-      ON messages(session_id, COALESCE(turn_number, 0), ordinal);
+      ON messages(session_id, turn_number, ordinal)
+      WHERE turn_number IS NOT NULL;
   `)
 }
 

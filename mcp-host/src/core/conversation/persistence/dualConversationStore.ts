@@ -1,8 +1,9 @@
 /**
  * `DualConversationStore` — shadow-write to two stores for canary validation.
  *
- * Hot reads come from `memory`; durable-listing reads return SQLite pages so
- * pagination cannot switch sources mid-flow during validation.
+ * User-visible reads come from `memory`, the canonical store during validation.
+ * SQLite is still queried for parity so the canary can detect drift without
+ * hiding memory-only live sessions from the sidebar or transcript endpoints.
  * Writes apply to both; parity is recorded via the optional metrics callback.
  * Used when `CLERUM_SESSION_STORE=dual` to validate that the SQLite store
  * produces the same observable behavior as the in-memory store before we
@@ -139,7 +140,7 @@ export class DualConversationStore implements ConversationStore {
       this.sqlite.listSessionSummariesByPrefix(prefix, query),
     ])
     this.recordParity('listSessionSummariesByPrefix', memList.length === sqlList.length)
-    return sqlList
+    return memList
   }
 
   async getSessionMessagesByKey(
@@ -147,9 +148,6 @@ export class DualConversationStore implements ConversationStore {
     prefix: string,
     query: SessionMessagesQuery = {}
   ): Promise<ConversationSessionMessages | undefined> {
-    // Transcript pages deliberately return the SQLite result in dual mode.
-    // That keeps the durable pagination contract under canary coverage; a
-    // memory-only session can read as absent until dual parity is complete.
     const [memPage, sqlPage] = await Promise.all([
       this.memory.getSessionMessagesByKey(key, prefix, query),
       this.sqlite.getSessionMessagesByKey(key, prefix, query),
@@ -158,7 +156,7 @@ export class DualConversationStore implements ConversationStore {
       'getSessionMessagesByKey',
       memPage === undefined ? sqlPage === undefined : sqlPage !== undefined
     )
-    return sqlPage
+    return memPage
   }
 
   async loadAllPendingApprovals(): Promise<PersistedSessionListing[]> {

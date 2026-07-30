@@ -94,6 +94,22 @@ describe('session pagination projections', () => {
       hasMoreBefore: false,
       hasMoreAfter: false,
     })
+    expect(
+      projectMessageWindowBounds([], { firstTurnNumber: 1, lastTurnNumber: 5 }, { afterTurn: 5 })
+    ).toEqual({
+      oldestTurnNumber: undefined,
+      latestTurnNumber: undefined,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    })
+    expect(
+      projectMessageWindowBounds([], { firstTurnNumber: 1, lastTurnNumber: 10 }, { beforeTurn: 1 })
+    ).toEqual({
+      oldestTurnNumber: undefined,
+      latestTurnNumber: undefined,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    })
   })
 })
 

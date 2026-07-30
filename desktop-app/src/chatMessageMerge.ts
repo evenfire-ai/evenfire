@@ -10,6 +10,10 @@ function roleRank(message: Pick<ChatMessage, 'role'>): number {
   return message.role === 'user' ? 0 : message.role === 'assistant' ? 1 : 2
 }
 
+function serverSlotKey(message: Pick<ChatMessage, 'id' | 'role' | 'serverTurnNumber'>): string {
+  return `${messageServerTurnNumber(message)}\u0000${message.role}`
+}
+
 function preferredServerMessage(
   server: ChatMessage,
   local: ChatMessage | undefined,
@@ -20,7 +24,57 @@ function preferredServerMessage(
     ...server,
     task_id: local.task_id ?? server.task_id,
     attachments: server.attachments?.length ? server.attachments : local.attachments,
+    toolSteps: server.toolSteps?.length ? server.toolSteps : local.toolSteps,
   }
+}
+
+function insertUnmatchedTurnlessIncoming(
+  mergedMessages: ChatMessage[],
+  incoming: ChatMessage[],
+  removedIds: ReadonlySet<string>
+): ChatMessage[] {
+  const merged = [...mergedMessages]
+  const mergedIds = new Set(merged.map(message => message.id))
+
+  for (const [incomingIndex, message] of incoming.entries()) {
+    if (
+      messageServerTurnNumber(message) !== undefined ||
+      mergedIds.has(message.id) ||
+      removedIds.has(message.id)
+    ) {
+      continue
+    }
+
+    let previousTurn: number | undefined
+    for (let index = incomingIndex - 1; index >= 0; index -= 1) {
+      previousTurn = messageServerTurnNumber(incoming[index]!)
+      if (previousTurn !== undefined) break
+    }
+
+    let nextTurn: number | undefined
+    for (let index = incomingIndex + 1; index < incoming.length; index += 1) {
+      nextTurn = messageServerTurnNumber(incoming[index]!)
+      if (nextTurn !== undefined) break
+    }
+
+    let insertionIndex = merged.length
+    if (previousTurn !== undefined) {
+      for (let index = merged.length - 1; index >= 0; index -= 1) {
+        if (messageServerTurnNumber(merged[index]!) === previousTurn) {
+          insertionIndex = index + 1
+          break
+        }
+      }
+    } else if (nextTurn !== undefined) {
+      const nextIndex = merged.findIndex(item => messageServerTurnNumber(item) === nextTurn)
+      if (nextIndex >= 0) insertionIndex = nextIndex
+    }
+
+    merged.splice(insertionIndex, 0, message)
+    mergedIds.add(message.id)
+  }
+
+  return merged
 }
 
 /**
@@ -50,131 +104,120 @@ export function mergeAuthoritativeServerMessages(
     return [...existing.filter(message => !incomingIds.has(message.id)), ...incoming]
   }
 
-  const firstTurn = messageServerTurnNumber(authoritative[0]!)!
-  const lastTurn = messageServerTurnNumber(authoritative.at(-1)!)!
-  const previousTurns: Array<number | undefined> = []
-  let previousTurn: number | undefined
+  const previousNumberedMessages: Array<ChatMessage | undefined> = []
+  let previousNumberedMessage: ChatMessage | undefined
   for (const message of existing) {
-    previousTurns.push(previousTurn)
-    previousTurn = messageServerTurnNumber(message) ?? previousTurn
+    previousNumberedMessages.push(previousNumberedMessage)
+    if (messageServerTurnNumber(message) !== undefined) previousNumberedMessage = message
   }
-  const nextTurns: Array<number | undefined> = new Array(existing.length)
-  let nextTurn: number | undefined
+  const nextNumberedMessages: Array<ChatMessage | undefined> = new Array(existing.length)
+  let nextNumberedMessage: ChatMessage | undefined
   for (let index = existing.length - 1; index >= 0; index -= 1) {
-    nextTurns[index] = nextTurn
-    nextTurn = messageServerTurnNumber(existing[index]!) ?? nextTurn
+    nextNumberedMessages[index] = nextNumberedMessage
+    if (messageServerTurnNumber(existing[index]!) !== undefined) {
+      nextNumberedMessage = existing[index]
+    }
   }
 
   const removed: ChatMessage[] = []
   const removedIndexes = new Set<number>()
   const removedIndexByMessage = new Map<ChatMessage, number>()
-  for (const [index, message] of existing.entries()) {
-    const turn = messageServerTurnNumber(message)
-    const numberedInRange = turn !== undefined && turn >= firstTurn && turn <= lastTurn
-    const turnlessInRange =
-      turn === undefined &&
-      (previousTurns[index] ?? Number.NEGATIVE_INFINITY) <= lastTurn &&
-      (nextTurns[index] ?? Number.POSITIVE_INFINITY) >= firstTurn
-    const replaceableTurnRole = message.role === 'user' || message.role === 'assistant'
-    const belongsToActiveTask =
-      message.task_id !== undefined && options.activeTaskIds?.has(message.task_id) === true
-    const shouldReplace =
-      numberedInRange ||
-      (turnlessInRange && replaceableTurnRole && !message.isError && !belongsToActiveTask)
-    if (shouldReplace) {
-      removed.push(message)
-      removedIndexes.add(index)
-      removedIndexByMessage.set(message, index)
-    }
+  const localByServerMessage = new Map<ChatMessage, ChatMessage>()
+  const consumedLocalMessages = new Set<ChatMessage>()
+
+  const markLocalReplacement = (serverMessage: ChatMessage, localMessage: ChatMessage) => {
+    const index = existing.indexOf(localMessage)
+    if (index < 0 || consumedLocalMessages.has(localMessage)) return
+    consumedLocalMessages.add(localMessage)
+    removed.push(localMessage)
+    removedIndexes.add(index)
+    removedIndexByMessage.set(localMessage, index)
+    localByServerMessage.set(serverMessage, localMessage)
   }
 
-  const availableByRole = new Map<ChatMessage['role'], ChatMessage[]>()
-  for (const message of removed) {
-    const entries = availableByRole.get(message.role) ?? []
-    entries.push(message)
-    availableByRole.set(message.role, entries)
+  for (const serverMessage of authoritative) {
+    const slot = serverSlotKey(serverMessage)
+    const sameSlot = existing.find(
+      local =>
+        !consumedLocalMessages.has(local) &&
+        messageServerTurnNumber(local) !== undefined &&
+        serverSlotKey(local) === slot
+    )
+    if (sameSlot) markLocalReplacement(serverMessage, sameSlot)
   }
-  const claimedAuthoritativeSlots = new Set<string>()
+
+  const serverTurnAllowedForTurnlessLocal = (
+    serverMessage: ChatMessage,
+    localMessage: ChatMessage,
+    localIndex: number
+  ): boolean => {
+    const serverTurn = messageServerTurnNumber(serverMessage)!
+    const previous = previousNumberedMessages[localIndex]
+    const previousTurn =
+      previous !== undefined
+        ? (messageServerTurnNumber(previous) ?? Number.NEGATIVE_INFINITY)
+        : Number.NEGATIVE_INFINITY
+    const next = nextNumberedMessages[localIndex]
+    const nextTurn =
+      next !== undefined
+        ? (messageServerTurnNumber(next) ?? Number.POSITIVE_INFINITY)
+        : Number.POSITIVE_INFINITY
+    const lowerBoundAllows =
+      serverTurn > previousTurn ||
+      (serverTurn === previousTurn && previous?.role !== localMessage.role)
+    const upperBoundAllows =
+      serverTurn < nextTurn || (serverTurn === nextTurn && next?.role !== localMessage.role)
+    return lowerBoundAllows && upperBoundAllows
+  }
+
   for (const [index, message] of existing.entries()) {
     if (
       messageServerTurnNumber(message) !== undefined ||
       message.task_id === undefined ||
-      options.activeTaskIds?.has(message.task_id) !== true ||
-      (message.role !== 'user' && message.role !== 'assistant')
+      options.activeTaskIds?.has(message.task_id) !== true
     ) {
       continue
     }
-    const previous = previousTurns[index] ?? Number.NEGATIVE_INFINITY
-    const next = nextTurns[index] ?? Number.POSITIVE_INFINITY
-    const matchingServerMessage = authoritative.find(serverMessage => {
-      const serverTurn = messageServerTurnNumber(serverMessage)!
-      const slot = `${serverTurn}\u0000${serverMessage.role}`
-      return (
+    if (message.role !== 'user' && message.role !== 'assistant') continue
+    if (message.isError || message.preserveLocal || consumedLocalMessages.has(message)) continue
+    const matchingServerMessage = authoritative.find(
+      serverMessage =>
+        !localByServerMessage.has(serverMessage) &&
         serverMessage.role === message.role &&
-        serverTurn > previous &&
-        serverTurn < next &&
-        !claimedAuthoritativeSlots.has(slot)
-      )
-    })
-    if (matchingServerMessage) {
-      claimedAuthoritativeSlots.add(
-        `${messageServerTurnNumber(matchingServerMessage)}\u0000${matchingServerMessage.role}`
-      )
-    }
-  }
-  const replacements = authoritative.filter(
-    message =>
-      !claimedAuthoritativeSlots.has(`${messageServerTurnNumber(message)}\u0000${message.role}`)
-  )
-  const consumedRemovedMessages = new Set<ChatMessage>()
-  const exactLocalByIncoming = new Map<ChatMessage, ChatMessage>()
-  const copyLocalMetadataByIncoming = new Map<ChatMessage, boolean>()
-  for (const message of replacements) {
-    const sameTurn = removed.find(
-      local =>
-        !consumedRemovedMessages.has(local) &&
-        messageServerTurnNumber(local) === messageServerTurnNumber(message) &&
-        local.role === message.role
+        serverTurnAllowedForTurnlessLocal(serverMessage, message, index)
     )
-    if (sameTurn) {
-      consumedRemovedMessages.add(sameTurn)
-      exactLocalByIncoming.set(message, sameTurn)
-      copyLocalMetadataByIncoming.set(message, true)
-    }
+    if (matchingServerMessage) markLocalReplacement(matchingServerMessage, message)
   }
-  const shouldCopyFallbackMetadata = (local: ChatMessage): boolean => {
-    const index = removedIndexByMessage.get(local)
-    if (index === undefined || messageServerTurnNumber(local) !== undefined) return false
-    if (nextTurns[index] !== undefined) return false
 
-    const previous = previousTurns[index] ?? Number.NEGATIVE_INFINITY
-    const next = nextTurns[index] ?? Number.POSITIVE_INFINITY
+  for (const [index, message] of existing.entries()) {
+    if (messageServerTurnNumber(message) !== undefined) continue
+    if (message.role !== 'user' && message.role !== 'assistant') continue
+    if (message.isError || message.preserveLocal || consumedLocalMessages.has(message)) continue
+
+    const authoritativeCandidates = authoritative.filter(
+      serverMessage =>
+        serverMessage.role === message.role &&
+        serverTurnAllowedForTurnlessLocal(serverMessage, message, index)
+    )
     const candidateTurns = new Set<number>()
-    for (const replacement of replacements) {
-      const turn = messageServerTurnNumber(replacement)
-      if (turn !== undefined && turn > previous && turn < next) {
-        candidateTurns.add(turn)
-      }
+    for (const candidate of authoritativeCandidates) {
+      candidateTurns.add(messageServerTurnNumber(candidate)!)
     }
-    return candidateTurns.size === 1
+    if (candidateTurns.size !== 1) continue
+
+    const candidates = authoritativeCandidates.filter(
+      serverMessage =>
+        !localByServerMessage.has(serverMessage) &&
+        serverTurnAllowedForTurnlessLocal(serverMessage, message, index)
+    )
+    if (!candidates.length) continue
+    markLocalReplacement(candidates[0]!, message)
   }
-  const takeFallbackByRole = (role: ChatMessage['role']): ChatMessage | undefined => {
-    const entries = availableByRole.get(role)
-    while (entries?.length) {
-      const candidate = entries.shift()!
-      if (consumedRemovedMessages.has(candidate)) continue
-      consumedRemovedMessages.add(candidate)
-      return candidate
-    }
-    return undefined
-  }
-  const hydratedReplacements = replacements.map(message => {
-    const local = exactLocalByIncoming.get(message) ?? takeFallbackByRole(message.role)
-    const copyLocalMetadata =
-      copyLocalMetadataByIncoming.get(message) ??
-      (local ? shouldCopyFallbackMetadata(local) : false)
+
+  const hydratedReplacements = authoritative.map(message => {
+    const local = localByServerMessage.get(message)
     return {
-      message: preferredServerMessage(message, local, { copyLocalMetadata }),
+      message: preferredServerMessage(message, local, { copyLocalMetadata: Boolean(local) }),
       localAnchorIndex: local ? removedIndexByMessage.get(local) : undefined,
     }
   })
@@ -221,5 +264,9 @@ export function mergeAuthoritativeServerMessages(
       merged.push(existing[index]!)
     }
   }
-  return merged
+  return insertUnmatchedTurnlessIncoming(
+    merged,
+    incoming,
+    new Set(removed.map(message => message.id))
+  )
 }

@@ -710,6 +710,15 @@ export function getActiveEnvKey(): string {
   return resolveEnvKey(config.externalRestApiBaseUrl, config.rpcProxyBaseUrl)
 }
 
+/**
+ * Legacy env key from the pre-RPC-origin namespace. Used only for one-shot
+ * upgrade migration into the current REST+RPC namespace.
+ */
+export function getActiveLegacyRestOnlyEnvKey(): string {
+  hydrateDesktopRuntimeConfig()
+  return resolveEnvKey(config.externalRestApiBaseUrl)
+}
+
 export function getDesktopRuntimeConfigState(): DesktopRuntimeConfigState {
   hydrateDesktopRuntimeConfig()
   const current = currentRuntimeConfig()

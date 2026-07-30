@@ -117,6 +117,7 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
   it.each([
     '/rpc/hosts/chatllm/sessions?limit=1.5',
     '/rpc/hosts/chatllm/sessions?limit=1&limit=2',
+    '/rpc/hosts/chatllm/sessions?cursor=',
     '/rpc/hosts/chatllm/sessions?cursor=one&cursor=two',
     '/rpc/hosts/chatllm/sessions?agent=one&agent=two',
     '/rpc/hosts/chatllm/sessions?agent=',

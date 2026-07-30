@@ -651,15 +651,17 @@ export function createRpcRouter(): Router {
         const rawSessionAgent = req.query.agent
         const sessionAgent =
           typeof rawSessionAgent === 'string' ? rawSessionAgent.trim() : undefined
-        const sessionCursor = typeof req.query.cursor === 'string' ? req.query.cursor : ''
+        const rawSessionCursor = req.query.cursor
+        const sessionCursor = typeof rawSessionCursor === 'string' ? rawSessionCursor : ''
         const sessionLimit =
           typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined
         if (
           (rawSessionAgent !== undefined && typeof rawSessionAgent !== 'string') ||
-          (req.query.cursor !== undefined && typeof req.query.cursor !== 'string') ||
+          (rawSessionCursor !== undefined && typeof rawSessionCursor !== 'string') ||
           (req.query.limit !== undefined && typeof req.query.limit !== 'string') ||
           (rawSessionAgent !== undefined &&
             (!sessionAgent || !isSafeUpstreamAgentSegment(sessionAgent))) ||
+          (rawSessionCursor !== undefined && !sessionCursor) ||
           sessionCursor.length > 2048 ||
           (sessionLimit !== undefined && (!Number.isInteger(sessionLimit) || sessionLimit < 1))
         ) {

@@ -535,7 +535,9 @@ export type SessionMessagesResult = {
   totalTurns: number
   oldestTurnNumber?: number
   latestTurnNumber?: number
+  /** True only when older turns exist before the returned non-empty window. */
   hasMoreBefore: boolean
+  /** True only when newer turns exist after the returned non-empty window. */
   hasMoreAfter: boolean
   turns: Array<{
     number: number

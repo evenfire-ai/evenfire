@@ -81,17 +81,28 @@ describe('DualConversationStore — dual-write parity', () => {
     }
   })
 
-  it('returns the sqlite summary page instead of falling back to memory rows', async () => {
+  it('returns memory summaries and messages while recording sqlite parity', async () => {
     const sqlite = makeSqliteStore({ cacheSize: 4 })
     try {
       const memory = new InMemoryConversationStore()
-      const dual = new DualConversationStore(memory, sqlite.store)
+      const parity: Array<{ op: string; match: boolean }> = []
+      const dual = new DualConversationStore(memory, sqlite.store, {
+        recordParity: (op, match) => parity.push({ op, match }),
+      })
       const manager = new ConversationManager(memory)
       const memoryOnly = await manager.getOrCreate('u-1:rpc:a:memory-only')
       await manager.startTurn(memoryOnly, 'memory only', 'task-memory')
       await manager.completeTurn(memoryOnly, 'done')
 
-      await expect(dual.listSessionSummariesByPrefix('u-1:rpc:', { limit: 1 })).resolves.toEqual([])
+      const summaries = await dual.listSessionSummariesByPrefix('u-1:rpc:', { limit: 1 })
+      expect(summaries.map(summary => summary.chatId)).toEqual(['memory-only'])
+
+      const messages = await dual.getSessionMessagesByKey('u-1:rpc:a:memory-only', 'u-1:rpc:', {
+        limit: 1,
+      })
+      expect(messages?.turns.map(turn => turn.user_input)).toEqual(['memory only'])
+      expect(parity).toContainEqual({ op: 'listSessionSummariesByPrefix', match: false })
+      expect(parity).toContainEqual({ op: 'getSessionMessagesByKey', match: false })
     } finally {
       await sqlite.shutdown()
     }

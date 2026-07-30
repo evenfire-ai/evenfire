@@ -50,9 +50,16 @@ function assertSafeSegment(label: string, value: string): void {
  * first; the desktop is a cache of the server (spec §3.5, §7.1), so a stale
  * directory is dropped and re-hydrated from the source of truth.
  */
-export async function bindChatStoreForUser(userId: string, envKey: string): Promise<void> {
+export async function bindChatStoreForUser(
+  userId: string,
+  envKey: string,
+  options: { legacyEnvKeys?: readonly string[] } = {}
+): Promise<void> {
   assertSafeSegment('userId', userId)
   assertSafeSegment('envKey', envKey)
+  for (const legacyEnvKey of options.legacyEnvKeys ?? []) {
+    assertSafeSegment('legacyEnvKey', legacyEnvKey)
+  }
   // Re-binding the same (env, user) is a no-op. Team switches and access-catalog
   // refreshes re-call this with an unchanged `me.id`; tearing the store down
   // just to rebuild it opens a window where every concurrent chat IPC fails
@@ -72,6 +79,7 @@ export async function bindChatStoreForUser(userId: string, envKey: string): Prom
     // One-shot: drop the pre-`envKey` cache tree (no env level) before rooting
     // the env-scoped store. Safe to discard — the server rebuilds it (spec §5.5).
     await maybeWipePreEnvLegacyCache(baseDir)
+    await maybeMigrateEnvScopedCache(baseDir, userId, envKey, options.legacyEnvKeys ?? [])
     const userDir = join(baseDir, envKey, userId)
     await maybeWipeLegacyCache(userDir)
     await sweepExpiredCorruptQuarantines(userDir)
@@ -85,6 +93,49 @@ export async function bindChatStoreForUser(userId: string, envKey: string): Prom
     await promise
   } finally {
     if (bindInFlight?.promise === promise) bindInFlight = null
+  }
+}
+
+/**
+ * One-shot rename from older env-key namespaces into the current env-key
+ * namespace. This preserves local chat pages when only the env-key derivation
+ * changed, e.g. REST-only key → REST+RPC key.
+ */
+async function maybeMigrateEnvScopedCache(
+  baseDir: string,
+  userId: string,
+  envKey: string,
+  legacyEnvKeys: readonly string[]
+): Promise<void> {
+  const candidates = Array.from(
+    new Set(legacyEnvKeys.map(key => String(key || '').trim()).filter(key => key && key !== envKey))
+  )
+  if (!candidates.length) return
+
+  const targetDir = join(baseDir, envKey, userId)
+  try {
+    await fs.access(targetDir)
+    return
+  } catch {
+    // target absent → a legacy env-scoped cache may be migrated below
+  }
+
+  for (const legacyEnvKey of candidates) {
+    const sourceDir = join(baseDir, legacyEnvKey, userId)
+    try {
+      await fs.access(sourceDir)
+    } catch {
+      continue
+    }
+    await fs.mkdir(join(baseDir, envKey), { recursive: true, mode: 0o700 })
+    try {
+      await fs.rename(sourceDir, targetDir)
+      console.info(`[chatStore] Migrated chat cache from legacy env key "${legacyEnvKey}"`)
+      return
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') return
+      throw err
+    }
   }
 }
 

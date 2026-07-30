@@ -76,6 +76,11 @@ interface UseChatListControllerParams {
 const byUpdatedDesc = (a: { updatedAt: string }, b: { updatedAt: string }) =>
   new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
 
+function isRecoverableCatalogCursorError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /\b4\d\d\b/.test(message) || message.toLowerCase().includes('invalid')
+}
+
 function dedupeSidebarChats<T extends SidebarChatEntry>(chats: T[]): T[] {
   const seen = new Set<string>()
   return chats.filter(chat => {
@@ -288,20 +293,24 @@ export function useChatListController({
     const requestGeneration = requestGenerationRef.current
     setChatListMoreLoading(true)
     try {
-      const serverResult = await chatStore
-        .listSessions(
+      let serverResult: SessionsListResult
+      try {
+        serverResult = await chatStore.listSessions(
           agentRef,
           { agent: agentRef, limit: SESSION_CATALOG_PAGE_LIMIT, cursor },
           { force: true }
         )
-        .catch(() => null)
-      if (!serverResult) {
+      } catch (error) {
         if (
           requestGenerationRef.current === requestGeneration &&
           selectedAgentRef.current === agentRef
         ) {
-          chatListNextCursorByAgentRef.current[agentRef] = null
-          setChatListHasMoreRemoteSessions(false)
+          if (isRecoverableCatalogCursorError(error)) {
+            chatListNextCursorByAgentRef.current[agentRef] = null
+            setChatListHasMoreRemoteSessions(false)
+          } else {
+            setChatListHasMoreRemoteSessions(true)
+          }
         }
         return
       }

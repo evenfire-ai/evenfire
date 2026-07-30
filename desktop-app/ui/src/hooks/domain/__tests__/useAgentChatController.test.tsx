@@ -1101,6 +1101,64 @@ describe('useAgentChatController — characterization (D.0)', () => {
       ).toBe(true)
     })
 
+    it('keeps the remote session cursor after a transient load-more failure', async () => {
+      let cursorTwoCalls = 0
+      clerum.rpc.listSessions.mockImplementation(
+        async (_hostRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
+          if (query?.cursor === 'cursor-2') {
+            cursorTwoCalls += 1
+            if (cursorTwoCalls === 1) throw new Error('fetch failed')
+            return {
+              items: [
+                {
+                  agent: 'agent-x',
+                  chatId: 'remote-page-2-after-retry',
+                  turnCount: 3,
+                  lastActivityAt: '2026-05-02T00:00:00Z',
+                },
+              ],
+            }
+          }
+          return {
+            items: [
+              {
+                agent: 'agent-x',
+                chatId: 'remote-page-1',
+                turnCount: 2,
+                lastActivityAt: '2026-05-03T00:00:00Z',
+              },
+            ],
+            nextCursor: 'cursor-2',
+          }
+        }
+      )
+
+      const { result } = renderController()
+
+      await waitFor(() =>
+        expect(result.current.chatList.some(chat => chat.id === 'remote-page-1')).toBe(true)
+      )
+      expect(result.current.chatListHasMoreRemoteSessions).toBe(true)
+
+      await act(async () => {
+        await result.current.loadMoreChatSessions()
+      })
+
+      expect(result.current.chatListHasMoreRemoteSessions).toBe(true)
+
+      await act(async () => {
+        await result.current.loadMoreChatSessions()
+      })
+
+      await waitFor(() =>
+        expect(result.current.chatList.some(chat => chat.id === 'remote-page-2-after-retry')).toBe(
+          true
+        )
+      )
+      expect(cursorTwoCalls).toBe(2)
+      expect(result.current.chatListHasMoreRemoteSessions).toBe(false)
+    })
+
     it('does not advance a session cursor from a stale load-more result', async () => {
       let resolveStalePage:
         | ((value: {

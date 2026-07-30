@@ -123,6 +123,20 @@ describe('chatStoreBinding', () => {
     expect((await requireChatStore().listChats('agent-x')).map(c => c.id)).toEqual(['chat-in-b'])
   })
 
+  it('migrates a legacy env-scoped user cache into the active env key when empty', async () => {
+    await bindChatStoreForUser('user-a', ENV_A)
+    await requireChatStore().createChat('agent-x', 'chat-from-legacy-env')
+    unbindChatStore()
+
+    await bindChatStoreForUser('user-a', ENV_B, { legacyEnvKeys: [ENV_A] })
+
+    expect((await requireChatStore().listChats('agent-x')).map(c => c.id)).toEqual([
+      'chat-from-legacy-env',
+    ])
+    expect(await exists(path.join(tmpBase, ENV_A, 'user-a'))).toBe(false)
+    expect(await exists(path.join(tmpBase, ENV_B, 'user-a', 'agent-x', 'index.json'))).toBe(true)
+  })
+
   it('re-binds when the envKey changes for the same user', async () => {
     await bindChatStoreForUser('user-a', ENV_A)
     const storeA = requireChatStore()
