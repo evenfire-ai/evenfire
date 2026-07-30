@@ -41,6 +41,15 @@ downloadable `dockerconfigjson` for CI, and your exact push coordinate. A key
 minted at **Marketplace → API keys** works identically — both are `efrk_` org
 keys.
 
+Your key needs the **`registry:publish`** scope. Without it the registry still
+issues a token, but with the push action stripped, so the push is denied with no
+message explaining why. Check first:
+
+```bash
+curl -s -H "Authorization: Bearer $REGISTRY_API_KEY" \
+  https://registry.evenfire.ai/api/v1/whoami   # scopes must include registry:publish
+```
+
 Log in with the literal username `_`:
 
 ```bash
@@ -54,39 +63,70 @@ docker tag my-connector:local registry.evenfire.ai/acme/db-tools:1.4.0
 docker push registry.evenfire.ai/acme/db-tools:1.4.0
 ```
 
-### Four things that go wrong here
+### The repo path is stricter than Docker's
 
-1. **No `@` in the image path.** The entry is named `@acme/db-tools`, but the
-   image is `registry.evenfire.ai/acme/db-tools:1.4.0`. Docker reads `@` as the
-   digest delimiter and refuses `registry.evenfire.ai/@acme/…` outright with
-   `invalid reference format`. The scope prefix belongs in the entry name and
-   nowhere else.
+The registry accepts **exactly two segments**, `<org>/<name>`, each matching
+`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`. Every entry in the catalog looks like
+`registry.evenfire.ai/evenfire/mcp-whois:1.0.0` — host, org, name, tag.
 
-2. **The org segment is not optional.** `registry.evenfire.ai/db-tools:1.4.0`
-   is outside your namespace, and your key only grants `<org>/…`. The path is
-   always host, then org, then name.
+| Wrong                                     | Why                                                                                                                                                                      |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `registry.evenfire.ai/@acme/db-tools`     | The `@` belongs to the **entry name**, never the image path. Docker reads it as the digest delimiter and refuses the reference outright with `invalid reference format`. |
+| `registry.evenfire.ai/db-tools`           | One segment. There is no namespace, and your key only grants `<org>/…`.                                                                                                  |
+| `registry.evenfire.ai/acme/team/db-tools` | Three segments. Nested namespaces are rejected — a path must resolve unambiguously to one org and one repo.                                                              |
+| `registry.evenfire.ai/Acme/DB-Tools`      | Uppercase. Segments are lowercase alphanumerics separated by single `.`, `_`, or `-`.                                                                                    |
+| `registry.evenfire.ai/acme/db__tools`     | Doubled separator. Also no leading or trailing separator.                                                                                                                |
 
-3. **`<name>` must equal the entry's name.** For an evenfire-hosted local
-   plugin, the pull grant is resolved from the OCI path as
-   `@<org>/<name>`, so the image repo path has to match the entry exactly.
-   Publishing `@acme/db-tools` with an `imageRef` of
-   `registry.evenfire.ai/acme/dbtools` is rejected with a `422` naming both
-   values. The check runs at publish **and** at install, because a mismatch
-   would otherwise deny the cross-org pull and surface as a silent
-   `ImagePullBackOff` in someone else's cluster.
+**A malformed path fails silently.** The registry drops an unparseable scope
+rather than erroring on it, so you get a token carrying no access and Docker
+reports a plain denial. If a push is refused and the credential is definitely
+good, re-read the path before anything else.
 
-4. **Docker manifest format.** The registry advertises
+### Three more things that go wrong
+
+1. **`<name>` must equal the entry's name.** For an evenfire-hosted local
+   plugin, the pull grant is resolved from the OCI path as `@<org>/<name>`, so
+   the image repo path has to match the entry exactly. Publishing
+   `@acme/db-tools` with an `imageRef` of `registry.evenfire.ai/acme/dbtools`
+   is rejected with a `422` naming both values. The check runs at publish
+   **and** at install, because a mismatch would otherwise deny the cross-org
+   pull and surface as a silent `ImagePullBackOff` in someone else's cluster.
+
+2. **Docker manifest format.** The registry advertises
    `http.compat: ["docker2s2"]`, so Docker schema-2 manifests are accepted and a
    plain `docker push` works. If your tooling emits OCI-only images and the push
    is rejected, re-tag to Docker manifest format.
 
-The **tag** is yours to choose. Only the repo path (`<org>/<name>`) is checked
-against the entry name, so a tag that differs from the entry `version` is
-allowed — though matching them keeps things legible.
+3. **Quotas apply to self-hosted orgs.** A deployment that onboarded through
+   open registration gets **10 image repos**, **2 GiB** of storage, and **200
+   entry versions** by default. Exceeding a limit denies the push the same
+   quiet way a bad path does — the token comes back without the push action.
+   The 11th repo is the usual surprise; delete an unused one or ask Evenfire to
+   raise the cap.
+
+The **tag** is yours to choose. Only the repo path is checked against the entry
+name, so a tag that differs from the entry `version` is allowed, though the
+catalog convention is to match them.
 
 For CI, download the `dockerconfigjson` and mount it as `~/.docker/config.json`
 or a Kubernetes `dockerconfigjson` secret. Keys are listable and revocable from
 the same panel.
+
+### Who can pull what you pushed
+
+Images you push are **private to your org**, and a self-hosted deployment cannot
+change that:
+
+- Flipping an image repo to public returns `403 selfhosted_public_disabled` for
+  any org that onboarded through open registration. The block exists to stop
+  unmetered anonymous-pull egress.
+- Cross-org pull needs a **grant**, and a self-hosted deployment's credentials
+  carry `registry:read`, `registry:publish`, `registry:update`, and
+  `registry:delete` — not `registry:grant`.
+
+So your images install cleanly into your own clusters. Sharing one with another
+organization currently needs Evenfire to issue the grant. Plan around that
+before you build a distribution story on top of a self-hosted push.
 
 ## 3. Publish — `POST /api/v1/entries`
 
