@@ -1147,7 +1147,7 @@ describe('McpServerWatcher startup', () => {
 
   it('keeps readiness after a current Context safety delta while an older additive pass is pending', async () => {
     const olderAdditivePass = deferred()
-    const currentDeltaSafety = deferred()
+    const currentDeltaSafety = deferred<boolean>()
     let contextWatchCallback:
       | ((
           type: string,
@@ -1208,10 +1208,92 @@ describe('McpServerWatcher startup', () => {
         expect((watcher as any).netPolReconciler.reconcileContext).toHaveBeenCalledOnce()
       )
       expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
-      currentDeltaSafety.resolve(undefined)
+      // The scoped revocation completed, which is what authorises the delta
+      // certificate; see the aborted-pass twin above for the negative side.
+      currentDeltaSafety.resolve(true)
       await currentDelta
       expect((await requestReadyOverHttp(server)).statusCode).toBe(200)
       expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
+    } finally {
+      olderAdditivePass.resolve(undefined)
+      await initialPass
+      await server.stop()
+      await watcher.stop()
+    }
+  })
+
+  it('does not certify a Context delta whose stale-allow revocation aborted mid-pass', async () => {
+    const olderAdditivePass = deferred()
+    const abortedDeltaSafety = deferred<boolean>()
+    let contextWatchCallback:
+      | ((
+          type: string,
+          apiObj: {
+            metadata: { name: string; namespace: string; uid: string }
+            spec: { contextId: string; mcpServers: string[] }
+          }
+        ) => Promise<void>)
+      | undefined
+    let networkPolicyPasses = 0
+    mocks.watch.mockImplementationOnce(async (path, _options, callback) => {
+      if (path.endsWith('/contexts')) contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    mocks.netPolFullReconcile.mockImplementation(async (...args: unknown[]) => {
+      networkPolicyPasses += 1
+      const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
+      options?.onAuthoritativeRevocationComplete?.()
+      if (networkPolicyPasses === 1) await olderAdditivePass.promise
+    })
+
+    const watcher = new McpServerWatcher()
+    await (watcher as any).startContextWatch('aborted-delta-rv')
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).mcpWatchGeneration = 1
+    ;(watcher as any).contexts.set('delta-context', {
+      name: 'delta-context',
+      namespace: 'mcp-server',
+      uid: 'delta-context-uid',
+      spec: { contextId: 'delta-context', mcpServers: [] },
+    })
+    const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+      watcher.isReadinessInventoryAuthoritative()
+    )
+    await server.start()
+    server.setReady(true)
+    const initialPass = (watcher as any).runInitialNetworkPolicyConvergence() as Promise<void>
+    // `reconcileContext` reports that its authority fence broke, so the scoped
+    // revocation never finished deleting this Context's stale allows.
+    ;(watcher as any).netPolReconciler.reconcileContext.mockImplementationOnce(
+      () => abortedDeltaSafety.promise
+    )
+
+    try {
+      await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce())
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(200)
+
+      const abortedDelta = contextWatchCallback!('MODIFIED', {
+        metadata: {
+          name: 'delta-context',
+          namespace: 'mcp-server',
+          uid: 'delta-context-uid',
+        },
+        spec: { contextId: 'delta-context', mcpServers: ['delta-server'] },
+      })
+
+      await vi.waitFor(() =>
+        expect((watcher as any).netPolReconciler.reconcileContext).toHaveBeenCalledOnce()
+      )
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+      abortedDeltaSafety.resolve(false)
+      await abortedDelta
+
+      // An incomplete revocation must leave readiness withheld until the
+      // authoritative full pass re-certifies. Certifying here would report
+      // Ready while a stale allow is still live.
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
     } finally {
       olderAdditivePass.resolve(undefined)
       await initialPass

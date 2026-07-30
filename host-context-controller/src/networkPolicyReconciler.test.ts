@@ -2651,7 +2651,7 @@ describe('NetworkPolicyReconciler', () => {
         ...queuedContext,
         spec: { contextId: 'replacement-context', mcpServers: [] },
       }
-      const reconcileContext = vi.spyOn(reconciler, 'reconcileContext').mockResolvedValue(undefined)
+      const reconcileContext = vi.spyOn(reconciler, 'reconcileContext').mockResolvedValue(true)
       const effectKeys: string[] = []
 
       await reconciler.fullReconcile([queuedContext], [], {
@@ -2686,6 +2686,7 @@ describe('NetworkPolicyReconciler', () => {
         selectedLease = options?.isCurrent
         mutationStarted.resolve(undefined)
         await releaseMutation.promise
+        return true
       })
 
       const fullPass = reconciler.fullReconcile([selected], [], {
@@ -2784,7 +2785,7 @@ describe('NetworkPolicyReconciler', () => {
         spec: { contextId: 'desired-context', mcpServers: [] },
       }
       const effectKeys: string[] = []
-      vi.spyOn(reconciler, 'reconcileContext').mockResolvedValue(undefined)
+      vi.spyOn(reconciler, 'reconcileContext').mockResolvedValue(true)
       mockApi.listNamespacedNetworkPolicy.mockImplementation(
         async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
           if (namespace === 'mcp-server' && labelSelector?.includes('context-allow')) {
@@ -2843,6 +2844,7 @@ describe('NetworkPolicyReconciler', () => {
       vi.spyOn(reconciler, 'reconcileContext').mockImplementationOnce(async () => {
         additiveStarted.resolve(undefined)
         await releaseAdditive.promise
+        return true
       })
       mockApi.listNamespacedNetworkPolicy.mockImplementation(
         async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
@@ -2946,6 +2948,7 @@ describe('NetworkPolicyReconciler', () => {
       vi.spyOn(reconciler, 'reconcileContext').mockImplementationOnce(async () => {
         additiveStarted.resolve(undefined)
         await releaseAdditive.promise
+        return true
       })
       mockApi.listNamespacedNetworkPolicy.mockImplementation(
         async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
@@ -3089,6 +3092,7 @@ describe('NetworkPolicyReconciler', () => {
       vi.spyOn(reconciler, 'reconcileContext').mockImplementation(async context => {
         ordering.push(`context:${context.spec.contextId}`)
         if (context.spec.contextId === 'aaa-poisoned') throw additiveFailure
+        return true
       })
       const onAuthoritativeRevocationComplete = vi.fn(() => {
         ordering.push('certify')
@@ -3160,7 +3164,7 @@ describe('NetworkPolicyReconciler', () => {
           }
         }
       )
-      vi.spyOn(rec, 'reconcileContext').mockResolvedValue(undefined)
+      vi.spyOn(rec, 'reconcileContext').mockResolvedValue(true)
       vi.spyOn(rec, 'reconcileExternalEgress').mockResolvedValue(undefined)
       const ordering: string[] = []
       mockApi.replaceNamespacedNetworkPolicy.mockImplementation(
@@ -3368,7 +3372,7 @@ describe('NetworkPolicyReconciler', () => {
           }
         }
       )
-      vi.spyOn(rec, 'reconcileContext').mockResolvedValue(undefined)
+      vi.spyOn(rec, 'reconcileContext').mockResolvedValue(true)
       vi.spyOn(rec, 'reconcileExternalEgress').mockResolvedValue(undefined)
 
       await rec.fullReconcile([liveContext], [server], {
@@ -4189,6 +4193,7 @@ describe('NetworkPolicyReconciler', () => {
       vi.spyOn(reconciler, 'reconcileContext').mockImplementationOnce(async () => {
         additiveStarted.resolve(undefined)
         await releaseAdditive.promise
+        return true
       })
       mockApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
 
@@ -4401,7 +4406,7 @@ describe('NetworkPolicyReconciler', () => {
         namespace: 'mcp-server',
         spec: { contextId: 'current', mcpServers: [] },
       }
-      const reconcileContext = vi.spyOn(reconciler, 'reconcileContext').mockResolvedValue(undefined)
+      const reconcileContext = vi.spyOn(reconciler, 'reconcileContext').mockResolvedValue(true)
       const contextInventoryAuthoritative = vi
         .fn()
         .mockReturnValueOnce(true)

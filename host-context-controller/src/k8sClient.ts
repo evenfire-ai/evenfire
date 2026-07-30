@@ -3708,14 +3708,22 @@ export class McpServerWatcher implements McpServerProvider {
           } else if (current?.spec.contextId !== context.spec.contextId) {
             return
           }
+          // A scoped delta may only certify readiness when its own stale-allow
+          // revocation ran to completion. `reconcileContext` aborts mid-pass
+          // whenever its authority fence breaks, so treating "it returned" as
+          // "it revoked" would certify a Context whose stale allows are live.
+          let scopedRevocationCompleted = false
           if (type === 'ADDED' || type === 'MODIFIED') {
             const selectedContext = current!
-            await this.netPolReconciler.reconcileContext(selectedContext, {
-              isCurrent: () =>
-                contextInventoryAuthoritative() &&
-                this.hasMcpServerInventoryAuthority(serverInventoryGeneration) &&
-                this.contexts.get(selectedContext.name) === selectedContext,
-            })
+            scopedRevocationCompleted = await this.netPolReconciler.reconcileContext(
+              selectedContext,
+              {
+                isCurrent: () =>
+                  contextInventoryAuthoritative() &&
+                  this.hasMcpServerInventoryAuthority(serverInventoryGeneration) &&
+                  this.contexts.get(selectedContext.name) === selectedContext,
+              }
+            )
           } else if (type === 'DELETED') {
             const deleteAllowed = () =>
               this.contextAbsentForDelete(context.name, context.namespace, watchGeneration)
@@ -3726,7 +3734,7 @@ export class McpServerWatcher implements McpServerProvider {
             )
           }
 
-          if (deltaSafetyCertificate) {
+          if (deltaSafetyCertificate && scopedRevocationCompleted) {
             this.recordNetworkPolicySafetyCertificate(deltaSafetyCertificate)
           }
         } catch (error) {

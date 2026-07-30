@@ -745,12 +745,18 @@ export class NetworkPolicyReconciler {
    * Reconcile NetworkPolicies for a Context CRD.
    * Creates one policy per allowed MCP server.
    */
+  /**
+   * Returns whether this Context's stale-allow revocation ran to completion.
+   * Callers that certify readiness from a scoped delta MUST honour it: the pass
+   * aborts as soon as its authority fence breaks, and an aborted pass leaves
+   * stale allows live.
+   */
   async reconcileContext(
     context: ContextCRD,
     options: NetworkPolicyMutationOptions = {}
-  ): Promise<void> {
+  ): Promise<boolean> {
     const callerIsCurrent = options.isCurrent ?? (() => true)
-    if (!callerIsCurrent()) return
+    if (!callerIsCurrent()) return false
     const contextId = context.spec.contextId
     const allowedServers = context.spec.mcpServers || []
     const selectedServers = new Map(
@@ -764,7 +770,7 @@ export class NetworkPolicyReconciler {
         if (!selected || !current) return selected === current
         return sameMcpServerDesiredRevision(selected, current)
       })
-    if (!isCurrent()) return
+    if (!isCurrent()) return false
 
     console.log(
       `[NetPol] Reconciling context "${contextId}" — allowed servers: [${allowedServers.join(', ')}]`
@@ -772,7 +778,7 @@ export class NetworkPolicyReconciler {
 
     // Create or update policies for each allowed server.
     for (const serverName of allowedServers) {
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       const server = this.serverCache.get(serverName)
       if (!server) {
         console.warn(
@@ -784,7 +790,7 @@ export class NetworkPolicyReconciler {
       const desired = this.buildContextAllowPolicies(context, server)
       const ingressName = desired.ingress.metadata!.name!
       await this.applyContextIngressPolicy(ingressName, desired.ingress, isCurrent)
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
 
       const hostEgressName = desired.hostEgress.metadata!.name!
       await this.applyOwnedPolicy(
@@ -794,7 +800,7 @@ export class NetworkPolicyReconciler {
         'context-host-egress',
         isCurrent
       )
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
 
       const rpcProxyEgressName = desired.rpcProxyEgress.metadata!.name!
       await this.applyOwnedPolicy(
@@ -808,7 +814,7 @@ export class NetworkPolicyReconciler {
 
     // Re-LIST every lane after writes so a same-name policy that was just
     // replaced is compared in its new form and cannot delete itself.
-    await this.revokeStaleContextAllows(context, isCurrent)
+    return await this.revokeStaleContextAllows(context, isCurrent)
   }
 
   private async revokeStaleContextAllows(
