@@ -460,6 +460,35 @@ describe('McpServerWatcher startup', () => {
     }
   })
 
+  it('coalesces sustained convergence churn into a single trailing pass', async () => {
+    // Sustained churn must not turn the trailing loop into one apiserver pass
+    // per request. `trailingRequested` is a boolean latch, so an unbounded
+    // burst arriving during one in-flight pass may cost at most one more pass.
+    const watcher = new McpServerWatcher()
+    const inFlight = deferred()
+    let coreRuns = 0
+    ;(watcher as any).runInitialNetworkPolicyConvergenceCore = async () => {
+      coreRuns += 1
+      if (coreRuns === 1) await inFlight.promise
+    }
+
+    try {
+      const first = (watcher as any).runInitialNetworkPolicyConvergence() as Promise<void>
+      await flushMicrotasks()
+      for (let burst = 0; burst < 50; burst += 1) {
+        void (watcher as any).runInitialNetworkPolicyConvergence()
+      }
+      inFlight.resolve(undefined)
+      await first
+      await flushMicrotasks()
+
+      expect(coreRuns).toBeLessThanOrEqual(2)
+    } finally {
+      inFlight.resolve(undefined)
+      await watcher.stop()
+    }
+  })
+
   it('retains Context uid and generation from the authoritative initial snapshot', async () => {
     mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
       if (plural === 'contexts') {
