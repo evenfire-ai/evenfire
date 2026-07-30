@@ -10,6 +10,7 @@ SCRIPT_DIR="${ROOT}/scripts/e2e"
 WATCH_GATE="${SCRIPT_DIR}/e2e-hcc-communicationchannel-watch-recovery.sh"
 READINESS_GATE="${SCRIPT_DIR}/e2e-hcc-readiness-bootstrap.sh"
 MCP_READINESS_GATE="${SCRIPT_DIR}/e2e-hcc-mcp-context-readiness.sh"
+HOST_BUNDLE_MEASURE="${SCRIPT_DIR}/measure-host-bundle-reconcile.sh"
 GATES=("$WATCH_GATE" "$READINESS_GATE" "$MCP_READINESS_GATE")
 LOCK_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-lock.sh"
 LOG_HELPER="${SCRIPT_DIR}/_lib/hcc-watch-recovery-logs.sh"
@@ -575,6 +576,29 @@ if (
   kctl() {
     case "$2" in
       pod)
+        printf '%s\n' '{"metadata":{"uid":"pod-uid"},"status":{"conditions":[{"type":"Ready","status":"False"}],"containerStatuses":[{"name":"host-context-controller","ready":true}]}}'
+        ;;
+      deployment)
+        printf '%s\n' '{"metadata":{"generation":4},"spec":{"replicas":1},"status":{"observedGeneration":4,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1,"unavailableReplicas":0}}'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  eval "$hcc_kubernetes_readiness_function"
+  ! hcc_kubernetes_readiness_is_exact
+); then
+  pass "exact Kubernetes readiness rejects a current pod whose Ready condition is False"
+else
+  fail "exact Kubernetes readiness can accept a non-Ready HCC pod"
+fi
+if (
+  NEW_HCC_POD=hcc-pod
+  HCC_UID=pod-uid
+  HCC_NS=control-plane
+  HCC_DEPLOY='host-context-controller'
+  kctl() {
+    case "$2" in
+      pod)
         printf '%s\n' '{"metadata":{"uid":"pod-uid"},"status":{"conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"host-context-controller","ready":true}]}}'
         ;;
       deployment)
@@ -1103,6 +1127,17 @@ if grep -Fq 'Starting initial Host background convergence...' \
   pass "bootstrap START/COMPLETE/FAIL markers remain bound to the initial Host producer reason"
 else
   fail "bootstrap Host pass markers drifted from their runtime producer or reason binding"
+fi
+
+# The destructive Host-bundle measurement uses the same cold-start transition
+# as the bootstrap readiness gate. Keep its active-pass marker tied to the
+# emitted producer rather than an obsolete reason-string log line.
+if grep -Fq "readonly HCC_PASS_STARTED_MARKER='Starting initial Host background convergence'" \
+     "$HOST_BUNDLE_MEASURE" &&
+   grep -Fq 'Starting initial Host background convergence...' "$HCC_K8S_CLIENT"; then
+  pass "Host-bundle measurement START marker remains bound to the cold-start producer"
+else
+  fail "Host-bundle measurement can wait for a stale HCC START marker"
 fi
 # shellcheck disable=SC2016
 probe_result_line="$(grep -nF 'probe_result="$(kctl exec' "$READINESS_GATE" | cut -d: -f1)"

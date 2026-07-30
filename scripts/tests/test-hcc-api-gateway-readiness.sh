@@ -88,6 +88,45 @@ if [[ "${runtime_hold_function}" != *'hcc_gateway_deployment_ready'* ]] ||
 fi
 echo "PASS: bootstrap E2E proves gateway readiness remains local while HCC is unavailable"
 
+# Exercise the full conjunction with a bounded synthetic clock. Each required
+# observation must independently fail the hold; this kills a permissive
+# && -> || mutation without requiring a cluster or a real sleep.
+gateway_hold_case() (
+  local failed_observation=$1 clock_file
+  clock_file="$(mktemp "${TMPDIR:-/tmp}/hcc-gateway-clock.XXXXXX")"
+  printf '%s' 0 >"$clock_file"
+  trap 'rm -f "$clock_file"' EXIT
+  HCC_NS=control-plane
+  date() {
+    local calls
+    calls="$(<"$clock_file")"
+    calls=$((calls + 1))
+    printf '%s' "$calls" >"$clock_file"
+    [ "$calls" -le 2 ] && printf '%s\n' 0 || printf '%s\n' 1
+  }
+  sleep() { :; }
+  hcc_gateway_deployment_ready() {
+    [ "$failed_observation" != deployment ]
+  }
+  hcc_gateway_local_health_ok() {
+    [ "$failed_observation" != health ]
+  }
+  hcc_gateway_ready_proxy_unavailable() {
+    [ "$failed_observation" != proxy ]
+  }
+  eval "${runtime_hold_function}"
+  hcc_gateway_remains_ready_without_hcc 1
+)
+
+if gateway_hold_case none &&
+   ! gateway_hold_case deployment &&
+   ! gateway_hold_case health &&
+   ! gateway_hold_case proxy; then
+  echo "PASS: gateway hold requires every readiness, health, and proxy-unavailable observation"
+else
+  fail "gateway hold can accept a failed readiness, health, or proxy observation"
+fi
+
 for unavailable_status in 502 503 504; do
   if (
     HCC_NS=control-plane

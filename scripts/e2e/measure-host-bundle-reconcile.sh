@@ -151,9 +151,10 @@ readonly DELPASS_RESURRECTION_SETTLE_S=30     # quiet window before re-asserting
 # termination grace. A child with NO deletionTimestamp never gets this
 # extension (the delete was never issued → immediate fail).
 readonly MEASURE_TEARDOWN_CONVERGE_S=120
-# Exact log lines emitted by host-context-controller/src/k8sClient.ts for
-# the startup full fleet pass (reason string 'initial Host reconciliation').
-readonly HCC_PASS_STARTED_MARKER='Running initial Host reconciliation'
+# The startup marker is emitted immediately before the cold-start Host
+# inventory/watch recovery. COMPLETE/FAIL below retain the precise
+# 'initial Host reconciliation' reason supplied to the fleet pass.
+readonly HCC_PASS_STARTED_MARKER='Starting initial Host background convergence'
 readonly HCC_PASS_COMPLETED_MARKER='Completed Host reconciliation after initial Host reconciliation'
 readonly HCC_PASS_FAILED_MARKER='Host reconciliation after initial Host reconciliation failed'
 

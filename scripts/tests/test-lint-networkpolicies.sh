@@ -62,7 +62,7 @@ write_policy "${TMP_DIR}/safe-specific.yaml" '    - ports:
           protocol: TCP
       to:
         - ipBlock:
-            cidr: 203.0.113.10/32'
+            cidr: 198.51.100.10/32'
 run_lint "${TMP_DIR}/safe-specific.yaml" >/dev/null
 echo "PASS: lint-networkpolicies allows explicit port plus specific destination"
 
@@ -135,8 +135,8 @@ ${PUBLIC_EXCEPT_BLOCK}"
 run_lint "${TMP_DIR}/public-with-excepts.yaml" >/dev/null
 echo "PASS: lint-networkpolicies allows public-only exception set with explicit ports"
 
-GCP_DEV_RENDERED="${TMP_DIR}/gcp-dev-rendered.yaml"
-kubectl kustomize "${ROOT}/deploy/overlays/gcp-dev" >"${GCP_DEV_RENDERED}"
+MINIKUBE_RENDERED="${TMP_DIR}/minikube-rendered.yaml"
+kubectl kustomize "${ROOT}/deploy/overlays/minikube" >"${MINIKUBE_RENDERED}"
 RUBYOPT=--disable=gems ruby -ryaml -e '
   forbidden = %w[allow-dns-egress-sandbox-ui deny-all-sandbox-ui]
   required = %w[sandbox-ui-static-deny-all sandbox-ui-static-dns-egress]
@@ -151,7 +151,6 @@ RUBYOPT=--disable=gems ruby -ryaml -e '
     found << name if forbidden.include?(name)
     if name == "sandbox-ui-static-dns-egress"
       saw_dns_peer = false
-      saw_dns_ipblock = false
       Array(doc.dig("spec", "egress")).each_with_index do |rule, rule_idx|
         ports = Array(rule["ports"]).map { |port| [port.fetch("protocol", "TCP"), port["port"]] }.sort
         expected_ports = [["TCP", 53], ["UDP", 53]]
@@ -164,27 +163,20 @@ RUBYOPT=--disable=gems ruby -ryaml -e '
         peers.each_with_index do |peer, peer_idx|
           ns_name = peer.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name")
           dns_selector = peer.dig("podSelector", "matchLabels", "k8s-app")
-          dns_ipblock = peer.dig("ipBlock", "cidr")
 
           if ns_name == "kube-system" && dns_selector == "kube-dns"
             saw_dns_peer = true
             next
           end
 
-          if dns_ipblock == "203.0.113.10/32"
-            saw_dns_ipblock = true
-            next
-          end
-
-          abort("sandbox-ui static DNS egress peer #{rule_idx}/#{peer_idx} must stay scoped to kube-system kube-dns pods or the example-dev kube-dns ClusterIP")
+          abort("sandbox-ui static DNS egress peer #{rule_idx}/#{peer_idx} must stay scoped to kube-system kube-dns pods")
         end
       end
       abort("sandbox-ui static DNS egress must include a kube-system kube-dns peer") unless saw_dns_peer
-      abort("sandbox-ui static DNS egress must include the example-dev kube-dns ClusterIP") unless saw_dns_ipblock
     end
   end
   abort("sandbox-ui static slice must not render HCC-owned policies: #{found.join(", ")}") unless found.empty?
   missing = required - names
   abort("sandbox-ui static slice must render renamed baseline policies: #{missing.join(", ")}") unless missing.empty?
-' "${GCP_DEV_RENDERED}"
-echo "PASS: gcp-dev sandbox-ui static policies do not take HCC-owned deny-all/DNS ownership and include kube-dns ClusterIP"
+' "${MINIKUBE_RENDERED}"
+echo "PASS: minikube sandbox-ui static policies do not take HCC-owned deny-all/DNS ownership and retain kube-dns-only DNS egress"
