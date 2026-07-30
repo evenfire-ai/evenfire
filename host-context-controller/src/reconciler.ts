@@ -1532,7 +1532,6 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         }
       )
       if (!isCurrent()) return
-      server.spec.image = config.egressProxyImage
       console.log(
         `[Reconciler] Canonicalized remote McpServer "${server.name}" image to ${config.egressProxyImage}`
       )

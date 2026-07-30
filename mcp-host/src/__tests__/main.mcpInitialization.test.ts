@@ -705,6 +705,7 @@ describe('replaceAuthoritativeMcpFleet', () => {
     }
     let installedState: Map<string, string> | undefined
     const pollingStarted = vi.fn()
+    let initializationSettled = false
     const initialization = replaceAuthoritativeMcpFleet({
       servers: [slowServer, healthyServer],
       previousManager: null,
@@ -716,11 +717,14 @@ describe('replaceAuthoritativeMcpFleet', () => {
       coordinator,
       onColdStartPublished: pollingStarted,
       maxConcurrency: 2,
+    }).finally(() => {
+      initializationSettled = true
     })
 
     await slowStarted.promise
     await vi.waitFor(() => expect(connected).toContain(healthyServer.name))
     expect(pollingStarted).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => expect(initializationSettled).toBe(true))
 
     await reconcileAuthoritativeMcpSnapshot({
       servers: [slowServer, healthyServer],
@@ -809,6 +813,15 @@ describe('replaceAuthoritativeMcpFleet', () => {
 
     releaseFirst.resolve()
     await initialization
+    await vi.waitFor(() =>
+      expect(
+        (
+          coordinator as unknown as {
+            admissionTasks: Set<Promise<void>>
+          }
+        ).admissionTasks.size
+      ).toBe(0)
+    )
     expect(state).toEqual(new Map())
 
     await reconcileAuthoritativeMcpSnapshot({
@@ -1585,6 +1598,47 @@ describe('reconcileAuthoritativeMcpSnapshot', () => {
     expect(manager.addServer).toHaveBeenCalledWith(notReady, undefined, expect.any(Object))
     expect(serverState.get(previous.name)).toBe(JSON.stringify(notReady))
   })
+
+  it.each([
+    [
+      'disabled',
+      readyServer({
+        enabled: false,
+        status: { deployed: true, ready: true, authoritative: true },
+      }),
+    ],
+    [
+      'authoritatively not-ready',
+      readyServer({
+        status: { deployed: true, ready: false, authoritative: true },
+      }),
+    ],
+  ])(
+    'synchronously detaches a connected %s server before asynchronous reconciliation',
+    async (_reason, next) => {
+      const previous = readyServer()
+      const detachServer = vi.fn(() => vi.fn().mockResolvedValue(undefined))
+      const manager = {
+        addServer: appliedAdmission(),
+        replaceServer: appliedAdmission(),
+        removeServer: vi.fn().mockResolvedValue(undefined),
+        detachServer,
+        getConnectedServers: vi.fn(() => [previous.name]),
+        getKnownServers: vi.fn(() => [previous.name]),
+        recordAdmissionFailure: vi.fn(),
+      }
+
+      const reconciliation = reconcileAuthoritativeMcpSnapshot({
+        servers: [next],
+        manager,
+        serverState: new Map([[previous.name, JSON.stringify(previous)]]),
+        getAuthToken: vi.fn(),
+      })
+
+      expect(detachServer).toHaveBeenCalledWith(previous.name)
+      await reconciliation
+    }
+  )
 
   it('retains legacy fail-closed teardown when status authority is undefined', async () => {
     const previous = readyServer()

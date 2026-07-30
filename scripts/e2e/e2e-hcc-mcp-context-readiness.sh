@@ -138,6 +138,21 @@ wait_until() {
   return 1
 }
 
+wait_until_fast() {
+  local timeout=$1 description=$2
+  shift 2
+  local deadline now
+  deadline=$(( $(date +%s) + timeout ))
+  while :; do
+    "$@" && return 0
+    now="$(date +%s)"
+    [ "$now" -lt "$deadline" ] || break
+    sleep 0.5
+  done
+  echo "Timed out after ${timeout}s waiting for ${description}" >&2
+  return 1
+}
+
 running_hcc_pod() {
   local rows
   rows="$(kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" \
@@ -181,15 +196,28 @@ dns_has_not_released_since_hold() {
 }
 
 startup_convergence_window_is_clean() {
+  local logs
   # The fault injection deliberately withholds DNS answers. A resolver timeout
   # may therefore schedule a bounded external-egress retry before the Context
-  # assertion completes. That retry is expected while runtime and policy stay
-  # absent; NetworkPolicy failures and terminal retry exhaustion are not.
-  ! hcc_log_contains "Initial NetworkPolicy background reconciliation failed:" &&
-    ! hcc_log_contains "Scheduling initial NetworkPolicy background convergence retry" &&
-    ! hcc_log_contains "NetworkPolicy reconciliation failed for context ${CONTEXT_NAME}:" &&
-    ! hcc_log_contains \
-      "External egress retry exhausted for McpServer \"${MCP_NAME}\" in namespace \"${MCP_NS}\""
+  # assertion completes. Read one authoritative snapshot first so a kubectl
+  # logs failure cannot make the negative assertions pass vacuously.
+  [ -n "$NEW_HCC_POD" ] || return 1
+  logs="$(kctl logs "pod/${NEW_HCC_POD}" -n "$HCC_NS" \
+    -c host-context-controller 2>/dev/null)" || return 1
+  ! grep -Fq "Initial NetworkPolicy background reconciliation failed:" <<<"$logs" &&
+    ! grep -Fq "Scheduling initial NetworkPolicy background convergence retry" <<<"$logs" &&
+    ! grep -Fq "NetworkPolicy reconciliation failed for context ${CONTEXT_NAME}:" <<<"$logs"
+}
+
+external_egress_retry_progress_is_observed() {
+  local logs
+  [ -n "$NEW_HCC_POD" ] || return 1
+  logs="$(kctl logs "pod/${NEW_HCC_POD}" -n "$HCC_NS" \
+    -c host-context-controller 2>/dev/null)" || return 1
+  grep -Fq \
+    "Initial external egress reconciliation failed for ${MCP_NS}/${MCP_NAME};" <<<"$logs" &&
+    grep -Fq "Scheduling external egress retry " <<<"$logs" &&
+    grep -Fq "for McpServer \"${MCP_NAME}\"" <<<"$logs"
 }
 
 hcc_identity_is_stable() {
@@ -480,6 +508,9 @@ mcp_egress_binding_is_udp() {
 
 create_peer_fleet() {
   local index server context
+  # Arm cleanup before the first write so a partial apply cannot strand input
+  # CRDs or leave HCC deliberately scaled down during failure recovery.
+  PEER_FLEET_CREATED=1
   for ((index = 1; index < ${#MCP_FLEET_NAMES[@]}; index++)); do
     server="${MCP_FLEET_NAMES[index]}"
     context="${CONTEXT_FLEET_NAMES[index]}"
@@ -516,7 +547,6 @@ spec:
     port: 3000
 EOF
   done
-  PEER_FLEET_CREATED=1
 }
 
 fixture_converged() {
@@ -651,6 +681,36 @@ probe_hcc_ready_pod() {
       request.setTimeout(5000, () => request.destroy(new Error("timeout")));
       request.once("error", () => process.exit(4));
     ' >/dev/null 2>&1
+}
+
+probe_new_hcc_ready_endpoint() {
+  [ -n "$NEW_HCC_POD" ] || return 1
+  kctl exec "pod/${NEW_HCC_POD}" -n "$HCC_NS" -c host-context-controller -- \
+    env "HCC_E2E_PORT=${HCC_PORT}" \
+    node -e '
+      const http = require("node:http");
+      const request = http.get(
+        {host: "127.0.0.1", port: Number(process.env.HCC_E2E_PORT), path: "/ready"},
+        response => {
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", chunk => { body += chunk; });
+          response.on("end", () => {
+            let parsed;
+            try { parsed = JSON.parse(body); } catch { process.exit(2); }
+            process.exit(response.statusCode === 200 && parsed?.ready === true ? 0 : 3);
+          });
+        }
+      );
+      request.setTimeout(2000, () => request.destroy(new Error("timeout")));
+      request.once("error", () => process.exit(4));
+    ' >/dev/null 2>&1
+}
+
+hcc_ready_only_after_stale_policy_revoked() {
+  probe_new_hcc_ready_endpoint || return 1
+  fixture_mcp_runtime_absent ||
+    die "HCC served /ready=200 while the stale external-egress allow or fixture runtime was present"
 }
 
 hcc_restore_is_verified() {
@@ -1251,9 +1311,12 @@ wait_until 120 "fixture external-egress DNS query to reach the hold proxy" \
 wait_until 60 "HCC to begin initial external-egress convergence" \
   hcc_log_contains "Reconciling external egress before startup runtime reconciliation" ||
   die "HCC did not log initial McpServer external-egress convergence"
-wait_until 120 "replacement HCC pod and Deployment to become Kubernetes Ready during the hold" \
+wait_until_fast 120 "HCC /ready to become available only after stale policy revocation" \
+  hcc_ready_only_after_stale_policy_revoked ||
+  die "HCC did not become ready after authoritative stale-policy revocation"
+wait_until 30 "replacement HCC pod and Deployment to corroborate readiness" \
   hcc_kubernetes_readiness_is_exact ||
-  die "HCC did not become Kubernetes Ready while initial McpServer convergence remained blocked"
+  die "Kubernetes did not corroborate HCC readiness after the direct ordering assertion"
 dns_log_contains "holding DNS A ${TARGET_DNS}" ||
   die "DNS hold ended before Kubernetes reported HCC Ready"
 if ! dns_has_not_released_since_hold; then
@@ -1286,7 +1349,9 @@ wait_until 120 "initial NetworkPolicy pass to reconcile the fixture's empty Cont
   hcc_log_contains "$initial_empty_context_log" ||
   die "initial NetworkPolicy pass never reconciled the fixture's empty Context"
 startup_convergence_window_is_clean ||
-  die "startup NetworkPolicy failed or fixture external-egress retries exhausted before the Context update"
+  die "startup NetworkPolicy failed or HCC logs were unavailable before the Context update"
+external_egress_retry_progress_is_observed ||
+  die "the injected DNS failure did not produce observable external-egress retry progress"
 context_policies_absent ||
   die "Context policy appeared before the isolated MODIFIED event"
 
@@ -1306,7 +1371,7 @@ wait_until 120 "all three latest-Context NetworkPolicies to converge during the 
   context_policies_converged ||
   die "Context policies remained blocked behind the held McpServer convergence"
 startup_convergence_window_is_clean ||
-  die "startup NetworkPolicy failed or fixture external-egress retries exhausted during the isolation window"
+  die "startup NetworkPolicy failed or HCC logs were unavailable during the isolation window"
 fixture_mcp_convergence_absent ||
   die "McpServer runtime or external-egress policy escaped the deterministic DNS hold boundary"
 dns_log_contains "holding DNS A ${TARGET_DNS}" ||
@@ -1347,7 +1412,7 @@ wait_until 60 "initial NetworkPolicy full pass to run" \
   hcc_log_contains "Running initial NetworkPolicy background reconciliation" ||
   die "initial NetworkPolicy convergence was not observed after releasing MCP convergence"
 startup_convergence_window_is_clean ||
-  die "startup NetworkPolicy failed or fixture external-egress retries exhausted before final convergence"
+  die "startup NetworkPolicy failed or HCC logs were unavailable before final convergence"
 hcc_identity_is_stable ||
   die "HCC restarted instead of completing the released background convergence"
 final_probe="$(probe_hcc_final_context)" ||

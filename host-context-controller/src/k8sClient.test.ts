@@ -656,6 +656,59 @@ describe('McpServerWatcher startup', () => {
   })
 
   it.each([
+    ['Context', 'startContextWatch', 'contextWatchGeneration'],
+    ['Host', 'startHostWatch', 'hostWatchGeneration'],
+  ] as const)(
+    'assigns a fresh generation to every replacement %s watch',
+    async (_kind, method, generationField) => {
+      const watcher = new McpServerWatcher()
+      const before = (watcher as any)[generationField] as number
+
+      const first = await (watcher as any)[method]('first-rv')
+      const second = await (watcher as any)[method]('second-rv')
+
+      expect(first).toBe(before + 1)
+      expect(second).toBe(before + 2)
+      expect((watcher as any)[generationField]).toBe(before + 2)
+      await watcher.stop()
+    }
+  )
+
+  it.each([
+    [
+      'McpServer',
+      'restartMcpServerWatch',
+      'startMcpServerWatch',
+      'mcpWatchGeneration',
+      'mcpServerCacheSynced',
+      { resourceVersion: 'mcp-rv', servers: [] },
+    ],
+    [
+      'Context',
+      'restartContextWatch',
+      'startContextWatch',
+      'contextWatchGeneration',
+      'contextCacheSynced',
+      { resourceVersion: 'context-rv', contexts: [] },
+    ],
+  ] as const)(
+    'rejects a %s LIST snapshot that is not paired with a live watch request',
+    async (_kind, restartMethod, startMethod, generationField, cacheField, snapshot) => {
+      const watcher = new McpServerWatcher()
+      vi.spyOn(watcher as any, startMethod).mockImplementation(async () => {
+        ;(watcher as any)[generationField] += 1
+        return (watcher as any)[generationField]
+      })
+
+      await expect((watcher as any)[restartMethod](snapshot)).rejects.toThrow(
+        'snapshot could not be paired with an active watch'
+      )
+      expect((watcher as any)[cacheField]).toBe(false)
+      await watcher.stop()
+    }
+  )
+
+  it.each([
     ['McpServer', 'mcpservers'],
     ['Context', 'contexts'],
   ] as const)(
@@ -2476,6 +2529,93 @@ describe('McpServerWatcher startup', () => {
     await watcher.stop()
   })
 
+  it('does not lose an initial convergence request queued in the settlement microtask', async () => {
+    const watcher = new McpServerWatcher()
+    let trailing: Promise<void> | undefined
+    const convergenceCore = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          ({
+            then: (resolve: () => void) => {
+              resolve()
+              queueMicrotask(() => {
+                trailing = (watcher as any).runInitialMcpServerConvergence()
+              })
+            },
+          }) as PromiseLike<void>
+      )
+      .mockResolvedValueOnce(undefined)
+    ;(watcher as any).runInitialMcpServerConvergenceCore = convergenceCore
+
+    const first = (watcher as any).runInitialMcpServerConvergence()
+    await first
+    await vi.waitFor(() => expect(trailing).toBeDefined())
+    await trailing
+
+    expect(convergenceCore).toHaveBeenCalledTimes(2)
+    await watcher.stop()
+  })
+
+  it('retains one keyed queue until every same-key waiter has drained', async () => {
+    const watcher = new McpServerWatcher()
+    const firstStarted = deferred()
+    const releaseFirst = deferred()
+    const effects: string[] = []
+    const queues = (watcher as any).contextReconciliationQueues as Map<
+      string,
+      { references: number }
+    >
+
+    const first = (watcher as any).enqueueContextReconciliation('shared', async () => {
+      effects.push('first')
+      firstStarted.resolve(undefined)
+      await releaseFirst.promise
+    })
+    await firstStarted.promise
+    const second = (watcher as any).enqueueContextReconciliation('shared', async () => {
+      effects.push('second')
+    })
+
+    expect(queues.get('shared')?.references).toBe(2)
+    expect(effects).toEqual(['first'])
+    releaseFirst.resolve(undefined)
+    await Promise.all([first, second])
+    expect(effects).toEqual(['first', 'second'])
+    expect(queues.size).toBe(0)
+    await watcher.stop()
+  })
+
+  it('does not execute newly enqueued keyed work after stop', async () => {
+    const watcher = new McpServerWatcher()
+    const work = vi.fn()
+    ;(watcher as any).stopped = true
+
+    await (watcher as any).enqueueContextReconciliation('stopped', work)
+
+    expect(work).not.toHaveBeenCalled()
+    expect((watcher as any).contextReconciliationQueues.size).toBe(0)
+  })
+
+  it('acquires multi-context identity keys in one deterministic sorted order', async () => {
+    const watcher = new McpServerWatcher()
+    const acquired: string[] = []
+    vi.spyOn(watcher as any, 'enqueueContextReconciliation').mockImplementation(
+      async (key: string, work: () => Promise<void>) => {
+        acquired.push(key)
+        await work()
+      }
+    )
+
+    await (watcher as any).enqueueContextIdentityReconciliation(
+      ['z-context', 'a-context', 'm-context', 'z-context'],
+      async () => undefined
+    )
+
+    expect(acquired).toEqual(['a-context', 'm-context', 'z-context'])
+    await watcher.stop()
+  })
+
   it('fences an McpServer fleet pass when its LIST-to-WATCH authority is retired', async () => {
     const egressStarted = deferred()
     const releaseEgress = deferred()
@@ -2627,6 +2767,24 @@ describe('McpServerWatcher startup', () => {
     expect(appliedContexts).toEqual(['current-context'])
     expect(appliedServers).toEqual(['current-server'])
     expect((watcher as any).initialConvergenceRetryAttempts.has('NetworkPolicy')).toBe(false)
+    await watcher.stop()
+  })
+
+  it('does not certify NetworkPolicy revocation after authority is lost at the callback boundary', async () => {
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).contextWatchGeneration = 21
+    ;(watcher as any).mcpWatchGeneration = 34
+    mocks.netPolFullReconcile.mockImplementationOnce(async (_contexts, _servers, options) => {
+      ;(watcher as any).contextCacheSynced = false
+      options.onAuthoritativeRevocationComplete()
+    })
+
+    await (watcher as any).runInitialNetworkPolicyConvergence()
+
+    expect((watcher as any).networkPolicyRevocationContextGeneration).not.toBe(21)
+    expect((watcher as any).networkPolicyRevocationServerGeneration).not.toBe(34)
     await watcher.stop()
   })
 

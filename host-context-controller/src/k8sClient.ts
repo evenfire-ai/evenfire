@@ -2465,8 +2465,15 @@ export class McpServerWatcher implements McpServerProvider {
             await this.runInitialNetworkPolicyConvergenceCore()
           }
         } while (!this.stopped && run.trailingRequested)
+        // Retire the active slot synchronously before this promise settles.
+        // A request arriving in the following settlement microtask must start
+        // a new run instead of attaching to a pass whose loop already exited.
+        if (this.initialConvergenceRuns.get(lane) === run) {
+          this.initialConvergenceRuns.delete(lane)
+        }
       })
       .finally(() => {
+        // Errors bypass the normal retirement above.
         if (this.initialConvergenceRuns.get(lane) === run) {
           this.initialConvergenceRuns.delete(lane)
         }

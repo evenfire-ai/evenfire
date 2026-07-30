@@ -51,6 +51,8 @@ type JsonPatchOperation = {
 
 type NetworkPolicyMutationOptions = {
   isCurrent?: () => boolean
+  existingPolicies?: k8s.V1NetworkPolicy[]
+  preserveCertifiedDnsPolicyOnRefreshFailure?: boolean
 }
 
 export function sameContextDesiredRevision(expected: ContextCRD, current: ContextCRD): boolean {
@@ -655,7 +657,7 @@ export class NetworkPolicyReconciler {
       `[NetPol] Reconciling context "${contextId}" — allowed servers: [${allowedServers.join(', ')}]`
     )
 
-    const existingPolicies = await this.listPoliciesForContext(contextId)
+    await this.listPoliciesForContext(contextId)
     if (!isCurrent()) return
 
     // Create or update policies for each allowed server.
@@ -696,7 +698,10 @@ export class NetworkPolicyReconciler {
       )
     }
 
-    await this.revokeStaleContextAllows(context, isCurrent, { context: existingPolicies })
+    // The pre-apply LIST above is an authority fence, not a post-apply cleanup
+    // snapshot. Re-LIST every lane after the writes so a same-name policy that
+    // was just replaced is compared in its new form and cannot delete itself.
+    await this.revokeStaleContextAllows(context, isCurrent)
   }
 
   private async revokeStaleContextAllows(
@@ -885,7 +890,20 @@ export class NetworkPolicyReconciler {
       if (!contextCleanupAuthoritative()) return
       for (const policy of policies) {
         const contextId = policy.metadata?.labels?.[CONTEXT_LABEL]
-        if (contextId && !desiredContextIds.has(contextId)) {
+        if (!contextId) {
+          if (!contextCleanupAuthoritative()) return
+          const name = policy.metadata?.name
+          if (!name) {
+            throw new Error('HCC-managed Context NetworkPolicy is missing its name and owner label')
+          }
+          console.warn(
+            `[NetPol] Deleting malformed HCC-managed policy "${name}" without ${CONTEXT_LABEL}`
+          )
+          await deletePolicy(name)
+          recordSafetyPassRevocation()
+          continue
+        }
+        if (!desiredContextIds.has(contextId)) {
           const name = policy.metadata?.name || ''
           await runContextEffect(contextId, async () => {
             if (
@@ -980,7 +998,22 @@ export class NetworkPolicyReconciler {
       safetyPassListedPolicies += allExternalPolicies.length
       for (const policy of allExternalPolicies) {
         const serverName = policy.metadata?.labels?.[MCPSERVER_LABEL]
-        if (serverName && !desiredServerNames.has(serverName)) {
+        if (!serverName) {
+          if (!serverCleanupAuthoritative()) break
+          const name = policy.metadata?.name
+          if (!name) {
+            throw new Error(
+              'HCC-managed external egress NetworkPolicy is missing its name and owner label'
+            )
+          }
+          console.warn(
+            `[NetPol] Deleting malformed HCC-managed policy "${name}" without ${MCPSERVER_LABEL}`
+          )
+          await this.deletePolicyInNamespace(config.namespace, name)
+          recordSafetyPassRevocation()
+          continue
+        }
+        if (!desiredServerNames.has(serverName)) {
           const name = policy.metadata?.name || ''
           await runServerEffect(serverName, async () => {
             if (
@@ -1027,12 +1060,12 @@ export class NetworkPolicyReconciler {
             const latest = options.resolveCurrentServer(current.name)
             return latest !== undefined && sameMcpServerDesiredRevision(current, latest)
           }
-          const completed = await this.revokeStaleExternalEgress(
+          const completed = await this.reconcileExternalEgressSafety(
             current,
-            serverEffectIsCurrent,
             allExternalPolicies.filter(
               policy => policy.metadata?.labels?.[MCPSERVER_LABEL] === server.name
             ),
+            serverEffectIsCurrent,
             recordSafetyPassRevocation
           )
           if (!completed && serverCleanupAuthoritative()) {
@@ -1095,8 +1128,11 @@ export class NetworkPolicyReconciler {
       })
     }
 
-    // Reconcile external egress for all existing servers on startup so a
-    // controller restart converges pre-existing McpServer CRDs too.
+    // Refresh and create external egress policies after certification. The
+    // safety phase above retains structurally valid same-intent DNS policies
+    // across restart, while changed bindings use make-before-break before
+    // readiness. This background refresh therefore cannot create a restart-
+    // induced deny window or preserve a stale allow.
     for (const server of servers) {
       await runServerEffect(server.name, async () => {
         const current = options.resolveCurrentServer
@@ -1109,7 +1145,10 @@ export class NetworkPolicyReconciler {
           const latest = options.resolveCurrentServer(current.name)
           return latest !== undefined && sameMcpServerDesiredRevision(current, latest)
         }
-        await this.reconcileExternalEgress(current, { isCurrent: serverEffectIsCurrent })
+        await this.reconcileExternalEgress(current, {
+          isCurrent: serverEffectIsCurrent,
+          preserveCertifiedDnsPolicyOnRefreshFailure: true,
+        })
       })
     }
 
@@ -1207,10 +1246,47 @@ export class NetworkPolicyReconciler {
     }
   }
 
-  private desiredProvableExternalEgressPolicies(
-    server: McpServerCRD
-  ): Map<string, k8s.V1NetworkPolicy> {
-    const desired = new Map<string, k8s.V1NetworkPolicy>()
+  private canRetainDnsEgressPolicy(
+    policy: k8s.V1NetworkPolicy,
+    server: McpServerCRD,
+    binding: EgressBinding
+  ): boolean {
+    const expectedProtocol = binding.protocol ?? 'TCP'
+    return (
+      policy.metadata?.labels?.[MANAGED_BY_LABEL] === MANAGED_BY_VALUE &&
+      policy.metadata?.labels?.[POLICY_TYPE_LABEL] === EXTERNAL_EGRESS_POLICY_TYPE &&
+      policy.metadata?.labels?.[MCPSERVER_LABEL] === server.name &&
+      policy.metadata?.labels?.[EGRESS_CLASS_LABEL] === 'exact-host' &&
+      policy.spec?.podSelector?.matchLabels?.[MCPSERVER_LABEL] === server.name &&
+      policy.spec?.policyTypes?.length === 1 &&
+      policy.spec.policyTypes[0] === 'Egress' &&
+      (policy.spec.egress?.length ?? 0) > 0 &&
+      policy.spec.egress!.every(rule => {
+        const port = rule.ports?.[0]
+        const cidr = rule.to?.[0]?.ipBlock?.cidr
+        return (
+          rule.ports?.length === 1 &&
+          port !== undefined &&
+          port.port === binding.port &&
+          port.protocol === expectedProtocol &&
+          rule.to?.length === 1 &&
+          typeof cidr === 'string' &&
+          cidr.endsWith('/32') &&
+          isAllowedExternalEgressCidr(cidr) &&
+          (rule.to[0].ipBlock?.except?.length ?? 0) === 0
+        )
+      })
+    )
+  }
+
+  private async reconcileExternalEgressSafety(
+    server: McpServerCRD,
+    existingPolicies: k8s.V1NetworkPolicy[],
+    isCurrent: () => boolean,
+    onRevoked?: () => void
+  ): Promise<boolean> {
+    if (!isCurrent()) return false
+    const desired = new Map<string, { binding: EgressBinding; policy?: k8s.V1NetworkPolicy }>()
     for (const binding of server.spec.egressBindings ?? []) {
       const name = this.externalEgressPolicyName(server.name, binding)
       if (!name) continue
@@ -1222,10 +1298,8 @@ export class NetworkPolicyReconciler {
         binding.port === undefined &&
         binding.protocol === undefined
       ) {
-        desired.set(name, this.buildPublicWebEgressPolicy(server, name))
-        continue
-      }
-      if (
+        desired.set(name, { binding, policy: this.buildPublicWebEgressPolicy(server, name) })
+      } else if (
         egressClass === 'exact-host' &&
         binding.cidr &&
         isAllowedExternalEgressCidr(binding.cidr) &&
@@ -1234,37 +1308,55 @@ export class NetworkPolicyReconciler {
         binding.port >= 1 &&
         binding.port <= 65535
       ) {
-        desired.set(name, this.buildExactHostEgressPolicy(server, name, binding, [binding.cidr]))
+        desired.set(name, {
+          binding,
+          policy: this.buildExactHostEgressPolicy(server, name, binding, [binding.cidr]),
+        })
+      } else if (
+        egressClass === 'exact-host' &&
+        binding.dns &&
+        isPublicDnsHostname(binding.dns) &&
+        binding.port !== undefined &&
+        Number.isInteger(binding.port) &&
+        binding.port >= 1 &&
+        binding.port <= 65535
+      ) {
+        desired.set(name, { binding })
       }
-      // DNS-derived IPs are intentionally not retained in the safety phase:
-      // their currentness cannot be proven without the slow external lookup.
-      // The additive phase resolves DNS and recreates the policy after stale
-      // allows have been revoked and readiness can become available.
     }
-    return desired
-  }
 
-  private async revokeStaleExternalEgress(
-    server: McpServerCRD,
-    isCurrent: () => boolean,
-    listedPolicies?: k8s.V1NetworkPolicy[],
-    onRevoked?: () => void
-  ): Promise<boolean> {
-    if (!isCurrent()) return false
-    const existingPolicies =
-      listedPolicies ??
-      (await this.listExternalEgressPoliciesForServer(server.name, server.namespace))
-    if (!isCurrent()) return false
-    const desiredPolicies = this.desiredProvableExternalEgressPolicies(server)
+    const stale: k8s.V1NetworkPolicy[] = []
+    let needsMakeBeforeBreak = false
+    for (const existing of existingPolicies) {
+      const name = existing.metadata?.name
+      const selected = name ? desired.get(name) : undefined
+      if (!selected) {
+        stale.push(existing)
+        continue
+      }
+      desired.delete(name!)
+      const retainable = selected.policy
+        ? sameNetworkPolicySpec(existing, selected.policy)
+        : this.canRetainDnsEgressPolicy(existing, server, selected.binding)
+      if (!retainable) {
+        needsMakeBeforeBreak = true
+      }
+    }
+    // A desired replacement with a different name must be created before its
+    // stale predecessor is removed. A purely missing allow has no stale
+    // permission to revoke and remains additive work after readiness.
+    if (stale.length > 0 && desired.size > 0) {
+      needsMakeBeforeBreak = true
+    }
+
+    if (needsMakeBeforeBreak) {
+      await this.reconcileExternalEgress(server, { isCurrent, existingPolicies })
+      return isCurrent()
+    }
     await this.cleanupExternalEgress(
       server.name,
       server.namespace,
-      existingPolicies.filter(policy => {
-        const name = policy.metadata?.name
-        if (!name) return false
-        const desired = desiredPolicies.get(name)
-        return !desired || !sameNetworkPolicySpec(policy, desired)
-      }),
+      stale,
       async () => isCurrent(),
       onRevoked
     )
@@ -1282,23 +1374,25 @@ export class NetworkPolicyReconciler {
   ): Promise<void> {
     const isCurrent = options.isCurrent ?? (() => true)
     if (!isCurrent()) return
-    let existingPolicies: k8s.V1NetworkPolicy[]
-    try {
-      existingPolicies = await this.listExternalEgressPoliciesForServer(
-        server.name,
-        server.namespace
-      )
-    } catch (error) {
-      if (!isCurrent()) return
-      await this.writeExternalEgressStatus(
-        server,
-        [],
-        'False',
-        'InventoryListFailed',
-        `Failed to list existing external egress policies: ${this.errorMessage(error)}`,
-        isCurrent
-      )
-      throw error
+    let existingPolicies = options.existingPolicies
+    if (!existingPolicies) {
+      try {
+        existingPolicies = await this.listExternalEgressPoliciesForServer(
+          server.name,
+          server.namespace
+        )
+      } catch (error) {
+        if (!isCurrent()) return
+        await this.writeExternalEgressStatus(
+          server,
+          [],
+          'False',
+          'InventoryListFailed',
+          `Failed to list existing external egress policies: ${this.errorMessage(error)}`,
+          isCurrent
+        )
+        throw error
+      }
     }
     if (!isCurrent()) return
 
@@ -1437,6 +1531,17 @@ export class NetworkPolicyReconciler {
           resolvedEgressIPs.push({ dns: binding.dns, ips: uniqueIps, resolvedAt })
           console.log(`[NetPol] Resolved ${binding.dns} → [${cidrs.join(', ')}]`)
         } catch (err) {
+          const certifiedExisting = existingPolicies.find(
+            policy =>
+              policy.metadata?.name === name &&
+              this.canRetainDnsEgressPolicy(policy, server, binding)
+          )
+          if (
+            options.preserveCertifiedDnsPolicyOnRefreshFailure &&
+            certifiedExisting !== undefined
+          ) {
+            desiredPolicyNames.add(name)
+          }
           failures.push(`failed to resolve hostname "${binding.dns}": ${this.errorMessage(err)}`)
           continue
         }

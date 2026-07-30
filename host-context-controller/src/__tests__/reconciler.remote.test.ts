@@ -676,7 +676,7 @@ describe('McpServerReconciler remote egress proxy', () => {
   })
 
   describe('canonicalizeRemoteEgressProxyImage', () => {
-    it('patches stale remote McpServer spec.image to the platform egress proxy image', async () => {
+    it('patches stale remote spec.image without mutating the observed cache object', async () => {
       const staleRemote = cloneServer(REMOTE_SERVER, {
         image: LEGACY_REMOTE_EGRESS_IMAGE,
       })
@@ -700,7 +700,7 @@ describe('McpServerReconciler remote egress proxy', () => {
           middleware: expect.any(Array),
         })
       )
-      expect(staleRemote.spec.image).toBe('clerum/nginx-egress-proxy:0.1.0')
+      expect(staleRemote.spec.image).toBe(LEGACY_REMOTE_EGRESS_IMAGE)
       expect(lastPatchedStatusConditions(customApi)).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -873,7 +873,7 @@ describe('McpServerReconciler remote egress proxy', () => {
         'createService',
         'createDeployment',
       ])
-      expect(staleRemote.spec.image).toBe('clerum/nginx-egress-proxy:0.1.0')
+      expect(staleRemote.spec.image).toBe(LEGACY_REMOTE_EGRESS_IMAGE)
       expect(customApi.patchNamespacedCustomObject).toHaveBeenCalledWith(
         expect.objectContaining({
           body: {

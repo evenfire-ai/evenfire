@@ -569,11 +569,18 @@ export async function replaceAuthoritativeMcpFleet<
     // them independently through a finite worker pool so one slow connection
     // cannot head-of-line block a healthy peer and a large fleet cannot create
     // an unbounded connection burst. Each failure remains retryable above.
-    await runMcpFleetEffects(options.servers, maxConcurrency, server =>
+    const reconciliation = runMcpFleetEffects(options.servers, maxConcurrency, server =>
       coordinator.runAdmission(nextManager, server.name, lease, isCurrent =>
         admitServer(server, () => isCurrent() && options.isFleetLifecycleCurrent?.() !== false)
       )
     )
+    if (coldStart && coordinator.reconcilesInBackground) {
+      void reconciliation.catch(error => {
+        console.error('[Main] MCP background cold-start reconciliation failed:', error)
+      })
+      return
+    }
+    await reconciliation
 
     // Cold start may publish healthy peers so HCC readiness is independent of
     // full-fleet convergence. A live prior fleet is safer to preserve

@@ -216,6 +216,7 @@ fixture_inputs_absent() {
 
 fixture_runtime_absent() {
   local host resources
+  [ "${#FIXTURE_HOST_NAMES[@]}" -eq 0 ] && return 0
   for host in "${FIXTURE_HOST_NAMES[@]}"; do
     resources="$(
       kctl get deployment,service,serviceaccount,role,rolebinding,secret,persistentvolumeclaim,networkpolicy \
@@ -327,6 +328,7 @@ delete_host_fixtures() {
     --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
   kctl delete secret -n "$HOST_NS" -l "e2e.clerum.io/suite=${SUITE_NAME}" \
     --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
+  [ "${#FIXTURE_HOST_NAMES[@]}" -eq 0 ] && return "$failed"
   for host in "${FIXTURE_HOST_NAMES[@]}"; do
     kctl delete \
       deployment,service,serviceaccount,role,rolebinding,secret,persistentvolumeclaim,networkpolicy \

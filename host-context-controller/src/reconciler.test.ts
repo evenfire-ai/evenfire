@@ -41,6 +41,7 @@ vi.mock('./config', () => ({
     controlPlaneNamespace: 'control-plane',
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
+    egressProxyImage: 'clerum/nginx-egress-proxy:test',
     devMcpServers: [],
     devContexts: [],
     devAuthTokens: new Map(),
@@ -164,6 +165,26 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
     const server = makeServer({ name: 'mongo-mcp' })
     await reconciler.reconcile(server)
     expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
+  })
+
+  it('canonicalizes a remote proxy image without mutating the authoritative cache object', async () => {
+    const server = makeServer({
+      name: 'remote-api',
+      image: 'vendor/original-image:1',
+      remote: { baseUrl: 'https://api.example.com' },
+    })
+    const originalSpec = structuredClone(server.spec)
+
+    await reconciler.reconcile(server)
+
+    expect(server.spec).toEqual(originalSpec)
+    expect(customApi.patchNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'remote-api',
+        body: { spec: { image: 'clerum/nginx-egress-proxy:test' } },
+      }),
+      expect.anything()
+    )
   })
 
   it('should log WRC-owned ownership when managed: false', async () => {

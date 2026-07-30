@@ -132,9 +132,17 @@ describe('ExternalEgressConvergenceCoordinator', () => {
     }).instance
 
     instance.scheduleRetry('ADDED', selected)
-    for (const delay of [5000, 15000, 30000, 30000, 30000]) {
-      await vi.advanceTimersByTimeAsync(delay)
-    }
+    await vi.advanceTimersByTimeAsync(5000)
+    await vi.advanceTimersByTimeAsync(15000)
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(attempts).toBe(3)
+    await vi.advanceTimersByTimeAsync(29999)
+    expect(attempts).toBe(3)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(attempts).toBe(4)
+    await vi.advanceTimersByTimeAsync(29999)
+    expect(attempts).toBe(4)
+    await vi.advanceTimersByTimeAsync(1)
 
     expect(attempts).toBe(5)
     await vi.advanceTimersByTimeAsync(30000)

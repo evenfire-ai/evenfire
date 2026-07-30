@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Values in the eval-based fixture harness are consumed by extracted gate
+# functions, which static shell analysis cannot follow.
+# shellcheck disable=SC2034
 set -u
 
 FAIL=0
@@ -231,7 +234,12 @@ done
 startup_window_function="$(
   sed -n '/^startup_convergence_window_is_clean() {$/,/^}$/p' "$MCP_READINESS_GATE"
 )"
+retry_progress_function="$(
+  sed -n '/^external_egress_retry_progress_is_observed() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
 if (
+  NEW_HCC_POD=hcc-pod
+  HCC_NS=control-plane
   MCP_NS=mcp-server
   MCP_NAME=e2e-held-server
   CONTEXT_NAME=e2e-context
@@ -239,26 +247,43 @@ if (
 [K8s] Initial external egress reconciliation failed for mcp-server/e2e-held-server; runtime reconciliation will stay blocked until retry succeeds: dns timeout
 [K8s] Scheduling external egress retry 1/3 for McpServer "e2e-held-server" in 5000ms
 '
-  hcc_log_contains() { grep -Fq "$1" <<<"$MOCK_HCC_LOG"; }
+  kctl() { printf '%s\n' "$MOCK_HCC_LOG"; }
   eval "$startup_window_function"
-  startup_convergence_window_is_clean
+  eval "$retry_progress_function"
+  startup_convergence_window_is_clean && external_egress_retry_progress_is_observed
 ); then
-  pass "the injected DNS hold permits transient external-egress failure and bounded retry"
+  pass "the injected DNS hold requires observable live retry progress without treating it as fatal"
 else
-  fail "the injected DNS hold incorrectly treats its expected transient retry as fatal"
+  fail "the injected DNS hold cannot distinguish expected live retry progress"
 fi
 if (
+  NEW_HCC_POD=hcc-pod
+  HCC_NS=control-plane
   MCP_NS=mcp-server
   MCP_NAME=e2e-held-server
   CONTEXT_NAME=e2e-context
-  MOCK_HCC_LOG='External egress retry exhausted for McpServer "e2e-held-server" in namespace "mcp-server"'
-  hcc_log_contains() { grep -Fq "$1" <<<"$MOCK_HCC_LOG"; }
+  MOCK_HCC_LOG='[K8s] Initial NetworkPolicy background reconciliation failed: denied'
+  kctl() { printf '%s\n' "$MOCK_HCC_LOG"; }
   eval "$startup_window_function"
   ! startup_convergence_window_is_clean
 ); then
-  pass "the injected DNS hold still rejects terminal external-egress retry exhaustion"
+  pass "the convergence window rejects a real NetworkPolicy failure marker"
 else
-  fail "the injected DNS hold can accept terminal external-egress retry exhaustion"
+  fail "the convergence window accepts a real NetworkPolicy failure marker"
+fi
+if (
+  NEW_HCC_POD=hcc-pod
+  HCC_NS=control-plane
+  MCP_NS=mcp-server
+  MCP_NAME=e2e-held-server
+  CONTEXT_NAME=e2e-context
+  kctl() { return 1; }
+  eval "$startup_window_function"
+  ! startup_convergence_window_is_clean
+); then
+  pass "the convergence window fails closed when HCC logs are unavailable"
+else
+  fail "the convergence window passes vacuously when HCC logs are unavailable"
 fi
 
 # shellcheck source=scripts/e2e/_lib/hcc-watch-recovery-logs.sh
@@ -319,6 +344,55 @@ if (
   pass "an intermediate Host apply failure aborts fixture creation even from an OR-list"
 else
   fail "fixture creation can continue or report success after an intermediate apply failure"
+fi
+
+bootstrap_runtime_absent_function="$(
+  sed -n '/^fixture_runtime_absent() {$/,/^}$/p' "$READINESS_GATE"
+)"
+bootstrap_delete_fixtures_function="$(
+  sed -n '/^delete_host_fixtures() {$/,/^}$/p' "$READINESS_GATE"
+)"
+# Literal source-code assertions for macOS bash 3.2, where expanding an empty
+# array under set -u terminates the shell before cleanup can release its lock.
+# shellcheck disable=SC2016
+if [[ "$bootstrap_runtime_absent_function" == *'[ "${#FIXTURE_HOST_NAMES[@]}" -eq 0 ] && return 0'* ]] &&
+   [[ "$bootstrap_delete_fixtures_function" == *'[ "${#FIXTURE_HOST_NAMES[@]}" -eq 0 ] && return "$failed"'* ]]; then
+  pass "bootstrap cleanup guards empty fixture arrays before bash 3.2 expansion"
+else
+  fail "bootstrap cleanup can abort on an empty fixture array before lock finalization"
+fi
+
+create_peer_fleet_function="$(
+  sed -n '/^create_peer_fleet() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+peer_flag_line="$(grep -nF '  PEER_FLEET_CREATED=1' <<<"$create_peer_fleet_function" | head -1 | cut -d: -f1)"
+peer_loop_line="$(grep -nF '  for ((index = 1;' <<<"$create_peer_fleet_function" | head -1 | cut -d: -f1)"
+if [ -n "$peer_flag_line" ] && [ -n "$peer_loop_line" ] &&
+   [ "$peer_flag_line" -lt "$peer_loop_line" ]; then
+  pass "peer fleet cleanup is armed before the first partial apply can fail"
+else
+  fail "peer fleet cleanup is armed only after all applies complete"
+fi
+
+readiness_boundary_function="$(
+  sed -n '/^hcc_ready_only_after_stale_policy_revoked() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+direct_ready_line="$(
+  grep -nF 'wait_until_fast 120 "HCC /ready to become available only after stale policy revocation"' \
+    "$MCP_READINESS_GATE" | cut -d: -f1
+)"
+kubernetes_ready_line="$(
+  grep -nF 'wait_until 30 "replacement HCC pod and Deployment to corroborate readiness"' \
+    "$MCP_READINESS_GATE" | cut -d: -f1
+)"
+# shellcheck disable=SC2016
+if [[ "$readiness_boundary_function" == *'probe_new_hcc_ready_endpoint || return 1'* ]] &&
+   [[ "$readiness_boundary_function" == *'fixture_mcp_runtime_absent ||'* ]] &&
+   [ -n "$direct_ready_line" ] && [ -n "$kubernetes_ready_line" ] &&
+   [ "$direct_ready_line" -lt "$kubernetes_ready_line" ]; then
+  pass "direct /ready ordering is asserted against stale policy presence before Kubernetes corroboration"
+else
+  fail "readiness ordering still relies on the delayed Kubernetes Pod Ready signal"
 fi
 
 printf '%s\n' \
@@ -555,7 +629,7 @@ if grep -Fq 'source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"' \
    grep -Fq 'hcc_pods_absent' "$MCP_READINESS_GATE" &&
    ! grep -Fq -- '--for=delete' "$MCP_READINESS_GATE" &&
    ! grep -Fq 'port: 8081' "$MCP_READINESS_GATE" &&
-   [ "$mcp_port_probe_count" = 3 ] &&
+   [ "$mcp_port_probe_count" = 4 ] &&
    [ "$mcp_pod_absence_count" = 3 ]; then
   pass "MCP readiness gate shares exact-head ownership and uses bounded portable runtime probes"
 else
@@ -649,7 +723,7 @@ truncate_rfc1123() { printf '%.63s' "$1"; }
 source "$LOCK_HELPER"
 
 HCC_NS=control-plane
-HCC_DEPLOY=host-context-controller
+HCC_DEPLOY="host-context-controller"
 E2E_KUBECONTEXT=clerum-codex-lock-test-1234abcd
 RUN_ID=owner-1
 HCC_GATE_LOCK_ACQUIRED=0

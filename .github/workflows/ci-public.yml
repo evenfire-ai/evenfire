@@ -331,6 +331,12 @@ jobs:
       - name: Test host-storm metric adjudication
         run: bash scripts/tests/test-host-storm-metric-gate.sh
 
+      - name: Test WRC-to-HCC contracts
+        run: bash scripts/tests/test-wrc-hcc-contracts-gate.sh
+
+      - name: Test WRC internal dependency NetworkPolicy contracts
+        run: bash scripts/tests/test-wrc-internal-dependency-networkpolicy-gate.sh
+
       - name: Test Plugin Workload SDK auth bootstrap policy
         run: bash scripts/tests/test-plugin-workload-sdk-auth-bootstrap.sh
 
