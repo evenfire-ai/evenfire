@@ -193,11 +193,12 @@ export function prepareStatements(db: Database): PreparedStatements {
                ELSE last_activity_at
              END,
              turn_count = turn_count + CASE
-               WHEN (
+               WHEN @turn_number IS NOT NULL
+                AND (
                  SELECT COUNT(*)
                    FROM messages
                   WHERE session_id = @id
-                    AND COALESCE(turn_number, 0) = COALESCE(@turn_number, 0)
+                    AND turn_number = @turn_number
                ) = 1
                  THEN 1
                ELSE 0

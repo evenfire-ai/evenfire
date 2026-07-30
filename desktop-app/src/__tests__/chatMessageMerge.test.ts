@@ -75,7 +75,7 @@ describe('mergeAuthoritativeServerMessages', () => {
     expect(merged.map(message => message.id)).toEqual(['turn-3-user', 'pending'])
   })
 
-  it('does not duplicate an active optimistic message when the server returns its turn', () => {
+  it('keeps an active optimistic message until the server identifies its task', () => {
     const serverMessages = turnsToChatMessages([
       {
         number: 2,
@@ -106,6 +106,39 @@ describe('mergeAuthoritativeServerMessages', () => {
 
     expect(merged).toEqual([
       expect.objectContaining({ id: 'turn-1-user' }),
+      expect.objectContaining({
+        id: 'optimistic-task-2',
+        content: 'second',
+        task_id: 'task-2',
+      }),
+    ])
+  })
+
+  it('replaces an active optimistic message when the server identifies the same task', () => {
+    const merged = mergeAuthoritativeServerMessages(
+      [
+        {
+          id: 'optimistic-task-2',
+          role: 'user',
+          content: 'second',
+          timestamp: 2,
+          task_id: 'task-2',
+        },
+      ],
+      [
+        {
+          id: 'turn-2-user',
+          role: 'user',
+          content: 'second',
+          timestamp: 3,
+          task_id: 'task-2',
+          serverTurnNumber: 2,
+        },
+      ],
+      { activeTaskIds: new Set(['task-2']) }
+    )
+
+    expect(merged).toEqual([
       expect.objectContaining({
         id: 'turn-2-user',
         content: 'second',
@@ -608,6 +641,7 @@ describe('mergeAuthoritativeServerMessages', () => {
     )
 
     const turnFive = merged.find(message => message.id === 'turn-5-user')
+    expect(merged.map(message => message.id)).toContain('live-optimistic')
     expect(turnFive?.task_id).toBeUndefined()
     expect(turnFive?.attachments).toBeUndefined()
   })

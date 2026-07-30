@@ -124,6 +124,7 @@ export function mergeAuthoritativeServerMessages(
   const removedIndexByMessage = new Map<ChatMessage, number>()
   const localByServerMessage = new Map<ChatMessage, ChatMessage>()
   const consumedLocalMessages = new Set<ChatMessage>()
+  const suppressedServerMessages = new Set<ChatMessage>()
 
   const markLocalReplacement = (serverMessage: ChatMessage, localMessage: ChatMessage) => {
     const index = existing.indexOf(localMessage)
@@ -180,19 +181,40 @@ export function mergeAuthoritativeServerMessages(
     }
     if (message.role !== 'user' && message.role !== 'assistant') continue
     if (message.isError || message.preserveLocal || consumedLocalMessages.has(message)) continue
-    const matchingServerMessage = authoritative.find(
+    const eligibleServerMessages = authoritative.filter(
       serverMessage =>
         !localByServerMessage.has(serverMessage) &&
+        !suppressedServerMessages.has(serverMessage) &&
         serverMessage.role === message.role &&
         serverTurnAllowedForTurnlessLocal(serverMessage, message, index)
     )
-    if (matchingServerMessage) markLocalReplacement(matchingServerMessage, message)
+    // A live local bubble remains authoritative for the UI until the server can
+    // identify the same task. Current server history rows are usually unscoped,
+    // so suppress one only when its role and position identify a single slot.
+    const exactTaskMatches = eligibleServerMessages.filter(
+      serverMessage => serverMessage.task_id === message.task_id
+    )
+    if (exactTaskMatches.length === 1) {
+      markLocalReplacement(exactTaskMatches[0]!, message)
+      continue
+    }
+
+    const unscopedCandidates = eligibleServerMessages.filter(
+      serverMessage => serverMessage.task_id === undefined
+    )
+    const candidateTurns = new Set(
+      unscopedCandidates.map(serverMessage => messageServerTurnNumber(serverMessage)!)
+    )
+    if (candidateTurns.size === 1 && unscopedCandidates.length === 1) {
+      suppressedServerMessages.add(unscopedCandidates[0]!)
+    }
   }
 
   for (const [index, message] of existing.entries()) {
     if (messageServerTurnNumber(message) !== undefined) continue
     if (message.role !== 'user' && message.role !== 'assistant') continue
     if (message.isError || message.preserveLocal || consumedLocalMessages.has(message)) continue
+    if (message.task_id && options.activeTaskIds?.has(message.task_id)) continue
 
     const authoritativeCandidates = authoritative.filter(
       serverMessage =>
@@ -214,13 +236,15 @@ export function mergeAuthoritativeServerMessages(
     markLocalReplacement(candidates[0]!, message)
   }
 
-  const hydratedReplacements = authoritative.map(message => {
-    const local = localByServerMessage.get(message)
-    return {
-      message: preferredServerMessage(message, local, { copyLocalMetadata: Boolean(local) }),
-      localAnchorIndex: local ? removedIndexByMessage.get(local) : undefined,
-    }
-  })
+  const hydratedReplacements = authoritative
+    .filter(message => !suppressedServerMessages.has(message))
+    .map(message => {
+      const local = localByServerMessage.get(message)
+      return {
+        message: preferredServerMessage(message, local, { copyLocalMetadata: Boolean(local) }),
+        localAnchorIndex: local ? removedIndexByMessage.get(local) : undefined,
+      }
+    })
 
   const replacementAnchorByTurn = new Map<number, number>()
   for (const replacement of hydratedReplacements) {

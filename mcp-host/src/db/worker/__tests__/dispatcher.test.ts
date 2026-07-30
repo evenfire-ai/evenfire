@@ -223,7 +223,7 @@ describe('dbWorker dispatcher', () => {
     const incrementalSummary = readSummary()
     expect(incrementalSummary).toEqual({
       last_activity_at: 20,
-      turn_count: 3,
+      turn_count: 2,
       message_count: 3,
     })
 
