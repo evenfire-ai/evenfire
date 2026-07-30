@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { ChatStore } from './chatStore.js'
+import { assertSafeFilesystemSegment } from './pathSafety.js'
 
 /**
  * Keep the shared catalog at v2 so pre-paging desktop builds can read the
@@ -36,12 +37,6 @@ const PRE_ENV_MIGRATION_MARKER = '.env-scoped'
  * empty/`.`/`..`/separator-bearing value could make the wipe escape its subdir
  * or target the whole base dir.
  */
-function assertSafeSegment(label: string, value: string): void {
-  if (!value || value === '.' || value === '..' || /[/\\\0]/.test(value)) {
-    throw new Error(`Invalid ${label}: unsafe path segment`)
-  }
-}
-
 /**
  * Bind the chat store to a `(envKey, user)` directory (spec §5.2). The path is
  * namespaced by environment — `<base>/<envKey>/<userId>/…` — so switching
@@ -55,10 +50,10 @@ export async function bindChatStoreForUser(
   envKey: string,
   options: { legacyEnvKeys?: readonly string[] } = {}
 ): Promise<void> {
-  assertSafeSegment('userId', userId)
-  assertSafeSegment('envKey', envKey)
+  assertSafeFilesystemSegment('userId', userId)
+  assertSafeFilesystemSegment('envKey', envKey)
   for (const legacyEnvKey of options.legacyEnvKeys ?? []) {
-    assertSafeSegment('legacyEnvKey', legacyEnvKey)
+    assertSafeFilesystemSegment('legacyEnvKey', legacyEnvKey)
   }
   // Re-binding the same (env, user) is a no-op. Team switches and access-catalog
   // refreshes re-call this with an unchanged `me.id`; tearing the store down
@@ -81,6 +76,9 @@ export async function bindChatStoreForUser(
     await maybeWipePreEnvLegacyCache(baseDir)
     await maybeMigrateEnvScopedCache(baseDir, userId, envKey, options.legacyEnvKeys ?? [])
     const userDir = join(baseDir, envKey, userId)
+    await ensurePrivateDirectory(baseDir)
+    await ensurePrivateDirectory(join(baseDir, envKey))
+    await ensurePrivateDirectory(userDir)
     await maybeWipeLegacyCache(userDir)
     await sweepExpiredCorruptQuarantines(userDir)
     if (generation !== bindingGeneration) return
@@ -94,6 +92,13 @@ export async function bindChatStoreForUser(
   } finally {
     if (bindInFlight?.promise === promise) bindInFlight = null
   }
+}
+
+async function ensurePrivateDirectory(directoryPath: string): Promise<void> {
+  await fs.mkdir(directoryPath, { recursive: true, mode: 0o700 })
+  // mkdir's mode does not update an existing directory. Tighten legacy
+  // permissions at the three ancestry boundaries that protect the full cache.
+  await fs.chmod(directoryPath, 0o700)
 }
 
 /**
@@ -259,7 +264,13 @@ async function maybeWipeLegacyCache(userDir: string): Promise<void> {
       } else {
         isLegacy = parsed.version !== SCHEMA_VERSION
       }
-    } catch {
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code
+      if (code !== undefined && code !== 'ENOENT') {
+        // A transient permission/I/O failure is not evidence of an old schema.
+        // Propagate it instead of recursively deleting a live agent cache.
+        throw error
+      }
       // index.json missing or unparseable → treat as legacy
       isLegacy = true
     }

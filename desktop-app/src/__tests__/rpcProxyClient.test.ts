@@ -20,13 +20,26 @@ describe('RpcProxyClient.listSessions', () => {
     vi.restoreAllMocks()
   })
 
-  it.each(['.', '..', 'host/name', 'host\\name'])(
+  it.each(['.', '..', 'host/name', 'host\\name', 'host\nforged', 'x'.repeat(501)])(
     'rejects an unsafe host path before issuing a request: %s',
     async hostRef => {
       const fetchMock = vi.fn()
       vi.stubGlobal('fetch', fetchMock)
 
       await expect(client.listSessions('rpc-token', hostRef)).rejects.toThrow(/unsafe path segment/)
+      expect(fetchMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(['agent:rpc', 'agent\nforged', 'x'.repeat(201)])(
+    'rejects an unsafe session agent before issuing a request: %s',
+    async agent => {
+      const fetchMock = vi.fn()
+      vi.stubGlobal('fetch', fetchMock)
+
+      await expect(client.loadSessionMessages('rpc-token', 'host', agent, 'chat')).rejects.toThrow(
+        /unsafe path segment/
+      )
       expect(fetchMock).not.toHaveBeenCalled()
     }
   )

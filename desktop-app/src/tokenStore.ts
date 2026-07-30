@@ -15,7 +15,7 @@ const LEGACY_ACCOUNT = 'session-token'
  * `-` separator, and a 12-hex sha256 suffix. Every call site feeds `envKey`
  * straight into keychain account names and on-disk file names, so validate the
  * shape before interpolating — defense in depth mirroring the
- * `assertSafeSegment` guard in chatStore/chatStoreBinding. Today all callers
+ * `assertSafeFilesystemSegment` guard in chatStore/chatStoreBinding. Today all callers
  * pass sanitized `getActiveEnvKey()` output, so a mismatch signals a bug (or a
  * tampered value), never a normal input.
  */

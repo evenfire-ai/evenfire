@@ -137,6 +137,20 @@ describe('renameChat', () => {
     expect(chat!.title).toBe('Renamed Chat')
     expect(chat!.updatedAt >= created.updatedAt).toBe(true)
   })
+
+  it('removes the index temp file when its atomic rename fails', async () => {
+    await store.createChat('agent-1', 'r1')
+    const originalRename = fs.rename.bind(fs)
+    vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (String(from) === agentPath('index.json.tmp')) {
+        throw transientFileReadError('EACCES')
+      }
+      return originalRename(from, to)
+    })
+
+    await expect(store.renameChat('agent-1', 'r1', 'Renamed Chat')).rejects.toThrow()
+    await expect(fs.access(agentPath('index.json.tmp'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
 })
 
 // ── deleteChat ───────────────────────────────────────────────────────────────
@@ -702,6 +716,21 @@ describe('messages', () => {
     expect(chat!.messageCount).toBe(2)
   })
 
+  it('keeps sidebar messageCount in visible user/assistant units after appends', async () => {
+    await store.createChat('agent-1', 'visible-count')
+    await store.saveMessages('agent-1', 'visible-count', [
+      { id: 'm1', role: 'user', content: 'question', timestamp: 1 },
+      { id: 's1', role: 'system', content: 'local status', timestamp: 2 },
+    ])
+    await store.appendMessages('agent-1', 'visible-count', [
+      { id: 'm2', role: 'assistant', content: 'answer', timestamp: 3 },
+      { id: 's2', role: 'system', content: 'another status', timestamp: 4 },
+    ])
+
+    const chat = (await store.listChats('agent-1')).find(item => item.id === 'visible-count')
+    expect(chat?.messageCount).toBe(2)
+  })
+
   it('persists activity aggregates in the chat index', async () => {
     await store.createChat('agent-1', 'activity-1')
     await store.saveMessages('agent-1', 'activity-1', [
@@ -1252,6 +1281,39 @@ describe('messages', () => {
     const messages = await store.loadMessages('agent-1', 'migration-failure')
     expect(messages.map(message => message.id)).toEqual(['m1'])
   })
+
+  it('keeps a committed paged rewrite successful when the downgrade snapshot write fails', async () => {
+    const chatId = 'compatibility-write-failure'
+    await store.createChat('agent-1', chatId)
+    await store.saveMessages('agent-1', chatId, [
+      { id: 'old', role: 'user', content: 'old', timestamp: 1 },
+    ])
+
+    const originalWriteFile = fs.writeFile.bind(fs)
+    let injected = false
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+      if (!injected && String(args[0]) === agentPath(`${chatId}.json.tmp`)) {
+        injected = true
+        throw transientFileReadError('ENOSPC')
+      }
+      return originalWriteFile(...(args as Parameters<typeof fs.writeFile>))
+    })
+
+    await expect(
+      store.saveMessages('agent-1', chatId, [
+        { id: 'new', role: 'assistant', content: 'new', timestamp: 2 },
+      ])
+    ).resolves.toBeUndefined()
+
+    expect((await store.loadMessages('agent-1', chatId)).map(message => message.id)).toEqual([
+      'new',
+    ])
+    expect(
+      (await readJsonFile<{ messages: ChatMessage[] }>(agentPath(`${chatId}.json`))).messages.map(
+        message => message.id
+      )
+    ).toEqual(['new'])
+  })
 })
 
 // ── lastActiveChatId ─────────────────────────────────────────────────────────
@@ -1295,6 +1357,26 @@ describe('corrupt/missing files', () => {
     const index = await store.getIndex('agent-1')
     expect(index.version).toBe(2) // v2 remains readable by pre-paging desktop builds
     expect(index.chats).toEqual([])
+  })
+
+  it('does not overwrite an index after a transient read failure', async () => {
+    await store.createChat('agent-1', 'kept')
+    const originalReadFile = fs.readFile.bind(fs)
+    let injected = false
+    vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
+      if (!injected && String(args[0]) === agentPath('index.json')) {
+        injected = true
+        throw transientFileReadError('EACCES')
+      }
+      return originalReadFile(...(args as Parameters<typeof fs.readFile>))
+    })
+
+    await expect(store.renameChat('agent-1', 'kept', 'Lost')).rejects.toThrow()
+
+    vi.restoreAllMocks()
+    expect((await store.listChats('agent-1')).find(chat => chat.id === 'kept')?.title).toBe(
+      'New Chat'
+    )
   })
 
   it('returns empty messages for missing chat file', async () => {
@@ -1436,6 +1518,8 @@ describe('path-segment validation', () => {
     await expect(store.createChat('../escape', 'c1')).rejects.toThrow(/unsafe path segment/)
     await expect(store.createChat('a/b', 'c1')).rejects.toThrow(/unsafe path segment/)
     await expect(store.createChat('.', 'c1')).rejects.toThrow(/unsafe path segment/)
+    await expect(store.createChat('agent\nforged', 'c1')).rejects.toThrow(/unsafe path segment/)
+    await expect(store.createChat('CON', 'c1')).rejects.toThrow(/unsafe path segment/)
   })
 
   it('rejects a traversing chatId on replace/append', async () => {
@@ -1451,6 +1535,9 @@ describe('path-segment validation', () => {
       /unsafe path segment/
     )
     await expect(store.saveMessages('agent-1', 'index', [])).rejects.toThrow(/unsafe path segment/)
+    for (const chatId of ['INDEX', 'chat:1', 'chat.', 'chat ', 'NUL.txt', 'chat\u0007id']) {
+      await expect(store.saveMessages('agent-1', chatId, [])).rejects.toThrow(/unsafe path segment/)
+    }
   })
 
   // Read verbs are tolerant-by-contract (return empty on any failure) — the key

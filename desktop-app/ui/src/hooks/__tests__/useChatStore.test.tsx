@@ -71,4 +71,20 @@ describe('useChatStore remote request cache', () => {
     expect(setHostModel).toHaveBeenCalledTimes(1)
     expect(getHostModels).toHaveBeenCalledTimes(2)
   })
+
+  it('does not carry pending model selections across an identity scope change', () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { rpc: {} },
+    })
+    const { result } = renderHook(() => useChatStore())
+    result.current.setRemoteCacheScope('authenticated:user-a:team-a')
+    result.current.setPendingModel('agent', 'chat', 'model-a')
+    result.current.setPreChatModel('agent', 'model-b')
+
+    result.current.setRemoteCacheScope('authenticated:user-b:team-b')
+
+    expect(result.current.getPendingModel('agent', 'chat')).toBeUndefined()
+    expect(result.current.getPreChatModel('agent')).toBeUndefined()
+  })
 })

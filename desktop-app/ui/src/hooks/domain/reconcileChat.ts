@@ -41,8 +41,9 @@ export interface ReconcileChatDeps {
   loadSessionMessages: (
     agentRef: string,
     chatId: string,
-    query?: SessionMessagesQuery
-  ) => Promise<SessionMessagesResult>
+    query?: SessionMessagesQuery,
+    stillRelevant?: () => boolean
+  ) => Promise<SessionMessagesResult | undefined>
   /**
    * Server reports a live (`processing`/`awaiting_approval`) task: seed the
    * snapshot and attach a stream via the coordinator. Returns the outcome
@@ -159,8 +160,9 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (!stillRelevant()) return undefined
       try {
-        return await deps.loadSessionMessages(agentRef, chatId, query)
+        return await deps.loadSessionMessages(agentRef, chatId, query, stillRelevant)
       } catch (err) {
+        if (!stillRelevant()) return undefined
         // Non-network (404, etc.) rethrows to the branch handler; a network blip
         // is retried with backoff up to the cap (mirrors switchToChat P2-A).
         if (!deps.isNetworkError(err) || attempt === attempts - 1) throw err
@@ -209,6 +211,10 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
           )
       return outcome
     } catch (err) {
+      if (!stillRelevant()) {
+        outcome = 'stale_drop'
+        return outcome
+      }
       if (deps.isHttp404(err)) {
         await deps.evictChat(chatKey)
         deps.fsm.dispatch(chatKey, { type: 'RESET' })
@@ -230,7 +236,9 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
     } finally {
       // RESET already tore the entry down on 404; re-dispatching FINISHED would
       // resurrect an empty entry, so skip the finalizer in that case.
-      if (outcome !== '404') deps.fsm.dispatch(chatKey, { type: 'RECONCILE_FINISHED' })
+      if (outcome !== '404' && generation === startGeneration) {
+        deps.fsm.dispatch(chatKey, { type: 'RECONCILE_FINISHED' })
+      }
       deps.telemetry('stream_recovery', { reason: args.reason, outcome })
     }
   }
@@ -249,8 +257,12 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
     }
     inFlightHint.set(chatKey, args.taskIdHint)
     const promise = run(chatKey, args).finally(() => {
-      inFlight.delete(chatKey)
-      inFlightHint.delete(chatKey)
+      // reset() permits a fresh reconcile for the same key while this older
+      // promise is still settling. Only clear the entry we actually own.
+      if (inFlight.get(chatKey) === promise) {
+        inFlight.delete(chatKey)
+        inFlightHint.delete(chatKey)
+      }
     })
     inFlight.set(chatKey, promise)
     return promise

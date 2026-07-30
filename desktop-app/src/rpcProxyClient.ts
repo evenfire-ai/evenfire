@@ -1,5 +1,6 @@
 import { config } from './config.js'
 import { ApiError, requestJson, withTimeout } from './httpClient.js'
+import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   ApprovalDecisionResult,
   ContextBreakdownResult,
@@ -28,12 +29,6 @@ import {
  * convention used by {@link RpcProxyClient.loadSessionMessages}.
  */
 const MODEL_NOT_ALLOWED = 'model_not_allowed'
-
-function assertSafePathSegment(label: string, value: string): void {
-  if (!value || value === '.' || value === '..' || /[/\\\0]/.test(value)) {
-    throw new Error(`Invalid ${label}: unsafe path segment`)
-  }
-}
 
 /**
  * mcp-host answers HTTP 200 with `{success:false, error}` when an approval was
@@ -556,7 +551,7 @@ export class RpcProxyClient {
     hostRef: string,
     query: SessionsListQuery = {}
   ): Promise<SessionsListResult> {
-    assertSafePathSegment('hostRef', hostRef)
+    assertSafeRouteSegment('hostRef', hostRef)
     const requestUrl = new URL(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions`))
     if (query.agent) requestUrl.searchParams.set('agent', query.agent)
     if (query.limit !== undefined) requestUrl.searchParams.set('limit', String(query.limit))
@@ -583,9 +578,9 @@ export class RpcProxyClient {
     chatId: string,
     query: SessionMessagesQuery = {}
   ): Promise<SessionMessagesResult> {
-    assertSafePathSegment('hostRef', hostRef)
-    assertSafePathSegment('agent', agent)
-    assertSafePathSegment('chatId', chatId)
+    assertSafeRouteSegment('hostRef', hostRef)
+    assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+    assertSafeRouteSegment('chatId', chatId)
     const requestUrl = new URL(
       url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
@@ -636,9 +631,9 @@ export class RpcProxyClient {
     agent: string,
     chatId: string
   ): Promise<ContextBreakdownResult> {
-    assertSafePathSegment('hostRef', hostRef)
-    assertSafePathSegment('agent', agent)
-    assertSafePathSegment('chatId', chatId)
+    assertSafeRouteSegment('hostRef', hostRef)
+    assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+    assertSafeRouteSegment('chatId', chatId)
     const response = await fetch(
       url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`

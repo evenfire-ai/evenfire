@@ -1354,6 +1354,7 @@ export function useAgentChatController({
       if (chatId) {
         try {
           await chatStore.appendMessages(agentName, chatId, [message])
+          bumpActivity(agentName, chatId, new Date(message.timestamp).toISOString())
         } catch {
           // persistence is best-effort; the in-memory view already updated
         }
@@ -1367,7 +1368,7 @@ export function useAgentChatController({
         // notification delivery is best-effort
       }
     },
-    [chatStore, pushAssistantReplyNotification]
+    [bumpActivity, chatStore, pushAssistantReplyNotification]
   )
 
   // ─── reconcileChat branch callbacks (§4.3) ───
@@ -1674,7 +1675,7 @@ export function useAgentChatController({
 
   useEffect(() => {
     reconcileBranchesRef.current = {
-      loadSessionMessages: async (agentRef, chatId, query) => {
+      loadSessionMessages: async (agentRef, chatId, query, stillRelevant = () => true) => {
         let requestedQuery = query ?? { limit: SERVER_TURN_PAGE_SIZE }
         if (requestedQuery.beforeTurn === undefined && requestedQuery.afterTurn === undefined) {
           const cached = (await chatStore
@@ -1699,6 +1700,7 @@ export function useAgentChatController({
           chatId,
           requestedQuery
         )
+        if (!stillRelevant()) return undefined
         if (requestedQuery.afterTurn === undefined || !response.hasMoreAfter) {
           if (requestedQuery.afterTurn !== undefined) {
             return {
@@ -1723,6 +1725,7 @@ export function useAgentChatController({
         }
         let pagesLoaded = 1
         while (
+          stillRelevant() &&
           response.hasMoreAfter &&
           cursor !== undefined &&
           !seenCursors.has(cursor) &&
@@ -1734,6 +1737,7 @@ export function useAgentChatController({
             limit: requestedQuery.limit ?? SERVER_TURN_PAGE_SIZE,
             afterTurn: cursor,
           })
+          if (!stillRelevant()) return undefined
           turns.push(...response.turns)
           cursor = response.latestTurnNumber ?? response.turns.at(-1)?.number
           pagesLoaded += 1
@@ -1750,10 +1754,12 @@ export function useAgentChatController({
             }
           }
         }
+        if (!stillRelevant()) return undefined
         if (response.hasMoreAfter) {
           const latest = await chatStore.loadSessionMessages(agentRef, agentRef, chatId, {
             limit: requestedQuery.limit ?? SERVER_TURN_PAGE_SIZE,
           })
+          if (!stillRelevant()) return undefined
           const combinedTurns = mergeUniqueSessionTurns(turns, latest.turns)
           return {
             ...latest,

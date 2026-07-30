@@ -177,11 +177,37 @@ describe('chatStoreBinding', () => {
   })
 
   it('rejects an unsafe userId or envKey before touching the filesystem (no wipe escape)', async () => {
-    for (const bad of ['', '.', '..', '../../etc', 'a/b', 'a\\b']) {
+    for (const bad of [
+      '',
+      '.',
+      '..',
+      '../../etc',
+      'a/b',
+      'a\\b',
+      'user:name',
+      'user.',
+      'NUL',
+      'line\nbreak',
+    ]) {
       await expect(bindChatStoreForUser(bad, ENV_A)).rejects.toThrow(/unsafe path segment/)
       await expect(bindChatStoreForUser('user-a', bad)).rejects.toThrow(/unsafe path segment/)
     }
     expect(() => requireChatStore()).toThrow(/Not authenticated/)
+  })
+
+  it('backfills owner-only permissions on existing cache ancestry', async () => {
+    const envDir = path.join(tmpBase, ENV_A)
+    const userDir = path.join(envDir, 'user-permissions')
+    await fs.mkdir(userDir, { recursive: true })
+    await fs.chmod(tmpBase, 0o777)
+    await fs.chmod(envDir, 0o777)
+    await fs.chmod(userDir, 0o777)
+
+    await bindChatStoreForUser('user-permissions', ENV_A)
+
+    for (const directory of [tmpBase, envDir, userDir]) {
+      expect((await fs.stat(directory)).mode & 0o777).toBe(0o700)
+    }
   })
 
   it('sweeps expired corrupt transcript quarantines while retaining recent recovery data', async () => {
@@ -347,6 +373,33 @@ describe('chatStoreBinding', () => {
           )
         ).version
       ).toBe(3)
+    })
+
+    it('does not delete a current cache after a transient index read failure', async () => {
+      const v2Index = JSON.stringify({
+        version: 2,
+        chats: [{ id: 'keep', title: 'Keep', createdAt: 'x', updatedAt: 'x', messageCount: 1 }],
+        lastActiveChatId: 'keep',
+        onboardingDismissed: false,
+      })
+      await seedAgentDir(ENV_A, 'user-read-failure', 'agent-x', v2Index, {
+        'keep.json': '{"version":2,"chatId":"keep","messages":[]}',
+      })
+      const indexPath = path.join(tmpBase, ENV_A, 'user-read-failure', 'agent-x', 'index.json')
+      const originalReadFile = fs.readFile.bind(fs)
+      vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
+        if (String(args[0]) === indexPath) {
+          const error = new Error('temporarily unreadable') as NodeJS.ErrnoException
+          error.code = 'EACCES'
+          throw error
+        }
+        return originalReadFile(...(args as Parameters<typeof fs.readFile>))
+      })
+
+      await expect(bindChatStoreForUser('user-read-failure', ENV_A)).rejects.toThrow()
+      expect(
+        await exists(path.join(tmpBase, ENV_A, 'user-read-failure', 'agent-x', 'keep.json'))
+      ).toBe(true)
     })
 
     it('is a no-op when the user has no cache directory yet', async () => {

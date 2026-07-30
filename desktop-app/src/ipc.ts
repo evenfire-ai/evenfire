@@ -31,9 +31,28 @@ function sanitizeSubjectKeys(input: unknown): string[] {
 
 function sanitizeOptionalInteger(input: unknown): number | undefined {
   if (input === undefined || input === null || input === '') return undefined
-  const value = Number(input)
-  if (!Number.isInteger(value)) throw new Error('Invalid integer')
-  return value
+  if (typeof input !== 'number' || !Number.isSafeInteger(input)) {
+    throw new Error('Invalid integer')
+  }
+  return input
+}
+
+export function sanitizeChatLoadWindow(
+  limitInput: unknown,
+  offsetInput: unknown
+): { limit?: number; offset?: number } {
+  const limit = sanitizeOptionalInteger(limitInput)
+  const offset = sanitizeOptionalInteger(offsetInput)
+  if (limit !== undefined && (limit < 1 || limit > 1000)) {
+    throw new Error('Invalid chat message limit')
+  }
+  if (offset !== undefined && offset < 0) {
+    throw new Error('Invalid chat message offset')
+  }
+  return {
+    ...(limit !== undefined ? { limit } : {}),
+    ...(offset !== undefined ? { offset } : {}),
+  }
 }
 
 function sanitizeSessionsListQuery(
@@ -1105,7 +1124,8 @@ export function registerIpcHandlers(service: AppService): void {
       const agentRef = sanitizeString(payload?.agentRef)
       const chatId = sanitizeString(payload?.chatId)
       if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
-      return requireChatStore().loadMessages(agentRef, chatId, payload?.limit, payload?.offset)
+      const { limit, offset } = sanitizeChatLoadWindow(payload?.limit, payload?.offset)
+      return requireChatStore().loadMessages(agentRef, chatId, limit, offset)
     }
   )
 

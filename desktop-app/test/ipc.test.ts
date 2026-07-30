@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { registerIpcHandlers } from '../src/ipc.js'
+import { registerIpcHandlers, sanitizeChatLoadWindow } from '../src/ipc.js'
 import type { HostStatusStreamEvent } from '../src/types.js'
 
 const testState = vi.hoisted(() => {
@@ -38,6 +38,24 @@ function makeTrustedEvent(senderId = 77) {
     destroy: () => destroyedCallbacks.forEach(callback => callback()),
   }
 }
+
+describe('chat IPC pagination validation', () => {
+  it('accepts bounded safe-integer windows', () => {
+    expect(sanitizeChatLoadWindow(100, 200)).toEqual({ limit: 100, offset: 200 })
+    expect(sanitizeChatLoadWindow(undefined, undefined)).toEqual({})
+  })
+
+  it.each([
+    ['10', 0],
+    [1.5, 0],
+    [0, 0],
+    [1001, 0],
+    [10, -1],
+    [Number.MAX_SAFE_INTEGER + 1, 0],
+  ])('rejects an invalid limit/offset pair: %s, %s', (limit, offset) => {
+    expect(() => sanitizeChatLoadWindow(limit, offset)).toThrow()
+  })
+})
 
 describe('ipc host status stream handlers', () => {
   const service = {

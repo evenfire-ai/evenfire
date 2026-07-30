@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { mergeAuthoritativeServerMessages, messageServerTurnNumber } from './chatMessageMerge.js'
+import { assertSafeFilesystemSegment } from './pathSafety.js'
 import type {
   ChatFile,
   ChatIndex,
@@ -130,13 +131,6 @@ function pageEntry(file: string, messages: ChatMessage[]): ChatPageEntry {
  * (wholesale overwrite) and `deleteChat` (unlink) make traversal high-impact,
  * so we guard centrally where the on-disk path is built.
  */
-function assertSafeSegment(label: string, value: string): void {
-  const reservedChatId = label === 'chatId' && (value.startsWith('.') || value === 'index')
-  if (!value || value === '.' || value === '..' || reservedChatId || /[/\\\0]/.test(value)) {
-    throw new Error(`Invalid ${label}: unsafe path segment`)
-  }
-}
-
 function encodedChatId(chatId: string): string {
   return Buffer.from(chatId, 'utf8').toString('base64url')
 }
@@ -298,7 +292,7 @@ export class ChatStore {
   }
 
   private agentDir(agentRef: string): string {
-    assertSafeSegment('agentRef', agentRef)
+    assertSafeFilesystemSegment('agentRef', agentRef)
     return join(this.baseDir, agentRef)
   }
 
@@ -307,22 +301,30 @@ export class ChatStore {
   }
 
   private chatFilePath(agentRef: string, chatId: string): string {
-    assertSafeSegment('chatId', chatId)
+    assertSafeFilesystemSegment('chatId', chatId, {
+      reservedNames: ['index', 'chats'],
+    })
     return join(this.agentDir(agentRef), `${chatId}.json`)
   }
 
   private chatCompatibilitySignaturePath(agentRef: string, chatId: string): string {
-    assertSafeSegment('chatId', chatId)
+    assertSafeFilesystemSegment('chatId', chatId, {
+      reservedNames: ['index', 'chats'],
+    })
     return join(this.agentDir(agentRef), `${chatId}.compat`)
   }
 
   private corruptLegacyChatFilePath(agentRef: string, chatId: string): string {
-    assertSafeSegment('chatId', chatId)
+    assertSafeFilesystemSegment('chatId', chatId, {
+      reservedNames: ['index', 'chats'],
+    })
     return join(this.agentDir(agentRef), '.corrupt', encodedChatId(chatId), `${randomUUID()}.json`)
   }
 
   private chatDirPath(agentRef: string, chatId: string): string {
-    assertSafeSegment('chatId', chatId)
+    assertSafeFilesystemSegment('chatId', chatId, {
+      reservedNames: ['index', 'chats'],
+    })
     return join(this.agentDir(agentRef), 'chats', chatId)
   }
 
@@ -332,7 +334,9 @@ export class ChatStore {
     kind: 'next' | 'previous' | 'corrupt',
     token: string
   ): string {
-    assertSafeSegment('chatId', chatId)
+    assertSafeFilesystemSegment('chatId', chatId, {
+      reservedNames: ['index', 'chats'],
+    })
     return join(
       this.agentDir(agentRef),
       'chats',
@@ -343,7 +347,9 @@ export class ChatStore {
   }
 
   private chatSnapshotRootPath(agentRef: string, chatId: string): string {
-    assertSafeSegment('chatId', chatId)
+    assertSafeFilesystemSegment('chatId', chatId, {
+      reservedNames: ['index', 'chats'],
+    })
     return join(this.agentDir(agentRef), 'chats', '.snapshots', encodedChatId(chatId))
   }
 
@@ -1054,6 +1060,7 @@ export class ChatStore {
     const backupDir = this.chatSnapshotSiblingPath(agentRef, chatId, 'previous', snapshotToken)
     const pagesDir = this.chatPagesDirFromChatDir(stagingDir)
     let movedExistingSnapshot = false
+    let primaryCommitted = false
 
     this.cleanedSnapshotSiblingKeys.delete(this.chatSnapshotCleanupKey(agentRef, chatId))
     await fs.mkdir(join(this.agentDir(agentRef), 'chats'), { recursive: true, mode: 0o700 })
@@ -1104,18 +1111,30 @@ export class ChatStore {
       }
 
       await fs.rename(stagingDir, chatDir)
+      primaryCommitted = true
+      const cacheKey = this.chatSnapshotCleanupKey(agentRef, chatId)
+      try {
+        await this.writeLegacyCompatibilitySnapshot(agentRef, chatId, messages)
+        this.compatibilityCheckedKeys.add(cacheKey)
+      } catch (error) {
+        // The paged snapshot is the durable source of truth and has already
+        // committed. Keep the successful write visible to the caller; a later
+        // read repairs the auxiliary downgrade window from the paged data.
+        this.compatibilityCheckedKeys.delete(cacheKey)
+        console.warn(
+          `[chatStore] Failed to refresh downgrade snapshot for ${chatId}; retrying on read`,
+          error
+        )
+      }
       if (movedExistingSnapshot) {
         await fs.rm(backupDir, { recursive: true, force: true }).catch(() => undefined)
       }
-      await this.writeLegacyCompatibilitySnapshot(agentRef, chatId, messages)
-      const cacheKey = this.chatSnapshotCleanupKey(agentRef, chatId)
       this.cleanedSnapshotSiblingKeys.add(cacheKey)
-      this.compatibilityCheckedKeys.add(cacheKey)
 
       return pruned.meta
     } catch (err) {
       await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined)
-      if (movedExistingSnapshot) {
+      if (movedExistingSnapshot && !primaryCommitted) {
         await fs.rename(backupDir, chatDir).catch(() => undefined)
       }
       throw err
@@ -1242,17 +1261,38 @@ export class ChatStore {
         fs.rm(this.chatPagePath(agentRef, chatId, file), { force: true })
       )
     )
-    if (compatibility.signature !== meta.legacyCompatibilitySignature) {
-      await this.writeLegacyCompatibilitySnapshot(agentRef, chatId, compatibilityMessages)
+    let compatibilityCurrent = compatibility.signature === meta.legacyCompatibilitySignature
+    if (!compatibilityCurrent) {
+      try {
+        await this.writeLegacyCompatibilitySnapshot(agentRef, chatId, compatibilityMessages)
+        compatibilityCurrent = true
+      } catch (error) {
+        // The page and metadata writes above are already durable. Do not turn an
+        // auxiliary downgrade-window failure into a false append failure.
+        console.warn(
+          `[chatStore] Failed to refresh downgrade snapshot for ${chatId}; retrying on read`,
+          error
+        )
+      }
     }
     this.cleanedSnapshotSiblingKeys.add(cacheKey)
-    this.compatibilityCheckedKeys.add(cacheKey)
+    if (compatibilityCurrent) {
+      this.compatibilityCheckedKeys.add(cacheKey)
+    } else {
+      this.compatibilityCheckedKeys.delete(cacheKey)
+    }
     return pruned.meta
   }
 
   async getIndex(agentRef: string): Promise<ChatIndex> {
+    let raw: string
     try {
-      const raw = await fs.readFile(this.indexPath(agentRef), 'utf-8')
+      raw = await fs.readFile(this.indexPath(agentRef), 'utf-8')
+    } catch (error) {
+      if (isNotFoundError(error)) return emptyIndex()
+      throw error
+    }
+    try {
       const parsed = JSON.parse(raw) as ChatIndex
       // Version-agnostic read: legacy directories are handled at bind time by
       // chatStoreBinding. saveIndex normalizes v3 indexes produced by earlier
@@ -1262,6 +1302,9 @@ export class ChatStore {
       }
       return emptyIndex()
     } catch {
+      // A malformed catalog can be rebuilt from the server and the transcript
+      // files. Raw filesystem failures above must propagate so a later RMW
+      // cannot overwrite a temporarily unreadable live index with an empty one.
       return emptyIndex()
     }
   }
@@ -1277,8 +1320,13 @@ export class ChatStore {
     // index as legacy and would delete live paged chats.
     const target = this.indexPath(agentRef)
     const tmp = `${target}.tmp`
-    await fs.writeFile(tmp, JSON.stringify(normalized, null, 2), { mode: 0o600 })
-    await fs.rename(tmp, target)
+    try {
+      await fs.writeFile(tmp, JSON.stringify(normalized, null, 2), { mode: 0o600 })
+      await fs.rename(tmp, target)
+    } catch (error) {
+      await fs.rm(tmp, { force: true }).catch(() => undefined)
+      throw error
+    }
   }
 
   async listChats(agentRef: string): Promise<ChatMetadata[]> {
@@ -1507,7 +1555,7 @@ export class ChatStore {
         const chat = index.chats.find(c => c.id === chatId)
         if (chat) {
           const delta = aggregateMessages(newMessages)
-          chat.messageCount = meta.messageCount
+          chat.messageCount = (chat.messageCount ?? 0) + visibleMessageCount(newMessages)
           chat.errorCount = (chat.errorCount ?? 0) + (delta.errorCount ?? 0)
           chat.toolCallCount = (chat.toolCallCount ?? 0) + (delta.toolCallCount ?? 0)
           chat.updatedAt = new Date().toISOString()

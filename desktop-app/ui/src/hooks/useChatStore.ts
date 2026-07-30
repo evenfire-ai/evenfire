@@ -232,6 +232,11 @@ export function useChatStore() {
     remoteCacheScope = scope
     sessionCatalogRequests.clear()
     hostModelRequests.clear()
+    // Pending selections are session-owned even though they are not remote
+    // responses. Never carry an unpersisted model choice across logout, user,
+    // or team boundaries where the same agent/chat identifiers may reappear.
+    for (const key of Object.keys(pendingModelByChat)) delete pendingModelByChat[key]
+    for (const key of Object.keys(preChatModelByAgent)) delete preChatModelByAgent[key]
   }, [])
 
   // --- Pending (unpersisted) model selections — R2 "Option A" (see the
