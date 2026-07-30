@@ -563,6 +563,23 @@ wake_lifecycle_state() {
   kctl -n "$MCP_HOST_NS" get host "$WAKE_HOST_REF" -o jsonpath='{.status.lifecycle.state}' 2>/dev/null || true
 }
 
+# shellcheck disable=SC2329  # invoked from the wait_until callback below
+wake_handled_generation() {
+  kctl -n "$MCP_HOST_NS" get host "$WAKE_HOST_REF" \
+    -o jsonpath='{.status.lifecycle.wakeHandledGeneration}' 2>/dev/null || true
+}
+
+# Correlate the public wake request with HCC's durable lifecycle status. This
+# predicate is deliberately pure so the static gate test can exercise the
+# same ordering contract used by the cluster E2E.
+# shellcheck disable=SC2329  # invoked from the wait_until callback below
+wake_generation_is_handled() {
+  local requested="$1" handled="$2"
+  [[ "$requested" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "$handled" =~ ^[0-9]+$ ]] || return 1
+  (( handled >= requested ))
+}
+
 # shellcheck disable=SC2329  # invoked from _wake_converged_probe (runs via wait_until)
 wake_ready_pod_exists() {
   kctl -n "$MCP_HOST_NS" get pods -l "app=${WAKE_HOST_REF}" \
@@ -601,19 +618,31 @@ mint_rpc_token() {
 
 # The wake route is the user-facing rpc-proxy endpoint Desktop uses;
 # rpc-proxy owns the control-api hop. Never kubectl scale.
-WAKE_STATUS=''; WAKE_BODY=''
+WAKE_STATUS=''; WAKE_BODY=''; WAKE_GENERATION=''
 post_wake() {
-  local resp
+  local resp response_status response_generation
+  WAKE_STATUS=''; WAKE_BODY=''; WAKE_GENERATION=''
   mint_rpc_token || return 1
   resp=$(curl -sS -m 30 -w '\n%{http_code}' -X POST \
     "${RPC_BASE}/api/v1/rpc/hosts/${WAKE_HOST_REF}/wake" \
     -H "Authorization: Bearer ${RPC_TOKEN}" -H 'Content-Type: application/json') || {
     echo "wake POST failed at ${RPC_BASE}" >&2; return 1; }
   WAKE_STATUS="$(echo "$resp" | tail -n1)"; WAKE_BODY="$(echo "$resp" | sed '$d')"
-  case "$WAKE_STATUS" in
-    200|202|204) return 0 ;;
-    *) echo "wake POST returned HTTP ${WAKE_STATUS}: ${WAKE_BODY}" >&2; return 1 ;;
-  esac
+  [[ "$WAKE_STATUS" == '202' ]] || {
+    echo "wake POST returned HTTP ${WAKE_STATUS}, expected 202: ${WAKE_BODY}" >&2
+    return 1
+  }
+  response_status="$(jq -r '.status // empty' <<<"$WAKE_BODY" 2>/dev/null || true)"
+  response_generation="$(jq -r '.wakeGeneration // empty' <<<"$WAKE_BODY" 2>/dev/null || true)"
+  [[ "$response_status" == 'wake-requested' ]] || {
+    echo "wake POST returned unexpected status '${response_status:-<missing>}': ${WAKE_BODY}" >&2
+    return 1
+  }
+  [[ "$response_generation" =~ ^[1-9][0-9]*$ ]] || {
+    echo "wake POST returned invalid wakeGeneration '${response_generation:-<missing>}': ${WAKE_BODY}" >&2
+    return 1
+  }
+  WAKE_GENERATION="$response_generation"
 }
 
 # ─── HCC cadence shortening (only when the wake target must suspend) ──
@@ -812,22 +841,37 @@ fi
 
 T_WAKE_MS="$(now_ms)"
 if post_wake; then
-  log "storm: wake POST accepted for ${WAKE_HOST_REF} (HTTP ${WAKE_STATUS})"
+  log "storm: wake POST accepted for ${WAKE_HOST_REF} (HTTP ${WAKE_STATUS}, generation ${WAKE_GENERATION})"
 else
   fail "storm: mid-storm wake POST failed for ${WAKE_HOST_REF}"; print_results; exit 1
 fi
 
-# Prove that the supported wake reached HCC, completed its urgent reconcile,
-# published at least one new queue sample, and left no urgent reconcile in
-# flight. This closes the old process-death measurement gap for the wake: the
-# pre-kill scrape is accepted only after its queue observation is durable.
+# Prove that this specific supported wake reached HCC: its response generation
+# must be durably reflected in lifecycle status. Then require a new urgent
+# queue sample and an idle urgent lane on the same pod. Prometheus collectors
+# are read independently, so this deliberately uses a two-scrape fence instead
+# of assuming cross-metric atomicity: once the first scrape observes the urgent
+# lane idle, HCC's observe-before-in-flight-decrement ordering guarantees the
+# wake observation is durable and therefore visible to the second scrape.
 # shellcheck disable=SC2329  # invoked by name via wait_until
 _wake_urgent_evidence_recorded() {
-  local current_pod lifecycle_state pre_count post_count in_flight
+  local current_pod lifecycle_state handled_generation
+  local fence_in_flight pre_count post_count in_flight
   current_pod="$(hcc_pod_name)"
   [[ -n "$current_pod" && "$current_pod" == "$HCC_POD_WAKE" ]] || return 1
   lifecycle_state="$(wake_lifecycle_state)"
   [[ -n "$lifecycle_state" && "$lifecycle_state" != 'suspended' ]] || return 1
+  handled_generation="$(wake_handled_generation)"
+  wake_generation_is_handled "$WAKE_GENERATION" "$handled_generation" || return 1
+  scrape_hcc_metrics "$SCRAPE_WAKE_POST" "$HCC_POD_WAKE" || return 1
+  fence_in_flight="$(awk -v metric="${IN_FLIGHT_METRIC}" '
+    index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ { total += $NF }
+    END { print total + 0 }
+  ' "$SCRAPE_WAKE_POST")"
+  awk -v active="$fence_in_flight" 'BEGIN { exit !(active == 0) }' || return 1
+
+  # The wake histogram observation precedes the decrement seen by the fence.
+  # Re-scrape so the adjudicated histogram cannot predate that observation.
   scrape_hcc_metrics "$SCRAPE_WAKE_POST" "$HCC_POD_WAKE" || return 1
   pre_count="$(awk -v metric="${QUEUE_WAIT_METRIC}_bucket" '
     index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ && $0 ~ /le="\+Inf"/ { total += $NF }
@@ -853,14 +897,18 @@ else
   print_results; exit 1
 fi
 
-# Scrape B is the already-validated final wake-window scrape on the pre-kill
-# pod. Reuse it rather than opening a second race between evidence and kill.
+# Capture A7's fleet-failure baseline immediately before the kill. The wake
+# scrape remains the A2 wake-window oracle; a separate fresh scrape prevents
+# fleet failures after wake adjudication from falling outside A7's delta.
 HCC_POD_B="$(hcc_pod_name)"
 if [[ "$HCC_POD_B" != "$HCC_POD_A" ]]; then
   fail "storm: HCC pod changed unexpectedly before the kill (${HCC_POD_A} -> ${HCC_POD_B:-<none>}) — counter deltas would be invalid"
   storm_diagnostics; print_results; exit 1
 fi
-cp "$SCRAPE_WAKE_POST" "$SCRAPE_B"
+if ! scrape_hcc_metrics "$SCRAPE_B" "$HCC_POD_B"; then
+  fail "storm: could not capture the fresh pre-kill metric baseline"
+  print_results; exit 1
+fi
 log "storm: pre-kill scrape B captured (pod ${HCC_POD_B})"
 
 T_KILL_MS="$(now_ms)"

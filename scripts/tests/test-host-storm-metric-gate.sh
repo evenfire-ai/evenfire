@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # literal source-contract assertions below
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -99,13 +100,87 @@ grep -Fq 'VERDICT|A2-wake-urgent-hard-gate|PASS|' <<<"$HEALTHY_OUTPUT" ||
 WAKE_EVIDENCE_FUNCTION="$(
   sed -n '/^_wake_urgent_evidence_recorded() {$/,/^}$/p' "$GATE"
 )"
+WAKE_GENERATION_FUNCTION="$(
+  sed -n '/^wake_generation_is_handled() {$/,/^}$/p' "$GATE"
+)"
+POST_WAKE_FUNCTION="$(
+  sed -n '/^post_wake() {$/,/^}$/p' "$GATE"
+)"
+
+[[ -n "$WAKE_GENERATION_FUNCTION" ]] ||
+  fail "runtime wake evidence has no generation-correlation predicate"
+
+# Exercise the exact pure predicate embedded in the E2E gate. The requested
+# generation is the business identifier returned by the public wake route;
+# an older handled generation must never satisfy that request.
+eval "$WAKE_GENERATION_FUNCTION"
+if wake_generation_is_handled 7 6; then
+  fail "wake generation predicate accepted an older handled generation"
+fi
+wake_generation_is_handled 7 7 ||
+  fail "wake generation predicate rejected the exact handled generation"
+wake_generation_is_handled 7 8 ||
+  fail "wake generation predicate rejected a newer handled generation"
+if wake_generation_is_handled 0 8 || wake_generation_is_handled invalid 8 ||
+   wake_generation_is_handled 7 invalid; then
+  fail "wake generation predicate accepted malformed generation evidence"
+fi
+
 # Literal source assertions intentionally match unexpanded shell variables.
 # shellcheck disable=SC2016
 if ! grep -Fq '"$current_pod" == "$HCC_POD_WAKE"' <<<"$WAKE_EVIDENCE_FUNCTION" ||
    ! grep -Fq '"$lifecycle_state" != '\''suspended'\''' <<<"$WAKE_EVIDENCE_FUNCTION" ||
+   ! grep -Fq 'handled_generation="$(wake_handled_generation)"' <<<"$WAKE_EVIDENCE_FUNCTION" ||
+   ! grep -Fq 'wake_generation_is_handled "$WAKE_GENERATION" "$handled_generation"' <<<"$WAKE_EVIDENCE_FUNCTION" ||
    ! grep -Fq 'metric="${IN_FLIGHT_METRIC}"' <<<"$WAKE_EVIDENCE_FUNCTION" ||
    ! grep -Fq '(after - before) >= 1 && active == 0' <<<"$WAKE_EVIDENCE_FUNCTION"; then
-  fail "runtime wake evidence is not fenced to the same pod, completed lifecycle, metric delta, and idle urgent lane"
+  fail "runtime wake evidence is not fenced to the same pod, requested generation, metric delta, and idle urgent lane"
+fi
+generation_check_line="$(
+  grep -nF 'wake_generation_is_handled "$WAKE_GENERATION" "$handled_generation"' \
+    <<<"$WAKE_EVIDENCE_FUNCTION" | cut -d: -f1
+)"
+metrics_scrape_line="$(
+  grep -nF 'scrape_hcc_metrics "$SCRAPE_WAKE_POST" "$HCC_POD_WAKE"' \
+    <<<"$WAKE_EVIDENCE_FUNCTION" | head -n1 | cut -d: -f1
+)"
+if [[ -z "$generation_check_line" || -z "$metrics_scrape_line" ]] ||
+   (( generation_check_line >= metrics_scrape_line )); then
+  fail "wake generation is not correlated before accepting shared urgent metrics"
+fi
+wake_scrape_count="$(
+  grep -Fc 'scrape_hcc_metrics "$SCRAPE_WAKE_POST" "$HCC_POD_WAKE"' \
+    <<<"$WAKE_EVIDENCE_FUNCTION"
+)"
+if (( wake_scrape_count < 2 )) ||
+   ! grep -Fq 'fence_in_flight=' <<<"$WAKE_EVIDENCE_FUNCTION" ||
+   ! grep -Fq 'active == 0' <<<"$WAKE_EVIDENCE_FUNCTION"; then
+  fail "wake evidence lacks a completed-lane fence followed by a fresh metric scrape"
 fi
 
-echo "PASS: host-storm metric oracle rejects a slow wake hidden by later fast probes"
+# shellcheck disable=SC2016
+if ! grep -Fq 'WAKE_GENERATION=' <<<"$POST_WAKE_FUNCTION" ||
+   ! grep -Fq '"$WAKE_STATUS" == '\''202'\''' <<<"$POST_WAKE_FUNCTION" ||
+   ! grep -Fq '.status // empty' <<<"$POST_WAKE_FUNCTION" ||
+   ! grep -Fq '.wakeGeneration // empty' <<<"$POST_WAKE_FUNCTION"; then
+  fail "public wake response is not validated as an accepted wake-generation contract"
+fi
+
+# A7 must start from a fresh scrape immediately before the kill. Reusing the
+# earlier wake-evidence scrape creates an unobserved interval in which a fleet
+# failure could occur and escape the pre/post recovery counter delta.
+# shellcheck disable=SC2016
+if ! grep -Fq 'scrape_hcc_metrics "$SCRAPE_B" "$HCC_POD_B"' "$GATE" ||
+   grep -Fq 'cp "$SCRAPE_WAKE_POST" "$SCRAPE_B"' "$GATE"; then
+  fail "pre-kill scrape B is not freshly captured after wake adjudication"
+fi
+fresh_scrape_line="$(
+  grep -nF 'scrape_hcc_metrics "$SCRAPE_B" "$HCC_POD_B"' "$GATE" | cut -d: -f1
+)"
+kill_line="$(grep -nF 'T_KILL_MS="$(now_ms)"' "$GATE" | cut -d: -f1)"
+if [[ -z "$fresh_scrape_line" || -z "$kill_line" ]] ||
+   (( fresh_scrape_line >= kill_line )); then
+  fail "fresh scrape B does not precede the HCC kill"
+fi
+
+echo "PASS: host-storm oracle binds wake generation, fences metrics, and refreshes the pre-kill baseline"
