@@ -328,6 +328,9 @@ jobs:
       - name: Test HCC watch-recovery gate coordination
         run: bash scripts/tests/test-hcc-watch-recovery-gate.sh
 
+      - name: Test host-storm metric adjudication
+        run: bash scripts/tests/test-host-storm-metric-gate.sh
+
       - name: Test Plugin Workload SDK auth bootstrap policy
         run: bash scripts/tests/test-plugin-workload-sdk-auth-bootstrap.sh
 

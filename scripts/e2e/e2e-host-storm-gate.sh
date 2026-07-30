@@ -26,11 +26,14 @@
 #      construction, so A1 is primarily a RECORDING of that evidence — it
 #      can only fail if the harness itself degenerates into sequential
 #      phases; the load-bearing falsifiable claims are A2-A8.
-#   A2 urgent queue-wait p95 <= 5s, computed from ten dedicated Host ADDED
-#      events issued only after the replacement HCC has completed LIST→WATCH
-#      recovery (proved by scrape C1's A4 recovery sample). Their histogram
-#      delta is scrape D - C1 on one pod, so the result cannot be diluted by
-#      cold-start snapshot work or corrupted by the intentional pod restart.
+#   A2 urgent queue-wait coverage has two independent same-pod windows:
+#      (a) the supported wake window immediately before the HCC kill requires
+#      every completed urgent sample <= 5s, after proving the wake reconcile
+#      finished and the urgent lane returned idle; and
+#      (b) ten dedicated Host ADDED events issued only after the replacement
+#      HCC completed LIST→WATCH recovery use a D - C1 p95 delta. A slow wake
+#      can therefore never be diluted by later fast post-recovery probes, and
+#      neither window crosses the intentional process restart.
 #   A3 no starvation: EVERY created Host's Deployment materializes within
 #      STORM_MATERIALIZATION_BUDGET_S (20s, §14.2 "New Host
 #      materialization") of that Host's OWN metadata.creationTimestamp,
@@ -151,6 +154,7 @@ readonly BUNDLE_NAMESPACES="${MCP_HOST_NS} ${CHANNELS_NS} ${RPC_PROXY_NS}"
 # (`QUEUE_WAIT_METRIC="$QUEUE_WAIT_METRIC" python3 …`) would fail as a readonly
 # reassignment under `set -e` — export once here and drop the inline prefixes.
 readonly QUEUE_WAIT_METRIC='clerum_hcc_host_reconcile_queue_wait_seconds'
+readonly IN_FLIGHT_METRIC='clerum_hcc_host_reconcile_in_flight'
 readonly WATCH_RECOVERY_METRIC='clerum_hcc_host_watch_recovery_seconds'
 readonly FLEET_METRIC='clerum_hcc_host_fleet_requests_total'
 readonly DELETE_CLEANUP_METRIC='clerum_hcc_host_delete_cleanup_total'
@@ -169,6 +173,10 @@ readonly STORM_DELETE_COUNT=3
 # §14.2 "urgent new/wake queue wait": local hard gate <= 5s (histogram
 # bucket boundary le="5" exists in RECONCILE_LATENCY_BUCKETS).
 readonly STORM_URGENT_P95_BUDGET_S=5
+# The queue value itself is adjudicated against the 5s hard gate. This larger
+# deadline bounds collection of the completed reconcile evidence and produces
+# a loud operational failure if the wake never settles or telemetry is absent.
+readonly STORM_WAKE_QUEUE_EVIDENCE_DEADLINE_S=60
 # §14.2 "New Host materialization": Host CR -> Deployment <= 20s.
 readonly STORM_MATERIALIZATION_BUDGET_S=20
 # §14.2 "Watch recovery": recovery requested -> WATCH installed <= 15s
@@ -753,6 +761,8 @@ SCRAPE_B="${WORK_DIR}/metrics-B.prom"
 SCRAPE_C1="${WORK_DIR}/metrics-C1.prom"
 SCRAPE_C2="${WORK_DIR}/metrics-C2.prom"
 SCRAPE_D="${WORK_DIR}/metrics-D.prom"
+SCRAPE_WAKE_PRE="${WORK_DIR}/metrics-wake-pre.prom"
+SCRAPE_WAKE_POST="${WORK_DIR}/metrics-wake-post.prom"
 HCC_POD_A="$(hcc_pod_name)"
 if [[ -z "$HCC_POD_A" ]]; then
   fail "no Running HCC pod found for baseline identity"; storm_diagnostics; print_results; exit 1
@@ -786,6 +796,20 @@ for h in "${STORM_DELETE_HOSTS[@]}"; do
 done
 log "storm: ${STORM_DELETE_COUNT} mid-storm Host deletions issued"
 
+# Isolate the supported wake on the pre-kill pod. Samples from the first half
+# of Host creation may still settle inside this window; they are valid urgent
+# traffic and the hard-gate assertion below requires every one of them, not
+# only a percentile, to remain within budget.
+HCC_POD_WAKE="$(hcc_pod_name)"
+if [[ -z "$HCC_POD_WAKE" || "$HCC_POD_WAKE" != "$HCC_POD_A" ]]; then
+  fail "storm: HCC pod changed before the wake metric baseline (${HCC_POD_A} -> ${HCC_POD_WAKE:-<none>})"
+  storm_diagnostics; print_results; exit 1
+fi
+if ! scrape_hcc_metrics "$SCRAPE_WAKE_PRE" "$HCC_POD_WAKE"; then
+  fail "storm: could not capture the same-pod wake metric baseline"
+  print_results; exit 1
+fi
+
 T_WAKE_MS="$(now_ms)"
 if post_wake; then
   log "storm: wake POST accepted for ${WAKE_HOST_REF} (HTTP ${WAKE_STATUS})"
@@ -793,16 +817,50 @@ else
   fail "storm: mid-storm wake POST failed for ${WAKE_HOST_REF}"; print_results; exit 1
 fi
 
-# Scrape B: last look at the pre-kill pod's counters, immediately before
-# the kill (samples still in flight at process death are a recorded gap).
+# Prove that the supported wake reached HCC, completed its urgent reconcile,
+# published at least one new queue sample, and left no urgent reconcile in
+# flight. This closes the old process-death measurement gap for the wake: the
+# pre-kill scrape is accepted only after its queue observation is durable.
+# shellcheck disable=SC2329  # invoked by name via wait_until
+_wake_urgent_evidence_recorded() {
+  local current_pod lifecycle_state pre_count post_count in_flight
+  current_pod="$(hcc_pod_name)"
+  [[ -n "$current_pod" && "$current_pod" == "$HCC_POD_WAKE" ]] || return 1
+  lifecycle_state="$(wake_lifecycle_state)"
+  [[ -n "$lifecycle_state" && "$lifecycle_state" != 'suspended' ]] || return 1
+  scrape_hcc_metrics "$SCRAPE_WAKE_POST" "$HCC_POD_WAKE" || return 1
+  pre_count="$(awk -v metric="${QUEUE_WAIT_METRIC}_bucket" '
+    index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ && $0 ~ /le="\+Inf"/ { total += $NF }
+    END { print total + 0 }
+  ' "$SCRAPE_WAKE_PRE")"
+  post_count="$(awk -v metric="${QUEUE_WAIT_METRIC}_bucket" '
+    index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ && $0 ~ /le="\+Inf"/ { total += $NF }
+    END { print total + 0 }
+  ' "$SCRAPE_WAKE_POST")"
+  in_flight="$(awk -v metric="${IN_FLIGHT_METRIC}" '
+    index($0, metric "{") == 1 && $0 ~ /lane="urgent"/ { total += $NF }
+    END { print total + 0 }
+  ' "$SCRAPE_WAKE_POST")"
+  awk -v before="$pre_count" -v after="$post_count" -v active="$in_flight" \
+    'BEGIN { exit !((after - before) >= 1 && active == 0) }'
+}
+if wait_until "$STORM_WAKE_QUEUE_EVIDENCE_DEADLINE_S" 1 \
+  "supported wake urgent reconcile + same-pod queue evidence" \
+  _wake_urgent_evidence_recorded _wake_target_diag; then
+  ok "A2 wake input: supported wake reconcile completed and published same-pod urgent queue evidence"
+else
+  fail "A2 wake input: wake did not complete with durable same-pod urgent queue evidence within ${STORM_WAKE_QUEUE_EVIDENCE_DEADLINE_S}s"
+  print_results; exit 1
+fi
+
+# Scrape B is the already-validated final wake-window scrape on the pre-kill
+# pod. Reuse it rather than opening a second race between evidence and kill.
 HCC_POD_B="$(hcc_pod_name)"
 if [[ "$HCC_POD_B" != "$HCC_POD_A" ]]; then
   fail "storm: HCC pod changed unexpectedly before the kill (${HCC_POD_A} -> ${HCC_POD_B:-<none>}) — counter deltas would be invalid"
   storm_diagnostics; print_results; exit 1
 fi
-if ! scrape_hcc_metrics "$SCRAPE_B" "$HCC_POD_B"; then
-  fail "storm: could not scrape HCC metrics immediately before the kill"; print_results; exit 1
-fi
+cp "$SCRAPE_WAKE_POST" "$SCRAPE_B"
 log "storm: pre-kill scrape B captured (pod ${HCC_POD_B})"
 
 T_KILL_MS="$(now_ms)"
@@ -1058,11 +1116,12 @@ if ! scrape_hcc_metrics "$SCRAPE_C2" "$HCC_POD_C"; then
 fi
 log "scrape C2 captured (replacement pod ${HCC_POD_C}; A6/A7 counters settled post-A5)"
 
-# One python pass performs the four metric assertions and emits one
+# One python pass performs the five metric assertions and emits one
 # VERDICT|<name>|PASS/FAIL|<detail> line each. python exits nonzero only
 # when it cannot parse its inputs (a hard failure of the gate itself).
 METRIC_VERDICTS="${WORK_DIR}/metric-verdicts.txt"
 if ! SCRAPE_A="$SCRAPE_A" SCRAPE_B="$SCRAPE_B" SCRAPE_C1="$SCRAPE_C1" SCRAPE_C2="$SCRAPE_C2" SCRAPE_D="$SCRAPE_D" \
+  SCRAPE_WAKE_PRE="$SCRAPE_WAKE_PRE" SCRAPE_WAKE_POST="$SCRAPE_WAKE_POST" \
   P95_BUDGET_S="$STORM_URGENT_P95_BUDGET_S" RECOVERY_BUDGET_S="$STORM_WATCH_RECOVERY_BUDGET_S" \
   MIN_URGENT_SAMPLES="$STORM_URGENT_PROBE_COUNT" \
   python3 >"$METRIC_VERDICTS" <<'PY'
@@ -1101,6 +1160,8 @@ b, _ = load(os.environ["SCRAPE_B"])
 c1, _ = load(os.environ["SCRAPE_C1"])
 c2, c2_types = load(os.environ["SCRAPE_C2"])
 d, _ = load(os.environ["SCRAPE_D"])
+wake_pre, _ = load(os.environ["SCRAPE_WAKE_PRE"])
+wake_post, _ = load(os.environ["SCRAPE_WAKE_POST"])
 
 def buckets(samples, metric, match):
     """Cumulative histogram buckets {le: count} summed over matching series."""
@@ -1125,9 +1186,40 @@ def le_key(le):
 
 verdicts = []
 
-# ── A2: urgent queue-wait p95 across direct-watch window D-C1 ─────────
+# ── A2a: every completed urgent reconcile in the supported wake window ─
 qm = os.environ["QUEUE_WAIT_METRIC"]
 budget = float(os.environ["P95_BUDGET_S"])
+wake_before = buckets(wake_pre, qm, {"lane": "urgent"})
+wake_after = buckets(wake_post, qm, {"lane": "urgent"})
+wake_delta = defaultdict(float)
+wake_reset = False
+for le in set(wake_before) | set(wake_after):
+    delta = wake_after.get(le, 0.0) - wake_before.get(le, 0.0)
+    if delta < 0:
+        wake_reset = True
+    wake_delta[le] = delta
+if wake_reset:
+    verdicts.append(("A2-wake-urgent-hard-gate", False,
+                     "negative bucket delta in the same-pod wake window"))
+else:
+    wake_total = wake_delta.get("+Inf", 0.0)
+    wake_within = wake_delta.get(str(int(budget)), wake_delta.get(str(budget), 0.0))
+    wake_dist = " ".join(
+        f"le{le}={wake_delta[le]:.0f}" for le in sorted(wake_delta, key=le_key)
+    )
+    if wake_total < 1:
+        verdicts.append(("A2-wake-urgent-hard-gate", False,
+                         "no completed urgent queue sample in the supported wake window"))
+    elif wake_within != wake_total:
+        verdicts.append(("A2-wake-urgent-hard-gate", False,
+                         f"{wake_total - wake_within:.0f} of {wake_total:.0f} urgent sample(s) exceeded "
+                         f"{budget:.0f}s in the supported wake window ({wake_dist})"))
+    else:
+        verdicts.append(("A2-wake-urgent-hard-gate", True,
+                         f"all {wake_total:.0f} urgent sample(s) <= {budget:.0f}s in the supported "
+                         f"same-pod wake window ({wake_dist})"))
+
+# ── A2b: urgent queue-wait p95 across direct-watch window D-C1 ────────
 window_note = "window: replacement-pod direct-watch probe delta (D-C1) after LIST→WATCH recovery"
 pre = buckets(c1, qm, {"lane": "urgent"})
 post = buckets(d, qm, {"lane": "urgent"})
@@ -1139,13 +1231,13 @@ for le in set(pre) | set(post):
         reset = True
     combined[le] = delta
 if reset:
-    verdicts.append(("A2-urgent-queue-wait-p95", False,
+    verdicts.append(("A2-direct-watch-urgent-p95", False,
                      "negative bucket delta between scrapes C1 and D (unexpected counter reset)"))
 else:
     total = combined.get("+Inf", 0.0)
     min_samples = float(os.environ["MIN_URGENT_SAMPLES"])
     if total < min_samples:
-        verdicts.append(("A2-urgent-queue-wait-p95", False,
+        verdicts.append(("A2-direct-watch-urgent-p95", False,
                          f"only {total:.0f} direct-watch urgent samples (need >= {min_samples:.0f} — "
                          "the urgent probe did not exercise its declared lane)"))
     else:
@@ -1156,10 +1248,10 @@ else:
                 break
         dist = " ".join(f"le{le}={combined[le]:.0f}" for le in sorted(combined, key=le_key))
         if p95_ub is not None and le_key(p95_ub) <= budget:
-            verdicts.append(("A2-urgent-queue-wait-p95", True,
+            verdicts.append(("A2-direct-watch-urgent-p95", True,
                              f"p95 <= {p95_ub}s over {total:.0f} samples (budget {budget:.0f}s; {dist}; {window_note})"))
         else:
-            verdicts.append(("A2-urgent-queue-wait-p95", False,
+            verdicts.append(("A2-direct-watch-urgent-p95", False,
                              f"p95 bucket upper bound {p95_ub} exceeds {budget:.0f}s over {total:.0f} samples ({dist}; {window_note})"))
 
 # ── A4: watch recovery <= budget on the replacement pod (C1) ──────────
@@ -1242,8 +1334,8 @@ while IFS='|' read -r tag name verdict detail; do
     fail "${name}: ${detail}"
   fi
 done <"$METRIC_VERDICTS"
-if [[ "$VERDICT_COUNT" -ne 4 ]]; then
-  fail "metric adjudication emitted ${VERDICT_COUNT}/4 verdicts — truncated output is a failure, not a pass"
+if [[ "$VERDICT_COUNT" -ne 5 ]]; then
+  fail "metric adjudication emitted ${VERDICT_COUNT}/5 verdicts — truncated output is a failure, not a pass"
 fi
 
 # ======================================================================
