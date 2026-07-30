@@ -744,7 +744,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   }
 
   private buildDeployment(server: McpServerCRD): k8s.V1Deployment {
-    // ── Platform hardening: sanitize CRD before building PodSpec ──
+    // ── Platform hardening: sanitize an ephemeral copy before building PodSpec ──
+    // The caller retains this object as the LIST -> WATCH desired-state cache.
+    // Mutating it here makes a later status-only watch event look like a
+    // user-driven spec revision, which invalidates the authoritative policy
+    // revocation marker during startup. Sanitization remains mandatory for the
+    // generated PodSpec, but must never rewrite the observed CRD inventory.
+    server = structuredClone(server)
     this.sanitizeCrdSpec(server)
 
     const transportPort = server.spec.transport.port || 3000
