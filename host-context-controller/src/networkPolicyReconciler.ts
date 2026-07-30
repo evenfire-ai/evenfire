@@ -30,6 +30,10 @@ import {
   sameMcpServerDesiredRevision,
 } from './mcpServerSafety'
 import {
+  networkPolicySafetyPassDurationSeconds,
+  networkPolicySafetyPassPoliciesTotal,
+} from './metrics'
+import {
   ContextCRD,
   EgressBinding,
   McpServerCRD,
@@ -702,7 +706,8 @@ export class NetworkPolicyReconciler {
       context?: k8s.V1NetworkPolicy[]
       hostEgress?: k8s.V1NetworkPolicy[]
       rpcProxyEgress?: k8s.V1NetworkPolicy[]
-    }
+    },
+    onRevoked?: () => void
   ): Promise<boolean> {
     if (!isCurrent()) return false
     const contextId = context.spec.contextId
@@ -729,6 +734,7 @@ export class NetworkPolicyReconciler {
       if (!desired || !sameNetworkPolicySpec(existing, desired)) {
         console.log(`[NetPol] Deleting stale or orphaned policy "${existingName}"`)
         await this.deletePolicy(existingName, isCurrent)
+        onRevoked?.()
       }
     }
 
@@ -742,6 +748,7 @@ export class NetworkPolicyReconciler {
       if (!desired || !sameNetworkPolicySpec(existing, desired)) {
         console.log(`[NetPol] Deleting stale or orphaned L2 egress policy "${existingName}"`)
         await this.deleteEgressPolicy(existingName, isCurrent)
+        onRevoked?.()
       }
     }
 
@@ -755,6 +762,7 @@ export class NetworkPolicyReconciler {
       if (!desired || !sameNetworkPolicySpec(existing, desired)) {
         console.log(`[NetPol] Deleting stale or orphaned rpc-proxy egress policy "${existingName}"`)
         await this.deletePolicyInNamespace(config.rpcProxyNamespace, existingName, isCurrent)
+        onRevoked?.()
       }
     }
 
@@ -798,6 +806,17 @@ export class NetworkPolicyReconciler {
     options: NetworkPolicyFullReconcileOptions = {}
   ): Promise<void> {
     console.log(`[NetPol] Running full reconciliation for ${contexts.length} Context(s)`)
+
+    // This is intentionally scoped to callers that use the authoritative
+    // revocation callback. Ordinary additive reconciles must not be presented
+    // as readiness safety passes.
+    const measureSafetyPass = options.onAuthoritativeRevocationComplete !== undefined
+    const safetyPassStartedAt = measureSafetyPass ? performance.now() : 0
+    let safetyPassListedPolicies = 0
+    let safetyPassRevokedPolicies = 0
+    const recordSafetyPassRevocation = (): void => {
+      if (measureSafetyPass) safetyPassRevokedPolicies += 1
+    }
 
     // The revision fence starts at invocation, before any asynchronous
     // default-policy setup can interleave a watch update with this snapshot.
@@ -880,6 +899,7 @@ export class NetworkPolicyReconciler {
             }
             console.log(describePolicy(name, contextId))
             await deletePolicy(name)
+            recordSafetyPassRevocation()
           })
         }
       }
@@ -894,6 +914,8 @@ export class NetworkPolicyReconciler {
     const allRpcProxyEgressPolicies = contextCleanupAuthoritative()
       ? await this.listAllRpcProxyEgressPolicies()
       : []
+    safetyPassListedPolicies +=
+      allContextPolicies.length + allContextEgressPolicies.length + allRpcProxyEgressPolicies.length
 
     // Delete orphaned Context policies across every L2 lane. Each lane uses
     // the canonical contextId effect key and rechecks authority plus live CRD
@@ -934,11 +956,16 @@ export class NetworkPolicyReconciler {
         }
         const forContext = (policy: k8s.V1NetworkPolicy): boolean =>
           policy.metadata?.labels?.[CONTEXT_LABEL] === contextId
-        const completed = await this.revokeStaleContextAllows(current, contextEffectIsCurrent, {
-          context: allContextPolicies.filter(forContext),
-          hostEgress: allContextEgressPolicies.filter(forContext),
-          rpcProxyEgress: allRpcProxyEgressPolicies.filter(forContext),
-        })
+        const completed = await this.revokeStaleContextAllows(
+          current,
+          contextEffectIsCurrent,
+          {
+            context: allContextPolicies.filter(forContext),
+            hostEgress: allContextEgressPolicies.filter(forContext),
+            rpcProxyEgress: allRpcProxyEgressPolicies.filter(forContext),
+          },
+          recordSafetyPassRevocation
+        )
         if (!completed && contextCleanupAuthoritative() && serverCleanupAuthoritative()) {
           liveDesiredRevisionChanged = true
         }
@@ -950,6 +977,7 @@ export class NetworkPolicyReconciler {
     if (options.serverInventoryComplete !== false && serverCleanupAuthoritative()) {
       const desiredServerNames = new Set(servers.map(s => s.name))
       allExternalPolicies = await this.listAllExternalEgressPolicies()
+      safetyPassListedPolicies += allExternalPolicies.length
       for (const policy of allExternalPolicies) {
         const serverName = policy.metadata?.labels?.[MCPSERVER_LABEL]
         if (serverName && !desiredServerNames.has(serverName)) {
@@ -973,6 +1001,7 @@ export class NetworkPolicyReconciler {
             }
             console.log(`[NetPol] Deleting orphaned external egress policy "${name}"`)
             await this.deletePolicyInNamespace(config.namespace, name)
+            recordSafetyPassRevocation()
           })
         }
       }
@@ -1003,7 +1032,8 @@ export class NetworkPolicyReconciler {
             serverEffectIsCurrent,
             allExternalPolicies.filter(
               policy => policy.metadata?.labels?.[MCPSERVER_LABEL] === server.name
-            )
+            ),
+            recordSafetyPassRevocation
           )
           if (!completed && serverCleanupAuthoritative()) {
             liveDesiredRevisionChanged = true
@@ -1030,6 +1060,17 @@ export class NetworkPolicyReconciler {
       contextCleanupAuthoritative() &&
       serverCleanupAuthoritative()
     ) {
+      if (measureSafetyPass) {
+        networkPolicySafetyPassPoliciesTotal.inc({ operation: 'listed' }, safetyPassListedPolicies)
+        networkPolicySafetyPassPoliciesTotal.inc(
+          { operation: 'revoked' },
+          safetyPassRevokedPolicies
+        )
+        networkPolicySafetyPassDurationSeconds.observe(
+          { outcome: 'completed' },
+          (performance.now() - safetyPassStartedAt) / 1_000
+        )
+      }
       options.onAuthoritativeRevocationComplete?.()
     }
 
@@ -1206,7 +1247,8 @@ export class NetworkPolicyReconciler {
   private async revokeStaleExternalEgress(
     server: McpServerCRD,
     isCurrent: () => boolean,
-    listedPolicies?: k8s.V1NetworkPolicy[]
+    listedPolicies?: k8s.V1NetworkPolicy[],
+    onRevoked?: () => void
   ): Promise<boolean> {
     if (!isCurrent()) return false
     const existingPolicies =
@@ -1223,7 +1265,8 @@ export class NetworkPolicyReconciler {
         const desired = desiredPolicies.get(name)
         return !desired || !sameNetworkPolicySpec(policy, desired)
       }),
-      async () => isCurrent()
+      async () => isCurrent(),
+      onRevoked
     )
     return isCurrent()
   }
@@ -1468,7 +1511,8 @@ export class NetworkPolicyReconciler {
     serverName: string,
     namespace: string,
     policies?: k8s.V1NetworkPolicy[],
-    deleteAllowed?: () => Promise<boolean>
+    deleteAllowed?: () => Promise<boolean>,
+    onDeleted?: () => void
   ): Promise<void> {
     const policiesToDelete =
       policies ?? (await this.listExternalEgressPoliciesForServer(serverName, namespace))
@@ -1480,11 +1524,13 @@ export class NetworkPolicyReconciler {
         if (deleteAllowed && !(await deleteAllowed())) return
         await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
         console.log(`[NetPol] Deleted external egress policy "${name}"`)
+        onDeleted?.()
       } catch (error: unknown) {
         if (getErrorCode(error) !== 404) {
           console.error(`[NetPol] Failed to delete external egress policy "${name}":`, error)
           throw error
         }
+        onDeleted?.()
       }
     }
   }

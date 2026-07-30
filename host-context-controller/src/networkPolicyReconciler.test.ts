@@ -4,6 +4,10 @@ import * as dns from 'node:dns/promises'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { confirmAuthoritativeMcpServerAbsence } from './mcpServerSafety'
+import {
+  networkPolicySafetyPassDurationSeconds,
+  networkPolicySafetyPassPoliciesTotal,
+} from './metrics'
 import { NetworkPolicyReconciler, PUBLIC_EGRESS_EXCEPT_CIDRS } from './networkPolicyReconciler'
 import { ContextCRD, McpServerCRD } from './types'
 
@@ -42,6 +46,11 @@ vi.mock('./config', () => ({
 // Mock dns
 vi.mock('node:dns/promises', () => ({
   resolve4: vi.fn().mockResolvedValue(['1.2.3.4', '5.6.7.8']),
+}))
+
+vi.mock('./metrics', () => ({
+  networkPolicySafetyPassDurationSeconds: { observe: vi.fn() },
+  networkPolicySafetyPassPoliciesTotal: { inc: vi.fn() },
 }))
 
 function makeMockNetworkingApi() {
@@ -101,6 +110,70 @@ describe('NetworkPolicyReconciler', () => {
     reconciler = makeReconciler(mockApi, undefined, mockCustomApi)
     vi.clearAllMocks()
     vi.mocked(dns.resolve4).mockResolvedValue(['1.2.3.4', '5.6.7.8'])
+  })
+
+  it('records the authoritative safety-pass inventory, completed revocations, and duration', async () => {
+    mockApi.listNamespacedNetworkPolicy
+      .mockResolvedValueOnce({
+        items: [
+          {
+            metadata: {
+              name: 'orphan-context',
+              labels: { 'clerum.io/context': 'missing-context' },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            metadata: {
+              name: 'orphan-host-egress',
+              labels: { 'clerum.io/context': 'missing-context' },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            metadata: {
+              name: 'orphan-rpc-egress',
+              labels: { 'clerum.io/context': 'missing-context' },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            metadata: {
+              name: 'orphan-external-egress',
+              labels: { 'clerum.io/mcpserver': 'missing-server' },
+            },
+          },
+        ],
+      })
+    const complete = vi.fn()
+
+    await reconciler.fullReconcile([], [], {
+      ensureDefaults: false,
+      onAuthoritativeRevocationComplete: complete,
+    })
+
+    expect(complete).toHaveBeenCalledOnce()
+    expect(networkPolicySafetyPassPoliciesTotal.inc).toHaveBeenCalledWith(
+      { operation: 'listed' },
+      4
+    )
+    expect(networkPolicySafetyPassPoliciesTotal.inc).toHaveBeenCalledWith(
+      { operation: 'revoked' },
+      4
+    )
+    expect(networkPolicySafetyPassDurationSeconds.observe).toHaveBeenCalledWith(
+      { outcome: 'completed' },
+      expect.any(Number)
+    )
   })
 
   describe('public egress blocklist parity', () => {

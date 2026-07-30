@@ -91,6 +91,18 @@ export const initialConvergenceLastSuccessTimestampSeconds = gauge({
   labelNames: ['lane'] as const,
 })
 
+export const networkPolicySafetyPassDurationSeconds = histogram({
+  name: 'clerum_hcc_networkpolicy_safety_pass_duration_seconds',
+  help: 'Seconds until an authoritative NetworkPolicy safety pass has revoked stale allows.',
+  labelNames: ['outcome'] as const,
+})
+
+export const networkPolicySafetyPassPoliciesTotal = counter({
+  name: 'clerum_hcc_networkpolicy_safety_pass_policies_total',
+  help: 'NetworkPolicies listed and revoked by authoritative HCC safety passes.',
+  labelNames: ['operation'] as const,
+})
+
 export const contextReconciliationsTotal = counter({
   name: 'clerum_hcc_context_reconciliations_total',
   help: 'Total Context CRD reconciliations',
