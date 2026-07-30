@@ -496,6 +496,75 @@ describe('registry connect flow', () => {
       .send({ claim_token: 'tok-abc' })
       .expect(500)
   })
+
+  // GET is mounted by RegistryCatalog on every Marketplace visit and is
+  // CSRF-reachable (SameSite=Lax, no origin check), so it too is now behind a
+  // per-admin token bucket. This proves the middleware sits AFTER
+  // requireAuthForControlUI (bucket keyed on adminAuth.sub) and BEFORE the
+  // handler without breaking the normal success path.
+  it('GET is rate-limited per admin, keyed on adminAuth.sub, and still succeeds when allowed', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    const res = await request(app()).get('/admin/registry/connect').expect(200)
+    expect(res.body.state).toBe('disconnected')
+    expect(checkAndIncrement).toHaveBeenCalledWith('registry_connect_status:admin-uuid-123', 30)
+    expect(res.headers['x-ratelimit-limit']).toBe('30')
+  })
+
+  // Proves the limiter blocks BEFORE any DB/registry work: a denied admin
+  // must not reach getRegistryConnection.
+  it('GET 429s when the per-admin bucket is exceeded, without touching the registry', async () => {
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 30000,
+    })
+    const res = await request(app()).get('/admin/registry/connect').expect(429)
+    expect(res.body.error).toBe('Too Many Requests')
+    expect(res.headers['retry-after']).toBeDefined()
+    expect(connDb.getRegistryConnection).not.toHaveBeenCalled()
+  })
+
+  // POST request registers against the SHARED production registry — each call
+  // consumes one of its ~5/day per-IP registration attempts. This proves the
+  // middleware sits AFTER requireAuthForControlUI (bucket keyed on
+  // adminAuth.sub) and BEFORE the handler without breaking the normal success
+  // path.
+  it('POST request is rate-limited per admin, keyed on adminAuth.sub, and still succeeds when allowed', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ deployment_id: 'dep-9', key_id: 'kid-9', status: 'pending' }), {
+        status: 202,
+      })
+    )
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(202)
+    expect(res.body.state).toBe('pending')
+    expect(checkAndIncrement).toHaveBeenCalledWith('registry_connect_request:admin-uuid-123', 3)
+    expect(res.headers['x-ratelimit-limit']).toBe('3')
+  })
+
+  // Proves the limiter blocks BEFORE any registry work: a denied admin must
+  // not burn a registration attempt against the shared registry's small daily
+  // per-IP quota.
+  it('POST request 429s when the per-admin bucket is exceeded, without touching the registry', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 30000,
+    })
+    const spy = routeFetch({})
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(429)
+    expect(res.body.error).toBe('Too Many Requests')
+    expect(res.headers['retry-after']).toBeDefined()
+    expect(connDb.getRegistryConnection).not.toHaveBeenCalled()
+    expect(spy.mock.calls.length).toBe(0)
+  })
 })
 
 describe('register — auto-claim (201)', () => {
