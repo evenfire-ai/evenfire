@@ -1278,11 +1278,7 @@ baseline_policies_exist ||
   die "baseline safety NetworkPolicies are absent while HCC reports Ready"
 hcc_identity_is_stable ||
   die "HCC restarted while the MCP external-egress query was held"
-wait_until 300 "peer MCP/Context fleet to make safe background progress during held primary egress" \
-  peer_fleet_has_background_progress ||
-  die "peer MCP/Context fleet made no safe background progress while the primary egress remained held"
 ok "/ready is 200 and discovery contains the exact McpServer while its real initial convergence is blocked"
-ok "the worker-width-crossing peer fleet made safe background progress while the primary egress remained held"
 ok "baseline NetworkPolicies exist and the stale same-name external-egress policy was revoked before Ready"
 
 initial_empty_context_log="[NetPol] Reconciling context \"${CONTEXT_ID}\" — allowed servers: []"
@@ -1329,8 +1325,12 @@ hcc_kubernetes_readiness_is_exact ||
   die "HCC lost Kubernetes readiness while Context policies converged during the MCP hold"
 hcc_identity_is_stable ||
   die "HCC restarted while Context policies converged around the held MCP entity"
+wait_until 300 "peer MCP/Context fleet to make safe background progress during held primary egress" \
+  peer_fleet_has_background_progress ||
+  die "peer MCP/Context fleet made no safe background progress while the primary egress remained held"
 ok "the MODIFIED handler, not the initial empty-Context pass, converged all three policies"
 ok "McpServer runtime and external-egress remained absent until release; readiness stayed 200"
+ok "the worker-width-crossing peer fleet made safe background progress while the primary egress remained held"
 
 release_dns_blocker ||
   die "could not release the fixture DNS query"
