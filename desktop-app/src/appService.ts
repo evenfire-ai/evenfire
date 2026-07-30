@@ -267,6 +267,7 @@ export class AppService {
   private accessCatalog: AccessCatalog | null = null
   private teamDirectoryCache: TeamDirectoryResult | null = null
   private teamContextQueue: Promise<void> = Promise.resolve()
+  private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
   private readonly prewarmAttemptAtByHostRef = new Map<string, number>()
@@ -497,6 +498,15 @@ export class AppService {
 
     const matchingEntry = directory.items.find(teamHasRefs)
     return matchingEntry?.team.id ?? this.accessCatalog?.teamId ?? null
+  }
+
+  private enqueueSandboxUiLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.sandboxUiLifecycleQueue.then(operation)
+    this.sandboxUiLifecycleQueue = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
   }
 
   private async issueRpcTokenForHostRefs(
@@ -2873,7 +2883,21 @@ export class AppService {
    * this). This keeps memory + GPU usage bounded and avoids accidental
    * cross-recipe focus / cookie-jar mixups.
    */
-  async openSandboxUi(args: {
+  openSandboxUi(args: {
+    recipeNs: string
+    recipeName: string
+    defaultPath?: string
+    routePath?: string
+    bounds: import('./sandboxUiDriver.js').SandboxUiBounds
+    parentWindow: import('electron').BrowserWindow
+    onClosed?: () => void
+    onRefreshError?: (message: string) => void
+    onOauthError?: (message: string) => void
+  }): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(() => this.openSandboxUiNow(args))
+  }
+
+  private async openSandboxUiNow(args: {
     recipeNs: string
     recipeName: string
     defaultPath?: string
@@ -2919,10 +2943,10 @@ export class AppService {
       },
     })
     const activeView = driver.getActiveSandboxUi()
-    if (!activeView) {
-      // The mount step already threw if it failed; if we still get null
-      // here something racy happened (parent window closed during the
-      // mint).  Bail without arming refresh.
+    if (!activeView || activeView.appRef !== `${recipeNs}/${recipeName}`) {
+      // A queued close or newer mount can invalidate this operation while an
+      // async cookie write is in flight. Do not cross-wire its refresh loop
+      // to whichever recipe is active now.
       return
     }
     refreshModule.startSandboxUiRefresh({
@@ -2938,11 +2962,13 @@ export class AppService {
     })
   }
 
-  async closeSandboxUi(): Promise<void> {
-    const driver = await import('./sandboxUiDriver.js')
-    const refreshModule = await import('./sandboxUiSessionRefresh.js')
-    refreshModule.cancelSandboxUiRefresh()
-    await driver.unmountSandboxUiView()
+  closeSandboxUi(): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(async () => {
+      const driver = await import('./sandboxUiDriver.js')
+      const refreshModule = await import('./sandboxUiSessionRefresh.js')
+      refreshModule.cancelSandboxUiRefresh()
+      await driver.unmountSandboxUiView()
+    })
   }
 
   async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {

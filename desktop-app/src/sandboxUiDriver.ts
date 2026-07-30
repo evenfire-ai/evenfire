@@ -102,6 +102,7 @@ type ActiveView = {
 }
 
 let active: ActiveView | null = null
+let mountGeneration = 0
 
 export const isSandboxUiNavigationWithinPrefix = isNavigationWithinPrefix
 
@@ -246,6 +247,13 @@ async function writeSandboxUiCookie(args: {
  */
 export async function installSandboxUiCookie(setCookie: string | string[]): Promise<void> {
   if (!active) return
+  const expectedPath =
+    `/api/v1/sandbox-ui/${encodeURIComponent(active.recipeNs)}/` +
+    `${encodeURIComponent(active.recipeName)}/`
+  const cookiePath = extractSandboxUiPath(setCookie, active.recipeNs, active.recipeName)
+  if (cookiePath !== expectedPath) {
+    throw new Error(`sandbox-ui refresh cookie path ${cookiePath} does not match the active recipe`)
+  }
   await writeSandboxUiCookie({
     rpcProxyOrigin: active.rpcProxyOrigin,
     recipeNs: active.recipeNs,
@@ -296,10 +304,16 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     throw new Error('recipeNs and recipeName are required')
   }
 
+  // Publish intent before the first await. A newer mount or unmount invalidates
+  // this operation while cookie installation is in flight, preventing an older
+  // request from attaching a view after the user has moved on.
+  const generation = ++mountGeneration
+
   // Tear down any existing view before mounting (one-at-a-time embed). The
   // per-recipe partition is left in place so storage survives a re-mount
   // within the ACL window.
   await teardownActive('replaced')
+  if (generation !== mountGeneration) return
 
   const partition = partitionFor(getActiveEnvKey(), recipeNs, recipeName)
   const proxyOriginUrl = new URL(rpcProxyUrl).toString().replace(/\/+$/, '')
@@ -320,6 +334,10 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     setCookie,
     partition,
   })
+  if (generation !== mountGeneration) return
+  if (parentWindow.isDestroyed()) {
+    throw new Error('parent window is destroyed')
+  }
 
   // Apply default-deny permission + download policy on the partition's
   // Session before the view is constructed so the very first navigation
@@ -573,6 +591,7 @@ export function canApplySandboxUiClientRoute(input: {
  * re-mount within the ACL window is fast.
  */
 export async function unmountSandboxUiView(): Promise<void> {
+  mountGeneration += 1
   await teardownActive('closed')
 }
 

@@ -2,8 +2,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppService } from '../appService.js'
 import { ApiError } from '../httpClient.js'
 
-const { mockGetActiveSandboxUiLocation } = vi.hoisted(() => ({
+const {
+  mockCancelSandboxUiRefresh,
+  mockGetActiveSandboxUi,
+  mockGetActiveSandboxUiLocation,
+  mockInstallSandboxUiCookie,
+  mockMountSandboxUiView,
+  mockStartSandboxUiRefresh,
+  mockUnmountSandboxUiView,
+} = vi.hoisted(() => ({
+  mockCancelSandboxUiRefresh: vi.fn(),
+  mockGetActiveSandboxUi: vi.fn(),
   mockGetActiveSandboxUiLocation: vi.fn(),
+  mockInstallSandboxUiCookie: vi.fn(),
+  mockMountSandboxUiView: vi.fn(),
+  mockStartSandboxUiRefresh: vi.fn(),
+  mockUnmountSandboxUiView: vi.fn(),
 }))
 
 vi.mock('electron', () => ({
@@ -21,7 +35,16 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('../sandboxUiDriver.js', () => ({
+  getActiveSandboxUi: mockGetActiveSandboxUi,
   getActiveSandboxUiLocation: mockGetActiveSandboxUiLocation,
+  installSandboxUiCookie: mockInstallSandboxUiCookie,
+  mountSandboxUiView: mockMountSandboxUiView,
+  unmountSandboxUiView: mockUnmountSandboxUiView,
+}))
+
+vi.mock('../sandboxUiSessionRefresh.js', () => ({
+  cancelSandboxUiRefresh: mockCancelSandboxUiRefresh,
+  startSandboxUiRefresh: mockStartSandboxUiRefresh,
 }))
 
 vi.mock('../config.js', () => ({
@@ -148,6 +171,121 @@ describe('AppService.listSandboxUiApps', () => {
     )
     expect(mockListSandboxUiApps).toHaveBeenNthCalledWith(1, 'stale-rpc-token')
     expect(mockListSandboxUiApps).toHaveBeenNthCalledWith(2, 'fresh-rpc-token')
+  })
+})
+
+describe('AppService sandbox UI lifecycle serialization', () => {
+  const openArgs = (recipeName: string) => ({
+    recipeNs: 'sandbox-recipes',
+    recipeName,
+    bounds: { x: 0, y: 0, width: 400, height: 300 },
+    parentWindow: {} as never,
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockMountSandboxUiView.mockImplementation(
+      async ({ recipeNs, recipeName }: { recipeNs: string; recipeName: string }) => {
+        mockGetActiveSandboxUi.mockReturnValue({
+          recipeNs,
+          recipeName,
+          appRef: `${recipeNs}/${recipeName}`,
+          webContentsId: recipeName === 'first-app' ? 1 : 2,
+        })
+      }
+    )
+    mockInstallSandboxUiCookie.mockResolvedValue(undefined)
+    mockUnmountSandboxUiView.mockResolvedValue(undefined)
+  })
+
+  it('finishes one mint, mount, and refresh setup before starting the next open', async () => {
+    let resolveFirstMint!: (value: { setCookie: string }) => void
+    let resolveSecondMint!: (value: { setCookie: string }) => void
+    const firstMint = new Promise<{ setCookie: string }>(resolve => {
+      resolveFirstMint = resolve
+    })
+    const secondMint = new Promise<{ setCookie: string }>(resolve => {
+      resolveSecondMint = resolve
+    })
+    const service = makeService() as unknown as {
+      mintSandboxUiSession: ReturnType<typeof vi.fn>
+      openSandboxUi: AppService['openSandboxUi']
+    }
+    service.mintSandboxUiSession = vi
+      .fn()
+      .mockReturnValueOnce(firstMint)
+      .mockReturnValueOnce(secondMint)
+
+    const firstOpen = service.openSandboxUi(openArgs('first-app'))
+    const secondOpen = service.openSandboxUi(openArgs('second-app'))
+
+    await vi.waitFor(() => {
+      expect(service.mintSandboxUiSession).toHaveBeenCalledTimes(1)
+    })
+    expect(mockMountSandboxUiView).not.toHaveBeenCalled()
+
+    resolveFirstMint({
+      setCookie:
+        'clerum_sandbox_ui_session=first;' + ' Path=/api/v1/sandbox-ui/sandbox-recipes/first-app/',
+    })
+    await firstOpen
+    expect(mockStartSandboxUiRefresh).toHaveBeenCalledTimes(1)
+    expect(mockStartSandboxUiRefresh.mock.calls[0]?.[0]).toMatchObject({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'first-app',
+      webContentsId: 1,
+    })
+
+    await vi.waitFor(() => {
+      expect(service.mintSandboxUiSession).toHaveBeenCalledTimes(2)
+    })
+    resolveSecondMint({
+      setCookie:
+        'clerum_sandbox_ui_session=second;' +
+        ' Path=/api/v1/sandbox-ui/sandbox-recipes/second-app/',
+    })
+    await secondOpen
+
+    expect(mockMountSandboxUiView.mock.calls.map(call => call[0].recipeName)).toEqual([
+      'first-app',
+      'second-app',
+    ])
+    expect(mockStartSandboxUiRefresh.mock.calls[1]?.[0]).toMatchObject({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'second-app',
+      webContentsId: 2,
+    })
+  })
+
+  it('queues close behind an in-flight open so the final state stays closed', async () => {
+    let resolveMint!: (value: { setCookie: string }) => void
+    const mint = new Promise<{ setCookie: string }>(resolve => {
+      resolveMint = resolve
+    })
+    const service = makeService() as unknown as {
+      mintSandboxUiSession: ReturnType<typeof vi.fn>
+      openSandboxUi: AppService['openSandboxUi']
+      closeSandboxUi: AppService['closeSandboxUi']
+    }
+    service.mintSandboxUiSession = vi.fn().mockReturnValue(mint)
+
+    const open = service.openSandboxUi(openArgs('first-app'))
+    const close = service.closeSandboxUi()
+
+    await vi.waitFor(() => {
+      expect(service.mintSandboxUiSession).toHaveBeenCalledOnce()
+    })
+    expect(mockUnmountSandboxUiView).not.toHaveBeenCalled()
+
+    resolveMint({
+      setCookie:
+        'clerum_sandbox_ui_session=first;' + ' Path=/api/v1/sandbox-ui/sandbox-recipes/first-app/',
+    })
+    await open
+    await close
+
+    expect(mockCancelSandboxUiRefresh).toHaveBeenCalledOnce()
+    expect(mockUnmountSandboxUiView).toHaveBeenCalledOnce()
   })
 })
 

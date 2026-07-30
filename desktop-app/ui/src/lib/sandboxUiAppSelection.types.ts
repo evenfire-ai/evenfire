@@ -1,5 +1,5 @@
 import type { ActiveSandboxUiApp } from '@/uiTypes'
-import type { SandboxUiApp } from '../../../src/rpcProxyClient'
+import type { SandboxUiApp } from '../../../src/types'
 
 export type SandboxUiAppListing = SandboxUiApp
 

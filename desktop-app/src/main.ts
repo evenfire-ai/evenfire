@@ -4,7 +4,7 @@ import { AppService } from './appService.js'
 import { config } from './config.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
-import { shouldResetRendererReadinessForNavigation } from './mainWindowReadiness.js'
+import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { collectInitialProtocolUrls } from './protocolLaunchArgs.js'
 import { SandboxUiDeepLinkQueue } from './sandboxUiDeepLinkQueue.js'
 import {
@@ -343,15 +343,12 @@ async function createWindow(): Promise<void> {
       mainWindowRendererReady = false
     }
   })
-  window.webContents.on('did-start-navigation', details => {
-    if (mainWindow === window && shouldResetRendererReadinessForNavigation(details)) {
+  wireMainWindowRendererReadiness({
+    webContents: window.webContents,
+    isCurrentWindow: () => mainWindow === window,
+    markNotReady: () => {
       mainWindowRendererReady = false
-    }
-  })
-  window.webContents.on('render-process-gone', () => {
-    if (mainWindow === window) {
-      mainWindowRendererReady = false
-    }
+    },
   })
 
   wireWindowVisibility(window)

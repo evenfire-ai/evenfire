@@ -1,5 +1,3 @@
-import type { SandboxUiApp } from './rpcProxyClient.js'
-import type { SandboxUiDeepLinkEnvelope } from './sandboxUiDeepLinks.js'
 import {
   AccessCatalog,
   AgentWithMcpServers,
@@ -27,6 +25,8 @@ import {
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
   RpcAllowedServersResult,
+  SandboxUiApp,
+  SandboxUiDeepLinkEnvelope,
   SessionLifecycleState,
   SessionState,
   SessionTokensLite,

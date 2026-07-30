@@ -1,10 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mountSandboxUiView, unmountSandboxUiView } from '../sandboxUiDriver.js'
+import {
+  installSandboxUiCookie,
+  mountSandboxUiView,
+  unmountSandboxUiView,
+} from '../sandboxUiDriver.js'
 
 type Listener = () => void
 
 const electronMocks = vi.hoisted(() => {
   let nextWebContentsId = 1
+  const views: FakeWebContentsView[] = []
 
   class FakeWebContents {
     id = nextWebContentsId++
@@ -45,10 +50,16 @@ const electronMocks = vi.hoisted(() => {
     webContents = new FakeWebContents()
     setBounds = vi.fn()
     setVisible = vi.fn()
+
+    constructor() {
+      views.push(this)
+    }
   }
 
   const sessionObject = {
-    cookies: { set: vi.fn(async () => undefined) },
+    cookies: {
+      set: vi.fn(async (_details?: { value: string }): Promise<void> => undefined),
+    },
     setPermissionRequestHandler: vi.fn(),
     setPermissionCheckHandler: vi.fn(),
     removeAllListeners: vi.fn(),
@@ -62,6 +73,7 @@ const electronMocks = vi.hoisted(() => {
     getDisplayMatching: vi.fn(() => ({ scaleFactor: 1 })),
     touchSandboxUiPartition: vi.fn(async () => undefined),
     sessionObject,
+    views,
   }
 })
 
@@ -140,6 +152,8 @@ function mountArgs(overrides: MountSandboxUiViewOverrides): MountSandboxUiViewAr
 
 beforeEach(() => {
   vi.clearAllMocks()
+  electronMocks.views.length = 0
+  electronMocks.sessionObject.cookies.set.mockResolvedValue(undefined)
 })
 
 afterEach(async () => {
@@ -177,5 +191,94 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     expect(parentWindow.listenerCount('closed')).toBe(0)
     parentWindow.emit('closed')
     expect(onClosed).not.toHaveBeenCalled()
+  })
+
+  it('keeps only the newest view when cookie writes complete out of order', async () => {
+    const parentWindow = new FakeParentWindow()
+    let resolveFirstCookie!: () => void
+    let resolveSecondCookie!: () => void
+    electronMocks.sessionObject.cookies.set.mockImplementation(
+      (details?: { value: string }) =>
+        new Promise<void>(resolve => {
+          const value = details?.value
+          if (value === 'tok-first') resolveFirstCookie = resolve
+          if (value === 'tok-second') resolveSecondCookie = resolve
+        })
+    )
+
+    const firstMount = mountSandboxUiView(
+      mountArgs({
+        parentWindow,
+        recipeName: 'first-app',
+        setCookie:
+          'clerum_sandbox_ui_session=tok-first;' +
+          ' Path=/api/v1/sandbox-ui/sandbox-recipes/first-app/; HttpOnly',
+      })
+    )
+    await vi.waitFor(() => {
+      expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledTimes(1)
+    })
+
+    const secondMount = mountSandboxUiView(
+      mountArgs({
+        parentWindow,
+        recipeName: 'second-app',
+        setCookie:
+          'clerum_sandbox_ui_session=tok-second;' +
+          ' Path=/api/v1/sandbox-ui/sandbox-recipes/second-app/; HttpOnly',
+      })
+    )
+    await vi.waitFor(() => {
+      expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledTimes(2)
+    })
+
+    resolveSecondCookie()
+    await secondMount
+    resolveFirstCookie()
+    await firstMount
+
+    expect(electronMocks.views).toHaveLength(1)
+    expect(parentWindow.contentView.addChildView).toHaveBeenCalledOnce()
+    expect(parentWindow.contentView.removeChildView).not.toHaveBeenCalled()
+    expect(parentWindow.listenerCount('closed')).toBe(1)
+    expect(electronMocks.views[0]?.webContents.isDestroyed()).toBe(false)
+  })
+
+  it('does not attach a view when unmount invalidates an in-flight mount', async () => {
+    const parentWindow = new FakeParentWindow()
+    let resolveCookie!: () => void
+    electronMocks.sessionObject.cookies.set.mockImplementation(
+      () =>
+        new Promise<void>(resolve => {
+          resolveCookie = resolve
+        })
+    )
+
+    const mount = mountSandboxUiView(mountArgs({ parentWindow }))
+    await vi.waitFor(() => {
+      expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledOnce()
+    })
+
+    await unmountSandboxUiView()
+    resolveCookie()
+    await mount
+
+    expect(electronMocks.views).toHaveLength(0)
+    expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
+    expect(parentWindow.listenerCount('closed')).toBe(0)
+  })
+
+  it('rejects a refresh cookie scoped to a different recipe', async () => {
+    const parentWindow = new FakeParentWindow()
+    await mountSandboxUiView(mountArgs({ parentWindow }))
+
+    await expect(
+      installSandboxUiCookie(
+        'clerum_sandbox_ui_session=foreign;' +
+          ' Path=/api/v1/sandbox-ui/sandbox-recipes/other-app/; HttpOnly'
+      )
+    ).rejects.toThrow('does not match the active recipe')
+
+    expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledOnce()
   })
 })

@@ -1,6 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { SandboxUiDeepLinkEnvelope } from './sandboxUiDeepLinks.js'
-import type { HostMessageRequest, ProfileSettingsOpenOptions } from './types.js'
+import type {
+  HostMessageRequest,
+  ProfileSettingsOpenOptions,
+  SandboxUiDeepLinkEnvelope,
+} from './types.js'
 
 const clerum = Object.freeze({
   auth: {
