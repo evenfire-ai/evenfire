@@ -2503,6 +2503,27 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
+  private recordNetworkPolicySafetyCertificate(
+    certificate: NetworkPolicySafetyCertificate
+  ): boolean {
+    if (
+      this.stopped ||
+      !this.contextCacheSynced ||
+      !this.mcpServerCacheSynced ||
+      this.contextWatchGeneration !== certificate.contextGeneration ||
+      this.mcpWatchGeneration !== certificate.serverGeneration ||
+      this.contextDesiredRevision !== certificate.contextRevision ||
+      this.mcpServerDesiredRevision !== certificate.serverRevision
+    ) {
+      return false
+    }
+    this.networkPolicyRevocationContextGeneration = certificate.contextGeneration
+    this.networkPolicyRevocationServerGeneration = certificate.serverGeneration
+    this.networkPolicyRevocationContextRevision = certificate.contextRevision
+    this.networkPolicyRevocationServerRevision = certificate.serverRevision
+    return true
+  }
+
   private isNetworkPolicySafetyCertificateCurrent(
     certificate: NetworkPolicySafetyCertificate
   ): boolean {
@@ -2611,6 +2632,12 @@ export class McpServerWatcher implements McpServerProvider {
       const initialServers = [...this.servers.values()]
       const contextInventoryGeneration = this.contextWatchGeneration
       const serverInventoryGeneration = this.mcpWatchGeneration
+      const safetyCertificate: NetworkPolicySafetyCertificate = {
+        contextGeneration: contextInventoryGeneration,
+        serverGeneration: serverInventoryGeneration,
+        contextRevision: this.contextDesiredRevision,
+        serverRevision: this.mcpServerDesiredRevision,
+      }
       const serverInventoryComplete = this.mcpServerCacheSynced
       const contextInventoryAuthoritative = () =>
         this.hasContextInventoryAuthority(contextInventoryGeneration)
@@ -2644,11 +2671,7 @@ export class McpServerWatcher implements McpServerProvider {
         contextDesiredRevision: () => this.contextDesiredRevision,
         serverDesiredRevision: () => this.mcpServerDesiredRevision,
         onAuthoritativeRevocationComplete: () => {
-          if (!contextInventoryAuthoritative() || !serverInventoryAuthoritative()) return
-          this.networkPolicyRevocationContextGeneration = contextInventoryGeneration
-          this.networkPolicyRevocationServerGeneration = serverInventoryGeneration
-          this.networkPolicyRevocationContextRevision = this.contextDesiredRevision
-          this.networkPolicyRevocationServerRevision = this.mcpServerDesiredRevision
+          if (!this.recordNetworkPolicySafetyCertificate(safetyCertificate)) return
           authoritativeRevocationCompleted = true
           // Start runtime convergence at the safety boundary, before this full
           // pass enters additive Context work. Startup egress gates may now
@@ -3562,6 +3585,7 @@ export class McpServerWatcher implements McpServerProvider {
 
       // Cache the context for cross-resource re-reconciliation
       let desiredStateChanged = false
+      let deltaSafetyCertificate: NetworkPolicySafetyCertificate | undefined
       if (type === 'ADDED' || type === 'MODIFIED') {
         desiredStateChanged =
           previous === undefined || !sameContextDesiredRevision(previous, context)
@@ -3571,6 +3595,19 @@ export class McpServerWatcher implements McpServerProvider {
       }
       if (desiredStateChanged) {
         this.contextDesiredRevision += 1
+        // A same-identity Context MODIFIED event can complete its own stale
+        // allow revocation below. Once that exact delta is current, it is safe
+        // to restore readiness without waiting for an older pass's additive
+        // fleet. Deletes and identity changes remain fail-closed until the
+        // authoritative full pass certifies their broader cleanup.
+        if (type === 'MODIFIED' && previous?.spec.contextId === context.spec.contextId) {
+          deltaSafetyCertificate = {
+            contextGeneration: watchGeneration,
+            serverGeneration: this.mcpWatchGeneration,
+            contextRevision: this.contextDesiredRevision,
+            serverRevision: this.mcpServerDesiredRevision,
+          }
+        }
         void this.runInitialNetworkPolicyConvergence()
       }
 
@@ -3629,6 +3666,10 @@ export class McpServerWatcher implements McpServerProvider {
               context.spec.contextId,
               deleteAllowed
             )
+          }
+
+          if (deltaSafetyCertificate) {
+            this.recordNetworkPolicySafetyCertificate(deltaSafetyCertificate)
           }
         } catch (error) {
           console.error(

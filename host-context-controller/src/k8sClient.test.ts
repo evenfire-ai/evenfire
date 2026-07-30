@@ -1080,6 +1080,104 @@ describe('McpServerWatcher startup', () => {
     }
   })
 
+  it('keeps readiness after a current Context safety delta while an older additive pass is pending', async () => {
+    const olderAdditivePass = deferred()
+    const currentDeltaSafety = deferred()
+    let contextWatchCallback:
+      | ((
+          type: string,
+          apiObj: {
+            metadata: { name: string; namespace: string }
+            spec: { contextId: string; mcpServers: string[] }
+          }
+        ) => Promise<void>)
+      | undefined
+    let networkPolicyPasses = 0
+    mocks.watch.mockImplementationOnce(async (path, _options, callback) => {
+      if (path.endsWith('/contexts')) contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    mocks.netPolFullReconcile.mockImplementation(async (...args: unknown[]) => {
+      networkPolicyPasses += 1
+      const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
+      options?.onAuthoritativeRevocationComplete?.()
+      if (networkPolicyPasses === 1) await olderAdditivePass.promise
+    })
+
+    const watcher = new McpServerWatcher()
+    await (watcher as any).startContextWatch('context-delta-rv')
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).mcpWatchGeneration = 1
+    ;(watcher as any).contexts.set('delta-context', {
+      name: 'delta-context',
+      namespace: 'mcp-server',
+      spec: { contextId: 'delta-context', mcpServers: [] },
+    })
+    const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+      watcher.isReadinessInventoryAuthoritative()
+    )
+    await server.start()
+    server.setReady(true)
+    const initialPass = (watcher as any).runInitialNetworkPolicyConvergence() as Promise<void>
+    ;(watcher as any).netPolReconciler.reconcileContext.mockImplementationOnce(
+      () => currentDeltaSafety.promise
+    )
+
+    try {
+      await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce())
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(200)
+
+      const currentDelta = contextWatchCallback!('MODIFIED', {
+        metadata: { name: 'delta-context', namespace: 'mcp-server' },
+        spec: { contextId: 'delta-context', mcpServers: ['delta-server'] },
+      })
+
+      await vi.waitFor(() =>
+        expect((watcher as any).netPolReconciler.reconcileContext).toHaveBeenCalledOnce()
+      )
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+      currentDeltaSafety.resolve(undefined)
+      await currentDelta
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(200)
+      expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
+    } finally {
+      olderAdditivePass.resolve(undefined)
+      await initialPass
+      await server.stop()
+      await watcher.stop()
+    }
+  })
+
+  it.each([
+    ['Context', 'contextDesiredRevision'],
+    ['McpServer', 'mcpServerDesiredRevision'],
+  ] as const)(
+    'does not restore readiness from a stale %s delta safety certificate',
+    async (_kind, revisionField) => {
+      const watcher = new McpServerWatcher()
+      ;(watcher as any).contextCacheSynced = true
+      ;(watcher as any).mcpServerCacheSynced = true
+      ;(watcher as any).hostCacheSynced = true
+      ;(watcher as any).contextWatchGeneration = 4
+      ;(watcher as any).mcpWatchGeneration = 7
+      markNetworkPolicyRevocationAuthoritative(watcher)
+      const certificate = {
+        contextGeneration: (watcher as any).contextWatchGeneration,
+        serverGeneration: (watcher as any).mcpWatchGeneration,
+        contextRevision: (watcher as any).contextDesiredRevision,
+        serverRevision: (watcher as any).mcpServerDesiredRevision,
+      }
+
+      ;(watcher as any)[revisionField] += 1
+
+      expect((watcher as any).recordNetworkPolicySafetyCertificate(certificate)).toBe(false)
+      expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+      await watcher.stop()
+    }
+  )
+
   it.each([
     ['SharedFileSystem', 'LIST', 'sharedfilesystems', 'startSharedFileSystemWatch'],
     ['SharedFileSystem', 'WATCH', 'sharedfilesystems', 'startSharedFileSystemWatch'],
