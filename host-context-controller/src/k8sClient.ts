@@ -319,7 +319,12 @@ async function listContextSnapshot(): Promise<ContextSnapshot> {
     const list = response as {
       metadata?: { resourceVersion?: string }
       items: Array<{
-        metadata: { name: string; namespace?: string }
+        metadata: {
+          name: string
+          namespace?: string
+          uid?: string
+          generation?: number
+        }
         spec: ContextSpec
       }>
     }
@@ -327,6 +332,8 @@ async function listContextSnapshot(): Promise<ContextSnapshot> {
     const contexts = list.items.map(item => ({
       name: item.metadata.name,
       namespace: item.metadata.namespace || config.namespace,
+      uid: item.metadata.uid,
+      generation: item.metadata.generation,
       spec: item.spec,
     }))
 
@@ -666,6 +673,10 @@ export class McpServerWatcher implements McpServerProvider {
   // process-wide convergence tail — they enter the per-Host serializer directly.
   private hostRecoveryInFlight: ActiveHostInventoryRecovery | null = null
   private hostCacheRecoveryIntent: HostInventoryRecoveryRequest | null = null
+  // Only the cold-start Host fleet pass waits for the initial SFS inventory.
+  // The inventory itself remains asynchronous with respect to provider.start
+  // and NetworkPolicy readiness certification.
+  private initialHostFleetSfsInventory: Promise<boolean> | null = null
   // B2: tracks whether the CC snapshot is paired with a continuing watch.
   // Set to true only while a complete snapshot is paired with a live watch;
   // used by HostReconciler to make fail-closed lifecycle decisions.
@@ -1552,12 +1563,26 @@ export class McpServerWatcher implements McpServerProvider {
         this.enqueueRecoveredHostDeletes(snapshot.hosts, previousNames)
       }
       // Request a coalesced background full pass, but do NOT await it before
-      // declaring watch recovery complete.
-      void this.requestHostFleetReconcile(
-        request.convergenceReason,
-        request.ccLifecycleGeneration,
-        'full'
-      )
+      // declaring watch recovery complete. The cold-start pass alone waits for
+      // the concurrent SFS LIST: otherwise it can write every Host template
+      // without its declared mounts, then immediately roll the fleet again
+      // when SFS discovery finishes. NetworkPolicy readiness and start() stay
+      // independent from that finite inventory request.
+      const requestFleetPass = () => {
+        if (this.stopped) return
+        void this.requestHostFleetReconcile(
+          request.convergenceReason,
+          request.ccLifecycleGeneration,
+          'full'
+        )
+      }
+      const initialSfsInventory =
+        request.cause === 'cold-start' ? this.initialHostFleetSfsInventory : null
+      if (initialSfsInventory) {
+        void initialSfsInventory.then(() => requestFleetPass())
+      } else {
+        requestFleetPass()
+      }
       return snapshot.hosts
     } catch (error) {
       // Keep authority unknown, record the failure, and use the existing
@@ -2312,6 +2337,14 @@ export class McpServerWatcher implements McpServerProvider {
     const initialContextSnapshot = await listContextSnapshot()
     await this.restartContextWatch(initialContextSnapshot)
 
+    // Host templates resolve Context SharedFileSystem references from this
+    // cache. Inventory is therefore a fixed startup boundary, not part of the
+    // unbounded SFS reconciliation fleet: letting the first Host pass run
+    // without it writes mount-less templates and immediately rolls the entire
+    // Host fleet a second time once discovery catches up.
+    const initialSharedFileSystemInventory = this.startSharedFileSystemInventoryAndWatch()
+    this.initialHostFleetSfsInventory = initialSharedFileSystemInventory
+
     // ── CommunicationChannel snapshot + watch — MUST complete before Host fullReconcile ──
     // A stateless Host may suspend only after this controller has a complete
     // CommunicationChannel snapshot and a watch continuing from that snapshot's
@@ -2429,11 +2462,15 @@ export class McpServerWatcher implements McpServerProvider {
     // This prevents the startup egress refresh from racing or undoing the safety
     // pass while keeping readiness independent from both additive fleets.
     void this.runInitialNetworkPolicyConvergence()
-    void this.startSharedFileSystemBackgroundLane()
+    void initialSharedFileSystemInventory.then(inventoryComplete => {
+      if (inventoryComplete && !this.stopped) {
+        void this.runInitialSharedFileSystemConvergence()
+      }
+    })
     void this.startGlobalFileSystemBackgroundLane()
   }
 
-  private async startSharedFileSystemBackgroundLane(): Promise<void> {
+  private async startSharedFileSystemInventoryAndWatch(): Promise<boolean> {
     let inventoryComplete = false
     try {
       const initialSfses = await listAllSharedFileSystems()
@@ -2452,8 +2489,9 @@ export class McpServerWatcher implements McpServerProvider {
       this.scheduleSharedFileSystemWatchRestart(5000)
     }
     if (inventoryComplete && !this.stopped) {
-      void this.runInitialSharedFileSystemConvergence()
+      return true
     }
+    return false
   }
 
   private async startGlobalFileSystemBackgroundLane(): Promise<void> {
@@ -3568,12 +3606,22 @@ export class McpServerWatcher implements McpServerProvider {
 
     const watchCallback = async (
       type: string,
-      apiObj: { metadata: { name: string; namespace?: string }; spec: ContextSpec }
+      apiObj: {
+        metadata: {
+          name: string
+          namespace?: string
+          uid?: string
+          generation?: number
+        }
+        spec: ContextSpec
+      }
     ) => {
       if (this.stopped || watchGeneration !== this.contextWatchGeneration) return
       const context: ContextCRD = {
         name: apiObj.metadata.name,
         namespace: apiObj.metadata.namespace || config.namespace,
+        uid: apiObj.metadata.uid,
+        generation: apiObj.metadata.generation,
         spec: apiObj.spec,
       }
 
@@ -3582,6 +3630,11 @@ export class McpServerWatcher implements McpServerProvider {
       // Capture the previous spec before mutating the cache so we can
       // re-reconcile any SFS that *was* referenced but is no longer.
       const previous = this.contexts.get(context.name)
+      // A scoped Context delta may replace only a prior, fully authoritative
+      // safety certificate. Capturing it before this event changes desired
+      // state proves there was no outstanding Context or McpServer revocation
+      // work that the scoped reconciliation could accidentally certify.
+      const previousSafetyCertificate = this.currentNetworkPolicySafetyCertificate()
 
       // Cache the context for cross-resource re-reconciliation
       let desiredStateChanged = false
@@ -3600,12 +3653,17 @@ export class McpServerWatcher implements McpServerProvider {
         // to restore readiness without waiting for an older pass's additive
         // fleet. Deletes and identity changes remain fail-closed until the
         // authoritative full pass certifies their broader cleanup.
-        if (type === 'MODIFIED' && previous?.spec.contextId === context.spec.contextId) {
+        if (
+          type === 'MODIFIED' &&
+          previous?.uid === context.uid &&
+          previous?.spec.contextId === context.spec.contextId &&
+          previousSafetyCertificate !== null
+        ) {
           deltaSafetyCertificate = {
-            contextGeneration: watchGeneration,
-            serverGeneration: this.mcpWatchGeneration,
+            contextGeneration: previousSafetyCertificate.contextGeneration,
+            serverGeneration: previousSafetyCertificate.serverGeneration,
             contextRevision: this.contextDesiredRevision,
-            serverRevision: this.mcpServerDesiredRevision,
+            serverRevision: previousSafetyCertificate.serverRevision,
           }
         }
         void this.runInitialNetworkPolicyConvergence()

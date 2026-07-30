@@ -1265,6 +1265,54 @@ describe('NetworkPolicyReconciler', () => {
   // ─── L3: External Egress ───────────────────────────────────────────
 
   describe('L3 — reconcileExternalEgress', () => {
+    it('removes a deterministic safety policy created after its desired-state fence is lost', async () => {
+      const server: McpServerCRD = {
+        name: 'race-server',
+        namespace: 'mcp-server',
+        spec: {
+          contextRef: 'default',
+          image: 'race:latest',
+          transport: { type: 'streamableHttp', port: 3000 },
+          egressBindings: [{ cidr: '104.18.0.0/16', port: 443 }],
+        },
+      }
+      const createStarted = deferred()
+      const releaseCreate = deferred()
+      let current = true
+      mockApi.createNamespacedNetworkPolicy.mockImplementationOnce(async () => {
+        createStarted.resolve(undefined)
+        await releaseCreate.promise
+        return {
+          metadata: {
+            name: 'ext-egress-race-server-104-18-0-0-16-443',
+            namespace: server.namespace,
+            uid: 'created-race-policy',
+            resourceVersion: '7',
+          },
+        }
+      })
+
+      const safety = (reconciler as any).reconcileExternalEgressSafety(
+        server,
+        [{ metadata: { name: 'ext-egress-race-server-stale' } }],
+        () => current
+      ) as Promise<boolean>
+
+      await createStarted.promise
+      current = false
+      releaseCreate.resolve(undefined)
+
+      expect(await safety).toBe(false)
+      const created = mockApi.createNamespacedNetworkPolicy.mock.calls[0][0].body
+      expect(mockApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: created.metadata.name,
+          namespace: server.namespace,
+          body: { preconditions: { uid: 'created-race-policy', resourceVersion: '7' } },
+        })
+      )
+    })
+
     it('refuses to adopt a foreign policy that collides with an external-egress name', async () => {
       const server: McpServerCRD = {
         name: 'openai-mcp',

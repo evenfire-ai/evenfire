@@ -2445,11 +2445,18 @@ export class NetworkPolicyReconciler {
     isCurrent: () => boolean
   ): Promise<boolean> {
     if (!isCurrent()) return false
-    await this.networkingApi.createNamespacedNetworkPolicy({
+    const created = await this.networkingApi.createNamespacedNetworkPolicy({
       namespace,
       body: desired,
     })
-    return isCurrent()
+    if (isCurrent()) return true
+
+    // The mutation crossed its desired-state fence. Remove exactly the object
+    // this request created, even though the old reconciliation is no longer
+    // authoritative. The UID/resourceVersion preconditions ensure a
+    // replacement or foreign policy with the same name is never deleted.
+    await this.deleteSafetyPolicySnapshot(namespace, created)
+    return false
   }
 
   /** List L2 egress counterpart policies in mcp-host namespace for a given context. */

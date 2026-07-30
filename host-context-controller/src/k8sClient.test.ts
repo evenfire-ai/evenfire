@@ -385,6 +385,71 @@ describe('McpServerWatcher startup', () => {
     await watcher.stop()
   })
 
+  it('loads the SharedFileSystem inventory before scheduling the first Host fleet pass', async () => {
+    const sharedFileSystemsListed = deferred<{ items: unknown[] }>()
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'sharedfilesystems') return sharedFileSystemsListed.promise
+      if (plural === 'communicationchannels') {
+        return { metadata: { resourceVersion: 'sfs-ordering-cc-rv' }, items: [] }
+      }
+      return { items: [] }
+    })
+    const watcher = new McpServerWatcher()
+    const start = watcher.start()
+
+    try {
+      await flushMicrotasks()
+      expect(mocks.hostFullReconcile).not.toHaveBeenCalled()
+
+      sharedFileSystemsListed.resolve({
+        items: [{ metadata: { name: 'initial-sfs', namespace: 'mcp-host' }, spec: {} }],
+      })
+      await start
+      await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledOnce())
+      expect((watcher as any).sharedFileSystems.get('initial-sfs')).toEqual(
+        expect.objectContaining({ name: 'initial-sfs' })
+      )
+    } finally {
+      sharedFileSystemsListed.resolve({ items: [] })
+      await start.catch(() => undefined)
+      await watcher.stop()
+    }
+  })
+
+  it('retains Context uid and generation from the authoritative initial snapshot', async () => {
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'contexts') {
+        return {
+          items: [
+            {
+              metadata: {
+                name: 'identity-context',
+                namespace: 'mcp-server',
+                uid: 'context-uid-1',
+                generation: 7,
+              },
+              spec: { contextId: 'identity-context', mcpServers: [] },
+            },
+          ],
+        }
+      }
+      if (plural === 'communicationchannels') {
+        return { metadata: { resourceVersion: 'context-identity-cc-rv' }, items: [] }
+      }
+      return { items: [] }
+    })
+    const watcher = new McpServerWatcher()
+
+    try {
+      await watcher.start()
+      expect((watcher as any).contexts.get('identity-context')).toEqual(
+        expect.objectContaining({ uid: 'context-uid-1', generation: 7 })
+      )
+    } finally {
+      await watcher.stop()
+    }
+  })
+
   it('fails safe bootstrap and keeps readiness unavailable when baseline NetworkPolicies fail', async () => {
     const policyError = new Error('baseline NetworkPolicies unavailable')
     mocks.ensureDefaultPolicies.mockRejectedValueOnce(policyError)
@@ -1087,7 +1152,7 @@ describe('McpServerWatcher startup', () => {
       | ((
           type: string,
           apiObj: {
-            metadata: { name: string; namespace: string }
+            metadata: { name: string; namespace: string; uid: string }
             spec: { contextId: string; mcpServers: string[] }
           }
         ) => Promise<void>)
@@ -1147,6 +1212,178 @@ describe('McpServerWatcher startup', () => {
       await initialPass
       await server.stop()
       await watcher.stop()
+    }
+  })
+
+  it('does not issue a Context delta certificate before any authoritative safety certificate', async () => {
+    const pendingFullSafetyPass = deferred()
+    let contextWatchCallback:
+      | ((
+          type: string,
+          apiObj: {
+            metadata: { name: string; namespace: string }
+            spec: { contextId: string; mcpServers: string[] }
+          }
+        ) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback) => {
+      contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    mocks.netPolFullReconcile.mockImplementationOnce(() => pendingFullSafetyPass.promise)
+
+    const watcher = new McpServerWatcher()
+    await (watcher as any).startContextWatch('uncertified-context-delta-rv')
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).mcpWatchGeneration = 1
+    ;(watcher as any).contexts.set('uncertified-context', {
+      name: 'uncertified-context',
+      namespace: 'mcp-server',
+      uid: 'uncertified-context-uid',
+      spec: { contextId: 'uncertified-context', mcpServers: [] },
+    })
+    const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+      watcher.isReadinessInventoryAuthoritative()
+    )
+    await server.start()
+    server.setReady(true)
+
+    try {
+      await contextWatchCallback!('MODIFIED', {
+        metadata: {
+          name: 'uncertified-context',
+          namespace: 'mcp-server',
+          uid: 'uncertified-context-uid',
+        },
+        spec: { contextId: 'uncertified-context', mcpServers: ['delta-server'] },
+      })
+
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+    } finally {
+      pendingFullSafetyPass.resolve(undefined)
+      await watcher.stop()
+      await server.stop()
+    }
+  })
+
+  it('does not let a Context delta certify an outstanding McpServer revision', async () => {
+    const pendingFullSafetyPass = deferred()
+    let contextWatchCallback:
+      | ((
+          type: string,
+          apiObj: {
+            metadata: { name: string; namespace: string; uid: string }
+            spec: { contextId: string; mcpServers: string[] }
+          }
+        ) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback) => {
+      contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    mocks.netPolFullReconcile.mockImplementationOnce(() => pendingFullSafetyPass.promise)
+
+    const watcher = new McpServerWatcher()
+    await (watcher as any).startContextWatch('server-revision-context-delta-rv')
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).mcpWatchGeneration = 1
+    ;(watcher as any).contexts.set('unrelated-context', {
+      name: 'unrelated-context',
+      namespace: 'mcp-server',
+      uid: 'unrelated-context-uid',
+      spec: { contextId: 'unrelated-context', mcpServers: [] },
+    })
+    markNetworkPolicyRevocationAuthoritative(watcher)
+    ;(watcher as any).mcpServerDesiredRevision += 1
+    const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+      watcher.isReadinessInventoryAuthoritative()
+    )
+    await server.start()
+    server.setReady(true)
+
+    try {
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+      await contextWatchCallback!('MODIFIED', {
+        metadata: {
+          name: 'unrelated-context',
+          namespace: 'mcp-server',
+          uid: 'unrelated-context-uid',
+        },
+        spec: { contextId: 'unrelated-context', mcpServers: ['delta-server'] },
+      })
+
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+    } finally {
+      pendingFullSafetyPass.resolve(undefined)
+      await watcher.stop()
+      await server.stop()
+    }
+  })
+
+  it('does not let one Context delta certify another Context revision still in flight', async () => {
+    const pendingFullSafetyPass = deferred()
+    let contextWatchCallback:
+      | ((
+          type: string,
+          apiObj: {
+            metadata: { name: string; namespace: string; uid: string }
+            spec: { contextId: string; mcpServers: string[] }
+          }
+        ) => Promise<void>)
+      | undefined
+    mocks.watch.mockImplementationOnce(async (_path, _options, callback) => {
+      contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    mocks.netPolFullReconcile.mockImplementationOnce(() => pendingFullSafetyPass.promise)
+
+    const watcher = new McpServerWatcher()
+    await (watcher as any).startContextWatch('parallel-context-delta-rv')
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).mcpWatchGeneration = 1
+    ;(watcher as any).contexts.set('first-context', {
+      name: 'first-context',
+      namespace: 'mcp-server',
+      uid: 'first-context-uid',
+      spec: { contextId: 'first-context', mcpServers: [] },
+    })
+    ;(watcher as any).contexts.set('second-context', {
+      name: 'second-context',
+      namespace: 'mcp-server',
+      uid: 'second-context-uid',
+      spec: { contextId: 'second-context', mcpServers: [] },
+    })
+    markNetworkPolicyRevocationAuthoritative(watcher)
+    // This represents a prior Context change whose global safety sweep is
+    // pending. It invalidates the old certificate before the scoped delta.
+    ;(watcher as any).contextDesiredRevision += 1
+    const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+      watcher.isReadinessInventoryAuthoritative()
+    )
+    await server.start()
+    server.setReady(true)
+
+    try {
+      await contextWatchCallback!('MODIFIED', {
+        metadata: {
+          name: 'second-context',
+          namespace: 'mcp-server',
+          uid: 'second-context-uid',
+        },
+        spec: { contextId: 'second-context', mcpServers: ['delta-server'] },
+      })
+
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+    } finally {
+      pendingFullSafetyPass.resolve(undefined)
+      await watcher.stop()
+      await server.stop()
     }
   })
 
