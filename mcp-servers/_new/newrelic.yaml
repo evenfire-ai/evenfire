@@ -1,0 +1,37 @@
+# New Relic MCP — remote wrapper (Category A)
+# Official remote: https://mcp.newrelic.com/mcp/ (Streamable HTTP; public preview)
+# Docs: https://docs.newrelic.com/docs/agentic-ai/mcp/setup/
+# Auth (headless): Api-Key: NRAK-... (New Relic user API key)
+# EU: https://mcp.eu.newrelic.com/mcp/  JP: https://mcp.jp.newrelic.com/mcp/
+#   kubectl --context=dev create secret generic newrelic-credentials \
+#     -n mcp-server --from-literal=NEW_RELIC_API_KEY=NRAK-<user-api-key>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: newrelic
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: New Relic remote MCP (official) - observability, entities, NRQL, alerts. Api-Key auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://mcp.newrelic.com/mcp/
+    authHeaders:
+      - header: Api-Key
+        valueTemplate: ${NEW_RELIC_API_KEY}
+  envSecret:
+    name: newrelic-credentials
+    keys:
+      - secretKey: NEW_RELIC_API_KEY
+        envVar: NEW_RELIC_API_KEY
+  egressBindings:
+    - dns: mcp.newrelic.com
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://newrelic.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000

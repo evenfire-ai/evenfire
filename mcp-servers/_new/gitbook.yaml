@@ -1,0 +1,36 @@
+# GitBook MCP — remote wrapper (Category A)
+# Official remote: https://mcp.gitbook.com/mcp (Streamable HTTP only)
+# Docs: https://gitbook.com/docs/getting-started/ai-documentation/gitbook-mcp.md
+# Auth (headless): Authorization: Bearer <PAT> (from app.gitbook.com/account/developer)
+#   kubectl --context=dev create secret generic gitbook-credentials \
+#     -n mcp-server --from-literal=GITBOOK_TOKEN=<personal-access-token>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: gitbook
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: GitBook remote MCP (official) - docs sites, spaces, content management. Bearer PAT auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://mcp.gitbook.com/mcp
+    authHeaders:
+      - header: Authorization
+        valueTemplate: Bearer ${GITBOOK_TOKEN}
+  envSecret:
+    name: gitbook-credentials
+    keys:
+      - secretKey: GITBOOK_TOKEN
+        envVar: GITBOOK_TOKEN
+  egressBindings:
+    - dns: mcp.gitbook.com
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://gitbook.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000

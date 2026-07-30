@@ -1,0 +1,44 @@
+# Linear MCP — remote MCP wrapper (Category A)
+#
+# Official remote MCP: https://mcp.linear.app/mcp (Streamable HTTP)
+# Docs: https://linear.app/docs/mcp
+#
+# Auth: Linear supports direct bearer auth with an OAuth token OR a Linear API
+# key: Authorization: Bearer <token>. A read-only variant exists at
+# https://mcp.linear.app/mcp/readonly if you only want read tools.
+#
+# Secret must exist BEFORE the MCP handshake works:
+#   kubectl --context=dev create secret generic linear-credentials \
+#     -n mcp-server --from-literal=LINEAR_API_KEY=<linear-api-key>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: linear
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: >-
+    Linear remote MCP (official) - find, create and update issues, projects,
+    cycles and comments. Bearer (API key or OAuth token) auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://mcp.linear.app/mcp
+    authHeaders:
+      - header: Authorization
+        valueTemplate: Bearer ${LINEAR_API_KEY}
+  envSecret:
+    name: linear-credentials
+    keys:
+      - secretKey: LINEAR_API_KEY
+        envVar: LINEAR_API_KEY
+  egressBindings:
+    - dns: mcp.linear.app
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://linear.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000

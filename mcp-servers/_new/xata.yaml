@@ -1,0 +1,36 @@
+# Xata MCP — remote wrapper (Category A)
+# Official remote: https://api.xata.tech/mcp (Streamable HTTP only)
+# Docs: https://xata.io/docs/platform/mcp.md
+# Auth (CI/headless): Authorization: Bearer <XATA_API_KEY>
+#   kubectl --context=dev create secret generic xata-credentials \
+#     -n mcp-server --from-literal=XATA_API_KEY=<api-key>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: xata
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: Xata remote MCP (official) - serverless Postgres branches, schema, queries. Bearer API key auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://api.xata.tech/mcp
+    authHeaders:
+      - header: Authorization
+        valueTemplate: Bearer ${XATA_API_KEY}
+  envSecret:
+    name: xata-credentials
+    keys:
+      - secretKey: XATA_API_KEY
+        envVar: XATA_API_KEY
+  egressBindings:
+    - dns: api.xata.tech
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://xata.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000

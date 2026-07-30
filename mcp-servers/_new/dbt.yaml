@@ -1,0 +1,43 @@
+# dbt Cloud MCP — remote wrapper (Category A)
+# Official remote: https://cloud.getdbt.com/api/ai/v1/mcp/ (streamable HTTP)
+# Docs: https://docs.getdbt.com/docs/dbt-ai/setup-remote-mcp
+# Auth: Authorization: Token <PAT_OR_SERVICE_TOKEN> (+ required x-dbt-prod-environment-id).
+# execute_sql needs a PAT plus x-dbt-user-id / x-dbt-dev-environment-id — not set here.
+#   kubectl --context=dev create secret generic dbt-credentials \
+#     -n mcp-server \
+#     --from-literal=DBT_TOKEN=<pat-or-service-token> \
+#     --from-literal=DBT_PROD_ENVIRONMENT_ID=<prod-env-id>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: dbt
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: dbt Cloud remote MCP (official) - semantic layer, discovery, consumption tools. Token auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://cloud.getdbt.com/api/ai/v1/mcp/
+    authHeaders:
+      - header: Authorization
+        valueTemplate: Token ${DBT_TOKEN}
+      - header: x-dbt-prod-environment-id
+        valueTemplate: ${DBT_PROD_ENVIRONMENT_ID}
+  envSecret:
+    name: dbt-credentials
+    keys:
+      - secretKey: DBT_TOKEN
+        envVar: DBT_TOKEN
+      - secretKey: DBT_PROD_ENVIRONMENT_ID
+        envVar: DBT_PROD_ENVIRONMENT_ID
+  egressBindings:
+    - dns: cloud.getdbt.com
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://dbt.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000

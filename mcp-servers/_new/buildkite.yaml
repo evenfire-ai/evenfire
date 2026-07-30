@@ -1,0 +1,36 @@
+# Buildkite MCP — remote wrapper (Category A)
+# Official remote (headless): https://mcp.buildkite.com/direct (Streamable HTTP)
+# Docs: https://buildkite.com/docs/apis/mcp-server
+# Auth: /direct endpoint accepts Authorization: Bearer <buildkite-api-token>
+#   kubectl --context=dev create secret generic buildkite-credentials \
+#     -n mcp-server --from-literal=BUILDKITE_API_TOKEN=<api-token>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: buildkite
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: Buildkite remote MCP (official) - builds, pipelines, agents. Bearer token auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://mcp.buildkite.com/direct
+    authHeaders:
+      - header: Authorization
+        valueTemplate: Bearer ${BUILDKITE_API_TOKEN}
+  envSecret:
+    name: buildkite-credentials
+    keys:
+      - secretKey: BUILDKITE_API_TOKEN
+        envVar: BUILDKITE_API_TOKEN
+  egressBindings:
+    - dns: mcp.buildkite.com
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://buildkite.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000

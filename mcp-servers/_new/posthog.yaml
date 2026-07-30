@@ -1,0 +1,36 @@
+# PostHog MCP — remote wrapper (Category A)
+# Official remote: https://mcp.posthog.com/mcp (Streamable HTTP, auto-routes US/EU)
+# Docs: https://posthog.com/docs/model-context-protocol
+# Auth (headless): Authorization: Bearer phx_<personal_api_key> (use "MCP Server" key preset)
+#   kubectl --context=dev create secret generic posthog-credentials \
+#     -n mcp-server --from-literal=POSTHOG_API_KEY=phx_<personal-api-key>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: posthog
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: PostHog remote MCP (official) - product analytics, feature flags. Bearer (phx_ key) auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://mcp.posthog.com/mcp
+    authHeaders:
+      - header: Authorization
+        valueTemplate: Bearer ${POSTHOG_API_KEY}
+  envSecret:
+    name: posthog-credentials
+    keys:
+      - secretKey: POSTHOG_API_KEY
+        envVar: POSTHOG_API_KEY
+  egressBindings:
+    - dns: mcp.posthog.com
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://posthog.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000

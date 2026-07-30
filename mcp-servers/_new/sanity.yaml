@@ -1,0 +1,36 @@
+# Sanity MCP — remote wrapper (Category A)
+# Official remote: https://mcp.sanity.io (Streamable HTTP)
+# Docs: https://www.sanity.io/docs/compute-and-ai/mcp-server
+# Auth (headless): Authorization: Bearer sk<token> (API token; skips OAuth when set)
+#   kubectl --context=dev create secret generic sanity-credentials \
+#     -n mcp-server --from-literal=SANITY_API_TOKEN=sk<token>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: sanity
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: Sanity remote MCP (official) - content lake, schemas, documents. Bearer API token auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://mcp.sanity.io
+    authHeaders:
+      - header: Authorization
+        valueTemplate: Bearer ${SANITY_API_TOKEN}
+  envSecret:
+    name: sanity-credentials
+    keys:
+      - secretKey: SANITY_API_TOKEN
+        envVar: SANITY_API_TOKEN
+  egressBindings:
+    - dns: mcp.sanity.io
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://sanity.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000

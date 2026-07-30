@@ -1,0 +1,37 @@
+# PayPal MCP — remote wrapper (Category A)
+# Official remote: https://mcp.paypal.com — Streamable HTTP at /http (SSE at /sse)
+# Docs: https://developer.paypal.com/tools/mcp-server/
+# Auth (headless): Authorization: Bearer <auth_header derived from client ID + secret>
+# Sandbox: https://mcp.sandbox.paypal.com
+#   kubectl --context=dev create secret generic paypal-credentials \
+#     -n mcp-server --from-literal=PAYPAL_ACCESS_TOKEN=<auth-header-token>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: paypal
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: PayPal remote MCP (official) - payments, invoices, disputes. Bearer token auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://mcp.paypal.com/http
+    authHeaders:
+      - header: Authorization
+        valueTemplate: Bearer ${PAYPAL_ACCESS_TOKEN}
+  envSecret:
+    name: paypal-credentials
+    keys:
+      - secretKey: PAYPAL_ACCESS_TOKEN
+        envVar: PAYPAL_ACCESS_TOKEN
+  egressBindings:
+    - dns: mcp.paypal.com
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://paypal.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000

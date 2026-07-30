@@ -1,0 +1,39 @@
+# Datadog MCP — remote wrapper (Category A)
+# Official remote: https://mcp.datadoghq.com/api/unstable/mcp-server/mcp (Streamable HTTP)
+# Docs: https://docs.datadoghq.com/mcp_server/setup/
+# Auth (headless): Authorization: Bearer <PAT_OR_SAT> (personal/service account token).
+# Docs also allow DD_API_KEY + DD_APPLICATION_KEY headers, but underscores are not
+# valid in our proxy's header-name allowlist, so Bearer is used instead.
+# Regional sites: mcp.us3.datadoghq.com, mcp.datadoghq.eu (same path).
+#   kubectl --context=dev create secret generic datadog-credentials \
+#     -n mcp-server --from-literal=DATADOG_ACCESS_TOKEN=<pat-or-service-account-token>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: datadog
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: Datadog remote MCP (official) - monitors, logs, APM, incidents. Bearer PAT/SAT auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://mcp.datadoghq.com/api/unstable/mcp-server/mcp
+    authHeaders:
+      - header: Authorization
+        valueTemplate: Bearer ${DATADOG_ACCESS_TOKEN}
+  envSecret:
+    name: datadog-credentials
+    keys:
+      - secretKey: DATADOG_ACCESS_TOKEN
+        envVar: DATADOG_ACCESS_TOKEN
+  egressBindings:
+    - dns: mcp.datadoghq.com
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://datadog.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000

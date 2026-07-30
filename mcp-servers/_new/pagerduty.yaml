@@ -1,0 +1,36 @@
+# PagerDuty MCP — remote wrapper (Category A)
+# Official remote: https://mcp.pagerduty.com/mcp (Streamable HTTP)
+# Docs: https://mcp-docs.fde.pagerduty.com/pagerduty-mcp-server/docs/remote-server/setup
+# Auth: Authorization: Token token=<API_KEY> (headless) — classic PagerDuty API token.
+#   kubectl --context=dev create secret generic pagerduty-credentials \
+#     -n mcp-server --from-literal=PAGERDUTY_API_KEY=<api-key>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: pagerduty
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: PagerDuty remote MCP (official) - incidents, on-call, services. Token auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://mcp.pagerduty.com/mcp
+    authHeaders:
+      - header: Authorization
+        valueTemplate: Token token=${PAGERDUTY_API_KEY}
+  envSecret:
+    name: pagerduty-credentials
+    keys:
+      - secretKey: PAGERDUTY_API_KEY
+        envVar: PAGERDUTY_API_KEY
+  egressBindings:
+    - dns: mcp.pagerduty.com
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://pagerduty.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000

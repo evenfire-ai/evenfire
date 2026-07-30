@@ -1,0 +1,37 @@
+# Supabase MCP — remote wrapper (Category A)
+# Official remote: https://mcp.supabase.com/mcp (Streamable HTTP)
+# Docs: https://supabase.com/docs/guides/getting-started/mcp
+# Auth (headless/CI): Authorization: Bearer <SUPABASE_PERSONAL_ACCESS_TOKEN>
+# Scope via URL params: ?project_ref=, ?read_only=true, ?features=
+#   kubectl --context=dev create secret generic supabase-credentials \
+#     -n mcp-server --from-literal=SUPABASE_ACCESS_TOKEN=<personal-access-token>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: supabase
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: Supabase remote MCP (official) - Postgres, auth, storage, edge functions. Bearer PAT auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://mcp.supabase.com/mcp
+    authHeaders:
+      - header: Authorization
+        valueTemplate: Bearer ${SUPABASE_ACCESS_TOKEN}
+  envSecret:
+    name: supabase-credentials
+    keys:
+      - secretKey: SUPABASE_ACCESS_TOKEN
+        envVar: SUPABASE_ACCESS_TOKEN
+  egressBindings:
+    - dns: mcp.supabase.com
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://supabase.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000

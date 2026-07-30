@@ -1,0 +1,46 @@
+# Atlassian Rovo MCP — remote MCP wrapper (Category A)
+#
+# Official remote MCP: https://mcp.atlassian.com/v1/mcp/authv2
+# Docs: https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/
+#
+# Auth (non-interactive, per Atlassian docs):
+#   - Service account API key:  Authorization: Bearer <api_key>   (used here)
+#   - Personal API token:       Authorization: Basic <base64(email:api_token)>
+# Caveats: some tools are unavailable with API-token auth; tokens are not bound
+# to a cloudId, so tools must pass cloudId explicitly.
+#
+# Secret must exist BEFORE the MCP handshake works:
+#   kubectl --context=dev create secret generic atlassian-credentials \
+#     -n mcp-server --from-literal=ATLASSIAN_API_KEY=<service-account-api-key>
+apiVersion: clerum.io/v1alpha1
+kind: McpServer
+metadata:
+  name: atlassian
+  namespace: mcp-server
+spec:
+  contextRef: context1
+  description: >-
+    Atlassian Rovo remote MCP (official) - Jira, Confluence, JSM and Bitbucket
+    search, read and write via the Teamwork Graph. Service-account API key auth.
+  enabled: true
+  managed: true
+  image: us-central1-docker.pkg.dev/eventfire-491421/clerum/nginx-egress-proxy:sha-094c86f
+  remote:
+    baseUrl: https://mcp.atlassian.com/v1/mcp/authv2
+    authHeaders:
+      - header: Authorization
+        valueTemplate: Bearer ${ATLASSIAN_API_KEY}
+  envSecret:
+    name: atlassian-credentials
+    keys:
+      - secretKey: ATLASSIAN_API_KEY
+        envVar: ATLASSIAN_API_KEY
+  egressBindings:
+    - dns: mcp.atlassian.com
+      egressClass: exact-host
+      port: 443
+      protocol: TCP
+  transport:
+    type: streamableHttp
+    url: http://atlassian.mcp-server.svc.cluster.local:3000/mcp
+    port: 3000
