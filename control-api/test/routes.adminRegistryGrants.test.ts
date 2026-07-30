@@ -360,15 +360,31 @@ describe('wire shape (real wrappers, stubbed registry fetch)', () => {
     vi.stubGlobal('fetch', fetchMock)
     return fetchMock
   }
-  // registry auth OFF so authedFetch's mintToken() returns '' (no token round trip);
-  // every stubbed fetch call is the /org/... endpoint. The route's own
-  // registry_auth_disabled guard is bypassed because we only unmock the WRAPPERS
-  // here — config stays mocked with registryAuthEnabled true for the route guard,
-  // while the wrapper's mintToken reads process.env (set below) = auth off.
+  // Auth-derived (Task 7): the route guard (resolveSelfServiceOrg) AND
+  // mintToken now BOTH derive their auth state from the same
+  // isRegistryAuthActive() accessor — mintToken no longer has its own
+  // independent process.env.CLERUM_REGISTRY_AUTH_ENABLED read to diverge from
+  // it. A single blanket mock value can no longer give the guard "on" (so the
+  // request isn't 409'd) and the wrapper's mintToken "off" (so it returns ''
+  // instead of throwing on missing creds) at the same time.
+  //
+  // Fixed by sequencing connDb.isRegistryAuthActive per call instead: the
+  // guard's call is the FIRST isRegistryAuthActive() call made while handling
+  // the request (resolveSelfServiceOrg calls it before anything else and
+  // returns/409s before the route ever reaches createOrgGrant/revokeOrgGrant —
+  // see routes/admin/registry.ts's resolveSelfServiceOrg), so
+  // mockResolvedValueOnce(true) satisfies exactly that call. Every call after
+  // it — i.e. mintToken's own internal call, reached via
+  // createOrgGrant/revokeOrgGrant → authedFetch → mintToken — falls through to
+  // the mockResolvedValue(false) default, so mintToken takes the auth-off
+  // branch and returns '' (no token round trip), with no real credentials
+  // configured anywhere in this file's mocked config.
+  function armGuardOnMintTokenOff(): void {
+    connDb.isRegistryAuthActive.mockReset().mockResolvedValueOnce(true).mockResolvedValue(false)
+  }
 
   it('POST self_grant → 400 with {error:"self_grant"} verbatim', async () => {
-    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
-    process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'false'
+    armGuardOnMintTokenOff()
     // Use the REAL wrapper for exactly this one request; mockImplementationOnce
     // ensures it does not leak into any later test in this file.
     const real = await vi.importActual<typeof import('../src/services/registryClient.js')>(
@@ -383,13 +399,10 @@ describe('wire shape (real wrappers, stubbed registry fetch)', () => {
     expect(res.status).toBe(400)
     expect(res.body).toEqual({ error: 'self_grant' })
     vi.unstubAllGlobals()
-    delete process.env.CLERUM_REGISTRY_AUTH_ENABLED
-    delete process.env.CLERUM_REGISTRY_URL
   })
 
   it('DELETE 204 → 204 (no 500 from res.json on empty body)', async () => {
-    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
-    process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'false'
+    armGuardOnMintTokenOff()
     const real = await vi.importActual<typeof import('../src/services/registryClient.js')>(
       '../src/services/registryClient.js'
     )
@@ -401,7 +414,5 @@ describe('wire shape (real wrappers, stubbed registry fetch)', () => {
     const res = await request(makeApp()).delete('/admin/registry/grants/g1')
     expect(res.status).toBe(204)
     vi.unstubAllGlobals()
-    delete process.env.CLERUM_REGISTRY_AUTH_ENABLED
-    delete process.env.CLERUM_REGISTRY_URL
   })
 })
