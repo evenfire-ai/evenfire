@@ -2177,6 +2177,10 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
       res.status(409).json({ error: 'registry_auth_disabled' })
       return null
     }
+    if (config.registryConnectionMode === 'self-hosted' && config.registryUrl === '') {
+      res.status(409).json({ error: 'registry_url_not_configured' })
+      return null
+    }
     const sub = (req as UiAuthedRequest).adminAuth?.sub
     const admin = sub ? await findAdminById(sub) : null
     if (!admin || admin.status !== 'active') {
@@ -2280,6 +2284,10 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     }
     if (!authActive) {
       res.status(409).json({ error: 'registry_auth_disabled' })
+      return null
+    }
+    if (config.registryConnectionMode === 'self-hosted' && config.registryUrl === '') {
+      res.status(409).json({ error: 'registry_url_not_configured' })
       return null
     }
     const actingUserId = (req as UiAuthedRequest).adminAuth?.sub

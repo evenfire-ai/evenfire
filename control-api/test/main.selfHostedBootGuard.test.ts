@@ -102,9 +102,14 @@ describe('logRegistryConnectionState', () => {
     expect(logger.rootLogger.info).not.toHaveBeenCalled()
   })
 
-  it('no-op when no registry URL is configured', async () => {
+  it('still reports connection state when no registry URL is configured', async () => {
     cfg.registryUrl = ''
+    connDb.getRegistryConnection.mockResolvedValue({ status: 'connected', clientId: 'cid' })
     await expect(logRegistryConnectionState()).resolves.toBeUndefined()
-    expect(connDb.getRegistryConnection).not.toHaveBeenCalled()
+    expect(connDb.getRegistryConnection).toHaveBeenCalledTimes(1)
+    expect(logger.rootLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ connected: true }),
+      expect.any(String)
+    )
   })
 })

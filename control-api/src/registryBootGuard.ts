@@ -31,7 +31,6 @@ import type { RegistryConnectionRow } from './services/registryConnectionDb.js'
  */
 export async function logRegistryConnectionState(): Promise<void> {
   if (config.registryConnectionMode !== 'self-hosted') return
-  if (config.registryUrl === '') return
   let row: RegistryConnectionRow | null = null
   try {
     row = await getRegistryConnection()

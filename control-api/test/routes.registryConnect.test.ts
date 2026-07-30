@@ -455,6 +455,12 @@ describe('registry connect flow', () => {
     expect(connDb.deleteConnection).toHaveBeenCalled()
   })
 
+  it('DELETE still drops the local row when the registry URL was removed', async () => {
+    cfg.registryUrl = ''
+    await request(app()).delete('/admin/registry/connect').expect(204)
+    expect(connDb.deleteConnection).toHaveBeenCalled()
+  })
+
   // The disconnect transition: nothing currently re-reads state after a
   // DELETE. cfg.registryAuthEnabled is never touched in this test (stays
   // true throughout, per beforeEach) -- only the mocked accessor moves, so
@@ -568,10 +574,9 @@ describe('registry connect flow', () => {
 })
 
 describe('register — auto-claim (201)', () => {
-  // Parameterized over registryAuthEnabled: the beforeEach default is `true`,
-  // so a mutation replacing `authEnabled: config.registryAuthEnabled` with the
-  // literal `true` on the 201-connected response passes an authEnabled-only-true
-  // suite. The `false` case is the one that would catch it.
+  // A successful claim has persisted a validated credential pair, so the
+  // response is authEnabled:true regardless of the now-inert self-hosted env
+  // flag. Parameterize over both values to pin that invariant.
   it.each([true, false])(
     'claims immediately and reports connected (registryAuthEnabled=%s)',
     async registryAuthEnabled => {
@@ -597,7 +602,7 @@ describe('register — auto-claim (201)', () => {
         .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
         .expect(200)
       expect(res.body).toMatchObject({ state: 'connected', org: 'acme' })
-      expect(res.body.authEnabled).toBe(registryAuthEnabled)
+      expect(res.body.authEnabled).toBe(true)
       // The claim call must actually carry the token the registry minted, and
       // be PoP-authenticated — otherwise every auto-approved self-hoster gets a
       // registry-side 401 and silently falls back to 202 connecting.
@@ -609,13 +614,7 @@ describe('register — auto-claim (201)', () => {
     }
   )
 
-  // By the time this branch runs, redeemClaim has already persisted the
-  // credentials (markConnected succeeded) -- isRegistryAuthActive() rejecting
-  // here must not crash the process. It degrades to the same 502 the sibling
-  // admin registry routes use for this accessor (routes.adminRegistryKeys.test.ts),
-  // rather than falling through to the router's generic catch -> next(err) ->
-  // a bare 500 for a request whose underlying connect already succeeded.
-  it('502 registry_integration_error when isRegistryAuthActive rejects after a successful auto-claim', async () => {
+  it('does not re-read auth state after a successful auto-claim', async () => {
     connDb.getRegistryConnection.mockResolvedValue(null)
     connDb.markConnected.mockResolvedValue(true)
     connDb.isRegistryAuthActive.mockRejectedValue(new Error('pg blip'))
@@ -630,8 +629,29 @@ describe('register — auto-claim (201)', () => {
     const res = await request(app())
       .post('/admin/registry/connect/request')
       .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
-      .expect(502)
-    expect(res.body.error).toBe('registry_integration_error')
+      .expect(200)
+    expect(res.body).toMatchObject({ state: 'connected', authEnabled: true })
+    expect(connDb.isRegistryAuthActive).not.toHaveBeenCalled()
+  })
+
+  it('does not persist empty machine credentials from a malformed claim response', async () => {
+    connDb.getRegistryConnection.mockResolvedValue(null)
+    routeFetch({
+      '/register': () =>
+        json(
+          { deployment_id: 'dep-1', key_id: 'kid-1', status: 'approved', claim_token: 'tok-abc' },
+          201
+        ),
+      '/claim': () => json({ client_id: '', client_secret: '', org: 'acme' }, 200),
+    })
+
+    const res = await request(app())
+      .post('/admin/registry/connect/request')
+      .send({ requested_org_name: 'acme', contact_email: 'a@x.io' })
+      .expect(202)
+
+    expect(res.body.state).toBe('connecting')
+    expect(connDb.markConnected).not.toHaveBeenCalled()
   })
 
   // The mocks return undefined, so `await x` and `void x` produce IDENTICAL
@@ -954,11 +974,7 @@ describe('POST recover', () => {
     expect(JSON.parse(String((claim[1] as RequestInit).body)).claim_token).toBe('tok-new')
   })
 
-  // Same hazard as the auto-claim path: by the time 'connected' is reached
-  // here, the rotate + redeemClaim have already succeeded (markConnected
-  // committed). isRegistryAuthActive() rejecting must degrade to 502, not an
-  // uncaught rejection or a bare 500, for a recovery that already succeeded.
-  it('502 registry_integration_error when isRegistryAuthActive rejects after a successful recover', async () => {
+  it('does not re-read auth state after a successful recover', async () => {
     connDb.getRegistryConnection.mockResolvedValue({
       status: 'approved',
       deploymentId: 'dep-1',
@@ -973,8 +989,9 @@ describe('POST recover', () => {
       'claim-token': () => json({ claim_token: 'tok-new' }, 200),
       '/claim': () => json({ client_id: 'cid', client_secret: 'csecret', org: 'acme' }, 200),
     })
-    const res = await request(app()).post('/admin/registry/connect/recover').expect(502)
-    expect(res.body.error).toBe('registry_integration_error')
+    const res = await request(app()).post('/admin/registry/connect/recover').expect(200)
+    expect(res.body).toMatchObject({ state: 'connected', authEnabled: true })
+    expect(connDb.isRegistryAuthActive).not.toHaveBeenCalled()
   })
 
   // The route is rate-limited (each call rotates a one-time claim token at

@@ -26,6 +26,7 @@ type View =
   | { kind: 'not-owner'; org?: string }
   | { kind: 'no-org' }
   | { kind: 'auth-disabled' }
+  | { kind: 'url-not-configured' }
   | { kind: 'error' }
 
 const API_KEYS_COLUMNS: TableHeaderColumn[] = [
@@ -78,6 +79,8 @@ export default function RegistryApiKeysPanel() {
       else if (status === 409 && code === 'no_org') setView({ kind: 'no-org' })
       else if (status === 409 && code === 'registry_auth_disabled')
         setView({ kind: 'auth-disabled' })
+      else if (status === 409 && code === 'registry_url_not_configured')
+        setView({ kind: 'url-not-configured' })
       else setView({ kind: 'error' })
     }
   }, [])
@@ -171,6 +174,13 @@ export default function RegistryApiKeysPanel() {
                   <a href={CONTROL_ROUTES.marketplace.connect}>Connect to Evenfire Registry</a>.
                 </>
               )}
+            </p>
+          ) : null}
+          {view.kind === 'url-not-configured' ? (
+            <p className="cu-banner cu-banner--warn">
+              This deployment still holds registry credentials, but <code>CLERUM_REGISTRY_URL</code>{' '}
+              is not configured. Restore the registry URL or disconnect the stale connection before
+              managing API keys.
             </p>
           ) : null}
           {view.kind === 'error' ? (

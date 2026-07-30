@@ -1,13 +1,12 @@
 /**
  * Registry Client — fetches entries from Clerum Registry service.
- * When CLERUM_REGISTRY_AUTH_ENABLED=true, calls are Bearer-authenticated
- * via OAuth2 client_credentials minted from CLERUM_REGISTRY_CLIENT_ID/SECRET.
- * Auth-off mode preserved for minikube: mintToken returns "" and the
- * Authorization header is omitted downstream.
+ * Managed deployments use CLERUM_REGISTRY_AUTH_ENABLED plus env-provided
+ * client credentials. Self-hosted deployments become Bearer-authenticated when
+ * their claimed registry_connection row holds machine credentials.
  */
 import { config } from '../config.js'
 import { rootLogger } from '../observability/logger.js'
-import { isRegistryAuthActive, resolveMachineCreds } from './registryConnectionDb.js'
+import { resolveMachineCreds } from './registryConnectionDb.js'
 
 const API_BASE = `${config.registryUrl}/api/v1`
 
@@ -76,36 +75,32 @@ export async function mintToken(envOverride?: NodeJS.ProcessEnv): Promise<string
   const now = Date.now()
   if (cached && now < cached.expiresAt - 30_000) return cached.token
 
-  // Env precedence: explicit override wins; otherwise process.env / config
-  // (which is what config also reads, but routes through env directly here so
-  // tests can mutate without rebuilding the config singleton). This resolves
-  // MANAGED creds — env/Secret, unchanged from before.
-  let id = env.CLERUM_REGISTRY_CLIENT_ID || (envOverride ? '' : config.registryClientId)
-  let secret = env.CLERUM_REGISTRY_CLIENT_SECRET || (envOverride ? '' : config.registryClientSecret)
+  // An explicit override is a test-only path and remains fully env-driven. In
+  // production, credentials MUST come from the mode-aware resolver: managed
+  // reads config/env, self-hosted reads only the claimed DB row. Reading env
+  // first here would create a split brain where isRegistryAuthActive authorizes
+  // the DB identity while the registry client authenticates as a stale managed
+  // identity left in the pod environment.
+  let id = envOverride ? env.CLERUM_REGISTRY_CLIENT_ID || '' : ''
+  let secret = envOverride ? env.CLERUM_REGISTRY_CLIENT_SECRET || '' : ''
   // Single source of truth for the registry base URL — env override wins for
   // tests/minikube, else config.registryUrl (mandatory + allowlisted when auth
   // is on). resolveMachineCreds no longer carries a `url`.
   const url = env.CLERUM_REGISTRY_URL || (envOverride ? '' : config.registryUrl)
 
-  // When creds are still absent AND no explicit env override is in play, fall
-  // through to the mode-aware resolver: managed → config env creds (a no-op
-  // here, already resolved above); self-hosted → the registry_connection DB row
-  // populated at claim. An explicit envOverride short-circuits this so the
-  // env-driven test/minikube paths never touch the DB.
-  if ((!id || !secret) && !envOverride) {
+  let authEnabled = false
+  if (!envOverride) {
     const resolved = await resolveMachineCreds()
     if (resolved) {
-      id = id || resolved.clientId
-      secret = secret || resolved.clientSecret
+      id = resolved.clientId
+      secret = resolved.clientSecret
     }
+    // Derive the decision from the SAME resolution used for the credentials.
+    // Managed deliberately keeps its env flag; self-hosted is active exactly
+    // when the DB row yielded a complete credential pair.
+    authEnabled =
+      config.registryConnectionMode === 'managed' ? config.registryAuthEnabled : resolved !== null
   }
-
-  // Auth is ACTIVE when credentials actually exist (self-hosted) or the env
-  // says so (managed). The old CLERUM_REGISTRY_AUTH_ENABLED override is gone:
-  // in self-hosted the var is inert, and in managed isRegistryAuthActive()
-  // returns it verbatim. envOverride still short-circuits for the env-driven
-  // test/minikube paths, which must never touch the DB.
-  const authEnabled = envOverride ? false : await isRegistryAuthActive()
 
   if (!id || !secret) {
     if (!authEnabled) return '' // minikube / auth-off

@@ -103,6 +103,17 @@ describe('RegistryApiKeysPanel', () => {
     expect(screen.queryByRole('link', { name: /connect to evenfire registry/i })).toBeNull()
   })
 
+  it('shows actionable configuration guidance when connected credentials remain without a URL', async () => {
+    vi.mocked(api.listRegistryApiKeys).mockRejectedValue(
+      Object.assign(new Error('x'), { status: 409, code: 'registry_url_not_configured' })
+    )
+    render(<RegistryApiKeysPanel />)
+
+    expect(await screen.findByText(/still holds registry credentials/i)).toBeInTheDocument()
+    expect(screen.getByText('CLERUM_REGISTRY_URL')).toBeInTheDocument()
+    expect(screen.getByText(/disconnect the stale connection/i)).toBeInTheDocument()
+  })
+
   it('on create success, shows the reveal modal then refetches', async () => {
     vi.mocked(api.listRegistryApiKeys)
       .mockResolvedValueOnce({ org: 'acme', keys: [] })

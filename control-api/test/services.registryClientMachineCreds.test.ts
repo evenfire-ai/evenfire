@@ -13,14 +13,8 @@ const { cfg } = vi.hoisted(() => ({
 }))
 vi.mock('../src/config.js', () => ({ config: cfg }))
 
-// Task 7: mintToken() now also calls isRegistryAuthActive() to derive
-// authEnabled (replacing the CLERUM_REGISTRY_AUTH_ENABLED env read). This is
-// a whole-module mock, so isRegistryAuthActive must be included here too —
-// otherwise it is undefined on the mocked module and mintToken's `await
-// isRegistryAuthActive()` throws a TypeError in both tests below.
 const resolver = vi.hoisted(() => ({
   resolveMachineCreds: vi.fn(),
-  isRegistryAuthActive: vi.fn(),
 }))
 vi.mock('../src/services/registryConnectionDb.js', () => resolver)
 
@@ -29,6 +23,8 @@ afterEach(() => {
   vi.restoreAllMocks()
   cfg.registryConnectionMode = 'self-hosted'
   cfg.registryAuthEnabled = true
+  delete process.env.CLERUM_REGISTRY_CLIENT_ID
+  delete process.env.CLERUM_REGISTRY_CLIENT_SECRET
 })
 
 describe('mintToken — self-hosted sources creds from the DB row', () => {
@@ -37,8 +33,6 @@ describe('mintToken — self-hosted sources creds from the DB row', () => {
       clientId: 'db-id',
       clientSecret: 'db-secret',
     })
-    // Mirrors the real self-hosted isRegistryAuthActive(): creds resolved → active.
-    resolver.isRegistryAuthActive.mockResolvedValue(true)
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(
@@ -54,8 +48,39 @@ describe('mintToken — self-hosted sources creds from the DB row', () => {
   it('returns "" (auth-off) when no creds are resolvable and auth is disabled', async () => {
     cfg.registryAuthEnabled = false
     resolver.resolveMachineCreds.mockResolvedValue(null)
-    // Mirrors the real self-hosted isRegistryAuthActive(): no creds → inactive.
-    resolver.isRegistryAuthActive.mockResolvedValue(false)
     expect(await mintToken()).toBe('')
+  })
+
+  it('ignores stale env credentials and authenticates with the self-hosted DB identity', async () => {
+    process.env.CLERUM_REGISTRY_CLIENT_ID = 'stale-managed-id'
+    process.env.CLERUM_REGISTRY_CLIENT_SECRET = 'stale-managed-secret'
+    resolver.resolveMachineCreds.mockResolvedValue({
+      clientId: 'db-id',
+      clientSecret: 'db-secret',
+    })
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response(JSON.stringify({ access_token: 'tok', expires_in: 300 }), { status: 200 })
+      )
+
+    await mintToken()
+
+    const [, init] = fetchSpy.mock.calls[0]
+    const auth = (init as RequestInit).headers as Record<string, string>
+    expect(auth.Authorization).toBe(`Basic ${Buffer.from('db-id:db-secret').toString('base64')}`)
+    expect(auth.Authorization).not.toContain(
+      Buffer.from('stale-managed-id:stale-managed-secret').toString('base64')
+    )
+  })
+
+  it('does not authenticate from stale env credentials before the DB connection exists', async () => {
+    process.env.CLERUM_REGISTRY_CLIENT_ID = 'stale-managed-id'
+    process.env.CLERUM_REGISTRY_CLIENT_SECRET = 'stale-managed-secret'
+    resolver.resolveMachineCreds.mockResolvedValue(null)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+
+    await expect(mintToken()).resolves.toBe('')
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 })

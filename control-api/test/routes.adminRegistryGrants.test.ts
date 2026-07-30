@@ -57,7 +57,11 @@ vi.mock('../src/services/adminAuthService.js', () => ({ findAdminById: vi.fn() }
 // which branches on mode first. 'managed' makes it return registryAuthEnabled
 // verbatim, which is the behaviour these tests intend to exercise.
 const { cfg } = vi.hoisted(() => ({
-  cfg: { registryAuthEnabled: true, registryConnectionMode: 'managed' },
+  cfg: {
+    registryAuthEnabled: true,
+    registryConnectionMode: 'managed',
+    registryUrl: 'https://registry.evenfire.ai',
+  },
 }))
 vi.mock('../src/config.js', () => ({ config: cfg }))
 // Partial mock (unlike the Keys file's full replacement): the "wire shape"
@@ -98,6 +102,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   cfg.registryAuthEnabled = true
   cfg.registryConnectionMode = 'managed'
+  cfg.registryUrl = 'https://registry.evenfire.ai'
   // Default mirrors the real accessor's managed-mode branch (registryAuthEnabled
   // verbatim) so the pre-existing tests below — which only flip
   // cfg.registryAuthEnabled, not this mock — still reach the same 200/400/409
@@ -264,6 +269,20 @@ describe('GET /admin/registry/grants + granted-to-me', () => {
     const res = await request(makeApp()).get('/admin/registry/grants')
     expect(res.status).not.toBe(409)
   })
+
+  it('self-hosted: 409 registry_url_not_configured when credentials remain but URL was removed', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.registryAuthEnabled = false
+    cfg.registryUrl = ''
+    connDb.isRegistryAuthActive.mockResolvedValue(true)
+
+    const res = await request(makeApp()).get('/admin/registry/grants')
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'registry_url_not_configured' })
+    expect(resolvePublishScope).not.toHaveBeenCalled()
+    expect(listOrgGrants).not.toHaveBeenCalled()
+  })
 })
 
 describe('DELETE /admin/registry/grants/:id', () => {
@@ -360,27 +379,13 @@ describe('wire shape (real wrappers, stubbed registry fetch)', () => {
     vi.stubGlobal('fetch', fetchMock)
     return fetchMock
   }
-  // Auth-derived (Task 7): the route guard (resolveSelfServiceOrg) AND
-  // mintToken now BOTH derive their auth state from the same
-  // isRegistryAuthActive() accessor — mintToken no longer has its own
-  // independent process.env.CLERUM_REGISTRY_AUTH_ENABLED read to diverge from
-  // it. A single blanket mock value can no longer give the guard "on" (so the
-  // request isn't 409'd) and the wrapper's mintToken "off" (so it returns ''
-  // instead of throwing on missing creds) at the same time.
-  //
-  // Fixed by sequencing connDb.isRegistryAuthActive per call instead: the
-  // guard's call is the FIRST isRegistryAuthActive() call made while handling
-  // the request (resolveSelfServiceOrg calls it before anything else and
-  // returns/409s before the route ever reaches createOrgGrant/revokeOrgGrant —
-  // see routes/admin/registry.ts's resolveSelfServiceOrg), so
-  // mockResolvedValueOnce(true) satisfies exactly that call. Every call after
-  // it — i.e. mintToken's own internal call, reached via
-  // createOrgGrant/revokeOrgGrant → authedFetch → mintToken — falls through to
-  // the mockResolvedValue(false) default, so mintToken takes the auth-off
-  // branch and returns '' (no token round trip), with no real credentials
-  // configured anywhere in this file's mocked config.
+  // Keep the route guard active while the real wrapper's managed token path is
+  // auth-off. mintToken now resolves credentials through resolveMachineCreds
+  // and reads the managed flag from config; it no longer performs a second
+  // isRegistryAuthActive call that tests can sequence independently.
   function armGuardOnMintTokenOff(): void {
-    connDb.isRegistryAuthActive.mockReset().mockResolvedValueOnce(true).mockResolvedValue(false)
+    cfg.registryAuthEnabled = false
+    connDb.isRegistryAuthActive.mockReset().mockResolvedValue(true)
   }
 
   it('POST self_grant → 400 with {error:"self_grant"} verbatim', async () => {

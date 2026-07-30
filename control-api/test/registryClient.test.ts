@@ -11,16 +11,17 @@ import {
   searchEntries,
 } from '../src/services/registryClient.js'
 
-// Controls the derived-auth path (Task 7): mintToken() with NO envOverride
-// consults isRegistryAuthActive() for the authEnabled decision and
-// resolveMachineCreds() for self-hosted credentials. Every OTHER test in this
-// file drives mintToken via ENV_OVERRIDE or process.env id/secret directly,
-// so it never reaches either mock — only the two derived-auth tests below do.
+// mintToken() with NO envOverride resolves both the active decision and the
+// credential pair through this mode-aware dependency. Most tests in this file
+// populate process.env; the default mock mirrors managed-mode resolution from
+// those values so they exercise the normal client path without rebuilding the
+// config singleton.
 const connDb = vi.hoisted(() => ({
-  isRegistryAuthActive: vi.fn(),
   resolveMachineCreds: vi.fn(),
 }))
 vi.mock('../src/services/registryConnectionDb.js', () => connDb)
+
+const ORIGINAL_ENV = { ...process.env }
 
 function fakeTokenResponse(token = 'tok-abc', expiresIn = 600) {
   return new Response(
@@ -37,18 +38,18 @@ const ENV_OVERRIDE: NodeJS.ProcessEnv = {
 }
 
 beforeEach(() => {
+  process.env = { ...ORIGINAL_ENV }
   __resetTokenCacheForTests()
   __resetScopeCacheForTests()
-  // Deterministic defaults for the connDb mock (no creds, auth off) rather
-  // than relying on an unconfigured vi.fn() resolving `undefined` (falsy, but
-  // for the wrong reason). Only the derived-auth tests below reach these; every
-  // other test in the file resolves id/secret from ENV_OVERRIDE/process.env
-  // before this mock would ever be consulted.
-  connDb.resolveMachineCreds.mockReset().mockResolvedValue(null)
-  connDb.isRegistryAuthActive.mockReset().mockResolvedValue(false)
+  connDb.resolveMachineCreds.mockReset().mockImplementation(async () => {
+    const clientId = process.env.CLERUM_REGISTRY_CLIENT_ID
+    const clientSecret = process.env.CLERUM_REGISTRY_CLIENT_SECRET
+    return clientId && clientSecret ? { clientId, clientSecret } : null
+  })
 })
 
 afterEach(() => {
+  process.env = { ...ORIGINAL_ENV }
   vi.unstubAllGlobals()
   vi.useRealTimers()
 })
@@ -146,15 +147,8 @@ describe('registryClient — mintToken cache behavior', () => {
 })
 
 describe('registryClient — mintToken derived auth (no envOverride)', () => {
-  // Critical: no ENV_OVERRIDE here. An envOverride short-circuits authEnabled
-  // to false by design (see mintToken), so these two tests must call
-  // mintToken() bare to actually reach the isRegistryAuthActive()-derived path.
-  // They also explicitly blank CLIENT_ID/SECRET: earlier tests in this file
-  // mutate the REAL process.env via Object.assign(process.env, ENV_OVERRIDE)
-  // and never reset it (only afterEach's unstubAllGlobals/useRealTimers run),
-  // so without this, a leftover id/secret from a prior test would populate
-  // `id`/`secret` and the credential-missing branch under test would never
-  // trigger.
+  // Critical: no ENV_OVERRIDE here. That test-only path intentionally bypasses
+  // the mode-aware resolver.
   beforeEach(() => {
     process.env = {
       ...process.env,
@@ -165,21 +159,8 @@ describe('registryClient — mintToken derived auth (no envOverride)', () => {
 
   it('returns an empty token when auth is inactive and no creds exist', async () => {
     connDb.resolveMachineCreds.mockResolvedValue(null)
-    connDb.isRegistryAuthActive.mockResolvedValue(false)
     await expect(mintToken()).resolves.toBe('') // NO ENV_OVERRIDE — see above
-    // Without this, the assertion above is vacuous: the old env-var-based
-    // implementation also resolves authEnabled=false here (config.registryAuthEnabled
-    // is frozen false at module load in this test env) WITHOUT ever calling
-    // isRegistryAuthActive — so the return-value alone can't tell the derived
-    // path apart from the old, un-refactored one. This call-count assertion fails
-    // under both a full revert and a "hardcoded/ignored accessor" mutation.
-    expect(connDb.isRegistryAuthActive).toHaveBeenCalledTimes(1)
-  })
-
-  it('throws when auth is active but credentials are unavailable', async () => {
-    connDb.resolveMachineCreds.mockResolvedValue(null)
-    connDb.isRegistryAuthActive.mockResolvedValue(true)
-    await expect(mintToken()).rejects.toThrow(/machine credentials unavailable/)
+    expect(connDb.resolveMachineCreds).toHaveBeenCalledTimes(1)
   })
 })
 

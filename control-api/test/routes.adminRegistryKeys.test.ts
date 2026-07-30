@@ -43,7 +43,11 @@ vi.mock('../src/services/adminAuthService.js', () => ({ findAdminById: vi.fn() }
 // which branches on mode first. 'managed' makes it return registryAuthEnabled
 // verbatim, which is the behaviour these tests intend to exercise.
 const { cfg } = vi.hoisted(() => ({
-  cfg: { registryAuthEnabled: true, registryConnectionMode: 'managed' },
+  cfg: {
+    registryAuthEnabled: true,
+    registryConnectionMode: 'managed',
+    registryUrl: 'https://registry.evenfire.ai',
+  },
 }))
 vi.mock('../src/config.js', () => ({ config: cfg }))
 // Narrow mock: registry.ts imports nothing else from registryConnectionDb, so
@@ -75,6 +79,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   cfg.registryAuthEnabled = true
   cfg.registryConnectionMode = 'managed'
+  cfg.registryUrl = 'https://registry.evenfire.ai'
   // Default mirrors the real accessor's managed-mode branch (registryAuthEnabled
   // verbatim) so the pre-existing tests below — which only flip
   // cfg.registryAuthEnabled, not this mock — still reach the same 200/409 they did
@@ -124,6 +129,20 @@ describe('GET /admin/registry/keys', () => {
     const res = await request(makeApp()).get('/admin/registry/keys')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ org: 'acme', keys: [{ id: 'k1' }] })
+  })
+
+  it('self-hosted: 409 registry_url_not_configured when credentials remain but URL was removed', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.registryAuthEnabled = false
+    cfg.registryUrl = ''
+    connDb.isRegistryAuthActive.mockResolvedValue(true)
+
+    const res = await request(makeApp()).get('/admin/registry/keys')
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'registry_url_not_configured' })
+    expect(resolvePublishScope).not.toHaveBeenCalled()
+    expect(listKeys).not.toHaveBeenCalled()
   })
 
   // isRegistryAuthActive() can now reject (self-hosted reaches a raw pool.query

@@ -102,8 +102,11 @@ export function createRegistryConnectRouter(): Router {
       // Buffer.from(null) crash inside the encryption path.
       if (
         typeof claimed.client_id !== 'string' ||
+        claimed.client_id.length === 0 ||
         typeof claimed.client_secret !== 'string' ||
-        typeof claimed.org !== 'string'
+        claimed.client_secret.length === 0 ||
+        typeof claimed.org !== 'string' ||
+        claimed.org.length === 0
       ) {
         rootLogger.error(
           { event: 'registry_connect_claim_malformed', status: claimRes.status },
@@ -132,16 +135,17 @@ export function createRegistryConnectRouter(): Router {
 
   async function requireSelfHostedAdmin(
     req: Request,
-    res: Response
+    res: Response,
+    options: { requireRegistryUrl?: boolean } = {}
   ): Promise<{ adminId: string } | null> {
     if (config.registryConnectionMode !== 'self-hosted') {
       res.status(409).json({ error: 'not_self_hosted' })
       return null
     }
-    // Task 4 permits booting without a registry URL. Fail cleanly here rather
-    // than letting base() build '/api/v1/deployments' and fetch() throw
-    // TypeError: Failed to parse URL, which surfaces as a bare 500.
-    if (config.registryUrl === '') {
+    // Network-dependent connect routes need a configured registry URL. DELETE
+    // is deliberately exempt: it only removes local credentials, and must
+    // remain the recovery path after an operator removes a broken/stale URL.
+    if (options.requireRegistryUrl !== false && config.registryUrl === '') {
       res.status(409).json({ error: 'registry_url_not_configured' })
       return null
     }
@@ -486,23 +490,16 @@ export function createRegistryConnectRouter(): Router {
           claimToken: reg.claim_token as string,
         })
         if (outcome.kind === 'connected') {
-          // The connect itself already succeeded (markConnected committed
-          // inside redeemClaim) by the time we get here — a rejecting
-          // isRegistryAuthActive() must not surface as an uncaught rejection
-          // or a bare 500 for a request whose underlying mutation landed.
-          // Same 502 the sibling admin registry routes use for this accessor.
-          let authEnabled: boolean
-          try {
-            authEnabled = await isRegistryAuthActive()
-          } catch {
-            res.status(502).json({ error: 'registry_integration_error' })
-            return
-          }
+          // redeemClaim validated a non-empty credential pair and
+          // markConnected committed it. Do not perform a second fallible DB
+          // read after this irreversible one-time claim has succeeded: a
+          // transient read failure must not turn a completed connection into a
+          // misleading 502 response.
           res.status(200).json({
             state: 'connected',
             org: outcome.org,
             deploymentId: reg.deployment_id,
-            authEnabled,
+            authEnabled: true,
           })
           return
         }
@@ -676,21 +673,13 @@ export function createRegistryConnectRouter(): Router {
         })
         switch (outcome.kind) {
           case 'connected': {
-            // Same reasoning as the auto-claim branch in POST /request: the
-            // recover has already succeeded (markConnected committed) by the
-            // time we're here, so a rejecting isRegistryAuthActive() must
-            // degrade to 502 rather than an uncaught rejection or a bare 500.
-            let authEnabled: boolean
-            try {
-              authEnabled = await isRegistryAuthActive()
-            } catch {
-              res.status(502).json({ error: 'registry_integration_error' })
-              return
-            }
+            // Same committed-outcome rule as POST /request: recovery already
+            // consumed the one-time token and stored a validated credential
+            // pair, so its response must not depend on a redundant DB read.
             res.status(200).json({
               state: 'connected',
               org: outcome.org,
-              authEnabled,
+              authEnabled: true,
             })
             return
           }
@@ -725,7 +714,7 @@ export function createRegistryConnectRouter(): Router {
   // DELETE — disconnect (drop the row).
   router.delete('/admin/registry/connect', requireAuthForControlUI, async (req, res, next) => {
     try {
-      const ctx = await requireSelfHostedAdmin(req, res)
+      const ctx = await requireSelfHostedAdmin(req, res, { requireRegistryUrl: false })
       if (!ctx) return
       await deleteConnection()
       res.status(204).end()
