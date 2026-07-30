@@ -201,6 +201,37 @@ describe('reconcileChat — single-flight', () => {
     expect(reconcile.isInFlight(chatKey)).toBe(false)
   })
 
+  it('supersedes an old same-chat run and permits a fresh authoritative fetch', async () => {
+    let resolveOld: (value: SessionMessagesResult) => void = () => {}
+    const load = vi
+      .fn<() => Promise<SessionMessagesResult>>()
+      .mockImplementationOnce(
+        () => new Promise<SessionMessagesResult>(resolve => (resolveOld = resolve))
+      )
+      .mockResolvedValueOnce(idleResp({ totalTurns: 2 }))
+    const deps = buildDeps({
+      loadSessionMessages: load as unknown as ReconcileChatDeps['loadSessionMessages'],
+    })
+    const reconcile = createReconcileChat(deps)
+
+    const oldRun = reconcile(chatKey, { reason: 'first-open' })
+    reconcile.supersede(chatKey)
+    const freshRun = reconcile(chatKey, { reason: 'second-open' })
+
+    await freshRun
+    resolveOld(idleResp({ totalTurns: 1 }))
+    await expect(oldRun).resolves.toBe('stale_drop')
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(deps.settleIdle).toHaveBeenCalledTimes(1)
+    expect(deps.settleIdle).toHaveBeenCalledWith(
+      chatKey,
+      expect.objectContaining({ totalTurns: 2 }),
+      expect.any(Number),
+      undefined,
+      expect.any(Function)
+    )
+  })
+
   it('drops a late 404 after reset instead of evicting the next session cache', async () => {
     let rejectLoad: (reason: unknown) => void = () => {}
     const load = vi.fn(

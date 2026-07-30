@@ -471,6 +471,7 @@ export function useAgentChatController({
     navItem,
     selectedAgent,
   })
+  const activeChatSwitchRequestRef = useRef<symbol | null>(null)
   // Latest `pushToast` for the hoisted tracker callbacks (onTrackerTerminal reads
   // it) so that `tracker.setCallbacks` can run once (cross-ref D.3 M1) without
   // closing over a stale toast fn. Assigned in an effect, not the render body
@@ -745,6 +746,7 @@ export function useAgentChatController({
       ...activeChatVisibilityRef.current,
       activeChatId: null,
     }
+    activeChatSwitchRequestRef.current = null
     autoSelectedChatIdRef.current = null
     setActiveChatId(null)
     clearList()
@@ -787,6 +789,10 @@ export function useAgentChatController({
   // chat, and a task in flight is rejoined via the tracker D.3 already mounts.
   const switchToChat = useCallback(
     async (agentRef: string, chatId: string) => {
+      const switchRequest = Symbol(`${agentRef}:${chatId}`)
+      activeChatSwitchRequestRef.current = switchRequest
+      const key = makeTaskKey(agentRef, chatId)
+      reconcileChatRef.current!.supersede(key)
       activeChatVisibilityRef.current = {
         ...activeChatVisibilityRef.current,
         activeChatId: chatId,
@@ -807,7 +813,6 @@ export function useAgentChatController({
       setFailedAgentSend(null)
       await chatStore.setLastActive(agentRef, chatId)
 
-      const key = makeTaskKey(agentRef, chatId)
       unfillableServerGapUpperBoundsRef.current.delete(key)
 
       // Renderer-local relevance guard for a fast A→B→A switch: THIS switch's
@@ -815,7 +820,14 @@ export function useAgentChatController({
       // `reconcileChat` as a per-call `isRelevant` (replaces the Phase-2
       // AbortController) so a background reconcile — system:resume, or a bell
       // approval on a NON-visible chat — is never subject to an active-chat guard.
-      const isStillActive = () => activeChatVisibilityRef.current.activeChatId === chatId
+      const isStillActive = () => {
+        const visible = activeChatVisibilityRef.current
+        return (
+          activeChatSwitchRequestRef.current === switchRequest &&
+          visible.selectedAgent === agentRef &&
+          visible.activeChatId === chatId
+        )
+      }
 
       // PHASE 1 — render only the newest local page. The authoritative reconcile
       // below requests a delta after the newest cached server turn.

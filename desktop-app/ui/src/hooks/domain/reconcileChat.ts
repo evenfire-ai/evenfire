@@ -117,6 +117,8 @@ export interface ReconcileChat {
   (chatKey: string, args: ReconcileChatArgs): Promise<ReconcileOutcome>
   /** Whether a reconcile is currently in flight for the chat (single-flight). */
   isInFlight: (chatKey: string) => boolean
+  /** Invalidate and detach the current run for one chat while leaving others alone. */
+  supersede: (chatKey: string) => void
   /**
    * Abort every in-flight reconcile (logout / team-switch / renderer teardown):
    * bumps a generation so any run past its next relevance check bails BEFORE its
@@ -145,6 +147,7 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
   // at `settleIdle` time, so a hint that arrives before the fetch resolves is
   // still honoured (M6).
   const inFlightHint = new Map<string, string | undefined>()
+  const chatGenerations = new Map<string, number>()
   const attempts = deps.networkRetryAttempts ?? DEFAULT_RETRY_ATTEMPTS
   const backoff = deps.networkRetryBackoffMs ?? DEFAULT_RETRY_BACKOFF_MS
   // Bumped by `reset()`; a run started under an older generation is no longer
@@ -175,11 +178,13 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
 
   async function run(chatKey: string, args: ReconcileChatArgs): Promise<ReconcileOutcome> {
     const startGeneration = generation
+    const startChatGeneration = chatGenerations.get(chatKey) ?? 0
     const { agentRef, chatId } = parseTaskKey(chatKey)
     // Relevant only while (a) no `reset()` happened since this run began AND (b)
     // the injected chat-level guard still holds.
     const stillRelevant = () =>
       generation === startGeneration &&
+      (chatGenerations.get(chatKey) ?? 0) === startChatGeneration &&
       (deps.isStillRelevant?.(chatKey) ?? true) &&
       (args.isRelevant?.() ?? true)
     // R2 anchor: the epoch at the START of the fetch, so a snapshot that a newer
@@ -236,7 +241,11 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
     } finally {
       // RESET already tore the entry down on 404; re-dispatching FINISHED would
       // resurrect an empty entry, so skip the finalizer in that case.
-      if (outcome !== '404' && generation === startGeneration) {
+      if (
+        outcome !== '404' &&
+        generation === startGeneration &&
+        (chatGenerations.get(chatKey) ?? 0) === startChatGeneration
+      ) {
         deps.fsm.dispatch(chatKey, { type: 'RECONCILE_FINISHED' })
       }
       deps.telemetry('stream_recovery', { reason: args.reason, outcome })
@@ -268,10 +277,16 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
     return promise
   }) as ReconcileChat
   reconcile.isInFlight = (chatKey: string) => inFlight.has(chatKey)
+  reconcile.supersede = (chatKey: string) => {
+    chatGenerations.set(chatKey, (chatGenerations.get(chatKey) ?? 0) + 1)
+    inFlight.delete(chatKey)
+    inFlightHint.delete(chatKey)
+  }
   reconcile.reset = () => {
     generation += 1
     inFlight.clear()
     inFlightHint.clear()
+    chatGenerations.clear()
   }
   return reconcile
 }

@@ -119,6 +119,47 @@ describe('switchToChat (unified, D.4)', () => {
     )
   })
 
+  it('drops an old A response after A-B-A and uses the fresh same-chat reconcile', async () => {
+    const sessionResult = (chatId: string, answer?: string) => ({
+      agent: 'agent-x',
+      chatId,
+      state: 'idle' as const,
+      turns: chatId === 'chat-a' ? [turn(1, 'question', answer)] : [],
+    })
+    let resolveOldA!: (value: ReturnType<typeof sessionResult>) => void
+    const oldA = new Promise<ReturnType<typeof sessionResult>>(resolve => {
+      resolveOldA = resolve
+    })
+    clerum.chat.loadMessages.mockResolvedValue([])
+    clerum.rpc.loadSessionMessages
+      .mockImplementationOnce(() => oldA)
+      .mockResolvedValueOnce(sessionResult('chat-b'))
+      .mockResolvedValueOnce(sessionResult('chat-a', 'fresh answer'))
+    const { result } = renderController()
+    await settleMount()
+
+    let firstSwitch!: Promise<void>
+    await act(async () => {
+      firstSwitch = result.current.switchToChat('agent-x', 'chat-a')
+      await waitFor(() => expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(1))
+    })
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'chat-b')
+      await result.current.switchToChat('agent-x', 'chat-a')
+    })
+    resolveOldA(sessionResult('chat-a', 'stale answer'))
+    await act(async () => {
+      await firstSwitch
+    })
+
+    expect(result.current.activeChatId).toBe('chat-a')
+    expect(result.current.chatMessages.map(message => message.content)).toContain('fresh answer')
+    expect(result.current.chatMessages.map(message => message.content)).not.toContain(
+      'stale answer'
+    )
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(3)
+  })
+
   it('does not overwrite a long chat whose cache already matches the server (no 50-cap false-stale)', async () => {
     // 30 turns → 60 messages, well past any windowing limit.
     const turns = Array.from({ length: 30 }, (_, i) => turn(i + 1, `q${i + 1}`, `a${i + 1}`))
