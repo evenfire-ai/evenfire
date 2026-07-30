@@ -455,12 +455,16 @@ export async function getAuthToken(
  * SharedFileSystems are allowed to live in, per CRD validation).
  */
 export async function listAllSharedFileSystems(): Promise<SharedFileSystemCRD[]> {
-  if (!customObjectsApi) {
+  if (!hostCustomObjectsApi) {
     throw new Error('K8s client not initialized - are you in dev mode?')
   }
   try {
     console.log(`[K8s] Listing all SharedFileSystems in namespace ${config.hostNamespace}`)
-    const response = await customObjectsApi.listNamespacedCustomObject({
+    // Deadline-bearing client, like listHostSnapshot: the cold-start Host fleet
+    // pass waits on this inventory, so an apiserver that never answers would
+    // otherwise strand the fleet behind an already-certified readiness — and
+    // leave the SharedFileSystem watch, which starts after this await, dead.
+    const response = await hostCustomObjectsApi.listNamespacedCustomObject({
       group: GROUP,
       version: VERSION,
       namespace: config.hostNamespace,
@@ -1581,25 +1585,11 @@ export class McpServerWatcher implements McpServerProvider {
       if (initialSfsInventory) {
         // Waiting for the inventory is deliberate: a Host fleet pass without it
         // writes mount-less templates and immediately rerolls the whole fleet.
-        // An apiserver that never answers the LIST, though, would strand the
-        // fleet pass behind an already-certified readiness — no Host would ever
-        // reconcile while `/ready` reports 200 — so the wait is bounded.
-        let fleetPassRequested = false
-        const requestFleetPassOnce = () => {
-          if (fleetPassRequested) return
-          fleetPassRequested = true
-          requestFleetPass()
-        }
-        const inventoryDeadline = setTimeout(() => {
-          console.error(
-            `[K8s] SharedFileSystem inventory did not settle within ${config.hostFleetSfsInventoryTimeoutMs}ms — scheduling the initial Host fleet pass without it`
-          )
-          requestFleetPassOnce()
-        }, config.hostFleetSfsInventoryTimeoutMs)
-        void initialSfsInventory.then(() => {
-          clearTimeout(inventoryDeadline)
-          requestFleetPassOnce()
-        })
+        // The wait cannot strand the fleet, because the LIST underneath runs on
+        // the deadline-bearing client: an apiserver that never answers aborts
+        // the request, `startSharedFileSystemInventoryAndWatch` logs and
+        // resolves false, and this settles. One path, one pass.
+        void initialSfsInventory.then(() => requestFleetPass())
       } else {
         requestFleetPass()
       }

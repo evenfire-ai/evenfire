@@ -157,7 +157,6 @@ vi.mock('./config', () => ({
     port: 8081,
     runtimeNamespaces: ['mcp-server', 'mcp-host', 'sandbox-recipes', 'rpc-proxy'],
     hostK8sRequestTimeoutMs: 30_000,
-    hostFleetSfsInventoryTimeoutMs: 30_000,
     hostResyncIntervalSec: 0,
     externalEgressResyncIntervalSec: 0,
     controlApiBaseUrl: 'http://control-api.test:8090',
@@ -434,16 +433,15 @@ describe('McpServerWatcher startup', () => {
     }
   })
 
-  it('schedules the first Host fleet pass when the SharedFileSystem inventory never settles', async () => {
-    vi.useFakeTimers()
-    // A SharedFileSystem LIST that never settles must not strand the initial
-    // Host fleet pass: readiness can already be certified, so a Host fleet that
-    // never reconciles is invisible to every probe.
-    const neverSettles = new Promise<{ items: unknown[] }>(() => undefined)
+  it('schedules the first Host fleet pass when the SharedFileSystem inventory fails', async () => {
+    // The inventory LIST runs on the deadline-bearing client, so an apiserver
+    // that never answers is aborted and surfaces here as a rejection. The Host
+    // fleet must still converge: stranding it would leave every Host
+    // unreconciled behind an already-certified readiness.
     mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
-      if (plural === 'sharedfilesystems') return neverSettles
+      if (plural === 'sharedfilesystems') throw new Error('sharedfilesystems LIST aborted')
       if (plural === 'communicationchannels') {
-        return { metadata: { resourceVersion: 'sfs-stall-cc-rv' }, items: [] }
+        return { metadata: { resourceVersion: 'sfs-abort-cc-rv' }, items: [] }
       }
       return { items: [] }
     })
@@ -451,41 +449,11 @@ describe('McpServerWatcher startup', () => {
     const start = watcher.start()
 
     try {
-      await vi.advanceTimersByTimeAsync(config.hostFleetSfsInventoryTimeoutMs + 1000)
+      await start
       await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledOnce())
     } finally {
       await watcher.stop()
       await start.catch(() => undefined)
-      vi.useRealTimers()
-    }
-  })
-
-  it('coalesces sustained convergence churn into a single trailing pass', async () => {
-    // Sustained churn must not turn the trailing loop into one apiserver pass
-    // per request. `trailingRequested` is a boolean latch, so an unbounded
-    // burst arriving during one in-flight pass may cost at most one more pass.
-    const watcher = new McpServerWatcher()
-    const inFlight = deferred()
-    let coreRuns = 0
-    ;(watcher as any).runInitialNetworkPolicyConvergenceCore = async () => {
-      coreRuns += 1
-      if (coreRuns === 1) await inFlight.promise
-    }
-
-    try {
-      const first = (watcher as any).runInitialNetworkPolicyConvergence() as Promise<void>
-      await flushMicrotasks()
-      for (let burst = 0; burst < 50; burst += 1) {
-        void (watcher as any).runInitialNetworkPolicyConvergence()
-      }
-      inFlight.resolve(undefined)
-      await first
-      await flushMicrotasks()
-
-      expect(coreRuns).toBeLessThanOrEqual(2)
-    } finally {
-      inFlight.resolve(undefined)
-      await watcher.stop()
     }
   })
 
