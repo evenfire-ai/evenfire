@@ -93,6 +93,19 @@ describe('sameMcpServerDesiredRevision', () => {
       )
     ).toBe(false)
   })
+
+  it('ignores the controller-owned network-ready handshake annotation', () => {
+    const expected = makeServer({ annotations: { 'clerum.io/pre-deploy': 'true' } })
+    const current = makeServer({
+      annotations: {
+        'clerum.io/pre-deploy': 'true',
+        'clerum.io/network-ready': 'true',
+      },
+    })
+
+    expect(sameMcpServerDesiredRevision(expected, current)).toBe(true)
+    expect(sameMcpServerDesiredRevision(current, expected)).toBe(true)
+  })
 })
 
 describe('isMcpServerStatusOnlyUpdate', () => {
@@ -121,6 +134,18 @@ describe('isMcpServerStatusOnlyUpdate', () => {
     })
 
     expect(isMcpServerStatusOnlyUpdate(previous, current)).toBe(false)
+  })
+
+  it('treats the controller-owned network-ready handshake as a status-only update', () => {
+    const previous = makeServer({ annotations: { 'clerum.io/pre-deploy': 'true' } })
+    const current = makeServer({
+      annotations: {
+        'clerum.io/pre-deploy': 'true',
+        'clerum.io/network-ready': 'true',
+      },
+    })
+
+    expect(isMcpServerStatusOnlyUpdate(previous, current)).toBe(true)
   })
 })
 

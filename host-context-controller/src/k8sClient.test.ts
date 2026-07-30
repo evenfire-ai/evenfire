@@ -1160,6 +1160,44 @@ describe('McpServerWatcher startup', () => {
     await watcher.stop()
   })
 
+  it('does not advance desired revision for the controller-owned network-ready handshake', async () => {
+    const previousServer = {
+      name: 'network-ready-server',
+      namespace: 'mcp-server',
+      uid: 'network-ready-server-uid',
+      generation: 7,
+      annotations: { 'clerum.io/pre-deploy': 'true' },
+      labels: { 'clerum.io/workload': 'network-ready-server' },
+      spec: {
+        contextRef: 'default',
+        image: 'clerum/network-ready-server:test',
+        transport: { type: 'streamableHttp' as const, port: 3000 },
+      },
+    }
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).servers.set(previousServer.name, previousServer)
+    const callback = (watcher as any).getMcpServerWatchCallback()
+
+    await callback('MODIFIED', {
+      metadata: {
+        name: previousServer.name,
+        namespace: previousServer.namespace,
+        uid: previousServer.uid,
+        generation: previousServer.generation,
+        annotations: {
+          ...previousServer.annotations,
+          'clerum.io/network-ready': 'true',
+        },
+        labels: previousServer.labels,
+      },
+      spec: previousServer.spec,
+    })
+
+    expect((watcher as any).mcpServerDesiredRevision).toBe(0)
+    expect((watcher as any).reconciler.reconcile).not.toHaveBeenCalled()
+    await watcher.stop()
+  })
+
   it('advances McpServer desired revision for owner addition and deletion', async () => {
     const serverObject = {
       metadata: {

@@ -1,6 +1,21 @@
 import type { McpServerCRD } from './types'
 import { getErrorCode } from './utils'
 
+const NETWORK_READY_ANNOTATION = 'clerum.io/network-ready'
+
+/**
+ * This acknowledgement is written by HCC after it has applied a server's
+ * NetworkPolicies so WRC can admit its workload. It is not user intent and it
+ * cannot change any NetworkPolicy decision. Treating that write as desired
+ * state makes HCC invalidate its own authoritative revocation pass under a
+ * large startup fleet, coupling /ready to additive runtime convergence again.
+ */
+function desiredAnnotations(annotations: Record<string, string> | undefined): Record<string, string> {
+  if (!annotations?.[NETWORK_READY_ANNOTATION]) return annotations ?? {}
+  const { [NETWORK_READY_ANNOTATION]: _networkReady, ...remaining } = annotations
+  return remaining
+}
+
 export function sameMcpServerDesiredRevision(
   expected: McpServerCRD,
   current: McpServerCRD
@@ -17,7 +32,8 @@ export function sameMcpServerDesiredRevision(
 
   return (
     JSON.stringify(expected.spec) === JSON.stringify(current.spec) &&
-    JSON.stringify(expected.annotations ?? {}) === JSON.stringify(current.annotations ?? {}) &&
+    JSON.stringify(desiredAnnotations(expected.annotations)) ===
+      JSON.stringify(desiredAnnotations(current.annotations)) &&
     JSON.stringify(expected.labels ?? {}) === JSON.stringify(current.labels ?? {})
   )
 }
