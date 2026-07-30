@@ -1579,7 +1579,27 @@ export class McpServerWatcher implements McpServerProvider {
       const initialSfsInventory =
         request.cause === 'cold-start' ? this.initialHostFleetSfsInventory : null
       if (initialSfsInventory) {
-        void initialSfsInventory.then(() => requestFleetPass())
+        // Waiting for the inventory is deliberate: a Host fleet pass without it
+        // writes mount-less templates and immediately rerolls the whole fleet.
+        // An apiserver that never answers the LIST, though, would strand the
+        // fleet pass behind an already-certified readiness — no Host would ever
+        // reconcile while `/ready` reports 200 — so the wait is bounded.
+        let fleetPassRequested = false
+        const requestFleetPassOnce = () => {
+          if (fleetPassRequested) return
+          fleetPassRequested = true
+          requestFleetPass()
+        }
+        const inventoryDeadline = setTimeout(() => {
+          console.error(
+            `[K8s] SharedFileSystem inventory did not settle within ${config.hostFleetSfsInventoryTimeoutMs}ms — scheduling the initial Host fleet pass without it`
+          )
+          requestFleetPassOnce()
+        }, config.hostFleetSfsInventoryTimeoutMs)
+        void initialSfsInventory.then(() => {
+          clearTimeout(inventoryDeadline)
+          requestFleetPassOnce()
+        })
       } else {
         requestFleetPass()
       }

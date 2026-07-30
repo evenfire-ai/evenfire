@@ -200,6 +200,13 @@ export interface Config {
   // safety convergence indefinitely.
   externalEgressDnsResolveTimeoutMs: number
 
+  // Deadline for the cold-start SharedFileSystem inventory that the first Host
+  // fleet pass waits on. Waiting is deliberate — a pass without the inventory
+  // writes mount-less templates and rerolls the fleet — but an apiserver that
+  // never answers must not strand the fleet pass behind an already-certified
+  // readiness.
+  hostFleetSfsInventoryTimeoutMs: number
+
   // Plugin image-host allowlist (Phase 2.3). Trusted raw-image prefixes for
   // local-mode McpServer images. Audit mode (default) logs would-be denials
   // without blocking; enforce mode blocks the workload build.
@@ -231,6 +238,17 @@ function getEnvInt(key: string, defaultValue: number): number {
   if (!value) return defaultValue
   const parsed = parseInt(value, 10)
   return isNaN(parsed) ? defaultValue : parsed
+}
+
+export function parseHostFleetSfsInventoryTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 30_000
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > 2_147_483_647) {
+    throw new Error(
+      `HCC_HOST_FLEET_SFS_INVENTORY_TIMEOUT_MS must be a positive integer no greater than 2147483647, got '${raw}'`
+    )
+  }
+  return parsed
 }
 
 export function parseExternalEgressDnsTimeoutMs(raw: string | undefined): number {
@@ -611,6 +629,9 @@ export const config: Config = {
 
   // Periodic external-egress DNS resync (default 5 min). 0 disables.
   externalEgressResyncIntervalSec: getEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 300),
+  hostFleetSfsInventoryTimeoutMs: parseHostFleetSfsInventoryTimeoutMs(
+    getEnv('HCC_HOST_FLEET_SFS_INVENTORY_TIMEOUT_MS')
+  ),
   externalEgressDnsResolveTimeoutMs: parseExternalEgressDnsTimeoutMs(
     getEnv('HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS')
   ),

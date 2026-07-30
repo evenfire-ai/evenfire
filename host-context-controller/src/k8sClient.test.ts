@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as http from 'http'
+import { config } from './config'
 import { HostFleetReconcileError } from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
 import {
@@ -156,6 +157,7 @@ vi.mock('./config', () => ({
     port: 8081,
     runtimeNamespaces: ['mcp-server', 'mcp-host', 'sandbox-recipes', 'rpc-proxy'],
     hostK8sRequestTimeoutMs: 30_000,
+    hostFleetSfsInventoryTimeoutMs: 30_000,
     hostResyncIntervalSec: 0,
     externalEgressResyncIntervalSec: 0,
     controlApiBaseUrl: 'http://control-api.test:8090',
@@ -395,17 +397,33 @@ describe('McpServerWatcher startup', () => {
       return { items: [] }
     })
     const watcher = new McpServerWatcher()
+    // Sampling "not yet called" after a fixed number of microtask turns cannot
+    // distinguish "correctly waiting" from "scheduled but not drained yet".
+    // Record what the first pass actually observed instead: the invariant is
+    // that it never runs against an unpopulated SharedFileSystem cache, because
+    // that is what writes mount-less templates and rerolls the fleet.
+    let sfsCacheSizeAtFirstPass: number | undefined
+    mocks.hostFullReconcile.mockImplementation(async () => {
+      if (sfsCacheSizeAtFirstPass === undefined) {
+        sfsCacheSizeAtFirstPass = (watcher as any).sharedFileSystems.size
+      }
+    })
     const start = watcher.start()
 
     try {
+      // Await the whole startup first. That is the positive signal that the
+      // cold-start Host recovery already reached the point where it decides
+      // whether to schedule the fleet pass, so the absence assertion below
+      // cannot pass merely because nothing has been drained yet.
+      await start
       await flushMicrotasks()
       expect(mocks.hostFullReconcile).not.toHaveBeenCalled()
 
       sharedFileSystemsListed.resolve({
         items: [{ metadata: { name: 'initial-sfs', namespace: 'mcp-host' }, spec: {} }],
       })
-      await start
       await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledOnce())
+      expect(sfsCacheSizeAtFirstPass).toBe(1)
       expect((watcher as any).sharedFileSystems.get('initial-sfs')).toEqual(
         expect.objectContaining({ name: 'initial-sfs' })
       )
@@ -413,6 +431,32 @@ describe('McpServerWatcher startup', () => {
       sharedFileSystemsListed.resolve({ items: [] })
       await start.catch(() => undefined)
       await watcher.stop()
+    }
+  })
+
+  it('schedules the first Host fleet pass when the SharedFileSystem inventory never settles', async () => {
+    vi.useFakeTimers()
+    // A SharedFileSystem LIST that never settles must not strand the initial
+    // Host fleet pass: readiness can already be certified, so a Host fleet that
+    // never reconciles is invisible to every probe.
+    const neverSettles = new Promise<{ items: unknown[] }>(() => undefined)
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'sharedfilesystems') return neverSettles
+      if (plural === 'communicationchannels') {
+        return { metadata: { resourceVersion: 'sfs-stall-cc-rv' }, items: [] }
+      }
+      return { items: [] }
+    })
+    const watcher = new McpServerWatcher()
+    const start = watcher.start()
+
+    try {
+      await vi.advanceTimersByTimeAsync(config.hostFleetSfsInventoryTimeoutMs + 1000)
+      await vi.waitFor(() => expect(mocks.hostFullReconcile).toHaveBeenCalledOnce())
+    } finally {
+      await watcher.stop()
+      await start.catch(() => undefined)
+      vi.useRealTimers()
     }
   })
 
