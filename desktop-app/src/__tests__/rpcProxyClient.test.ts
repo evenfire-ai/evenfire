@@ -43,6 +43,130 @@ describe('RpcProxyClient.listSessions', () => {
       expect(fetchMock).not.toHaveBeenCalled()
     }
   )
+
+  it('accepts legacy session catalog responses that omit optional metadata', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          items: [
+            {
+              agent: 'agent-a',
+              chatId: 'chat-a',
+              turnCount: 1,
+              lastActivityAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(client.listSessions('token', 'host')).resolves.toEqual({
+      items: [
+        {
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          turnCount: 1,
+          lastActivityAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    })
+  })
+
+  it.each([NaN, Infinity, 1.5, -1, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid session catalog counts: %s',
+    async invalidCount => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({
+            items: [
+              {
+                agent: 'agent-a',
+                chatId: 'chat-a',
+                turnCount: invalidCount,
+                lastActivityAt: '2026-01-01T00:00:00.000Z',
+              },
+            ],
+          }),
+        })
+      )
+
+      await expect(client.listSessions('token', 'host')).rejects.toThrow(/turnCount/)
+    }
+  )
+
+  it('rejects a malformed sessions items container', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ items: {} }) })
+    )
+    await expect(client.listSessions('token', 'host')).rejects.toThrow(/items/)
+  })
+
+  it('accepts legacy message responses that omit optional paging metadata', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          agent: 'agent-a',
+          chatId: 'chat-a',
+          turns: [
+            {
+              number: 1,
+              user_input: 'hello',
+              started_at: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+        }),
+      })
+    )
+
+    await expect(
+      client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+    ).resolves.toMatchObject({ agent: 'agent-a', chatId: 'chat-a', turns: [{ number: 1 }] })
+  })
+
+  it.each([NaN, Infinity, 1.5, -1, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid message metadata counts: %s',
+    async invalidCount => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            agent: 'agent-a',
+            chatId: 'chat-a',
+            totalTurns: invalidCount,
+            turns: [],
+          }),
+        })
+      )
+
+      await expect(
+        client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')
+      ).rejects.toThrow(/totalTurns/)
+    }
+  )
+
+  it('rejects a message response for a different session identity', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ agent: 'agent-b', chatId: 'chat-a', turns: [] }),
+      })
+    )
+    await expect(client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')).rejects.toThrow(
+      /identity/
+    )
+  })
 })
 
 describe('RpcProxyClient.cancelTask', () => {

@@ -30,6 +30,254 @@ import {
  */
 const MODEL_NOT_ALLOWED = 'model_not_allowed'
 
+function wireObject(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Invalid ${label}`)
+  }
+  return value as Record<string, unknown>
+}
+
+function wireString(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new Error(`Invalid ${label}`)
+  return value
+}
+
+function optionalWireString(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined
+  return wireString(value, label)
+}
+
+function wireSafeInteger(
+  value: unknown,
+  label: string,
+  minimum: number,
+  optional = false
+): number | undefined {
+  if (optional && value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum) {
+    throw new Error(`Invalid ${label}`)
+  }
+  return value
+}
+
+function optionalWireBoolean(value: unknown, label: string): boolean | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'boolean') throw new Error(`Invalid ${label}`)
+  return value
+}
+
+function parseSessionState(value: unknown, label: string): SessionLifecycleState | undefined {
+  if (value === undefined) return undefined
+  if (value !== 'idle' && value !== 'processing' && value !== 'awaiting_approval') {
+    throw new Error(`Invalid ${label}`)
+  }
+  return value
+}
+
+function parsePendingApproval(value: unknown, label: string): PendingApprovalLite | undefined {
+  if (value === undefined) return undefined
+  const record = wireObject(value, label)
+  return {
+    requestId: wireString(record.requestId, `${label}.requestId`),
+    displayName: wireString(record.displayName, `${label}.displayName`),
+  }
+}
+
+function parseTokens(value: unknown, label: string): SessionTokensLite | undefined {
+  if (value === undefined) return undefined
+  const record = wireObject(value, label)
+  return {
+    input: wireSafeInteger(record.input, `${label}.input`, 0)!,
+    output: wireSafeInteger(record.output, `${label}.output`, 0)!,
+    ...(record.cacheRead !== undefined
+      ? { cacheRead: wireSafeInteger(record.cacheRead, `${label}.cacheRead`, 0)! }
+      : {}),
+    ...(record.cacheWrite !== undefined
+      ? { cacheWrite: wireSafeInteger(record.cacheWrite, `${label}.cacheWrite`, 0)! }
+      : {}),
+  }
+}
+
+function parseSessionsListResult(value: unknown): SessionsListResult {
+  const record = wireObject(value, 'sessions response')
+  if (!Array.isArray(record.items)) throw new Error('Invalid sessions response.items')
+  return {
+    items: record.items.map((item, index) => {
+      const entry = wireObject(item, `sessions response.items[${index}]`)
+      return {
+        agent: wireString(entry.agent, `sessions response.items[${index}].agent`),
+        chatId: wireString(entry.chatId, `sessions response.items[${index}].chatId`),
+        turnCount: wireSafeInteger(
+          entry.turnCount,
+          `sessions response.items[${index}].turnCount`,
+          0
+        )!,
+        ...(entry.messageCount !== undefined
+          ? {
+              messageCount: wireSafeInteger(
+                entry.messageCount,
+                `sessions response.items[${index}].messageCount`,
+                0
+              )!,
+            }
+          : {}),
+        lastActivityAt: wireString(
+          entry.lastActivityAt,
+          `sessions response.items[${index}].lastActivityAt`
+        ),
+        ...(entry.state !== undefined
+          ? { state: parseSessionState(entry.state, `sessions response.items[${index}].state`) }
+          : {}),
+        ...(entry.activeTaskId !== undefined
+          ? {
+              activeTaskId: optionalWireString(
+                entry.activeTaskId,
+                `sessions response.items[${index}].activeTaskId`
+              ),
+            }
+          : {}),
+        ...(entry.pendingApproval !== undefined
+          ? {
+              pendingApproval: parsePendingApproval(
+                entry.pendingApproval,
+                `sessions response.items[${index}].pendingApproval`
+              ),
+            }
+          : {}),
+        ...(entry.tokens !== undefined
+          ? { tokens: parseTokens(entry.tokens, `sessions response.items[${index}].tokens`) }
+          : {}),
+      }
+    }),
+    ...(record.nextCursor !== undefined
+      ? { nextCursor: wireString(record.nextCursor, 'sessions response.nextCursor') }
+      : {}),
+  }
+}
+
+function parseSessionMessagesResult(
+  value: unknown,
+  expectedAgent: string,
+  expectedChatId: string
+): SessionMessagesResult {
+  const record = wireObject(value, 'session messages response')
+  const agent = wireString(record.agent, 'session messages response.agent')
+  const chatId = wireString(record.chatId, 'session messages response.chatId')
+  if (agent !== expectedAgent || chatId !== expectedChatId) {
+    throw new Error('Invalid session messages response identity')
+  }
+  if (!Array.isArray(record.turns)) throw new Error('Invalid session messages response.turns')
+  return {
+    agent,
+    chatId,
+    ...(record.totalTurns !== undefined
+      ? {
+          totalTurns: wireSafeInteger(
+            record.totalTurns,
+            'session messages response.totalTurns',
+            0
+          )!,
+        }
+      : {}),
+    ...(record.oldestTurnNumber !== undefined
+      ? {
+          oldestTurnNumber: wireSafeInteger(
+            record.oldestTurnNumber,
+            'session messages response.oldestTurnNumber',
+            1
+          )!,
+        }
+      : {}),
+    ...(record.latestTurnNumber !== undefined
+      ? {
+          latestTurnNumber: wireSafeInteger(
+            record.latestTurnNumber,
+            'session messages response.latestTurnNumber',
+            1
+          )!,
+        }
+      : {}),
+    ...(record.hasMoreBefore !== undefined
+      ? {
+          hasMoreBefore: optionalWireBoolean(
+            record.hasMoreBefore,
+            'session messages response.hasMoreBefore'
+          ),
+        }
+      : {}),
+    ...(record.hasMoreAfter !== undefined
+      ? {
+          hasMoreAfter: optionalWireBoolean(
+            record.hasMoreAfter,
+            'session messages response.hasMoreAfter'
+          ),
+        }
+      : {}),
+    ...(record.state !== undefined
+      ? { state: parseSessionState(record.state, 'session messages response.state') }
+      : {}),
+    ...(record.activeTaskId !== undefined
+      ? {
+          activeTaskId: optionalWireString(
+            record.activeTaskId,
+            'session messages response.activeTaskId'
+          ),
+        }
+      : {}),
+    ...(record.pendingApproval !== undefined
+      ? {
+          pendingApproval: parsePendingApproval(
+            record.pendingApproval,
+            'session messages response.pendingApproval'
+          ),
+        }
+      : {}),
+    ...(record.tokens !== undefined
+      ? { tokens: parseTokens(record.tokens, 'session messages response.tokens') }
+      : {}),
+    turns: record.turns.map((turn, index) => {
+      const entry = wireObject(turn, `session messages response.turns[${index}]`)
+      return {
+        number: wireSafeInteger(
+          entry.number,
+          `session messages response.turns[${index}].number`,
+          1
+        )!,
+        user_input: wireString(
+          entry.user_input,
+          `session messages response.turns[${index}].user_input`
+        ),
+        ...(entry.response !== undefined
+          ? {
+              response: optionalWireString(
+                entry.response,
+                `session messages response.turns[${index}].response`
+              ),
+            }
+          : {}),
+        started_at: wireString(
+          entry.started_at,
+          `session messages response.turns[${index}].started_at`
+        ),
+        ...(entry.completed_at !== undefined
+          ? {
+              completed_at: optionalWireString(
+                entry.completed_at,
+                `session messages response.turns[${index}].completed_at`
+              ),
+            }
+          : {}),
+        ...(entry.tokens !== undefined
+          ? {
+              tokens: parseTokens(entry.tokens, `session messages response.turns[${index}].tokens`),
+            }
+          : {}),
+        ...(entry.tool_steps !== undefined ? { tool_steps: entry.tool_steps as never } : {}),
+      }
+    }),
+  }
+}
+
 /**
  * mcp-host answers HTTP 200 with `{success:false, error}` when an approval was
  * already decided by another channel (spec-v2 §4.7.4). Parse the body into a
@@ -568,7 +816,7 @@ export class RpcProxyClient {
         body
       )
     }
-    return response.json() as Promise<SessionsListResult>
+    return parseSessionsListResult(await response.json())
   }
 
   async loadSessionMessages(
@@ -613,7 +861,7 @@ export class RpcProxyClient {
     // F5: cast to the full wire shape — the server returns `state`/`activeTaskId`/
     // `pendingApproval` + per-turn `tool_steps`, and the renderer's recovery path
     // reads them. The previous cast dropped them, silently weakening the contract.
-    return response.json() as Promise<SessionMessagesResult>
+    return parseSessionMessagesResult(await response.json(), agent, chatId)
   }
 
   /**
