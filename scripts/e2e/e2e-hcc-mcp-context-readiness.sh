@@ -73,6 +73,7 @@ ORIGINAL_REPLICAS=""
 ORIGINAL_DNS_POLICY=""
 ORIGINAL_DNS_CONFIG=""
 DNS_BLOCKER_IP=""
+DNS_RELEASE_COUNT_AT_HOLD=0
 UPSTREAM_DNS_IP=""
 NEW_HCC_POD=""
 HCC_UID=""
@@ -150,6 +151,17 @@ dns_log_contains() {
   logs="$(kctl logs "deployment/${DNS_BLOCKER_NAME}" -n "$HCC_NS" 2>/dev/null)" ||
     return 1
   grep -Fq "$marker" <<<"$logs"
+}
+
+dns_release_count() {
+  local marker="released DNS A ${TARGET_DNS}" logs
+  logs="$(kctl logs "deployment/${DNS_BLOCKER_NAME}" -n "$HCC_NS" 2>/dev/null)" ||
+    return 1
+  grep -Fc "$marker" <<<"$logs" || true
+}
+
+dns_has_not_released_since_hold() {
+  [ "$(dns_release_count)" = "$DNS_RELEASE_COUNT_AT_HOLD" ]
 }
 
 startup_convergence_window_is_clean() {
@@ -1052,6 +1064,8 @@ external_egress_policy_converged_with_protocol "$INITIAL_EXTERNAL_EGRESS_PROTOCO
   die "the actual initial external-egress policy disappeared before the revision"
 
 hold_dns_blocker || die "could not hold the next fixture DNS query"
+DNS_RELEASE_COUNT_AT_HOLD="$(dns_release_count)" ||
+  die "could not capture the DNS release baseline before the held revision"
 egress_patch="$(jq -cn --arg dns "$TARGET_DNS" \
   '{spec:{egressBindings:[{dns:$dns,port:443,protocol:"UDP"}]}}')"
 kctl patch mcpserver "$MCP_NAME" -n "$MCP_NS" --type=merge \
@@ -1085,7 +1099,7 @@ wait_until 120 "replacement HCC pod and Deployment to become Kubernetes Ready du
   die "HCC did not become Kubernetes Ready while initial McpServer convergence remained blocked"
 dns_log_contains "holding DNS A ${TARGET_DNS}" ||
   die "DNS hold ended before Kubernetes reported HCC Ready"
-if dns_log_contains "released DNS A ${TARGET_DNS}"; then
+if ! dns_has_not_released_since_hold; then
   die "DNS blocker released the McpServer query before Kubernetes reported HCC Ready"
 fi
 fixture_mcp_runtime_absent ||
@@ -1140,7 +1154,7 @@ fixture_mcp_convergence_absent ||
   die "McpServer runtime or external-egress policy escaped the deterministic DNS hold boundary"
 dns_log_contains "holding DNS A ${TARGET_DNS}" ||
   die "DNS hold evidence disappeared before Context policy convergence"
-if dns_log_contains "released DNS A ${TARGET_DNS}"; then
+if ! dns_has_not_released_since_hold; then
   die "DNS blocker released the McpServer query before the Context isolation assertion"
 fi
 post_context_probe="$(probe_hcc_during_block)" ||
