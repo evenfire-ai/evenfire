@@ -157,4 +157,76 @@ describe('AuthPage', () => {
 
     expect(handleSelectRuntimeConfig).toHaveBeenCalledWith(LOCALHOST_RUNTIME_CONFIG_OPTION_ID)
   })
+
+  it('clears the selected localhost environment when clicked again', async () => {
+    const user = userEvent.setup()
+    const handleSelectRuntimeConfig = vi.fn()
+    const handleClearRuntimeConfigSelection = vi.fn()
+
+    renderAuthPage({
+      runtimeConfigState: {
+        configured: true,
+        isLocalhost: true,
+        selectorVisible: true,
+        activeOptionId: LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
+        envKey: 'http_127_0_0_1_8091-eaf18b680d58',
+        storagePath: '/tmp/evenfire-runtime-config',
+        options: [
+          {
+            id: LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
+            label: 'Localhost',
+            source: 'localhost',
+            configPath: null,
+            externalRestApiBaseUrl: 'http://127.0.0.1:8091',
+            rpcProxyBaseUrl: 'http://127.0.0.1:8094',
+            appName: 'Localhost',
+          },
+        ],
+      },
+      handleSelectRuntimeConfig,
+      handleClearRuntimeConfigSelection,
+    })
+
+    await user.click(screen.getByLabelText('Open environment selector'))
+    await user.click(screen.getByRole('button', { name: 'Localhost' }))
+
+    expect(handleSelectRuntimeConfig).not.toHaveBeenCalled()
+    expect(handleClearRuntimeConfigSelection).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not clear an active saved environment when clicked again', async () => {
+    const user = userEvent.setup()
+    const handleSelectRuntimeConfig = vi.fn()
+    const handleClearRuntimeConfigSelection = vi.fn()
+
+    renderAuthPage({
+      runtimeConfigState: {
+        configured: true,
+        isLocalhost: false,
+        selectorVisible: true,
+        activeOptionId: 'saved-dev',
+        envKey: 'saved-dev-key',
+        storagePath: '/tmp/evenfire-runtime-config',
+        options: [
+          {
+            id: 'saved-dev',
+            label: 'Development',
+            source: 'file',
+            configPath: '/tmp/evenfire-runtime-config/dev.json',
+            externalRestApiBaseUrl: 'https://api.example.com',
+            rpcProxyBaseUrl: 'https://rpc.example.com',
+            appName: 'Development',
+          },
+        ],
+      },
+      handleSelectRuntimeConfig,
+      handleClearRuntimeConfigSelection,
+    })
+
+    await user.click(screen.getByLabelText('Open environment selector'))
+    await user.click(screen.getByRole('button', { name: 'Development' }))
+
+    expect(handleSelectRuntimeConfig).not.toHaveBeenCalled()
+    expect(handleClearRuntimeConfigSelection).not.toHaveBeenCalled()
+  })
 })

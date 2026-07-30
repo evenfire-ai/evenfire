@@ -11,6 +11,7 @@
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import type { MessageToolStep } from '../../../../../src/types'
 import type { AgentChatMessage, TaskProgress } from '../../../uiTypes'
 // vi.mock calls are hoisted above this import, so ChatThread binds the mocks.
@@ -34,6 +35,9 @@ let threadStateValue: {
   activeChatId: string | null
   activityByMessageId: Record<string, unknown>
   progressByMessageId: Record<string, TaskProgress>
+  hasOlderMessages: boolean
+  olderMessagesLoading: boolean
+  handleLoadOlderMessages: ReturnType<typeof vi.fn>
 }
 
 vi.mock('@contexts/NavigationContext', () => ({ useNavigationContext: () => navValue }))
@@ -85,7 +89,8 @@ const toolSteps: MessageToolStep[] = [
 
 function setThreadState(
   groupedMessages: typeof threadStateValue.groupedMessages,
-  progressByMessageId: Record<string, TaskProgress> = {}
+  progressByMessageId: Record<string, TaskProgress> = {},
+  options: { hasOlderMessages?: boolean; olderMessagesLoading?: boolean } = {}
 ) {
   const activeMessages = groupedMessages.flatMap(g => g.items)
   threadStateValue = {
@@ -95,6 +100,9 @@ function setThreadState(
     activeChatId: 'c1',
     activityByMessageId: {},
     progressByMessageId,
+    hasOlderMessages: options.hasOlderMessages ?? false,
+    olderMessagesLoading: options.olderMessagesLoading ?? false,
+    handleLoadOlderMessages: vi.fn().mockResolvedValue(undefined),
   }
 }
 
@@ -208,5 +216,39 @@ describe('ChatThread tool-steps fallback (#582)', () => {
     // Live progress has 1 step → "1 tool"; the hydrated fallback (2 steps) must NOT render.
     expect(screen.getByText(/More details · 1 tool\b/i)).toBeTruthy()
     expect(screen.queryByText(/More details · 2 tools/i)).toBeNull()
+  })
+
+  it('renders and invokes the older-history page control', async () => {
+    const user = userEvent.setup()
+    setThreadState([{ role: 'user', items: [userMsg] }], {}, { hasOlderMessages: true })
+
+    render(<ChatThread />)
+
+    await user.click(screen.getByRole('button', { name: 'Load older messages' }))
+    expect(threadStateValue.handleLoadOlderMessages).toHaveBeenCalledTimes(1)
+  })
+
+  it('wraps long histories in virtualized message chunks', () => {
+    const groups = Array.from({ length: 10 }, (_, index) => {
+      const role = index % 2 === 0 ? ('user' as const) : ('assistant' as const)
+      const turn = Math.floor(index / 2) + 1
+      return {
+        role,
+        items: [
+          {
+            id: `turn-${turn}-${role}`,
+            role,
+            content: `${role} ${turn}`,
+            timestamp: index,
+            serverTurnNumber: turn,
+          },
+        ],
+      }
+    })
+    setThreadState(groups)
+
+    const { container } = render(<ChatThread />)
+
+    expect(container.querySelectorAll('.virtualized-message-chunk').length).toBeGreaterThan(1)
   })
 })

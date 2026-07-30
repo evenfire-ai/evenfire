@@ -12,8 +12,11 @@ import {
   PendingApprovalLite,
   RpcAllowedServersResult,
   SessionLifecycleState,
+  SessionMessagesQuery,
   SessionMessagesResult,
   SessionTokensLite,
+  SessionsListQuery,
+  SessionsListResult,
   SetHostModelResult,
 } from './types.js'
 
@@ -25,6 +28,12 @@ import {
  * convention used by {@link RpcProxyClient.loadSessionMessages}.
  */
 const MODEL_NOT_ALLOWED = 'model_not_allowed'
+
+function assertSafePathSegment(label: string, value: string): void {
+  if (!value || value === '.' || value === '..' || /[/\\\0]/.test(value)) {
+    throw new Error(`Invalid ${label}: unsafe path segment`)
+  }
+}
 
 /**
  * mcp-host answers HTTP 200 with `{success:false, error}` when an approval was
@@ -544,23 +553,15 @@ export class RpcProxyClient {
 
   async listSessions(
     rpcToken: string,
-    hostRef: string
-  ): Promise<{
-    items: Array<{
-      agent: string
-      chatId: string
-      turnCount: number
-      lastActivityAt: string
-      // V5: the wire already carries these per-session recovery fields
-      // (mcp-host `main.ts` `...sessionStateView(conversation)`); only the TS
-      // return type used to omit them, hiding the batch badge seeding source.
-      state?: SessionLifecycleState
-      activeTaskId?: string
-      pendingApproval?: PendingApprovalLite
-      tokens?: SessionTokensLite
-    }>
-  }> {
-    const response = await fetch(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions`), {
+    hostRef: string,
+    query: SessionsListQuery = {}
+  ): Promise<SessionsListResult> {
+    assertSafePathSegment('hostRef', hostRef)
+    const requestUrl = new URL(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions`))
+    if (query.agent) requestUrl.searchParams.set('agent', query.agent)
+    if (query.limit !== undefined) requestUrl.searchParams.set('limit', String(query.limit))
+    if (query.cursor) requestUrl.searchParams.set('cursor', query.cursor)
+    const response = await fetch(requestUrl, {
       headers: { authorization: `Bearer ${rpcToken}` },
       signal: withTimeout(),
     })
@@ -572,32 +573,35 @@ export class RpcProxyClient {
         body
       )
     }
-    return response.json() as Promise<{
-      items: Array<{
-        agent: string
-        chatId: string
-        turnCount: number
-        lastActivityAt: string
-        state?: SessionLifecycleState
-        activeTaskId?: string
-        pendingApproval?: PendingApprovalLite
-        tokens?: SessionTokensLite
-      }>
-    }>
+    return response.json() as Promise<SessionsListResult>
   }
 
   async loadSessionMessages(
     rpcToken: string,
     hostRef: string,
     agent: string,
-    chatId: string
+    chatId: string,
+    query: SessionMessagesQuery = {}
   ): Promise<SessionMessagesResult> {
-    const response = await fetch(
+    assertSafePathSegment('hostRef', hostRef)
+    assertSafePathSegment('agent', agent)
+    assertSafePathSegment('chatId', chatId)
+    const requestUrl = new URL(
       url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
-      ),
-      { headers: { authorization: `Bearer ${rpcToken}` }, signal: withTimeout() }
+      )
     )
+    if (query.limit !== undefined) requestUrl.searchParams.set('limit', String(query.limit))
+    if (query.beforeTurn !== undefined) {
+      requestUrl.searchParams.set('beforeTurn', String(query.beforeTurn))
+    }
+    if (query.afterTurn !== undefined) {
+      requestUrl.searchParams.set('afterTurn', String(query.afterTurn))
+    }
+    const response = await fetch(requestUrl, {
+      headers: { authorization: `Bearer ${rpcToken}` },
+      signal: withTimeout(),
+    })
     if (response.status === 404) {
       // Keep the '404' token in the message: the renderer's `isHttp404` matches on
       // it to evict a stale local chat.
@@ -632,6 +636,9 @@ export class RpcProxyClient {
     agent: string,
     chatId: string
   ): Promise<ContextBreakdownResult> {
+    assertSafePathSegment('hostRef', hostRef)
+    assertSafePathSegment('agent', agent)
+    assertSafePathSegment('chatId', chatId)
     const response = await fetch(
       url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`

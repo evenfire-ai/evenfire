@@ -62,11 +62,15 @@ export type AgentChatMessage = {
   role: AgentChatRole
   content: string
   timestamp: number
+  /** Authoritative server turn ordinal used for delta reconciliation and paging. */
+  serverTurnNumber?: number
   /** mcp-host task that produced/owns this message — used to rejoin after reload (D.3, v2). */
   task_id?: string
   attachments?: ChatMessageAttachment[]
   /** True when this message represents a structured error returned by mcp-host. */
   isError?: boolean
+  /** Local-only durable message that must not be evicted by server window reconciliation. */
+  preserveLocal?: boolean
   /** LLM error code, e.g. "LLM_AUTHENTICATION_FAILED". Present when isError is true. */
   errorCode?: string
   /** LLM provider name, e.g. "zai". Present when isError is true. */

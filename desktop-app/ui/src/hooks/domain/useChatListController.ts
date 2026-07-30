@@ -1,8 +1,11 @@
 import { type MutableRefObject, useCallback, useEffect, useRef, useState } from 'react'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
-import type { ChatIndex, ChatMetadata } from '../../../../src/types'
+import type { ChatIndex, ChatMetadata, SessionsListResult } from '../../../../src/types'
+import { scheduleAfterFirstPaint } from '../scheduleAfterFirstPaint'
 import type { useChatStore } from '../useChatStore'
 import { type SessionFsmEvent, type SessionFsmStore, seedSessionSnapshots } from './sessionFsm'
+
+const SESSION_CATALOG_PAGE_LIMIT = 50
 
 /**
  * useChatListController (spec-v2 §4.4) — owns the whole sidebar chat-list
@@ -30,7 +33,6 @@ import { type SessionFsmEvent, type SessionFsmStore, seedSessionSnapshots } from
 
 export interface SidebarChatEntry extends ChatMetadata {
   remote?: boolean
-  turnCount?: number
 }
 
 /** Cross-agent sidebar entry (dev's `latestChatSessions`): a chat plus its owning agent. */
@@ -55,12 +57,17 @@ export interface ChatListControllerHost {
   dispatchSession: (chatKey: string, event: SessionFsmEvent) => void
   clearComposerDraft: (chatId: string) => void
   getActiveChatId: () => string | null
+  getAutoSelectedChatId: () => string | null
+  markAutoSelectedChat: (chatId: string | null) => void
+  shouldAutoSelectLatest: () => boolean
 }
 
 interface UseChatListControllerParams {
   selectedAgent: string | null
   agentNames: string[]
   isAuthenticated: boolean
+  scopeKey: string
+  loadMenuData: boolean
   chatStore: ReturnType<typeof useChatStore>
   fsm: SessionFsmStore
   host: MutableRefObject<ChatListControllerHost | null>
@@ -69,10 +76,31 @@ interface UseChatListControllerParams {
 const byUpdatedDesc = (a: { updatedAt: string }, b: { updatedAt: string }) =>
   new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
 
+function isRecoverableCatalogCursorError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /\b4\d\d\b/.test(message) || message.toLowerCase().includes('invalid')
+}
+
+function dedupeSidebarChats<T extends SidebarChatEntry>(chats: T[]): T[] {
+  const seen = new Set<string>()
+  return chats.filter(chat => {
+    if (seen.has(chat.id)) return false
+    seen.add(chat.id)
+    return true
+  })
+}
+
+function knownServerMessageCount(session: SessionsListResult['items'][number]): number {
+  const count = session.messageCount
+  return typeof count === 'number' && Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0
+}
+
 export function useChatListController({
   selectedAgent,
   agentNames,
   isAuthenticated,
+  scopeKey,
+  loadMenuData,
   chatStore,
   fsm,
   host,
@@ -80,12 +108,23 @@ export function useChatListController({
   // Per-agent list for the SELECTED agent (the sidebar's chat list).
   const [chatList, setChatList] = useState<SidebarChatEntry[]>([])
   const [chatListLoading, setChatListLoading] = useState(false)
+  const [chatListMoreLoading, setChatListMoreLoading] = useState(false)
+  const [chatListHasMoreRemoteSessions, setChatListHasMoreRemoteSessions] = useState(false)
   // Cross-agent "Latest sessions" list (badges live in the FSM, seeded below).
   const [latestChatSessions, setLatestChatSessions] = useState<LatestSidebarChatEntry[]>([])
   const [latestChatSessionsLoading, setLatestChatSessionsLoading] = useState(false)
   // Selection requested for an agent before its chats have loaded, consumed by
   // the parent's agent-selection effect. Ref (not state): imperative, per-agent.
   const pendingChatSelectionByAgentRef = useRef<Record<string, PendingChatSelection>>({})
+  const suppressAutoSelectionByAgentRef = useRef<Map<string, number>>(new Map())
+  const suppressAutoSelectionSequenceRef = useRef(0)
+  const chatListNextCursorByAgentRef = useRef<Record<string, string | null | undefined>>({})
+  const chatListLoadingMoreByAgentRef = useRef<Set<string>>(new Set())
+  const requestGenerationRef = useRef(0)
+
+  useEffect(() => {
+    requestGenerationRef.current += 1
+  }, [isAuthenticated, scopeKey])
 
   // Live `selectedAgent` for the stable callbacks below (they gate a chatList
   // write on "is this the selected agent"). A ref keeps the callbacks stable
@@ -93,6 +132,17 @@ export function useChatListController({
   const selectedAgentRef = useRef(selectedAgent)
   useEffect(() => {
     selectedAgentRef.current = selectedAgent
+    setChatListHasMoreRemoteSessions(
+      Boolean(selectedAgent && chatListNextCursorByAgentRef.current[selectedAgent])
+    )
+    setChatListMoreLoading(
+      Boolean(selectedAgent && chatListLoadingMoreByAgentRef.current.has(selectedAgent))
+    )
+    return () => {
+      if (selectedAgentRef.current === selectedAgent) {
+        selectedAgentRef.current = null
+      }
+    }
   }, [selectedAgent])
 
   // ─── Cross-agent latest-sessions mutators ───
@@ -117,42 +167,177 @@ export function useChatListController({
 
   const loadChatListOnce = useCallback(
     async (agentRef: string): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] }> => {
-      const [index, serverResult] = await Promise.all([
-        chatStore.getIndex(agentRef),
-        chatStore.listSessions(agentRef).catch(() => ({ items: [] })),
-      ])
-
-      const localChats: SidebarChatEntry[] = index.chats
-      const localIds = new Set(localChats.map(c => c.id))
-      const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
-
-      // Seed sidebar session state (state/activeTaskId/pendingApproval/tokens) for
-      // badges via SERVER_SNAPSHOT (D4 / §4.1 R2 owns "never degrade a live task").
-      seedSessionSnapshots(fsm, agentRef, serverSessions)
-
-      // Chats the server knows but the local cache doesn't (e.g. created on
-      // another device). Post-§7.1 wipe these are normal entries — no "Remote ·"
-      // label, no isRemote branch; switchToChat's unified path hydrates them.
-      const fromServerOnly: SidebarChatEntry[] = serverSessions
-        .filter(s => !localIds.has(s.chatId))
-        .map(s => ({
-          id: s.chatId,
-          title: `Chat ${s.chatId.slice(0, 8)}`,
-          createdAt: s.lastActivityAt,
-          updatedAt: s.lastActivityAt,
-          messageCount: 0,
-        }))
-
-      const merged = [...localChats, ...fromServerOnly].sort(byUpdatedDesc)
+      chatListNextCursorByAgentRef.current[agentRef] = null
+      if (selectedAgentRef.current === agentRef) {
+        setChatListHasMoreRemoteSessions(false)
+        setChatListMoreLoading(false)
+      }
+      const index = await chatStore.getIndex(agentRef)
+      const merged = [...index.chats].sort(byUpdatedDesc)
       setChatList(merged)
 
-      // Persist server freshness into the local index (spec §5.3): keeps the
-      // durable sidebar order aligned with the source of truth. A pure tail
-      // effect that does NOT affect this render — the merge above sorts local
-      // chats by their (possibly stale) local `updatedAt`, so a chat whose
-      // server `lastActivityAt` is newer only re-sorts on the next cold start
-      // from this persisted reconcile. Best-effort: must never block or fail the
-      // load (fully swallowed).
+      const requestGeneration = requestGenerationRef.current
+      const suppressionMarkerAtRequest = suppressAutoSelectionByAgentRef.current.get(agentRef)
+      scheduleAfterFirstPaint(async () => {
+        const serverResult = await chatStore
+          .listSessions(agentRef, { agent: agentRef, limit: SESSION_CATALOG_PAGE_LIMIT })
+          .catch((): SessionsListResult => ({ items: [] }))
+        if (
+          selectedAgentRef.current !== agentRef ||
+          requestGenerationRef.current !== requestGeneration
+        ) {
+          if (
+            suppressionMarkerAtRequest !== undefined &&
+            suppressAutoSelectionByAgentRef.current.get(agentRef) === suppressionMarkerAtRequest
+          ) {
+            suppressAutoSelectionByAgentRef.current.delete(agentRef)
+          }
+          return
+        }
+
+        // New hosts scope the page server-side. Keep this boundary check for
+        // older hosts and malformed proxy responses so another agent's catalog
+        // entry can never leak into the selected agent's sidebar.
+        const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
+        chatListNextCursorByAgentRef.current[agentRef] = serverResult.nextCursor ?? null
+        setChatListHasMoreRemoteSessions(Boolean(serverResult.nextCursor))
+
+        // Seed sidebar session state (state/activeTaskId/pendingApproval/tokens)
+        // for badges via SERVER_SNAPSHOT (D4 / §4.1 R2 owns "never degrade a live
+        // task").
+        seedSessionSnapshots(fsm, agentRef, serverSessions)
+
+        // Chats the server knows but the local cache doesn't (e.g. created on
+        // another device). Post-§7.1 wipe these are normal entries — no
+        // "Remote ·" label, no isRemote branch; switchToChat's unified path
+        // hydrates them.
+        setChatList(previous => {
+          const dedupedPrevious = dedupeSidebarChats(previous)
+          const knownIds = new Set(dedupedPrevious.map(c => c.id))
+          const fromServerOnly: SidebarChatEntry[] = serverSessions
+            .filter(s => !knownIds.has(s.chatId))
+            .map(s => ({
+              id: s.chatId,
+              title: `Chat ${s.chatId.slice(0, 8)}`,
+              createdAt: s.lastActivityAt,
+              updatedAt: s.lastActivityAt,
+              // Older hosts omit messageCount. Keep that unknown value at zero
+              // instead of fabricating two messages per turn and overstating
+              // Activity totals when tool/system messages vary by session.
+              messageCount: knownServerMessageCount(s),
+              remote: true,
+            }))
+          return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
+        })
+
+        const latestServerSession = serverSessions[0]
+        // A mode:none request suppresses this one deferred catalog result. Consume
+        // it here, after the post-paint continuation reaches the auto-select gate,
+        // instead of clearing it with the synchronous local-index selection.
+        const suppressAutoSelection = suppressAutoSelectionByAgentRef.current.delete(agentRef)
+        const currentHost = host.current
+        const activeChatId = currentHost?.getActiveChatId() ?? null
+        const autoSelectedChatId = currentHost?.getAutoSelectedChatId() ?? null
+        const selectedLocalChat = activeChatId
+          ? merged.find(chat => chat.id === activeChatId)
+          : undefined
+        const serverIsNewerThanSelection =
+          !selectedLocalChat ||
+          Date.parse(latestServerSession?.lastActivityAt ?? '') >
+            Date.parse(selectedLocalChat.updatedAt)
+        if (
+          currentHost &&
+          latestServerSession &&
+          (activeChatId === null || activeChatId === autoSelectedChatId) &&
+          activeChatId !== latestServerSession.chatId &&
+          serverIsNewerThanSelection &&
+          currentHost.shouldAutoSelectLatest() &&
+          !suppressAutoSelection
+        ) {
+          currentHost.markAutoSelectedChat(latestServerSession.chatId)
+          void currentHost.switchToChat(agentRef, latestServerSession.chatId)
+        }
+
+        // Persist server freshness into the local index (spec §5.3): keeps the
+        // durable sidebar order aligned with the source of truth. Best-effort:
+        // must never block or fail the visible local-cache render.
+        try {
+          void chatStore
+            .reconcileServerSessions(
+              agentRef,
+              serverSessions.map(s => ({ chatId: s.chatId, lastActivityAt: s.lastActivityAt }))
+            )
+            .catch(() => undefined)
+        } catch {
+          // ignore — reconciliation is best-effort freshness only
+        }
+      })
+
+      return { index, merged }
+    },
+    [chatStore.getIndex, chatStore.listSessions, chatStore.reconcileServerSessions, fsm]
+  )
+
+  const loadMoreChatSessions = useCallback(async () => {
+    const agentRef = selectedAgentRef.current
+    if (!agentRef) return
+
+    const cursor = chatListNextCursorByAgentRef.current[agentRef]
+    if (!cursor) {
+      setChatListHasMoreRemoteSessions(false)
+      return
+    }
+    if (chatListLoadingMoreByAgentRef.current.has(agentRef)) return
+
+    chatListLoadingMoreByAgentRef.current.add(agentRef)
+    const requestGeneration = requestGenerationRef.current
+    setChatListMoreLoading(true)
+    try {
+      let serverResult: SessionsListResult
+      try {
+        serverResult = await chatStore.listSessions(
+          agentRef,
+          { agent: agentRef, limit: SESSION_CATALOG_PAGE_LIMIT, cursor },
+          { force: true }
+        )
+      } catch (error) {
+        if (
+          requestGenerationRef.current === requestGeneration &&
+          selectedAgentRef.current === agentRef
+        ) {
+          if (isRecoverableCatalogCursorError(error)) {
+            chatListNextCursorByAgentRef.current[agentRef] = null
+            setChatListHasMoreRemoteSessions(false)
+          } else {
+            setChatListHasMoreRemoteSessions(true)
+          }
+        }
+        return
+      }
+      if (requestGenerationRef.current !== requestGeneration) return
+
+      const serverSessions = serverResult.items.filter(s => s.agent === agentRef)
+      if (selectedAgentRef.current !== agentRef) return
+
+      chatListNextCursorByAgentRef.current[agentRef] = serverResult.nextCursor ?? null
+      setChatListHasMoreRemoteSessions(Boolean(serverResult.nextCursor))
+      seedSessionSnapshots(fsm, agentRef, serverSessions)
+      setChatList(previous => {
+        const dedupedPrevious = dedupeSidebarChats(previous)
+        const knownIds = new Set(dedupedPrevious.map(c => c.id))
+        const fromServerOnly: SidebarChatEntry[] = serverSessions
+          .filter(s => !knownIds.has(s.chatId))
+          .map(s => ({
+            id: s.chatId,
+            title: `Chat ${s.chatId.slice(0, 8)}`,
+            createdAt: s.lastActivityAt,
+            updatedAt: s.lastActivityAt,
+            messageCount: knownServerMessageCount(s),
+            remote: true,
+          }))
+        return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
+      })
+
       try {
         void chatStore
           .reconcileServerSessions(
@@ -163,11 +348,13 @@ export function useChatListController({
       } catch {
         // ignore — reconciliation is best-effort freshness only
       }
-
-      return { index, merged }
-    },
-    [chatStore.getIndex, chatStore.listSessions, chatStore.reconcileServerSessions, fsm]
-  )
+    } finally {
+      chatListLoadingMoreByAgentRef.current.delete(agentRef)
+      if (selectedAgentRef.current === agentRef) {
+        setChatListMoreLoading(false)
+      }
+    }
+  }, [chatStore.listSessions, chatStore.reconcileServerSessions, fsm])
 
   const loadChatList = useCallback(
     async (agentRef: string): Promise<{ index: ChatIndex; merged: SidebarChatEntry[] } | null> => {
@@ -196,7 +383,14 @@ export function useChatListController({
   // ─── Narrow chatList mutation API (called by the parent's remaining flows) ───
 
   /** Reset the selected agent's list (logout teardown / load failure). */
-  const clearList = useCallback(() => setChatList([]), [])
+  const clearList = useCallback(() => {
+    chatListNextCursorByAgentRef.current = {}
+    chatListLoadingMoreByAgentRef.current.clear()
+    suppressAutoSelectionByAgentRef.current.clear()
+    setChatList([])
+    setChatListMoreLoading(false)
+    setChatListHasMoreRemoteSessions(false)
+  }, [])
 
   /** Sidebar badge mirror: mark/clear the `unreadTerminal` flag by chat id. */
   const markUnreadInList = useCallback((chatId: string) => {
@@ -257,7 +451,7 @@ export function useChatListController({
   const upsertHydratedEntry = useCallback((meta: ChatMetadata, title: string) => {
     setChatList(prev =>
       prev.some(c => c.id === meta.id)
-        ? prev.map(c => (c.id === meta.id ? { ...c, title } : c))
+        ? prev.map(c => (c.id === meta.id ? { ...c, ...meta, title, remote: false } : c))
         : [...prev, { ...meta, title }]
     )
   }, [])
@@ -292,7 +486,10 @@ export function useChatListController({
   /** Append a freshly-created chat to both lists (create / send auto-create). */
   const appendNewEntry = useCallback(
     (agentRef: string, meta: ChatMetadata) => {
-      setChatList(prev => [...prev, meta])
+      setChatList(prev => {
+        const next = prev.some(chat => chat.id === meta.id) ? prev : [...prev, meta]
+        return dedupeSidebarChats(next)
+      })
       upsertLatestChatSession(agentRef, meta)
     },
     [upsertLatestChatSession]
@@ -308,6 +505,15 @@ export function useChatListController({
   const writePendingSelection = useCallback(
     (agentName: string, selection: PendingChatSelection) => {
       pendingChatSelectionByAgentRef.current[agentName] = selection
+      if (selection.mode === 'none') {
+        suppressAutoSelectionSequenceRef.current += 1
+        suppressAutoSelectionByAgentRef.current.set(
+          agentName,
+          suppressAutoSelectionSequenceRef.current
+        )
+      } else {
+        suppressAutoSelectionByAgentRef.current.delete(agentName)
+      }
     },
     []
   )
@@ -322,7 +528,9 @@ export function useChatListController({
     if (!agentRef) return
     const chatId = crypto.randomUUID()
     const meta = await chatStore.createChat(agentRef, chatId)
+    chatStore.clearCachedRemoteData()
     appendNewEntry(agentRef, meta)
+    host.current?.markAutoSelectedChat(null)
     await host.current?.switchToChat(agentRef, chatId)
     host.current?.scrollChatToBottom()
   }, [chatStore, appendNewEntry, host])
@@ -372,6 +580,7 @@ export function useChatListController({
       // FIRST (before the delete), preserving the ack-before-delete ordering.
       host.current?.dispatchSession(deletedKey, { type: 'CHAT_DELETED' })
       await chatStore.deleteChat(agentRef, chatId)
+      chatStore.clearCachedRemoteData()
       host.current?.clearComposerDraft(chatId)
       removeLatestChatSession(agentRef, chatId)
       // Post-await guards read the LIVE committed values (selectedAgentRef /
@@ -410,7 +619,7 @@ export function useChatListController({
   // ─── Cross-agent latest-sessions loader (seeds badges via SERVER_SNAPSHOT) ───
 
   useEffect(() => {
-    if (!isAuthenticated || !agentNames.length) {
+    if (!isAuthenticated || !loadMenuData || !agentNames.length) {
       setLatestChatSessions([])
       setLatestChatSessionsLoading(false)
       return
@@ -420,51 +629,71 @@ export function useChatListController({
     setLatestChatSessionsLoading(true)
     ;(async () => {
       try {
-        const sessionGroups = await Promise.all(
+        const localGroups = await Promise.all(
           agentNames.map(async agentRef => {
             try {
-              const [index, serverResult] = await Promise.all([
-                chatStore.getIndex(agentRef),
-                chatStore.listSessions(agentRef).catch(() => ({ items: [] })),
-              ])
-              const localChats: LatestSidebarChatEntry[] = index.chats.map(chat => ({
-                ...chat,
+              const index = await chatStore.getIndex(agentRef)
+              return {
                 agentRef,
-              }))
-              const localIds = new Set(localChats.map(chat => chat.id))
-              const remoteOnly: LatestSidebarChatEntry[] = serverResult.items
-                .filter(session => session.agent === agentRef && !localIds.has(session.chatId))
-                .map(session => ({
-                  id: session.chatId,
-                  title: `Remote · ${session.chatId.slice(0, 8)}`,
-                  createdAt: session.lastActivityAt,
-                  updatedAt: session.lastActivityAt,
-                  messageCount: 0,
-                  remote: true,
-                  turnCount: session.turnCount,
+                entries: index.chats.map(chat => ({
+                  ...chat,
                   agentRef,
-                }))
-              // Seed this agent's session state from its server snapshot; the outer
-              // agentNames.map gives the cross-agent coverage the navbar badges
-              // (Running / Awaiting approval / Completed-unread) need.
-              // D4 (§4.1 R2): the "snapshot never degrades a live task" rule that
-              // used to live in `mergeSeededSessionStates` is now the reducer's.
-              const sessions = serverResult.items.filter(session => session.agent === agentRef)
-              return { agentRef, entries: [...localChats, ...remoteOnly], sessions }
+                })),
+              }
             } catch {
               return {
                 agentRef,
                 entries: [] as LatestSidebarChatEntry[],
-                sessions: [] as Awaited<ReturnType<typeof chatStore.listSessions>>['items'],
               }
             }
           })
         )
         if (cancelled) return
-        setLatestChatSessions(sessionGroups.flatMap(group => group.entries).sort(byUpdatedDesc))
+        setLatestChatSessions(localGroups.flatMap(group => group.entries).sort(byUpdatedDesc))
+        setLatestChatSessionsLoading(false)
+
+        const sessionGroups = await Promise.all(
+          agentNames.map(async agentRef => {
+            // This feeds only the cross-agent sidebar preview. Do not follow
+            // cursors here; the selected-agent session list exposes explicit
+            // on-demand pagination through `loadMoreChatSessions`.
+            const serverResult: SessionsListResult = await chatStore
+              .listSessions(agentRef, {
+                agent: agentRef,
+                limit: SESSION_CATALOG_PAGE_LIMIT,
+              })
+              .catch((): SessionsListResult => ({ items: [] }))
+            return {
+              agentRef,
+              sessions: serverResult.items.filter(session => session.agent === agentRef),
+            }
+          })
+        )
+        if (cancelled) return
         for (const group of sessionGroups) {
           seedSessionSnapshots(fsm, group.agentRef, group.sessions)
         }
+        setLatestChatSessions(previous => {
+          const knownKeys = new Set(previous.map(item => `${item.agentRef}:${item.id}`))
+          const remoteOnly: LatestSidebarChatEntry[] = []
+          for (const group of sessionGroups) {
+            for (const session of group.sessions) {
+              const key = `${group.agentRef}:${session.chatId}`
+              if (knownKeys.has(key)) continue
+              knownKeys.add(key)
+              remoteOnly.push({
+                id: session.chatId,
+                title: `Remote · ${session.chatId.slice(0, 8)}`,
+                createdAt: session.lastActivityAt,
+                updatedAt: session.lastActivityAt,
+                messageCount: knownServerMessageCount(session),
+                remote: true,
+                agentRef: group.agentRef,
+              })
+            }
+          }
+          return [...previous, ...remoteOnly].sort(byUpdatedDesc)
+        })
       } finally {
         if (!cancelled) {
           setLatestChatSessionsLoading(false)
@@ -475,12 +704,22 @@ export function useChatListController({
     return () => {
       cancelled = true
     }
-  }, [agentNames, chatStore.getIndex, chatStore.listSessions, isAuthenticated, fsm])
+  }, [
+    agentNames,
+    chatStore.getIndex,
+    chatStore.listSessions,
+    isAuthenticated,
+    loadMenuData,
+    scopeKey,
+    fsm,
+  ])
 
   return {
     // State (public contract, re-exported unchanged by the parent).
     chatList,
     chatListLoading,
+    chatListMoreLoading,
+    chatListHasMoreRemoteSessions,
     latestChatSessions,
     latestChatSessionsLoading,
     // CRUD (public contract).
@@ -491,6 +730,7 @@ export function useChatListController({
     handleDeleteChatForAgent,
     // Loader + list-loading control (parent agent-selection effect).
     loadChatList,
+    loadMoreChatSessions,
     setChatListLoading,
     clearList,
     // Narrow chatList ops (parent flows).

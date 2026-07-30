@@ -36,6 +36,43 @@ function sanitizeOptionalInteger(input: unknown): number | undefined {
   return value
 }
 
+function sanitizeSessionsListQuery(
+  input: import('./types.js').SessionsListQuery | undefined
+): import('./types.js').SessionsListQuery {
+  const agent = sanitizeString(input?.agent)
+  const cursor = sanitizeString(input?.cursor)
+  if (agent && (agent.length > 200 || agent.includes(':'))) {
+    throw new Error('Invalid session agent')
+  }
+  if (cursor.length > 2048) throw new Error('Invalid sessions cursor')
+  const rawLimit = sanitizeOptionalInteger(input?.limit)
+  if (rawLimit !== undefined && rawLimit < 1) throw new Error('Invalid sessions limit')
+  return {
+    ...(agent ? { agent } : {}),
+    ...(rawLimit !== undefined ? { limit: Math.min(rawLimit, 100) } : {}),
+    ...(cursor ? { cursor } : {}),
+  }
+}
+
+function sanitizeSessionMessagesQuery(
+  input: import('./types.js').SessionMessagesQuery | undefined
+): import('./types.js').SessionMessagesQuery {
+  const rawLimit = sanitizeOptionalInteger(input?.limit)
+  const beforeTurn = sanitizeOptionalInteger(input?.beforeTurn)
+  const afterTurn = sanitizeOptionalInteger(input?.afterTurn)
+  if (rawLimit !== undefined && rawLimit < 1) throw new Error('Invalid messages limit')
+  if (beforeTurn !== undefined && beforeTurn < 1) throw new Error('Invalid beforeTurn')
+  if (afterTurn !== undefined && afterTurn < 0) throw new Error('Invalid afterTurn')
+  if (beforeTurn !== undefined && afterTurn !== undefined) {
+    throw new Error('beforeTurn and afterTurn are mutually exclusive')
+  }
+  return {
+    ...(rawLimit !== undefined ? { limit: Math.min(rawLimit, 200) } : {}),
+    ...(beforeTurn !== undefined ? { beforeTurn } : {}),
+    ...(afterTurn !== undefined ? { afterTurn } : {}),
+  }
+}
+
 function runScopedArtifactDownloadName(runId: string, artifactName: string): string {
   const rawName = path.basename(artifactName).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
   const safeName = rawName || 'artifact'
@@ -918,11 +955,22 @@ export function registerIpcHandlers(service: AppService): void {
 
   ipcMain.handle(
     'rpc:listSessions',
-    async (event, payload: { hostRef: string; hostRefs?: string[] }) => {
+    async (
+      event,
+      payload: {
+        hostRef: string
+        hostRefs?: string[]
+        query?: import('./types.js').SessionsListQuery
+      }
+    ) => {
       assertTrustedSender(event)
       const hostRef = sanitizeString(payload?.hostRef)
       if (!hostRef) throw new Error('hostRef is required')
-      return service.listSessions(hostRef, payload?.hostRefs)
+      return service.listSessions(
+        hostRef,
+        payload?.hostRefs,
+        sanitizeSessionsListQuery(payload?.query)
+      )
     }
   )
 
@@ -930,7 +978,13 @@ export function registerIpcHandlers(service: AppService): void {
     'rpc:loadSessionMessages',
     async (
       event,
-      payload: { hostRef: string; agent: string; chatId: string; hostRefs?: string[] }
+      payload: {
+        hostRef: string
+        agent: string
+        chatId: string
+        hostRefs?: string[]
+        query?: import('./types.js').SessionMessagesQuery
+      }
     ) => {
       assertTrustedSender(event)
       const hostRef = sanitizeString(payload?.hostRef)
@@ -939,7 +993,13 @@ export function registerIpcHandlers(service: AppService): void {
       if (!hostRef || !agent || !chatId) {
         throw new Error('hostRef, agent, and chatId are required')
       }
-      return service.loadSessionMessages(hostRef, agent, chatId, payload?.hostRefs)
+      return service.loadSessionMessages(
+        hostRef,
+        agent,
+        chatId,
+        payload?.hostRefs,
+        sanitizeSessionMessagesQuery(payload?.query)
+      )
     }
   )
 
@@ -1067,13 +1127,46 @@ export function registerIpcHandlers(service: AppService): void {
 
   ipcMain.handle(
     'chat:replaceMessages',
+    async (
+      event,
+      payload: {
+        agentRef: string
+        chatId: string
+        messages: unknown[]
+        options?: import('./types.js').ReplaceChatMessagesOptions
+      }
+    ) => {
+      assertTrustedSender(event)
+      const agentRef = sanitizeString(payload?.agentRef)
+      const chatId = sanitizeString(payload?.chatId)
+      if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
+      const messages = Array.isArray(payload?.messages) ? payload.messages : []
+      const activeTaskIds = Array.isArray(payload?.options?.activeTaskIds)
+        ? payload.options.activeTaskIds
+            .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0)
+            .slice(0, 32)
+        : undefined
+      await requireChatStore().replaceMessages(
+        agentRef,
+        chatId,
+        messages as import('./types.js').ChatMessage[],
+        {
+          activeTaskIds,
+          replaceLocalWindow: payload?.options?.replaceLocalWindow === true,
+        }
+      )
+    }
+  )
+
+  ipcMain.handle(
+    'chat:backfillCounters',
     async (event, payload: { agentRef: string; chatId: string; messages: unknown[] }) => {
       assertTrustedSender(event)
       const agentRef = sanitizeString(payload?.agentRef)
       const chatId = sanitizeString(payload?.chatId)
       if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
       const messages = Array.isArray(payload?.messages) ? payload.messages : []
-      await requireChatStore().replaceMessages(
+      await requireChatStore().backfillChatCounters(
         agentRef,
         chatId,
         messages as import('./types.js').ChatMessage[]

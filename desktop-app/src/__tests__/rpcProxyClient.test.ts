@@ -12,6 +12,26 @@ vi.mock('../config.js', () => ({
   },
 }))
 
+describe('RpcProxyClient.listSessions', () => {
+  let client: RpcProxyClient
+
+  beforeEach(() => {
+    client = new RpcProxyClient()
+    vi.restoreAllMocks()
+  })
+
+  it.each(['.', '..', 'host/name', 'host\\name'])(
+    'rejects an unsafe host path before issuing a request: %s',
+    async hostRef => {
+      const fetchMock = vi.fn()
+      vi.stubGlobal('fetch', fetchMock)
+
+      await expect(client.listSessions('rpc-token', hostRef)).rejects.toThrow(/unsafe path segment/)
+      expect(fetchMock).not.toHaveBeenCalled()
+    }
+  )
+})
+
 describe('RpcProxyClient.cancelTask', () => {
   let client: RpcProxyClient
 

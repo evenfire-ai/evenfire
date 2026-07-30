@@ -70,7 +70,13 @@ describe('useAgentChatController — characterization (D.0)', () => {
 
       expect(clerum.chat.setLastActive).toHaveBeenCalledWith('agent-x', 'chat-1')
       // Phase 2 now always reconciles with the server.
-      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-1')
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+        'agent-x',
+        'agent-x',
+        'chat-1',
+        undefined,
+        { limit: 40 }
+      )
       // Cache was up to date → no overwrite, no rejoin.
       expect(clerum.chat.replaceMessages).not.toHaveBeenCalled()
       expect(result.current.chatMessages).toHaveLength(3)
@@ -100,7 +106,13 @@ describe('useAgentChatController — characterization (D.0)', () => {
         await result.current.switchToChat('agent-x', 'chat-2')
       })
 
-      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-x', 'agent-x', 'chat-2')
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+        'agent-x',
+        'agent-x',
+        'chat-2',
+        undefined,
+        { limit: 40 }
+      )
       expect(clerum.chat.create).toHaveBeenCalledWith('agent-x', 'chat-2')
       // Server is source of truth → replace, not append.
       expect(clerum.chat.replaceMessages).toHaveBeenCalled()
@@ -725,8 +737,8 @@ describe('useAgentChatController — characterization (D.0)', () => {
         })
       })
 
-      // The durable reply lands; no error/resend, no zombie blocking the replace.
-      await waitFor(() => expect(clerum.chat.replaceMessages).toHaveBeenCalled())
+      // The durable reply lands as a delta; no error/resend and no zombie block.
+      await waitFor(() => expect(clerum.chat.appendMessages).toHaveBeenCalled())
       expect(spies.pushToast).not.toHaveBeenCalledWith(expect.stringContaining('failed'), 'error')
       expect(result.current.failedAgentSend).toBeNull()
       await sendPromise
@@ -931,6 +943,23 @@ describe('useAgentChatController — characterization (D.0)', () => {
    * the D.3 reweave (the behaviors survive; only the lifecycle plumbing moves).
    */
   describe('dev behaviors (must survive the D.3 reweave)', () => {
+    it('defers cross-agent menu sessions until the first screen has painted', async () => {
+      const { rerender } = renderController({
+        selectedAgent: null,
+        loadMenuData: false,
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+
+      expect(clerum.chat.getIndex).not.toHaveBeenCalled()
+      expect(clerum.rpc.listSessions).not.toHaveBeenCalled()
+
+      rerender({ selectedAgent: null, loadMenuData: true })
+
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+    })
+
     it('GAP-D populates latestChatSessions from chat.getIndex on mount', async () => {
       clerum.chat.getIndex.mockResolvedValue({
         version: 1,
@@ -950,6 +979,274 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await waitFor(() => expect(result.current.latestChatSessions.length).toBeGreaterThan(0))
       const entry = result.current.latestChatSessions.find(e => e.id === 'c1')
       expect(entry?.agentRef).toBe('agent-x')
+    })
+
+    it('renders local sessions without waiting for remote listSessions', async () => {
+      clerum.chat.getIndex.mockResolvedValue({
+        version: 1,
+        lastActiveChatId: null,
+        onboardingDismissed: false,
+        chats: [
+          {
+            id: 'local-chat',
+            title: 'Local chat',
+            createdAt: '2026-05-01T00:00:00Z',
+            updatedAt: '2026-05-01T00:00:00Z',
+            messageCount: 2,
+          },
+        ],
+      })
+      clerum.rpc.listSessions.mockImplementation(() => new Promise(() => undefined))
+
+      const { result } = renderController()
+
+      await waitFor(() =>
+        expect(result.current.chatList.some(chat => chat.id === 'local-chat')).toBe(true)
+      )
+      expect(result.current.chatListLoading).toBe(false)
+
+      await waitFor(() =>
+        expect(result.current.latestChatSessions.some(chat => chat.id === 'local-chat')).toBe(true)
+      )
+      expect(result.current.latestChatSessionsLoading).toBe(false)
+    })
+
+    it('does not replace a newer local auto-selection with an older server session', async () => {
+      clerum.chat.getIndex.mockResolvedValue({
+        version: 1,
+        lastActiveChatId: null,
+        onboardingDismissed: false,
+        chats: [
+          {
+            id: 'newer-local',
+            title: 'Newer local chat',
+            createdAt: '2026-05-03T00:00:00Z',
+            updatedAt: '2026-05-03T00:00:00Z',
+            messageCount: 2,
+          },
+        ],
+      })
+      clerum.rpc.listSessions.mockResolvedValue({
+        items: [
+          {
+            agent: 'agent-x',
+            chatId: 'older-server',
+            turnCount: 1,
+            lastActivityAt: '2026-05-02T00:00:00Z',
+          },
+        ],
+      })
+
+      const { result } = renderController({ navItem: 'chat' })
+
+      await waitFor(() => expect(result.current.activeChatId).toBe('newer-local'))
+      await waitFor(() => expect(clerum.rpc.listSessions).toHaveBeenCalled())
+      expect(result.current.activeChatId).toBe('newer-local')
+      expect(clerum.chat.setLastActive).not.toHaveBeenCalledWith('agent-x', 'older-server')
+    })
+
+    it('loads the next remote session page only when requested', async () => {
+      clerum.rpc.listSessions.mockImplementation(
+        async (_hostRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
+          if (query?.cursor === 'cursor-2') {
+            return {
+              items: [
+                {
+                  agent: 'agent-x',
+                  chatId: 'remote-page-2',
+                  turnCount: 3,
+                  lastActivityAt: '2026-05-02T00:00:00Z',
+                },
+              ],
+            }
+          }
+          return {
+            items: [
+              {
+                agent: 'agent-x',
+                chatId: 'remote-page-1',
+                turnCount: 2,
+                lastActivityAt: '2026-05-03T00:00:00Z',
+              },
+            ],
+            nextCursor: 'cursor-2',
+          }
+        }
+      )
+
+      const { result } = renderController()
+
+      await waitFor(() =>
+        expect(result.current.chatList.some(chat => chat.id === 'remote-page-1')).toBe(true)
+      )
+      expect(result.current.chatListHasMoreRemoteSessions).toBe(true)
+      expect(
+        clerum.rpc.listSessions.mock.calls.some(
+          call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-2'
+        )
+      ).toBe(false)
+
+      await act(async () => {
+        await result.current.loadMoreChatSessions()
+      })
+
+      await waitFor(() =>
+        expect(result.current.chatList.some(chat => chat.id === 'remote-page-2')).toBe(true)
+      )
+      expect(result.current.chatListHasMoreRemoteSessions).toBe(false)
+      expect(
+        clerum.rpc.listSessions.mock.calls.some(
+          call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-2'
+        )
+      ).toBe(true)
+    })
+
+    it('keeps the remote session cursor after a transient load-more failure', async () => {
+      let cursorTwoCalls = 0
+      clerum.rpc.listSessions.mockImplementation(
+        async (_hostRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
+          if (query?.cursor === 'cursor-2') {
+            cursorTwoCalls += 1
+            if (cursorTwoCalls === 1) throw new Error('fetch failed')
+            return {
+              items: [
+                {
+                  agent: 'agent-x',
+                  chatId: 'remote-page-2-after-retry',
+                  turnCount: 3,
+                  lastActivityAt: '2026-05-02T00:00:00Z',
+                },
+              ],
+            }
+          }
+          return {
+            items: [
+              {
+                agent: 'agent-x',
+                chatId: 'remote-page-1',
+                turnCount: 2,
+                lastActivityAt: '2026-05-03T00:00:00Z',
+              },
+            ],
+            nextCursor: 'cursor-2',
+          }
+        }
+      )
+
+      const { result } = renderController()
+
+      await waitFor(() =>
+        expect(result.current.chatList.some(chat => chat.id === 'remote-page-1')).toBe(true)
+      )
+      expect(result.current.chatListHasMoreRemoteSessions).toBe(true)
+
+      await act(async () => {
+        await result.current.loadMoreChatSessions()
+      })
+
+      expect(result.current.chatListHasMoreRemoteSessions).toBe(true)
+
+      await act(async () => {
+        await result.current.loadMoreChatSessions()
+      })
+
+      await waitFor(() =>
+        expect(result.current.chatList.some(chat => chat.id === 'remote-page-2-after-retry')).toBe(
+          true
+        )
+      )
+      expect(cursorTwoCalls).toBe(2)
+      expect(result.current.chatListHasMoreRemoteSessions).toBe(false)
+    })
+
+    it('does not advance a session cursor from a stale load-more result', async () => {
+      let resolveStalePage:
+        | ((value: {
+            items: Array<{
+              agent: string
+              chatId: string
+              turnCount: number
+              lastActivityAt: string
+            }>
+            nextCursor?: string
+          }) => void)
+        | undefined
+      const stalePage = new Promise<{
+        items: Array<{
+          agent: string
+          chatId: string
+          turnCount: number
+          lastActivityAt: string
+        }>
+        nextCursor?: string
+      }>(resolve => {
+        resolveStalePage = resolve
+      })
+      let cursorTwoCalls = 0
+      clerum.rpc.listSessions.mockImplementation(
+        async (hostRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
+          if (hostRef === 'agent-y') return { items: [] }
+          if (query?.cursor === 'cursor-2') {
+            cursorTwoCalls += 1
+            if (cursorTwoCalls === 1) return stalePage
+            return {
+              items: [
+                {
+                  agent: 'agent-x',
+                  chatId: 'remote-page-2-retry',
+                  turnCount: 3,
+                  lastActivityAt: '2026-05-02T00:00:00Z',
+                },
+              ],
+            }
+          }
+          return {
+            items: [
+              {
+                agent: 'agent-x',
+                chatId: 'remote-page-1',
+                turnCount: 2,
+                lastActivityAt: '2026-05-03T00:00:00Z',
+              },
+            ],
+            nextCursor: 'cursor-2',
+          }
+        }
+      )
+
+      const { result, rerender } = renderController({ agentNames: ['agent-x', 'agent-y'] })
+      await waitFor(() =>
+        expect(result.current.chatList.some(chat => chat.id === 'remote-page-1')).toBe(true)
+      )
+
+      let pendingLoad: Promise<void> | undefined
+      await act(async () => {
+        pendingLoad = result.current.loadMoreChatSessions()
+        await Promise.resolve()
+      })
+      rerender({ selectedAgent: 'agent-y', agentNames: ['agent-x', 'agent-y'] })
+      resolveStalePage?.({
+        items: [
+          {
+            agent: 'agent-x',
+            chatId: 'stale-remote-page',
+            turnCount: 4,
+            lastActivityAt: '2026-05-04T00:00:00Z',
+          },
+        ],
+        nextCursor: 'cursor-3',
+      })
+      await act(async () => {
+        await pendingLoad
+      })
+
+      expect(cursorTwoCalls).toBe(1)
+      expect(
+        clerum.rpc.listSessions.mock.calls.some(
+          call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-3'
+        )
+      ).toBe(false)
+      expect(result.current.chatList.some(chat => chat.id === 'stale-remote-page')).toBe(false)
     })
 
     it('GAP-A persists the outgoing user message to the chat store on send', async () => {
