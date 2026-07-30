@@ -91,6 +91,12 @@ function isRawFilesystemError(err: unknown): boolean {
   return typeof (err as NodeJS.ErrnoException | undefined)?.code === 'string'
 }
 
+function isUnsupportedDirectorySyncError(err: unknown): boolean {
+  if (process.platform !== 'win32') return false
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  return code === 'EISDIR' || code === 'EPERM' || code === 'EINVAL' || code === 'ENOTSUP'
+}
+
 function isUnsafeSegmentError(err: unknown): boolean {
   return err instanceof Error && /unsafe path segment/.test(err.message)
 }
@@ -380,11 +386,51 @@ export class ChatStore {
     return this.chatPagePathFromPagesDir(this.chatPagesDirPath(agentRef, chatId), fileName)
   }
 
-  private async writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
+  private async syncFile(filePath: string): Promise<void> {
+    const handle = await fs.open(filePath, 'r')
+    try {
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+  }
+
+  private async syncDirectory(directoryPath: string): Promise<void> {
+    let handle: Awaited<ReturnType<typeof fs.open>> | null = null
+    try {
+      handle = await fs.open(directoryPath, 'r')
+      await handle.sync()
+    } catch (error) {
+      // Node cannot open/fsync directories on Windows. The file itself is still
+      // flushed before rename; retain directory fsync on platforms that support it.
+      if (!isUnsupportedDirectorySyncError(error)) throw error
+    } finally {
+      await handle?.close()
+    }
+  }
+
+  private async syncRenamedEntry(sourcePath: string, targetPath: string): Promise<void> {
+    const sourceDir = dirname(sourcePath)
+    const targetDir = dirname(targetPath)
+    await this.syncDirectory(sourceDir)
+    if (targetDir !== sourceDir) {
+      await this.syncDirectory(targetDir)
+    }
+  }
+
+  private async writeJsonAtomic(
+    filePath: string,
+    value: unknown,
+    indentation?: number
+  ): Promise<void> {
     const tmp = `${filePath}.tmp`
     try {
-      await fs.writeFile(tmp, JSON.stringify(value), { mode: 0o600 })
+      const serialized = JSON.stringify(value, null, indentation)
+      if (serialized === undefined) throw new TypeError('Unable to serialize JSON value')
+      await fs.writeFile(tmp, serialized, { mode: 0o600 })
+      await this.syncFile(tmp)
       await fs.rename(tmp, filePath)
+      await this.syncRenamedEntry(tmp, filePath)
     } catch (err) {
       await fs.rm(tmp, { force: true }).catch(() => undefined)
       throw err
@@ -426,7 +472,14 @@ export class ChatStore {
       ) {
         throw new Error('Invalid paged chat metadata')
       }
-      if (parsed.pages.some(page => !PAGE_FILE_PATTERN.test(page.file))) {
+      if (
+        parsed.pages.some(
+          page =>
+            !PAGE_FILE_PATTERN.test(page.file) ||
+            !Number.isSafeInteger(page.count) ||
+            page.count < 1
+        )
+      ) {
         throw new Error('Invalid paged chat metadata page reference')
       }
       return this.finalizePagedMeta({
@@ -980,13 +1033,17 @@ export class ChatStore {
       try {
         if (activeReadError) {
           corruptDir = this.chatSnapshotSiblingPath(agentRef, chatId, 'corrupt', randomUUID())
-          await fs.rename(activeDir, corruptDir).catch(err => {
+          try {
+            await fs.rename(activeDir, corruptDir)
+            await this.syncRenamedEntry(activeDir, corruptDir)
+          } catch (err) {
             if (!isNotFoundError(err)) throw err
-          })
+          }
         } else {
           await fs.rm(activeDir, { recursive: true, force: true })
         }
         await fs.rename(snapshot.dir, activeDir)
+        await this.syncRenamedEntry(snapshot.dir, activeDir)
         await this.removePagedChatSnapshotSiblings(agentRef, chatId)
         if (corruptDir) {
           await fs.rm(corruptDir, { recursive: true, force: true }).catch(() => undefined)
@@ -995,7 +1052,12 @@ export class ChatStore {
         return await this.readPagedMeta(agentRef, chatId)
       } catch (err) {
         if (corruptDir) {
-          await fs.rename(corruptDir, activeDir).catch(() => undefined)
+          try {
+            await fs.rename(corruptDir, activeDir)
+            await this.syncRenamedEntry(corruptDir, activeDir)
+          } catch {
+            // Try the next complete snapshot, if one exists.
+          }
         }
         // Try the next complete snapshot, if one exists.
       }
@@ -1011,9 +1073,12 @@ export class ChatStore {
         recursive: true,
         mode: 0o700,
       })
-      await fs.rename(activeDir, corruptDir).catch(err => {
+      try {
+        await fs.rename(activeDir, corruptDir)
+        await this.syncRenamedEntry(activeDir, corruptDir)
+      } catch (err) {
         if (!isNotFoundError(err)) throw err
-      })
+      }
       console.warn(`[chatStore] Quarantined unreadable paged cache for "${chatId}"`)
       return null
     }
@@ -1106,12 +1171,14 @@ export class ChatStore {
       try {
         await fs.rename(chatDir, backupDir)
         movedExistingSnapshot = true
+        await this.syncRenamedEntry(chatDir, backupDir)
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
       }
 
       await fs.rename(stagingDir, chatDir)
       primaryCommitted = true
+      await this.syncRenamedEntry(stagingDir, chatDir)
       const cacheKey = this.chatSnapshotCleanupKey(agentRef, chatId)
       try {
         await this.writeLegacyCompatibilitySnapshot(agentRef, chatId, messages)
@@ -1135,7 +1202,10 @@ export class ChatStore {
     } catch (err) {
       await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined)
       if (movedExistingSnapshot && !primaryCommitted) {
-        await fs.rename(backupDir, chatDir).catch(() => undefined)
+        await fs
+          .rename(backupDir, chatDir)
+          .then(() => this.syncRenamedEntry(backupDir, chatDir))
+          .catch(() => undefined)
       }
       throw err
     }
@@ -1315,18 +1385,10 @@ export class ChatStore {
     // Keep the index readable by the pre-paging desktop while the transcript
     // files are maintained in both paged and bounded v2-compatible forms.
     const normalized: ChatIndex = { ...index, version: INDEX_VERSION }
-    // Atomic write (temp + rename): a crash mid-write must never leave a
-    // truncated index.json, because the bootstrap wipe treats an unparseable
-    // index as legacy and would delete live paged chats.
+    // Flush the temp file before rename and the containing directory afterward.
+    // Visibility atomicity alone does not make the catalog durable across power loss.
     const target = this.indexPath(agentRef)
-    const tmp = `${target}.tmp`
-    try {
-      await fs.writeFile(tmp, JSON.stringify(normalized, null, 2), { mode: 0o600 })
-      await fs.rename(tmp, target)
-    } catch (error) {
-      await fs.rm(tmp, { force: true }).catch(() => undefined)
-      throw error
-    }
+    await this.writeJsonAtomic(target, normalized, 2)
   }
 
   async listChats(agentRef: string): Promise<ChatMetadata[]> {

@@ -269,7 +269,7 @@ export class TokenStore {
       const data = JSON.parse(raw) as { token?: unknown }
       const token = typeof data.token === 'string' && data.token ? data.token : null
       if (token) {
-        await this.setSessionToken(token, envKey).catch(() => {})
+        await this.setSessionToken(token, envKey)
         await fs.unlink(file).catch(() => {})
       }
       return token
@@ -301,15 +301,24 @@ export class TokenStore {
     await fs.writeFile(file, JSON.stringify({ token }), { encoding: 'utf8', mode: 0o600 })
   }
 
-  async clearSessionToken(envKey: string): Promise<void> {
+  async clearSessionToken(
+    envKey: string,
+    options: { legacyEnvKeys?: readonly string[] } = {}
+  ): Promise<void> {
     assertEnvKey(envKey)
-    const account = accountFor(envKey)
+    const legacyEnvKeys = Array.from(
+      new Set(
+        (options.legacyEnvKeys ?? [])
+          .map(key => String(key || '').trim())
+          .filter(key => key && key !== envKey)
+      )
+    )
+    for (const legacyEnvKey of legacyEnvKeys) assertEnvKey(legacyEnvKey)
+    const scopedEnvKeys = [envKey, ...legacyEnvKeys]
     const keytar = await loadKeytar()
     if (keytar) {
-      try {
-        await keytar.deletePassword(SERVICE, account)
-      } catch {
-        // Continue cleaning up file-based storage even if keychain fails.
+      for (const scopedEnvKey of scopedEnvKeys) {
+        await keytar.deletePassword(SERVICE, accountFor(scopedEnvKey)).catch(() => {})
       }
       // Best-effort cleanup of the legacy global slot so it can't be migrated
       // into another environment later.
@@ -318,12 +327,14 @@ export class TokenStore {
     // Always clean up file-based storage regardless of keychain result,
     // since prior versions may have written both stores.
     await Promise.all([
-      encryptedFilePath(envKey)
-        .then(file => fs.unlink(file))
-        .catch(() => {}),
-      plainFilePath(envKey)
-        .then(file => fs.unlink(file))
-        .catch(() => {}),
+      ...scopedEnvKeys.flatMap(scopedEnvKey => [
+        encryptedFilePath(scopedEnvKey)
+          .then(file => fs.unlink(file))
+          .catch(() => {}),
+        plainFilePath(scopedEnvKey)
+          .then(file => fs.unlink(file))
+          .catch(() => {}),
+      ]),
       legacyEncryptedFilePath()
         .then(file => fs.unlink(file))
         .catch(() => {}),

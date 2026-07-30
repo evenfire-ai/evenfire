@@ -174,6 +174,7 @@ export function useChatListController({
       }
       const index = await chatStore.getIndex(agentRef)
       const merged = [...index.chats].sort(byUpdatedDesc)
+      if (selectedAgentRef.current !== agentRef) return { index, merged }
       setChatList(merged)
 
       const requestGeneration = requestGenerationRef.current
@@ -372,7 +373,9 @@ export function useChatListController({
             continue
           }
           console.warn('[loadChatList] failed after retry, clearing list', { agentRef, err })
-          setChatList([])
+          if (selectedAgentRef.current === agentRef) {
+            setChatList([])
+          }
           return null
         }
       }

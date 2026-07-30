@@ -473,11 +473,7 @@ export function useAgentChatController({
   // (assigned in an effect, not the render body — R-F12) so the instance stays
   // stable while the closures it calls track the latest state.
   const reconcileBranchesRef = useRef<{
-    loadSessionMessages: (
-      agentRef: string,
-      chatId: string,
-      query?: SessionMessagesQuery
-    ) => Promise<SessionMessagesResult>
+    loadSessionMessages: ReconcileChatDeps['loadSessionMessages']
     attachLiveTask: ReconcileChatDeps['attachLiveTask']
     settleIdle: ReconcileChatDeps['settleIdle']
     evictChat: ReconcileChatDeps['evictChat']
@@ -486,8 +482,8 @@ export function useAgentChatController({
   if (!reconcileChatRef.current) {
     reconcileChatRef.current = createReconcileChat({
       fsm,
-      loadSessionMessages: (agentRef, chatId, query) =>
-        reconcileBranchesRef.current!.loadSessionMessages(agentRef, chatId, query),
+      loadSessionMessages: (agentRef, chatId, query, stillRelevant) =>
+        reconcileBranchesRef.current!.loadSessionMessages(agentRef, chatId, query, stillRelevant),
       attachLiveTask: (chatKey, resp, epoch, stillRelevant) =>
         reconcileBranchesRef.current!.attachLiveTask(chatKey, resp, epoch, stillRelevant),
       settleIdle: (chatKey, resp, epoch, hint, stillRelevant) =>

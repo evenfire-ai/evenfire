@@ -280,14 +280,16 @@ describe('chatStoreBinding', () => {
       expect(await requireChatStore().listChats('agent-x')).toEqual([])
     })
 
-    it('wipes an agent dir with a missing/unparseable index.json', async () => {
-      await seedAgentDir(ENV_A, 'user-broken', 'agent-x', 'not json{', { 'c.json': '{}' })
+    it('preserves agent dirs with missing or torn index.json files', async () => {
+      await seedAgentDir(ENV_A, 'user-broken', 'agent-x', '{"version":2,"chats":[', {
+        'c.json': '{}',
+      })
       await seedAgentDir(ENV_A, 'user-broken', 'agent-y', null, { 'c.json': '{}' })
 
       await bindChatStoreForUser('user-broken', ENV_A)
 
-      expect(await exists(path.join(tmpBase, ENV_A, 'user-broken', 'agent-x'))).toBe(false)
-      expect(await exists(path.join(tmpBase, ENV_A, 'user-broken', 'agent-y'))).toBe(false)
+      expect(await exists(path.join(tmpBase, ENV_A, 'user-broken', 'agent-x', 'c.json'))).toBe(true)
+      expect(await exists(path.join(tmpBase, ENV_A, 'user-broken', 'agent-y', 'c.json'))).toBe(true)
     })
 
     it('preserves the downgrade-compatible v2 agent index', async () => {

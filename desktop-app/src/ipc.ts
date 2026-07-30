@@ -37,6 +37,14 @@ function sanitizeOptionalInteger(input: unknown): number | undefined {
   return input
 }
 
+function sanitizeOptionalPositiveInteger(input: unknown, label: string): number | undefined {
+  if (input === undefined || input === null || input === '') return undefined
+  if (typeof input !== 'number' || !Number.isSafeInteger(input) || input < 1) {
+    throw new Error(`Invalid ${label}`)
+  }
+  return input
+}
+
 export function sanitizeChatLoadWindow(
   limitInput: unknown,
   offsetInput: unknown
@@ -514,9 +522,8 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('approvals:listPending', async (event, payload?: { limit?: number }) => {
     assertTrustedSender(event)
-    return service.listPendingWorkflowApprovals(
-      typeof payload?.limit === 'number' ? payload.limit : 20
-    )
+    const limit = sanitizeOptionalPositiveInteger(payload?.limit, 'pending approvals limit')
+    return service.listPendingWorkflowApprovals(limit ?? 20)
   })
   ipcMain.handle(
     'approvals:decide',
@@ -752,8 +759,9 @@ export function registerIpcHandlers(service: AppService): void {
       const hostRefs = Array.isArray(payload?.hostRefs)
         ? payload.hostRefs.map(v => String(v).trim()).filter(Boolean)
         : undefined
+      const limit = sanitizeOptionalPositiveInteger(payload?.limit, 'host activity limit')
       return service.getHostActivity(hostRef, {
-        limit: typeof payload?.limit === 'number' ? payload.limit : undefined,
+        limit,
         sinceEventId: sanitizeString(payload?.sinceEventId) || undefined,
         hostRefs,
       })
@@ -1323,7 +1331,8 @@ export function registerIpcHandlers(service: AppService): void {
       const ns = sanitizeString(payload?.ns)
       const name = sanitizeString(payload?.name)
       if (!ns || !name) throw new Error('ns and name are required')
-      return service.listWorkflowRuns(ns, name, payload?.limit)
+      const limit = sanitizeOptionalPositiveInteger(payload?.limit, 'workflow runs limit')
+      return service.listWorkflowRuns(ns, name, limit)
     }
   )
 

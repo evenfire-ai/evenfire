@@ -124,6 +124,27 @@ describe('createChat', () => {
     const chats = await store.listChats('agent-1')
     expect(chats).toHaveLength(1)
   })
+
+  it('flushes the atomic index temp file and containing directory', async () => {
+    const originalOpen = fs.open.bind(fs)
+    const syncedPaths: string[] = []
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const filePath = String(args[0])
+      const handle = await originalOpen(...(args as Parameters<typeof fs.open>))
+      return {
+        sync: async () => {
+          syncedPaths.push(filePath)
+          await handle.sync()
+        },
+        close: () => handle.close(),
+      } as Awaited<ReturnType<typeof fs.open>>
+    })
+
+    await store.createChat('agent-1', 'durable-index')
+
+    expect(syncedPaths).toContain(agentPath('index.json.tmp'))
+    expect(syncedPaths).toContain(agentPath())
+  })
 })
 
 // ── renameChat ───────────────────────────────────────────────────────────────
@@ -410,6 +431,31 @@ describe('messages', () => {
     expect(reloaded.map(message => message.id)).toEqual(['old-0', 'old-1', 'old-2', 'old-3'])
   })
 
+  it('flushes both parents when promoting a staged paged snapshot', async () => {
+    const originalOpen = fs.open.bind(fs)
+    const syncedPaths: string[] = []
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const filePath = String(args[0])
+      const handle = await originalOpen(...(args as Parameters<typeof fs.open>))
+      return {
+        sync: async () => {
+          syncedPaths.push(filePath)
+          await handle.sync()
+        },
+        close: () => handle.close(),
+      } as Awaited<ReturnType<typeof fs.open>>
+    })
+
+    await store.createChat('agent-1', 'durable-snapshot')
+    await store.saveMessages('agent-1', 'durable-snapshot', [
+      { id: 'm1', role: 'user', content: 'durable', timestamp: 1 },
+    ])
+
+    const encodedChatId = Buffer.from('durable-snapshot', 'utf8').toString('base64url')
+    expect(syncedPaths).toContain(agentPath('chats'))
+    expect(syncedPaths).toContain(agentPath('chats', '.snapshots', encodedChatId))
+  })
+
   it('aborts append instead of resetting the transcript on transient meta read failure', async () => {
     const pagedStore = new ChatStore(tempDir, {
       pageSize: 5,
@@ -493,10 +539,26 @@ describe('messages', () => {
     const previousSnapshot = chatSnapshotDir('switch-recovery', 'previous', 'test')
     await fs.mkdir(dirname(previousSnapshot), { recursive: true })
     await fs.rename(chatCacheDir('switch-recovery'), previousSnapshot)
+    const originalOpen = fs.open.bind(fs)
+    const syncedPaths: string[] = []
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const filePath = String(args[0])
+      const handle = await originalOpen(...(args as Parameters<typeof fs.open>))
+      return {
+        sync: async () => {
+          syncedPaths.push(filePath)
+          await handle.sync()
+        },
+        close: () => handle.close(),
+      } as Awaited<ReturnType<typeof fs.open>>
+    })
 
     const reloaded = await pagedStore.loadMessages('agent-1', 'switch-recovery')
     expect(reloaded.map(message => message.id)).toEqual(['m0', 'm1'])
     await expect(fs.access(chatMetaPath('switch-recovery'))).resolves.toBeUndefined()
+    const encodedChatId = Buffer.from('switch-recovery', 'utf8').toString('base64url')
+    expect(syncedPaths).toContain(agentPath('chats'))
+    expect(syncedPaths).toContain(agentPath('chats', '.snapshots', encodedChatId))
   })
 
   it('completes recovery from a fully written next snapshot after a mid-swap crash', async () => {
@@ -1002,6 +1064,26 @@ describe('messages', () => {
       (await restartedStore.listChats('agent-1')).find(chat => chat.id === 'orphan-append')
         ?.messageCount
     ).toBe(3)
+  })
+
+  it('recovers page data when hot metadata contains an invalid page count', async () => {
+    await store.createChat('agent-1', 'invalid-page-count')
+    await store.saveMessages('agent-1', 'invalid-page-count', [
+      { id: 'm0', role: 'user', content: 'keep me', timestamp: 0 },
+    ])
+    const meta = await readJsonFile<{ pages: Array<{ count: number | null }> }>(
+      chatMetaPath('invalid-page-count')
+    )
+    meta.pages[0]!.count = null
+    await fs.writeFile(chatMetaPath('invalid-page-count'), JSON.stringify(meta))
+
+    const recovered = await store.loadMessages('agent-1', 'invalid-page-count')
+
+    expect(recovered.map(message => message.id)).toEqual(['m0'])
+    expect(
+      (await readJsonFile<{ pages: Array<{ count: number }> }>(chatMetaPath('invalid-page-count')))
+        .pages[0]!.count
+    ).toBe(1)
   })
 
   it('persists task_id and writes the paged chat cache', async () => {

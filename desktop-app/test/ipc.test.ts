@@ -96,6 +96,7 @@ describe('ipc host status stream handlers', () => {
     getExternalChannelsSummary: vi.fn(),
     listArtifacts: vi.fn(),
     downloadArtifact: vi.fn(),
+    listWorkflowRuns: vi.fn(),
     listWorkflowRunArtifacts: vi.fn(),
     downloadWorkflowRunArtifact: vi.fn(),
     resolveGfsUri: vi.fn(),
@@ -528,6 +529,19 @@ describe('ipc host status stream handlers', () => {
     expect(result).toEqual([{ id: 'approval-1' }])
   })
 
+  it.each([-1, 1.5, Number.POSITIVE_INFINITY])(
+    'rejects invalid pending approval limit %s at the IPC boundary',
+    async limit => {
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('approvals:listPending')
+
+      await expect(Promise.resolve(handler?.(event, { limit }))).rejects.toThrow(
+        'Invalid pending approvals limit'
+      )
+      expect(service.listPendingWorkflowApprovals).not.toHaveBeenCalled()
+    }
+  )
+
   it('routes artifact listing through the IPC handler for trusted senders', async () => {
     service.listArtifacts.mockResolvedValue({ artifacts: [] })
     const { event } = makeTrustedEvent()
@@ -584,6 +598,38 @@ describe('ipc host status stream handlers', () => {
     ).rejects.toThrow('Untrusted IPC sender')
     expect(service.downloadArtifact).not.toHaveBeenCalled()
   })
+
+  it('routes workflow run listing through a validated IPC limit', async () => {
+    service.listWorkflowRuns.mockResolvedValue({ items: [] })
+    const { event } = makeTrustedEvent()
+    const handler = testState.handlers.get('workflows:runs')
+
+    const result = await Promise.resolve(
+      handler?.(event, { ns: 'sandbox-recipes', name: 'recipe', limit: 25 })
+    )
+
+    expect(service.listWorkflowRuns).toHaveBeenCalledWith('sandbox-recipes', 'recipe', 25)
+    expect(result).toEqual({ items: [] })
+  })
+
+  it.each([-1, 1.5, Number.POSITIVE_INFINITY])(
+    'rejects invalid workflow run limit %s at the IPC boundary',
+    async limit => {
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('workflows:runs')
+
+      await expect(
+        Promise.resolve(
+          handler?.(event, {
+            ns: 'sandbox-recipes',
+            name: 'recipe',
+            limit,
+          })
+        )
+      ).rejects.toThrow('Invalid workflow runs limit')
+      expect(service.listWorkflowRuns).not.toHaveBeenCalled()
+    }
+  )
 
   it('saves run artifacts under Downloads with sanitized filenames', async () => {
     service.downloadWorkflowRunArtifact.mockResolvedValue(Buffer.from('run artifact'))
@@ -675,6 +721,19 @@ describe('ipc host status stream handlers', () => {
       hostRefs: ['chatllm'],
     })
   })
+
+  it.each([-1, 1.5, Number.POSITIVE_INFINITY])(
+    'rejects invalid host activity limit %s at the IPC boundary',
+    async limit => {
+      const { event } = makeTrustedEvent()
+      const handler = testState.handlers.get('rpc:getHostActivity')
+
+      await expect(
+        Promise.resolve(handler?.(event, { hostRef: 'chatllm', limit }))
+      ).rejects.toThrow('Invalid host activity limit')
+      expect(service.getHostActivity).not.toHaveBeenCalled()
+    }
+  )
 
   it('rejects untrusted sender for stream stop', async () => {
     const handler = testState.handlers.get('rpc:hostStatusStreamStop')

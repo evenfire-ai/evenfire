@@ -70,6 +70,19 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     expect(await store.getSessionToken(ENV_B)).toBe('tok-b')
   })
 
+  it('clear removes explicitly supported legacy environment alias slots', async () => {
+    const store = new TokenStore()
+    await store.setSessionToken('legacy-token', ENV_A)
+    await store.setSessionToken('current-token', ENV_A_WITH_RPC)
+
+    await store.clearSessionToken(ENV_A_WITH_RPC, { legacyEnvKeys: [ENV_A] })
+
+    expect(keychain.has(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe(false)
+    expect(keychain.has(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A_WITH_RPC}`))).toBe(false)
+    expect(await store.getSessionToken(ENV_A_WITH_RPC)).toBeNull()
+    expect(await store.getSessionToken(ENV_A)).toBeNull()
+  })
+
   it('migrates a legacy global-slot token into the active env slot, then deletes it', async () => {
     // Simulate a pre-per-env install: token in the single global account.
     keychain.set(keyOf(SERVICE, LEGACY_ACCOUNT), 'legacy-tok')

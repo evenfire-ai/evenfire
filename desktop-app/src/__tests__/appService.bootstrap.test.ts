@@ -290,7 +290,10 @@ describe('AppService invitation configuration lookup', () => {
     process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
     vi.resetModules()
 
-    const { AppService } = await import('../appService.js')
+    const [{ AppService }, { getActiveEnvKey, getActiveLegacyRestOnlyEnvKey }] = await Promise.all([
+      import('../appService.js'),
+      import('../config.js'),
+    ])
     const service = new AppService() as unknown as {
       tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
       rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
@@ -303,6 +306,9 @@ describe('AppService invitation configuration lookup', () => {
     service.rpcTokenManager = { clear: vi.fn() } as never
 
     await expect(service.logout()).rejects.toThrow(/keychain unavailable/)
+    expect(service.tokenStore.clearSessionToken).toHaveBeenCalledWith(getActiveEnvKey(), {
+      legacyEnvKeys: [getActiveLegacyRestOnlyEnvKey()],
+    })
     expect(service.logoutInProgress).toBe(false)
   })
 
@@ -425,7 +431,10 @@ describe('AppService invitation configuration lookup', () => {
     await expect(service.initialize()).resolves.toEqual({ authenticated: false, me: null })
 
     expect(clearSessionToken).toHaveBeenCalledWith(
-      resolveEnvKey('https://api.example.com', 'https://rpc.example.com')
+      resolveEnvKey('https://api.example.com', 'https://rpc.example.com'),
+      {
+        legacyEnvKeys: [resolveEnvKey('https://api.example.com')],
+      }
     )
   })
 

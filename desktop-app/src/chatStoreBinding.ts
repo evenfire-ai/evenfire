@@ -10,6 +10,7 @@ import { assertSafeFilesystemSegment } from './pathSafety.js'
  */
 const SCHEMA_VERSION = 2
 const PREVIOUS_PAGED_INDEX_VERSION = 3
+const LEGACY_INDEX_VERSIONS = new Set([1])
 const CORRUPT_QUARANTINE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 
 // Default base dir derived from Electron's userData path. Tests override via
@@ -221,9 +222,9 @@ async function writeMigrationMarker(markerPath: string): Promise<void> {
 }
 
 /**
- * Scan a user's per-agent chat directories and remove any whose `index.json`
- * is missing or not at the current schema version. Idempotent and best-effort
- * per agent dir — a parse failure is treated as legacy and wiped.
+ * Scan a user's per-agent chat directories and remove only caches whose parsed
+ * catalog declares a known legacy schema. Missing, torn, or future-version
+ * catalogs are not evidence that their paged transcripts are disposable.
  */
 async function maybeWipeLegacyCache(userDir: string): Promise<void> {
   let entries
@@ -261,8 +262,10 @@ async function maybeWipeLegacyCache(userDir: string): Promise<void> {
             error
           )
         }
-      } else {
-        isLegacy = parsed.version !== SCHEMA_VERSION
+      } else if (LEGACY_INDEX_VERSIONS.has(parsed.version ?? Number.NaN)) {
+        isLegacy = true
+      } else if (parsed.version !== SCHEMA_VERSION) {
+        console.warn(`[chatStore] Preserving cache for "${entry.name}" with unknown index schema`)
       }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException | undefined)?.code
@@ -271,8 +274,9 @@ async function maybeWipeLegacyCache(userDir: string): Promise<void> {
         // Propagate it instead of recursively deleting a live agent cache.
         throw error
       }
-      // index.json missing or unparseable → treat as legacy
-      isLegacy = true
+      // Missing or unparseable catalogs can be a torn atomic write. Preserve
+      // paged transcripts so server reconciliation or manual recovery can use them.
+      console.warn(`[chatStore] Preserving cache for "${entry.name}" with unreadable index`)
     }
     if (isLegacy) {
       console.warn(

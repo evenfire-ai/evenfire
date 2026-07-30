@@ -615,7 +615,7 @@ export class AppService {
       }
       this.clearAuthenticatedSessionState()
       if (AppService.isRejectedStoredSessionError(error)) {
-        await this.tokenStore.clearSessionToken(envKey)
+        await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
       } else {
         console.warn('[AppService] Saved session restore failed; keeping token for retry:', error)
       }
@@ -908,8 +908,11 @@ export class AppService {
   async logout(): Promise<void> {
     this.logoutInProgress = true
     try {
+      const envKey = getActiveEnvKey()
+      const legacyEnvKey = getActiveLegacyRestOnlyEnvKey()
+      const legacyEnvKeys = legacyEnvKey !== envKey ? [legacyEnvKey] : []
       this.clearAuthenticatedSessionState()
-      await this.tokenStore.clearSessionToken(getActiveEnvKey())
+      await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
     } finally {
       this.logoutInProgress = false
     }
