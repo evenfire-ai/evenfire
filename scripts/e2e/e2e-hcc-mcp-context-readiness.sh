@@ -379,7 +379,11 @@ context_watch_has_latest_spec() {
 mcp_egress_binding_is_udp() {
   kctl get mcpserver "$MCP_NAME" -n "$MCP_NS" -o json |
     jq -e --arg dns "$TARGET_DNS" '
-      .spec.egressBindings == [{dns: $dns, port: 443, protocol: "UDP"}]
+      (.spec.egressBindings | length) == 1 and
+      .spec.egressBindings[0].egressClass == "exact-host" and
+      .spec.egressBindings[0].dns == $dns and
+      .spec.egressBindings[0].port == 443 and
+      .spec.egressBindings[0].protocol == "UDP"
     ' >/dev/null
 }
 
