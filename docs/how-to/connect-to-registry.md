@@ -22,8 +22,8 @@ and use registry SSO from your Control UI.
 
 ## Connect
 
-Open **Control UI → Registry → Connect** (`/registry/connect`). The panel walks
-one of two state machines, depending on how the registry is configured:
+Open **Control UI → Marketplace → Connect** (`/marketplace/connect`). The panel
+walks one of two state machines, depending on how the registry is configured:
 
 - Auto-approved: `disconnected → connecting → connected`
 - Operator-approved: `disconnected → pending → approved → connected`
