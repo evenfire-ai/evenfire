@@ -73,6 +73,7 @@ export const CONTROL_ROUTES = {
     plugins: '/marketplace/plugins',
     install: (query?: ControlRouteQuery) => withQuery('/marketplace/install', query),
     publish: (query?: ControlRouteQuery) => withQuery('/marketplace/publish', query),
+    keys: '/marketplace/keys',
     connect: '/marketplace/connect',
     entry: (name: string, version: string) =>
       `/marketplace/entries/${segment(name)}/${segment(version)}`,
@@ -101,7 +102,6 @@ export const CONTROL_ROUTES = {
     entries: '/publisher/entries',
     sharedWithMe: '/publisher/shared-with-me',
     credentials: '/publisher/credentials',
-    apiKeys: '/publisher/api-keys',
   },
   secrets: {
     root: '/secrets',

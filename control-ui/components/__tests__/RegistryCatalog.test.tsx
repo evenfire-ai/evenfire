@@ -319,6 +319,16 @@ describe('RegistryCatalog controls', () => {
     expect(navigation.push).toHaveBeenCalledWith('/marketplace/publish?type=recipe')
   })
 
+  it('opens API-key management from the Marketplace title menu', async () => {
+    mockApiSuccess()
+    render(<RegistryCatalog />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Marketplace actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Manage API keys' }))
+
+    expect(navigation.push).toHaveBeenCalledWith('/marketplace/keys')
+  })
+
 })
 
 describe('RegistryCatalog state handling', () => {

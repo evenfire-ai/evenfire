@@ -261,6 +261,18 @@ export default function RegistryCatalog() {
               {isInitialLoad ? 'Marketplace' : `Marketplace (${filtered.length})`}
             </>
           }
+          titleActions={
+            <RowActionsMenu
+              ariaLabel="Marketplace actions"
+              actions={[
+                {
+                  key: 'api-keys',
+                  label: 'Manage API keys',
+                  onClick: () => router.push(CONTROL_ROUTES.marketplace.keys),
+                },
+              ]}
+            />
+          }
           subtitle="Discover and install connectors and plugins from the Marketplace."
           actionsClassName="cu-registry-toolbar"
           actions={

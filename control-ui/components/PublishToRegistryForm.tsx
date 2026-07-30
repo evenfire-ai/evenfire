@@ -587,7 +587,7 @@ export function PublishToRegistryForm({
                   </p>
                   <p className="cu-field__hint">
                     Need a key to publish from CI or a script?{' '}
-                    <a href={CONTROL_ROUTES.publisher.apiKeys}>Manage API keys →</a>
+                    <a href={CONTROL_ROUTES.marketplace.keys}>Manage API keys →</a>
                   </p>
                 </div>
               ))}

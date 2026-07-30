@@ -2169,6 +2169,12 @@ textarea.cu-input {
   min-width: 0;
 }
 
+.cu-table-panel__title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+}
+
 .cu-table-panel__subtitle {
   margin: 0;
   font-size: 0.75rem;

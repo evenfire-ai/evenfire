@@ -50,7 +50,7 @@ function fmtExpiry(v: string | null): string {
   return d.getTime() < Date.now() ? `Expired ${d.toLocaleDateString()}` : d.toLocaleString()
 }
 
-export default function RegistryApiKeysPanel({ embedded = false }: { embedded?: boolean }) {
+export default function RegistryApiKeysPanel() {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [view, setView] = useState<View>({ kind: 'loading' })
@@ -235,7 +235,7 @@ export default function RegistryApiKeysPanel({ embedded = false }: { embedded?: 
 
   return (
     <section>
-      {embedded ? content : <div className="cu-card cu-card--viewport-fill">{content}</div>}
+      <div className="cu-card cu-card--viewport-fill">{content}</div>
       {creating ? (
         <CreateApiKeyModal onCreate={handleCreate} onCancel={() => setCreating(false)} />
       ) : null}

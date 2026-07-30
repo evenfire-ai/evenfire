@@ -1,5 +1,6 @@
-import { PublisherPageContent } from '../PublisherPageContent'
+import { redirect } from 'next/navigation'
+import { CONTROL_ROUTES } from '@constants/routes'
 
 export default function PublisherApiKeysPage() {
-  return <PublisherPageContent activeTab="api-keys" />
+  redirect(CONTROL_ROUTES.marketplace.keys)
 }

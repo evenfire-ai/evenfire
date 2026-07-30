@@ -1,6 +1,13 @@
-import { redirect } from 'next/navigation'
-import { CONTROL_ROUTES } from '@constants/routes'
+import { AuthGate } from '@components/AuthGate'
+import { DashboardLayout } from '@components/DashboardLayout'
+import RegistryApiKeysPanel from '@components/RegistryApiKeysPanel'
 
 export default function RegistryKeysPage() {
-  redirect(CONTROL_ROUTES.publisher.apiKeys)
+  return (
+    <AuthGate>
+      <DashboardLayout isDetailPage>
+        <RegistryApiKeysPanel />
+      </DashboardLayout>
+    </AuthGate>
+  )
 }
