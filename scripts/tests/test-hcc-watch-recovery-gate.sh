@@ -393,27 +393,6 @@ else
   fail "the DNS fixture can mistake a resolver retransmit for a dedicated retry"
 fi
 
-# Keep the runtime log contract consumed above tied to its producer. Template
-# literals are checked as their fixed text plus the variable that supplies the
-# dynamic identity, avoiding a rendered-string grep that would produce false
-# drift reports.
-if grep -Fq 'Initial external egress reconciliation failed for ${key};' \
-     "$HCC_EGRESS_COORDINATOR" &&
-   grep -Fq 'Scheduling external egress retry ${attempt}/${EXTERNAL_EGRESS_RETRY_DELAYS_MS.length}' \
-     "$HCC_EGRESS_COORDINATOR" &&
-   grep -Fq 'for McpServer "${this.retryIntents.get(key)!.server.name}"' \
-     "$HCC_EGRESS_COORDINATOR" &&
-   grep -Fq 'Context watch event: ${type} for ${context.name}' \
-     "$HCC_K8S_CLIENT" &&
-   grep -Fq 'Running initial NetworkPolicy background reconciliation...' \
-     "$HCC_K8S_CLIENT" &&
-   grep -Fq 'Reconciling context "${contextId}" — allowed servers: [${allowedServers.join(' \
-     "$HCC_NETWORK_POLICY_RECONCILER"; then
-  pass "MCP readiness log predicates remain bound to their runtime producers"
-else
-  fail "an MCP readiness log predicate drifted from its runtime producer"
-fi
-
 # Full marker inventory: every runtime log marker any HCC gate consumes, paired
 # with the producer statement that emits it. Both sides are matched as fixed
 # source text, never as a rendered string: a template literal is pinned by its

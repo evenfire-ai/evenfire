@@ -4729,7 +4729,11 @@ describe('NetworkPolicyReconciler', () => {
       ).rejects.toThrow(/Ambiguous NetworkPolicy ownership/)
       expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
 
-      expect(await reconciler.reconcileContext(deltaContext)).toBe(false)
+      // The delta's own revocation still completes — its label-scoped LISTs are
+      // clean. What it may not do is vouch for the namespace-wide inventory,
+      // which the readiness lane checks separately.
+      expect(await reconciler.reconcileContext(deltaContext)).toBe(true)
+      expect(reconciler.hasCertifiedSafetyInventory()).toBe(false)
     })
 
     it('certifies a scoped delta again once a later safety pass completes', async () => {
@@ -4754,10 +4758,12 @@ describe('NetworkPolicyReconciler', () => {
 
       expect(onAuthoritativeRevocationComplete).toHaveBeenCalledOnce()
       expect(await reconciler.reconcileContext(deltaContext)).toBe(true)
+      expect(reconciler.hasCertifiedSafetyInventory()).toBe(true)
     })
 
     it('certifies a scoped delta when no safety pass has failed', async () => {
       expect(await reconciler.reconcileContext(deltaContext)).toBe(true)
+      expect(reconciler.hasCertifiedSafetyInventory()).toBe(true)
     })
   })
 

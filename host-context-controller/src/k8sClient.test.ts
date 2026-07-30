@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as http from 'http'
-import { config } from './config'
 import { HostFleetReconcileError } from './hostReconciler'
 import { HostK8sRequestTimeoutError } from './k8s/hostK8sApiClient'
 import {
@@ -121,6 +120,7 @@ const mocks = vi.hoisted(() => {
     .fn()
     .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 }))
   const ensureDefaultPolicies = vi.fn().mockResolvedValue(undefined)
+  const hasCertifiedSafetyInventory = vi.fn().mockReturnValue(true)
   const netPolFullReconcile = vi.fn().mockImplementation(async (...args: unknown[]) => {
     const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
     options?.onAuthoritativeRevocationComplete?.()
@@ -133,6 +133,7 @@ const mocks = vi.hoisted(() => {
   const hostListCallOptions = vi.fn()
   const createAdministrativeOutcomeReporter = vi.fn().mockReturnValue(undefined)
   return {
+    hasCertifiedSafetyInventory,
     listNamespacedCustomObject,
     getNamespacedCustomObject,
     ensureDefaultPolicies,
@@ -305,6 +306,7 @@ vi.mock('./networkPolicyReconciler', () => ({
     reconcileContext = vi.fn()
     reconcileDeleteContext = vi.fn()
     cleanupExternalEgress = vi.fn()
+    hasCertifiedSafetyInventory = mocks.hasCertifiedSafetyInventory
   },
 }))
 
@@ -1336,6 +1338,86 @@ describe('McpServerWatcher startup', () => {
       // Ready while a stale allow is still live.
       expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
     } finally {
+      olderAdditivePass.resolve(undefined)
+      await initialPass
+      await server.stop()
+      await watcher.stop()
+    }
+  })
+
+  it('does not certify a Context delta while the namespace-wide inventory is uncertified', async () => {
+    const olderAdditivePass = deferred()
+    const uncertifiedDelta = deferred<boolean>()
+    let contextWatchCallback:
+      | ((
+          type: string,
+          apiObj: {
+            metadata: { name: string; namespace: string; uid: string }
+            spec: { contextId: string; mcpServers: string[] }
+          }
+        ) => Promise<void>)
+      | undefined
+    let networkPolicyPasses = 0
+    mocks.watch.mockImplementationOnce(async (path, _options, callback) => {
+      if (path.endsWith('/contexts')) contextWatchCallback = callback
+      return { abort: vi.fn() }
+    })
+    mocks.netPolFullReconcile.mockImplementation(async (...args: unknown[]) => {
+      networkPolicyPasses += 1
+      const options = args[2] as { onAuthoritativeRevocationComplete?: () => void } | undefined
+      options?.onAuthoritativeRevocationComplete?.()
+      if (networkPolicyPasses === 1) await olderAdditivePass.promise
+    })
+
+    const watcher = new McpServerWatcher()
+    await (watcher as any).startContextWatch('uncertified-inventory-rv')
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    ;(watcher as any).hostCacheSynced = true
+    ;(watcher as any).mcpWatchGeneration = 1
+    ;(watcher as any).contexts.set('delta-context', {
+      name: 'delta-context',
+      namespace: 'mcp-server',
+      uid: 'delta-context-uid',
+      spec: { contextId: 'delta-context', mcpServers: [] },
+    })
+    const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
+      watcher.isReadinessInventoryAuthoritative()
+    )
+    await server.start()
+    server.setReady(true)
+    const initialPass = (watcher as any).runInitialNetworkPolicyConvergence() as Promise<void>
+    ;(watcher as any).netPolReconciler.reconcileContext.mockImplementationOnce(
+      () => uncertifiedDelta.promise
+    )
+    // The delta's own revocation completes, but the last authoritative pass left
+    // the namespace-wide inventory uncertified. A label-scoped delta cannot
+    // vouch for that namespace, so readiness must stay withheld.
+    mocks.hasCertifiedSafetyInventory.mockReturnValue(false)
+
+    try {
+      await vi.waitFor(() => expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce())
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(200)
+
+      const delta = contextWatchCallback!('MODIFIED', {
+        metadata: {
+          name: 'delta-context',
+          namespace: 'mcp-server',
+          uid: 'delta-context-uid',
+        },
+        spec: { contextId: 'delta-context', mcpServers: ['delta-server'] },
+      })
+
+      await vi.waitFor(() =>
+        expect((watcher as any).netPolReconciler.reconcileContext).toHaveBeenCalledOnce()
+      )
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+      uncertifiedDelta.resolve(true)
+      await delta
+
+      expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
+    } finally {
+      mocks.hasCertifiedSafetyInventory.mockReturnValue(true)
       olderAdditivePass.resolve(undefined)
       await initialPass
       await server.stop()

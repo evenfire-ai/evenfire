@@ -823,14 +823,19 @@ export class NetworkPolicyReconciler {
 
     // Re-LIST every lane after writes so a same-name policy that was just
     // replaced is compared in its new form and cannot delete itself.
-    const revoked = await this.revokeStaleContextAllows(context, isCurrent)
-    if (revoked && this.safetyPassLeftUncertified) {
-      console.warn(
-        `[NetPol] Not certifying the scoped delta for context "${contextId}": the last authoritative safety pass ended without certifying its namespace-wide inventory`
-      )
-      return false
-    }
-    return revoked
+    return await this.revokeStaleContextAllows(context, isCurrent)
+  }
+
+  /**
+   * Whether the last authoritative safety pass certified its namespace-wide
+   * inventory. Only that pass enumerates the bounded namespaces and classifies
+   * every object it finds; a scoped delta sees nothing but its own label
+   * selectors, so it cannot vouch for a namespace whose classified inventory is
+   * still stuck. The readiness lane consults this before letting a delta
+   * replace the safety certificate.
+   */
+  hasCertifiedSafetyInventory(): boolean {
+    return !this.safetyPassLeftUncertified
   }
 
   private async revokeStaleContextAllows(
@@ -2525,6 +2530,12 @@ export class NetworkPolicyReconciler {
       console.log(
         `[NetPol] Safety policy "${name}" in ${namespace} already exists — converging it to the desired spec`
       )
+      // Deliberately not delegating to applyOwnedPolicy here: that helper owns
+      // the create-then-conflict flow, so calling it from inside our own
+      // create's catch would issue a second create. Delegating from the top is
+      // not an option either — the desired-state fence below needs the object
+      // this request created, which applyNetworkPolicy does not return. The
+      // wiring below is kept identical to it on purpose.
       await replaceWithConflictRetry<k8s.V1NetworkPolicy>({
         description: `policy "${name}" in ${namespace}`,
         logPrefix: '[NetPol]',

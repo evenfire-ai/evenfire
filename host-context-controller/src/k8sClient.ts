@@ -3718,14 +3718,16 @@ export class McpServerWatcher implements McpServerProvider {
           } else if (current?.spec.contextId !== context.spec.contextId) {
             return
           }
-          // A scoped delta may only certify readiness when its own stale-allow
-          // revocation ran to completion. `reconcileContext` aborts mid-pass
-          // whenever its authority fence breaks, so treating "it returned" as
-          // "it revoked" would certify a Context whose stale allows are live.
-          let scopedRevocationCompleted = false
           if (type === 'ADDED' || type === 'MODIFIED') {
             const selectedContext = current!
-            scopedRevocationCompleted = await this.netPolReconciler.reconcileContext(
+            // A scoped delta may only replace the safety certificate when its
+            // own stale-allow revocation ran to completion — `reconcileContext`
+            // aborts mid-pass whenever its authority fence breaks — and when
+            // the last authoritative pass certified its namespace-wide
+            // inventory, which a label-scoped delta cannot vouch for.
+            // `deltaSafetyCertificate` is only ever built for MODIFIED, so this
+            // is the one branch where it can be recorded.
+            const scopedRevocationCompleted = await this.netPolReconciler.reconcileContext(
               selectedContext,
               {
                 isCurrent: () =>
@@ -3734,6 +3736,15 @@ export class McpServerWatcher implements McpServerProvider {
                   this.contexts.get(selectedContext.name) === selectedContext,
               }
             )
+            if (deltaSafetyCertificate && scopedRevocationCompleted) {
+              if (this.netPolReconciler.hasCertifiedSafetyInventory()) {
+                this.recordNetworkPolicySafetyCertificate(deltaSafetyCertificate)
+              } else {
+                console.warn(
+                  `[K8s] Not certifying the scoped delta for context "${context.spec.contextId}": the last authoritative safety pass ended without certifying its namespace-wide inventory`
+                )
+              }
+            }
           } else if (type === 'DELETED') {
             const deleteAllowed = () =>
               this.contextAbsentForDelete(context.name, context.namespace, watchGeneration)
@@ -3742,10 +3753,6 @@ export class McpServerWatcher implements McpServerProvider {
               context.spec.contextId,
               deleteAllowed
             )
-          }
-
-          if (deltaSafetyCertificate && scopedRevocationCompleted) {
-            this.recordNetworkPolicySafetyCertificate(deltaSafetyCertificate)
           }
         } catch (error) {
           console.error(
