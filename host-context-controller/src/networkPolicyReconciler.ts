@@ -610,7 +610,21 @@ export class NetworkPolicyReconciler {
       },
     }
 
-    await this.applyPolicy(name, policy)
+    await applyNetworkPolicy(
+      this.networkingApi,
+      name,
+      config.namespace,
+      policy,
+      '[NetPol]',
+      undefined,
+      existing => {
+        if (!hasExpectedPolicyOwnership(existing, 'allow-api')) {
+          throw new Error(
+            `NetworkPolicy "${name}" has conflicting ownership for the allow-api lane`
+          )
+        }
+      }
+    )
   }
 
   // ─── Context-Based Policies ──────────────────────────────────────────
@@ -783,7 +797,7 @@ export class NetworkPolicyReconciler {
 
       const desired = this.buildContextAllowPolicies(context, server)
       const ingressName = desired.ingress.metadata!.name!
-      await this.applyPolicy(ingressName, desired.ingress, isCurrent)
+      await this.applyContextIngressPolicy(ingressName, desired.ingress, isCurrent)
       if (!isCurrent()) return
 
       const hostEgressName = desired.hostEgress.metadata!.name!
@@ -2277,7 +2291,7 @@ export class NetworkPolicyReconciler {
   }
 
   /** Create or update a NetworkPolicy. */
-  private async applyPolicy(
+  private async applyContextIngressPolicy(
     name: string,
     policy: k8s.V1NetworkPolicy,
     isCurrent?: () => boolean

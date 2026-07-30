@@ -507,6 +507,63 @@ describe('NetworkPolicyReconciler', () => {
   // ─── L1: Allow API ─────────────────────────────────────────────────
 
   describe('L1 — ensureAllowContextMapperApi', () => {
+    it('updates the existing HCC-owned allow-api policy without requiring Context owner labels', async () => {
+      mockApi.createNamespacedNetworkPolicy.mockImplementation(
+        async ({ body }: { body: k8s.V1NetworkPolicy }) => {
+          if (body.metadata?.name === 'allow-host-context-controller-api') {
+            throw Object.assign(new Error('already exists'), { code: 409 })
+          }
+          return {}
+        }
+      )
+      mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => ({
+        metadata: {
+          name,
+          namespace,
+          uid: 'existing-default-policy-uid',
+          resourceVersion: '7',
+          labels: {
+            'clerum.io/managed-by': 'host-context-controller',
+            'clerum.io/policy-type': 'allow-api',
+          },
+        },
+      }))
+
+      await expect(reconciler.ensureDefaultPolicies()).resolves.toBeUndefined()
+      expect(mockApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'allow-host-context-controller-api',
+          namespace: 'mcp-server',
+        })
+      )
+    })
+
+    it('refuses to adopt a foreign policy that collides with the allow-api policy name', async () => {
+      mockApi.createNamespacedNetworkPolicy.mockImplementation(
+        async ({ body }: { body: k8s.V1NetworkPolicy }) => {
+          if (body.metadata?.name === 'allow-host-context-controller-api') {
+            throw Object.assign(new Error('already exists'), { code: 409 })
+          }
+          return {}
+        }
+      )
+      mockApi.readNamespacedNetworkPolicy.mockResolvedValue({
+        metadata: {
+          name: 'allow-host-context-controller-api',
+          namespace: 'mcp-server',
+          uid: 'foreign-default-policy-uid',
+          resourceVersion: '7',
+          labels: {
+            'clerum.io/managed-by': 'foreign-controller',
+            'clerum.io/policy-type': 'allow-api',
+          },
+        },
+      })
+
+      await expect(reconciler.ensureDefaultPolicies()).rejects.toThrow(/ownership/i)
+      expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
     it('creates allow-api ingress policy using _from (K8s client convention)', async () => {
       await reconciler.ensureDefaultPolicies()
 
