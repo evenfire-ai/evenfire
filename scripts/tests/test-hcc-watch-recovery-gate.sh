@@ -38,6 +38,21 @@ else
   fail "CommunicationChannel gate target omits exact pre-gate or profile ownership"
 fi
 
+proxy_rollout_function="$(
+  sed -n '/^print_hcc_proxy_rollout_diagnostics() {$/,/^}$/p' "$WATCH_GATE"
+)"
+# Literal source-code assertions.
+# shellcheck disable=SC2016
+if [[ "$proxy_rollout_function" == *'kctl get pods'* ]] &&
+   [[ "$proxy_rollout_function" == *'--previous --tail=120'* ]] &&
+   [[ "$proxy_rollout_function" == *'status.containerStatuses'* ]] &&
+   grep -Fq 'if ! kctl rollout status deployment "$HCC_DEPLOY"' "$WATCH_GATE" &&
+   [ "$(grep -Fc 'print_hcc_proxy_rollout_diagnostics' "$WATCH_GATE")" = 2 ]; then
+  pass "proxy rollout failure emits bounded HCC pod and previous-container diagnostics"
+else
+  fail "proxy rollout failure can discard the distinguishing HCC startup evidence"
+fi
+
 if grep -Fq 'source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"' "$READINESS_GATE" &&
    [ "$(grep -Fc 'require_branch_owned_hcc_gate "$HCC_NS"' "$READINESS_GATE")" = 1 ] &&
    ! grep -Fq 'HCC_BRANCH_GATE_SYNC_MARKER' "$READINESS_GATE" &&

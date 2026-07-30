@@ -75,6 +75,33 @@ HCC_GATE_FINALIZATION_FAILURE=""
 die() { fail "$*"; exit 1; }
 now_rfc3339() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
+# This gate deliberately changes only the HCC Kubernetes API path.  If its
+# rollout fails before the normal recovery log stream starts, preserve the
+# bounded pod state and both container log buffers that distinguish a proxy,
+# policy, or process-startup failure.  Cleanup still restores HCC afterwards.
+print_hcc_proxy_rollout_diagnostics() {
+  local pod
+
+  echo "HCC proxy rollout diagnostics (before restoration):" >&2
+  kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" -o json |
+    jq -r '
+      .items[] |
+      .status.containerStatuses[]? |
+      "pod=\(.metadata.name) phase=\(.status.phase // \"unknown\") ready=\(.ready) restarts=\(.restartCount) waiting=\(.state.waiting.reason // \"none\") terminated=\(.state.terminated.reason // \"none\") exitCode=\(.state.terminated.exitCode // \"none\") lastTerminated=\(.lastState.terminated.reason // \"none\") lastExitCode=\(.lastState.terminated.exitCode // \"none\")"
+    ' >&2 || true
+
+  while IFS= read -r pod; do
+    [ -n "$pod" ] || continue
+    echo "HCC proxy rollout previous logs for pod/${pod}:" >&2
+    kctl logs "pod/${pod}" -n "$HCC_NS" -c host-context-controller \
+      --previous --tail=120 >&2 || true
+    echo "HCC proxy rollout current logs for pod/${pod}:" >&2
+    kctl logs "pod/${pod}" -n "$HCC_NS" -c host-context-controller \
+      --tail=120 >&2 || true
+  done < <(kctl get pods -n "$HCC_NS" -l "app=${HCC_DEPLOY}" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+}
+
 cleanup() {
   local status=$? cleanup_failed=0 restore_ok=1 host remaining
   set +e
@@ -172,8 +199,10 @@ hcc_proxy_patch="$(jq -cn --arg ip "$PROXY_IP" '{spec:{template:{spec:{
   ]}]
 }}}}')"
 kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=strategic -p "$hcc_proxy_patch" >/dev/null
-kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" --timeout=180s >/dev/null ||
+if ! kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" --timeout=180s >/dev/null; then
+  print_hcc_proxy_rollout_diagnostics
   die "HCC did not become ready through the API proxy"
+fi
 initial_hcc_identity="$(wait_for_hcc_identity 30)" || die "could not capture HCC pod identity"
 read -r HCC_UID HCC_RESTARTS <<<"$initial_hcc_identity"
 [ -n "$HCC_UID" ] && [ "$HCC_UID" != invalid ] || die "could not capture HCC pod identity"
