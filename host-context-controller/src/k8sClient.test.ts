@@ -3337,6 +3337,48 @@ describe('McpServerWatcher startup', () => {
     errorSpy.mockRestore()
   })
 
+  it('does not report a post-certification additive failure as a readiness safety failure', async () => {
+    vi.useFakeTimers()
+    const additiveFailure = new AggregateError(
+      [new Error('Context policy API unavailable')],
+      'One or more additive Context NetworkPolicy reconciliations failed'
+    )
+    mocks.netPolFullReconcile.mockImplementationOnce(
+      async (
+        _contexts: unknown,
+        _servers: unknown,
+        options?: { onAuthoritativeRevocationComplete?: () => void }
+      ) => {
+        options?.onAuthoritativeRevocationComplete?.()
+        throw additiveFailure
+      }
+    )
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const watcher = new McpServerWatcher()
+    stubAuthoritativeInventoryWatch(watcher, 'McpServer')
+    stubAuthoritativeInventoryWatch(watcher, 'Context')
+    vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
+    vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
+
+    await watcher.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[K8s] Initial NetworkPolicy post-certification additive reconciliation failed:',
+      additiveFailure
+    )
+    expect(errorSpy).not.toHaveBeenCalledWith(
+      '[K8s] Initial NetworkPolicy background reconciliation failed:',
+      additiveFailure
+    )
+    expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
+
+    await watcher.stop()
+    errorSpy.mockRestore()
+  })
+
   it.each([
     ['McpServer', 'startMcpServerWatch'],
     ['Context', 'startContextWatch'],
@@ -3570,7 +3612,8 @@ describe('McpServerWatcher startup', () => {
       )
     })
     const netPol = (watcher as any).netPolReconciler
-    netPol.reconcileExternalEgress.mockRejectedValueOnce(new Error('dns resolution failed'))
+    const dnsFailure = new Error('dns resolution failed')
+    netPol.reconcileExternalEgress.mockRejectedValueOnce(dnsFailure)
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     stubAuthoritativeInventoryWatch(watcher, 'McpServer')
@@ -3590,6 +3633,12 @@ describe('McpServerWatcher startup', () => {
     )
     expect(netPol.reconcileExternalEgress).toHaveBeenCalledTimes(1)
     expect(reconciler.reconcile).not.toHaveBeenCalled()
+    expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
+    expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(false)
+    expect(errorSpy).not.toHaveBeenCalledWith(
+      '[K8s] Initial NetworkPolicy background reconciliation failed:',
+      dnsFailure
+    )
 
     watcher.stop()
     errorSpy.mockRestore()

@@ -78,6 +78,7 @@ ORIGINAL_DNS_CONFIG=""
 DNS_BLOCKER_IP=""
 DNS_RELEASE_COUNT_AT_HOLD=0
 DNS_HOLD_COUNT_AT_ARM=0
+DNS_HOLD_COUNT_AT_RETRY_SCHEDULE=0
 UPSTREAM_DNS_IP=""
 NEW_HCC_POD=""
 HCC_UID=""
@@ -184,20 +185,6 @@ hcc_log_contains() {
   grep -Fq "$marker" <<<"$logs"
 }
 
-hcc_log_count() {
-  local marker=$1 logs
-  [ -n "$NEW_HCC_POD" ] || return 1
-  logs="$(kctl logs "pod/${NEW_HCC_POD}" -n "$HCC_NS" \
-    -c host-context-controller 2>/dev/null)" || return 1
-  grep -Fc "$marker" <<<"$logs" || true
-}
-
-hcc_log_count_exceeds() {
-  local marker=$1 baseline=$2 current
-  current="$(hcc_log_count "$marker")" || return 1
-  [ "$current" -gt "$baseline" ]
-}
-
 dns_log_contains() {
   local marker=$1 logs
   logs="$(kctl logs "deployment/${DNS_BLOCKER_NAME}" -n "$HCC_NS" 2>/dev/null)" ||
@@ -231,14 +218,6 @@ dns_released_since_hold() {
   [ "$(dns_release_count)" -gt "$DNS_RELEASE_COUNT_AT_HOLD" ]
 }
 
-initial_network_policy_failure_is_absent() {
-  local logs
-  [ -n "$NEW_HCC_POD" ] || return 1
-  logs="$(kctl logs "pod/${NEW_HCC_POD}" -n "$HCC_NS" \
-    -c host-context-controller 2>/dev/null)" || return 1
-  ! grep -Fq "Initial NetworkPolicy background reconciliation failed:" <<<"$logs"
-}
-
 external_egress_retry_progress_is_observed() {
   local logs marker
   [ -n "$NEW_HCC_POD" ] || return 1
@@ -255,12 +234,8 @@ external_egress_retry_progress_is_observed() {
       ' <<<"$logs"
 }
 
-external_egress_retry_rearmed_is_observed() {
-  local logs
-  [ -n "$NEW_HCC_POD" ] || return 1
-  logs="$(kctl logs "pod/${NEW_HCC_POD}" -n "$HCC_NS" \
-    -c host-context-controller 2>/dev/null)" || return 1
-  grep -Fq "Scheduling external egress retry 2/3 for McpServer \"${MCP_NAME}\"" <<<"$logs"
+dns_retry_query_observed_since_schedule() {
+  [ "$(dns_hold_count)" -gt "$DNS_HOLD_COUNT_AT_RETRY_SCHEDULE" ]
 }
 
 hcc_identity_is_stable() {
@@ -1271,7 +1246,7 @@ dns_patch="$(jq -cn --arg nameserver "$DNS_BLOCKER_IP" '
       options:[
         {name:"ndots",value:"1"},
         {name:"timeout",value:"30"},
-        {name:"attempts",value:"20"}
+        {name:"attempts",value:"1"}
       ]
     }
   }}}}
@@ -1370,8 +1345,10 @@ external_egress_policy_absent ||
 wait_until 120 "a real same-intent external-egress retry to be scheduled" \
   external_egress_retry_progress_is_observed ||
   die "the held same-intent refresh did not schedule a real retry"
+DNS_HOLD_COUNT_AT_RETRY_SCHEDULE="$(dns_hold_count)" ||
+  die "could not snapshot DNS hold evidence after the same-intent retry was scheduled"
 wait_until 180 "the scheduled same-intent external-egress retry to execute" \
-  external_egress_retry_rearmed_is_observed ||
+  dns_retry_query_observed_since_schedule ||
   die "the scheduled same-intent external-egress retry did not execute"
 probe_new_hcc_ready_endpoint ||
   die "HCC lost readiness after a same-intent DNS retry (${HCC_READY_PROBE_DIAGNOSTIC:-HCC_READY_PROBE category=unknown})"
@@ -1452,8 +1429,14 @@ initial_empty_context_log="[NetPol] Reconciling context \"${CONTEXT_ID}\" — al
 wait_until 120 "initial NetworkPolicy pass to reconcile the fixture's empty Context snapshot" \
   hcc_log_contains "$initial_empty_context_log" ||
   die "initial NetworkPolicy pass never reconciled the fixture's empty Context"
-initial_network_policy_failure_is_absent ||
-  die "the DNS hold unexpectedly failed the readiness safety lane"
+wait_until 120 "a real divergent external-egress retry to be scheduled" \
+  external_egress_retry_progress_is_observed ||
+  die "the held divergent refresh did not schedule a real retry"
+DNS_HOLD_COUNT_AT_RETRY_SCHEDULE="$(dns_hold_count)" ||
+  die "could not snapshot DNS hold evidence after the divergent retry was scheduled"
+wait_until 180 "the scheduled divergent external-egress retry to execute" \
+  dns_retry_query_observed_since_schedule ||
+  die "the scheduled divergent external-egress retry did not execute"
 context_policies_absent ||
   die "Context policy appeared before the isolated MODIFIED event"
 
@@ -1465,10 +1448,6 @@ wait_until 60 "Context API to expose the latest server membership" context_watch
 wait_until 60 "HCC Context watch to observe the update during the blocked fleet pass" \
   hcc_log_contains "Context watch event: MODIFIED for ${CONTEXT_NAME}" ||
   die "HCC did not observe the real Context update while initial MCP convergence was blocked"
-modified_context_log="[NetPol] Reconciling context \"${CONTEXT_ID}\" — allowed servers: [${MCP_NAME}]"
-wait_until 60 "MODIFIED handler to reconcile the fixture's latest Context snapshot" \
-  hcc_log_contains "$modified_context_log" ||
-  die "the observed MODIFIED event never reconciled the latest Context membership"
 wait_until 120 "all three latest-Context NetworkPolicies to converge during the MCP hold" \
   context_policies_converged ||
   die "Context policies remained blocked behind the held McpServer convergence"
@@ -1490,14 +1469,6 @@ hcc_identity_is_stable ||
 ok "the MODIFIED handler, not the initial empty-Context pass, converged all three policies"
 ok "global readiness and Context progress continued while the affected runtime stayed blocked"
 
-initial_policy_run_marker="Running initial NetworkPolicy background reconciliation"
-initial_policy_complete_marker="[NetPol] Full reconciliation complete"
-initial_policy_run_count_before_release="$(hcc_log_count "$initial_policy_run_marker")" ||
-  die "could not snapshot initial NetworkPolicy run evidence before DNS release"
-initial_policy_complete_count_before_release="$(
-  hcc_log_count "$initial_policy_complete_marker"
-)" || die "could not snapshot initial NetworkPolicy completion evidence before DNS release"
-
 release_dns_blocker ||
   die "could not release the fixture DNS query"
 wait_until 30 "DNS blocker to answer the held query" \
@@ -1514,14 +1485,6 @@ wait_until 300 "McpServer runtime, status, and latest Context NetworkPolicies to
 wait_until 300 "all peer MCP/Context runtimes to converge after releasing the held primary egress" \
   peer_fleet_converged ||
   die "peer MCP/Context fleet did not converge after the held primary egress was released"
-wait_until 60 "initial NetworkPolicy full pass to run" \
-  hcc_log_count_exceeds \
-    "$initial_policy_run_marker" "$initial_policy_run_count_before_release" ||
-  die "initial NetworkPolicy convergence was not observed after releasing MCP convergence"
-wait_until 60 "initial NetworkPolicy retry to complete after DNS release" \
-  hcc_log_count_exceeds \
-    "$initial_policy_complete_marker" "$initial_policy_complete_count_before_release" ||
-  die "initial NetworkPolicy convergence did not recover after DNS release"
 hcc_identity_is_stable ||
   die "HCC restarted instead of completing the released background convergence"
 final_probe="$(probe_hcc_final_context)" ||

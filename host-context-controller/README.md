@@ -119,7 +119,8 @@ McpServers carrying a `clerum.io/recipe-bindings` annotation (set for WorkflowRe
 
 ### Reconciliation Lifecycle
 
-- **Startup** — Ensures L0/L1 defaults, reconciles all Contexts and all McpServer egress bindings, then deletes orphaned context-allow policies in the MCP server namespace, plus orphaned rpc-proxy-egress and external-egress policies, whose owning CRD no longer exists (`fullReconcile`).
+- **Startup safety** — Ensures L0/L1 defaults, revokes stale or orphaned context-allow, rpc-proxy-egress, and external-egress policies from authoritative Context/McpServer inventories, then certifies readiness safety.
+- **Startup additive convergence** — Reconciles Context allows after certification. The dedicated external-egress coordinator is the sole owner of McpServer egress creation, per-server startup gating, retry, and periodic DNS refresh; a failed binding blocks only that server's runtime.
 - **Context ADDED/MODIFIED/DELETED** — Creates, updates, or removes the L2 policy set for that context.
 - **McpServer ADDED/MODIFIED/DELETED** — Reconciles L3 external egress (before the workload Deployment is created) and recipe binding policies.
 

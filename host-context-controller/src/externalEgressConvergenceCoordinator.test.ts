@@ -528,6 +528,39 @@ describe('ExternalEgressConvergenceCoordinator', () => {
     instance.stop()
   })
 
+  it('keeps a failed startup DNS gate isolated and recovers it through the dedicated retry', async () => {
+    vi.useFakeTimers()
+    const selected = server('dns-held-server')
+    const dnsFailure = new Error('dns resolution failed')
+    const mutate = vi.fn().mockRejectedValueOnce(dnsFailure).mockResolvedValue(undefined)
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    let instance!: ExternalEgressConvergenceCoordinator
+    const built = coordinator({
+      mutate,
+      replay: async (type, current, retry) => {
+        const completion = await instance.reconcile(type, current, { retry })
+        completion?.complete()
+      },
+    })
+    instance = built.instance
+    built.servers.set(selected.name, selected)
+
+    const gates = instance.prepareStartupGates([selected])
+    await expect(gates.waitFor(selected)).resolves.toBe(false)
+    expect(mutate).toHaveBeenCalledOnce()
+    expect(error).toHaveBeenCalledWith(
+      `[K8s] Initial external egress reconciliation failed for ${selected.namespace}/${selected.name}; ` +
+        'runtime reconciliation will stay blocked until retry succeeds:',
+      dnsFailure
+    )
+
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(mutate).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(mutate).toHaveBeenCalledTimes(2)
+    instance.stop()
+  })
+
   it('retires a direct mutation lease when desired revision changes in place', async () => {
     const selected = server('web-search', 1)
     const replacement = server('web-search', 2)

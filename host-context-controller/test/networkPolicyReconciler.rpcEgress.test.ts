@@ -122,6 +122,8 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
           metadata: {
             name: 'rpc-egress-ctx-gamma-mongodb-mcp',
             namespace: 'rpc-proxy',
+            uid: 'rpc-delete-uid',
+            resourceVersion: '7',
             labels: {
               'clerum.io/managed-by': 'host-context-controller',
               'clerum.io/policy-type': 'rpc-proxy-egress',
@@ -147,7 +149,18 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
     await reconciler.reconcileContext(ctx1)
     const existingRpcProxyPolicies = mockApply.mock.calls
       .filter(call => call[2] === 'rpc-proxy')
-      .map(call => call[3] as k8s.V1NetworkPolicy)
+      .map(call => {
+        const policy = call[3] as k8s.V1NetworkPolicy
+        const name = policy.metadata?.name
+        return {
+          ...policy,
+          metadata: {
+            ...policy.metadata,
+            uid: `rpc-proxy:${name}:uid`,
+            resourceVersion: '1',
+          },
+        }
+      })
     expect(existingRpcProxyPolicies).toHaveLength(2)
 
     vi.clearAllMocks()
@@ -177,6 +190,12 @@ describe('NetworkPolicyReconciler rpc-proxy egress', () => {
     expect(mockNetApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
       name: 'rpc-egress-ctx-delta-airtable-mcp',
       namespace: 'rpc-proxy',
+      body: {
+        preconditions: {
+          uid: 'rpc-proxy:rpc-egress-ctx-delta-airtable-mcp:uid',
+          resourceVersion: '1',
+        },
+      },
     })
     expect(mockNetApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
       name: 'rpc-egress-ctx-delta-mongodb-mcp',

@@ -301,20 +301,11 @@ for case_name in detached minikube-profile-missing minikube-profile profile-name
   fi
 done
 
-network_policy_failure_absent_function="$(
-  sed -n '/^initial_network_policy_failure_is_absent() {$/,/^}$/p' "$MCP_READINESS_GATE"
-)"
 retry_progress_function="$(
   sed -n '/^external_egress_retry_progress_is_observed() {$/,/^}$/p' "$MCP_READINESS_GATE"
 )"
-retry_rearmed_function="$(
-  sed -n '/^external_egress_retry_rearmed_is_observed() {$/,/^}$/p' "$MCP_READINESS_GATE"
-)"
-hcc_log_count_function="$(
-  sed -n '/^hcc_log_count() {$/,/^}$/p' "$MCP_READINESS_GATE"
-)"
-hcc_log_count_exceeds_function="$(
-  sed -n '/^hcc_log_count_exceeds() {$/,/^}$/p' "$MCP_READINESS_GATE"
+retry_query_function="$(
+  sed -n '/^dns_retry_query_observed_since_schedule() {$/,/^}$/p' "$MCP_READINESS_GATE"
 )"
 if (
   NEW_HCC_POD=hcc-pod
@@ -325,19 +316,14 @@ if (
   MOCK_HCC_LOG='
 [K8s] Initial external egress reconciliation failed for mcp-server/e2e-held-server; runtime reconciliation will stay blocked until retry succeeds: dns timeout
 [K8s] Scheduling external egress retry 1/3 for McpServer "e2e-held-server" in 5000ms
-[K8s] Scheduling external egress retry 2/3 for McpServer "e2e-held-server" in 15000ms
 '
   kctl() { printf '%s\n' "$MOCK_HCC_LOG"; }
-  eval "$network_policy_failure_absent_function"
   eval "$retry_progress_function"
-  eval "$retry_rearmed_function"
-  initial_network_policy_failure_is_absent &&
-    external_egress_retry_progress_is_observed &&
-    external_egress_retry_rearmed_is_observed
+  external_egress_retry_progress_is_observed
 ); then
-  pass "DNS failure remains in the additive runtime lane and does not fail readiness safety"
+  pass "DNS failure is attributed to the dedicated external-egress retry lane"
 else
-  fail "the injected DNS hold can leak into readiness safety or hide runtime retry progress"
+  fail "the injected DNS hold cannot prove dedicated external-egress retry progress"
 fi
 if (
   NEW_HCC_POD=hcc-pod
@@ -380,62 +366,30 @@ else
   fail "a valid early retry marker is lost in a high-volume log buffer"
 fi
 if (
-  NEW_HCC_POD=hcc-pod
-  HCC_NS=control-plane
-  MCP_NS=mcp-server
-  MCP_NAME=e2e-held-server
-  CONTEXT_NAME=e2e-context
-  MOCK_HCC_LOG='[K8s] Initial NetworkPolicy background reconciliation failed: denied'
-  kctl() { printf '%s\n' "$MOCK_HCC_LOG"; }
-  eval "$network_policy_failure_absent_function"
-  ! initial_network_policy_failure_is_absent
+  DNS_HOLD_COUNT_AT_RETRY_SCHEDULE=3
+  dns_hold_count() { printf '%s\n' 4; }
+  eval "$retry_query_function"
+  dns_retry_query_observed_since_schedule
 ); then
-  pass "the safety predicate rejects an observed NetworkPolicy failure"
+  pass "a post-schedule DNS query proves the dedicated retry executed"
 else
-  fail "an observed NetworkPolicy safety failure can masquerade as clean certification"
+  fail "a fresh DNS query after scheduling does not prove retry execution"
 fi
 if (
-  NEW_HCC_POD=hcc-pod
-  HCC_NS=control-plane
-  MCP_NS=mcp-server
-  MCP_NAME=e2e-held-server
-  CONTEXT_NAME=e2e-context
-  kctl() { return 1; }
-  eval "$network_policy_failure_absent_function"
-  ! initial_network_policy_failure_is_absent
+  DNS_HOLD_COUNT_AT_RETRY_SCHEDULE=3
+  dns_hold_count() { printf '%s\n' 3; }
+  eval "$retry_query_function"
+  ! dns_retry_query_observed_since_schedule
 ); then
-  pass "the safety predicate fails closed when HCC logs are unavailable"
+  pass "a pre-schedule DNS query cannot satisfy retry execution"
 else
-  fail "the safety predicate passes vacuously when HCC logs are unavailable"
+  fail "stale DNS evidence can masquerade as retry execution"
 fi
-
-if (
-  NEW_HCC_POD=hcc-pod
-  HCC_NS=control-plane
-  marker='[NetPol] Full reconciliation complete'
-  MOCK_HCC_LOG="$marker"
-  kctl() { printf '%s\n' "$MOCK_HCC_LOG"; }
-  eval "$hcc_log_count_function"
-  eval "$hcc_log_count_exceeds_function"
-  baseline="$(hcc_log_count "$marker")" &&
-    ! hcc_log_count_exceeds "$marker" "$baseline" &&
-    MOCK_HCC_LOG="${MOCK_HCC_LOG}"$'\n'"$marker" &&
-    hcc_log_count_exceeds "$marker" "$baseline"
-); then
-  pass "post-release NetworkPolicy waits require evidence newer than their baseline snapshot"
+if grep -Fq '{name:"timeout",value:"30"}' "$MCP_READINESS_GATE" &&
+   grep -Fq '{name:"attempts",value:"1"}' "$MCP_READINESS_GATE"; then
+  pass "the DNS fixture disables resolver retransmits that could counterfeit retry execution"
 else
-  fail "post-release NetworkPolicy waits can pass on a pre-release log marker"
-fi
-# Literal source-code assertions bind both final waits to their pre-release
-# counters; a plain contains check would make either wait vacuous.
-# shellcheck disable=SC2016
-if grep -Fq 'initial_policy_run_count_before_release="$(hcc_log_count "$initial_policy_run_marker")"' \
-     "$MCP_READINESS_GATE" &&
-   grep -Fq 'initial_policy_complete_count_before_release="$(' "$MCP_READINESS_GATE" &&
-   [ "$(grep -Fc 'hcc_log_count_exceeds \' "$MCP_READINESS_GATE")" = 2 ]; then
-  pass "both final NetworkPolicy waits are causally fenced by pre-release counts"
-else
-  fail "a final NetworkPolicy wait is not fenced from earlier startup logs"
+  fail "the DNS fixture can mistake a resolver retransmit for a dedicated retry"
 fi
 
 # Keep the runtime log contract consumed above tied to its producer. Template
@@ -448,15 +402,11 @@ if grep -Fq 'Initial external egress reconciliation failed for ${key};' \
      "$HCC_EGRESS_COORDINATOR" &&
    grep -Fq 'for McpServer "${this.retryIntents.get(key)!.server.name}"' \
      "$HCC_EGRESS_COORDINATOR" &&
-   grep -Fq 'Initial NetworkPolicy background reconciliation failed:' \
-     "$HCC_K8S_CLIENT" &&
    grep -Fq 'Context watch event: ${type} for ${context.name}' \
      "$HCC_K8S_CLIENT" &&
    grep -Fq 'Running initial NetworkPolicy background reconciliation...' \
      "$HCC_K8S_CLIENT" &&
    grep -Fq 'Reconciling context "${contextId}" — allowed servers: [${allowedServers.join(' \
-     "$HCC_NETWORK_POLICY_RECONCILER" &&
-   grep -Fq "[NetPol] Full reconciliation complete" \
      "$HCC_NETWORK_POLICY_RECONCILER"; then
   pass "MCP readiness log predicates remain bound to their runtime producers"
 else

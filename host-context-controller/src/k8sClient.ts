@@ -2598,11 +2598,14 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   private async runInitialNetworkPolicyConvergenceCore(): Promise<void> {
-    // A NetworkPolicy full pass mixes Context- and McpServer-derived positive
-    // effects with orphan cleanup. Running it from a partial inventory would
-    // be neither a full convergence nor safe evidence of success. Recovery of
-    // either missing LIST -> WATCH pair schedules a fresh current-cache pass.
+    // A NetworkPolicy full pass combines authoritative Context/McpServer allow
+    // revocation with additive Context policy effects. External egress
+    // creation and DNS refresh have one separate owner: the startup/resync
+    // coordinator. Running safety from a partial inventory would be neither a
+    // full convergence nor safe evidence of success. Recovery of either
+    // missing LIST -> WATCH pair schedules a fresh current-cache pass.
     if (!this.contextCacheSynced || !this.mcpServerCacheSynced) return
+    let authoritativeRevocationCompleted = false
     try {
       const initialContexts = [...this.contexts.values()]
       const initialServers = [...this.servers.values()]
@@ -2646,10 +2649,11 @@ export class McpServerWatcher implements McpServerProvider {
           this.networkPolicyRevocationServerGeneration = serverInventoryGeneration
           this.networkPolicyRevocationContextRevision = this.contextDesiredRevision
           this.networkPolicyRevocationServerRevision = this.mcpServerDesiredRevision
+          authoritativeRevocationCompleted = true
           // Start runtime convergence at the safety boundary, before this full
-          // pass enters additive Context and DNS refresh work. Startup egress
-          // gates may now preserve only policies certified by this exact
-          // authoritative inventory generation.
+          // pass enters additive Context work. Startup egress gates may now
+          // preserve only policies certified by this exact authoritative
+          // inventory generation.
           void this.runInitialMcpServerConvergence()
         },
       })
@@ -2660,7 +2664,12 @@ export class McpServerWatcher implements McpServerProvider {
       )
       this.clearInitialConvergenceRetry('NetworkPolicy')
     } catch (error) {
-      console.error('[K8s] Initial NetworkPolicy background reconciliation failed:', error)
+      console.error(
+        authoritativeRevocationCompleted
+          ? '[K8s] Initial NetworkPolicy post-certification additive reconciliation failed:'
+          : '[K8s] Initial NetworkPolicy background reconciliation failed:',
+        error
+      )
       this.scheduleInitialConvergenceRetry('NetworkPolicy')
     }
   }

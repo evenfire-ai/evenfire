@@ -36,6 +36,8 @@ export async function replaceWithConflictRetry<
    * when a meaningful change is still required.
    */
   isUpToDate?: (body: T, existing: T) => boolean
+  /** Reject an object whose identity or ownership is unsafe to replace. */
+  validateExisting?: (existing: T) => void
   /** Rechecked immediately before every Kubernetes write attempt. */
   mutationAllowed?: () => boolean
   maxAttempts?: number
@@ -49,11 +51,13 @@ export async function replaceWithConflictRetry<
     replace,
     mergeExisting,
     isUpToDate,
+    validateExisting,
     mutationAllowed,
     maxAttempts = 3,
   } = opts
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const existing = await read()
+    validateExisting?.(existing)
     const desired = resolveBody ? await resolveBody() : body
     const base: T = {
       ...desired,
@@ -176,7 +180,8 @@ export async function applyNetworkPolicy(
   namespace: string,
   policy: k8s.V1NetworkPolicy,
   logPrefix = '[NetPol]',
-  mutationAllowed?: () => boolean
+  mutationAllowed?: () => boolean,
+  validateExisting?: (existing: k8s.V1NetworkPolicy) => void
 ): Promise<void> {
   if (mutationAllowed && !mutationAllowed()) return
   try {
@@ -195,5 +200,6 @@ export async function applyNetworkPolicy(
     read: () => api.readNamespacedNetworkPolicy({ name, namespace }),
     replace: body => api.replaceNamespacedNetworkPolicy({ name, namespace, body }),
     mutationAllowed,
+    validateExisting,
   })
 }
