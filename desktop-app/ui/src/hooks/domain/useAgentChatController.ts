@@ -213,13 +213,27 @@ function sameMessageSequence(a: AgentChatMessage[], b: AgentChatMessage[]): bool
     a.length === b.length &&
     a.every((message, index) => {
       const other = b[index]
-      return (
-        other !== undefined &&
-        message.id === other.id &&
-        serverTurnNumber(message) === serverTurnNumber(other)
-      )
+      if (!other) return false
+      const { timestamp: _timestamp, serverTurnNumber: _serverTurnNumber, ...comparable } = message
+      const {
+        timestamp: _otherTimestamp,
+        serverTurnNumber: _otherServerTurnNumber,
+        ...otherComparable
+      } = other
+      return stableJson(comparable) === stableJson(otherComparable)
     })
   )
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, nested: unknown) => {
+    if (nested === null || typeof nested !== 'object' || Array.isArray(nested)) return nested
+    return Object.fromEntries(
+      Object.entries(nested as Record<string, unknown>).sort(([left], [right]) =>
+        left.localeCompare(right)
+      )
+    )
+  })
 }
 
 /** Keep only the last `n` insertion-ordered keys of a per-message map. Returns the

@@ -76,6 +76,49 @@ describe('switchToChat (unified, D.4)', () => {
     expect(result.current.chatMessages).toHaveLength(2)
   })
 
+  it('persists authoritative content changes when stable message IDs are unchanged', async () => {
+    clerum.chat.loadMessages.mockResolvedValue([
+      {
+        id: 'turn-1-user',
+        role: 'user',
+        content: 'old question',
+        timestamp: Date.parse('2026-05-28T10:01:00Z'),
+        serverTurnNumber: 1,
+      },
+      {
+        id: 'turn-1-assistant',
+        role: 'assistant',
+        content: 'old answer',
+        timestamp: Date.parse('2026-05-28T10:01:05Z'),
+        serverTurnNumber: 1,
+      },
+    ])
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'content-update',
+      state: 'idle',
+      turns: [turn(1, 'new question', 'new answer')],
+    })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'content-update')
+    })
+
+    expect(result.current.chatMessages.map(message => message.content)).toEqual([
+      'new question',
+      'new answer',
+    ])
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'content-update',
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'turn-1-assistant', content: 'new answer' }),
+      ])
+    )
+  })
+
   it('does not overwrite a long chat whose cache already matches the server (no 50-cap false-stale)', async () => {
     // 30 turns → 60 messages, well past any windowing limit.
     const turns = Array.from({ length: 30 }, (_, i) => turn(i + 1, `q${i + 1}`, `a${i + 1}`))
