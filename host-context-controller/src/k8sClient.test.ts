@@ -1178,6 +1178,7 @@ describe('McpServerWatcher startup', () => {
     ;(watcher as any).contexts.set('delta-context', {
       name: 'delta-context',
       namespace: 'mcp-server',
+      uid: 'delta-context-uid',
       spec: { contextId: 'delta-context', mcpServers: [] },
     })
     const server = new ContextMapperServer(watcher, 0, undefined, undefined, () =>
@@ -1195,7 +1196,11 @@ describe('McpServerWatcher startup', () => {
       expect((await requestReadyOverHttp(server)).statusCode).toBe(200)
 
       const currentDelta = contextWatchCallback!('MODIFIED', {
-        metadata: { name: 'delta-context', namespace: 'mcp-server' },
+        metadata: {
+          name: 'delta-context',
+          namespace: 'mcp-server',
+          uid: 'delta-context-uid',
+        },
         spec: { contextId: 'delta-context', mcpServers: ['delta-server'] },
       })
 
@@ -1221,7 +1226,7 @@ describe('McpServerWatcher startup', () => {
       | ((
           type: string,
           apiObj: {
-            metadata: { name: string; namespace: string }
+            metadata: { name: string; namespace: string; uid: string }
             spec: { contextId: string; mcpServers: string[] }
           }
         ) => Promise<void>)
