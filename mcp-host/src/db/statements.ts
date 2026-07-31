@@ -284,11 +284,22 @@ export function prepareStatements(db: Database): PreparedStatements {
        ORDER BY summary_last_activity_at DESC, s.session_key ASC
     `),
     selectSessionTurnBounds: db.prepare(`
-      SELECT MIN(turn_number) AS first_turn_number,
-             MAX(turn_number) AS last_turn_number
-        FROM messages
-       WHERE session_id = ?
-         AND turn_number IS NOT NULL
+      SELECT (
+               SELECT turn_number
+                 FROM messages
+                WHERE session_id = @session_id
+                  AND turn_number IS NOT NULL
+                ORDER BY turn_number ASC
+                LIMIT 1
+             ) AS first_turn_number,
+             (
+               SELECT turn_number
+                 FROM messages
+                WHERE session_id = @session_id
+                  AND turn_number IS NOT NULL
+                ORDER BY turn_number DESC
+                LIMIT 1
+             ) AS last_turn_number
     `),
     selectMessagesBySessionNewestTurns: db.prepare(`
       WITH selected_turns AS (
@@ -302,9 +313,9 @@ export function prepareStatements(db: Database): PreparedStatements {
       )
       SELECT m.*
         FROM messages m
-        JOIN selected_turns st
-          ON m.turn_number = st.turn_number
        WHERE m.session_id = @session_id
+         AND m.turn_number >= (SELECT MIN(turn_number) FROM selected_turns)
+         AND m.turn_number <= (SELECT MAX(turn_number) FROM selected_turns)
        ORDER BY m.turn_number ASC, m.ordinal ASC
     `),
     selectMessagesBySessionTurnsBefore: db.prepare(`
@@ -320,9 +331,9 @@ export function prepareStatements(db: Database): PreparedStatements {
       )
       SELECT m.*
         FROM messages m
-        JOIN selected_turns st
-          ON m.turn_number = st.turn_number
        WHERE m.session_id = @session_id
+         AND m.turn_number >= (SELECT MIN(turn_number) FROM selected_turns)
+         AND m.turn_number <= (SELECT MAX(turn_number) FROM selected_turns)
        ORDER BY m.turn_number ASC, m.ordinal ASC
     `),
     selectMessagesBySessionTurnsAfter: db.prepare(`
@@ -338,9 +349,9 @@ export function prepareStatements(db: Database): PreparedStatements {
       )
       SELECT m.*
         FROM messages m
-        JOIN selected_turns st
-          ON m.turn_number = st.turn_number
        WHERE m.session_id = @session_id
+         AND m.turn_number >= (SELECT MIN(turn_number) FROM selected_turns)
+         AND m.turn_number <= (SELECT MAX(turn_number) FROM selected_turns)
        ORDER BY m.turn_number ASC, m.ordinal ASC
     `),
 

@@ -608,7 +608,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 session_id: sessionRow.id,
                 limit,
               })
-      const bounds = s.selectSessionTurnBounds.get(sessionRow.id) as
+      const bounds = s.selectSessionTurnBounds.get({ session_id: sessionRow.id }) as
         | {
             first_turn_number: number | null
             last_turn_number: number | null

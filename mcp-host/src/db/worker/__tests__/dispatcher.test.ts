@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
 import { runMigrations } from '../../migrate'
 import { applyPragmas } from '../../pragmas'
+import { prepareStatements } from '../../statements'
 import { createDispatcher, dispatch } from '../dispatcher'
 import type { MessageRow, PersistedSession, ReapedSession, SessionRow } from '../protocol'
 
@@ -68,6 +69,37 @@ describe('dbWorker dispatcher', () => {
     expect(loaded.session.id).toBe('conv-1')
     expect(loaded.messages).toHaveLength(0)
     expect(loaded.pending_approval).toBeNull()
+  })
+
+  it('uses bounded turn-index ranges for transcript windows and bounds', () => {
+    const statements = prepareStatements(db)
+    const windowStatements = [
+      statements.selectMessagesBySessionNewestTurns,
+      statements.selectMessagesBySessionTurnsBefore,
+      statements.selectMessagesBySessionTurnsAfter,
+    ]
+
+    for (const statement of windowStatements) {
+      const plan = db
+        .prepare(`EXPLAIN QUERY PLAN ${statement.source}`)
+        .all({ session_id: 'conv-plan', limit: 20, before_turn: 100, after_turn: 0 }) as Array<{
+        detail: string
+      }>
+      expect(
+        plan.some(step =>
+          step.detail.includes(
+            'idx_messages_session_turn_ordinal (session_id=? AND turn_number>? AND turn_number<?)'
+          )
+        )
+      ).toBe(true)
+    }
+
+    const boundsPlan = db
+      .prepare(`EXPLAIN QUERY PLAN ${statements.selectSessionTurnBounds.source}`)
+      .all({ session_id: 'conv-plan' }) as Array<{ detail: string }>
+    expect(
+      boundsPlan.filter(step => step.detail.includes('idx_messages_session_turn_ordinal')).length
+    ).toBe(2)
   })
 
   it('insert_message updates session counters', async () => {
