@@ -1,9 +1,10 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import type { LlmModelPrice } from '@lib/api'
+import type { LlmModelPrice, UnpricedModel } from '@lib/api'
 import { getProviderDisplayLabel } from '@lib/llm'
 import type { LlmPriceTableProps } from './LlmPriceTable.types'
+import { MissingPriceWarning } from './MissingPriceWarning'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconPrice } from './Sidebar/icons'
 import { SkeletonTableRows } from './SkeletonTableRows'
@@ -43,8 +44,9 @@ function formatPrice(value: number): string {
 
 export function LlmPriceTable({
   items,
-  banner,
+  unpricedItems,
   onCreate,
+  onAddMissingPrice,
   onEdit,
   onDelete,
   onRefresh,
@@ -55,7 +57,7 @@ export function LlmPriceTable({
   const [searchQuery, setSearchQuery] = useState('')
   const normalizedSearch = searchQuery.trim().toLowerCase()
 
-  const filteredItems = useMemo(() => {
+  const filteredPrices = useMemo(() => {
     if (!normalizedSearch) return items
     return items.filter(price =>
       [price.provider, getProviderDisplayLabel(price.provider), price.model, price.currency]
@@ -65,15 +67,43 @@ export function LlmPriceTable({
     )
   }, [items, normalizedSearch])
 
+  const missingPriceItems = useMemo(() => {
+    const seen = new Set<string>()
+    return unpricedItems.filter(item => {
+      const key = `${item.provider ?? ''}/${item.model}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return !items.some(
+        price =>
+          price.model === item.model && (item.provider === null || price.provider === item.provider)
+      )
+    })
+  }, [items, unpricedItems])
+
+  const filteredMissingPriceItems = useMemo(() => {
+    if (!normalizedSearch) return missingPriceItems
+    return missingPriceItems.filter(item =>
+      [
+        item.provider ?? '',
+        item.provider ? getProviderDisplayLabel(item.provider) : 'any provider',
+        item.model,
+      ]
+        .join(' ')
+        .toLowerCase()
+        .includes(normalizedSearch)
+    )
+  }, [missingPriceItems, normalizedSearch])
+
+  const visibleRowCount = filteredPrices.length + filteredMissingPriceItems.length
   const isInitialLoad = Boolean(loading) && items.length === 0
 
   return (
-    <div className="cu-card cu-card--viewport-fill" style={{ marginBottom: '1.25rem' }}>
+    <div className="cu-card cu-card--viewport-fill cu-section-card">
       <TablePanelHeader
         title={
           <>
             <IconPrice />
-            {isInitialLoad ? 'LLM Prices' : `LLM Prices (${filteredItems.length})`}
+            {isInitialLoad ? 'LLM Prices' : `LLM Prices (${visibleRowCount})`}
           </>
         }
         subtitle="Per-model token prices that back cost-unit budgets. Prices are per 1M tokens."
@@ -106,7 +136,6 @@ export function LlmPriceTable({
           </>
         }
       />
-      {banner ? <div className="cu-px-unpriced-slot">{banner}</div> : null}
       {isInitialLoad ? (
         <div className="cu-table-wrap">
           <table className="cu-table cu-table--header-band">
@@ -118,7 +147,7 @@ export function LlmPriceTable({
             </tbody>
           </table>
         </div>
-      ) : filteredItems.length === 0 ? (
+      ) : visibleRowCount === 0 ? (
         <div className="cu-empty">
           {normalizedSearch
             ? 'No prices match this search.'
@@ -131,51 +160,109 @@ export function LlmPriceTable({
               <TableHeaderRow columns={PRICE_COLUMNS} />
             </thead>
             <tbody>
-              {filteredItems.map((price: LlmModelPrice) => (
-                <tr key={price.id} className="cu-table__row">
-                  <td>{getProviderDisplayLabel(price.provider)}</td>
-                  <td className="cu-px-model">{price.model}</td>
-                  <td className="cu-px-num">{formatPrice(price.input_token_price)}</td>
-                  <td className="cu-px-num">{formatPrice(price.output_token_price)}</td>
-                  <td className="cu-px-num">{formatPrice(price.cache_read_token_price)}</td>
-                  <td className="cu-px-num">{formatPrice(price.cache_write_token_price)}</td>
-                  <td>{price.currency}</td>
-                  <td>
-                    <span
-                      className={
-                        price.enabled
-                          ? 'cu-px-badge cu-px-badge--on'
-                          : 'cu-px-badge cu-px-badge--off'
-                      }
-                    >
-                      {price.enabled ? 'Enabled' : 'Disabled'}
-                    </span>
-                  </td>
-                  <td className="cu-px-actions">
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--icon cu-btn--toolbar"
-                      onClick={() => onEdit(price.id)}
-                      aria-label={`Edit price ${price.provider}/${price.model}`}
-                    >
-                      <IconPencil width={16} height={16} />
-                    </button>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                      onClick={() => void onDelete(price)}
-                      disabled={deletingId === price.id}
-                      aria-label={
-                        deletingId === price.id
-                          ? 'Deleting price…'
-                          : `Delete price ${price.provider}/${price.model}`
-                      }
-                    >
-                      <IconX width={16} height={16} />
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {filteredPrices.map((price: LlmModelPrice) => {
+                const isUnpriced = unpricedItems.some(
+                  item =>
+                    item.model === price.model &&
+                    (item.provider === null || item.provider === price.provider)
+                )
+                return (
+                  <tr key={price.id} className="cu-table__row">
+                    <td>{getProviderDisplayLabel(price.provider)}</td>
+                    <td className="cu-px-model">
+                      <span className="cu-px-model-content">
+                        {price.model}
+                        {isUnpriced ? (
+                          <MissingPriceWarning
+                            provider={price.provider}
+                            model={price.model}
+                            priceId={price.id}
+                          />
+                        ) : null}
+                      </span>
+                    </td>
+                    <td className="cu-px-num">{formatPrice(price.input_token_price)}</td>
+                    <td className="cu-px-num">{formatPrice(price.output_token_price)}</td>
+                    <td className="cu-px-num">{formatPrice(price.cache_read_token_price)}</td>
+                    <td className="cu-px-num">{formatPrice(price.cache_write_token_price)}</td>
+                    <td>{price.currency}</td>
+                    <td>
+                      <span
+                        className={
+                          price.enabled
+                            ? 'cu-px-badge cu-px-badge--on'
+                            : 'cu-px-badge cu-px-badge--off'
+                        }
+                      >
+                        {price.enabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </td>
+                    <td className="cu-px-actions">
+                      <button
+                        type="button"
+                        className="cu-btn cu-btn--icon cu-btn--toolbar"
+                        onClick={() => onEdit(price.id)}
+                        aria-label={`Edit price ${price.provider}/${price.model}`}
+                      >
+                        <IconPencil width={16} height={16} />
+                      </button>
+                      <button
+                        type="button"
+                        className="cu-btn cu-btn--icon cu-btn--danger-icon"
+                        onClick={() => void onDelete(price)}
+                        disabled={deletingId === price.id}
+                        aria-label={
+                          deletingId === price.id
+                            ? 'Deleting price…'
+                            : `Delete price ${price.provider}/${price.model}`
+                        }
+                      >
+                        <IconX width={16} height={16} />
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+              {filteredMissingPriceItems.map((item: UnpricedModel) => {
+                const label = item.provider
+                  ? `${getProviderDisplayLabel(item.provider)}/${item.model}`
+                  : item.model
+                return (
+                  <tr
+                    key={`missing/${item.provider ?? ''}/${item.model}`}
+                    className="cu-table__row cu-px-missing-row"
+                  >
+                    <td>
+                      {item.provider ? getProviderDisplayLabel(item.provider) : 'Any provider'}
+                    </td>
+                    <td className="cu-px-model">
+                      <span className="cu-px-model-content">
+                        {item.model}
+                        <MissingPriceWarning provider={item.provider} model={item.model} />
+                      </span>
+                    </td>
+                    <td className="cu-px-num">—</td>
+                    <td className="cu-px-num">—</td>
+                    <td className="cu-px-num">—</td>
+                    <td className="cu-px-num">—</td>
+                    <td>—</td>
+                    <td>
+                      <span className="cu-px-badge cu-px-badge--warn">Missing</span>
+                    </td>
+                    <td className="cu-px-actions">
+                      <button
+                        type="button"
+                        className="cu-btn cu-btn--icon cu-btn--toolbar"
+                        onClick={() => onAddMissingPrice(item)}
+                        aria-label={`Add price for ${label}`}
+                        title={`Add price for ${label}`}
+                      >
+                        <IconPencil width={16} height={16} />
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>

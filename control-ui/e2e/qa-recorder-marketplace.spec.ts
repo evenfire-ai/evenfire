@@ -8,8 +8,8 @@ import {
   screenshotAndLog,
 } from './qa-recorder-helpers'
 
-// Read-only inventory/navigation journey for the Marketplace (registry catalog)
-// and Plugins (installed workflow recipes) shells. The sidebar 'Marketplace'
+// Read-only inventory/navigation journey for the Marketplace connector catalog
+// and the installed Plugins (workflow recipes) shell. The sidebar 'Marketplace'
 // link (href /marketplace/connectors) is rewritten transparently to the
 // /registry page (RegistryCatalog); 'Plugins' (href /plugins) is rewritten to
 // /workflow-recipes (RecipesTab). Both rewrites keep the source URL in the
@@ -37,15 +37,13 @@ test.describe('optional QA recorder: Control UI marketplace and plugins journey'
       page.getByText('Discover and install connectors and plugins from the Marketplace.')
     ).toBeVisible({ timeout: 20_000 })
 
-    // The Marketplace entry-type tablist (Connectors / Plugins) is part of the
-    // shell. Scope to the named tablist so the locator is unambiguous.
+    // Marketplace now presents a connector-only catalog. Scope to the named
+    // tablist so the locator is unambiguous and assert the retired tab is gone.
     const entryTabs = page.getByRole('tablist', { name: 'Marketplace entry types' })
     await expect(entryTabs.getByRole('tab', { name: 'Connectors', exact: true })).toBeVisible({
       timeout: 20_000,
     })
-    await expect(entryTabs.getByRole('tab', { name: 'Plugins', exact: true })).toBeVisible({
-      timeout: 20_000,
-    })
+    await expect(entryTabs.getByRole('tab', { name: 'Plugins', exact: true })).toHaveCount(0)
 
     await screenshotAndLog(page, testInfo, 'control-ui-marketplace')
   })

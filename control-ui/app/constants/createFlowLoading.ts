@@ -78,8 +78,8 @@ export const CREATE_FLOW_LOADING = {
     title: 'Install from Marketplace',
     subtitle: 'Install a Marketplace entry into your cluster and bind it to a context.',
     backLabel: 'Back to Marketplace',
-    steps: ['Package', 'Configure', 'Network', 'Install'],
-    stepFlowClassName: 'cu-create-step-flow--4',
+    steps: ['Package', 'Install'],
+    stepFlowClassName: 'cu-create-step-flow--2',
   },
   installPlugin: {
     iconKey: 'workflow',

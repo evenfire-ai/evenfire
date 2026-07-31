@@ -5,4 +5,5 @@ export type TablePanelHeaderProps = {
   actionsClassName?: string
   subtitle?: ReactNode
   title: ReactNode
+  titleActions?: ReactNode
 }

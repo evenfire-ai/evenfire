@@ -61,6 +61,10 @@ test.describe('optional QA recorder: Control UI LLM model lifecycle', () => {
       ).toBeVisible()
       await expect(page).toHaveURL(/\/llm-models$/, { timeout: 20_000 })
 
+      // Provider groups are collapsed by default. Searching opens the matching
+      // group so the newly added row and its actions are immediately reachable.
+      await page.getByLabel('Search models').fill(modelName)
+
       // The list shows a static Enabled/Disabled badge (no inline toggle), so the
       // disable step goes through the edit page. The pencil's name is provider/model.
       const editButton = page.getByRole('button', {
@@ -85,6 +89,7 @@ test.describe('optional QA recorder: Control UI LLM model lifecycle', () => {
       ).toBeVisible()
       await expect(page).toHaveURL(/\/llm-models$/, { timeout: 20_000 })
 
+      await page.getByLabel('Search models').fill(modelName)
       const row = page.getByRole('row').filter({ hasText: modelName })
       await expect(row).toBeVisible({ timeout: 20_000 })
       await expect(row).toContainText('Disabled')

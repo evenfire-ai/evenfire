@@ -1,13 +1,5 @@
-import { AuthGate } from '@components/AuthGate'
-import { DashboardLayout } from '@components/DashboardLayout'
-import { LlmDiscoveryPanel } from '@components/LlmDiscoveryPanel'
+import { LlmModelsSurface } from '@components/LlmModelsSurface'
 
 export default function LlmModelsDiscoveryPage() {
-  return (
-    <AuthGate>
-      <DashboardLayout>
-        <LlmDiscoveryPanel />
-      </DashboardLayout>
-    </AuthGate>
-  )
+  return <LlmModelsSurface activeTab="discovery" />
 }
