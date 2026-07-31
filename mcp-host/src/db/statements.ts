@@ -209,6 +209,7 @@ export function prepareStatements(db: Database): PreparedStatements {
     recomputeSessionMessageSummary: db.prepare(`
       UPDATE sessions
          SET last_activity_at = MAX(
+               COALESCE(last_activity_at, started_at),
                started_at,
                COALESCE(
                  (SELECT MAX(timestamp) FROM messages WHERE session_id = @id),

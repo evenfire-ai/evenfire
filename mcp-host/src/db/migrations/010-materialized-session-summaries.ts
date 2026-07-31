@@ -16,9 +16,12 @@ export function up(db: Database): void {
     ALTER TABLE sessions ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0;
 
     UPDATE sessions
-       SET last_activity_at = COALESCE(
-             (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = sessions.id),
-             started_at
+       SET last_activity_at = MAX(
+             started_at,
+             COALESCE(
+               (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = sessions.id),
+               started_at
+             )
            ),
            turn_count = (
              SELECT COUNT(DISTINCT m.turn_number)

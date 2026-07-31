@@ -17,6 +17,7 @@ describe('migration 010 — materialized session summaries', () => {
     )
     insertSession.run('session-with-messages', 'u-1:rpc:agent:chat-1', 1)
     insertSession.run('empty-session', 'u-1:rpc:agent:chat-2', 5)
+    insertSession.run('clock-skewed-session', 'u-1:rpc:agent:chat-3', 100)
 
     const insertMessage = db.prepare(
       `INSERT INTO messages (
@@ -28,6 +29,7 @@ describe('migration 010 — materialized session summaries', () => {
     insertMessage.run('session-with-messages', 2, 'tool', 'result', null, 11, 1)
     insertMessage.run('session-with-messages', 3, 'assistant', 'answer', null, 12, 1)
     insertMessage.run('session-with-messages', 4, 'user', 'next', null, 20, 2)
+    insertMessage.run('clock-skewed-session', 0, 'user', 'early', null, 20, 1)
 
     m010.up(db)
 
@@ -57,6 +59,11 @@ describe('migration 010 — materialized session summaries', () => {
       turn_count: 0,
       message_count: 0,
     })
+    expect(
+      db
+        .prepare(`SELECT last_activity_at FROM sessions WHERE id = 'clock-skewed-session'`)
+        .get()
+    ).toEqual({ last_activity_at: 100 })
 
     const indexes = db
       .prepare(

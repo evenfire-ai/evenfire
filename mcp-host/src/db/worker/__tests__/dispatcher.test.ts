@@ -310,6 +310,46 @@ describe('dbWorker dispatcher', () => {
     expect(readSummary()).toEqual(incrementalSummary)
   })
 
+  it('does not move session activity backward when replacing retained messages', async () => {
+    const deps = createDispatcher(db)
+    const session = {
+      ...makeSession('conv-replace-activity', 'u-replace:rpc:agent:default'),
+      started_at: 100,
+    }
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+    db.prepare('UPDATE sessions SET last_activity_at = ? WHERE id = ?').run(200, session.id)
+
+    await dispatch(
+      {
+        kind: 'replace_messages',
+        sessionId: session.id,
+        messages: [
+          {
+            session_id: session.id,
+            ordinal: 0,
+            role: 'user',
+            content: 'retained summary',
+            content_parts: null,
+            tool_call_id: null,
+            tool_calls: null,
+            tool_name: null,
+            timestamp: 150,
+            token_count: null,
+            finish_reason: null,
+            spillover_ref: null,
+            is_error: 0,
+            turn_number: 1,
+          },
+        ],
+      },
+      deps
+    )
+
+    expect(
+      db.prepare('SELECT last_activity_at FROM sessions WHERE id = ?').get(session.id)
+    ).toEqual({ last_activity_at: 200 })
+  })
+
   it('separates tool-call storage rows from visible messages and token counters', async () => {
     const deps = createDispatcher(db)
     await dispatch(
