@@ -102,6 +102,53 @@ describe('dbWorker dispatcher', () => {
     ).toBe(2)
   })
 
+  it('returns exact transcript windows when turn numbers contain gaps', async () => {
+    const deps = createDispatcher(db)
+    const session = makeSession('conv-window', 'u-window:rpc:agent:chat-1')
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+
+    let ordinal = 0
+    for (const turnNumber of [1, 3, 7, 8]) {
+      for (const role of ['user', 'assistant'] as const) {
+        await dispatch(
+          {
+            kind: 'insert_message',
+            payload: {
+              session_id: session.id,
+              ordinal: ordinal++,
+              role,
+              content: `${role}-${turnNumber}`,
+              content_parts: null,
+              tool_call_id: null,
+              tool_calls: null,
+              tool_name: null,
+              timestamp: turnNumber,
+              token_count: null,
+              finish_reason: role === 'assistant' ? 'stop' : null,
+              spillover_ref: null,
+              is_error: 0,
+              turn_number: turnNumber,
+            },
+          },
+          deps
+        )
+      }
+    }
+
+    const readTurns = async (query: { limit?: number; beforeTurn?: number; afterTurn?: number }) => {
+      const page = (await dispatch(
+        { kind: 'load_session_message_page', sessionKey: session.session_key, ...query },
+        deps
+      )) as { messages: MessageRow[] }
+      return page.messages.map(message => message.turn_number)
+    }
+
+    await expect(readTurns({})).resolves.toEqual([1, 1, 3, 3, 7, 7, 8, 8])
+    await expect(readTurns({ limit: 2 })).resolves.toEqual([7, 7, 8, 8])
+    await expect(readTurns({ limit: 2, beforeTurn: 7 })).resolves.toEqual([1, 1, 3, 3])
+    await expect(readTurns({ limit: 2, afterTurn: 1 })).resolves.toEqual([3, 3, 7, 7])
+  })
+
   it('insert_message updates session counters', async () => {
     const deps = createDispatcher(db)
     const sessionRow = makeSession('conv-2', 'u-2:rpc:agent:default')
