@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { LlmProviderIcon } from '@components/LlmProviderIcon'
 import { IconModels } from '@components/Sidebar/icons'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
@@ -119,6 +119,7 @@ export function LlmDiscoveryPanel({
   const [bulkEnabling, setBulkEnabling] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
+  const statusRequestGeneration = useRef(0)
 
   const isInitialLoad = loading && items.length === 0
   const reviewQueue = useMemo(
@@ -135,16 +136,17 @@ export function LlmDiscoveryPanel({
 
   useEffect(() => {
     let active = true
+    const generation = ++statusRequestGeneration.current
     setStatusLoading(true)
     void getDiscoveryStatus()
       .then(nextStatus => {
-        if (active) setStatus(nextStatus)
+        if (active && generation === statusRequestGeneration.current) setStatus(nextStatus)
       })
       .catch(() => {
         // Status is optional while older control-api builds roll forward.
       })
       .finally(() => {
-        if (active) setStatusLoading(false)
+        if (active && generation === statusRequestGeneration.current) setStatusLoading(false)
       })
     return () => {
       active = false
@@ -187,29 +189,35 @@ export function LlmDiscoveryPanel({
   }
 
   async function handleRefresh() {
+    const generation = ++statusRequestGeneration.current
     setStatusLoading(true)
     setError('')
     try {
       const [, statusResult] = await Promise.allSettled([onRefresh(), getDiscoveryStatus()])
-      if (statusResult.status === 'fulfilled') setStatus(statusResult.value)
+      if (generation === statusRequestGeneration.current && statusResult.status === 'fulfilled') {
+        setStatus(statusResult.value)
+      }
     } finally {
-      setStatusLoading(false)
+      if (generation === statusRequestGeneration.current) setStatusLoading(false)
     }
   }
 
   async function handleSync() {
+    const generation = ++statusRequestGeneration.current
     setSyncing(true)
     setError('')
     try {
       const result = await syncDiscovery()
       await onRefresh()
-      setStatus({
-        ranAt: result.ranAt,
-        source: result.source,
-        added: result.added,
-        updated: result.updated,
-        staled: result.staled,
-      })
+      if (generation === statusRequestGeneration.current) {
+        setStatus({
+          ranAt: result.ranAt,
+          source: result.source,
+          added: result.added,
+          updated: result.updated,
+          staled: result.staled,
+        })
+      }
       showToast(
         `Synced from ${result.source}: +${result.added} new, ${result.updated} updated, ${result.staled} marked stale`,
         { tone: 'success' }

@@ -8,6 +8,11 @@ import { Button } from '../ui'
 import { GrantAccessModal } from './GrantAccessModal'
 import { RetryBanner } from './RetryBanner'
 
+type GrantTarget = {
+  entryName: string
+  opener: HTMLButtonElement
+}
+
 const COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
   { key: 'type', label: 'Type' },
@@ -34,7 +39,7 @@ export function OwnedEntries({ orgScope }: { orgScope: string }) {
   const [entries, setEntries] = useState<OwnedRegistryEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
-  const [grantTarget, setGrantTarget] = useState<string | null>(null)
+  const [grantTarget, setGrantTarget] = useState<GrantTarget | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -74,7 +79,7 @@ export function OwnedEntries({ orgScope }: { orgScope: string }) {
             {entries.map(e => {
               const k = entryKey(e)
               const isPrivate = e.visibility === 'private'
-              const isGranting = grantTarget === e.name
+              const isGranting = grantTarget?.entryName === e.name
               return (
                 <tr key={k}>
                   <td>
@@ -98,7 +103,9 @@ export function OwnedEntries({ orgScope }: { orgScope: string }) {
                         size="sm"
                         aria-haspopup="dialog"
                         aria-expanded={isGranting}
-                        onClick={() => setGrantTarget(e.name)}
+                        onClick={event =>
+                          setGrantTarget({ entryName: e.name, opener: event.currentTarget })
+                        }
                       >
                         Share access
                       </Button>
@@ -114,8 +121,9 @@ export function OwnedEntries({ orgScope }: { orgScope: string }) {
       </div>
       {grantTarget ? (
         <GrantAccessModal
-          entryName={grantTarget}
+          entryName={grantTarget.entryName}
           orgScope={orgScope}
+          opener={grantTarget.opener}
           onClose={() => setGrantTarget(null)}
         />
       ) : null}

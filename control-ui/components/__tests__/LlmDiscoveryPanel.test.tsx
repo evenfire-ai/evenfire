@@ -124,4 +124,32 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     expect(screen.queryByText(/Stale models/)).toBeNull()
     expect(screen.queryByRole('button', { name: /Anthropic stale models/ })).toBeNull()
   })
+
+  it('keeps the sync status when an older mount-time status request resolves afterwards', async () => {
+    let resolveInitialStatus!: (value: Awaited<ReturnType<typeof api.getDiscoveryStatus>>) => void
+    vi.mocked(api.getDiscoveryStatus).mockReset()
+    vi.mocked(api.getDiscoveryStatus).mockReturnValueOnce(
+      new Promise(resolve => {
+        resolveInitialStatus = resolve
+      })
+    )
+    const onRefresh = vi.fn().mockResolvedValue(undefined)
+
+    render(<LlmDiscoveryPanel items={[reviewModel]} loading={false} onRefresh={onRefresh} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Sync catalog' }))
+
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1))
+    expect(screen.getByText('+2 new')).toBeInTheDocument()
+
+    resolveInitialStatus({
+      ranAt: '2026-07-01T00:00:00.000Z',
+      source: 'fallback',
+      added: 99,
+      updated: 99,
+      staled: 99,
+    })
+
+    await waitFor(() => expect(screen.getByText('+2 new')).toBeInTheDocument())
+    expect(screen.queryByText('+99 new')).toBeNull()
+  })
 })

@@ -62,10 +62,10 @@ function successfulMutation(...updated: GfsSubjectInput[]): GfsMutationResponse 
   return { ok: true, resourceId: resource.resourceId, updated, count: updated.length }
 }
 
-function renderPanel() {
+function renderPanel(target = resource) {
   return render(
     <ToastProvider>
-      <GfsGrantPanel resource={resource} />
+      <GfsGrantPanel resource={target} />
     </ToastProvider>
   )
 }
@@ -101,9 +101,10 @@ function selectPermission(name: string) {
   fireEvent.click(within(openPermissionMenu()).getByRole('menuitemcheckbox', { name }))
 }
 
-function submit(action: 'Grant access' | 'Create share') {
+async function submit(action: 'Grant access' | 'Create share') {
   fireEvent.click(screen.getByRole('button', { name: action }))
-  expect(screen.queryByRole('alertdialog')).toBeNull()
+  const dialog = await screen.findByRole('alertdialog')
+  fireEvent.click(within(dialog).getByRole('button', { name: action }))
 }
 
 describe('GfsGrantPanel bulk access', () => {
@@ -374,6 +375,26 @@ describe('GfsGrantPanel bulk access', () => {
         includeDescendants: false,
       })
     )
+  })
+
+  it('requires an explicit scope review before creating access', async () => {
+    const directory = { ...resource, name: 'reports', kind: 'directory' as const }
+    renderPanel(directory)
+    await chooseSubjects('Ada Lovelace', 'Research')
+    selectPermission('Read')
+    selectPermission('Write')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('2 recipients (1 user, 1 team)')
+    expect(dialog).toHaveTextContent('"reports"')
+    expect(dialog).toHaveTextContent('Permissions: read, write')
+    expect(dialog).toHaveTextContent('Scope: this resource and all descendants')
+    expect(screen.getByRole('button', { name: 'Grant access' })).toBeDisabled()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(mockPutGfsGrant).not.toHaveBeenCalled()
   })
 
   it('keeps operator singular and prevents mixing it with bulk subjects', async () => {

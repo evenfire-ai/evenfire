@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
@@ -129,6 +130,61 @@ describe('GrantAccessModal', () => {
     await screen.findByLabelText(/grantee org/i)
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('restores focus to the Share access trigger when the dialog closes', async () => {
+    vi.mocked(api.listOrgGrants).mockResolvedValue({ grants: [] })
+    function Harness() {
+      const [open, setOpen] = useState(false)
+      const opener = useRef<HTMLButtonElement | null>(null)
+      return (
+        <>
+          <button ref={opener} type="button" onClick={() => setOpen(true)}>
+            Share access
+          </button>
+          {open ? (
+            <GrantAccessModal
+              entryName="db"
+              orgScope="acme"
+              opener={opener.current}
+              onClose={() => setOpen(false)}
+            />
+          ) : null}
+        </>
+      )
+    }
+
+    render(<Harness />)
+    const trigger = screen.getByRole('button', { name: 'Share access' })
+    fireEvent.click(trigger)
+    await screen.findByLabelText(/grantee org/i)
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    await waitFor(() => expect(trigger).toHaveFocus())
+  })
+
+  it('does not close the grant dialog when Escape cancels a revoke confirmation', async () => {
+    vi.mocked(api.listOrgGrants).mockResolvedValue({
+      grants: [{ id: 'g1', pluginName: '@acme/db', granteeOrg: 'beta' }],
+    })
+    let resolveConfirmation!: (value: boolean) => void
+    vi.mocked(ConfirmDialogModule.useConfirmDialog).mockReturnValue({
+      confirm: vi.fn().mockReturnValue(
+        new Promise(resolve => {
+          resolveConfirmation = resolve
+        })
+      ),
+      confirmDialog: <div role="alertdialog">Revoke access</div>,
+    })
+    const onClose = vi.fn()
+    render(<GrantAccessModal entryName="db" orgScope="acme" onClose={onClose} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke' }))
+    await screen.findByRole('alertdialog')
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).not.toHaveBeenCalled()
+
+    resolveConfirmation(false)
   })
 
   it('Enter in the grantee input submits the grant', async () => {

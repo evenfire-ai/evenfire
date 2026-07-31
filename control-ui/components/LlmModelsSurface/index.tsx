@@ -45,15 +45,21 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
     setLoading(true)
     setError('')
     try {
-      const [modelsResult, unpricedResult] = await Promise.allSettled([
-        getLlmModels(),
-        getUnpricedModels(),
-      ])
+      const modelsResultPromise = Promise.allSettled([getLlmModels()])
+      const unpricedResultPromise =
+        activeTab === 'catalog' ? Promise.allSettled([getUnpricedModels()]) : null
+      const [modelsResult] = await modelsResultPromise
       if (modelsResult.status === 'fulfilled') {
         setModels(modelsResult.value.rows ?? [])
       } else if (!isSilentApiError(modelsResult.reason)) {
         throw modelsResult.reason
       }
+
+      if (!unpricedResultPromise) {
+        setUnpriced([])
+        return
+      }
+      const [unpricedResult] = await unpricedResultPromise
       if (unpricedResult.status === 'fulfilled') {
         setUnpriced(unpricedResult.value.rows ?? [])
       } else {
@@ -100,7 +106,7 @@ function LlmModelsContent({ activeTab }: LlmModelsSurfaceProps) {
     if (authState.isLoggedIn && !authState.isLoading) {
       void loadAll()
     }
-  }, [authState.isLoggedIn, authState.isLoading])
+  }, [activeTab, authState.isLoggedIn, authState.isLoading])
 
   const tabs = [
     {

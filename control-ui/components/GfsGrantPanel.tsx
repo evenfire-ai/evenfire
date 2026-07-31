@@ -67,6 +67,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const [bits, setBits] = useState<string[]>([])
   const [includeDescendants, setIncludeDescendants] = useState(resource.kind === 'directory')
   const [busy, setBusy] = useState(false)
+  const [confirming, setConfirming] = useState(false)
   const [error, setError] = useState('')
   const [existingAccess, setExistingAccess] = useState<GfsExistingAccessItem[]>([])
   const [existingAccessLoading, setExistingAccessLoading] = useState(true)
@@ -185,7 +186,8 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const subjectValid = operatorSelected || selectedSubjects.length > 0
   const canCreateShare =
     operatorSelected || selectedSubjects.every(subject => subject.type !== 'host')
-  const canSubmit = subjectValid && bits.length > 0 && !busy
+  const actionPending = busy || confirming
+  const canSubmit = subjectValid && bits.length > 0 && !actionPending
 
   function changeSelectedSubjects(nextValues: string[]) {
     const addingOperator = nextValues.includes(OPERATOR_VALUE) && !operatorSelected
@@ -219,6 +221,33 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       setError('subject_and_permissions_required')
       return
     }
+
+    const recipientSummary = operatorSelected
+      ? 'the cluster operator'
+      : (() => {
+          const counts = selectedSubjects.reduce<Record<string, number>>((result, subject) => {
+            result[subject.type] = (result[subject.type] ?? 0) + 1
+            return result
+          }, {})
+          const types = Object.entries(counts)
+            .map(([type, count]) => `${count} ${type}${count === 1 ? '' : 's'}`)
+            .join(', ')
+          return `${selectedSubjects.length} recipient${selectedSubjects.length === 1 ? '' : 's'} (${types})`
+        })()
+    const scope =
+      canIncludeDescendants && includeDescendants
+        ? 'this resource and all descendants'
+        : 'this resource only'
+
+    setConfirming(true)
+    const confirmed = await confirm({
+      title: kind === 'grant' ? 'Grant access?' : 'Create share?',
+      message: `${kind === 'grant' ? 'Grant access' : 'Create a share'} for ${recipientSummary} on "${resource.name}". Permissions: ${bits.join(', ')}. Scope: ${scope}.`,
+      confirmLabel: kind === 'grant' ? 'Grant access' : 'Create share',
+    })
+    setConfirming(false)
+    if (!confirmed) return
+
     setBusy(true)
     try {
       if (operatorSelected) {
@@ -323,14 +352,14 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     <div className="cu-gfs-grant-panel">
       <div className="cu-gfs-grant__composer">
         <GfsSubjectPicker
-          disabled={busy}
+          disabled={actionPending}
           loading={directoryLoading}
           onChange={changeSelectedSubjects}
           options={subjectOptions}
           value={selectedValues}
         />
         <GfsPermissionDropdown
-          disabled={busy}
+          disabled={actionPending}
           onChange={setBits}
           permissions={visiblePermissionBits}
           value={bits}
@@ -366,7 +395,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             <p role="alert" className="cu-field__error">
               {existingAccessError}
             </p>
-            <Button size="sm" disabled={busy} onClick={() => void loadExistingAccess()}>
+            <Button size="sm" disabled={actionPending} onClick={() => void loadExistingAccess()}>
               Retry
             </Button>
           </div>
@@ -392,7 +421,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                     title={`Remove ${item.kind} access for ${label}`}
                     variant="danger"
                     size="sm"
-                    disabled={busy}
+                    disabled={actionPending}
                     onClick={() => void revokeAccess(item)}
                   >
                     <IconTrash width={15} height={15} />
@@ -411,7 +440,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           description="Apply this grant or share to the full folder tree."
           checked={includeDescendants}
           onChange={() => setIncludeDescendants(current => !current)}
-          disabled={busy}
+          disabled={actionPending}
         />
       ) : null}
       <div className="cu-gfs-grant__actions">

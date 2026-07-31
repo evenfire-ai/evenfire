@@ -161,6 +161,52 @@ describe('LlmModelTable filters', () => {
     expect(screen.queryByText('No models match this filter.')).toBeNull()
   })
 
+  it('clears a selected provider that disappears while other providers remain', async () => {
+    const openAiModel = {
+      ...enabledModel,
+      id: 'openai-model',
+      provider: 'openai',
+      model: 'gpt-5',
+      vendor: 'OpenAI',
+      display_name: 'GPT-5',
+    }
+    const googleModel = {
+      ...enabledModel,
+      id: 'google-model',
+      provider: 'google',
+      model: 'gemini-2.5-pro',
+      vendor: 'Google',
+      display_name: 'Gemini 2.5 Pro',
+    }
+    const view = renderTable([enabledModel, openAiModel, googleModel])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Filter by provider' }))
+    fireEvent.click(screen.getByRole('option', { name: 'OpenAI' }))
+
+    view.rerender(
+      <LlmModelTable
+        items={[enabledModel, googleModel]}
+        unpricedKeys={new Set()}
+        onCreate={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        onRefresh={vi.fn()}
+        deletingId={null}
+        refreshing={false}
+        loading={false}
+      />
+    )
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Filter by provider' })).toHaveTextContent(
+        'All providers'
+      )
+    })
+    expect(screen.queryByText('No models match this filter.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Expand Anthropic models' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Expand Google models' })).toBeInTheDocument()
+  })
+
   it('shows the filtered empty state when no row matches', () => {
     renderTable([enabledModel])
     fireEvent.change(screen.getByLabelText('Filter by enabled state'), {
