@@ -44,6 +44,12 @@ export function up(db: Database): void {
 export function down(db: Database): void {
   db.exec(`
     DROP INDEX IF EXISTS idx_sessions_summary_activity;
+    UPDATE sessions
+       SET message_count = (
+             SELECT COUNT(*)
+               FROM messages m
+              WHERE m.session_id = sessions.id
+           );
     ALTER TABLE sessions DROP COLUMN turn_count;
     ALTER TABLE sessions DROP COLUMN last_activity_at;
   `)

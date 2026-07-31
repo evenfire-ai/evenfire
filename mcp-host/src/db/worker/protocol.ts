@@ -36,6 +36,7 @@ export interface SessionRow {
   turn_count?: number
   ended_at: number | null
   end_reason: string | null
+  /** Visible user/assistant bubble count after migration 010. */
   message_count: number
   tool_call_count: number
   input_tokens: number

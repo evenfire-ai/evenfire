@@ -98,6 +98,24 @@ describe('migration 010 — materialized session summaries', () => {
     expect(activityPlan.some(step => step.detail.includes('idx_sessions_summary_activity'))).toBe(
       true
     )
+
+    m010.down(db)
+    expect(
+      db
+        .prepare(`SELECT message_count FROM sessions WHERE id = 'session-with-messages'`)
+        .get()
+    ).toEqual({ message_count: 5 })
+
+    m010.up(db)
+    expect(
+      db
+        .prepare(
+          `SELECT last_activity_at, turn_count, message_count
+             FROM sessions
+            WHERE id = 'session-with-messages'`
+        )
+        .get()
+    ).toEqual({ last_activity_at: 20, turn_count: 2, message_count: 3 })
     db.close()
   })
 })
