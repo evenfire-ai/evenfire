@@ -3,7 +3,10 @@ FROM node:24-alpine AS builder
 
 WORKDIR /app
 
-RUN apk add --no-cache git
+# ca-certificates is what makes the HTTPS clone below verifiable. The alpine
+# base happens to ship a bundle today; declare the dependency so a base bump
+# cannot silently remove it. Guarded by scripts/check-dockerfile-ca-certificates.sh.
+RUN apk add --no-cache ca-certificates git
 
 # Clone the latest source which includes HTTP transport support
 RUN git clone --depth 1 https://github.com/domdomegg/airtable-mcp-server.git .

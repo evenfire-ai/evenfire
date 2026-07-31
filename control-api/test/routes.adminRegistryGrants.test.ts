@@ -53,8 +53,30 @@ vi.mock('../src/services/orgApiKeyClient.js', () => ({
   },
 }))
 vi.mock('../src/services/adminAuthService.js', () => ({ findAdminById: vi.fn() }))
-const { cfg } = vi.hoisted(() => ({ cfg: { registryAuthEnabled: true } }))
+// registryConnectionMode is required: the routes now call isRegistryAuthActive(),
+// which branches on mode first. 'managed' makes it return registryAuthEnabled
+// verbatim, which is the behaviour these tests intend to exercise.
+const { cfg } = vi.hoisted(() => ({
+  cfg: {
+    registryAuthEnabled: true,
+    registryConnectionMode: 'managed',
+    registryUrl: 'https://registry.evenfire.ai',
+  },
+}))
 vi.mock('../src/config.js', () => ({ config: cfg }))
+// Partial mock (unlike the Keys file's full replacement): the "wire shape"
+// tests below exercise the REAL registryClient.ts wrapper via importActual,
+// and its mintToken() calls resolveMachineCreds() unconditionally whenever env
+// creds are absent — regardless of the auth-enabled flag. A full-replacement
+// mock leaves resolveMachineCreds undefined and 500s those tests. Keep every
+// real export (resolveMachineCreds, getRegistryConnection, ...) and override
+// only the one symbol the route guard now consumes, mirroring the
+// registryClient.js partial mock above.
+const connDb = vi.hoisted(() => ({ isRegistryAuthActive: vi.fn() }))
+vi.mock('../src/services/registryConnectionDb.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/registryConnectionDb.js')>()
+  return { ...actual, isRegistryAuthActive: connDb.isRegistryAuthActive }
+})
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn(async () => ({
     allowed: true,
@@ -79,6 +101,16 @@ function makeApp(adminId: string | null = 'admin-1') {
 beforeEach(() => {
   vi.clearAllMocks()
   cfg.registryAuthEnabled = true
+  cfg.registryConnectionMode = 'managed'
+  cfg.registryUrl = 'https://registry.evenfire.ai'
+  // Default mirrors the real accessor's managed-mode branch (registryAuthEnabled
+  // verbatim) so the pre-existing tests below — which only flip
+  // cfg.registryAuthEnabled, not this mock — still reach the same 200/400/409
+  // they did before this module was mocked. Reading cfg at call time (not a
+  // captured literal) also means vi.clearAllMocks() can never silently freeze
+  // this to a stale value. The self-hosted test overrides this per-call via
+  // mockResolvedValue, independent of cfg.registryAuthEnabled.
+  connDb.isRegistryAuthActive.mockImplementation(async () => cfg.registryAuthEnabled)
   vi.mocked(checkAndIncrement).mockResolvedValue({
     allowed: true,
     remaining: 29,
@@ -225,6 +257,32 @@ describe('GET /admin/registry/grants + granted-to-me', () => {
     expect(res.body).toEqual({ grants: [] })
     expect(listGrantedToMe).toHaveBeenCalledWith('acme')
   })
+
+  // Discriminates resolveSelfServiceOrg's guard from a plain config read: reverting
+  // just that guard to `if (!config.registryAuthEnabled)` would make this fail,
+  // since registryAuthEnabled is deliberately false here and only the mocked
+  // accessor says auth is active.
+  it('self-hosted: grants work with NO auth env var once credentials exist', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.registryAuthEnabled = false // deliberately off — must be ignored
+    connDb.isRegistryAuthActive.mockResolvedValue(true) // credentials exist
+    const res = await request(makeApp()).get('/admin/registry/grants')
+    expect(res.status).not.toBe(409)
+  })
+
+  it('self-hosted: 409 registry_url_not_configured when credentials remain but URL was removed', async () => {
+    cfg.registryConnectionMode = 'self-hosted'
+    cfg.registryAuthEnabled = false
+    cfg.registryUrl = ''
+    connDb.isRegistryAuthActive.mockResolvedValue(true)
+
+    const res = await request(makeApp()).get('/admin/registry/grants')
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'registry_url_not_configured' })
+    expect(resolvePublishScope).not.toHaveBeenCalled()
+    expect(listOrgGrants).not.toHaveBeenCalled()
+  })
 })
 
 describe('DELETE /admin/registry/grants/:id', () => {
@@ -321,15 +379,17 @@ describe('wire shape (real wrappers, stubbed registry fetch)', () => {
     vi.stubGlobal('fetch', fetchMock)
     return fetchMock
   }
-  // registry auth OFF so authedFetch's mintToken() returns '' (no token round trip);
-  // every stubbed fetch call is the /org/... endpoint. The route's own
-  // registry_auth_disabled guard is bypassed because we only unmock the WRAPPERS
-  // here — config stays mocked with registryAuthEnabled true for the route guard,
-  // while the wrapper's mintToken reads process.env (set below) = auth off.
+  // Keep the route guard active while the real wrapper's managed token path is
+  // auth-off. mintToken now resolves credentials through resolveMachineCreds
+  // and reads the managed flag from config; it no longer performs a second
+  // isRegistryAuthActive call that tests can sequence independently.
+  function armGuardOnMintTokenOff(): void {
+    cfg.registryAuthEnabled = false
+    connDb.isRegistryAuthActive.mockReset().mockResolvedValue(true)
+  }
 
   it('POST self_grant → 400 with {error:"self_grant"} verbatim', async () => {
-    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
-    process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'false'
+    armGuardOnMintTokenOff()
     // Use the REAL wrapper for exactly this one request; mockImplementationOnce
     // ensures it does not leak into any later test in this file.
     const real = await vi.importActual<typeof import('../src/services/registryClient.js')>(
@@ -344,13 +404,10 @@ describe('wire shape (real wrappers, stubbed registry fetch)', () => {
     expect(res.status).toBe(400)
     expect(res.body).toEqual({ error: 'self_grant' })
     vi.unstubAllGlobals()
-    delete process.env.CLERUM_REGISTRY_AUTH_ENABLED
-    delete process.env.CLERUM_REGISTRY_URL
   })
 
   it('DELETE 204 → 204 (no 500 from res.json on empty body)', async () => {
-    process.env.CLERUM_REGISTRY_URL = 'https://registry.evenfire.ai'
-    process.env.CLERUM_REGISTRY_AUTH_ENABLED = 'false'
+    armGuardOnMintTokenOff()
     const real = await vi.importActual<typeof import('../src/services/registryClient.js')>(
       '../src/services/registryClient.js'
     )
@@ -362,7 +419,5 @@ describe('wire shape (real wrappers, stubbed registry fetch)', () => {
     const res = await request(makeApp()).delete('/admin/registry/grants/g1')
     expect(res.status).toBe(204)
     vi.unstubAllGlobals()
-    delete process.env.CLERUM_REGISTRY_AUTH_ENABLED
-    delete process.env.CLERUM_REGISTRY_URL
   })
 })

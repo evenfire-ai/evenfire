@@ -127,10 +127,9 @@ export class DbSeedResourceStore implements SeedResourceStore {
   constructor(private readonly db: SeedDb) {}
 
   async acquireStructureLock(drive: string): Promise<void> {
-    await this.db.query(
-      `SELECT pg_advisory_xact_lock(hashtext('gfs:structure:' || $1)::bigint)`,
-      [drive]
-    )
+    await this.db.query(`SELECT pg_advisory_xact_lock(hashtext('gfs:structure:' || $1)::bigint)`, [
+      drive,
+    ])
   }
 
   async ensureDirectory(input: {
@@ -267,7 +266,9 @@ function directoryRowOf(row: unknown): DirectoryChainRow {
 function canonicalDirectoryPath(rows: DirectoryChainRow[], drive: string): string {
   if (
     rows.length === 0 ||
-    rows.some(row => row.cycle || row.deleted_at !== null || row.drive !== drive || row.kind !== 'directory') ||
+    rows.some(
+      row => row.cycle || row.deleted_at !== null || row.drive !== drive || row.kind !== 'directory'
+    ) ||
     rows.at(-1)?.parent_resource_id !== null ||
     rows.at(-1)?.name !== GFS_ROOT_NAME
   ) {

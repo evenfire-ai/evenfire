@@ -102,16 +102,22 @@ function formatApiError(res: Response, text: string): Error {
             ? 'Desktop App password must be between 8 and 256 characters.'
             : detail === 'password must be between 8 and 256 characters'
               ? 'Password must be between 8 and 256 characters.'
-              : // Exact match is correct HERE: control-ui calls control-api directly,
-                // so a member-registration 503 arrives as the bare { error: '<code>' }
-                // body. profile-ui reaches these same codes through external-rest-api,
-                // whose error middleware wraps any 5xx into { message: '...: <code>' },
-                // so it must use .includes() instead — the two matchers differ on purpose.
-                detail === 'member_registration_unavailable'
-                ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
-                : detail === 'member_registration_misconfigured'
-                  ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
-                  : detail
+              : detail === 'precondition_failed'
+                ? 'This item changed since it was loaded. Reload the page, review the latest state, and try again.'
+                : detail === 'agent_grant_precondition_required'
+                  ? 'Agent access could not be updated because the page did not include its current access state. Reload the page and try again.'
+                  : detail === 'deleted_agent_history_limit_exceeded'
+                    ? 'Agent access was not updated because the deleted-agent history limit was reached. No existing history was removed. Reload the page, review the current access, and try again.'
+                    : // Exact match is correct HERE: control-ui calls control-api directly,
+                      // so a member-registration 503 arrives as the bare { error: '<code>' }
+                      // body. profile-ui reaches these same codes through external-rest-api,
+                      // whose error middleware wraps any 5xx into { message: '...: <code>' },
+                      // so it must use .includes() instead — the two matchers differ on purpose.
+                      detail === 'member_registration_unavailable'
+                      ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
+                      : detail === 'member_registration_misconfigured'
+                        ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
+                        : detail
   const error = new Error(`${res.status} ${res.statusText} - ${friendlyDetail}`)
   ;(error as Error & { status?: number }).status = res.status
   // Preserve the machine-readable error code and full JSON body so callers can
@@ -815,10 +821,14 @@ export type TeamContextAccess = {
 export type UserAgentAccess = {
   userId: string
   agentNames: string[]
+  deletedAgentNames: string[]
+  deletedHistoryLimit: number
 }
 export type TeamAgentAccess = {
   teamId: string
   agentNames: string[]
+  deletedAgentNames: string[]
+  deletedHistoryLimit: number
 }
 export type TeamMember = {
   id: string
@@ -1800,9 +1810,14 @@ export async function getAdminUserAgents(userId: string) {
   ) as Promise<UserAgentAccess>
 }
 
-export async function updateAdminUserAgents(userId: string, agentNames: string[]) {
+export async function updateAdminUserAgents(
+  userId: string,
+  agentNames: string[],
+  expectedCurrentAgentNames: string[]
+) {
   return apiSend('PUT', `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`, {
     agentNames,
+    expectedCurrentAgentNames,
   }) as Promise<UserAgentAccess>
 }
 
@@ -1842,9 +1857,14 @@ export async function getAdminTeamAgents(teamId: string) {
   ) as Promise<TeamAgentAccess>
 }
 
-export async function updateAdminTeamAgents(teamId: string, agentNames: string[]) {
+export async function updateAdminTeamAgents(
+  teamId: string,
+  agentNames: string[],
+  expectedCurrentAgentNames: string[]
+) {
   return apiSend('PUT', `/api/v1/admin/teams/${encodeURIComponent(teamId)}/agents`, {
     agentNames,
+    expectedCurrentAgentNames,
   }) as Promise<TeamAgentAccess>
 }
 
@@ -3356,28 +3376,50 @@ export async function revokeRegistryApiKey(id: string): Promise<void> {
 }
 
 // ─── Self-hosted registry connect flow (spec §6.1/§6.3) ───────────────────────
-// Drives control-api's /api/v1/admin/registry/connect endpoints (Plan A1 Task 7,
-// control-api/src/routes/admin/registryConnect.ts). GET polls the registry status
-// endpoint, so state ∈ disconnected|pending|approved|rejected|connected — the panel
-// renders one view per state. Uses registryCodedRequest so it can branch on err.code
-// (not_self_hosted, already_connected, not_pending, claim_expired, claim_rejected).
+// Drives control-api's /api/v1/admin/registry/connect endpoints
+// (control-api/src/routes/admin/registryConnect.ts). GET is READ-ONLY and polls
+// the registry status endpoint, so state ∈ disconnected | pending | connecting |
+// approved | rejected | connected — the panel renders one view per state.
 //
-// GET fields by state: connected → { deploymentId, org }; pending/approved/rejected
-// → { deploymentId, requestedOrgName }; disconnected → {}. All fields optional below.
-// There is NO rejection_reason in the contract.
+// `connecting` means the registry AUTO-APPROVED (open registration) and the
+// inline claim has not completed. It is finished by recoverRegistryConnection(),
+// never by pasting a token — under auto-approval no operator ever sees one.
+// `approved` keeps its original meaning: an operator approved and a human must
+// paste the token they were given out of band.
+//
+// GET fields by state: connected → { deploymentId, org, authEnabled };
+// connecting → { deploymentId, requestedOrgName, authEnabled, recoveryError? };
+// pending/approved/rejected → { deploymentId, requestedOrgName };
+// disconnected → {}. There is NO rejection_reason in the contract.
+//
+// Uses registryCodedRequest so callers can branch on err.code: not_self_hosted,
+// already_connected, recovery_in_progress, not_pending, not_recoverable,
+// org_name_taken, registration_capacity, rate_limited, invalid_contact_email,
+// org_blocklisted, claim_expired, claim_rejected, already_claimed,
+// deployment_suspended, client_unavailable, connection_superseded.
 
 export type RegistryConnectionState =
   | 'disconnected'
   | 'pending'
+  | 'connecting'
   | 'approved'
   | 'rejected'
   | 'connected'
+
+export type RegistryRecoveryError =
+  | 'already_claimed'
+  | 'deployment_suspended'
+  | 'client_unavailable'
+  | 'connection_superseded'
+  | 'claim_expired'
+
 export type RegistryConnectionStatus = {
   state: RegistryConnectionState
   deploymentId?: string
   requestedOrgName?: string
   org?: string
   authEnabled?: boolean
+  recoveryError?: RegistryRecoveryError
 }
 
 export async function getRegistryConnection(): Promise<RegistryConnectionStatus> {
@@ -3407,4 +3449,11 @@ export async function submitRegistryClaim(input: {
 
 export async function disconnectRegistryConnection(): Promise<void> {
   await registryCodedRequest('DELETE', '/api/v1/admin/registry/connect')
+}
+
+export async function recoverRegistryConnection(): Promise<RegistryConnectionStatus> {
+  return registryCodedRequest(
+    'POST',
+    '/api/v1/admin/registry/connect/recover'
+  ) as Promise<RegistryConnectionStatus>
 }

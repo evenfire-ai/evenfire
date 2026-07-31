@@ -51,7 +51,8 @@ export function cleanupGfsCopyTreeFixture(fixture: GfsCopyTreeFixture): void {
       failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
-  if (failures.length > 0) throw new Error(`GFS Copy fixture cleanup failed: ${failures.join('; ')}`)
+  if (failures.length > 0)
+    throw new Error(`GFS Copy fixture cleanup failed: ${failures.join('; ')}`)
 }
 
 function driveRoot(): string {
@@ -298,13 +299,18 @@ export function getGfsHostGrantsUnderTree(rootId: string, subjectId: string): Gf
     SELECT resource_id::text || '|' || array_to_string(permissions, ',') || '|' || inherit::text
       FROM gfs_grants WHERE resource_id IN (SELECT resource_id FROM tree)
        AND subject_type = 'host' AND subject_id = ${sqlLiteral(subjectId)} ORDER BY resource_id;
-  `).split('\n').map(line => line.trim()).filter(Boolean).map(row => {
-    const parts = splitSqlRow(row)
-    if (parts.length !== 3 || !UUID_RE.test(parts[0] ?? '')) throw new Error(`invalid host grant row: ${row}`)
-    return {
-      resourceId: parts[0]!,
-      permissions: parts[1] ? parts[1].split(',') : [],
-      inherit: parts[2] === 't' || parts[2] === 'true',
-    }
-  })
+  `)
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(row => {
+      const parts = splitSqlRow(row)
+      if (parts.length !== 3 || !UUID_RE.test(parts[0] ?? ''))
+        throw new Error(`invalid host grant row: ${row}`)
+      return {
+        resourceId: parts[0]!,
+        permissions: parts[1] ? parts[1].split(',') : [],
+        inherit: parts[2] === 't' || parts[2] === 'true',
+      }
+    })
 }

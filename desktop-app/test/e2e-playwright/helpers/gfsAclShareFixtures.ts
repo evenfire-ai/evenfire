@@ -1,8 +1,4 @@
-import {
-  UUID_RE,
-  runControlPostgresSql,
-  sqlLiteral,
-} from '../../../../tests/e2e/gfsUiFixtures'
+import { UUID_RE, runControlPostgresSql, sqlLiteral } from '../../../../tests/e2e/gfsUiFixtures'
 
 /**
  * Named setup precondition: shares may target users/teams, never managed Host

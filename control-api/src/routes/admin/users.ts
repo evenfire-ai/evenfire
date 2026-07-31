@@ -1,23 +1,13 @@
 import { Router } from 'express'
 import type { K8sGateway } from '../../k8s.js'
-import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
-import {
-  filterAccessValues,
-  mergeActiveUpdateWithDeletedHistory,
-  partitionAccessValues,
-} from '../../services/directory/accessReconciliation.js'
 import {
   adminDeleteUser,
   createAdminUser,
   createPasswordSetupInvitationForUser,
   findMembership,
   getAdminUserContext,
-  getUserAgents,
-  getUserContexts,
   listTeams,
   listUsers,
-  setUserAgents,
-  setUserContexts,
   updateAdminUserContext,
 } from '../../services/directory/index.js'
 import { disableVerifiedMediumAccount } from '../../services/workflowApprovalMediumIdentityService.js'
@@ -26,11 +16,7 @@ import {
   listVerifiedMediumAccountsWithPreference,
   preferVerifiedMediumAccount,
 } from '../../services/workflowApprovalMediumPreferenceService.js'
-import {
-  loadAdminActiveAgentNames,
-  loadAdminActiveContextIds,
-  sendAdminAccessReconciliationError,
-} from './accessReconciliationResponse.js'
+import { registerAdminUserAccessRoutes } from './userAccess.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -256,89 +242,7 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
     }
   })
 
-  router.get('/admin/users/:userId/contexts', async (req, res, next) => {
-    try {
-      const base = await getUserContexts(req.params.userId)
-      const partition = partitionAccessValues(
-        base.contextIds,
-        await loadAdminActiveContextIds(gateway)
-      )
-      res.status(200).json({
-        ...base,
-        contextIds: partition.active,
-        deletedContextIds: partition.deleted,
-      })
-    } catch (error) {
-      if (sendAdminAccessReconciliationError(res, error)) return
-      next(error)
-    }
-  })
-
-  router.put('/admin/users/:userId/contexts', async (req, res, next) => {
-    try {
-      const contextIds = Array.isArray(req.body?.contextIds) ? req.body.contextIds.map(String) : []
-      const [existing, activeContextIds] = await Promise.all([
-        getUserContexts(req.params.userId),
-        loadAdminActiveContextIds(gateway),
-      ])
-      const existingPartition = partitionAccessValues(existing.contextIds, activeContextIds)
-      const updated = await setUserContexts(
-        req.params.userId,
-        mergeActiveUpdateWithDeletedHistory(
-          contextIds,
-          activeContextIds,
-          existingPartition.deleted
-        ),
-        (req as UiAuthedRequest).adminAuth!.sub
-      )
-      const updatedPartition = partitionAccessValues(updated.contextIds, activeContextIds)
-      res.status(200).json({
-        ...updated,
-        contextIds: updatedPartition.active,
-        deletedContextIds: updatedPartition.deleted,
-      })
-    } catch (error) {
-      if (sendAdminAccessReconciliationError(res, error)) return
-      next(error)
-    }
-  })
-
-  router.get('/admin/users/:userId/agents', async (req, res, next) => {
-    try {
-      const base = await getUserAgents(req.params.userId)
-      const partition = partitionAccessValues(
-        base.agentNames,
-        await loadAdminActiveAgentNames(gateway)
-      )
-      res.status(200).json({
-        ...base,
-        agentNames: partition.active,
-      })
-    } catch (error) {
-      if (sendAdminAccessReconciliationError(res, error)) return
-      next(error)
-    }
-  })
-
-  router.put('/admin/users/:userId/agents', async (req, res, next) => {
-    try {
-      const agentNames = Array.isArray(req.body?.agentNames) ? req.body.agentNames.map(String) : []
-      const activeAgentNames = await loadAdminActiveAgentNames(gateway)
-      const updated = await setUserAgents(
-        req.params.userId,
-        filterAccessValues(agentNames, new Set(activeAgentNames)),
-        (req as UiAuthedRequest).adminAuth!.sub
-      )
-      const updatedPartition = partitionAccessValues(updated.agentNames, activeAgentNames)
-      res.status(200).json({
-        ...updated,
-        agentNames: updatedPartition.active,
-      })
-    } catch (error) {
-      if (sendAdminAccessReconciliationError(res, error)) return
-      next(error)
-    }
-  })
+  registerAdminUserAccessRoutes(router, gateway)
 
   /**
    * Hard-delete user profile, memberships, and personal context/agent links (DB CASCADE).

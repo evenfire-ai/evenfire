@@ -33,6 +33,7 @@ import {
   updateVersionMetadata,
   uploadArtifacts,
 } from '../../services/registryClient.js'
+import { isRegistryAuthActive } from '../../services/registryConnectionDb.js'
 import {
   validateWorkflowRecipeEgressPreflight,
   validateWorkflowRecipeLimits,
@@ -2165,8 +2166,19 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     req: Request,
     res: Response
   ): Promise<{ admin: AdminUserRecord; orgName: string } | null> {
-    if (!config.registryAuthEnabled) {
+    let authActive: boolean
+    try {
+      authActive = await isRegistryAuthActive()
+    } catch {
+      res.status(502).json({ error: 'registry_integration_error' })
+      return null
+    }
+    if (!authActive) {
       res.status(409).json({ error: 'registry_auth_disabled' })
+      return null
+    }
+    if (config.registryConnectionMode === 'self-hosted' && config.registryUrl === '') {
+      res.status(409).json({ error: 'registry_url_not_configured' })
       return null
     }
     const sub = (req as UiAuthedRequest).adminAuth?.sub
@@ -2263,8 +2275,19 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
     req: Request,
     res: Response
   ): Promise<{ orgName: string; actingUserId: string } | null> {
-    if (!config.registryAuthEnabled) {
+    let authActive: boolean
+    try {
+      authActive = await isRegistryAuthActive()
+    } catch {
+      res.status(502).json({ error: 'registry_integration_error' })
+      return null
+    }
+    if (!authActive) {
       res.status(409).json({ error: 'registry_auth_disabled' })
+      return null
+    }
+    if (config.registryConnectionMode === 'self-hosted' && config.registryUrl === '') {
+      res.status(409).json({ error: 'registry_url_not_configured' })
       return null
     }
     const actingUserId = (req as UiAuthedRequest).adminAuth?.sub

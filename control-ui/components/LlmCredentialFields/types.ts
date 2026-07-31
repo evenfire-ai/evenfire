@@ -1,0 +1,41 @@
+import type { LlmProvider } from '@/lib/llm'
+
+// An operator-created extra credential slot (spec R4.5.6). The slot OWNS its
+// name draft and value; only a validated, non-colliding key is ever projected
+// into the parent `draft` (`committedKey`). This guarantees editing an extra
+// slot can never write to — and clobber — a real provider slot, and that an
+// invalid/colliding key never reaches submit.
+export type ExtraSlot = {
+  id: string
+  provider: LlmProvider
+  nameInput: string
+  value: string
+  committedKey: string | null
+  // The stored Secret key this slot was seeded from (edit mode, additive
+  // editor spec B1) — exempted from the "already exists" collision check so
+  // the operator can keep the name while rewriting the value. Null for slots
+  // created in this session.
+  existingKey: string | null
+}
+
+export type LlmCredentialFieldsProps = {
+  // dataKey -> value. Write-only: existing values are NEVER passed in here (the
+  // status-only listing returns names only, spec R4.5.3).
+  draft: Record<string, string>
+  onChange: (dataKey: string, value: string) => void
+  disabled?: boolean
+  // Keys already stored in the Secret (edit mode) — light up the present chips
+  // without ever exposing a value. Create flows omit it.
+  existingKeys?: string[]
+  // Stored keys (a subset of `existingKeys`) the operator retired in this
+  // session: removed with the slot's X, or renamed away with a valid
+  // replacement typed under the new name. Reported on every change so the
+  // parent can send them as `removeKeys` on save — without this channel the
+  // draft alone can never express a deletion (it is write-only, and blanking a
+  // value is explicitly NOT deletion server-side). Create flows omit it.
+  onRemovedKeysChange?: (keys: string[]) => void
+  // Render the "Add provider" picker as an always-open inline list instead of a
+  // popover. Scroll-clipped surfaces (the update modal) must set it — an
+  // absolute-positioned menu would open below the modal's visible fold.
+  pickerInline?: boolean
+}

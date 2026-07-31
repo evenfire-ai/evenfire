@@ -233,10 +233,10 @@ for mode in pin-terminating pin-patch-fail; do
 done
 
 for mode in missing-expectation uid-mismatch concurrent uid-replaced-before-delete state-create-fail state-cas-fail state-substitution; do
-  args=(--expected-pvc-uid claim-uid-1)
-  [ "$mode" != missing-expectation ] || args=()
+  args=("$mode")
+  [ "$mode" = missing-expectation ] || args+=(--expected-pvc-uid claim-uid-1)
   [ "$mode" != state-substitution ] || args+=(--resume)
-  if run_case "$mode" "${args[@]}"; then
+  if run_case "${args[@]}"; then
     echo "FAIL: $mode was accepted" >&2; exit 1
   fi
 done

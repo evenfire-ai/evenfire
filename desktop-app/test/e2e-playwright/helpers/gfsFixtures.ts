@@ -1,17 +1,5 @@
 /** Exact-subject GFS fixtures for the #775 regression and #797 Copy journey. */
-import {
-  type GfsFileFixture,
-  cleanupGfsFixture,
-  countGfsLiveChildrenByName,
-  getGfsChildResourceSummary,
-  getE2EUserId,
-  kubectlOut,
-  runControlPostgresSql,
-  seedGfsFileFixture,
-  seedGfsGrant,
-  sqlLiteral,
-  uniqueGfsFixtureName,
-} from '../../../../tests/e2e/gfsUiFixtures'
+import { request } from '@playwright/test'
 import {
   type GfsCopyTreeFixture,
   cleanupGfsCopyTreeFixture,
@@ -20,13 +8,25 @@ import {
   getGfsTreeSnapshot,
   seedGfsCopyTreeFixture,
 } from '../../../../tests/e2e/gfsCopyFixtures'
-import { request } from '@playwright/test'
 import {
+  type GfsFileFixture,
+  cleanupGfsFixture,
+  countGfsLiveChildrenByName,
+  getE2EUserId,
+  getGfsChildResourceSummary,
+  kubectlOut,
+  runControlPostgresSql,
+  seedGfsFileFixture,
+  seedGfsGrant,
+  sqlLiteral,
+  uniqueGfsFixtureName,
+} from '../../../../tests/e2e/gfsUiFixtures'
+import { seedIssue797SourceShare } from './gfsAclShareFixtures'
+import {
+  type ManagedGfsAgent,
   discoverManagedGfsAgent,
   discoverManagedGfsAgents,
-  type ManagedGfsAgent,
 } from './gfsAgentDiscovery'
-import { seedIssue797SourceShare } from './gfsAclShareFixtures'
 
 export {
   discoverManagedGfsAgent,
@@ -143,21 +143,36 @@ export function seedAgentGfsCopyFixtures(ownerEmail: string): AgentGfsCopyFixtur
       grantedBy: 'e2e:issue-797-agent-a',
     })
     seedGfsGrant({
-      resourceId: tree.sourceResourceId, subjectType: 'host', subjectId: agentB.subjectId,
-      permissions: ['read'], inherit: false, grantedBy: 'e2e:issue-797-agent-b-root-only',
+      resourceId: tree.sourceResourceId,
+      subjectType: 'host',
+      subjectId: agentB.subjectId,
+      permissions: ['read'],
+      inherit: false,
+      grantedBy: 'e2e:issue-797-agent-b-root-only',
     })
     seedGfsGrant({
-      resourceId: tree.destinationResourceId, subjectType: 'host', subjectId: agentB.subjectId,
-      permissions: ['read', 'write'], inherit: true, grantedBy: 'e2e:issue-797-agent-b-destination',
+      resourceId: tree.destinationResourceId,
+      subjectType: 'host',
+      subjectId: agentB.subjectId,
+      permissions: ['read', 'write'],
+      inherit: true,
+      grantedBy: 'e2e:issue-797-agent-b-destination',
     })
     const agentBSource = getGfsHostGrantsUnderTree(tree.sourceResourceId, agentB.subjectId)
-    if (agentBSource.length !== 1 || agentBSource[0]?.resourceId !== tree.sourceResourceId ||
-        agentBSource[0].inherit || agentBSource[0].permissions.join(',') !== 'read') {
+    if (
+      agentBSource.length !== 1 ||
+      agentBSource[0]?.resourceId !== tree.sourceResourceId ||
+      agentBSource[0].inherit ||
+      agentBSource[0].permissions.join(',') !== 'read'
+    ) {
       throw new Error('Agent B fixture must have root-only source read and no descendant grant')
     }
     const agentBDest = getGfsHostGrantsUnderTree(tree.destinationResourceId, agentB.subjectId)
-    if (agentBDest.length !== 1 || !agentBDest[0]?.inherit ||
-        agentBDest[0].permissions.join(',') !== 'read,write') {
+    if (
+      agentBDest.length !== 1 ||
+      !agentBDest[0]?.inherit ||
+      agentBDest[0].permissions.join(',') !== 'read,write'
+    ) {
       throw new Error('Agent B fixture must have destination read/write')
     }
     const destinationGrantId = seedGfsGrant({
@@ -240,7 +255,9 @@ export async function revokeGfsGrantViaControlApi(grantId: string): Promise<void
       },
     })
     if (!response.ok()) {
-      throw new Error(`audited GFS revoke failed with HTTP ${response.status()}: ${await response.text()}`)
+      throw new Error(
+        `audited GFS revoke failed with HTTP ${response.status()}: ${await response.text()}`
+      )
     }
   } finally {
     await api.dispose()
