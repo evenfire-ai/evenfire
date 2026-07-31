@@ -78,8 +78,20 @@ describe('ContextMapperServer readiness', () => {
     vi.restoreAllMocks()
   })
 
-  it('serves health immediately but gates readiness and API responses until warm-up completes', async () => {
+  it('withholds readiness when no inventory-authority gate is wired', async () => {
+    // The gate decides whether the provider's inventory is authoritative. A
+    // caller that forgets to wire it must not get a permanently Ready server:
+    // this endpoint is the contract that no stale allow is live, so the default
+    // has to fail closed. There is no type error to catch the omission.
     server = new ContextMapperServer(new FakeProvider(), 0)
+    server.setReady(true)
+
+    const response = await invoke(server, '/ready')
+    expect(response.statusCode).toBe(503)
+  })
+
+  it('serves health immediately but gates readiness and API responses until warm-up completes', async () => {
+    server = new ContextMapperServer(new FakeProvider(), 0, undefined, undefined, () => true)
 
     let response = await invoke(server, '/health')
     expect(response.statusCode).toBe(200)
@@ -182,7 +194,7 @@ describe('ContextMapperServer readiness', () => {
   })
 
   it('withdraws readiness as soon as shutdown begins', async () => {
-    server = new ContextMapperServer(new FakeProvider(), 0)
+    server = new ContextMapperServer(new FakeProvider(), 0, undefined, undefined, () => true)
     server.setReady(true)
 
     expect((await invoke(server, '/ready')).statusCode).toBe(200)

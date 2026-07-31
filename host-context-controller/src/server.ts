@@ -26,7 +26,10 @@ export class ContextMapperServer {
     port: number = config.port,
     hostReconciler?: HostReconciler,
     hasDesktopFn?: (hostRef: string) => boolean,
-    providerAuthoritativeFn: () => boolean = () => true
+    // Fails closed. /ready is the assertion that no stale allow is live, and a
+    // caller that omits this gate gets no type error, so the default must
+    // withhold readiness rather than grant it.
+    providerAuthoritativeFn: () => boolean = () => false
   ) {
     this.provider = provider
     this.port = port
