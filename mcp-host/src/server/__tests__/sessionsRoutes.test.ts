@@ -199,6 +199,7 @@ describe('handleSessionsListRoute', () => {
     ['repeated limit', { limit: ['1', '2'] }],
     ['repeated cursor', { cursor: ['one', 'two'] }],
     ['repeated agent', { agent: ['agent-a', 'agent-b'] }],
+    ['bracketed agent', { 'agent[]': 'agent-a' }],
     ['dot agent', { agent: '.' }],
     ['colon-bearing agent', { agent: 'agent:other' }],
     ['control-bearing agent', { agent: 'agent\nother' }],
@@ -402,6 +403,20 @@ describe('handleSessionMessagesRoute', () => {
     const req = {
       ...makeReqWithParams('user-1', 'chatllm', 'c1'),
       query: { limit: ['1', '2'] },
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+
+    expect(captured.statusCode).toBe(400)
+    expect(sessionMessagesHandler).not.toHaveBeenCalled()
+  })
+
+  it('rejects bracketed message pagination parameters', async () => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn()
+    const req = {
+      ...makeReqWithParams('user-1', 'chatllm', 'c1'),
+      query: { 'beforeTurn[]': '1' },
     } as unknown as Request
     const captured = makeRes()
 

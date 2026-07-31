@@ -80,6 +80,10 @@ function parseUnsignedIntegerParam(value: unknown): number | undefined | null {
   return Number.isSafeInteger(parsed) ? parsed : null
 }
 
+function hasBracketedQueryVariant(query: Request['query'], names: string[]): boolean {
+  return Object.keys(query).some(key => names.some(name => key.startsWith(`${name}[`)))
+}
+
 function isSafeRouteSegment(value: string): boolean {
   return (
     value.length > 0 &&
@@ -1117,6 +1121,10 @@ export async function handleSessionsListRoute(
       json(res, 401, { error: 'Missing rpc edge caller context' })
       return
     }
+    if (hasBracketedQueryVariant(req.query, ['agent', 'cursor', 'limit'])) {
+      badRequest(res, 'Invalid session pagination query')
+      return
+    }
     if (req.query.agent !== undefined && typeof req.query.agent !== 'string') {
       badRequest(res, 'Invalid session agent')
       return
@@ -1229,7 +1237,10 @@ export async function handleSessionMessagesRoute(
     const invalidQueryShape = ['limit', 'beforeTurn', 'afterTurn'].some(
       key => req.query[key] !== undefined && typeof req.query[key] !== 'string'
     )
-    if (invalidQueryShape) {
+    if (
+      invalidQueryShape ||
+      hasBracketedQueryVariant(req.query, ['limit', 'beforeTurn', 'afterTurn'])
+    ) {
       badRequest(res, 'pagination parameters must be specified once')
       return
     }
